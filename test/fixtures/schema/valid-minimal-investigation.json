@@ -1,0 +1,17 @@
+{
+  "version": "0.1.0",
+  "profile": "minimal",
+  "id": "handoff-investigation-01",
+  "created_at": "2030-01-02T03:04:05Z",
+  "task": {
+    "title": "Investigate validation failure",
+    "objective": "Identify the failing validation phase without inventing source locations."
+  },
+  "state": {
+    "done": [],
+    "next": ["Locate the first failing validation phase."],
+    "blocked": []
+  },
+  "risks": [],
+  "verification": []
+}

@@ -1,0 +1,34 @@
+{
+  "version": "0.1.0",
+  "profile": "minimal",
+  "id": "handoff-interrupted-01",
+  "created_at": "2030-01-02T04:05:06+00:00",
+  "task": {
+    "title": "Continue interrupted analysis",
+    "objective": "Preserve confirmed progress and the next executable action."
+  },
+  "state": {
+    "done": ["Confirmed the input can be parsed."],
+    "next": ["Run the pending schema check."],
+    "blocked": [
+      {
+        "reason": "The validation environment was unavailable.",
+        "needed": "A working local validation environment."
+      }
+    ]
+  },
+  "risks": [
+    {
+      "severity": "low",
+      "description": "Validation remains incomplete."
+    }
+  ],
+  "verification": [
+    {
+      "check": "schema-check",
+      "status": "not_run",
+      "exit_code": null,
+      "summary": "Deferred until the local environment is available."
+    }
+  ]
+}

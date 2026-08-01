@@ -1,0 +1,46 @@
+{
+  "version": "0.1.0",
+  "profile": "full",
+  "id": "handoff-complete_01",
+  "created_at": "2030-01-02T05:06:07Z",
+  "task": {
+    "title": "Complete schema implementation",
+    "objective": "Provide a validated handoff schema and evidence."
+  },
+  "scope": {
+    "paths": ["src/schema/handoff-v0.1.schema.json", "test/schema.test.ts"],
+    "excludes": ["dist/"]
+  },
+  "state": {
+    "done": ["Implemented and validated the schema."],
+    "next": [],
+    "blocked": []
+  },
+  "sources": [
+    {
+      "path": "doc/contract-design.md",
+      "rev": "rev-deadbeef",
+      "hash": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    }
+  ],
+  "risks": [
+    {
+      "severity": "medium",
+      "description": "Future contract revisions may require migration.",
+      "mitigation": "Keep contract versions explicit."
+    }
+  ],
+  "verification": [
+    {
+      "check": "schema-tests",
+      "status": "pass",
+      "exit_code": 0,
+      "summary": "All schema tests passed."
+    }
+  ],
+  "ext": {
+    "host": {
+      "custom_field": true
+    }
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "version": "0.1.0",
+  "profile": "minimal",
+  "id": "handoff-invalid-01",
+  "created_at": "2030-01-02T03:04:05Z",
+  "task": {
+    "title": "Reject unknown fields",
+    "objective": "Confirm strict object validation.",
+    "unexpected": true
+  },
+  "state": {
+    "done": [],
+    "next": ["Remove the unknown field."],
+    "blocked": []
+  },
+  "risks": [],
+  "verification": []
+}
