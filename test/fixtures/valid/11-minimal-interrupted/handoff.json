@@ -1,0 +1,10 @@
+{
+  "version": "0.1.0",
+  "profile": "minimal",
+  "id": "dummy-interrupted",
+  "created_at": "2035-01-12T03:04:05Z",
+  "task": { "title": "Resume interrupted check", "objective": "Preserve progress, pending validation, and the next action." },
+  "state": { "done": ["Prepared the dummy input."], "next": ["Run the pending integration check."], "blocked": [] },
+  "risks": [{ "severity": "low", "description": "Integration evidence remains incomplete." }],
+  "verification": [{ "check": "integration-check", "status": "not_run", "exit_code": null, "summary": "The interrupted check has not run." }]
+}

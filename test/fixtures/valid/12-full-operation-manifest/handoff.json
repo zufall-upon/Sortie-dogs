@@ -1,0 +1,15 @@
+{
+  "version": "0.1.0",
+  "profile": "full",
+  "id": "dummy-full-operation",
+  "created_at": "2035-01-13T03:04:05Z",
+  "task": { "title": "Complete declared operation", "objective": "Record a full handoff with complete manifest validation evidence." },
+  "scope": { "paths": ["src/worker.ts", "test/worker.test.ts"] },
+  "state": { "done": ["Completed the declared source and test changes."], "next": [], "blocked": [] },
+  "sources": [{ "path": "src/worker.ts", "rev": "fictional-rev-operation-a" }],
+  "risks": [],
+  "verification": [
+    { "check": "npm run build", "status": "pass", "exit_code": 0, "summary": "Build passed." },
+    { "check": "npm test -- --test-name-pattern=worker", "status": "pass", "exit_code": 0, "summary": "Focused worker test passed." }
+  ]
+}

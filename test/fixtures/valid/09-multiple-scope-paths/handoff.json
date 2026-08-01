@@ -1,0 +1,12 @@
+{
+  "version": "0.1.0",
+  "profile": "full",
+  "id": "dummy-multiple-scope-paths",
+  "created_at": "2035-01-10T03:04:05Z",
+  "task": { "title": "Update multiple scoped paths", "objective": "Record several independent repository-relative scope paths." },
+  "scope": { "paths": ["packages/alpha", "packages/beta", "test/shared.test.ts"] },
+  "state": { "done": [], "next": ["Update each declared scope path."], "blocked": [] },
+  "sources": [{ "path": "packages/alpha/source.ts", "rev": "fictional-rev-scope-a" }],
+  "risks": [],
+  "verification": []
+}

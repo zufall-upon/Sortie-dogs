@@ -1,0 +1,10 @@
+{
+  "version": "0.1.0",
+  "profile": "minimal",
+  "id": "dummy-completed",
+  "created_at": "2035-01-05T03:04:05Z",
+  "task": { "title": "Complete focused update", "objective": "Record completion without an unnecessary next action." },
+  "state": { "done": ["Completed the focused update."], "next": [], "blocked": [] },
+  "risks": [],
+  "verification": [{ "check": "focused-check", "status": "pass", "exit_code": 0, "summary": "Focused check passed." }]
+}

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { validateManifest } from "../src/core/validate-manifest.ts";
@@ -206,4 +207,24 @@ test("manifest diagnostics use fixed messages without input values", () => {
   ]) {
     assert.equal(serialized.includes(value), false);
   }
+});
+
+test("synthetic valid full operation-manifest fixture accepts all changed paths and validations", async () => {
+  const directory = new URL("./fixtures/valid/12-full-operation-manifest/", import.meta.url);
+  const handoff = JSON.parse(await readFile(new URL("handoff.json", directory), "utf8")) as Handoff;
+  const manifest = JSON.parse(
+    await readFile(new URL("operation-manifest.json", directory), "utf8"),
+  ) as OperationManifest;
+  const expected = JSON.parse(await readFile(new URL("expected.json", directory), "utf8")) as {
+    diagnostics: string[];
+    exit: number;
+  };
+  const changedPaths = (await readFile(new URL("changed-paths.txt", directory), "utf8"))
+    .split(/\r?\n/u)
+    .filter((path) => path.length > 0);
+  const diagnostics = validateManifest(handoff, manifest, changedPaths, true);
+
+  assert.equal(manifest.task_id, handoff.id);
+  assert.deepEqual(diagnostics.map(({ code }) => code), expected.diagnostics);
+  assert.equal(diagnostics.some(({ severity }) => severity === "error") ? 1 : 0, expected.exit);
 });

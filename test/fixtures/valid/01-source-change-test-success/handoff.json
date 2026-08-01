@@ -1,0 +1,12 @@
+{
+  "version": "0.1.0",
+  "profile": "full",
+  "id": "dummy-source-change",
+  "created_at": "2035-01-02T03:04:05Z",
+  "task": { "title": "Update source behavior", "objective": "Record a source change with successful focused tests." },
+  "scope": { "paths": ["src/widget.ts", "test/widget.test.ts"] },
+  "state": { "done": ["Updated widget behavior and its focused test."], "next": [], "blocked": [] },
+  "sources": [{ "path": "src/widget.ts", "rev": "fictional-rev-source-a" }],
+  "risks": [],
+  "verification": [{ "check": "widget-test", "status": "pass", "exit_code": 0, "summary": "Focused widget test passed." }]
+}

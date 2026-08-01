@@ -1,0 +1,10 @@
+{
+  "version": "0.1.0",
+  "profile": "minimal",
+  "id": "dummy-risk-mitigation",
+  "created_at": "2035-01-09T03:04:05Z",
+  "task": { "title": "Track migration risk", "objective": "Record a risk with a concrete mitigation." },
+  "state": { "done": [], "next": ["Run the compatibility sample."], "blocked": [] },
+  "risks": [{ "severity": "medium", "description": "A fictional consumer may use the earlier shape.", "mitigation": "Run compatibility samples before release." }],
+  "verification": []
+}

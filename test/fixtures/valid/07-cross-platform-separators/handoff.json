@@ -1,0 +1,12 @@
+{
+  "version": "0.1.0",
+  "profile": "full",
+  "id": "dummy-path-separators",
+  "created_at": "2035-01-08T03:04:05Z",
+  "task": { "title": "Normalize path separators", "objective": "Accept repository-relative paths from different host conventions." },
+  "scope": { "paths": ["src\\core", "test/integration"] },
+  "state": { "done": [], "next": ["Apply normalized paths to the focused operation."], "blocked": [] },
+  "sources": [{ "path": "src\\core\\reference.ts", "rev": "fictional-rev-path-a" }],
+  "risks": [],
+  "verification": []
+}

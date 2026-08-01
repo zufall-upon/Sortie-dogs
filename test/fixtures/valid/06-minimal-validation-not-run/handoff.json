@@ -1,0 +1,10 @@
+{
+  "version": "0.1.0",
+  "profile": "minimal",
+  "id": "dummy-validation-not-run",
+  "created_at": "2035-01-07T03:04:05Z",
+  "task": { "title": "Defer focused validation", "objective": "Record a valid unrun validation result." },
+  "state": { "done": ["Prepared the validation input."], "next": ["Run the focused validation."], "blocked": [] },
+  "risks": [],
+  "verification": [{ "check": "focused-check", "status": "not_run", "exit_code": null, "summary": "Focused validation remains pending." }]
+}

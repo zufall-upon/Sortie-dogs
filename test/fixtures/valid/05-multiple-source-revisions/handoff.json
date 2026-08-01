@@ -1,0 +1,15 @@
+{
+  "version": "0.1.0",
+  "profile": "full",
+  "id": "dummy-multiple-revisions",
+  "created_at": "2035-01-06T03:04:05Z",
+  "task": { "title": "Combine source revisions", "objective": "Record multiple fictional source revisions." },
+  "scope": { "paths": ["src"] },
+  "state": { "done": [], "next": ["Implement the scoped combination."], "blocked": [] },
+  "sources": [
+    { "path": "src/alpha.ts", "rev": "fictional-rev-alpha" },
+    { "path": "src/beta.ts", "rev": "fictional-rev-beta" }
+  ],
+  "risks": [],
+  "verification": []
+}

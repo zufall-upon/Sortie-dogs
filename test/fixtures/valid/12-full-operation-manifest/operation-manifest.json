@@ -1,0 +1,7 @@
+{
+  "version": "0.1.0",
+  "task_id": "dummy-full-operation",
+  "read": ["src/worker.ts"],
+  "write": ["src/worker.ts", "test/worker.test.ts"],
+  "validation": ["npm run build", "npm test -- --test-name-pattern=worker"]
+}

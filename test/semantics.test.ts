@@ -12,6 +12,27 @@ async function readSemanticFixture(name: string): Promise<Handoff> {
   return JSON.parse(await readFile(url, "utf8")) as Handoff;
 }
 
+const validFixtureNames = [
+  "01-source-change-test-success",
+  "02-docs-only-change",
+  "03-blocker",
+  "04-completed-no-next",
+  "05-multiple-source-revisions",
+  "06-minimal-validation-not-run",
+  "07-cross-platform-separators",
+  "08-risks-mitigation",
+  "09-multiple-scope-paths",
+  "10-minimal-investigation-start",
+  "11-minimal-interrupted",
+  "12-full-operation-manifest",
+  "13-host-wrapper-minimal",
+] as const;
+
+interface ValidFixtureExpectation {
+  diagnostics: string[];
+  exit: number;
+}
+
 function handoffWithInvalidSemantics(): Handoff {
   return {
     version: "0.1.0",
@@ -225,4 +246,23 @@ test("H004 accepts a completed state without a next action", () => {
   handoff.verification = [{ check: "complete", status: "pass", exit_code: 0, summary: "Complete." }];
 
   assert.equal(lintHandoff(handoff).some(({ code }) => code === "H004"), false);
+});
+
+test("all 13 synthetic valid fixtures match expected diagnostics and exit", async () => {
+  for (const name of validFixtureNames) {
+    const directory = `./fixtures/valid/${name}`;
+    const handoff = JSON.parse(await readFile(new URL(`${directory}/handoff.json`, import.meta.url), "utf8")) as Handoff;
+    const expected = JSON.parse(
+      await readFile(new URL(`${directory}/expected.json`, import.meta.url), "utf8"),
+    ) as ValidFixtureExpectation;
+    const pathDiagnostics = lintHandoffPaths(handoff);
+    const semanticResult = lint(handoff);
+    const diagnosticCodes = [
+      ...pathDiagnostics.map(({ code }) => code),
+      ...semanticResult.diagnostics.map(({ code }) => code),
+    ];
+
+    assert.deepEqual(diagnosticCodes, expected.diagnostics, name);
+    assert.equal(pathDiagnostics.length === 0 && semanticResult.ok ? 0 : 1, expected.exit, name);
+  }
 });

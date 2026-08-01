@@ -1,0 +1,12 @@
+{
+  "version": "0.1.0",
+  "profile": "full",
+  "id": "dummy-docs-change",
+  "created_at": "2035-01-03T03:04:05Z",
+  "task": { "title": "Clarify usage guide", "objective": "Record a documentation-only update." },
+  "scope": { "paths": ["docs/guide.md"] },
+  "state": { "done": ["Clarified the usage guide."], "next": [], "blocked": [] },
+  "sources": [{ "path": "docs/guide.md", "rev": "fictional-rev-docs-a" }],
+  "risks": [],
+  "verification": [{ "check": "docs-check", "status": "pass", "exit_code": 0, "summary": "Documentation check passed." }]
+}

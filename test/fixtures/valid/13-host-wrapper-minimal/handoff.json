@@ -1,0 +1,11 @@
+{
+  "version": "0.1.0",
+  "profile": "minimal",
+  "id": "dummy-host-wrapper",
+  "created_at": "2035-01-14T03:04:05Z",
+  "task": { "title": "Preserve host wrapper metadata", "objective": "Carry fictional host metadata through the open extension field." },
+  "state": { "done": [], "next": ["Pass the minimal handoff to the fictional host wrapper."], "blocked": [] },
+  "risks": [],
+  "verification": [],
+  "ext": { "host_wrapper": { "run_id": "dummy-run", "sequence": 2 } }
+}

@@ -1,0 +1,10 @@
+{
+  "version": "0.1.0",
+  "profile": "minimal",
+  "id": "dummy-investigation-start",
+  "created_at": "2035-01-11T03:04:05Z",
+  "task": { "title": "Start focused investigation", "objective": "Begin investigation before scope and sources are known." },
+  "state": { "done": [], "next": ["Locate the first relevant repository-relative path."], "blocked": [] },
+  "risks": [],
+  "verification": []
+}

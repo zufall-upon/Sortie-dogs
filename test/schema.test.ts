@@ -24,6 +24,22 @@ const operationSchema = await readJson(new URL("../src/schema/operation-manifest
 const validOperation = await readJson(new URL("./fixtures/schema/valid-operation-manifest.json", import.meta.url));
 const invalidOperationUnknownField = await readJson(new URL("./fixtures/schema/invalid-operation-manifest-unknown-field.json", import.meta.url));
 
+const validFixtureNames = [
+  "01-source-change-test-success",
+  "02-docs-only-change",
+  "03-blocker",
+  "04-completed-no-next",
+  "05-multiple-source-revisions",
+  "06-minimal-validation-not-run",
+  "07-cross-platform-separators",
+  "08-risks-mitigation",
+  "09-multiple-scope-paths",
+  "10-minimal-investigation-start",
+  "11-minimal-interrupted",
+  "12-full-operation-manifest",
+  "13-host-wrapper-minimal",
+] as const;
+
 const ajv = new Ajv2020({ allErrors: true, strict: true, strictRequired: false });
 addFormats(ajv);
 const validate = ajv.compile(schema);
@@ -175,6 +191,21 @@ test("accepts minimal investigation, minimal interruption, and full completion f
   assertValid(minimal);
   assertValid(interrupted);
   assertValid(full);
+});
+
+test("all 13 synthetic valid fixtures satisfy their schemas", async () => {
+  assert.equal(validFixtureNames.length, 13);
+
+  for (const name of validFixtureNames) {
+    const handoff = await readJson(new URL(`./fixtures/valid/${name}/handoff.json`, import.meta.url));
+    assert.equal(validate(handoff), true, `${name}: ${JSON.stringify(validate.errors)}`);
+  }
+
+  const operation = await readJson(new URL(
+    "./fixtures/valid/12-full-operation-manifest/operation-manifest.json",
+    import.meta.url,
+  ));
+  assert.equal(validateOperation(operation), true, JSON.stringify(validateOperation.errors));
 });
 
 test("requires every common top-level field", () => {

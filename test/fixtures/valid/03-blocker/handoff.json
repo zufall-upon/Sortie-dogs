@@ -1,0 +1,14 @@
+{
+  "version": "0.1.0",
+  "profile": "minimal",
+  "id": "dummy-blocker",
+  "created_at": "2035-01-04T03:04:05Z",
+  "task": { "title": "Continue blocked work", "objective": "Preserve a concrete blocker and recovery action." },
+  "state": {
+    "done": ["Confirmed the input format."],
+    "next": ["Resume the focused check after the sample is supplied."],
+    "blocked": [{ "reason": "A fictional sample is unavailable.", "needed": "Supply a dummy sample file." }]
+  },
+  "risks": [],
+  "verification": []
+}
