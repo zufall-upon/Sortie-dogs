@@ -6,6 +6,11 @@ import test from "node:test";
 
 const TEST_ROOT = join(process.cwd(), "_testenv");
 const ENTRY = join(process.cwd(), "src", "cli", "main.ts");
+const USAGE = `Usage: agent-contract-guard lint <handoff.json> [<handoff.json> ...]
+  [--manifest <operation-manifest.json>]
+  [--changed-paths-from <file|->]
+  [--changed-path <path> ...]
+  [--format text|json] [--quiet] [--strict]\n`;
 
 interface CliResult {
   exit: number | null;
@@ -48,10 +53,138 @@ function handoff(id: string): object {
   };
 }
 
+function handoffWithWarning(): object {
+  return {
+    ...handoff("output-warning"),
+    verification: [
+      { check: "cli-output", status: "pass", exit_code: 1, summary: "Intentional mismatch." },
+    ],
+  };
+}
+
 async function clean(directory: string): Promise<void> {
   await rm(directory, { recursive: true, force: true });
   await rm(TEST_ROOT).catch(() => undefined);
 }
+
+test("renders warning diagnostics as text without failing by default", async () => {
+  const directory = await fixtureDirectory();
+  try {
+    const input = join(directory, "warning.json");
+    await writeFile(input, JSON.stringify(handoffWithWarning()));
+
+    const result = await runCli(["lint", input]);
+    assert.deepEqual(result, {
+      exit: 0,
+      stdout: "handoff[0] /verification/0/exit_code verification_exit_code_mismatch warning " +
+        "Verification exit code does not match its status.\n",
+      stderr: "",
+    });
+  } finally {
+    await clean(directory);
+  }
+});
+
+test("renders diagnostics as JSON", async () => {
+  const directory = await fixtureDirectory();
+  try {
+    const input = join(directory, "warning.json");
+    await writeFile(input, JSON.stringify(handoffWithWarning()));
+
+    const result = await runCli(["lint", input, "--format", "json"]);
+    assert.deepEqual(result, {
+      exit: 0,
+      stdout: JSON.stringify([{
+        file: "handoff[0]",
+        code: "verification_exit_code_mismatch",
+        severity: "warning",
+        pointer: "/verification/0/exit_code",
+        message: "Verification exit code does not match its status.",
+      }]) + "\n",
+      stderr: "",
+    });
+  } finally {
+    await clean(directory);
+  }
+});
+
+test("quiet suppresses diagnostics without changing warning exit semantics", async () => {
+  const directory = await fixtureDirectory();
+  try {
+    const input = join(directory, "warning.json");
+    await writeFile(input, JSON.stringify(handoffWithWarning()));
+
+    assert.deepEqual(await runCli(["lint", input, "--quiet"]), {
+      exit: 0,
+      stdout: "",
+      stderr: "",
+    });
+  } finally {
+    await clean(directory);
+  }
+});
+
+test("strict promotes warning diagnostics to exit 1", async () => {
+  const directory = await fixtureDirectory();
+  try {
+    const input = join(directory, "warning.json");
+    await writeFile(input, JSON.stringify(handoffWithWarning()));
+
+    const result = await runCli(["lint", input, "--strict"]);
+    assert.equal(result.exit, 1);
+    assert.match(result.stdout, / verification_exit_code_mismatch warning /);
+    assert.equal(result.stderr, "");
+  } finally {
+    await clean(directory);
+  }
+});
+
+test("error diagnostics return exit 1", async () => {
+  const directory = await fixtureDirectory();
+  try {
+    const input = join(directory, "error.json");
+    await writeFile(input, JSON.stringify({
+      ...handoff("output-error"),
+      state: { done: [], next: [], blocked: [] },
+    }));
+
+    const result = await runCli(["lint", input]);
+    assert.deepEqual(result, {
+      exit: 1,
+      stdout: "handoff[0] /state/next H004 error " +
+        "State does not provide an actionable next step.\n",
+      stderr: "",
+    });
+  } finally {
+    await clean(directory);
+  }
+});
+
+test("input and usage failures return exit 2 on stderr", async () => {
+  const directory = await fixtureDirectory();
+  try {
+    assert.deepEqual(await runCli(["lint", join(directory, "missing.json")]), {
+      exit: 2,
+      stdout: "",
+      stderr: "Handoff input could not be read.\n",
+    });
+    assert.deepEqual(await runCli(["lint", "input.json", "--format", "xml"]), {
+      exit: 2,
+      stdout: "",
+      stderr: USAGE,
+    });
+  } finally {
+    await clean(directory);
+  }
+});
+
+test("help returns exit 0 on stdout", async () => {
+  assert.deepEqual(await runCli(["--help"]), {
+    exit: 0,
+    stdout: USAGE,
+    stderr: "",
+  });
+});
 
 test("accepts multiple handoffs, an optional manifest, and the changed-path union", async () => {
   const directory = await fixtureDirectory();
