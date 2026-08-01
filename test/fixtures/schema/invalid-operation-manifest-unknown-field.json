@@ -1,0 +1,8 @@
+{
+  "version": "0.1.0",
+  "task_id": "card-03-operation-manifest-schema",
+  "read": [],
+  "write": [],
+  "validation": [],
+  "path_existence_checked": true
+}

@@ -1,0 +1,16 @@
+{
+  "version": "0.1.0",
+  "task_id": "card-03-operation-manifest-schema",
+  "read": [
+    "src/schema/handoff-v0.1.schema.json",
+    "test/schema.test.ts"
+  ],
+  "write": [
+    "src/schema/operation-manifest-v0.1.schema.json",
+    "test/schema.test.ts"
+  ],
+  "validation": [
+    "npm run build",
+    "npm test -- --test-name-pattern=operation"
+  ]
+}

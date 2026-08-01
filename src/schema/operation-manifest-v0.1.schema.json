@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/agent-contract-guard/schema/operation-manifest-v0.1.json",
+  "$comment": "Provisional pre-publication identifier; unstable until a public schema origin is selected.",
+  "title": "agent-contract-guard operation manifest v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "task_id", "read", "write", "validation"],
+  "properties": {
+    "version": { "const": "0.1.0" },
+    "task_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "read": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/path" }
+    },
+    "write": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/path" }
+    },
+    "validation": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/validationCommand" }
+    }
+  },
+  "$defs": {
+    "path": { "type": "string", "minLength": 1, "maxLength": 512 },
+    "validationCommand": { "type": "string", "minLength": 1, "maxLength": 1000 }
+  }
+}

@@ -16,10 +16,14 @@ const minimal = await readJson(new URL("./fixtures/schema/valid-minimal-investig
 const interrupted = await readJson(new URL("./fixtures/schema/valid-minimal-interrupted.json", import.meta.url));
 const full = await readJson(new URL("./fixtures/schema/valid-full-completion.json", import.meta.url));
 const unknownField = await readJson(new URL("./fixtures/schema/invalid-unknown-field.json", import.meta.url));
+const operationSchema = await readJson(new URL("../src/schema/operation-manifest-v0.1.schema.json", import.meta.url));
+const validOperation = await readJson(new URL("./fixtures/schema/valid-operation-manifest.json", import.meta.url));
+const invalidOperationUnknownField = await readJson(new URL("./fixtures/schema/invalid-operation-manifest-unknown-field.json", import.meta.url));
 
 const ajv = new Ajv2020({ allErrors: true, strict: true, strictRequired: false });
 addFormats(ajv);
 const validate = ajv.compile(schema);
+const validateOperation = ajv.compile(operationSchema);
 
 function clone(value) {
   return structuredClone(value);
@@ -32,6 +36,74 @@ function assertValid(value) {
 function assertInvalid(value) {
   assert.equal(validate(value), false, "expected schema validation to fail");
 }
+
+function assertValidOperation(value) {
+  assert.equal(validateOperation(value), true, JSON.stringify(validateOperation.errors));
+}
+
+function assertInvalidOperation(value) {
+  assert.equal(validateOperation(value), false, "expected operation manifest schema validation to fail");
+}
+
+test("operation manifest accepts its fixture and read/write overlap", () => {
+  assertValidOperation(validOperation);
+
+  const overlapping = clone(validOperation);
+  overlapping.read = ["shared/path"];
+  overlapping.write = ["shared/path"];
+  assertValidOperation(overlapping);
+});
+
+test("operation manifest requires every field and rejects unknown fields", () => {
+  for (const key of ["version", "task_id", "read", "write", "validation"]) {
+    const candidate = clone(validOperation);
+    delete candidate[key];
+    assertInvalidOperation(candidate);
+  }
+
+  assertInvalidOperation(invalidOperationUnknownField);
+});
+
+test("operation manifest requires arrays of unique strings", () => {
+  for (const key of ["read", "write", "validation"]) {
+    const wrongType = clone(validOperation);
+    wrongType[key] = "not-an-array";
+    assertInvalidOperation(wrongType);
+
+    const duplicate = clone(validOperation);
+    duplicate[key] = ["same", "same"];
+    assertInvalidOperation(duplicate);
+
+    const nonString = clone(validOperation);
+    nonString[key] = [42];
+    assertInvalidOperation(nonString);
+  }
+});
+
+test("operation manifest enforces version and string length boundaries", () => {
+  const atBoundary = clone(validOperation);
+  atBoundary.task_id = "t".repeat(128);
+  atBoundary.read = ["r".repeat(512)];
+  atBoundary.write = ["w".repeat(512)];
+  atBoundary.validation = ["v".repeat(1000)];
+  assertValidOperation(atBoundary);
+
+  for (const mutate of [
+    (candidate) => { candidate.version = "0.2.0"; },
+    (candidate) => { candidate.task_id = ""; },
+    (candidate) => { candidate.task_id = "t".repeat(129); },
+    (candidate) => { candidate.read = [""]; },
+    (candidate) => { candidate.read = ["r".repeat(513)]; },
+    (candidate) => { candidate.write = [""]; },
+    (candidate) => { candidate.write = ["w".repeat(513)]; },
+    (candidate) => { candidate.validation = [""]; },
+    (candidate) => { candidate.validation = ["v".repeat(1001)]; }
+  ]) {
+    const candidate = clone(validOperation);
+    mutate(candidate);
+    assertInvalidOperation(candidate);
+  }
+});
 
 test("accepts minimal investigation, minimal interruption, and full completion fixtures", () => {
   assertValid(minimal);
