@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { lint } from "../src/core/diagnostics.ts";
-import { lintHandoff } from "../src/core/validate-semantics.ts";
+import { normalizeRelativePath, RelativePathError } from "../src/core/path.ts";
+import { lintHandoff, lintHandoffPaths } from "../src/core/validate-semantics.ts";
 import type { Handoff } from "../src/core/types.ts";
 
 function handoffWithInvalidSemantics(): Handoff {
@@ -97,4 +98,61 @@ test("applies code filtering, severity overrides, counts, and error-only ok stat
     counts: { error: 0, warning: 0, info: 0 },
     ok: true,
   });
+});
+
+test("H001 normalizes separators and empty or dot segments while preserving case", () => {
+  assert.equal(normalizeRelativePath("Src\\Core//./Path.ts/"), "Src/Core/Path.ts");
+  assert.equal(normalizeRelativePath("a.../b.."), "a.../b..");
+});
+
+test("H001 rejects empty, traversal, absolute, drive, and UNC paths without exposing inputs", () => {
+  const invalidPaths = [
+    "",
+    ".",
+    "..",
+    "safe/../private-value",
+    "/absolute/private-value",
+    "\\absolute\\private-value",
+    "C:private-value",
+    "C:\\private-value",
+    "\\\\server\\private-value",
+  ];
+
+  for (const invalidPath of invalidPaths) {
+    assert.throws(
+      () => normalizeRelativePath(invalidPath),
+      (error: unknown) => {
+        assert.ok(error instanceof RelativePathError);
+        assert.equal(error.message.includes("private-value"), false);
+        assert.equal(error.message.includes("server"), false);
+        return true;
+      },
+    );
+  }
+});
+
+test("H001 detects duplicates after normalization without exposing path values", () => {
+  const handoff = handoffWithInvalidSemantics();
+  handoff.scope = {
+    paths: ["Secret\\Source", "Secret//./Source"],
+    excludes: ["Private/Output", "Private\\Output/"],
+  };
+  handoff.sources = [
+    { path: "Internal\\Reference", rev: "one" },
+    { path: "Internal/./Reference", rev: "two" },
+  ];
+
+  const issues = lintHandoffPaths(handoff);
+  assert.deepEqual(
+    issues.map(({ code, path }) => ({ code, path })),
+    [
+      { code: "H001", path: "/scope/paths/1" },
+      { code: "H001", path: "/scope/excludes/1" },
+      { code: "H001", path: "/sources/1/path" },
+    ],
+  );
+  const serializedMessages = issues.map(({ message }) => message).join(" ");
+  for (const inputValue of ["Secret", "Source", "Private", "Output", "Internal", "Reference"]) {
+    assert.equal(serializedMessages.includes(inputValue), false);
+  }
 });
