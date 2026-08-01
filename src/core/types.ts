@@ -60,6 +60,44 @@ export interface Handoff {
   verification: HandoffVerification[];
 }
 
+export type OperationManifestVersion = "0.1.0";
+
+export interface OperationManifest {
+  version: OperationManifestVersion;
+  task_id: string;
+  read: string[];
+  write: string[];
+  validation: string[];
+}
+
+export type SchemaKind = "handoff" | "operation-manifest";
+
+export type SchemaDiagnosticCode = `schema_${string}`;
+
+/** A structural validation diagnostic, intentionally separate from semantic lint. */
+export interface SchemaDiagnostic {
+  code: SchemaDiagnosticCode;
+  severity: "error";
+  pointer: string;
+  message: string;
+}
+
+export interface SchemaValidationSuccess<T> {
+  ok: true;
+  value: T;
+  diagnostics: [];
+}
+
+export interface SchemaValidationFailure {
+  ok: false;
+  value: unknown;
+  diagnostics: SchemaDiagnostic[];
+}
+
+export type SchemaValidationResult<T> =
+  | SchemaValidationSuccess<T>
+  | SchemaValidationFailure;
+
 export type SemanticIssueCode =
   | "verification_exit_code_mismatch"
   | "source_hash_length_mismatch";

@@ -5,6 +5,10 @@ import test from "node:test";
 import Ajv2020 from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
 
+import {
+  validateHandoffSchema,
+  validateOperationManifestSchema,
+} from "../src/core/validate-schema.ts";
 import { lintHandoff } from "../src/core/validate-semantics.ts";
 
 async function readJson(url) {
@@ -44,6 +48,68 @@ function assertValidOperation(value) {
 function assertInvalidOperation(value) {
   assert.equal(validateOperation(value), false, "expected operation manifest schema validation to fail");
 }
+
+test("schema engine validates handoffs without mutating or copying input", () => {
+  const candidate = clone(minimal);
+  const before = clone(candidate);
+  const result = validateHandoffSchema(candidate);
+
+  assert.equal(result.ok, true);
+  assert.strictEqual(result.value, candidate);
+  assert.deepEqual(result.diagnostics, []);
+  assert.deepEqual(candidate, before);
+});
+
+test("schema engine returns structural diagnostics separately from semantic lint", () => {
+  const structurallyInvalid = clone(minimal);
+  structurallyInvalid.task.title = 42;
+  const schemaResult = validateHandoffSchema(structurallyInvalid);
+
+  assert.equal(schemaResult.ok, false);
+  assert.strictEqual(schemaResult.value, structurallyInvalid);
+  assert.deepEqual(schemaResult.diagnostics, [{
+    code: "schema_type",
+    severity: "error",
+    pointer: "/task/title",
+    message: "Value has an invalid type.",
+  }]);
+
+  const semanticallyInvalid = clone(minimal);
+  semanticallyInvalid.verification = [{
+    check: "schema-valid",
+    status: "pass",
+    exit_code: 9,
+    summary: "Semantic mismatch.",
+  }];
+  assert.equal(validateHandoffSchema(semanticallyInvalid).ok, true);
+  assert.equal(lintHandoff(semanticallyInvalid).length, 1);
+});
+
+test("schema engine validates operation manifests and preserves rejected values", () => {
+  const validResult = validateOperationManifestSchema(validOperation);
+  assert.equal(validResult.ok, true);
+  assert.strictEqual(validResult.value, validOperation);
+
+  const candidate = clone(invalidOperationUnknownField);
+  const before = clone(candidate);
+  const invalidResult = validateOperationManifestSchema(candidate);
+  assert.equal(invalidResult.ok, false);
+  assert.strictEqual(invalidResult.value, candidate);
+  assert.ok(invalidResult.diagnostics.some(({ code }) => code === "schema_additionalProperties"));
+  assert.deepEqual(candidate, before);
+});
+
+test("schema diagnostics use deterministic codepoint ordering", () => {
+  const candidate = clone(minimal);
+  candidate.task = { z: true, A: true };
+
+  const result = validateHandoffSchema(candidate);
+  assert.equal(result.ok, false);
+  assert.deepEqual(
+    result.diagnostics.map(({ pointer }) => pointer),
+    ["/task/A", "/task/objective", "/task/title", "/task/z"],
+  );
+});
 
 test("operation manifest accepts its fixture and read/write overlap", () => {
   assertValidOperation(validOperation);
