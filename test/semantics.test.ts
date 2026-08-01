@@ -1,10 +1,16 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { lint } from "../src/core/diagnostics.ts";
 import { normalizeRelativePath, RelativePathError } from "../src/core/path.ts";
 import { lintHandoff, lintHandoffPaths } from "../src/core/validate-semantics.ts";
 import type { Handoff } from "../src/core/types.ts";
+
+async function readSemanticFixture(name: string): Promise<Handoff> {
+  const url = new URL(`./fixtures/invalid-semantic/${name}.json`, import.meta.url);
+  return JSON.parse(await readFile(url, "utf8")) as Handoff;
+}
 
 function handoffWithInvalidSemantics(): Handoff {
   return {
@@ -14,19 +20,19 @@ function handoffWithInvalidSemantics(): Handoff {
     created_at: "2030-01-02T03:04:05Z",
     task: { title: "Diagnostics", objective: "Exercise deterministic diagnostics." },
     scope: { paths: ["src"] },
-    state: { done: [], next: [], blocked: [] },
+    state: { done: [], next: ["Continue semantic validation."], blocked: [] },
     sources: [
-      { path: "secret-source", rev: "main", hash: "sha256:private-value" },
-      { path: "source-1", rev: "main", hash: "sha256:short" },
-      { path: "source-2", rev: "main", hash: "sha256:tiny" },
-      { path: "source-3", rev: "main", hash: "sha256:x" },
-      { path: "source-4", rev: "main", hash: "sha256:y" },
-      { path: "source-5", rev: "main", hash: "sha256:z" },
-      { path: "source-6", rev: "main", hash: "sha256:a" },
-      { path: "source-7", rev: "main", hash: "sha256:b" },
-      { path: "source-8", rev: "main", hash: "sha256:c" },
-      { path: "source-9", rev: "main", hash: "sha256:d" },
-      { path: "source-10", rev: "main", hash: "sha256:e" },
+      { path: "src/secret-source", rev: "main", hash: "sha256:private-value" },
+      { path: "src/source-1", rev: "main", hash: "sha256:short" },
+      { path: "src/source-2", rev: "main", hash: "sha256:tiny" },
+      { path: "src/source-3", rev: "main", hash: "sha256:x" },
+      { path: "src/source-4", rev: "main", hash: "sha256:y" },
+      { path: "src/source-5", rev: "main", hash: "sha256:z" },
+      { path: "src/source-6", rev: "main", hash: "sha256:a" },
+      { path: "src/source-7", rev: "main", hash: "sha256:b" },
+      { path: "src/source-8", rev: "main", hash: "sha256:c" },
+      { path: "src/source-9", rev: "main", hash: "sha256:d" },
+      { path: "src/source-10", rev: "main", hash: "sha256:e" },
     ],
     risks: [],
     verification: [
@@ -155,4 +161,27 @@ test("H001 detects duplicates after normalization without exposing path values",
   for (const inputValue of ["Secret", "Source", "Private", "Output", "Internal", "Reference"]) {
     assert.equal(serializedMessages.includes(inputValue), false);
   }
+});
+
+test("H002-H005 valid fixture produces no semantic rule diagnostics", async () => {
+  const result = lint(await readSemanticFixture("valid-h002-h005"));
+  assert.deepEqual(result.diagnostics, []);
+});
+
+for (const code of ["H002", "H003", "H004", "H005"] as const) {
+  test(`${code} invalid fixture produces only ${code}`, async () => {
+    const result = lint(await readSemanticFixture(`invalid-${code.toLowerCase()}`));
+    assert.deepEqual(result.diagnostics.map((diagnostic) => diagnostic.code), [code]);
+    assert.equal(result.diagnostics[0]?.message.includes("TBD"), false);
+  });
+}
+
+test("H004 accepts a completed state without a next action", () => {
+  const handoff = handoffWithInvalidSemantics();
+  handoff.state.done = ["Completed the scoped task."];
+  handoff.state.next = [];
+  handoff.sources = undefined;
+  handoff.verification = [{ check: "complete", status: "pass", exit_code: 0, summary: "Complete." }];
+
+  assert.equal(lintHandoff(handoff).some(({ code }) => code === "H004"), false);
 });

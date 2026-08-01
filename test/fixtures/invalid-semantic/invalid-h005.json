@@ -1,0 +1,16 @@
+{
+  "version": "0.1.0",
+  "profile": "full",
+  "id": "invalid-h005",
+  "created_at": "2030-01-02T03:04:05Z",
+  "task": { "title": "Validate semantics", "objective": "Exercise H005." },
+  "scope": { "paths": ["src", "docs"], "excludes": ["src/generated"] },
+  "state": {
+    "done": [],
+    "next": ["Resolve the blocker."],
+    "blocked": [{ "reason": "A decision is pending.", "needed": "TBD" }]
+  },
+  "sources": [{ "path": "docs/design.md", "rev": "main" }],
+  "risks": [],
+  "verification": []
+}

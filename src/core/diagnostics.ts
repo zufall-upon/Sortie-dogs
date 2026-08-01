@@ -12,12 +12,23 @@ const validateSemantics: typeof import("./validate-semantics.js") = await import
   `./validate-semantics.${import.meta.url.endsWith(".ts") ? "ts" : "js"}`
 );
 
-const DEFAULT_SEVERITIES: Readonly<Record<SemanticIssueCode, Severity>> = {
+type DiagnosticIssue = ReturnType<typeof validateSemantics.lintHandoff>[number];
+type DiagnosticIssueCode = DiagnosticIssue["code"];
+
+const DEFAULT_SEVERITIES: Readonly<Record<DiagnosticIssueCode, Severity>> = {
+  H002: "error",
+  H003: "error",
+  H004: "error",
+  H005: "error",
   verification_exit_code_mismatch: "error",
   source_hash_length_mismatch: "error",
 };
 
-const MESSAGES: Readonly<Record<SemanticIssueCode, string>> = {
+const MESSAGES: Readonly<Record<DiagnosticIssueCode, string>> = {
+  H002: "Scope path conflicts with an exclusion.",
+  H003: "Source path is outside the effective scope.",
+  H004: "State does not provide an actionable next step.",
+  H005: "Blocker does not identify a concrete needed action.",
   verification_exit_code_mismatch: "Verification exit code does not match its status.",
   source_hash_length_mismatch: "Source hash digest has an invalid length.",
 };
@@ -62,15 +73,15 @@ function compareDiagnostics(left: Diagnostic, right: Diagnostic): number {
 }
 
 function createLintResult(
-  issues: readonly SemanticIssue[],
+  issues: readonly DiagnosticIssue[],
   options: LintOptions = {},
 ): LintResult {
-  const enabledCodes = options.codes === undefined ? undefined : new Set(options.codes);
+  const enabledCodes = options.codes === undefined ? undefined : new Set<string>(options.codes);
   const diagnostics = issues
     .filter((issue) => enabledCodes === undefined || enabledCodes.has(issue.code))
     .map<Diagnostic>((issue) => ({
-      code: issue.code,
-      severity: options.severity?.[issue.code] ?? DEFAULT_SEVERITIES[issue.code],
+      code: issue.code as SemanticIssueCode,
+      severity: options.severity?.[issue.code as SemanticIssueCode] ?? DEFAULT_SEVERITIES[issue.code],
       pointer: issue.path,
       message: MESSAGES[issue.code],
     }))

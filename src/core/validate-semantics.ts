@@ -15,8 +15,33 @@ export interface H001Issue {
   message: string;
 }
 
+export type HandoffRuleCode = "H002" | "H003" | "H004" | "H005";
+
+export interface HandoffRuleIssue {
+  code: HandoffRuleCode;
+  path: string;
+  message: string;
+}
+
 const INVALID_PATH_MESSAGE = "Path must be a valid repository-relative path.";
 const DUPLICATE_PATH_MESSAGE = "Path duplicates another entry after normalization.";
+const RULE_MESSAGES: Readonly<Record<HandoffRuleCode, string>> = {
+  H002: "Scope path is excluded by the same scope.",
+  H003: "Source path is outside the effective scope.",
+  H004: "State has neither a next action nor completion evidence.",
+  H005: "Blocker needed action is a placeholder.",
+};
+
+// H005 placeholder vocabulary is intentionally centralized here.
+const BLOCKER_ACTION_PLACEHOLDERS = new Set([
+  "?",
+  "n/a",
+  "none",
+  "tbd",
+  "todo",
+  "unknown",
+  "unspecified",
+]);
 
 function lintPathList(paths: readonly string[], pointer: string): H001Issue[] {
   const issues: H001Issue[] = [];
@@ -68,8 +93,61 @@ export function lintHandoffPaths(handoff: Handoff): H001Issue[] {
   return issues;
 }
 
-export function lintHandoff(handoff: Handoff): SemanticIssue[] {
-  const issues: SemanticIssue[] = [];
+function normalizePath(path: string): string | undefined {
+  try {
+    return pathUtils.normalizeRelativePath(path);
+  } catch (error) {
+    if (error instanceof pathUtils.RelativePathError) return undefined;
+    throw error;
+  }
+}
+
+function isWithin(path: string, parent: string): boolean {
+  return path === parent || path.startsWith(`${parent}/`);
+}
+
+function lintHandoffRules(handoff: Handoff): HandoffRuleIssue[] {
+  const issues: HandoffRuleIssue[] = [];
+  const scopePaths = handoff.scope?.paths.map(normalizePath).filter((path): path is string => path !== undefined) ?? [];
+  const excludes = handoff.scope?.excludes?.map(normalizePath).filter((path): path is string => path !== undefined) ?? [];
+
+  handoff.scope?.paths.forEach((path, index) => {
+    const normalized = normalizePath(path);
+    if (normalized !== undefined && excludes.some((exclude) => isWithin(normalized, exclude))) {
+      issues.push({ code: "H002", path: `/scope/paths/${index}`, message: RULE_MESSAGES.H002 });
+    }
+  });
+
+  handoff.sources?.forEach((source, index) => {
+    const normalized = normalizePath(source.path);
+    if (normalized === undefined || handoff.scope === undefined) return;
+    const included = scopePaths.some((scopePath) => isWithin(normalized, scopePath));
+    const excluded = excludes.some((exclude) => isWithin(normalized, exclude));
+    if (!included || excluded) {
+      issues.push({ code: "H003", path: `/sources/${index}/path`, message: RULE_MESSAGES.H003 });
+    }
+  });
+
+  const completed =
+    handoff.state.done.length > 0 &&
+    handoff.state.blocked.length === 0 &&
+    handoff.verification.length > 0 &&
+    handoff.verification.every(({ status }) => status === "pass");
+  if (handoff.state.next.length === 0 && !completed) {
+    issues.push({ code: "H004", path: "/state/next", message: RULE_MESSAGES.H004 });
+  }
+
+  handoff.state.blocked.forEach((blocker, index) => {
+    if (BLOCKER_ACTION_PLACEHOLDERS.has(blocker.needed.trim().toLowerCase())) {
+      issues.push({ code: "H005", path: `/state/blocked/${index}/needed`, message: RULE_MESSAGES.H005 });
+    }
+  });
+
+  return issues;
+}
+
+export function lintHandoff(handoff: Handoff): Array<SemanticIssue | HandoffRuleIssue> {
+  const issues: Array<SemanticIssue | HandoffRuleIssue> = lintHandoffRules(handoff);
 
   handoff.verification.forEach((verification, index) => {
     const exitCode = verification.exit_code;

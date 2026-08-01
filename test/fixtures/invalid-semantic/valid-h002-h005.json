@@ -1,0 +1,16 @@
+{
+  "version": "0.1.0",
+  "profile": "full",
+  "id": "valid-semantic-rules",
+  "created_at": "2030-01-02T03:04:05Z",
+  "task": { "title": "Validate semantics", "objective": "Exercise semantic handoff rules." },
+  "scope": { "paths": ["src", "docs"], "excludes": ["src/generated"] },
+  "state": {
+    "done": [],
+    "next": ["Implement the next scoped change."],
+    "blocked": [{ "reason": "Approval is pending.", "needed": "Provide the approved design decision." }]
+  },
+  "sources": [{ "path": "docs/design.md", "rev": "main" }],
+  "risks": [],
+  "verification": []
+}

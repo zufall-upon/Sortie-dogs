@@ -1,0 +1,12 @@
+{
+  "version": "0.1.0",
+  "profile": "full",
+  "id": "invalid-h004",
+  "created_at": "2030-01-02T03:04:05Z",
+  "task": { "title": "Validate semantics", "objective": "Exercise H004." },
+  "scope": { "paths": ["src", "docs"], "excludes": ["src/generated"] },
+  "state": { "done": [], "next": [], "blocked": [] },
+  "sources": [{ "path": "docs/design.md", "rev": "main" }],
+  "risks": [],
+  "verification": []
+}
