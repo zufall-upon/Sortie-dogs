@@ -1,0 +1,11 @@
+{
+  "version": "0.1.0",
+  "profile": "minimal",
+  "id": "invalid-schema-unknown-property",
+  "created_at": "2030-01-02T03:04:05Z",
+  "task": { "title": "Validate schema", "objective": "Exercise strict objects." },
+  "state": { "done": [], "next": ["Continue."], "blocked": [] },
+  "risks": [],
+  "verification": [],
+  "unexpected": true
+}

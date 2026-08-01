@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
 import test from "node:test";
 
 const TEST_ROOT = join(process.cwd(), "_testenv");
 const ENTRY = join(process.cwd(), "src", "cli", "main.ts");
+const INVALID_SCHEMA = join(process.cwd(), "test", "fixtures", "invalid-schema");
+const INVALID_SEMANTIC = join(process.cwd(), "test", "fixtures", "invalid-semantic");
 const USAGE = `Usage: agent-contract-guard lint <handoff.json> [<handoff.json> ...]
   [--manifest <operation-manifest.json>]
   [--changed-paths-from <file|->]
@@ -16,6 +18,16 @@ interface CliResult {
   exit: number | null;
   stdout: string;
   stderr: string;
+}
+
+interface JsonDiagnostic {
+  code: string;
+  severity: "error" | "warning";
+  pointer: string;
+}
+
+function diagnostics(result: CliResult): JsonDiagnostic[] {
+  return JSON.parse(result.stdout) as JsonDiagnostic[];
 }
 
 async function fixtureDirectory(): Promise<string> {
@@ -76,8 +88,8 @@ test("renders warning diagnostics as text without failing by default", async () 
     const result = await runCli(["lint", input]);
     assert.deepEqual(result, {
       exit: 0,
-      stdout: "handoff[0] /verification/0/exit_code verification_exit_code_mismatch warning " +
-        "Verification exit code does not match its status.\n",
+      stdout: "handoff[0] /verification/0/exit_code H006 warning " +
+        "exit_code is inconsistent with verification status pass\n",
       stderr: "",
     });
   } finally {
@@ -96,10 +108,10 @@ test("renders diagnostics as JSON", async () => {
       exit: 0,
       stdout: JSON.stringify([{
         file: "handoff[0]",
-        code: "verification_exit_code_mismatch",
+        code: "H006",
         severity: "warning",
         pointer: "/verification/0/exit_code",
-        message: "Verification exit code does not match its status.",
+        message: "exit_code is inconsistent with verification status pass",
       }]) + "\n",
       stderr: "",
     });
@@ -132,7 +144,7 @@ test("strict promotes warning diagnostics to exit 1", async () => {
 
     const result = await runCli(["lint", input, "--strict"]);
     assert.equal(result.exit, 1);
-    assert.match(result.stdout, / verification_exit_code_mismatch warning /);
+    assert.match(result.stdout, / H006 warning /);
     assert.equal(result.stderr, "");
   } finally {
     await clean(directory);
@@ -152,7 +164,7 @@ test("error diagnostics return exit 1", async () => {
     assert.deepEqual(result, {
       exit: 1,
       stdout: "handoff[0] /state/next H004 error " +
-        "State does not provide an actionable next step.\n",
+        "State has neither a next action nor completion evidence.\n",
       stderr: "",
     });
   } finally {
@@ -387,6 +399,179 @@ test("help is successful and manifest parse failures are inspection failures", a
     const result = await runCli(["lint", input, "--manifest", manifest]);
     assert.equal(result.exit, 2);
     assert.equal(result.stderr, "Manifest input is not valid JSON.\n");
+  } finally {
+    await clean(directory);
+  }
+});
+
+test("invalid fixture matrix fixes H001-H010 codes and error exits", async () => {
+  const cases = [
+    ["invalid-h001.json", "H001"],
+    ["invalid-h002.json", "H002"],
+    ["invalid-h003.json", "H003"],
+    ["invalid-h004.json", "H004"],
+    ["invalid-h005.json", "H005"],
+    ["invalid-h006.json", "H006"],
+    ["invalid-h007.json", "H007"],
+    ["invalid-h008-date.json", "schema_format"],
+    ["invalid-h008-offset.json", "schema_format"],
+    ["invalid-h010.json", "H010"],
+  ] as const;
+
+  for (const [fixture, expectedCode] of cases) {
+    const result = await runCli(["lint", join(INVALID_SEMANTIC, fixture), "--format", "json"]);
+    assert.equal(result.exit, 1, fixture);
+    assert.deepEqual(diagnostics(result).map(({ code }) => code), [expectedCode], fixture);
+    assert.equal(result.stderr, "", fixture);
+  }
+});
+
+test("profile-specific null exits and H009 warning exits are stable", async () => {
+  const fullNull = join(INVALID_SEMANTIC, "invalid-h006-full-null.json");
+  const minimalNull = join(INVALID_SEMANTIC, "invalid-h006-minimal-null.json");
+  const secretLike = join(INVALID_SEMANTIC, "invalid-h009.json");
+
+  const fullResult = await runCli(["lint", fullNull, "--format", "json"]);
+  assert.equal(fullResult.exit, 1);
+  assert.deepEqual(diagnostics(fullResult).map(({ code, severity }) => [code, severity]), [["H006", "error"]]);
+
+  for (const fixture of [minimalNull, secretLike]) {
+    const normal = await runCli(["lint", fixture, "--format", "json"]);
+    assert.equal(normal.exit, 0);
+    assert.equal(diagnostics(normal)[0]?.severity, "warning");
+    const strict = await runCli(["lint", fixture, "--format", "json", "--strict"]);
+    assert.equal(strict.exit, 1);
+    assert.deepEqual(diagnostics(strict), diagnostics(normal));
+  }
+  assert.deepEqual(diagnostics(await runCli(["lint", secretLike, "--format", "json"]))
+    .map(({ code }) => code), ["H009"]);
+});
+
+test("invalid schema and malformed fixture exits are stable", async () => {
+  for (const [fixture, code] of [
+    ["missing-version.json", "schema_required"],
+    ["unknown-property.json", "schema_additionalProperties"],
+  ] as const) {
+    const result = await runCli(["lint", join(INVALID_SCHEMA, fixture), "--format", "json"]);
+    assert.equal(result.exit, 1);
+    assert.deepEqual(diagnostics(result).map((diagnostic) => diagnostic.code), [code]);
+  }
+
+  const malformed = await runCli(["lint", join(INVALID_SCHEMA, "malformed.json")]);
+  assert.deepEqual(malformed, {
+    exit: 2,
+    stdout: "",
+    stderr: "Handoff input is not valid JSON.\n",
+  });
+});
+
+test("manifest matrix fixes H011 and M002-M005/M007 exit semantics", async () => {
+  const directory = await fixtureDirectory();
+  const input = join(directory, "handoff.json");
+  const manifestPath = join(directory, "manifest.json");
+  const baseHandoff = {
+    ...handoff("manifest-matrix"),
+    profile: "full",
+    scope: { paths: ["src"] },
+    sources: [{ path: "src/index.ts", rev: "main" }],
+  };
+  const baseManifest = {
+    version: "0.1.0",
+    task_id: "manifest-matrix",
+    read: ["src", "src/index.ts"],
+    write: ["src", "src/index.ts"],
+    validation: [],
+  };
+
+  async function manifestCase(
+    handoffValue: object,
+    manifestValue: object,
+    changed: readonly string[] = ["src/index.ts"],
+    strict: boolean = false,
+  ): Promise<CliResult> {
+    await Promise.all([
+      writeFile(input, JSON.stringify(handoffValue)),
+      writeFile(manifestPath, JSON.stringify(manifestValue)),
+    ]);
+    const args = ["lint", input, "--manifest", manifestPath, "--format", "json"];
+    for (const path of changed) args.push("--changed-path", path);
+    if (strict) args.push("--strict");
+    return runCli(args);
+  }
+
+  try {
+    const cases = [
+      [{ ...baseHandoff, scope: { paths: ["src", "outside"] } }, baseManifest, "M002_SCOPE_NOT_ALLOWED"],
+      [{ ...baseHandoff, sources: [{ path: "src/missing.ts", rev: "main" }] }, baseManifest, "M003_SOURCE_NOT_DECLARED"],
+      [{ ...baseHandoff, verification: [{ check: "other-check", status: "pass", exit_code: 0, summary: "Passed." }] }, baseManifest, "M004_VERIFICATION_NOT_DECLARED"],
+    ] as const;
+    for (const [handoffValue, manifestValue, code] of cases) {
+      const result = await manifestCase(handoffValue, manifestValue);
+      assert.equal(result.exit, 1, code);
+      assert.deepEqual(diagnostics(result).map((diagnostic) => diagnostic.code), [code], code);
+    }
+
+    const h011 = await manifestCase(
+      JSON.parse(await readFile(join(INVALID_SEMANTIC, "invalid-h011.json"), "utf8")) as object,
+      { ...baseManifest, validation: ["completed-check", "missing-check"] },
+    );
+    assert.equal(h011.exit, 1);
+    assert.deepEqual(diagnostics(h011).map(({ code }) => code), ["H011_VALIDATION_MISSING"]);
+
+    const m005 = await manifestCase(baseHandoff, baseManifest, ["outside.ts"]);
+    assert.equal(m005.exit, 1);
+    assert.deepEqual(diagnostics(m005).map(({ code }) => code), ["M005_CHANGED_PATH_NOT_WRITABLE"]);
+
+    const m007 = await manifestCase(baseHandoff, baseManifest, []);
+    assert.equal(m007.exit, 0);
+    assert.deepEqual(diagnostics(m007).map(({ code, severity }) => [code, severity]),
+      [["M007_CHANGED_PATHS_MISSING", "warning"]]);
+    const m007Strict = await manifestCase(baseHandoff, baseManifest, [], true);
+    assert.equal(m007Strict.exit, 1);
+    assert.deepEqual(diagnostics(m007Strict), diagnostics(m007));
+  } finally {
+    await clean(directory);
+  }
+});
+
+test("diagnostic JSON order is pointer then code and never includes secret-like values", async () => {
+  const directory = await fixtureDirectory();
+  try {
+    const input = join(directory, "sorted.json");
+    const secretLike = "aB3dE5fG7hJ9kL2m";
+    await writeFile(input, JSON.stringify({
+      ...handoff("sorted-diagnostics"),
+      state: { done: [], next: [], blocked: [] },
+      verification: [{ check: "sorted-check", status: "pass", exit_code: 1, summary: "Mismatch." }],
+      ext: { token: secretLike },
+    }));
+    const result = await runCli(["lint", input, "--format", "json"]);
+    assert.equal(result.exit, 1);
+    assert.deepEqual(diagnostics(result).map(({ pointer, code }) => [pointer, code]), [
+      ["/ext/token", "H009"],
+      ["/state/next", "H004"],
+      ["/verification/0/exit_code", "H006"],
+    ]);
+    assert.equal(`${result.stdout}${result.stderr}`.includes(secretLike), false);
+  } finally {
+    await clean(directory);
+  }
+});
+
+test("path checks are lexical: traversal fails while symlink resolution stays out of scope", async () => {
+  const traversal = await runCli(["lint", join(INVALID_SEMANTIC, "invalid-h001.json"), "--format", "json"]);
+  assert.equal(traversal.exit, 1);
+  assert.deepEqual(diagnostics(traversal).map(({ code }) => code), ["H001"]);
+
+  const directory = await fixtureDirectory();
+  try {
+    const input = join(directory, "lexical-only.json");
+    await writeFile(input, JSON.stringify({ ...handoff("lexical-only"), scope: { paths: ["links/source.ts"] } }));
+    assert.deepEqual(await runCli(["lint", input, "--format", "json"]), {
+      exit: 0,
+      stdout: "[]\n",
+      stderr: "",
+    });
   } finally {
     await clean(directory);
   }

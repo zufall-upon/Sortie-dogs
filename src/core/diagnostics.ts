@@ -16,33 +16,16 @@ type DiagnosticIssue = ReturnType<typeof validateSemantics.lintHandoff>[number];
 type DiagnosticIssueCode = DiagnosticIssue["code"];
 
 const DEFAULT_SEVERITIES: Readonly<Record<DiagnosticIssueCode, Severity>> = {
+  H001: "error",
   H002: "error",
   H003: "error",
   H004: "error",
   H005: "error",
+  H006: "error",
+  H007: "error",
   H008: "error",
   H009: "warning",
   H010: "error",
-  verification_exit_code_mismatch: "error",
-  source_hash_length_mismatch: "error",
-};
-
-const MESSAGES: Readonly<Record<DiagnosticIssueCode, string>> = {
-  H002: "Scope path conflicts with an exclusion.",
-  H003: "Source path is outside the effective scope.",
-  H004: "State does not provide an actionable next step.",
-  H005: "Blocker does not identify a concrete needed action.",
-  H008: "Creation timestamp is invalid.",
-  H009: "Value resembles a credential or high-entropy token.",
-  H010: "Claim contains only whitespace.",
-  verification_exit_code_mismatch: "Verification exit code does not match its status.",
-  source_hash_length_mismatch: "Source hash digest has an invalid length.",
-};
-
-const SEVERITY_ORDER: Readonly<Record<Severity, number>> = {
-  error: 0,
-  warning: 1,
-  info: 2,
 };
 
 function compareText(left: string, right: string): number {
@@ -72,7 +55,6 @@ function comparePointer(left: string, right: string): number {
 
 function compareDiagnostics(left: Diagnostic, right: Diagnostic): number {
   return (
-    SEVERITY_ORDER[left.severity] - SEVERITY_ORDER[right.severity] ||
     comparePointer(left.pointer, right.pointer) ||
     compareText(left.code, right.code)
   );
@@ -91,11 +73,11 @@ function createLintResult(
       code: issue.code as SemanticIssueCode,
       severity:
         severityOverrides?.[issue.code] ??
-        (issue.code === "verification_exit_code_mismatch" && profile === "minimal"
+        (issue.code === "H006" && profile === "minimal"
           ? "warning"
           : DEFAULT_SEVERITIES[issue.code]),
       pointer: issue.path,
-      message: MESSAGES[issue.code],
+      message: issue.message,
     }))
     .sort(compareDiagnostics);
 

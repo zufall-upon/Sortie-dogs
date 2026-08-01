@@ -4,10 +4,13 @@ const pathUtils: typeof import("./path.js") = await import(
   `./path.${import.meta.url.endsWith(".ts") ? "ts" : "js"}`
 );
 
-const HASH_LENGTHS: Readonly<Record<string, number>> = {
+const HASH_LENGTHS = {
   sha256: 64,
   sha512: 128,
-};
+} as const;
+
+const HEX_DIGEST = /^[0-9a-f]+$/i;
+const INVALID_HASH_MESSAGE = "Source hash must use a supported algorithm and hexadecimal digest.";
 
 export interface H001Issue {
   code: "H001";
@@ -91,24 +94,33 @@ function escapePointerSegment(segment: string): string {
 
 function lintSecretLikeValues(handoff: Handoff): HandoffRuleIssue[] {
   const issues: HandoffRuleIssue[] = [];
-  const visited = new WeakSet<object>();
+  const ancestors = new WeakSet<object>();
 
   function visit(value: unknown, path: string): void {
     if (typeof value === "string") {
       if (isSecretLike(value)) issues.push({ code: "H009", path, message: RULE_MESSAGES.H009 });
       return;
     }
-    if (value === null || typeof value !== "object" || visited.has(value)) return;
+    if (value === null || typeof value !== "object" || ancestors.has(value)) return;
 
-    visited.add(value);
-    if (Array.isArray(value)) {
-      value.forEach((entry, index) => visit(entry, `${path}/${index}`));
-      return;
+    ancestors.add(value);
+    try {
+      if (Array.isArray(value)) {
+        value.forEach((entry, index) => visit(entry, `${path}/${index}`));
+        return;
+      }
+      Object.entries(value).forEach(([key, entry], index) => {
+        if (isSecretLike(key)) {
+          const position = `${path}/@${index}`;
+          issues.push({ code: "H009", path: `${position}/key`, message: RULE_MESSAGES.H009 });
+          visit(entry, `${position}/value`);
+        } else {
+          visit(entry, `${path}/${escapePointerSegment(key)}`);
+        }
+      });
+    } finally {
+      ancestors.delete(value);
     }
-    Object.entries(value).forEach(([key, entry], index) => {
-      const segment = isSecretLike(key) ? `@${index}` : escapePointerSegment(key);
-      visit(entry, `${path}/${segment}`);
-    });
   }
 
   visit(handoff, "");
@@ -264,7 +276,7 @@ function lintHandoffRules(handoff: Handoff): Array<HandoffRuleIssue | SemanticIs
 
     if (mismatch) {
       issues.push({
-        code: "verification_exit_code_mismatch",
+        code: "H006",
         path: `/verification/${index}/exit_code`,
         message: `exit_code is inconsistent with verification status ${verification.status}`,
       });
@@ -274,14 +286,26 @@ function lintHandoffRules(handoff: Handoff): Array<HandoffRuleIssue | SemanticIs
   handoff.sources?.forEach((source, index) => {
     if (source.hash === undefined) return;
     const separator = source.hash.indexOf(":");
+    if (separator < 1) {
+      issues.push({
+        code: "H007",
+        path: `/sources/${index}/hash`,
+        message: INVALID_HASH_MESSAGE,
+      });
+      return;
+    }
     const algorithm = source.hash.slice(0, separator);
     const digest = source.hash.slice(separator + 1);
-    const expectedLength = HASH_LENGTHS[algorithm];
-    if (expectedLength !== undefined && digest.length !== expectedLength) {
+    const expectedLength = Object.hasOwn(HASH_LENGTHS, algorithm)
+      ? HASH_LENGTHS[algorithm as keyof typeof HASH_LENGTHS]
+      : undefined;
+    if (expectedLength === undefined || digest.length !== expectedLength || !HEX_DIGEST.test(digest)) {
       issues.push({
-        code: "source_hash_length_mismatch",
+        code: "H007",
         path: `/sources/${index}/hash`,
-        message: `${algorithm} digest must contain ${expectedLength} hexadecimal characters`,
+        message: expectedLength === undefined
+          ? INVALID_HASH_MESSAGE
+          : `${algorithm} digest must contain ${expectedLength} hexadecimal characters.`,
       });
     }
   });
@@ -310,6 +334,6 @@ function lintHandoffRules(handoff: Handoff): Array<HandoffRuleIssue | SemanticIs
   return issues;
 }
 
-export function lintHandoff(handoff: Handoff): Array<HandoffRuleIssue | SemanticIssue> {
-  return lintHandoffRules(handoff);
+export function lintHandoff(handoff: Handoff): Array<H001Issue | HandoffRuleIssue | SemanticIssue> {
+  return [...lintHandoffPaths(handoff), ...lintHandoffRules(handoff)];
 }

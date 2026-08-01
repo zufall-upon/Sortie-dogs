@@ -332,12 +332,12 @@ test("enforces the semantic exit-code invariant for every verification status", 
   ]) {
     const candidate = clone(minimal);
     candidate.verification = [{ check: "focused-check", status, exit_code: exitCode, summary: "Focused result." }];
-    assert.equal(lintHandoff(candidate).filter((issue) => issue.code === "verification_exit_code_mismatch").length, 1);
+    assert.equal(lintHandoff(candidate).filter((issue) => issue.code === "H006").length, 1);
   }
 
   for (const status of ["pass", "fail", "not_run"]) {
     const candidate = clone(minimal);
     candidate.verification = [{ check: "focused-check", status, summary: "Focused result." }];
-    assert.equal(lintHandoff(candidate).filter((issue) => issue.code === "verification_exit_code_mismatch").length, 1);
+    assert.equal(lintHandoff(candidate).filter((issue) => issue.code === "H006").length, 1);
   }
 });

@@ -1,0 +1,10 @@
+{
+  "version": "0.1.0",
+  "profile": "minimal",
+  "id": "invalid-h006-minimal-null",
+  "created_at": "2030-01-02T03:04:05Z",
+  "task": { "title": "Validate semantics", "objective": "Exercise minimal H006 null handling." },
+  "state": { "done": [], "next": ["Continue."], "blocked": [] },
+  "risks": [],
+  "verification": [{ "check": "focused-check", "status": "pass", "exit_code": null, "summary": "Check result unavailable." }]
+}

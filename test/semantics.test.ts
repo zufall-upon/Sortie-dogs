@@ -70,38 +70,38 @@ test("adapts existing semantic issues to fixed codes and messages without input 
   assert.equal(rawIssues.length, result.diagnostics.length);
   assert.deepEqual(
     new Set(result.diagnostics.map(({ code }) => code)),
-    new Set(["verification_exit_code_mismatch", "source_hash_length_mismatch"]),
+    new Set(["H006", "H007"]),
   );
   assert.deepEqual(
     new Set(result.diagnostics.map(({ message }) => message)),
     new Set([
-      "Verification exit code does not match its status.",
-      "Source hash digest has an invalid length.",
+      "exit_code is inconsistent with verification status pass",
+      "sha256 digest must contain 64 hexadecimal characters.",
     ]),
   );
 
   const serializedMessages = result.diagnostics.map(({ message }) => message).join(" ");
-  for (const inputValue of ["secret-source", "private-value", "secret-check", "private-summary", "sha256", "64", "pass", "17"]) {
+  for (const inputValue of ["secret-source", "private-value", "secret-check", "private-summary", "17"]) {
     assert.equal(serializedMessages.includes(inputValue), false);
   }
 });
 
-test("sorts by severity, numeric JSON-pointer segments, then code", () => {
+test("sorts by numeric JSON-pointer segments, then code", () => {
   const handoff = handoffWithInvalidSemantics();
   handoff.profile = "minimal";
   const result = lint(handoff);
 
   assert.deepEqual(result.diagnostics.at(-1), {
-    code: "verification_exit_code_mismatch",
+    code: "H006",
     severity: "warning",
     pointer: "/verification/0/exit_code",
-    message: "Verification exit code does not match its status.",
+    message: "exit_code is inconsistent with verification status pass",
   });
   assert.deepEqual(result.diagnostics[0], {
-    code: "source_hash_length_mismatch",
+    code: "H007",
     severity: "error",
     pointer: "/sources/0/hash",
-    message: "Source hash digest has an invalid length.",
+    message: "sha256 digest must contain 64 hexadecimal characters.",
   });
   assert.deepEqual(
     result.diagnostics.slice(0, -1).map(({ pointer }) => pointer),
@@ -127,6 +127,32 @@ test("H006 applies profile-aware severity, counts, and error-only ok status", ()
     counts: { error: 0, warning: 0, info: 0 },
     ok: true,
   });
+});
+
+test("H006 treats omitted exit_code as a mismatch for every status", () => {
+  for (const status of ["pass", "fail", "not_run"] as const) {
+    const handoff = handoffWithInvalidSemantics();
+    handoff.sources = undefined;
+    handoff.verification = [{ check: "focused-check", status, summary: "Focused result." }];
+    const full = lint(handoff);
+    assert.deepEqual(full.diagnostics.map(({ code, severity }) => [code, severity]), [["H006", "error"]]);
+
+    handoff.profile = "minimal";
+    assert.deepEqual(lint(handoff).diagnostics.map(({ code, severity }) => [code, severity]), [["H006", "warning"]]);
+  }
+});
+
+test("H007 safely rejects missing separators, inherited names, and non-hex digests", () => {
+  for (const hash of ["toString", `toString:${"a".repeat(64)}`, `sha256:${"g".repeat(64)}`]) {
+    const handoff = handoffWithInvalidSemantics();
+    handoff.verification = [];
+    handoff.sources = [{ path: "src/index.ts", rev: "main", hash }];
+    const diagnostic = lint(handoff).diagnostics.find(({ code }) => code === "H007");
+    assert.ok(diagnostic);
+    assert.equal(diagnostic.message.includes("function"), false);
+    assert.equal(diagnostic.message.includes("native code"), false);
+    assert.equal(diagnostic.message.includes("toString"), false);
+  }
 });
 
 test("H001 normalizes separators and empty or dot segments while preserving case", () => {
@@ -197,8 +223,8 @@ test("H006-H008 and H010 valid fixture produces no semantic rule diagnostics", a
 });
 
 for (const [fixture, code] of [
-  ["invalid-h006", "verification_exit_code_mismatch"],
-  ["invalid-h007", "source_hash_length_mismatch"],
+  ["invalid-h006", "H006"],
+  ["invalid-h007", "H007"],
   ["invalid-h008-date", "H008"],
   ["invalid-h008-offset", "H008"],
   ["invalid-h010", "H010"],

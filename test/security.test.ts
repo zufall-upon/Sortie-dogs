@@ -63,13 +63,79 @@ test("H009 detects short, embedded, and late secret-like tokens", () => {
 
 test("H009 positionalizes secret-like object keys", () => {
   const input = handoff();
-  input.ext = { container: { [SECRET]: SHORT_SECRET } };
+  input.ext = { container: { [SECRET]: "ordinary" } };
 
   const result = lint(input);
   const serialized = JSON.stringify(result);
-  assert.equal(result.diagnostics.find(({ code }) => code === "H009")?.pointer, "/ext/container/@0");
+  assert.equal(result.diagnostics.find(({ code }) => code === "H009")?.pointer, "/ext/container/@0/key");
   assert.equal(serialized.includes(SECRET), false);
   assert.equal(serialized.includes("ABCDEFGHIJKLMNOPQRSTUVWXYZ"), false);
+});
+
+test("H009 checks shared references at every path and terminates cycles", () => {
+  const shared = { token: SHORT_SECRET };
+  const cyclic: Record<string, unknown> = {};
+  cyclic.self = cyclic;
+  cyclic[SECRET] = "ordinary";
+  const input = handoff();
+  input.ext = { first: shared, second: shared, cyclic };
+
+  const result = lint(input);
+  assert.deepEqual(result.diagnostics.map(({ pointer }) => pointer), [
+    "/ext/cyclic/@1/key",
+    "/ext/first/token",
+    "/ext/second/token",
+  ]);
+  assert.equal(JSON.stringify(result).includes(SECRET), false);
+});
+
+test("H001 rejects lexical traversal without attempting symlink resolution", () => {
+  const traversal = handoff();
+  traversal.ext = {};
+  traversal.scope = { paths: ["../private-value"] };
+  const rejected = lint(traversal);
+  assert.deepEqual(rejected.diagnostics.map(({ code, pointer }) => [code, pointer]),
+    [["H001", "/scope/paths/0"]]);
+  assert.equal(JSON.stringify(rejected).includes("private-value"), false);
+
+  const lexicalOnly = handoff();
+  lexicalOnly.ext = {};
+  lexicalOnly.scope = { paths: ["links/source.ts"] };
+  assert.equal(lint(lexicalOnly).diagnostics.some(({ code }) => code === "H001"), false,
+    "symlink resolution is intentionally unsupported");
+});
+
+test("CLI rejects oversized input without exposing its contents", async () => {
+  const root = join(process.cwd(), "_testenv");
+  await mkdir(root, { recursive: true });
+  const directory = await mkdtemp(join(root, "security-oversized-"));
+  try {
+    const input = join(directory, "oversized.json");
+    await writeFile(input, Buffer.concat([Buffer.alloc(2 * 1024 * 1024 + 1, 0x20), Buffer.from(SECRET)]));
+    const output = await new Promise<{ exit: number | null; text: string }>((resolve, reject) => {
+      const child = spawn(process.execPath, [
+        "--experimental-strip-types",
+        join(process.cwd(), "src", "cli", "main.ts"),
+        "lint",
+        input,
+      ], {
+        env: { ...process.env, NODE_NO_WARNINGS: "1" },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let text = "";
+      child.stdout.setEncoding("utf8").on("data", (chunk) => { text += chunk; });
+      child.stderr.setEncoding("utf8").on("data", (chunk) => { text += chunk; });
+      child.once("error", reject);
+      child.once("close", (exit) => resolve({ exit, text }));
+    });
+
+    assert.equal(output.exit, 2);
+    assert.equal(output.text, "Handoff input exceeds the size limit.\n");
+    assert.equal(output.text.includes(SECRET), false);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+    await rm(root).catch(() => undefined);
+  }
 });
 
 test("CLI schema and parse output never discloses secret input", async () => {

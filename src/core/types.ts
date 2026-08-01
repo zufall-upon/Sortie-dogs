@@ -99,8 +99,16 @@ export type SchemaValidationResult<T> =
   | SchemaValidationFailure;
 
 export type SemanticIssueCode =
-  | "verification_exit_code_mismatch"
-  | "source_hash_length_mismatch";
+  | "H001"
+  | "H002"
+  | "H003"
+  | "H004"
+  | "H005"
+  | "H006"
+  | "H007"
+  | "H008"
+  | "H009"
+  | "H010";
 
 export type ManifestDiagnosticCode =
   | "H001_PATH_RELATIVE"
