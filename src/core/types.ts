@@ -102,6 +102,17 @@ export type SemanticIssueCode =
   | "verification_exit_code_mismatch"
   | "source_hash_length_mismatch";
 
+export type ManifestDiagnosticCode =
+  | "H001_PATH_RELATIVE"
+  | "H011_VALIDATION_MISSING"
+  | "M002_SCOPE_NOT_ALLOWED"
+  | "M003_SOURCE_NOT_DECLARED"
+  | "M004_VERIFICATION_NOT_DECLARED"
+  | "M005_CHANGED_PATH_NOT_WRITABLE"
+  | "M007_CHANGED_PATHS_MISSING";
+
+export type DiagnosticCode = SemanticIssueCode | ManifestDiagnosticCode;
+
 export interface SemanticIssue {
   code: SemanticIssueCode;
   path: string;
@@ -111,10 +122,15 @@ export interface SemanticIssue {
 export type Severity = "error" | "warning" | "info";
 
 export interface Diagnostic {
-  code: SemanticIssueCode;
+  code: DiagnosticCode;
   severity: Severity;
   pointer: string;
   message: string;
+}
+
+export interface ManifestDiagnostic extends Diagnostic {
+  code: ManifestDiagnosticCode;
+  severity: "error" | "warning";
 }
 
 export interface LintOptions {
