@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
 import test from "node:test";
@@ -196,6 +196,29 @@ test("help returns exit 0 on stdout", async () => {
     stdout: USAGE,
     stderr: "",
   });
+});
+
+test("package metadata exposes both bin names and agrees with the lockfile", async () => {
+  const packageJson = JSON.parse(await readFile(join(process.cwd(), "package.json"), "utf8"));
+  const packageLock = JSON.parse(await readFile(join(process.cwd(), "package-lock.json"), "utf8"));
+
+  assert.deepEqual(packageJson.bin, {
+    "agent-contract-guard": "dist/cli/main.js",
+    acg: "dist/cli/main.js",
+  });
+  assert.deepEqual(packageLock.packages[""].bin, packageJson.bin);
+  assert.equal(packageLock.packages[""].engines.node, packageJson.engines.node);
+
+  const distPath = join(process.cwd(), "dist");
+  const dist = await stat(distPath).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return undefined;
+    throw error;
+  });
+  if (dist === undefined) return;
+
+  assert.ok(dist.isDirectory(), "dist must be a directory when present");
+  const binSource = await readFile(join(process.cwd(), packageJson.bin.acg), "utf8");
+  assert.match(binSource, /^#!\/usr\/bin\/env node\r?\n/);
 });
 
 test("accepts multiple handoffs, an optional manifest, and the changed-path union", async () => {

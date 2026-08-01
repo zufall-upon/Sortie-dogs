@@ -16,11 +16,13 @@
     }
   },
   "bin": {
-    "agent-contract-guard": "dist/cli.js",
-    "acg": "dist/cli.js"
+    "agent-contract-guard": "dist/cli/main.js",
+    "acg": "dist/cli/main.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "postbuild": "node --input-type=module --eval \"import fs from 'node:fs'; const path = 'dist/cli/main.js'; const source = fs.readFileSync(path, 'utf8'); if (!source.startsWith('#!')) fs.writeFileSync(path, '#!/usr/bin/env node\\n' + source); if (process.platform !== 'win32') fs.chmodSync(path, 0o755);\"",
+    "prepack": "npm run build",
     "test": "node --experimental-strip-types --test \"test/**/*.test.ts\""
   },
   "dependencies": {
