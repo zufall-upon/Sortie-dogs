@@ -15,7 +15,7 @@ export interface H001Issue {
   message: string;
 }
 
-export type HandoffRuleCode = "H002" | "H003" | "H004" | "H005" | "H008" | "H010";
+export type HandoffRuleCode = "H002" | "H003" | "H004" | "H005" | "H008" | "H009" | "H010";
 
 export interface HandoffRuleIssue {
   code: HandoffRuleCode;
@@ -31,8 +31,89 @@ const RULE_MESSAGES: Readonly<Record<HandoffRuleCode, string>> = {
   H004: "State has neither a next action nor completion evidence.",
   H005: "Blocker needed action is a placeholder.",
   H008: "Creation timestamp is not a real RFC 3339 date-time with an offset.",
+  H009: "Value resembles a credential or high-entropy token.",
   H010: "Claim must contain a non-whitespace character.",
 };
+
+const CREDENTIAL_PATTERNS: readonly RegExp[] = [
+  /(?:^|[^A-Z0-9])AKIA[0-9A-Z]{16}(?=$|[^A-Z0-9])/,
+  /(?:^|[^A-Za-z0-9])(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,})(?=$|[^A-Za-z0-9_])/,
+  /(?:^|[^A-Za-z0-9])xox[baprs]-[A-Za-z0-9-]{10,}/,
+  /(?:^|[^A-Za-z0-9_-])AIza[A-Za-z0-9_-]{35}/,
+  /(?:^|[^A-Za-z0-9_-])sk-(?:proj-)?[A-Za-z0-9_-]{20,}/,
+  /-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/,
+  /(?:^|\s)eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{16,}(?=$|\s)/,
+];
+
+const TOKEN_CANDIDATES = /[A-Za-z0-9_+/=-]{16,256}/g;
+const COMMON_DIGEST = /^(?:[0-9a-f]{32}|[0-9a-f]{40}|[0-9a-f]{64}|[0-9a-f]{96}|[0-9a-f]{128})$/i;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const SCAN_WINDOW_LENGTH = 4096;
+const SCAN_WINDOW_OVERLAP = 256;
+
+function shannonEntropy(value: string): number {
+  const frequencies = new Map<string, number>();
+  for (const character of value) frequencies.set(character, (frequencies.get(character) ?? 0) + 1);
+
+  let entropy = 0;
+  for (const count of frequencies.values()) {
+    const probability = count / value.length;
+    entropy -= probability * Math.log2(probability);
+  }
+  return entropy;
+}
+
+function isHighEntropyToken(candidate: string): boolean {
+  if (COMMON_DIGEST.test(candidate) || UUID.test(candidate)) return false;
+  const hasLower = /[a-z]/.test(candidate);
+  const hasUpper = /[A-Z]/.test(candidate);
+  const hasDigit = /\d/.test(candidate);
+  const hasEncodingSymbol = /[_+/=]/.test(candidate);
+  const tokenShape =
+    (hasLower && hasUpper && (hasDigit || hasEncodingSymbol)) ||
+    (hasLower && hasDigit && hasEncodingSymbol);
+  return tokenShape && shannonEntropy(candidate) >= 3.5;
+}
+
+function isSecretLike(value: string): boolean {
+  const step = SCAN_WINDOW_LENGTH - SCAN_WINDOW_OVERLAP;
+  for (let offset = 0; offset < value.length; offset += step) {
+    const window = value.slice(offset, offset + SCAN_WINDOW_LENGTH);
+    if (CREDENTIAL_PATTERNS.some((pattern) => pattern.test(window))) return true;
+    if ([...window.matchAll(TOKEN_CANDIDATES)].some(([candidate]) => isHighEntropyToken(candidate))) return true;
+  }
+  return false;
+}
+
+function escapePointerSegment(segment: string): string {
+  return segment.replaceAll("~", "~0").replaceAll("/", "~1");
+}
+
+function lintSecretLikeValues(handoff: Handoff): HandoffRuleIssue[] {
+  const issues: HandoffRuleIssue[] = [];
+  const visited = new WeakSet<object>();
+
+  function visit(value: unknown, path: string): void {
+    if (typeof value === "string") {
+      if (isSecretLike(value)) issues.push({ code: "H009", path, message: RULE_MESSAGES.H009 });
+      return;
+    }
+    if (value === null || typeof value !== "object" || visited.has(value)) return;
+
+    visited.add(value);
+    if (Array.isArray(value)) {
+      value.forEach((entry, index) => visit(entry, `${path}/${index}`));
+      return;
+    }
+    Object.entries(value).forEach(([key, entry], index) => {
+      const segment = isSecretLike(key) ? `@${index}` : escapePointerSegment(key);
+      visit(entry, `${path}/${segment}`);
+    });
+  }
+
+  visit(handoff, "");
+  return issues;
+}
 
 // H005 placeholder vocabulary is intentionally centralized here.
 const BLOCKER_ACTION_PLACEHOLDERS = new Set([
@@ -138,7 +219,7 @@ function addBlankClaimIssue(issues: Array<HandoffRuleIssue | SemanticIssue>, val
 }
 
 function lintHandoffRules(handoff: Handoff): Array<HandoffRuleIssue | SemanticIssue> {
-  const issues: Array<HandoffRuleIssue | SemanticIssue> = [];
+  const issues: Array<HandoffRuleIssue | SemanticIssue> = [...lintSecretLikeValues(handoff)];
   const scopePaths = handoff.scope?.paths.map(normalizePath).filter((path): path is string => path !== undefined) ?? [];
   const excludes = handoff.scope?.excludes?.map(normalizePath).filter((path): path is string => path !== undefined) ?? [];
 
