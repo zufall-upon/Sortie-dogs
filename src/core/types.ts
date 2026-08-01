@@ -69,3 +69,23 @@ export interface SemanticIssue {
   path: string;
   message: string;
 }
+
+export type Severity = "error" | "warning" | "info";
+
+export interface Diagnostic {
+  code: SemanticIssueCode;
+  severity: Severity;
+  pointer: string;
+  message: string;
+}
+
+export interface LintOptions {
+  codes?: readonly SemanticIssueCode[];
+  severity?: Partial<Record<SemanticIssueCode, Severity>>;
+}
+
+export interface LintResult {
+  diagnostics: Diagnostic[];
+  counts: Record<Severity, number>;
+  ok: boolean;
+}
