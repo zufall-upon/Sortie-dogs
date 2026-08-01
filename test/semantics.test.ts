@@ -66,37 +66,39 @@ test("adapts existing semantic issues to fixed codes and messages without input 
 });
 
 test("sorts by severity, numeric JSON-pointer segments, then code", () => {
-  const result = lint(handoffWithInvalidSemantics(), {
-    severity: { source_hash_length_mismatch: "warning" },
-  });
+  const handoff = handoffWithInvalidSemantics();
+  handoff.profile = "minimal";
+  const result = lint(handoff);
 
-  assert.deepEqual(result.diagnostics[0], {
+  assert.deepEqual(result.diagnostics.at(-1), {
     code: "verification_exit_code_mismatch",
-    severity: "error",
+    severity: "warning",
     pointer: "/verification/0/exit_code",
     message: "Verification exit code does not match its status.",
   });
+  assert.deepEqual(result.diagnostics[0], {
+    code: "source_hash_length_mismatch",
+    severity: "error",
+    pointer: "/sources/0/hash",
+    message: "Source hash digest has an invalid length.",
+  });
   assert.deepEqual(
-    result.diagnostics.slice(1).map(({ pointer }) => pointer),
+    result.diagnostics.slice(0, -1).map(({ pointer }) => pointer),
     Array.from({ length: 11 }, (_, index) => `/sources/${index}/hash`),
   );
 });
 
-test("applies code filtering, severity overrides, counts, and error-only ok status", () => {
+test("H006 applies profile-aware severity, counts, and error-only ok status", () => {
   const handoff = handoffWithInvalidSemantics();
-  const filtered = lint(handoff, {
-    codes: ["source_hash_length_mismatch"],
-    severity: { source_hash_length_mismatch: "warning" },
-  });
+  handoff.sources = undefined;
+  const full = lint(handoff);
+  assert.deepEqual(full.counts, { error: 1, warning: 0, info: 0 });
+  assert.equal(full.ok, false);
 
-  assert.equal(filtered.diagnostics.length, 11);
-  assert.ok(filtered.diagnostics.every(({ code, severity }) => code === "source_hash_length_mismatch" && severity === "warning"));
-  assert.deepEqual(filtered.counts, { error: 0, warning: 11, info: 0 });
-  assert.equal(filtered.ok, true);
-
-  const errors = lint(handoff, { codes: ["verification_exit_code_mismatch"] });
-  assert.deepEqual(errors.counts, { error: 1, warning: 0, info: 0 });
-  assert.equal(errors.ok, false);
+  handoff.profile = "minimal";
+  const minimal = lint(handoff);
+  assert.deepEqual(minimal.counts, { error: 0, warning: 1, info: 0 });
+  assert.equal(minimal.ok, true);
 
   const empty = lint(handoff, { codes: [] });
   assert.deepEqual(empty, {
@@ -166,6 +168,45 @@ test("H001 detects duplicates after normalization without exposing path values",
 test("H002-H005 valid fixture produces no semantic rule diagnostics", async () => {
   const result = lint(await readSemanticFixture("valid-h002-h005"));
   assert.deepEqual(result.diagnostics, []);
+});
+
+test("H006-H008 and H010 valid fixture produces no semantic rule diagnostics", async () => {
+  const result = lint(await readSemanticFixture("valid-h006-h008-h010"));
+  assert.deepEqual(result.diagnostics, []);
+});
+
+for (const [fixture, code] of [
+  ["invalid-h006", "verification_exit_code_mismatch"],
+  ["invalid-h007", "source_hash_length_mismatch"],
+  ["invalid-h008-date", "H008"],
+  ["invalid-h008-offset", "H008"],
+  ["invalid-h010", "H010"],
+] as const) {
+  test(`${fixture} fixture produces only ${code}`, async () => {
+    const result = lint(await readSemanticFixture(fixture));
+    assert.deepEqual(result.diagnostics.map((diagnostic) => diagnostic.code), [code]);
+  });
+}
+
+test("H010 checks every human-authored claim field", async () => {
+  const mutations: Array<(handoff: Handoff) => void> = [
+    (handoff) => { handoff.task.title = "   "; },
+    (handoff) => { handoff.task.objective = "\t"; },
+    (handoff) => { handoff.state.done = ["\n"]; },
+    (handoff) => { handoff.state.next = ["   "]; },
+    (handoff) => { handoff.state.blocked = [{ reason: " ", needed: "Act." }]; },
+    (handoff) => { handoff.state.blocked = [{ reason: "Blocked.", needed: "\t" }]; },
+    (handoff) => { handoff.risks = [{ severity: "low", description: " " }]; },
+    (handoff) => { handoff.risks = [{ severity: "low", description: "Risk.", mitigation: "\n" }]; },
+    (handoff) => { handoff.verification[0].check = " "; },
+    (handoff) => { handoff.verification[0].summary = "\t"; },
+  ];
+
+  for (const mutate of mutations) {
+    const handoff = await readSemanticFixture("valid-h006-h008-h010");
+    mutate(handoff);
+    assert.deepEqual(lint(handoff).diagnostics.map(({ code }) => code), ["H010"]);
+  }
 });
 
 for (const code of ["H002", "H003", "H004", "H005"] as const) {

@@ -1,0 +1,12 @@
+{
+  "version": "0.1.0",
+  "profile": "full",
+  "id": "invalid-h010",
+  "created_at": "2030-01-02T03:04:05Z",
+  "task": { "title": "Validate semantics", "objective": "Exercise H010." },
+  "scope": { "paths": ["src"] },
+  "state": { "done": ["   "], "next": ["Continue."], "blocked": [] },
+  "sources": [{ "path": "src/index.ts", "rev": "main" }],
+  "risks": [],
+  "verification": []
+}

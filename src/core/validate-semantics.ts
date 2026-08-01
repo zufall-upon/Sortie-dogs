@@ -15,7 +15,7 @@ export interface H001Issue {
   message: string;
 }
 
-export type HandoffRuleCode = "H002" | "H003" | "H004" | "H005";
+export type HandoffRuleCode = "H002" | "H003" | "H004" | "H005" | "H008" | "H010";
 
 export interface HandoffRuleIssue {
   code: HandoffRuleCode;
@@ -30,6 +30,8 @@ const RULE_MESSAGES: Readonly<Record<HandoffRuleCode, string>> = {
   H003: "Source path is outside the effective scope.",
   H004: "State has neither a next action nor completion evidence.",
   H005: "Blocker needed action is a placeholder.",
+  H008: "Creation timestamp is not a real RFC 3339 date-time with an offset.",
+  H010: "Claim must contain a non-whitespace character.",
 };
 
 // H005 placeholder vocabulary is intentionally centralized here.
@@ -106,8 +108,37 @@ function isWithin(path: string, parent: string): boolean {
   return path === parent || path.startsWith(`${parent}/`);
 }
 
-function lintHandoffRules(handoff: Handoff): HandoffRuleIssue[] {
-  const issues: HandoffRuleIssue[] = [];
+function isValidTimestamp(value: string): boolean {
+  const match = /^(\d{4})-(\d{2})-(\d{2})[Tt](\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:[Zz]|[+-](\d{2}):(\d{2}))$/.exec(value);
+  if (match === null) return false;
+
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText, offsetHourText, offsetMinuteText] = match;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+  const second = Number(secondText);
+  const offsetHour = offsetHourText === undefined ? 0 : Number(offsetHourText);
+  const offsetMinute = offsetMinuteText === undefined ? 0 : Number(offsetMinuteText);
+
+  if (month < 1 || month > 12 || hour > 23 || minute > 59 || second > 60 || offsetHour > 23 || offsetMinute > 59) {
+    return false;
+  }
+
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return day >= 1 && day <= daysInMonth[month - 1];
+}
+
+function addBlankClaimIssue(issues: Array<HandoffRuleIssue | SemanticIssue>, value: string, path: string): void {
+  if (value.trim().length === 0) {
+    issues.push({ code: "H010", path, message: RULE_MESSAGES.H010 });
+  }
+}
+
+function lintHandoffRules(handoff: Handoff): Array<HandoffRuleIssue | SemanticIssue> {
+  const issues: Array<HandoffRuleIssue | SemanticIssue> = [];
   const scopePaths = handoff.scope?.paths.map(normalizePath).filter((path): path is string => path !== undefined) ?? [];
   const excludes = handoff.scope?.excludes?.map(normalizePath).filter((path): path is string => path !== undefined) ?? [];
 
@@ -143,12 +174,6 @@ function lintHandoffRules(handoff: Handoff): HandoffRuleIssue[] {
     }
   });
 
-  return issues;
-}
-
-export function lintHandoff(handoff: Handoff): Array<SemanticIssue | HandoffRuleIssue> {
-  const issues: Array<SemanticIssue | HandoffRuleIssue> = lintHandoffRules(handoff);
-
   handoff.verification.forEach((verification, index) => {
     const exitCode = verification.exit_code;
     const mismatch =
@@ -167,12 +192,10 @@ export function lintHandoff(handoff: Handoff): Array<SemanticIssue | HandoffRule
 
   handoff.sources?.forEach((source, index) => {
     if (source.hash === undefined) return;
-
     const separator = source.hash.indexOf(":");
     const algorithm = source.hash.slice(0, separator);
     const digest = source.hash.slice(separator + 1);
     const expectedLength = HASH_LENGTHS[algorithm];
-
     if (expectedLength !== undefined && digest.length !== expectedLength) {
       issues.push({
         code: "source_hash_length_mismatch",
@@ -182,5 +205,30 @@ export function lintHandoff(handoff: Handoff): Array<SemanticIssue | HandoffRule
     }
   });
 
+  if (!isValidTimestamp(handoff.created_at)) {
+    issues.push({ code: "H008", path: "/created_at", message: RULE_MESSAGES.H008 });
+  }
+
+  addBlankClaimIssue(issues, handoff.task.title, "/task/title");
+  addBlankClaimIssue(issues, handoff.task.objective, "/task/objective");
+  handoff.state.done.forEach((claim, index) => addBlankClaimIssue(issues, claim, `/state/done/${index}`));
+  handoff.state.next.forEach((claim, index) => addBlankClaimIssue(issues, claim, `/state/next/${index}`));
+  handoff.state.blocked.forEach((blocker, index) => {
+    addBlankClaimIssue(issues, blocker.reason, `/state/blocked/${index}/reason`);
+    addBlankClaimIssue(issues, blocker.needed, `/state/blocked/${index}/needed`);
+  });
+  handoff.risks.forEach((risk, index) => {
+    addBlankClaimIssue(issues, risk.description, `/risks/${index}/description`);
+    if (risk.mitigation !== undefined) addBlankClaimIssue(issues, risk.mitigation, `/risks/${index}/mitigation`);
+  });
+  handoff.verification.forEach((verification, index) => {
+    addBlankClaimIssue(issues, verification.check, `/verification/${index}/check`);
+    addBlankClaimIssue(issues, verification.summary, `/verification/${index}/summary`);
+  });
+
   return issues;
+}
+
+export function lintHandoff(handoff: Handoff): Array<HandoffRuleIssue | SemanticIssue> {
+  return lintHandoffRules(handoff);
 }

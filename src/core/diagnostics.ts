@@ -20,6 +20,8 @@ const DEFAULT_SEVERITIES: Readonly<Record<DiagnosticIssueCode, Severity>> = {
   H003: "error",
   H004: "error",
   H005: "error",
+  H008: "error",
+  H010: "error",
   verification_exit_code_mismatch: "error",
   source_hash_length_mismatch: "error",
 };
@@ -29,6 +31,8 @@ const MESSAGES: Readonly<Record<DiagnosticIssueCode, string>> = {
   H003: "Source path is outside the effective scope.",
   H004: "State does not provide an actionable next step.",
   H005: "Blocker does not identify a concrete needed action.",
+  H008: "Creation timestamp is invalid.",
+  H010: "Claim contains only whitespace.",
   verification_exit_code_mismatch: "Verification exit code does not match its status.",
   source_hash_length_mismatch: "Source hash digest has an invalid length.",
 };
@@ -74,14 +78,16 @@ function compareDiagnostics(left: Diagnostic, right: Diagnostic): number {
 
 function createLintResult(
   issues: readonly DiagnosticIssue[],
+  profile: Handoff["profile"],
   options: LintOptions = {},
 ): LintResult {
   const enabledCodes = options.codes === undefined ? undefined : new Set<string>(options.codes);
+  const severityOverrides = options.severity as Partial<Record<DiagnosticIssueCode, Severity>> | undefined;
   const diagnostics = issues
     .filter((issue) => enabledCodes === undefined || enabledCodes.has(issue.code))
     .map<Diagnostic>((issue) => ({
       code: issue.code as SemanticIssueCode,
-      severity: options.severity?.[issue.code as SemanticIssueCode] ?? DEFAULT_SEVERITIES[issue.code],
+      severity: severityOverrides?.[issue.code] ?? (issue.code === "verification_exit_code_mismatch" && profile === "minimal" ? "warning" : DEFAULT_SEVERITIES[issue.code]),
       pointer: issue.path,
       message: MESSAGES[issue.code],
     }))
@@ -98,5 +104,5 @@ function createLintResult(
 }
 
 export function lint(handoff: Handoff, options?: LintOptions): LintResult {
-  return createLintResult(validateSemantics.lintHandoff(handoff), options);
+  return createLintResult(validateSemantics.lintHandoff(handoff), handoff.profile, options);
 }

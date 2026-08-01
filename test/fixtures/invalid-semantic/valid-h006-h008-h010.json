@@ -1,0 +1,12 @@
+{
+  "version": "0.1.0",
+  "profile": "full",
+  "id": "valid-semantic-rules-6-10",
+  "created_at": "2032-02-29T03:04:05+01:30",
+  "task": { "title": "Validate semantics", "objective": "Exercise semantic handoff rules." },
+  "scope": { "paths": ["src"] },
+  "state": { "done": [], "next": ["Implement the next scoped change."], "blocked": [] },
+  "sources": [{ "path": "src/index.ts", "rev": "main", "hash": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" }],
+  "risks": [],
+  "verification": [{ "check": "focused-check", "status": "pass", "exit_code": 0, "summary": "Focused check passed." }]
+}
