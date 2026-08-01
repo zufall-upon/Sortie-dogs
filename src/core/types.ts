@@ -143,3 +143,12 @@ export interface LintResult {
   counts: Record<Severity, number>;
   ok: boolean;
 }
+
+/** A diagnostic after the CLI has associated it with an input document. */
+export interface CliDiagnostic {
+  file: string;
+  code: string;
+  severity: Severity;
+  pointer: string;
+  message: string;
+}

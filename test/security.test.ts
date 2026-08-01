@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import test from "node:test";
 
 import { lint } from "../src/core/diagnostics.ts";
@@ -67,4 +70,102 @@ test("H009 positionalizes secret-like object keys", () => {
   assert.equal(result.diagnostics.find(({ code }) => code === "H009")?.pointer, "/ext/container/@0");
   assert.equal(serialized.includes(SECRET), false);
   assert.equal(serialized.includes("ABCDEFGHIJKLMNOPQRSTUVWXYZ"), false);
+});
+
+test("CLI schema and parse output never discloses secret input", async () => {
+  const root = join(process.cwd(), "_testenv");
+  await mkdir(root, { recursive: true });
+  const directory = await mkdtemp(join(root, "security-cli-"));
+  try {
+    const schemaInput = join(directory, "schema.json");
+    const parseInput = join(directory, "parse.json");
+    await writeFile(schemaInput, JSON.stringify({
+      version: "0.1.0",
+      profile: "minimal",
+      id: "security-cli",
+      created_at: "2026-08-02T00:00:00Z",
+      task: { title: "Security CLI", objective: "Check output redaction" },
+      state: { done: [], next: ["Continue"], blocked: [] },
+      risks: [],
+      verification: [],
+      [SECRET]: SHORT_SECRET,
+    }));
+    await writeFile(parseInput, `{\"secret\":\"${SECRET}\"`);
+
+    const output = await new Promise<{ exit: number | null; text: string }>((resolve, reject) => {
+      const child = spawn(process.execPath, [
+        "--experimental-strip-types",
+        join(process.cwd(), "src", "cli", "main.ts"),
+        "lint",
+        schemaInput,
+        parseInput,
+      ], {
+        env: { ...process.env, NODE_NO_WARNINGS: "1" },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let text = "";
+      child.stdout.setEncoding("utf8").on("data", (chunk) => { text += chunk; });
+      child.stderr.setEncoding("utf8").on("data", (chunk) => { text += chunk; });
+      child.once("error", reject);
+      child.once("close", (exit) => resolve({ exit, text }));
+    });
+
+    assert.equal(output.exit, 2);
+    assert.match(output.text, /schema_additionalProperties/);
+    assert.match(output.text, /\/@unknown/);
+    assert.equal(output.text.includes(SECRET), false);
+    assert.equal(output.text.includes(SHORT_SECRET), false);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+    await rm(root).catch(() => undefined);
+  }
+});
+
+test("CLI text neutralizes controls while JSON preserves diagnostic data", async () => {
+  const root = join(process.cwd(), "_testenv");
+  await mkdir(root, { recursive: true });
+  const directory = await mkdtemp(join(root, "security-controls-"));
+  try {
+    const input = join(directory, "handoff.json");
+    const controlledKey = "line\r\n\u0000\u001b[31m\u007f\u0085";
+    const value = {
+      ...handoff(),
+      version: "0.1.0" as const,
+      id: "security-controls",
+    };
+    value.ext = { [controlledKey]: SECRET };
+    await writeFile(input, JSON.stringify(value));
+
+    const invoke = (format: "text" | "json") => new Promise<{ exit: number | null; stdout: string }>((resolve, reject) => {
+      const child = spawn(process.execPath, [
+        "--experimental-strip-types",
+        join(process.cwd(), "src", "cli", "main.ts"),
+        "lint",
+        input,
+        "--format",
+        format,
+      ], {
+        env: { ...process.env, NODE_NO_WARNINGS: "1" },
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+      let stdout = "";
+      child.stdout.setEncoding("utf8").on("data", (chunk) => { stdout += chunk; });
+      child.once("error", reject);
+      child.once("close", (exit) => resolve({ exit, stdout }));
+    });
+
+    const text = await invoke("text");
+    assert.equal(text.exit, 0);
+    assert.equal(text.stdout,
+      "handoff[0] /ext/line\\r\\n\\u0000\\u001b[31m\\u007f\\u0085 H009 warning Value resembles a credential or high-entropy token.\n");
+    assert.equal(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/u.test(text.stdout), false);
+
+    const json = await invoke("json");
+    assert.equal(json.exit, 0);
+    const parsed = JSON.parse(json.stdout) as Array<{ pointer: string }>;
+    assert.equal(parsed[0]?.pointer, `/ext/${controlledKey}`);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+    await rm(root).catch(() => undefined);
+  }
 });
