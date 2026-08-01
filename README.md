@@ -5,11 +5,12 @@ OpenCode の既存 MkII ワークフローを配布可能にする AI orchestrat
 
 ## Quickstart
 
-Node.js 22.6.0 以上で install、build する。
+Node.js 22.6.0 以上で install、build、test する。
 
 ```console
 npm install
 npm run build
+npm test
 ```
 
 ### Manifest gate（推奨）
@@ -50,13 +51,20 @@ npm run build
 npm exec --package=. -- acg lint handoff.json --manifest operation-manifest.json --changed-path src/index.ts --strict
 ```
 
-最小検査では manifest と変更対象を省略できる。
+### Minimal
+
+handoff の schema と semantic rules だけを検査する場合は manifest と変更対象を省略できる。
 
 ```console
 npm exec --package=. -- agent-contract-guard lint handoff.json
 ```
 
-`--package=.` は現在の local package の bin を一時 PATH に追加する。`agent-contract-guard` と `acg` は同じ CLI を起動する bin 名。
+`--package=.` は現在の local package の bin を一時 PATH に追加する。
+
+### Entry points
+
+- `agent-contract-guard`: 完全名
+- `acg`: 同じ CLI を起動する短縮名
 
 ## CLI contract
 
@@ -64,7 +72,18 @@ npm exec --package=. -- agent-contract-guard lint handoff.json
 - exit `1`: error あり、または `--strict` で warning あり
 - exit `2`: usage、入力読込、JSON parse など検査を開始できない失敗
 - `--changed-paths-from -` の stdin は改行区切り changed paths 専用。handoff JSON は stdin から読まず、引数の file path から読む
-- host や LLM は不要。検査はローカルかつ決定的で、handoff の内容を命令として実行しない
-- 入力には機密情報を含めない。診断は入力値の露出を避けるが、file の読取権限と保管・削除は呼出側の責任
+
+## Non-goals
+
+- OpenCode や MkII workflow の実行・代替
+- agent、host、LLM、model、provider の選択・起動
+- handoff や manifest に書かれた command、instruction、next action の実行
 
 「opus相当」と「sol相当」は役割を人に示す表示ラベルのみ。特定 model、provider、host の選択や実行を保証・要求しない。
+
+## Security boundary
+
+- host や LLM は不要。検査はローカルかつ決定的で、入力内容を命令として実行しない
+- CLI が読むのは引数で指定した handoff、任意の manifest、任意の changed-path file、および `--changed-paths-from -` の stdin
+- 入力には機密情報を含めない。診断は入力値の露出を避けるが、file と stdin の読取権限、保管、削除は呼出側の責任
+- untrusted input を安全な command や agent instruction に変換する sandbox ではない
