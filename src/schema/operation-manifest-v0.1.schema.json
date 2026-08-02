@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://example.invalid/agent-contract-guard/schema/operation-manifest-v0.1.json",
   "$comment": "Provisional pre-publication identifier; unstable until a public schema origin is selected.",
-  "title": "agent-contract-guard operation manifest v0.1",
+  "title": "Sortie-dogs operation manifest v0.1",
   "type": "object",
   "additionalProperties": false,
   "required": ["version", "task_id", "read", "write", "validation"],

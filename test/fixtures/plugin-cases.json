@@ -1,0 +1,75 @@
+{
+  "manifest": {
+    "version": "0.1.0",
+    "task_id": "plugin-harness",
+    "read": [],
+    "write": ["allowed.txt", "handoff.json"],
+    "validation": []
+  },
+  "handoffs": {
+    "valid": {
+      "version": "0.1.0",
+      "profile": "minimal",
+      "id": "plugin-harness",
+      "created_at": "2035-01-02T03:04:05Z",
+      "task": {
+        "title": "Plugin harness",
+        "objective": "Exercise the OpenCode plugin boundary."
+      },
+      "state": {
+        "done": [],
+        "next": ["Continue through the plugin boundary."],
+        "blocked": []
+      },
+      "risks": [],
+      "verification": []
+    },
+    "invalid": {
+      "version": "0.1.0",
+      "private": "PRIVATE_HANDOFF_MARKER"
+    }
+  },
+  "invalidManifestJson": "{\"private\":\"PRIVATE_MANIFEST_MARKER\"",
+  "shell": {
+    "readOnly": ["rg plugin src", "git status", "Get-Content README.md"],
+    "unknownWrites": [
+      "sed -i s/a/b/ allowed.txt",
+      "dd if=input of=allowed.txt",
+      "python -e write",
+      "node -e write",
+      "curl -o allowed.txt https://example.invalid",
+      "tar -xf archive.tgz",
+      "ln source allowed.txt",
+      "git checkout -- allowed.txt",
+      "npm install package"
+    ]
+  },
+  "cases": [
+    {
+      "name": "allow-write",
+      "target": "allowed.txt"
+    },
+    {
+      "name": "deny-write",
+      "target": "blocked.txt",
+      "error": "Write denied for \"blocked.txt\": operation manifest write scope."
+    },
+    {
+      "name": "deny-traversal",
+      "target": "../escape.txt",
+      "error": "Write denied for \"../escape.txt\": project-root-relative path required."
+    },
+    {
+      "name": "missing-manifest",
+      "error": "Write denied for \"<unknown>\": operation manifest unavailable."
+    },
+    {
+      "name": "invalid-manifest-json",
+      "error": "Write denied for \"<unknown>\": operation manifest unavailable."
+    },
+    {
+      "name": "strict-warning",
+      "error": "Handoff denied for \"handoff.json\": handoff and operation manifest contract."
+    }
+  ]
+}

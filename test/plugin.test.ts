@@ -1,0 +1,260 @@
+import assert from "node:assert/strict";
+import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import test from "node:test";
+import { fileURLToPath } from "node:url";
+
+import { SortieDogsPlugin } from "../dist/plugin/index.js";
+
+interface PluginCase {
+  name: string;
+  target?: string;
+  error?: string;
+}
+
+interface PluginFixture {
+  manifest: Record<string, unknown>;
+  handoffs: {
+    valid: Record<string, unknown>;
+    invalid: Record<string, unknown>;
+  };
+  invalidManifestJson: string;
+  shell: {
+    readOnly: string[];
+    unknownWrites: string[];
+  };
+  cases: PluginCase[];
+}
+
+const fixture = JSON.parse(
+  await readFile(new URL("./fixtures/plugin-cases.json", import.meta.url), "utf8"),
+) as PluginFixture;
+const cases = new Map(fixture.cases.map((candidate) => [candidate.name, candidate]));
+const testEnvironment = fileURLToPath(new URL("../_testenv/", import.meta.url));
+
+assert.deepEqual([...cases.keys()], [
+  "allow-write",
+  "deny-write",
+  "deny-traversal",
+  "missing-manifest",
+  "invalid-manifest-json",
+  "strict-warning",
+]);
+
+function fixtureCase(name: string): PluginCase {
+  const candidate = cases.get(name);
+  assert.ok(candidate, `missing fixture case ${name}`);
+  return candidate;
+}
+
+async function withProject(
+  name: string,
+  run: (directory: string) => Promise<void>,
+): Promise<void> {
+  await mkdir(testEnvironment, { recursive: true });
+  const directory = await mkdtemp(join(testEnvironment, `plugin-${name}-`));
+  try {
+    await run(directory);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
+async function configuredHooks(directory: string) {
+  await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+  return await SortieDogsPlugin({ directory });
+}
+
+async function invokeWrite(
+  hooks: Awaited<ReturnType<typeof SortieDogsPlugin>>,
+  target: string,
+): Promise<void> {
+  const before = hooks["tool.execute.before"];
+  assert.ok(before);
+  await before(
+    { tool: "write", sessionID: "plugin-session", callID: "plugin-call" },
+    { args: { file: target, content: "PRIVATE_WRITE_CONTENT" } },
+  );
+}
+
+async function expectMessage(
+  action: () => Promise<void>,
+  expected: string,
+  reason?: string,
+): Promise<void> {
+  await assert.rejects(action, (error: unknown) => {
+    assert.ok(error instanceof Error);
+    assert.equal(error.message, expected);
+    assert.equal(error.message.includes("PRIVATE_"), false);
+    if (reason !== undefined) {
+      assert.equal(error.name.endsWith("DeniedError"), true);
+      assert.equal((error as Error & { reason?: string }).reason, reason);
+    }
+    return true;
+  });
+}
+
+test("plugin fixture allows a manifest-scoped write", async () => {
+  const candidate = fixtureCase("allow-write");
+  await withProject(candidate.name, async (directory) => {
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+    const nested = join(directory, "nested");
+    await mkdir(nested);
+    await invokeWrite(await SortieDogsPlugin({ directory: nested, worktree: directory }), candidate.target!);
+    await invokeWrite(await SortieDogsPlugin({ directory }, {}), candidate.target!);
+  });
+});
+
+test("plugin fixture denies an out-of-manifest write with target and reason", async () => {
+  const candidate = fixtureCase("deny-write");
+  await withProject(candidate.name, async (directory) => {
+    const hooks = await configuredHooks(directory);
+    await expectMessage(() => invokeWrite(hooks, candidate.target!), candidate.error!, "manifest-scope");
+  });
+});
+
+test("plugin fixture denies traversal before write-scope comparison", async () => {
+  const candidate = fixtureCase("deny-traversal");
+  await withProject(candidate.name, async (directory) => {
+    const hooks = await configuredHooks(directory);
+    await expectMessage(() => invokeWrite(hooks, candidate.target!), candidate.error!, "project-boundary");
+  });
+});
+
+test("plugin fixture fails closed for a missing manifest while reads remain no-op", async () => {
+  const candidate = fixtureCase("missing-manifest");
+  await withProject(candidate.name, async (directory) => {
+    const hooks = await SortieDogsPlugin({ directory });
+    await expectMessage(() => invokeWrite(hooks, "allowed.txt"), candidate.error!, "manifest-unavailable");
+
+    const before = hooks["tool.execute.before"];
+    assert.ok(before);
+    await before(
+      { tool: "read", sessionID: "plugin-session", callID: "read-call" },
+      { args: { file: "unrestricted-read.txt" } },
+    );
+  });
+});
+
+test("plugin fixture fails closed for invalid manifest JSON without exposing input", async () => {
+  const candidate = fixtureCase("invalid-manifest-json");
+  await withProject(candidate.name, async (directory) => {
+    await writeFile(join(directory, "operation-manifest.json"), fixture.invalidManifestJson);
+    const hooks = await SortieDogsPlugin({ directory });
+    await expectMessage(() => invokeWrite(hooks, "allowed.txt"), candidate.error!, "manifest-unavailable");
+  });
+});
+
+test("plugin fixture loads project and environment configuration with host override precedence", async () => {
+  await withProject("configuration", async (directory) => {
+    await mkdir(join(directory, ".opencode"));
+    await writeFile(join(directory, "project-manifest.json"), JSON.stringify(fixture.manifest));
+    await writeFile(join(directory, "environment-manifest.json"), JSON.stringify(fixture.manifest));
+    await writeFile(join(directory, "override-manifest.json"), JSON.stringify(fixture.manifest));
+    await writeFile(join(directory, ".opencode", "sortie-dogs.json"), JSON.stringify({
+      operationManifestPath: "project-manifest.json",
+      handoffPaths: [],
+    }));
+
+    const previous = process.env.SORTIE_DOGS_CONFIG;
+    process.env.SORTIE_DOGS_CONFIG = JSON.stringify({
+      operationManifestPath: "environment-manifest.json",
+    });
+    try {
+      const fromEnvironment = await SortieDogsPlugin({ directory });
+      await invokeWrite(fromEnvironment, "allowed.txt");
+      const overridden = await SortieDogsPlugin(
+        { directory },
+        { operationManifestPath: "override-manifest.json" },
+      );
+      await invokeWrite(overridden, "allowed.txt");
+    } finally {
+      if (previous === undefined) delete process.env.SORTIE_DOGS_CONFIG;
+      else process.env.SORTIE_DOGS_CONFIG = previous;
+    }
+  });
+});
+
+test("plugin ignores the old project config path when the new config is absent", async () => {
+  await withProject("old-configuration", async (directory) => {
+    await mkdir(join(directory, ".opencode"));
+    await writeFile(join(directory, "legacy-manifest.json"), JSON.stringify(fixture.manifest));
+    await writeFile(join(directory, ".opencode", "agent-contract-guard.json"), JSON.stringify({
+      operationManifestPath: "legacy-manifest.json",
+    }));
+
+    const hooks = await SortieDogsPlugin({ directory });
+    await expectMessage(
+      () => invokeWrite(hooks, "allowed.txt"),
+      'Write denied for "<unknown>": operation manifest unavailable.',
+      "manifest-unavailable",
+    );
+  });
+});
+
+test("plugin shell gate allows explicit reads and denies unknown executables", async () => {
+  await withProject("shell", async (directory) => {
+    const hooks = await configuredHooks(directory);
+    const before = hooks["tool.execute.before"];
+    assert.ok(before);
+    const invoke = (command: string) => before(
+      { tool: "bash", sessionID: "shell", callID: command },
+      { args: { command } },
+    );
+    for (const command of fixture.shell.readOnly) await invoke(command);
+    await invoke("echo safe > allowed.txt");
+    await expectMessage(
+      () => invoke("echo blocked > blocked.txt"),
+      'Write denied for "blocked.txt": operation manifest write scope.',
+      "manifest-scope",
+    );
+    for (const command of fixture.shell.unknownWrites) {
+      await expectMessage(
+        () => invoke(command),
+        'Write denied for "<unknown>": write path must be explicit.',
+        "path-required",
+      );
+    }
+  });
+});
+
+test("plugin fixture accepts warning-only handoff state and dedupes per session", async () => {
+  const candidate = fixtureCase("strict-warning");
+  await withProject(candidate.name, async (directory) => {
+    const handoffPath = join(directory, "handoff.json");
+    const valid = JSON.stringify(fixture.handoffs.valid);
+    const invalidValue = JSON.stringify(fixture.handoffs.invalid);
+    assert.ok(Buffer.byteLength(invalidValue) < Buffer.byteLength(valid));
+    const invalid = invalidValue.padEnd(Buffer.byteLength(valid), " ");
+    await writeFile(handoffPath, valid);
+    const fixtureTime = new Date("2035-01-02T03:04:05.000Z");
+    await utimes(handoffPath, fixtureTime, fixtureTime);
+
+    const hooks = await configuredHooks(directory);
+    const event = hooks.event;
+    assert.ok(event);
+    const edited = { event: { type: "file.edited", properties: { file: "handoff.json", sessionID: "one" } } };
+
+    // Missing changed-path evidence produces only M007; the plugin rejects errors, not warnings.
+    await event(edited);
+    await event({ event: { type: "session.idle", properties: { sessionID: "one" } } });
+    await event({ event: { type: "file.edited", properties: { file: "ordinary.txt", sessionID: "one" } } });
+    await event({ event: { type: "unrelated.event", properties: { sessionID: "one" } } });
+
+    const original = await stat(handoffPath);
+    await writeFile(handoffPath, invalid);
+    await utimes(handoffPath, original.atime, original.mtime);
+    const replaced = await stat(handoffPath);
+    assert.deepEqual(
+      [replaced.size, replaced.mtimeMs],
+      [original.size, original.mtimeMs],
+      "content change fixture must retain the filesystem metadata",
+    );
+
+    await expectMessage(
+      () => event(edited),
+      candidate.error!,
+      "schema-invalid",
+    );
+  });
+});

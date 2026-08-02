@@ -1,7 +1,7 @@
 # Sortie-dogs
 
 OpenCode の既存 MkII ワークフローを配布可能にする AI orchestration loop plugin。
-`agent-contract-guard` は handoff と operation manifest の契約をローカルで検査する。
+`sortie-dogs` は handoff と operation manifest の契約をローカルで検査する。
 
 ## Quickstart
 
@@ -48,7 +48,7 @@ npm test
 変更対象を manifest と照合する。warning も gate failure にする場合は `--strict` を使う。
 
 ```console
-npm exec --package=. -- acg lint handoff.json --manifest operation-manifest.json --changed-path src/index.ts --strict
+npm exec --package=. -- sortie-dogs lint handoff.json --manifest operation-manifest.json --changed-path src/index.ts --strict
 ```
 
 ### Minimal
@@ -56,15 +56,56 @@ npm exec --package=. -- acg lint handoff.json --manifest operation-manifest.json
 handoff の schema と semantic rules だけを検査する場合は manifest と変更対象を省略できる。
 
 ```console
-npm exec --package=. -- agent-contract-guard lint handoff.json
+npm exec --package=. -- sortie-dogs lint handoff.json
 ```
 
 `--package=.` は現在の local package の bin を一時 PATH に追加する。
 
 ### Entry points
 
-- `agent-contract-guard`: 完全名
-- `acg`: 同じ CLI を起動する短縮名
+- `sortie-dogs`: CLI entry point
+
+## OpenCode plugin
+
+package plugin は `sortie-dogs/plugin` から `SortieDogsPlugin` を公開する。project root の
+`opencode.json` で plugin を指定し、`.opencode/package.json` に package dependency を置く。
+
+`opencode.json`:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": ["sortie-dogs/plugin"]
+}
+```
+
+`.opencode/package.json`:
+
+```json
+{
+  "private": true,
+  "dependencies": {
+    "sortie-dogs": "file:../_testenv/sortie-dogs-0.1.0.tgz"
+  }
+}
+```
+
+local tarball は必ず test environment に作成してから dependency を install する。
+
+```console
+npm pack --pack-destination ./_testenv
+npm install --prefix ./.opencode
+# PowerShell: run Node from .opencode so package resolution uses its node_modules.
+Push-Location ./.opencode
+node --input-type=module --eval "import('sortie-dogs/plugin').then(({ SortieDogsPlugin }) => { if (typeof SortieDogsPlugin !== 'function') process.exit(1); console.log('plugin import PASS') })"
+Pop-Location
+```
+
+最後の command は package entrypoint の import smoke のみ。これは structural OpenCode hook と write gate の読込み設定。
+MkII workflow、agent、command を起動・実行しない。
+plugin 呼出しは project root の `operation-manifest.json` と `handoff.json` を既定使用する。
+`.opencode/sortie-dogs.json`、JSON object形式の `SORTIE_DOGS_CONFIG`、host override の順で既定値を上書きする。
+manifest/configを読めない場合、read-only hookはno-op、write/handoff hookはfail closed。package importのみではhookやI/Oを開始しない。
 
 ## CLI contract
 
