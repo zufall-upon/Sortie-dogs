@@ -1,34 +1,6 @@
 {
   "version": "0.1.0",
   "task_id": "u3-fresh-runtime-revalidation",
-  "operation": {
-    "host": "WSL",
-    "approved_executable": "/home/rozen/.opencode/bin/opencode",
-    "root": "/mnt/m/_work/_Sortie-dogs/_testenv/u3-rpt",
-    "paths": {
-      "local_config": "opencode.json",
-      "private_canonical_source_target": "/mnt/c/Users/rozen/.config/opencode/agents/coordinator-mk2a2.md",
-      "canonical_source_placement": "symlink"
-    },
-    "allowed_mutation": [
-      "opencode.json",
-      ".opencode/commands/sortie.md",
-      "operation-manifest.json",
-      "handoff.json",
-      "allowed.txt",
-      ".opencode/agent/coordinator-mk2a2.md (symlink only)"
-    ],
-    "cleanup": [
-      "delete temporary node_modules",
-      "delete temporary package-lock.json",
-      "delete temporary package archive",
-      "delete empty directories"
-    ],
-    "rollback": {
-      "condition": "validation failure",
-      "action": "delete _testenv/u3-rpt"
-    }
-  },
   "read": [
     "operation-manifest.json",
     "handoff.json"
