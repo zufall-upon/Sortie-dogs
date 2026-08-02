@@ -1,4 +1,11 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["sortie-dogs/plugin"]
+  "plugin": ["sortie-dogs/plugin"],
+  "command": {
+    "sortie": {
+      "description": "Run the Sortie workflow",
+      "agent": "coordinator-mk2a2",
+      "template": "Run the Sortie workflow. $ARGUMENTS"
+    }
+  }
 }
