@@ -33,7 +33,7 @@ const LIMITS = {
   jsonDepth: 32,
 } as const;
 
-const USAGE = `Usage: agent-contract-guard lint <handoff.json> [<handoff.json> ...]
+const USAGE = `Usage: sortie-dogs lint <handoff.json> [<handoff.json> ...]
   [--manifest <operation-manifest.json>]
   [--changed-paths-from <file|->]
   [--changed-path <path> ...]

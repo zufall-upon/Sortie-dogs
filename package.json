@@ -1,5 +1,5 @@
 {
-  "name": "agent-contract-guard",
+  "name": "sortie-dogs",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -13,16 +13,20 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./plugin": {
+      "types": "./dist/plugin/index.d.ts",
+      "import": "./dist/plugin/index.js"
     }
   },
   "bin": {
-    "agent-contract-guard": "dist/cli/main.js",
-    "acg": "dist/cli/main.js"
+    "sortie-dogs": "dist/cli/main.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "postbuild": "node --input-type=module --eval \"import fs from 'node:fs'; const path = 'dist/cli/main.js'; const source = fs.readFileSync(path, 'utf8'); if (!source.startsWith('#!')) fs.writeFileSync(path, '#!/usr/bin/env node\\n' + source); if (process.platform !== 'win32') fs.chmodSync(path, 0o755);\"",
     "prepack": "npm run build",
+    "pretest": "npm run build",
     "test": "node --experimental-strip-types --test \"test/**/*.test.ts\""
   },
   "dependencies": {

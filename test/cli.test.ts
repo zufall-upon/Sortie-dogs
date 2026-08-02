@@ -8,7 +8,7 @@ const TEST_ROOT = join(process.cwd(), "_testenv");
 const ENTRY = join(process.cwd(), "src", "cli", "main.ts");
 const INVALID_SCHEMA = join(process.cwd(), "test", "fixtures", "invalid-schema");
 const INVALID_SEMANTIC = join(process.cwd(), "test", "fixtures", "invalid-semantic");
-const USAGE = `Usage: agent-contract-guard lint <handoff.json> [<handoff.json> ...]
+const USAGE = `Usage: sortie-dogs lint <handoff.json> [<handoff.json> ...]
   [--manifest <operation-manifest.json>]
   [--changed-paths-from <file|->]
   [--changed-path <path> ...]
@@ -198,15 +198,16 @@ test("help returns exit 0 on stdout", async () => {
   });
 });
 
-test("package metadata exposes both bin names and agrees with the lockfile", async () => {
+test("package metadata exposes the sortie-dogs bin and agrees with the lockfile", async () => {
   const packageJson = JSON.parse(await readFile(join(process.cwd(), "package.json"), "utf8"));
   const packageLock = JSON.parse(await readFile(join(process.cwd(), "package-lock.json"), "utf8"));
 
   assert.deepEqual(packageJson.bin, {
-    "agent-contract-guard": "dist/cli/main.js",
-    acg: "dist/cli/main.js",
+    "sortie-dogs": "dist/cli/main.js",
   });
   assert.deepEqual(packageLock.packages[""].bin, packageJson.bin);
+  assert.equal(packageLock.name, packageJson.name);
+  assert.equal(packageLock.packages[""].name, packageJson.name);
   assert.equal(packageLock.packages[""].engines.node, packageJson.engines.node);
 
   const distPath = join(process.cwd(), "dist");
@@ -217,7 +218,7 @@ test("package metadata exposes both bin names and agrees with the lockfile", asy
   if (dist === undefined) return;
 
   assert.ok(dist.isDirectory(), "dist must be a directory when present");
-  const binSource = await readFile(join(process.cwd(), packageJson.bin.acg), "utf8");
+  const binSource = await readFile(join(process.cwd(), packageJson.bin["sortie-dogs"]), "utf8");
   assert.match(binSource, /^#!\/usr\/bin\/env node\r?\n/);
 });
 
