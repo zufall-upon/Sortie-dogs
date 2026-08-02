@@ -4,7 +4,7 @@
   "command": {
     "sortie": {
       "description": "Run the Sortie workflow",
-      "agent": "coordinator-mk2a2",
+      "agent": "builder",
       "template": "Run the Sortie workflow. $ARGUMENTS"
     }
   }
