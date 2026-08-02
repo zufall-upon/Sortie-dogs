@@ -1,1 +1,1 @@
-declared-path write passed
+Declared-path Patch write passed.

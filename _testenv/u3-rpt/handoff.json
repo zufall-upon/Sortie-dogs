@@ -12,8 +12,8 @@
   },
   "state": {
     "done": [
-      "Native Patch denied the undeclared-path write to denied.txt.",
-      "Native Patch wrote allowed.txt with a declared-path proof line."
+      "Native Patch gate DENY: undeclared-path write to denied.txt.",
+      "Native Patch gate PASS: declared-path write to allowed.txt."
     ],
     "next": [],
     "blocked": []
@@ -36,7 +36,7 @@
       "check": "/home/rozen/.opencode/bin/opencode run --command sortie",
       "status": "pass",
       "exit_code": 0,
-      "summary": "Fresh runtime denied the undeclared denied.txt write and permitted the declared allowed.txt write."
+        "summary": "Fresh runtime recorded DENY for undeclared denied.txt and PASS for declared allowed.txt."
     }
   ]
 }
