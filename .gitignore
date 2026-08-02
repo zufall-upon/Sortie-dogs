@@ -1,7 +1,13 @@
 doc/
-.opencode/
+.opencode/*
+!.opencode/.gitignore
+!.opencode/package.json
+!.opencode/plugins/
+.opencode/plugins/*
+!.opencode/plugins/sortie-dogs.ts
 AGENTS.md
 _testenv/
 dist/
 marketing/
 node_modules/
+temp/

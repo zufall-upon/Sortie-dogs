@@ -1,6 +1,5 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["sortie-dogs/plugin"],
   "command": {
     "sortie": {
       "description": "Run the Sortie workflow",

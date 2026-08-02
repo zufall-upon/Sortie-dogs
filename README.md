@@ -83,16 +83,14 @@ npm pack --pack-destination ./_testenv
 tarball は build 済み `dist/`、`sortie-dogs` CLI、`sortie-dogs/plugin` export を含む。
 次の例では `npm pack` が出力した tarball 名を `.opencode/package.json` に指定する。
 
-package plugin は `sortie-dogs/plugin` から `SortieDogsPlugin` を公開する。project root の
-`opencode.json` で plugin を指定し、`.opencode/package.json` に package dependency を置く。
+package plugin は `sortie-dogs/plugin` から `SortieDogsPlugin` を公開する。
+`.opencode/package.json` に package dependency を置き、project-local bridge から再公開する。
+OpenCode は `.opencode/plugins/` を自動検出するため、`opencode.json` の `plugin` entry は不要。
 
-`opencode.json`:
+`.opencode/plugins/sortie-dogs.ts`:
 
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "plugin": ["sortie-dogs/plugin"]
-}
+```ts
+export { SortieDogsPlugin } from "sortie-dogs/plugin";
 ```
 
 `.opencode/package.json`:
@@ -118,7 +116,9 @@ npm --prefix ./.opencode run check:sortie-dogs
 
 最後の command は package entrypoint の import smoke のみ。これは structural OpenCode hook と write gate の読込み設定。
 MkII workflow、agent、command を起動・実行しない。
-OpenCode runtime は project の通常起動時に `opencode.json` の plugin entry を読み込む。この package 自体に OpenCode 起動 command はない。
+OpenCode runtime は project の通常起動時に local bridge を検出する。bridge 位置から
+`.opencode/node_modules/sortie-dogs` が解決され、npm global cache の同名 package に依存しない。
+この package 自体に OpenCode 起動 command はない。
 plugin 呼出しは project root の `operation-manifest.json` と `handoff.json` を既定使用する。
 `.opencode/sortie-dogs.json`、JSON object形式の `SORTIE_DOGS_CONFIG`、host override の順で既定値を上書きする。
 manifest/configを読めない場合、read-only hookはno-op、write/handoff hookはfail closed。package importのみではhookやI/Oを開始しない。

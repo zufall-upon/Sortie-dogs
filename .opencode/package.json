@@ -1,0 +1,9 @@
+{
+  "private": true,
+  "scripts": {
+    "check:sortie-dogs": "node --input-type=module --eval \"import('sortie-dogs/plugin').then(({ SortieDogsPlugin }) => { if (typeof SortieDogsPlugin !== 'function') process.exit(1); console.log('plugin import PASS') })\""
+  },
+  "dependencies": {
+    "sortie-dogs": "file:../_testenv/sortie-dogs-0.1.0.tgz"
+  }
+}
