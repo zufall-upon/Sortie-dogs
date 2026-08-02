@@ -82,10 +82,7 @@ export function safePath(path: string): string {
 }
 
 export function resolveProjectRoot(input: { directory: string; worktree?: string }): string {
-  const candidate = typeof input.worktree === "string" && input.worktree.length > 0
-    ? input.worktree
-    : input.directory;
-  return resolve(candidate);
+  return resolve(input.directory);
 }
 
 function directPaths(args: unknown): string[] {

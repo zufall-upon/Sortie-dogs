@@ -100,8 +100,35 @@ test("plugin fixture allows a manifest-scoped write", async () => {
     await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
     const nested = join(directory, "nested");
     await mkdir(nested);
+    await writeFile(join(nested, "operation-manifest.json"), JSON.stringify(fixture.manifest));
     await invokeWrite(await SortieDogsPlugin({ directory: nested, worktree: directory }), candidate.target!);
     await invokeWrite(await SortieDogsPlugin({ directory }, {}), candidate.target!);
+  });
+});
+
+test("plugin gate uses the execution directory when worktree differs", async () => {
+  await withProject("directory-worktree-divergence", async (worktree) => {
+    const directory = join(worktree, "u3-rpt");
+    await mkdir(directory);
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+    await writeFile(join(worktree, "operation-manifest.json"), JSON.stringify({
+      ...fixture.manifest,
+      write: ["denied.txt"],
+    }));
+
+    const hooks = await SortieDogsPlugin({ directory, worktree });
+    await invokeWrite(hooks, "allowed.txt");
+    const before = hooks["tool.execute.before"];
+    assert.ok(before);
+    await expectMessage(
+      () => before(
+        { tool: "apply_patch", sessionID: "plugin-session", callID: "patch-call" },
+        { args: { patchText: "*** Begin Patch\n*** Add File: denied.txt\n+blocked\n*** End Patch" } },
+      ),
+      'Write denied for "denied.txt": operation manifest write scope.',
+      "manifest-scope",
+    );
+    await assert.rejects(stat(join(directory, "denied.txt")), { code: "ENOENT" });
   });
 });
 
