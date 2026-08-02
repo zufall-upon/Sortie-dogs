@@ -7,8 +7,8 @@ import type { OperationManifest } from "../core/types.js";
 import { validateManifest } from "../core/validate-manifest.js";
 import { validateHandoffSchema, validateOperationManifestSchema } from "../core/validate-schema.js";
 import {
-  resolvePluginConfiguration,
-  type ConfiguredPlugin,
+  resolvePluginConfigurationSources,
+  type ConfiguredPluginSources,
   type SortieDogsPluginOptions,
 } from "./config.js";
 import {
@@ -23,6 +23,10 @@ import {
   type ToolExecuteBeforeOutput,
   type WriteGate,
 } from "./gate.js";
+import {
+  createModelRoutingHook,
+  type OpenCodeChatMessageHook,
+} from "./model-routing-hook.js";
 
 const INPUT_LIMITS = { config: 64 * 1024, manifest: 512 * 1024, handoff: 2 * 1024 * 1024 } as const;
 const INSPECTION_CACHE = { maximum: 256, ttlMilliseconds: 30 * 60 * 1000 } as const;
@@ -50,6 +54,7 @@ export interface OpenCodeHooks {
     input: ToolExecuteBeforeInput,
     output: ToolExecuteBeforeOutput,
   ) => Promise<void>;
+  "chat.message"?: OpenCodeChatMessageHook;
 }
 
 export type OpenCodePlugin = (
@@ -88,6 +93,7 @@ interface LoadedConfiguration {
   gate: WriteGate;
   manifest: OperationManifest;
   handoffPaths: readonly string[];
+  modelRoutingHook?: OpenCodeChatMessageHook;
 }
 
 interface InspectionCacheEntry {
@@ -147,7 +153,7 @@ function readEnvironmentConfig(): unknown {
   }
 }
 
-async function loadConfigured(project: ProjectPaths, config: ConfiguredPlugin): Promise<LoadedConfiguration> {
+async function loadConfigured(project: ProjectPaths, config: ConfiguredPluginSources): Promise<LoadedConfiguration> {
   const manifestPath = await project.toRelativePath(config.operationManifestPath);
   const manifestValue = await readJson(project.absolute(manifestPath), INPUT_LIMITS.manifest);
   const validation = validateOperationManifestSchema(manifestValue);
@@ -156,7 +162,16 @@ async function loadConfigured(project: ProjectPaths, config: ConfiguredPlugin): 
   const gate = await createWriteGate(project, validation.value);
   const handoffPaths: string[] = [];
   for (const path of config.handoffPaths) handoffPaths.push(await project.toRelativePath(path));
-  return { gate, manifest: validation.value, handoffPaths };
+  const hasModelRouting = Object.keys(config.localModelRouting).length > 0 ||
+    Object.keys(config.globalModelRouting).length > 0;
+  const modelRoutingHook = hasModelRouting
+    ? createModelRoutingHook({
+      local: config.localModelRouting,
+      global: config.globalModelRouting,
+      catalog: config.modelCatalog,
+    })
+    : undefined;
+  return { gate, manifest: validation.value, handoffPaths, modelRoutingHook };
 }
 
 function stableValue(value: unknown): unknown {
@@ -185,7 +200,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     project = await createProjectPaths(resolveProjectRoot(input));
     const projectConfig = await readOptionalProjectConfig(project);
     const environmentConfig = readEnvironmentConfig();
-    const parsed = resolvePluginConfiguration(projectConfig, environmentConfig, options);
+    const parsed = resolvePluginConfigurationSources(projectConfig, environmentConfig, options);
     if (parsed.kind === "invalid") throw new WriteDeniedError("manifest-unavailable", "<unknown>");
     loaded = await loadConfigured(project, parsed);
   } catch (error) {
@@ -236,6 +251,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   }
 
   return {
+    ...(loaded?.modelRoutingHook === undefined ? {} : { "chat.message": loaded.modelRoutingHook }),
     "permission.ask": async (permission): Promise<void> => {
       if (permission.permission !== "edit") return;
       if (loaded === undefined) {
@@ -275,3 +291,4 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
 };
 
 export type { SortieDogsPluginOptions } from "./config.js";
+export { InvalidModelTargetError, ModelRoutingDeniedError } from "./model-routing-hook.js";

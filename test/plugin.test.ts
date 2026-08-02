@@ -4,7 +4,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { SortieDogsPlugin } from "../dist/plugin/index.js";
+import { ModelRoutingDeniedError, SortieDogsPlugin } from "../dist/plugin/index.js";
 import { resolvePluginConfiguration } from "../dist/plugin/config.js";
 import {
   parseModelRoutingConfig,
@@ -48,7 +48,7 @@ test("model routing configuration is strict and merges roles by layer", () => {
     },
   };
   const parsed = resolvePluginConfiguration(
-    { modelRouting: project },
+    { modelRouting: project, modelCatalog: { global: [{ model: "provider/primary" }] } },
     { modelRouting: host },
   );
   assert.equal(parsed.kind, "configured");
@@ -57,6 +57,7 @@ test("model routing configuration is strict and merges roles by layer", () => {
   }
   assert.equal(parseModelRoutingConfig({ reviewer: { preferred: { model: "x", extra: true } } }), undefined);
   assert.deepEqual(resolvePluginConfiguration({ unknown: true }), { kind: "invalid" });
+  assert.deepEqual(resolvePluginConfiguration({ modelRouting: host }), { kind: "invalid" });
 });
 
 test("model routing rejects prototype-sensitive JSON role names", () => {
@@ -194,6 +195,61 @@ async function expectMessage(
     return true;
   });
 }
+
+test("chat message hook applies explicit catalog routing and fails closed with ordered attempts", async () => {
+  await withProject("model-routing-hook", async (directory) => {
+    await mkdir(join(directory, ".opencode"));
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+    await writeFile(join(directory, ".opencode", "sortie-dogs.json"), JSON.stringify({
+      modelRouting: {
+        implementer: { preferred: { model: "provider/local-primary", variant: "thinking" } },
+        reviewer: {
+          preferred: { model: "provider/local-missing" },
+          fallback: [{ model: "provider/variant", variant: "missing" }],
+        },
+      },
+    }));
+    const hooks = await SortieDogsPlugin({ directory }, {
+      modelRouting: {
+        implementer: { preferred: { model: "provider/global-primary", variant: "thinking" } },
+        reviewer: {
+          preferred: { model: "provider/global-missing" },
+          fallback: [{ model: "provider/variant", variant: "also-missing" }],
+        },
+      },
+      modelCatalog: { global: [
+        { model: "provider/local-primary", variants: ["thinking"] },
+        { model: "provider/global-primary", variants: ["thinking"] },
+        { model: "provider/variant", variants: ["valid"] },
+      ] },
+    });
+    const chat = hooks["chat.message"];
+    assert.ok(chat);
+    const output = {
+      message: { agent: "implementer", model: { providerID: "old", modelID: "old", variant: "old" } },
+      parts: [],
+    };
+    await chat({ sessionID: "routing", agent: "implementer" }, output);
+    assert.deepEqual(output.message.model, { providerID: "provider", modelID: "local-primary", variant: "thinking" });
+    const unclassified = { message: { model: { providerID: "host", modelID: "preserved" } }, parts: [] };
+    await chat({ sessionID: "routing" }, unclassified);
+    assert.deepEqual(unclassified.message.model, { providerID: "host", modelID: "preserved" });
+    await assert.rejects(
+      () => chat({ sessionID: "routing", agent: "reviewer" }, output),
+      (error: unknown) => {
+        assert.ok(error instanceof ModelRoutingDeniedError);
+        assert.equal(error.reason, "unresolved-role");
+        assert.deepEqual(error.attempts, [
+          { source: "local", target: { model: "provider/local-missing" }, reason: "model-unavailable" },
+          { source: "local", target: { model: "provider/variant", variant: "missing" }, reason: "variant-unavailable" },
+          { source: "global", target: { model: "provider/global-missing" }, reason: "model-unavailable" },
+          { source: "global", target: { model: "provider/variant", variant: "also-missing" }, reason: "variant-unavailable" },
+        ]);
+        return true;
+      },
+    );
+  });
+});
 
 test("plugin fixture allows a manifest-scoped write", async () => {
   const candidate = fixtureCase("allow-write");
