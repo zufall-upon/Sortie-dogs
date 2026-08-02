@@ -3,15 +3,22 @@
 OpenCode の既存 MkII ワークフローを配布可能にする AI orchestration loop plugin。
 `sortie-dogs` は handoff と operation manifest の契約をローカルで検査する。
 
-## Quickstart
+## Prerequisites
 
-Node.js 22.6.0 以上で install、build、test する。
+- Node.js 22.6.0 以上
+- npm
+
+## Install、build、test
+
+source checkout では lockfile から dependency を install し、`dist/` を build して test する。
 
 ```console
-npm install
+npm ci
 npm run build
 npm test
 ```
+
+`npm test` は `pretest` で build してから Node.js test suite を実行する。
 
 ### Manifest gate（推奨）
 
@@ -65,7 +72,16 @@ npm exec --package=. -- sortie-dogs lint handoff.json
 
 - `sortie-dogs`: CLI entry point
 
-## OpenCode plugin
+## Package distribution and OpenCode runtime
+
+配布用 tarball は repository の test environment に作成する。
+
+```console
+npm pack --pack-destination ./_testenv
+```
+
+tarball は build 済み `dist/`、`sortie-dogs` CLI、`sortie-dogs/plugin` export を含む。
+次の例では `npm pack` が出力した tarball 名を `.opencode/package.json` に指定する。
 
 package plugin は `sortie-dogs/plugin` から `SortieDogsPlugin` を公開する。project root の
 `opencode.json` で plugin を指定し、`.opencode/package.json` に package dependency を置く。
@@ -84,25 +100,25 @@ package plugin は `sortie-dogs/plugin` から `SortieDogsPlugin` を公開す�
 ```json
 {
   "private": true,
+  "scripts": {
+    "check:sortie-dogs": "node --input-type=module --eval \"import('sortie-dogs/plugin').then(({ SortieDogsPlugin }) => { if (typeof SortieDogsPlugin !== 'function') process.exit(1); console.log('plugin import PASS') })\""
+  },
   "dependencies": {
     "sortie-dogs": "file:../_testenv/sortie-dogs-0.1.0.tgz"
   }
 }
 ```
 
-local tarball は必ず test environment に作成してから dependency を install する。
+local tarball を dependency として install し、package export を smoke test する。両 command は host shell に依存しない。
 
 ```console
-npm pack --pack-destination ./_testenv
 npm install --prefix ./.opencode
-# PowerShell: run Node from .opencode so package resolution uses its node_modules.
-Push-Location ./.opencode
-node --input-type=module --eval "import('sortie-dogs/plugin').then(({ SortieDogsPlugin }) => { if (typeof SortieDogsPlugin !== 'function') process.exit(1); console.log('plugin import PASS') })"
-Pop-Location
+npm --prefix ./.opencode run check:sortie-dogs
 ```
 
 最後の command は package entrypoint の import smoke のみ。これは structural OpenCode hook と write gate の読込み設定。
 MkII workflow、agent、command を起動・実行しない。
+OpenCode runtime は project の通常起動時に `opencode.json` の plugin entry を読み込む。この package 自体に OpenCode 起動 command はない。
 plugin 呼出しは project root の `operation-manifest.json` と `handoff.json` を既定使用する。
 `.opencode/sortie-dogs.json`、JSON object形式の `SORTIE_DOGS_CONFIG`、host override の順で既定値を上書きする。
 manifest/configを読めない場合、read-only hookはno-op、write/handoff hookはfail closed。package importのみではhookやI/Oを開始しない。
