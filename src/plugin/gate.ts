@@ -45,6 +45,7 @@ export interface ProjectPaths {
 
 export interface WriteGate {
   check(input: ToolExecuteBeforeInput, output: ToolExecuteBeforeOutput): Promise<void>;
+  checkPath(path: string): Promise<void>;
   toRelativePath(path: string): Promise<string>;
 }
 
@@ -254,7 +255,21 @@ export async function createWriteGate(project: ProjectPaths, value: unknown): Pr
   if (!validated.ok) throw new WriteDeniedError("manifest-unavailable", "<unknown>");
   const manifest: OperationManifest = validated.value;
   const writable = new Set(manifest.write.map((path) => normalizeRelativePath(path)));
+  const checkPath = async (path: string): Promise<void> => {
+    let normalized: string;
+    try {
+      normalized = await project.toRelativePath(path);
+    } catch (error) {
+      if (error instanceof WriteDeniedError) throw error;
+      if (error instanceof RelativePathError) {
+        throw new WriteDeniedError("project-boundary", path, { cause: error });
+      }
+      throw error;
+    }
+    if (!writable.has(normalized)) throw new WriteDeniedError("manifest-scope", normalized);
+  };
   return {
+    checkPath,
     toRelativePath: project.toRelativePath,
     async check(_input, output): Promise<void> {
       const extracted = extractWritePaths(_input.tool, output.args);
@@ -262,19 +277,7 @@ export async function createWriteGate(project: ProjectPaths, value: unknown): Pr
       if (extracted.ambiguous || extracted.paths.length === 0) {
         throw new WriteDeniedError("path-required", "<unknown>");
       }
-      for (const path of extracted.paths) {
-        let normalized: string;
-        try {
-          normalized = await project.toRelativePath(path);
-        } catch (error) {
-          if (error instanceof WriteDeniedError) throw error;
-          if (error instanceof RelativePathError) {
-            throw new WriteDeniedError("project-boundary", path, { cause: error });
-          }
-          throw error;
-        }
-        if (!writable.has(normalized)) throw new WriteDeniedError("manifest-scope", normalized);
-      }
+      for (const path of extracted.paths) await checkPath(path);
     },
   };
 }

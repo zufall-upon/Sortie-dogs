@@ -119,11 +119,25 @@ test("plugin gate uses the execution directory when worktree differs", async () 
     const hooks = await SortieDogsPlugin({ directory, worktree });
     await invokeWrite(hooks, "allowed.txt");
     const before = hooks["tool.execute.before"];
+    const permission = hooks["permission.ask"];
     assert.ok(before);
+    assert.ok(permission);
     await expectMessage(
       () => before(
         { tool: "apply_patch", sessionID: "plugin-session", callID: "patch-call" },
-        { args: { patchText: "*** Begin Patch\n*** Add File: denied.txt\n+blocked\n*** End Patch" } },
+        { args: { patchText: `*** Begin Patch\n*** Add File: ${join(directory, "denied.txt")}\n+blocked\n*** End Patch` } },
+      ),
+      'Write denied for "denied.txt": operation manifest write scope.',
+      "manifest-scope",
+    );
+    await permission(
+      { permission: "edit", patterns: [join("u3-rpt", "allowed.txt")] },
+      { status: "allow" },
+    );
+    await expectMessage(
+      () => permission(
+        { permission: "edit", patterns: [join("u3-rpt", "denied.txt")] },
+        { status: "allow" },
       ),
       'Write denied for "denied.txt": operation manifest write scope.',
       "manifest-scope",

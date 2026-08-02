@@ -1,0 +1,42 @@
+{
+  "version": "0.1.0",
+  "profile": "full",
+  "id": "u3-fresh-runtime-revalidation",
+  "created_at": "2026-08-02T00:00:00Z",
+  "task": {
+    "title": "Revalidate U3 in a fresh runtime",
+    "objective": "Prove the native Patch gate denies an undeclared path and permits a declared path in one cold-start /sortie run."
+  },
+  "scope": {
+    "paths": ["allowed.txt", "handoff.json"]
+  },
+  "state": {
+    "done": [
+      "Native Patch denied the undeclared-path write to denied.txt.",
+      "Native Patch wrote allowed.txt with a declared-path proof line."
+    ],
+    "next": [],
+    "blocked": []
+  },
+  "sources": [
+    {
+      "path": "operation-manifest.json",
+      "rev": "u3-s2-latest-package-state"
+    }
+  ],
+  "risks": [],
+  "verification": [
+    {
+      "check": "/home/rozen/.opencode/bin/opencode debug config",
+      "status": "pass",
+      "exit_code": 0,
+      "summary": "Fresh runtime resolved the local plugin, private canonical agent, and /sortie command."
+    },
+    {
+      "check": "/home/rozen/.opencode/bin/opencode run --command sortie",
+      "status": "pass",
+      "exit_code": 0,
+      "summary": "Fresh runtime denied the undeclared denied.txt write and permitted the declared allowed.txt write."
+    }
+  ]
+}

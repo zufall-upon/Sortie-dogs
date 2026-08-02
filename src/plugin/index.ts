@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
+import { isAbsolute, resolve } from "node:path";
 
 import { RelativePathError } from "../core/path.js";
 import type { OperationManifest } from "../core/types.js";
@@ -41,6 +42,10 @@ export interface OpenCodeEvent {
 
 export interface OpenCodeHooks {
   event?: (input: { event: OpenCodeEvent }) => Promise<void>;
+  "permission.ask"?: (
+    input: { permission: string; patterns: string[] },
+    output: { status: "ask" | "deny" | "allow" },
+  ) => Promise<void>;
   "tool.execute.before"?: (
     input: ToolExecuteBeforeInput,
     output: ToolExecuteBeforeOutput,
@@ -231,6 +236,18 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   }
 
   return {
+    "permission.ask": async (permission): Promise<void> => {
+      if (permission.permission !== "edit") return;
+      if (loaded === undefined) {
+        throw new WriteDeniedError("manifest-unavailable", "<unknown>", { cause: loadFailure });
+      }
+      for (const pattern of permission.patterns) {
+        const path = isAbsolute(pattern) || input.worktree === undefined
+          ? pattern
+          : resolve(input.worktree, pattern);
+        await loaded.gate.checkPath(path);
+      }
+    },
     "tool.execute.before": async (toolInput, output): Promise<void> => {
       if (loaded === undefined) {
         const extraction = extractWritePaths(toolInput.tool, output.args);
