@@ -1,0 +1,7 @@
+doc/
+.opencode/
+AGENTS.md
+_testenv/
+dist/
+marketing/
+node_modules/
