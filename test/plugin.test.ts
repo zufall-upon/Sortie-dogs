@@ -5,6 +5,11 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { SortieDogsPlugin } from "../dist/plugin/index.js";
+import { resolvePluginConfiguration } from "../dist/plugin/config.js";
+import {
+  parseModelRoutingConfig,
+  resolveModelRoute,
+} from "../dist/plugin/model-routing.js";
 
 interface PluginCase {
   name: string;
@@ -31,6 +36,102 @@ const fixture = JSON.parse(
 ) as PluginFixture;
 const cases = new Map(fixture.cases.map((candidate) => [candidate.name, candidate]));
 const testEnvironment = fileURLToPath(new URL("../_testenv/", import.meta.url));
+
+test("model routing configuration is strict and merges roles by layer", () => {
+  const project = {
+    reviewer: { preferred: { model: "fable/opus", variant: "thinking" } },
+  };
+  const host = {
+    implementer: {
+      preferred: { model: "provider/primary" },
+      fallback: [{ model: "provider/free" }],
+    },
+  };
+  const parsed = resolvePluginConfiguration(
+    { modelRouting: project },
+    { modelRouting: host },
+  );
+  assert.equal(parsed.kind, "configured");
+  if (parsed.kind === "configured") {
+    assert.deepEqual(parsed.modelRouting, { ...project, ...host });
+  }
+  assert.equal(parseModelRoutingConfig({ reviewer: { preferred: { model: "x", extra: true } } }), undefined);
+  assert.deepEqual(resolvePluginConfiguration({ unknown: true }), { kind: "invalid" });
+});
+
+test("model routing rejects prototype-sensitive JSON role names", () => {
+  const routing = JSON.parse('{"__proto__":{"preferred":{"model":"provider/model"}}}') as unknown;
+  assert.equal(parseModelRoutingConfig(routing), undefined);
+});
+
+test("model resolver preserves valid variants and prioritizes preferred, local, and project catalog", () => {
+  const resolution = resolveModelRoute({
+    role: "reviewer",
+    local: {
+      reviewer: {
+        preferred: { model: "fable/opus", variant: "thinking" },
+        fallback: [{ model: "provider/free" }],
+      },
+    },
+    global: { reviewer: { preferred: { model: "provider/global" } } },
+    catalog: {
+      project: [{ model: "fable/opus", variants: ["thinking"] }],
+      global: [
+        { model: "fable/opus", variants: ["thinking"] },
+        { model: "provider/free" },
+        { model: "provider/global" },
+      ],
+    },
+  });
+  assert.deepEqual(resolution, {
+    ok: true,
+    role: "reviewer",
+    source: "local",
+    catalog: "project",
+    model: "fable/opus",
+    variant: "thinking",
+  });
+});
+
+test("model resolver falls back in order and returns structured unresolved failures", () => {
+  const route = {
+    reviewer: {
+      preferred: { model: "fable/opus", variant: "missing" },
+      fallback: [{ model: "provider/free" }],
+    },
+  };
+  assert.deepEqual(resolveModelRoute({
+    role: "reviewer",
+    local: route,
+    catalog: { global: [{ model: "fable/opus", variants: ["valid"] }, { model: "provider/free" }] },
+  }), {
+    ok: true,
+    role: "reviewer",
+    source: "local",
+    catalog: "global",
+    model: "provider/free",
+  });
+
+  assert.deepEqual(resolveModelRoute({
+    role: "unknown",
+    local: route,
+    catalog: { global: [{ model: "provider/free" }] },
+  }), {
+    ok: false,
+    role: "unknown",
+    reason: "unresolved-role",
+    attempts: [],
+  });
+
+  for (const role of ["constructor", "toString", "valueOf"]) {
+    assert.deepEqual(resolveModelRoute({ role, local: {}, global: {}, catalog: {} }), {
+      ok: false,
+      role,
+      reason: "unresolved-role",
+      attempts: [],
+    });
+  }
+});
 
 assert.deepEqual([...cases.keys()], [
   "allow-write",
