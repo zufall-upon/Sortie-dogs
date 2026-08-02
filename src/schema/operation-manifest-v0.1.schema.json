@@ -16,6 +16,7 @@
     },
     "write": {
       "type": "array",
+      "description": "Repository-relative write scopes. Each entry permits that exact path. When an entry names an existing directory at gate creation, it also permits descendants at a path-segment boundary, provided their resolved filesystem target remains within that directory; similarly prefixed sibling paths are not permitted.",
       "uniqueItems": true,
       "items": { "$ref": "#/$defs/path" }
     },

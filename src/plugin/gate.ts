@@ -255,6 +255,28 @@ export async function createWriteGate(project: ProjectPaths, value: unknown): Pr
   if (!validated.ok) throw new WriteDeniedError("manifest-unavailable", "<unknown>");
   const manifest: OperationManifest = validated.value;
   const writable = new Set(manifest.write.map((path) => normalizeRelativePath(path)));
+  const writableDirectories: { path: string; realPath: string }[] = [];
+  for (const path of writable) {
+    try {
+      const metadata = await lstat(project.absolute(path));
+      if (metadata.isDirectory()) {
+        writableDirectories.push({ path, realPath: await realpath(project.absolute(path)) });
+      }
+    } catch {
+      // Missing, inaccessible, and concurrently changed paths remain exact-only scopes.
+    }
+  }
+  const isWritable = async (normalized: string): Promise<boolean> => {
+    if (writable.has(normalized)) return true;
+    const scopes = writableDirectories.filter((scope) => normalized.startsWith(`${scope.path}/`));
+    if (scopes.length === 0) return false;
+    try {
+      const realTarget = await nearestExistingRealPath(project.absolute(normalized));
+      return scopes.some((scope) => isWithin(scope.realPath, realTarget));
+    } catch {
+      return false;
+    }
+  };
   const checkPath = async (path: string): Promise<void> => {
     let normalized: string;
     try {
@@ -266,7 +288,7 @@ export async function createWriteGate(project: ProjectPaths, value: unknown): Pr
       }
       throw error;
     }
-    if (!writable.has(normalized)) throw new WriteDeniedError("manifest-scope", normalized);
+    if (!await isWritable(normalized)) throw new WriteDeniedError("manifest-scope", normalized);
   };
   return {
     checkPath,

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -260,6 +260,55 @@ test("plugin fixture allows a manifest-scoped write", async () => {
     await writeFile(join(nested, "operation-manifest.json"), JSON.stringify(fixture.manifest));
     await invokeWrite(await SortieDogsPlugin({ directory: nested, worktree: directory }), candidate.target!);
     await invokeWrite(await SortieDogsPlugin({ directory }, {}), candidate.target!);
+  });
+});
+
+test("plugin gate allows directory descendants without allowing prefixed siblings", async () => {
+  await withProject("directory-write-scope", async (directory) => {
+    await mkdir(join(directory, "_testenv"));
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify({
+      ...fixture.manifest,
+      write: ["_testenv", "_future"],
+    }));
+    const hooks = await SortieDogsPlugin({ directory });
+
+    await invokeWrite(hooks, "_testenv/result.json");
+    await expectMessage(
+      () => invokeWrite(hooks, "undeclared/result.json"),
+      'Write denied for "undeclared/result.json": operation manifest write scope.',
+      "manifest-scope",
+    );
+    await expectMessage(
+      () => invokeWrite(hooks, "_testenv-sibling/result.json"),
+      'Write denied for "_testenv-sibling/result.json": operation manifest write scope.',
+      "manifest-scope",
+    );
+    await expectMessage(
+      () => invokeWrite(hooks, "_future/result.json"),
+      'Write denied for "_future/result.json": operation manifest write scope.',
+      "manifest-scope",
+    );
+  });
+});
+
+test("plugin gate denies directory-scope writes routed through an escaping symlink", async () => {
+  await withProject("directory-write-scope-symlink", async (directory) => {
+    const scope = join(directory, "_testenv");
+    const outsideScope = join(directory, "other");
+    await mkdir(scope);
+    await mkdir(outsideScope);
+    await symlink(outsideScope, join(scope, "link"), process.platform === "win32" ? "junction" : "dir");
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify({
+      ...fixture.manifest,
+      write: ["_testenv"],
+    }));
+    const hooks = await SortieDogsPlugin({ directory });
+
+    await expectMessage(
+      () => invokeWrite(hooks, "_testenv/link/result.json"),
+      'Write denied for "_testenv/link/result.json": operation manifest write scope.',
+      "manifest-scope",
+    );
   });
 });
 
