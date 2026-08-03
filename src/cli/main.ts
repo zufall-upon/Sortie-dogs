@@ -22,6 +22,9 @@ const manifestValidator: typeof import("../core/validate-manifest.js") = await i
 const pathUtils: typeof import("../core/path.js") = await import(
   `../core/path.${import.meta.url.endsWith(".ts") ? "ts" : "js"}`
 );
+const initializer: typeof import("../core/initialize.js") = await import(
+  `../core/initialize.${import.meta.url.endsWith(".ts") ? "ts" : "js"}`
+);
 
 const LIMITS = {
   handoffBytes: 2 * 1024 * 1024,
@@ -38,6 +41,7 @@ const USAGE = `Usage: sortie-dogs lint <handoff.json> [<handoff.json> ...]
   [--changed-paths-from <file|->]
   [--changed-path <path> ...]
   [--format text|json] [--quiet] [--strict]`;
+const INIT_USAGE = "Usage: sortie-dogs init [project-root]";
 
 type OutputFormat = "text" | "json";
 
@@ -252,6 +256,29 @@ function render(output: readonly CliDiagnostic[], format: OutputFormat): string 
 }
 
 export async function run(argv: readonly string[]): Promise<number> {
+  if (argv[0] === "init") {
+    if (argv[1] === "--help" && argv.length === 2) {
+      process.stdout.write(`${INIT_USAGE}\n`);
+      return 0;
+    }
+    if (argv.length > 2 || argv[1]?.startsWith("-") === true) {
+      process.stderr.write(`${INIT_USAGE}\n`);
+      return 2;
+    }
+    try {
+      const initialized = await initializer.initializeProject(argv[1]);
+      process.stdout.write(initialized.status === "installed"
+        ? `Initialized Sortie-dogs ${initialized.version}.\n`
+        : `Sortie-dogs ${initialized.version} is already initialized.\n`);
+      return 0;
+    } catch (error) {
+      process.stderr.write(error instanceof initializer.ProjectInitializationError
+        ? `${error.message}\n`
+        : "Initialization failed.\n");
+      return 2;
+    }
+  }
+
   const result = parseArguments(argv);
   if (result.kind === "help") {
     process.stdout.write(`${USAGE}\n`);
