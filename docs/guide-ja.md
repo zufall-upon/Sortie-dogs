@@ -52,12 +52,12 @@ manifest gate が各 role の write scope を限定する。
 Canonical validation とリスク別 review を通過してから coordinator が完了を確定する。
 変更内容と確認方法を示す簡潔な evidence を伴ってタスクを返す。
 
-## v0.1.0 リリースからインストール
+## v0.1.1 リリースからインストール
 
 対象プロジェクトで GitHub Release の公開 asset を依存関係へ追加し、runtime file を生成する。
 
 ```sh
-npm install --save-dev https://github.com/zufall-upon/Sortie-dogs/releases/download/v0.1.0/sortie-dogs-0.1.0.tgz
+npm install --save-dev https://github.com/zufall-upon/Sortie-dogs/releases/download/v0.1.1/sortie-dogs-0.1.1.tgz
 npx sortie-dogs init .
 ```
 

@@ -63,13 +63,13 @@ gets more complex.
 Validation and risk-based review happen before coordinator-owned completion, so
 the result returns with a concise record of what changed and how it was checked.
 
-## Install from the v0.1.0 release
+## Install from the v0.1.1 release
 
 Install the published GitHub release asset in the target project, then generate
 the project-local runtime files:
 
 ```sh
-npm install --save-dev https://github.com/zufall-upon/Sortie-dogs/releases/download/v0.1.0/sortie-dogs-0.1.0.tgz
+npm install --save-dev https://github.com/zufall-upon/Sortie-dogs/releases/download/v0.1.1/sortie-dogs-0.1.1.tgz
 npx sortie-dogs init .
 ```
 
