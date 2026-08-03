@@ -13,6 +13,19 @@ import { runtimeAssets } from "../src/runtime-assets.ts";
 const TEST_ROOT = join(process.cwd(), "_testenv");
 const ENTRY = join(process.cwd(), "src", "cli", "main.ts");
 const MARKER = join(".opencode", "sortie-dogs.version");
+const LEGACY_WORKER_PATH = join(".opencode", "agent", "sol-worker-mk2a2.md");
+const LEGACY_WORKER_CONTENT = `---
+description: Dedicated Sol worker for the canonical Mk2A2 coordinator
+mode: subagent
+---
+# sol-worker-mk2a2
+
+You are the dedicated Sol worker for coordinator-mk2a2.
+
+Execute the supplied manifest within its acceptance criteria, run the requested
+validation, and return concise change and validation evidence to coordinator-mk2a2.
+Do not act as the user-facing coordinator.
+`;
 
 async function fixtureDirectory(): Promise<string> {
   await mkdir(TEST_ROOT, { recursive: true });
@@ -45,11 +58,11 @@ test("fresh init installs every runtime asset and preserves project settings", a
     const result = await initializeProject(project);
 
     assert.equal(result.status, "installed");
-    assert.equal(result.version, "0.2.0-card04");
+    assert.equal(result.version, "0.2.0-card05");
     for (const asset of runtimeAssets) {
       assert.equal(await readFile(join(project, ".opencode", asset.installPath), "utf8"), asset.content);
     }
-    assert.equal(await readFile(join(project, MARKER), "utf8"), "0.2.0-card04\n");
+    assert.equal(await readFile(join(project, MARKER), "utf8"), "0.2.0-card05\n");
     assert.equal(await readFile(config, "utf8"), "{\"userSetting\":true}\n");
   } finally {
     await clean(project);
@@ -101,7 +114,7 @@ test("compatible update replaces owned drift, preserves user files, then becomes
     const marker = join(project, MARKER);
     const ownedAsset = join(project, ".opencode", runtimeAssets[0].installPath);
     const userFile = join(project, ".opencode", "sortie-dogs.json");
-    await writeFile(marker, (await readFile(marker, "utf8")).replace("0.2.0-card04", "0.2.0-card03"));
+    await writeFile(marker, (await readFile(marker, "utf8")).replace("0.2.0-card05", "0.2.0-card03"));
     await writeFile(ownedAsset, "old RPT-owned content\n");
     await writeFile(userFile, "{\"userOwned\":true}\n");
 
@@ -123,12 +136,49 @@ test("compatible update replaces owned drift, preserves user files, then becomes
   }
 });
 
+test("rename migration removes a byte-matched owned legacy file", async () => {
+  const project = await fixtureDirectory();
+  try {
+    const legacyWorker = join(project, LEGACY_WORKER_PATH);
+    await mkdir(join(project, ".opencode", "agent"), { recursive: true });
+    await writeFile(join(project, MARKER), "0.2.0-card04\n");
+    await writeFile(legacyWorker, LEGACY_WORKER_CONTENT);
+
+    const result = await initializeProject(project);
+
+    assert.equal(result.status, "installed");
+    assert.deepEqual(result.preservedLegacyPaths, []);
+    assert.equal(await lstat(legacyWorker).then(() => true, () => false), false);
+    assert.equal(await readFile(join(project, MARKER), "utf8"), "0.2.0-card05\n");
+  } finally {
+    await clean(project);
+  }
+});
+
+test("rename migration preserves and reports a user-edited legacy file", async () => {
+  const project = await fixtureDirectory();
+  try {
+    const legacyWorker = join(project, LEGACY_WORKER_PATH);
+    const edited = `${LEGACY_WORKER_CONTENT}\nUser edit.\n`;
+    await mkdir(join(project, ".opencode", "agent"), { recursive: true });
+    await writeFile(join(project, MARKER), "0.2.0-card04\n");
+    await writeFile(legacyWorker, edited);
+
+    const result = await initializeProject(project);
+
+    assert.deepEqual(result.preservedLegacyPaths, [".opencode/agent/sol-worker-mk2a2.md"]);
+    assert.equal(await readFile(legacyWorker, "utf8"), edited);
+  } finally {
+    await clean(project);
+  }
+});
+
 test("a recognized current-version marker repairs a partial install and then becomes unchanged", async () => {
   const project = await fixtureDirectory();
   try {
     const firstAsset = runtimeAssets[0];
     await mkdir(join(project, ".opencode", "agent"), { recursive: true });
-    await writeFile(join(project, MARKER), "0.2.0-card04\n");
+    await writeFile(join(project, MARKER), "0.2.0-card05\n");
     await writeFile(join(project, ".opencode", firstAsset.installPath), firstAsset.content);
 
     const repaired = await initializeProject(project);
@@ -143,7 +193,7 @@ test("a recognized current-version marker repairs a partial install and then bec
   }
 });
 
-test("incompatible update is rejected before any mutation", async () => {
+test("an out-of-line update is rejected before any mutation", async () => {
   const project = await fixtureDirectory();
   try {
     const openCode = join(project, ".opencode");
@@ -227,7 +277,7 @@ test("symlinked install paths fail before writing runtime files", async (context
       assert.equal(error.code, "unsafe-path");
       return true;
     });
-    assert.deepEqual(await rm(join(outside, "coordinator-mk2a2.md")).then(() => true, () => false), false);
+    assert.deepEqual(await rm(join(outside, "dog-coordinator.md")).then(() => true, () => false), false);
   } finally {
     await clean(project);
     await clean(outside);
@@ -293,12 +343,12 @@ test("CLI init supports an explicit project root, repeated init, and help", asyn
     });
     assert.deepEqual(await runCli(["init", project]), {
       exit: 0,
-      stdout: "Initialized Sortie-dogs 0.2.0-card04.\n",
+      stdout: "Initialized Sortie-dogs 0.2.0-card05.\n",
       stderr: "",
     });
     assert.deepEqual(await runCli(["init", project]), {
       exit: 0,
-      stdout: "Sortie-dogs 0.2.0-card04 is already initialized.\n",
+      stdout: "Sortie-dogs 0.2.0-card05 is already initialized.\n",
       stderr: "",
     });
   } finally {

@@ -124,19 +124,24 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       }>;
     };
     assert.equal(loaded.pluginType, "function");
-    assert.equal(loaded.runtimeAssets.length, 3);
+    assert.equal(loaded.runtimeAssets.length, 6);
     assert.deepEqual(
       loaded.runtimeAssets.map(({ name, installPath }) => ({ name, installPath })),
       [
-        { name: "coordinator-mk2a2", installPath: "agent/coordinator-mk2a2.md" },
-        { name: "sol-worker-mk2a2", installPath: "agent/sol-worker-mk2a2.md" },
+        { name: "dog-coordinator", installPath: "agent/dog-coordinator.md" },
+        { name: "dog-worker", installPath: "agent/dog-worker.md" },
+        { name: "dog-scout", installPath: "agent/dog-scout.md" },
+        { name: "dog-reviewer", installPath: "agent/dog-reviewer.md" },
+        { name: "dog-advisor", installPath: "agent/dog-advisor.md" },
         { name: "sortie", installPath: "command/sortie.md" },
       ],
     );
 
-    const coordinator = loaded.runtimeAssets.find(({ name }) => name === "coordinator-mk2a2");
+    const coordinator = loaded.runtimeAssets.find(({ name }) => name === "dog-coordinator");
+    const worker = loaded.runtimeAssets.find(({ name }) => name === "dog-worker");
     const sortie = loaded.runtimeAssets.find(({ name }) => name === "sortie");
     assert.ok(coordinator);
+    assert.ok(worker);
     assert.ok(sortie);
 
     assert.match(coordinator.content, /only user-facing agent/i);
@@ -188,8 +193,12 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       restartRecovery[1],
       /validation_history_entry:\s*\{ command: <exact command>, exit: <exit>, fingerprint: <concise fingerprint> \}/,
     );
-    assert.match(restartRecovery[1], /resume_route:\s*coordinator-mk2a2 -> sol-worker-mk2a2/);
-    assert.match(restartRecovery[1], /user_route:\s*coordinator-mk2a2 only/);
+    assert.match(restartRecovery[1], /resume_route:\s*dog-coordinator -> dog-worker/);
+    assert.match(restartRecovery[1], /user_route:\s*dog-coordinator only/);
+    assert.match(coordinator.content, /dispatch implementation only to dog-worker/i);
+    assert.match(coordinator.content, /dog-scout for bounded read-only evidence/i);
+    assert.match(coordinator.content, /dog-advisor for focused technical consultation/i);
+    assert.match(coordinator.content, /dog-reviewer for independent review/i);
     assert.match(coordinator.content, /do not repeat a recorded successful validation unless\s+relevant source changed/i);
 
     const batchContinuation = coordinator.content.match(
@@ -574,32 +583,34 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       await rm(highRiskRepo, { recursive: true, force: true });
     }
 
-    assert.match(sortie.content, /preflight the current project/i);
+    assert.match(sortie.content, /preflight/i);
     assert.match(sortie.content, /\.opencode\/sortie-dogs\.version/i);
-    assert.match(sortie.content, /\.opencode\/agent\/coordinator-mk2a2\.md/i);
-    assert.match(sortie.content, /\.opencode\/agent\/sol-worker-mk2a2\.md/i);
-    assert.match(sortie.content, /\.opencode\/command\/sortie\.md/i);
-    assert.match(sortie.content, /gather the inline task entry context/i);
+    for (const name of ["dog-coordinator", "dog-worker", "dog-scout", "dog-reviewer", "dog-advisor"]) {
+      assert.match(sortie.content, new RegExp(`${name}\\.md`, "i"));
+    }
+    assert.match(sortie.content, /command\/sortie\.md/i);
     assert.match(sortie.content, /\$ARGUMENTS/);
+    assert.match(sortie.content, /if \$ARGUMENTS is empty, request task context and stop/i);
+    assert.ok(sortie.content.length < 900, "sortie command should remain concise");
     const sortieFrontmatter = sortie.content.match(/^---\r?\n([\s\S]+?)\r?\n---\r?\n/);
     assert.ok(sortieFrontmatter);
     const routeLines = sortieFrontmatter[1].match(/^agent:\s*.+$/gmu) ?? [];
-    assert.deepEqual(routeLines, ["agent: coordinator-mk2a2"]);
+    assert.deepEqual(routeLines, ["agent: dog-coordinator"]);
     assert.doesNotMatch(sortieFrontmatter[1], /^agent:\s*(?:build|alternate-coordinator)\s*$/imu);
     assert.match(sortie.content, /single coordinator transfer/i);
     assert.match(
       sortie.content,
-      /restart or re-entry[\s\S]+project-local\s+durable artifacts plus the latest bounded handoff or checkpoint/i,
+      /restart or re-entry[\s\S]+project-local durable artifacts and the\s+latest bounded handoff or checkpoint/i,
     );
     assert.match(
       sortie.content,
-      /preserve its source_manifest,\s+operation_manifest, and ordered validation history/i,
+      /preserve both manifests and ordered validation history/i,
     );
-    assert.match(sortie.content, /resume the same task through\s+coordinator-mk2a2/i);
-    assert.match(sortie.content, /do not route a worker directly to the user/i);
+    assert.match(sortie.content, /resume the same task through dog-coordinator/i);
+    assert.match(sortie.content, /never route a worker to the user/i);
 
     for (const asset of loaded.runtimeAssets) {
-      assert.equal(asset.version, "0.2.0-card04");
+      assert.equal(asset.version, "0.2.0-card05");
       const frontmatter = asset.content.match(/^---\r?\n([\s\S]+?)\r?\n---\r?\n/);
       assert.ok(frontmatter, `${asset.name} must have frontmatter`);
       const entries = Object.fromEntries(
@@ -610,15 +621,22 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
         }),
       );
       assert.ok(entries.description, `${asset.name} needs a description`);
-      if (asset.name === "coordinator-mk2a2") assert.equal(entries.mode, "primary");
-      if (asset.name === "sol-worker-mk2a2") assert.equal(entries.mode, "subagent");
-      if (asset.name === "sortie") assert.equal(entries.agent, "coordinator-mk2a2");
+      if (asset.name === "dog-coordinator") assert.equal(entries.mode, "primary");
+      if (["dog-worker", "dog-scout", "dog-reviewer", "dog-advisor"].includes(asset.name)) {
+        assert.equal(entries.mode, "subagent");
+      }
+      if (asset.name === "sortie") assert.equal(entries.agent, "dog-coordinator");
       assert.doesNotMatch(
         asset.content,
         /project\s+helper|capsule|controller|\bFSM\b|routing\s+ledger|dedicated\s+harness|alternate\s+orchestrator/i,
         `${asset.name} must not reference forbidden artifacts`,
       );
     }
+    assert.equal(new Set(loaded.runtimeAssets.map(({ version }) => version)).size, 1);
+    assert.doesNotMatch(
+      loaded.runtimeAssets.filter(({ name }) => name !== "sortie").map(({ name, installPath }) => `${name}:${installPath}`).join("\n"),
+      /coordinator-mk2a2|sol-worker-mk2a2/,
+    );
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }

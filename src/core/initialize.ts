@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, mkdir, open, readFile, rm, rmdir } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
@@ -10,12 +11,32 @@ const { runtimeAssets } = assets;
 const OPEN_CODE_DIRECTORY = ".opencode";
 const VERSION_MARKER = `${OPEN_CODE_DIRECTORY}/sortie-dogs.version`;
 
+interface LegacyRuntimeAsset {
+  readonly relativePath: string;
+  readonly markerVersions: readonly string[];
+  readonly sha256: string;
+}
+
+const LEGACY_RUNTIME_ASSETS: readonly LegacyRuntimeAsset[] = [
+  {
+    relativePath: ".opencode/agent/coordinator-mk2a2.md",
+    markerVersions: ["0.2.0-card04"],
+    sha256: "464e58c4973073937493d6a2205dc8594236b38d83cf63a8bba2965afe7c011c",
+  },
+  {
+    relativePath: ".opencode/agent/sol-worker-mk2a2.md",
+    markerVersions: ["0.2.0-card04"],
+    sha256: "32391b899a2b1a39bcd03653adfcfe9e5d7343e1494cab020b16e5784b8bc0ba",
+  },
+] as const;
+
 export type InitializationStatus = "installed" | "unchanged";
 
 export interface InitializeProjectResult {
   readonly status: InitializationStatus;
   readonly version: string;
   readonly installedPaths: readonly string[];
+  readonly preservedLegacyPaths: readonly string[];
 }
 
 export type ProjectInitializationErrorCode =
@@ -162,6 +183,26 @@ async function assertSafeExistingPath(root: string, relativePath: string, file: 
   return true;
 }
 
+async function readableOwnedLegacyFile(
+  root: string,
+  asset: LegacyRuntimeAsset,
+): Promise<Buffer | "absent" | "preserve"> {
+  let candidate = root;
+  const segments = asset.relativePath.split("/");
+  for (let index = 0; index < segments.length; index += 1) {
+    candidate = resolve(candidate, segments[index]);
+    if (!insideRoot(root, candidate)) return "preserve";
+    const info = await metadata(candidate);
+    if (info === undefined) return "absent";
+    if (info.isSymbolicLink()) return "preserve";
+    const isLast = index === segments.length - 1;
+    if (isLast ? !info.isFile() : !info.isDirectory()) return "preserve";
+  }
+
+  const content = await readFile(candidate);
+  return createHash("sha256").update(content).digest("hex") === asset.sha256 ? content : "preserve";
+}
+
 async function ensureDirectory(
   root: string,
   relativePath: string,
@@ -197,6 +238,7 @@ async function rollback(
   root: string,
   createdFiles: readonly string[],
   modifiedFiles: readonly { readonly relativePath: string; readonly content: Buffer }[],
+  removedFiles: readonly { readonly relativePath: string; readonly content: Buffer }[],
   createdDirectories: readonly string[],
 ): Promise<void> {
   const failures: unknown[] = [];
@@ -205,6 +247,18 @@ async function rollback(
   }
   for (const file of [...modifiedFiles].reverse()) {
     await overwriteFileSafely(root, file.relativePath, file.content).catch((error) => failures.push(error));
+  }
+  for (const file of [...removedFiles].reverse()) {
+    const path = resolve(root, file.relativePath);
+    let handle;
+    try {
+      handle = await open(path, "wx");
+      await handle.writeFile(file.content);
+    } catch (error) {
+      failures.push(error);
+    } finally {
+      await handle?.close().catch((error) => failures.push(error));
+    }
   }
   for (const directory of [...createdDirectories].reverse()) {
     await rmdir(directory).catch((error: NodeJS.ErrnoException) => {
@@ -283,7 +337,12 @@ export async function initializeProject(projectRoot: string = process.cwd()): Pr
     existing[index]?.equals(Buffer.from(entry.content)) ?? false;
   const assetsMatch = assetEntries.every(matches);
   if (markerText !== undefined && parseMarker(markerText.toString("utf8")) === version && assetsMatch) {
-    return { status: "unchanged", version, installedPaths: entries.map(({ relativePath }) => relativePath) };
+    return {
+      status: "unchanged",
+      version,
+      installedPaths: entries.map(({ relativePath }) => relativePath),
+      preservedLegacyPaths: [],
+    };
   }
 
   if (markerText === undefined) {
@@ -300,8 +359,21 @@ export async function initializeProject(projectRoot: string = process.cwd()): Pr
     }
   }
 
+  const installedVersion = markerText === undefined ? undefined : parseMarker(markerText.toString("utf8"));
+  const removableLegacyFiles: Array<{ asset: LegacyRuntimeAsset; content: Buffer }> = [];
+  const preservedLegacyPaths: string[] = [];
+  if (installedVersion !== undefined) {
+    for (const asset of LEGACY_RUNTIME_ASSETS) {
+      if (!asset.markerVersions.includes(installedVersion)) continue;
+      const state = await readableOwnedLegacyFile(root, asset);
+      if (Buffer.isBuffer(state)) removableLegacyFiles.push({ asset, content: state });
+      else if (state === "preserve") preservedLegacyPaths.push(asset.relativePath);
+    }
+  }
+
   const createdFiles: string[] = [];
   const modifiedFiles: Array<{ relativePath: string; content: Buffer }> = [];
+  const removedFiles: Array<{ relativePath: string; content: Buffer }> = [];
   const createdDirectories: string[] = [];
   try {
     for (let index = 0; index < entries.length; index += 1) {
@@ -319,9 +391,20 @@ export async function initializeProject(projectRoot: string = process.cwd()): Pr
         });
       }
     }
+    for (const { asset } of removableLegacyFiles) {
+      const state = await readableOwnedLegacyFile(root, asset);
+      if (!Buffer.isBuffer(state)) {
+        if (state === "preserve" && !preservedLegacyPaths.includes(asset.relativePath)) {
+          preservedLegacyPaths.push(asset.relativePath);
+        }
+        continue;
+      }
+      await rm(resolve(root, asset.relativePath));
+      removedFiles.push({ relativePath: asset.relativePath, content: state });
+    }
   } catch (error) {
     try {
-      await rollback(root, createdFiles, modifiedFiles, createdDirectories);
+      await rollback(root, createdFiles, modifiedFiles, removedFiles, createdDirectories);
     } catch (rollbackError) {
       throw new ProjectInitializationError("write-failed", "Initialization failed and rollback was incomplete.", {
         cause: new AggregateError([error, rollbackError]),
@@ -332,5 +415,10 @@ export async function initializeProject(projectRoot: string = process.cwd()): Pr
     throw new ProjectInitializationError(code, "Initialization failed without changing the project.", { cause: error });
   }
 
-  return { status: "installed", version, installedPaths: entries.map(({ relativePath }) => relativePath) };
+  return {
+    status: "installed",
+    version,
+    installedPaths: entries.map(({ relativePath }) => relativePath),
+    preservedLegacyPaths,
+  };
 }
