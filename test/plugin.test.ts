@@ -249,10 +249,23 @@ async function configuredHooks(directory: string) {
   return await SortieDogsPlugin({ directory });
 }
 
+async function activate(
+  hooks: Awaited<ReturnType<typeof SortieDogsPlugin>>,
+  sessionID = "plugin-session",
+): Promise<void> {
+  const chat = hooks["chat.message"];
+  assert.ok(chat);
+  await chat(
+    { sessionID },
+    { message: { model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: "/sortie task" }] },
+  );
+}
+
 async function invokeWrite(
   hooks: Awaited<ReturnType<typeof SortieDogsPlugin>>,
   target: string,
 ): Promise<void> {
+  await activate(hooks);
   const before = hooks["tool.execute.before"];
   assert.ok(before);
   await before(
@@ -309,13 +322,19 @@ test("chat message hook applies explicit catalog routing and fails closed with o
     assert.ok(chat);
     const output = {
       message: { agent: "implementer", model: { providerID: "old", modelID: "old", variant: "old" } },
-      parts: [],
+      parts: [{ type: "text", text: "/sortie route" }],
     };
     await chat({ sessionID: "routing", agent: "implementer" }, output);
     assert.deepEqual(output.message.model, { providerID: "provider", modelID: "local-primary", variant: "thinking" });
     const unclassified = { message: { model: { providerID: "host", modelID: "preserved" } }, parts: [] };
     await chat({ sessionID: "routing" }, unclassified);
     assert.deepEqual(unclassified.message.model, { providerID: "host", modelID: "preserved" });
+    const unconfigured = {
+      message: { agent: "planning", model: { providerID: "host", modelID: "session-fallback" } },
+      parts: [],
+    };
+    await chat({ sessionID: "routing", agent: "planning" }, unconfigured);
+    assert.deepEqual(unconfigured.message.model, { providerID: "host", modelID: "session-fallback" });
     await assert.rejects(
       () => chat({ sessionID: "routing", agent: "reviewer" }, output),
       (error: unknown) => {
@@ -330,6 +349,51 @@ test("chat message hook applies explicit catalog routing and fails closed with o
         return true;
       },
     );
+  });
+});
+
+test("session policy is passive until an exact trigger and deactivates on idle or end", async () => {
+  await withProject("session-activation", async (directory) => {
+    const hooks = await SortieDogsPlugin({ directory });
+    const before = hooks["tool.execute.before"];
+    const chat = hooks["chat.message"];
+    const event = hooks.event;
+    assert.ok(before);
+    assert.ok(chat);
+    assert.ok(event);
+    const write = (sessionID: string) => before(
+      { tool: "write", sessionID, callID: "activation" },
+      { args: { file: "outside.txt", content: "not-written" } },
+    );
+    const message = (sessionID: string, text: string, agent?: string) => chat(
+      { sessionID, agent },
+      { message: { agent, model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text }] },
+    );
+
+    await write("passive");
+    await message("passive", "/sortie-other");
+    await write("passive");
+    await message("passive", "/sortie task");
+    await message("passive", "/sortie task");
+    const isolatedHooks = await SortieDogsPlugin({ directory });
+    const isolatedBefore = isolatedHooks["tool.execute.before"];
+    assert.ok(isolatedBefore);
+    await isolatedBefore(
+      { tool: "write", sessionID: "passive", callID: "isolated" },
+      { args: { file: "outside.txt", content: "not-written" } },
+    );
+    await expectMessage(() => write("passive"), 'Write denied for "<unknown>": operation manifest unavailable.', "manifest-unavailable");
+    await assert.rejects(event({ event: { type: "session.idle", properties: { sessionID: "passive" } } }));
+    await expectMessage(() => write("passive"), 'Write denied for "<unknown>": operation manifest unavailable.', "manifest-unavailable");
+    await event({ event: { type: "session.deleted", properties: { sessionID: "passive" } } });
+    await write("passive");
+
+    await message("coordinator", "ordinary text", "dog-coordinator");
+    await expectMessage(() => write("coordinator"), 'Write denied for "<unknown>": operation manifest unavailable.', "manifest-unavailable");
+    await event({ event: { type: "session.deleted", properties: { sessionID: "coordinator" } } });
+    await write("coordinator");
+    await message("malformed", "/sortie task");
+    await event({ event: { type: "session.deleted", properties: {} } });
   });
 });
 
@@ -419,12 +483,20 @@ test("plugin gate uses the execution directory when worktree differs", async () 
       "manifest-scope",
     );
     await permission(
-      { permission: "edit", patterns: [join("u3-rpt", "allowed.txt")] },
+      { permission: "edit", patterns: [join("u3-rpt", "allowed.txt")], sessionID: "plugin-session" },
       { status: "allow" },
     );
     await expectMessage(
       () => permission(
         { permission: "edit", patterns: [join("u3-rpt", "denied.txt")] },
+        { status: "allow" },
+      ),
+      'Write denied for "denied.txt": operation manifest write scope.',
+      "manifest-scope",
+    );
+    await expectMessage(
+      () => permission(
+        { permission: "edit", patterns: [join("u3-rpt", "denied.txt")], sessionID: "plugin-session" },
         { status: "allow" },
       ),
       'Write denied for "denied.txt": operation manifest write scope.',
@@ -524,6 +596,7 @@ test("plugin ignores the old project config path when the new config is absent",
 test("plugin shell gate allows explicit reads and denies unknown executables", async () => {
   await withProject("shell", async (directory) => {
     const hooks = await configuredHooks(directory);
+    await activate(hooks, "shell");
     const before = hooks["tool.execute.before"];
     assert.ok(before);
     const invoke = (command: string) => before(
@@ -576,12 +649,20 @@ test("plugin fixture accepts warning-only handoff state and dedupes per session"
 
     const hooks = await configuredHooks(directory);
     const event = hooks.event;
+    const before = hooks["tool.execute.before"];
     assert.ok(event);
+    assert.ok(before);
+    await activate(hooks, "one");
     const edited = { event: { type: "file.edited", properties: { file: "handoff.json", sessionID: "one" } } };
 
     // Missing changed-path evidence produces only M007; the plugin rejects errors, not warnings.
     await event(edited);
     await event({ event: { type: "session.idle", properties: { sessionID: "one" } } });
+    await before(
+      { tool: "write", sessionID: "one", callID: "idle-cleanup" },
+      { args: { file: "outside.txt", content: "not-written" } },
+    );
+    await activate(hooks, "one");
     await event({ event: { type: "file.edited", properties: { file: "ordinary.txt", sessionID: "one" } } });
     await event({ event: { type: "unrelated.event", properties: { sessionID: "one" } } });
 

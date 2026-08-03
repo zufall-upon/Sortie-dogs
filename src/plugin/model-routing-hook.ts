@@ -69,6 +69,9 @@ export function createModelRoutingHook(config: ModelRoutingHookConfiguration): O
         ? output.message.agent
         : undefined;
     if (role === undefined) return;
+    const hasRoute = Object.prototype.hasOwnProperty.call(config.local ?? {}, role) ||
+      Object.prototype.hasOwnProperty.call(config.global ?? {}, role);
+    if (!hasRoute) return;
     const resolution = resolveModelRoute({
       role,
       local: config.local,

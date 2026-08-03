@@ -32,6 +32,8 @@ const INPUT_LIMITS = { config: 64 * 1024, manifest: 512 * 1024, handoff: 2 * 102
 const INSPECTION_CACHE = { maximum: 256, ttlMilliseconds: 30 * 60 * 1000 } as const;
 const PROJECT_CONFIG_PATH = ".opencode/sortie-dogs.json";
 const ENV_CONFIG = "SORTIE_DOGS_CONFIG";
+const COORDINATOR_AGENT = "dog-coordinator";
+const SORTIE_TRIGGER = /^\/sortie(?:\s|$)/;
 
 export interface OpenCodePluginInput {
   directory: string;
@@ -47,7 +49,7 @@ export interface OpenCodeEvent {
 export interface OpenCodeHooks {
   event?: (input: { event: OpenCodeEvent }) => Promise<void>;
   "permission.ask"?: (
-    input: { permission: string; patterns: string[] },
+    input: { permission: string; patterns: string[]; sessionID?: string },
     output: { status: "ask" | "deny" | "allow" },
   ) => Promise<void>;
   "tool.execute.before"?: (
@@ -174,6 +176,18 @@ async function loadConfigured(project: ProjectPaths, config: ConfiguredPluginSou
   return { gate, manifest: validation.value, handoffPaths, modelRoutingHook };
 }
 
+function textPart(part: unknown): string | undefined {
+  return isRecord(part) && typeof part.text === "string" ? part.text : undefined;
+}
+
+function activatesSession(input: Parameters<OpenCodeChatMessageHook>[0], output: Parameters<OpenCodeChatMessageHook>[1]): boolean {
+  if (input.agent === COORDINATOR_AGENT || output.message.agent === COORDINATOR_AGENT) return true;
+  return output.parts.some((part) => {
+    const text = textPart(part);
+    return text !== undefined && SORTIE_TRIGGER.test(text);
+  });
+}
+
 function stableValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(stableValue);
   if (!isRecord(value)) return value;
@@ -196,20 +210,30 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   let project: ProjectPaths | undefined;
   let loaded: LoadedConfiguration | undefined;
   let loadFailure: unknown;
-  try {
-    project = await createProjectPaths(resolveProjectRoot(input));
-    const projectConfig = await readOptionalProjectConfig(project);
-    const environmentConfig = readEnvironmentConfig();
-    const parsed = resolvePluginConfigurationSources(projectConfig, environmentConfig, options);
-    if (parsed.kind === "invalid") throw new WriteDeniedError("manifest-unavailable", "<unknown>");
-    loaded = await loadConfigured(project, parsed);
-  } catch (error) {
-    loadFailure = error;
+  let loading: Promise<void> | undefined;
+
+  async function ensureLoaded(): Promise<void> {
+    if (loading !== undefined) return loading;
+    loading = (async () => {
+      try {
+        project = await createProjectPaths(resolveProjectRoot(input));
+        const projectConfig = await readOptionalProjectConfig(project);
+        const environmentConfig = readEnvironmentConfig();
+        const parsed = resolvePluginConfigurationSources(projectConfig, environmentConfig, options);
+        if (parsed.kind === "invalid") throw new WriteDeniedError("manifest-unavailable", "<unknown>");
+        loaded = await loadConfigured(project, parsed);
+      } catch (error) {
+        loadFailure = error;
+      }
+    })();
+    return loading;
   }
 
   const inspected = new Map<string, InspectionCacheEntry>();
+  const activeSessions = new Set<string>();
 
   async function inspect(path: string, sessionID: string | undefined): Promise<void> {
+    await ensureLoaded();
     if (loaded === undefined || project === undefined) {
       throw new HandoffDeniedError("configuration-unavailable", path, { cause: loadFailure });
     }
@@ -251,9 +275,16 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   }
 
   return {
-    ...(loaded?.modelRoutingHook === undefined ? {} : { "chat.message": loaded.modelRoutingHook }),
+    "chat.message": async (chatInput, output): Promise<void> => {
+      if (activatesSession(chatInput, output)) activeSessions.add(chatInput.sessionID);
+      if (!activeSessions.has(chatInput.sessionID)) return;
+      await ensureLoaded();
+      await loaded?.modelRoutingHook?.(chatInput, output);
+    },
     "permission.ask": async (permission): Promise<void> => {
       if (permission.permission !== "edit") return;
+      if (permission.sessionID !== undefined && !activeSessions.has(permission.sessionID)) return;
+      await ensureLoaded();
       if (loaded === undefined) {
         throw new WriteDeniedError("manifest-unavailable", "<unknown>", { cause: loadFailure });
       }
@@ -265,6 +296,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       }
     },
     "tool.execute.before": async (toolInput, output): Promise<void> => {
+      if (!activeSessions.has(toolInput.sessionID)) return;
+      await ensureLoaded();
       if (loaded === undefined) {
         const extraction = extractWritePaths(toolInput.tool, output.args);
         if (extraction.applies) {
@@ -278,13 +311,18 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       const eventSessionID = typeof event.properties?.sessionID === "string"
         ? event.properties.sessionID
         : undefined;
+      if (eventSessionID === undefined || !activeSessions.has(eventSessionID)) return;
       if (event.type === "file.edited" && typeof event.properties?.file === "string") {
         await inspect(event.properties.file, eventSessionID);
       } else if (event.type === "session.idle" && eventSessionID !== undefined) {
+        await ensureLoaded();
         if (loaded === undefined) {
           throw new HandoffDeniedError("configuration-unavailable", "<unknown>", { cause: loadFailure });
         }
         for (const path of loaded.handoffPaths) await inspect(path, eventSessionID);
+        activeSessions.delete(eventSessionID);
+      } else if (event.type === "session.deleted") {
+        activeSessions.delete(eventSessionID);
       }
     },
   };

@@ -196,10 +196,28 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(restartRecovery[1], /resume_route:\s*dog-coordinator -> dog-worker/);
     assert.match(restartRecovery[1], /user_route:\s*dog-coordinator only/);
     assert.match(coordinator.content, /dispatch implementation only to dog-worker/i);
-    assert.match(coordinator.content, /dog-scout for bounded read-only evidence/i);
-    assert.match(coordinator.content, /dog-advisor for focused technical consultation/i);
-    assert.match(coordinator.content, /dog-reviewer for independent review/i);
+    const scoutFanout = coordinator.content.match(
+      /SCOUT_FANOUT_FIXTURE\r?\n([\s\S]+?)\r?\nEND_SCOUT_FANOUT_FIXTURE/,
+    );
+    assert.ok(scoutFanout, "coordinator needs the required three-role scout fan-out");
+    assert.match(scoutFanout[1], /exactly three bounded dog-scout calls in one parallel fan-out/);
+    assert.match(scoutFanout[1], /role_A:\s*determine exact source_manifest or operation_manifest/);
+    assert.match(scoutFanout[1], /role_B:\s*determine exact canonical validation command/);
+    assert.match(scoutFanout[1], /role_C:\s*identify blocker owner/);
+    assert.match(scoutFanout[1], /union all well-formed facts; no voting or majority rule/);
+    assert.match(scoutFanout[1], /malformed \| timeout \| empty -> discard without retry/);
+    assert.match(scoutFanout[1], /implementation \| remediation \| blocker-resolution -> dog-worker only/);
+    assert.match(coordinator.content, /dog-advisor only for Strategy or SourceReview consultation/);
+    assert.match(coordinator.content, /findings from every subagent return\s+through dog-coordinator/i);
     assert.match(coordinator.content, /do not repeat a recorded successful validation unless\s+relevant source changed/i);
+
+    const takeover = coordinator.content.match(
+      /TAKEOVER_FIXTURE\r?\n([\s\S]+?)\r?\nEND_TAKEOVER_FIXTURE/,
+    );
+    assert.ok(takeover, "coordinator needs same-task dog-worker takeover");
+    assert.match(takeover[1], /same task_id \+ preserved effective inline handoff \+ bounded resume_delta/);
+    assert.match(takeover[1], /roles:\s*remediation \| blocker-resolution/);
+    assert.match(takeover[1], /route:\s*dog-coordinator -> dog-worker only/);
 
     const batchContinuation = coordinator.content.match(
       /BATCH_CONTINUATION_FIXTURE\r?\n([\s\S]+?)\r?\nEND_BATCH_CONTINUATION_FIXTURE/,
@@ -268,7 +286,25 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(manifestScope[1], /rejected:\s*write src\/undeclared\.ts -> fail closed before mutation/);
     assert.match(coordinator.content, /operational work requires an exact operation_manifest/i);
     assert.match(coordinator.content, /undeclared write or mutation must be reported as rejected/i);
-    assert.match(coordinator.content, /validation attempts in order with exact command,\s*\nexit, and fingerprint/i);
+    const terminalEvidence = coordinator.content.match(
+      /TERMINAL_EVIDENCE_FIXTURE\r?\n([\s\S]+?)\r?\nEND_TERMINAL_EVIDENCE_FIXTURE/,
+    );
+    assert.ok(terminalEvidence, "coordinator needs complete terminal evidence");
+    for (const field of [
+      "status",
+      "task_id",
+      "manifest",
+      "decisions",
+      "validation",
+      "raw_status",
+      "diff",
+      "stale_paths",
+      "new_findings",
+      "next_action",
+    ]) {
+      assert.match(terminalEvidence[1], new RegExp(`^\\s*${field}:`, "m"));
+    }
+    assert.match(terminalEvidence[1], /validation:\s*\[\{ command: <exact command>, exit: <exit>, fingerprint: <concise fingerprint> \}\]/);
 
     const gatePolicy = coordinator.content.match(
       /GATE_POLICY_FIXTURE\r?\n([\s\S]+?)\r?\nEND_GATE_POLICY_FIXTURE/,
@@ -283,6 +319,11 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(gatePolicy[1], /low_risk_validated: independent_review skipped and recorded; staging allowed/);
     assert.match(gatePolicy[1], /high_risk_unreviewed: staging rejected; commit rejected/);
     assert.match(gatePolicy[1], /high_risk_validated_reviewed: staging allowed/);
+    assert.match(
+      coordinator.content,
+      /high-risk candidate, run\s+dog-reviewer only after canonical validation passes[\s\S]+before the coordinator\s+stages or commits/i,
+    );
+    assert.match(coordinator.content, /low-risk candidate,\s+explicitly record dog-reviewer skipped/i);
 
     const commitScope = coordinator.content.match(
       /COMMIT_SCOPE_FIXTURE\r?\n([\s\S]+?)\r?\nEND_COMMIT_SCOPE_FIXTURE/,
@@ -597,7 +638,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     const routeLines = sortieFrontmatter[1].match(/^agent:\s*.+$/gmu) ?? [];
     assert.deepEqual(routeLines, ["agent: dog-coordinator"]);
     assert.doesNotMatch(sortieFrontmatter[1], /^agent:\s*(?:build|alternate-coordinator)\s*$/imu);
-    assert.match(sortie.content, /single coordinator transfer/i);
+    assert.match(sortie.content, /single coordinator\s+transfer/i);
     assert.match(
       sortie.content,
       /restart or re-entry[\s\S]+project-local durable artifacts and the\s+latest bounded handoff or checkpoint/i,
