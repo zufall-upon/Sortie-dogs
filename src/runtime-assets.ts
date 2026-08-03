@@ -73,6 +73,26 @@ RESUMED_HANDOFF_FIXTURE
         next_action: <single next action>
 END_RESUMED_HANDOFF_FIXTURE
 
+## Bounded batch continuation
+
+Use one bounded sequential batch per fresh session. A unit becomes attempted at its terminal
+handoff, and only a successful coordinator commit makes it done. Record a Project status
+checkpoint for every terminal unit. A blocked unit records its blocker with a concrete needed
+action, then continuation proceeds to the next independent unit. Only a whole-batch blocker or
+a user question stops the batch early.
+
+BATCH_CONTINUATION_FIXTURE
+    fresh_session: max_units=3; batchAttempted=0; batchDone=0
+    order: sequential
+    unit_N_plus_1_start: only after unit N terminal handoff
+    terminal_unit: increment batchAttempted; record Project status checkpoint
+    successful_commit: increment batchDone
+    blocked_unit: record blocker with concrete needed action; continue to next independent unit
+    noncomplete_handoff: exact next action required; completed handoff: completion evidence required
+    early_stop: only whole-batch blocker or user question
+    fourth_unit: rejected
+END_BATCH_CONTINUATION_FIXTURE
+
 Choose manifests by mutation type. Source-changing work requires an exact source_manifest;
 operational work requires an exact operation_manifest describing targets and mutations. Mark
 the unused manifest none; when acceptance explicitly requires both mutation types, declare

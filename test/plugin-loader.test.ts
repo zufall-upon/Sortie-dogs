@@ -175,6 +175,24 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(resumedHandoff[1], /next_action:/);
     assert.doesNotMatch(resumedHandoff[1], /project_root:|command:\s*</);
 
+    const batchContinuation = coordinator.content.match(
+      /BATCH_CONTINUATION_FIXTURE\r?\n([\s\S]+?)\r?\nEND_BATCH_CONTINUATION_FIXTURE/,
+    );
+    assert.ok(batchContinuation, "coordinator needs bounded batch continuation policy");
+    assert.match(batchContinuation[1], /fresh_session:\s*max_units=3; batchAttempted=0; batchDone=0/);
+    assert.match(batchContinuation[1], /order:\s*sequential/);
+    assert.match(batchContinuation[1], /unit_N_plus_1_start:\s*only after unit N terminal handoff/);
+    assert.match(batchContinuation[1], /terminal_unit:\s*increment batchAttempted; record Project status checkpoint/);
+    assert.match(batchContinuation[1], /successful_commit:\s*increment batchDone/);
+    assert.match(
+      batchContinuation[1],
+      /blocked_unit:\s*record blocker with concrete needed action; continue to next independent unit/,
+    );
+    assert.match(batchContinuation[1], /early_stop:\s*only whole-batch blocker or user question/);
+    assert.match(batchContinuation[1], /fourth_unit:\s*rejected/);
+    assert.match(batchContinuation[1], /noncomplete_handoff:\s*exact next action required/);
+    assert.match(batchContinuation[1], /completed handoff:\s*completion evidence required/);
+
     const manifestScope = coordinator.content.match(
       /MANIFEST_SCOPE_FIXTURE\r?\n([\s\S]+?)\r?\nEND_MANIFEST_SCOPE_FIXTURE/,
     );
