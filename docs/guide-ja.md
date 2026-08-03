@@ -86,13 +86,25 @@ OpenCode が自動検出するため、`opencode.json` の `plugin` 設定は不
 
 ## モデルルーティング
 
+`dog-coordinator` と `dog-scout` のデフォルトは `openai/gpt-5.6-luna` の `xhigh`
+variant。この構成を推奨する。境界付き prompt、簡潔な scout evidence、不要な context / tool turn
+の削減により、品質維持に配慮しつつ token 使用量を抑えられる可能性がある。Project-local routing
+で両 role のデフォルトを上書き可能。
+
 `implementation`、`remediation`、`blocker-resolution` は専用 Sol worker に固定され、
-ユーザー設定では置換できない。その他の role は任意設定。Preferred target から順序付き fallback
-へ決定的に解決する。Route 未設定なら OpenCode で選択済みの model を変更しない。
+ユーザー設定では置換できない。その他の明示 route は Preferred target から順序付き fallback
+へ決定的に解決する。Built-in default も明示 route もない role は、OpenCode で選択済みの model
+を維持する。
 
 ```json
 {
   "modelRouting": {
+    "dog-coordinator": {
+      "preferred": { "model": "openai/gpt-5.6-luna", "variant": "xhigh" }
+    },
+    "dog-scout": {
+      "preferred": { "model": "openai/gpt-5.6-luna", "variant": "xhigh" }
+    },
     "dog-advisor": {
       "preferred": { "model": "fable/opus", "variant": "thinking" },
       "fallback": [{ "model": "provider/general" }]
@@ -104,6 +116,7 @@ OpenCode が自動検出するため、`opencode.json` の `plugin` 設定は不
   },
   "modelCatalog": {
     "project": [
+      { "model": "openai/gpt-5.6-luna", "variants": ["xhigh"] },
       { "model": "fable/opus", "variants": ["thinking"] },
       { "model": "provider/general" }
     ]
@@ -113,7 +126,8 @@ OpenCode が自動検出するため、`opencode.json` の `plugin` 設定は不
 
 設定先は `.opencode/sortie-dogs.json`。`modelCatalog` には実在する provider model と named
 variant だけを宣言する。Sortie-dogs は variant を推測、probe、変換しない。Preferred、fallback
-の順で解決し、明示 route の候補が catalog に一つもなければ拒否する。
+の順で解決し、明示 route の候補が catalog に一つもなければ拒否する。上記 advisor / reviewer
+route は任意の secondary example。不要なら省略できる。
 
 `dog-advisor` は coordinator からの限定 Strategy / SourceReview 相談専用。
 `dog-reviewer` は canonical validation 後、高リスク候補だけを独立 review する。どちらも実装、

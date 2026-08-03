@@ -102,15 +102,27 @@ workflow again.
 
 ## Model routing
 
+`dog-coordinator` and `dog-scout` default to `openai/gpt-5.6-luna` with the
+`xhigh` variant. This is the recommended balance: bounded prompts, concise
+scout evidence, and fewer unnecessary context or tool turns can reduce token
+use while preserving quality. Project-local routing can override either
+default.
+
 The `implementation`, `remediation`, and `blocker-resolution` roles always use
 the dedicated Sol worker; user configuration cannot replace those routes. For
-non-worker roles, routing is optional and deterministic: Sortie-dogs tries the
-preferred target, then ordered fallbacks. If no route is configured, OpenCode's
-already selected model remains unchanged.
+other explicitly routed roles, resolution is deterministic: Sortie-dogs tries
+the preferred target, then ordered fallbacks. Roles without either a built-in
+default or an explicit route keep OpenCode's already selected model.
 
 ```json
 {
   "modelRouting": {
+    "dog-coordinator": {
+      "preferred": { "model": "openai/gpt-5.6-luna", "variant": "xhigh" }
+    },
+    "dog-scout": {
+      "preferred": { "model": "openai/gpt-5.6-luna", "variant": "xhigh" }
+    },
     "dog-advisor": {
       "preferred": { "model": "fable/opus", "variant": "thinking" },
       "fallback": [{ "model": "provider/general" }]
@@ -122,6 +134,7 @@ already selected model remains unchanged.
   },
   "modelCatalog": {
     "project": [
+      { "model": "openai/gpt-5.6-luna", "variants": ["xhigh"] },
       { "model": "fable/opus", "variants": ["thinking"] },
       { "model": "provider/general" }
     ]
@@ -133,7 +146,8 @@ Save project configuration as `.opencode/sortie-dogs.json`. `modelCatalog`
 declares provider models and named variants that are actually available;
 Sortie-dogs does not invent, probe, or translate variants. Resolution tries the
 preferred target and then its fallbacks, rejecting an explicitly routed role
-when no candidate appears in the catalog.
+when no candidate appears in the catalog. The advisor and reviewer routes above
+are optional secondary examples; omit them when they are not needed.
 
 `dog-advisor` accepts bounded Strategy or SourceReview consultation from the
 coordinator. `dog-reviewer` independently checks high-risk candidates after

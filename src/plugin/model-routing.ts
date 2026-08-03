@@ -27,6 +27,20 @@ export const DEDICATED_SOL_ROUTING: ModelRoutingConfig = Object.freeze(Object.fr
   })]),
 ));
 
+export const RECOMMENDED_LUNA_MODEL = "openai/gpt-5.6-luna";
+export const RECOMMENDED_LUNA_VARIANT = "xhigh";
+export const RECOMMENDED_LUNA_ROLES = ["dog-coordinator", "dog-scout"] as const;
+
+/** Configurable Mk2A2 defaults. Project-local and global configuration may override these routes. */
+export const RECOMMENDED_LUNA_ROUTING: ModelRoutingConfig = Object.freeze(Object.fromEntries(
+  RECOMMENDED_LUNA_ROLES.map((role) => [role, Object.freeze({
+    preferred: Object.freeze({
+      model: RECOMMENDED_LUNA_MODEL,
+      variant: RECOMMENDED_LUNA_VARIANT,
+    }),
+  })]),
+));
+
 export function isDedicatedSolRole(role: string): boolean {
   return dedicatedSolRoleSet.has(role);
 }
@@ -41,6 +55,14 @@ export interface ModelCatalog {
   readonly project?: readonly CatalogModel[];
   readonly global?: readonly CatalogModel[];
 }
+
+/** Built-in availability metadata for source-level recommendations; no provider probing required. */
+export const BUILT_IN_MODEL_CATALOG: ModelCatalog = Object.freeze({
+  global: Object.freeze([Object.freeze({
+    model: RECOMMENDED_LUNA_MODEL,
+    variants: Object.freeze([RECOMMENDED_LUNA_VARIANT]),
+  })]),
+});
 
 export interface ResolveModelRouteInput {
   readonly role: string;

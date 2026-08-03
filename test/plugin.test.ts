@@ -58,11 +58,19 @@ test("model routing configuration is strict and merges roles by layer", () => {
   );
   assert.equal(parsed.kind, "configured");
   if (parsed.kind === "configured") {
-    assert.deepEqual(parsed.modelRouting, { ...project, ...host });
+    assert.deepEqual(parsed.modelRouting, {
+      "dog-coordinator": { preferred: { model: "openai/gpt-5.6-luna", variant: "xhigh" } },
+      "dog-scout": { preferred: { model: "openai/gpt-5.6-luna", variant: "xhigh" } },
+      ...project,
+      ...host,
+    });
   }
   assert.equal(parseModelRoutingConfig({ reviewer: { preferred: { model: "x", extra: true } } }), undefined);
   assert.deepEqual(resolvePluginConfiguration({ unknown: true }), { kind: "invalid" });
-  assert.deepEqual(resolvePluginConfiguration({ modelRouting: host }), { kind: "invalid" });
+  assert.deepEqual(resolvePluginConfiguration({
+    modelRouting: host,
+    modelCatalog: { global: [{ model: "" }] },
+  }), { kind: "invalid" });
 });
 
 test("model routing rejects prototype-sensitive JSON role names", () => {
@@ -137,6 +145,60 @@ test("model resolver falls back in order and returns structured unresolved failu
       attempts: [],
     });
   }
+});
+
+test("recommended Luna routes cover exact installed roles and remain below project routing", () => {
+  const defaults = resolvePluginConfigurationSources(undefined, undefined, {
+    modelCatalog: { global: [
+      { model: "openai/gpt-5.6-luna", variants: ["xhigh"] },
+      { model: "provider/custom" },
+    ] },
+  });
+  assert.equal(defaults.kind, "configured");
+  if (defaults.kind !== "configured") return;
+  assert.deepEqual(defaults.modelCatalog.global, [
+    { model: "openai/gpt-5.6-luna", variants: ["xhigh"] },
+    { model: "provider/custom" },
+  ]);
+  assert.deepEqual(["dog-coordinator", "dog-scout"].map((role) => ({
+    configured: defaults.modelRouting[role],
+    resolved: resolveModelRoute({
+      role,
+      local: defaults.localModelRouting,
+      global: defaults.globalModelRouting,
+      catalog: defaults.modelCatalog,
+    }),
+  })), ["dog-coordinator", "dog-scout"].map((role) => ({
+    configured: { preferred: { model: "openai/gpt-5.6-luna", variant: "xhigh" } },
+    resolved: {
+      ok: true,
+      role,
+      source: "global",
+      catalog: "global",
+      model: "openai/gpt-5.6-luna",
+      variant: "xhigh",
+    },
+  })));
+
+  const projectModel = "provider/project-coordinator";
+  const overridden = resolvePluginConfigurationSources({
+    modelRouting: { "dog-coordinator": { preferred: { model: projectModel } } },
+    modelCatalog: { project: [{ model: projectModel }] },
+  }, undefined, undefined);
+  assert.equal(overridden.kind, "configured");
+  if (overridden.kind !== "configured") return;
+  assert.deepEqual(resolveModelRoute({
+    role: "dog-coordinator",
+    local: overridden.localModelRouting,
+    global: overridden.globalModelRouting,
+    catalog: overridden.modelCatalog,
+  }), {
+    ok: true,
+    role: "dog-coordinator",
+    source: "local",
+    catalog: "project",
+    model: projectModel,
+  });
 });
 
 test("Mk2A2 routes only dedicated worker roles to Sol with stable fail-closed resolution", () => {
@@ -313,6 +375,7 @@ test("chat message hook applies explicit catalog routing and fails closed with o
         },
       },
       modelCatalog: { global: [
+        { model: "openai/gpt-5.6-luna", variants: ["xhigh"] },
         { model: "provider/local-primary", variants: ["thinking"] },
         { model: "provider/global-primary", variants: ["thinking"] },
         { model: "provider/variant", variants: ["valid"] },
@@ -335,6 +398,16 @@ test("chat message hook applies explicit catalog routing and fails closed with o
     };
     await chat({ sessionID: "routing", agent: "planning" }, unconfigured);
     assert.deepEqual(unconfigured.message.model, { providerID: "host", modelID: "session-fallback" });
+    const recommended = {
+      message: { agent: "dog-scout", model: { providerID: "host", modelID: "selected" } },
+      parts: [],
+    };
+    await chat({ sessionID: "routing", agent: "dog-scout" }, recommended);
+    assert.deepEqual(recommended.message.model, {
+      providerID: "openai",
+      modelID: "gpt-5.6-luna",
+      variant: "xhigh",
+    });
     await assert.rejects(
       () => chat({ sessionID: "routing", agent: "reviewer" }, output),
       (error: unknown) => {

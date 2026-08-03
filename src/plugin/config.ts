@@ -1,5 +1,7 @@
 import {
+  BUILT_IN_MODEL_CATALOG,
   DEDICATED_SOL_ROUTING,
+  RECOMMENDED_LUNA_ROUTING,
   isDedicatedSolRole,
   parseModelRoutingConfig,
   type CatalogModel,
@@ -34,8 +36,8 @@ export type PluginConfigurationSources = ConfiguredPluginSources | { kind: "inva
 export const DEFAULT_PLUGIN_OPTIONS: Readonly<Required<SortieDogsPluginOptions>> = {
   operationManifestPath: "operation-manifest.json",
   handoffPaths: ["handoff.json"],
-  modelRouting: {},
-  modelCatalog: {},
+  modelRouting: RECOMMENDED_LUNA_ROUTING,
+  modelCatalog: BUILT_IN_MODEL_CATALOG,
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -77,6 +79,31 @@ function parseModelCatalog(value: unknown): ModelCatalog | undefined {
     ...(project === undefined ? {} : { project }),
     ...(global === undefined ? {} : { global }),
   };
+}
+
+function mergeCatalogModels(
+  builtIn: readonly CatalogModel[],
+  configured: readonly CatalogModel[],
+): readonly CatalogModel[] {
+  const models = new Map<string, Set<string> | undefined>();
+  for (const candidate of [...builtIn, ...configured]) {
+    if (!models.has(candidate.model)) {
+      models.set(candidate.model, candidate.variants === undefined
+        ? undefined
+        : new Set(candidate.variants));
+      continue;
+    }
+    if (candidate.variants === undefined) continue;
+    const variants = models.get(candidate.model);
+    if (variants === undefined) {
+      models.set(candidate.model, new Set(candidate.variants));
+    } else {
+      for (const variant of candidate.variants) variants.add(variant);
+    }
+  }
+  return [...models].map(([model, variants]) => variants === undefined
+    ? { model }
+    : { model, variants: [...variants] });
 }
 
 function parseLayer(value: unknown): SortieDogsPluginOptions | undefined {
@@ -129,7 +156,18 @@ export function resolvePluginConfiguration(...values: readonly unknown[]): Plugi
     if (layer.modelRouting !== undefined) {
       modelRouting = { ...modelRouting, ...layer.modelRouting };
     }
-    if (layer.modelCatalog !== undefined) modelCatalog = { ...modelCatalog, ...layer.modelCatalog };
+    if (layer.modelCatalog !== undefined) {
+      modelCatalog = {
+        ...modelCatalog,
+        ...layer.modelCatalog,
+        ...(layer.modelCatalog.global === undefined ? {} : {
+          global: mergeCatalogModels(
+            BUILT_IN_MODEL_CATALOG.global ?? [],
+            layer.modelCatalog.global,
+          ),
+        }),
+      };
+    }
   }
   const hasRouting = Object.keys(modelRouting).length > 0;
   const hasCatalogEntries = (modelCatalog.project?.length ?? 0) + (modelCatalog.global?.length ?? 0) > 0;
@@ -159,6 +197,7 @@ export function resolvePluginConfigurationSources(
     return { kind: "invalid" };
   }
   const globalModelRouting = Object.fromEntries(Object.entries({
+    ...RECOMMENDED_LUNA_ROUTING,
     ...(environmentLayer.modelRouting ?? {}),
     ...(hostLayer.modelRouting ?? {}),
   }).filter(([role]) => !isDedicatedSolRole(role)));
