@@ -2,7 +2,7 @@
   "version": "0.1.0",
   "profile": "full",
   "id": "u3-fresh-runtime-revalidation",
-  "created_at": "2026-08-02T00:00:00Z",
+  "created_at": "2026-08-04T00:00:00Z",
   "task": {
     "title": "Revalidate U3 in a fresh runtime",
     "objective": "Prove the native Patch gate denies an undeclared path and permits a declared path in one cold-start /sortie run."
@@ -12,8 +12,8 @@
   },
   "state": {
     "done": [
-      "Native Patch gate DENY: undeclared-path write to denied.txt.",
-      "Native Patch gate PASS: declared-path write to allowed.txt."
+      "Native Patch on undeclared denied.txt was denied; denied.txt was not created.",
+      "Native Patch on declared allowed.txt passed."
     ],
     "next": [],
     "blocked": []
@@ -36,7 +36,7 @@
       "check": "/home/rozen/.opencode/bin/opencode run --command sortie",
       "status": "pass",
       "exit_code": 0,
-        "summary": "Fresh runtime recorded DENY for undeclared denied.txt and PASS for declared allowed.txt."
+      "summary": "Cold-start /sortie probe recorded native Patch DENY for undeclared denied.txt and PASS for declared allowed.txt; denied.txt was not created."
     }
   ]
 }
