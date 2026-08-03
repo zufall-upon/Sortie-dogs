@@ -17,6 +17,10 @@
     "./plugin": {
       "types": "./dist/plugin/index.d.ts",
       "import": "./dist/plugin/index.js"
+    },
+    "./assets": {
+      "types": "./dist/runtime-assets.d.ts",
+      "import": "./dist/runtime-assets.js"
     }
   },
   "bin": {
