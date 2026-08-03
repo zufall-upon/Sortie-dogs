@@ -114,6 +114,16 @@ npm install --prefix ./.opencode
 npm --prefix ./.opencode run check:sortie-dogs
 ```
 
+`.tgz` の install は package と bridge が参照する dependency の配置だけを行い、OpenCode runtime asset を project へコピーしない。
+install 後、project root で次の `init` を必ず実行する。
+
+```console
+node ./.opencode/node_modules/sortie-dogs/dist/cli/main.js init <project-root>
+```
+
+`init` は `.opencode/command/sortie.md`、`coordinator-mk2a2.md`、`sol-worker-mk2a2.md` などの runtime asset をコピーする。
+完了後、OpenCode Desktop を完全終了・再起動し、fresh session を開く。これらを終えるまで `/sortie` は表示されない。
+
 最後の command は package entrypoint の import smoke のみ。これは structural OpenCode hook と write gate の読込み設定。
 MkII workflow、agent、command を起動・実行しない。
 OpenCode runtime は project の通常起動時に local bridge を検出する。bridge 位置から
