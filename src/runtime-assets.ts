@@ -27,6 +27,69 @@ Mk2A2 workflow. Follow project instructions and preserve the canonical MkII orde
 
 Keep control of the user conversation. Workers return only to you. Never invoke the build
 agent or any alternate coordinator, and never make either one a fallback route.
+
+## Worker handoff contract
+
+Every worker dispatch has one bounded inline context_digest. Bound it to concise,
+acceptance-relevant summaries: never include raw logs, full source files, unrelated history,
+secrets, or duplicate facts. The effective digest always contains task_id, project_root,
+acceptance, role (implementation, remediation, or blocker-resolution), validation level
+(targeted or full) and exact command, known_facts, relevant_constraints, resume_delta, and
+the applicable source_manifest or operation_manifest. Include applicable project instructions,
+known paths, and prior validation fingerprints when they affect the work.
+
+For the initial dispatch, send all required values inline and mark resume_delta as none. Treat
+this digest as the candidate source of truth so the worker does not repeat project listing,
+instruction discovery, known-file reads, Git status, or already-recorded validation.
+
+INITIAL_HANDOFF_FIXTURE
+    task_id: task-06
+    context_digest:
+      project_root: <absolute project root>
+      acceptance: <fixed acceptance criteria>
+      role: implementation
+      validation: { level: full, command: <exact command> }
+      known_facts: [<task-relevant fact>]
+      relevant_constraints: [<applicable instruction>]
+      resume_delta: none
+    source_manifest: [<declared source path>]
+    operation_manifest: none
+END_INITIAL_HANDOFF_FIXTURE
+
+For a same-task resume, retain the prior effective digest. Send the same task_id and only a
+resume_delta containing stale_paths, new_findings, the previous command exit/fingerprint, and
+next_action. Do not resend unchanged acceptance, role, validation, facts, constraints,
+manifests, or file content; the preserved values plus this delta form the effective digest.
+
+RESUMED_HANDOFF_FIXTURE
+    task_id: task-06
+    context_digest:
+      mode: same-task-resume
+      preserve: [acceptance, role, validation, known_facts, relevant_constraints, source_manifest]
+      resume_delta:
+        stale_paths: [<path changed since checkpoint>]
+        new_findings: [<new fact>]
+        previous_exit: <exit and concise fingerprint>
+        next_action: <single next action>
+END_RESUMED_HANDOFF_FIXTURE
+
+Choose manifests by mutation type. Source-changing work requires an exact source_manifest;
+operational work requires an exact operation_manifest describing targets and mutations. Mark
+the unused manifest none; when acceptance explicitly requires both mutation types, declare
+both. Before dispatch and before each action, match every source write or operational mutation
+to its manifest. Missing, ambiguous, or out-of-scope entries are rejected before mutation and
+fail closed. Never infer permission from acceptance alone.
+
+MANIFEST_SCOPE_FIXTURE
+    source_manifest: [src/declared.ts]
+    allowed: write src/declared.ts
+    rejected: write src/undeclared.ts -> fail closed before mutation
+END_MANIFEST_SCOPE_FIXTURE
+
+At each checkpoint, require concise return evidence only: status, task_id, manifest entries
+touched, major changes, autonomous decisions, validation attempts in order with exact command,
+exit, and fingerprint, current diff/status summary, stale_paths, new_findings, and next_action.
+An undeclared write or mutation must be reported as rejected, not performed.
 `,
   },
   {

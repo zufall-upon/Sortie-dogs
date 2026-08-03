@@ -94,6 +94,46 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(coordinator.content, /all required context inline/i);
     assert.match(coordinator.content, /never invoke the build\s+agent or any alternate coordinator/i);
 
+    const initialHandoff = coordinator.content.match(
+      /INITIAL_HANDOFF_FIXTURE\r?\n([\s\S]+?)\r?\nEND_INITIAL_HANDOFF_FIXTURE/,
+    );
+    assert.ok(initialHandoff, "coordinator needs an initial handoff fixture");
+    assert.match(initialHandoff[1], /task_id:/);
+    assert.match(initialHandoff[1], /context_digest:/);
+    assert.match(initialHandoff[1], /project_root:/);
+    assert.match(initialHandoff[1], /acceptance:/);
+    assert.match(initialHandoff[1], /role:\s*implementation/);
+    assert.match(initialHandoff[1], /validation:\s*\{\s*level:\s*full,\s*command:/);
+    assert.match(initialHandoff[1], /known_facts:/);
+    assert.match(initialHandoff[1], /relevant_constraints:/);
+    assert.match(initialHandoff[1], /resume_delta:\s*none/);
+    assert.match(initialHandoff[1], /source_manifest:/);
+    assert.match(initialHandoff[1], /operation_manifest:\s*none/);
+
+    const resumedHandoff = coordinator.content.match(
+      /RESUMED_HANDOFF_FIXTURE\r?\n([\s\S]+?)\r?\nEND_RESUMED_HANDOFF_FIXTURE/,
+    );
+    assert.ok(resumedHandoff, "coordinator needs a same-task resume fixture");
+    assert.match(resumedHandoff[1], /mode:\s*same-task-resume/);
+    assert.match(resumedHandoff[1], /preserve:\s*\[acceptance, role, validation, known_facts,/);
+    assert.match(resumedHandoff[1], /resume_delta:/);
+    assert.match(resumedHandoff[1], /stale_paths:/);
+    assert.match(resumedHandoff[1], /new_findings:/);
+    assert.match(resumedHandoff[1], /previous_exit:/);
+    assert.match(resumedHandoff[1], /next_action:/);
+    assert.doesNotMatch(resumedHandoff[1], /project_root:|command:\s*</);
+
+    const manifestScope = coordinator.content.match(
+      /MANIFEST_SCOPE_FIXTURE\r?\n([\s\S]+?)\r?\nEND_MANIFEST_SCOPE_FIXTURE/,
+    );
+    assert.ok(manifestScope, "coordinator needs manifest scope examples");
+    assert.match(manifestScope[1], /source_manifest:\s*\[src\/declared\.ts\]/);
+    assert.match(manifestScope[1], /allowed:\s*write src\/declared\.ts/);
+    assert.match(manifestScope[1], /rejected:\s*write src\/undeclared\.ts -> fail closed before mutation/);
+    assert.match(coordinator.content, /operational work requires an exact operation_manifest/i);
+    assert.match(coordinator.content, /undeclared write or mutation must be reported as rejected/i);
+    assert.match(coordinator.content, /validation attempts in order with exact command,\s*\nexit, and fingerprint/i);
+
     assert.match(sortie.content, /preflight the current project/i);
     assert.match(sortie.content, /\.opencode\/sortie-dogs\.version/i);
     assert.match(sortie.content, /\.opencode\/agent\/coordinator-mk2a2\.md/i);
