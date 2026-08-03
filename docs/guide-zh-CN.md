@@ -67,12 +67,23 @@ gate 仍会限制各角色的写入范围。
 
 ## 从 npm 安装
 
-在目标项目中安装公开 npm package，再生成项目内 runtime file：
+在目标项目中安装公开 npm package，再生成项目内的 OpenCode runtime file：
 
 ```sh
 npm install --save-dev sortie-dogs
 npx sortie-dogs init .
 ```
+
+也可以全局安装 CLI，再初始化目标项目：
+
+```sh
+npm install --global sortie-dogs
+sortie-dogs init .
+```
+
+全局安装会提供 `sortie-dogs` CLI；`sortie-dogs init .` 写入的 OpenCode runtime file 仍位于
+目标项目内。仅全局安装 npm package 不会激活目标项目，还需要继续完成下面的项目级配置和
+plugin bridge。
 
 `dog-coordinator` 和 `dog-scout` 默认使用 `openai/gpt-5.6-luna`。如需为这两个角色改用其他模型，
 请将以下配置保存为 `.opencode/sortie-dogs.json`：

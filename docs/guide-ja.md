@@ -68,12 +68,25 @@ Canonical validation とリスク別 review を通過してから coordinator �
 
 ## npm からインストール
 
-対象プロジェクトで公開 npm package を依存関係へ追加し、runtime file を生成する。
+対象プロジェクトで公開 npm package を依存関係へ追加し、project-local な OpenCode runtime
+file を生成する。
 
 ```sh
 npm install --save-dev sortie-dogs
 npx sortie-dogs init .
 ```
+
+または CLI をグローバルインストールし、対象プロジェクトを初期化する。
+
+```sh
+npm install --global sortie-dogs
+sortie-dogs init .
+```
+
+グローバルインストールで `sortie-dogs` CLI が利用可能になる。`sortie-dogs init .` が
+書き込む OpenCode runtime file は引き続き対象プロジェクト内に置かれる。npm package の
+グローバルインストールだけでは対象プロジェクトは有効化されない。以下の project-local 設定と
+plugin bridge の作成も行う。
 
 `dog-coordinator` と `dog-scout` のデフォルト model は `openai/gpt-5.6-luna`。両 role で
 別の model を使う場合、次を `.opencode/sortie-dogs.json` に保存する。

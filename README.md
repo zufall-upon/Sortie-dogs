@@ -19,12 +19,25 @@ Guides: [日本語](docs/guide-ja.md) · [简体中文](docs/guide-zh-CN.md)
 
 ## Quick start
 
-Install the public npm package and generate the project-local runtime files:
+Install the public npm package in the project and generate the project-local
+OpenCode runtime files:
 
 ```sh
 npm install --save-dev sortie-dogs
 npx sortie-dogs init .
 ```
+
+Alternatively, install the CLI globally and initialize the target project:
+
+```sh
+npm install --global sortie-dogs
+sortie-dogs init .
+```
+
+The global install supplies the `sortie-dogs` CLI; `sortie-dogs init .` still
+writes OpenCode runtime files into the target project. Installing the package
+globally alone does not activate Sortie-dogs for a project. Continue with the
+project-local configuration and plugin bridge below.
 
 `dog-coordinator` and `dog-scout` default to `openai/gpt-5.6-luna`. To use a
 different model for both roles, save this as `.opencode/sortie-dogs.json`:
