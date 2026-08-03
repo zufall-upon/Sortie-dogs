@@ -158,6 +158,7 @@ test("recommended Luna routes cover exact installed roles and remain below proje
   assert.equal(defaults.kind, "configured");
   if (defaults.kind !== "configured") return;
   assert.deepEqual(defaults.modelCatalog.global, [
+    { model: DEDICATED_SOL_MODEL },
     { model: "openai/gpt-5.6-luna", variants: ["xhigh"] },
     { model: "provider/custom" },
   ]);
@@ -218,7 +219,7 @@ test("Mk2A2 routes only dedicated worker roles to Sol with stable fail-closed re
         "blocker-resolution": { preferred: { model: canonicalModel } },
         "dog-worker": { preferred: { model: canonicalModel } },
       },
-      modelCatalog: { global: [{ model: DEDICATED_SOL_MODEL }, { model: canonicalModel }] },
+      modelCatalog: { global: [{ model: canonicalModel }] },
     },
   );
   assert.equal(configured.kind, "configured");

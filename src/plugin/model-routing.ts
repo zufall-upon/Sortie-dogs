@@ -59,10 +59,13 @@ export interface ModelCatalog {
 
 /** Built-in availability metadata for source-level recommendations; no provider probing required. */
 export const BUILT_IN_MODEL_CATALOG: ModelCatalog = Object.freeze({
-  global: Object.freeze([Object.freeze({
-    model: RECOMMENDED_LUNA_MODEL,
-    variants: Object.freeze([RECOMMENDED_LUNA_VARIANT]),
-  })]),
+  global: Object.freeze([
+    Object.freeze({ model: DEDICATED_SOL_MODEL }),
+    Object.freeze({
+      model: RECOMMENDED_LUNA_MODEL,
+      variants: Object.freeze([RECOMMENDED_LUNA_VARIANT]),
+    }),
+  ]),
 });
 
 export interface ResolveModelRouteInput {
