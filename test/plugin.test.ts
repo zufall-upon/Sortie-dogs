@@ -4,6 +4,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { runtimeAssets } from "../dist/runtime-assets.js";
 import { ModelRoutingDeniedError, SortieDogsPlugin } from "../dist/plugin/index.js";
 import {
   resolvePluginConfiguration,
@@ -204,15 +205,32 @@ test("recommended Luna routes cover exact installed roles and remain below proje
 test("Mk2A2 routes only dedicated worker roles to Sol with stable fail-closed resolution", () => {
   const canonicalModel = "provider/canonical";
   const configured = resolvePluginConfigurationSources(
-    { modelRouting: { implementation: { preferred: { model: canonicalModel } } } },
-    { modelRouting: { remediation: { preferred: { model: canonicalModel } } } },
+    { modelRouting: {
+      implementation: { preferred: { model: canonicalModel } },
+      "dog-worker": { preferred: { model: canonicalModel } },
+    } },
+    { modelRouting: {
+      remediation: { preferred: { model: canonicalModel } },
+      "dog-worker": { preferred: { model: canonicalModel } },
+    } },
     {
-      modelRouting: { "blocker-resolution": { preferred: { model: canonicalModel } } },
+      modelRouting: {
+        "blocker-resolution": { preferred: { model: canonicalModel } },
+        "dog-worker": { preferred: { model: canonicalModel } },
+      },
       modelCatalog: { global: [{ model: DEDICATED_SOL_MODEL }, { model: canonicalModel }] },
     },
   );
   assert.equal(configured.kind, "configured");
   if (configured.kind !== "configured") return;
+
+  assert.deepEqual([...DEDICATED_SOL_ROLES], [
+    "implementation",
+    "remediation",
+    "blocker-resolution",
+    "sol-worker-mk2a2",
+    "dog-worker",
+  ]);
 
   const resolveRole = (role: string) => resolveModelRoute({
     role,
@@ -276,6 +294,17 @@ test("Mk2A2 routes only dedicated worker roles to Sol with stable fail-closed re
       }],
     });
   }
+});
+
+test("generated dog-worker runtime asset selects the dedicated Sol model explicitly", () => {
+  const dogWorker = runtimeAssets.find((asset) => asset.name === "dog-worker");
+  assert.ok(dogWorker);
+  assert.ok(dogWorker.content.startsWith(`---
+description: Dedicated Sol worker for the canonical Mk2A2 coordinator
+mode: subagent
+model: ${DEDICATED_SOL_MODEL}
+---
+`));
 });
 
 assert.deepEqual([...cases.keys()], [

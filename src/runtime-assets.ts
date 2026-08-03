@@ -1,3 +1,7 @@
+const { DEDICATED_SOL_MODEL }: typeof import("./plugin/model-routing.js") = await import(
+  `./plugin/model-routing.${import.meta.url.endsWith(".ts") ? "ts" : "js"}`
+);
+
 export interface RuntimeAsset {
   readonly name: string;
   readonly version: "0.2.0-card05";
@@ -258,6 +262,7 @@ END_TERMINAL_EVIDENCE_FIXTURE
     content: `---
 description: Dedicated Sol worker for the canonical Mk2A2 coordinator
 mode: subagent
+model: ${DEDICATED_SOL_MODEL}
 ---
 # dog-worker
 

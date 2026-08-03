@@ -16,6 +16,7 @@ export const DEDICATED_SOL_ROLES = [
   "remediation",
   "blocker-resolution",
   "sol-worker-mk2a2",
+  "dog-worker",
 ] as const;
 
 const dedicatedSolRoleSet = new Set<string>(DEDICATED_SOL_ROLES);
