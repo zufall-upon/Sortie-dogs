@@ -139,10 +139,29 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
 
     const coordinator = loaded.runtimeAssets.find(({ name }) => name === "dog-coordinator");
     const worker = loaded.runtimeAssets.find(({ name }) => name === "dog-worker");
+    const scout = loaded.runtimeAssets.find(({ name }) => name === "dog-scout")!;
+    const reviewer = loaded.runtimeAssets.find(({ name }) => name === "dog-reviewer")!;
+    const advisor = loaded.runtimeAssets.find(({ name }) => name === "dog-advisor")!;
     const sortie = loaded.runtimeAssets.find(({ name }) => name === "sortie");
     assert.ok(coordinator);
     assert.ok(worker);
     assert.ok(sortie);
+
+    assert.match(
+      scout.content,
+      /assigned parallel role A \(manifest\), B \(canonical validation\), or C \(blocker owner\)[\s\S]+bounded question and paths[\s\S]+Do not edit, stage,\s+commit, retry, or become user-facing[\s\S]+facts, evidence\s+paths, and unresolved risks only to dog-coordinator/i,
+    );
+    assert.ok(scout.content.length >= 350, "dog-scout needs a substantive bounded role");
+    assert.match(
+      reviewer.content,
+      /Only after canonical validation, review a high-risk candidate[\s\S]+Do not review low-risk candidates[\s\S]+Do not edit, stage,\s+commit, or become user-facing[\s\S]+Return PASS or concrete findings only to dog-coordinator before\s+the coordinator commit/i,
+    );
+    assert.ok(reviewer.content.length >= 350, "dog-reviewer needs a substantive risk-gated role");
+    assert.match(
+      advisor.content,
+      /only a bounded Strategy or SourceReview consultation from dog-coordinator[\s\S]+Do not\s+implement, remediate, resolve blockers, edit, stage, commit, dispatch other agents, or become\s+user-facing[\s\S]+options and a recommendation only to dog-coordinator/i,
+    );
+    assert.ok(advisor.content.length >= 350, "dog-advisor needs a substantive consultation role");
 
     assert.match(coordinator.content, /only user-facing agent/i);
     assert.match(coordinator.content, /before any edit/i);
