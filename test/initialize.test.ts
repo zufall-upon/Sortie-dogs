@@ -31,6 +31,10 @@ async function snapshot(paths: readonly string[]): Promise<Array<{ content: stri
   })));
 }
 
+async function snapshotDirectories(paths: readonly string[]): Promise<Array<{ mtimeMs: number }>> {
+  return Promise.all(paths.map(async (path) => ({ mtimeMs: (await stat(path)).mtimeMs })));
+}
+
 test("fresh init installs every runtime asset and preserves project settings", async () => {
   const project = await fixtureDirectory();
   try {
@@ -90,6 +94,119 @@ test("conflicts fail closed and leave existing content untouched", async () => {
   }
 });
 
+test("compatible update replaces owned drift, preserves user files, then becomes unchanged", async () => {
+  const project = await fixtureDirectory();
+  try {
+    await initializeProject(project);
+    const marker = join(project, MARKER);
+    const ownedAsset = join(project, ".opencode", runtimeAssets[0].installPath);
+    const userFile = join(project, ".opencode", "sortie-dogs.json");
+    await writeFile(marker, (await readFile(marker, "utf8")).replace("0.2.0-card04", "0.2.0-card03"));
+    await writeFile(ownedAsset, "old RPT-owned content\n");
+    await writeFile(userFile, "{\"userOwned\":true}\n");
+
+    const updated = await initializeProject(project);
+
+    assert.equal(updated.status, "installed");
+    assert.equal(await readFile(ownedAsset, "utf8"), runtimeAssets[0].content);
+    assert.equal(await readFile(userFile, "utf8"), "{\"userOwned\":true}\n");
+    const paths = [
+      ...runtimeAssets.map(({ installPath }) => join(project, ".opencode", installPath)),
+      marker,
+      userFile,
+    ];
+    const afterUpdate = await snapshot(paths);
+    assert.equal((await initializeProject(project)).status, "unchanged");
+    assert.deepEqual(await snapshot(paths), afterUpdate);
+  } finally {
+    await clean(project);
+  }
+});
+
+test("a recognized current-version marker repairs a partial install and then becomes unchanged", async () => {
+  const project = await fixtureDirectory();
+  try {
+    const firstAsset = runtimeAssets[0];
+    await mkdir(join(project, ".opencode", "agent"), { recursive: true });
+    await writeFile(join(project, MARKER), "0.2.0-card04\n");
+    await writeFile(join(project, ".opencode", firstAsset.installPath), firstAsset.content);
+
+    const repaired = await initializeProject(project);
+
+    assert.equal(repaired.status, "installed");
+    for (const asset of runtimeAssets) {
+      assert.equal(await readFile(join(project, ".opencode", asset.installPath), "utf8"), asset.content);
+    }
+    assert.equal((await initializeProject(project)).status, "unchanged");
+  } finally {
+    await clean(project);
+  }
+});
+
+test("incompatible update is rejected before any mutation", async () => {
+  const project = await fixtureDirectory();
+  try {
+    const openCode = join(project, ".opencode");
+    await mkdir(openCode);
+    const marker = join(project, MARKER);
+    const userFile = join(openCode, "sortie-dogs.json");
+    await writeFile(marker, "0.3.0\n");
+    await writeFile(userFile, "{\"future\":true}\n");
+    const filesBefore = await snapshot([marker, userFile]);
+    const directoriesBefore = await snapshotDirectories([project, openCode]);
+
+    await assert.rejects(initializeProject(project), (error: unknown) => {
+      assert.ok(error instanceof ProjectInitializationError);
+      assert.equal(error.code, "incompatible-version");
+      return true;
+    });
+    assert.deepEqual(await snapshot([marker, userFile]), filesBefore);
+    assert.deepEqual(await snapshotDirectories([project, openCode]), directoriesBefore);
+    for (const asset of runtimeAssets) {
+      assert.equal(await lstat(join(openCode, asset.installPath)).then(() => true, () => false), false);
+    }
+  } finally {
+    await clean(project);
+  }
+});
+
+test("a future version in the recognized compatibility line is rejected", async () => {
+  const project = await fixtureDirectory();
+  try {
+    await mkdir(join(project, ".opencode"));
+    await writeFile(join(project, MARKER), "0.2.0-card99\n");
+
+    await assert.rejects(initializeProject(project), (error: unknown) => {
+      assert.ok(error instanceof ProjectInitializationError);
+      assert.equal(error.code, "incompatible-version");
+      return true;
+    });
+  } finally {
+    await clean(project);
+  }
+});
+
+test("an invalid marker keeps unknown-ownership conflict behavior", async () => {
+  const project = await fixtureDirectory();
+  try {
+    await initializeProject(project);
+    const marker = join(project, MARKER);
+    const unknownAsset = join(project, ".opencode", runtimeAssets[0].installPath);
+    await writeFile(marker, "not-a-version\n");
+    await writeFile(unknownAsset, "unknown owner\n");
+
+    await assert.rejects(initializeProject(project), (error: unknown) => {
+      assert.ok(error instanceof ProjectInitializationError);
+      assert.equal(error.code, "conflict");
+      return true;
+    });
+    assert.equal(await readFile(unknownAsset, "utf8"), "unknown owner\n");
+    assert.equal(await readFile(marker, "utf8"), "not-a-version\n");
+  } finally {
+    await clean(project);
+  }
+});
+
 test("symlinked install paths fail before writing runtime files", async (context) => {
   const project = await fixtureDirectory();
   const outside = await fixtureDirectory();
@@ -111,6 +228,37 @@ test("symlinked install paths fail before writing runtime files", async (context
       return true;
     });
     assert.deepEqual(await rm(join(outside, "coordinator-mk2a2.md")).then(() => true, () => false), false);
+  } finally {
+    await clean(project);
+    await clean(outside);
+  }
+});
+
+test("owned drift cannot overwrite through a file symlink", async (context) => {
+  const project = await fixtureDirectory();
+  const outside = await fixtureDirectory();
+  try {
+    await initializeProject(project);
+    const asset = join(project, ".opencode", runtimeAssets[0].installPath);
+    const outsideFile = join(outside, "user-owned.txt");
+    await writeFile(outsideFile, "outside remains unchanged\n");
+    await rm(asset);
+    try {
+      await symlink(outsideFile, asset, "file");
+    } catch (error) {
+      if (["EPERM", "EACCES"].includes((error as NodeJS.ErrnoException).code ?? "")) {
+        context.skip("File symlinks are unavailable in this environment.");
+        return;
+      }
+      throw error;
+    }
+
+    await assert.rejects(initializeProject(project), (error: unknown) => {
+      assert.ok(error instanceof ProjectInitializationError);
+      assert.equal(error.code, "unsafe-path");
+      return true;
+    });
+    assert.equal(await readFile(outsideFile, "utf8"), "outside remains unchanged\n");
   } finally {
     await clean(project);
     await clean(outside);
