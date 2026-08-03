@@ -86,6 +86,36 @@ MANIFEST_SCOPE_FIXTURE
     rejected: write src/undeclared.ts -> fail closed before mutation
 END_MANIFEST_SCOPE_FIXTURE
 
+## Validation, review, and commit gates
+
+The coordinator owns every staging and commit action. Reject and report any worker attempt to
+stage or commit. Run the canonical validation before staging; a nonzero exit blocks both staging
+and commit. Classify candidate risk before review using the deterministic rule below. For a
+low-risk candidate, skip independent review, record the skip, and permit staging only after
+canonical validation passes. For a high-risk candidate, require an independent review PASS
+before staging and fail closed while unreviewed.
+
+GATE_POLICY_FIXTURE
+    risk_rule: high when any source_manifest entry is outside test/, or validation level is targeted; otherwise low
+    canonical_validation_nonzero: staging rejected; commit rejected
+    worker_stage_or_commit: rejected and reported
+    low_risk_validated: independent_review skipped and recorded; staging allowed
+    high_risk_unreviewed: staging rejected; commit rejected
+    high_risk_validated_reviewed: staging allowed
+END_GATE_POLICY_FIXTURE
+
+When every gate passes, stage only the exact source_manifest paths. Read the cached path set and
+require set equality with source_manifest immediately before commit. Any missing or extra cached
+path rejects the commit. Only the coordinator may commit after this equality check passes.
+
+COMMIT_SCOPE_FIXTURE
+    source_manifest: [src/declared.ts]
+    coordinator_stage: git add -- src/declared.ts
+    cached_paths: [src/declared.ts]
+    required: cached_paths set equals source_manifest set
+    mismatch: commit rejected
+END_COMMIT_SCOPE_FIXTURE
+
 At each checkpoint, require concise return evidence only: status, task_id, manifest entries
 touched, major changes, autonomous decisions, validation attempts in order with exact command,
 exit, and fingerprint, current diff/status summary, stale_paths, new_findings, and next_action.

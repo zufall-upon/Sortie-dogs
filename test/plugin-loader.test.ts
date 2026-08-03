@@ -10,6 +10,58 @@ const testEnvironment = fileURLToPath(new URL("../_testenv/", import.meta.url));
 const projectRoot = fileURLToPath(new URL("../", import.meta.url));
 const execFileAsync = promisify(execFile);
 
+type CandidateRisk = "low" | "high";
+type ValidationLevel = "targeted" | "full";
+
+function classifyRisk(manifest: readonly string[], validationLevel: ValidationLevel): CandidateRisk {
+  return validationLevel === "targeted" || manifest.some((path) => !path.startsWith("test/"))
+    ? "high"
+    : "low";
+}
+
+function gate(input: {
+  readonly actor: "coordinator" | "worker";
+  readonly intent: "stage" | "commit";
+  readonly risk: CandidateRisk;
+  readonly validationExit: number;
+  readonly reviewed: boolean;
+  readonly cachedPaths: readonly string[];
+  readonly manifest: readonly string[];
+}): { readonly action: "stage" | "commit" | "reject"; readonly report: readonly string[] } {
+  if (input.actor === "worker") {
+    return { action: "reject", report: [`worker ${input.intent} rejected and reported`] };
+  }
+  if (input.validationExit !== 0) {
+    return {
+      action: "reject",
+      report: [`canonical validation exit ${input.validationExit}; ${input.intent} rejected`],
+    };
+  }
+
+  const report: string[] = [];
+  if (input.risk === "high" && !input.reviewed) {
+    return {
+      action: "reject",
+      report: [`high-risk independent review required; ${input.intent} rejected`],
+    };
+  }
+  report.push(input.risk === "low" ? "independent review skipped and recorded" : "independent review passed");
+
+  if (input.intent === "stage") return { action: "stage", report };
+
+  const cachedSet = [...new Set(input.cachedPaths)].sort();
+  const manifestSet = [...new Set(input.manifest)].sort();
+  const scopeMatches =
+    cachedSet.length === manifestSet.length && cachedSet.every((path, index) => path === manifestSet[index]);
+  if (!scopeMatches) {
+    return {
+      action: "reject",
+      report: [...report, "cached paths differ from source_manifest; commit rejected"],
+    };
+  }
+  return { action: "commit", report: [...report, "cached paths equal source_manifest; commit approved"] };
+}
+
 test("packed package exposes plugin and versioned runtime assets", async () => {
   const npmCli = process.env.npm_execpath;
   assert.ok(npmCli, "npm_execpath is required for the package smoke test");
@@ -133,6 +185,319 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(coordinator.content, /operational work requires an exact operation_manifest/i);
     assert.match(coordinator.content, /undeclared write or mutation must be reported as rejected/i);
     assert.match(coordinator.content, /validation attempts in order with exact command,\s*\nexit, and fingerprint/i);
+
+    const gatePolicy = coordinator.content.match(
+      /GATE_POLICY_FIXTURE\r?\n([\s\S]+?)\r?\nEND_GATE_POLICY_FIXTURE/,
+    );
+    assert.ok(gatePolicy, "coordinator needs deterministic validation and review gates");
+    assert.match(
+      gatePolicy[1],
+      /risk_rule: high when any source_manifest entry is outside test\/, or validation level is targeted; otherwise low/,
+    );
+    assert.match(gatePolicy[1], /canonical_validation_nonzero: staging rejected; commit rejected/);
+    assert.match(gatePolicy[1], /worker_stage_or_commit: rejected and reported/);
+    assert.match(gatePolicy[1], /low_risk_validated: independent_review skipped and recorded; staging allowed/);
+    assert.match(gatePolicy[1], /high_risk_unreviewed: staging rejected; commit rejected/);
+    assert.match(gatePolicy[1], /high_risk_validated_reviewed: staging allowed/);
+
+    const commitScope = coordinator.content.match(
+      /COMMIT_SCOPE_FIXTURE\r?\n([\s\S]+?)\r?\nEND_COMMIT_SCOPE_FIXTURE/,
+    );
+    assert.ok(commitScope, "coordinator needs deterministic cached-path scope rules");
+    assert.match(commitScope[1], /source_manifest: \[src\/declared\.ts\]/);
+    assert.match(commitScope[1], /coordinator_stage: git add -- src\/declared\.ts/);
+    assert.match(commitScope[1], /required: cached_paths set equals source_manifest set/);
+    assert.match(commitScope[1], /mismatch: commit rejected/);
+
+    assert.equal(classifyRisk(["test/manifest.txt"], "full"), "low");
+    assert.equal(classifyRisk(["src/manifest.txt"], "full"), "high");
+    assert.equal(classifyRisk(["test/manifest.txt"], "targeted"), "high");
+
+    const failedValidationRepo = await mkdtemp(join(testEnvironment, "git-failed-validation-"));
+    try {
+      await execFileAsync("git", ["-C", failedValidationRepo, "init", "--quiet"]);
+      await mkdir(join(failedValidationRepo, "src"));
+      await writeFile(join(failedValidationRepo, "src", "manifest.txt"), "declared\n");
+      await writeFile(join(failedValidationRepo, "undeclared.txt"), "outside manifest\n");
+
+      const manifest = ["src/manifest.txt"];
+      const risk = classifyRisk(manifest, "full");
+      const failedValidation = gate({
+        actor: "coordinator",
+        intent: "stage",
+        risk,
+        validationExit: 1,
+        reviewed: true,
+        cachedPaths: [],
+        manifest,
+      });
+      const workerStage = gate({
+        actor: "worker",
+        intent: "stage",
+        risk,
+        validationExit: 0,
+        reviewed: true,
+        cachedPaths: [],
+        manifest,
+      });
+      const workerCommit = gate({
+        actor: "worker",
+        intent: "commit",
+        risk,
+        validationExit: 0,
+        reviewed: true,
+        cachedPaths: manifest,
+        manifest,
+      });
+      assert.deepEqual(failedValidation, {
+        action: "reject",
+        report: ["canonical validation exit 1; stage rejected"],
+      });
+      assert.deepEqual(workerStage, {
+        action: "reject",
+        report: ["worker stage rejected and reported"],
+      });
+      assert.deepEqual(workerCommit, {
+        action: "reject",
+        report: ["worker commit rejected and reported"],
+      });
+      const { stdout: cachedPaths } = await execFileAsync("git", [
+        "-C",
+        failedValidationRepo,
+        "diff",
+        "--cached",
+        "--name-only",
+      ]);
+      assert.equal(cachedPaths, "");
+      await assert.rejects(
+        execFileAsync("git", ["-C", failedValidationRepo, "rev-parse", "--verify", "HEAD"]),
+      );
+      const { stdout: status } = await execFileAsync("git", [
+        "-C",
+        failedValidationRepo,
+        "status",
+        "--porcelain",
+      ]);
+      assert.deepEqual(status.trim().split(/\r?\n/), ["?? src/", "?? undeclared.txt"]);
+    } finally {
+      await rm(failedValidationRepo, { recursive: true, force: true });
+    }
+
+    const lowRiskRepo = await mkdtemp(join(testEnvironment, "git-low-risk-"));
+    try {
+      await execFileAsync("git", ["-C", lowRiskRepo, "init", "--quiet"]);
+      await mkdir(join(lowRiskRepo, "test"));
+      await writeFile(join(lowRiskRepo, "test", "manifest.txt"), "declared\n");
+      await writeFile(join(lowRiskRepo, "undeclared.txt"), "outside manifest\n");
+
+      const manifest = ["test/manifest.txt"];
+      const risk = classifyRisk(manifest, "full");
+      const stageDecision = gate({
+        actor: "coordinator",
+        intent: "stage",
+        risk,
+        validationExit: 0,
+        reviewed: false,
+        cachedPaths: [],
+        manifest,
+      });
+      assert.deepEqual(stageDecision, {
+        action: "stage",
+        report: ["independent review skipped and recorded"],
+      });
+      if (stageDecision.action === "stage") {
+        await execFileAsync("git", ["-C", lowRiskRepo, "add", "--", ...manifest]);
+      }
+      const { stdout: cachedPaths } = await execFileAsync("git", [
+        "-C",
+        lowRiskRepo,
+        "diff",
+        "--cached",
+        "--name-only",
+      ]);
+      const cached = cachedPaths.trim().split(/\r?\n/);
+      assert.deepEqual(cached, manifest);
+      const commitDecision = gate({
+        actor: "coordinator",
+        intent: "commit",
+        risk,
+        validationExit: 0,
+        reviewed: false,
+        cachedPaths: cached,
+        manifest,
+      });
+      assert.deepEqual(commitDecision, {
+        action: "commit",
+        report: [
+          "independent review skipped and recorded",
+          "cached paths equal source_manifest; commit approved",
+        ],
+      });
+      if (commitDecision.action === "commit") {
+        await execFileAsync("git", [
+          "-C",
+          lowRiskRepo,
+          "-c",
+          "user.name=Sortie Test",
+          "-c",
+          "user.email=sortie@example.invalid",
+          "-c",
+          "commit.gpgsign=false",
+          "commit",
+          "--quiet",
+          "-m",
+          "low-risk: independent review skipped and recorded",
+        ]);
+      }
+      const { stdout: commitMessage } = await execFileAsync("git", [
+        "-C",
+        lowRiskRepo,
+        "log",
+        "-1",
+        "--format=%s",
+      ]);
+      assert.equal(commitMessage.trim(), "low-risk: independent review skipped and recorded");
+      const { stdout: committedPaths } = await execFileAsync("git", [
+        "-C",
+        lowRiskRepo,
+        "show",
+        "--pretty=format:",
+        "--name-only",
+        "HEAD",
+      ]);
+      assert.deepEqual(committedPaths.trim().split(/\r?\n/), manifest);
+      const { stdout: status } = await execFileAsync("git", ["-C", lowRiskRepo, "status", "--porcelain"]);
+      assert.equal(status.trim(), "?? undeclared.txt");
+    } finally {
+      await rm(lowRiskRepo, { recursive: true, force: true });
+    }
+
+    const highRiskRepo = await mkdtemp(join(testEnvironment, "git-high-risk-"));
+    try {
+      await execFileAsync("git", ["-C", highRiskRepo, "init", "--quiet"]);
+      await mkdir(join(highRiskRepo, "src"));
+      await writeFile(join(highRiskRepo, "src", "manifest.txt"), "declared\n");
+      await writeFile(join(highRiskRepo, "undeclared.txt"), "outside manifest\n");
+
+      const manifest = ["src/manifest.txt"];
+      const risk = classifyRisk(manifest, "full");
+      const unreviewedDecision = gate({
+        actor: "coordinator",
+        intent: "stage",
+        risk,
+        validationExit: 0,
+        reviewed: false,
+        cachedPaths: [],
+        manifest,
+      });
+      assert.deepEqual(unreviewedDecision, {
+        action: "reject",
+        report: ["high-risk independent review required; stage rejected"],
+      });
+      const { stdout: unreviewedCachedPaths } = await execFileAsync("git", [
+        "-C",
+        highRiskRepo,
+        "diff",
+        "--cached",
+        "--name-only",
+      ]);
+      assert.equal(unreviewedCachedPaths, "");
+      await assert.rejects(execFileAsync("git", ["-C", highRiskRepo, "rev-parse", "--verify", "HEAD"]));
+
+      const reviewedDecision = gate({
+        actor: "coordinator",
+        intent: "stage",
+        risk,
+        validationExit: 0,
+        reviewed: true,
+        cachedPaths: [],
+        manifest,
+      });
+      assert.deepEqual(reviewedDecision, {
+        action: "stage",
+        report: ["independent review passed"],
+      });
+      if (reviewedDecision.action === "stage") {
+        await execFileAsync("git", ["-C", highRiskRepo, "add", "--", ...manifest]);
+      }
+      await execFileAsync("git", ["-C", highRiskRepo, "add", "--", "undeclared.txt"]);
+      const { stdout: reviewedCachedPaths } = await execFileAsync("git", [
+        "-C",
+        highRiskRepo,
+        "diff",
+        "--cached",
+        "--name-only",
+      ]);
+      const mismatchedCache = reviewedCachedPaths.trim().split(/\r?\n/);
+      assert.deepEqual(mismatchedCache, ["src/manifest.txt", "undeclared.txt"]);
+      const mismatchDecision = gate({
+        actor: "coordinator",
+        intent: "commit",
+        risk,
+        validationExit: 0,
+        reviewed: true,
+        cachedPaths: mismatchedCache,
+        manifest,
+      });
+      assert.deepEqual(mismatchDecision, {
+        action: "reject",
+        report: [
+          "independent review passed",
+          "cached paths differ from source_manifest; commit rejected",
+        ],
+      });
+      await assert.rejects(execFileAsync("git", ["-C", highRiskRepo, "rev-parse", "--verify", "HEAD"]));
+
+      await execFileAsync("git", ["-C", highRiskRepo, "rm", "--cached", "--quiet", "--", "undeclared.txt"]);
+      const { stdout: restoredCachedPaths } = await execFileAsync("git", [
+        "-C",
+        highRiskRepo,
+        "diff",
+        "--cached",
+        "--name-only",
+      ]);
+      const restoredCache = restoredCachedPaths.trim().split(/\r?\n/);
+      assert.deepEqual(restoredCache, manifest);
+      const commitDecision = gate({
+        actor: "coordinator",
+        intent: "commit",
+        risk,
+        validationExit: 0,
+        reviewed: true,
+        cachedPaths: restoredCache,
+        manifest,
+      });
+      assert.equal(commitDecision.action, "commit");
+      if (commitDecision.action === "commit") {
+        await execFileAsync("git", [
+          "-C",
+          highRiskRepo,
+          "-c",
+          "user.name=Sortie Test",
+          "-c",
+          "user.email=sortie@example.invalid",
+          "-c",
+          "commit.gpgsign=false",
+          "commit",
+          "--quiet",
+          "-m",
+          "high-risk: independent review passed",
+        ]);
+      }
+      const { stdout: committedPaths } = await execFileAsync("git", [
+        "-C",
+        highRiskRepo,
+        "show",
+        "--pretty=format:",
+        "--name-only",
+        "HEAD",
+      ]);
+      assert.deepEqual(committedPaths.trim().split(/\r?\n/), manifest);
+      const { stdout: status } = await execFileAsync("git", ["-C", highRiskRepo, "status", "--porcelain"]);
+      assert.equal(status.trim(), "?? undeclared.txt");
+    } finally {
+      await rm(highRiskRepo, { recursive: true, force: true });
+    }
 
     assert.match(sortie.content, /preflight the current project/i);
     assert.match(sortie.content, /\.opencode\/sortie-dogs\.version/i);
