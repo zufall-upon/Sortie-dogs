@@ -36,6 +36,20 @@ OpenCode 標準のエージェントや設定は置き換えない。
 6. **Coordinator 完了** — manifest、validation、review、evidence gate 通過後だけ完了と commit を管理。
 7. **境界付き継続** — restart recovery と compaction handoff で進捗を引き継ぎ、batch の無制限化を防止。
 
+## 実行例
+
+低リスクの実行例では、各 gate を示しながら境界内で完了する。
+
+```text
+利用者: /sortie 要求された動作を追加する
+dog-coordinator: manifest 確定
+dog-scout ×3: 調査完了
+dog-worker: 実装完了
+validation: npm test — PASS
+review: 省略 — 低リスク
+dog-coordinator: 完了 evidence 承認
+```
+
 ## 画面で見る流れ
 
 ### 複雑さを抑える
@@ -61,7 +75,27 @@ npm install --save-dev sortie-dogs
 npx sortie-dogs init .
 ```
 
-OpenCode 用ブリッジ `.opencode/plugins/sortie-dogs.ts` を作成する。
+`dog-coordinator` と `dog-scout` のデフォルト model は `openai/gpt-5.6-luna`。両 role で
+別の model を使う場合、次を `.opencode/sortie-dogs.json` に保存する。
+
+```json
+{
+  "modelRouting": {
+    "dog-coordinator": {
+      "preferred": { "model": "provider/model" }
+    },
+    "dog-scout": {
+      "preferred": { "model": "provider/model" }
+    }
+  },
+  "modelCatalog": {
+    "project": [{ "model": "provider/model" }]
+  }
+}
+```
+
+`provider/model` は利用可能な model に置き換える。次に OpenCode 用ブリッジ
+`.opencode/plugins/sortie-dogs.ts` を作成する。
 
 ```ts
 export { SortieDogsPlugin } from "sortie-dogs/plugin";
@@ -147,26 +181,6 @@ npx sortie-dogs init .
 
 ## 安全な手動削除
 
-Sortie-dogs に対応済み uninstall command はない。npm dependency の削除は別操作。
-依存を宣言した `package.json` の directory だけで `npm uninstall sortie-dogs` を実行する。
-削除目的で `package.json` や `package-lock.json` を消してはならない。
-
-生成 runtime を手動削除する場合、次の Sortie-dogs 所有 path だけを正確に削除する。
-
-```text
-.opencode/agent/dog-coordinator.md
-.opencode/agent/dog-worker.md
-.opencode/agent/dog-scout.md
-.opencode/agent/dog-reviewer.md
-.opencode/agent/dog-advisor.md
-.opencode/command/sortie.md
-.opencode/sortie-dogs.version
-```
-
-`.opencode`、`.opencode/agent`、`.opencode/command` directory 自体を削除しない。`*.md` のような
-wildcard も使わない。標準の `plan`、`build`、`builder` agent と全ユーザー所有 file を残す。
-`.opencode/sortie-dogs.json`、plugin bridge、他 agent、OpenCode setting も削除対象外。
-
-旧 file `.opencode/agent/coordinator-mk2a2.md` と
-`.opencode/agent/sol-worker-mk2a2.md` は、旧 Sortie-dogs marker または内容で Sortie-dogs 所有を
-確認できた場合だけ削除可能。所有不明または想定外 filename なら削除を中止して確認する。
+Sortie-dogs にサポート対象の uninstall command はない。npm dependency は別途削除し、生成
+runtime file は[安全な手動削除ガイド](uninstall.md)に従って削除する。Sortie-dogs 所有を確認した
+exact path だけを対象とし、`.opencode` directory、wildcard、ユーザー所有 file は削除しない。

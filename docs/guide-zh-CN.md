@@ -35,6 +35,20 @@ Sortie-dogs 是一个按需启用的 OpenCode 编排插件。它把任务依次�
    coordinator 才负责完成与 commit。
 7. **有界续跑** — restart recovery 和 compaction handoff 保留进度，每个 batch 仍有明确上限。
 
+## 运行示例
+
+以下低风险示例在明确边界内完成，并报告各项 gate：
+
+```text
+用户：/sortie 添加所需行为
+dog-coordinator：manifest 已确认
+dog-scout ×3：调研完成
+dog-worker：实现完成
+validation：npm test — PASS
+review：已跳过 — 低风险
+dog-coordinator：完成 evidence 已接受
+```
+
 ## 图解流程
 
 ### 控制复杂度
@@ -60,7 +74,27 @@ npm install --save-dev sortie-dogs
 npx sortie-dogs init .
 ```
 
-创建 OpenCode 插件桥接文件 `.opencode/plugins/sortie-dogs.ts`：
+`dog-coordinator` 和 `dog-scout` 默认使用 `openai/gpt-5.6-luna`。如需为这两个角色改用其他模型，
+请将以下配置保存为 `.opencode/sortie-dogs.json`：
+
+```json
+{
+  "modelRouting": {
+    "dog-coordinator": {
+      "preferred": { "model": "provider/model" }
+    },
+    "dog-scout": {
+      "preferred": { "model": "provider/model" }
+    }
+  },
+  "modelCatalog": {
+    "project": [{ "model": "provider/model" }]
+  }
+}
+```
+
+将 `provider/model` 替换为你可以使用的模型。然后创建 OpenCode 插件桥接文件
+`.opencode/plugins/sortie-dogs.ts`：
 
 ```ts
 export { SortieDogsPlugin } from "sortie-dogs/plugin";
@@ -143,26 +177,6 @@ npx sortie-dogs init .
 
 ## 安全手动删除
 
-Sortie-dogs 没有受支持的 uninstall command。删除 npm dependency 是独立的软件包管理操作：
-只能在声明该依赖的 `package.json` 所在目录运行 `npm uninstall sortie-dogs`。切勿为了移除包而
-删除 `package.json` 或 `package-lock.json`。
-
-如需手动删除生成的 runtime file，只能按准确路径删除以下 Sortie-dogs 自有文件：
-
-```text
-.opencode/agent/dog-coordinator.md
-.opencode/agent/dog-worker.md
-.opencode/agent/dog-scout.md
-.opencode/agent/dog-reviewer.md
-.opencode/agent/dog-advisor.md
-.opencode/command/sortie.md
-.opencode/sortie-dogs.version
-```
-
-切勿删除 `.opencode`、`.opencode/agent` 或 `.opencode/command` 目录，也不要使用 `*.md` 等通配符。
-必须保留标准 `plan`、`build`、`builder` 智能体和所有其他用户文件。手动清理 runtime file 时，
-不要删除 `.opencode/sortie-dogs.json`、插件桥接文件、其他智能体或 OpenCode 设置。
-
-旧文件 `.opencode/agent/coordinator-mk2a2.md` 和
-`.opencode/agent/sol-worker-mk2a2.md` 只有在旧 Sortie-dogs 标记或内容能够确认其归属时才可删除。
-如果归属不明或文件名不符合预期，请停止删除并先检查内容。
+Sortie-dogs 没有受支持的 uninstall command。请单独移除 npm dependency，再按照
+[安全手动删除指南](uninstall.md)删除生成的 runtime file。只能删除已确认归 Sortie-dogs 所有的
+准确路径；切勿删除 `.opencode` 目录、使用通配符或移除用户自有文件。
