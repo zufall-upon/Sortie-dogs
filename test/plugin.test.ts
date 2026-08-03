@@ -537,6 +537,21 @@ test("plugin shell gate allows explicit reads and denies unknown executables", a
       'Write denied for "blocked.txt": operation manifest write scope.',
       "manifest-scope",
     );
+    await invoke('env -u GITHUB_TOKEN "/approved/gh.exe" project item-list 1 --owner example');
+    await invoke('env -u GITHUB_TOKEN "/approved/gh.exe" project item-edit --id ITEM --field-id FIELD --single-select-option-id OPTION');
+    await invoke('env -u GITHUB_TOKEN "/approved/gh.exe" api graphql -f query="query { viewer { login } }"');
+    await invoke('env -u GITHUB_TOKEN "/approved/gh.exe" api graphql -f query="mutation { placeholder }"');
+    await invoke("git branch --show-current");
+    await expectMessage(
+      () => invoke("env -u GITHUB_TOKEN node -e write"),
+      'Write denied for "<unknown>": write path must be explicit.',
+      "path-required",
+    );
+    await expectMessage(
+      () => invoke("git branch feature"),
+      'Write denied for "<unknown>": write path must be explicit.',
+      "path-required",
+    );
     for (const command of fixture.shell.unknownWrites) {
       await expectMessage(
         () => invoke(command),

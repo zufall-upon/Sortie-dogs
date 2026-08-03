@@ -131,6 +131,34 @@ function operands(tokens: readonly string[]): string[] {
   return result.filter(Boolean);
 }
 
+function unwrapEnvironmentCommand(tokens: readonly string[]): readonly string[] {
+  const executable = tokens[0]?.replaceAll("\\", "/").split("/").at(-1)?.toLowerCase();
+  if (executable !== "env") return tokens;
+  let index = 1;
+  while (index < tokens.length) {
+    const token = tokens[index];
+    if (token === "-u" || token === "--unset") {
+      index += 2;
+    } else if (token.startsWith("--unset=") || /^[A-Za-z_][A-Za-z0-9_]*=/u.test(token)) {
+      index += 1;
+    } else {
+      break;
+    }
+  }
+  return tokens.slice(index);
+}
+
+function isRemoteOnlyGitHubCommand(tokens: readonly string[]): boolean {
+  const command = tokens[1]?.toLowerCase();
+  return command === "project" || (command === "api" && tokens[2]?.toLowerCase() === "graphql");
+}
+
+function isReadOnlyGitCommand(tokens: readonly string[]): boolean {
+  const command = tokens[1]?.toLowerCase() ?? "";
+  return READ_ONLY_GIT_COMMANDS.has(command) ||
+    (command === "branch" && tokens.length === 3 && tokens[2] === "--show-current");
+}
+
 function shellPaths(command: string): Extraction {
   const paths: string[] = [];
   let applies = false;
@@ -142,7 +170,7 @@ function shellPaths(command: string): Extraction {
   }
 
   for (const segment of command.split(/(?:&&|\|\||(?<!>)\|(?!\|)|;|\r?\n)/u)) {
-    const tokens = words(segment.trim());
+    const tokens = unwrapEnvironmentCommand(words(segment.trim()));
     if (tokens.length === 0) continue;
     const executable = tokens[0].replaceAll("\\", "/").split("/").at(-1)!.toLowerCase();
     const commandOperands = operands(tokens);
@@ -176,8 +204,10 @@ function shellPaths(command: string): Extraction {
       const selected = patchPaths(segment);
       if (selected.length === 0) ambiguous = true;
       paths.push(...selected);
-    } else if (executable === "git" && READ_ONLY_GIT_COMMANDS.has(tokens[1]?.toLowerCase() ?? "")) {
+    } else if (executable === "git" && isReadOnlyGitCommand(tokens)) {
       // Explicitly read-only git subcommands.
+    } else if (/^gh(?:\.exe)?$/u.test(executable) && isRemoteOnlyGitHubCommand(tokens)) {
+      // GitHub Project commands mutate remote state, not project files. Redirections remain gated above.
     } else if (!READ_ONLY_COMMANDS.has(executable)) {
       applies = true;
       ambiguous = true;
