@@ -5,8 +5,13 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { ModelRoutingDeniedError, SortieDogsPlugin } from "../dist/plugin/index.js";
-import { resolvePluginConfiguration } from "../dist/plugin/config.js";
 import {
+  resolvePluginConfiguration,
+  resolvePluginConfigurationSources,
+} from "../dist/plugin/config.js";
+import {
+  DEDICATED_SOL_MODEL,
+  DEDICATED_SOL_ROLES,
   parseModelRoutingConfig,
   resolveModelRoute,
 } from "../dist/plugin/model-routing.js";
@@ -130,6 +135,83 @@ test("model resolver falls back in order and returns structured unresolved failu
       role,
       reason: "unresolved-role",
       attempts: [],
+    });
+  }
+});
+
+test("Mk2A2 routes only dedicated worker roles to Sol with stable fail-closed resolution", () => {
+  const canonicalModel = "provider/canonical";
+  const configured = resolvePluginConfigurationSources(
+    { modelRouting: { implementation: { preferred: { model: canonicalModel } } } },
+    { modelRouting: { remediation: { preferred: { model: canonicalModel } } } },
+    {
+      modelRouting: { "blocker-resolution": { preferred: { model: canonicalModel } } },
+      modelCatalog: { global: [{ model: DEDICATED_SOL_MODEL }, { model: canonicalModel }] },
+    },
+  );
+  assert.equal(configured.kind, "configured");
+  if (configured.kind !== "configured") return;
+
+  const resolveRole = (role: string) => resolveModelRoute({
+    role,
+    local: configured.localModelRouting,
+    global: configured.globalModelRouting,
+    catalog: configured.modelCatalog,
+  });
+  for (const role of DEDICATED_SOL_ROLES) {
+    const expected = {
+      ok: true,
+      role,
+      source: "local",
+      catalog: "global",
+      model: DEDICATED_SOL_MODEL,
+    };
+    assert.deepEqual(configured.modelRouting[role], {
+      preferred: { model: DEDICATED_SOL_MODEL },
+    }, `${role} public route must remain authoritative`);
+    assert.deepEqual(resolveRole(role), expected);
+    assert.deepEqual(resolveModelRoute({
+      role,
+      local: { ...configured.localModelRouting },
+      global: { ...configured.globalModelRouting },
+      catalog: {
+        project: configured.modelCatalog.project === undefined
+          ? undefined
+          : [...configured.modelCatalog.project],
+        global: configured.modelCatalog.global === undefined
+          ? undefined
+          : [...configured.modelCatalog.global],
+      },
+    }), expected, `${role} resume route must remain stable for equivalent fresh input`);
+  }
+  for (const role of ["coordinator", "planning", "reviewer", "scout", "unknown"]) {
+    assert.deepEqual(resolveRole(role), {
+      ok: false,
+      role,
+      reason: "unresolved-role",
+      attempts: [],
+    });
+  }
+
+  const missingSol = {
+    ...configured,
+    modelCatalog: { global: [{ model: canonicalModel }] },
+  };
+  for (const role of DEDICATED_SOL_ROLES) {
+    assert.deepEqual(resolveModelRoute({
+      role,
+      local: missingSol.localModelRouting,
+      global: missingSol.globalModelRouting,
+      catalog: missingSol.modelCatalog,
+    }), {
+      ok: false,
+      role,
+      reason: "unresolved-role",
+      attempts: [{
+        source: "local",
+        target: { model: DEDICATED_SOL_MODEL },
+        reason: "model-unavailable",
+      }],
     });
   }
 });

@@ -1,4 +1,6 @@
 import {
+  DEDICATED_SOL_ROUTING,
+  isDedicatedSolRole,
   parseModelRoutingConfig,
   type CatalogModel,
   type ModelCatalog,
@@ -156,12 +158,20 @@ export function resolvePluginConfigurationSources(
   if (projectLayer === undefined || environmentLayer === undefined || hostLayer === undefined) {
     return { kind: "invalid" };
   }
+  const globalModelRouting = Object.fromEntries(Object.entries({
+    ...(environmentLayer.modelRouting ?? {}),
+    ...(hostLayer.modelRouting ?? {}),
+  }).filter(([role]) => !isDedicatedSolRole(role)));
+  const modelRouting = {
+    ...Object.fromEntries(Object.entries(configured.modelRouting)
+      .filter(([role]) => !isDedicatedSolRole(role))),
+    ...DEDICATED_SOL_ROUTING,
+  };
   return {
     ...configured,
-    localModelRouting: projectLayer.modelRouting ?? {},
-    globalModelRouting: {
-      ...(environmentLayer.modelRouting ?? {}),
-      ...(hostLayer.modelRouting ?? {}),
-    },
+    modelRouting,
+    // Mk2A2 worker policy is authoritative over every configurable layer.
+    localModelRouting: { ...(projectLayer.modelRouting ?? {}), ...DEDICATED_SOL_ROUTING },
+    globalModelRouting,
   };
 }
