@@ -1,7 +1,19 @@
 {
   "name": "sortie-dogs",
   "version": "0.1.1",
-  "private": true,
+  "description": "Bounded, validated orchestration loop plugin for OpenCode",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zufall-upon/Sortie-dogs.git"
+  },
+  "bugs": {
+    "url": "https://github.com/zufall-upon/Sortie-dogs/issues"
+  },
+  "homepage": "https://github.com/zufall-upon/Sortie-dogs#readme",
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "engines": {
     "node": ">=22.6.0"

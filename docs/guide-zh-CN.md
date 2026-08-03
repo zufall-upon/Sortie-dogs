@@ -51,12 +51,12 @@ gate 仍会限制各角色的写入范围。
 通过 canonical validation 和按风险 review 后，coordinator 才会确认完成，并附上说明变更内容与
 验证方法的简洁 evidence。
 
-## 从 v0.1.1 Release 安装
+## 从 npm 安装
 
-在目标项目中直接安装 GitHub Release 公开 asset，再生成项目内 runtime file：
+在目标项目中安装公开 npm package，再生成项目内 runtime file：
 
 ```sh
-npm install --save-dev https://github.com/zufall-upon/Sortie-dogs/releases/download/v0.1.1/sortie-dogs-0.1.1.tgz
+npm install --save-dev sortie-dogs
 npx sortie-dogs init .
 ```
 
