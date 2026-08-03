@@ -2,6 +2,10 @@
 
 **Give OpenCode a task; get a bounded, validated implementation loop instead of an open-ended agent run.**
 
+[![npm](https://img.shields.io/npm/v/sortie-dogs)](https://www.npmjs.com/package/sortie-dogs)
+[![license](https://img.shields.io/npm/l/sortie-dogs)](LICENSE)
+[![Node.js](https://img.shields.io/node/v/sortie-dogs)](https://www.npmjs.com/package/sortie-dogs)
+
 ![Sortie-dogs coordinating a bounded implementation workflow](https://raw.githubusercontent.com/zufall-upon/Sortie-dogs/main/docs/assets/sortie-workflow.gif)
 
 Sortie-dogs is an opt-in OpenCode orchestration plugin. It turns a task into a
@@ -12,6 +16,50 @@ agents and settings.
 Requirements: Node.js 22.6 or newer, npm, and OpenCode.
 
 Guides: [日本語](docs/guide-ja.md) · [简体中文](docs/guide-zh-CN.md)
+
+## Quick start
+
+Install the public npm package and generate the project-local runtime files:
+
+```sh
+npm install --save-dev sortie-dogs
+npx sortie-dogs init .
+```
+
+`dog-coordinator` and `dog-scout` default to `openai/gpt-5.6-luna`. To use a
+different model for both roles, save this as `.opencode/sortie-dogs.json`:
+
+```json
+{
+  "modelRouting": {
+    "dog-coordinator": {
+      "preferred": { "model": "provider/model" }
+    },
+    "dog-scout": {
+      "preferred": { "model": "provider/model" }
+    }
+  },
+  "modelCatalog": {
+    "project": [{ "model": "provider/model" }]
+  }
+}
+```
+
+Replace `provider/model` with a model available to you. Then create
+`.opencode/plugins/sortie-dogs.ts` as the OpenCode plugin bridge:
+
+```ts
+export { SortieDogsPlugin } from "sortie-dogs/plugin";
+```
+
+OpenCode discovers the bridge automatically; no `plugin` entry in
+`opencode.json` is required. Restart OpenCode, then start a task:
+
+```text
+/sortie <task>
+```
+
+Selecting `dog-coordinator` directly also activates the workflow.
 
 ## Why Sortie-dogs
 
@@ -27,6 +75,20 @@ Guides: [日本語](docs/guide-ja.md) · [简体中文](docs/guide-zh-CN.md)
   terminal evidence gate coordinator-owned completion and commits.
 - **Long work can recover.** Restart recovery and bounded compaction continue
   from retained handoff context rather than silently starting over.
+
+## Example run
+
+An illustrative low-risk run stays bounded and reports its gates:
+
+```text
+You: /sortie Add the requested behavior
+dog-coordinator: manifest confirmed
+dog-scout ×3: investigation complete
+dog-worker: implementation complete
+validation: npm test — PASS
+review: skipped — low risk
+dog-coordinator: completion evidence accepted
+```
 
 ## The workflow
 
@@ -62,31 +124,6 @@ gets more complex.
 
 Validation and risk-based review happen before coordinator-owned completion, so
 the result returns with a concise record of what changed and how it was checked.
-
-## Install from npm
-
-Install the public package in the target project, then generate the
-project-local runtime files:
-
-```sh
-npm install --save-dev sortie-dogs
-npx sortie-dogs init .
-```
-
-Create `.opencode/plugins/sortie-dogs.ts` as the OpenCode plugin bridge:
-
-```ts
-export { SortieDogsPlugin } from "sortie-dogs/plugin";
-```
-
-OpenCode discovers the bridge automatically; no `plugin` entry in
-`opencode.json` is required. Restart OpenCode, then start a task:
-
-```text
-/sortie <task>
-```
-
-Selecting `dog-coordinator` directly also activates the workflow.
 
 ## Scope and session guarantees
 
@@ -170,31 +207,7 @@ untouched and initialization stops safely. User-owned configuration—including
 
 ## Safe manual removal
 
-There is no supported Sortie-dogs uninstall command. Removing the npm dependency
-is a separate package-manager operation: run `npm uninstall sortie-dogs` only in
-the directory whose `package.json` declares it. Never delete `package.json` or
-`package-lock.json` to remove the package.
-
-To remove generated runtime files manually, delete only these exact
-Sortie-dogs-owned paths:
-
-```text
-.opencode/agent/dog-coordinator.md
-.opencode/agent/dog-worker.md
-.opencode/agent/dog-scout.md
-.opencode/agent/dog-reviewer.md
-.opencode/agent/dog-advisor.md
-.opencode/command/sortie.md
-.opencode/sortie-dogs.version
-```
-
-Never delete the `.opencode`, `.opencode/agent`, or `.opencode/command`
-directories, and never use a wildcard such as `*.md`. Preserve the standard
-`plan`, `build`, and `builder` agents and every other user-owned file. Do not
-remove `.opencode/sortie-dogs.json`, the plugin bridge, other agents, or OpenCode
-settings as part of runtime-file removal.
-
-The legacy files `.opencode/agent/coordinator-mk2a2.md` and
-`.opencode/agent/sol-worker-mk2a2.md` may be removed only after an old
-Sortie-dogs marker or the content confirms Sortie-dogs ownership. If ownership
-is unclear or a filename is unexpected, stop and inspect instead of deleting.
+There is no supported Sortie-dogs uninstall command. Remove the npm dependency
+separately, then follow the [safe manual removal guide](docs/uninstall.md) to
+delete only Sortie-dogs-owned runtime files without affecting user files or
+standard OpenCode agents.
