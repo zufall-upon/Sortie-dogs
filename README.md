@@ -101,10 +101,17 @@ invent, probe, or translate variants. Variant names must be supplied by the
 provider. Resolution tries the preferred target, then its fallbacks, and rejects
 an explicitly routed role when none appears in the catalog.
 
-## Runtime file maintenance
+## Runtime file maintenance and manual removal
 
-Re-running `npx sortie-dogs init .` is the normal installation and migration
-path. If the generated runtime must be removed manually, delete only these
+Sortie-dogs has no supported uninstall command. Re-running
+`npx sortie-dogs init .` remains the normal installation and migration path.
+
+Removing the npm dependency is a separate operation: run
+`npm uninstall sortie-dogs` in the directory whose `package.json` declares the
+dependency. Never delete `package.json` or `package-lock.json` to remove the
+package.
+
+To remove the generated runtime manually, delete only these exact
 Sortie-dogs-owned files:
 
 ```text
@@ -117,8 +124,17 @@ Sortie-dogs-owned files:
 .opencode/sortie-dogs.version
 ```
 
-Do not delete `.opencode/sortie-dogs.json`, the plugin bridge, other agents, or
-OpenCode settings unless you created them specifically for this installation
-and intend to remove them separately.
+Never delete the `.opencode`, `.opencode/agent`, or `.opencode/command`
+directories, and never use a wildcard such as `*.md`. Preserve the standard
+`plan`, `build`, and `builder` agents and every other user-owned file. Do not
+remove `.opencode/sortie-dogs.json`, the plugin bridge, other agents, or
+OpenCode settings as part of runtime-file removal.
 
-`/sortie --model` and package uninstall behavior are outside the current scope.
+The legacy files `.opencode/agent/coordinator-mk2a2.md` and
+`.opencode/agent/sol-worker-mk2a2.md` may be removed only after their old
+Sortie-dogs marker or content confirms Sortie-dogs ownership. If the marker is
+absent or unknown, or any filename is unexpected, stop and inspect instead of
+deleting it.
+
+This safety guidance does not change installation or migration behavior, or
+the scope of `/sortie --model`.

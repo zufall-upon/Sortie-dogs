@@ -93,8 +93,15 @@ provider model と named variant だけを宣言する。Sortie-dogs は variant
 
 ## 手動削除
 
-通常の更新・移行には `npx sortie-dogs init .` を使う。生成されたランタイムだけを
-手動削除する場合、次の Sortie-dogs 所有ファイルだけを削除する。
+Sortie-dogs に対応済みのアンインストールコマンドはない。通常の更新・移行には引き続き
+`npx sortie-dogs init .` を使う。
+
+npm 依存関係の削除は別操作となる。依存関係を宣言した `package.json` があるディレクトリで
+`npm uninstall sortie-dogs` を実行する。パッケージ削除のために `package.json` や
+`package-lock.json` を削除してはならない。
+
+生成されたランタイムを手動削除する場合、次の Sortie-dogs 所有ファイルだけを正確な
+パスで削除する。
 
 ```text
 .opencode/agent/dog-coordinator.md
@@ -106,5 +113,14 @@ provider model と named variant だけを宣言する。Sortie-dogs は variant
 .opencode/sortie-dogs.version
 ```
 
-`.opencode/sortie-dogs.json`、プラグインブリッジ、他のエージェント、OpenCode 設定は
-削除しない。それらをこの導入専用に自分で作成し、別途削除する意図がある場合だけ対象にする。
+`.opencode`、`.opencode/agent`、`.opencode/command` の各ディレクトリを削除してはならない。
+`*.md` のようなワイルドカードも使用しない。標準の `plan`、`build`、`builder` エージェントと、
+その他すべてのユーザー所有ファイルを残す。ランタイムファイルの削除時には
+`.opencode/sortie-dogs.json`、プラグインブリッジ、他のエージェント、OpenCode 設定を削除しない。
+
+旧ファイル `.opencode/agent/coordinator-mk2a2.md` と
+`.opencode/agent/sol-worker-mk2a2.md` は、旧 Sortie-dogs マーカーまたは内容から
+Sortie-dogs 所有と確認できる場合だけ削除できる。マーカーがない、判別できない、または
+想定外のファイル名がある場合、削除を中止して内容を確認する。
+
+この安全上の説明は、導入・移行の動作や `/sortie --model` の対象範囲を変更しない。

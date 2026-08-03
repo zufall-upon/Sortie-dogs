@@ -90,8 +90,13 @@ preferred，再按声明顺序尝试 fallback。若显式路由角色的所有�
 
 ## 手动删除
 
-正常更新和迁移应使用 `npx sortie-dogs init .`。如需仅手动删除生成的运行时，请只删除
-以下 Sortie-dogs 自有文件：
+Sortie-dogs 没有受支持的卸载命令。正常更新和迁移仍应使用
+`npx sortie-dogs init .`。
+
+删除 npm 依赖是另一项操作：请在声明该依赖的 `package.json` 所在目录中运行
+`npm uninstall sortie-dogs`。切勿通过删除 `package.json` 或 `package-lock.json` 来移除包。
+
+如需手动删除生成的运行时，请仅按准确路径删除以下 Sortie-dogs 自有文件：
 
 ```text
 .opencode/agent/dog-coordinator.md
@@ -103,5 +108,13 @@ preferred，再按声明顺序尝试 fallback。若显式路由角色的所有�
 .opencode/sortie-dogs.version
 ```
 
-不要删除 `.opencode/sortie-dogs.json`、插件桥接文件、其他智能体或 OpenCode 设置。
-只有在这些文件或设置由你专门为本次安装创建，且你明确计划另行移除时，才应处理它们。
+切勿删除 `.opencode`、`.opencode/agent` 或 `.opencode/command` 目录，也不要使用 `*.md`
+之类的通配符。必须保留标准的 `plan`、`build`、`builder` 智能体以及所有其他用户文件。
+删除运行时文件时，不要删除 `.opencode/sortie-dogs.json`、插件桥接文件、其他智能体或
+OpenCode 设置。
+
+只有在旧 Sortie-dogs 标记或文件内容能够确认归属时，才可删除旧文件
+`.opencode/agent/coordinator-mk2a2.md` 和 `.opencode/agent/sol-worker-mk2a2.md`。
+若标记缺失、归属不明或出现非预期文件名，请停止删除并检查文件。
+
+这些安全说明不会改变安装或迁移行为，也不会改变 `/sortie --model` 的适用范围。
