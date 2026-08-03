@@ -41,11 +41,11 @@ test("fresh init installs every runtime asset and preserves project settings", a
     const result = await initializeProject(project);
 
     assert.equal(result.status, "installed");
-    assert.equal(result.version, "0.2.0-card02");
+    assert.equal(result.version, "0.2.0-card04");
     for (const asset of runtimeAssets) {
       assert.equal(await readFile(join(project, ".opencode", asset.installPath), "utf8"), asset.content);
     }
-    assert.equal(await readFile(join(project, MARKER), "utf8"), "0.2.0-card02\n");
+    assert.equal(await readFile(join(project, MARKER), "utf8"), "0.2.0-card04\n");
     assert.equal(await readFile(config, "utf8"), "{\"userSetting\":true}\n");
   } finally {
     await clean(project);
@@ -74,7 +74,7 @@ test("conflicts fail closed and leave existing content untouched", async () => {
   const project = await fixtureDirectory();
   try {
     const conflict = join(project, ".opencode", runtimeAssets[0].installPath);
-    await mkdir(join(project, ".opencode", "agents"), { recursive: true });
+    await mkdir(join(project, ".opencode", "agent"), { recursive: true });
     await writeFile(conflict, "user-owned\n");
 
     await assert.rejects(initializeProject(project), (error: unknown) => {
@@ -96,7 +96,7 @@ test("symlinked install paths fail before writing runtime files", async (context
   try {
     await mkdir(join(project, ".opencode"));
     try {
-      await symlink(outside, join(project, ".opencode", "agents"), "dir");
+      await symlink(outside, join(project, ".opencode", "agent"), "dir");
     } catch (error) {
       if (["EPERM", "EACCES"].includes((error as NodeJS.ErrnoException).code ?? "")) {
         context.skip("Directory symlinks are unavailable in this environment.");
@@ -145,12 +145,12 @@ test("CLI init supports an explicit project root, repeated init, and help", asyn
     });
     assert.deepEqual(await runCli(["init", project]), {
       exit: 0,
-      stdout: "Initialized Sortie-dogs 0.2.0-card02.\n",
+      stdout: "Initialized Sortie-dogs 0.2.0-card04.\n",
       stderr: "",
     });
     assert.deepEqual(await runCli(["init", project]), {
       exit: 0,
-      stdout: "Sortie-dogs 0.2.0-card02 is already initialized.\n",
+      stdout: "Sortie-dogs 0.2.0-card04 is already initialized.\n",
       stderr: "",
     });
   } finally {

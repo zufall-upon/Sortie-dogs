@@ -76,14 +76,40 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.deepEqual(
       loaded.runtimeAssets.map(({ name, installPath }) => ({ name, installPath })),
       [
-        { name: "coordinator-mk2a2", installPath: "agents/coordinator-mk2a2.md" },
-        { name: "sol-worker-mk2a2", installPath: "agents/sol-worker-mk2a2.md" },
-        { name: "sortie", installPath: "commands/sortie.md" },
+        { name: "coordinator-mk2a2", installPath: "agent/coordinator-mk2a2.md" },
+        { name: "sol-worker-mk2a2", installPath: "agent/sol-worker-mk2a2.md" },
+        { name: "sortie", installPath: "command/sortie.md" },
       ],
     );
 
+    const coordinator = loaded.runtimeAssets.find(({ name }) => name === "coordinator-mk2a2");
+    const sortie = loaded.runtimeAssets.find(({ name }) => name === "sortie");
+    assert.ok(coordinator);
+    assert.ok(sortie);
+
+    assert.match(coordinator.content, /only user-facing agent/i);
+    assert.match(coordinator.content, /before any edit/i);
+    assert.match(coordinator.content, /no more than three lines/i);
+    assert.match(coordinator.content, /canonical MkII order/i);
+    assert.match(coordinator.content, /all required context inline/i);
+    assert.match(coordinator.content, /never invoke the build\s+agent or any alternate coordinator/i);
+
+    assert.match(sortie.content, /preflight the current project/i);
+    assert.match(sortie.content, /\.opencode\/sortie-dogs\.version/i);
+    assert.match(sortie.content, /\.opencode\/agent\/coordinator-mk2a2\.md/i);
+    assert.match(sortie.content, /\.opencode\/agent\/sol-worker-mk2a2\.md/i);
+    assert.match(sortie.content, /\.opencode\/command\/sortie\.md/i);
+    assert.match(sortie.content, /gather the inline task entry context/i);
+    assert.match(sortie.content, /\$ARGUMENTS/);
+    const sortieFrontmatter = sortie.content.match(/^---\r?\n([\s\S]+?)\r?\n---\r?\n/);
+    assert.ok(sortieFrontmatter);
+    const routeLines = sortieFrontmatter[1].match(/^agent:\s*.+$/gmu) ?? [];
+    assert.deepEqual(routeLines, ["agent: coordinator-mk2a2"]);
+    assert.doesNotMatch(sortieFrontmatter[1], /^agent:\s*(?:build|alternate-coordinator)\s*$/imu);
+    assert.match(sortie.content, /single coordinator transfer/i);
+
     for (const asset of loaded.runtimeAssets) {
-      assert.equal(asset.version, "0.2.0-card02");
+      assert.equal(asset.version, "0.2.0-card04");
       const frontmatter = asset.content.match(/^---\r?\n([\s\S]+?)\r?\n---\r?\n/);
       assert.ok(frontmatter, `${asset.name} must have frontmatter`);
       const entries = Object.fromEntries(
