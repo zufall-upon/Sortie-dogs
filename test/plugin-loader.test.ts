@@ -175,6 +175,23 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(resumedHandoff[1], /next_action:/);
     assert.doesNotMatch(resumedHandoff[1], /project_root:|command:\s*</);
 
+    const restartRecovery = coordinator.content.match(
+      /RESTART_RECOVERY_FIXTURE\r?\n([\s\S]+?)\r?\nEND_RESTART_RECOVERY_FIXTURE/,
+    );
+    assert.ok(restartRecovery, "coordinator needs restart recovery policy");
+    assert.match(
+      restartRecovery[1],
+      /reconstruction:\s*project-local durable artifacts \+ latest bounded handoff\/checkpoint/,
+    );
+    assert.match(restartRecovery[1], /preserve:\s*\[source_manifest, operation_manifest, validation_history\]/);
+    assert.match(
+      restartRecovery[1],
+      /validation_history_entry:\s*\{ command: <exact command>, exit: <exit>, fingerprint: <concise fingerprint> \}/,
+    );
+    assert.match(restartRecovery[1], /resume_route:\s*coordinator-mk2a2 -> sol-worker-mk2a2/);
+    assert.match(restartRecovery[1], /user_route:\s*coordinator-mk2a2 only/);
+    assert.match(coordinator.content, /do not repeat a recorded successful validation unless\s+relevant source changed/i);
+
     const batchContinuation = coordinator.content.match(
       /BATCH_CONTINUATION_FIXTURE\r?\n([\s\S]+?)\r?\nEND_BATCH_CONTINUATION_FIXTURE/,
     );
@@ -530,6 +547,16 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.deepEqual(routeLines, ["agent: coordinator-mk2a2"]);
     assert.doesNotMatch(sortieFrontmatter[1], /^agent:\s*(?:build|alternate-coordinator)\s*$/imu);
     assert.match(sortie.content, /single coordinator transfer/i);
+    assert.match(
+      sortie.content,
+      /restart or re-entry[\s\S]+project-local\s+durable artifacts plus the latest bounded handoff or checkpoint/i,
+    );
+    assert.match(
+      sortie.content,
+      /preserve its source_manifest,\s+operation_manifest, and ordered validation history/i,
+    );
+    assert.match(sortie.content, /resume the same task through\s+coordinator-mk2a2/i);
+    assert.match(sortie.content, /do not route a worker directly to the user/i);
 
     for (const asset of loaded.runtimeAssets) {
       assert.equal(asset.version, "0.2.0-card04");

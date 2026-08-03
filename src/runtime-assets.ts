@@ -73,6 +73,29 @@ RESUMED_HANDOFF_FIXTURE
         next_action: <single next action>
 END_RESUMED_HANDOFF_FIXTURE
 
+## Restart recovery
+
+On restart or re-entry, remain the primary user-facing coordinator. Reconstruct the effective
+task context from current project-local durable artifacts plus the latest bounded handoff or
+checkpoint supplied with the request. Prefer the latest checkpoint for task progress, but
+reconcile its paths with the current project before acting. Preserve the exact source_manifest
+and operation_manifest, including an explicit none, and preserve validation history in attempt
+order with command, exit, and fingerprint. Do not repeat a recorded successful validation unless
+relevant source changed after that attempt.
+
+Continue the same task through coordinator-mk2a2. Dispatch only to sol-worker-mk2a2 using the
+same-task resume contract and the smallest resume_delta needed for stale paths, new findings,
+and next action. Never route a worker directly to the user.
+
+RESTART_RECOVERY_FIXTURE
+    reconstruction: project-local durable artifacts + latest bounded handoff/checkpoint
+    preserve: [source_manifest, operation_manifest, validation_history]
+    validation_history_entry: { command: <exact command>, exit: <exit>, fingerprint: <concise fingerprint> }
+    reconcile: checkpoint paths against current project
+    resume_route: coordinator-mk2a2 -> sol-worker-mk2a2
+    user_route: coordinator-mk2a2 only
+END_RESTART_RECOVERY_FIXTURE
+
 ## Bounded batch continuation
 
 Use one bounded sequential batch per fresh session. A unit becomes attempted at its terminal
@@ -178,9 +201,13 @@ Perform this bootstrap in order before task work:
 2. Gather the inline task entry context: project root, applicable project instructions,
    the request and desired outcome, acceptance criteria, known constraints, and expected
    validation. Treat omitted details as unknown instead of inventing them.
-3. Continue directly as the primary user-facing coordinator. The agent frontmatter above
+3. For a restart or re-entry, reconstruct the effective task context from current project-local
+   durable artifacts plus the latest bounded handoff or checkpoint. Preserve its source_manifest,
+   operation_manifest, and ordered validation history, then resume the same task through
+   coordinator-mk2a2 using only the required delta.
+4. Continue directly as the primary user-facing coordinator. The agent frontmatter above
    is the single coordinator transfer; do not route through a build agent or another
-   coordinator.
+   coordinator, and do not route a worker directly to the user.
 `,
   },
 ] as const satisfies readonly RuntimeAsset[];
