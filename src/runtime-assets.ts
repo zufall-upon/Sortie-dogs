@@ -98,6 +98,7 @@ END_RESTART_RECOVERY_FIXTURE
 
 ## Bounded batch continuation
 
+This normal bounded-batch section applies only while backlogDrain.enabled=false.
 Use one bounded sequential batch per fresh session. A unit becomes attempted at its terminal
 handoff, and only a successful coordinator commit makes it done. Record a Project status
 checkpoint for every terminal unit. A blocked unit records its blocker with a concrete needed
@@ -105,6 +106,7 @@ action, then continuation proceeds to the next independent unit. Only a whole-ba
 a user question stops the batch early.
 
 BATCH_CONTINUATION_FIXTURE
+    scope: backlogDrain.enabled=false; mode=normal bounded batch
     fresh_session: max_units=3; batchAttempted=0; batchDone=0
     order: sequential
     unit_N_plus_1_start: only after unit N terminal handoff
@@ -115,6 +117,40 @@ BATCH_CONTINUATION_FIXTURE
     early_stop: only whole-batch blocker or user question
     fourth_unit: rejected
 END_BATCH_CONTINUATION_FIXTURE
+
+Backlog drain is a configurable, explicit opt-in only. Unless the task entry sets
+backlogDrain.enabled to true and supplies a positive backlogDrain.maxUnits guard, use the
+unchanged bounded batch above with batchTarget=3. Drain mode remains sequential and keeps the
+same worker handoff, manifest, validation, review, checkpoint, and coordinator-owned commit
+gates for every unit.
+
+At drain start and after each compact resume, inventory all non-Done Project items. Request
+items(first:100), inspect pageInfo, and continue from endCursor while hasNextPage is true; never
+treat a first page or a capped count as complete inventory. Select the next independent item
+from that complete inventory. After each terminal handoff and checkpoint, compact the context,
+resume through coordinator-mk2a2, reinventory, and continue until a stop condition applies.
+Track a progress fingerprint from the completed inventory and terminal outcomes. Stop rather
+than loop when a full resume cycle changes neither inventory nor outcomes, when user input is
+required, when a proven external blocker prevents the drain, or before attempted units would
+exceed backlogDrain.maxUnits. The attempted-unit count survives every compact resume, is carried
+in both the Project checkpoint and resume_delta, and never resets during the drain run; the max
+guard counts attempted units across that whole run. A blocked item alone does not stop
+independent work.
+
+BACKLOG_DRAIN_FIXTURE
+    default_config: batchTarget=3; backlogDrain.enabled=false
+    opt_in_required: backlogDrain.enabled=true; backlogDrain.maxUnits=<positive integer>
+    execution: sequential; coordinator_authority=unchanged; per_unit_gates=unchanged
+    inventory_page_1: items(first:100)
+    inventory_next_page: while pageInfo.hasNextPage; after=pageInfo.endCursor
+    inventory_filter: include every item whose status is not Done
+    continuation: terminal handoff -> Project checkpoint -> compact resume -> complete reinventory
+    attempted_count: survive every compact resume; carry in Project checkpoint and resume_delta
+    max_guard_scope: count attempted units across the whole drain run; never reset on resume
+    progress: compare complete inventory and terminal outcomes across a full resume cycle
+    stop: no progress | user decision | proven external blocker | backlogDrain.maxUnits reached
+    blocked_item: continue with next independent item
+END_BACKLOG_DRAIN_FIXTURE
 
 Choose manifests by mutation type. Source-changing work requires an exact source_manifest;
 operational work requires an exact operation_manifest describing targets and mutations. Mark

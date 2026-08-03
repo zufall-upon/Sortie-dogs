@@ -196,6 +196,10 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       /BATCH_CONTINUATION_FIXTURE\r?\n([\s\S]+?)\r?\nEND_BATCH_CONTINUATION_FIXTURE/,
     );
     assert.ok(batchContinuation, "coordinator needs bounded batch continuation policy");
+    assert.match(
+      batchContinuation[1],
+      /scope:\s*backlogDrain\.enabled=false; mode=normal bounded batch/,
+    );
     assert.match(batchContinuation[1], /fresh_session:\s*max_units=3; batchAttempted=0; batchDone=0/);
     assert.match(batchContinuation[1], /order:\s*sequential/);
     assert.match(batchContinuation[1], /unit_N_plus_1_start:\s*only after unit N terminal handoff/);
@@ -209,6 +213,42 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(batchContinuation[1], /fourth_unit:\s*rejected/);
     assert.match(batchContinuation[1], /noncomplete_handoff:\s*exact next action required/);
     assert.match(batchContinuation[1], /completed handoff:\s*completion evidence required/);
+
+    const backlogDrain = coordinator.content.match(
+      /BACKLOG_DRAIN_FIXTURE\r?\n([\s\S]+?)\r?\nEND_BACKLOG_DRAIN_FIXTURE/,
+    );
+    assert.ok(backlogDrain, "coordinator needs an explicit backlog-drain policy");
+    assert.match(backlogDrain[1], /default_config:\s*batchTarget=3; backlogDrain\.enabled=false/);
+    assert.match(
+      backlogDrain[1],
+      /opt_in_required:\s*backlogDrain\.enabled=true; backlogDrain\.maxUnits=<positive integer>/,
+    );
+    assert.match(backlogDrain[1], /execution:\s*sequential; coordinator_authority=unchanged; per_unit_gates=unchanged/);
+    assert.match(backlogDrain[1], /inventory_page_1:\s*items\(first:100\)/);
+    assert.match(
+      backlogDrain[1],
+      /inventory_next_page:\s*while pageInfo\.hasNextPage; after=pageInfo\.endCursor/,
+    );
+    assert.match(backlogDrain[1], /inventory_filter:\s*include every item whose status is not Done/);
+    assert.match(
+      backlogDrain[1],
+      /continuation:\s*terminal handoff -> Project checkpoint -> compact resume -> complete reinventory/,
+    );
+    assert.match(
+      backlogDrain[1],
+      /attempted_count:\s*survive every compact resume; carry in Project checkpoint and resume_delta/,
+    );
+    assert.match(
+      backlogDrain[1],
+      /max_guard_scope:\s*count attempted units across the whole drain run; never reset on resume/,
+    );
+    assert.match(backlogDrain[1], /progress:\s*compare complete inventory and terminal outcomes across a full resume cycle/);
+    assert.match(
+      backlogDrain[1],
+      /stop:\s*no progress \| user decision \| proven external blocker \| backlogDrain\.maxUnits reached/,
+    );
+    assert.match(backlogDrain[1], /blocked_item:\s*continue with next independent item/);
+    assert.doesNotMatch(coordinator.content, /\b(?:PVT|PVTI|PVTSF|PVTSSF)_[A-Za-z0-9]+\b/);
 
     const manifestScope = coordinator.content.match(
       /MANIFEST_SCOPE_FIXTURE\r?\n([\s\S]+?)\r?\nEND_MANIFEST_SCOPE_FIXTURE/,
