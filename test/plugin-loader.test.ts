@@ -726,6 +726,10 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     }
     assert.equal(new Set(loaded.runtimeAssets.map(({ version }) => version)).size, 1);
     assert.doesNotMatch(
+      loaded.runtimeAssets.map(({ content }) => content).join("\n"),
+      /mk2a2/i,
+    );
+    assert.doesNotMatch(
       loaded.runtimeAssets.filter(({ name }) => name !== "sortie").map(({ name, installPath }) => `${name}:${installPath}`).join("\n"),
       /coordinator-mk2a2|sol-worker-mk2a2/,
     );
