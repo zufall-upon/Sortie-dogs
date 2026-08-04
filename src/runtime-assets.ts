@@ -98,8 +98,9 @@ evidence to the same dog-worker with role=blocker-resolution so the worker fixes
 On resume, retain scoutAttempted and scoutRevision. The same revision may never fan out twice, even
 when stale_paths are present. A stale_paths entry permits one retry on a new revision only when it
 actually invalidates the prior manifest, validation, or owner. An unrelated or merely listed stale
-path never resets Scout state or authorizes a retry. Record scoutAttempted, scoutRevision, and the
-exact skip or retry reason in both checkpoint decisions[] and resume_delta. Supplied known_paths
+path never resets Scout state or authorizes a retry. Record scoutAttempted, scoutRevision, blocker
+owner, and the exact skip or retry reason in the initial worker handoff, checkpoint decisions[], and
+resume_delta. Supplied known_paths
 remain the worker read boundary when no Scout read occurs.
 
 SCOUT_SKIP_FIXTURE
@@ -112,7 +113,7 @@ SCOUT_SKIP_FIXTURE
     unresolved_action: route same dog-worker with role=blocker-resolution
     retry_guard: new revision + stale_paths that actually invalidate manifest, validation, or owner
     unrelated_stale_path: retain scoutAttempted; no retry
-    audit: checkpoint decisions[] and resume_delta record scoutAttempted + scoutRevision + exact skip or retry reason
+    provenance: worker handoff + checkpoint decisions[] + resume_delta record scoutAttempted + scoutRevision + blocker owner + exact skip or retry reason
     known_paths: worker read boundary even without Scout read
     action: route directly to dog-worker
 END_SCOUT_SKIP_FIXTURE
@@ -173,6 +174,7 @@ INITIAL_HANDOFF_FIXTURE
       known_facts: [<task-relevant fact>]
       known_paths: [<up to 4 exact paths>]
       relevant_constraints: [<applicable instruction>]
+      scout: { attempted: <candidate boolean>, revision: <candidate revision>, blocker_owner: <fixed owner>, reason: <exact skip or fan-out reason> }
       resume_delta: none
     source_manifest: [<declared source path>]
     operation_manifest: none
@@ -187,14 +189,12 @@ RESUMED_HANDOFF_FIXTURE
     task_id: task-06
     context_digest:
       mode: same-task-resume
-      preserve: [acceptance, role, validation, known_facts, relevant_constraints, source_manifest]
+      preserve: [acceptance, role, validation, known_facts, relevant_constraints, source_manifest, operation_manifest]
       resume_delta:
         stale_paths: [<path changed since checkpoint>]
         new_findings: [<new fact>]
         previous_exit: <exit and concise fingerprint>
-        scoutAttempted: <preserved candidate boolean>
-        scoutRevision: <preserved candidate revision>
-        scout_reason: <exact skip or retry reason>
+        scout: { attempted: <preserved candidate boolean>, revision: <preserved candidate revision>, blocker_owner: <preserved owner>, reason: <exact skip or retry reason> }
         next_action: <single next action>
 END_RESUMED_HANDOFF_FIXTURE
 
@@ -357,7 +357,9 @@ USER_QUESTION_FIXTURE
 END_USER_QUESTION_FIXTURE
 
 A recoverable write-gate denial is a local activation or handoff defect, not a terminal candidate
-and not a user question. Create the operation manifest before Task dispatch. The Task activates only
+and not a user question. For operational work, create the operation manifest before Task dispatch.
+For source-only work, keep operation_manifest=none, authorize only the exact source_manifest, and do
+not invent or bind an operation manifest. The Task activates only
 the child session; Task return/session.idle performs authoritative handoff inspection, then the
 coordinator resumes that same child session before sortie_bind_write_gate. Reading the handoff alone
 never records inspection, activates a session, grants a write gate, or authorizes mutation. The
@@ -377,7 +379,8 @@ RECOVERABLE_HANDSHAKE_FIXTURE
     attempt_limit: after the same session-inactive bind failure twice, continue blocker-resolution as a local handoff defect
     inactive_inspection: Read alone never counts; file.edited or session.idle is authoritative
     inactive_authorization: session activation denied; write gate denied; mutation denied
-    worker_return: structured response to dog-coordinator; terminal and question forbidden
+    worker_return: structured denial unchanged + bounded candidate provenance to dog-coordinator; terminal and question forbidden
+    provenance: { task_id: <stable task id>, manifest: { source_manifest: <exact entries or none>, operation_manifest: <exact path or none> }, validation: [{ command: <exact command>, exit: <exit>, fingerprint: <concise fingerprint> }] | [], scout: { attempted: <boolean>, revision: <revision>, blocker_owner: <owner>, reason: <exact decision reason> } }
     handoff_mismatch: dog-coordinator regenerates registered handoff; worker never rewrites it
     safe_rebind: same manifest hash + mtime after reread -> idempotent bound
     stale_rebind: changed path, hash, or mtime -> deny and require new candidate session
@@ -454,9 +457,10 @@ An undeclared write or mutation must be reported as rejected, not performed.
 TERMINAL_EVIDENCE_FIXTURE
     status: DONE | BLOCKED | NEED_DECISION
     task_id: <stable task id>
-    manifest: <entries touched>
+    manifest: { source_manifest: <exact entries or none>, operation_manifest: <exact path or none> }
     decisions: [<autonomous decision>]
     validation: [{ command: <exact command>, exit: <exit>, fingerprint: <concise fingerprint> }]
+    scout: { attempted: <boolean>, revision: <revision>, blocker_owner: <owner>, reason: <exact decision reason> }
     raw_status: <unmodified status evidence>
     diff: <concise diff summary>
     stale_paths: [<path or none>]
@@ -484,9 +488,12 @@ Execute the supplied manifest within its acceptance criteria, run the requested 
 and return concise change and validation evidence only to dog-coordinator. Do not act as the
 user-facing coordinator.
 
-Before Task, require the candidate operation manifest. After child activation and Task return/session.idle,
-resume the same child session, then call sortie_bind_write_gate with the candidate project_root and
-project-relative operation manifest path. Treat a denied bind as fail-closed for mutation;
+Before Task, require the applicable exact manifest and an explicit none for the unused manifest. For
+source-only work with operation_manifest=none, never invent an operation manifest or call
+sortie_bind_write_gate; constrain every source write to source_manifest. For operational work, after
+child activation and Task return/session.idle, resume the same child session, then call
+sortie_bind_write_gate with the candidate project_root and project-relative operation manifest path.
+Treat a denied bind as fail-closed for mutation;
 never use file.edited or session.idle as implicit authorization. Do not retry the same validation
 command after the same failure phase occurs twice. Never stage outside exact manifest paths, use
 git add -A, amend, push, or perform coordinator-owned commit work.
@@ -499,7 +506,9 @@ reporting an external blocker. A confirmed
 idempotent bound result may continue; a changed manifest binding remains fail-closed. Only
 dog-coordinator may regenerate a mismatched handoff; never rewrite it as the worker.
 
-Every denied bind includes a machine-readable escalation. Return it unchanged. Only a recoverable
+Every denied bind includes a machine-readable escalation. Return it unchanged together with bounded
+candidate provenance from the effective handoff: task_id, both manifest values, ordered canonical
+validation command/exit/fingerprint evidence, and Scout attempted/revision/blocker owner/reason. Only a recoverable
 denial with resume_session=true authorizes blocker-resolution takeover on the same solSession. For
 a nonrecoverable denial, follow its existing remedy and never same-session resume. When a normal
 worker return is BLOCKED without TRUE_BLOCKER, dog-coordinator resumes the same solSession with

@@ -351,6 +351,10 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(initialHandoff[1], /known_facts:/);
     assert.match(initialHandoff[1], /known_paths:\s*\[<up to 4 exact paths>\]/);
     assert.match(initialHandoff[1], /relevant_constraints:/);
+    assert.match(
+      initialHandoff[1],
+      /scout:\s*\{ attempted: <candidate boolean>, revision: <candidate revision>, blocker_owner: <fixed owner>, reason: <exact skip or fan-out reason> \}/,
+    );
     assert.match(initialHandoff[1], /resume_delta:\s*none/);
     assert.match(initialHandoff[1], /source_manifest:/);
     assert.match(initialHandoff[1], /operation_manifest:\s*none/);
@@ -360,14 +364,18 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     );
     assert.ok(resumedHandoff, "coordinator needs a same-task resume fixture");
     assert.match(resumedHandoff[1], /mode:\s*same-task-resume/);
-    assert.match(resumedHandoff[1], /preserve:\s*\[acceptance, role, validation, known_facts,/);
+    assert.match(
+      resumedHandoff[1],
+      /preserve:\s*\[acceptance, role, validation, known_facts, relevant_constraints, source_manifest, operation_manifest\]/,
+    );
     assert.match(resumedHandoff[1], /resume_delta:/);
     assert.match(resumedHandoff[1], /stale_paths:/);
     assert.match(resumedHandoff[1], /new_findings:/);
     assert.match(resumedHandoff[1], /previous_exit:/);
-    assert.match(resumedHandoff[1], /scoutAttempted:\s*<preserved candidate boolean>/);
-    assert.match(resumedHandoff[1], /scoutRevision:\s*<preserved candidate revision>/);
-    assert.match(resumedHandoff[1], /scout_reason:\s*<exact skip or retry reason>/);
+    assert.match(
+      resumedHandoff[1],
+      /scout:\s*\{ attempted: <preserved candidate boolean>, revision: <preserved candidate revision>, blocker_owner: <preserved owner>, reason: <exact skip or retry reason> \}/,
+    );
     assert.match(resumedHandoff[1], /next_action:/);
     assert.doesNotMatch(resumedHandoff[1], /project_root:|command:\s*</);
 
@@ -400,7 +408,10 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(scoutSkip[1], /route same dog-worker with role=blocker-resolution/);
     assert.match(scoutSkip[1], /new revision \+ stale_paths that actually invalidate manifest, validation, or owner/);
     assert.match(scoutSkip[1], /unrelated_stale_path:\s*retain scoutAttempted; no retry/);
-    assert.match(scoutSkip[1], /checkpoint decisions\[\] and resume_delta record scoutAttempted \+ scoutRevision \+ exact skip or retry reason/);
+    assert.match(
+      scoutSkip[1],
+      /worker handoff \+ checkpoint decisions\[\] \+ resume_delta record scoutAttempted \+ scoutRevision \+ blocker owner \+ exact skip or retry reason/,
+    );
     assert.match(scoutSkip[1], /known_paths:\s*worker read boundary even without Scout read/);
     assert.match(scoutSkip[1], /action:\s*route directly to dog-worker/);
 
@@ -621,6 +632,10 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(manifestScope[1], /rejected:\s*write src\/undeclared\.ts -> fail closed before mutation/);
     assert.match(coordinator.content, /operational work requires an exact operation_manifest/i);
     assert.match(coordinator.content, /undeclared write or mutation must be reported as rejected/i);
+    assert.match(
+      coordinator.content,
+      /source-only work, keep operation_manifest=none,[\s\S]{0,180}?do\s+not invent or bind an operation manifest/i,
+    );
     const writeGateHandoff = coordinator.content.match(
       /WRITE_GATE_HANDOFF_FIXTURE\r?\n([\s\S]+?)\r?\nEND_WRITE_GATE_HANDOFF_FIXTURE/,
     );
@@ -643,6 +658,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       "manifest",
       "decisions",
       "validation",
+      "scout",
       "raw_status",
       "diff",
       "stale_paths",
@@ -651,7 +667,33 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     ]) {
       assert.match(terminalEvidence[1], new RegExp(`^\\s*${field}:`, "m"));
     }
+    assert.match(
+      terminalEvidence[1],
+      /manifest:\s*\{ source_manifest: <exact entries or none>, operation_manifest: <exact path or none> \}/,
+    );
     assert.match(terminalEvidence[1], /validation:\s*\[\{ command: <exact command>, exit: <exit>, fingerprint: <concise fingerprint> \}\]/);
+    assert.match(
+      terminalEvidence[1],
+      /scout:\s*\{ attempted: <boolean>, revision: <revision>, blocker_owner: <owner>, reason: <exact decision reason> \}/,
+    );
+    assert.match(
+      worker.content,
+      /source-only work with operation_manifest=none,[\s\S]{0,180}?never invent an operation manifest or call\s+sortie_bind_write_gate[\s\S]{0,180}?every source write to source_manifest/i,
+    );
+    assert.match(
+      worker.content,
+      /Return it unchanged together with bounded\s+candidate provenance[\s\S]{0,180}?task_id, both manifest values, ordered canonical\s+validation command\/exit\/fingerprint evidence, and Scout attempted\/revision\/blocker owner\/reason/i,
+    );
+
+    const recoverableHandshake = coordinator.content.match(
+      /RECOVERABLE_HANDSHAKE_FIXTURE\r?\n([\s\S]+?)\r?\nEND_RECOVERABLE_HANDSHAKE_FIXTURE/,
+    );
+    assert.ok(recoverableHandshake, "coordinator needs recoverable denial provenance");
+    assert.match(recoverableHandshake[1], /structured denial unchanged \+ bounded candidate provenance/);
+    assert.match(
+      recoverableHandshake[1],
+      /provenance:\s*\{ task_id: <stable task id>, manifest: \{ source_manifest: <exact entries or none>, operation_manifest: <exact path or none> \}, validation: \[\{ command: <exact command>, exit: <exit>, fingerprint: <concise fingerprint> \}\] \| \[\], scout: \{ attempted: <boolean>, revision: <revision>, blocker_owner: <owner>, reason: <exact decision reason> \} \}/,
+    );
 
     const gatePolicy = coordinator.content.match(
       /GATE_POLICY_FIXTURE\r?\n([\s\S]+?)\r?\nEND_GATE_POLICY_FIXTURE/,
