@@ -95,6 +95,8 @@ interface LoadedConfiguration {
   gate?: WriteGate;
   manifest?: OperationManifest;
   operationManifestPath: string;
+  operationManifestAbsolutePath?: string;
+  manifestFingerprint?: string;
   handoffPaths: readonly string[];
   modelRoutingHook?: OpenCodeChatMessageHook;
 }
@@ -106,7 +108,10 @@ interface InspectionCacheEntry {
 
 interface SessionAuthorization {
   gate: WriteGate;
+  contractFingerprint: string;
   expiresAt: number;
+  handoffPath: string;
+  manifestPath: string;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -235,16 +240,18 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         if (parsed.kind === "invalid") throw new WriteDeniedError("manifest-unavailable", "<unknown>");
         loaded = loadConfigured(parsed, input.worktree ?? project.root);
         const manifestPath = await project.toRelativePath(loaded.operationManifestPath);
-        const manifestValue = await readJson(project.absolute(manifestPath), INPUT_LIMITS.manifest);
+        loaded.operationManifestAbsolutePath = project.absolute(manifestPath);
+        const manifestValue = await readJson(loaded.operationManifestAbsolutePath, INPUT_LIMITS.manifest);
         const validation = validateOperationManifestSchema(manifestValue);
         if (!validation.ok) throw new WriteDeniedError("manifest-unavailable", "<unknown>");
         loaded.manifest = validation.value;
+        loaded.manifestFingerprint = inspectionFingerprint(validation.value, undefined);
         loaded.gate = await createWriteGate(project, validation.value);
         loadFailure = undefined;
       } catch (error) {
         loadFailure = error;
       } finally {
-        if (loaded?.gate === undefined) loading = undefined;
+        loading = undefined;
       }
     })();
     return loading;
@@ -252,7 +259,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
 
   const inspected = new Map<string, InspectionCacheEntry>();
   const sessionAuthorizations = new Map<string, SessionAuthorization>();
+  const handoffBoundSessions = new Set<string>();
   const activeSessions = new Set<string>();
+  let loadedGateRefresh: Promise<WriteGate | undefined> | undefined;
 
   async function inspect(path: string, sessionID: string | undefined): Promise<void> {
     await ensureLoaded();
@@ -263,7 +272,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       ? resolve(path)
       : resolve(input.worktree ?? project.root, path);
     if (!loaded.handoffPaths.includes(absolutePath)) return;
-    if (sessionID !== undefined) sessionAuthorizations.delete(sessionID);
+    if (sessionID !== undefined) {
+      handoffBoundSessions.add(sessionID);
+      sessionAuthorizations.delete(sessionID);
+    }
 
     let value: unknown;
     try {
@@ -277,11 +289,15 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const validation = validateHandoffSchema(value);
     if (!validation.ok) throw new HandoffDeniedError("schema-invalid", path);
 
-    let authorization: SessionAuthorization | undefined;
+    let authorizationGate: WriteGate;
+    let manifestPath: string;
     let manifest: OperationManifest;
     const extension = validation.value.ext?.["sortie-dogs/write-gate"];
     if (extension === undefined) {
-      if (loaded.manifest === undefined) {
+      if (
+        loaded.manifest === undefined || loaded.gate === undefined ||
+        loaded.operationManifestAbsolutePath === undefined
+      ) {
         throw new HandoffDeniedError("configuration-unavailable", path, { cause: loadFailure });
       }
       try {
@@ -293,6 +309,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         throw error;
       }
       manifest = loaded.manifest;
+      authorizationGate = loaded.gate;
+      manifestPath = loaded.operationManifestAbsolutePath;
     } else {
       if (
         !isRecord(extension) ||
@@ -312,15 +330,13 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         if (!containment.some(Boolean)) throw new WriteDeniedError("project-boundary", "<candidate-root>");
         const candidateProject = await createProjectPaths(extension.project_root);
         await candidateProject.toRelativePath(absolutePath);
-        const manifestPath = await candidateProject.toRelativePath(extension.operation_manifest);
-        const manifestValue = await readJson(candidateProject.absolute(manifestPath), INPUT_LIMITS.manifest);
+        const relativeManifestPath = await candidateProject.toRelativePath(extension.operation_manifest);
+        manifestPath = candidateProject.absolute(relativeManifestPath);
+        const manifestValue = await readJson(manifestPath, INPUT_LIMITS.manifest);
         const manifestValidation = validateOperationManifestSchema(manifestValue);
         if (!manifestValidation.ok) throw new WriteDeniedError("manifest-unavailable", "<unknown>");
         manifest = manifestValidation.value;
-        authorization = {
-          gate: await createWriteGate(candidateProject, manifest),
-          expiresAt: Date.now() + INSPECTION_CACHE.ttlMilliseconds,
-        };
+        authorizationGate = await createWriteGate(candidateProject, manifest);
       } catch (error) {
         throw new HandoffDeniedError("contract-invalid", path, { cause: error });
       }
@@ -337,20 +353,84 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     pruneInspectionCache(inspected, now);
     inspected.delete(key);
     inspected.set(key, { fingerprint, expiresAt: now + INSPECTION_CACHE.ttlMilliseconds });
-    if (authorization !== undefined) {
-      pruneSessionAuthorizations(sessionAuthorizations, now);
-      sessionAuthorizations.set(sessionID, authorization);
+    pruneSessionAuthorizations(sessionAuthorizations, now);
+    sessionAuthorizations.set(sessionID, {
+      gate: authorizationGate,
+      contractFingerprint: inspectionFingerprint(validation.value, manifest),
+      expiresAt: now + INSPECTION_CACHE.ttlMilliseconds,
+      handoffPath: absolutePath,
+      manifestPath,
+    });
+  }
+
+  async function sessionGate(sessionID: string | undefined): Promise<WriteGate | undefined> {
+    const now = Date.now();
+    pruneSessionAuthorizations(sessionAuthorizations, now);
+    if (sessionID === undefined) return undefined;
+    const authorization = sessionAuthorizations.get(sessionID);
+    if (authorization === undefined) return undefined;
+    try {
+      const handoffValue = await readJson(authorization.handoffPath, INPUT_LIMITS.handoff);
+      const handoffValidation = validateHandoffSchema(handoffValue);
+      if (!handoffValidation.ok) throw new Error("handoff-invalid");
+      const manifestValue = await readJson(authorization.manifestPath, INPUT_LIMITS.manifest);
+      const manifestValidation = validateOperationManifestSchema(manifestValue);
+      if (!manifestValidation.ok) throw new Error("manifest-invalid");
+      if (inspectionFingerprint(handoffValidation.value, manifestValidation.value) !== authorization.contractFingerprint) {
+        throw new Error("authorization-stale");
+      }
+      return authorization.gate;
+    } catch {
+      sessionAuthorizations.delete(sessionID);
+      return undefined;
     }
   }
 
-  function sessionGate(sessionID: string | undefined): WriteGate | undefined {
-    const now = Date.now();
-    pruneSessionAuthorizations(sessionAuthorizations, now);
-    return sessionID === undefined ? undefined : sessionAuthorizations.get(sessionID)?.gate;
+  async function loadedGate(): Promise<WriteGate | undefined> {
+    if (loadedGateRefresh !== undefined) return loadedGateRefresh;
+    const refresh = (async (): Promise<WriteGate | undefined> => {
+      await ensureLoaded();
+      if (
+        loaded?.gate === undefined || loaded.manifestFingerprint === undefined ||
+        loaded.operationManifestAbsolutePath === undefined || project === undefined
+      ) return undefined;
+      try {
+        const manifestValue = await readJson(loaded.operationManifestAbsolutePath, INPUT_LIMITS.manifest);
+        const validation = validateOperationManifestSchema(manifestValue);
+        if (!validation.ok) throw new WriteDeniedError("manifest-unavailable", "<unknown>");
+        const fingerprint = inspectionFingerprint(validation.value, undefined);
+        if (fingerprint !== loaded.manifestFingerprint) {
+          const gate = await createWriteGate(project, validation.value);
+          loaded.manifest = validation.value;
+          loaded.manifestFingerprint = fingerprint;
+          loaded.gate = gate;
+        }
+        return loaded.gate;
+      } catch (error) {
+        loaded.gate = undefined;
+        loaded.manifest = undefined;
+        loaded.manifestFingerprint = undefined;
+        loadFailure = error;
+        return undefined;
+      }
+    })();
+    loadedGateRefresh = refresh;
+    try {
+      return await refresh;
+    } finally {
+      if (loadedGateRefresh === refresh) loadedGateRefresh = undefined;
+    }
+  }
+
+  async function authorizedGate(sessionID: string): Promise<WriteGate | undefined> {
+    const boundGate = await sessionGate(sessionID);
+    if (boundGate !== undefined || handoffBoundSessions.has(sessionID)) return boundGate;
+    return await loadedGate();
   }
 
   function evictSession(sessionID: string): void {
     activeSessions.delete(sessionID);
+    handoffBoundSessions.delete(sessionID);
     sessionAuthorizations.delete(sessionID);
     for (const key of inspected.keys()) {
       if (key.startsWith(`${sessionID}\u0000`)) inspected.delete(key);
@@ -367,8 +447,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     "permission.ask": async (permission): Promise<void> => {
       if (permission.permission !== "edit") return;
       if (permission.sessionID !== undefined && !activeSessions.has(permission.sessionID)) return;
-      await ensureLoaded();
-      const gate = sessionGate(permission.sessionID) ?? loaded?.gate;
+      const gate = permission.sessionID === undefined
+        ? await loadedGate()
+        : await authorizedGate(permission.sessionID);
       if (gate === undefined) {
         throw new WriteDeniedError("manifest-unavailable", "<unknown>", { cause: loadFailure });
       }
@@ -381,8 +462,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     },
     "tool.execute.before": async (toolInput, output): Promise<void> => {
       if (!activeSessions.has(toolInput.sessionID)) return;
-      await ensureLoaded();
-      const gate = sessionGate(toolInput.sessionID) ?? loaded?.gate;
+      const gate = await authorizedGate(toolInput.sessionID);
       if (gate === undefined) {
         const extraction = extractWritePaths(toolInput.tool, output.args);
         if (extraction.applies) {

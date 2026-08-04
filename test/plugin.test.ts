@@ -1054,6 +1054,25 @@ test("plugin reloads a missing or invalid manifest after repair in the same sess
   });
 });
 
+test("plugin recovers after a loaded manifest becomes temporarily invalid", async () => {
+  await withProject("loaded-manifest-repair", async (directory) => {
+    const manifestPath = join(directory, "operation-manifest.json");
+    await writeFile(manifestPath, JSON.stringify(fixture.manifest));
+    const hooks = await SortieDogsPlugin({ directory });
+    await invokeWrite(hooks, "allowed.txt");
+
+    await writeFile(manifestPath, fixture.invalidManifestJson);
+    await expectMessage(
+      () => invokeWrite(hooks, "allowed.txt"),
+      'Write denied for "<unknown>": operation manifest unavailable.',
+      "manifest-unavailable",
+    );
+
+    await writeFile(manifestPath, JSON.stringify(fixture.manifest));
+    await invokeWrite(hooks, "allowed.txt");
+  });
+});
+
 test("handoff write authorization uses its candidate root when the parent worktree differs", async () => {
   await withProject("candidate-root", async (directory) => {
     const candidateRoot = join(directory, "subrepo");
@@ -1177,6 +1196,69 @@ test("candidate handoff replacement never reuses its prior manifest", async () =
       () => write("old.txt"),
       'Write denied for "old.txt": operation manifest write scope.',
       "manifest-scope",
+    );
+  });
+});
+
+test("failed candidate handoff inspection revokes authorization without falling back", async () => {
+  await withProject("candidate-inspection-failure", async (directory) => {
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(operationManifest(["old.txt"])));
+    await writeFile(join(directory, "candidate-manifest.json"), JSON.stringify(operationManifest(["old.txt"])));
+    const handoffPath = join(directory, "handoff.json");
+    await writeFile(handoffPath, JSON.stringify(writeGateHandoff(directory, "candidate-manifest.json")));
+    const hooks = await SortieDogsPlugin({ directory });
+    await activate(hooks, "inspection-failure");
+    const event = hooks.event;
+    const before = hooks["tool.execute.before"];
+    assert.ok(event);
+    assert.ok(before);
+    const edited = { event: { type: "file.edited", properties: { file: "handoff.json", sessionID: "inspection-failure" } } };
+    const write = () => before(
+      { tool: "write", sessionID: "inspection-failure", callID: "old" },
+      { args: { file: "old.txt", content: "not-written" } },
+    );
+
+    await event(edited);
+    await write();
+    await writeFile(handoffPath, fixture.invalidManifestJson);
+    await assert.rejects(() => event(edited));
+    await expectMessage(
+      write,
+      'Write denied for "<unknown>": operation manifest unavailable.',
+      "manifest-unavailable",
+    );
+  });
+});
+
+test("candidate authorization fails closed when its operation manifest becomes stale", async () => {
+  await withProject("candidate-stale-manifest", async (directory) => {
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(operationManifest(["fallback.txt"])));
+    const manifestPath = join(directory, "candidate-manifest.json");
+    await writeFile(manifestPath, JSON.stringify(operationManifest(["old.txt"])));
+    await writeFile(join(directory, "handoff.json"), JSON.stringify(writeGateHandoff(directory, "candidate-manifest.json")));
+    const hooks = await SortieDogsPlugin({ directory });
+    await activate(hooks, "stale-manifest");
+    const event = hooks.event;
+    const before = hooks["tool.execute.before"];
+    assert.ok(event);
+    assert.ok(before);
+    await event({ event: { type: "file.edited", properties: { file: "handoff.json", sessionID: "stale-manifest" } } });
+    const write = (file: string) => before(
+      { tool: "write", sessionID: "stale-manifest", callID: file },
+      { args: { file, content: "not-written" } },
+    );
+
+    await write("old.txt");
+    await writeFile(manifestPath, JSON.stringify(operationManifest(["new.txt"])));
+    await expectMessage(
+      () => write("new.txt"),
+      'Write denied for "<unknown>": operation manifest unavailable.',
+      "manifest-unavailable",
+    );
+    await expectMessage(
+      () => write("old.txt"),
+      'Write denied for "<unknown>": operation manifest unavailable.',
+      "manifest-unavailable",
     );
   });
 });
