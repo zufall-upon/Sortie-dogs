@@ -11,20 +11,22 @@ export interface RoleModelRoute {
 export type ModelRoutingConfig = Readonly<Record<string, RoleModelRoute>>;
 
 export const DEDICATED_SOL_MODEL = "openai/gpt-5.6-sol";
+export const DEDICATED_SOL_VARIANT = "xhigh";
 export const DEDICATED_SOL_ROLES = [
   "implementation",
   "remediation",
   "blocker-resolution",
   "sol-worker-mk2a2",
   "dog-worker",
+  "dog-advisor",
 ] as const;
 
 const dedicatedSolRoleSet = new Set<string>(DEDICATED_SOL_ROLES);
 
-/** Fixed Mk2A2 worker routes. These deliberately contain no fallback targets. */
+/** Fixed Mk2A2 Sol routes. These deliberately contain no fallback targets. */
 export const DEDICATED_SOL_ROUTING: ModelRoutingConfig = Object.freeze(Object.fromEntries(
   DEDICATED_SOL_ROLES.map((role) => [role, Object.freeze({
-    preferred: Object.freeze({ model: DEDICATED_SOL_MODEL }),
+    preferred: Object.freeze({ model: DEDICATED_SOL_MODEL, variant: DEDICATED_SOL_VARIANT }),
   })]),
 ));
 
@@ -60,7 +62,7 @@ export interface ModelCatalog {
 /** Built-in availability metadata for source-level recommendations; no provider probing required. */
 export const BUILT_IN_MODEL_CATALOG: ModelCatalog = Object.freeze({
   global: Object.freeze([
-    Object.freeze({ model: DEDICATED_SOL_MODEL }),
+    Object.freeze({ model: DEDICATED_SOL_MODEL, variants: Object.freeze([DEDICATED_SOL_VARIANT]) }),
     Object.freeze({
       model: RECOMMENDED_LUNA_MODEL,
       variants: Object.freeze([RECOMMENDED_LUNA_VARIANT]),

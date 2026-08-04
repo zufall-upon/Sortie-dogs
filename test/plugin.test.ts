@@ -12,6 +12,7 @@ import {
 } from "../dist/plugin/config.js";
 import {
   DEDICATED_SOL_MODEL,
+  DEDICATED_SOL_VARIANT,
   DEDICATED_SOL_ROLES,
   parseModelRoutingConfig,
   resolveModelRoute,
@@ -158,7 +159,7 @@ test("recommended Luna routes cover exact installed roles and remain below proje
   assert.equal(defaults.kind, "configured");
   if (defaults.kind !== "configured") return;
   assert.deepEqual(defaults.modelCatalog.global, [
-    { model: DEDICATED_SOL_MODEL },
+    { model: DEDICATED_SOL_MODEL, variants: [DEDICATED_SOL_VARIANT] },
     { model: "openai/gpt-5.6-luna", variants: ["xhigh"] },
     { model: "provider/custom" },
   ]);
@@ -231,6 +232,7 @@ test("Mk2A2 routes only dedicated worker roles to Sol with stable fail-closed re
     "blocker-resolution",
     "sol-worker-mk2a2",
     "dog-worker",
+    "dog-advisor",
   ]);
 
   const resolveRole = (role: string) => resolveModelRoute({
@@ -246,9 +248,10 @@ test("Mk2A2 routes only dedicated worker roles to Sol with stable fail-closed re
       source: "local",
       catalog: "global",
       model: DEDICATED_SOL_MODEL,
+      variant: DEDICATED_SOL_VARIANT,
     };
     assert.deepEqual(configured.modelRouting[role], {
-      preferred: { model: DEDICATED_SOL_MODEL },
+      preferred: { model: DEDICATED_SOL_MODEL, variant: DEDICATED_SOL_VARIANT },
     }, `${role} public route must remain authoritative`);
     assert.deepEqual(resolveRole(role), expected);
     assert.deepEqual(resolveModelRoute({
@@ -290,7 +293,7 @@ test("Mk2A2 routes only dedicated worker roles to Sol with stable fail-closed re
       reason: "unresolved-role",
       attempts: [{
         source: "local",
-        target: { model: DEDICATED_SOL_MODEL },
+        target: { model: DEDICATED_SOL_MODEL, variant: DEDICATED_SOL_VARIANT },
         reason: "model-unavailable",
       }],
     });
@@ -304,6 +307,19 @@ test("generated dog-worker runtime asset selects the dedicated Sol model explici
 description: Dedicated Sol worker for the canonical Mk2A2 coordinator
 mode: subagent
 model: ${DEDICATED_SOL_MODEL}
+variant: ${DEDICATED_SOL_VARIANT}
+---
+`));
+});
+
+test("generated dog-advisor runtime asset selects Sol xhigh explicitly", () => {
+  const dogAdvisor = runtimeAssets.find((asset) => asset.name === "dog-advisor");
+  assert.ok(dogAdvisor);
+  assert.ok(dogAdvisor.content.startsWith(`---
+description: Focused technical advisor for dog-coordinator
+mode: subagent
+model: ${DEDICATED_SOL_MODEL}
+variant: ${DEDICATED_SOL_VARIANT}
 ---
 `));
 });

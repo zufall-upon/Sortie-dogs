@@ -1,4 +1,4 @@
-const { DEDICATED_SOL_MODEL }: typeof import("./plugin/model-routing.js") = await import(
+const { DEDICATED_SOL_MODEL, DEDICATED_SOL_VARIANT }: typeof import("./plugin/model-routing.js") = await import(
   `./plugin/model-routing.${import.meta.url.endsWith(".ts") ? "ts" : "js"}`
 );
 
@@ -271,6 +271,7 @@ END_TERMINAL_EVIDENCE_FIXTURE
 description: Dedicated Sol worker for the canonical Mk2A2 coordinator
 mode: subagent
 model: ${DEDICATED_SOL_MODEL}
+variant: ${DEDICATED_SOL_VARIANT}
 ---
 # dog-worker
 
@@ -348,6 +349,8 @@ the coordinator commit.
     content: `---
 description: Focused technical advisor for dog-coordinator
 mode: subagent
+model: ${DEDICATED_SOL_MODEL}
+variant: ${DEDICATED_SOL_VARIANT}
 ---
 # dog-advisor
 

@@ -134,9 +134,10 @@ OpenCode 的标准智能体、角色、设置和其他会话均保持原样。
 平衡方案：有边界的 prompt、简洁的 scout evidence，以及减少不必要的 context / tool turn，可以在
 保持质量的同时降低 token 使用量。项目级 routing 可以覆盖这两个角色的默认设置。
 
-`implementation`、`remediation` 和 `blocker-resolution` 始终使用专用 Sol worker，用户配置不能
-替换这些路由。其他显式配置的路由会依次尝试 preferred target 和有序 fallback。没有 built-in
+`implementation`、`remediation`、`blocker-resolution` 和 `dog-advisor` 始终使用专用 Sol 的
+`xhigh`，用户配置不能替换这些路由。其他显式配置的路由会依次尝试 preferred target 和有序 fallback。没有 built-in
 default 或显式路由的角色会保留 OpenCode 已选择的模型。
+下面示例中的 `dog-advisor` 条目表示内置的生效路由，用户配置不能覆盖它。
 
 ```json
 {
@@ -148,8 +149,7 @@ default 或显式路由的角色会保留 OpenCode 已选择的模型。
       "preferred": { "model": "openai/gpt-5.6-luna", "variant": "xhigh" }
     },
     "dog-advisor": {
-      "preferred": { "model": "fable/opus", "variant": "thinking" },
-      "fallback": [{ "model": "provider/general" }]
+      "preferred": { "model": "openai/gpt-5.6-sol", "variant": "xhigh" }
     },
     "dog-reviewer": {
       "preferred": { "model": "fable/opus", "variant": "thinking" },
@@ -158,6 +158,7 @@ default 或显式路由的角色会保留 OpenCode 已选择的模型。
   },
   "modelCatalog": {
     "project": [
+      { "model": "openai/gpt-5.6-sol", "variants": ["xhigh"] },
       { "model": "openai/gpt-5.6-luna", "variants": ["xhigh"] },
       { "model": "fable/opus", "variants": ["thinking"] },
       { "model": "provider/general" }
@@ -169,7 +170,7 @@ default 或显式路由的角色会保留 OpenCode 已选择的模型。
 将配置保存为 `.opencode/sortie-dogs.json`。`modelCatalog` 只声明实际可用的 provider model 与
 named variant；Sortie-dogs 不会猜测、探测或转换 variant。解析顺序为 preferred、随后是各个
 fallback。若显式路由的所有候选项均不在 catalog 中，该路由会被拒绝。上述 advisor / reviewer
-路由只是可选的 secondary example，不需要时可以省略。
+advisor 路由固定；reviewer 路由仍是可选的 secondary example。
 
 `dog-advisor` 只接受 coordinator 发起的有限 Strategy / SourceReview 咨询。`dog-reviewer` 仅在
 canonical validation 后独立审查高风险候选项。二者都不负责实现、stage、commit 或用户交互。

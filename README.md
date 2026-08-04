@@ -161,9 +161,9 @@ scout evidence, and fewer unnecessary context or tool turns can reduce token
 use while preserving quality. Project-local routing can override either
 default.
 
-The `implementation`, `remediation`, and `blocker-resolution` roles always use
-the dedicated Sol worker; user configuration cannot replace those routes. For
-other explicitly routed roles, resolution is deterministic: Sortie-dogs tries
+The `implementation`, `remediation`, `blocker-resolution`, and `dog-advisor`
+roles always use dedicated Sol `xhigh`; user configuration cannot replace those
+routes. For other explicitly routed roles, resolution is deterministic: Sortie-dogs tries
 the preferred target, then ordered fallbacks. Roles without either a built-in
 default or an explicit route keep OpenCode's already selected model.
 
@@ -177,8 +177,7 @@ default or an explicit route keep OpenCode's already selected model.
       "preferred": { "model": "openai/gpt-5.6-luna", "variant": "xhigh" }
     },
     "dog-advisor": {
-      "preferred": { "model": "fable/opus", "variant": "thinking" },
-      "fallback": [{ "model": "provider/general" }]
+      "preferred": { "model": "openai/gpt-5.6-sol", "variant": "xhigh" }
     },
     "dog-reviewer": {
       "preferred": { "model": "fable/opus", "variant": "thinking" },
@@ -187,6 +186,7 @@ default or an explicit route keep OpenCode's already selected model.
   },
   "modelCatalog": {
     "project": [
+      { "model": "openai/gpt-5.6-sol", "variants": ["xhigh"] },
       { "model": "openai/gpt-5.6-luna", "variants": ["xhigh"] },
       { "model": "fable/opus", "variants": ["thinking"] },
       { "model": "provider/general" }
@@ -195,12 +195,14 @@ default or an explicit route keep OpenCode's already selected model.
 }
 ```
 
-Save project configuration as `.opencode/sortie-dogs.json`. `modelCatalog`
+Save project configuration as `.opencode/sortie-dogs.json`. The `dog-advisor`
+entry above shows the built-in effective route and is not user-overridable.
+`modelCatalog`
 declares provider models and named variants that are actually available;
 Sortie-dogs does not invent, probe, or translate variants. Resolution tries the
 preferred target and then its fallbacks, rejecting an explicitly routed role
-when no candidate appears in the catalog. The advisor and reviewer routes above
-are optional secondary examples; omit them when they are not needed.
+when no candidate appears in the catalog. The advisor route is authoritative; the
+reviewer route remains an optional secondary example.
 
 `dog-advisor` accepts bounded Strategy or SourceReview consultation from the
 coordinator. `dog-reviewer` independently checks high-risk candidates after

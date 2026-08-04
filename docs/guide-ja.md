@@ -138,9 +138,9 @@ variant。この構成を推奨する。境界付き prompt、簡潔な scout ev
 の削減により、品質維持に配慮しつつ token 使用量を抑えられる可能性がある。Project-local routing
 で両 role のデフォルトを上書き可能。
 
-`implementation`、`remediation`、`blocker-resolution` は専用 Sol worker に固定され、
-ユーザー設定では置換できない。その他の明示 route は Preferred target から順序付き fallback
-へ決定的に解決する。Built-in default も明示 route もない role は、OpenCode で選択済みの model
+`implementation`、`remediation`、`blocker-resolution`、`dog-advisor` は専用 Sol の
+`xhigh` に固定され、ユーザー設定では置換できない。その他の明示 route は Preferred target から順序付き fallback
+へ決定的に解決する。以下の `dog-advisor` は built-in の固定 route 表示であり、ユーザー設定では上書きできない。Built-in default も明示 route もない role は、OpenCode で選択済みの model
 を維持する。
 
 ```json
@@ -153,8 +153,7 @@ variant。この構成を推奨する。境界付き prompt、簡潔な scout ev
       "preferred": { "model": "openai/gpt-5.6-luna", "variant": "xhigh" }
     },
     "dog-advisor": {
-      "preferred": { "model": "fable/opus", "variant": "thinking" },
-      "fallback": [{ "model": "provider/general" }]
+      "preferred": { "model": "openai/gpt-5.6-sol", "variant": "xhigh" }
     },
     "dog-reviewer": {
       "preferred": { "model": "fable/opus", "variant": "thinking" },
@@ -163,6 +162,7 @@ variant。この構成を推奨する。境界付き prompt、簡潔な scout ev
   },
   "modelCatalog": {
     "project": [
+      { "model": "openai/gpt-5.6-sol", "variants": ["xhigh"] },
       { "model": "openai/gpt-5.6-luna", "variants": ["xhigh"] },
       { "model": "fable/opus", "variants": ["thinking"] },
       { "model": "provider/general" }
@@ -173,8 +173,8 @@ variant。この構成を推奨する。境界付き prompt、簡潔な scout ev
 
 設定先は `.opencode/sortie-dogs.json`。`modelCatalog` には実在する provider model と named
 variant だけを宣言する。Sortie-dogs は variant を推測、probe、変換しない。Preferred、fallback
-の順で解決し、明示 route の候補が catalog に一つもなければ拒否する。上記 advisor / reviewer
-route は任意の secondary example。不要なら省略できる。
+の順で解決し、明示 route の候補が catalog に一つもなければ拒否する。advisor route は固定、
+reviewer route は任意の secondary example。
 
 `dog-advisor` は coordinator からの限定 Strategy / SourceReview 相談専用。
 `dog-reviewer` は canonical validation 後、高リスク候補だけを独立 review する。どちらも実装、

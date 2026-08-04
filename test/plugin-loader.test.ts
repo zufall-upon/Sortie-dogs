@@ -6,6 +6,8 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
+import { DEDICATED_SOL_MODEL, DEDICATED_SOL_VARIANT } from "../dist/plugin/model-routing.js";
+
 const testEnvironment = fileURLToPath(new URL("../_testenv/", import.meta.url));
 const projectRoot = fileURLToPath(new URL("../", import.meta.url));
 const execFileAsync = promisify(execFile);
@@ -146,6 +148,9 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.ok(coordinator);
     assert.ok(worker);
     assert.ok(sortie);
+    for (const asset of [worker, advisor]) {
+      assert.match(asset.content, new RegExp(`model: ${DEDICATED_SOL_MODEL.replace("/", "\\/")}\\r?\\nvariant: ${DEDICATED_SOL_VARIANT}`));
+    }
 
     assert.match(scout.content, /^---\r?\n[\s\S]*\nsteps:\s*8\r?\n/);
     const deniedScoutTools = [
