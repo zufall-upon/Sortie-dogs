@@ -818,6 +818,20 @@ async function expectMessage(
   });
 }
 
+async function expectActionableCommandDenial(
+  action: () => Promise<void>,
+  cause?: string,
+): Promise<void> {
+  await assert.rejects(action, (error: unknown) => {
+    assert.ok(error instanceof Error);
+    assert.equal((error as Error & { reason?: string }).reason, "unclassified-command");
+    assert.match(error.message, /segment=.+; cause=.+; hint=.+/u);
+    assert.equal(error.message.includes("<unknown>"), false);
+    if (cause !== undefined) assert.match(error.message, new RegExp(`cause=${cause}`, "u"));
+    return true;
+  });
+}
+
 test("chat message hook applies explicit catalog routing and fails closed with ordered attempts", async () => {
   await withProject("model-routing-hook", async (directory) => {
     await mkdir(join(directory, ".opencode"));
@@ -909,6 +923,26 @@ test("session policy is passive until an exact trigger and deactivates only on e
     );
 
     await write("passive");
+    await message(
+      "task-handoff",
+      "role=implementation\nprojectRoot=C:\\candidate\ncandidate=card-01\nsource_manifest=[src/a.ts]\nacceptance: safe change",
+    );
+    await write("task-handoff");
+    await message(
+      "quoted-handoff",
+      "log copy:\nrole=implementation\nprojectRoot=C:\\candidate\ncandidate=card-01\nsource_manifest=[src/a.ts]\nacceptance: safe change",
+    );
+    await write("quoted-handoff");
+    await message(
+      "coordinator-task",
+      "role=implementation\nprojectRoot=C:\\candidate\ncandidate=card-01\nsource_manifest=[src/a.ts]\nacceptance: safe change",
+      "dog-coordinator",
+    );
+    await expectMessage(
+      () => write("coordinator-task"),
+      'Write denied for "<unknown>": operation manifest unavailable.',
+      "manifest-unavailable",
+    );
     await message("passive", "/sortie-other");
     await write("passive");
     await message("passive", "/sortie task");
@@ -924,14 +958,14 @@ test("session policy is passive until an exact trigger and deactivates only on e
     await event({ event: { type: "session.idle", properties: { sessionID: "passive" } } });
     await expectMessage(
       () => write("passive"),
-      'Write denied for "<unknown>": same command and denial reason already denied in this session; retry blocked.',
+      'Write denied for "<repeated-command>": same command and denial reason already denied in this session; retry blocked.',
       "repeated-denial",
     );
     await event({ event: { type: "session.deleted", properties: { sessionID: "passive" } } });
     await write("passive");
 
     await message("coordinator", "ordinary text", "dog-coordinator");
-    await expectMessage(() => write("coordinator"), 'Write denied for "<unknown>": operation manifest unavailable.', "manifest-unavailable");
+    await write("coordinator");
     await event({ event: { type: "session.deleted", properties: { sessionID: "coordinator" } } });
     await write("coordinator");
     await message("malformed", "/sortie task");
@@ -1107,7 +1141,7 @@ test("plugin reloads a missing or invalid manifest after repair in the same sess
     await writeFile(join(directory, "operation-manifest.json"), fixture.invalidManifestJson);
     await expectMessage(
       () => invokeWrite(hooks, "allowed.txt", directory),
-      'Write denied for "<unknown>": same command and denial reason already denied in this session; retry blocked.',
+      'Write denied for "<repeated-command>": same command and denial reason already denied in this session; retry blocked.',
       "repeated-denial",
     );
     await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
@@ -1423,7 +1457,7 @@ test("git add requires exact explicit paths and rejects broad or undeclared path
     );
     await expectMessage(
       () => invoke("git add -- allowed.txt"),
-      'Write denied for "<unknown>": operation manifest unavailable.',
+      'Write denied for "<unbound:bash>": operation manifest unavailable.',
       "manifest-unavailable",
     );
     assert.equal((await bindWriteGate(hooks, directory, "git-add")).status, "bound");
@@ -1431,12 +1465,12 @@ test("git add requires exact explicit paths and rejects broad or undeclared path
     await invoke("git add -- nested\\file.txt");
     await expectMessage(
       () => invoke("git add allowed.txt"),
-      'Write denied for "<unknown>": write path must be explicit.',
+      'Write denied for "<missing-path>": write path must be explicit.',
       "path-required",
     );
     await expectMessage(
       () => invoke("git add -- ."),
-      'Write denied for "<unknown>": write path must be explicit.',
+      'Write denied for "<missing-path>": write path must be explicit.',
       "path-required",
     );
     await expectMessage(
@@ -1475,7 +1509,7 @@ test("git commit requires the cached path set to equal the manifest", async () =
     await execFileAsync("git", ["-C", directory, "add", "--", "undeclared.txt"]);
     await expectMessage(
       commit,
-      'Write denied for "<unknown>": same command and denial reason already denied in this session; retry blocked.',
+      'Write denied for "<repeated-command>": same command and denial reason already denied in this session; retry blocked.',
       "repeated-denial",
     );
     await execFileAsync("git", ["-C", directory, "rm", "--cached", "--", "undeclared.txt"]);
@@ -1486,7 +1520,7 @@ test("git commit requires the cached path set to equal the manifest", async () =
         { tool: "bash", sessionID: "git-commit", callID: "commit-all" },
         { args: { command: "git commit --all -m gate" } },
       ),
-      'Write denied for "<unknown>": write path must be explicit.',
+      'Write denied for "<missing-path>": write path must be explicit.',
       "path-required",
     );
   });
@@ -1615,11 +1649,7 @@ test("plugin shell gate allows explicit reads and denies unknown executables", a
       'cat "${WRITE_TARGET}"',
       "cat <(node -e write)",
     ]) {
-      await expectMessage(
-        () => invoke(command),
-        'Write denied for "<unknown>": write path must be explicit.',
-        "path-required",
-      );
+      await expectActionableCommandDenial(() => invoke(command), "active-expansion");
     }
     const invokePowerShell = (command: string) => before(
       { tool: "powershell", sessionID: "shell", callID: command },
@@ -1634,16 +1664,31 @@ test("plugin shell gate allows explicit reads and denies unknown executables", a
     await invokePowerShell("$env:PATH");
     await invokePowerShell("git status; git rev-parse --show-toplevel; git ls-files | ForEach-Object { $_ }");
     await invokePowerShell("git ls-files | ForEach-Object { $_.Length }");
+    await invokePowerShell("git ls-files | % { $_ }");
+    await invokePowerShell("gh api graphql -f 'query=query { viewer { login } }'");
+    await invokePowerShell("pwsh -NoProfile -Command 'Get-Date'");
+    await invokePowerShell("pwsh -NoProfile -Command 'git status'");
+    await expectActionableCommandDenial(
+      () => invokePowerShell("pwsh -NoProfile -Command '[Console]::WriteLine((Get-Date).ToString(\"o\"))'"),
+      "executable-not-allowlisted",
+    );
+    await expectActionableCommandDenial(
+      () => invoke('echo "don\'t $(node -e write)"'),
+      "active-expansion",
+    );
+    await expectMessage(
+      () => invokePowerShell('Get-ChildItem "src\\" ; Remove-Item blocked.txt'),
+      'Write denied for "blocked.txt": operation manifest write scope.',
+      "manifest-scope",
+    );
     for (const command of [
       "git ls-files | ForEach-Object { Remove-Item $_ }",
       "Get-Content allowed.txt | Where-Object { $_ }",
       "pwsh -File inventory.ps1",
+      "pwsh -EncodedCommand Z2l0IHN0YXR1cw==",
+      "pwsh -NoProfile -Command 'pwsh -NoProfile -Command ''git status'''",
     ]) {
-      await expectMessage(
-        () => invokePowerShell(command),
-        'Write denied for "<unknown>": write path must be explicit.',
-        "path-required",
-      );
+      await expectActionableCommandDenial(() => invokePowerShell(command));
     }
     await invokePowerShell("Set-Content -LiteralPath allowed.txt -Value safe");
     await expectMessage(
@@ -1668,23 +1713,18 @@ test("plugin shell gate allows explicit reads and denies unknown executables", a
       'Write denied for "blocked-ps.txt": operation manifest write scope.',
       "manifest-scope",
     );
-    await expectMessage(
-      () => invoke("echo x 2>&1"),
-      'Write denied for "<unknown>": write path must be explicit.',
-      "path-required",
-    );
+    await expectActionableCommandDenial(() => invoke("echo x 2>&1"), "redirect-target-unresolved");
     for (const command of [
       "$value = $(Remove-Item C:\\out\\f.txt)",
       '$value = "$(Remove-Item C:\\out\\f.txt)"',
       "$value = `Remove-Item C:\\out\\f.txt`",
-      "$value = & Remove-Item C:\\out\\f.txt",
     ]) {
-      await expectMessage(
-        () => invokePowerShell(command),
-        'Write denied for "<unknown>": write path must be explicit.',
-        "path-required",
-      );
+      await expectActionableCommandDenial(() => invokePowerShell(command), "active-expansion");
     }
+    await expectActionableCommandDenial(
+      () => invokePowerShell("$value = & Remove-Item C:\\out\\f.txt"),
+      "executable-not-allowlisted",
+    );
     await invoke("echo safe > allowed.txt");
     await expectMessage(
       () => invoke("echo blocked > blocked.txt"),
@@ -1695,23 +1735,16 @@ test("plugin shell gate allows explicit reads and denies unknown executables", a
     await invoke('env -u GITHUB_TOKEN "/approved/gh.exe" project item-edit --id ITEM --field-id FIELD --single-select-option-id OPTION');
     await invoke('env -u GITHUB_TOKEN "/approved/gh.exe" api graphql -f query="query { viewer { login } }"');
     await invoke('env -u GITHUB_TOKEN "/approved/gh.exe" api graphql -f query="mutation { placeholder }"');
+    await invoke("gh api graphql -f 'query=query { viewer { login } }'");
+    await expectActionableCommandDenial(
+      () => invoke('gh api graphql -f query="query { viewer { login(name: $(node -e write)) } }"'),
+      "active-expansion",
+    );
     await invoke("git branch --show-current");
-    await expectMessage(
-      () => invoke("env -u GITHUB_TOKEN node -e write"),
-      'Write denied for "<unknown>": write path must be explicit.',
-      "path-required",
-    );
-    await expectMessage(
-      () => invoke("git branch feature"),
-      'Write denied for "<unknown>": write path must be explicit.',
-      "path-required",
-    );
+    await expectActionableCommandDenial(() => invoke("env -u GITHUB_TOKEN node -e write"));
+    await expectActionableCommandDenial(() => invoke("git branch feature"));
     for (const command of fixture.shell.unknownWrites) {
-      await expectMessage(
-        () => invoke(command),
-        'Write denied for "<unknown>": write path must be explicit.',
-        "path-required",
-      );
+      await expectActionableCommandDenial(() => invoke(command));
     }
   });
 });
@@ -1731,12 +1764,13 @@ test("unbound sessions allow only known read-only tools and complete read-only s
     for (const command of [
       "cat $(node -e write)",
       "grep needle `node -e write`",
-      "echo x>blocked.txt",
-      "cat allowed.txt>>blocked.txt",
     ]) {
+      await expectActionableCommandDenial(() => invoke("bash", { command }), "active-expansion");
+    }
+    for (const command of ["echo x>blocked.txt", "cat allowed.txt>>blocked.txt"]) {
       await expectMessage(
         () => invoke("bash", { command }),
-        'Write denied for "<unknown>": operation manifest unavailable.',
+        'Write denied for "<unbound:bash>": operation manifest unavailable.',
         "manifest-unavailable",
       );
     }
@@ -1744,7 +1778,6 @@ test("unbound sessions allow only known read-only tools and complete read-only s
       ["multiedit", { edits: [{ file: "allowed.txt" }] }],
       ["mcp_write_file", { path: "allowed.txt" }],
       ["unknown_tool", {}],
-      ["bash", {}],
     ] as const) {
       await expectMessage(
         () => invoke(tool, args),
@@ -1752,6 +1785,10 @@ test("unbound sessions allow only known read-only tools and complete read-only s
         "manifest-unavailable",
       );
     }
+    await expectActionableCommandDenial(
+      () => invoke("bash", {}),
+      "command-argument-missing",
+    );
   });
 });
 
@@ -1766,21 +1803,13 @@ test("session denial signatures normalize command whitespace without merging com
       { tool: "powershell", sessionID: "denial-signatures", callID: command },
       { args: { command } },
     );
-    await expectMessage(
-      () => invoke("node -e write"),
-      'Write denied for "<unknown>": write path must be explicit.',
-      "path-required",
-    );
+    await expectActionableCommandDenial(() => invoke("node -e write"), "executable-not-allowlisted");
     await expectMessage(
       () => invoke("  node   -e   write  "),
-      'Write denied for "<unknown>": same command and denial reason already denied in this session; retry blocked.',
+      'Write denied for "<repeated-command>": same command and denial reason already denied in this session; retry blocked.',
       "repeated-denial",
     );
-    await expectMessage(
-      () => invoke("node -e other-write"),
-      'Write denied for "<unknown>": write path must be explicit.',
-      "path-required",
-    );
+    await expectActionableCommandDenial(() => invoke("node -e other-write"), "executable-not-allowlisted");
     await expectMessage(
       () => invoke("echo blocked > blocked.txt"),
       'Write denied for "blocked.txt": operation manifest write scope.',

@@ -15,6 +15,7 @@ import {
   WriteDeniedError,
   createProjectPaths,
   createWriteGate,
+  describeUnclassifiedCommand,
   isKnownReadOnlyTool,
   resolveProjectRoot,
   safePath,
@@ -35,6 +36,7 @@ const PROJECT_CONFIG_PATH = ".opencode/sortie-dogs.json";
 const ENV_CONFIG = "SORTIE_DOGS_CONFIG";
 const COORDINATOR_AGENT = "dog-coordinator";
 const SORTIE_TRIGGER = /^\/sortie(?:\s|$)/;
+const TASK_ROLES = new Set(["implementation", "remediation", "blocker-resolution"]);
 
 export interface OpenCodePluginInput {
   directory: string;
@@ -249,11 +251,20 @@ function textPart(part: unknown): string | undefined {
   return isRecord(part) && typeof part.text === "string" ? part.text : undefined;
 }
 
+function isExplicitTaskHandoff(text: string): boolean {
+  const role = /^role\s*=\s*([^\s]+)\s*$/imu.exec(text)?.[1]?.toLowerCase();
+  return role !== undefined && TASK_ROLES.has(role) &&
+    /^projectRoot\s*=\s*\S+\s*$/imu.test(text) &&
+    /^candidate\s*=\s*\S+\s*$/imu.test(text) &&
+    /^(?:source_manifest|operation_manifest)\s*=/imu.test(text) &&
+    /^(?:acceptance|validation(?:\s+history)?)\b/imu.test(text);
+}
+
 function activatesSession(input: Parameters<OpenCodeChatMessageHook>[0], output: Parameters<OpenCodeChatMessageHook>[1]): boolean {
-  if (input.agent === COORDINATOR_AGENT || output.message.agent === COORDINATOR_AGENT) return true;
+  const coordinatorOrigin = input.agent === COORDINATOR_AGENT || output.message.agent === COORDINATOR_AGENT;
   return output.parts.some((part) => {
     const text = textPart(part);
-    return text !== undefined && SORTIE_TRIGGER.test(text);
+    return text !== undefined && (SORTIE_TRIGGER.test(text) || (coordinatorOrigin && isExplicitTaskHandoff(text)));
   });
 }
 
@@ -634,7 +645,14 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         const gate = await authorizedGate(toolInput.sessionID);
         if (gate === undefined) {
           if (!isKnownReadOnlyTool(toolInput.tool, output.args)) {
-            throw new WriteDeniedError("manifest-unavailable", "<unknown>", { cause: loadFailure });
+            const detail = describeUnclassifiedCommand(toolInput.tool, output.args);
+            if (detail !== undefined) throw new WriteDeniedError("unclassified-command", detail);
+            const shellTool = /^(?:bash|shell|powershell|pwsh)(?:$|[_-])/iu.test(toolInput.tool);
+            throw new WriteDeniedError(
+              "manifest-unavailable",
+              shellTool ? `<unbound:${toolInput.tool}>` : "<unknown>",
+              { cause: loadFailure },
+            );
           }
           return;
         }
@@ -646,7 +664,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         if (activeSession === undefined) throw error;
         const denied = activeSession.deniedSignatures;
         if (denied.has(signature)) {
-          throw new WriteDeniedError("repeated-denial", "<unknown>", { cause: error });
+          throw new WriteDeniedError("repeated-denial", "<repeated-command>", { cause: error });
         }
         if (denied.size >= SESSION_DENIAL_LIMIT) denied.delete(denied.values().next().value!);
         denied.add(signature);

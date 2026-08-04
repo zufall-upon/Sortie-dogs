@@ -19,6 +19,7 @@ export interface ToolExecuteBeforeOutput {
 
 export type WriteDenialReason =
   | "manifest-unavailable"
+  | "unclassified-command"
   | "path-required"
   | "project-boundary"
   | "manifest-scope"
@@ -30,6 +31,7 @@ export class WriteDeniedError extends Error {
   constructor(reason: WriteDenialReason, path: string, options?: ErrorOptions) {
     const messages: Record<WriteDenialReason, string> = {
       "manifest-unavailable": "operation manifest unavailable.",
+      "unclassified-command": "unclassified command; use the stated direct-command hint.",
       "path-required": "write path must be explicit.",
       "project-boundary": "project-root-relative path required.",
       "manifest-scope": "operation manifest write scope.",
@@ -59,6 +61,13 @@ interface Extraction {
   ambiguous: boolean;
   paths: string[];
   gitCommit?: boolean;
+  issue?: CommandIssue;
+}
+
+interface CommandIssue {
+  segment: string;
+  cause: string;
+  hint: string;
 }
 
 const execFileAsync = promisify(execFile);
@@ -69,7 +78,7 @@ const DIRECT_PATH_KEYS = new Set([
 const ALL_OPERAND_COMMANDS = new Set(["mkdir", "rm", "rmdir", "touch", "truncate", "unlink"]);
 const LAST_OPERAND_COMMANDS = new Set(["cp", "install"]);
 const READ_ONLY_COMMANDS = new Set([
-  "cat", "echo", "false", "get-childitem", "get-content", "grep", "head", "ls", "pwd",
+  "cat", "echo", "false", "get-childitem", "get-content", "get-date", "grep", "head", "ls", "pwd",
   "measure-object", "rg", "select-object", "stat", "tail", "test-path", "true", "type",
   "where-object", "wc",
 ]);
@@ -202,35 +211,120 @@ function isLiteralPowerShellAssignment(value: string): boolean {
 }
 
 function isSafePowerShellForEach(source: string): boolean {
-  return /^foreach-object\s+\{\s*\$_(?:\.[A-Za-z_][A-Za-z0-9_]*)?\s*\}$/iu.test(source);
+  return /^(?:foreach-object|%)\s+\{\s*\$_(?:\.[A-Za-z_][A-Za-z0-9_]*)?\s*\}$/iu.test(source);
 }
 
-function hasUnsafeShellExpansion(source: string): boolean {
-  return /(?:\$\(|\$\{|`|<\()/u.test(source);
+type ShellDialect = "posix" | "powershell";
+
+interface ShellSyntax {
+  masked: string;
+  unsafeExpansion: boolean;
+  activeBrace: boolean;
 }
 
-function shellPaths(command: string, powershell: boolean): Extraction {
+function scanShellSyntax(source: string, dialect: ShellDialect): ShellSyntax {
+  const masked = new Array<string>(source.length).fill(" ");
+  let quote: "\"" | "'" | undefined;
+  let unsafeExpansion = false;
+  let activeBrace = false;
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index];
+    if (quote !== undefined) {
+      if (dialect === "powershell" && quote === "\"" && character === "`") {
+        unsafeExpansion = true;
+        index += 1;
+        continue;
+      }
+      if (dialect === "posix" && quote === "\"" && character === "\\") {
+        index += 1;
+        continue;
+      }
+      if (character === quote) {
+        if (dialect === "powershell" && source[index + 1] === quote) index += 1;
+        else quote = undefined;
+        continue;
+      }
+      if (quote === "\"" &&
+          (((character === "$" || character === "<") && source[index + 1] === "(") ||
+            (character === "$" && source[index + 1] === "{"))) unsafeExpansion = true;
+      continue;
+    }
+    if (character === "\"" || character === "'") {
+      quote = character;
+      continue;
+    }
+    masked[index] = character;
+    if (character === "`") {
+      unsafeExpansion = true;
+      if (dialect === "powershell") index += 1;
+    } else if (((character === "$" || character === "<") && source[index + 1] === "(") ||
+               (character === "$" && source[index + 1] === "{")) {
+      unsafeExpansion = true;
+    } else if (character === "{" || character === "}") {
+      activeBrace = true;
+    }
+  }
+  return { masked: masked.join(""), unsafeExpansion, activeBrace };
+}
+
+function shellSegments(command: string, dialect: ShellDialect): string[] {
+  const segments: string[] = [];
+  const masked = scanShellSyntax(command, dialect).masked;
+  let start = 0;
+  for (let index = 0; index < masked.length; index += 1) {
+    const character = masked[index];
+    const pair = masked.slice(index, index + 2);
+    const separator = pair === "&&" || pair === "||" ? 2
+      : character === ";" || character === "\n" || character === "\r" ||
+          (character === "|" && command[index - 1] !== ">") ? 1 : 0;
+    if (separator === 0) continue;
+    segments.push(command.slice(start, index));
+    index += separator - 1;
+    if (character === "\r" && command[index + 1] === "\n") index += 1;
+    start = index + 1;
+  }
+  segments.push(command.slice(start));
+  return segments;
+}
+
+function depthOnePowerShellLiteral(source: string): string | undefined {
+  const match = /^\s*(?:"[^"]*(?:pwsh|powershell)(?:\.exe)?"|[^\s"']*(?:pwsh|powershell)(?:\.exe)?)\s+-noprofile\s+-command\s+'((?:''|[^'])*)'\s*$/iu.exec(source);
+  return match?.[1].replaceAll("''", "'");
+}
+
+function commandIssue(segment: string, cause: string, hint: string): CommandIssue {
+  return { segment: segment.trim().slice(0, 240), cause, hint };
+}
+
+function shellPaths(command: string, powershell: boolean, depth = 0): Extraction {
   const paths: string[] = [];
   let applies = false;
   let ambiguous = false;
   let gitCommit = false;
+  let issue: CommandIssue | undefined;
   const redirection = /(?<![<>=!])(?:&|\d*)?(?:>>|>\||>)(?![=])/gu;
   const redirectionTarget = /^\s*("(?:\\.|[^"])*"|'[^']*'|&?\d+|[^\s;&|]+)/u;
-  for (const match of command.matchAll(redirection)) {
-    applies = true;
-    const target = redirectionTarget.exec(command.slice(match.index + match[0].length))?.[1];
-    if (target === undefined || target.startsWith("&")) ambiguous = true;
-    else paths.push(unquote(target));
-  }
-
-  const segments = command.split(/(?:&&|\|\||(?<!>)\|(?!\|)|;|\r?\n)/u);
+  const dialect: ShellDialect = powershell ? "powershell" : "posix";
+  const segments = shellSegments(command, dialect);
   for (let segmentIndex = 0; segmentIndex < segments.length; segmentIndex += 1) {
     const segment = segments[segmentIndex];
     let source = segment.trim();
     let assignment = false;
-    if (hasUnsafeShellExpansion(source)) {
+    const syntax = scanShellSyntax(source, dialect);
+    for (const match of syntax.masked.matchAll(redirection)) {
+      applies = true;
+      const target = redirectionTarget.exec(source.slice(match.index + match[0].length))?.[1];
+      if (target === undefined || target.startsWith("&")) {
+        ambiguous = true;
+        issue ??= commandIssue(source, "redirect-target-unresolved", "name one manifest-scoped output path");
+      } else {
+        paths.push(unquote(target));
+      }
+    }
+    if (syntax.unsafeExpansion) {
       applies = true;
       ambiguous = true;
+      issue ??= commandIssue(source, "active-expansion", "remove substitution and run a direct literal command");
       continue;
     }
     if (powershell) {
@@ -244,10 +338,11 @@ function shellPaths(command: string, powershell: boolean): Extraction {
     if (tokens.length === 0) continue;
     const executable = tokens[0].replaceAll("\\", "/").split("/").at(-1)!.toLowerCase();
     const commandOperands = operands(tokens);
-    if (powershell && /[{}]/u.test(source)) {
+    if (powershell && syntax.activeBrace) {
       if (segmentIndex > 0 && isSafePowerShellForEach(source)) continue;
       applies = true;
       ambiguous = true;
+      issue ??= commandIssue(source, "active-scriptblock", "use strict ForEach-Object { $_.Property } or a direct command");
     } else if (ALL_OPERAND_COMMANDS.has(executable)) {
       applies = true;
       paths.push(...commandOperands);
@@ -291,12 +386,36 @@ function shellPaths(command: string, powershell: boolean): Extraction {
       // Explicitly read-only git subcommands.
     } else if (/^gh(?:\.exe)?$/u.test(executable) && isRemoteOnlyGitHubCommand(tokens)) {
       // GitHub Project commands mutate remote state, not project files. Redirections remain gated above.
+    } else if (depth === 0 && /^(?:pwsh|powershell)(?:\.exe)?$/u.test(executable)) {
+      const literal = depthOnePowerShellLiteral(source);
+      if (literal === undefined) {
+        applies = true;
+        ambiguous = true;
+        issue ??= commandIssue(source, "unsupported-pwsh-form", "use pwsh -NoProfile -Command '<literal>' at depth one");
+      } else {
+        const nested = shellPaths(literal, true, depth + 1);
+        applies ||= nested.applies;
+        ambiguous ||= nested.ambiguous;
+        paths.push(...nested.paths);
+        gitCommit ||= nested.gitCommit === true;
+        issue ??= nested.issue;
+      }
     } else if (!READ_ONLY_COMMANDS.has(executable)) {
       applies = true;
       ambiguous = true;
+      issue ??= commandIssue(source, "executable-not-allowlisted", "use a direct allowlisted read-only command");
     }
   }
-  return { applies, ambiguous, paths, ...(gitCommit ? { gitCommit: true } : {}) };
+  return { applies, ambiguous, paths, ...(gitCommit ? { gitCommit: true } : {}), ...(issue ? { issue } : {}) };
+}
+
+function issuePath(issue: CommandIssue): string {
+  return `segment=${issue.segment}; cause=${issue.cause}; hint=${issue.hint}`;
+}
+
+export function describeUnclassifiedCommand(tool: string, args: unknown): string | undefined {
+  const extracted = extractWritePaths(tool, args);
+  return extracted.ambiguous && extracted.issue !== undefined ? issuePath(extracted.issue) : undefined;
 }
 
 /** Extract known write destinations; unknown shell executables fail closed as ambiguous. */
@@ -313,13 +432,24 @@ export function extractWritePaths(tool: string, args: unknown): Extraction {
   }
   if (/^(?:bash|shell|powershell|pwsh)(?:$|[_-])/u.test(name)) {
     const command = isRecord(args) && typeof args.command === "string" ? args.command : undefined;
-    if (command === undefined) return { applies: paths.length > 0, ambiguous: paths.length === 0, paths };
+    if (command === undefined) {
+      const ambiguous = paths.length === 0;
+      return {
+        applies: paths.length > 0,
+        ambiguous,
+        paths,
+        ...(ambiguous ? {
+          issue: commandIssue("<missing-command>", "command-argument-missing", "provide one direct literal command"),
+        } : {}),
+      };
+    }
     const extracted = shellPaths(command, /^(?:powershell|pwsh)(?:$|[_-])/u.test(name));
     return {
       applies: extracted.applies || paths.length > 0,
       ambiguous: extracted.ambiguous,
       paths: [...paths, ...extracted.paths],
       ...(extracted.gitCommit ? { gitCommit: true } : {}),
+      ...(extracted.issue ? { issue: extracted.issue } : {}),
     };
   }
   return { applies: false, ambiguous: false, paths: [] };
@@ -455,7 +585,10 @@ export async function createWriteGate(project: ProjectPaths, value: unknown): Pr
       const extracted = extractWritePaths(_input.tool, output.args);
       if (!extracted.applies) return;
       if (extracted.ambiguous || (extracted.paths.length === 0 && !extracted.gitCommit)) {
-        throw new WriteDeniedError("path-required", "<unknown>");
+        if (extracted.issue !== undefined) {
+          throw new WriteDeniedError("unclassified-command", issuePath(extracted.issue));
+        }
+        throw new WriteDeniedError("path-required", "<missing-path>");
       }
       for (const path of extracted.paths) await checkPath(path);
       if (extracted.gitCommit) await checkCachedSet();

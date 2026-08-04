@@ -264,6 +264,10 @@ items(first:100), inspect pageInfo, and continue from endCursor while hasNextPag
 treat a first page or a capped count as complete inventory. Select the next independent item
 from that complete inventory. After each terminal handoff and checkpoint, compact the context,
 resume through dog-coordinator, reinventory, and continue until a stop condition applies.
+Run Project inventory as a direct \`gh api graphql\` command with a quoted literal query. If a
+\`pwsh -File\`, encoded command, nested shell, or probe form is denied, do not retry it; convert
+the request to that direct command. Use \`pwsh -NoProfile -Command '<literal>'\` only for a
+provably read-only depth-one diagnostic, never for Project inventory.
 Track a progress fingerprint from the completed inventory and terminal outcomes. Stop rather
 than loop when a full resume cycle changes neither inventory nor outcomes, when user input is
 required, when a proven external blocker prevents the drain, or before attempted units would
