@@ -19,6 +19,7 @@ export interface ToolExecuteBeforeOutput {
 
 export type WriteDenialReason =
   | "manifest-unavailable"
+  | "session-expired"
   | "unclassified-command"
   | "path-required"
   | "project-boundary"
@@ -31,6 +32,7 @@ export class WriteDeniedError extends Error {
   constructor(reason: WriteDenialReason, path: string, options?: ErrorOptions) {
     const messages: Record<WriteDenialReason, string> = {
       "manifest-unavailable": "operation manifest unavailable.",
+      "session-expired": "active session expired; start or resume an explicit Task takeover.",
       "unclassified-command": "unclassified command; use the stated direct-command hint.",
       "path-required": "write path must be explicit.",
       "project-boundary": "project-root-relative path required.",

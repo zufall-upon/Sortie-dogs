@@ -324,7 +324,10 @@ regenerates the registered handoff; the worker inspects it read-only after same-
 
 RECOVERABLE_HANDSHAKE_FIXTURE
     denial_shape: { status: denied, reason: <reason>, recoverable: true, remedy: <short action> }
-    recoverable_reasons: session-inactive | handoff-uninspected | handoff-mismatch
+    recoverable_reasons: session-inactive | session-expired | handoff-uninspected | handoff-mismatch
+    recoverable_bind_signal: escalation.action=blocker-resolution-takeover; resume_session=true; true_blocker=false
+    nonrecoverable_bind_signal: escalation.action=follow-remedy; resume_session=false; existing remedy takes priority
+    normal_worker_blocked: TRUE_BLOCKER absent -> blocker-resolution takeover on the same solSession
     sequence: Task exact-path read-only inspection -> same worker session resume -> one bind attempt
     attempt_limit: one handshake per candidate
     inactive_inspection: exact registered handoff path; read and schema-check only
@@ -447,6 +450,13 @@ user. Return its structured reason and remedy to dog-coordinator. After exact-pa
 inspection, accept one same-session resume and make the single handshake bind attempt. A confirmed
 idempotent bound result may continue; a changed manifest binding remains fail-closed. Only
 dog-coordinator may regenerate a mismatched handoff; never rewrite it as the worker.
+
+Every denied bind includes a machine-readable escalation. Return it unchanged. Only a recoverable
+denial with resume_session=true authorizes blocker-resolution takeover on the same solSession. For
+a nonrecoverable denial, follow its existing remedy and never same-session resume. When a normal
+worker return is BLOCKED without TRUE_BLOCKER, dog-coordinator resumes the same solSession with
+role=blocker-resolution rather than terminating, replacing the session, or reporting a blocker to
+the user.
 `,
   },
   {

@@ -708,13 +708,18 @@ test("runtime contract requires interactive continuation and deterministic recov
     /RECOVERABLE_HANDSHAKE_FIXTURE\r?\n([\s\S]+?)\r?\nEND_RECOVERABLE_HANDSHAKE_FIXTURE/,
   );
   assert.ok(handshake);
-  assert.match(handshake[1], /session-inactive \| handoff-uninspected \| handoff-mismatch/);
+  assert.match(handshake[1], /session-inactive \| session-expired \| handoff-uninspected \| handoff-mismatch/);
   assert.match(handshake[1], /Task exact-path read-only inspection -> same worker session resume -> one bind attempt/);
   assert.match(handshake[1], /same manifest hash \+ mtime after reread -> idempotent bound/);
   assert.match(handshake[1], /changed path, hash, or mtime -> deny/);
   assert.match(handshake[1], /dog-coordinator regenerates registered handoff; worker never rewrites it/);
+  assert.match(handshake[1], /recoverable_bind_signal: escalation\.action=blocker-resolution-takeover/);
+  assert.match(handshake[1], /nonrecoverable_bind_signal: escalation\.action=follow-remedy; resume_session=false/);
+  assert.match(handshake[1], /TRUE_BLOCKER absent -> blocker-resolution takeover on the same solSession/);
   assert.match(worker.content, /do not terminate and do not ask the\s+user/i);
   assert.match(worker.content, /Only\s+dog-coordinator may regenerate a mismatched handoff/i);
+  assert.match(worker.content, /Only a recoverable[\s\S]+resume_session=true[\s\S]+same solSession/i);
+  assert.match(worker.content, /nonrecoverable denial[\s\S]+existing remedy[\s\S]+never same-session resume/i);
 
   const batch = coordinator.content.match(
     /BATCH_CONTINUATION_FIXTURE\r?\n([\s\S]+?)\r?\nEND_BATCH_CONTINUATION_FIXTURE/,
@@ -1008,6 +1013,116 @@ test("session policy is passive until an exact trigger and deactivates only on e
   });
 });
 
+test("explicit Task children activate through parent identity without inheriting authorization", async () => {
+  await withProject("child-session-activation", async (directory) => {
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+    await writeFile(join(directory, "handoff.json"), JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
+    const hooks = await SortieDogsPlugin({ directory });
+    const chat = hooks["chat.message"];
+    const before = hooks["tool.execute.before"];
+    const event = hooks.event;
+    assert.ok(chat);
+    assert.ok(before);
+    assert.ok(event);
+    await activate(hooks, "parent");
+    await event({ event: { type: "session.created", properties: { info: { id: "child", parentID: "parent", directory } } } });
+    assert.equal((await executeBindWriteGate(hooks, directory, "child")).reason, "handoff-uninspected");
+    const task = `role=implementation\nprojectRoot=${directory}\ncandidate=child\nsource_manifest=[src/a.ts]\nacceptance: safe change`;
+    await chat(
+      { sessionID: "child", agent: "renamed-worker" },
+      { message: { agent: "renamed-worker", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: task }] },
+    );
+    const uninspected = await executeBindWriteGate(hooks, directory, "child");
+    assert.equal(uninspected.reason, "handoff-uninspected");
+    assert.deepEqual(uninspected.escalation, {
+      action: "blocker-resolution-takeover",
+      resume_session: true,
+      true_blocker: false,
+    });
+    await event({ event: { type: "file.edited", properties: { file: "handoff.json", sessionID: "child" } } });
+    assert.equal((await executeBindWriteGate(hooks, directory, "child")).status, "bound");
+    await before(
+      { tool: "write", sessionID: "child", callID: "child-write" },
+      { args: { file: "allowed.txt", content: "not-written" } },
+    );
+
+    for (const [sessionID, parentID, projectRoot] of [
+      ["inactive-child", "inactive-parent", directory],
+      ["other-project-child", "parent", join(directory, "..", "other-project")],
+    ]) {
+      await event({ event: { type: "session.created", properties: { info: { id: sessionID, parentID, directory: projectRoot } } } });
+      await chat(
+        { sessionID, agent: "renamed-worker" },
+        { message: { agent: "renamed-worker", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: `role=implementation\nprojectRoot=${projectRoot}\ncandidate=child\nsource_manifest=[src/a.ts]\nacceptance: safe change` }] },
+      );
+      assert.equal((await executeBindWriteGate(hooks, directory, sessionID)).reason, "session-inactive");
+    }
+
+    for (let index = 0; index <= 256; index += 1) {
+      await event({ event: { type: "session.created", properties: { info: { id: `deferred-${index}`, parentID: "parent" } } } });
+    }
+    await chat(
+      { sessionID: "deferred-0", agent: "renamed-worker" },
+      { message: { agent: "renamed-worker", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: task }] },
+    );
+    assert.equal((await executeBindWriteGate(hooks, directory, "deferred-0")).reason, "handoff-uninspected");
+
+    await activate(hooks, "deleted-parent");
+    await event({ event: { type: "session.created", properties: { info: { id: "deleted-parent-child", parentID: "deleted-parent" } } } });
+    await event({ event: { type: "session.deleted", properties: { sessionID: "deleted-parent" } } });
+    await chat(
+      { sessionID: "deleted-parent-child", agent: "renamed-worker" },
+      { message: { agent: "renamed-worker", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: task }] },
+    );
+    assert.equal((await executeBindWriteGate(hooks, directory, "deleted-parent-child")).reason, "session-inactive");
+  });
+});
+
+test("matching parent and child inspections recover missing parent propagation", async () => {
+  await withProject("child-inspection-fallback", async (directory) => {
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+    await writeFile(join(directory, "handoff.json"), JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
+    const hooks = await SortieDogsPlugin({ directory });
+    const chat = hooks["chat.message"];
+    const event = hooks.event;
+    assert.ok(chat);
+    assert.ok(event);
+    await activate(hooks, "parent");
+    for (const sessionID of ["parent", "fallback-child"]) {
+      await event({ event: { type: "file.edited", properties: { file: "handoff.json", sessionID } } });
+    }
+    await chat(
+      { sessionID: "fallback-child", agent: "renamed-worker" },
+      { message: { agent: "renamed-worker", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: `role=implementation\nprojectRoot=${directory}\ncandidate=child\nsource_manifest=[src/a.ts]\nacceptance: safe change` }] },
+    );
+    assert.equal((await executeBindWriteGate(hooks, directory, "fallback-child")).status, "bound");
+  });
+});
+
+test("sibling inspection fallback requires the same inspected fingerprint", async () => {
+  await withProject("child-inspection-fingerprint", async (directory) => {
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+    const handoffPath = join(directory, "handoff.json");
+    await writeFile(handoffPath, JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
+    const hooks = await SortieDogsPlugin({ directory });
+    const chat = hooks["chat.message"];
+    const event = hooks.event;
+    assert.ok(chat);
+    assert.ok(event);
+    await activate(hooks, "parent");
+    await event({ event: { type: "file.edited", properties: { file: handoffPath, sessionID: "parent" } } });
+    const changedHandoff = writeGateHandoff(directory, "operation-manifest.json");
+    changedHandoff.task = { title: "Plugin harness", objective: "Exercise a different inspected handoff." };
+    await writeFile(handoffPath, JSON.stringify(changedHandoff));
+    await event({ event: { type: "file.edited", properties: { file: handoffPath, sessionID: "fingerprint-child" } } });
+    await chat(
+      { sessionID: "fingerprint-child", agent: "renamed-worker" },
+      { message: { agent: "renamed-worker", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: `role=implementation\nprojectRoot=${directory}\ncandidate=child\nsource_manifest=[src/a.ts]\nacceptance: safe change` }] },
+    );
+    assert.equal((await executeBindWriteGate(hooks, directory, "fingerprint-child")).reason, "session-inactive");
+  });
+});
+
 test("plugin fixture allows a manifest-scoped write", async () => {
   const candidate = fixtureCase("allow-write");
   await withProject(candidate.name, async (directory) => {
@@ -1259,7 +1374,7 @@ test("handoff write authorization rejects a candidate root above the execution a
   });
 });
 
-test("active sessions use deterministic TTL and oldest-first capacity pruning", async () => {
+test("active sessions use sliding TTL, fail closed after expiry, and discard deleted state", async () => {
   await withProject("session-bounds", async (directory) => {
     const hooks = await configuredHooks(directory);
     const chat = hooks["chat.message"];
@@ -1281,14 +1396,88 @@ test("active sessions use deterministic TTL and oldest-first capacity pruning", 
         { tool: "write", sessionID, callID: "bounded-write" },
         { args: { file: "outside.txt", content: "not-written" } },
       );
-      await write("bounded-0");
+      await expectMessage(
+        () => write("bounded-0"),
+        'Write denied for "<expired-session>": active session expired; start or resume an explicit Task takeover.',
+        "session-expired",
+      );
       await expectMessage(
         () => write("bounded-1"),
         'Write denied for "<unknown>": operation manifest unavailable.',
         "manifest-unavailable",
       );
+      now += 20 * 60 * 1000;
+      await chat(
+        { sessionID: "bounded-256" },
+        { message: { model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: "activity" }] },
+      );
+      now += 20 * 60 * 1000;
+      await expectMessage(
+        () => write("bounded-256"),
+        'Write denied for "<unknown>": operation manifest unavailable.',
+        "manifest-unavailable",
+      );
       now += 30 * 60 * 1000 + 1;
+      await expectMessage(
+        () => write("bounded-256"),
+        'Write denied for "<expired-session>": active session expired; start or resume an explicit Task takeover.',
+        "session-expired",
+      );
+      const expiredBind = await executeBindWriteGate(hooks, directory, "bounded-256");
+      assert.equal(expiredBind.reason, "session-expired");
+      assert.equal((expiredBind.escalation as Record<string, unknown>).action, "blocker-resolution-takeover");
+      await write("bounded-0");
+      const event = hooks.event;
+      assert.ok(event);
+      await event({ event: { type: "session.deleted", properties: { sessionID: "bounded-0" } } });
+      await write("bounded-0");
+      await event({ event: { type: "session.deleted", properties: { sessionID: "bounded-256" } } });
       await write("bounded-256");
+    } finally {
+      Date.now = originalNow;
+    }
+  });
+});
+
+test("expired session signals are FIFO bounded", async () => {
+  await withProject("expired-session-bounds", async (directory) => {
+    const hooks = await configuredHooks(directory);
+    const before = hooks["tool.execute.before"];
+    assert.ok(before);
+    for (let index = 0; index <= 512; index += 1) await activate(hooks, `expired-bounded-${index}`);
+    await before(
+      { tool: "write", sessionID: "expired-bounded-0", callID: "trimmed-expiry" },
+      { args: { file: "outside.txt", content: "not-written" } },
+    );
+    await expectMessage(
+      () => before(
+        { tool: "write", sessionID: "expired-bounded-1", callID: "retained-expiry" },
+        { args: { file: "outside.txt", content: "not-written" } },
+      ),
+      'Write denied for "<expired-session>": active session expired; start or resume an explicit Task takeover.',
+      "session-expired",
+    );
+  });
+});
+
+test("expired sessions ignore created and updated reactivation events", async () => {
+  await withProject("expired-session-events", async (directory) => {
+    const hooks = await configuredHooks(directory);
+    const event = hooks.event;
+    assert.ok(event);
+    const originalNow = Date.now;
+    let now = 1_000_000;
+    Date.now = () => now;
+    try {
+      await activate(hooks, "expired-child");
+      now += 20 * 60 * 1000;
+      await activate(hooks, "active-parent");
+      now += 10 * 60 * 1000 + 1;
+      assert.equal((await executeBindWriteGate(hooks, directory, "expired-child")).reason, "session-expired");
+      for (const type of ["session.created", "session.updated"] as const) {
+        await event({ event: { type, properties: { info: { id: "expired-child", parentID: "active-parent", directory } } } });
+        assert.equal((await executeBindWriteGate(hooks, directory, "expired-child")).reason, "session-expired");
+      }
     } finally {
       Date.now = originalNow;
     }
@@ -1432,6 +1621,11 @@ test("explicit binding is idempotent only for the same pinned manifest and ignor
     const replay = await executeBindWriteGate(hooks, directory, "replacement", "manifest-b.json");
     assert.equal(replay.reason, "binding-replay");
     assert.equal(replay.recoverable, false);
+    assert.deepEqual(replay.escalation, {
+      action: "follow-remedy",
+      resume_session: false,
+      true_blocker: false,
+    });
     const edited = { event: { type: "file.edited", properties: { file: "handoff.json", sessionID: "replacement" } } };
     const write = (file: string) => before(
       { tool: "write", sessionID: "replacement", callID: file },

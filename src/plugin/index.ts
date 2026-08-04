@@ -31,6 +31,7 @@ import {
 
 const INPUT_LIMITS = { config: 64 * 1024, manifest: 512 * 1024, handoff: 2 * 1024 * 1024 } as const;
 const INSPECTION_CACHE = { maximum: 256, ttlMilliseconds: 30 * 60 * 1000 } as const;
+const ACTIVE_SESSION_CACHE = { maximum: 256, ttlMilliseconds: 30 * 60 * 1000 } as const;
 const SESSION_DENIAL_LIMIT = 256;
 const PROJECT_CONFIG_PATH = ".opencode/sortie-dogs.json";
 const ENV_CONFIG = "SORTIE_DOGS_CONFIG";
@@ -260,6 +261,21 @@ function isExplicitTaskHandoff(text: string): boolean {
     /^(?:acceptance|validation(?:\s+history)?)\b/imu.test(text);
 }
 
+function explicitTaskText(output: Parameters<OpenCodeChatMessageHook>[1]): string | undefined {
+  return output.parts.map(textPart).find((text) => text !== undefined && isExplicitTaskHandoff(text));
+}
+
+function taskProjectRoot(text: string): string | undefined {
+  return /^projectRoot\s*=\s*(\S+)\s*$/imu.exec(text)?.[1];
+}
+
+function chatParentID(input: Parameters<OpenCodeChatMessageHook>[0]): string | undefined {
+  const candidate = input as typeof input & { parentID?: unknown; parentId?: unknown };
+  return typeof candidate.parentID === "string" ? candidate.parentID
+    : typeof candidate.parentId === "string" ? candidate.parentId
+      : undefined;
+}
+
 function activatesSession(input: Parameters<OpenCodeChatMessageHook>[0], output: Parameters<OpenCodeChatMessageHook>[1]): boolean {
   const coordinatorOrigin = input.agent === COORDINATOR_AGENT || output.message.agent === COORDINATOR_AGENT;
   return output.parts.some((part) => {
@@ -387,6 +403,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   const inspected = new Map<string, InspectionCacheEntry>();
   const sessionAuthorizations = new Map<string, SessionAuthorization>();
   const activeSessions = new Map<string, ActiveSessionState>();
+  const expiredSessions = new Set<string>();
+  const sessionParents = new Map<string, string>();
 
   async function inspect(path: string, sessionID: string | undefined): Promise<void> {
     await ensureLoaded();
@@ -495,6 +513,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         recoverable: true,
         remedy: "Inspect the exact registered handoff path, then resume this worker session once.",
       },
+      "session-expired": {
+        recoverable: true,
+        remedy: "Resume this worker session once with an explicit blocker-resolution Task.",
+      },
       "handoff-uninspected": {
         recoverable: true,
         remedy: "Inspect the exact registered handoff path read-only, then resume this worker once.",
@@ -513,10 +535,30 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         recoverable: false,
         remedy: "Correct the reported contract defect before starting a new bind flow.",
       };
-      return JSON.stringify({ status: "denied", reason, ...detail });
+      const escalation = detail.recoverable
+        ? {
+          action: "blocker-resolution-takeover",
+          resume_session: true,
+          true_blocker: false,
+        }
+        : {
+          action: "follow-remedy",
+          resume_session: false,
+          true_blocker: reason === "binding-failed",
+        };
+      return JSON.stringify({
+        status: "denied",
+        reason,
+        ...detail,
+        escalation,
+      });
     };
     try {
-      if (!isActiveSession(sessionID)) return deny("session-inactive");
+      const sessionStatus = activeSessionStatus(sessionID);
+      if (sessionStatus !== "active") {
+        return deny(sessionStatus === "expired" ? "session-expired" : "session-inactive");
+      }
+      touchActiveSession(sessionID);
       const now = Date.now();
       pruneSessionAuthorizations(sessionAuthorizations, now);
       if (!isAbsolute(projectRoot) || isAbsolute(manifestPathArgument)) return deny("path-invalid");
@@ -558,6 +600,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         inspectionFingerprint(handoffValidation.value, diagnostics, validation.value) !== inspectedEntry.fingerprint
       ) return deny("handoff-mismatch");
       if (existingAuthorization !== undefined) {
+        existingAuthorization.expiresAt = now + ACTIVE_SESSION_CACHE.ttlMilliseconds;
         return JSON.stringify({
           status: "bound",
           manifest_hash: pinned.hash,
@@ -568,7 +611,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       const gate = await createWriteGate(candidate, validation.value);
       sessionAuthorizations.set(sessionID, {
         gate,
-        expiresAt: now + INSPECTION_CACHE.ttlMilliseconds,
+        expiresAt: now + ACTIVE_SESSION_CACHE.ttlMilliseconds,
         manifestHash: pinned.hash,
         manifestMtimeMs: pinned.mtimeMs,
         manifestPath,
@@ -600,6 +643,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       if (pinned.hash !== authorization.manifestHash || pinned.mtimeMs !== authorization.manifestMtimeMs) {
         throw new Error("authorization-stale");
       }
+      authorization.expiresAt = now + ACTIVE_SESSION_CACHE.ttlMilliseconds;
       return authorization.gate;
     } catch {
       sessionAuthorizations.delete(sessionID);
@@ -613,10 +657,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
 
   function pruneActiveSessions(now: number, reserveSlot = false): void {
     for (const [sessionID, state] of activeSessions) {
-      if (state.expiresAt <= now) evictSession(sessionID);
+      if (state.expiresAt <= now) expireSession(sessionID);
     }
-    const limit = INSPECTION_CACHE.maximum - (reserveSlot ? 1 : 0);
-    while (activeSessions.size > limit) evictSession(activeSessions.keys().next().value!);
+    const limit = ACTIVE_SESSION_CACHE.maximum - (reserveSlot ? 1 : 0);
+    while (activeSessions.size > limit) expireSession(activeSessions.keys().next().value!);
   }
 
   function activateSession(sessionID: string): void {
@@ -625,15 +669,47 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const existing = activeSessions.get(sessionID);
     if (existing !== undefined) activeSessions.delete(sessionID);
     else pruneActiveSessions(now, true);
+    expiredSessions.delete(sessionID);
     activeSessions.set(sessionID, {
       deniedSignatures: existing?.deniedSignatures ?? new Set<string>(),
-      expiresAt: now + INSPECTION_CACHE.ttlMilliseconds,
+      expiresAt: now + ACTIVE_SESSION_CACHE.ttlMilliseconds,
     });
   }
 
-  function isActiveSession(sessionID: string): boolean {
+  function activeSessionStatus(sessionID: string): "active" | "expired" | "inactive" {
     pruneActiveSessions(Date.now());
-    return activeSessions.has(sessionID);
+    return activeSessions.has(sessionID) ? "active"
+      : expiredSessions.has(sessionID) ? "expired"
+        : "inactive";
+  }
+
+  function isActiveSession(sessionID: string): boolean {
+    return activeSessionStatus(sessionID) === "active";
+  }
+
+  function touchActiveSession(sessionID: string): boolean {
+    const now = Date.now();
+    pruneActiveSessions(now);
+    const state = activeSessions.get(sessionID);
+    if (state === undefined) return false;
+    activeSessions.delete(sessionID);
+    state.expiresAt = now + ACTIVE_SESSION_CACHE.ttlMilliseconds;
+    activeSessions.set(sessionID, state);
+    return true;
+  }
+
+  function expireSession(sessionID: string): void {
+    activeSessions.delete(sessionID);
+    sessionAuthorizations.delete(sessionID);
+    for (const key of inspected.keys()) {
+      if (key.startsWith(`${sessionID}\u0000`)) inspected.delete(key);
+    }
+    expiredSessions.delete(sessionID);
+    expiredSessions.add(sessionID);
+    while (expiredSessions.size > ACTIVE_SESSION_CACHE.maximum) {
+      expiredSessions.delete(expiredSessions.values().next().value!);
+    }
+    clearSessionLinks(sessionID);
   }
 
   function evictSession(sessionID: string): void {
@@ -641,6 +717,54 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     sessionAuthorizations.delete(sessionID);
     for (const key of inspected.keys()) {
       if (key.startsWith(`${sessionID}\u0000`)) inspected.delete(key);
+    }
+    expiredSessions.delete(sessionID);
+    clearSessionLinks(sessionID);
+  }
+
+  async function pathMatchesProject(root: string): Promise<boolean> {
+    if (!isAbsolute(root)) return false;
+    project ??= await createProjectPaths(resolveProjectRoot(input));
+    const allowedRoots = [project];
+    if (input.worktree !== undefined && resolve(input.worktree) !== project.root) {
+      allowedRoots.push(await createProjectPaths(resolve(input.worktree)));
+    }
+    return (await Promise.all(allowedRoots.map((allowed) => allowed.contains(root)))).some(Boolean);
+  }
+
+  async function taskMatchesProject(text: string): Promise<boolean> {
+    const root = taskProjectRoot(text);
+    return root !== undefined && await pathMatchesProject(root);
+  }
+
+  function matchingActiveInspection(sessionID: string, text: string): boolean {
+    const root = taskProjectRoot(text);
+    if (root === undefined) return false;
+    const candidateRoot = resolve(root);
+    const childEntries = [...inspected.entries()]
+      .filter(([key, entry]) => key.startsWith(`${sessionID}\u0000`) && entry.projectRoot === candidateRoot)
+      .map(([, entry]) => entry);
+    if (childEntries.length === 0) return false;
+    return [...inspected.entries()].some(([key, entry]) => {
+      const owner = key.slice(0, key.indexOf("\u0000"));
+      return owner !== sessionID && isActiveSession(owner) && childEntries.some((child) =>
+        child.projectRoot === entry.projectRoot &&
+        child.manifestPath === entry.manifestPath &&
+        child.handoffPath === entry.handoffPath &&
+        child.fingerprint === entry.fingerprint
+      );
+    });
+  }
+
+  function rememberParent(sessionID: string, parentID: string): void {
+    sessionParents.delete(sessionID);
+    sessionParents.set(sessionID, parentID);
+  }
+
+  function clearSessionLinks(sessionID: string): void {
+    sessionParents.delete(sessionID);
+    for (const [childID, parentID] of sessionParents) {
+      if (parentID === sessionID) sessionParents.delete(childID);
     }
   }
 
@@ -658,14 +782,27 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       }),
     },
     "chat.message": async (chatInput, output): Promise<void> => {
-      if (activatesSession(chatInput, output)) activateSession(chatInput.sessionID);
-      if (!isActiveSession(chatInput.sessionID)) return;
+      const parentID = chatParentID(chatInput);
+      if (parentID !== undefined) rememberParent(chatInput.sessionID, parentID);
+      const taskText = explicitTaskText(output);
+      const linkedParent = sessionParents.get(chatInput.sessionID);
+      const inheritedTaskActivation = taskText !== undefined && await taskMatchesProject(taskText) && (
+        (linkedParent !== undefined && isActiveSession(linkedParent)) ||
+        matchingActiveInspection(chatInput.sessionID, taskText)
+      );
+      if (activatesSession(chatInput, output) || inheritedTaskActivation) activateSession(chatInput.sessionID);
+      if (!touchActiveSession(chatInput.sessionID)) return;
       await ensureLoaded();
       await loaded?.modelRoutingHook?.(chatInput, output);
     },
     "permission.ask": async (permission): Promise<void> => {
       if (permission.permission !== "edit") return;
-      if (permission.sessionID !== undefined && !isActiveSession(permission.sessionID)) return;
+      if (permission.sessionID !== undefined) {
+        const status = activeSessionStatus(permission.sessionID);
+        if (status === "inactive") return;
+        if (status === "expired") throw new WriteDeniedError("session-expired", "<expired-session>");
+        touchActiveSession(permission.sessionID);
+      }
       const gate = permission.sessionID === undefined ? undefined : await authorizedGate(permission.sessionID);
       if (gate === undefined) {
         throw new WriteDeniedError("manifest-unavailable", "<unknown>", { cause: loadFailure });
@@ -678,7 +815,13 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       }
     },
     "tool.execute.before": async (toolInput, output): Promise<void> => {
-      if (!isActiveSession(toolInput.sessionID)) return;
+      const status = activeSessionStatus(toolInput.sessionID);
+      if (status === "inactive") return;
+      if (status === "expired") {
+        if (isKnownReadOnlyTool(toolInput.tool, output.args)) return;
+        throw new WriteDeniedError("session-expired", "<expired-session>");
+      }
+      touchActiveSession(toolInput.sessionID);
       if (toolInput.tool === "sortie_bind_write_gate") return;
       try {
         const gate = await authorizedGate(toolInput.sessionID);
@@ -711,10 +854,30 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       }
     },
     event: async ({ event }): Promise<void> => {
-      const eventSessionID = typeof event.properties?.sessionID === "string"
-        ? event.properties.sessionID
-        : undefined;
+      const info = isRecord(event.properties?.info) ? event.properties.info : undefined;
+      const eventSessionID = typeof event.properties?.sessionID === "string" ? event.properties.sessionID
+        : typeof info?.id === "string" ? info.id
+          : undefined;
       if (eventSessionID === undefined) return;
+      const eventParentID = typeof event.properties?.parentID === "string" ? event.properties.parentID
+        : typeof info?.parentID === "string" ? info.parentID
+          : undefined;
+      if (event.type === "session.created" || event.type === "session.updated") {
+        const expired = activeSessionStatus(eventSessionID) === "expired";
+        if (eventParentID !== undefined) {
+          rememberParent(eventSessionID, eventParentID);
+          if (expired) return;
+          const eventDirectory = typeof event.properties?.directory === "string" ? event.properties.directory
+            : typeof info?.directory === "string" ? info.directory
+              : undefined;
+          if (
+            eventDirectory !== undefined &&
+            isActiveSession(eventParentID) &&
+            await pathMatchesProject(eventDirectory)
+          ) activateSession(eventSessionID);
+        }
+        return;
+      }
       if (event.type === "session.deleted") {
         evictSession(eventSessionID);
         return;
@@ -738,6 +901,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         return;
       }
       if (!isActiveSession(eventSessionID)) return;
+      if (event.type !== "session.idle") touchActiveSession(eventSessionID);
       if (event.type === "file.edited" && typeof event.properties?.file === "string") {
         try {
           await inspect(event.properties.file, eventSessionID);
