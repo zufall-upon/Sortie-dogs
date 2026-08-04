@@ -245,10 +245,56 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(restartRecovery[1], /resume_route:\s*dog-coordinator -> dog-worker/);
     assert.match(restartRecovery[1], /user_route:\s*dog-coordinator only/);
     assert.match(coordinator.content, /dispatch implementation only to dog-worker/i);
+    const scoutSkip = coordinator.content.match(
+      /SCOUT_SKIP_FIXTURE\r?\n([\s\S]+?)\r?\nEND_SCOUT_SKIP_FIXTURE/,
+    );
+    assert.ok(scoutSkip, "coordinator needs the Scout skip branch");
+    assert.match(scoutSkip[1], /exact manifest \+ canonical validation \+ blocker owner all fixed/);
+    assert.match(scoutSkip[1], /simple <=2 files \| compact resume \| same-candidate Scout already done/);
+    assert.match(scoutSkip[1], /no stale_path affects prior manifest, validation, or owner/);
+    assert.match(scoutSkip[1], /stale_action:\s*required three-role fan-out/);
+    assert.match(scoutSkip[1], /record skip reason in checkpoint decisions\[\] and resume_delta/);
+    assert.match(scoutSkip[1], /known_paths:\s*worker read boundary even without Scout read/);
+    assert.match(scoutSkip[1], /action:\s*route directly to dog-worker/);
+
+    type ScoutSkipEvidence = {
+      exactManifest: boolean;
+      canonicalValidation: boolean;
+      blockerOwner: boolean;
+      editableFiles: number;
+      compactResume?: boolean;
+      sameCandidateScoutDone?: boolean;
+      stalePriorDecision?: boolean;
+    };
+    const shouldSkipScout = (evidence: ScoutSkipEvidence): boolean => {
+      const exactEvidence = evidence.exactManifest && evidence.canonicalValidation && evidence.blockerOwner;
+      const safeResume =
+        (evidence.compactResume === true || evidence.sameCandidateScoutDone === true) &&
+        evidence.stalePriorDecision !== true;
+      return exactEvidence && (evidence.editableFiles <= 2 || safeResume);
+    };
+    const exactEvidence = {
+      exactManifest: true,
+      canonicalValidation: true,
+      blockerOwner: true,
+    };
+    assert.equal(shouldSkipScout({ ...exactEvidence, editableFiles: 2 }), true);
+    assert.equal(shouldSkipScout({ ...exactEvidence, editableFiles: 3, compactResume: true }), true);
+    assert.equal(shouldSkipScout({ ...exactEvidence, editableFiles: 3, sameCandidateScoutDone: true }), true);
+    assert.equal(shouldSkipScout({ ...exactEvidence, editableFiles: 3 }), false);
+    assert.equal(
+      shouldSkipScout({ ...exactEvidence, editableFiles: 3, compactResume: true, stalePriorDecision: true }),
+      false,
+    );
+    for (const absent of ["exactManifest", "canonicalValidation", "blockerOwner"] as const) {
+      assert.equal(shouldSkipScout({ ...exactEvidence, [absent]: false, editableFiles: 2 }), false);
+    }
+
     const scoutFanout = coordinator.content.match(
       /SCOUT_FANOUT_FIXTURE\r?\n([\s\S]+?)\r?\nEND_SCOUT_FANOUT_FIXTURE/,
     );
     assert.ok(scoutFanout, "coordinator needs the required three-role scout fan-out");
+    assert.match(scoutFanout[1], /required for unresolved or complex candidate not skipped/);
     assert.match(scoutFanout[1], /exactly three bounded dog-scout calls in one parallel fan-out/);
     assert.match(scoutFanout[1], /role_A:\s*determine exact source_manifest or operation_manifest/);
     assert.match(scoutFanout[1], /role_B:\s*determine exact canonical validation command/);

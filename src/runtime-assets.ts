@@ -41,21 +41,41 @@ Use dog-advisor only for Strategy or SourceReview consultation. Keep implementat
 remediation, and blocker-resolution work on dog-worker. Findings from every subagent return
 through dog-coordinator; subagents never report to each other or the user.
 
-## Required scout fan-out
+## Conditional scout routing
 
-Before each worker handoff, perform exactly one bounded parallel fan-out containing exactly
-three dog-scout calls: role A determines the exact manifest, role B determines the canonical
-validation command, and role C identifies the blocker owner. Do not add a fourth scout or run
-these roles sequentially. Union all well-formed facts without voting or majority rules. A scout
-result is well formed only when it identifies its assigned role and supplies non-empty facts;
-discard malformed, timed-out, or empty output without retry. The coordinator fixes the manifest,
-validation, and owner from the accepted union plus existing evidence, then hands implementation,
-remediation, or blocker-resolution only to dog-worker.
+Before each worker handoff, evaluate whether Scout adds evidence. Skip Scout only when current
+evidence already fixes all three of the exact source_manifest or operation_manifest, canonical
+validation command, and blocker owner, and either the candidate is a simple change with at most 2
+editable files or it is a compact resume or same-candidate handoff after Scout already ran. A resume
+may skip only when no stale_path affects the prior manifest, validation, or owner; otherwise use the
+required fan-out. Record the skip reason in the coordinator checkpoint decisions[] and resume_delta,
+then route directly to dog-worker. Supplied known_paths remain the worker read boundary even though
+no Scout read occurs.
 
-This fan-out is the one bounded scout step before the worker gate. Supply each scout only an
-explicit known_paths list containing at most four paths; scouts may not discover other paths.
+SCOUT_SKIP_FIXTURE
+    required_evidence: exact manifest + canonical validation + blocker owner all fixed
+    eligible: simple <=2 files | compact resume | same-candidate Scout already done
+    resume_guard: no stale_path affects prior manifest, validation, or owner
+    stale_action: required three-role fan-out
+    audit: record skip reason in checkpoint decisions[] and resume_delta
+    known_paths: worker read boundary even without Scout read
+    action: route directly to dog-worker
+END_SCOUT_SKIP_FIXTURE
+
+For every unresolved or complex candidate not skipped, perform exactly one bounded parallel fan-out
+containing exactly three dog-scout calls: role A determines the exact manifest, role B determines the
+canonical validation command, and role C identifies the blocker owner. Do not add a fourth scout or
+run these roles sequentially. Union all well-formed facts without voting or majority rules. A scout
+result is well formed only when it identifies its assigned role and supplies non-empty facts; discard
+malformed, timed-out, or empty output without retry. The coordinator fixes the manifest, validation,
+and owner from the accepted union plus existing evidence, then hands implementation, remediation, or
+blocker-resolution only to dog-worker.
+
+This required fan-out is the one bounded Scout step before the worker gate. Supply each scout only
+an explicit known_paths list containing at most four paths; scouts may not discover other paths.
 
 SCOUT_FANOUT_FIXTURE
+    decision: required for unresolved or complex candidate not skipped
     dispatch: exactly three bounded dog-scout calls in one parallel fan-out
     role_A: determine exact source_manifest or operation_manifest
     role_B: determine exact canonical validation command
