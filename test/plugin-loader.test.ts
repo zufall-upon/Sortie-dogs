@@ -521,19 +521,48 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       batchContinuation[1],
       /scope:\s*backlogDrain\.enabled=false; mode=normal bounded batch/,
     );
-    assert.match(batchContinuation[1], /fresh_session:\s*max_units=3; batchAttempted=0; batchDone=0/);
+    assert.match(
+      batchContinuation[1],
+      /fresh_session:\s*max_units=3; batchAttempted=0; batchCommitted=0; batchReconciled=0/,
+    );
+    assert.match(
+      batchContinuation[1],
+      /display:\s*committed <batchCommitted>\/<batchTarget>; attempted <batchAttempted>\/<batchTarget>; reconciled <batchReconciled>/,
+    );
     assert.match(batchContinuation[1], /order:\s*sequential/);
     assert.match(batchContinuation[1], /unit_N_plus_1_start:\s*only after unit N terminal handoff/);
     assert.match(batchContinuation[1], /terminal_unit:\s*increment batchAttempted; record Project status checkpoint/);
-    assert.match(batchContinuation[1], /successful_commit:\s*increment batchDone/);
+    assert.match(batchContinuation[1], /new_successful_commit:\s*increment batchCommitted only/);
+    assert.match(batchContinuation[1], /existing_commit_accepted:\s*increment batchReconciled only/);
     assert.match(
       batchContinuation[1],
-      /blocked_unit:\s*record blocker with concrete needed action; continue to next independent unit/,
+      /blocked_unit:\s*increment batchAttempted only; record blocker with concrete needed action; continue to next independent unit/,
     );
+    assert.match(
+      batchContinuation[1],
+      /compact_guard:\s*batchAttempted < batchTarget and independent next candidate exists/,
+    );
+    assert.match(batchContinuation[1], /compact_action:\s*after checkpoint invoke configured continuation; then same-turn stop/);
     assert.match(batchContinuation[1], /early_stop:\s*only whole-batch blocker or user question/);
     assert.match(batchContinuation[1], /fourth_unit:\s*rejected/);
     assert.match(batchContinuation[1], /noncomplete_handoff:\s*exact next action required/);
     assert.match(batchContinuation[1], /completed handoff:\s*completion evidence required/);
+    assert.doesNotMatch(coordinator.content, /\bbatchDone\b/);
+
+    const compactionIdentity = coordinator.content.match(
+      /COMPACTION_IDENTITY_FIXTURE\r?\n([\s\S]+?)\r?\nEND_COMPACTION_IDENTITY_FIXTURE/,
+    );
+    assert.ok(compactionIdentity, "coordinator needs identity-safe compaction continuation");
+    assert.match(compactionIdentity[1], /one resolver for direct tool \| continuation marker fallback \| step-exhausted fallback/);
+    assert.match(compactionIdentity[1], /configured continuation agent \+ configured continuation capability required/);
+    assert.match(compactionIdentity[1], /available root dog-coordinator; preserved across compaction/);
+    assert.match(compactionIdentity[1], /another coordinator rejected/);
+    assert.match(compactionIdentity[1], /child session -> root rejected/);
+    assert.match(compactionIdentity[1], /automatic continuation disabled/);
+    assert.match(compactionIdentity[1], /only when direct capability unavailable; never combine direct tool and marker/);
+    assert.match(compactionIdentity[1], /final_unit:\s*no compaction/);
+    assert.match(compactionIdentity[1], /pending_host_autocontinue:\s*no compaction/);
+    assert.match(compactionIdentity[1], /same-turn stop; no tool \| Task \| analysis \| final/);
 
     const backlogDrain = coordinator.content.match(
       /BACKLOG_DRAIN_FIXTURE\r?\n([\s\S]+?)\r?\nEND_BACKLOG_DRAIN_FIXTURE/,
@@ -545,6 +574,14 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       /opt_in_required:\s*backlogDrain\.enabled=true; backlogDrain\.maxUnits=<positive integer>/,
     );
     assert.match(backlogDrain[1], /execution:\s*sequential; coordinator_authority=unchanged; per_unit_gates=unchanged/);
+    assert.match(
+      backlogDrain[1],
+      /drain_counts:\s*batchAttempted=terminal handoffs; batchCommitted=new commits; batchReconciled=accepted existing commits/,
+    );
+    assert.match(
+      backlogDrain[1],
+      /display:\s*committed <batchCommitted>\/<backlogDrain\.maxUnits>; attempted <batchAttempted>\/<backlogDrain\.maxUnits>; reconciled <batchReconciled>/,
+    );
     assert.match(backlogDrain[1], /inventory_page_1:\s*items\(first:100\)/);
     assert.match(
       backlogDrain[1],
@@ -553,8 +590,12 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(backlogDrain[1], /inventory_filter:\s*include every item whose status is not Done/);
     assert.match(
       backlogDrain[1],
-      /continuation:\s*terminal handoff -> Project checkpoint -> compact resume -> complete reinventory/,
+      /continuation:\s*terminal handoff -> Project checkpoint -> same identity-preserving resolver -> compact resume -> complete reinventory/,
     );
+    assert.match(backlogDrain[1], /source_identity:\s*preserve root source agent identity across drain compaction/);
+    assert.match(backlogDrain[1], /child_promotion:\s*child session -> root rejected/);
+    assert.match(backlogDrain[1], /pending_host_autocontinue:\s*drain compaction rejected/);
+    assert.match(backlogDrain[1], /fallback_exclusivity:\s*direct capability or marker fallback; never both/);
     assert.match(
       backlogDrain[1],
       /attempted_count:\s*survive every compact resume; carry in Project checkpoint and resume_delta/,

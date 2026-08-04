@@ -40,10 +40,10 @@ agent or any alternate coordinator, and never make either one a fallback route.
 At every candidate phase start or phase change and every batch start or count change, emit exactly
 one current progress line before the next action:
 
-進行中: <candidate> — <n>% (<phase>) | バッチ: <done>/<target>
+進行中: <candidate> — <n>% (<phase>) | バッチ: committed <committed>/<target>; attempted <attempted>/<target>; reconciled <reconciled>
 
-Use an integer 0 through 100, the current candidate and phase, and the real committed done count and
-configured target. Immediately after every Task result, before any tool call or routing decision,
+Use an integer 0 through 100, the current candidate and phase, and the real committed, attempted,
+reconciled, and configured target counts. Immediately after every Task result, before any tool call or routing decision,
 emit exactly these three lines with concrete concise content:
 
 所感(<child>/<role>): <assessment>
@@ -57,7 +57,7 @@ do not issue a diagnostic variant or retry; continue by delegation or report the
 
 OPERATIONAL_VISIBILITY_FIXTURE
     progress_trigger: candidate phase start/change | batch start/count change
-    progress_line: 進行中: <candidate> — <n>% (<phase>) | バッチ: <done>/<target>
+    progress_line: 進行中: <candidate> — <n>% (<phase>) | バッチ: committed <committed>/<target>; attempted <attempted>/<target>; reconciled <reconciled>
     task_return_immediate: exactly three lines before any tool or routing action
     task_line_1: 所感(<child>/<role>): <assessment>
     task_line_2: 根拠: <result evidence>
@@ -234,27 +234,61 @@ END_TAKEOVER_FIXTURE
 ## Bounded batch continuation
 
 This normal bounded-batch section applies only while backlogDrain.enabled=false.
-Use one bounded sequential batch per fresh session. A unit becomes attempted at its terminal
-handoff, and only a successful coordinator commit makes it done. Record a Project status
-checkpoint for every terminal unit. A blocked unit records its blocker with a concrete needed
-action, then continuation proceeds to the next independent unit. Only a whole-batch blocker or
-a user question stops the batch early.
+Use one bounded sequential batch per fresh session. Keep batchAttempted, batchCommitted, and
+batchReconciled as separate counters; the legacy combined done counter is forbidden because it conflates outcomes. A
+unit becomes attempted at its terminal handoff. Only a new successful coordinator commit increments
+batchCommitted; acceptance of an already-existing commit increments batchReconciled instead. Record
+a Project status checkpoint for every terminal unit. A blocked unit increments only batchAttempted,
+records its blocker with a concrete needed action, then continuation proceeds to the next independent
+unit. Only a whole-batch blocker or a user question stops the batch early.
 
 BATCH_CONTINUATION_FIXTURE
     scope: backlogDrain.enabled=false; mode=normal bounded batch
-    fresh_session: max_units=3; batchAttempted=0; batchDone=0
+    fresh_session: max_units=3; batchAttempted=0; batchCommitted=0; batchReconciled=0
+    display: committed <batchCommitted>/<batchTarget>; attempted <batchAttempted>/<batchTarget>; reconciled <batchReconciled>
     order: sequential
     unit_N_plus_1_start: only after unit N terminal handoff
     terminal_unit: increment batchAttempted; record Project status checkpoint
     terminal_order: establish terminal handoff first; then increment batchAttempted
-    successful_commit: increment batchDone
-    blocked_unit: record blocker with concrete needed action; continue to next independent unit
+    new_successful_commit: increment batchCommitted only
+    existing_commit_accepted: increment batchReconciled only
+    blocked_unit: increment batchAttempted only; record blocker with concrete needed action; continue to next independent unit
     local_handoff_defect: recover in the same candidate flow; never stop or count the unit terminal
-    remaining_units: after checkpoint invoke compact_and_continue and resume the batch
+    compact_guard: batchAttempted < batchTarget and independent next candidate exists
+    compact_action: after checkpoint invoke configured continuation; then same-turn stop
     noncomplete_handoff: exact next action required; completed handoff: completion evidence required
     early_stop: only whole-batch blocker or user question
     fourth_unit: rejected
 END_BATCH_CONTINUATION_FIXTURE
+
+Resolve every batch continuation through one identity-preserving resolver. The resolver receives the
+active source session identity and the host-configured continuation agent and capability. It permits
+continuation only when the source identity is available, is the root dog-coordinator, and exactly
+matches the configured continuation agent; preserve that identity through compaction. Reject any
+conversion to another coordinator and reject promotion of a child session to root. Missing identity,
+missing configured agent or capability, a final unit, a pending host auto-continue, or absence of an
+independent next candidate disables automatic continuation.
+
+Direct continuation-tool calls, continuation-marker fallback, and step-exhausted fallback all use
+this same resolver. Prefer the direct configured capability when available. Use the marker fallback
+only when the direct capability is unavailable, never in addition to a direct call. After invoking
+either continuation mechanism, stop the current turn immediately: no later tool call, Task dispatch,
+analysis, or final response.
+
+COMPACTION_IDENTITY_FIXTURE
+    resolver: one resolver for direct tool | continuation marker fallback | step-exhausted fallback
+    configured_route: configured continuation agent + configured continuation capability required
+    source_identity: available root dog-coordinator; preserved across compaction
+    identity_conversion: another coordinator rejected
+    child_promotion: child session -> root rejected
+    unavailable_identity: automatic continuation disabled
+    direct_preference: configured direct capability when available
+    marker_fallback: only when direct capability unavailable; never combine direct tool and marker
+    compact_guard: batchAttempted < batchTarget and independent next candidate exists
+    final_unit: no compaction
+    pending_host_autocontinue: no compaction
+    post_call: same-turn stop; no tool | Task | analysis | final
+END_COMPACTION_IDENTITY_FIXTURE
 
 Backlog drain is a configurable, explicit opt-in only. Unless the task entry sets
 backlogDrain.enabled to true and supplies a positive backlogDrain.maxUnits guard, use the
@@ -266,7 +300,10 @@ At drain start and after each compact resume, inventory all non-Done Project ite
 items(first:100), inspect pageInfo, and continue from endCursor while hasNextPage is true; never
 treat a first page or a capped count as complete inventory. Select the next independent item
 from that complete inventory. After each terminal handoff and checkpoint, compact the context,
-resume through dog-coordinator, reinventory, and continue until a stop condition applies.
+resume through dog-coordinator, reinventory, and continue until a stop condition applies. Every
+drain continuation uses the same identity-preserving resolver defined above: preserve the root source
+agent identity, reject child-to-root promotion and pending host auto-continue, and keep direct
+capability invocation exclusive from marker fallback.
 Run Project inventory as a direct \`gh api graphql\` command with a quoted literal query. If a
 \`pwsh -File\`, encoded command, nested shell, or probe form is denied, do not retry it; convert
 the request to that direct command. Use \`pwsh -NoProfile -Command '<literal>'\` only for a
@@ -283,10 +320,16 @@ BACKLOG_DRAIN_FIXTURE
     default_config: batchTarget=3; backlogDrain.enabled=false
     opt_in_required: backlogDrain.enabled=true; backlogDrain.maxUnits=<positive integer>
     execution: sequential; coordinator_authority=unchanged; per_unit_gates=unchanged
+    drain_counts: batchAttempted=terminal handoffs; batchCommitted=new commits; batchReconciled=accepted existing commits
+    display: committed <batchCommitted>/<backlogDrain.maxUnits>; attempted <batchAttempted>/<backlogDrain.maxUnits>; reconciled <batchReconciled>
     inventory_page_1: items(first:100)
     inventory_next_page: while pageInfo.hasNextPage; after=pageInfo.endCursor
     inventory_filter: include every item whose status is not Done
-    continuation: terminal handoff -> Project checkpoint -> compact resume -> complete reinventory
+    continuation: terminal handoff -> Project checkpoint -> same identity-preserving resolver -> compact resume -> complete reinventory
+    source_identity: preserve root source agent identity across drain compaction
+    child_promotion: child session -> root rejected
+    pending_host_autocontinue: drain compaction rejected
+    fallback_exclusivity: direct capability or marker fallback; never both
     attempted_count: survive every compact resume; carry in Project checkpoint and resume_delta
     max_guard_scope: count attempted units across the whole drain run; never reset on resume
     progress: compare complete inventory and terminal outcomes across a full resume cycle
@@ -313,11 +356,12 @@ USER_QUESTION_FIXTURE
 END_USER_QUESTION_FIXTURE
 
 A recoverable write-gate denial is a local activation or handoff defect, not a terminal candidate
-and not a user question. Perform one deterministic handshake only: Task worker inspects the exact
-registered handoff path read-only, coordinator resumes that same worker session, and the worker calls
-sortie_bind_write_gate once. Inactive inspection may only read and schema-check that exact path; it
-must not activate a session, grant a write gate, or authorize mutation. The worker returns the
-structured recoverable response and remedy to the coordinator instead of a plain final. A safe
+and not a user question. Create the operation manifest before Task dispatch. The Task activates only
+the child session; Task return/session.idle performs authoritative handoff inspection, then the
+coordinator resumes that same child session before sortie_bind_write_gate. Reading the handoff alone
+never records inspection, activates a session, grants a write gate, or authorizes mutation. The
+worker returns the structured recoverable response and remedy to the coordinator instead of a plain
+final. A safe
 repeat bind succeeds only when rereading confirms the same manifest hash and mtime; any difference
 is denied as stale and requires a new candidate session. For handoff-mismatch, only the coordinator
 regenerates the registered handoff; the worker inspects it read-only after same-session resume.
@@ -328,9 +372,9 @@ RECOVERABLE_HANDSHAKE_FIXTURE
     recoverable_bind_signal: escalation.action=blocker-resolution-takeover; resume_session=true; true_blocker=false
     nonrecoverable_bind_signal: escalation.action=follow-remedy; resume_session=false; existing remedy takes priority
     normal_worker_blocked: TRUE_BLOCKER absent -> blocker-resolution takeover on the same solSession
-    sequence: Task exact-path read-only inspection -> same worker session resume -> one bind attempt
-    attempt_limit: one handshake per candidate
-    inactive_inspection: exact registered handoff path; read and schema-check only
+    sequence: operation manifest -> Task child activation -> Task return/session.idle inspection -> same-session resume -> bind
+    attempt_limit: after the same session-inactive bind failure twice, continue blocker-resolution as a local handoff defect
+    inactive_inspection: Read alone never counts; file.edited or session.idle is authoritative
     inactive_authorization: session activation denied; write gate denied; mutation denied
     worker_return: structured response to dog-coordinator; terminal and question forbidden
     handoff_mismatch: dog-coordinator regenerates registered handoff; worker never rewrites it
@@ -439,15 +483,18 @@ Execute the supplied manifest within its acceptance criteria, run the requested 
 and return concise change and validation evidence only to dog-coordinator. Do not act as the
 user-facing coordinator.
 
-Before any write or staging request, call sortie_bind_write_gate exactly once with the candidate
-project_root and project-relative operation manifest path. Treat a denied bind as fail-closed;
+Before Task, require the candidate operation manifest. After child activation and Task return/session.idle,
+resume the same child session, then call sortie_bind_write_gate with the candidate project_root and
+project-relative operation manifest path. Treat a denied bind as fail-closed for mutation;
 never use file.edited or session.idle as implicit authorization. Do not retry the same validation
 command after the same failure phase occurs twice. Never stage outside exact manifest paths, use
 git add -A, amend, push, or perform coordinator-owned commit work.
 
 For a recoverable session-inactive, handoff-uninspected, or handoff-mismatch result, do not terminate and do not ask the
-user. Return its structured reason and remedy to dog-coordinator. After exact-path read-only Task
-inspection, accept one same-session resume and make the single handshake bind attempt. A confirmed
+user. Classify session-inactive as a local handoff defect and return its structured reason and remedy
+to dog-coordinator. After Task return/session.idle inspection, accept same-session resume and make the
+handshake bind attempt. If session-inactive repeats twice, continue blocker-resolution rather than
+reporting an external blocker. A confirmed
 idempotent bound result may continue; a changed manifest binding remains fail-closed. Only
 dog-coordinator may regenerate a mismatched handoff; never rewrite it as the worker.
 
