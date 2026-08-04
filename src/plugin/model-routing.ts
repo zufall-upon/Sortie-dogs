@@ -89,14 +89,14 @@ export interface ResolveModelRouteInput {
 export interface ResolvedModelRoute {
   readonly ok: true;
   readonly role: string;
-  readonly source: "local" | "global";
+  readonly source: "fixed" | "local" | "global";
   readonly catalog: "project" | "global";
   readonly model: string;
   readonly variant?: string;
 }
 
 export interface ModelResolutionAttempt {
-  readonly source: "local" | "global";
+  readonly source: "fixed" | "local" | "global";
   readonly target: ModelTarget;
   readonly reason: "model-unavailable" | "variant-unavailable";
 }
@@ -194,12 +194,18 @@ function findAvailable(
 /** Resolve a role deterministically without provider calls or implicit model guesses. */
 export function resolveModelRoute(input: ResolveModelRouteInput): ModelRouteResolution {
   const attempts: ModelResolutionAttempt[] = [];
-  for (const [source, route] of [
-    ["local", ownRoute(input.local, input.role)],
-    ["global", ownRoute(input.global, input.role)],
-  ] as const) {
-    if (route === undefined) continue;
-    for (const target of [route.preferred, ...(route.fallback ?? [])]) {
+  const routes = isFixedModelRole(input.role)
+    ? [["fixed", [FIXED_MODEL_ROUTING[input.role].preferred]] as const]
+    : [
+      ["local", ownRoute(input.local, input.role)] as const,
+      ["global", ownRoute(input.global, input.role)] as const,
+    ];
+  for (const [source, routeOrTargets] of routes) {
+    if (routeOrTargets === undefined) continue;
+    const targets = source === "fixed"
+      ? routeOrTargets
+      : [routeOrTargets.preferred, ...(routeOrTargets.fallback ?? [])];
+    for (const target of targets) {
       const availability = findAvailable(target, input.catalog);
       if (typeof availability === "object") {
         return {

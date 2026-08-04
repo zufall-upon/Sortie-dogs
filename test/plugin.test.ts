@@ -286,7 +286,7 @@ test("MkII worker routes stay fixed while consultation roles remain host configu
     const expected = {
       ok: true,
       role,
-      source: "local",
+      source: "fixed",
       catalog: "global",
       model: DEDICATED_SOL_MODEL,
       variant: DEDICATED_SOL_VARIANT,
@@ -295,6 +295,22 @@ test("MkII worker routes stay fixed while consultation roles remain host configu
       preferred: { model: DEDICATED_SOL_MODEL, variant: DEDICATED_SOL_VARIANT },
     }, `${role} public route must remain authoritative`);
     assert.deepEqual(resolveRole(role), expected);
+    assert.deepEqual(resolveModelRoute({
+      role,
+      local: {
+        [role]: {
+          preferred: { model: canonicalModel },
+          fallback: [{ model: "vendor-a/advice" }],
+        },
+      },
+      global: {
+        [role]: {
+          preferred: { model: "vendor-b/review" },
+          fallback: [{ model: "vendor-c/review" }],
+        },
+      },
+      catalog: configured.modelCatalog,
+    }), expected, `${role} must reject direct override and fallback injection`);
     assert.deepEqual(resolveModelRoute({
       role,
       local: { ...configured.localModelRouting },
@@ -347,7 +363,7 @@ test("MkII worker routes stay fixed while consultation roles remain host configu
       role,
       reason: "unresolved-role",
       attempts: [{
-        source: "local",
+        source: "fixed",
         target: { model: DEDICATED_SOL_MODEL, variant: DEDICATED_SOL_VARIANT },
         reason: "model-unavailable",
       }],
@@ -657,10 +673,46 @@ test("consultation adapter is provider-neutral and model names do not affect cor
   const result = await adapter.consult(request);
   assert.equal(result.status, "completed");
   assert.deepEqual(seen, [request]);
+  assert.deepEqual(Object.keys(request).sort(), [
+    "agent",
+    "candidateId",
+    "capability",
+    "constraints",
+    "options",
+    "question",
+    "requestId",
+  ]);
+  assert.deepEqual(Object.keys(result).sort(), [
+    "candidateId",
+    "capability",
+    "considerations",
+    "recommendation",
+    "requestId",
+    "status",
+  ]);
+  for (const envelope of [request, result]) {
+    for (const forbidden of ["provider", "vendor", "model", "variant", "transport"]) {
+      assert.equal(Object.hasOwn(envelope, forbidden), false, `${forbidden} leaked into consultation envelope`);
+    }
+  }
   for (const model of ["vendor-one/model-a", "vendor-two/model-z"]) {
     const route = parseModelRoutingConfig({ "dog-advisor": { model } });
     assert.deepEqual(route?.["dog-advisor"], { preferred: { model } });
     assert.equal(JSON.stringify(request).includes(model), false);
+  }
+
+  const coordinator = runtimeAssets.find((asset) => asset.name === "dog-coordinator");
+  assert.ok(coordinator);
+  assert.match(
+    coordinator.content,
+    /ConsultationAdapter is the sole explicit transport boundary;\s+the host adapter owns it/i,
+  );
+  for (const name of ["dog-coordinator", "dog-advisor", "dog-reviewer"]) {
+    const asset = runtimeAssets.find((candidate) => candidate.name === name);
+    assert.ok(asset);
+    const frontmatter = asset.content.match(/^---\r?\n([\s\S]+?)\r?\n---/)?.[1];
+    assert.ok(frontmatter);
+    assert.doesNotMatch(frontmatter, /^(?:provider|vendor|model|variant|transport):/m);
   }
 });
 
@@ -681,7 +733,7 @@ test("generated coordinator requires progress, immediate Task feedback, and deny
   assert.ok(coordinator);
   const content = coordinator.content.replace(/\s+/gu, " ");
   for (const required of [
-    "進行中: <candidate> — <n>% (<phase>) | バッチ: <done>/<target>",
+    "進行中: <candidate> — <n>% (<phase>) | バッチ: committed <committed>/<target>; attempted <attempted>/<target>; reconciled <reconciled>",
     "所感(<child>/<role>): <assessment>",
     "根拠: <result evidence>",
     "次action: <single next action>",
@@ -709,7 +761,9 @@ test("runtime contract requires interactive continuation and deterministic recov
   );
   assert.ok(handshake);
   assert.match(handshake[1], /session-inactive \| session-expired \| handoff-uninspected \| handoff-mismatch/);
-  assert.match(handshake[1], /Task exact-path read-only inspection -> same worker session resume -> one bind attempt/);
+    assert.match(handshake[1], /operation manifest -> Task child activation -> Task return\/session\.idle inspection -> same-session resume -> bind/);
+    assert.match(handshake[1], /same session-inactive bind failure twice, continue blocker-resolution/);
+    assert.match(handshake[1], /Read alone never counts; file\.edited or session\.idle is authoritative/);
   assert.match(handshake[1], /same manifest hash \+ mtime after reread -> idempotent bound/);
   assert.match(handshake[1], /changed path, hash, or mtime -> deny/);
   assert.match(handshake[1], /dog-coordinator regenerates registered handoff; worker never rewrites it/);
@@ -726,8 +780,49 @@ test("runtime contract requires interactive continuation and deterministic recov
   );
   assert.ok(batch);
   assert.match(batch[1], /terminal_order: establish terminal handoff first; then increment batchAttempted/);
+  assert.match(batch[1], /new_successful_commit: increment batchCommitted only/);
+  assert.match(batch[1], /existing_commit_accepted: increment batchReconciled only/);
+  assert.match(
+    batch[1],
+    /blocked_unit: increment batchAttempted only; record blocker with concrete needed action; continue to next independent unit/,
+  );
   assert.match(batch[1], /local_handoff_defect: recover in the same candidate flow; never stop or count the unit terminal/);
-  assert.match(batch[1], /remaining_units: after checkpoint invoke compact_and_continue and resume the batch/);
+  assert.match(batch[1], /compact_guard: batchAttempted < batchTarget and independent next candidate exists/);
+  assert.match(batch[1], /compact_action: after checkpoint invoke configured continuation; then same-turn stop/);
+
+  const compaction = coordinator.content.match(
+    /COMPACTION_IDENTITY_FIXTURE\r?\n([\s\S]+?)\r?\nEND_COMPACTION_IDENTITY_FIXTURE/,
+  );
+  assert.ok(compaction);
+  for (const contract of [
+    "resolver: one resolver for direct tool | continuation marker fallback | step-exhausted fallback",
+    "configured_route: configured continuation agent + configured continuation capability required",
+    "source_identity: available root dog-coordinator; preserved across compaction",
+    "identity_conversion: another coordinator rejected",
+    "child_promotion: child session -> root rejected",
+    "unavailable_identity: automatic continuation disabled",
+    "marker_fallback: only when direct capability unavailable; never combine direct tool and marker",
+    "final_unit: no compaction",
+    "pending_host_autocontinue: no compaction",
+    "post_call: same-turn stop; no tool | Task | analysis | final",
+  ]) assert.ok(compaction[1].includes(contract), contract);
+  assert.match(
+    coordinator.content,
+    /marker fallback\s+only when the direct capability is unavailable, never in addition to or after a direct call/i,
+  );
+
+  const drain = coordinator.content.match(
+    /BACKLOG_DRAIN_FIXTURE\r?\n([\s\S]+?)\r?\nEND_BACKLOG_DRAIN_FIXTURE/,
+  );
+  assert.ok(drain);
+  for (const contract of [
+    "drain_counts: batchAttempted=terminal handoffs; batchCommitted=new commits; batchReconciled=accepted existing commits",
+    "continuation: terminal handoff -> Project checkpoint -> same identity-preserving resolver -> compact resume -> complete reinventory",
+    "source_identity: preserve root source agent identity across drain compaction",
+    "child_promotion: child session -> root rejected",
+    "pending_host_autocontinue: drain compaction rejected",
+    "fallback_exclusivity: direct capability or marker fallback; never both",
+  ]) assert.ok(drain[1].includes(contract), contract);
 });
 
 assert.deepEqual([...cases.keys()], [
@@ -978,11 +1073,7 @@ test("session policy is passive until an exact trigger and deactivates only on e
       "role=implementation\nprojectRoot=C:\\candidate\ncandidate=card-01\nsource_manifest=[src/a.ts]\nacceptance: safe change",
       "dog-coordinator",
     );
-    await expectMessage(
-      () => write("coordinator-task"),
-      'Write denied for "<unknown>": operation manifest unavailable.',
-      "manifest-unavailable",
-    );
+    await write("coordinator-task");
     await message("passive", "/sortie-other");
     await write("passive");
     await message("passive", "/sortie task");
@@ -1013,7 +1104,7 @@ test("session policy is passive until an exact trigger and deactivates only on e
   });
 });
 
-test("explicit Task children activate through parent identity without inheriting authorization", async () => {
+test("passive coordinator lineage activates only its Task child without inheriting authorization", async () => {
   await withProject("child-session-activation", async (directory) => {
     await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
     await writeFile(join(directory, "handoff.json"), JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
@@ -1024,9 +1115,13 @@ test("explicit Task children activate through parent identity without inheriting
     assert.ok(chat);
     assert.ok(before);
     assert.ok(event);
-    await activate(hooks, "parent");
+    await chat(
+      { sessionID: "parent", agent: "dog-coordinator" },
+      { message: { agent: "dog-coordinator", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: "ordinary coordinator turn" }] },
+    );
+    assert.equal((await executeBindWriteGate(hooks, directory, "parent")).reason, "session-inactive");
     await event({ event: { type: "session.created", properties: { info: { id: "child", parentID: "parent", directory } } } });
-    assert.equal((await executeBindWriteGate(hooks, directory, "child")).reason, "handoff-uninspected");
+    assert.equal((await executeBindWriteGate(hooks, directory, "child")).reason, "session-inactive");
     const task = `role=implementation\nprojectRoot=${directory}\ncandidate=child\nsource_manifest=[src/a.ts]\nacceptance: safe change`;
     await chat(
       { sessionID: "child", agent: "renamed-worker" },
@@ -1039,10 +1134,29 @@ test("explicit Task children activate through parent identity without inheriting
       resume_session: true,
       true_blocker: false,
     });
-    await event({ event: { type: "file.edited", properties: { file: "handoff.json", sessionID: "child" } } });
+    await before(
+      { tool: "read", sessionID: "child", callID: "read-only" },
+      { args: { filePath: join(directory, "handoff.json") } },
+    );
+    assert.equal((await executeBindWriteGate(hooks, directory, "child")).reason, "handoff-uninspected");
+    await event({ event: { type: "session.idle", properties: { sessionID: "child" } } });
+    await chat(
+      { sessionID: "child", agent: "renamed-worker" },
+      { message: { agent: "renamed-worker", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: "same-session resume" }] },
+    );
     assert.equal((await executeBindWriteGate(hooks, directory, "child")).status, "bound");
     await before(
       { tool: "write", sessionID: "child", callID: "child-write" },
+      { args: { file: "allowed.txt", content: "not-written" } },
+    );
+
+    await event({ event: { type: "session.idle", properties: { sessionID: "child" } } });
+    await chat(
+      { sessionID: "child", agent: "renamed-worker" },
+      { message: { agent: "renamed-worker", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: "resume completed child" }] },
+    );
+    await before(
+      { tool: "write", sessionID: "child", callID: "resumed-child-write" },
       { args: { file: "allowed.txt", content: "not-written" } },
     );
 
@@ -1058,16 +1172,17 @@ test("explicit Task children activate through parent identity without inheriting
       assert.equal((await executeBindWriteGate(hooks, directory, sessionID)).reason, "session-inactive");
     }
 
-    for (let index = 0; index <= 256; index += 1) {
-      await event({ event: { type: "session.created", properties: { info: { id: `deferred-${index}`, parentID: "parent" } } } });
-    }
+    await event({ event: { type: "session.created", properties: { info: { id: "fresh-child", parentID: "parent", directory } } } });
     await chat(
-      { sessionID: "deferred-0", agent: "renamed-worker" },
+      { sessionID: "fresh-child", agent: "renamed-worker" },
       { message: { agent: "renamed-worker", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: task }] },
     );
-    assert.equal((await executeBindWriteGate(hooks, directory, "deferred-0")).reason, "handoff-uninspected");
+    assert.equal((await executeBindWriteGate(hooks, directory, "fresh-child")).reason, "handoff-uninspected");
 
-    await activate(hooks, "deleted-parent");
+    await chat(
+      { sessionID: "deleted-parent", agent: "dog-coordinator" },
+      { message: { agent: "dog-coordinator", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: "ordinary coordinator turn" }] },
+    );
     await event({ event: { type: "session.created", properties: { info: { id: "deleted-parent-child", parentID: "deleted-parent" } } } });
     await event({ event: { type: "session.deleted", properties: { sessionID: "deleted-parent" } } });
     await chat(
@@ -1078,7 +1193,7 @@ test("explicit Task children activate through parent identity without inheriting
   });
 });
 
-test("matching parent and child inspections recover missing parent propagation", async () => {
+test("same-fingerprint inspection cannot cross coordinator root lineage", async () => {
   await withProject("child-inspection-fallback", async (directory) => {
     await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
     await writeFile(join(directory, "handoff.json"), JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
@@ -1087,15 +1202,25 @@ test("matching parent and child inspections recover missing parent propagation",
     const event = hooks.event;
     assert.ok(chat);
     assert.ok(event);
-    await activate(hooks, "parent");
-    for (const sessionID of ["parent", "fallback-child"]) {
-      await event({ event: { type: "file.edited", properties: { file: "handoff.json", sessionID } } });
+    for (const sessionID of ["root-a", "root-b"]) {
+      await chat(
+        { sessionID, agent: "dog-coordinator" },
+        { message: { agent: "dog-coordinator", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: "ordinary" }] },
+      );
     }
+    await event({ event: { type: "session.created", properties: { info: { id: "owner-child", parentID: "root-a", directory } } } });
+    await chat(
+      { sessionID: "owner-child", agent: "renamed-worker" },
+      { message: { agent: "renamed-worker", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: `role=implementation\nprojectRoot=${directory}\ncandidate=child\nsource_manifest=[src/a.ts]\nacceptance: safe change` }] },
+    );
+    await event({ event: { type: "session.idle", properties: { sessionID: "owner-child" } } });
+    assert.equal((await executeBindWriteGate(hooks, directory, "owner-child")).status, "bound");
+    await event({ event: { type: "session.created", properties: { info: { id: "fallback-child", parentID: "root-b", directory } } } });
     await chat(
       { sessionID: "fallback-child", agent: "renamed-worker" },
       { message: { agent: "renamed-worker", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: `role=implementation\nprojectRoot=${directory}\ncandidate=child\nsource_manifest=[src/a.ts]\nacceptance: safe change` }] },
     );
-    assert.equal((await executeBindWriteGate(hooks, directory, "fallback-child")).status, "bound");
+    assert.equal((await executeBindWriteGate(hooks, directory, "fallback-child")).reason, "handoff-uninspected");
   });
 });
 
@@ -1120,6 +1245,66 @@ test("sibling inspection fallback requires the same inspected fingerprint", asyn
       { message: { agent: "renamed-worker", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: `role=implementation\nprojectRoot=${directory}\ncandidate=child\nsource_manifest=[src/a.ts]\nacceptance: safe change` }] },
     );
     assert.equal((await executeBindWriteGate(hooks, directory, "fingerprint-child")).reason, "session-inactive");
+  });
+});
+
+test("root and inspection TTLs stop new inheritance without revoking existing child authorization", async () => {
+  await withProject("lineage-ttl", async (directory) => {
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+    await writeFile(join(directory, "handoff.json"), JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
+    const hooks = await SortieDogsPlugin({ directory });
+    const chat = hooks["chat.message"];
+    const before = hooks["tool.execute.before"];
+    const event = hooks.event;
+    assert.ok(chat);
+    assert.ok(before);
+    assert.ok(event);
+    const originalNow = Date.now;
+    let now = 1_000_000;
+    Date.now = () => now;
+    try {
+      const task = `role=implementation\nprojectRoot=${directory}\ncandidate=child\nsource_manifest=[src/a.ts]\nacceptance: safe change`;
+      await chat(
+        { sessionID: "ttl-root", agent: "dog-coordinator" },
+        { message: { agent: "dog-coordinator", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: "ordinary" }] },
+      );
+      await event({ event: { type: "session.created", properties: { info: { id: "authorized-child", parentID: "ttl-root", directory } } } });
+      await chat(
+        { sessionID: "authorized-child", agent: "dog-worker" },
+        { message: { agent: "dog-worker", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: task }] },
+      );
+      await event({ event: { type: "session.idle", properties: { sessionID: "authorized-child" } } });
+      assert.equal((await executeBindWriteGate(hooks, directory, "authorized-child")).status, "bound");
+
+      await activate(hooks, "inspection-ttl");
+      await event({ event: { type: "file.edited", properties: { file: "handoff.json", sessionID: "inspection-ttl" } } });
+      now += 20 * 60 * 1000;
+      for (const sessionID of ["authorized-child", "inspection-ttl"]) {
+        await chat(
+          { sessionID, agent: "dog-worker" },
+          { message: { agent: "dog-worker", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: "keep active" }] },
+        );
+      }
+      await before(
+        { tool: "write", sessionID: "authorized-child", callID: "refresh-authorization" },
+        { args: { file: "allowed.txt", content: "not-written" } },
+      );
+      now += 10 * 60 * 1000 + 1;
+      assert.equal((await executeBindWriteGate(hooks, directory, "inspection-ttl")).reason, "handoff-uninspected");
+
+      await event({ event: { type: "session.created", properties: { info: { id: "late-child", parentID: "ttl-root", directory } } } });
+      await chat(
+        { sessionID: "late-child", agent: "dog-worker" },
+        { message: { agent: "dog-worker", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: task }] },
+      );
+      assert.equal((await executeBindWriteGate(hooks, directory, "late-child")).reason, "session-inactive");
+      await before(
+        { tool: "write", sessionID: "authorized-child", callID: "post-root-expiry" },
+        { args: { file: "allowed.txt", content: "not-written" } },
+      );
+    } finally {
+      Date.now = originalNow;
+    }
   });
 });
 
@@ -1527,7 +1712,7 @@ test("write-gate binding requires a matching inspected Task handoff", async () =
   });
 });
 
-test("inactive exact-path inspection stays passive and enables one same-session handshake", async () => {
+test("inactive file events stay passive and only active lifecycle inspection enables binding", async () => {
   await withProject("inactive-inspection", async (directory) => {
     await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
     const handoffPath = join(directory, "handoff.json");
@@ -1543,6 +1728,8 @@ test("inactive exact-path inspection stays passive and enables one same-session 
       { status: "denied", reason: "session-inactive", recoverable: true },
     );
     await activate(hooks, "inactive");
+    assert.equal((await executeBindWriteGate(hooks, directory, "inactive")).reason, "handoff-uninspected");
+    await event({ event: { type: "session.idle", properties: { sessionID: "inactive" } } });
     assert.equal((await executeBindWriteGate(hooks, directory, "inactive")).status, "bound");
 
     await event({ event: { type: "file.edited", properties: { file: join(directory, "other.json"), sessionID: "off-path" } } });

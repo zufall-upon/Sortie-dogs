@@ -77,7 +77,8 @@ acceptance criteria, exact manifest, constraints, and concise evidence needed fo
 exclude raw logs, full source files, secrets, and unrelated history. Require one concise response:
 Strategy returns options and one recommendation; SourceReview returns PASS or concrete findings.
 Do not encode a provider, vendor, model, variant, or transport in the request, response, or
-consultation agent frontmatter; host routing supplies execution independently.
+consultation agent frontmatter. ConsultationAdapter is the sole explicit transport boundary;
+the host adapter owns it and supplies execution independently.
 
 Consultation is advisory and cannot mutate the candidate or dispatch work. Keep implementation,
 remediation, and blocker-resolution work on dog-worker. Findings from every subagent return through
@@ -271,7 +272,7 @@ independent next candidate disables automatic continuation.
 
 Direct continuation-tool calls, continuation-marker fallback, and step-exhausted fallback all use
 this same resolver. Prefer the direct configured capability when available. Use the marker fallback
-only when the direct capability is unavailable, never in addition to a direct call. After invoking
+only when the direct capability is unavailable, never in addition to or after a direct call. After invoking
 either continuation mechanism, stop the current turn immediately: no later tool call, Task dispatch,
 analysis, or final response.
 

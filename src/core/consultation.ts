@@ -177,7 +177,10 @@ export type ConsultationResult =
   | SourceReviewConsultationResult
   | UnavailableConsultationResult;
 
-/** Host-owned adapters implement transport. Core never executes commands or selects providers. */
+/**
+ * Sole consultation transport boundary. The host supplies this adapter; core passes only the
+ * provider-, model-, variant-, and transport-neutral request and result envelopes above.
+ */
 export interface ConsultationAdapter {
   consult(request: ConsultationRequest): Promise<ConsultationResult>;
 }
