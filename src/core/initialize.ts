@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, mkdir, open, readFile, rm, rmdir } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, realpath, rm, rmdir, stat } from "node:fs/promises";
+import { homedir } from "node:os";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
 const assets: typeof import("../runtime-assets.js") = await import(
@@ -10,6 +11,7 @@ const { runtimeAssets } = assets;
 
 const OPEN_CODE_DIRECTORY = ".opencode";
 const VERSION_MARKER = `${OPEN_CODE_DIRECTORY}/sortie-dogs.version`;
+const GLOBAL_VERSION_MARKER = "sortie-dogs.version";
 
 interface LegacyRuntimeAsset {
   readonly relativePath: string;
@@ -76,14 +78,14 @@ function assetVersion(): string {
   return versions.values().next().value!;
 }
 
-function safeAssetPath(installPath: string): string {
+function safeAssetPath(installPath: string, prefix: string): string {
   const unified = installPath.replaceAll("\\", "/");
   const segments = unified.split("/");
   if (isAbsolute(installPath) || /^[A-Za-z]:/u.test(unified) ||
       segments.some((segment) => segment === "" || segment === "." || segment === "..")) {
     throw new ProjectInitializationError("unsafe-path", "A runtime asset has an unsafe install path.");
   }
-  return `${OPEN_CODE_DIRECTORY}/${unified}`;
+  return prefix === "" ? unified : `${prefix}/${unified}`;
 }
 
 function parseMarker(content: string): string {
@@ -309,23 +311,62 @@ async function overwriteFileSafely(
   }
 }
 
-/** Installs the packaged runtime into one existing project without changing user settings. */
-export async function initializeProject(projectRoot: string = process.cwd()): Promise<InitializeProjectResult> {
-  const root = resolve(projectRoot);
+interface InitializationLayout {
+  readonly assetPrefix: string;
+  readonly markerPath: string;
+  readonly preserveAllLegacy: boolean;
+  readonly invalidRootMessage: string;
+}
+
+const PROJECT_LAYOUT: InitializationLayout = {
+  assetPrefix: OPEN_CODE_DIRECTORY,
+  markerPath: VERSION_MARKER,
+  preserveAllLegacy: false,
+  invalidRootMessage: "Project root must be an existing non-symlink directory.",
+};
+
+const GLOBAL_LAYOUT: InitializationLayout = {
+  assetPrefix: "",
+  markerPath: GLOBAL_VERSION_MARKER,
+  preserveAllLegacy: true,
+  invalidRootMessage: "Global configuration root must be an existing non-symlink directory.",
+};
+
+function layoutLegacyPath(asset: LegacyRuntimeAsset, layout: InitializationLayout): string {
+  return layout.preserveAllLegacy
+    ? asset.relativePath.slice(`${OPEN_CODE_DIRECTORY}/`.length)
+    : asset.relativePath;
+}
+
+async function initializeRoot(
+  requestedRoot: string,
+  layout: InitializationLayout,
+): Promise<InitializeProjectResult> {
+  const root = resolve(requestedRoot);
   const rootInfo = await metadata(root);
   if (rootInfo === undefined || !rootInfo.isDirectory() || rootInfo.isSymbolicLink()) {
-    throw new ProjectInitializationError("invalid-project", "Project root must be an existing non-symlink directory.");
+    throw new ProjectInitializationError("invalid-project", layout.invalidRootMessage);
   }
 
   const version = assetVersion();
   const assetEntries: InstallEntry[] = runtimeAssets.map(({ installPath, content }) => ({
-    relativePath: safeAssetPath(installPath),
+    relativePath: safeAssetPath(installPath, layout.assetPrefix),
     content,
   }));
   const entries: InstallEntry[] = [
     ...assetEntries,
-    { relativePath: VERSION_MARKER, content: `${version}\n` },
+    { relativePath: layout.markerPath, content: `${version}\n` },
   ];
+
+  const preservedGlobalLegacyPaths: string[] = [];
+  if (layout.preserveAllLegacy) {
+    for (const asset of LEGACY_RUNTIME_ASSETS) {
+      const relativePath = layoutLegacyPath(asset, layout);
+      if (await metadata(resolve(root, relativePath)) !== undefined) {
+        preservedGlobalLegacyPaths.push(relativePath);
+      }
+    }
+  }
 
   const existing = await Promise.all(entries.map(async (entry) => {
     const present = await assertSafeExistingPath(root, entry.relativePath, true);
@@ -341,7 +382,7 @@ export async function initializeProject(projectRoot: string = process.cwd()): Pr
       status: "unchanged",
       version,
       installedPaths: entries.map(({ relativePath }) => relativePath),
-      preservedLegacyPaths: [],
+      preservedLegacyPaths: preservedGlobalLegacyPaths,
     };
   }
 
@@ -361,8 +402,8 @@ export async function initializeProject(projectRoot: string = process.cwd()): Pr
 
   const installedVersion = markerText === undefined ? undefined : parseMarker(markerText.toString("utf8"));
   const removableLegacyFiles: Array<{ asset: LegacyRuntimeAsset; content: Buffer }> = [];
-  const preservedLegacyPaths: string[] = [];
-  if (installedVersion !== undefined) {
+  const preservedLegacyPaths: string[] = [...preservedGlobalLegacyPaths];
+  if (!layout.preserveAllLegacy && installedVersion !== undefined) {
     for (const asset of LEGACY_RUNTIME_ASSETS) {
       if (!asset.markerVersions.includes(installedVersion)) continue;
       const state = await readableOwnedLegacyFile(root, asset);
@@ -421,4 +462,102 @@ export async function initializeProject(projectRoot: string = process.cwd()): Pr
     installedPaths: entries.map(({ relativePath }) => relativePath),
     preservedLegacyPaths,
   };
+}
+
+/** Resolves the OpenCode global configuration directory without platform-specific paths. */
+export async function resolveGlobalConfigRoot(
+  env: NodeJS.ProcessEnv = process.env,
+  home: string = homedir(),
+): Promise<string> {
+  if (env.OPENCODE_CONFIG_DIR) return resolve(env.OPENCODE_CONFIG_DIR);
+  if (env.OPENCODE_CONFIG) {
+    const configured = resolve(env.OPENCODE_CONFIG);
+    try {
+      if ((await stat(configured)).isDirectory()) return await realpath(configured);
+    } catch (error) {
+      if (!(["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? ""))) throw error;
+    }
+    return dirname(configured);
+  }
+  if (env.XDG_CONFIG_HOME) return resolve(env.XDG_CONFIG_HOME, "opencode");
+  return resolve(home, ".config", "opencode");
+}
+
+/** Installs the packaged runtime into one existing project without changing user settings. */
+export async function initializeProject(projectRoot: string = process.cwd()): Promise<InitializeProjectResult> {
+  return initializeRoot(projectRoot, PROJECT_LAYOUT);
+}
+
+async function removeEmptyDirectories(paths: readonly string[]): Promise<unknown[]> {
+  const failures: unknown[] = [];
+  for (const directory of [...paths].reverse()) {
+    await rmdir(directory).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT") failures.push(error);
+    });
+  }
+  return failures;
+}
+
+/** Installs the packaged runtime into OpenCode's global configuration directory. */
+export async function initializeGlobal(globalRoot?: string): Promise<InitializeProjectResult> {
+  let root = resolve(globalRoot ?? await resolveGlobalConfigRoot());
+  let existing = await metadata(root);
+  if (existing?.isSymbolicLink()) {
+    try {
+      if (!(await stat(root)).isDirectory()) throw new Error("Global configuration root is not a directory.");
+      root = await realpath(root);
+      existing = await metadata(root);
+    } catch (error) {
+      throw new ProjectInitializationError("invalid-project", GLOBAL_LAYOUT.invalidRootMessage, { cause: error });
+    }
+  }
+
+  const createdRootDirectories: string[] = [];
+  if (existing === undefined) {
+    try {
+      const missing: string[] = [];
+      let candidate = root;
+      while (await metadata(candidate) === undefined) {
+        missing.push(candidate);
+        const parent = dirname(candidate);
+        if (parent === candidate) break;
+        candidate = parent;
+      }
+      for (const directory of missing.reverse()) {
+        try {
+          await mkdir(directory);
+          createdRootDirectories.push(directory);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+          const raced = await metadata(directory);
+          if (raced === undefined || raced.isSymbolicLink() || !raced.isDirectory()) throw error;
+        }
+      }
+    } catch (error) {
+      const cleanupFailures = await removeEmptyDirectories(createdRootDirectories);
+      if (cleanupFailures.length > 0) {
+        throw new ProjectInitializationError(
+          "write-failed",
+          "Global configuration directory creation failed and cleanup was incomplete.",
+          { cause: new AggregateError([error, ...cleanupFailures]) },
+        );
+      }
+      throw new ProjectInitializationError("write-failed", "Global configuration directory could not be created.", {
+        cause: error,
+      });
+    }
+  }
+  try {
+    return await initializeRoot(root, GLOBAL_LAYOUT);
+  } catch (error) {
+    const cleanupFailures = await removeEmptyDirectories(createdRootDirectories);
+    if (cleanupFailures.length > 0) {
+      throw new ProjectInitializationError(
+        "write-failed",
+        "Global initialization failed and directory cleanup was incomplete.",
+        { cause: new AggregateError([error, ...cleanupFailures]) },
+      );
+    }
+    throw error;
+  }
 }

@@ -41,7 +41,8 @@ const USAGE = `Usage: sortie-dogs lint <handoff.json> [<handoff.json> ...]
   [--changed-paths-from <file|->]
   [--changed-path <path> ...]
   [--format text|json] [--quiet] [--strict]`;
-const INIT_USAGE = "Usage: sortie-dogs init [project-root]";
+const INIT_USAGE = `Usage: sortie-dogs init [project-root]
+       sortie-dogs init --global`;
 
 type OutputFormat = "text" | "json";
 
@@ -261,15 +262,28 @@ export async function run(argv: readonly string[]): Promise<number> {
       process.stdout.write(`${INIT_USAGE}\n`);
       return 0;
     }
-    if (argv.length > 2 || argv[1]?.startsWith("-") === true) {
+    const global = argv[1] === "--global";
+    if (argv.length > 2 || (argv[1]?.startsWith("-") === true && !global)) {
       process.stderr.write(`${INIT_USAGE}\n`);
       return 2;
     }
     try {
-      const initialized = await initializer.initializeProject(argv[1]);
-      process.stdout.write(initialized.status === "installed"
-        ? `Initialized Sortie-dogs ${initialized.version}.\n`
-        : `Sortie-dogs ${initialized.version} is already initialized.\n`);
+      const target = global ? await initializer.resolveGlobalConfigRoot() : undefined;
+      const initialized = global
+        ? await initializer.initializeGlobal(target)
+        : await initializer.initializeProject(argv[1]);
+      if (global) {
+        process.stdout.write(initialized.status === "installed"
+          ? `Initialized Sortie-dogs ${initialized.version} globally at ${target}.\n`
+          : `Sortie-dogs ${initialized.version} is already initialized globally at ${target}.\n`);
+      } else {
+        process.stdout.write(initialized.status === "installed"
+          ? `Initialized Sortie-dogs ${initialized.version}.\n`
+          : `Sortie-dogs ${initialized.version} is already initialized.\n`);
+      }
+      if (initialized.preservedLegacyPaths.length > 0) {
+        process.stdout.write(`Preserved legacy runtime files: ${initialized.preservedLegacyPaths.join(", ")}.\n`);
+      }
       return 0;
     } catch (error) {
       process.stderr.write(error instanceof initializer.ProjectInitializationError

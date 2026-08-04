@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { lstat, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
 import {
+  initializeGlobal,
   initializeProject,
   ProjectInitializationError,
+  resolveGlobalConfigRoot,
 } from "../src/core/initialize.ts";
 import { runtimeAssets } from "../src/runtime-assets.ts";
 
@@ -317,11 +319,11 @@ test("owned drift cannot overwrite through a file symlink", async (context) => {
 
 interface CliResult { exit: number | null; stdout: string; stderr: string }
 
-async function runCli(args: readonly string[]): Promise<CliResult> {
+async function runCli(args: readonly string[], env: NodeJS.ProcessEnv = {}): Promise<CliResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, ["--experimental-strip-types", ENTRY, ...args], {
       cwd: process.cwd(),
-      env: { ...process.env, NODE_NO_WARNINGS: "1" },
+      env: { ...process.env, NODE_NO_WARNINGS: "1", ...env },
       stdio: ["ignore", "pipe", "pipe"],
     });
     let stdout = "";
@@ -338,7 +340,7 @@ test("CLI init supports an explicit project root, repeated init, and help", asyn
   try {
     assert.deepEqual(await runCli(["init", "--help"]), {
       exit: 0,
-      stdout: "Usage: sortie-dogs init [project-root]\n",
+      stdout: "Usage: sortie-dogs init [project-root]\n       sortie-dogs init --global\n",
       stderr: "",
     });
     assert.deepEqual(await runCli(["init", project]), {
@@ -353,5 +355,172 @@ test("CLI init supports an explicit project root, repeated init, and help", asyn
     });
   } finally {
     await clean(project);
+  }
+});
+
+test("global root resolver honors OpenCode and XDG precedence", async () => {
+  const fixture = await fixtureDirectory();
+  try {
+    const configDirectory = join(fixture, "configured-directory");
+    await mkdir(configDirectory);
+    assert.equal(await resolveGlobalConfigRoot({
+      OPENCODE_CONFIG_DIR: join(fixture, "explicit"),
+      OPENCODE_CONFIG: join(fixture, "opencode.json"),
+      XDG_CONFIG_HOME: join(fixture, "xdg"),
+    }, join(fixture, "home")), join(fixture, "explicit"));
+    assert.equal(await resolveGlobalConfigRoot({ OPENCODE_CONFIG: configDirectory }, fixture), configDirectory);
+    assert.equal(
+      await resolveGlobalConfigRoot({ OPENCODE_CONFIG: join(fixture, "settings.json") }, fixture),
+      fixture,
+    );
+    assert.equal(
+      await resolveGlobalConfigRoot({ XDG_CONFIG_HOME: join(fixture, "xdg") }, join(fixture, "home")),
+      join(fixture, "xdg", "opencode"),
+    );
+    assert.equal(await resolveGlobalConfigRoot({}, join(fixture, "home")), join(fixture, "home", ".config", "opencode"));
+  } finally {
+    await clean(fixture);
+  }
+});
+
+test("symlinked global config directories resolve and install at the real target", async (context) => {
+  const fixture = await fixtureDirectory();
+  try {
+    const actual = join(fixture, "actual-config");
+    const linked = join(fixture, "linked-config");
+    await mkdir(actual);
+    try {
+      await symlink(actual, linked, "dir");
+    } catch (error) {
+      if (["EPERM", "EACCES"].includes((error as NodeJS.ErrnoException).code ?? "")) {
+        context.skip("Directory symlinks are unavailable in this environment.");
+        return;
+      }
+      throw error;
+    }
+
+    assert.equal(await resolveGlobalConfigRoot({ OPENCODE_CONFIG: linked }, fixture), await realpath(actual));
+    assert.equal((await initializeGlobal(linked)).status, "installed");
+    for (const asset of runtimeAssets) {
+      assert.equal(await readFile(join(actual, asset.installPath), "utf8"), asset.content);
+    }
+    assert.equal(await lstat(join(fixture, "sortie-dogs.version")).then(() => true, () => false), false);
+  } finally {
+    await clean(fixture);
+  }
+});
+
+test("project init retains its invalid-root error contract", async () => {
+  const fixture = await fixtureDirectory();
+  try {
+    await assert.rejects(initializeProject(join(fixture, "missing")), (error: unknown) => {
+      assert.ok(error instanceof ProjectInitializationError);
+      assert.equal(error.code, "invalid-project");
+      assert.equal(error.message, "Project root must be an existing non-symlink directory.");
+      return true;
+    });
+  } finally {
+    await clean(fixture);
+  }
+});
+
+test("global init installs directly in the config root and is idempotent", async () => {
+  const fixture = await fixtureDirectory();
+  const globalRoot = join(fixture, "global", "opencode");
+  try {
+    const installed = await initializeGlobal(globalRoot);
+    assert.equal(installed.status, "installed");
+    for (const asset of runtimeAssets) {
+      assert.equal(await readFile(join(globalRoot, asset.installPath), "utf8"), asset.content);
+    }
+    const paths = [
+      ...runtimeAssets.map(({ installPath }) => join(globalRoot, installPath)),
+      join(globalRoot, "sortie-dogs.version"),
+    ];
+    const before = await snapshot(paths);
+    assert.equal((await initializeGlobal(globalRoot)).status, "unchanged");
+    assert.deepEqual(await snapshot(paths), before);
+    assert.equal(await lstat(join(globalRoot, ".opencode")).then(() => true, () => false), false);
+  } finally {
+    await clean(fixture);
+  }
+});
+
+test("global init preserves and reports legacy runtime files", async () => {
+  const globalRoot = await fixtureDirectory();
+  try {
+    const legacyCoordinator = join(globalRoot, "agent", "coordinator-mk2a2.md");
+    const legacyWorker = join(globalRoot, "agent", "sol-worker-mk2a2.md");
+    await mkdir(join(globalRoot, "agent"));
+    await writeFile(legacyCoordinator, "user coordinator\n");
+    await writeFile(legacyWorker, LEGACY_WORKER_CONTENT);
+
+    const result = await initializeGlobal(globalRoot);
+    assert.deepEqual(result.preservedLegacyPaths, [
+      "agent/coordinator-mk2a2.md",
+      "agent/sol-worker-mk2a2.md",
+    ]);
+    assert.equal(await readFile(legacyCoordinator, "utf8"), "user coordinator\n");
+    assert.equal(await readFile(legacyWorker, "utf8"), LEGACY_WORKER_CONTENT);
+    assert.deepEqual((await initializeGlobal(globalRoot)).preservedLegacyPaths, result.preservedLegacyPaths);
+  } finally {
+    await clean(globalRoot);
+  }
+});
+
+test("CLI global init reports its target, legacy preservation, and invalid combinations", async () => {
+  const fixture = await fixtureDirectory();
+  const globalRoot = join(fixture, "config");
+  try {
+    await mkdir(join(globalRoot, "agent"), { recursive: true });
+    await writeFile(join(globalRoot, "agent", "coordinator-mk2a2.md"), "legacy\n");
+    const env = { OPENCODE_CONFIG_DIR: globalRoot };
+    assert.deepEqual(await runCli(["init", "--global"], env), {
+      exit: 0,
+      stdout: `Initialized Sortie-dogs 0.2.0-card05 globally at ${globalRoot}.\n` +
+        "Preserved legacy runtime files: agent/coordinator-mk2a2.md.\n",
+      stderr: "",
+    });
+    assert.deepEqual(await runCli(["init", "--global"], env), {
+      exit: 0,
+      stdout: `Sortie-dogs 0.2.0-card05 is already initialized globally at ${globalRoot}.\n` +
+        "Preserved legacy runtime files: agent/coordinator-mk2a2.md.\n",
+      stderr: "",
+    });
+    for (const args of [["init", "--global", fixture], ["init", fixture, "--global"]]) {
+      const result = await runCli(args, env);
+      assert.equal(result.exit, 2);
+      assert.equal(result.stdout, "");
+      assert.equal(result.stderr, "Usage: sortie-dogs init [project-root]\n       sortie-dogs init --global\n");
+    }
+  } finally {
+    await clean(fixture);
+  }
+});
+
+test("failed global init unwinds every config-root directory it created", async () => {
+  const fixture = await fixtureDirectory();
+  const parent = join(fixture, "rollback-root");
+  const globalRoot = join(parent, "nested", "opencode");
+  const mutableAssets = runtimeAssets as unknown as Array<{
+    installPath: string;
+    content: string;
+    version: string;
+  }>;
+  mutableAssets.push({
+    installPath: "agent",
+    content: "forced test conflict\n",
+    version: runtimeAssets[0].version,
+  });
+  try {
+    await assert.rejects(initializeGlobal(globalRoot), (error: unknown) => {
+      assert.ok(error instanceof ProjectInitializationError);
+      assert.equal(error.code, "conflict");
+      return true;
+    });
+    assert.equal(await lstat(parent).then(() => true, () => false), false);
+  } finally {
+    mutableAssets.pop();
+    await clean(fixture);
   }
 });
