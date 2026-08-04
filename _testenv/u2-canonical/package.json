@@ -1,8 +1,0 @@
-{
-  "name": "sortie-dogs-u2-private-validation",
-  "private": true,
-  "type": "module",
-  "dependencies": {
-    "sortie-dogs": "file:../sortie-dogs-0.1.0.tgz"
-  }
-}
