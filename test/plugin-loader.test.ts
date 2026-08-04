@@ -147,9 +147,33 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.ok(worker);
     assert.ok(sortie);
 
+    assert.match(scout.content, /^---\r?\n[\s\S]*\nsteps:\s*8\r?\n/);
+    const deniedScoutTools = [
+      "bash",
+      "webfetch",
+      "task",
+      "question",
+      "glob",
+      "grep",
+      "edit",
+      "list",
+      "write",
+      "patch",
+    ];
+    for (const tool of deniedScoutTools) {
+      assert.match(scout.content, new RegExp(`^  ${tool}: deny$`, "m"));
+      assert.match(scout.content, new RegExp(`^  ${tool}: false$`, "m"));
+    }
+    assert.match(scout.content, /permission:\r?\n(?:  [a-z]+: deny\r?\n){10}tools:/);
+    assert.match(scout.content, /tools:\r?\n(?:  [a-z]+: false\r?\n){10}---/);
+    assert.doesNotMatch(scout.content, /^  read: (?:deny|false)$/im);
     assert.match(
       scout.content,
-      /assigned parallel role A \(manifest\), B \(canonical validation\), or C \(blocker owner\)[\s\S]+bounded question and paths[\s\S]+Do not edit, stage,\s+commit, retry, or become user-facing[\s\S]+facts, evidence\s+paths, and unresolved risks only to dog-coordinator/i,
+      /assigned parallel role A \(manifest\), B \(canonical validation\), or C \(blocker owner\)[\s\S]+known_paths list of at most four paths[\s\S]+Use Read only[\s\S]+at most 120 lines per read[\s\S]+no more than one read per path[\s\S]+Do not explore for more paths, invoke another tool, retry/i,
+    );
+    assert.match(
+      scout.content,
+      /exactly one concise JSON object of at most 800 characters with exactly these keys: role,\s+facts, evidence_paths, risks[\s\S]+no Markdown, code fence, commentary, or raw log/i,
     );
     assert.ok(scout.content.length >= 350, "dog-scout needs a substantive bounded role");
     assert.match(
@@ -181,6 +205,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(initialHandoff[1], /role:\s*implementation/);
     assert.match(initialHandoff[1], /validation:\s*\{\s*level:\s*full,\s*command:/);
     assert.match(initialHandoff[1], /known_facts:/);
+    assert.match(initialHandoff[1], /known_paths:\s*\[<up to 4 exact paths>\]/);
     assert.match(initialHandoff[1], /relevant_constraints:/);
     assert.match(initialHandoff[1], /resume_delta:\s*none/);
     assert.match(initialHandoff[1], /source_manifest:/);
@@ -223,6 +248,8 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(scoutFanout[1], /role_A:\s*determine exact source_manifest or operation_manifest/);
     assert.match(scoutFanout[1], /role_B:\s*determine exact canonical validation command/);
     assert.match(scoutFanout[1], /role_C:\s*identify blocker owner/);
+    assert.match(scoutFanout[1], /known_paths:\s*at most 4 supplied paths per scout/);
+    assert.match(scoutFanout[1], /worker_gate:\s*one bounded scout step, then dog-worker/);
     assert.match(scoutFanout[1], /union all well-formed facts; no voting or majority rule/);
     assert.match(scoutFanout[1], /malformed \| timeout \| empty -> discard without retry/);
     assert.match(scoutFanout[1], /implementation \| remediation \| blocker-resolution -> dog-worker only/);

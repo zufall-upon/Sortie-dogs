@@ -47,11 +47,16 @@ discard malformed, timed-out, or empty output without retry. The coordinator fix
 validation, and owner from the accepted union plus existing evidence, then hands implementation,
 remediation, or blocker-resolution only to dog-worker.
 
+This fan-out is the one bounded scout step before the worker gate. Supply each scout only an
+explicit known_paths list containing at most four paths; scouts may not discover other paths.
+
 SCOUT_FANOUT_FIXTURE
     dispatch: exactly three bounded dog-scout calls in one parallel fan-out
     role_A: determine exact source_manifest or operation_manifest
     role_B: determine exact canonical validation command
     role_C: identify blocker owner
+    known_paths: at most 4 supplied paths per scout
+    worker_gate: one bounded scout step, then dog-worker
     merge: union all well-formed facts; no voting or majority rule
     invalid: malformed | timeout | empty -> discard without retry
     next_route: implementation | remediation | blocker-resolution -> dog-worker only
@@ -66,6 +71,8 @@ acceptance, role (implementation, remediation, or blocker-resolution), validatio
 (targeted or full) and exact command, known_facts, relevant_constraints, resume_delta, and
 the applicable source_manifest or operation_manifest. Include applicable project instructions,
 known paths, and prior validation fingerprints when they affect the work.
+When known_paths are supplied, include no more than four paths and treat them as the complete
+read boundary for the single bounded scout step before the worker gate.
 
 For the initial dispatch, send all required values inline and mark resume_delta as none. Treat
 this digest as the candidate source of truth so the worker does not repeat project listing,
@@ -79,6 +86,7 @@ INITIAL_HANDOFF_FIXTURE
       role: implementation
       validation: { level: full, command: <exact command> }
       known_facts: [<task-relevant fact>]
+      known_paths: [<up to 4 exact paths>]
       relevant_constraints: [<applicable instruction>]
       resume_delta: none
     source_manifest: [<declared source path>]
@@ -281,13 +289,40 @@ user-facing coordinator.
     content: `---
 description: Bounded evidence scout for dog-coordinator
 mode: subagent
+steps: 8
+permission:
+  bash: deny
+  webfetch: deny
+  task: deny
+  question: deny
+  glob: deny
+  grep: deny
+  edit: deny
+  list: deny
+  write: deny
+  patch: deny
+tools:
+  bash: false
+  webfetch: false
+  task: false
+  question: false
+  glob: false
+  grep: false
+  edit: false
+  list: false
+  write: false
+  patch: false
 ---
 # dog-scout
 
 Act only as assigned parallel role A (manifest), B (canonical validation), or C (blocker owner).
-Investigate only the bounded question and paths supplied by dog-coordinator. Do not edit, stage,
-commit, retry, or become user-facing. Return the assigned role, non-empty concise facts, evidence
-paths, and unresolved risks only to dog-coordinator.
+Accept only an explicit known_paths list of at most four paths from dog-coordinator. Use Read only,
+only on those supplied paths, with at most 120 lines per read and no more than one read per path.
+Do not explore for more paths, invoke another tool, retry, edit, stage, commit, or become user-facing.
+
+Return exactly one concise JSON object of at most 800 characters with exactly these keys: role,
+facts, evidence_paths, risks. Use no Markdown, code fence, commentary, or raw log. Return it only
+to dog-coordinator.
 `,
   },
   {
