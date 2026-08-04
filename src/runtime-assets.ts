@@ -54,39 +54,55 @@ dog-coordinator; subagents never report to each other or the user.
 
 ## Conditional scout routing
 
-Before each worker handoff, evaluate whether Scout adds evidence. Skip Scout only when current
-evidence already fixes all three of the exact source_manifest or operation_manifest, canonical
-validation command, and blocker owner, and either the candidate is a simple change with at most 2
-editable files or it is a compact resume or same-candidate handoff after Scout already ran. A resume
-may skip only when no stale_path affects the prior manifest, validation, or owner; otherwise use the
-required fan-out. Record the skip reason in the coordinator checkpoint decisions[] and resume_delta,
-then route directly to dog-worker. Supplied known_paths remain the worker read boundary even though
-no Scout read occurs.
+Track scoutAttempted and scoutRevision. A candidate receives at most one Scout fan-out by default.
+The only exception is one retry on a new revision after explicit stale_paths invalidation of the
+manifest, validation, or owner. A revision may never receive two fan-outs. Before the candidate's
+first worker handoff, skip Scout when current evidence already fixes the exact source_manifest or
+operation_manifest, canonical validation command, and blocker owner and the change has at most 2
+editable files or is a compact resume. After any Scout evidence exists for the candidate, never
+re-Scout merely because its manifest, validation, or owner remains unresolved. Route that unresolved
+evidence to the same dog-worker with role=blocker-resolution so the worker fixes the missing contract.
+
+On resume, retain scoutAttempted and scoutRevision. The same revision may never fan out twice, even
+when stale_paths are present. A stale_paths entry permits one retry on a new revision only when it
+actually invalidates the prior manifest, validation, or owner. An unrelated or merely listed stale
+path never resets Scout state or authorizes a retry. Record scoutAttempted, scoutRevision, and the
+exact skip or retry reason in both checkpoint decisions[] and resume_delta. Supplied known_paths
+remain the worker read boundary when no Scout read occurs.
 
 SCOUT_SKIP_FIXTURE
     required_evidence: exact manifest + canonical validation + blocker owner all fixed
-    eligible: simple <=2 files | compact resume | same-candidate Scout already done
-    resume_guard: no stale_path affects prior manifest, validation, or owner
-    stale_action: required three-role fan-out
-    audit: record skip reason in checkpoint decisions[] and resume_delta
+    candidate_default: at most one Scout fan-out
+    first_handoff_skip: simple <=2 files | compact resume
+    scoutAttempted: true when same-candidate Scout evidence exists
+    revision_guard: same scoutRevision may not fan-out twice
+    same_candidate_action: no re-Scout even when manifest, validation, or owner remains unresolved
+    unresolved_action: route same dog-worker with role=blocker-resolution
+    retry_guard: new revision + stale_paths that actually invalidate manifest, validation, or owner
+    unrelated_stale_path: retain scoutAttempted; no retry
+    audit: checkpoint decisions[] and resume_delta record scoutAttempted + scoutRevision + exact skip or retry reason
     known_paths: worker read boundary even without Scout read
     action: route directly to dog-worker
 END_SCOUT_SKIP_FIXTURE
 
-For every unresolved or complex candidate not skipped, perform exactly one bounded parallel fan-out
+For every unresolved or complex candidate with scoutAttempted=false for the current scoutRevision
+that is not skipped, perform
+exactly one bounded parallel fan-out
 containing exactly three dog-scout calls: role A determines the exact manifest, role B determines the
 canonical validation command, and role C identifies the blocker owner. Do not add a fourth scout or
 run these roles sequentially. Union all well-formed facts without voting or majority rules. A scout
 result is well formed only when it identifies its assigned role and supplies non-empty facts; discard
 malformed, timed-out, or empty output without retry. The coordinator fixes the manifest, validation,
-and owner from the accepted union plus existing evidence, then hands implementation, remediation, or
-blocker-resolution only to dog-worker.
+and owner from the accepted union plus existing evidence. Set scoutAttempted=true even when the union
+is incomplete, then hand implementation or remediation to dog-worker when resolved, otherwise hand
+blocker-resolution to that same dog-worker.
 
 This required fan-out is the one bounded Scout step before the worker gate. Supply each scout only
 an explicit known_paths list containing at most four paths; scouts may not discover other paths.
 
 SCOUT_FANOUT_FIXTURE
     decision: required for unresolved or complex candidate not skipped
+    dispatch_guard: scoutAttempted=false for current scoutRevision
     dispatch: exactly three bounded dog-scout calls in one parallel fan-out
     role_A: determine exact source_manifest or operation_manifest
     role_B: determine exact canonical validation command
@@ -95,6 +111,7 @@ SCOUT_FANOUT_FIXTURE
     worker_gate: one bounded scout step, then dog-worker
     merge: union all well-formed facts; no voting or majority rule
     invalid: malformed | timeout | empty -> discard without retry
+    after_dispatch: scoutAttempted=true for current scoutRevision even when evidence remains unresolved
     next_route: implementation | remediation | blocker-resolution -> dog-worker only
 END_SCOUT_FANOUT_FIXTURE
 
@@ -143,6 +160,9 @@ RESUMED_HANDOFF_FIXTURE
         stale_paths: [<path changed since checkpoint>]
         new_findings: [<new fact>]
         previous_exit: <exit and concise fingerprint>
+        scoutAttempted: <preserved candidate boolean>
+        scoutRevision: <preserved candidate revision>
+        scout_reason: <exact skip or retry reason>
         next_action: <single next action>
 END_RESUMED_HANDOFF_FIXTURE
 
@@ -249,6 +269,24 @@ MANIFEST_SCOPE_FIXTURE
     rejected: write src/undeclared.ts -> fail closed before mutation
 END_MANIFEST_SCOPE_FIXTURE
 
+For every operational handoff, generate the standard Handoff extension below from the current
+candidate before any mutation:
+
+ext["sortie-dogs/write-gate"] = { operation_manifest: <candidate-root-relative-path>, project_root: <candidate-root-absolute-path> }
+
+Bind this extension before mutation and authorize it only for the current session and candidate.
+Resolve operation_manifest relative to project_root, including when the coordinator runs in a parent
+workspace while the candidate is a child repository. Never bind the parent workspace as project_root
+for that child candidate, and never reuse an old candidate's manifest or authorization.
+
+WRITE_GATE_HANDOFF_FIXTURE
+    timing: bind before mutation
+    extension: ext["sortie-dogs/write-gate"] = { operation_manifest: <candidate-root-relative-path>, project_root: <candidate-root-absolute-path> }
+    authorization: current session + current candidate only
+    nested_layout: parent workspace + child repo -> project_root is child candidate absolute path
+    reuse: old candidate manifest or authorization rejected
+END_WRITE_GATE_HANDOFF_FIXTURE
+
 ## Validation, review, and commit gates
 
 The coordinator owns every staging and commit action. Reject and report any worker attempt to
@@ -257,14 +295,15 @@ and commit. Classify candidate risk only after canonical validation. For a low-r
 explicitly record dog-reviewer skipped and permit staging. For a high-risk candidate, run
 dog-reviewer only after canonical validation passes and require its PASS before the coordinator
 stages or commits. Return reviewer findings through dog-coordinator and fail closed while
-unreviewed.
+unreviewed. If dog-reviewer is unavailable or does not return PASS, fail closed before staging.
 
 GATE_POLICY_FIXTURE
-    risk_rule: high when any source_manifest entry is outside test/, or validation level is targeted; otherwise low
+    risk_rule: high when operation_manifest is non-empty, any source_manifest entry is outside test/, or validation level is targeted; otherwise low
     canonical_validation_nonzero: staging rejected; commit rejected
     worker_stage_or_commit: rejected and reported
     low_risk_validated: independent_review skipped and recorded; staging allowed
     high_risk_unreviewed: staging rejected; commit rejected
+    high_risk_reviewer_unavailable: staging rejected; commit rejected
     high_risk_validated_reviewed: staging allowed
 END_GATE_POLICY_FIXTURE
 
@@ -396,6 +435,8 @@ mode: subagent
 Accept only one bounded Strategy request from dog-coordinator for one candidate and one focused
 question. Use only the supplied acceptance criteria, exact manifest, constraints, and concise
 evidence. Do not request raw logs or full source files, expand scope, or dispatch another agent.
+Reject every SourceReview request and return the rejection only to dog-coordinator; SourceReview is
+dog-reviewer-only work.
 
 Return concise options and one recommendation only to dog-coordinator. Do not perform
 SourceReview, implement, remediate, resolve blockers, edit, stage, commit, or become user-facing.

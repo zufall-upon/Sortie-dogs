@@ -15,8 +15,13 @@ const execFileAsync = promisify(execFile);
 type CandidateRisk = "low" | "high";
 type ValidationLevel = "targeted" | "full";
 
-function classifyRisk(manifest: readonly string[], validationLevel: ValidationLevel): CandidateRisk {
-  return validationLevel === "targeted" || manifest.some((path) => !path.startsWith("test/"))
+function classifyRisk(
+  manifest: readonly string[],
+  validationLevel: ValidationLevel,
+  operationManifest: readonly string[] = [],
+): CandidateRisk {
+  return operationManifest.length > 0 ||
+    validationLevel === "targeted" || manifest.some((path) => !path.startsWith("test/"))
     ? "high"
     : "low";
 }
@@ -166,6 +171,17 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
           import('./node_modules/sortie-dogs/dist/core/consultation.js'),
         ]);
         const consultationValueNames = ${JSON.stringify(consultationValueNames)};
+        const artifact = {
+          schemaVersion: 1,
+          candidateId: 'packed-candidate',
+          sourceFingerprint: 'packed-source-v1',
+          acceptance: ['fail closed before staging'],
+          manifest: ['src/runtime-assets.ts'],
+          riskTags: ['public-api'],
+          riskBearingHunks: ['src/runtime-assets.ts:1-2'],
+          validation: { command: 'npm test', exit: 0, fingerprint: 'packed-validation-v1' },
+          invariants: ['dog-reviewer-only'],
+        };
         process.stdout.write(JSON.stringify({
           pluginType: typeof SortieDogsPlugin,
           runtimeAssets,
@@ -180,6 +196,26 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
           consultationIdentity: Object.fromEntries(
             consultationValueNames.map((name) => [name, root[name] === consultation[name]]),
           ),
+          reviewAvailability: root.evaluateReviewAvailability(true, false),
+          nonPassReviewGate: root.evaluateReviewGate({
+            phase: 'initial',
+            candidateId: 'packed-candidate',
+            currentSourceFingerprint: 'packed-source-v1',
+            artifact,
+            verdict: {
+              verdict: 'MUST_FIX',
+              sourceFingerprint: 'packed-source-v1',
+              findings: [{
+                severity: 'major',
+                path: 'src/runtime-assets.ts',
+                evidence: 'reviewer did not return PASS',
+                requiredFix: 'fail closed before staging',
+              }],
+            },
+            reviewedFingerprints: [],
+            maxCallsPerCandidate: 1,
+            callsForPhase: 0,
+          }),
         }));`,
       ],
       { cwd: consumer },
@@ -190,6 +226,8 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       consultationIdentity: Readonly<Record<string, boolean>>;
       consultationRolePolicy: Readonly<Record<string, string>>;
       consultationValidatorTypes: readonly string[];
+      reviewAvailability: { readonly ok: boolean; readonly code?: string };
+      nonPassReviewGate: { readonly ok: boolean; readonly permitStage?: boolean; readonly verdict?: string };
       runtimeAssets: Array<{
         name: string;
         version: string;
@@ -273,6 +311,8 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       advisor.content,
       /only one bounded Strategy request from dog-coordinator[\s\S]+one candidate and one focused\s+question[\s\S]+Do not request raw logs or full source files[\s\S]+options and one recommendation only to dog-coordinator/i,
     );
+    assert.match(advisor.content, /Reject every SourceReview request[\s\S]+SourceReview is\s+dog-reviewer-only work/i);
+    assert.doesNotMatch(advisor.content, /Accept[^.]*SourceReview/i);
     assert.ok(advisor.content.length >= 350, "dog-advisor needs a substantive consultation role");
     for (const consultationAsset of [coordinator, reviewer, advisor]) {
       const frontmatter = consultationAsset.content.match(/^---\r?\n([\s\S]+?)\r?\n---/)?.[1];
@@ -325,6 +365,9 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(resumedHandoff[1], /stale_paths:/);
     assert.match(resumedHandoff[1], /new_findings:/);
     assert.match(resumedHandoff[1], /previous_exit:/);
+    assert.match(resumedHandoff[1], /scoutAttempted:\s*<preserved candidate boolean>/);
+    assert.match(resumedHandoff[1], /scoutRevision:\s*<preserved candidate revision>/);
+    assert.match(resumedHandoff[1], /scout_reason:\s*<exact skip or retry reason>/);
     assert.match(resumedHandoff[1], /next_action:/);
     assert.doesNotMatch(resumedHandoff[1], /project_root:|command:\s*</);
 
@@ -349,10 +392,15 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     );
     assert.ok(scoutSkip, "coordinator needs the Scout skip branch");
     assert.match(scoutSkip[1], /exact manifest \+ canonical validation \+ blocker owner all fixed/);
-    assert.match(scoutSkip[1], /simple <=2 files \| compact resume \| same-candidate Scout already done/);
-    assert.match(scoutSkip[1], /no stale_path affects prior manifest, validation, or owner/);
-    assert.match(scoutSkip[1], /stale_action:\s*required three-role fan-out/);
-    assert.match(scoutSkip[1], /record skip reason in checkpoint decisions\[\] and resume_delta/);
+    assert.match(scoutSkip[1], /candidate_default:\s*at most one Scout fan-out/);
+    assert.match(scoutSkip[1], /first_handoff_skip:\s*simple <=2 files \| compact resume/);
+    assert.match(scoutSkip[1], /scoutAttempted:\s*true when same-candidate Scout evidence exists/);
+    assert.match(scoutSkip[1], /revision_guard:\s*same scoutRevision may not fan-out twice/);
+    assert.match(scoutSkip[1], /no re-Scout even when manifest, validation, or owner remains unresolved/);
+    assert.match(scoutSkip[1], /route same dog-worker with role=blocker-resolution/);
+    assert.match(scoutSkip[1], /new revision \+ stale_paths that actually invalidate manifest, validation, or owner/);
+    assert.match(scoutSkip[1], /unrelated_stale_path:\s*retain scoutAttempted; no retry/);
+    assert.match(scoutSkip[1], /checkpoint decisions\[\] and resume_delta record scoutAttempted \+ scoutRevision \+ exact skip or retry reason/);
     assert.match(scoutSkip[1], /known_paths:\s*worker read boundary even without Scout read/);
     assert.match(scoutSkip[1], /action:\s*route directly to dog-worker/);
 
@@ -362,28 +410,71 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       blockerOwner: boolean;
       editableFiles: number;
       compactResume?: boolean;
-      sameCandidateScoutDone?: boolean;
-      stalePriorDecision?: boolean;
+      scoutAttempted?: boolean;
+      revision: string;
+      scoutAttemptedRevision?: string;
+      stalePathsInvalidateDecision?: boolean;
     };
     const shouldSkipScout = (evidence: ScoutSkipEvidence): boolean => {
       const exactEvidence = evidence.exactManifest && evidence.canonicalValidation && evidence.blockerOwner;
-      const safeResume =
-        (evidence.compactResume === true || evidence.sameCandidateScoutDone === true) &&
-        evidence.stalePriorDecision !== true;
-      return exactEvidence && (evidence.editableFiles <= 2 || safeResume);
+      if (evidence.scoutAttempted === true) {
+        if (evidence.scoutAttemptedRevision === evidence.revision) return true;
+        return evidence.stalePathsInvalidateDecision !== true;
+      }
+      return exactEvidence && (evidence.editableFiles <= 2 || evidence.compactResume === true);
     };
     const exactEvidence = {
       exactManifest: true,
       canonicalValidation: true,
       blockerOwner: true,
+      revision: "r1",
     };
     assert.equal(shouldSkipScout({ ...exactEvidence, editableFiles: 2 }), true);
     assert.equal(shouldSkipScout({ ...exactEvidence, editableFiles: 3, compactResume: true }), true);
-    assert.equal(shouldSkipScout({ ...exactEvidence, editableFiles: 3, sameCandidateScoutDone: true }), true);
+    assert.equal(
+      shouldSkipScout({
+        exactManifest: false,
+        canonicalValidation: false,
+        blockerOwner: false,
+        editableFiles: 3,
+        scoutAttempted: true,
+        revision: "r1",
+        scoutAttemptedRevision: "r1",
+      }),
+      true,
+    );
     assert.equal(shouldSkipScout({ ...exactEvidence, editableFiles: 3 }), false);
     assert.equal(
-      shouldSkipScout({ ...exactEvidence, editableFiles: 3, compactResume: true, stalePriorDecision: true }),
+      shouldSkipScout({
+        ...exactEvidence,
+        editableFiles: 3,
+        scoutAttempted: true,
+        scoutAttemptedRevision: "r1",
+        stalePathsInvalidateDecision: true,
+      }),
+      true,
+    );
+    assert.equal(
+      shouldSkipScout({
+        ...exactEvidence,
+        editableFiles: 3,
+        scoutAttempted: true,
+        revision: "r2",
+        scoutAttemptedRevision: "r1",
+        stalePathsInvalidateDecision: true,
+      }),
       false,
+    );
+    assert.equal(
+      shouldSkipScout({
+        ...exactEvidence,
+        editableFiles: 3,
+        scoutAttempted: true,
+        revision: "r2",
+        scoutAttemptedRevision: "r1",
+        stalePathsInvalidateDecision: false,
+      }),
+      true,
     );
     for (const absent of ["exactManifest", "canonicalValidation", "blockerOwner"] as const) {
       assert.equal(shouldSkipScout({ ...exactEvidence, [absent]: false, editableFiles: 2 }), false);
@@ -394,6 +485,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     );
     assert.ok(scoutFanout, "coordinator needs the required three-role scout fan-out");
     assert.match(scoutFanout[1], /required for unresolved or complex candidate not skipped/);
+    assert.match(scoutFanout[1], /dispatch_guard:\s*scoutAttempted=false for current scoutRevision/);
     assert.match(scoutFanout[1], /exactly three bounded dog-scout calls in one parallel fan-out/);
     assert.match(scoutFanout[1], /role_A:\s*determine exact source_manifest or operation_manifest/);
     assert.match(scoutFanout[1], /role_B:\s*determine exact canonical validation command/);
@@ -402,6 +494,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(scoutFanout[1], /worker_gate:\s*one bounded scout step, then dog-worker/);
     assert.match(scoutFanout[1], /union all well-formed facts; no voting or majority rule/);
     assert.match(scoutFanout[1], /malformed \| timeout \| empty -> discard without retry/);
+    assert.match(scoutFanout[1], /after_dispatch:\s*scoutAttempted=true for current scoutRevision even when evidence remains unresolved/);
     assert.match(scoutFanout[1], /implementation \| remediation \| blocker-resolution -> dog-worker only/);
     assert.match(coordinator.content, /only consultation capabilities are Strategy and SourceReview/);
     assert.match(coordinator.content, /Strategy follows\s+dog-coordinator -> dog-advisor -> dog-coordinator/);
@@ -487,6 +580,18 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(manifestScope[1], /rejected:\s*write src\/undeclared\.ts -> fail closed before mutation/);
     assert.match(coordinator.content, /operational work requires an exact operation_manifest/i);
     assert.match(coordinator.content, /undeclared write or mutation must be reported as rejected/i);
+    const writeGateHandoff = coordinator.content.match(
+      /WRITE_GATE_HANDOFF_FIXTURE\r?\n([\s\S]+?)\r?\nEND_WRITE_GATE_HANDOFF_FIXTURE/,
+    );
+    assert.ok(writeGateHandoff, "coordinator needs the standard write-gate Handoff extension");
+    assert.match(
+      writeGateHandoff[1],
+      /ext\["sortie-dogs\/write-gate"\] = \{ operation_manifest: <candidate-root-relative-path>, project_root: <candidate-root-absolute-path> \}/,
+    );
+    assert.match(writeGateHandoff[1], /timing:\s*bind before mutation/);
+    assert.match(writeGateHandoff[1], /authorization:\s*current session \+ current candidate only/);
+    assert.match(writeGateHandoff[1], /parent workspace \+ child repo -> project_root is child candidate absolute path/);
+    assert.match(writeGateHandoff[1], /old candidate manifest or authorization rejected/);
     const terminalEvidence = coordinator.content.match(
       /TERMINAL_EVIDENCE_FIXTURE\r?\n([\s\S]+?)\r?\nEND_TERMINAL_EVIDENCE_FIXTURE/,
     );
@@ -513,18 +618,20 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.ok(gatePolicy, "coordinator needs deterministic validation and review gates");
     assert.match(
       gatePolicy[1],
-      /risk_rule: high when any source_manifest entry is outside test\/, or validation level is targeted; otherwise low/,
+      /risk_rule: high when operation_manifest is non-empty, any source_manifest entry is outside test\/, or validation level is targeted; otherwise low/,
     );
     assert.match(gatePolicy[1], /canonical_validation_nonzero: staging rejected; commit rejected/);
     assert.match(gatePolicy[1], /worker_stage_or_commit: rejected and reported/);
     assert.match(gatePolicy[1], /low_risk_validated: independent_review skipped and recorded; staging allowed/);
     assert.match(gatePolicy[1], /high_risk_unreviewed: staging rejected; commit rejected/);
+    assert.match(gatePolicy[1], /high_risk_reviewer_unavailable: staging rejected; commit rejected/);
     assert.match(gatePolicy[1], /high_risk_validated_reviewed: staging allowed/);
     assert.match(
       coordinator.content,
       /high-risk candidate, run\s+dog-reviewer only after canonical validation passes[\s\S]+before the coordinator\s+stages or commits/i,
     );
     assert.match(coordinator.content, /low-risk candidate,\s+explicitly record dog-reviewer skipped/i);
+    assert.match(coordinator.content, /dog-reviewer is unavailable or does not return PASS, fail closed before staging/i);
 
     const commitScope = coordinator.content.match(
       /COMMIT_SCOPE_FIXTURE\r?\n([\s\S]+?)\r?\nEND_COMMIT_SCOPE_FIXTURE/,
@@ -538,6 +645,33 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.equal(classifyRisk(["test/manifest.txt"], "full"), "low");
     assert.equal(classifyRisk(["src/manifest.txt"], "full"), "high");
     assert.equal(classifyRisk(["test/manifest.txt"], "targeted"), "high");
+    assert.equal(classifyRisk([], "full", ["deploy/config.json"]), "high");
+
+    assert.deepEqual(loaded.reviewAvailability, { ok: false, code: "REVIEW_UNAVAILABLE" });
+    assert.deepEqual(loaded.nonPassReviewGate, { ok: true, permitStage: false, verdict: "MUST_FIX" });
+    const packedReviewRepo = await mkdtemp(join(testEnvironment, "git-packed-review-gate-"));
+    try {
+      await execFileAsync("git", ["-C", packedReviewRepo, "init", "--quiet"]);
+      await mkdir(join(packedReviewRepo, "src"));
+      await writeFile(join(packedReviewRepo, "src", "candidate.txt"), "candidate\n");
+      const unavailableStagePermitted = loaded.reviewAvailability.ok;
+      const nonPassStagePermitted = loaded.nonPassReviewGate.ok && loaded.nonPassReviewGate.permitStage === true;
+      assert.equal(unavailableStagePermitted, false);
+      assert.equal(nonPassStagePermitted, false);
+      if (unavailableStagePermitted || nonPassStagePermitted) {
+        await execFileAsync("git", ["-C", packedReviewRepo, "add", "--", "src/candidate.txt"]);
+      }
+      const { stdout: packedReviewCachedPaths } = await execFileAsync("git", [
+        "-C",
+        packedReviewRepo,
+        "diff",
+        "--cached",
+        "--name-only",
+      ]);
+      assert.equal(packedReviewCachedPaths, "");
+    } finally {
+      await rm(packedReviewRepo, { recursive: true, force: true });
+    }
 
     const failedValidationRepo = await mkdtemp(join(testEnvironment, "git-failed-validation-"));
     try {
