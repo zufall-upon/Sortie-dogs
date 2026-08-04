@@ -13,14 +13,28 @@ import {
   resolvePluginConfigurationSources,
 } from "../dist/plugin/config.js";
 import {
-  AUTHORITATIVE_REVIEWER_MODEL,
-  AUTHORITATIVE_REVIEWER_VARIANT,
   DEDICATED_SOL_MODEL,
   DEDICATED_SOL_VARIANT,
   DEDICATED_SOL_ROLES,
   parseModelRoutingConfig,
   resolveModelRoute,
 } from "../dist/plugin/model-routing.js";
+import {
+  CONSULTATION_ROLE_POLICY,
+  SOURCE_REVIEW_RISK_TAGS,
+  evaluateReviewAvailability,
+  evaluateReviewGate,
+  evaluateSourceReviewRequirement,
+  requiresSourceReview,
+  shouldConsultStrategy,
+  validateReviewArtifact,
+  validateReviewVerdict,
+  type ConsultationAdapter,
+  type ConsultationRequest,
+  type ConsultationResult,
+  type ReviewArtifact,
+  type ReviewVerdict,
+} from "../dist/core/consultation.js";
 
 interface PluginCase {
   name: string;
@@ -51,7 +65,7 @@ const execFileAsync = promisify(execFile);
 
 test("model routing configuration is strict and merges roles by layer", () => {
   const project = {
-    reviewer: { preferred: { model: "fable/opus", variant: "thinking" } },
+    reviewer: { preferred: { model: "vendor-a/review", variant: "deep" } },
   };
   const host = {
     implementer: {
@@ -65,19 +79,34 @@ test("model routing configuration is strict and merges roles by layer", () => {
   );
   assert.equal(parsed.kind, "configured");
   if (parsed.kind === "configured") {
-    assert.deepEqual(parsed.modelRouting, {
-      "dog-coordinator": { preferred: { model: "openai/gpt-5.6-luna", variant: "xhigh" } },
-      "dog-scout": { preferred: { model: "openai/gpt-5.6-luna", variant: "xhigh" } },
-      ...project,
-      ...host,
-    });
+    assert.deepEqual(parsed.modelRouting.reviewer, project.reviewer);
+    assert.deepEqual(parsed.modelRouting.implementer, host.implementer);
+    for (const role of DEDICATED_SOL_ROLES) {
+      assert.deepEqual(parsed.modelRouting[role], {
+        preferred: { model: DEDICATED_SOL_MODEL, variant: DEDICATED_SOL_VARIANT },
+      });
+    }
   }
   assert.equal(parseModelRoutingConfig({ reviewer: { preferred: { model: "x", extra: true } } }), undefined);
+  assert.deepEqual(
+    parseModelRoutingConfig({ reviewer: { model: "vendor-b/review", variant: "careful" } })?.reviewer,
+    { preferred: { model: "vendor-b/review", variant: "careful" } },
+  );
+  assert.equal(parseModelRoutingConfig({ reviewer: { model: "x", fallback: [] } }), undefined);
   assert.deepEqual(resolvePluginConfiguration({ unknown: true }), { kind: "invalid" });
   assert.deepEqual(resolvePluginConfiguration({
     modelRouting: host,
     modelCatalog: { global: [{ model: "" }] },
   }), { kind: "invalid" });
+  const fixed = resolvePluginConfiguration({
+    modelRouting: { implementation: { model: "attempted/override" } },
+  });
+  assert.equal(fixed.kind, "configured");
+  if (fixed.kind === "configured") {
+    assert.deepEqual(fixed.modelRouting.implementation, {
+      preferred: { model: DEDICATED_SOL_MODEL, variant: DEDICATED_SOL_VARIANT },
+    });
+  }
 });
 
 test("model routing rejects prototype-sensitive JSON role names", () => {
@@ -90,15 +119,15 @@ test("model resolver preserves valid variants and prioritizes preferred, local, 
     role: "reviewer",
     local: {
       reviewer: {
-        preferred: { model: "fable/opus", variant: "thinking" },
+        preferred: { model: "vendor-a/review", variant: "deep" },
         fallback: [{ model: "provider/free" }],
       },
     },
     global: { reviewer: { preferred: { model: "provider/global" } } },
     catalog: {
-      project: [{ model: "fable/opus", variants: ["thinking"] }],
+      project: [{ model: "vendor-a/review", variants: ["deep"] }],
       global: [
-        { model: "fable/opus", variants: ["thinking"] },
+        { model: "vendor-a/review", variants: ["deep"] },
         { model: "provider/free" },
         { model: "provider/global" },
       ],
@@ -109,22 +138,22 @@ test("model resolver preserves valid variants and prioritizes preferred, local, 
     role: "reviewer",
     source: "local",
     catalog: "project",
-    model: "fable/opus",
-    variant: "thinking",
+    model: "vendor-a/review",
+    variant: "deep",
   });
 });
 
 test("model resolver falls back in order and returns structured unresolved failures", () => {
   const route = {
     reviewer: {
-      preferred: { model: "fable/opus", variant: "missing" },
+      preferred: { model: "vendor-a/review", variant: "missing" },
       fallback: [{ model: "provider/free" }],
     },
   };
   assert.deepEqual(resolveModelRoute({
     role: "reviewer",
     local: route,
-    catalog: { global: [{ model: "fable/opus", variants: ["valid"] }, { model: "provider/free" }] },
+    catalog: { global: [{ model: "vendor-a/review", variants: ["valid"] }, { model: "provider/free" }] },
   }), {
     ok: true,
     role: "reviewer",
@@ -165,7 +194,6 @@ test("recommended Luna routes cover exact installed roles and remain below proje
   if (defaults.kind !== "configured") return;
   assert.deepEqual(defaults.modelCatalog.global, [
     { model: DEDICATED_SOL_MODEL, variants: [DEDICATED_SOL_VARIANT] },
-    { model: AUTHORITATIVE_REVIEWER_MODEL, variants: [AUTHORITATIVE_REVIEWER_VARIANT] },
     { model: "openai/gpt-5.6-luna", variants: ["xhigh"] },
     { model: "provider/custom" },
   ]);
@@ -210,26 +238,31 @@ test("recommended Luna routes cover exact installed roles and remain below proje
   });
 });
 
-test("MkII fixed routes remain authoritative with stable fail-closed resolution", () => {
+test("MkII worker routes stay fixed while consultation roles remain host configurable", () => {
   const canonicalModel = "provider/canonical";
   const configured = resolvePluginConfigurationSources(
     { modelRouting: {
       implementation: { preferred: { model: canonicalModel } },
       "dog-worker": { preferred: { model: canonicalModel } },
-      "dog-reviewer": { preferred: { model: canonicalModel } },
+      "dog-advisor": { preferred: { model: "vendor-a/advice" } },
     } },
     { modelRouting: {
       remediation: { preferred: { model: canonicalModel } },
       "dog-worker": { preferred: { model: canonicalModel } },
-      "dog-reviewer": { preferred: { model: canonicalModel } },
+      "dog-reviewer": { preferred: { model: "vendor-b/review" } },
     } },
     {
       modelRouting: {
         "blocker-resolution": { preferred: { model: canonicalModel } },
         "dog-worker": { preferred: { model: canonicalModel } },
-        "dog-reviewer": { preferred: { model: canonicalModel } },
+        "dog-reviewer": { preferred: { model: "vendor-c/review" } },
       },
-      modelCatalog: { global: [{ model: canonicalModel }] },
+      modelCatalog: { global: [
+        { model: canonicalModel },
+        { model: "vendor-a/advice" },
+        { model: "vendor-b/review" },
+        { model: "vendor-c/review" },
+      ] },
     },
   );
   assert.equal(configured.kind, "configured");
@@ -241,7 +274,6 @@ test("MkII fixed routes remain authoritative with stable fail-closed resolution"
     "blocker-resolution",
     "sol-worker-mk2a2",
     "dog-worker",
-    "dog-advisor",
   ]);
 
   const resolveRole = (role: string) => resolveModelRoute({
@@ -277,22 +309,20 @@ test("MkII fixed routes remain authoritative with stable fail-closed resolution"
       },
     }), expected, `${role} resume route must remain stable for equivalent fresh input`);
   }
-  const expectedReviewer = {
+  assert.deepEqual(resolveRole("dog-advisor"), {
     ok: true,
-    role: "dog-reviewer",
+    role: "dog-advisor",
     source: "local",
     catalog: "global",
-    model: AUTHORITATIVE_REVIEWER_MODEL,
-    variant: AUTHORITATIVE_REVIEWER_VARIANT,
-  };
-  assert.deepEqual(configured.modelRouting["dog-reviewer"], {
-    preferred: {
-      model: AUTHORITATIVE_REVIEWER_MODEL,
-      variant: AUTHORITATIVE_REVIEWER_VARIANT,
-    },
+    model: "vendor-a/advice",
   });
-  assert.deepEqual(resolveRole("dog-reviewer"), expectedReviewer);
-  assert.equal(configured.globalModelRouting["dog-reviewer"], undefined);
+  assert.deepEqual(resolveRole("dog-reviewer"), {
+    ok: true,
+    role: "dog-reviewer",
+    source: "global",
+    catalog: "global",
+    model: "vendor-c/review",
+  });
   for (const role of ["coordinator", "planning", "reviewer", "scout", "unknown"]) {
     assert.deepEqual(resolveRole(role), {
       ok: false,
@@ -325,6 +355,315 @@ test("MkII fixed routes remain authoritative with stable fail-closed resolution"
   }
 });
 
+test("consultation policy parses strictly and deep-merges defaults through host precedence", () => {
+  const projectConsultation = {
+    strategy: { agent: CONSULTATION_ROLE_POLICY.strategy },
+    sourceReview: { maxArtifactBytes: 20_000 },
+  };
+  const configured = resolvePluginConfiguration(
+    {
+      handoffPaths: ["project.json"],
+      consultation: projectConsultation,
+    },
+    {
+      consultation: {
+        strategy: { required: true },
+        sourceReview: { agent: CONSULTATION_ROLE_POLICY.sourceReview },
+      },
+    },
+    {
+      handoffPaths: ["host.json"],
+      consultation: { strategy: { maxCallsPerCandidate: 2 } },
+    },
+  );
+  assert.equal(configured.kind, "configured");
+  if (configured.kind !== "configured") return;
+  assert.deepEqual(configured.handoffPaths, ["host.json"]);
+  assert.deepEqual(configured.consultation, {
+    strategy: { agent: CONSULTATION_ROLE_POLICY.strategy, required: true, maxCallsPerCandidate: 2 },
+    sourceReview: {
+      agent: CONSULTATION_ROLE_POLICY.sourceReview,
+      requiredPolicy: "risk-based",
+      unavailable: "block-required-only",
+      maxCallsPerCandidate: 1,
+      maxArtifactBytes: 20_000,
+    },
+  });
+  projectConsultation.strategy.agent = "mutated-after-resolution";
+  projectConsultation.sourceReview.maxArtifactBytes = 1;
+  assert.equal(configured.consultation.strategy.agent, CONSULTATION_ROLE_POLICY.strategy);
+  assert.equal(configured.consultation.sourceReview.maxArtifactBytes, 20_000);
+  assert.equal(Object.isFrozen(configured.consultation.strategy), true);
+  assert.equal(Object.isFrozen(configured.consultation.sourceReview), true);
+  for (const consultation of [
+    { strategy: { maxCallsPerCandidate: 0 } },
+    { sourceReview: { maxArtifactBytes: 30_721 } },
+    { sourceReview: { requiredPolicy: "always" } },
+    { sourceReview: { command: "external-tool" } },
+    { strategy: { agent: "alternate-advisor" } },
+    { sourceReview: { agent: "alternate-reviewer" } },
+  ]) {
+    assert.deepEqual(resolvePluginConfiguration({ consultation }), { kind: "invalid" });
+  }
+});
+
+test("Strategy trigger is decision-based, excludes routine/resume work, and permits at most one call", () => {
+  const base = {
+    candidateId: "candidate-1",
+    trigger: "architecture-choice" as const,
+    callsForCandidate: 0,
+  };
+  assert.equal(shouldConsultStrategy(base), true);
+  assert.equal(shouldConsultStrategy({ ...base, callsForCandidate: 1 }), false);
+  assert.equal(shouldConsultStrategy({ ...base, decisionAlreadyRecorded: true }), false);
+  assert.equal(shouldConsultStrategy({ ...base, mechanicalChange: true }), false);
+  assert.equal(shouldConsultStrategy({ ...base, sameTaskResume: true }), false);
+  assert.equal(shouldConsultStrategy({ ...base, trigger: undefined }), false);
+});
+
+test("SourceReview risk matrix is fixed and review is gated after validation and before staging", () => {
+  assert.equal(SOURCE_REVIEW_RISK_TAGS.length, 14);
+  for (const riskTag of SOURCE_REVIEW_RISK_TAGS) {
+    assert.equal(requiresSourceReview([riskTag]), true, riskTag);
+    assert.equal(evaluateSourceReviewRequirement({
+      riskTags: [riskTag],
+      canonicalValidationExit: 0,
+      stagingStarted: false,
+    }), "REVIEW_REQUIRED", riskTag);
+  }
+  assert.equal(evaluateSourceReviewRequirement({
+    riskTags: [],
+    canonicalValidationExit: 0,
+    stagingStarted: false,
+  }), "SKIP_LOW_RISK");
+  assert.equal(evaluateSourceReviewRequirement({
+    riskTags: ["security"],
+    canonicalValidationExit: 1,
+    stagingStarted: false,
+  }), "WAIT_CANONICAL_VALIDATION");
+  assert.equal(evaluateSourceReviewRequirement({
+    riskTags: ["security"],
+    canonicalValidationExit: 0,
+    stagingStarted: true,
+  }), "REVIEW_TOO_LATE");
+  assert.equal(evaluateSourceReviewRequirement({
+    riskTags: ["not-a-risk-tag"],
+    canonicalValidationExit: 0,
+    stagingStarted: false,
+  }), "RISK_TAGS_INVALID");
+  assert.equal(evaluateSourceReviewRequirement({
+    riskTags: "security",
+    canonicalValidationExit: 0,
+    stagingStarted: false,
+  }), "RISK_TAGS_INVALID");
+  assert.deepEqual(evaluateReviewAvailability(true, false), { ok: false, code: "REVIEW_UNAVAILABLE" });
+  assert.deepEqual(evaluateReviewAvailability(false, false), { ok: true });
+});
+
+function reviewArtifact(overrides: Partial<ReviewArtifact> = {}): ReviewArtifact {
+  return {
+    schemaVersion: 1,
+    candidateId: "candidate-1",
+    sourceFingerprint: "source-v1",
+    acceptance: ["preserve behavior"],
+    manifest: ["src/core/consultation.ts"],
+    riskTags: ["public-api"],
+    riskBearingHunks: ["src/core/consultation.ts:1-20"],
+    validation: { command: "package test", exit: 0, fingerprint: "validation-v1" },
+    invariants: ["provider-neutral"],
+    ...overrides,
+  };
+}
+
+function reviewVerdict(
+  verdict: ReviewVerdict["verdict"] = "PASS",
+  sourceFingerprint = "source-v1",
+): ReviewVerdict {
+  return {
+    verdict,
+    sourceFingerprint,
+    findings: verdict === "PASS" ? [] : [{
+      severity: "major",
+      path: "src/core/consultation.ts",
+      evidence: "A material issue remains",
+      requiredFix: "Preserve the review boundary",
+    }],
+  };
+}
+
+test("review artifact and verdict validators reject extra, raw, oversized, and invalid evidence", () => {
+  assert.equal(validateReviewArtifact(reviewArtifact()).ok, true);
+  assert.deepEqual(validateReviewArtifact({ ...reviewArtifact(), raw: "opaque" }), {
+    ok: false,
+    code: "ARTIFACT_SCHEMA_INVALID",
+  });
+  assert.deepEqual(validateReviewArtifact(reviewArtifact({
+    acceptance: ["x".repeat(31_000)],
+  })), { ok: false, code: "ARTIFACT_TOO_LARGE" });
+  assert.deepEqual(validateReviewArtifact({
+    ...reviewArtifact(),
+    validation: { command: "package test", exit: 1, fingerprint: "validation-v1" },
+  }), { ok: false, code: "ARTIFACT_SCHEMA_INVALID" });
+  assert.deepEqual(validateReviewArtifact({
+    ...reviewArtifact(),
+    validation: { command: "package test", exit: 0, fingerprint: "" },
+  }), { ok: false, code: "ARTIFACT_SCHEMA_INVALID" });
+  const { riskBearingHunks: omittedRiskHunks, ...withoutRiskHunks } = reviewArtifact();
+  const { invariants: omittedInvariants, ...withoutInvariants } = reviewArtifact();
+  assert.ok(omittedRiskHunks.length > 0 && omittedInvariants.length > 0);
+  assert.deepEqual(validateReviewArtifact(withoutRiskHunks), {
+    ok: false,
+    code: "ARTIFACT_SCHEMA_INVALID",
+  });
+  assert.deepEqual(validateReviewArtifact(withoutInvariants), {
+    ok: false,
+    code: "ARTIFACT_SCHEMA_INVALID",
+  });
+  assert.equal(validateReviewVerdict(reviewVerdict()).ok, true);
+  assert.deepEqual(validateReviewVerdict({ ...reviewVerdict(), extra: true }), {
+    ok: false,
+    code: "VERDICT_SCHEMA_INVALID",
+  });
+  assert.deepEqual(validateReviewVerdict({
+    verdict: "PASS",
+    sourceFingerprint: "source-v1",
+    findings: [{ severity: "minor", path: "x", evidence: "nit", requiredFix: "fix" }],
+  }), { ok: false, code: "VERDICT_SCHEMA_INVALID" });
+  assert.deepEqual(validateReviewVerdict({
+    verdict: "MUST_FIX",
+    sourceFingerprint: "source-v1",
+    findings: [{ severity: "major", code: "old", summary: "old", paths: ["x"] }],
+  }), { ok: false, code: "VERDICT_SCHEMA_INVALID" });
+});
+
+test("review gate rejects stale, mismatched, and reused fingerprints and allows one verification", () => {
+  const initial = {
+    phase: "initial" as const,
+    candidateId: "candidate-1",
+    currentSourceFingerprint: "source-v1",
+    artifact: reviewArtifact(),
+    verdict: reviewVerdict("MUST_FIX"),
+    reviewedFingerprints: [],
+    maxCallsPerCandidate: 1,
+    callsForPhase: 0,
+  };
+  assert.deepEqual(evaluateReviewGate(initial), { ok: true, permitStage: false, verdict: "MUST_FIX" });
+  assert.deepEqual(evaluateReviewGate({ ...initial, currentSourceFingerprint: "source-v2" }), {
+    ok: false,
+    code: "STALE_FINGERPRINT",
+  });
+  assert.deepEqual(evaluateReviewGate({ ...initial, verdict: reviewVerdict("PASS", "other") }), {
+    ok: false,
+    code: "FINGERPRINT_MISMATCH",
+  });
+  assert.deepEqual(evaluateReviewGate({ ...initial, reviewedFingerprints: ["source-v1"] }), {
+    ok: false,
+    code: "FINGERPRINT_REUSED",
+  });
+  const verified = evaluateReviewGate({
+    phase: "verification",
+    candidateId: "candidate-1",
+    currentSourceFingerprint: "source-v2",
+    artifact: reviewArtifact({ sourceFingerprint: "source-v2" }),
+    verdict: reviewVerdict("PASS", "source-v2"),
+    reviewedFingerprints: ["source-v1"],
+    maxCallsPerCandidate: 1,
+    callsForPhase: 0,
+    initialVerdict: "MUST_FIX",
+    initialArtifact: reviewArtifact(),
+    remediationApplied: true,
+  });
+  assert.deepEqual(verified, { ok: true, permitStage: true, verdict: "PASS" });
+  assert.deepEqual(evaluateReviewGate({
+    phase: "verification",
+    candidateId: "candidate-1",
+    currentSourceFingerprint: "source-v3",
+    artifact: reviewArtifact({ sourceFingerprint: "source-v3" }),
+    verdict: reviewVerdict("PASS", "source-v3"),
+    reviewedFingerprints: ["source-v1", "source-v2"],
+    maxCallsPerCandidate: 1,
+    callsForPhase: 0,
+    initialVerdict: "MUST_FIX",
+    initialArtifact: reviewArtifact(),
+    remediationApplied: true,
+  }), { ok: false, code: "VERIFICATION_NOT_ALLOWED" });
+  assert.deepEqual(evaluateReviewGate({ ...initial, callsForPhase: 1 }), {
+    ok: false,
+    code: "REVIEW_BUDGET_EXHAUSTED",
+  });
+  assert.deepEqual(evaluateReviewGate({
+    phase: "verification",
+    candidateId: "candidate-1",
+    currentSourceFingerprint: "source-v2",
+    artifact: reviewArtifact({ sourceFingerprint: "source-v2", manifest: [] }),
+    verdict: reviewVerdict("PASS", "source-v2"),
+    reviewedFingerprints: ["source-v1"],
+    maxCallsPerCandidate: 1,
+    callsForPhase: 0,
+    initialVerdict: "MUST_FIX",
+    initialArtifact: reviewArtifact(),
+    remediationApplied: true,
+  }), { ok: false, code: "REVIEW_SCOPE_MISMATCH" });
+  for (const artifact of [
+    reviewArtifact({ sourceFingerprint: "source-v2", acceptance: [] }),
+    reviewArtifact({ sourceFingerprint: "source-v2", riskTags: [] }),
+    reviewArtifact({ sourceFingerprint: "source-v2", riskBearingHunks: [] }),
+    reviewArtifact({ sourceFingerprint: "source-v2", invariants: [] }),
+    reviewArtifact({
+      sourceFingerprint: "source-v2",
+      validation: { command: "different validation", exit: 0, fingerprint: "validation-v2" },
+    }),
+  ]) {
+    assert.deepEqual(evaluateReviewGate({
+      phase: "verification",
+      candidateId: "candidate-1",
+      currentSourceFingerprint: "source-v2",
+      artifact,
+      verdict: reviewVerdict("PASS", "source-v2"),
+      reviewedFingerprints: ["source-v1"],
+      maxCallsPerCandidate: 1,
+      callsForPhase: 0,
+      initialVerdict: "MUST_FIX",
+      initialArtifact: reviewArtifact(),
+      remediationApplied: true,
+    }), { ok: false, code: "REVIEW_SCOPE_MISMATCH" });
+  }
+});
+
+test("consultation adapter is provider-neutral and model names do not affect core requests", async () => {
+  const seen: ConsultationRequest[] = [];
+  const adapter: ConsultationAdapter = {
+    async consult(request): Promise<ConsultationResult> {
+      seen.push(request);
+      return {
+        requestId: request.requestId,
+        candidateId: request.candidateId,
+        capability: "strategy",
+        status: "completed",
+        recommendation: "keep the port pure",
+        considerations: [],
+      };
+    },
+  };
+  const request: ConsultationRequest = {
+    requestId: "request-1",
+    candidateId: "candidate-1",
+    capability: "strategy",
+    agent: CONSULTATION_ROLE_POLICY.strategy,
+    question: "Which boundary is stable?",
+    constraints: ["no command execution"],
+    options: ["port", "direct integration"],
+  };
+  const result = await adapter.consult(request);
+  assert.equal(result.status, "completed");
+  assert.deepEqual(seen, [request]);
+  for (const model of ["vendor-one/model-a", "vendor-two/model-z"]) {
+    const route = parseModelRoutingConfig({ "dog-advisor": { model } });
+    assert.deepEqual(route?.["dog-advisor"], { preferred: { model } });
+    assert.equal(JSON.stringify(request).includes(model), false);
+  }
+});
+
 test("generated dog-worker runtime asset selects the dedicated Sol model explicitly", () => {
   const dogWorker = runtimeAssets.find((asset) => asset.name === "dog-worker");
   assert.ok(dogWorker);
@@ -333,30 +672,6 @@ description: Dedicated Sol worker for the canonical Sortie-dogs coordinator
 mode: subagent
 model: ${DEDICATED_SOL_MODEL}
 variant: ${DEDICATED_SOL_VARIANT}
----
-`));
-});
-
-test("generated dog-advisor runtime asset selects Sol xhigh explicitly", () => {
-  const dogAdvisor = runtimeAssets.find((asset) => asset.name === "dog-advisor");
-  assert.ok(dogAdvisor);
-  assert.ok(dogAdvisor.content.startsWith(`---
-description: Focused technical advisor for dog-coordinator
-mode: subagent
-model: ${DEDICATED_SOL_MODEL}
-variant: ${DEDICATED_SOL_VARIANT}
----
-`));
-});
-
-test("generated dog-reviewer runtime asset selects Opus thinking explicitly", () => {
-  const dogReviewer = runtimeAssets.find((asset) => asset.name === "dog-reviewer");
-  assert.ok(dogReviewer);
-  assert.ok(dogReviewer.content.startsWith(`---
-description: Independent source reviewer for dog-coordinator
-mode: subagent
-model: ${AUTHORITATIVE_REVIEWER_MODEL}
-variant: ${AUTHORITATIVE_REVIEWER_VARIANT}
 ---
 `));
 });

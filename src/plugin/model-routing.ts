@@ -18,7 +18,6 @@ export const DEDICATED_SOL_ROLES = [
   "blocker-resolution",
   "sol-worker-mk2a2",
   "dog-worker",
-  "dog-advisor",
 ] as const;
 
 const dedicatedSolRoleSet = new Set<string>(DEDICATED_SOL_ROLES);
@@ -30,24 +29,7 @@ export const DEDICATED_SOL_ROUTING: ModelRoutingConfig = Object.freeze(Object.fr
   })]),
 ));
 
-export const AUTHORITATIVE_REVIEWER_MODEL = "fable/opus";
-export const AUTHORITATIVE_REVIEWER_VARIANT = "thinking";
-export const AUTHORITATIVE_REVIEWER_ROLES = ["dog-reviewer"] as const;
-
-/** Built-in reviewer route. Configurable routing layers cannot override it. */
-export const AUTHORITATIVE_REVIEWER_ROUTING: ModelRoutingConfig = Object.freeze(Object.fromEntries(
-  AUTHORITATIVE_REVIEWER_ROLES.map((role) => [role, Object.freeze({
-    preferred: Object.freeze({
-      model: AUTHORITATIVE_REVIEWER_MODEL,
-      variant: AUTHORITATIVE_REVIEWER_VARIANT,
-    }),
-  })]),
-));
-
-export const FIXED_MODEL_ROUTING: ModelRoutingConfig = Object.freeze({
-  ...DEDICATED_SOL_ROUTING,
-  ...AUTHORITATIVE_REVIEWER_ROUTING,
-});
+export const FIXED_MODEL_ROUTING: ModelRoutingConfig = DEDICATED_SOL_ROUTING;
 
 const fixedModelRoleSet = new Set<string>(Object.keys(FIXED_MODEL_ROUTING));
 
@@ -88,10 +70,6 @@ export interface ModelCatalog {
 export const BUILT_IN_MODEL_CATALOG: ModelCatalog = Object.freeze({
   global: Object.freeze([
     Object.freeze({ model: DEDICATED_SOL_MODEL, variants: Object.freeze([DEDICATED_SOL_VARIANT]) }),
-    Object.freeze({
-      model: AUTHORITATIVE_REVIEWER_MODEL,
-      variants: Object.freeze([AUTHORITATIVE_REVIEWER_VARIANT]),
-    }),
     Object.freeze({
       model: RECOMMENDED_LUNA_MODEL,
       variants: Object.freeze([RECOMMENDED_LUNA_VARIANT]),
@@ -151,6 +129,25 @@ function parseTarget(value: unknown): ModelTarget | undefined {
     : { model: value.model, variant: value.variant };
 }
 
+function parseRoute(value: unknown): RoleModelRoute | undefined {
+  const shorthand = parseTarget(value);
+  if (shorthand !== undefined) return { preferred: shorthand };
+  if (!isRecord(value) || Object.keys(value).some((key) => key !== "preferred" && key !== "fallback")) {
+    return undefined;
+  }
+  const preferred = parseTarget(value.preferred);
+  if (preferred === undefined) return undefined;
+  const fallbackValue = value.fallback;
+  if (fallbackValue !== undefined && !Array.isArray(fallbackValue)) return undefined;
+  const fallback: ModelTarget[] = [];
+  for (const candidate of fallbackValue ?? []) {
+    const target = parseTarget(candidate);
+    if (target === undefined) return undefined;
+    fallback.push(target);
+  }
+  return fallbackValue === undefined ? { preferred } : { preferred, fallback };
+}
+
 /** Strict runtime parser for project, environment, and host routing layers. */
 export function parseModelRoutingConfig(value: unknown): ModelRoutingConfig | undefined {
   if (!isRecord(value)) return undefined;
@@ -161,20 +158,9 @@ export function parseModelRoutingConfig(value: unknown): ModelRoutingConfig | un
       Object.prototype.hasOwnProperty.call(Object.prototype, role) ||
       !isRecord(routeValue)
     ) return undefined;
-    if (Object.keys(routeValue).some((key) => key !== "preferred" && key !== "fallback")) {
-      return undefined;
-    }
-    const preferred = parseTarget(routeValue.preferred);
-    if (preferred === undefined) return undefined;
-    const fallbackValue = routeValue.fallback;
-    if (fallbackValue !== undefined && !Array.isArray(fallbackValue)) return undefined;
-    const fallback: ModelTarget[] = [];
-    for (const candidate of fallbackValue ?? []) {
-      const target = parseTarget(candidate);
-      if (target === undefined) return undefined;
-      fallback.push(target);
-    }
-    parsed[role] = fallbackValue === undefined ? { preferred } : { preferred, fallback };
+    const route = parseRoute(routeValue);
+    if (route === undefined) return undefined;
+    parsed[role] = route;
   }
   return parsed;
 }

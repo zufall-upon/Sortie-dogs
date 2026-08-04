@@ -8,12 +8,39 @@ import {
   type ModelCatalog,
   type ModelRoutingConfig,
 } from "./model-routing.js";
+import { CONSULTATION_ROLE_POLICY } from "../core/consultation.js";
 
 export interface SortieDogsPluginOptions {
   operationManifestPath?: string;
   handoffPaths?: readonly string[];
   modelRouting?: ModelRoutingConfig;
   modelCatalog?: ModelCatalog;
+  consultation?: ConsultationPolicyInput;
+}
+
+export interface ConsultationPolicyInput {
+  readonly strategy?: Partial<StrategyConsultationPolicy>;
+  readonly sourceReview?: Partial<SourceReviewConsultationPolicy>;
+}
+
+export interface StrategyConsultationPolicy {
+  readonly agent: string;
+  readonly required: boolean;
+  readonly maxCallsPerCandidate: number;
+}
+
+export interface SourceReviewConsultationPolicy {
+  readonly agent: string;
+  readonly requiredPolicy: "risk-based";
+  readonly unavailable: "block-required-only";
+  /** Maximum calls in each explicit initial or verification phase. */
+  readonly maxCallsPerCandidate: number;
+  readonly maxArtifactBytes: number;
+}
+
+export interface ConsultationPolicy {
+  readonly strategy: StrategyConsultationPolicy;
+  readonly sourceReview: SourceReviewConsultationPolicy;
 }
 
 export interface ConfiguredPlugin {
@@ -22,6 +49,7 @@ export interface ConfiguredPlugin {
   handoffPaths: readonly string[];
   modelRouting: ModelRoutingConfig;
   modelCatalog: ModelCatalog;
+  consultation: ConsultationPolicy;
 }
 
 export type PluginConfiguration = ConfiguredPlugin | { kind: "invalid" };
@@ -33,11 +61,27 @@ export interface ConfiguredPluginSources extends ConfiguredPlugin {
 
 export type PluginConfigurationSources = ConfiguredPluginSources | { kind: "invalid" };
 
-export const DEFAULT_PLUGIN_OPTIONS: Readonly<Required<SortieDogsPluginOptions>> = {
+export const DEFAULT_PLUGIN_OPTIONS: Readonly<
+  Omit<Required<SortieDogsPluginOptions>, "consultation"> & { consultation: ConsultationPolicy }
+> = {
   operationManifestPath: "operation-manifest.json",
   handoffPaths: ["handoff.json"],
   modelRouting: RECOMMENDED_LUNA_ROUTING,
   modelCatalog: BUILT_IN_MODEL_CATALOG,
+  consultation: Object.freeze({
+    strategy: Object.freeze({
+      agent: CONSULTATION_ROLE_POLICY.strategy,
+      required: false,
+      maxCallsPerCandidate: 1,
+    }),
+    sourceReview: Object.freeze({
+      agent: CONSULTATION_ROLE_POLICY.sourceReview,
+      requiredPolicy: "risk-based",
+      unavailable: "block-required-only",
+      maxCallsPerCandidate: 1,
+      maxArtifactBytes: 30_720,
+    }),
+  }),
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -46,6 +90,80 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function nonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
+}
+
+function positiveInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value > 0;
+}
+
+function parseConsultationPolicy(value: unknown): ConsultationPolicyInput | undefined {
+  if (!isRecord(value) || Object.keys(value).some((key) => key !== "strategy" && key !== "sourceReview")) {
+    return undefined;
+  }
+  let strategy: Partial<StrategyConsultationPolicy> | undefined;
+  if (value.strategy !== undefined) {
+    if (!isRecord(value.strategy) || Object.keys(value.strategy).some(
+      (key) => key !== "agent" && key !== "required" && key !== "maxCallsPerCandidate",
+    )) return undefined;
+    if (
+      value.strategy.agent !== undefined &&
+      value.strategy.agent !== CONSULTATION_ROLE_POLICY.strategy
+    ) return undefined;
+    if (value.strategy.required !== undefined && typeof value.strategy.required !== "boolean") return undefined;
+    if (value.strategy.maxCallsPerCandidate !== undefined && !positiveInteger(value.strategy.maxCallsPerCandidate)) {
+      return undefined;
+    }
+    strategy = Object.freeze({
+      ...(value.strategy.agent === undefined ? {} : { agent: value.strategy.agent }),
+      ...(value.strategy.required === undefined ? {} : { required: value.strategy.required }),
+      ...(value.strategy.maxCallsPerCandidate === undefined
+        ? {}
+        : { maxCallsPerCandidate: value.strategy.maxCallsPerCandidate }),
+    });
+  }
+  let sourceReview: Partial<SourceReviewConsultationPolicy> | undefined;
+  if (value.sourceReview !== undefined) {
+    if (!isRecord(value.sourceReview) || Object.keys(value.sourceReview).some(
+      (key) => !["agent", "requiredPolicy", "unavailable", "maxCallsPerCandidate", "maxArtifactBytes"].includes(key),
+    )) return undefined;
+    if (
+      value.sourceReview.agent !== undefined &&
+      value.sourceReview.agent !== CONSULTATION_ROLE_POLICY.sourceReview
+    ) return undefined;
+    if (value.sourceReview.requiredPolicy !== undefined && value.sourceReview.requiredPolicy !== "risk-based") {
+      return undefined;
+    }
+    if (value.sourceReview.unavailable !== undefined && value.sourceReview.unavailable !== "block-required-only") {
+      return undefined;
+    }
+    if (
+      value.sourceReview.maxCallsPerCandidate !== undefined &&
+      !positiveInteger(value.sourceReview.maxCallsPerCandidate)
+    ) return undefined;
+    if (
+      value.sourceReview.maxArtifactBytes !== undefined &&
+      (!positiveInteger(value.sourceReview.maxArtifactBytes) || value.sourceReview.maxArtifactBytes > 30_720)
+    ) return undefined;
+    sourceReview = Object.freeze({
+      ...(value.sourceReview.agent === undefined ? {} : { agent: value.sourceReview.agent }),
+      ...(value.sourceReview.requiredPolicy === undefined
+        ? {}
+        : { requiredPolicy: value.sourceReview.requiredPolicy }),
+      ...(value.sourceReview.unavailable === undefined
+        ? {}
+        : { unavailable: value.sourceReview.unavailable }),
+      ...(value.sourceReview.maxCallsPerCandidate === undefined
+        ? {}
+        : { maxCallsPerCandidate: value.sourceReview.maxCallsPerCandidate }),
+      ...(value.sourceReview.maxArtifactBytes === undefined
+        ? {}
+        : { maxArtifactBytes: value.sourceReview.maxArtifactBytes }),
+    });
+  }
+  return Object.freeze({
+    ...(strategy === undefined ? {} : { strategy }),
+    ...(sourceReview === undefined ? {} : { sourceReview }),
+  });
 }
 
 function parseCatalogModels(value: unknown): readonly CatalogModel[] | undefined {
@@ -110,7 +228,7 @@ function parseLayer(value: unknown): SortieDogsPluginOptions | undefined {
   if (value === undefined) return {};
   if (!isRecord(value)) return undefined;
   if (Object.keys(value).some(
-    (key) => key !== "operationManifestPath" && key !== "handoffPaths" && key !== "modelRouting" && key !== "modelCatalog",
+    (key) => !["operationManifestPath", "handoffPaths", "modelRouting", "modelCatalog", "consultation"].includes(key),
   )) {
     return undefined;
   }
@@ -123,6 +241,9 @@ function parseLayer(value: unknown): SortieDogsPluginOptions | undefined {
   const modelCatalog = value.modelCatalog === undefined
     ? undefined
     : parseModelCatalog(value.modelCatalog);
+  const consultation = value.consultation === undefined
+    ? undefined
+    : parseConsultationPolicy(value.consultation);
   if (manifestPath !== undefined && (typeof manifestPath !== "string" || manifestPath.length === 0)) {
     return undefined;
   }
@@ -134,11 +255,13 @@ function parseLayer(value: unknown): SortieDogsPluginOptions | undefined {
   }
   if (value.modelRouting !== undefined && modelRouting === undefined) return undefined;
   if (value.modelCatalog !== undefined && modelCatalog === undefined) return undefined;
+  if (value.consultation !== undefined && consultation === undefined) return undefined;
   return {
     operationManifestPath: manifestPath as string | undefined,
     handoffPaths: handoffPaths as readonly string[] | undefined,
     modelRouting,
     modelCatalog,
+    consultation,
   };
 }
 
@@ -148,6 +271,7 @@ export function resolvePluginConfiguration(...values: readonly unknown[]): Plugi
   let handoffPaths = DEFAULT_PLUGIN_OPTIONS.handoffPaths;
   let modelRouting = DEFAULT_PLUGIN_OPTIONS.modelRouting;
   let modelCatalog = DEFAULT_PLUGIN_OPTIONS.modelCatalog;
+  let consultation = DEFAULT_PLUGIN_OPTIONS.consultation;
   for (const value of values) {
     const layer = parseLayer(value);
     if (layer === undefined) return { kind: "invalid" };
@@ -168,7 +292,17 @@ export function resolvePluginConfiguration(...values: readonly unknown[]): Plugi
         }),
       };
     }
+    if (layer.consultation !== undefined) {
+      consultation = Object.freeze({
+        strategy: Object.freeze({ ...consultation.strategy, ...(layer.consultation.strategy ?? {}) }),
+        sourceReview: Object.freeze({ ...consultation.sourceReview, ...(layer.consultation.sourceReview ?? {}) }),
+      });
+    }
   }
+  modelRouting = {
+    ...Object.fromEntries(Object.entries(modelRouting).filter(([role]) => !isFixedModelRole(role))),
+    ...FIXED_MODEL_ROUTING,
+  };
   const hasRouting = Object.keys(modelRouting).length > 0;
   const hasCatalogEntries = (modelCatalog.project?.length ?? 0) + (modelCatalog.global?.length ?? 0) > 0;
   if (hasRouting && !hasCatalogEntries) return { kind: "invalid" };
@@ -178,6 +312,7 @@ export function resolvePluginConfiguration(...values: readonly unknown[]): Plugi
     handoffPaths,
     modelRouting,
     modelCatalog,
+    consultation,
   };
 }
 
@@ -209,7 +344,7 @@ export function resolvePluginConfigurationSources(
   return {
     ...configured,
     modelRouting,
-    // Fixed worker and reviewer policy is authoritative over every configurable layer.
+    // Dedicated worker policy is authoritative over every configurable layer.
     localModelRouting: { ...(projectLayer.modelRouting ?? {}), ...FIXED_MODEL_ROUTING },
     globalModelRouting,
   };

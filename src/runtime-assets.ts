@@ -1,6 +1,4 @@
 const {
-  AUTHORITATIVE_REVIEWER_MODEL,
-  AUTHORITATIVE_REVIEWER_VARIANT,
   DEDICATED_SOL_MODEL,
   DEDICATED_SOL_VARIANT,
 }: typeof import("./plugin/model-routing.js") = await import(
@@ -358,8 +356,6 @@ to dog-coordinator.
     content: `---
 description: Independent source reviewer for dog-coordinator
 mode: subagent
-model: ${AUTHORITATIVE_REVIEWER_MODEL}
-variant: ${AUTHORITATIVE_REVIEWER_VARIANT}
 ---
 # dog-reviewer
 
@@ -376,8 +372,6 @@ the coordinator commit.
     content: `---
 description: Focused technical advisor for dog-coordinator
 mode: subagent
-model: ${DEDICATED_SOL_MODEL}
-variant: ${DEDICATED_SOL_VARIANT}
 ---
 # dog-advisor
 

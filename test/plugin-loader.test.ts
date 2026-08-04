@@ -148,9 +148,10 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.ok(coordinator);
     assert.ok(worker);
     assert.ok(sortie);
-    for (const asset of [worker, advisor]) {
-      assert.match(asset.content, new RegExp(`model: ${DEDICATED_SOL_MODEL.replace("/", "\\/")}\\r?\\nvariant: ${DEDICATED_SOL_VARIANT}`));
-    }
+    assert.match(
+      worker.content,
+      new RegExp(`model: ${DEDICATED_SOL_MODEL.replace("/", "\\/")}\\r?\\nvariant: ${DEDICATED_SOL_VARIANT}`),
+    );
 
     assert.match(scout.content, /^---\r?\n[\s\S]*\nsteps:\s*8\r?\n/);
     const deniedScoutTools = [
@@ -191,6 +192,15 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       /only a bounded Strategy or SourceReview consultation from dog-coordinator[\s\S]+Do not\s+implement, remediate, resolve blockers, edit, stage, commit, dispatch other agents, or become\s+user-facing[\s\S]+options and a recommendation only to dog-coordinator/i,
     );
     assert.ok(advisor.content.length >= 350, "dog-advisor needs a substantive consultation role");
+    for (const consultationAsset of [reviewer, advisor]) {
+      const frontmatter = consultationAsset.content.match(/^---\r?\n([\s\S]+?)\r?\n---/)?.[1];
+      assert.ok(frontmatter, `${consultationAsset.name} needs frontmatter`);
+      assert.doesNotMatch(frontmatter, /^(?:model|variant):/m);
+      assert.doesNotMatch(
+        consultationAsset.content,
+        /(?:opus|fable|claude|powershell|windows|credential|provider[ /_-]*api|vendor[ /_-]*api)/i,
+      );
+    }
 
     assert.match(coordinator.content, /only user-facing agent/i);
     assert.match(coordinator.content, /before any edit/i);
