@@ -1,8 +1,8 @@
 import {
   BUILT_IN_MODEL_CATALOG,
-  DEDICATED_SOL_ROUTING,
+  FIXED_MODEL_ROUTING,
   RECOMMENDED_LUNA_ROUTING,
-  isDedicatedSolRole,
+  isFixedModelRole,
   parseModelRoutingConfig,
   type CatalogModel,
   type ModelCatalog,
@@ -200,17 +200,17 @@ export function resolvePluginConfigurationSources(
     ...RECOMMENDED_LUNA_ROUTING,
     ...(environmentLayer.modelRouting ?? {}),
     ...(hostLayer.modelRouting ?? {}),
-  }).filter(([role]) => !isDedicatedSolRole(role)));
+  }).filter(([role]) => !isFixedModelRole(role)));
   const modelRouting = {
     ...Object.fromEntries(Object.entries(configured.modelRouting)
-      .filter(([role]) => !isDedicatedSolRole(role))),
-    ...DEDICATED_SOL_ROUTING,
+      .filter(([role]) => !isFixedModelRole(role))),
+    ...FIXED_MODEL_ROUTING,
   };
   return {
     ...configured,
     modelRouting,
-    // Mk2A2 worker policy is authoritative over every configurable layer.
-    localModelRouting: { ...(projectLayer.modelRouting ?? {}), ...DEDICATED_SOL_ROUTING },
+    // Fixed worker and reviewer policy is authoritative over every configurable layer.
+    localModelRouting: { ...(projectLayer.modelRouting ?? {}), ...FIXED_MODEL_ROUTING },
     globalModelRouting,
   };
 }

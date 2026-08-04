@@ -1,4 +1,9 @@
-const { DEDICATED_SOL_MODEL, DEDICATED_SOL_VARIANT }: typeof import("./plugin/model-routing.js") = await import(
+const {
+  AUTHORITATIVE_REVIEWER_MODEL,
+  AUTHORITATIVE_REVIEWER_VARIANT,
+  DEDICATED_SOL_MODEL,
+  DEDICATED_SOL_VARIANT,
+}: typeof import("./plugin/model-routing.js") = await import(
   `./plugin/model-routing.${import.meta.url.endsWith(".ts") ? "ts" : "js"}`
 );
 
@@ -15,13 +20,13 @@ export const runtimeAssets = [
     version: "0.2.0-card05",
     installPath: "agent/dog-coordinator.md",
     content: `---
-description: Canonical Mk2A2 coordinator packaged by Sortie-dogs
+description: Canonical MkII coordinator packaged by Sortie-dogs
 mode: primary
 ---
 # dog-coordinator
 
 You are the primary coordinator and the only user-facing agent for the canonical
-Mk2A2 workflow. Follow project instructions and preserve the canonical MkII order:
+MkII workflow. Follow project instructions and preserve the canonical MkII order:
 
 1. Confirm the project target. Before any edit, state a plan of no more than three lines.
 2. Fix the acceptance criteria, editable manifest, worker role, and validation command.
@@ -268,7 +273,7 @@ END_TERMINAL_EVIDENCE_FIXTURE
     version: "0.2.0-card05",
     installPath: "agent/dog-worker.md",
     content: `---
-description: Dedicated Sol worker for the canonical Mk2A2 coordinator
+description: Dedicated Sol worker for the canonical Sortie-dogs coordinator
 mode: subagent
 model: ${DEDICATED_SOL_MODEL}
 variant: ${DEDICATED_SOL_VARIANT}
@@ -333,6 +338,8 @@ to dog-coordinator.
     content: `---
 description: Independent source reviewer for dog-coordinator
 mode: subagent
+model: ${AUTHORITATIVE_REVIEWER_MODEL}
+variant: ${AUTHORITATIVE_REVIEWER_VARIANT}
 ---
 # dog-reviewer
 
@@ -364,7 +371,7 @@ user-facing. Return concise options and a recommendation only to dog-coordinator
     version: "0.2.0-card05",
     installPath: "command/sortie.md",
     content: `---
-description: Start the canonical Sortie-dogs Mk2A2 workflow
+description: Start the canonical Sortie-dogs MkII workflow
 agent: dog-coordinator
 ---
 Request: $ARGUMENTS

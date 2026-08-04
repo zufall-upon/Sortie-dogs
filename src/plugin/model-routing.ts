@@ -23,18 +23,39 @@ export const DEDICATED_SOL_ROLES = [
 
 const dedicatedSolRoleSet = new Set<string>(DEDICATED_SOL_ROLES);
 
-/** Fixed Mk2A2 Sol routes. These deliberately contain no fallback targets. */
+/** Fixed Sol routes. These deliberately contain no fallback targets. */
 export const DEDICATED_SOL_ROUTING: ModelRoutingConfig = Object.freeze(Object.fromEntries(
   DEDICATED_SOL_ROLES.map((role) => [role, Object.freeze({
     preferred: Object.freeze({ model: DEDICATED_SOL_MODEL, variant: DEDICATED_SOL_VARIANT }),
   })]),
 ));
 
+export const AUTHORITATIVE_REVIEWER_MODEL = "fable/opus";
+export const AUTHORITATIVE_REVIEWER_VARIANT = "thinking";
+export const AUTHORITATIVE_REVIEWER_ROLES = ["dog-reviewer"] as const;
+
+/** Built-in reviewer route. Configurable routing layers cannot override it. */
+export const AUTHORITATIVE_REVIEWER_ROUTING: ModelRoutingConfig = Object.freeze(Object.fromEntries(
+  AUTHORITATIVE_REVIEWER_ROLES.map((role) => [role, Object.freeze({
+    preferred: Object.freeze({
+      model: AUTHORITATIVE_REVIEWER_MODEL,
+      variant: AUTHORITATIVE_REVIEWER_VARIANT,
+    }),
+  })]),
+));
+
+export const FIXED_MODEL_ROUTING: ModelRoutingConfig = Object.freeze({
+  ...DEDICATED_SOL_ROUTING,
+  ...AUTHORITATIVE_REVIEWER_ROUTING,
+});
+
+const fixedModelRoleSet = new Set<string>(Object.keys(FIXED_MODEL_ROUTING));
+
 export const RECOMMENDED_LUNA_MODEL = "openai/gpt-5.6-luna";
 export const RECOMMENDED_LUNA_VARIANT = "xhigh";
 export const RECOMMENDED_LUNA_ROLES = ["dog-coordinator", "dog-scout"] as const;
 
-/** Configurable Mk2A2 defaults. Project-local and global configuration may override these routes. */
+/** Configurable MkII defaults. Project-local and global configuration may override these routes. */
 export const RECOMMENDED_LUNA_ROUTING: ModelRoutingConfig = Object.freeze(Object.fromEntries(
   RECOMMENDED_LUNA_ROLES.map((role) => [role, Object.freeze({
     preferred: Object.freeze({
@@ -46,6 +67,10 @@ export const RECOMMENDED_LUNA_ROUTING: ModelRoutingConfig = Object.freeze(Object
 
 export function isDedicatedSolRole(role: string): boolean {
   return dedicatedSolRoleSet.has(role);
+}
+
+export function isFixedModelRole(role: string): boolean {
+  return fixedModelRoleSet.has(role);
 }
 
 export interface CatalogModel {
@@ -63,6 +88,10 @@ export interface ModelCatalog {
 export const BUILT_IN_MODEL_CATALOG: ModelCatalog = Object.freeze({
   global: Object.freeze([
     Object.freeze({ model: DEDICATED_SOL_MODEL, variants: Object.freeze([DEDICATED_SOL_VARIANT]) }),
+    Object.freeze({
+      model: AUTHORITATIVE_REVIEWER_MODEL,
+      variants: Object.freeze([AUTHORITATIVE_REVIEWER_VARIANT]),
+    }),
     Object.freeze({
       model: RECOMMENDED_LUNA_MODEL,
       variants: Object.freeze([RECOMMENDED_LUNA_VARIANT]),

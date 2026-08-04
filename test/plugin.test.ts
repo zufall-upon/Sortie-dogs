@@ -11,6 +11,8 @@ import {
   resolvePluginConfigurationSources,
 } from "../dist/plugin/config.js";
 import {
+  AUTHORITATIVE_REVIEWER_MODEL,
+  AUTHORITATIVE_REVIEWER_VARIANT,
   DEDICATED_SOL_MODEL,
   DEDICATED_SOL_VARIANT,
   DEDICATED_SOL_ROLES,
@@ -160,6 +162,7 @@ test("recommended Luna routes cover exact installed roles and remain below proje
   if (defaults.kind !== "configured") return;
   assert.deepEqual(defaults.modelCatalog.global, [
     { model: DEDICATED_SOL_MODEL, variants: [DEDICATED_SOL_VARIANT] },
+    { model: AUTHORITATIVE_REVIEWER_MODEL, variants: [AUTHORITATIVE_REVIEWER_VARIANT] },
     { model: "openai/gpt-5.6-luna", variants: ["xhigh"] },
     { model: "provider/custom" },
   ]);
@@ -204,21 +207,24 @@ test("recommended Luna routes cover exact installed roles and remain below proje
   });
 });
 
-test("Mk2A2 routes only dedicated worker roles to Sol with stable fail-closed resolution", () => {
+test("MkII fixed routes remain authoritative with stable fail-closed resolution", () => {
   const canonicalModel = "provider/canonical";
   const configured = resolvePluginConfigurationSources(
     { modelRouting: {
       implementation: { preferred: { model: canonicalModel } },
       "dog-worker": { preferred: { model: canonicalModel } },
+      "dog-reviewer": { preferred: { model: canonicalModel } },
     } },
     { modelRouting: {
       remediation: { preferred: { model: canonicalModel } },
       "dog-worker": { preferred: { model: canonicalModel } },
+      "dog-reviewer": { preferred: { model: canonicalModel } },
     } },
     {
       modelRouting: {
         "blocker-resolution": { preferred: { model: canonicalModel } },
         "dog-worker": { preferred: { model: canonicalModel } },
+        "dog-reviewer": { preferred: { model: canonicalModel } },
       },
       modelCatalog: { global: [{ model: canonicalModel }] },
     },
@@ -268,6 +274,22 @@ test("Mk2A2 routes only dedicated worker roles to Sol with stable fail-closed re
       },
     }), expected, `${role} resume route must remain stable for equivalent fresh input`);
   }
+  const expectedReviewer = {
+    ok: true,
+    role: "dog-reviewer",
+    source: "local",
+    catalog: "global",
+    model: AUTHORITATIVE_REVIEWER_MODEL,
+    variant: AUTHORITATIVE_REVIEWER_VARIANT,
+  };
+  assert.deepEqual(configured.modelRouting["dog-reviewer"], {
+    preferred: {
+      model: AUTHORITATIVE_REVIEWER_MODEL,
+      variant: AUTHORITATIVE_REVIEWER_VARIANT,
+    },
+  });
+  assert.deepEqual(resolveRole("dog-reviewer"), expectedReviewer);
+  assert.equal(configured.globalModelRouting["dog-reviewer"], undefined);
   for (const role of ["coordinator", "planning", "reviewer", "scout", "unknown"]) {
     assert.deepEqual(resolveRole(role), {
       ok: false,
@@ -304,7 +326,7 @@ test("generated dog-worker runtime asset selects the dedicated Sol model explici
   const dogWorker = runtimeAssets.find((asset) => asset.name === "dog-worker");
   assert.ok(dogWorker);
   assert.ok(dogWorker.content.startsWith(`---
-description: Dedicated Sol worker for the canonical Mk2A2 coordinator
+description: Dedicated Sol worker for the canonical Sortie-dogs coordinator
 mode: subagent
 model: ${DEDICATED_SOL_MODEL}
 variant: ${DEDICATED_SOL_VARIANT}
@@ -320,6 +342,18 @@ description: Focused technical advisor for dog-coordinator
 mode: subagent
 model: ${DEDICATED_SOL_MODEL}
 variant: ${DEDICATED_SOL_VARIANT}
+---
+`));
+});
+
+test("generated dog-reviewer runtime asset selects Opus thinking explicitly", () => {
+  const dogReviewer = runtimeAssets.find((asset) => asset.name === "dog-reviewer");
+  assert.ok(dogReviewer);
+  assert.ok(dogReviewer.content.startsWith(`---
+description: Independent source reviewer for dog-coordinator
+mode: subagent
+model: ${AUTHORITATIVE_REVIEWER_MODEL}
+variant: ${AUTHORITATIVE_REVIEWER_VARIANT}
 ---
 `));
 });
