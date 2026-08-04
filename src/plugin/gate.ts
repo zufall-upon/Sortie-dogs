@@ -21,7 +21,8 @@ export type WriteDenialReason =
   | "manifest-unavailable"
   | "path-required"
   | "project-boundary"
-  | "manifest-scope";
+  | "manifest-scope"
+  | "repeated-denial";
 
 export class WriteDeniedError extends Error {
   readonly reason: WriteDenialReason;
@@ -32,6 +33,7 @@ export class WriteDeniedError extends Error {
       "path-required": "write path must be explicit.",
       "project-boundary": "project-root-relative path required.",
       "manifest-scope": "operation manifest write scope.",
+      "repeated-denial": "same command and denial reason already denied in this session; retry blocked.",
     };
     super(`Write denied for "${safePath(path)}": ${messages[reason]}`, options);
     this.name = "WriteDeniedError";
@@ -68,7 +70,8 @@ const ALL_OPERAND_COMMANDS = new Set(["mkdir", "rm", "rmdir", "touch", "truncate
 const LAST_OPERAND_COMMANDS = new Set(["cp", "install"]);
 const READ_ONLY_COMMANDS = new Set([
   "cat", "echo", "false", "get-childitem", "get-content", "grep", "head", "ls", "pwd",
-  "rg", "stat", "tail", "test-path", "true", "type", "wc",
+  "measure-object", "rg", "select-object", "stat", "tail", "test-path", "true", "type",
+  "where-object", "wc",
 ]);
 const READ_ONLY_GIT_COMMANDS = new Set(["diff", "log", "ls-files", "rev-parse", "show", "status"]);
 const POWERSHELL_WRITE_COMMANDS = new Set([
@@ -76,6 +79,10 @@ const POWERSHELL_WRITE_COMMANDS = new Set([
   "rename-item", "set-content",
 ]);
 const READ_ONLY_OPTIONS_WITH_VALUES = new Set(["-c", "--directory", "--exclude", "--include"]);
+const READ_ONLY_TOOLS = new Set([
+  "glob", "grep", "list", "list_mcp_resource_templates", "list_mcp_resources", "question",
+  "read", "read_mcp_resource", "review_git_evidence", "skill", "webfetch",
+]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -190,23 +197,58 @@ function isSafeGitCommit(tokens: readonly string[]): boolean {
   return true;
 }
 
-function shellPaths(command: string): Extraction {
+function isLiteralPowerShellAssignment(value: string): boolean {
+  return /^(?:[+-]?(?:\d+(?:\.\d+)?|\.\d+)|\$(?:null|true|false)|\$[A-Za-z_][A-Za-z0-9_]*|\$env:[A-Za-z_][A-Za-z0-9_]*|'[^']*'|"[^"`$]*")$/iu.test(value);
+}
+
+function isSafePowerShellForEach(source: string): boolean {
+  return /^foreach-object\s+\{\s*\$_(?:\.[A-Za-z_][A-Za-z0-9_]*)?\s*\}$/iu.test(source);
+}
+
+function hasUnsafeShellExpansion(source: string): boolean {
+  return /(?:\$\(|\$\{|`|<\()/u.test(source);
+}
+
+function shellPaths(command: string, powershell: boolean): Extraction {
   const paths: string[] = [];
   let applies = false;
   let ambiguous = false;
   let gitCommit = false;
-  const redirection = /(?:^|[\s;&|])(?:\d*)(?:>>?|>\|)\s*("(?:\\.|[^"])*"|'[^']*'|[^\s;&|]+)/gu;
+  const redirection = /(?<![<>=!])(?:&|\d*)?(?:>>|>\||>)(?![=])/gu;
+  const redirectionTarget = /^\s*("(?:\\.|[^"])*"|'[^']*'|&?\d+|[^\s;&|]+)/u;
   for (const match of command.matchAll(redirection)) {
     applies = true;
-    paths.push(unquote(match[1]));
+    const target = redirectionTarget.exec(command.slice(match.index + match[0].length))?.[1];
+    if (target === undefined || target.startsWith("&")) ambiguous = true;
+    else paths.push(unquote(target));
   }
 
-  for (const segment of command.split(/(?:&&|\|\||(?<!>)\|(?!\|)|;|\r?\n)/u)) {
-    const tokens = unwrapEnvironmentCommand(words(segment.trim()));
+  const segments = command.split(/(?:&&|\|\||(?<!>)\|(?!\|)|;|\r?\n)/u);
+  for (let segmentIndex = 0; segmentIndex < segments.length; segmentIndex += 1) {
+    const segment = segments[segmentIndex];
+    let source = segment.trim();
+    let assignment = false;
+    if (hasUnsafeShellExpansion(source)) {
+      applies = true;
+      ambiguous = true;
+      continue;
+    }
+    if (powershell) {
+      const stripped = source.replace(/^\$[A-Za-z_][A-Za-z0-9_:]*\s*=\s*/u, "");
+      assignment = stripped !== source;
+      source = stripped;
+      if (/^\$env:[A-Za-z_][A-Za-z0-9_]*$/iu.test(source) ||
+          (assignment && isLiteralPowerShellAssignment(source))) continue;
+    }
+    const tokens = unwrapEnvironmentCommand(words(source));
     if (tokens.length === 0) continue;
     const executable = tokens[0].replaceAll("\\", "/").split("/").at(-1)!.toLowerCase();
     const commandOperands = operands(tokens);
-    if (ALL_OPERAND_COMMANDS.has(executable)) {
+    if (powershell && /[{}]/u.test(source)) {
+      if (segmentIndex > 0 && isSafePowerShellForEach(source)) continue;
+      applies = true;
+      ambiguous = true;
+    } else if (ALL_OPERAND_COMMANDS.has(executable)) {
       applies = true;
       paths.push(...commandOperands);
     } else if (LAST_OPERAND_COMMANDS.has(executable)) {
@@ -272,7 +314,7 @@ export function extractWritePaths(tool: string, args: unknown): Extraction {
   if (/^(?:bash|shell|powershell|pwsh)(?:$|[_-])/u.test(name)) {
     const command = isRecord(args) && typeof args.command === "string" ? args.command : undefined;
     if (command === undefined) return { applies: paths.length > 0, ambiguous: paths.length === 0, paths };
-    const extracted = shellPaths(command);
+    const extracted = shellPaths(command, /^(?:powershell|pwsh)(?:$|[_-])/u.test(name));
     return {
       applies: extracted.applies || paths.length > 0,
       ambiguous: extracted.ambiguous,
@@ -281,6 +323,15 @@ export function extractWritePaths(tool: string, args: unknown): Extraction {
     };
   }
   return { applies: false, ambiguous: false, paths: [] };
+}
+
+/** Unbound sessions may invoke only tools whose complete input is known to be read-only. */
+export function isKnownReadOnlyTool(tool: string, args: unknown): boolean {
+  const name = tool.toLowerCase();
+  if (READ_ONLY_TOOLS.has(name)) return true;
+  if (!/^(?:bash|shell|powershell|pwsh)(?:$|[_-])/u.test(name)) return false;
+  const extraction = extractWritePaths(tool, args);
+  return !extraction.applies && !extraction.ambiguous;
 }
 
 async function nearestExistingRealPath(path: string): Promise<string> {

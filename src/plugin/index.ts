@@ -15,7 +15,7 @@ import {
   WriteDeniedError,
   createProjectPaths,
   createWriteGate,
-  extractWritePaths,
+  isKnownReadOnlyTool,
   resolveProjectRoot,
   safePath,
   type ProjectPaths,
@@ -30,6 +30,7 @@ import {
 
 const INPUT_LIMITS = { config: 64 * 1024, manifest: 512 * 1024, handoff: 2 * 1024 * 1024 } as const;
 const INSPECTION_CACHE = { maximum: 256, ttlMilliseconds: 30 * 60 * 1000 } as const;
+const SESSION_DENIAL_LIMIT = 256;
 const PROJECT_CONFIG_PATH = ".opencode/sortie-dogs.json";
 const ENV_CONFIG = "SORTIE_DOGS_CONFIG";
 const COORDINATOR_AGENT = "dog-coordinator";
@@ -57,6 +58,7 @@ export interface OpenCodeHooks {
     output: ToolExecuteBeforeOutput,
   ) => Promise<void>;
   "chat.message"?: OpenCodeChatMessageHook;
+  tool?: Record<string, OpenCodeToolDefinition>;
 }
 
 export type OpenCodePlugin = (
@@ -104,14 +106,39 @@ interface LoadedConfiguration {
 interface InspectionCacheEntry {
   fingerprint: string;
   expiresAt: number;
+  handoffPath: string;
+  manifestPath: string;
+  projectRoot: string;
 }
 
 interface SessionAuthorization {
   gate: WriteGate;
-  contractFingerprint: string;
   expiresAt: number;
-  handoffPath: string;
+  manifestHash: string;
+  manifestMtimeMs: number;
   manifestPath: string;
+}
+
+interface ActiveSessionState {
+  deniedSignatures: Set<string>;
+  expiresAt: number;
+}
+
+interface OpenCodeToolDefinition {
+  description: string;
+  args: Record<string, unknown>;
+  execute(args: Record<string, string>, context: { sessionID: string }): Promise<string>;
+}
+
+interface OpenCodeToolFactory {
+  (definition: OpenCodeToolDefinition): OpenCodeToolDefinition;
+  schema: { string(): unknown };
+}
+
+interface PinnedJson {
+  value: unknown;
+  hash: string;
+  mtimeMs: number;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -136,6 +163,37 @@ async function readJson(path: string, limit: number): Promise<unknown> {
   }
   try {
     return JSON.parse(source);
+  } catch (error) {
+    throw new PluginInputError("invalid-json", { cause: error });
+  }
+}
+
+async function readPinnedJson(path: string, limit: number): Promise<PinnedJson> {
+  const before = await stat(path).catch((error: unknown) => {
+    throw new PluginInputError("read-failed", { cause: error });
+  });
+  if (!before.isFile()) throw new PluginInputError("not-file");
+  if (before.size > limit) throw new PluginInputError("too-large");
+  let source: string;
+  try {
+    source = await readFile(path, "utf8");
+  } catch (error) {
+    throw new PluginInputError("read-failed", { cause: error });
+  }
+  const after = await stat(path).catch((error: unknown) => {
+    throw new PluginInputError("read-failed", { cause: error });
+  });
+  const beforeMtimeMs = Math.trunc(before.mtimeMs);
+  const afterMtimeMs = Math.trunc(after.mtimeMs);
+  if (!after.isFile() || before.size !== after.size || beforeMtimeMs !== afterMtimeMs) {
+    throw new PluginInputError("read-failed");
+  }
+  try {
+    return {
+      value: JSON.parse(source),
+      hash: createHash("sha256").update(source).digest("hex"),
+      mtimeMs: afterMtimeMs,
+    };
   } catch (error) {
     throw new PluginInputError("invalid-json", { cause: error });
   }
@@ -205,15 +263,57 @@ function stableValue(value: unknown): unknown {
   return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stableValue(value[key])]));
 }
 
-function inspectionFingerprint(handoff: unknown, diagnostics: unknown): string {
+function inspectionFingerprint(handoff: unknown, diagnostics: unknown, manifest?: unknown): string {
   return createHash("sha256")
-    .update(JSON.stringify([stableValue(handoff), stableValue(diagnostics)]))
+    .update(JSON.stringify([stableValue(handoff), stableValue(manifest), stableValue(diagnostics)]))
     .digest("hex");
 }
 
-function pruneInspectionCache(cache: Map<string, InspectionCacheEntry>, now: number): void {
+function normalizeCommand(command: string): string {
+  let quote: "\"" | "'" | undefined;
+  let whitespace = false;
+  let normalized = "";
+  for (const character of command.trim()) {
+    if (quote !== undefined) {
+      normalized += character;
+      if (character === quote) quote = undefined;
+    } else if (character === "\"" || character === "'") {
+      if (whitespace && normalized.length > 0) normalized += " ";
+      whitespace = false;
+      quote = character;
+      normalized += character;
+    } else if (/\s/u.test(character)) {
+      whitespace = true;
+    } else {
+      if (whitespace && normalized.length > 0) normalized += " ";
+      whitespace = false;
+      normalized += character;
+    }
+  }
+  return normalized;
+}
+
+function denialSignature(
+  input: ToolExecuteBeforeInput,
+  output: ToolExecuteBeforeOutput,
+  reason: string,
+): string {
+  const command = isRecord(output.args) && typeof output.args.command === "string"
+    ? normalizeCommand(output.args.command)
+    : JSON.stringify(stableValue(output.args));
+  return createHash("sha256")
+    .update(JSON.stringify([input.tool.toLowerCase(), command, reason]))
+    .digest("hex");
+}
+
+function pruneInspectionCache(
+  cache: Map<string, InspectionCacheEntry>,
+  now: number,
+  reserveSlot = false,
+): void {
   for (const [key, entry] of cache) if (entry.expiresAt <= now) cache.delete(key);
-  while (cache.size >= INSPECTION_CACHE.maximum) cache.delete(cache.keys().next().value!);
+  const limit = INSPECTION_CACHE.maximum - (reserveSlot ? 1 : 0);
+  while (cache.size > limit) cache.delete(cache.keys().next().value!);
 }
 
 function pruneSessionAuthorizations(cache: Map<string, SessionAuthorization>, now: number): void {
@@ -223,6 +323,22 @@ function pruneSessionAuthorizations(cache: Map<string, SessionAuthorization>, no
 
 /** Named OpenCode plugin export. Importing the package has no side effects; invoking it installs active gates. */
 export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
+  const pluginModuleName = "@opencode-ai/plugin";
+  const pluginModule = await import(pluginModuleName).catch(() => undefined) as
+    | { tool?: OpenCodeToolFactory }
+    | undefined;
+  const toolCandidate = pluginModule?.tool as unknown;
+  const toolSchema = typeof toolCandidate === "function"
+    ? (toolCandidate as unknown as { schema?: unknown }).schema
+    : undefined;
+  const validToolCandidate = typeof toolCandidate === "function" &&
+    isRecord(toolSchema) && typeof toolSchema.string === "function";
+  const defineTool: OpenCodeToolFactory = validToolCandidate
+    ? toolCandidate as OpenCodeToolFactory
+    : Object.assign(
+    (definition: OpenCodeToolDefinition) => definition,
+    { schema: { string: () => ({ type: "string" }) } },
+  );
   let project: ProjectPaths | undefined;
   let loaded: LoadedConfiguration | undefined;
   let loadFailure: unknown;
@@ -259,9 +375,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
 
   const inspected = new Map<string, InspectionCacheEntry>();
   const sessionAuthorizations = new Map<string, SessionAuthorization>();
-  const handoffBoundSessions = new Set<string>();
-  const activeSessions = new Set<string>();
-  let loadedGateRefresh: Promise<WriteGate | undefined> | undefined;
+  const activeSessions = new Map<string, ActiveSessionState>();
 
   async function inspect(path: string, sessionID: string | undefined): Promise<void> {
     await ensureLoaded();
@@ -272,11 +386,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       ? resolve(path)
       : resolve(input.worktree ?? project.root, path);
     if (!loaded.handoffPaths.includes(absolutePath)) return;
-    if (sessionID !== undefined) {
-      handoffBoundSessions.add(sessionID);
-      sessionAuthorizations.delete(sessionID);
-    }
-
+    const key = sessionID === undefined ? undefined : `${sessionID}\u0000${absolutePath}`;
+    if (key !== undefined) inspected.delete(key);
     let value: unknown;
     try {
       value = await readJson(absolutePath, INPUT_LIMITS.handoff);
@@ -292,6 +403,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     let authorizationGate: WriteGate;
     let manifestPath: string;
     let manifest: OperationManifest;
+    let inspectedProjectRoot: string;
     const extension = validation.value.ext?.["sortie-dogs/write-gate"];
     if (extension === undefined) {
       if (
@@ -311,6 +423,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       manifest = loaded.manifest;
       authorizationGate = loaded.gate;
       manifestPath = loaded.operationManifestAbsolutePath;
+      inspectedProjectRoot = project.root;
     } else {
       if (
         !isRecord(extension) ||
@@ -337,6 +450,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         if (!manifestValidation.ok) throw new WriteDeniedError("manifest-unavailable", "<unknown>");
         manifest = manifestValidation.value;
         authorizationGate = await createWriteGate(candidateProject, manifest);
+        inspectedProjectRoot = candidateProject.root;
       } catch (error) {
         throw new HandoffDeniedError("contract-invalid", path, { cause: error });
       }
@@ -346,21 +460,81 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       throw new HandoffDeniedError("contract-invalid", path);
     }
 
-    const fingerprint = inspectionFingerprint(validation.value, diagnostics);
+    const fingerprint = inspectionFingerprint(validation.value, diagnostics, manifest);
     if (sessionID === undefined) return;
-    const key = `${sessionID}\u0000${absolutePath}`;
     const now = Date.now();
-    pruneInspectionCache(inspected, now);
-    inspected.delete(key);
-    inspected.set(key, { fingerprint, expiresAt: now + INSPECTION_CACHE.ttlMilliseconds });
-    pruneSessionAuthorizations(sessionAuthorizations, now);
-    sessionAuthorizations.set(sessionID, {
-      gate: authorizationGate,
-      contractFingerprint: inspectionFingerprint(validation.value, manifest),
+    pruneInspectionCache(inspected, now, true);
+    inspected.set(key!, {
+      fingerprint,
       expiresAt: now + INSPECTION_CACHE.ttlMilliseconds,
       handoffPath: absolutePath,
       manifestPath,
+      projectRoot: inspectedProjectRoot,
     });
+    pruneSessionAuthorizations(sessionAuthorizations, now);
+  }
+
+  async function bindWriteGate(
+    sessionID: string,
+    projectRoot: string,
+    manifestPathArgument: string,
+  ): Promise<string> {
+    const deny = (reason: string): string => JSON.stringify({ status: "denied", reason });
+    try {
+      if (!isActiveSession(sessionID)) return deny("session-inactive");
+      const now = Date.now();
+      pruneSessionAuthorizations(sessionAuthorizations, now);
+      if (sessionAuthorizations.has(sessionID)) return deny("binding-replay");
+      if (!isAbsolute(projectRoot) || isAbsolute(manifestPathArgument)) return deny("path-invalid");
+
+      project ??= await createProjectPaths(resolveProjectRoot(input));
+      const allowedRoots = [project];
+      if (input.worktree !== undefined && resolve(input.worktree) !== project.root) {
+        allowedRoots.push(await createProjectPaths(resolve(input.worktree)));
+      }
+      const containment = await Promise.all(allowedRoots.map((root) => root.contains(projectRoot)));
+      if (!containment.some(Boolean)) return deny("project-boundary");
+
+      const candidate = await createProjectPaths(projectRoot);
+      const relativeManifestPath = await candidate.toRelativePath(manifestPathArgument);
+      const manifestPath = candidate.absolute(relativeManifestPath);
+      const pinned = await readPinnedJson(manifestPath, INPUT_LIMITS.manifest);
+      const validation = validateOperationManifestSchema(pinned.value);
+      if (!validation.ok) return deny("manifest-invalid");
+      pruneInspectionCache(inspected, now);
+      const inspectedEntry = [...inspected.entries()].find(([key, entry]) =>
+        key.startsWith(`${sessionID}\u0000`) &&
+        entry.projectRoot === candidate.root && entry.manifestPath === manifestPath
+      )?.[1];
+      if (inspectedEntry === undefined) return deny("handoff-uninspected");
+      const handoffValue = await readJson(inspectedEntry.handoffPath, INPUT_LIMITS.handoff);
+      const handoffValidation = validateHandoffSchema(handoffValue);
+      if (!handoffValidation.ok) return deny("handoff-mismatch");
+      const diagnostics = validateManifest(handoffValidation.value, validation.value, undefined, false);
+      if (
+        diagnostics.some(({ severity }) => severity === "error") ||
+        inspectionFingerprint(handoffValidation.value, diagnostics, validation.value) !== inspectedEntry.fingerprint
+      ) return deny("handoff-mismatch");
+      const gate = await createWriteGate(candidate, validation.value);
+      sessionAuthorizations.set(sessionID, {
+        gate,
+        expiresAt: now + INSPECTION_CACHE.ttlMilliseconds,
+        manifestHash: pinned.hash,
+        manifestMtimeMs: pinned.mtimeMs,
+        manifestPath,
+      });
+      return JSON.stringify({
+        status: "bound",
+        manifest_hash: pinned.hash,
+        manifest_path: relativeManifestPath,
+      });
+    } catch (error) {
+      if (error instanceof RelativePathError || error instanceof WriteDeniedError) {
+        return deny(error.reason === "project-boundary" ? "project-boundary" : "manifest-invalid");
+      }
+      if (error instanceof PluginInputError) return deny("manifest-unavailable");
+      return deny("binding-failed");
+    }
   }
 
   async function sessionGate(sessionID: string | undefined): Promise<WriteGate | undefined> {
@@ -370,13 +544,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const authorization = sessionAuthorizations.get(sessionID);
     if (authorization === undefined) return undefined;
     try {
-      const handoffValue = await readJson(authorization.handoffPath, INPUT_LIMITS.handoff);
-      const handoffValidation = validateHandoffSchema(handoffValue);
-      if (!handoffValidation.ok) throw new Error("handoff-invalid");
-      const manifestValue = await readJson(authorization.manifestPath, INPUT_LIMITS.manifest);
-      const manifestValidation = validateOperationManifestSchema(manifestValue);
+      const pinned = await readPinnedJson(authorization.manifestPath, INPUT_LIMITS.manifest);
+      const manifestValidation = validateOperationManifestSchema(pinned.value);
       if (!manifestValidation.ok) throw new Error("manifest-invalid");
-      if (inspectionFingerprint(handoffValidation.value, manifestValidation.value) !== authorization.contractFingerprint) {
+      if (pinned.hash !== authorization.manifestHash || pinned.mtimeMs !== authorization.manifestMtimeMs) {
         throw new Error("authorization-stale");
       }
       return authorization.gate;
@@ -386,51 +557,37 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     }
   }
 
-  async function loadedGate(): Promise<WriteGate | undefined> {
-    if (loadedGateRefresh !== undefined) return loadedGateRefresh;
-    const refresh = (async (): Promise<WriteGate | undefined> => {
-      await ensureLoaded();
-      if (
-        loaded?.gate === undefined || loaded.manifestFingerprint === undefined ||
-        loaded.operationManifestAbsolutePath === undefined || project === undefined
-      ) return undefined;
-      try {
-        const manifestValue = await readJson(loaded.operationManifestAbsolutePath, INPUT_LIMITS.manifest);
-        const validation = validateOperationManifestSchema(manifestValue);
-        if (!validation.ok) throw new WriteDeniedError("manifest-unavailable", "<unknown>");
-        const fingerprint = inspectionFingerprint(validation.value, undefined);
-        if (fingerprint !== loaded.manifestFingerprint) {
-          const gate = await createWriteGate(project, validation.value);
-          loaded.manifest = validation.value;
-          loaded.manifestFingerprint = fingerprint;
-          loaded.gate = gate;
-        }
-        return loaded.gate;
-      } catch (error) {
-        loaded.gate = undefined;
-        loaded.manifest = undefined;
-        loaded.manifestFingerprint = undefined;
-        loadFailure = error;
-        return undefined;
-      }
-    })();
-    loadedGateRefresh = refresh;
-    try {
-      return await refresh;
-    } finally {
-      if (loadedGateRefresh === refresh) loadedGateRefresh = undefined;
-    }
+  async function authorizedGate(sessionID: string): Promise<WriteGate | undefined> {
+    return await sessionGate(sessionID);
   }
 
-  async function authorizedGate(sessionID: string): Promise<WriteGate | undefined> {
-    const boundGate = await sessionGate(sessionID);
-    if (boundGate !== undefined || handoffBoundSessions.has(sessionID)) return boundGate;
-    return await loadedGate();
+  function pruneActiveSessions(now: number, reserveSlot = false): void {
+    for (const [sessionID, state] of activeSessions) {
+      if (state.expiresAt <= now) evictSession(sessionID);
+    }
+    const limit = INSPECTION_CACHE.maximum - (reserveSlot ? 1 : 0);
+    while (activeSessions.size > limit) evictSession(activeSessions.keys().next().value!);
+  }
+
+  function activateSession(sessionID: string): void {
+    const now = Date.now();
+    pruneActiveSessions(now);
+    const existing = activeSessions.get(sessionID);
+    if (existing !== undefined) activeSessions.delete(sessionID);
+    else pruneActiveSessions(now, true);
+    activeSessions.set(sessionID, {
+      deniedSignatures: existing?.deniedSignatures ?? new Set<string>(),
+      expiresAt: now + INSPECTION_CACHE.ttlMilliseconds,
+    });
+  }
+
+  function isActiveSession(sessionID: string): boolean {
+    pruneActiveSessions(Date.now());
+    return activeSessions.has(sessionID);
   }
 
   function evictSession(sessionID: string): void {
     activeSessions.delete(sessionID);
-    handoffBoundSessions.delete(sessionID);
     sessionAuthorizations.delete(sessionID);
     for (const key of inspected.keys()) {
       if (key.startsWith(`${sessionID}\u0000`)) inspected.delete(key);
@@ -438,18 +595,28 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   }
 
   return {
+    tool: {
+      sortie_bind_write_gate: defineTool({
+        description: "Bind this active session to one project-relative operation manifest without changing files.",
+        args: {
+          project_root: defineTool.schema.string(),
+          manifest_path: defineTool.schema.string(),
+        },
+        async execute(args, context): Promise<string> {
+          return await bindWriteGate(context.sessionID, args.project_root, args.manifest_path);
+        },
+      }),
+    },
     "chat.message": async (chatInput, output): Promise<void> => {
-      if (activatesSession(chatInput, output)) activeSessions.add(chatInput.sessionID);
-      if (!activeSessions.has(chatInput.sessionID)) return;
+      if (activatesSession(chatInput, output)) activateSession(chatInput.sessionID);
+      if (!isActiveSession(chatInput.sessionID)) return;
       await ensureLoaded();
       await loaded?.modelRoutingHook?.(chatInput, output);
     },
     "permission.ask": async (permission): Promise<void> => {
       if (permission.permission !== "edit") return;
-      if (permission.sessionID !== undefined && !activeSessions.has(permission.sessionID)) return;
-      const gate = permission.sessionID === undefined
-        ? await loadedGate()
-        : await authorizedGate(permission.sessionID);
+      if (permission.sessionID !== undefined && !isActiveSession(permission.sessionID)) return;
+      const gate = permission.sessionID === undefined ? undefined : await authorizedGate(permission.sessionID);
       if (gate === undefined) {
         throw new WriteDeniedError("manifest-unavailable", "<unknown>", { cause: loadFailure });
       }
@@ -461,24 +628,42 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       }
     },
     "tool.execute.before": async (toolInput, output): Promise<void> => {
-      if (!activeSessions.has(toolInput.sessionID)) return;
-      const gate = await authorizedGate(toolInput.sessionID);
-      if (gate === undefined) {
-        const extraction = extractWritePaths(toolInput.tool, output.args);
-        if (extraction.applies) {
-          throw new WriteDeniedError("manifest-unavailable", "<unknown>", { cause: loadFailure });
+      if (!isActiveSession(toolInput.sessionID)) return;
+      if (toolInput.tool === "sortie_bind_write_gate") return;
+      try {
+        const gate = await authorizedGate(toolInput.sessionID);
+        if (gate === undefined) {
+          if (!isKnownReadOnlyTool(toolInput.tool, output.args)) {
+            throw new WriteDeniedError("manifest-unavailable", "<unknown>", { cause: loadFailure });
+          }
+          return;
         }
-        return;
+        await gate.check(toolInput, output);
+      } catch (error) {
+        if (!(error instanceof WriteDeniedError) || error.reason === "repeated-denial") throw error;
+        const signature = denialSignature(toolInput, output, error.reason);
+        const activeSession = activeSessions.get(toolInput.sessionID);
+        if (activeSession === undefined) throw error;
+        const denied = activeSession.deniedSignatures;
+        if (denied.has(signature)) {
+          throw new WriteDeniedError("repeated-denial", "<unknown>", { cause: error });
+        }
+        if (denied.size >= SESSION_DENIAL_LIMIT) denied.delete(denied.values().next().value!);
+        denied.add(signature);
+        throw error;
       }
-      await gate.check(toolInput, output);
     },
     event: async ({ event }): Promise<void> => {
       const eventSessionID = typeof event.properties?.sessionID === "string"
         ? event.properties.sessionID
         : undefined;
-      if (eventSessionID === undefined || !activeSessions.has(eventSessionID)) return;
+      if (eventSessionID === undefined || !isActiveSession(eventSessionID)) return;
       if (event.type === "file.edited" && typeof event.properties?.file === "string") {
-        await inspect(event.properties.file, eventSessionID);
+        try {
+          await inspect(event.properties.file, eventSessionID);
+        } catch {
+          sessionAuthorizations.delete(eventSessionID);
+        }
       } else if (event.type === "session.idle" && eventSessionID !== undefined) {
         try {
           await ensureLoaded();
@@ -486,8 +671,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
             throw new HandoffDeniedError("configuration-unavailable", "<unknown>", { cause: loadFailure });
           }
           for (const path of loaded.handoffPaths) await inspect(path, eventSessionID);
-        } finally {
-          evictSession(eventSessionID);
+        } catch {
+          sessionAuthorizations.delete(eventSessionID);
         }
       } else if (event.type === "session.deleted") {
         evictSession(eventSessionID);

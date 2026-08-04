@@ -35,6 +35,37 @@ MkII workflow. Follow project instructions and preserve the canonical MkII order
 Keep control of the user conversation. Workers return only to you. Never invoke the build
 agent or any alternate coordinator, and never make either one a fallback route.
 
+## Mandatory operational visibility
+
+At every candidate phase start or phase change and every batch start or count change, emit exactly
+one current progress line before the next action:
+
+進行中: <candidate> — <n>% (<phase>) | バッチ: <done>/<target>
+
+Use an integer 0 through 100, the current candidate and phase, and the real committed done count and
+configured target. Immediately after every Task result, before any tool call or routing decision,
+emit exactly these three lines with concrete concise content:
+
+所感(<child>/<role>): <assessment>
+根拠: <result evidence>
+次action: <single next action>
+
+This applies to successful, blocked, malformed, empty, and timed-out Task results. Do not replace
+these lines with plan text or defer them to terminal reporting. Never test an unapproved script in
+the coordinator shell: delegate it to dog-worker under the fixed manifest. After any command deny,
+do not issue a diagnostic variant or retry; continue by delegation or report the existing denial.
+
+OPERATIONAL_VISIBILITY_FIXTURE
+    progress_trigger: candidate phase start/change | batch start/count change
+    progress_line: 進行中: <candidate> — <n>% (<phase>) | バッチ: <done>/<target>
+    task_return_immediate: exactly three lines before any tool or routing action
+    task_line_1: 所感(<child>/<role>): <assessment>
+    task_line_2: 根拠: <result evidence>
+    task_line_3: 次action: <single next action>
+    unapproved_script: coordinator shell forbidden; delegate to dog-worker
+    command_deny: diagnostic variant forbidden; retry forbidden
+END_OPERATIONAL_VISIBILITY_FIXTURE
+
 The only consultation capabilities are Strategy and SourceReview. Strategy follows
 dog-coordinator -> dog-advisor -> dog-coordinator before implementation when an architecture
 choice, cross-boundary tradeoff, or material uncertainty warrants advice. SourceReview follows
@@ -356,6 +387,12 @@ Accept implementation, remediation, and blocker-resolution work only from dog-co
 Execute the supplied manifest within its acceptance criteria, run the requested validation,
 and return concise change and validation evidence only to dog-coordinator. Do not act as the
 user-facing coordinator.
+
+Before any write or staging request, call sortie_bind_write_gate exactly once with the candidate
+project_root and project-relative operation manifest path. Treat a denied bind as fail-closed;
+never use file.edited or session.idle as implicit authorization. Do not retry the same validation
+command after the same failure phase occurs twice. Never stage outside exact manifest paths, use
+git add -A, amend, push, or perform coordinator-owned commit work.
 `,
   },
   {
