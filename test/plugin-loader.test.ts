@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -103,21 +103,93 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       { cwd: projectRoot },
     );
 
+    const rootDeclaration = await readFile(
+      join(consumer, "node_modules", "sortie-dogs", "dist", "index.d.ts"),
+      "utf8",
+    );
+    const consultationValueNames = [
+      "CONSULTATION_CAPABILITIES",
+      "CONSULTATION_ROLE_POLICY",
+      "MAX_REVIEW_ARTIFACT_BYTES",
+      "SOURCE_REVIEW_RISK_TAGS",
+      "STRATEGY_TRIGGERS",
+      "evaluateReviewAvailability",
+      "evaluateReviewGate",
+      "evaluateSourceReviewRequirement",
+      "isSourceReviewRiskTag",
+      "requiresSourceReview",
+      "shouldConsultStrategy",
+      "validateReviewArtifact",
+      "validateReviewVerdict",
+    ] as const;
+    const consultationTypeNames = [
+      "ConsultationAdapter",
+      "ConsultationCapability",
+      "ConsultationRequest",
+      "ConsultationResult",
+      "ReviewArtifact",
+      "ReviewAvailability",
+      "ReviewFinding",
+      "ReviewFindingSeverity",
+      "ReviewGateInput",
+      "ReviewGateResult",
+      "ReviewVerdict",
+      "ReviewVerdictKind",
+      "SourceReviewConsultationRequest",
+      "SourceReviewConsultationResult",
+      "SourceReviewRequirement",
+      "SourceReviewRequirementInput",
+      "SourceReviewRiskTag",
+      "StrategyConsultationRequest",
+      "StrategyConsultationResult",
+      "StrategyTrigger",
+      "StrategyTriggerInput",
+      "UnavailableConsultationResult",
+      "ValidationResult",
+    ] as const;
+    assert.doesNotMatch(rootDeclaration, /export \* from "\.\/core\/consultation\.js";/);
+    assert.match(rootDeclaration, /export \{[^}]+\} from "\.\/core\/consultation\.js";/s);
+    assert.match(rootDeclaration, /export type \{[^}]+\} from "\.\/core\/consultation\.js";/s);
+    for (const publicName of [...consultationValueNames, ...consultationTypeNames]) {
+      assert.match(rootDeclaration, new RegExp(`\\b${publicName}\\b`));
+    }
+
     const { stdout } = await execFileAsync(
       process.execPath,
       [
         "--input-type=module",
         "--eval",
-        `const [{ SortieDogsPlugin }, { runtimeAssets }] = await Promise.all([
+        `const [{ SortieDogsPlugin }, { runtimeAssets }, root, consultation] = await Promise.all([
           import('sortie-dogs/plugin'),
           import('sortie-dogs/assets'),
+          import('sortie-dogs'),
+          import('./node_modules/sortie-dogs/dist/core/consultation.js'),
         ]);
-        process.stdout.write(JSON.stringify({ pluginType: typeof SortieDogsPlugin, runtimeAssets }));`,
+        const consultationValueNames = ${JSON.stringify(consultationValueNames)};
+        process.stdout.write(JSON.stringify({
+          pluginType: typeof SortieDogsPlugin,
+          runtimeAssets,
+          consultationCapabilities: root.CONSULTATION_CAPABILITIES,
+          consultationRolePolicy: root.CONSULTATION_ROLE_POLICY,
+          consultationValidatorTypes: [
+            typeof root.isSourceReviewRiskTag,
+            typeof root.requiresSourceReview,
+            typeof root.evaluateSourceReviewRequirement,
+            typeof root.shouldConsultStrategy,
+          ],
+          consultationIdentity: Object.fromEntries(
+            consultationValueNames.map((name) => [name, root[name] === consultation[name]]),
+          ),
+        }));`,
       ],
       { cwd: consumer },
     );
     const loaded = JSON.parse(stdout) as {
       pluginType: string;
+      consultationCapabilities: readonly string[];
+      consultationIdentity: Readonly<Record<string, boolean>>;
+      consultationRolePolicy: Readonly<Record<string, string>>;
+      consultationValidatorTypes: readonly string[];
       runtimeAssets: Array<{
         name: string;
         version: string;
@@ -126,6 +198,16 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       }>;
     };
     assert.equal(loaded.pluginType, "function");
+    assert.deepEqual(loaded.consultationCapabilities, ["strategy", "sourceReview"]);
+    assert.deepEqual(loaded.consultationRolePolicy, {
+      strategy: "dog-advisor",
+      sourceReview: "dog-reviewer",
+    });
+    assert.deepEqual(loaded.consultationValidatorTypes, ["function", "function", "function", "function"]);
+    assert.deepEqual(
+      loaded.consultationIdentity,
+      Object.fromEntries(consultationValueNames.map((name) => [name, true])),
+    );
     assert.equal(loaded.runtimeAssets.length, 6);
     assert.deepEqual(
       loaded.runtimeAssets.map(({ name, installPath }) => ({ name, installPath })),
@@ -184,21 +266,28 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.ok(scout.content.length >= 350, "dog-scout needs a substantive bounded role");
     assert.match(
       reviewer.content,
-      /Only after canonical validation, review a high-risk candidate[\s\S]+Do not review low-risk candidates[\s\S]+Do not edit, stage,\s+commit, or become user-facing[\s\S]+Return PASS or concrete findings only to dog-coordinator before\s+the coordinator commit/i,
+      /only one bounded SourceReview request from dog-coordinator[\s\S]+after canonical\s+validation for one high-risk candidate[\s\S]+Do not request raw logs or full source\s+files[\s\S]+Return one concise PASS or concrete-finding response only to dog-coordinator/i,
     );
     assert.ok(reviewer.content.length >= 350, "dog-reviewer needs a substantive risk-gated role");
     assert.match(
       advisor.content,
-      /only a bounded Strategy or SourceReview consultation from dog-coordinator[\s\S]+Do not\s+implement, remediate, resolve blockers, edit, stage, commit, dispatch other agents, or become\s+user-facing[\s\S]+options and a recommendation only to dog-coordinator/i,
+      /only one bounded Strategy request from dog-coordinator[\s\S]+one candidate and one focused\s+question[\s\S]+Do not request raw logs or full source files[\s\S]+options and one recommendation only to dog-coordinator/i,
     );
     assert.ok(advisor.content.length >= 350, "dog-advisor needs a substantive consultation role");
-    for (const consultationAsset of [reviewer, advisor]) {
+    for (const consultationAsset of [coordinator, reviewer, advisor]) {
       const frontmatter = consultationAsset.content.match(/^---\r?\n([\s\S]+?)\r?\n---/)?.[1];
       assert.ok(frontmatter, `${consultationAsset.name} needs frontmatter`);
       assert.doesNotMatch(frontmatter, /^(?:model|variant):/m);
       assert.doesNotMatch(
         consultationAsset.content,
-        /(?:opus|fable|claude|powershell|windows|credential|provider[ /_-]*api|vendor[ /_-]*api)/i,
+        /(?:opus|fable|claude|openai|anthropic|gemini|powershell|windows|credential|provider[ /_-]*api|vendor[ /_-]*api)/i,
+      );
+    }
+    for (const consultationAsset of [reviewer, advisor]) {
+      assert.match(consultationAsset.content, /host-routed/);
+      assert.match(
+        consultationAsset.content,
+        /do not require or identify a\s+provider, vendor, model, variant,\s+or transport/i,
       );
     }
 
@@ -314,8 +403,13 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(scoutFanout[1], /union all well-formed facts; no voting or majority rule/);
     assert.match(scoutFanout[1], /malformed \| timeout \| empty -> discard without retry/);
     assert.match(scoutFanout[1], /implementation \| remediation \| blocker-resolution -> dog-worker only/);
-    assert.match(coordinator.content, /dog-advisor only for Strategy or SourceReview consultation/);
-    assert.match(coordinator.content, /findings from every subagent return\s+through dog-coordinator/i);
+    assert.match(coordinator.content, /only consultation capabilities are Strategy and SourceReview/);
+    assert.match(coordinator.content, /Strategy follows\s+dog-coordinator -> dog-advisor -> dog-coordinator/);
+    assert.match(coordinator.content, /SourceReview follows\s+dog-coordinator -> dog-reviewer -> dog-coordinator only after canonical validation/);
+    assert.match(coordinator.content, /Each consultation covers one candidate and one capability/);
+    assert.match(coordinator.content, /Do not encode a provider, vendor, model, variant, or transport/);
+    assert.match(coordinator.content, /implementation,\s+remediation, and blocker-resolution work on dog-worker/i);
+    assert.match(coordinator.content, /findings from every subagent return\s+through\s+dog-coordinator/i);
     assert.match(coordinator.content, /do not repeat a recorded successful validation unless\s+relevant source changed/i);
 
     const takeover = coordinator.content.match(
