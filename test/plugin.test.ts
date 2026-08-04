@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 
 import { runtimeAssets } from "../dist/runtime-assets.js";
 import { ModelRoutingDeniedError, SortieDogsPlugin } from "../dist/plugin/index.js";
@@ -45,6 +47,7 @@ const fixture = JSON.parse(
 ) as PluginFixture;
 const cases = new Map(fixture.cases.map((candidate) => [candidate.name, candidate]));
 const testEnvironment = fileURLToPath(new URL("../_testenv/", import.meta.url));
+const execFileAsync = promisify(execFile);
 
 test("model routing configuration is strict and merges roles by layer", () => {
   const project = {
@@ -391,6 +394,22 @@ async function configuredHooks(directory: string) {
   return await SortieDogsPlugin({ directory });
 }
 
+function operationManifest(write: string[]): Record<string, unknown> {
+  return { ...fixture.manifest, write };
+}
+
+function writeGateHandoff(projectRoot: string, manifestPath: string): Record<string, unknown> {
+  return {
+    ...fixture.handoffs.valid,
+    ext: {
+      "sortie-dogs/write-gate": {
+        operation_manifest: manifestPath,
+        project_root: projectRoot,
+      },
+    },
+  };
+}
+
 async function activate(
   hooks: Awaited<ReturnType<typeof SortieDogsPlugin>>,
   sessionID = "plugin-session",
@@ -537,6 +556,8 @@ test("session policy is passive until an exact trigger and deactivates on idle o
     );
     await expectMessage(() => write("passive"), 'Write denied for "<unknown>": operation manifest unavailable.', "manifest-unavailable");
     await assert.rejects(event({ event: { type: "session.idle", properties: { sessionID: "passive" } } }));
+    await write("passive");
+    await message("passive", "/sortie task");
     await expectMessage(() => write("passive"), 'Write denied for "<unknown>": operation manifest unavailable.', "manifest-unavailable");
     await event({ event: { type: "session.deleted", properties: { sessionID: "passive" } } });
     await write("passive");
@@ -696,6 +717,282 @@ test("plugin fixture fails closed for invalid manifest JSON without exposing inp
     await writeFile(join(directory, "operation-manifest.json"), fixture.invalidManifestJson);
     const hooks = await SortieDogsPlugin({ directory });
     await expectMessage(() => invokeWrite(hooks, "allowed.txt"), candidate.error!, "manifest-unavailable");
+  });
+});
+
+test("plugin reloads a missing or invalid manifest after repair in the same session", async () => {
+  await withProject("manifest-repair", async (directory) => {
+    const hooks = await SortieDogsPlugin({ directory });
+    await expectMessage(
+      () => invokeWrite(hooks, "allowed.txt"),
+      'Write denied for "<unknown>": operation manifest unavailable.',
+      "manifest-unavailable",
+    );
+    await writeFile(join(directory, "operation-manifest.json"), fixture.invalidManifestJson);
+    await expectMessage(
+      () => invokeWrite(hooks, "allowed.txt"),
+      'Write denied for "<unknown>": operation manifest unavailable.',
+      "manifest-unavailable",
+    );
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+    await invokeWrite(hooks, "allowed.txt");
+  });
+});
+
+test("handoff write authorization uses its candidate root when the parent worktree differs", async () => {
+  await withProject("candidate-root", async (directory) => {
+    const candidateRoot = join(directory, "subrepo");
+    await mkdir(candidateRoot);
+    await writeFile(
+      join(candidateRoot, "candidate-manifest.json"),
+      JSON.stringify(operationManifest(["allowed.txt"])),
+    );
+    await writeFile(
+      join(candidateRoot, "handoff.json"),
+      JSON.stringify(writeGateHandoff(candidateRoot, "candidate-manifest.json")),
+    );
+    const hooks = await SortieDogsPlugin({ directory, worktree: candidateRoot });
+    await activate(hooks, "candidate");
+    const event = hooks.event;
+    const before = hooks["tool.execute.before"];
+    assert.ok(event);
+    assert.ok(before);
+    await event({ event: { type: "file.edited", properties: { file: "handoff.json", sessionID: "candidate" } } });
+    await before(
+      { tool: "write", sessionID: "candidate", callID: "candidate-allowed" },
+      { args: { file: "allowed.txt", content: "not-written" } },
+    );
+    await expectMessage(
+      () => before(
+        { tool: "write", sessionID: "candidate", callID: "candidate-denied" },
+        { args: { file: "parent.txt", content: "not-written" } },
+      ),
+      'Write denied for "parent.txt": operation manifest write scope.',
+      "manifest-scope",
+    );
+  });
+});
+
+test("handoff write authorization rejects a candidate root above the execution allowlist", async () => {
+  await withProject("candidate-root-ancestor", async (directory) => {
+    const executionRoot = join(directory, "execution");
+    await mkdir(executionRoot);
+    await writeFile(
+      join(directory, "ancestor-manifest.json"),
+      JSON.stringify(operationManifest(["execution/allowed.txt"])),
+    );
+    await writeFile(
+      join(executionRoot, "handoff.json"),
+      JSON.stringify(writeGateHandoff(directory, "ancestor-manifest.json")),
+    );
+    const hooks = await SortieDogsPlugin({ directory: executionRoot });
+    await activate(hooks, "ancestor");
+    const event = hooks.event;
+    assert.ok(event);
+    await assert.rejects(
+      () => event({ event: { type: "file.edited", properties: { file: "handoff.json", sessionID: "ancestor" } } }),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.equal((error as Error & { reason?: string }).reason, "contract-invalid");
+        return true;
+      },
+    );
+  });
+});
+
+test("session idle evicts activation and authorization when handoff inspection fails", async () => {
+  await withProject("idle-failed-handoff", async (directory) => {
+    await writeFile(join(directory, "candidate-manifest.json"), JSON.stringify(operationManifest(["allowed.txt"])));
+    const handoffPath = join(directory, "handoff.json");
+    await writeFile(handoffPath, JSON.stringify(writeGateHandoff(directory, "candidate-manifest.json")));
+    const hooks = await SortieDogsPlugin({ directory });
+    await activate(hooks, "idle-failure");
+    const event = hooks.event;
+    const before = hooks["tool.execute.before"];
+    assert.ok(event);
+    assert.ok(before);
+    await event({ event: { type: "file.edited", properties: { file: "handoff.json", sessionID: "idle-failure" } } });
+    await before(
+      { tool: "write", sessionID: "idle-failure", callID: "authorized" },
+      { args: { file: "allowed.txt", content: "not-written" } },
+    );
+    await writeFile(handoffPath, fixture.invalidManifestJson);
+    await assert.rejects(
+      () => event({ event: { type: "session.idle", properties: { sessionID: "idle-failure" } } }),
+    );
+    await before(
+      { tool: "write", sessionID: "idle-failure", callID: "passive-after-idle" },
+      { args: { file: "outside.txt", content: "not-written" } },
+    );
+    await activate(hooks, "idle-failure");
+    await expectMessage(
+      () => before(
+        { tool: "write", sessionID: "idle-failure", callID: "authorization-evicted" },
+        { args: { file: "allowed.txt", content: "not-written" } },
+      ),
+      'Write denied for "<unknown>": operation manifest unavailable.',
+      "manifest-unavailable",
+    );
+  });
+});
+
+test("candidate handoff replacement never reuses its prior manifest", async () => {
+  await withProject("candidate-replacement", async (directory) => {
+    await writeFile(join(directory, "manifest-a.json"), JSON.stringify(operationManifest(["old.txt"])));
+    await writeFile(join(directory, "manifest-b.json"), JSON.stringify(operationManifest(["new.txt"])));
+    const handoffPath = join(directory, "handoff.json");
+    await writeFile(handoffPath, JSON.stringify(writeGateHandoff(directory, "manifest-a.json")));
+    const hooks = await SortieDogsPlugin({ directory });
+    await activate(hooks, "replacement");
+    const event = hooks.event;
+    const before = hooks["tool.execute.before"];
+    assert.ok(event);
+    assert.ok(before);
+    const edited = { event: { type: "file.edited", properties: { file: "handoff.json", sessionID: "replacement" } } };
+    const write = (file: string) => before(
+      { tool: "write", sessionID: "replacement", callID: file },
+      { args: { file, content: "not-written" } },
+    );
+    await event(edited);
+    await write("old.txt");
+    await writeFile(handoffPath, JSON.stringify(writeGateHandoff(directory, "manifest-b.json")));
+    await event(edited);
+    await write("new.txt");
+    await expectMessage(
+      () => write("old.txt"),
+      'Write denied for "old.txt": operation manifest write scope.',
+      "manifest-scope",
+    );
+  });
+});
+
+test("git add requires exact explicit paths and rejects broad or undeclared pathspecs", async () => {
+  await withProject("git-add-gate", async (directory) => {
+    await writeFile(
+      join(directory, "operation-manifest.json"),
+      JSON.stringify(operationManifest(["allowed.txt", "second.txt", "nested/file.txt"])),
+    );
+    const hooks = await SortieDogsPlugin({ directory });
+    await activate(hooks, "git-add");
+    const before = hooks["tool.execute.before"];
+    assert.ok(before);
+    const invoke = (command: string) => before(
+      { tool: "bash", sessionID: "git-add", callID: command },
+      { args: { command } },
+    );
+    await invoke("git add -- allowed.txt second.txt");
+    await invoke("git add -- nested\\file.txt");
+    await expectMessage(
+      () => invoke("git add allowed.txt"),
+      'Write denied for "<unknown>": write path must be explicit.',
+      "path-required",
+    );
+    await expectMessage(
+      () => invoke("git add -- ."),
+      'Write denied for "<unknown>": write path must be explicit.',
+      "path-required",
+    );
+    await expectMessage(
+      () => invoke("git add -- allowed.txt undeclared.txt"),
+      'Write denied for "undeclared.txt": operation manifest write scope.',
+      "manifest-scope",
+    );
+  });
+});
+
+test("git commit requires the cached path set to equal the manifest", async () => {
+  await withProject("git-commit-gate", async (directory) => {
+    await execFileAsync("git", ["init", directory]);
+    await writeFile(join(directory, "allowed.txt"), "allowed");
+    await writeFile(join(directory, "second.txt"), "second");
+    await writeFile(join(directory, "undeclared.txt"), "undeclared");
+    await writeFile(
+      join(directory, "operation-manifest.json"),
+      JSON.stringify(operationManifest(["allowed.txt", "second.txt"])),
+    );
+    const hooks = await SortieDogsPlugin({ directory });
+    await activate(hooks, "git-commit");
+    const before = hooks["tool.execute.before"];
+    assert.ok(before);
+    const commit = () => before(
+      { tool: "bash", sessionID: "git-commit", callID: "commit" },
+      { args: { command: "git commit -m gate" } },
+    );
+    await execFileAsync("git", ["-C", directory, "add", "--", "allowed.txt"]);
+    await expectMessage(
+      commit,
+      'Write denied for "<cached>": operation manifest write scope.',
+      "manifest-scope",
+    );
+    await execFileAsync("git", ["-C", directory, "add", "--", "undeclared.txt"]);
+    await expectMessage(
+      commit,
+      'Write denied for "<cached>": operation manifest write scope.',
+      "manifest-scope",
+    );
+    await execFileAsync("git", ["-C", directory, "rm", "--cached", "--", "undeclared.txt"]);
+    await execFileAsync("git", ["-C", directory, "add", "--", "second.txt"]);
+    await commit();
+    await expectMessage(
+      () => before(
+        { tool: "bash", sessionID: "git-commit", callID: "commit-all" },
+        { args: { command: "git commit --all -m gate" } },
+      ),
+      'Write denied for "<unknown>": write path must be explicit.',
+      "path-required",
+    );
+  });
+});
+
+test("git commit normalizes cached paths relative to a candidate subdirectory", async () => {
+  await withProject("git-commit-candidate-subdirectory", async (directory) => {
+    const candidateRoot = join(directory, "subrepo");
+    await mkdir(candidateRoot);
+    await execFileAsync("git", ["init", directory]);
+    await writeFile(join(candidateRoot, "allowed.txt"), "allowed");
+    await writeFile(
+      join(candidateRoot, "candidate-manifest.json"),
+      JSON.stringify(operationManifest(["allowed.txt"])),
+    );
+    await writeFile(
+      join(candidateRoot, "handoff.json"),
+      JSON.stringify(writeGateHandoff(candidateRoot, "candidate-manifest.json")),
+    );
+    await execFileAsync("git", ["-C", directory, "add", "--", "subrepo/allowed.txt"]);
+    const hooks = await SortieDogsPlugin({ directory, worktree: candidateRoot });
+    await activate(hooks, "candidate-commit");
+    const event = hooks.event;
+    const before = hooks["tool.execute.before"];
+    assert.ok(event);
+    assert.ok(before);
+    await event({ event: { type: "file.edited", properties: { file: "handoff.json", sessionID: "candidate-commit" } } });
+    await before(
+      { tool: "bash", sessionID: "candidate-commit", callID: "candidate-commit" },
+      { args: { command: "git commit -m gate" } },
+    );
+  });
+});
+
+test("git commit accepts cached descendants of declared directory scopes", async () => {
+  await withProject("git-commit-directory-scope", async (directory) => {
+    const generated = join(directory, "generated");
+    await mkdir(generated);
+    await execFileAsync("git", ["init", directory]);
+    await writeFile(join(directory, "required.txt"), "required");
+    await writeFile(join(generated, "result.txt"), "result");
+    await writeFile(
+      join(directory, "operation-manifest.json"),
+      JSON.stringify(operationManifest(["required.txt", "generated"])),
+    );
+    await execFileAsync("git", ["-C", directory, "add", "--", "required.txt", "generated/result.txt"]);
+    const hooks = await SortieDogsPlugin({ directory });
+    await activate(hooks, "directory-commit");
+    const before = hooks["tool.execute.before"];
+    assert.ok(before);
+    await before(
+      { tool: "bash", sessionID: "directory-commit", callID: "directory-commit" },
+      { args: { command: "git commit -m gate" } },
+    );
   });
 });
 

@@ -1,5 +1,7 @@
+import { execFile } from "node:child_process";
 import { lstat, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
+import { promisify } from "node:util";
 
 import { RelativePathError, normalizeRelativePath } from "../core/path.js";
 import type { OperationManifest } from "../core/types.js";
@@ -40,6 +42,7 @@ export class WriteDeniedError extends Error {
 export interface ProjectPaths {
   readonly root: string;
   absolute(relativePath: string): string;
+  contains(path: string): Promise<boolean>;
   toRelativePath(path: string): Promise<string>;
 }
 
@@ -53,7 +56,10 @@ interface Extraction {
   applies: boolean;
   ambiguous: boolean;
   paths: string[];
+  gitCommit?: boolean;
 }
+
+const execFileAsync = promisify(execFile);
 
 const DIRECT_PATH_KEYS = new Set([
   "file", "filepath", "file_path", "path", "destination", "target",
@@ -159,10 +165,36 @@ function isReadOnlyGitCommand(tokens: readonly string[]): boolean {
     (command === "branch" && tokens.length === 3 && tokens[2] === "--show-current");
 }
 
+function exactGitAddPaths(tokens: readonly string[]): string[] | undefined {
+  if (tokens.length < 4 || tokens[2] !== "--") return undefined;
+  const paths = tokens.slice(3);
+  if (paths.some((path) =>
+    path === "." || path.startsWith("-") || path.startsWith(":") ||
+    path.includes("*") || path.includes("?") || path.includes("[")
+  )) return undefined;
+  return paths;
+}
+
+function isSafeGitCommit(tokens: readonly string[]): boolean {
+  for (let index = 2; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token === "-a" || token === "--all" || token === "--amend") return false;
+    if (token === "-m" || token === "--message") {
+      if (++index >= tokens.length) return false;
+    } else if (/^-m.+/u.test(token) || token.startsWith("--message=")) {
+      continue;
+    } else if (!["--no-verify", "--signoff", "-s", "--quiet", "-q", "--verbose", "-v"].includes(token)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function shellPaths(command: string): Extraction {
   const paths: string[] = [];
   let applies = false;
   let ambiguous = false;
+  let gitCommit = false;
   const redirection = /(?:^|[\s;&|])(?:\d*)(?:>>?|>\|)\s*("(?:\\.|[^"])*"|'[^']*'|[^\s;&|]+)/gu;
   for (const match of command.matchAll(redirection)) {
     applies = true;
@@ -204,6 +236,15 @@ function shellPaths(command: string): Extraction {
       const selected = patchPaths(segment);
       if (selected.length === 0) ambiguous = true;
       paths.push(...selected);
+    } else if (executable === "git" && tokens[1]?.toLowerCase() === "add") {
+      applies = true;
+      const selected = exactGitAddPaths(tokens);
+      if (selected === undefined) ambiguous = true;
+      else paths.push(...selected);
+    } else if (executable === "git" && tokens[1]?.toLowerCase() === "commit") {
+      applies = true;
+      if (isSafeGitCommit(tokens)) gitCommit = true;
+      else ambiguous = true;
     } else if (executable === "git" && isReadOnlyGitCommand(tokens)) {
       // Explicitly read-only git subcommands.
     } else if (/^gh(?:\.exe)?$/u.test(executable) && isRemoteOnlyGitHubCommand(tokens)) {
@@ -213,7 +254,7 @@ function shellPaths(command: string): Extraction {
       ambiguous = true;
     }
   }
-  return { applies, ambiguous, paths };
+  return { applies, ambiguous, paths, ...(gitCommit ? { gitCommit: true } : {}) };
 }
 
 /** Extract known write destinations; unknown shell executables fail closed as ambiguous. */
@@ -236,6 +277,7 @@ export function extractWritePaths(tool: string, args: unknown): Extraction {
       applies: extracted.applies || paths.length > 0,
       ambiguous: extracted.ambiguous,
       paths: [...paths, ...extracted.paths],
+      ...(extracted.gitCommit ? { gitCommit: true } : {}),
     };
   }
   return { applies: false, ambiguous: false, paths: [] };
@@ -268,6 +310,10 @@ export async function createProjectPaths(rootCandidate: string): Promise<Project
   return {
     root,
     absolute: (relativePath) => resolve(root, relativePath),
+    async contains(path): Promise<boolean> {
+      const absolute = resolve(path);
+      return isWithin(root, absolute) && isWithin(realRoot, await nearestExistingRealPath(absolute));
+    },
     async toRelativePath(path): Promise<string> {
       const relativePath = isAbsolute(path) ? relative(root, resolve(path)) : path;
       const normalized = normalizeRelativePath(relativePath);
@@ -296,6 +342,8 @@ export async function createWriteGate(project: ProjectPaths, value: unknown): Pr
       // Missing, inaccessible, and concurrently changed paths remain exact-only scopes.
     }
   }
+  const writableDirectoryPaths = new Set(writableDirectories.map(({ path }) => path));
+  const exactWritable = new Set([...writable].filter((path) => !writableDirectoryPaths.has(path)));
   const isWritable = async (normalized: string): Promise<boolean> => {
     if (writable.has(normalized)) return true;
     const scopes = writableDirectories.filter((scope) => normalized.startsWith(`${scope.path}/`));
@@ -320,16 +368,46 @@ export async function createWriteGate(project: ProjectPaths, value: unknown): Pr
     }
     if (!await isWritable(normalized)) throw new WriteDeniedError("manifest-scope", normalized);
   };
+  const checkCachedSet = async (): Promise<void> => {
+    let stdout: string;
+    try {
+      ({ stdout } = await execFileAsync(
+        "git",
+        [
+          "-C", project.root,
+          "-c", "core.quotePath=false",
+          "diff", "--cached", "--name-only", "--no-renames", "--relative", "-z", "--",
+        ],
+        { encoding: "utf8", windowsHide: true },
+      ));
+    } catch (error) {
+      throw new WriteDeniedError("manifest-scope", "<cached>", { cause: error });
+    }
+    let cached: Set<string>;
+    try {
+      cached = new Set(stdout.split("\0").filter(Boolean).map(normalizeRelativePath));
+    } catch (error) {
+      throw new WriteDeniedError("manifest-scope", "<cached>", { cause: error });
+    }
+    if (cached.size === 0) throw new WriteDeniedError("manifest-scope", "<cached>");
+    for (const path of cached) {
+      if (!await isWritable(path)) throw new WriteDeniedError("manifest-scope", "<cached>");
+    }
+    if ([...exactWritable].some((path) => !cached.has(path))) {
+      throw new WriteDeniedError("manifest-scope", "<cached>");
+    }
+  };
   return {
     checkPath,
     toRelativePath: project.toRelativePath,
     async check(_input, output): Promise<void> {
       const extracted = extractWritePaths(_input.tool, output.args);
       if (!extracted.applies) return;
-      if (extracted.ambiguous || extracted.paths.length === 0) {
+      if (extracted.ambiguous || (extracted.paths.length === 0 && !extracted.gitCommit)) {
         throw new WriteDeniedError("path-required", "<unknown>");
       }
       for (const path of extracted.paths) await checkPath(path);
+      if (extracted.gitCommit) await checkCachedSet();
     },
   };
 }

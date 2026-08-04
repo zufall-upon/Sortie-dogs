@@ -92,14 +92,20 @@ class PluginInputError extends Error {
 }
 
 interface LoadedConfiguration {
-  gate: WriteGate;
-  manifest: OperationManifest;
+  gate?: WriteGate;
+  manifest?: OperationManifest;
+  operationManifestPath: string;
   handoffPaths: readonly string[];
   modelRoutingHook?: OpenCodeChatMessageHook;
 }
 
 interface InspectionCacheEntry {
   fingerprint: string;
+  expiresAt: number;
+}
+
+interface SessionAuthorization {
+  gate: WriteGate;
   expiresAt: number;
 }
 
@@ -155,15 +161,11 @@ function readEnvironmentConfig(): unknown {
   }
 }
 
-async function loadConfigured(project: ProjectPaths, config: ConfiguredPluginSources): Promise<LoadedConfiguration> {
-  const manifestPath = await project.toRelativePath(config.operationManifestPath);
-  const manifestValue = await readJson(project.absolute(manifestPath), INPUT_LIMITS.manifest);
-  const validation = validateOperationManifestSchema(manifestValue);
-  if (!validation.ok) throw new WriteDeniedError("manifest-unavailable", "<unknown>");
-
-  const gate = await createWriteGate(project, validation.value);
-  const handoffPaths: string[] = [];
-  for (const path of config.handoffPaths) handoffPaths.push(await project.toRelativePath(path));
+function loadConfigured(
+  config: ConfiguredPluginSources,
+  handoffBase: string,
+): LoadedConfiguration {
+  const handoffPaths = config.handoffPaths.map((path) => resolve(handoffBase, path));
   const hasModelRouting = Object.keys(config.localModelRouting).length > 0 ||
     Object.keys(config.globalModelRouting).length > 0;
   const modelRoutingHook = hasModelRouting
@@ -173,7 +175,11 @@ async function loadConfigured(project: ProjectPaths, config: ConfiguredPluginSou
       catalog: config.modelCatalog,
     })
     : undefined;
-  return { gate, manifest: validation.value, handoffPaths, modelRoutingHook };
+  return {
+    operationManifestPath: config.operationManifestPath,
+    handoffPaths,
+    modelRoutingHook,
+  };
 }
 
 function textPart(part: unknown): string | undefined {
@@ -205,6 +211,11 @@ function pruneInspectionCache(cache: Map<string, InspectionCacheEntry>, now: num
   while (cache.size >= INSPECTION_CACHE.maximum) cache.delete(cache.keys().next().value!);
 }
 
+function pruneSessionAuthorizations(cache: Map<string, SessionAuthorization>, now: number): void {
+  for (const [key, entry] of cache) if (entry.expiresAt <= now) cache.delete(key);
+  while (cache.size >= INSPECTION_CACHE.maximum) cache.delete(cache.keys().next().value!);
+}
+
 /** Named OpenCode plugin export. Importing the package has no side effects; invoking it installs active gates. */
 export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   let project: ProjectPaths | undefined;
@@ -213,23 +224,34 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   let loading: Promise<void> | undefined;
 
   async function ensureLoaded(): Promise<void> {
+    if (loaded?.gate !== undefined) return;
     if (loading !== undefined) return loading;
     loading = (async () => {
       try {
-        project = await createProjectPaths(resolveProjectRoot(input));
+        project ??= await createProjectPaths(resolveProjectRoot(input));
         const projectConfig = await readOptionalProjectConfig(project);
         const environmentConfig = readEnvironmentConfig();
         const parsed = resolvePluginConfigurationSources(projectConfig, environmentConfig, options);
         if (parsed.kind === "invalid") throw new WriteDeniedError("manifest-unavailable", "<unknown>");
-        loaded = await loadConfigured(project, parsed);
+        loaded = loadConfigured(parsed, input.worktree ?? project.root);
+        const manifestPath = await project.toRelativePath(loaded.operationManifestPath);
+        const manifestValue = await readJson(project.absolute(manifestPath), INPUT_LIMITS.manifest);
+        const validation = validateOperationManifestSchema(manifestValue);
+        if (!validation.ok) throw new WriteDeniedError("manifest-unavailable", "<unknown>");
+        loaded.manifest = validation.value;
+        loaded.gate = await createWriteGate(project, validation.value);
+        loadFailure = undefined;
       } catch (error) {
         loadFailure = error;
+      } finally {
+        if (loaded?.gate === undefined) loading = undefined;
       }
     })();
     return loading;
   }
 
   const inspected = new Map<string, InspectionCacheEntry>();
+  const sessionAuthorizations = new Map<string, SessionAuthorization>();
   const activeSessions = new Set<string>();
 
   async function inspect(path: string, sessionID: string | undefined): Promise<void> {
@@ -237,41 +259,102 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     if (loaded === undefined || project === undefined) {
       throw new HandoffDeniedError("configuration-unavailable", path, { cause: loadFailure });
     }
-    let normalized: string;
-    try {
-      normalized = await project.toRelativePath(path);
-    } catch (error) {
-      if (error instanceof WriteDeniedError || error instanceof RelativePathError) {
-        throw new HandoffDeniedError("path-invalid", path, { cause: error });
-      }
-      throw error;
-    }
-    if (!loaded.handoffPaths.includes(normalized)) return;
+    const absolutePath = isAbsolute(path)
+      ? resolve(path)
+      : resolve(input.worktree ?? project.root, path);
+    if (!loaded.handoffPaths.includes(absolutePath)) return;
+    if (sessionID !== undefined) sessionAuthorizations.delete(sessionID);
 
     let value: unknown;
     try {
-      value = await readJson(project.absolute(normalized), INPUT_LIMITS.handoff);
+      value = await readJson(absolutePath, INPUT_LIMITS.handoff);
     } catch (error) {
       if (error instanceof PluginInputError) {
-        throw new HandoffDeniedError("input-unavailable", normalized, { cause: error });
+        throw new HandoffDeniedError("input-unavailable", path, { cause: error });
       }
       throw error;
     }
     const validation = validateHandoffSchema(value);
-    if (!validation.ok) throw new HandoffDeniedError("schema-invalid", normalized);
-    const diagnostics = validateManifest(validation.value, loaded.manifest, undefined, false);
+    if (!validation.ok) throw new HandoffDeniedError("schema-invalid", path);
+
+    let authorization: SessionAuthorization | undefined;
+    let manifest: OperationManifest;
+    const extension = validation.value.ext?.["sortie-dogs/write-gate"];
+    if (extension === undefined) {
+      if (loaded.manifest === undefined) {
+        throw new HandoffDeniedError("configuration-unavailable", path, { cause: loadFailure });
+      }
+      try {
+        await project.toRelativePath(absolutePath);
+      } catch (error) {
+        if (error instanceof WriteDeniedError || error instanceof RelativePathError) {
+          throw new HandoffDeniedError("path-invalid", path, { cause: error });
+        }
+        throw error;
+      }
+      manifest = loaded.manifest;
+    } else {
+      if (
+        !isRecord(extension) ||
+        Object.keys(extension).some((key) => key !== "operation_manifest" && key !== "project_root") ||
+        typeof extension.operation_manifest !== "string" || extension.operation_manifest.length === 0 ||
+        typeof extension.project_root !== "string" || !isAbsolute(extension.project_root) ||
+        isAbsolute(extension.operation_manifest)
+      ) throw new HandoffDeniedError("contract-invalid", path);
+      try {
+        const allowedRoots = [project];
+        if (input.worktree !== undefined && resolve(input.worktree) !== project.root) {
+          allowedRoots.push(await createProjectPaths(resolve(input.worktree)));
+        }
+        const containment = await Promise.all(
+          allowedRoots.map((allowedRoot) => allowedRoot.contains(extension.project_root as string)),
+        );
+        if (!containment.some(Boolean)) throw new WriteDeniedError("project-boundary", "<candidate-root>");
+        const candidateProject = await createProjectPaths(extension.project_root);
+        await candidateProject.toRelativePath(absolutePath);
+        const manifestPath = await candidateProject.toRelativePath(extension.operation_manifest);
+        const manifestValue = await readJson(candidateProject.absolute(manifestPath), INPUT_LIMITS.manifest);
+        const manifestValidation = validateOperationManifestSchema(manifestValue);
+        if (!manifestValidation.ok) throw new WriteDeniedError("manifest-unavailable", "<unknown>");
+        manifest = manifestValidation.value;
+        authorization = {
+          gate: await createWriteGate(candidateProject, manifest),
+          expiresAt: Date.now() + INSPECTION_CACHE.ttlMilliseconds,
+        };
+      } catch (error) {
+        throw new HandoffDeniedError("contract-invalid", path, { cause: error });
+      }
+    }
+    const diagnostics = validateManifest(validation.value, manifest, undefined, false);
     if (diagnostics.some(({ severity }) => severity === "error")) {
-      throw new HandoffDeniedError("contract-invalid", normalized);
+      throw new HandoffDeniedError("contract-invalid", path);
     }
 
     const fingerprint = inspectionFingerprint(validation.value, diagnostics);
     if (sessionID === undefined) return;
-    const key = `${sessionID}\u0000${normalized}`;
+    const key = `${sessionID}\u0000${absolutePath}`;
     const now = Date.now();
     pruneInspectionCache(inspected, now);
-    if (inspected.get(key)?.fingerprint === fingerprint) return;
     inspected.delete(key);
     inspected.set(key, { fingerprint, expiresAt: now + INSPECTION_CACHE.ttlMilliseconds });
+    if (authorization !== undefined) {
+      pruneSessionAuthorizations(sessionAuthorizations, now);
+      sessionAuthorizations.set(sessionID, authorization);
+    }
+  }
+
+  function sessionGate(sessionID: string | undefined): WriteGate | undefined {
+    const now = Date.now();
+    pruneSessionAuthorizations(sessionAuthorizations, now);
+    return sessionID === undefined ? undefined : sessionAuthorizations.get(sessionID)?.gate;
+  }
+
+  function evictSession(sessionID: string): void {
+    activeSessions.delete(sessionID);
+    sessionAuthorizations.delete(sessionID);
+    for (const key of inspected.keys()) {
+      if (key.startsWith(`${sessionID}\u0000`)) inspected.delete(key);
+    }
   }
 
   return {
@@ -285,27 +368,29 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       if (permission.permission !== "edit") return;
       if (permission.sessionID !== undefined && !activeSessions.has(permission.sessionID)) return;
       await ensureLoaded();
-      if (loaded === undefined) {
+      const gate = sessionGate(permission.sessionID) ?? loaded?.gate;
+      if (gate === undefined) {
         throw new WriteDeniedError("manifest-unavailable", "<unknown>", { cause: loadFailure });
       }
       for (const pattern of permission.patterns) {
-        const path = isAbsolute(pattern) || input.worktree === undefined
+        const path = isAbsolute(pattern)
           ? pattern
-          : resolve(input.worktree, pattern);
-        await loaded.gate.checkPath(path);
+          : resolve(input.worktree ?? input.directory, pattern);
+        await gate.checkPath(path);
       }
     },
     "tool.execute.before": async (toolInput, output): Promise<void> => {
       if (!activeSessions.has(toolInput.sessionID)) return;
       await ensureLoaded();
-      if (loaded === undefined) {
+      const gate = sessionGate(toolInput.sessionID) ?? loaded?.gate;
+      if (gate === undefined) {
         const extraction = extractWritePaths(toolInput.tool, output.args);
         if (extraction.applies) {
           throw new WriteDeniedError("manifest-unavailable", "<unknown>", { cause: loadFailure });
         }
         return;
       }
-      await loaded.gate.check(toolInput, output);
+      await gate.check(toolInput, output);
     },
     event: async ({ event }): Promise<void> => {
       const eventSessionID = typeof event.properties?.sessionID === "string"
@@ -315,14 +400,17 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       if (event.type === "file.edited" && typeof event.properties?.file === "string") {
         await inspect(event.properties.file, eventSessionID);
       } else if (event.type === "session.idle" && eventSessionID !== undefined) {
-        await ensureLoaded();
-        if (loaded === undefined) {
-          throw new HandoffDeniedError("configuration-unavailable", "<unknown>", { cause: loadFailure });
+        try {
+          await ensureLoaded();
+          if (loaded === undefined) {
+            throw new HandoffDeniedError("configuration-unavailable", "<unknown>", { cause: loadFailure });
+          }
+          for (const path of loaded.handoffPaths) await inspect(path, eventSessionID);
+        } finally {
+          evictSession(eventSessionID);
         }
-        for (const path of loaded.handoffPaths) await inspect(path, eventSessionID);
-        activeSessions.delete(eventSessionID);
       } else if (event.type === "session.deleted") {
-        activeSessions.delete(eventSessionID);
+        evictSession(eventSessionID);
       }
     },
   };
