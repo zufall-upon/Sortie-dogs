@@ -246,8 +246,11 @@ BATCH_CONTINUATION_FIXTURE
     order: sequential
     unit_N_plus_1_start: only after unit N terminal handoff
     terminal_unit: increment batchAttempted; record Project status checkpoint
+    terminal_order: establish terminal handoff first; then increment batchAttempted
     successful_commit: increment batchDone
     blocked_unit: record blocker with concrete needed action; continue to next independent unit
+    local_handoff_defect: recover in the same candidate flow; never stop or count the unit terminal
+    remaining_units: after checkpoint invoke compact_and_continue and resume the batch
     noncomplete_handoff: exact next action required; completed handoff: completion evidence required
     early_stop: only whole-batch blocker or user question
     fourth_unit: rejected
@@ -290,6 +293,47 @@ BACKLOG_DRAIN_FIXTURE
     stop: no progress | user decision | proven external blocker | backlogDrain.maxUnits reached
     blocked_item: continue with next independent item
 END_BACKLOG_DRAIN_FIXTURE
+
+## Interactive continuation and recoverable worker handshake
+
+When progress depends on user-controlled external state such as authentication material, an
+executable location, access authorization, connection details, or an unavailable external service,
+invoke the question tool with exactly five concise context lines. Do not emit a plain-text final.
+After the answer, resume the same candidate flow automatically without repeating completed work.
+
+USER_QUESTION_FIXTURE
+    trigger: user-controlled external state blocks the next required action
+    context_line_1: candidate and blocked action
+    context_line_2: exact failed capability
+    context_line_3: concise command, exit, or diagnostic
+    context_line_4: information required from the user
+    context_line_5: action that will resume after the answer
+    action: invoke question tool; plain-text final forbidden
+    after_answer: automatically resume the same candidate flow
+END_USER_QUESTION_FIXTURE
+
+A recoverable write-gate denial is a local activation or handoff defect, not a terminal candidate
+and not a user question. Perform one deterministic handshake only: Task worker inspects the exact
+registered handoff path read-only, coordinator resumes that same worker session, and the worker calls
+sortie_bind_write_gate once. Inactive inspection may only read and schema-check that exact path; it
+must not activate a session, grant a write gate, or authorize mutation. The worker returns the
+structured recoverable response and remedy to the coordinator instead of a plain final. A safe
+repeat bind succeeds only when rereading confirms the same manifest hash and mtime; any difference
+is denied as stale and requires a new candidate session. For handoff-mismatch, only the coordinator
+regenerates the registered handoff; the worker inspects it read-only after same-session resume.
+
+RECOVERABLE_HANDSHAKE_FIXTURE
+    denial_shape: { status: denied, reason: <reason>, recoverable: true, remedy: <short action> }
+    recoverable_reasons: session-inactive | handoff-uninspected | handoff-mismatch
+    sequence: Task exact-path read-only inspection -> same worker session resume -> one bind attempt
+    attempt_limit: one handshake per candidate
+    inactive_inspection: exact registered handoff path; read and schema-check only
+    inactive_authorization: session activation denied; write gate denied; mutation denied
+    worker_return: structured response to dog-coordinator; terminal and question forbidden
+    handoff_mismatch: dog-coordinator regenerates registered handoff; worker never rewrites it
+    safe_rebind: same manifest hash + mtime after reread -> idempotent bound
+    stale_rebind: changed path, hash, or mtime -> deny and require new candidate session
+END_RECOVERABLE_HANDSHAKE_FIXTURE
 
 Choose manifests by mutation type. Source-changing work requires an exact source_manifest;
 operational work requires an exact operation_manifest describing targets and mutations. Mark
@@ -397,6 +441,12 @@ project_root and project-relative operation manifest path. Treat a denied bind a
 never use file.edited or session.idle as implicit authorization. Do not retry the same validation
 command after the same failure phase occurs twice. Never stage outside exact manifest paths, use
 git add -A, amend, push, or perform coordinator-owned commit work.
+
+For a recoverable session-inactive, handoff-uninspected, or handoff-mismatch result, do not terminate and do not ask the
+user. Return its structured reason and remedy to dog-coordinator. After exact-path read-only Task
+inspection, accept one same-session resume and make the single handshake bind attempt. A confirmed
+idempotent bound result may continue; a changed manifest binding remains fail-closed. Only
+dog-coordinator may regenerate a mismatched handoff; never rewrite it as the worker.
 `,
   },
   {

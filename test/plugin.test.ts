@@ -690,6 +690,41 @@ test("generated coordinator requires progress, immediate Task feedback, and deny
   ]) assert.ok(content.includes(required), required);
 });
 
+test("runtime contract requires interactive continuation and deterministic recoverable handshake", () => {
+  const coordinator = runtimeAssets.find((asset) => asset.name === "dog-coordinator");
+  const worker = runtimeAssets.find((asset) => asset.name === "dog-worker");
+  assert.ok(coordinator);
+  assert.ok(worker);
+  const question = coordinator.content.match(
+    /USER_QUESTION_FIXTURE\r?\n([\s\S]+?)\r?\nEND_USER_QUESTION_FIXTURE/,
+  );
+  assert.ok(question);
+  assert.match(question[1], /context_line_1:/);
+  assert.match(question[1], /context_line_5:/);
+  assert.match(question[1], /invoke question tool; plain-text final forbidden/);
+  assert.match(question[1], /automatically resume the same candidate flow/);
+
+  const handshake = coordinator.content.match(
+    /RECOVERABLE_HANDSHAKE_FIXTURE\r?\n([\s\S]+?)\r?\nEND_RECOVERABLE_HANDSHAKE_FIXTURE/,
+  );
+  assert.ok(handshake);
+  assert.match(handshake[1], /session-inactive \| handoff-uninspected \| handoff-mismatch/);
+  assert.match(handshake[1], /Task exact-path read-only inspection -> same worker session resume -> one bind attempt/);
+  assert.match(handshake[1], /same manifest hash \+ mtime after reread -> idempotent bound/);
+  assert.match(handshake[1], /changed path, hash, or mtime -> deny/);
+  assert.match(handshake[1], /dog-coordinator regenerates registered handoff; worker never rewrites it/);
+  assert.match(worker.content, /do not terminate and do not ask the\s+user/i);
+  assert.match(worker.content, /Only\s+dog-coordinator may regenerate a mismatched handoff/i);
+
+  const batch = coordinator.content.match(
+    /BATCH_CONTINUATION_FIXTURE\r?\n([\s\S]+?)\r?\nEND_BATCH_CONTINUATION_FIXTURE/,
+  );
+  assert.ok(batch);
+  assert.match(batch[1], /terminal_order: establish terminal handoff first; then increment batchAttempted/);
+  assert.match(batch[1], /local_handoff_defect: recover in the same candidate flow; never stop or count the unit terminal/);
+  assert.match(batch[1], /remaining_units: after checkpoint invoke compact_and_continue and resume the batch/);
+});
+
 assert.deepEqual([...cases.keys()], [
   "allow-write",
   "deny-write",
@@ -1285,10 +1320,10 @@ test("write-gate binding requires a matching inspected Task handoff", async () =
     await writeFile(handoffPath, JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
     const hooks = await SortieDogsPlugin({ directory });
     await activate(hooks, "binding-inspection");
-    assert.equal(
-      (await executeBindWriteGate(hooks, directory, "binding-inspection")).reason,
-      "handoff-uninspected",
-    );
+    const uninspected = await executeBindWriteGate(hooks, directory, "binding-inspection");
+    assert.equal(uninspected.reason, "handoff-uninspected");
+    assert.equal(uninspected.recoverable, true);
+    assert.match(String(uninspected.remedy), /exact registered handoff path/i);
     const event = hooks.event;
     assert.ok(event);
     await event({ event: { type: "file.edited", properties: { file: "handoff.json", sessionID: "binding-inspection" } } });
@@ -1300,6 +1335,37 @@ test("write-gate binding requires a matching inspected Task handoff", async () =
       (await executeBindWriteGate(hooks, directory, "binding-inspection")).reason,
       "handoff-mismatch",
     );
+  });
+});
+
+test("inactive exact-path inspection stays passive and enables one same-session handshake", async () => {
+  await withProject("inactive-inspection", async (directory) => {
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+    const handoffPath = join(directory, "handoff.json");
+    await writeFile(handoffPath, JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
+    const hooks = await SortieDogsPlugin({ directory });
+    const event = hooks.event;
+    assert.ok(event);
+
+    await event({ event: { type: "file.edited", properties: { file: handoffPath, sessionID: "inactive" } } });
+    const inactive = await executeBindWriteGate(hooks, directory, "inactive");
+    assert.deepEqual(
+      { status: inactive.status, reason: inactive.reason, recoverable: inactive.recoverable },
+      { status: "denied", reason: "session-inactive", recoverable: true },
+    );
+    await activate(hooks, "inactive");
+    assert.equal((await executeBindWriteGate(hooks, directory, "inactive")).status, "bound");
+
+    await event({ event: { type: "file.edited", properties: { file: join(directory, "other.json"), sessionID: "off-path" } } });
+    await activate(hooks, "off-path");
+    const offPath = await executeBindWriteGate(hooks, directory, "off-path");
+    assert.equal(offPath.reason, "handoff-uninspected");
+
+    await event({ event: { type: "file.edited", properties: { file: handoffPath, sessionID: "deleted-inactive" } } });
+    await event({ event: { type: "session.deleted", properties: { sessionID: "deleted-inactive" } } });
+    await activate(hooks, "deleted-inactive");
+    const deletedInactive = await executeBindWriteGate(hooks, directory, "deleted-inactive");
+    assert.equal(deletedInactive.reason, "handoff-uninspected");
   });
 });
 
@@ -1342,7 +1408,7 @@ test("session idle keeps activation but revokes authorization when handoff inspe
   });
 });
 
-test("explicit binding rejects replay and ignores handoff replacement", async () => {
+test("explicit binding is idempotent only for the same pinned manifest and ignores handoff replacement", async () => {
   await withProject("candidate-replacement", async (directory) => {
     await writeFile(join(directory, "manifest-a.json"), JSON.stringify(operationManifest(["old.txt"])));
     await writeFile(join(directory, "manifest-b.json"), JSON.stringify(operationManifest(["new.txt"])));
@@ -1355,7 +1421,17 @@ test("explicit binding rejects replay and ignores handoff replacement", async ()
     assert.ok(event);
     assert.ok(before);
     assert.equal((await bindWriteGate(hooks, directory, "replacement", "manifest-a.json")).status, "bound");
-    assert.equal((await bindWriteGate(hooks, directory, "replacement", "manifest-b.json")).reason, "binding-replay");
+    const idempotent = await executeBindWriteGate(hooks, directory, "replacement", "manifest-a.json");
+    assert.equal(idempotent.status, "bound");
+    assert.equal(idempotent.idempotent, true);
+    await writeFile(handoffPath, JSON.stringify(writeGateHandoff(directory, "manifest-b.json")));
+    const mismatch = await executeBindWriteGate(hooks, directory, "replacement", "manifest-a.json");
+    assert.equal(mismatch.reason, "handoff-mismatch");
+    assert.equal(mismatch.recoverable, true);
+    assert.match(String(mismatch.remedy), /dog-coordinator regenerate/i);
+    const replay = await executeBindWriteGate(hooks, directory, "replacement", "manifest-b.json");
+    assert.equal(replay.reason, "binding-replay");
+    assert.equal(replay.recoverable, false);
     const edited = { event: { type: "file.edited", properties: { file: "handoff.json", sessionID: "replacement" } } };
     const write = (file: string) => before(
       { tool: "write", sessionID: "replacement", callID: file },
@@ -1428,6 +1504,14 @@ test("candidate authorization fails closed when its operation manifest becomes s
     await write("old.txt");
     await writeFile(manifestPath, JSON.stringify(operationManifest(["new.txt"])));
     await utimes(manifestPath, originalManifest.atime, originalManifest.mtime);
+    const staleRebind = await executeBindWriteGate(
+      hooks,
+      directory,
+      "stale-manifest",
+      "candidate-manifest.json",
+    );
+    assert.equal(staleRebind.reason, "binding-replay");
+    assert.equal(staleRebind.recoverable, false);
     await expectMessage(
       () => write("new.txt"),
       'Write denied for "<unknown>": operation manifest unavailable.',

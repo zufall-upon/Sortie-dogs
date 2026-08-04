@@ -490,12 +490,35 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     projectRoot: string,
     manifestPathArgument: string,
   ): Promise<string> {
-    const deny = (reason: string): string => JSON.stringify({ status: "denied", reason });
+    const remedies: Record<string, { recoverable: boolean; remedy: string }> = {
+      "session-inactive": {
+        recoverable: true,
+        remedy: "Inspect the exact registered handoff path, then resume this worker session once.",
+      },
+      "handoff-uninspected": {
+        recoverable: true,
+        remedy: "Inspect the exact registered handoff path read-only, then resume this worker once.",
+      },
+      "handoff-mismatch": {
+        recoverable: true,
+        remedy: "Have dog-coordinator regenerate the registered handoff, inspect it, then resume this worker once.",
+      },
+      "binding-replay": {
+        recoverable: false,
+        remedy: "Start a new candidate session; do not replace an existing binding.",
+      },
+    };
+    const deny = (reason: string): string => {
+      const detail = remedies[reason] ?? {
+        recoverable: false,
+        remedy: "Correct the reported contract defect before starting a new bind flow.",
+      };
+      return JSON.stringify({ status: "denied", reason, ...detail });
+    };
     try {
       if (!isActiveSession(sessionID)) return deny("session-inactive");
       const now = Date.now();
       pruneSessionAuthorizations(sessionAuthorizations, now);
-      if (sessionAuthorizations.has(sessionID)) return deny("binding-replay");
       if (!isAbsolute(projectRoot) || isAbsolute(manifestPathArgument)) return deny("path-invalid");
 
       project ??= await createProjectPaths(resolveProjectRoot(input));
@@ -512,6 +535,14 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       const pinned = await readPinnedJson(manifestPath, INPUT_LIMITS.manifest);
       const validation = validateOperationManifestSchema(pinned.value);
       if (!validation.ok) return deny("manifest-invalid");
+      const existingAuthorization = sessionAuthorizations.get(sessionID);
+      if (existingAuthorization !== undefined) {
+        if (
+          existingAuthorization.manifestPath !== manifestPath ||
+          existingAuthorization.manifestHash !== pinned.hash ||
+          existingAuthorization.manifestMtimeMs !== pinned.mtimeMs
+        ) return deny("binding-replay");
+      }
       pruneInspectionCache(inspected, now);
       const inspectedEntry = [...inspected.entries()].find(([key, entry]) =>
         key.startsWith(`${sessionID}\u0000`) &&
@@ -526,6 +557,14 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         diagnostics.some(({ severity }) => severity === "error") ||
         inspectionFingerprint(handoffValidation.value, diagnostics, validation.value) !== inspectedEntry.fingerprint
       ) return deny("handoff-mismatch");
+      if (existingAuthorization !== undefined) {
+        return JSON.stringify({
+          status: "bound",
+          manifest_hash: pinned.hash,
+          manifest_path: relativeManifestPath,
+          idempotent: true,
+        });
+      }
       const gate = await createWriteGate(candidate, validation.value);
       sessionAuthorizations.set(sessionID, {
         gate,
@@ -675,7 +714,30 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       const eventSessionID = typeof event.properties?.sessionID === "string"
         ? event.properties.sessionID
         : undefined;
-      if (eventSessionID === undefined || !isActiveSession(eventSessionID)) return;
+      if (eventSessionID === undefined) return;
+      if (event.type === "session.deleted") {
+        evictSession(eventSessionID);
+        return;
+      }
+      if (
+        !isActiveSession(eventSessionID) &&
+        event.type === "file.edited" &&
+        typeof event.properties?.file === "string"
+      ) {
+        await ensureLoaded();
+        if (loaded === undefined || project === undefined) return;
+        const candidate = isAbsolute(event.properties.file)
+          ? resolve(event.properties.file)
+          : resolve(input.worktree ?? project.root, event.properties.file);
+        if (!loaded.handoffPaths.includes(candidate)) return;
+        try {
+          await inspect(candidate, eventSessionID);
+        } catch {
+          sessionAuthorizations.delete(eventSessionID);
+        }
+        return;
+      }
+      if (!isActiveSession(eventSessionID)) return;
       if (event.type === "file.edited" && typeof event.properties?.file === "string") {
         try {
           await inspect(event.properties.file, eventSessionID);
@@ -692,8 +754,6 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         } catch {
           sessionAuthorizations.delete(eventSessionID);
         }
-      } else if (event.type === "session.deleted") {
-        evictSession(eventSessionID);
       }
     },
   };
