@@ -80,6 +80,55 @@ OpenCode discovers the bridge automatically; no `plugin` entry in
 
 Selecting `dog-coordinator` directly also activates the workflow.
 
+## The write gate
+
+The write gate is opt-in per project. Without `operation-manifest.json` in the
+project root, the plugin stays passive and never denies a tool call. Creating
+that file is how a project opts in, so the coordinator can always create it.
+
+```json
+{
+  "version": "0.1.0",
+  "task_id": "add-requested-behavior",
+  "read": ["src/feature.ts", "test/feature.test.ts"],
+  "write": ["src/feature.ts", "test/feature.test.ts"],
+  "validation": ["npm test"]
+}
+```
+
+- `write` lists the only paths a bound worker may change. A listed directory
+  covers the files under it; every other entry is an exact path.
+- `validation` lists the exact commands a bound worker may run. Build and test
+  commands cannot be classified by path, so a command is allowed only when it
+  matches a declared entry exactly. Anything else is denied as unclassified.
+- `read` documents the intended reading scope; reads are never blocked.
+
+`dog-coordinator` owns this file. A worker binds to it once per candidate with
+`sortie_bind_write_gate`, and only after the coordinator's handoff has been
+inspected. Coordinator sessions are never gated.
+
+Optional settings in `.opencode/sortie-dogs.json`:
+
+```json
+{
+  "operationManifestPath": "operation-manifest.json",
+  "handoffPaths": ["handoff.json"],
+  "readOnlyTools": ["my_mcp_search"],
+  "dedicatedWorkerModel": { "model": "provider/model", "variant": "deep" }
+}
+```
+
+- `operationManifestPath` moves the manifest; the path is project-relative.
+- `handoffPaths` lists the handoff files the plugin inspects. A worker can only
+  bind after one of these files passes inspection, so an empty list disables
+  binding entirely.
+- `readOnlyTools` adds host-specific tool names that never change files, such as
+  MCP tools. Unknown tools are denied for a bound session by default.
+- `dedicatedWorkerModel` selects the single model every worker role resolves to.
+  It defaults to `openai/gpt-5.6-sol` with variant `xhigh`; declare your own when
+  that model is unavailable. Worker roles always resolve to this one target and
+  cannot be routed per role.
+
 ## Why Sortie-dogs
 
 - **Focused when invited, invisible otherwise.** Activate it with `/sortie` or

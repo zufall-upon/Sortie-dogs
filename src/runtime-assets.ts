@@ -1,13 +1,8 @@
-const {
-  DEDICATED_SOL_MODEL,
-  DEDICATED_SOL_VARIANT,
-}: typeof import("./plugin/model-routing.js") = await import(
-  `./plugin/model-routing.${import.meta.url.endsWith(".ts") ? "ts" : "js"}`
-);
+import type { RuntimeAssetVersion } from "./asset-version.js";
 
 export interface RuntimeAsset {
   readonly name: string;
-  readonly version: "0.2.0-card05";
+  readonly version: RuntimeAssetVersion;
   readonly installPath: string;
   readonly content: string;
 }
@@ -234,6 +229,12 @@ END_TAKEOVER_FIXTURE
 
 ## Bounded batch continuation
 
+A Project checkpoint means whichever task tracker this project actually uses. When no external
+tracker is configured or its tooling is unavailable, record the same checkpoint content in a
+project-local durable artifact instead; never treat a missing tracker as a blocker, and never
+install or configure one on your own. The same applies to every shell form named below: use the
+shell this host actually provides.
+
 This normal bounded-batch section applies only while backlogDrain.enabled=false.
 Use one bounded sequential batch per fresh session. Keep batchAttempted, batchCommitted, and
 batchReconciled as separate counters; the legacy combined done counter is forbidden because it conflates outcomes. A
@@ -305,10 +306,11 @@ resume through dog-coordinator, reinventory, and continue until a stop condition
 drain continuation uses the same identity-preserving resolver defined above: preserve the root source
 agent identity, reject child-to-root promotion and pending host auto-continue, and keep direct
 capability invocation exclusive from marker fallback.
-Run Project inventory as a direct \`gh api graphql\` command with a quoted literal query. If a
-\`pwsh -File\`, encoded command, nested shell, or probe form is denied, do not retry it; convert
-the request to that direct command. Use \`pwsh -NoProfile -Command '<literal>'\` only for a
-provably read-only depth-one diagnostic, never for Project inventory.
+Run Project inventory as one direct read-only command of the tracker's own client, with a quoted
+literal query. On GitHub Projects that command is \`gh api graphql\`. If an encoded command, nested
+shell, script file, or probe form is denied, do not retry it; convert the request to that direct
+command. A wrapped shell invocation is acceptable only for a provably read-only depth-one
+diagnostic, never for Project inventory.
 Track a progress fingerprint from the completed inventory and terminal outcomes. Stop rather
 than loop when a full resume cycle changes neither inventory nor outcomes, when user input is
 required, when a proven external blocker prevents the drain, or before attempted units would
@@ -474,10 +476,8 @@ END_TERMINAL_EVIDENCE_FIXTURE
     version: "0.2.0-card05",
     installPath: "agent/dog-worker.md",
     content: `---
-description: Dedicated Sol worker for the canonical Sortie-dogs coordinator
+description: Dedicated worker for the canonical Sortie-dogs coordinator
 mode: subagent
-model: ${DEDICATED_SOL_MODEL}
-variant: ${DEDICATED_SOL_VARIANT}
 ---
 # dog-worker
 

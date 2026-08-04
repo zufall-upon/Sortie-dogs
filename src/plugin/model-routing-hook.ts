@@ -3,6 +3,7 @@ import {
   type ModelCatalog,
   type ModelResolutionAttempt,
   type ModelRoutingConfig,
+  type ModelTarget,
 } from "./model-routing.js";
 
 export interface OpenCodeChatMessageInput {
@@ -30,6 +31,7 @@ export interface ModelRoutingHookConfiguration {
   readonly local?: ModelRoutingConfig;
   readonly global?: ModelRoutingConfig;
   readonly catalog: ModelCatalog;
+  readonly dedicated?: ModelTarget;
 }
 
 export class ModelRoutingDeniedError extends Error {
@@ -77,6 +79,7 @@ export function createModelRoutingHook(config: ModelRoutingHookConfiguration): O
       local: config.local,
       global: config.global,
       catalog: config.catalog,
+      dedicated: config.dedicated,
     });
     if (!resolution.ok) throw new ModelRoutingDeniedError(resolution.role, resolution.attempts);
 

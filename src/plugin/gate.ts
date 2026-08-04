@@ -90,9 +90,15 @@ const POWERSHELL_WRITE_COMMANDS = new Set([
   "rename-item", "set-content",
 ]);
 const READ_ONLY_OPTIONS_WITH_VALUES = new Set(["-c", "--directory", "--exclude", "--include"]);
+/**
+ * Tools that never change project files themselves. A dispatched subagent runs in its own session
+ * and is gated there, and task-list tools only change session state, so denying them would stop
+ * delegation and progress tracking without protecting any path.
+ */
 const READ_ONLY_TOOLS = new Set([
   "glob", "grep", "list", "list_mcp_resource_templates", "list_mcp_resources", "question",
-  "read", "read_mcp_resource", "review_git_evidence", "skill", "webfetch",
+  "read", "read_mcp_resource", "review_git_evidence", "skill", "task", "todoread", "todowrite",
+  "webfetch",
 ]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -457,10 +463,42 @@ export function extractWritePaths(tool: string, args: unknown): Extraction {
   return { applies: false, ambiguous: false, paths: [] };
 }
 
+/**
+ * Quoted segments keep their contents; every unquoted whitespace run collapses to one space so the
+ * same command written with different spacing compares equal.
+ */
+export function normalizeCommand(command: string): string {
+  let quote: "\"" | "'" | undefined;
+  let whitespace = false;
+  let normalized = "";
+  for (const character of command.trim()) {
+    if (quote !== undefined) {
+      normalized += character;
+      if (character === quote) quote = undefined;
+    } else if (character === "\"" || character === "'") {
+      if (whitespace && normalized.length > 0) normalized += " ";
+      whitespace = false;
+      quote = character;
+      normalized += character;
+    } else if (/\s/u.test(character)) {
+      whitespace = true;
+    } else {
+      if (whitespace && normalized.length > 0) normalized += " ";
+      whitespace = false;
+      normalized += character;
+    }
+  }
+  return normalized;
+}
+
 /** Unbound sessions may invoke only tools whose complete input is known to be read-only. */
-export function isKnownReadOnlyTool(tool: string, args: unknown): boolean {
+export function isKnownReadOnlyTool(
+  tool: string,
+  args: unknown,
+  additionalReadOnlyTools: ReadonlySet<string> = new Set(),
+): boolean {
   const name = tool.toLowerCase();
-  if (READ_ONLY_TOOLS.has(name)) return true;
+  if (READ_ONLY_TOOLS.has(name) || additionalReadOnlyTools.has(name)) return true;
   if (!/^(?:bash|shell|powershell|pwsh)(?:$|[_-])/u.test(name)) return false;
   const extraction = extractWritePaths(tool, args);
   return !extraction.applies && !extraction.ambiguous;
@@ -513,6 +551,10 @@ export async function createWriteGate(project: ProjectPaths, value: unknown): Pr
   const validated = validateOperationManifestSchema(value);
   if (!validated.ok) throw new WriteDeniedError("manifest-unavailable", "<unknown>");
   const manifest: OperationManifest = validated.value;
+  // A build or test command may touch any path its toolchain owns, so it can never be classified by
+  // path extraction. The manifest already declares the commands this candidate is allowed to run,
+  // so an exact match against that declaration is the only accepted form.
+  const declaredValidation = new Set(manifest.validation.map(normalizeCommand));
   const writable = new Set(manifest.write.map((path) => normalizeRelativePath(path)));
   const writableDirectories: { path: string; realPath: string }[] = [];
   for (const path of writable) {
@@ -584,6 +626,10 @@ export async function createWriteGate(project: ProjectPaths, value: unknown): Pr
     checkPath,
     toRelativePath: project.toRelativePath,
     async check(_input, output): Promise<void> {
+      const command = isRecord(output.args) && typeof output.args.command === "string"
+        ? normalizeCommand(output.args.command)
+        : undefined;
+      if (command !== undefined && declaredValidation.has(command)) return;
       const extracted = extractWritePaths(_input.tool, output.args);
       if (!extracted.applies) return;
       if (extracted.ambiguous || (extracted.paths.length === 0 && !extracted.gitCommit)) {

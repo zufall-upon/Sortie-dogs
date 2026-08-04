@@ -122,7 +122,53 @@ OpenCode が自動検出するため、`opencode.json` の `plugin` 設定は不
 
 `dog-coordinator` を直接選択しても起動できる。
 
-## Write scope とセッション lifecycle
+## Write gate
+
+Write gate は project ごとの opt-in。project root に `operation-manifest.json` が無い間、
+plugin は passive でありツール呼び出しを一切拒否しない。この file を作ることが opt-in であり、
+だから coordinator はいつでもこの file を作成できる。
+
+```json
+{
+  "version": "0.1.0",
+  "task_id": "add-requested-behavior",
+  "read": ["src/feature.ts", "test/feature.test.ts"],
+  "write": ["src/feature.ts", "test/feature.test.ts"],
+  "validation": ["npm test"]
+}
+```
+
+- `write`: bind 済み worker が変更できる唯一の path 集合。directory 指定は配下を含み、
+  それ以外は exact path。
+- `validation`: bind 済み worker が実行できる exact command。build / test command は path 抽出で
+  分類できないため、宣言と完全一致した command だけを許可し、それ以外は unclassified として拒否する。
+- `read`: 読み取り範囲の記録。read は拒否しない。
+
+この file は `dog-coordinator` が所有する。worker は candidate ごとに一度だけ
+`sortie_bind_write_gate` で bind し、bind は coordinator の handoff 検査後にのみ成立する。
+coordinator session は gate 対象外。
+
+`.opencode/sortie-dogs.json` の任意設定:
+
+```json
+{
+  "operationManifestPath": "operation-manifest.json",
+  "handoffPaths": ["handoff.json"],
+  "readOnlyTools": ["my_mcp_search"],
+  "dedicatedWorkerModel": { "model": "provider/model", "variant": "deep" }
+}
+```
+
+- `operationManifestPath`: manifest の位置。project 相対。
+- `handoffPaths`: plugin が検査する handoff file。worker はこの検査を通過して初めて bind できる。
+  空配列にすると bind 自体が成立しない。
+- `readOnlyTools`: MCP tool など、file を変更しない host 固有 tool 名を追加する。
+  未知の tool は bind 済み session では既定で拒否される。
+- `dedicatedWorkerModel`: 全 worker role が解決する単一 model。既定は `openai/gpt-5.6-sol` /
+  variant `xhigh`。この model を使えない環境では自分の model を宣言する。worker role は常に
+  この単一 target に解決され、role ごとの routing はできない。
+
+## セッション lifecycle
 
 プラグインは通常時 passive。`/sortie` を使うか `dog-coordinator` を選択したセッションだけを
 有効化する。Source / operation manifest の exact write scope と worker handoff を検証し、

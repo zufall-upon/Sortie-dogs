@@ -119,7 +119,50 @@ OpenCode 会自动发现该桥接文件，无需在 `opencode.json` 中添加 `p
 
 也可以直接选择 `dog-coordinator` 来激活工作流。
 
-## 写入范围与会话生命周期
+## 写入门禁
+
+写入门禁按项目选择启用。项目根目录没有 `operation-manifest.json` 时，插件保持被动，不会拒绝
+任何工具调用。创建该文件即表示启用，因此协调者始终可以创建它。
+
+```json
+{
+  "version": "0.1.0",
+  "task_id": "add-requested-behavior",
+  "read": ["src/feature.ts", "test/feature.test.ts"],
+  "write": ["src/feature.ts", "test/feature.test.ts"],
+  "validation": ["npm test"]
+}
+```
+
+- `write`：已绑定的 worker 可以修改的唯一路径集合。列出的目录包含其下文件，其余为精确路径。
+- `validation`：已绑定的 worker 可以执行的精确命令。构建和测试命令无法按路径分类，
+  因此只有与声明完全一致的命令才被允许，其余一律作为未分类命令拒绝。
+- `read`：记录预期的读取范围；读取不会被拒绝。
+
+该文件由 `dog-coordinator` 拥有。worker 每个候选只绑定一次 `sortie_bind_write_gate`，
+且必须在协调者的 handoff 通过检查之后。协调者会话不受门禁约束。
+
+`.opencode/sortie-dogs.json` 中的可选设置：
+
+```json
+{
+  "operationManifestPath": "operation-manifest.json",
+  "handoffPaths": ["handoff.json"],
+  "readOnlyTools": ["my_mcp_search"],
+  "dedicatedWorkerModel": { "model": "provider/model", "variant": "deep" }
+}
+```
+
+- `operationManifestPath`：manifest 的位置，相对于项目根目录。
+- `handoffPaths`：插件检查的 handoff 文件。worker 只有通过其中一个文件的检查后才能绑定，
+  因此空数组会完全禁用绑定。
+- `readOnlyTools`：追加不会修改文件的宿主专用工具名，例如 MCP 工具。
+  对已绑定的会话，未知工具默认被拒绝。
+- `dedicatedWorkerModel`：所有 worker 角色解析到的唯一模型。默认为 `openai/gpt-5.6-sol`
+  与变体 `xhigh`；当该模型不可用时请声明自己的模型。worker 角色始终解析到这一个目标，
+  无法按角色分别路由。
+
+## 会话生命周期
 
 插件默认保持被动。只有消息使用 `/sortie` 或当前智能体为 `dog-coordinator` 时，才激活该会话。
 插件会验证 source / operation manifest 中的精确写入范围以及 worker handoff，拒绝范围外变更。

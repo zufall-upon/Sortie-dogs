@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 
+import { RUNTIME_ASSET_VERSION } from "../asset-version.js";
 import { RelativePathError } from "../core/path.js";
 import type { OperationManifest } from "../core/types.js";
 import { validateManifest } from "../core/validate-manifest.js";
@@ -17,6 +18,7 @@ import {
   createWriteGate,
   describeUnclassifiedCommand,
   isKnownReadOnlyTool,
+  normalizeCommand,
   resolveProjectRoot,
   safePath,
   type ProjectPaths,
@@ -34,6 +36,7 @@ const INSPECTION_CACHE = { maximum: 256, ttlMilliseconds: 30 * 60 * 1000 } as co
 const ACTIVE_SESSION_CACHE = { maximum: 256, ttlMilliseconds: 30 * 60 * 1000 } as const;
 const SESSION_DENIAL_LIMIT = 256;
 const PROJECT_CONFIG_PATH = ".opencode/sortie-dogs.json";
+const PROJECT_VERSION_MARKER = ".opencode/sortie-dogs.version";
 const ENV_CONFIG = "SORTIE_DOGS_CONFIG";
 const COORDINATOR_AGENT = "dog-coordinator";
 const SORTIE_TRIGGER = /^\/sortie(?:\s|$)/;
@@ -103,6 +106,7 @@ interface LoadedConfiguration {
   operationManifestAbsolutePath?: string;
   manifestFingerprint?: string;
   handoffPaths: readonly string[];
+  readOnlyTools: ReadonlySet<string>;
   modelRoutingHook?: OpenCodeChatMessageHook;
 }
 
@@ -209,17 +213,18 @@ async function readPinnedJson(path: string, limit: number): Promise<PinnedJson> 
   }
 }
 
+/** A path that was never created is an unconfigured project, not a defective one. */
+function isAbsentPathError(error: unknown): boolean {
+  return error instanceof PluginInputError && error.reason === "read-failed" &&
+    isRecord(error.cause) && (error.cause.code === "ENOENT" || error.cause.code === "ENOTDIR");
+}
+
 async function readOptionalProjectConfig(project: ProjectPaths): Promise<unknown> {
   const path = project.absolute(PROJECT_CONFIG_PATH);
   try {
     return await readJson(path, INPUT_LIMITS.config);
   } catch (error) {
-    if (
-      error instanceof PluginInputError &&
-      error.reason === "read-failed" &&
-      isRecord(error.cause) &&
-      error.cause.code === "ENOENT"
-    ) return undefined;
+    if (isAbsentPathError(error)) return undefined;
     throw error;
   }
 }
@@ -246,11 +251,13 @@ function loadConfigured(
       local: config.localModelRouting,
       global: config.globalModelRouting,
       catalog: config.modelCatalog,
+      dedicated: config.dedicatedWorkerModel,
     })
     : undefined;
   return {
     operationManifestPath: config.operationManifestPath,
     handoffPaths,
+    readOnlyTools: new Set(config.readOnlyTools.map((tool) => tool.toLowerCase())),
     modelRoutingHook,
   };
 }
@@ -259,13 +266,55 @@ function textPart(part: unknown): string | undefined {
   return isRecord(part) && typeof part.text === "string" ? part.text : undefined;
 }
 
-function isExplicitTaskHandoff(text: string): boolean {
-  const role = /^role\s*=\s*([^\s]+)\s*$/imu.exec(text)?.[1]?.toLowerCase();
+/**
+ * One handoff entry per line. The coordinator asset emits inline digests as `key: value`, often
+ * indented or list-prefixed, while host wrappers emit flat `key=value`. Both forms describe the
+ * same contract, so a single line parser accepts either separator instead of one fixed layout.
+ */
+const HANDOFF_ENTRY = /^[\t ]*(?:[-*][\t ]+)?([A-Za-z_][A-Za-z0-9_]*)[\t ]*[=:][\t ]*(.*)$/u;
+
+const HANDOFF_KEYS = {
+  role: ["role"],
+  projectRoot: ["projectroot", "project_root"],
+  manifest: ["source_manifest", "operation_manifest", "sourcemanifest", "operationmanifest"],
+  acceptance: ["acceptance", "validation"],
+} as const;
+
+function handoffEntries(text: string): Map<string, string> {
+  const entries = new Map<string, string>();
+  for (const line of text.split(/\r?\n/u)) {
+    const match = HANDOFF_ENTRY.exec(line);
+    if (match === null) continue;
+    const key = match[1].toLowerCase();
+    if (entries.has(key)) continue;
+    entries.set(key, match[2].trim());
+  }
+  return entries;
+}
+
+function handoffValue(entries: Map<string, string>, keys: readonly string[]): string | undefined {
+  for (const key of keys) {
+    const value = entries.get(key);
+    if (value !== undefined && value.length > 0) return value;
+  }
+  return undefined;
+}
+
+function unquoteValue(value: string): string {
+  const trimmed = value.replace(/,$/u, "").trim();
+  const quote = trimmed[0];
+  return (quote === "\"" || quote === "'") && trimmed.endsWith(quote) && trimmed.length > 1
+    ? trimmed.slice(1, -1)
+    : trimmed;
+}
+
+export function isExplicitTaskHandoff(text: string): boolean {
+  const entries = handoffEntries(text);
+  const role = handoffValue(entries, HANDOFF_KEYS.role)?.toLowerCase();
   return role !== undefined && TASK_ROLES.has(role) &&
-    /^projectRoot\s*=\s*\S+\s*$/imu.test(text) &&
-    /^candidate\s*=\s*\S+\s*$/imu.test(text) &&
-    /^(?:source_manifest|operation_manifest)\s*=/imu.test(text) &&
-    /^(?:acceptance|validation(?:\s+history)?)\b/imu.test(text);
+    handoffValue(entries, HANDOFF_KEYS.projectRoot) !== undefined &&
+    handoffValue(entries, HANDOFF_KEYS.manifest) !== undefined &&
+    handoffValue(entries, HANDOFF_KEYS.acceptance) !== undefined;
 }
 
 function explicitTaskText(output: Parameters<OpenCodeChatMessageHook>[1]): string | undefined {
@@ -273,7 +322,8 @@ function explicitTaskText(output: Parameters<OpenCodeChatMessageHook>[1]): strin
 }
 
 function taskProjectRoot(text: string): string | undefined {
-  return /^projectRoot\s*=\s*(\S+)\s*$/imu.exec(text)?.[1];
+  const value = handoffValue(handoffEntries(text), HANDOFF_KEYS.projectRoot);
+  return value === undefined ? undefined : unquoteValue(value);
 }
 
 function chatParentID(input: Parameters<OpenCodeChatMessageHook>[0]): string | undefined {
@@ -301,30 +351,6 @@ function inspectionFingerprint(handoff: unknown, diagnostics: unknown, manifest?
   return createHash("sha256")
     .update(JSON.stringify([stableValue(handoff), stableValue(manifest), stableValue(diagnostics)]))
     .digest("hex");
-}
-
-function normalizeCommand(command: string): string {
-  let quote: "\"" | "'" | undefined;
-  let whitespace = false;
-  let normalized = "";
-  for (const character of command.trim()) {
-    if (quote !== undefined) {
-      normalized += character;
-      if (character === quote) quote = undefined;
-    } else if (character === "\"" || character === "'") {
-      if (whitespace && normalized.length > 0) normalized += " ";
-      whitespace = false;
-      quote = character;
-      normalized += character;
-    } else if (/\s/u.test(character)) {
-      whitespace = true;
-    } else {
-      if (whitespace && normalized.length > 0) normalized += " ";
-      whitespace = false;
-      normalized += character;
-    }
-  }
-  return normalized;
 }
 
 function denialSignature(
@@ -377,6 +403,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   let loaded: LoadedConfiguration | undefined;
   let loadFailure: unknown;
   let loading: Promise<void> | undefined;
+  let manifestAbsent = false;
+  let assetVersionReported = false;
 
   async function ensureLoaded(): Promise<void> {
     if (loaded?.gate !== undefined) return;
@@ -384,6 +412,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     loading = (async () => {
       try {
         project ??= await createProjectPaths(resolveProjectRoot(input));
+        await reportAssetVersionSkew(project);
         const projectConfig = await readOptionalProjectConfig(project);
         const environmentConfig = readEnvironmentConfig();
         const parsed = resolvePluginConfigurationSources(projectConfig, environmentConfig, options);
@@ -391,7 +420,14 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         loaded = loadConfigured(parsed, input.worktree ?? project.root);
         const manifestPath = await project.toRelativePath(loaded.operationManifestPath);
         loaded.operationManifestAbsolutePath = project.absolute(manifestPath);
-        const manifestValue = await readJson(loaded.operationManifestAbsolutePath, INPUT_LIMITS.manifest);
+        let manifestValue: unknown;
+        try {
+          manifestValue = await readJson(loaded.operationManifestAbsolutePath, INPUT_LIMITS.manifest);
+        } catch (error) {
+          manifestAbsent = isAbsentPathError(error);
+          throw error;
+        }
+        manifestAbsent = false;
         const validation = validateOperationManifestSchema(manifestValue);
         if (!validation.ok) throw new WriteDeniedError("manifest-unavailable", "<unknown>");
         loaded.manifest = validation.value;
@@ -405,6 +441,33 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       }
     })();
     return loading;
+  }
+
+  /**
+   * Installed agents and this plugin implement two halves of one contract. A project that installed
+   * a different asset version is reported once so the mismatch is visible before it shows up as an
+   * unexplained handshake failure. Reporting never blocks: reinstalling is the operator's decision.
+   */
+  async function reportAssetVersionSkew(paths: ProjectPaths): Promise<void> {
+    if (assetVersionReported) return;
+    assetVersionReported = true;
+    const marker = await readFile(paths.absolute(PROJECT_VERSION_MARKER), "utf8").catch(() => undefined);
+    const installed = marker?.trim();
+    if (installed === undefined || installed.length === 0 || installed === RUNTIME_ASSET_VERSION) return;
+    console.warn(
+      `Sortie-dogs: this project installed agent assets ${installed} but the loaded plugin ships ` +
+      `${RUNTIME_ASSET_VERSION}. Run "sortie-dogs init ." to reinstall the matching agents.`,
+    );
+  }
+
+  /**
+   * A project without an operation manifest never opted into the write gate. Enforcing a scope that
+   * was never declared would also deny creating that same manifest, so an absent manifest disables
+   * enforcement while an unreadable or invalid manifest stays fail-closed.
+   */
+  async function isUnconfiguredProject(): Promise<boolean> {
+    await ensureLoaded();
+    return loaded?.gate === undefined && manifestAbsent;
   }
 
   const inspected = new Map<string, InspectionCacheEntry>();
@@ -698,6 +761,22 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     sessionRoots.set(sessionID, sessionID);
   }
 
+  /**
+   * The coordinator owns candidate setup, handoff regeneration, and the commit, so it must never be
+   * gated by the worker write scope. Enforcement is released instead of expired so a session that
+   * later becomes the coordinator is not reported as a revoked worker session.
+   */
+  function releaseSessionEnforcement(sessionID: string): void {
+    activeSessions.delete(sessionID);
+    sessionAuthorizations.delete(sessionID);
+    expiredSessions.delete(sessionID);
+  }
+
+  function isCoordinatorSession(sessionID: string): boolean {
+    pruneCoordinatorRoots(Date.now());
+    return coordinatorRoots.has(sessionID);
+  }
+
   function coordinatorRootForSession(sessionID: string, now = Date.now()): string | undefined {
     pruneCoordinatorRoots(now);
     const assigned = sessionRoots.get(sessionID);
@@ -864,6 +943,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       if (parentID !== undefined) rememberParent(chatInput.sessionID, parentID);
       const coordinatorOrigin = chatInput.agent === COORDINATOR_AGENT || output.message.agent === COORDINATOR_AGENT;
       if (coordinatorOrigin) {
+        releaseSessionEnforcement(chatInput.sessionID);
         await rememberCoordinatorRoot(chatInput.sessionID);
         await ensureLoaded();
         await loaded?.modelRoutingHook?.(chatInput, output);
@@ -881,14 +961,19 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     },
     "permission.ask": async (permission): Promise<void> => {
       if (permission.permission !== "edit") return;
-      if (permission.sessionID !== undefined) {
-        const status = activeSessionStatus(permission.sessionID);
-        if (status === "inactive") return;
-        if (status === "expired") throw new WriteDeniedError("session-expired", "<expired-session>");
-        touchActiveSession(permission.sessionID);
+      // Without a session identity no gate can be attributed; tool.execute.before still enforces.
+      if (permission.sessionID === undefined) return;
+      if (isCoordinatorSession(permission.sessionID)) return;
+      const status = activeSessionStatus(permission.sessionID);
+      if (status === "inactive") return;
+      if (status === "expired") {
+        if (await isUnconfiguredProject()) return;
+        throw new WriteDeniedError("session-expired", "<expired-session>");
       }
-      const gate = permission.sessionID === undefined ? undefined : await authorizedGate(permission.sessionID);
+      touchActiveSession(permission.sessionID);
+      const gate = await authorizedGate(permission.sessionID);
       if (gate === undefined) {
+        if (await isUnconfiguredProject()) return;
         throw new WriteDeniedError("manifest-unavailable", "<unknown>", { cause: loadFailure });
       }
       for (const pattern of permission.patterns) {
@@ -899,10 +984,12 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       }
     },
     "tool.execute.before": async (toolInput, output): Promise<void> => {
+      if (isCoordinatorSession(toolInput.sessionID)) return;
       const status = activeSessionStatus(toolInput.sessionID);
       if (status === "inactive") return;
       if (status === "expired") {
-        if (isKnownReadOnlyTool(toolInput.tool, output.args)) return;
+        if (isKnownReadOnlyTool(toolInput.tool, output.args, loaded?.readOnlyTools)) return;
+        if (await isUnconfiguredProject()) return;
         throw new WriteDeniedError("session-expired", "<expired-session>");
       }
       touchActiveSession(toolInput.sessionID);
@@ -910,7 +997,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       try {
         const gate = await authorizedGate(toolInput.sessionID);
         if (gate === undefined) {
-          if (!isKnownReadOnlyTool(toolInput.tool, output.args)) {
+          if (await isUnconfiguredProject()) return;
+          if (!isKnownReadOnlyTool(toolInput.tool, output.args, loaded?.readOnlyTools)) {
             const detail = describeUnclassifiedCommand(toolInput.tool, output.args);
             if (detail !== undefined) throw new WriteDeniedError("unclassified-command", detail);
             const shellTool = /^(?:bash|shell|powershell|pwsh)(?:$|[_-])/iu.test(toolInput.tool);

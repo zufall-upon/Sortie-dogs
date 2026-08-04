@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import { runtimeAssets } from "../dist/runtime-assets.js";
-import { ModelRoutingDeniedError, SortieDogsPlugin } from "../dist/plugin/index.js";
+import { ModelRoutingDeniedError, SortieDogsPlugin, isExplicitTaskHandoff } from "../dist/plugin/index.js";
 import {
   resolvePluginConfiguration,
   resolvePluginConfigurationSources,
@@ -107,6 +107,48 @@ test("model routing configuration is strict and merges roles by layer", () => {
       preferred: { model: DEDICATED_SOL_MODEL, variant: DEDICATED_SOL_VARIANT },
     });
   }
+});
+
+test("a host may declare which single model every dedicated worker role resolves to", () => {
+  const target = { model: "vendor-host/worker", variant: "deep" };
+  const configured = resolvePluginConfigurationSources(
+    { dedicatedWorkerModel: target },
+    undefined,
+    undefined,
+  );
+  assert.equal(configured.kind, "configured");
+  if (configured.kind !== "configured") return;
+  for (const role of DEDICATED_SOL_ROLES) {
+    assert.deepEqual(configured.modelRouting[role], { preferred: target }, `${role} follows the declared target`);
+    assert.deepEqual(resolveModelRoute({
+      role,
+      local: configured.localModelRouting,
+      global: configured.globalModelRouting,
+      catalog: configured.modelCatalog,
+      dedicated: configured.dedicatedWorkerModel,
+    }), {
+      ok: true,
+      role,
+      source: "fixed",
+      catalog: "global",
+      model: target.model,
+      variant: target.variant,
+    }, `${role} resolves against the declared target`);
+  }
+  // Declaring a role route directly still cannot displace the dedicated worker policy.
+  const attempted = resolvePluginConfiguration({
+    dedicatedWorkerModel: target,
+    modelRouting: { "dog-worker": { model: "attempted/override" } },
+  });
+  assert.equal(attempted.kind, "configured");
+  if (attempted.kind === "configured") {
+    assert.deepEqual(attempted.modelRouting["dog-worker"], { preferred: target });
+  }
+  assert.deepEqual(resolvePluginConfiguration({ dedicatedWorkerModel: { model: "" } }), { kind: "invalid" });
+  assert.deepEqual(
+    resolvePluginConfiguration({ dedicatedWorkerModel: { model: "vendor/worker", unknown: true } }),
+    { kind: "invalid" },
+  );
 });
 
 test("model routing rejects prototype-sensitive JSON role names", () => {
@@ -716,16 +758,17 @@ test("consultation adapter is provider-neutral and model names do not affect cor
   }
 });
 
-test("generated dog-worker runtime asset selects the dedicated Sol model explicitly", () => {
+test("generated dog-worker runtime asset leaves its model to dedicated routing", () => {
   const dogWorker = runtimeAssets.find((asset) => asset.name === "dog-worker");
   assert.ok(dogWorker);
   assert.ok(dogWorker.content.startsWith(`---
-description: Dedicated Sol worker for the canonical Sortie-dogs coordinator
+description: Dedicated worker for the canonical Sortie-dogs coordinator
 mode: subagent
-model: ${DEDICATED_SOL_MODEL}
-variant: ${DEDICATED_SOL_VARIANT}
 ---
 `));
+  // Pinning an unavailable model in the asset would stop the agent from loading at all, so the
+  // dedicated target stays a routing decision that a host can redeclare.
+  assert.equal(dogWorker.content.includes(DEDICATED_SOL_MODEL), false);
 });
 
 test("generated coordinator requires progress, immediate Task feedback, and deny-safe delegation", () => {
@@ -1039,9 +1082,67 @@ test("chat message hook applies explicit catalog routing and fails closed with o
   });
 });
 
+test("worker activation accepts the dispatch layout the shipped coordinator asset prescribes", () => {
+  const coordinator = runtimeAssets.find((asset) => asset.name === "dog-coordinator");
+  assert.ok(coordinator);
+  const dispatch = /INITIAL_HANDOFF_FIXTURE\r?\n([\s\S]*?)END_INITIAL_HANDOFF_FIXTURE/u
+    .exec(coordinator.content)?.[1];
+  assert.ok(dispatch);
+  assert.equal(isExplicitTaskHandoff(dispatch), true);
+});
+
+test("worker activation accepts both inline digest and flat wrapper dispatch forms", () => {
+  const inlineDigest = [
+    "Continue the current candidate and return structured evidence only.",
+    "",
+    "context_digest:",
+    "- task_id: task-06",
+    "- project_root: C:\\candidate",
+    "- acceptance: move the driver to a real browser flow",
+    "- role: blocker-resolution",
+    '- validation: { level: targeted, command: "npm test" }',
+    '- source_manifest: ["tests/e2e/driver.mjs"]',
+    '- operation_manifest: "candidate.operation-manifest.json"',
+  ].join("\n");
+  const flatWrapper = [
+    "role=implementation",
+    "projectRoot=C:\\candidate",
+    "source_manifest=[src/a.ts]",
+    "acceptance: safe change",
+  ].join("\n");
+  assert.equal(isExplicitTaskHandoff(inlineDigest), true);
+  assert.equal(isExplicitTaskHandoff(flatWrapper), true);
+});
+
+test("worker activation rejects dispatches without a complete worker contract", () => {
+  const unknownRole = [
+    "context_digest:",
+    "- project_root: C:\\candidate",
+    "- acceptance: review only",
+    "- role: reviewer",
+    "- source_manifest: [src/a.ts]",
+  ].join("\n");
+  const missingManifest = [
+    "context_digest:",
+    "- project_root: C:\\candidate",
+    "- acceptance: safe change",
+    "- role: implementation",
+  ].join("\n");
+  const missingRoot = [
+    "context_digest:",
+    "- acceptance: safe change",
+    "- role: implementation",
+    "- source_manifest: [src/a.ts]",
+  ].join("\n");
+  assert.equal(isExplicitTaskHandoff(unknownRole), false);
+  assert.equal(isExplicitTaskHandoff(missingManifest), false);
+  assert.equal(isExplicitTaskHandoff(missingRoot), false);
+  assert.equal(isExplicitTaskHandoff("ordinary prose about role and acceptance"), false);
+});
+
 test("session policy is passive until an exact trigger and deactivates only on end", async () => {
   await withProject("session-activation", async (directory) => {
-    const hooks = await SortieDogsPlugin({ directory });
+    const hooks = await configuredHooks(directory);
     const before = hooks["tool.execute.before"];
     const chat = hooks["chat.message"];
     const event = hooks.event;
@@ -1122,7 +1223,15 @@ test("passive coordinator lineage activates only its Task child without inheriti
     assert.equal((await executeBindWriteGate(hooks, directory, "parent")).reason, "session-inactive");
     await event({ event: { type: "session.created", properties: { info: { id: "child", parentID: "parent", directory } } } });
     assert.equal((await executeBindWriteGate(hooks, directory, "child")).reason, "session-inactive");
-    const task = `role=implementation\nprojectRoot=${directory}\ncandidate=child\nsource_manifest=[src/a.ts]\nacceptance: safe change`;
+    // The shipped coordinator asset dispatches an inline digest, so activation must accept it.
+    const task = [
+      "context_digest:",
+      "  task_id: task-06",
+      `  project_root: ${directory}`,
+      "  acceptance: safe change",
+      "  role: implementation",
+      "  source_manifest: [src/a.ts]",
+    ].join("\n");
     await chat(
       { sessionID: "child", agent: "renamed-worker" },
       { message: { agent: "renamed-worker", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: task }] },
@@ -1405,13 +1514,11 @@ test("plugin gate uses the execution directory when worktree differs", async () 
       { permission: "edit", patterns: [join("u3-rpt", "allowed.txt")], sessionID: "plugin-session" },
       { status: "allow" },
     );
-    await expectMessage(
-      () => permission(
-        { permission: "edit", patterns: [join("u3-rpt", "denied.txt")] },
-        { status: "allow" },
-      ),
-      'Write denied for "<unknown>": operation manifest unavailable.',
-      "manifest-unavailable",
+    // Without a session identity no gate can be attributed, so the permission hook stays passive
+    // and tool.execute.before remains the enforcing path.
+    await permission(
+      { permission: "edit", patterns: [join("u3-rpt", "denied.txt")] },
+      { status: "allow" },
     );
     await expectMessage(
       () => permission(
@@ -1441,11 +1548,13 @@ test("plugin fixture denies traversal before write-scope comparison", async () =
   });
 });
 
-test("plugin fixture fails closed for a missing manifest while reads remain no-op", async () => {
-  const candidate = fixtureCase("missing-manifest");
-  await withProject(candidate.name, async (directory) => {
+test("plugin stays passive for an absent manifest while reads remain no-op", async () => {
+  await withProject("missing-manifest", async (directory) => {
     const hooks = await SortieDogsPlugin({ directory });
-    await expectMessage(() => invokeWrite(hooks, "allowed.txt", directory), candidate.error!, "manifest-unavailable");
+    // A project without an operation manifest never declared a write scope. Enforcing an undeclared
+    // scope would also deny creating that manifest, so enforcement stays off until it exists.
+    await invokeWrite(hooks, "allowed.txt", directory);
+    await invokeWrite(hooks, "outside.txt", directory);
 
     const before = hooks["tool.execute.before"];
     assert.ok(before);
@@ -1453,6 +1562,7 @@ test("plugin fixture fails closed for a missing manifest while reads remain no-o
       { tool: "read", sessionID: "plugin-session", callID: "read-call" },
       { args: { file: "unrestricted-read.txt" } },
     );
+    await assert.rejects(stat(join(directory, "outside.txt")), { code: "ENOENT" });
   });
 });
 
@@ -1468,16 +1578,12 @@ test("plugin fixture fails closed for invalid manifest JSON without exposing inp
 test("plugin reloads a missing or invalid manifest after repair in the same session", async () => {
   await withProject("manifest-repair", async (directory) => {
     const hooks = await SortieDogsPlugin({ directory });
+    await invokeWrite(hooks, "allowed.txt", directory);
+    await writeFile(join(directory, "operation-manifest.json"), fixture.invalidManifestJson);
     await expectMessage(
       () => invokeWrite(hooks, "allowed.txt", directory),
       'Write denied for "<unknown>": operation manifest unavailable.',
       "manifest-unavailable",
-    );
-    await writeFile(join(directory, "operation-manifest.json"), fixture.invalidManifestJson);
-    await expectMessage(
-      () => invokeWrite(hooks, "allowed.txt", directory),
-      'Write denied for "<repeated-command>": same command and denial reason already denied in this session; retry blocked.',
-      "repeated-denial",
     );
     await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
     await invokeWrite(hooks, "allowed.txt", directory);
@@ -1747,6 +1853,7 @@ test("inactive file events stay passive and only active lifecycle inspection ena
 
 test("session idle keeps activation but revokes authorization when handoff inspection fails", async () => {
   await withProject("idle-failed-handoff", async (directory) => {
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
     await writeFile(join(directory, "candidate-manifest.json"), JSON.stringify(operationManifest(["allowed.txt"])));
     const handoffPath = join(directory, "handoff.json");
     await writeFile(handoffPath, JSON.stringify(writeGateHandoff(directory, "candidate-manifest.json")));
@@ -2088,11 +2195,9 @@ test("plugin ignores the old project config path when the new config is absent",
     }));
 
     const hooks = await SortieDogsPlugin({ directory });
-    await expectMessage(
-      () => invokeWrite(hooks, "allowed.txt", directory),
-      'Write denied for "<unknown>": operation manifest unavailable.',
-      "manifest-unavailable",
-    );
+    // The legacy configuration path is ignored, so the default manifest path stays absent and the
+    // gate remains passive instead of adopting the legacy scope.
+    await invokeWrite(hooks, "allowed.txt", directory);
   });
 });
 

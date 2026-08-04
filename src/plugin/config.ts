@@ -1,18 +1,31 @@
 import {
   BUILT_IN_MODEL_CATALOG,
-  FIXED_MODEL_ROUTING,
+  DEFAULT_DEDICATED_WORKER_TARGET,
   RECOMMENDED_LUNA_ROUTING,
+  dedicatedWorkerRouting,
   isFixedModelRole,
   parseModelRoutingConfig,
+  parseModelTarget,
   type CatalogModel,
   type ModelCatalog,
   type ModelRoutingConfig,
+  type ModelTarget,
 } from "./model-routing.js";
 import { CONSULTATION_ROLE_POLICY } from "../core/consultation.js";
 
 export interface SortieDogsPluginOptions {
   operationManifestPath?: string;
   handoffPaths?: readonly string[];
+  /**
+   * Host-specific tool names that never change project files, such as MCP tools. Names accumulate
+   * across layers because each layer describes a different part of the same environment.
+   */
+  readOnlyTools?: readonly string[];
+  /**
+   * The single model every dedicated worker role resolves to. Worker routing stays fixed to one
+   * target; a host that cannot serve the shipped target declares its own here.
+   */
+  dedicatedWorkerModel?: ModelTarget;
   modelRouting?: ModelRoutingConfig;
   modelCatalog?: ModelCatalog;
   consultation?: ConsultationPolicyInput;
@@ -47,6 +60,8 @@ export interface ConfiguredPlugin {
   kind: "configured";
   operationManifestPath: string;
   handoffPaths: readonly string[];
+  readOnlyTools: readonly string[];
+  dedicatedWorkerModel: ModelTarget;
   modelRouting: ModelRoutingConfig;
   modelCatalog: ModelCatalog;
   consultation: ConsultationPolicy;
@@ -66,6 +81,8 @@ export const DEFAULT_PLUGIN_OPTIONS: Readonly<
 > = {
   operationManifestPath: "operation-manifest.json",
   handoffPaths: ["handoff.json"],
+  readOnlyTools: [],
+  dedicatedWorkerModel: DEFAULT_DEDICATED_WORKER_TARGET,
   modelRouting: RECOMMENDED_LUNA_ROUTING,
   modelCatalog: BUILT_IN_MODEL_CATALOG,
   consultation: Object.freeze({
@@ -228,13 +245,21 @@ function parseLayer(value: unknown): SortieDogsPluginOptions | undefined {
   if (value === undefined) return {};
   if (!isRecord(value)) return undefined;
   if (Object.keys(value).some(
-    (key) => !["operationManifestPath", "handoffPaths", "modelRouting", "modelCatalog", "consultation"].includes(key),
+    (key) => ![
+      "operationManifestPath", "handoffPaths", "readOnlyTools", "dedicatedWorkerModel",
+      "modelRouting", "modelCatalog", "consultation",
+    ].includes(key),
   )) {
     return undefined;
   }
 
   const manifestPath = value.operationManifestPath;
   const handoffPaths = value.handoffPaths;
+  const readOnlyTools = value.readOnlyTools;
+  const dedicatedWorkerModel = value.dedicatedWorkerModel === undefined
+    ? undefined
+    : parseModelTarget(value.dedicatedWorkerModel);
+  if (value.dedicatedWorkerModel !== undefined && dedicatedWorkerModel === undefined) return undefined;
   const modelRouting = value.modelRouting === undefined
     ? undefined
     : parseModelRoutingConfig(value.modelRouting);
@@ -253,12 +278,21 @@ function parseLayer(value: unknown): SortieDogsPluginOptions | undefined {
   ) {
     return undefined;
   }
+  if (
+    readOnlyTools !== undefined &&
+    (!Array.isArray(readOnlyTools) ||
+      readOnlyTools.some((tool) => typeof tool !== "string" || tool.trim().length === 0))
+  ) {
+    return undefined;
+  }
   if (value.modelRouting !== undefined && modelRouting === undefined) return undefined;
   if (value.modelCatalog !== undefined && modelCatalog === undefined) return undefined;
   if (value.consultation !== undefined && consultation === undefined) return undefined;
   return {
     operationManifestPath: manifestPath as string | undefined,
     handoffPaths: handoffPaths as readonly string[] | undefined,
+    readOnlyTools: readOnlyTools as readonly string[] | undefined,
+    dedicatedWorkerModel,
     modelRouting,
     modelCatalog,
     consultation,
@@ -269,6 +303,8 @@ function parseLayer(value: unknown): SortieDogsPluginOptions | undefined {
 export function resolvePluginConfiguration(...values: readonly unknown[]): PluginConfiguration {
   let operationManifestPath = DEFAULT_PLUGIN_OPTIONS.operationManifestPath;
   let handoffPaths = DEFAULT_PLUGIN_OPTIONS.handoffPaths;
+  const readOnlyTools = new Set(DEFAULT_PLUGIN_OPTIONS.readOnlyTools);
+  let dedicatedWorkerModel = DEFAULT_PLUGIN_OPTIONS.dedicatedWorkerModel;
   let modelRouting = DEFAULT_PLUGIN_OPTIONS.modelRouting;
   let modelCatalog = DEFAULT_PLUGIN_OPTIONS.modelCatalog;
   let consultation = DEFAULT_PLUGIN_OPTIONS.consultation;
@@ -277,6 +313,8 @@ export function resolvePluginConfiguration(...values: readonly unknown[]): Plugi
     if (layer === undefined) return { kind: "invalid" };
     if (layer.operationManifestPath !== undefined) operationManifestPath = layer.operationManifestPath;
     if (layer.handoffPaths !== undefined) handoffPaths = layer.handoffPaths;
+    for (const tool of layer.readOnlyTools ?? []) readOnlyTools.add(tool.trim().toLowerCase());
+    if (layer.dedicatedWorkerModel !== undefined) dedicatedWorkerModel = layer.dedicatedWorkerModel;
     if (layer.modelRouting !== undefined) {
       modelRouting = { ...modelRouting, ...layer.modelRouting };
     }
@@ -301,7 +339,16 @@ export function resolvePluginConfiguration(...values: readonly unknown[]): Plugi
   }
   modelRouting = {
     ...Object.fromEntries(Object.entries(modelRouting).filter(([role]) => !isFixedModelRole(role))),
-    ...FIXED_MODEL_ROUTING,
+    ...dedicatedWorkerRouting(dedicatedWorkerModel),
+  };
+  // The dedicated target is authoritative for worker roles, so it is always a known catalog entry.
+  modelCatalog = {
+    ...modelCatalog,
+    global: mergeCatalogModels(modelCatalog.global ?? [], [
+      dedicatedWorkerModel.variant === undefined
+        ? { model: dedicatedWorkerModel.model }
+        : { model: dedicatedWorkerModel.model, variants: [dedicatedWorkerModel.variant] },
+    ]),
   };
   const hasRouting = Object.keys(modelRouting).length > 0;
   const hasCatalogEntries = (modelCatalog.project?.length ?? 0) + (modelCatalog.global?.length ?? 0) > 0;
@@ -310,6 +357,8 @@ export function resolvePluginConfiguration(...values: readonly unknown[]): Plugi
     kind: "configured",
     operationManifestPath,
     handoffPaths,
+    readOnlyTools: [...readOnlyTools],
+    dedicatedWorkerModel,
     modelRouting,
     modelCatalog,
     consultation,
@@ -336,16 +385,17 @@ export function resolvePluginConfigurationSources(
     ...(environmentLayer.modelRouting ?? {}),
     ...(hostLayer.modelRouting ?? {}),
   }).filter(([role]) => !isFixedModelRole(role)));
+  const fixedRouting = dedicatedWorkerRouting(configured.dedicatedWorkerModel);
   const modelRouting = {
     ...Object.fromEntries(Object.entries(configured.modelRouting)
       .filter(([role]) => !isFixedModelRole(role))),
-    ...FIXED_MODEL_ROUTING,
+    ...fixedRouting,
   };
   return {
     ...configured,
     modelRouting,
     // Dedicated worker policy is authoritative over every configurable layer.
-    localModelRouting: { ...(projectLayer.modelRouting ?? {}), ...FIXED_MODEL_ROUTING },
+    localModelRouting: { ...(projectLayer.modelRouting ?? {}), ...fixedRouting },
     globalModelRouting,
   };
 }

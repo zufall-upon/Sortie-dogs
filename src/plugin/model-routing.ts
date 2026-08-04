@@ -22,12 +22,31 @@ export const DEDICATED_SOL_ROLES = [
 
 const dedicatedSolRoleSet = new Set<string>(DEDICATED_SOL_ROLES);
 
-/** Fixed Sol routes. These deliberately contain no fallback targets. */
-export const DEDICATED_SOL_ROUTING: ModelRoutingConfig = Object.freeze(Object.fromEntries(
-  DEDICATED_SOL_ROLES.map((role) => [role, Object.freeze({
-    preferred: Object.freeze({ model: DEDICATED_SOL_MODEL, variant: DEDICATED_SOL_VARIANT }),
-  })]),
-));
+/** The dedicated worker target this build ships with when a host declares no target of its own. */
+export const DEFAULT_DEDICATED_WORKER_TARGET: ModelTarget = Object.freeze({
+  model: DEDICATED_SOL_MODEL,
+  variant: DEDICATED_SOL_VARIANT,
+});
+
+/**
+ * Fixed worker routes for one dedicated target. Which target is dedicated is a host decision, but
+ * every worker role resolves to that single target and never to a fallback.
+ */
+export function dedicatedWorkerRouting(
+  target: ModelTarget = DEFAULT_DEDICATED_WORKER_TARGET,
+): ModelRoutingConfig {
+  return Object.freeze(Object.fromEntries(
+    DEDICATED_SOL_ROLES.map((role) => [role, Object.freeze({
+      preferred: Object.freeze(
+        target.variant === undefined
+          ? { model: target.model }
+          : { model: target.model, variant: target.variant },
+      ),
+    })]),
+  ));
+}
+
+export const DEDICATED_SOL_ROUTING: ModelRoutingConfig = dedicatedWorkerRouting();
 
 export const FIXED_MODEL_ROUTING: ModelRoutingConfig = DEDICATED_SOL_ROUTING;
 
@@ -84,6 +103,8 @@ export interface ResolveModelRouteInput {
   /** Global routing is consulted only after the local route candidates fail. */
   readonly global?: ModelRoutingConfig;
   readonly catalog: ModelCatalog;
+  /** The single target every dedicated worker role resolves to. Defaults to the shipped target. */
+  readonly dedicated?: ModelTarget;
 }
 
 export interface ResolvedModelRoute {
@@ -116,6 +137,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function nonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
+}
+
+export function parseModelTarget(value: unknown): ModelTarget | undefined {
+  return parseTarget(value);
 }
 
 function parseTarget(value: unknown): ModelTarget | undefined {
@@ -195,7 +220,7 @@ function findAvailable(
 export function resolveModelRoute(input: ResolveModelRouteInput): ModelRouteResolution {
   const attempts: ModelResolutionAttempt[] = [];
   const routes = isFixedModelRole(input.role)
-    ? [["fixed", [FIXED_MODEL_ROUTING[input.role].preferred]] as const]
+    ? [["fixed", [input.dedicated ?? DEFAULT_DEDICATED_WORKER_TARGET]] as const]
     : [
       ["local", ownRoute(input.local, input.role)] as const,
       ["global", ownRoute(input.global, input.role)] as const,
