@@ -144,7 +144,8 @@ Optional settings in `.opencode/sortie-dogs.json`:
   "operationManifestPath": "operation-manifest.json",
   "handoffPaths": ["handoff.json"],
   "readOnlyTools": ["my_mcp_search"],
-  "dedicatedWorkerModel": { "model": "provider/model", "variant": "deep" }
+  "dedicatedWorkerModel": { "model": "provider/model", "variant": "deep" },
+  "continuation": { "enabled": true, "maxAutoContinues": 3 }
 }
 ```
 
@@ -162,6 +163,14 @@ Optional settings in `.opencode/sortie-dogs.json`:
   It defaults to `openai/gpt-5.6-sol` with variant `medium`; declare your own when
   that model is unavailable or when you want a different worker effort. Worker
   roles always resolve to this one target and cannot be routed per role.
+- `continuation` bounds the batch loop. After a terminal unit and its checkpoint,
+  `dog-coordinator` calls `sortie_compact_and_continue`, which compacts the run
+  and resumes the same root session on the next independent unit. Only a root
+  `dog-coordinator` session is ever resumed: a child session is never promoted and
+  another coordinator is never adopted. Set `enabled` to `false` to keep every
+  batch manual, raise or lower `maxAutoContinues` (default `3`, maximum `10`) to
+  change the ceiling, and set `summarizeModel` to pin the compaction model when
+  the host default is unsuitable.
 
 ## Why Sortie-dogs
 

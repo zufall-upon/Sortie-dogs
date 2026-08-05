@@ -56,7 +56,8 @@ export class InvalidModelTargetError extends Error {
   }
 }
 
-function openCodeModel(model: string): { providerID: string; modelID: string } | undefined {
+/** Split a `<providerID>/<modelID>` target into the pair every OpenCode host call expects. */
+export function openCodeModel(model: string): { providerID: string; modelID: string } | undefined {
   const separator = model.indexOf("/");
   if (separator <= 0 || separator === model.length - 1) return undefined;
   return { providerID: model.slice(0, separator), modelID: model.slice(separator + 1) };

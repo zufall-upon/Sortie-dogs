@@ -1,0 +1,393 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import {
+  AUTO_CONTINUE_PREFIX,
+  CONTINUATION_CAPABILITY,
+  CONTINUATION_MARKER,
+  DEFAULT_MAX_AUTO_CONTINUES,
+  ROLLOVER_MARKER,
+  ROLLOVER_TOKEN,
+  STEP_EXHAUSTED_PATTERN,
+  createContinuationHooks,
+  resolveContinuation,
+  type ContinuationClient,
+  type ContinuationPolicy,
+  type ContinuationTimings,
+} from "../dist/plugin/continuation.js";
+import { runtimeAssets } from "../dist/runtime-assets.js";
+import { SortieDogsPlugin } from "../dist/plugin/index.js";
+
+const COORDINATOR = "dog-coordinator";
+
+const POLICY: ContinuationPolicy = {
+  enabled: true,
+  agent: COORDINATOR,
+  capability: CONTINUATION_CAPABILITY,
+  maxAutoContinues: DEFAULT_MAX_AUTO_CONTINUES,
+};
+
+/** Real durations would add minutes to the suite without exercising one extra branch. */
+const FAST: ContinuationTimings = {
+  cooldownMilliseconds: 0,
+  settleMilliseconds: 0,
+  scheduleMilliseconds: 0,
+  scheduleAttempts: 2,
+};
+
+interface SummarizeCall {
+  readonly id: string;
+  readonly body?: { providerID: string; modelID: string } | undefined;
+}
+
+interface PromptCall {
+  readonly id: string;
+  readonly agent: string;
+  readonly text: string;
+}
+
+interface FakeHost {
+  readonly client: ContinuationClient;
+  readonly summarizeCalls: SummarizeCall[];
+  readonly promptCalls: PromptCall[];
+}
+
+function fakeHost(session: { agent?: string; parentID?: string } | undefined): FakeHost {
+  const summarizeCalls: SummarizeCall[] = [];
+  const promptCalls: PromptCall[] = [];
+  const client: ContinuationClient = {
+    session: {
+      get: async () => (session === undefined ? { data: undefined } : { data: session }),
+      summarize: async (request) => {
+        summarizeCalls.push({ id: request.path.id, body: request.body });
+        return { data: true };
+      },
+      promptAsync: async (request) => {
+        promptCalls.push({
+          id: request.path.id,
+          agent: request.body.agent,
+          text: request.body.parts[0]!.text,
+        });
+        return { data: true };
+      },
+    },
+  };
+  return { client, summarizeCalls, promptCalls };
+}
+
+/** The scheduled rollover runs on a timer, so drain the macrotask queue before asserting. */
+async function settle(): Promise<void> {
+  for (let turn = 0; turn < 12; turn += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+}
+
+function resolution(overrides: Partial<Parameters<typeof resolveContinuation>[0]> = {}) {
+  return resolveContinuation({
+    identity: { agent: COORDINATOR, parentID: undefined },
+    configuredAgent: COORDINATOR,
+    configuredCapability: CONTINUATION_CAPABILITY,
+    requestedCapability: CONTINUATION_CAPABILITY,
+    enabled: true,
+    attempts: 0,
+    maxAutoContinues: DEFAULT_MAX_AUTO_CONTINUES,
+    pendingAutoContinue: false,
+    ...overrides,
+  });
+}
+
+test("continuation resolver grants only a configured root coordinator", () => {
+  assert.deepEqual(resolution(), { compact: true, continue: true });
+
+  assert.deepEqual(resolution({ enabled: false }), {
+    compact: false,
+    continue: false,
+    reason: "continuation-disabled",
+  });
+  assert.equal(resolution({ configuredAgent: undefined }).reason, "capability-unavailable");
+  assert.equal(resolution({ configuredCapability: "" }).reason, "capability-unavailable");
+  assert.equal(resolution({ requestedCapability: "other_tool" }).reason, "capability-unavailable");
+  assert.equal(resolution({ identity: undefined }).reason, "identity-unavailable");
+  assert.equal(resolution({ identity: { agent: "" } }).reason, "identity-unavailable");
+  // A child session is never promoted to root, even when it runs the coordinator agent.
+  assert.equal(
+    resolution({ identity: { agent: COORDINATOR, parentID: "ses_parent" } }).reason,
+    "child-session",
+  );
+  assert.equal(
+    resolution({ identity: { agent: "another-coordinator", parentID: undefined } }).reason,
+    "agent-mismatch",
+  );
+  assert.equal(resolution({ pendingAutoContinue: true }).reason, "pending-autocontinue");
+
+  // The ceiling stops the resume, not the compaction.
+  assert.deepEqual(resolution({ attempts: DEFAULT_MAX_AUTO_CONTINUES }), {
+    compact: true,
+    continue: false,
+    reason: "limit-reached",
+  });
+});
+
+test("the direct capability compacts the root coordinator and resumes the same session", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
+
+  const result = await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR });
+  assert.equal(result, "SORTIE_COMPACT_AND_CONTINUE_QUEUED");
+  await settle();
+
+  assert.equal(host.summarizeCalls.length, 1);
+  assert.equal(host.summarizeCalls[0]!.id, "ses_root");
+  // No summarize model is configured, so the host default must remain in force.
+  assert.equal(host.summarizeCalls[0]!.body, undefined);
+  assert.equal(host.promptCalls.length, 1);
+  assert.equal(host.promptCalls[0]!.agent, COORDINATOR);
+  assert.ok(host.promptCalls[0]!.text.startsWith(AUTO_CONTINUE_PREFIX));
+  assert.match(host.promptCalls[0]!.text, /batchAttempted\/batchCommitted\/batchReconciled/);
+});
+
+test("a configured summarize model is sent as a provider and model pair", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  const hooks = createContinuationHooks(
+    host.client,
+    "/project",
+    { ...POLICY, summarizeModel: { model: "vendor-a/compact-model" } },
+    FAST,
+  );
+
+  await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR });
+  await settle();
+  assert.deepEqual(host.summarizeCalls[0]!.body, {
+    providerID: "vendor-a",
+    modelID: "compact-model",
+  });
+});
+
+test("a child session and a foreign agent are both refused without any host call", async () => {
+  const child = fakeHost({ agent: COORDINATOR, parentID: "ses_root" });
+  const childHooks = createContinuationHooks(child.client, "/project", POLICY, FAST);
+  assert.equal(
+    await childHooks.tool.execute({}, { sessionID: "ses_child", agent: COORDINATOR }),
+    "SORTIE_CONTINUATION_REJECTED: child-session",
+  );
+
+  const foreign = fakeHost({ agent: "dog-worker" });
+  const foreignHooks = createContinuationHooks(foreign.client, "/project", POLICY, FAST);
+  assert.equal(
+    await foreignHooks.tool.execute({}, { sessionID: "ses_worker", agent: "dog-worker" }),
+    "SORTIE_CONTINUATION_REJECTED: agent-mismatch",
+  );
+
+  await settle();
+  assert.deepEqual([child.summarizeCalls.length, child.promptCalls.length], [0, 0]);
+  assert.deepEqual([foreign.summarizeCalls.length, foreign.promptCalls.length], [0, 0]);
+});
+
+test("continuation stops resuming at its ceiling but still compacts", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  const hooks = createContinuationHooks(host.client, "/project", { ...POLICY, maxAutoContinues: 2 }, FAST);
+
+  for (let call = 0; call < 2; call += 1) {
+    assert.equal(
+      await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR }),
+      "SORTIE_COMPACT_AND_CONTINUE_QUEUED",
+    );
+    await settle();
+  }
+  assert.equal(
+    await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR }),
+    "SORTIE_COMPACT_QUEUED: auto-continue limit reached",
+  );
+  await settle();
+
+  assert.equal(host.summarizeCalls.length, 3);
+  assert.equal(host.promptCalls.length, 2);
+});
+
+test("the marker fallback continues only when the direct capability did not run", async () => {
+  const fallback = fakeHost({ agent: COORDINATOR });
+  const fallbackHooks = createContinuationHooks(fallback.client, "/project", POLICY, FAST);
+  await fallbackHooks.textComplete(
+    { sessionID: "ses_root" },
+    { text: `unit terminal\n${CONTINUATION_MARKER}` },
+  );
+  await settle();
+  assert.equal(fallback.summarizeCalls.length, 1);
+  assert.equal(fallback.promptCalls.length, 1);
+  assert.doesNotMatch(fallback.promptCalls[0]!.text, /SORTIE_CONTINUE/);
+
+  const both = fakeHost({ agent: COORDINATOR });
+  const bothHooks = createContinuationHooks(both.client, "/project", POLICY, FAST);
+  await bothHooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR });
+  await bothHooks.textComplete(
+    { sessionID: "ses_root" },
+    { text: `unit terminal\n${CONTINUATION_MARKER}` },
+  );
+  await settle();
+  // Exactly one continuation mechanism may act on one turn.
+  assert.equal(both.summarizeCalls.length, 1);
+  assert.equal(both.promptCalls.length, 1);
+});
+
+test("the stop marker compacts without resuming and clears the continuation budget", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  const hooks = createContinuationHooks(host.client, "/project", { ...POLICY, maxAutoContinues: 1 }, FAST);
+
+  await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR });
+  await settle();
+  await hooks.textComplete({ sessionID: "ses_root" }, { text: `batch stop\n${ROLLOVER_MARKER}` });
+  await settle();
+  assert.equal(host.promptCalls.length, 1, "the stop marker must not resume the batch");
+
+  // The budget reset means a fresh batch can continue again.
+  assert.equal(
+    await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR }),
+    "SORTIE_COMPACT_AND_CONTINUE_QUEUED",
+  );
+});
+
+test("an exhausted step budget is treated as a continuation request", async () => {
+  assert.match("最大step到達。残作業は次candidate。", STEP_EXHAUSTED_PATTERN);
+  assert.match("step limit reached; remaining work is the next unit", STEP_EXHAUSTED_PATTERN);
+  assert.doesNotMatch("unit committed and batch complete", STEP_EXHAUSTED_PATTERN);
+
+  const host = fakeHost({ agent: COORDINATOR });
+  const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
+  await hooks.textComplete(
+    { sessionID: "ses_root" },
+    { text: "最大step数に到達しました。残作業: 次の独立unit。" },
+  );
+  await settle();
+  assert.equal(host.promptCalls.length, 1);
+});
+
+test("the compaction prompt preserves batch state and names no legacy workflow", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
+  await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR });
+  // The host asks for the compaction prompt once the queued rollover has started.
+  await settle();
+
+  const output: { prompt?: string } = {};
+  await hooks.sessionCompacting({ sessionID: "ses_root" }, output);
+  const prompt = output.prompt ?? "";
+  assert.ok(prompt.includes(ROLLOVER_TOKEN));
+  for (const preserved of [
+    "task identity",
+    "batchTarget",
+    "batchAttempted",
+    "batchCommitted",
+    "batchReconciled",
+    "source_manifest",
+    "operation_manifest",
+    "validation",
+  ]) {
+    assert.ok(prompt.includes(preserved), `the rollover prompt must preserve ${preserved}`);
+  }
+  assert.doesNotMatch(prompt, /MK2A2|MKII|MK4|MK5|MK6/);
+
+  const untracked: { prompt?: string } = {};
+  await hooks.sessionCompacting({ sessionID: "ses_other" }, untracked);
+  assert.equal(untracked.prompt, undefined, "an untracked session keeps the host compaction prompt");
+});
+
+test("host auto-continue is disabled while a rollover is pending", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
+
+  const overflow = { enabled: true };
+  await hooks.compactionAutoContinue({ sessionID: "ses_root", overflow: true }, overflow);
+  assert.equal(overflow.enabled, true, "an untracked overflow keeps the host behaviour");
+
+  const nonOverflow = { enabled: true };
+  await hooks.compactionAutoContinue({ sessionID: "ses_root", overflow: false }, nonOverflow);
+  assert.equal(nonOverflow.enabled, false);
+
+  await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR });
+  const pending = { enabled: true };
+  await hooks.compactionAutoContinue({ sessionID: "ses_root", overflow: true }, pending);
+  assert.equal(pending.enabled, false, "continuation owns the resume while it is pending");
+});
+
+test("forgetting a session clears its continuation budget", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  const hooks = createContinuationHooks(host.client, "/project", { ...POLICY, maxAutoContinues: 1 }, FAST);
+
+  await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR });
+  await settle();
+  hooks.forgetSession("ses_root");
+  assert.equal(
+    await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR }),
+    "SORTIE_COMPACT_AND_CONTINUE_QUEUED",
+  );
+
+  const compacting: { prompt?: string } = {};
+  hooks.forgetSession("ses_root");
+  await hooks.sessionCompacting({ sessionID: "ses_root" }, compacting);
+  assert.equal(compacting.prompt, undefined);
+});
+
+test("a session lookup without an agent field still trusts the reported parent link", async () => {
+  const anonymous = fakeHost({});
+  const anonymousHooks = createContinuationHooks(anonymous.client, "/project", POLICY, FAST);
+  assert.equal(
+    await anonymousHooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR }),
+    "SORTIE_COMPACT_AND_CONTINUE_QUEUED",
+  );
+
+  const nested = fakeHost({ parentID: "ses_root" });
+  const nestedHooks = createContinuationHooks(nested.client, "/project", POLICY, FAST);
+  assert.equal(
+    await nestedHooks.tool.execute({}, { sessionID: "ses_child", agent: COORDINATOR }),
+    "SORTIE_CONTINUATION_REJECTED: child-session",
+  );
+  await settle();
+  assert.deepEqual([nested.summarizeCalls.length, nested.promptCalls.length], [0, 0]);
+});
+
+test("a host without the continuation client never resumes anything", async () => {
+  const hooks = createContinuationHooks(undefined, "/project", POLICY, FAST);
+  // The tool still answers deterministically instead of throwing into the coordinator turn.
+  const answer = await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR });
+  assert.equal(answer, "SORTIE_COMPACT_AND_CONTINUE_QUEUED");
+  await settle();
+  await hooks.sessionIdle("ses_root");
+});
+
+/*
+ * The original defect shipped a coordinator prompt naming a continuation capability that no runtime
+ * provided, and every test passed because they only inspected prompt text. This oracle fails unless
+ * each literal named by the asset is backed by something the plugin actually exposes.
+ */
+test("every capability and marker named by the coordinator asset exists at runtime", async () => {
+  const coordinator = runtimeAssets.find((asset) => asset.name === "dog-coordinator");
+  assert.ok(coordinator);
+
+  const capabilities = [...coordinator.content.matchAll(/^\s*direct_capability:\s*(\S+)$/gmu)]
+    .map((match) => match[1]!);
+  assert.deepEqual(capabilities, [CONTINUATION_CAPABILITY]);
+
+  const markers = [...coordinator.content.matchAll(/<!--\s*[A-Z0-9_]+\s*-->/gu)].map((match) => match[0]);
+  assert.ok(markers.length > 0, "the asset must name its fallback markers");
+  for (const marker of new Set(markers)) {
+    assert.ok(
+      marker === CONTINUATION_MARKER || marker === ROLLOVER_MARKER,
+      `the asset names marker ${marker} with no runtime that recognizes it`,
+    );
+  }
+
+  const hooks = await SortieDogsPlugin({ directory: process.cwd() });
+  for (const capability of capabilities) {
+    assert.ok(
+      hooks.tool?.[capability] !== undefined,
+      `the asset names capability ${capability} with no registered tool`,
+    );
+  }
+  for (const hook of [
+    "experimental.text.complete",
+    "experimental.session.compacting",
+    "experimental.compaction.autocontinue",
+  ] as const) {
+    assert.equal(typeof hooks[hook], "function", `${hook} must be registered for continuation`);
+  }
+});

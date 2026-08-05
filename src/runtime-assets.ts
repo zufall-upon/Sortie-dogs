@@ -10,7 +10,7 @@ export interface RuntimeAsset {
 export const runtimeAssets = [
   {
     name: "dog-coordinator",
-    version: "0.2.0-card07",
+    version: "0.2.0-card08",
     installPath: "agent/dog-coordinator.md",
     content: `---
 description: Canonical MkII coordinator packaged by Sortie-dogs
@@ -252,7 +252,9 @@ unit becomes attempted at its terminal handoff. Only a new successful coordinato
 batchCommitted; acceptance of an already-existing commit increments batchReconciled instead. Record
 a Project status checkpoint for every terminal unit. A blocked unit increments only batchAttempted,
 records its blocker with a concrete needed action, then continuation proceeds to the next independent
-unit. Only a whole-batch blocker or a user question stops the batch early.
+unit. A blocked unit is still a terminal unit: while batchAttempted stays below batchTarget and an
+independent next candidate exists, continuation is required, never optional, and a plain final report
+in its place is a defect. Only a whole-batch blocker or a user question stops the batch early.
 
 BATCH_CONTINUATION_FIXTURE
     scope: backlogDrain.enabled=false; mode=normal bounded batch
@@ -265,6 +267,8 @@ BATCH_CONTINUATION_FIXTURE
     new_successful_commit: increment batchCommitted only
     existing_commit_accepted: increment batchReconciled only
     blocked_unit: increment batchAttempted only; record blocker with concrete needed action; continue to next independent unit
+    blocked_unit_continuation: required while batchAttempted < batchTarget and an independent next candidate exists
+    plain_final_instead_of_continuation: defect
     local_handoff_defect: recover in the same candidate flow; never stop or count the unit terminal
     compact_guard: batchAttempted < batchTarget and independent next candidate exists
     compact_action: after checkpoint invoke configured continuation; then same-turn stop
@@ -299,8 +303,20 @@ COMPACTION_IDENTITY_FIXTURE
     compact_guard: batchAttempted < batchTarget and independent next candidate exists
     final_unit: no compaction
     pending_host_autocontinue: no compaction
+    continuation_agent: dog-coordinator
+    direct_capability: sortie_compact_and_continue
+    marker_literal: <!-- SORTIE_CONTINUE -->
+    stop_marker_literal: <!-- SORTIE_COMPACT -->
     post_call: same-turn stop; no tool | Task | analysis | final
 END_COMPACTION_IDENTITY_FIXTURE
+
+The configured continuation agent is dog-coordinator and the configured continuation capability is
+the plugin tool sortie_compact_and_continue. After the terminal handoff and its Project checkpoint,
+call that tool exactly once and end the assistant turn immediately. Use the marker <!-- SORTIE_CONTINUE -->
+appended to the final report only when that tool is unavailable or returns an error, never together
+with a tool call and never after a successful one. When the batch itself stops, append
+<!-- SORTIE_COMPACT --> instead so the run compacts without resuming. A rejected continuation returns
+a reason; report that reason instead of silently ending the batch.
 
 Backlog drain is a configurable, explicit opt-in only. Unless the task entry sets
 backlogDrain.enabled to true and supplies a positive backlogDrain.maxUnits guard, use the
@@ -557,7 +573,7 @@ END_TERMINAL_EVIDENCE_FIXTURE
   },
   {
     name: "dog-worker",
-    version: "0.2.0-card07",
+    version: "0.2.0-card08",
     installPath: "agent/dog-worker.md",
     content: `---
 description: Dedicated worker for the canonical Sortie-dogs coordinator
@@ -610,7 +626,7 @@ the user.
   },
   {
     name: "dog-scout",
-    version: "0.2.0-card07",
+    version: "0.2.0-card08",
     installPath: "agent/dog-scout.md",
     content: `---
 description: Bounded evidence scout for dog-coordinator
@@ -659,7 +675,7 @@ to dog-coordinator.
   },
   {
     name: "dog-reviewer",
-    version: "0.2.0-card07",
+    version: "0.2.0-card08",
     installPath: "agent/dog-reviewer.md",
     content: `---
 description: Independent source reviewer for dog-coordinator
@@ -680,7 +696,7 @@ or transport.
   },
   {
     name: "dog-advisor",
-    version: "0.2.0-card07",
+    version: "0.2.0-card08",
     installPath: "agent/dog-advisor.md",
     content: `---
 description: Focused technical advisor for dog-coordinator
@@ -702,7 +718,7 @@ provider, vendor, model, variant, or transport.
   },
   {
     name: "sortie",
-    version: "0.2.0-card07",
+    version: "0.2.0-card08",
     installPath: "command/sortie.md",
     content: `---
 description: Start the canonical Sortie-dogs MkII workflow

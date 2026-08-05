@@ -12,10 +12,18 @@ import {
   validateOperationManifestSchema,
 } from "../core/validate-schema.js";
 import {
+  DEFAULT_PLUGIN_OPTIONS,
   resolvePluginConfigurationSources,
   type ConfiguredPluginSources,
+  type ContinuationConfiguration,
   type SortieDogsPluginOptions,
 } from "./config.js";
+import {
+  CONTINUATION_CAPABILITY,
+  createContinuationHooks,
+  type ContinuationClient,
+  type ContinuationHooks,
+} from "./continuation.js";
 import {
   WriteDeniedError,
   createProjectPaths,
@@ -54,7 +62,7 @@ export interface OpenCodePluginInput {
   directory: string;
   worktree?: string;
   /** The host SDK client. Absent in hosts that construct the plugin without one. */
-  client?: SessionMessageReader;
+  client?: SessionMessageReader & ContinuationClient;
   [key: string]: unknown;
 }
 
@@ -78,6 +86,21 @@ export interface OpenCodeHooks {
     output: TaskResultRepairOutput,
   ) => Promise<void>;
   "chat.message"?: OpenCodeChatMessageHook;
+  /** Continuation observes the coordinator's completed final text to honour its fallback markers. */
+  "experimental.text.complete"?: (
+    input: { sessionID: string },
+    output: { text: string },
+  ) => Promise<void>;
+  /** Continuation replaces the compaction prompt so batch state survives the rollover. */
+  "experimental.session.compacting"?: (
+    input: { sessionID: string },
+    output: { context?: string[]; prompt?: string },
+  ) => Promise<void>;
+  /** Continuation owns the resume, so the host must not auto-continue the same session too. */
+  "experimental.compaction.autocontinue"?: (
+    input: { sessionID: string; overflow?: boolean },
+    output: { enabled: boolean },
+  ) => Promise<void>;
   tool?: Record<string, OpenCodeToolDefinition>;
 }
 
@@ -237,6 +260,7 @@ interface LoadedConfiguration {
   handoffRelativePaths: readonly string[];
   readOnlyTools: ReadonlySet<string>;
   modelRoutingHook?: OpenCodeChatMessageHook;
+  continuation: ContinuationConfiguration;
 }
 
 interface TaskToolExecuteAfterInput {
@@ -293,7 +317,10 @@ interface CoordinatorRootLineage {
 interface OpenCodeToolDefinition {
   description: string;
   args: Record<string, unknown>;
-  execute(args: Record<string, string>, context: { sessionID: string }): Promise<string>;
+  execute(
+    args: Record<string, string>,
+    context: { sessionID: string; agent?: string },
+  ): Promise<string>;
 }
 
 interface OpenCodeToolFactory {
@@ -419,6 +446,7 @@ function loadConfigured(
     handoffRelativePaths,
     readOnlyTools: new Set(config.readOnlyTools.map((tool) => tool.toLowerCase())),
     modelRoutingHook,
+    continuation: config.continuation,
   };
 }
 
@@ -585,6 +613,15 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   let loading: Promise<void> | undefined;
   let manifestAbsent = false;
   let assetVersionReported = false;
+  /*
+   * Continuation must be callable before the first lazy configuration load completes, so it reads
+   * the effective policy at call time and falls back to the shipped default until then.
+   */
+  const continuation: ContinuationHooks = createContinuationHooks(
+    input.client,
+    input.worktree ?? input.directory,
+    () => loaded?.continuation ?? DEFAULT_PLUGIN_OPTIONS.continuation,
+  );
 
   async function ensureLoaded(): Promise<void> {
     if (loaded?.gate !== undefined) return;
@@ -1344,6 +1381,24 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           }
         },
       }),
+      [CONTINUATION_CAPABILITY]: defineTool({
+        description: continuation.tool.description,
+        args: {},
+        async execute(_args, context): Promise<string> {
+          // A configuration failure must not remove the loop; the shipped default still resolves.
+          await ensureLoaded().catch(() => undefined);
+          return await continuation.tool.execute({}, context);
+        },
+      }),
+    },
+    "experimental.text.complete": async (textInput, textOutput): Promise<void> => {
+      await continuation.textComplete(textInput, textOutput);
+    },
+    "experimental.session.compacting": async (compactInput, compactOutput): Promise<void> => {
+      await continuation.sessionCompacting(compactInput, compactOutput);
+    },
+    "experimental.compaction.autocontinue": async (autoInput, autoOutput): Promise<void> => {
+      await continuation.compactionAutoContinue(autoInput, autoOutput);
     },
     "chat.message": async (chatInput, output): Promise<void> => {
       const parentID = chatParentID(chatInput);
@@ -1468,8 +1523,14 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       }
       if (event.type === "session.deleted") {
         evictSession(eventSessionID);
+        continuation.forgetSession(eventSessionID);
         return;
       }
+      /*
+       * The coordinator root is deliberately not a write-gate session, so continuation must run
+       * before the active-session guard below or the batch could never resume itself.
+       */
+      if (event.type === "session.idle") await continuation.sessionIdle(eventSessionID);
       if (!isActiveSession(eventSessionID)) return;
       if (event.type !== "session.idle") touchActiveSession(eventSessionID);
       if (event.type === "session.idle" && eventSessionID !== undefined) {

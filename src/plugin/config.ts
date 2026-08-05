@@ -13,6 +13,10 @@ import {
   type ModelTarget,
 } from "./model-routing.js";
 import { CONSULTATION_ROLE_POLICY } from "../core/consultation.js";
+import {
+  CONTINUATION_CAPABILITY,
+  DEFAULT_MAX_AUTO_CONTINUES,
+} from "./continuation.js";
 
 export interface SortieDogsPluginOptions {
   operationManifestPath?: string;
@@ -30,7 +34,28 @@ export interface SortieDogsPluginOptions {
   modelRouting?: ModelRoutingConfig;
   modelCatalog?: ModelCatalog;
   consultation?: ConsultationPolicyInput;
+  /**
+   * Bounded batch continuation. The shipped defaults already resolve to a working route, so a host
+   * only states this to raise the ceiling, choose a compaction model, or switch continuation off.
+   */
+  continuation?: ContinuationPolicyInput;
 }
+
+export type ContinuationPolicyInput = Partial<ContinuationConfiguration>;
+
+export interface ContinuationConfiguration {
+  readonly enabled: boolean;
+  /** Only the packaged coordinator may be resumed on the user's behalf. */
+  readonly agent: string;
+  readonly capability: string;
+  readonly maxAutoContinues: number;
+  /** Absent means the host picks the compaction model; this package never pins one. */
+  readonly summarizeModel?: ModelTarget;
+}
+
+/** A continuation ceiling beyond this stops being a bounded batch. */
+const MAX_AUTO_CONTINUE_LIMIT = 10;
+const CONTINUATION_AGENT = "dog-coordinator";
 
 export interface ConsultationPolicyInput {
   readonly strategy?: Partial<StrategyConsultationPolicy>;
@@ -66,6 +91,7 @@ export interface ConfiguredPlugin {
   modelRouting: ModelRoutingConfig;
   modelCatalog: ModelCatalog;
   consultation: ConsultationPolicy;
+  continuation: ContinuationConfiguration;
 }
 
 export type PluginConfiguration = ConfiguredPlugin | { kind: "invalid" };
@@ -78,7 +104,10 @@ export interface ConfiguredPluginSources extends ConfiguredPlugin {
 export type PluginConfigurationSources = ConfiguredPluginSources | { kind: "invalid" };
 
 export const DEFAULT_PLUGIN_OPTIONS: Readonly<
-  Omit<Required<SortieDogsPluginOptions>, "consultation"> & { consultation: ConsultationPolicy }
+  Omit<Required<SortieDogsPluginOptions>, "consultation" | "continuation"> & {
+    consultation: ConsultationPolicy;
+    continuation: ContinuationConfiguration;
+  }
 > = {
   operationManifestPath: "operation-manifest.json",
   handoffPaths: ["handoff.json"],
@@ -99,6 +128,12 @@ export const DEFAULT_PLUGIN_OPTIONS: Readonly<
       maxCallsPerCandidate: 1,
       maxArtifactBytes: 30_720,
     }),
+  }),
+  continuation: Object.freeze({
+    enabled: true,
+    agent: CONTINUATION_AGENT,
+    capability: CONTINUATION_CAPABILITY,
+    maxAutoContinues: DEFAULT_MAX_AUTO_CONTINUES,
   }),
 };
 
@@ -184,6 +219,33 @@ function parseConsultationPolicy(value: unknown): ConsultationPolicyInput | unde
   });
 }
 
+function parseContinuationPolicy(value: unknown): ContinuationPolicyInput | undefined {
+  if (!isRecord(value) || Object.keys(value).some(
+    (key) => !["enabled", "agent", "capability", "maxAutoContinues", "summarizeModel"].includes(key),
+  )) {
+    return undefined;
+  }
+  if (value.enabled !== undefined && typeof value.enabled !== "boolean") return undefined;
+  // The coordinator identity and the tool name are the whole safety boundary, so neither is free text.
+  if (value.agent !== undefined && value.agent !== CONTINUATION_AGENT) return undefined;
+  if (value.capability !== undefined && value.capability !== CONTINUATION_CAPABILITY) return undefined;
+  if (
+    value.maxAutoContinues !== undefined &&
+    (!positiveInteger(value.maxAutoContinues) || value.maxAutoContinues > MAX_AUTO_CONTINUE_LIMIT)
+  ) return undefined;
+  const summarizeModel = value.summarizeModel === undefined
+    ? undefined
+    : parseModelTarget(value.summarizeModel);
+  if (value.summarizeModel !== undefined && summarizeModel === undefined) return undefined;
+  return Object.freeze({
+    ...(value.enabled === undefined ? {} : { enabled: value.enabled }),
+    ...(value.agent === undefined ? {} : { agent: value.agent }),
+    ...(value.capability === undefined ? {} : { capability: value.capability }),
+    ...(value.maxAutoContinues === undefined ? {} : { maxAutoContinues: value.maxAutoContinues }),
+    ...(summarizeModel === undefined ? {} : { summarizeModel }),
+  });
+}
+
 function parseCatalogModels(value: unknown): readonly CatalogModel[] | undefined {
   if (!Array.isArray(value)) return undefined;
   const models: CatalogModel[] = [];
@@ -248,7 +310,7 @@ function parseLayer(value: unknown): SortieDogsPluginOptions | undefined {
   if (Object.keys(value).some(
     (key) => ![
       "operationManifestPath", "handoffPaths", "readOnlyTools", "dedicatedWorkerModel",
-      "modelRouting", "modelCatalog", "consultation",
+      "modelRouting", "modelCatalog", "consultation", "continuation",
     ].includes(key),
   )) {
     return undefined;
@@ -270,6 +332,9 @@ function parseLayer(value: unknown): SortieDogsPluginOptions | undefined {
   const consultation = value.consultation === undefined
     ? undefined
     : parseConsultationPolicy(value.consultation);
+  const continuation = value.continuation === undefined
+    ? undefined
+    : parseContinuationPolicy(value.continuation);
   if (manifestPath !== undefined && (typeof manifestPath !== "string" || manifestPath.length === 0)) {
     return undefined;
   }
@@ -289,6 +354,7 @@ function parseLayer(value: unknown): SortieDogsPluginOptions | undefined {
   if (value.modelRouting !== undefined && modelRouting === undefined) return undefined;
   if (value.modelCatalog !== undefined && modelCatalog === undefined) return undefined;
   if (value.consultation !== undefined && consultation === undefined) return undefined;
+  if (value.continuation !== undefined && continuation === undefined) return undefined;
   return {
     operationManifestPath: manifestPath as string | undefined,
     handoffPaths: handoffPaths as readonly string[] | undefined,
@@ -297,6 +363,7 @@ function parseLayer(value: unknown): SortieDogsPluginOptions | undefined {
     modelRouting,
     modelCatalog,
     consultation,
+    continuation,
   };
 }
 
@@ -309,6 +376,7 @@ export function resolvePluginConfiguration(...values: readonly unknown[]): Plugi
   let modelRouting = DEFAULT_PLUGIN_OPTIONS.modelRouting;
   let modelCatalog = DEFAULT_PLUGIN_OPTIONS.modelCatalog;
   let consultation = DEFAULT_PLUGIN_OPTIONS.consultation;
+  let continuation = DEFAULT_PLUGIN_OPTIONS.continuation;
   const configuredRoles = new Set<string>();
   for (const value of values) {
     const layer = parseLayer(value);
@@ -339,6 +407,9 @@ export function resolvePluginConfiguration(...values: readonly unknown[]): Plugi
         sourceReview: Object.freeze({ ...consultation.sourceReview, ...(layer.consultation.sourceReview ?? {}) }),
       });
     }
+    if (layer.continuation !== undefined) {
+      continuation = Object.freeze({ ...continuation, ...layer.continuation });
+    }
   }
   modelRouting = {
     ...Object.fromEntries(Object.entries(modelRouting).filter(([role]) => !isFixedModelRole(role))),
@@ -368,6 +439,7 @@ export function resolvePluginConfiguration(...values: readonly unknown[]): Plugi
     modelRouting,
     modelCatalog,
     consultation,
+    continuation,
   };
 }
 

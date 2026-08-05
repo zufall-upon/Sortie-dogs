@@ -175,11 +175,17 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
         const { SortieDogsPlugin } = pluginEntry;
         // OpenCode calls every runtime export of a plugin module as a plugin factory.
         const openCodeLoad = [];
+        let packedTools = [];
+        let packedHookKeys = [];
         for (const value of new Set(Object.values(pluginEntry))) {
           if (typeof value !== 'function') { openCodeLoad.push('not-a-function'); continue; }
           try {
             const hooks = await value({ directory: process.cwd() });
             openCodeLoad.push(hooks !== null && typeof hooks === 'object' ? 'hooks' : 'not-hooks');
+            if (hooks !== null && typeof hooks === 'object') {
+              packedTools = Object.keys(hooks.tool ?? {}).sort();
+              packedHookKeys = Object.keys(hooks).filter((key) => key.startsWith('experimental.')).sort();
+            }
           } catch (error) {
             openCodeLoad.push('threw: ' + String(error && error.message));
           }
@@ -202,6 +208,8 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
           serverEntryExports: Object.keys(serverEntry),
           serverMatchesPlugin: serverEntry.SortieDogsPlugin === SortieDogsPlugin,
           openCodeLoad,
+          packedTools,
+          packedHookKeys,
           runtimeAssets,
           consultationCapabilities: root.CONSULTATION_CAPABILITIES,
           consultationRolePolicy: root.CONSULTATION_ROLE_POLICY,
@@ -244,6 +252,8 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       serverEntryExports: readonly string[];
       serverMatchesPlugin: boolean;
       openCodeLoad: readonly string[];
+      packedTools: readonly string[];
+      packedHookKeys: readonly string[];
       consultationCapabilities: readonly string[];
       consultationIdentity: Readonly<Record<string, boolean>>;
       consultationRolePolicy: Readonly<Record<string, string>>;
@@ -270,6 +280,20 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       ["hooks"],
       "every runtime export must load as an OpenCode plugin factory",
     );
+    /*
+     * The packed artifact must carry the continuation runtime, not only the coordinator text that
+     * names it. Text-only parity is exactly what let the batch loop ship inert.
+     */
+    assert.deepEqual(loaded.packedTools, [
+      "sortie_bind_write_gate",
+      "sortie_check_contract",
+      "sortie_compact_and_continue",
+    ]);
+    assert.deepEqual(loaded.packedHookKeys, [
+      "experimental.compaction.autocontinue",
+      "experimental.session.compacting",
+      "experimental.text.complete",
+    ]);
     assert.deepEqual(loaded.consultationCapabilities, ["strategy", "sourceReview"]);
     assert.deepEqual(loaded.consultationRolePolicy, {
       strategy: "dog-advisor",
@@ -612,6 +636,11 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       /compact_guard:\s*batchAttempted < batchTarget and independent next candidate exists/,
     );
     assert.match(batchContinuation[1], /compact_action:\s*after checkpoint invoke configured continuation; then same-turn stop/);
+    assert.match(
+      batchContinuation[1],
+      /blocked_unit_continuation:\s*required while batchAttempted < batchTarget and an independent next candidate exists/,
+    );
+    assert.match(batchContinuation[1], /plain_final_instead_of_continuation:\s*defect/);
     assert.match(batchContinuation[1], /early_stop:\s*only whole-batch blocker or user question/);
     assert.match(batchContinuation[1], /fourth_unit:\s*rejected/);
     assert.match(batchContinuation[1], /noncomplete_handoff:\s*exact next action required/);
@@ -629,6 +658,18 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(compactionIdentity[1], /child session -> root rejected/);
     assert.match(compactionIdentity[1], /automatic continuation disabled/);
     assert.match(compactionIdentity[1], /only when direct capability unavailable; never combine direct tool and marker/);
+    // Every literal below must match a capability the packed plugin actually registers.
+    assert.match(compactionIdentity[1], /continuation_agent:\s*dog-coordinator/);
+    assert.match(compactionIdentity[1], /direct_capability:\s*sortie_compact_and_continue/);
+    assert.match(compactionIdentity[1], /marker_literal:\s*<!-- SORTIE_CONTINUE -->/);
+    assert.match(compactionIdentity[1], /stop_marker_literal:\s*<!-- SORTIE_COMPACT -->/);
+    assert.ok(
+      loaded.packedTools.includes(
+        /direct_capability:\s*(\S+)/.exec(compactionIdentity[1])![1]!,
+      ),
+      "the packed plugin must register the capability the coordinator asset names",
+    );
+    assert.doesNotMatch(coordinator.content, /MK2A2|MKII_|MK4_|MK5_|MK6_/);
     assert.match(compactionIdentity[1], /final_unit:\s*no compaction/);
     assert.match(compactionIdentity[1], /pending_host_autocontinue:\s*no compaction/);
     assert.match(compactionIdentity[1], /same-turn stop; no tool \| Task \| analysis \| final/);
@@ -1134,7 +1175,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(sortie.content, /never route a worker to the user/i);
 
     for (const asset of loaded.runtimeAssets) {
-      assert.equal(asset.version, "0.2.0-card07");
+      assert.equal(asset.version, "0.2.0-card08");
       const frontmatter = asset.content.match(/^---\r?\n([\s\S]+?)\r?\n---\r?\n/);
       assert.ok(frontmatter, `${asset.name} must have frontmatter`);
       const entries = Object.fromEntries(

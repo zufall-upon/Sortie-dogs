@@ -23,6 +23,11 @@ import {
   resolveModelRoute,
 } from "../dist/plugin/model-routing.js";
 import { lastAssistantText } from "../dist/plugin/task-result-repair.js";
+import {
+  CONTINUATION_CAPABILITY,
+  CONTINUATION_MARKER,
+  ROLLOVER_MARKER,
+} from "../dist/plugin/continuation.js";
 import { validateManifest } from "../dist/core/validate-manifest.js";
 import {
   validateHandoffSchema,
@@ -970,6 +975,12 @@ test("runtime contract requires interactive continuation and deterministic recov
   assert.match(batch[1], /local_handoff_defect: recover in the same candidate flow; never stop or count the unit terminal/);
   assert.match(batch[1], /compact_guard: batchAttempted < batchTarget and independent next candidate exists/);
   assert.match(batch[1], /compact_action: after checkpoint invoke configured continuation; then same-turn stop/);
+  // The observed field defect was a blocked unit ending the batch at attempted 1 of 3.
+  assert.match(
+    batch[1],
+    /blocked_unit_continuation: required while batchAttempted < batchTarget and an independent next candidate exists/,
+  );
+  assert.match(batch[1], /plain_final_instead_of_continuation: defect/);
 
   const compaction = coordinator.content.match(
     /COMPACTION_IDENTITY_FIXTURE\r?\n([\s\S]+?)\r?\nEND_COMPACTION_IDENTITY_FIXTURE/,
@@ -986,10 +997,19 @@ test("runtime contract requires interactive continuation and deterministic recov
     "final_unit: no compaction",
     "pending_host_autocontinue: no compaction",
     "post_call: same-turn stop; no tool | Task | analysis | final",
+    // Abstract policy alone left the coordinator with nothing to invoke, so the route is named.
+    "continuation_agent: dog-coordinator",
+    `direct_capability: ${CONTINUATION_CAPABILITY}`,
+    `marker_literal: ${CONTINUATION_MARKER}`,
+    `stop_marker_literal: ${ROLLOVER_MARKER}`,
   ]) assert.ok(compaction[1].includes(contract), contract);
   assert.match(
     coordinator.content,
     /marker fallback\s+only when the direct capability is unavailable, never in addition to or after a direct call/i,
+  );
+  assert.match(
+    coordinator.content,
+    new RegExp(`configured continuation capability is\\s+the plugin tool ${CONTINUATION_CAPABILITY}`, "i"),
   );
 
   const drain = coordinator.content.match(
@@ -1004,6 +1024,46 @@ test("runtime contract requires interactive continuation and deterministic recov
     "pending_host_autocontinue: drain compaction rejected",
     "fallback_exclusivity: direct capability or marker fallback; never both",
   ]) assert.ok(drain[1].includes(contract), contract);
+});
+
+test("continuation configuration ships a working default and rejects an unsafe override", () => {
+  const shipped = resolvePluginConfiguration({});
+  assert.equal(shipped.kind, "configured");
+  if (shipped.kind === "configured") {
+    // Continuation must work with no configuration at all, or the loop silently never runs.
+    assert.deepEqual(shipped.continuation, {
+      enabled: true,
+      agent: "dog-coordinator",
+      capability: CONTINUATION_CAPABILITY,
+      maxAutoContinues: 3,
+    });
+  }
+
+  const tuned = resolvePluginConfiguration({
+    continuation: { maxAutoContinues: 5, summarizeModel: { model: "vendor-a/compact" } },
+    modelCatalog: { global: [{ model: "vendor-a/compact" }] },
+  });
+  assert.equal(tuned.kind, "configured");
+  if (tuned.kind === "configured") {
+    assert.equal(tuned.continuation.maxAutoContinues, 5);
+    assert.deepEqual(tuned.continuation.summarizeModel, { model: "vendor-a/compact" });
+    assert.equal(tuned.continuation.agent, "dog-coordinator");
+  }
+
+  const disabled = resolvePluginConfiguration({ continuation: { enabled: false } });
+  assert.equal(disabled.kind === "configured" && disabled.continuation.enabled, false);
+
+  // The resumed agent and the invoked capability are the safety boundary, so neither is free text.
+  for (const invalid of [
+    { continuation: { agent: "coordinator-mk2a2" } },
+    { continuation: { capability: "compact_and_continue" } },
+    { continuation: { maxAutoContinues: 0 } },
+    { continuation: { maxAutoContinues: 11 } },
+    { continuation: { maxAutoContinues: 2.5 } },
+    { continuation: { enabled: "yes" } },
+    { continuation: { summarizeModel: { model: "" } } },
+    { continuation: { unknown: true } },
+  ]) assert.deepEqual(resolvePluginConfiguration(invalid), { kind: "invalid" }, JSON.stringify(invalid));
 });
 
 assert.deepEqual([...cases.keys()], [
