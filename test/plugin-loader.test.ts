@@ -378,6 +378,10 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       reviewer.content,
       /only one bounded SourceReview request from dog-coordinator[\s\S]+after canonical\s+validation for one high-risk candidate[\s\S]+Do not request raw logs or full source\s+files[\s\S]+Return one concise PASS or concrete-finding response only to dog-coordinator/i,
     );
+    assert.match(
+      reviewer.content,
+      /supplied\s+fields as the complete bounded SourceReview artifact; use only that artifact and invoke no tools/i,
+    );
     assert.ok(reviewer.content.length >= 350, "dog-reviewer needs a substantive risk-gated role");
     assert.match(
       advisor.content,
