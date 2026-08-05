@@ -886,6 +886,45 @@ test("generated coordinator requires progress, immediate Task feedback, and deny
   ]) assert.ok(content.includes(required), required);
 });
 
+test("generated assets require the user's language, per-line output, and emoji-marked lines", () => {
+  const coordinator = runtimeAssets.find((asset) => asset.name === "dog-coordinator");
+  assert.ok(coordinator);
+  const readable = coordinator.content.match(
+    /READABLE_OUTPUT_FIXTURE\r?\n([\s\S]+?)\r?\nEND_READABLE_OUTPUT_FIXTURE/,
+  );
+  assert.ok(readable);
+  assert.match(readable[1], /^ {4}language: user's request language for all prose/m);
+  assert.match(readable[1], /^ {4}verbatim: identifiers, paths, commands, document keys/m);
+  assert.match(readable[1], /^ {4}separation: one blank line between plan, progress/m);
+  assert.match(readable[1], /^ {4}line_rule: one statement per line; run-on single-line output forbidden$/m);
+  assert.match(readable[1], /^ {4}emoji: exactly one leading emoji per user-facing line$/m);
+  for (const emoji of ["🎯", "📊", "🐕", "🔍", "➡️", "⛔", "✅"]) {
+    assert.ok(readable[1].includes(emoji), emoji);
+  }
+  // The user cannot audit a delegated exchange written in a language they did not use.
+  assert.match(
+    coordinator.content,
+    /Detect the language of the user's latest request[\s\S]+prose\s+fields of every handoff, checkpoint, and consultation payload in that same language/i,
+  );
+  assert.match(coordinator.content, /Translate the fixture labels below into that language/i);
+  const visibility = coordinator.content.match(
+    /OPERATIONAL_VISIBILITY_FIXTURE\r?\n([\s\S]+?)\r?\nEND_OPERATIONAL_VISIBILITY_FIXTURE/,
+  );
+  assert.ok(visibility);
+  assert.match(visibility[1], /^ {4}progress_line: 📊 進行中:/m);
+  assert.match(visibility[1], /^ {4}task_line_1: 🐕 所感/m);
+  assert.match(visibility[1], /^ {4}task_line_2: 🔍 根拠/m);
+  assert.match(visibility[1], /^ {4}task_line_3: ➡️ 次action/m);
+  assert.match(visibility[1], /^ {4}task_line_format: one line each, never joined into one line/m);
+
+  for (const name of ["dog-worker", "dog-scout", "dog-reviewer", "dog-advisor"]) {
+    const asset = runtimeAssets.find((candidate) => candidate.name === name);
+    assert.ok(asset, name);
+    assert.match(asset.content, /in the language the\s+(?:supplied|dispatch uses)/i, name);
+    assert.match(asset.content, /verbatim/i, name);
+  }
+});
+
 test("shipped document fixtures satisfy the schemas the write gate enforces", () => {
   const coordinator = runtimeAssets.find((asset) => asset.name === "dog-coordinator");
   const worker = runtimeAssets.find((asset) => asset.name === "dog-worker");
