@@ -1,6 +1,6 @@
 {
   "name": "sortie-dogs",
-  "version": "0.1.11",
+  "version": "0.2.0",
   "description": "Bounded, validated orchestration loop plugin for OpenCode",
   "keywords": [
     "opencode",
@@ -33,8 +33,8 @@
       "import": "./dist/index.js"
     },
     "./plugin": {
-      "types": "./dist/plugin/index.d.ts",
-      "import": "./dist/plugin/index.js"
+      "types": "./dist/plugin/opencode.d.ts",
+      "import": "./dist/plugin/opencode.js"
     },
     "./assets": {
       "types": "./dist/runtime-assets.d.ts",

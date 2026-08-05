@@ -88,6 +88,19 @@ sortie-dogs init .
 グローバルインストールだけでは対象プロジェクトは有効化されない。以下の project-local 設定と
 plugin bridge の作成も行う。
 
+runtime asset の設置だけでは plugin は読み込まれず、その場合すべての role が呼び出し元と
+同じ model で動作する。agent が動作する OpenCode 設定の `plugin` 配列へ package を追加する。
+global asset なら `~/.config/opencode/opencode.json`、project なら `.opencode/opencode.json`。
+
+```json
+{
+  "plugin": ["sortie-dogs"]
+}
+```
+
+追加後は OpenCode を再起動する。`plugin` エントリには package 名を指定する。
+`sortie-dogs/plugin` は import specifier であり plugin specifier ではない。
+
 `dog-coordinator` と `dog-scout` のデフォルト model は `openai/gpt-5.6-luna`。両 role で
 別の model を使う場合、次を `.opencode/sortie-dogs.json` に保存する。
 
@@ -107,14 +120,18 @@ plugin bridge の作成も行う。
 }
 ```
 
-`provider/model` は利用可能な model に置き換える。次に OpenCode 用ブリッジ
-`.opencode/plugins/sortie-dogs.ts` を作成する。
+`provider/model` は利用可能な model に置き換える。
+
+package を依存関係に持つ project では、`plugin` 配列の代わりに
+`.opencode/plugins/sortie-dogs.ts` から読み込むこともできる。
 
 ```ts
 export { SortieDogsPlugin } from "sortie-dogs/plugin";
 ```
 
-OpenCode が自動検出するため、`opencode.json` の `plugin` 設定は不要。OpenCode 再起動後に開始する。
+この file は OpenCode が自動検出する。export は plugin だけにする。OpenCode は plugin module の
+runtime export をすべて plugin factory として呼び出すため、余分な export が 1 つあるだけで
+module 全体が無効になる。OpenCode 再起動後に開始する。
 
 ```text
 /sortie <タスク>
@@ -165,8 +182,8 @@ coordinator session は gate 対象外。
 - `readOnlyTools`: MCP tool など、file を変更しない host 固有 tool 名を追加する。
   未知の tool は bind 済み session では既定で拒否される。
 - `dedicatedWorkerModel`: 全 worker role が解決する単一 model。既定は `openai/gpt-5.6-sol` /
-  variant `xhigh`。この model を使えない環境では自分の model を宣言する。worker role は常に
-  この単一 target に解決され、role ごとの routing はできない。
+  variant `medium`。この model を使えない環境、または別の worker effort を使いたい場合は自分の
+  model を宣言する。worker role は常にこの単一 target に解決され、role ごとの routing はできない。
 
 ## セッション lifecycle
 
@@ -177,6 +194,12 @@ coordinator session は gate 対象外。
 `session.idle` で最終 handoff を検証して session を解放し、`session.deleted` でも解放する。
 後続 request では再度有効化が必要。
 
+host 側の欠陥を 1 つだけ in-place で修復する。subagent の結果は child の最終メッセージの
+「最後の text part」から構築されるため、reasoning model が turn の末尾に空の text part を
+付けると結果が空になり、coordinator は worker が完了済みの作業を再 dispatch する。完了した
+`task` の結果が空の場合、Sortie-dogs はその child session の最後の実 assistant text を復元する。
+空でない結果、他の tool、読めない child session には触れない。
+
 ## モデルルーティング
 
 `dog-coordinator` と `dog-scout` のデフォルトは `openai/gpt-5.6-luna` の `xhigh`
@@ -184,10 +207,21 @@ variant。この構成を推奨する。境界付き prompt、簡潔な scout ev
 の削減により、品質維持に配慮しつつ token 使用量を抑えられる可能性がある。Project-local routing
 で両 role のデフォルトを上書き可能。
 
-`implementation`、`remediation`、`blocker-resolution`、`dog-advisor` は専用 Sol の
-`xhigh` に固定され、ユーザー設定では置換できない。その他の明示 route は Preferred target から順序付き fallback
-へ決定的に解決する。以下の `dog-advisor` は built-in の固定 route 表示であり、ユーザー設定では上書きできない。Built-in default も明示 route もない role は、OpenCode で選択済みの model
-を維持する。
+`implementation`、`remediation`、`blocker-resolution`、`dog-worker` は専用 worker target
+`openai/gpt-5.6-sol` の `medium` variant に固定される。worker effort は review effort より意図的に
+低い。risk の高い候補には source review が必須で、worker は返された finding を remediation する。
+つまり loop 側が弱い実装をやり直す設計なので、初回から最大 effort を払っても reviewer が供給する
+精度を先払いするだけになりやすい。先払いしたい場合は `dedicatedWorkerModel` を引き上げる。
+`modelRouting` では置換できず、移動できるのは `dedicatedWorkerModel` のみ。その他の明示
+route は Preferred target から順序付き fallback へ決定的に解決する。Built-in default も明示 route
+もない role は、OpenCode で選択済みの model を維持する。
+
+`dog-reviewer` と `dog-advisor` は呼び出し元の model を継承してはならない。候補を生成した model
+で review / strategy を実行すると独立性が失われるため。両 role は catalog に
+`anthropic/claude-opus-5` が宣言されていればそれを、なければ worker target より 1 段上の
+`openai/gpt-5.6-sol` `xhigh` を使う。`dedicatedWorkerModel` を再宣言した host では、その target が
+最初の fallback になる。shipped model 自体を提供できない host があるため。特定 vendor は必須では
+なく、両 role とも設定可能なので、実際に利用できる model を宣言すればよい。
 
 ```json
 {
@@ -198,29 +232,28 @@ variant。この構成を推奨する。境界付き prompt、簡潔な scout ev
     "dog-scout": {
       "preferred": { "model": "openai/gpt-5.6-luna", "variant": "xhigh" }
     },
+    "dog-reviewer": {
+      "preferred": { "model": "anthropic/claude-opus-5" },
+      "fallback": [{ "model": "openai/gpt-5.6-sol", "variant": "xhigh" }]
+    },
     "dog-advisor": {
       "preferred": { "model": "openai/gpt-5.6-sol", "variant": "xhigh" }
-    },
-    "dog-reviewer": {
-      "preferred": { "model": "fable/opus", "variant": "thinking" },
-      "fallback": [{ "model": "provider/general" }]
     }
   },
   "modelCatalog": {
     "project": [
-      { "model": "openai/gpt-5.6-sol", "variants": ["xhigh"] },
+      { "model": "openai/gpt-5.6-sol", "variants": ["medium", "xhigh"] },
       { "model": "openai/gpt-5.6-luna", "variants": ["xhigh"] },
-      { "model": "fable/opus", "variants": ["thinking"] },
-      { "model": "provider/general" }
+      { "model": "anthropic/claude-opus-5" }
     ]
   }
 }
 ```
 
 設定先は `.opencode/sortie-dogs.json`。`modelCatalog` には実在する provider model と named
-variant だけを宣言する。Sortie-dogs は variant を推測、probe、変換しない。Preferred、fallback
-の順で解決し、明示 route の候補が catalog に一つもなければ拒否する。advisor route は固定、
-reviewer route は任意の secondary example。
+variant だけを宣言する。Sortie-dogs は variant を推測、probe、変換しない。Built-in catalog は
+`anthropic/claude-opus-5` を意図的に含めないため、宣言して初めて推奨 consultation model が適用される。
+Preferred、fallback の順で解決し、明示 route の候補が catalog に一つもなければ拒否する。
 
 `dog-advisor` は coordinator からの限定 Strategy / SourceReview 相談専用。
 `dog-reviewer` は canonical validation 後、高リスク候補だけを独立 review する。どちらも実装、

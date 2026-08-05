@@ -1,9 +1,10 @@
 import {
   BUILT_IN_MODEL_CATALOG,
   DEFAULT_DEDICATED_WORKER_TARGET,
-  RECOMMENDED_LUNA_ROUTING,
+  RECOMMENDED_ROLE_ROUTING,
   dedicatedWorkerRouting,
   isFixedModelRole,
+  recommendedRoleRouting,
   parseModelRoutingConfig,
   parseModelTarget,
   type CatalogModel,
@@ -83,7 +84,7 @@ export const DEFAULT_PLUGIN_OPTIONS: Readonly<
   handoffPaths: ["handoff.json"],
   readOnlyTools: [],
   dedicatedWorkerModel: DEFAULT_DEDICATED_WORKER_TARGET,
-  modelRouting: RECOMMENDED_LUNA_ROUTING,
+  modelRouting: RECOMMENDED_ROLE_ROUTING,
   modelCatalog: BUILT_IN_MODEL_CATALOG,
   consultation: Object.freeze({
     strategy: Object.freeze({
@@ -308,9 +309,11 @@ export function resolvePluginConfiguration(...values: readonly unknown[]): Plugi
   let modelRouting = DEFAULT_PLUGIN_OPTIONS.modelRouting;
   let modelCatalog = DEFAULT_PLUGIN_OPTIONS.modelCatalog;
   let consultation = DEFAULT_PLUGIN_OPTIONS.consultation;
+  const configuredRoles = new Set<string>();
   for (const value of values) {
     const layer = parseLayer(value);
     if (layer === undefined) return { kind: "invalid" };
+    for (const role of Object.keys(layer.modelRouting ?? {})) configuredRoles.add(role);
     if (layer.operationManifestPath !== undefined) operationManifestPath = layer.operationManifestPath;
     if (layer.handoffPaths !== undefined) handoffPaths = layer.handoffPaths;
     for (const tool of layer.readOnlyTools ?? []) readOnlyTools.add(tool.trim().toLowerCase());
@@ -339,6 +342,9 @@ export function resolvePluginConfiguration(...values: readonly unknown[]): Plugi
   }
   modelRouting = {
     ...Object.fromEntries(Object.entries(modelRouting).filter(([role]) => !isFixedModelRole(role))),
+    // A recommended route the host never restated must track the host's dedicated target.
+    ...Object.fromEntries(Object.entries(recommendedRoleRouting(dedicatedWorkerModel))
+      .filter(([role]) => !configuredRoles.has(role))),
     ...dedicatedWorkerRouting(dedicatedWorkerModel),
   };
   // The dedicated target is authoritative for worker roles, so it is always a known catalog entry.
@@ -381,7 +387,7 @@ export function resolvePluginConfigurationSources(
     return { kind: "invalid" };
   }
   const globalModelRouting = Object.fromEntries(Object.entries({
-    ...RECOMMENDED_LUNA_ROUTING,
+    ...recommendedRoleRouting(configured.dedicatedWorkerModel),
     ...(environmentLayer.modelRouting ?? {}),
     ...(hostLayer.modelRouting ?? {}),
   }).filter(([role]) => !isFixedModelRole(role)));

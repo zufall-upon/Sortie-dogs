@@ -85,6 +85,19 @@ sortie-dogs init .
 目标项目内。仅全局安装 npm package 不会激活目标项目，还需要继续完成下面的项目级配置和
 plugin bridge。
 
+只安装 runtime asset 不会加载插件；未加载插件时，所有角色都会沿用调用方的模型。
+请把该 package 加入这些 agent 所在 OpenCode 配置的 `plugin` 数组：全局 asset 对应
+`~/.config/opencode/opencode.json`，项目对应 `.opencode/opencode.json`。
+
+```json
+{
+  "plugin": ["sortie-dogs"]
+}
+```
+
+随后重启 OpenCode。`plugin` 条目必须写 package 名称；`sortie-dogs/plugin` 是 import specifier，
+不是 plugin specifier。
+
 `dog-coordinator` 和 `dog-scout` 默认使用 `openai/gpt-5.6-luna`。如需为这两个角色改用其他模型，
 请将以下配置保存为 `.opencode/sortie-dogs.json`：
 
@@ -104,14 +117,17 @@ plugin bridge。
 }
 ```
 
-将 `provider/model` 替换为你可以使用的模型。然后创建 OpenCode 插件桥接文件
-`.opencode/plugins/sortie-dogs.ts`：
+将 `provider/model` 替换为你可以使用的模型。
+
+已把该 package 加入依赖的项目，也可以用
+`.opencode/plugins/sortie-dogs.ts` 代替 `plugin` 数组：
 
 ```ts
 export { SortieDogsPlugin } from "sortie-dogs/plugin";
 ```
 
-OpenCode 会自动发现该桥接文件，无需在 `opencode.json` 中添加 `plugin` 设置。重启 OpenCode 后运行：
+OpenCode 会自动发现该文件。请只导出插件本身：OpenCode 会把插件模块的每一个 runtime export
+都当作插件工厂调用，多出一个导出就会让整个模块失效。重启 OpenCode 后运行：
 
 ```text
 /sortie <任务>
@@ -159,7 +175,7 @@ OpenCode 会自动发现该桥接文件，无需在 `opencode.json` 中添加 `p
 - `readOnlyTools`：追加不会修改文件的宿主专用工具名，例如 MCP 工具。
   对已绑定的会话，未知工具默认被拒绝。
 - `dedicatedWorkerModel`：所有 worker 角色解析到的唯一模型。默认为 `openai/gpt-5.6-sol`
-  与变体 `xhigh`；当该模型不可用时请声明自己的模型。worker 角色始终解析到这一个目标，
+  与变体 `medium`；当该模型不可用、或你想要不同的 worker effort 时，请声明自己的模型。worker 角色始终解析到这一个目标，
   无法按角色分别路由。
 
 ## 会话生命周期
@@ -171,16 +187,30 @@ OpenCode 的标准智能体、角色、设置和其他会话均保持原样。
 发生 `session.idle` 时，插件检查最终 handoff 并释放会话；`session.deleted` 也会释放会话。
 之后的请求必须重新激活工作流。
 
+插件只就地修复一个 host 缺陷。subagent 的结果取自 child 最终消息的「最后一个 text part」，
+因此推理模型若在回合末尾附加一个空 text part，结果就会为空，coordinator 会重新派发 worker
+已经完成的工作。当已完成的 `task` 结果为空时，Sortie-dogs 会从该 child session 恢复最后一段
+真实的 assistant text。非空结果、其他 tool、无法读取的 child session 都不会被改动。
+
 ## 模型路由
 
 `dog-coordinator` 和 `dog-scout` 默认使用 `openai/gpt-5.6-luna` 的 `xhigh` variant，这是推荐的
 平衡方案：有边界的 prompt、简洁的 scout evidence，以及减少不必要的 context / tool turn，可以在
 保持质量的同时降低 token 使用量。项目级 routing 可以覆盖这两个角色的默认设置。
 
-`implementation`、`remediation`、`blocker-resolution` 和 `dog-advisor` 始终使用专用 Sol 的
-`xhigh`，用户配置不能替换这些路由。其他显式配置的路由会依次尝试 preferred target 和有序 fallback。没有 built-in
-default 或显式路由的角色会保留 OpenCode 已选择的模型。
-下面示例中的 `dog-advisor` 条目表示内置的生效路由，用户配置不能覆盖它。
+`implementation`、`remediation`、`blocker-resolution` 和 `dog-worker` 始终使用专用 worker
+target，即 `openai/gpt-5.6-sol` 的 `medium` variant。worker effort 被刻意设置在 review effort 之下：
+高风险候选必须经过 source review，worker 需要修复返回的 finding，也就是说这套循环本来就会重跑质量不足的
+实现；首轮就付出最高 effort，往往只是提前买下 reviewer 会提供的准确性。想要提前支付时，请调高
+`dedicatedWorkerModel`。`modelRouting` 不能替换这些路由，只有 `dedicatedWorkerModel` 能移动它们。其他显式配置的路由
+会依次尝试 preferred target 和有序 fallback。没有 built-in default 或显式路由的角色会保留 OpenCode
+已选择的模型。
+
+`dog-reviewer` 和 `dog-advisor` 不得继承调用方的模型：如果 review / strategy 运行在生成候选的同一个
+模型上，就失去了独立性。当 catalog 声明了 `anthropic/claude-opus-5` 时，这两个角色默认使用它；否则回退到
+比 worker target 高一档的 `openai/gpt-5.6-sol` `xhigh`。重新声明了 `dedicatedWorkerModel` 的 host，
+会把该 target 作为第一顺位 fallback，因为这类 host 可能根本无法提供内置模型。这里不强制任何厂商：
+两个角色都可配置，声明你实际可用的模型即可。
 
 ```json
 {
@@ -191,29 +221,28 @@ default 或显式路由的角色会保留 OpenCode 已选择的模型。
     "dog-scout": {
       "preferred": { "model": "openai/gpt-5.6-luna", "variant": "xhigh" }
     },
+    "dog-reviewer": {
+      "preferred": { "model": "anthropic/claude-opus-5" },
+      "fallback": [{ "model": "openai/gpt-5.6-sol", "variant": "xhigh" }]
+    },
     "dog-advisor": {
       "preferred": { "model": "openai/gpt-5.6-sol", "variant": "xhigh" }
-    },
-    "dog-reviewer": {
-      "preferred": { "model": "fable/opus", "variant": "thinking" },
-      "fallback": [{ "model": "provider/general" }]
     }
   },
   "modelCatalog": {
     "project": [
-      { "model": "openai/gpt-5.6-sol", "variants": ["xhigh"] },
+      { "model": "openai/gpt-5.6-sol", "variants": ["medium", "xhigh"] },
       { "model": "openai/gpt-5.6-luna", "variants": ["xhigh"] },
-      { "model": "fable/opus", "variants": ["thinking"] },
-      { "model": "provider/general" }
+      { "model": "anthropic/claude-opus-5" }
     ]
   }
 }
 ```
 
 将配置保存为 `.opencode/sortie-dogs.json`。`modelCatalog` 只声明实际可用的 provider model 与
-named variant；Sortie-dogs 不会猜测、探测或转换 variant。解析顺序为 preferred、随后是各个
-fallback。若显式路由的所有候选项均不在 catalog 中，该路由会被拒绝。上述 advisor / reviewer
-advisor 路由固定；reviewer 路由仍是可选的 secondary example。
+named variant；Sortie-dogs 不会猜测、探测或转换 variant。内置 catalog 有意不包含
+`anthropic/claude-opus-5`，因此只有在你声明之后，推荐的 consultation 模型才会生效。解析顺序为
+preferred、随后是各个 fallback。若显式路由的所有候选项均不在 catalog 中，该路由会被拒绝。
 
 `dog-advisor` 只接受 coordinator 发起的有限 Strategy / SourceReview 咨询。`dog-reviewer` 仅在
 canonical validation 后独立审查高风险候选项。二者都不负责实现、stage、commit 或用户交互。

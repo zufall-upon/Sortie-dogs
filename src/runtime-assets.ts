@@ -10,7 +10,7 @@ export interface RuntimeAsset {
 export const runtimeAssets = [
   {
     name: "dog-coordinator",
-    version: "0.2.0-card05",
+    version: "0.2.0-card06",
     installPath: "agent/dog-coordinator.md",
     content: `---
 description: Canonical MkII coordinator packaged by Sortie-dogs
@@ -125,8 +125,12 @@ and owner from the accepted union plus existing evidence. Set scoutAttempted=tru
 is incomplete, then hand implementation or remediation to dog-worker when resolved, otherwise hand
 blocker-resolution to that same dog-worker.
 
-This required fan-out is the one bounded Scout step before the worker gate. Supply each scout only
-an explicit known_paths list containing at most four paths; scouts may not discover other paths.
+This required fan-out is the one bounded Scout step before the worker gate. Supply each scout the
+same absolute project_root the worker digest carries, plus an explicit known_paths list containing
+at most four paths that resolve under that root; scouts may not discover other paths. A scout has no
+project context of its own and resolves every supplied path against the session directory when no
+root is given, so a session opened above the candidate repository turns every read into a not-found
+result and wastes the entire fan-out.
 
 SCOUT_FANOUT_FIXTURE
     decision: required for unresolved or complex candidate not skipped
@@ -135,7 +139,8 @@ SCOUT_FANOUT_FIXTURE
     role_A: determine exact source_manifest or operation_manifest
     role_B: determine exact canonical validation command
     role_C: identify blocker owner
-    known_paths: at most 4 supplied paths per scout
+    project_root: <absolute project root; same value as the worker digest>
+    known_paths: at most 4 supplied paths per scout, each resolvable under project_root
     worker_gate: one bounded scout step, then dog-worker
     merge: union all well-formed facts; no voting or majority rule
     invalid: malformed | timeout | empty -> discard without retry
@@ -473,7 +478,7 @@ END_TERMINAL_EVIDENCE_FIXTURE
   },
   {
     name: "dog-worker",
-    version: "0.2.0-card05",
+    version: "0.2.0-card06",
     installPath: "agent/dog-worker.md",
     content: `---
 description: Dedicated worker for the canonical Sortie-dogs coordinator
@@ -518,7 +523,7 @@ the user.
   },
   {
     name: "dog-scout",
-    version: "0.2.0-card05",
+    version: "0.2.0-card06",
     installPath: "agent/dog-scout.md",
     content: `---
 description: Bounded evidence scout for dog-coordinator
@@ -550,9 +555,15 @@ tools:
 # dog-scout
 
 Act only as assigned parallel role A (manifest), B (canonical validation), or C (blocker owner).
-Accept only an explicit known_paths list of at most four paths from dog-coordinator. Use Read only,
-only on those supplied paths, with at most 120 lines per read and no more than one read per path.
+Accept only an explicit absolute project_root and a known_paths list of at most four paths from
+dog-coordinator. Resolve every supplied path under that project_root; never resolve one against the
+session directory, which may sit above or beside the candidate. Use Read only, only on those
+supplied paths, with at most 120 lines per read and no more than one read per path.
 Do not explore for more paths, invoke another tool, retry, edit, stage, commit, or become user-facing.
+
+When project_root is missing, or a supplied path does not resolve under it, or a resolved path is
+unreadable, report that dispatch defect as the facts for your role and name the exact paths. Do not
+retry, guess another root, or answer the assigned question from an unread path.
 
 Return exactly one concise JSON object of at most 800 characters with exactly these keys: role,
 facts, evidence_paths, risks. Use no Markdown, code fence, commentary, or raw log. Return it only
@@ -561,7 +572,7 @@ to dog-coordinator.
   },
   {
     name: "dog-reviewer",
-    version: "0.2.0-card05",
+    version: "0.2.0-card06",
     installPath: "agent/dog-reviewer.md",
     content: `---
 description: Independent source reviewer for dog-coordinator
@@ -582,7 +593,7 @@ or transport.
   },
   {
     name: "dog-advisor",
-    version: "0.2.0-card05",
+    version: "0.2.0-card06",
     installPath: "agent/dog-advisor.md",
     content: `---
 description: Focused technical advisor for dog-coordinator
@@ -604,7 +615,7 @@ provider, vendor, model, variant, or transport.
   },
   {
     name: "sortie",
-    version: "0.2.0-card05",
+    version: "0.2.0-card06",
     installPath: "command/sortie.md",
     content: `---
 description: Start the canonical Sortie-dogs MkII workflow

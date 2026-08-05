@@ -30,6 +30,11 @@ import {
   createModelRoutingHook,
   type OpenCodeChatMessageHook,
 } from "./model-routing-hook.js";
+import {
+  createTaskResultRepairHook,
+  type SessionMessageReader,
+  type TaskResultRepairHook,
+} from "./task-result-repair.js";
 
 const INPUT_LIMITS = { config: 64 * 1024, manifest: 512 * 1024, handoff: 2 * 1024 * 1024 } as const;
 const INSPECTION_CACHE = { maximum: 256, ttlMilliseconds: 30 * 60 * 1000 } as const;
@@ -45,6 +50,8 @@ const TASK_ROLES = new Set(["implementation", "remediation", "blocker-resolution
 export interface OpenCodePluginInput {
   directory: string;
   worktree?: string;
+  /** The host SDK client. Absent in hosts that construct the plugin without one. */
+  client?: SessionMessageReader;
   [key: string]: unknown;
 }
 
@@ -63,6 +70,7 @@ export interface OpenCodeHooks {
     input: ToolExecuteBeforeInput,
     output: ToolExecuteBeforeOutput,
   ) => Promise<void>;
+  "tool.execute.after"?: TaskResultRepairHook;
   "chat.message"?: OpenCodeChatMessageHook;
   tool?: Record<string, OpenCodeToolDefinition>;
 }
@@ -945,17 +953,22 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       if (coordinatorOrigin) {
         releaseSessionEnforcement(chatInput.sessionID);
         await rememberCoordinatorRoot(chatInput.sessionID);
-        await ensureLoaded();
-        await loaded?.modelRoutingHook?.(chatInput, output);
-        return;
+      } else {
+        const taskText = explicitTaskText(output);
+        const inheritedRoot = taskText === undefined
+          ? undefined
+          : await inheritedTaskRoot(chatInput.sessionID, taskText);
+        if (inheritedRoot !== undefined) {
+          sessionRoots.set(chatInput.sessionID, inheritedRoot);
+          activateSession(chatInput.sessionID);
+        } else if (activatesSession(chatInput, output)) activateSession(chatInput.sessionID);
+        touchActiveSession(chatInput.sessionID);
       }
-      const taskText = explicitTaskText(output);
-      const inheritedRoot = taskText === undefined ? undefined : await inheritedTaskRoot(chatInput.sessionID, taskText);
-      if (inheritedRoot !== undefined) {
-        sessionRoots.set(chatInput.sessionID, inheritedRoot);
-        activateSession(chatInput.sessionID);
-      } else if (activatesSession(chatInput, output)) activateSession(chatInput.sessionID);
-      if (!touchActiveSession(chatInput.sessionID)) return;
+      /*
+       * Role routing is a dispatch policy, not a write-gate concern. Consultation and evidence roles
+       * never activate the write gate, so gating routing on session activation left every one of
+       * them silently inheriting the caller's model instead of its own configured route.
+       */
       await ensureLoaded();
       await loaded?.modelRoutingHook?.(chatInput, output);
     },
@@ -983,6 +996,11 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         await gate.checkPath(path);
       }
     },
+    /*
+     * Upstream builds a task result from the child's last text part, so a trailing empty text part
+     * erases an answer the worker already produced and the coordinator re-dispatches the same work.
+     */
+    "tool.execute.after": createTaskResultRepairHook(input.client),
     "tool.execute.before": async (toolInput, output): Promise<void> => {
       if (isCoordinatorSession(toolInput.sessionID)) return;
       const status = activeSessionStatus(toolInput.sessionID);

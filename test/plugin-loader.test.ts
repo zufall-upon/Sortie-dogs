@@ -165,12 +165,24 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       [
         "--input-type=module",
         "--eval",
-        `const [{ SortieDogsPlugin }, { runtimeAssets }, root, consultation] = await Promise.all([
+        `const [pluginEntry, { runtimeAssets }, root, consultation] = await Promise.all([
           import('sortie-dogs/plugin'),
           import('sortie-dogs/assets'),
           import('sortie-dogs'),
           import('./node_modules/sortie-dogs/dist/core/consultation.js'),
         ]);
+        const { SortieDogsPlugin } = pluginEntry;
+        // OpenCode calls every runtime export of a plugin module as a plugin factory.
+        const openCodeLoad = [];
+        for (const value of new Set(Object.values(pluginEntry))) {
+          if (typeof value !== 'function') { openCodeLoad.push('not-a-function'); continue; }
+          try {
+            const hooks = await value({ directory: process.cwd() });
+            openCodeLoad.push(hooks !== null && typeof hooks === 'object' ? 'hooks' : 'not-hooks');
+          } catch (error) {
+            openCodeLoad.push('threw: ' + String(error && error.message));
+          }
+        }
         const consultationValueNames = ${JSON.stringify(consultationValueNames)};
         const artifact = {
           schemaVersion: 1,
@@ -185,6 +197,8 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
         };
         process.stdout.write(JSON.stringify({
           pluginType: typeof SortieDogsPlugin,
+          pluginEntryExports: Object.keys(pluginEntry),
+          openCodeLoad,
           runtimeAssets,
           consultationCapabilities: root.CONSULTATION_CAPABILITIES,
           consultationRolePolicy: root.CONSULTATION_ROLE_POLICY,
@@ -223,6 +237,8 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     );
     const loaded = JSON.parse(stdout) as {
       pluginType: string;
+      pluginEntryExports: readonly string[];
+      openCodeLoad: readonly string[];
       consultationCapabilities: readonly string[];
       consultationIdentity: Readonly<Record<string, boolean>>;
       consultationRolePolicy: Readonly<Record<string, string>>;
@@ -237,6 +253,16 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       }>;
     };
     assert.equal(loaded.pluginType, "function");
+    assert.deepEqual(
+      loaded.pluginEntryExports,
+      ["SortieDogsPlugin"],
+      "the OpenCode entry must export the plugin factory alone",
+    );
+    assert.deepEqual(
+      loaded.openCodeLoad,
+      ["hooks"],
+      "every runtime export must load as an OpenCode plugin factory",
+    );
     assert.deepEqual(loaded.consultationCapabilities, ["strategy", "sourceReview"]);
     assert.deepEqual(loaded.consultationRolePolicy, {
       strategy: "dog-advisor",
@@ -301,6 +327,16 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(
       scout.content,
       /assigned parallel role A \(manifest\), B \(canonical validation\), or C \(blocker owner\)[\s\S]+known_paths list of at most four paths[\s\S]+Use Read only[\s\S]+at most 120 lines per read[\s\S]+no more than one read per path[\s\S]+Do not explore for more paths, invoke another tool, retry/i,
+    );
+    // A scout resolving supplied paths against the session directory wastes the whole fan-out when
+    // the session sits above the candidate repository.
+    assert.match(
+      scout.content,
+      /explicit absolute project_root[\s\S]+Resolve every supplied path under that project_root; never resolve one against the\s+session directory/i,
+    );
+    assert.match(
+      scout.content,
+      /When project_root is missing, or a supplied path does not resolve under it, or a resolved path is\s+unreadable, report that dispatch defect as the facts for your role and name the exact paths/i,
     );
     assert.match(
       scout.content,
@@ -506,7 +542,12 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(scoutFanout[1], /role_A:\s*determine exact source_manifest or operation_manifest/);
     assert.match(scoutFanout[1], /role_B:\s*determine exact canonical validation command/);
     assert.match(scoutFanout[1], /role_C:\s*identify blocker owner/);
-    assert.match(scoutFanout[1], /known_paths:\s*at most 4 supplied paths per scout/);
+    // Scouts inherit no project context, so the dispatch must carry the same root as the worker.
+    assert.match(scoutFanout[1], /project_root:\s*<absolute project root; same value as the worker digest>/);
+    assert.match(
+      scoutFanout[1],
+      /known_paths:\s*at most 4 supplied paths per scout, each resolvable under project_root/,
+    );
     assert.match(scoutFanout[1], /worker_gate:\s*one bounded scout step, then dog-worker/);
     assert.match(scoutFanout[1], /union all well-formed facts; no voting or majority rule/);
     assert.match(scoutFanout[1], /malformed \| timeout \| empty -> discard without retry/);
@@ -1074,7 +1115,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(sortie.content, /never route a worker to the user/i);
 
     for (const asset of loaded.runtimeAssets) {
-      assert.equal(asset.version, "0.2.0-card05");
+      assert.equal(asset.version, "0.2.0-card06");
       const frontmatter = asset.content.match(/^---\r?\n([\s\S]+?)\r?\n---\r?\n/);
       assert.ok(frontmatter, `${asset.name} must have frontmatter`);
       const entries = Object.fromEntries(

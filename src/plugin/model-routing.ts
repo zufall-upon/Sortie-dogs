@@ -1,3 +1,5 @@
+import { CONSULTATION_ROLE_POLICY } from "../core/consultation.js";
+
 export interface ModelTarget {
   readonly model: string;
   readonly variant?: string;
@@ -11,7 +13,12 @@ export interface RoleModelRoute {
 export type ModelRoutingConfig = Readonly<Record<string, RoleModelRoute>>;
 
 export const DEDICATED_SOL_MODEL = "openai/gpt-5.6-sol";
-export const DEDICATED_SOL_VARIANT = "xhigh";
+/**
+ * Worker reasoning effort is deliberately below the review effort. Source review is mandatory and
+ * returns findings the worker must remediate, so the loop already re-runs weak implementation work;
+ * paying top-of-range effort on the first attempt buys accuracy the reviewer would otherwise supply.
+ */
+export const DEDICATED_SOL_VARIANT = "medium";
 export const DEDICATED_SOL_ROLES = [
   "implementation",
   "remediation",
@@ -66,6 +73,77 @@ export const RECOMMENDED_LUNA_ROUTING: ModelRoutingConfig = Object.freeze(Object
   })]),
 ));
 
+/**
+ * Consultation must not inherit the caller's model. The preferred consultation model is the
+ * strongest reasoning model a host declares; it stays out of the built-in catalog so an undeclared
+ * host falls back to the dedicated target instead of an unavailable route.
+ */
+export const RECOMMENDED_CONSULTATION_MODEL = "anthropic/claude-opus-5";
+export const RECOMMENDED_CONSULTATION_ROLES = Object.freeze(
+  Object.values(CONSULTATION_ROLE_POLICY) as readonly string[],
+);
+
+/** Review and advice carry the reasoning effort the worker target intentionally does not spend. */
+export const CONSULTATION_SOL_VARIANT = "xhigh";
+
+/** The shipped consultation fallback; higher effort than the worker target on the same model. */
+export const DEFAULT_CONSULTATION_FALLBACK_TARGET: ModelTarget = Object.freeze({
+  model: DEDICATED_SOL_MODEL,
+  variant: CONSULTATION_SOL_VARIANT,
+});
+
+function frozenTarget(target: ModelTarget): ModelTarget {
+  return Object.freeze(
+    target.variant === undefined
+      ? { model: target.model }
+      : { model: target.model, variant: target.variant },
+  );
+}
+
+function sameTarget(left: ModelTarget, right: ModelTarget): boolean {
+  return left.model === right.model && left.variant === right.variant;
+}
+
+/**
+ * Consultation prefers the strongest declared reasoning model. A host that relocated the dedicated
+ * worker target keeps that target as its first fallback, because such a host may not serve the
+ * shipped model at all. Every route then ends at the shipped high-effort target, so a host on the
+ * shipped defaults reviews above worker effort instead of inheriting the reduced worker effort.
+ * Every consultation route stays configurable, so a host without the preferred model may declare any
+ * role model it can actually serve.
+ */
+export function recommendedConsultationRouting(
+  fallbackTarget: ModelTarget = DEFAULT_DEDICATED_WORKER_TARGET,
+): ModelRoutingConfig {
+  const relocated = !sameTarget(fallbackTarget, DEFAULT_DEDICATED_WORKER_TARGET) &&
+    !sameTarget(fallbackTarget, DEFAULT_CONSULTATION_FALLBACK_TARGET);
+  const fallback = Object.freeze(
+    relocated
+      ? [frozenTarget(fallbackTarget), frozenTarget(DEFAULT_CONSULTATION_FALLBACK_TARGET)]
+      : [frozenTarget(DEFAULT_CONSULTATION_FALLBACK_TARGET)],
+  );
+  return Object.freeze(Object.fromEntries(
+    RECOMMENDED_CONSULTATION_ROLES.map((role) => [role, Object.freeze({
+      preferred: Object.freeze({ model: RECOMMENDED_CONSULTATION_MODEL }),
+      fallback,
+    })]),
+  ));
+}
+
+export const RECOMMENDED_CONSULTATION_ROUTING: ModelRoutingConfig = recommendedConsultationRouting();
+
+/** Every configurable role route this build recommends before host configuration is applied. */
+export function recommendedRoleRouting(
+  fallbackTarget: ModelTarget = DEFAULT_DEDICATED_WORKER_TARGET,
+): ModelRoutingConfig {
+  return Object.freeze({
+    ...RECOMMENDED_LUNA_ROUTING,
+    ...recommendedConsultationRouting(fallbackTarget),
+  });
+}
+
+export const RECOMMENDED_ROLE_ROUTING: ModelRoutingConfig = recommendedRoleRouting();
+
 export function isDedicatedSolRole(role: string): boolean {
   return dedicatedSolRoleSet.has(role);
 }
@@ -88,7 +166,10 @@ export interface ModelCatalog {
 /** Built-in availability metadata for source-level recommendations; no provider probing required. */
 export const BUILT_IN_MODEL_CATALOG: ModelCatalog = Object.freeze({
   global: Object.freeze([
-    Object.freeze({ model: DEDICATED_SOL_MODEL, variants: Object.freeze([DEDICATED_SOL_VARIANT]) }),
+    Object.freeze({
+      model: DEDICATED_SOL_MODEL,
+      variants: Object.freeze([DEDICATED_SOL_VARIANT, CONSULTATION_SOL_VARIANT]),
+    }),
     Object.freeze({
       model: RECOMMENDED_LUNA_MODEL,
       variants: Object.freeze([RECOMMENDED_LUNA_VARIANT]),

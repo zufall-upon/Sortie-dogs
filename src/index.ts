@@ -9,6 +9,24 @@ export type {
   ProjectInitializationErrorCode,
 } from "./core/initialize.js";
 export { SortieDogsPlugin } from "./plugin/index.js";
+/*
+ * The OpenCode entry at "sortie-dogs/plugin" must export the plugin factory alone, so every other
+ * plugin runtime symbol is public here instead.
+ */
+export {
+  HandoffDeniedError,
+  InvalidModelTargetError,
+  ModelRoutingDeniedError,
+  isExplicitTaskHandoff,
+} from "./plugin/index.js";
+export type {
+  HandoffDenialReason,
+  OpenCodeEvent,
+  OpenCodeHooks,
+  OpenCodePlugin,
+  OpenCodePluginInput,
+  SortieDogsPluginOptions,
+} from "./plugin/index.js";
 export {
   CONSULTATION_CAPABILITIES,
   CONSULTATION_ROLE_POLICY,

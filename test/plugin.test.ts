@@ -13,12 +13,16 @@ import {
   resolvePluginConfigurationSources,
 } from "../dist/plugin/config.js";
 import {
+  CONSULTATION_SOL_VARIANT,
   DEDICATED_SOL_MODEL,
   DEDICATED_SOL_VARIANT,
   DEDICATED_SOL_ROLES,
+  RECOMMENDED_CONSULTATION_MODEL,
+  RECOMMENDED_CONSULTATION_ROLES,
   parseModelRoutingConfig,
   resolveModelRoute,
 } from "../dist/plugin/model-routing.js";
+import { lastAssistantText } from "../dist/plugin/task-result-repair.js";
 import {
   CONSULTATION_ROLE_POLICY,
   SOURCE_REVIEW_RISK_TAGS,
@@ -235,7 +239,7 @@ test("recommended Luna routes cover exact installed roles and remain below proje
   assert.equal(defaults.kind, "configured");
   if (defaults.kind !== "configured") return;
   assert.deepEqual(defaults.modelCatalog.global, [
-    { model: DEDICATED_SOL_MODEL, variants: [DEDICATED_SOL_VARIANT] },
+    { model: DEDICATED_SOL_MODEL, variants: [DEDICATED_SOL_VARIANT, CONSULTATION_SOL_VARIANT] },
     { model: "openai/gpt-5.6-luna", variants: ["xhigh"] },
     { model: "provider/custom" },
   ]);
@@ -278,6 +282,79 @@ test("recommended Luna routes cover exact installed roles and remain below proje
     catalog: "project",
     model: projectModel,
   });
+});
+
+test("consultation never inherits the caller model and stays host-configurable", () => {
+  assert.deepEqual([...RECOMMENDED_CONSULTATION_ROLES].sort(), ["dog-advisor", "dog-reviewer"]);
+  const resolveFor = (sources, role) => resolveModelRoute({
+    role,
+    local: sources.localModelRouting,
+    global: sources.globalModelRouting,
+    catalog: sources.modelCatalog,
+  });
+
+  // Without a declared preferred model the route still resolves, never to the Luna caller model.
+  const defaults = resolvePluginConfigurationSources(undefined, undefined, undefined);
+  assert.equal(defaults.kind, "configured");
+  if (defaults.kind !== "configured") return;
+
+  const declared = resolvePluginConfigurationSources(undefined, undefined, {
+    modelCatalog: { global: [{ model: RECOMMENDED_CONSULTATION_MODEL }] },
+  });
+  assert.equal(declared.kind, "configured");
+  if (declared.kind !== "configured") return;
+
+  // A host that redeclares the dedicated target keeps a resolvable consultation fallback.
+  const relocated = resolvePluginConfigurationSources(undefined, undefined, {
+    dedicatedWorkerModel: { model: "provider/host-worker", variant: "deep" },
+  });
+  assert.equal(relocated.kind, "configured");
+  if (relocated.kind !== "configured") return;
+
+  // Review effort must stay above the deliberately reduced worker effort on the shipped model.
+  assert.notEqual(CONSULTATION_SOL_VARIANT, DEDICATED_SOL_VARIANT);
+
+  for (const role of RECOMMENDED_CONSULTATION_ROLES) {
+    assert.deepEqual(resolveFor(defaults, role), {
+      ok: true,
+      role,
+      source: "global",
+      catalog: "global",
+      model: DEDICATED_SOL_MODEL,
+      variant: CONSULTATION_SOL_VARIANT,
+    });
+    assert.deepEqual(resolveFor(declared, role), {
+      ok: true,
+      role,
+      source: "global",
+      catalog: "global",
+      model: RECOMMENDED_CONSULTATION_MODEL,
+    });
+    assert.deepEqual(resolveFor(relocated, role), {
+      ok: true,
+      role,
+      source: "global",
+      catalog: "global",
+      model: "provider/host-worker",
+      variant: "deep",
+    });
+
+    // Any host may assign its own model to a consultation role.
+    const projectModel = `provider/project-${role}`;
+    const overridden = resolvePluginConfigurationSources({
+      modelRouting: { [role]: { preferred: { model: projectModel } } },
+      modelCatalog: { project: [{ model: projectModel }] },
+    }, undefined, undefined);
+    assert.equal(overridden.kind, "configured");
+    if (overridden.kind !== "configured") return;
+    assert.deepEqual(resolveFor(overridden, role), {
+      ok: true,
+      role,
+      source: "local",
+      catalog: "project",
+      model: projectModel,
+    });
+  }
 });
 
 test("MkII worker routes stay fixed while consultation roles remain host configurable", () => {
@@ -1065,6 +1142,18 @@ test("chat message hook applies explicit catalog routing and fails closed with o
       modelID: "gpt-5.6-luna",
       variant: "xhigh",
     });
+    for (const role of RECOMMENDED_CONSULTATION_ROLES) {
+      const consultation = {
+        message: { agent: role, model: { providerID: "openai", modelID: "gpt-5.6-luna", variant: "xhigh" } },
+        parts: [],
+      };
+      await chat({ sessionID: "routing", agent: role }, consultation);
+      assert.deepEqual(consultation.message.model, {
+        providerID: "openai",
+        modelID: "gpt-5.6-sol",
+        variant: "xhigh",
+      }, `${role} never keeps the caller model`);
+    }
     await assert.rejects(
       () => chat({ sessionID: "routing", agent: "reviewer" }, output),
       (error: unknown) => {
@@ -1080,6 +1169,149 @@ test("chat message hook applies explicit catalog routing and fails closed with o
       },
     );
   });
+});
+
+test("every packaged role is routed even when its session never activates the write gate", async () => {
+  await withProject("model-routing-inactive", async (directory) => {
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+    const hooks = await SortieDogsPlugin({ directory });
+    const chat = hooks["chat.message"];
+    assert.ok(chat);
+    const expected: Record<string, { providerID: string; modelID: string; variant?: string }> = {
+      "dog-coordinator": { providerID: "openai", modelID: "gpt-5.6-luna", variant: "xhigh" },
+      "dog-scout": { providerID: "openai", modelID: "gpt-5.6-luna", variant: "xhigh" },
+      "dog-worker": { providerID: "openai", modelID: "gpt-5.6-sol", variant: DEDICATED_SOL_VARIANT },
+      "dog-reviewer": { providerID: "openai", modelID: "gpt-5.6-sol", variant: CONSULTATION_SOL_VARIANT },
+      "dog-advisor": { providerID: "openai", modelID: "gpt-5.6-sol", variant: CONSULTATION_SOL_VARIANT },
+    };
+    for (const [role, target] of Object.entries(expected)) {
+      // A consultation or evidence session carries no /sortie trigger and no worker handoff.
+      const output = {
+        message: { agent: role, model: { providerID: "openai", modelID: "gpt-5.6-luna", variant: "xhigh" } },
+        parts: [{ type: "text", text: "Answer one bounded question." }],
+      };
+      await chat({ sessionID: `inactive-${role}`, agent: role }, output);
+      assert.deepEqual(output.message.model, target, `${role} must be routed without activation`);
+    }
+    const unrouted = {
+      message: { agent: "plan", model: { providerID: "host", modelID: "session-default" } },
+      parts: [{ type: "text", text: "unrelated" }],
+    };
+    await chat({ sessionID: "inactive-plan", agent: "plan" }, unrouted);
+    assert.deepEqual(unrouted.message.model, { providerID: "host", modelID: "session-default" });
+  });
+});
+
+test("an empty task result is repaired from the child session instead of re-dispatched", async () => {
+  await withProject("task-result-repair", async (directory) => {
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+    const requested: unknown[] = [];
+    // The exact shape the defect produced: real answer, then a trailing empty text part.
+    const child = [
+      { info: { role: "user" }, parts: [{ type: "text", text: "dispatch" }] },
+      {
+        info: { role: "assistant" },
+        parts: [
+          { type: "reasoning" },
+          { type: "text", text: "status: READY\ntask_id: PVTI-1\n" },
+          { type: "reasoning" },
+          { type: "text", text: "" },
+        ],
+      },
+    ];
+    const client = {
+      session: {
+        messages: async (request: { path: { id: string } }) => {
+          requested.push(request);
+          return { data: child };
+        },
+      },
+    };
+    const hooks = await SortieDogsPlugin({ directory, client });
+    const after = hooks["tool.execute.after"];
+    assert.ok(after);
+
+    const emptyResult = {
+      output: '<task id="ses_child" state="completed">\n<task_result>\n\n</task_result>\n</task>',
+      metadata: { sessionId: "ses_child", parentSessionId: "ses_parent" },
+    };
+    await after({ tool: "task", sessionID: "ses_parent" }, emptyResult);
+    assert.deepEqual(requested, [{ path: { id: "ses_child" } }]);
+    assert.equal(
+      emptyResult.output,
+      '<task id="ses_child" state="completed">\n<task_result>\nstatus: READY\ntask_id: PVTI-1\n</task_result>\n</task>',
+    );
+
+    // A result the host already filled in must survive byte-identical.
+    const intact = {
+      output: '<task id="ses_child" state="completed">\n<task_result>\nPONG\n</task_result>\n</task>',
+      metadata: { sessionId: "ses_child" },
+    };
+    const intactOutput = intact.output;
+    await after({ tool: "task", sessionID: "ses_parent" }, intact);
+    assert.equal(intact.output, intactOutput);
+
+    // Other tools, other output shapes, and unreadable children are never rewritten.
+    const foreign = { output: "<task_result>\n\n</task_result>", metadata: { sessionId: "ses_child" } };
+    await after({ tool: "bash", sessionID: "ses_parent" }, foreign);
+    assert.equal(foreign.output, "<task_result>\n\n</task_result>");
+
+    const silent = await SortieDogsPlugin({
+      directory,
+      client: { session: { messages: async () => { throw new Error("unreachable"); } } },
+    });
+    const failing = {
+      output: '<task id="ses_child" state="completed">\n<task_result>\n\n</task_result>\n</task>',
+      metadata: { sessionId: "ses_child" },
+    };
+    const failingOutput = failing.output;
+    await silent["tool.execute.after"]!({ tool: "task", sessionID: "ses_parent" }, failing);
+    assert.equal(failing.output, failingOutput);
+
+    // A child that produced no text at all leaves the empty result for the coordinator to handle.
+    const blank = await SortieDogsPlugin({
+      directory,
+      client: {
+        session: {
+          messages: async () => ({
+            data: [{ info: { role: "assistant" }, parts: [{ type: "reasoning" }, { type: "text", text: "  " }] }],
+          }),
+        },
+      },
+    });
+    const unrecoverable = {
+      output: '<task id="ses_child" state="completed">\n<task_result>\n\n</task_result>\n</task>',
+      metadata: { sessionId: "ses_child" },
+    };
+    const unrecoverableOutput = unrecoverable.output;
+    await blank["tool.execute.after"]!({ tool: "task", sessionID: "ses_parent" }, unrecoverable);
+    assert.equal(unrecoverable.output, unrecoverableOutput);
+  });
+});
+
+test("task result repair never substitutes an earlier turn for a silent final turn", () => {
+  // Reaching back would answer a later dispatch with an earlier answer.
+  assert.equal(
+    lastAssistantText([
+      { info: { role: "assistant" }, parts: [{ type: "text", text: "first answer" }] },
+      { info: { role: "user" }, parts: [{ type: "text", text: "second dispatch" }] },
+      { info: { role: "assistant" }, parts: [{ type: "text", text: "" }] },
+    ]),
+    undefined,
+  );
+  // A host that reports the role on the message itself resolves the same way.
+  assert.equal(
+    lastAssistantText([{ role: "assistant", parts: [{ type: "text", text: " kept " }] }]),
+    "kept",
+  );
+  // Host-injected reminders are not the child's answer.
+  assert.equal(
+    lastAssistantText([{
+      role: "assistant",
+      parts: [{ type: "text", text: "answer" }, { type: "text", text: "reminder", synthetic: true }],
+    }]),
+    "answer",
+  );
 });
 
 test("worker activation accepts the dispatch layout the shipped coordinator asset prescribes", () => {

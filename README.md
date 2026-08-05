@@ -45,6 +45,21 @@ separate: `sortie-dogs init .` still writes runtime files only into that
 project. Project-local configuration and the plugin bridge below remain
 available when a project needs its own settings or dependency.
 
+Installing the runtime assets does not load the plugin, and without the plugin
+every role runs on whichever model the caller happened to use. Add the package
+to the `plugin` array of the OpenCode configuration the agents run under —
+`~/.config/opencode/opencode.json` for the global assets, or the project's
+`.opencode/opencode.json`:
+
+```json
+{
+  "plugin": ["sortie-dogs"]
+}
+```
+
+Restart OpenCode afterwards. A `plugin` entry must name the package, not a
+subpath: `sortie-dogs/plugin` is an import specifier, not a plugin specifier.
+
 `dog-coordinator` and `dog-scout` default to `openai/gpt-5.6-luna`. To use a
 different model for both roles, save this as `.opencode/sortie-dogs.json`:
 
@@ -64,15 +79,18 @@ different model for both roles, save this as `.opencode/sortie-dogs.json`:
 }
 ```
 
-Replace `provider/model` with a model available to you. Then create
-`.opencode/plugins/sortie-dogs.ts` as the OpenCode plugin bridge:
+Replace `provider/model` with a model available to you.
+
+A project that depends on the package can load it from
+`.opencode/plugins/sortie-dogs.ts` instead of the `plugin` array:
 
 ```ts
 export { SortieDogsPlugin } from "sortie-dogs/plugin";
 ```
 
-OpenCode discovers the bridge automatically; no `plugin` entry in
-`opencode.json` is required. Restart OpenCode, then start a task:
+OpenCode discovers that file automatically. Export the plugin and nothing else:
+OpenCode calls every runtime export of a plugin module as a plugin factory, so
+one extra export disables the whole module. Restart OpenCode, then start a task:
 
 ```text
 /sortie <task>
@@ -125,9 +143,9 @@ Optional settings in `.opencode/sortie-dogs.json`:
 - `readOnlyTools` adds host-specific tool names that never change files, such as
   MCP tools. Unknown tools are denied for a bound session by default.
 - `dedicatedWorkerModel` selects the single model every worker role resolves to.
-  It defaults to `openai/gpt-5.6-sol` with variant `xhigh`; declare your own when
-  that model is unavailable. Worker roles always resolve to this one target and
-  cannot be routed per role.
+  It defaults to `openai/gpt-5.6-sol` with variant `medium`; declare your own when
+  that model is unavailable or when you want a different worker effort. Worker
+  roles always resolve to this one target and cannot be routed per role.
 
 ## Why Sortie-dogs
 
@@ -205,6 +223,14 @@ On `session.idle`, the final handoff is checked and the session is released. A
 `session.deleted` event also releases it. A later request must activate the
 workflow again.
 
+One host defect is repaired in place. A subagent result is built from the last
+text part of the child's final message, so a reasoning model that closes its
+turn with an empty text part returns an empty result and the coordinator
+re-dispatches work the worker already finished. When a completed `task` result
+is empty, Sortie-dogs restores the last real assistant text from that child
+session. Non-empty results, other tools, and unreadable child sessions are left
+untouched.
+
 ## Model routing
 
 `dog-coordinator` and `dog-scout` default to `openai/gpt-5.6-luna` with the
@@ -213,11 +239,27 @@ scout evidence, and fewer unnecessary context or tool turns can reduce token
 use while preserving quality. Project-local routing can override either
 default.
 
-The `implementation`, `remediation`, `blocker-resolution`, and `dog-advisor`
-roles always use dedicated Sol `xhigh`; user configuration cannot replace those
-routes. For other explicitly routed roles, resolution is deterministic: Sortie-dogs tries
-the preferred target, then ordered fallbacks. Roles without either a built-in
-default or an explicit route keep OpenCode's already selected model.
+The `implementation`, `remediation`, `blocker-resolution`, and `dog-worker`
+roles always use the dedicated worker target, `openai/gpt-5.6-sol` with the
+`medium` variant. Worker effort is deliberately below review effort: source
+review is mandatory for risky candidates and returns findings the worker must
+remediate, so the loop already re-runs weak implementation work and top-of-range
+first-attempt effort mostly buys accuracy the reviewer supplies anyway. Raise
+`dedicatedWorkerModel` when you would rather pay for it up front. `modelRouting`
+cannot replace those routes, and only `dedicatedWorkerModel` moves them. For other explicitly
+routed roles, resolution is deterministic: Sortie-dogs tries the preferred
+target, then ordered fallbacks. Roles without either a built-in default or an
+explicit route keep OpenCode's already selected model.
+
+`dog-reviewer` and `dog-advisor` must never inherit the caller's model, because
+review and strategy lose their value when they run on the model that produced
+the candidate. Both default to `anthropic/claude-opus-5` when the catalog
+declares it, and otherwise fall back to `openai/gpt-5.6-sol` with the `xhigh`
+variant, one effort step above the worker target. A host that redeclares
+`dedicatedWorkerModel` keeps that target as its first fallback, since such a
+host may not serve the shipped model at all. Nothing here requires a particular
+vendor: both roles stay fully configurable, so declare whichever model you can
+actually serve.
 
 ```json
 {
@@ -228,33 +270,31 @@ default or an explicit route keep OpenCode's already selected model.
     "dog-scout": {
       "preferred": { "model": "openai/gpt-5.6-luna", "variant": "xhigh" }
     },
+    "dog-reviewer": {
+      "preferred": { "model": "anthropic/claude-opus-5" },
+      "fallback": [{ "model": "openai/gpt-5.6-sol", "variant": "xhigh" }]
+    },
     "dog-advisor": {
       "preferred": { "model": "openai/gpt-5.6-sol", "variant": "xhigh" }
-    },
-    "dog-reviewer": {
-      "preferred": { "model": "fable/opus", "variant": "thinking" },
-      "fallback": [{ "model": "provider/general" }]
     }
   },
   "modelCatalog": {
     "project": [
-      { "model": "openai/gpt-5.6-sol", "variants": ["xhigh"] },
+      { "model": "openai/gpt-5.6-sol", "variants": ["medium", "xhigh"] },
       { "model": "openai/gpt-5.6-luna", "variants": ["xhigh"] },
-      { "model": "fable/opus", "variants": ["thinking"] },
-      { "model": "provider/general" }
+      { "model": "anthropic/claude-opus-5" }
     ]
   }
 }
 ```
 
-Save project configuration as `.opencode/sortie-dogs.json`. The `dog-advisor`
-entry above shows the built-in effective route and is not user-overridable.
-`modelCatalog`
+Save project configuration as `.opencode/sortie-dogs.json`. `modelCatalog`
 declares provider models and named variants that are actually available;
-Sortie-dogs does not invent, probe, or translate variants. Resolution tries the
-preferred target and then its fallbacks, rejecting an explicitly routed role
-when no candidate appears in the catalog. The advisor route is authoritative; the
-reviewer route remains an optional secondary example.
+Sortie-dogs does not invent, probe, or translate variants. The built-in catalog
+intentionally omits `anthropic/claude-opus-5`, so the preferred consultation
+model applies only after you declare it. Resolution tries the preferred target
+and then its fallbacks, rejecting an explicitly routed role when no candidate
+appears in the catalog.
 
 `dog-advisor` accepts bounded Strategy or SourceReview consultation from the
 coordinator. `dog-reviewer` independently checks high-risk candidates after
