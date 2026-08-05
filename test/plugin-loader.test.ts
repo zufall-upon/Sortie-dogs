@@ -165,8 +165,9 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       [
         "--input-type=module",
         "--eval",
-        `const [pluginEntry, { runtimeAssets }, root, consultation] = await Promise.all([
+        `const [pluginEntry, serverEntry, { runtimeAssets }, root, consultation] = await Promise.all([
           import('sortie-dogs/plugin'),
+          import('sortie-dogs/server'),
           import('sortie-dogs/assets'),
           import('sortie-dogs'),
           import('./node_modules/sortie-dogs/dist/core/consultation.js'),
@@ -198,6 +199,8 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
         process.stdout.write(JSON.stringify({
           pluginType: typeof SortieDogsPlugin,
           pluginEntryExports: Object.keys(pluginEntry),
+          serverEntryExports: Object.keys(serverEntry),
+          serverMatchesPlugin: serverEntry.SortieDogsPlugin === SortieDogsPlugin,
           openCodeLoad,
           runtimeAssets,
           consultationCapabilities: root.CONSULTATION_CAPABILITIES,
@@ -238,6 +241,8 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     const loaded = JSON.parse(stdout) as {
       pluginType: string;
       pluginEntryExports: readonly string[];
+      serverEntryExports: readonly string[];
+      serverMatchesPlugin: boolean;
       openCodeLoad: readonly string[];
       consultationCapabilities: readonly string[];
       consultationIdentity: Readonly<Record<string, boolean>>;
@@ -258,6 +263,8 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       ["SortieDogsPlugin"],
       "the OpenCode entry must export the plugin factory alone",
     );
+    assert.deepEqual(loaded.serverEntryExports, ["SortieDogsPlugin"]);
+    assert.equal(loaded.serverMatchesPlugin, true, "OpenCode package resolution must reach the plugin factory");
     assert.deepEqual(
       loaded.openCodeLoad,
       ["hooks"],
@@ -386,6 +393,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(initialHandoff[1], /task_id:/);
     assert.match(initialHandoff[1], /context_digest:/);
     assert.match(initialHandoff[1], /project_root:/);
+    assert.match(initialHandoff[1], /handoff_path:\s*<absolute registered candidate handoff; operational work only>/);
     assert.match(initialHandoff[1], /acceptance:/);
     assert.match(initialHandoff[1], /role:\s*implementation/);
     assert.match(initialHandoff[1], /validation:\s*\{\s*level:\s*full,\s*command:/);
@@ -548,6 +556,10 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       scoutFanout[1],
       /known_paths:\s*at most 4 supplied paths per scout, each resolvable under project_root/,
     );
+    assert.match(
+      scoutFanout[1],
+      /predispatch_guard:\s*count known_paths per scout; over 4 -> reduce before Task, never dispatch malformed/,
+    );
     assert.match(scoutFanout[1], /worker_gate:\s*one bounded scout step, then dog-worker/);
     assert.match(scoutFanout[1], /union all well-formed facts; no voting or majority rule/);
     assert.match(scoutFanout[1], /malformed \| timeout \| empty -> discard without retry/);
@@ -691,6 +703,8 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       /ext\["sortie-dogs\/write-gate"\] = \{ operation_manifest: <candidate-root-relative-path>, project_root: <candidate-root-absolute-path> \}/,
     );
     assert.match(writeGateHandoff[1], /timing:\s*bind before mutation/);
+    assert.match(writeGateHandoff[1], /creation:\s*valid registered handoff exists before Task dispatch/);
+    assert.match(writeGateHandoff[1], /handoff_path:\s*exact absolute candidate handoff path included in worker digest/);
     assert.match(writeGateHandoff[1], /authorization:\s*current session \+ current candidate only/);
     assert.match(writeGateHandoff[1], /parent workspace \+ child repo -> project_root is child candidate absolute path/);
     assert.match(writeGateHandoff[1], /old candidate manifest or authorization rejected/);
@@ -736,6 +750,11 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     );
     assert.ok(recoverableHandshake, "coordinator needs recoverable denial provenance");
     assert.match(recoverableHandshake[1], /structured denial unchanged \+ bounded candidate provenance/);
+    assert.match(
+      recoverableHandshake[1],
+      /operation manifest \+ valid registered handoff -> Task child activation -> built-in Read exact handoff_path -> bind in same turn/,
+    );
+    assert.match(recoverableHandshake[1], /second unchanged denial -> retry-exhausted and checkpoint/);
     assert.match(
       recoverableHandshake[1],
       /provenance:\s*\{ task_id: <stable task id>, manifest: \{ source_manifest: <exact entries or none>, operation_manifest: <exact path or none> \}, validation: \[\{ command: <exact command>, exit: <exit>, fingerprint: <concise fingerprint> \}\] \| \[\], scout: \{ attempted: <boolean>, revision: <revision>, blocker_owner: <owner>, reason: <exact decision reason> \} \}/,
@@ -1115,7 +1134,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(sortie.content, /never route a worker to the user/i);
 
     for (const asset of loaded.runtimeAssets) {
-      assert.equal(asset.version, "0.2.0-card06");
+      assert.equal(asset.version, "0.2.0-card07");
       const frontmatter = asset.content.match(/^---\r?\n([\s\S]+?)\r?\n---\r?\n/);
       assert.ok(frontmatter, `${asset.name} must have frontmatter`);
       const entries = Object.fromEntries(

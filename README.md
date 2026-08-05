@@ -125,6 +125,18 @@ that file is how a project opts in, so the coordinator can always create it.
 `sortie_bind_write_gate`, and only after the coordinator's handoff has been
 inspected. Coordinator sessions are never gated.
 
+Both documents are schema-checked before inspection and binding, and every object
+rejects unknown properties. A rejection always names the failing document, the
+exact JSON pointer, and the failing rule, for example
+`Defects: handoff /state/blocked/0 schema_type`, so the coordinator repairs that
+pointer instead of resending an unchanged document. Check a handoff before
+dispatch with the read-only `sortie_check_contract` tool, which reports the same
+defects without inspecting or binding, or with `sortie-dogs lint <handoff.json>
+--manifest <operation-manifest.json>`. The two most common defects are a
+`state.blocked` list of strings instead of `{ reason, needed }` objects, and an
+operation manifest that declares anything other than `version`, `task_id`,
+`read`, `write`, and `validation`.
+
 Optional settings in `.opencode/sortie-dogs.json`:
 
 ```json
@@ -139,7 +151,11 @@ Optional settings in `.opencode/sortie-dogs.json`:
 - `operationManifestPath` moves the manifest; the path is project-relative.
 - `handoffPaths` lists the handoff files the plugin inspects. A worker can only
   bind after one of these files passes inspection, so an empty list disables
-  binding entirely.
+  binding entirely. Relative entries are also candidate-relative in a nested
+  repository: a child candidate may use its own `handoff.json` while OpenCode is
+  opened at the parent workspace. For operational work the coordinator creates
+  that valid handoff before dispatch and sends its exact absolute path; the
+  binding child must use the built-in Read tool on it immediately before bind.
 - `readOnlyTools` adds host-specific tool names that never change files, such as
   MCP tools. Unknown tools are denied for a bound session by default.
 - `dedicatedWorkerModel` selects the single model every worker role resolves to.

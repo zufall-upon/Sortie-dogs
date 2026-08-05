@@ -165,6 +165,16 @@ plugin は passive でありツール呼び出しを一切拒否しない。こ�
 `sortie_bind_write_gate` で bind し、bind は coordinator の handoff 検査後にのみ成立する。
 coordinator session は gate 対象外。
 
+handoff と operation manifest は inspection と bind の前に schema 検査され、どの object も
+未知 property を拒否する。拒否時は必ず失敗した document、正確な JSON pointer、違反した規則を
+返す。例: `Defects: handoff /state/blocked/0 schema_type`。coordinator は同じ document を
+再送せず、その pointer を修復する。dispatch 前の確認には read-only の `sortie_check_contract`
+tool を使う。inspection も bind も行わずに同じ defect を報告する。
+`sortie-dogs lint <handoff.json> --manifest <operation-manifest.json>` でも同じ結果を得られる。
+頻出 defect は 2 つ。`state.blocked` を `{ reason, needed }` object ではなく string 配列に
+した場合と、operation manifest に `version` / `task_id` / `read` / `write` / `validation`
+以外の property を宣言した場合。
+
 `.opencode/sortie-dogs.json` の任意設定:
 
 ```json
@@ -178,7 +188,9 @@ coordinator session は gate 対象外。
 
 - `operationManifestPath`: manifest の位置。project 相対。
 - `handoffPaths`: plugin が検査する handoff file。worker はこの検査を通過して初めて bind できる。
-  空配列にすると bind 自体が成立しない。
+  空配列にすると bind 自体が成立しない。相対 entry は親 workspace 配下の nested repo でも
+  candidate 相対として扱う。operational work では coordinator が dispatch 前に有効な handoff を
+  作成して絶対 path を渡し、bind する child 自身が直前に built-in Read で読む。
 - `readOnlyTools`: MCP tool など、file を変更しない host 固有 tool 名を追加する。
   未知の tool は bind 済み session では既定で拒否される。
 - `dedicatedWorkerModel`: 全 worker role が解決する単一 model。既定は `openai/gpt-5.6-sol` /

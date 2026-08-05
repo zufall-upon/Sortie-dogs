@@ -1,12 +1,16 @@
 import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
-import { isAbsolute, resolve } from "node:path";
+import { isAbsolute, resolve, sep } from "node:path";
 
 import { RUNTIME_ASSET_VERSION } from "../asset-version.js";
-import { RelativePathError } from "../core/path.js";
-import type { OperationManifest } from "../core/types.js";
+import { normalizeRelativePath, RelativePathError } from "../core/path.js";
+import type { ManifestDiagnostic, OperationManifest, SchemaDiagnostic } from "../core/types.js";
 import { validateManifest } from "../core/validate-manifest.js";
-import { validateHandoffSchema, validateOperationManifestSchema } from "../core/validate-schema.js";
+import {
+  safeSchemaPointer,
+  validateHandoffSchema,
+  validateOperationManifestSchema,
+} from "../core/validate-schema.js";
 import {
   resolvePluginConfigurationSources,
   type ConfiguredPluginSources,
@@ -33,7 +37,6 @@ import {
 import {
   createTaskResultRepairHook,
   type SessionMessageReader,
-  type TaskResultRepairHook,
 } from "./task-result-repair.js";
 
 const INPUT_LIMITS = { config: 64 * 1024, manifest: 512 * 1024, handoff: 2 * 1024 * 1024 } as const;
@@ -70,7 +73,10 @@ export interface OpenCodeHooks {
     input: ToolExecuteBeforeInput,
     output: ToolExecuteBeforeOutput,
   ) => Promise<void>;
-  "tool.execute.after"?: TaskResultRepairHook;
+  "tool.execute.after"?: (
+    input: TaskToolExecuteAfterInput,
+    output: TaskResultRepairOutput,
+  ) => Promise<void>;
   "chat.message"?: OpenCodeChatMessageHook;
   tool?: Record<string, OpenCodeToolDefinition>;
 }
@@ -87,13 +93,69 @@ export type HandoffDenialReason =
   | "schema-invalid"
   | "contract-invalid";
 
+/**
+ * A denial the author cannot diagnose is a denial the author repeats, so every contract rejection
+ * reports which document failed, which JSON pointer failed, and which rule failed. Defect evidence
+ * is deliberately limited to that structural triple: no file content ever reaches an agent report.
+ */
+type ContractDocument = "handoff" | "manifest" | "contract";
+
+const CONTRACT_DEFECTS = { limit: 8, pointerCharacters: 120 } as const;
+
+function contractPointer(pointer: string): string {
+  const bounded = pointer.slice(0, CONTRACT_DEFECTS.pointerCharacters);
+  const neutralized = bounded.replaceAll(/[^A-Za-z0-9@~/._-]/gu, "?");
+  return neutralized.length === 0 ? "/" : neutralized;
+}
+
+function contractDefect(document: ContractDocument, pointer: string, code: string): string {
+  return `${document} ${contractPointer(pointer)} ${code}`;
+}
+
+function schemaDefects(
+  document: ContractDocument,
+  diagnostics: readonly SchemaDiagnostic[],
+): string[] {
+  return diagnostics.map((diagnostic) =>
+    contractDefect(document, safeSchemaPointer(diagnostic), diagnostic.code)
+  );
+}
+
+function contractDefects(diagnostics: readonly ManifestDiagnostic[]): string[] {
+  return diagnostics
+    .filter(({ severity }) => severity === "error")
+    .map((diagnostic) => contractDefect("contract", diagnostic.pointer, diagnostic.code));
+}
+
+function normalizeDefects(defects: readonly string[] | undefined): readonly string[] {
+  return [...new Set(defects ?? [])];
+}
+
+function describeDefects(defects: readonly string[]): string {
+  const shown = defects.slice(0, CONTRACT_DEFECTS.limit);
+  const remainder = defects.length - shown.length;
+  return `${shown.join("; ")}${remainder > 0 ? `; +${remainder} more` : ""}`;
+}
+
 export class HandoffDeniedError extends Error {
   readonly reason: HandoffDenialReason;
+  readonly defects: readonly string[];
 
-  constructor(reason: HandoffDenialReason, path: string, options?: ErrorOptions) {
-    super(`Handoff denied for "${safePath(path)}": handoff and operation manifest contract.`, options);
+  constructor(
+    reason: HandoffDenialReason,
+    path: string,
+    options?: ErrorOptions & { defects?: readonly string[] },
+  ) {
+    const defects = normalizeDefects(options?.defects);
+    super(
+      `Handoff denied for "${safePath(path)}": handoff and operation manifest contract.` +
+        (defects.length === 0 ? "" : ` Defects: ${describeDefects(defects)}.`) +
+        " Correct the registered handoff or its operation manifest, then read the handoff again.",
+      options,
+    );
     this.name = "HandoffDeniedError";
     this.reason = reason;
+    this.defects = defects;
   }
 }
 
@@ -107,6 +169,64 @@ class PluginInputError extends Error {
   }
 }
 
+const WRITE_GATE_EXTENSION_POINTER = "/ext/sortie-dogs~1write-gate";
+
+interface WriteGateExtension {
+  readonly operation_manifest: string;
+  readonly project_root: string;
+}
+
+function defectCode(prefix: string, reason: string): string {
+  return `${prefix}_${reason.replaceAll("-", "_")}`;
+}
+
+function writeGateExtensionDefects(value: unknown): string[] {
+  if (!isRecord(value)) {
+    return [contractDefect("handoff", WRITE_GATE_EXTENSION_POINTER, "ext_not_an_object")];
+  }
+  const defects: string[] = [];
+  if (Object.keys(value).some((key) => key !== "operation_manifest" && key !== "project_root")) {
+    defects.push(
+      contractDefect("handoff", `${WRITE_GATE_EXTENSION_POINTER}/@unknown`, "ext_property_unknown"),
+    );
+  }
+  const manifestPointer = `${WRITE_GATE_EXTENSION_POINTER}/operation_manifest`;
+  if (typeof value.operation_manifest !== "string" || value.operation_manifest.length === 0) {
+    defects.push(contractDefect("handoff", manifestPointer, "ext_operation_manifest_missing"));
+  } else if (isAbsolute(value.operation_manifest)) {
+    defects.push(contractDefect("handoff", manifestPointer, "ext_operation_manifest_not_relative"));
+  }
+  const rootPointer = `${WRITE_GATE_EXTENSION_POINTER}/project_root`;
+  if (typeof value.project_root !== "string") {
+    defects.push(contractDefect("handoff", rootPointer, "ext_project_root_missing"));
+  } else if (!isAbsolute(value.project_root)) {
+    defects.push(contractDefect("handoff", rootPointer, "ext_project_root_not_absolute"));
+  }
+  return defects;
+}
+
+function isWriteGateExtension(value: unknown): value is WriteGateExtension {
+  return writeGateExtensionDefects(value).length === 0;
+}
+
+/** Map a resolution failure to the contract rule the author can act on, never to a raw path. */
+function extensionFailureDefect(error: unknown): string {
+  if (error instanceof PluginInputError) {
+    return contractDefect("manifest", "/", defectCode("input", error.reason));
+  }
+  if (error instanceof RelativePathError) {
+    return contractDefect(
+      "handoff",
+      `${WRITE_GATE_EXTENSION_POINTER}/operation_manifest`,
+      "ext_operation_manifest_not_relative",
+    );
+  }
+  if (error instanceof WriteDeniedError) {
+    return contractDefect("handoff", WRITE_GATE_EXTENSION_POINTER, defectCode("ext", error.reason));
+  }
+  return contractDefect("handoff", WRITE_GATE_EXTENSION_POINTER, "ext_unresolved");
+}
+
 interface LoadedConfiguration {
   gate?: WriteGate;
   manifest?: OperationManifest;
@@ -114,8 +234,22 @@ interface LoadedConfiguration {
   operationManifestAbsolutePath?: string;
   manifestFingerprint?: string;
   handoffPaths: readonly string[];
+  handoffRelativePaths: readonly string[];
   readOnlyTools: ReadonlySet<string>;
   modelRoutingHook?: OpenCodeChatMessageHook;
+}
+
+interface TaskToolExecuteAfterInput {
+  readonly tool: string;
+  readonly sessionID?: string;
+  readonly callID?: string;
+  readonly args?: unknown;
+}
+
+interface TaskResultRepairOutput {
+  output?: unknown;
+  metadata?: unknown;
+  [key: string]: unknown;
 }
 
 interface InspectionCacheEntry {
@@ -131,6 +265,16 @@ interface InspectionCacheEntry {
 interface SessionAuthorization {
   gate: WriteGate;
   expiresAt: number;
+  handoffPath: string;
+  manifestHash: string;
+  manifestMtimeMs: number;
+  manifestPath: string;
+  projectRoot: string;
+  rootSessionID: string;
+  suspended: boolean;
+}
+
+interface BindingPin {
   manifestHash: string;
   manifestMtimeMs: number;
   manifestPath: string;
@@ -252,6 +396,13 @@ function loadConfigured(
   handoffBase: string,
 ): LoadedConfiguration {
   const handoffPaths = config.handoffPaths.map((path) => resolve(handoffBase, path));
+  const handoffRelativePaths = config.handoffPaths.flatMap((path) => {
+    try {
+      return [normalizeRelativePath(path)];
+    } catch {
+      return [];
+    }
+  });
   const hasModelRouting = Object.keys(config.localModelRouting).length > 0 ||
     Object.keys(config.globalModelRouting).length > 0;
   const modelRoutingHook = hasModelRouting
@@ -265,9 +416,30 @@ function loadConfigured(
   return {
     operationManifestPath: config.operationManifestPath,
     handoffPaths,
+    handoffRelativePaths,
     readOnlyTools: new Set(config.readOnlyTools.map((tool) => tool.toLowerCase())),
     modelRoutingHook,
   };
+}
+
+function samePath(left: string, right: string): boolean {
+  return process.platform === "win32"
+    ? resolve(left).toLowerCase() === resolve(right).toLowerCase()
+    : resolve(left) === resolve(right);
+}
+
+function sameRelativePath(left: string, right: string): boolean {
+  const normalize = (value: string) => value.replaceAll("\\", "/");
+  return process.platform === "win32"
+    ? normalize(left).toLowerCase() === normalize(right).toLowerCase()
+    : normalize(left) === normalize(right);
+}
+
+function hasRelativePathSuffix(path: string, relativePath: string): boolean {
+  const platformPath = relativePath.replaceAll("/", sep);
+  const candidate = process.platform === "win32" ? resolve(path).toLowerCase() : resolve(path);
+  const suffix = process.platform === "win32" ? platformPath.toLowerCase() : platformPath;
+  return candidate === suffix || candidate.endsWith(`${sep}${suffix}`);
 }
 
 function textPart(part: unknown): string | undefined {
@@ -480,13 +652,89 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
 
   const inspected = new Map<string, InspectionCacheEntry>();
   const sessionAuthorizations = new Map<string, SessionAuthorization>();
+  const bindingPins = new Map<string, BindingPin>();
   const activeSessions = new Map<string, ActiveSessionState>();
   const coordinatorRoots = new Map<string, CoordinatorRootLineage>();
+  const bindingDenials = new Map<
+    string,
+    Map<string, Map<string, string>>
+  >();
   const expiredSessions = new Set<string>();
   const sessionParents = new Map<string, string>();
   const sessionRoots = new Map<string, string>();
 
-  async function inspect(path: string, sessionID: string | undefined): Promise<void> {
+  function hasSessionEnforcementState(sessionID: string): boolean {
+    return sessionAuthorizations.has(sessionID) || bindingPins.has(sessionID);
+  }
+
+  function bindingCandidateKey(projectRoot: string, manifestPath: string): string {
+    return `${projectRoot}\u0000${manifestPath}`;
+  }
+
+  function recordBindingDenial(
+    sessionID: string,
+    projectRoot: string,
+    manifestPath: string,
+    signature: string,
+  ): boolean {
+    const rootSessionID = inspectionRoot(sessionID, Date.now()) ?? sessionID;
+    const candidateKey = bindingCandidateKey(projectRoot, manifestPath);
+    const rootDenials = bindingDenials.get(rootSessionID) ?? new Map<string, Map<string, string>>();
+    const candidateDenials = rootDenials.get(candidateKey) ?? new Map<string, string>();
+    const repeated = candidateDenials.has(signature);
+    if (!repeated) candidateDenials.set(signature, sessionID);
+    while (candidateDenials.size > SESSION_DENIAL_LIMIT) {
+      candidateDenials.delete(candidateDenials.keys().next().value!);
+    }
+    rootDenials.delete(candidateKey);
+    rootDenials.set(candidateKey, candidateDenials);
+    while (rootDenials.size > SESSION_DENIAL_LIMIT) rootDenials.delete(rootDenials.keys().next().value!);
+    bindingDenials.delete(rootSessionID);
+    bindingDenials.set(rootSessionID, rootDenials);
+    while (bindingDenials.size > ACTIVE_SESSION_CACHE.maximum) {
+      bindingDenials.delete(bindingDenials.keys().next().value!);
+    }
+    return repeated;
+  }
+
+  function clearBindingDenial(
+    rootSessionID: string,
+    projectRoot: string,
+    manifestPath: string,
+    ownerSessionID?: string,
+  ): void {
+    const rootDenials = bindingDenials.get(rootSessionID);
+    if (rootDenials === undefined) return;
+    const candidateKey = bindingCandidateKey(projectRoot, manifestPath);
+    const candidateDenials = rootDenials.get(candidateKey);
+    if (candidateDenials === undefined) return;
+    if (ownerSessionID === undefined) {
+      rootDenials.delete(candidateKey);
+    } else {
+      for (const [signature, owner] of candidateDenials) {
+        if (owner === ownerSessionID) candidateDenials.delete(signature);
+      }
+      if (candidateDenials.size === 0) rootDenials.delete(candidateKey);
+    }
+    if (rootDenials.size === 0) bindingDenials.delete(rootSessionID);
+  }
+
+  /**
+   * Preflight reporting reuses this exact evaluation instead of a parallel implementation, so a
+   * document that passes the check cannot fail the gate. It never inspects, binds, or caches: an
+   * absent sessionID returns before any state is written.
+   */
+  async function inspect(
+    path: string,
+    sessionID: string | undefined,
+    options: { readonly report?: boolean } = {},
+  ): Promise<void> {
+    const unregistered = (code: string): void => {
+      if (!options.report) return;
+      throw new HandoffDeniedError("path-invalid", path, {
+        defects: [contractDefect("handoff", "/", code)],
+      });
+    };
     await ensureLoaded();
     if (loaded === undefined || project === undefined) {
       throw new HandoffDeniedError("configuration-unavailable", path, { cause: loadFailure });
@@ -494,7 +742,14 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const absolutePath = isAbsolute(path)
       ? resolve(path)
       : resolve(input.worktree ?? project.root, path);
-    if (!loaded.handoffPaths.includes(absolutePath)) return;
+    const exactRegisteredPath = loaded.handoffPaths.some((candidate) => samePath(candidate, absolutePath));
+    const candidateRelativePath = loaded.handoffRelativePaths.find((candidate) =>
+      hasRelativePathSuffix(absolutePath, candidate)
+    );
+    if (!exactRegisteredPath && candidateRelativePath === undefined) {
+      unregistered("handoff_path_not_registered");
+      return;
+    }
     const key = sessionID === undefined ? undefined : `${sessionID}\u0000${absolutePath}`;
     if (key !== undefined) inspected.delete(key);
     let value: unknown;
@@ -502,12 +757,19 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       value = await readJson(absolutePath, INPUT_LIMITS.handoff);
     } catch (error) {
       if (error instanceof PluginInputError) {
-        throw new HandoffDeniedError("input-unavailable", path, { cause: error });
+        throw new HandoffDeniedError("input-unavailable", path, {
+          cause: error,
+          defects: [contractDefect("handoff", "/", defectCode("input", error.reason))],
+        });
       }
       throw error;
     }
     const validation = validateHandoffSchema(value);
-    if (!validation.ok) throw new HandoffDeniedError("schema-invalid", path);
+    if (!validation.ok) {
+      throw new HandoffDeniedError("schema-invalid", path, {
+        defects: schemaDefects("handoff", validation.diagnostics),
+      });
+    }
 
     let authorizationGate: WriteGate;
     let manifestPath: string;
@@ -515,6 +777,11 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     let inspectedProjectRoot: string;
     const extension = validation.value.ext?.["sortie-dogs/write-gate"];
     if (extension === undefined) {
+      // Candidate-relative registration is only safe when the handoff names its candidate root.
+      if (!exactRegisteredPath) {
+        unregistered("ext_write_gate_missing");
+        return;
+      }
       if (
         loaded.manifest === undefined || loaded.gate === undefined ||
         loaded.operationManifestAbsolutePath === undefined
@@ -525,7 +792,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         await project.toRelativePath(absolutePath);
       } catch (error) {
         if (error instanceof WriteDeniedError || error instanceof RelativePathError) {
-          throw new HandoffDeniedError("path-invalid", path, { cause: error });
+          throw new HandoffDeniedError("path-invalid", path, {
+            cause: error,
+            defects: [contractDefect("handoff", "/", "handoff_path_outside_project")],
+          });
         }
         throw error;
       }
@@ -534,39 +804,60 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       manifestPath = loaded.operationManifestAbsolutePath;
       inspectedProjectRoot = project.root;
     } else {
-      if (
-        !isRecord(extension) ||
-        Object.keys(extension).some((key) => key !== "operation_manifest" && key !== "project_root") ||
-        typeof extension.operation_manifest !== "string" || extension.operation_manifest.length === 0 ||
-        typeof extension.project_root !== "string" || !isAbsolute(extension.project_root) ||
-        isAbsolute(extension.operation_manifest)
-      ) throw new HandoffDeniedError("contract-invalid", path);
+      if (!isWriteGateExtension(extension)) {
+        throw new HandoffDeniedError("contract-invalid", path, {
+          defects: writeGateExtensionDefects(extension),
+        });
+      }
       try {
         const allowedRoots = [project];
         if (input.worktree !== undefined && resolve(input.worktree) !== project.root) {
           allowedRoots.push(await createProjectPaths(resolve(input.worktree)));
         }
         const containment = await Promise.all(
-          allowedRoots.map((allowedRoot) => allowedRoot.contains(extension.project_root as string)),
+          allowedRoots.map((allowedRoot) => allowedRoot.contains(extension.project_root)),
         );
         if (!containment.some(Boolean)) throw new WriteDeniedError("project-boundary", "<candidate-root>");
         const candidateProject = await createProjectPaths(extension.project_root);
-        await candidateProject.toRelativePath(absolutePath);
+        const relativeHandoffPath = await candidateProject.toRelativePath(absolutePath);
+        if (
+          !exactRegisteredPath &&
+          !loaded.handoffRelativePaths.some((candidate) => sameRelativePath(candidate, relativeHandoffPath))
+        ) {
+          unregistered("handoff_path_not_registered");
+          return;
+        }
         const relativeManifestPath = await candidateProject.toRelativePath(extension.operation_manifest);
         manifestPath = candidateProject.absolute(relativeManifestPath);
         const manifestValue = await readJson(manifestPath, INPUT_LIMITS.manifest);
         const manifestValidation = validateOperationManifestSchema(manifestValue);
-        if (!manifestValidation.ok) throw new WriteDeniedError("manifest-unavailable", "<unknown>");
+        if (!manifestValidation.ok) {
+          throw new HandoffDeniedError("contract-invalid", path, {
+            defects: schemaDefects("manifest", manifestValidation.diagnostics),
+          });
+        }
         manifest = manifestValidation.value;
         authorizationGate = await createWriteGate(candidateProject, manifest);
         inspectedProjectRoot = candidateProject.root;
       } catch (error) {
-        throw new HandoffDeniedError("contract-invalid", path, { cause: error });
+        if (error instanceof HandoffDeniedError) throw error;
+        throw new HandoffDeniedError("contract-invalid", path, {
+          cause: error,
+          defects: [extensionFailureDefect(error)],
+        });
       }
     }
-    const diagnostics = validateManifest(validation.value, manifest, undefined, false);
+    const diagnostics = validateManifest(
+      validation.value,
+      manifest,
+      undefined,
+      false,
+      { requirePassedValidation: false },
+    );
     if (diagnostics.some(({ severity }) => severity === "error")) {
-      throw new HandoffDeniedError("contract-invalid", path);
+      throw new HandoffDeniedError("contract-invalid", path, {
+        defects: contractDefects(diagnostics),
+      });
     }
 
     if (sessionID === undefined) return;
@@ -584,6 +875,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       projectRoot: inspectedProjectRoot,
       rootSessionID,
     });
+    clearBindingDenial(rootSessionID, inspectedProjectRoot, manifestPath, sessionID);
     pruneSessionAuthorizations(sessionAuthorizations, now);
   }
 
@@ -613,12 +905,17 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         recoverable: false,
         remedy: "Start a new candidate session; do not replace an existing binding.",
       },
+      "retry-exhausted": {
+        recoverable: false,
+        remedy: "No write-gate state changed after one retry; stop this candidate and record the local blocker.",
+      },
     };
-    const deny = (reason: string): string => {
+    const deny = (reason: string, defects: readonly string[] = []): string => {
       const detail = remedies[reason] ?? {
         recoverable: false,
         remedy: "Correct the reported contract defect before starting a new bind flow.",
       };
+      const reported = normalizeDefects(defects).slice(0, CONTRACT_DEFECTS.limit);
       const escalation = detail.recoverable
         ? {
           action: "blocker-resolution-takeover",
@@ -628,12 +925,13 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         : {
           action: "follow-remedy",
           resume_session: false,
-          true_blocker: reason === "binding-failed",
+          true_blocker: reason === "binding-failed" || reason === "retry-exhausted",
         };
       return JSON.stringify({
         status: "denied",
         reason,
         ...detail,
+        ...(reported.length === 0 ? {} : { defects: reported }),
         escalation,
       });
     };
@@ -645,7 +943,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       touchActiveSession(sessionID);
       const now = Date.now();
       pruneSessionAuthorizations(sessionAuthorizations, now);
-      if (!isAbsolute(projectRoot) || isAbsolute(manifestPathArgument)) return deny("path-invalid");
+      if (!isAbsolute(projectRoot)) return deny("path-invalid");
 
       project ??= await createProjectPaths(resolveProjectRoot(input));
       const allowedRoots = [project];
@@ -660,32 +958,73 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       const manifestPath = candidate.absolute(relativeManifestPath);
       const pinned = await readPinnedJson(manifestPath, INPUT_LIMITS.manifest);
       const validation = validateOperationManifestSchema(pinned.value);
-      if (!validation.ok) return deny("manifest-invalid");
-      const existingAuthorization = sessionAuthorizations.get(sessionID);
-      if (existingAuthorization !== undefined) {
+      if (!validation.ok) {
+        return deny("manifest-invalid", schemaDefects("manifest", validation.diagnostics));
+      }
+      const bindingPin = bindingPins.get(sessionID);
+      if (bindingPin !== undefined) {
         if (
-          existingAuthorization.manifestPath !== manifestPath ||
-          existingAuthorization.manifestHash !== pinned.hash ||
-          existingAuthorization.manifestMtimeMs !== pinned.mtimeMs
+          bindingPin.manifestPath !== manifestPath ||
+          bindingPin.manifestHash !== pinned.hash ||
+          bindingPin.manifestMtimeMs !== pinned.mtimeMs
         ) return deny("binding-replay");
       }
+      const existingAuthorization = sessionAuthorizations.get(sessionID);
       pruneInspections(now);
       const inspectedEntry = [...inspected.entries()].find(([key, entry]) =>
         key.startsWith(`${sessionID}\u0000`) &&
         entry.ownerSessionID === sessionID &&
         entry.projectRoot === candidate.root && entry.manifestPath === manifestPath
       )?.[1];
-      if (inspectedEntry === undefined) return deny("handoff-uninspected");
-      const handoffValue = await readJson(inspectedEntry.handoffPath, INPUT_LIMITS.handoff);
+      if (inspectedEntry === undefined) {
+        const signature = inspectionFingerprint(
+          ["handoff-uninspected", candidate.root, manifestPath, pinned.hash, pinned.mtimeMs],
+          undefined,
+        );
+        if (recordBindingDenial(sessionID, candidate.root, manifestPath, signature)) {
+          return deny("retry-exhausted");
+        }
+        return deny("handoff-uninspected");
+      }
+      const denyHandoffMismatch = (evidence: unknown, defects: readonly string[] = []): string => {
+        const signature = inspectionFingerprint(
+          ["handoff-mismatch", candidate.root, manifestPath, pinned.hash, pinned.mtimeMs],
+          evidence,
+        );
+        if (recordBindingDenial(sessionID, candidate.root, manifestPath, signature)) {
+          return deny("retry-exhausted", defects);
+        }
+        return deny("handoff-mismatch", defects);
+      };
+      let handoffValue: unknown;
+      try {
+        handoffValue = await readJson(inspectedEntry.handoffPath, INPUT_LIMITS.handoff);
+      } catch (error) {
+        if (error instanceof PluginInputError) {
+          return denyHandoffMismatch({ input: error.reason }, [
+            contractDefect("handoff", "/", defectCode("input", error.reason)),
+          ]);
+        }
+        throw error;
+      }
       const handoffValidation = validateHandoffSchema(handoffValue);
-      if (!handoffValidation.ok) return deny("handoff-mismatch");
-      const diagnostics = validateManifest(handoffValidation.value, validation.value, undefined, false);
+      if (!handoffValidation.ok) {
+        return denyHandoffMismatch(handoffValue, schemaDefects("handoff", handoffValidation.diagnostics));
+      }
+      const diagnostics = validateManifest(
+        handoffValidation.value,
+        validation.value,
+        undefined,
+        false,
+        { requirePassedValidation: false },
+      );
       if (
         diagnostics.some(({ severity }) => severity === "error") ||
         inspectionFingerprint(handoffValidation.value, diagnostics, validation.value) !== inspectedEntry.fingerprint
-      ) return deny("handoff-mismatch");
+      ) return denyHandoffMismatch(handoffValue, contractDefects(diagnostics));
       if (existingAuthorization !== undefined) {
         existingAuthorization.expiresAt = now + ACTIVE_SESSION_CACHE.ttlMilliseconds;
+        existingAuthorization.suspended = false;
         return JSON.stringify({
           status: "bound",
           manifest_hash: pinned.hash,
@@ -694,17 +1033,28 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         });
       }
       const gate = await createWriteGate(candidate, validation.value);
-      sessionAuthorizations.set(sessionID, {
-        gate,
-        expiresAt: now + ACTIVE_SESSION_CACHE.ttlMilliseconds,
+      bindingPins.set(sessionID, {
         manifestHash: pinned.hash,
         manifestMtimeMs: pinned.mtimeMs,
         manifestPath,
       });
+      sessionAuthorizations.set(sessionID, {
+        gate,
+        expiresAt: now + ACTIVE_SESSION_CACHE.ttlMilliseconds,
+        handoffPath: inspectedEntry.handoffPath,
+        manifestHash: pinned.hash,
+        manifestMtimeMs: pinned.mtimeMs,
+        manifestPath,
+        projectRoot: candidate.root,
+        rootSessionID: inspectedEntry.rootSessionID,
+        suspended: false,
+      });
+      clearBindingDenial(inspectedEntry.rootSessionID, candidate.root, manifestPath, sessionID);
       return JSON.stringify({
         status: "bound",
         manifest_hash: pinned.hash,
         manifest_path: relativeManifestPath,
+        ...(bindingPin === undefined ? {} : { idempotent: true }),
       });
     } catch (error) {
       if (error instanceof RelativePathError || error instanceof WriteDeniedError) {
@@ -719,8 +1069,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const now = Date.now();
     pruneSessionAuthorizations(sessionAuthorizations, now);
     if (sessionID === undefined) return undefined;
-    const authorization = sessionAuthorizations.get(sessionID);
-    if (authorization === undefined) return undefined;
+      const authorization = sessionAuthorizations.get(sessionID);
+      if (authorization === undefined) return undefined;
+      if (authorization.suspended) return undefined;
     try {
       const pinned = await readPinnedJson(authorization.manifestPath, INPUT_LIMITS.manifest);
       const manifestValidation = validateOperationManifestSchema(pinned.value);
@@ -731,7 +1082,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       authorization.expiresAt = now + ACTIVE_SESSION_CACHE.ttlMilliseconds;
       return authorization.gate;
     } catch {
-      sessionAuthorizations.delete(sessionID);
+      authorization.suspended = true;
       return undefined;
     }
   }
@@ -777,6 +1128,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   function releaseSessionEnforcement(sessionID: string): void {
     activeSessions.delete(sessionID);
     sessionAuthorizations.delete(sessionID);
+    bindingPins.delete(sessionID);
     expiredSessions.delete(sessionID);
   }
 
@@ -883,12 +1235,38 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   function evictSession(sessionID: string): void {
     activeSessions.delete(sessionID);
     sessionAuthorizations.delete(sessionID);
+    bindingPins.delete(sessionID);
     for (const key of inspected.keys()) {
       if (key.startsWith(`${sessionID}\u0000`)) inspected.delete(key);
     }
     expiredSessions.delete(sessionID);
     coordinatorRoots.delete(sessionID);
+    bindingDenials.delete(sessionID);
     clearSessionLinks(sessionID);
+  }
+
+  async function inspectSuccessfulRead(input: TaskToolExecuteAfterInput): Promise<void> {
+    if (input.tool.toLowerCase() !== "read" || input.sessionID === undefined) return;
+    if (activeSessionStatus(input.sessionID) !== "active" || !isRecord(input.args)) return;
+    const path = input.args.filePath;
+    if (typeof path !== "string" || path.length === 0) return;
+    await inspect(path, input.sessionID);
+  }
+
+  async function invalidateEditedHandoff(path: string): Promise<void> {
+    await ensureLoaded();
+    if (loaded === undefined || project === undefined) return;
+    const absolutePath = isAbsolute(path)
+      ? resolve(path)
+      : resolve(input.worktree ?? project.root, path);
+    for (const [key, entry] of inspected) {
+      if (!samePath(entry.handoffPath, absolutePath)) continue;
+      inspected.delete(key);
+    }
+    for (const authorization of sessionAuthorizations.values()) {
+      if (!samePath(authorization.handoffPath, absolutePath)) continue;
+      authorization.suspended = true;
+    }
   }
 
   async function pathMatchesProject(root: string): Promise<boolean> {
@@ -945,6 +1323,27 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           return await bindWriteGate(context.sessionID, args.project_root, args.manifest_path);
         },
       }),
+      sortie_check_contract: defineTool({
+        description:
+          "Report handoff and operation manifest contract defects before dispatch. Read-only: it never inspects, binds, or authorizes.",
+        args: {
+          handoff_path: defineTool.schema.string(),
+        },
+        async execute(args): Promise<string> {
+          try {
+            await inspect(args.handoff_path, undefined, { report: true });
+            return JSON.stringify({ status: "ok", defects: [] });
+          } catch (error) {
+            if (!(error instanceof HandoffDeniedError)) throw error;
+            return JSON.stringify({
+              status: "defective",
+              reason: error.reason,
+              defects: error.defects.slice(0, CONTRACT_DEFECTS.limit),
+              remedy: "Repair each reported pointer in the named document, then check it again.",
+            });
+          }
+        },
+      }),
     },
     "chat.message": async (chatInput, output): Promise<void> => {
       const parentID = chatParentID(chatInput);
@@ -980,13 +1379,13 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       const status = activeSessionStatus(permission.sessionID);
       if (status === "inactive") return;
       if (status === "expired") {
-        if (await isUnconfiguredProject()) return;
+        if (!hasSessionEnforcementState(permission.sessionID) && await isUnconfiguredProject()) return;
         throw new WriteDeniedError("session-expired", "<expired-session>");
       }
       touchActiveSession(permission.sessionID);
       const gate = await authorizedGate(permission.sessionID);
       if (gate === undefined) {
-        if (await isUnconfiguredProject()) return;
+        if (!hasSessionEnforcementState(permission.sessionID) && await isUnconfiguredProject()) return;
         throw new WriteDeniedError("manifest-unavailable", "<unknown>", { cause: loadFailure });
       }
       for (const pattern of permission.patterns) {
@@ -1000,14 +1399,17 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
      * Upstream builds a task result from the child's last text part, so a trailing empty text part
      * erases an answer the worker already produced and the coordinator re-dispatches the same work.
      */
-    "tool.execute.after": createTaskResultRepairHook(input.client),
+    "tool.execute.after": async (toolInput, output): Promise<void> => {
+      await createTaskResultRepairHook(input.client)(toolInput, output);
+      await inspectSuccessfulRead(toolInput);
+    },
     "tool.execute.before": async (toolInput, output): Promise<void> => {
       if (isCoordinatorSession(toolInput.sessionID)) return;
       const status = activeSessionStatus(toolInput.sessionID);
       if (status === "inactive") return;
       if (status === "expired") {
         if (isKnownReadOnlyTool(toolInput.tool, output.args, loaded?.readOnlyTools)) return;
-        if (await isUnconfiguredProject()) return;
+        if (!hasSessionEnforcementState(toolInput.sessionID) && await isUnconfiguredProject()) return;
         throw new WriteDeniedError("session-expired", "<expired-session>");
       }
       touchActiveSession(toolInput.sessionID);
@@ -1015,7 +1417,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       try {
         const gate = await authorizedGate(toolInput.sessionID);
         if (gate === undefined) {
-          if (await isUnconfiguredProject()) return;
+          if (!hasSessionEnforcementState(toolInput.sessionID) && await isUnconfiguredProject()) return;
           if (!isKnownReadOnlyTool(toolInput.tool, output.args, loaded?.readOnlyTools)) {
             const detail = describeUnclassifiedCommand(toolInput.tool, output.args);
             if (detail !== undefined) throw new WriteDeniedError("unclassified-command", detail);
@@ -1048,6 +1450,12 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       const eventSessionID = typeof event.properties?.sessionID === "string" ? event.properties.sessionID
         : typeof info?.id === "string" ? info.id
           : undefined;
+      if (event.type === "file.edited" && typeof event.properties?.file === "string") {
+        // Event session identity is absent in current hosts and cannot be trusted as proof of which
+        // child read a file. Every edit therefore revokes state; only a successful Read can grant it.
+        await invalidateEditedHandoff(event.properties.file);
+        return;
+      }
       if (eventSessionID === undefined) return;
       const eventParentID = typeof event.properties?.parentID === "string" ? event.properties.parentID
         : typeof info?.parentID === "string" ? info.parentID
@@ -1064,21 +1472,15 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       }
       if (!isActiveSession(eventSessionID)) return;
       if (event.type !== "session.idle") touchActiveSession(eventSessionID);
-      if (event.type === "file.edited" && typeof event.properties?.file === "string") {
+      if (event.type === "session.idle" && eventSessionID !== undefined) {
+        const authorization = sessionAuthorizations.get(eventSessionID);
+        if (authorization === undefined) return;
         try {
-          await inspect(event.properties.file, eventSessionID);
+          // Idle can revalidate a handoff already pinned by a successful bind, but it can never
+          // create the first inspection or authorize an unbound child.
+          await inspect(authorization.handoffPath, eventSessionID);
         } catch {
-          sessionAuthorizations.delete(eventSessionID);
-        }
-      } else if (event.type === "session.idle" && eventSessionID !== undefined) {
-        try {
-          await ensureLoaded();
-          if (loaded === undefined) {
-            throw new HandoffDeniedError("configuration-unavailable", "<unknown>", { cause: loadFailure });
-          }
-          for (const path of loaded.handoffPaths) await inspect(path, eventSessionID);
-        } catch {
-          sessionAuthorizations.delete(eventSessionID);
+          authorization.suspended = true;
         }
       }
     },

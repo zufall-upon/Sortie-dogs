@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
 import test from "node:test";
@@ -36,8 +36,16 @@ async function fixtureDirectory(): Promise<string> {
 }
 
 async function runCli(args: readonly string[], stdin: string = ""): Promise<CliResult> {
+  return await runCliEntry(ENTRY, args, stdin);
+}
+
+async function runCliEntry(
+  entry: string,
+  args: readonly string[],
+  stdin: string = "",
+): Promise<CliResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ["--experimental-strip-types", ENTRY, ...args], {
+    const child = spawn(process.execPath, ["--experimental-strip-types", entry, ...args], {
       cwd: process.cwd(),
       env: { ...process.env, NODE_NO_WARNINGS: "1" },
       stdio: ["pipe", "pipe", "pipe"],
@@ -78,6 +86,24 @@ async function clean(directory: string): Promise<void> {
   await rm(directory, { recursive: true, force: true });
   await rm(TEST_ROOT).catch(() => undefined);
 }
+
+test("the CLI still runs when its entry path resolves through a link", async () => {
+  const directory = await fixtureDirectory();
+  const link = join(directory, "linked-src");
+  try {
+    // A global or linked install normally reaches the entry through a link, and Node reports the
+    // resolved real path, so an entry check on the literal path would silently disable the CLI.
+    // A junction on Windows and a symlink elsewhere both need no privilege, so a failure here is a
+    // real environment defect and must not be swallowed into a passing assertion-free run.
+    await symlink(join(process.cwd(), "src"), link, "junction");
+    const result = await runCliEntry(join(link, "cli", "main.ts"), []);
+    assert.equal(result.exit, 2);
+    assert.equal(result.stderr, USAGE);
+  } finally {
+    await rm(link, { recursive: false, force: true });
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test("renders warning diagnostics as text without failing by default", async () => {
   const directory = await fixtureDirectory();

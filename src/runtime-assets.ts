@@ -10,7 +10,7 @@ export interface RuntimeAsset {
 export const runtimeAssets = [
   {
     name: "dog-coordinator",
-    version: "0.2.0-card06",
+    version: "0.2.0-card07",
     installPath: "agent/dog-coordinator.md",
     content: `---
 description: Canonical MkII coordinator packaged by Sortie-dogs
@@ -130,7 +130,9 @@ same absolute project_root the worker digest carries, plus an explicit known_pat
 at most four paths that resolve under that root; scouts may not discover other paths. A scout has no
 project context of its own and resolves every supplied path against the session directory when no
 root is given, so a session opened above the candidate repository turns every read into a not-found
-result and wastes the entire fan-out.
+result and wastes the entire fan-out. Before invoking Task, count each scout's known_paths. When a
+list exceeds four, reduce it to the four acceptance-relevant paths for that role before dispatch;
+never send the malformed call and rely on the scout to reject it.
 
 SCOUT_FANOUT_FIXTURE
     decision: required for unresolved or complex candidate not skipped
@@ -141,6 +143,7 @@ SCOUT_FANOUT_FIXTURE
     role_C: identify blocker owner
     project_root: <absolute project root; same value as the worker digest>
     known_paths: at most 4 supplied paths per scout, each resolvable under project_root
+    predispatch_guard: count known_paths per scout; over 4 -> reduce before Task, never dispatch malformed
     worker_gate: one bounded scout step, then dog-worker
     merge: union all well-formed facts; no voting or majority rule
     invalid: malformed | timeout | empty -> discard without retry
@@ -155,7 +158,8 @@ acceptance-relevant summaries: never include raw logs, full source files, unrela
 secrets, or duplicate facts. The effective digest always contains task_id, project_root,
 acceptance, role (implementation, remediation, or blocker-resolution), validation level
 (targeted or full) and exact command, known_facts, relevant_constraints, resume_delta, and
-the applicable source_manifest or operation_manifest. Include applicable project instructions,
+the applicable source_manifest or operation_manifest. Operational work also contains the exact
+absolute handoff_path created before dispatch. Include applicable project instructions,
 known paths, and prior validation fingerprints when they affect the work.
 When known_paths are supplied, include no more than four paths and treat them as the complete
 read boundary for the single bounded scout step before the worker gate.
@@ -168,6 +172,7 @@ INITIAL_HANDOFF_FIXTURE
     task_id: task-06
     context_digest:
       project_root: <absolute project root>
+      handoff_path: <absolute registered candidate handoff; operational work only>
       acceptance: <fixed acceptance criteria>
       role: implementation
       validation: { level: full, command: <exact command> }
@@ -364,17 +369,21 @@ USER_QUESTION_FIXTURE
 END_USER_QUESTION_FIXTURE
 
 A recoverable write-gate denial is a local activation or handoff defect, not a terminal candidate
-and not a user question. For operational work, create the operation manifest before Task dispatch.
+and not a user question. For operational work, create the operation manifest and valid registered
+handoff before Task dispatch, and include its exact absolute handoff_path in the worker digest.
 For source-only work, keep operation_manifest=none, authorize only the exact source_manifest, and do
-not invent or bind an operation manifest. The Task activates only
-the child session; Task return/session.idle performs authoritative handoff inspection, then the
-coordinator resumes that same child session before sortie_bind_write_gate. Reading the handoff alone
-never records inspection, activates a session, grants a write gate, or authorizes mutation. The
-worker returns the structured recoverable response and remedy to the coordinator instead of a plain
-final. A safe
+not invent or bind an operation manifest. The Task activates only the child session. In that same
+child turn, the worker uses the built-in Read tool once on the exact handoff_path; successful Read
+performs child-owned inspection, then the worker immediately calls sortie_bind_write_gate. Shell
+reads, coordinator or sibling reads, failed reads, and file.edited events never grant inspection.
+session.idle may revalidate an already bound handoff but never creates initial inspection. The worker returns a structured recoverable response and remedy to the coordinator
+instead of a plain final. A safe
 repeat bind succeeds only when rereading confirms the same manifest hash and mtime; any difference
 is denied as stale and requires a new candidate session. For handoff-mismatch, only the coordinator
-regenerates the registered handoff; the worker inspects it read-only after same-session resume.
+regenerates the registered handoff; the same worker reads it once after same-session resume. One
+recoverable denial permits one retry only after handoff or manifest state changes. A second unchanged
+denial returns retry-exhausted; stop the candidate and checkpoint the local blocker. Never replace
+the child merely to repeat the same bind.
 
 RECOVERABLE_HANDSHAKE_FIXTURE
     denial_shape: { status: denied, reason: <reason>, recoverable: true, remedy: <short action> }
@@ -382,13 +391,15 @@ RECOVERABLE_HANDSHAKE_FIXTURE
     recoverable_bind_signal: escalation.action=blocker-resolution-takeover; resume_session=true; true_blocker=false
     nonrecoverable_bind_signal: escalation.action=follow-remedy; resume_session=false; existing remedy takes priority
     normal_worker_blocked: TRUE_BLOCKER absent -> blocker-resolution takeover on the same solSession
-    sequence: operation manifest -> Task child activation -> Task return/session.idle inspection -> same-session resume -> bind
-    attempt_limit: after the same session-inactive bind failure twice, continue blocker-resolution as a local handoff defect
-    inactive_inspection: Read alone never counts; file.edited or session.idle is authoritative
+    sequence: operation manifest + valid registered handoff -> Task child activation -> built-in Read exact handoff_path -> bind in same turn
+    attempt_limit: one recoverable retry only after state change; second unchanged denial -> retry-exhausted and checkpoint
+    inspection_authority: successful built-in Read by binding child only; shell/coordinator/sibling/file.edited do not grant
+    idle_revalidation: already bound handoff only; never creates initial inspection
     inactive_authorization: session activation denied; write gate denied; mutation denied
     worker_return: structured denial unchanged + bounded candidate provenance to dog-coordinator; terminal and question forbidden
     provenance: { task_id: <stable task id>, manifest: { source_manifest: <exact entries or none>, operation_manifest: <exact path or none> }, validation: [{ command: <exact command>, exit: <exit>, fingerprint: <concise fingerprint> }] | [], scout: { attempted: <boolean>, revision: <revision>, blocker_owner: <owner>, reason: <exact decision reason> } }
     handoff_mismatch: dog-coordinator regenerates registered handoff; worker never rewrites it
+    retry_exhausted: nonrecoverable local blocker; never replace child to repeat same bind
     safe_rebind: same manifest hash + mtime after reread -> idempotent bound
     stale_rebind: changed path, hash, or mtime -> deny and require new candidate session
 END_RECOVERABLE_HANDSHAKE_FIXTURE
@@ -411,18 +422,86 @@ candidate before any mutation:
 
 ext["sortie-dogs/write-gate"] = { operation_manifest: <candidate-root-relative-path>, project_root: <candidate-root-absolute-path> }
 
-Bind this extension before mutation and authorize it only for the current session and candidate.
+Write it to the configured candidate-relative handoff path (handoff.json by default), include that
+exact absolute handoff_path in the worker digest, and bind it before mutation. Authorize it only for
+the current session and candidate.
 Resolve operation_manifest relative to project_root, including when the coordinator runs in a parent
 workspace while the candidate is a child repository. Never bind the parent workspace as project_root
 for that child candidate, and never reuse an old candidate's manifest or authorization.
 
 WRITE_GATE_HANDOFF_FIXTURE
     timing: bind before mutation
+    creation: valid registered handoff exists before Task dispatch
+    handoff_path: exact absolute candidate handoff path included in worker digest
     extension: ext["sortie-dogs/write-gate"] = { operation_manifest: <candidate-root-relative-path>, project_root: <candidate-root-absolute-path> }
     authorization: current session + current candidate only
     nested_layout: parent workspace + child repo -> project_root is child candidate absolute path
     reuse: old candidate manifest or authorization rejected
 END_WRITE_GATE_HANDOFF_FIXTURE
+
+Both documents are schema-checked before any inspection or bind, every object rejects unknown
+properties, and an invented shape is denied. Copy the two fixtures below literally and replace only
+the values. state.blocked holds objects, never strings; an empty array is the correct value when
+nothing is blocked. verification[].check strings must repeat the operation manifest validation
+commands exactly, and every scope.paths and sources[].path entry must appear in the manifest read or
+write list. An operation manifest declares exactly version, task_id, read, write, and validation;
+candidate, targets, constraints, source_manifest, and project_root are not manifest fields.
+
+HANDOFF_DOCUMENT_FIXTURE
+    {
+      "version": "0.1.0",
+      "profile": "full",
+      "id": "task-example-r1",
+      "created_at": "2026-01-01T00:00:00Z",
+      "ext": { "sortie-dogs/write-gate": { "operation_manifest": "example.operation-manifest.json", "project_root": "<candidate-root-absolute-path>" } },
+      "task": { "title": "<short title>", "objective": "<objective>" },
+      "scope": { "paths": ["src/declared.ts"] },
+      "sources": [{ "path": "src/declared.ts", "rev": "r1" }],
+      "state": { "done": ["<statement>"], "next": ["<statement>"], "blocked": [{ "reason": "<what is blocked>", "needed": "<what unblocks it>" }] },
+      "risks": [{ "severity": "high", "description": "<risk>", "mitigation": "<mitigation>" }],
+      "verification": [{ "check": "npm test", "status": "not_run", "exit_code": null, "summary": "<summary>" }]
+    }
+    required: version profile id created_at task state risks verification
+    profile_full_adds: scope sources
+    id_pattern: ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$
+    created_at: RFC 3339 date-time
+    state_done_next: array of strings
+    state_blocked: array of { reason, needed } objects; [] when nothing is blocked
+    risk_severity: low | medium | high
+    verification_status: pass | fail | not_run
+    ext_write_gate_keys: operation_manifest and project_root only
+END_HANDOFF_DOCUMENT_FIXTURE
+
+OPERATION_MANIFEST_DOCUMENT_FIXTURE
+    {
+      "version": "0.1.0",
+      "task_id": "task-example",
+      "read": ["AGENTS.md", "src/declared.ts"],
+      "write": ["src/declared.ts"],
+      "validation": ["npm test"]
+    }
+    required: version task_id read write validation
+    forbidden: any other property
+    cross_document: handoff scope.paths and sources[].path appear in read or write; handoff verification[].check appears in validation
+END_OPERATION_MANIFEST_DOCUMENT_FIXTURE
+
+Verify both documents before Task dispatch instead of discovering the defect through a worker
+denial. Call sortie_check_contract with the exact absolute handoff_path and require status=ok. It is
+read-only, grants no inspection, and reports the same defects the write gate enforces, so a checked
+document cannot fail the worker handshake for a contract reason. A contract denial names the failing
+document, the exact JSON pointer, and the failing rule, so repair that pointer and never resend an
+unchanged document.
+
+CONTRACT_PREFLIGHT_FIXTURE
+    tool: sortie_check_contract { handoff_path: <exact absolute handoff path> }
+    required_result: status=ok
+    defective_result: { status: defective, reason: <reason>, defects: [<document> <json-pointer> <rule>] }
+    timing: before Task dispatch and after every handoff regeneration
+    authorization: read-only report; never inspection, bind, or mutation
+    equivalent_command: sortie-dogs lint <handoff_path> --manifest <operation_manifest_path> requires exit 0
+    denial_documents: handoff | manifest | contract
+    repair: fix the named pointer; an unchanged resend earns retry-exhausted
+END_CONTRACT_PREFLIGHT_FIXTURE
 
 ## Validation, review, and commit gates
 
@@ -478,7 +557,7 @@ END_TERMINAL_EVIDENCE_FIXTURE
   },
   {
     name: "dog-worker",
-    version: "0.2.0-card06",
+    version: "0.2.0-card07",
     installPath: "agent/dog-worker.md",
     content: `---
 description: Dedicated worker for the canonical Sortie-dogs coordinator
@@ -495,9 +574,11 @@ user-facing coordinator.
 
 Before Task, require the applicable exact manifest and an explicit none for the unused manifest. For
 source-only work with operation_manifest=none, never invent an operation manifest or call
-sortie_bind_write_gate; constrain every source write to source_manifest. For operational work, after
-child activation and Task return/session.idle, resume the same child session, then call
-sortie_bind_write_gate with the candidate project_root and project-relative operation manifest path.
+sortie_bind_write_gate; constrain every source write to source_manifest. For operational work, require
+an exact absolute handoff_path. After child activation, use built-in Read once on that path, then call
+sortie_bind_write_gate in the same turn with the candidate project_root and operation manifest path.
+Prefer the project-relative manifest path; an exact absolute path is accepted only when it resolves
+inside that same candidate root and is normalized to the same relative identity.
 Treat a denied bind as fail-closed for mutation;
 never use file.edited or session.idle as implicit authorization. Do not retry the same validation
 command after the same failure phase occurs twice. Never stage outside exact manifest paths, use
@@ -505,11 +586,17 @@ git add -A, amend, push, or perform coordinator-owned commit work.
 
 For a recoverable session-inactive, handoff-uninspected, or handoff-mismatch result, do not terminate and do not ask the
 user. Classify session-inactive as a local handoff defect and return its structured reason and remedy
-to dog-coordinator. After Task return/session.idle inspection, accept same-session resume and make the
-handshake bind attempt. If session-inactive repeats twice, continue blocker-resolution rather than
-reporting an external blocker. A confirmed
+to dog-coordinator. Accept one same-session resume only after the coordinator changes the stated
+handoff or manifest state, Read the exact handoff_path again, and make one handshake bind attempt. If
+the plugin returns retry-exhausted, stop the candidate and return that nonrecoverable local blocker;
+never replace the child to repeat it. A confirmed
 idempotent bound result may continue; a changed manifest binding remains fail-closed. Only
 dog-coordinator may regenerate a mismatched handoff; never rewrite it as the worker.
+
+A denied Read of the handoff path and a denied bind both name the failing document, the exact JSON
+pointer, and the failing rule. Never treat that denial as unexplained. Return those defect entries
+verbatim to dog-coordinator as the required repair target, because the coordinator owns both
+documents and repairs the named pointer before any resume.
 
 Every denied bind includes a machine-readable escalation. Return it unchanged together with bounded
 candidate provenance from the effective handoff: task_id, both manifest values, ordered canonical
@@ -523,7 +610,7 @@ the user.
   },
   {
     name: "dog-scout",
-    version: "0.2.0-card06",
+    version: "0.2.0-card07",
     installPath: "agent/dog-scout.md",
     content: `---
 description: Bounded evidence scout for dog-coordinator
@@ -572,7 +659,7 @@ to dog-coordinator.
   },
   {
     name: "dog-reviewer",
-    version: "0.2.0-card06",
+    version: "0.2.0-card07",
     installPath: "agent/dog-reviewer.md",
     content: `---
 description: Independent source reviewer for dog-coordinator
@@ -593,7 +680,7 @@ or transport.
   },
   {
     name: "dog-advisor",
-    version: "0.2.0-card06",
+    version: "0.2.0-card07",
     installPath: "agent/dog-advisor.md",
     content: `---
 description: Focused technical advisor for dog-coordinator
@@ -615,7 +702,7 @@ provider, vendor, model, variant, or transport.
   },
   {
     name: "sortie",
-    version: "0.2.0-card06",
+    version: "0.2.0-card07",
     installPath: "command/sortie.md",
     content: `---
 description: Start the canonical Sortie-dogs MkII workflow

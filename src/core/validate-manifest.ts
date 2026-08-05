@@ -99,6 +99,7 @@ export function validateManifest(
   manifest: OperationManifest,
   changedPaths: readonly string[] | undefined,
   changedPathsProvided: boolean,
+  options: { readonly requirePassedValidation?: boolean } = {},
 ): ManifestDiagnostic[] {
   const diagnostics: ManifestDiagnostic[] = [];
   const readable = collectManifestPaths(manifest.read, "read", diagnostics);
@@ -144,7 +145,7 @@ export function validateManifest(
     });
   });
 
-  if (handoff.profile === "full") {
+  if (handoff.profile === "full" && options.requirePassedValidation !== false) {
     const passedChecks = new Set(
       handoff.verification
         .filter(({ status }) => status === "pass")

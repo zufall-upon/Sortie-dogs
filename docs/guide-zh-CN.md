@@ -158,6 +158,14 @@ OpenCode 会自动发现该文件。请只导出插件本身：OpenCode 会把�
 该文件由 `dog-coordinator` 拥有。worker 每个候选只绑定一次 `sortie_bind_write_gate`，
 且必须在协调者的 handoff 通过检查之后。协调者会话不受门禁约束。
 
+handoff 与 operation manifest 在检查和绑定之前都会做 schema 校验，且每个对象都拒绝未知属性。
+被拒绝时一定会给出失败的文档、精确的 JSON 指针和违反的规则，例如
+`Defects: handoff /state/blocked/0 schema_type`，因此协调者应修复该指针，而不是重发同一份文档。
+派发前请使用只读的 `sortie_check_contract` 工具检查，它不做检查授权也不绑定，却报告相同的缺陷；
+`sortie-dogs lint <handoff.json> --manifest <operation-manifest.json>` 给出同样的结果。
+最常见的两类缺陷是：`state.blocked` 写成字符串数组而非 `{ reason, needed }` 对象，
+以及 operation manifest 声明了 `version`、`task_id`、`read`、`write`、`validation` 之外的属性。
+
 `.opencode/sortie-dogs.json` 中的可选设置：
 
 ```json
@@ -171,7 +179,9 @@ OpenCode 会自动发现该文件。请只导出插件本身：OpenCode 会把�
 
 - `operationManifestPath`：manifest 的位置，相对于项目根目录。
 - `handoffPaths`：插件检查的 handoff 文件。worker 只有通过其中一个文件的检查后才能绑定，
-  因此空数组会完全禁用绑定。
+  因此空数组会完全禁用绑定。相对条目在父 workspace 下的 nested repo 中也按 candidate 根目录解析。
+  对 operational work，coordinator 必须在派发前创建有效 handoff 并传递其绝对路径；执行绑定的 child
+  必须在 bind 前立即使用 built-in Read 读取该文件。
 - `readOnlyTools`：追加不会修改文件的宿主专用工具名，例如 MCP 工具。
   对已绑定的会话，未知工具默认被拒绝。
 - `dedicatedWorkerModel`：所有 worker 角色解析到的唯一模型。默认为 `openai/gpt-5.6-sol`

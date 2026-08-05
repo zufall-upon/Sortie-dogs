@@ -23,6 +23,11 @@ import {
   resolveModelRoute,
 } from "../dist/plugin/model-routing.js";
 import { lastAssistantText } from "../dist/plugin/task-result-repair.js";
+import { validateManifest } from "../dist/core/validate-manifest.js";
+import {
+  validateHandoffSchema,
+  validateOperationManifestSchema,
+} from "../dist/core/validate-schema.js";
 import {
   CONSULTATION_ROLE_POLICY,
   SOURCE_REVIEW_RISK_TAGS,
@@ -862,6 +867,60 @@ test("generated coordinator requires progress, immediate Task feedback, and deny
   ]) assert.ok(content.includes(required), required);
 });
 
+test("shipped document fixtures satisfy the schemas the write gate enforces", () => {
+  const coordinator = runtimeAssets.find((asset) => asset.name === "dog-coordinator");
+  const worker = runtimeAssets.find((asset) => asset.name === "dog-worker");
+  assert.ok(coordinator);
+  assert.ok(worker);
+  const block = (name: string): string => {
+    const match = coordinator.content.match(
+      new RegExp(`${name}\\r?\\n([\\s\\S]+?)\\r?\\n {4}required:`),
+    );
+    assert.ok(match, `missing ${name}`);
+    return match[1];
+  };
+
+  // The example an agent copies must pass the same validators that deny a defective candidate.
+  const handoff = JSON.parse(block("HANDOFF_DOCUMENT_FIXTURE")) as Record<string, unknown>;
+  const manifest = JSON.parse(block("OPERATION_MANIFEST_DOCUMENT_FIXTURE")) as Record<string, unknown>;
+  const handoffResult = validateHandoffSchema(handoff);
+  const manifestResult = validateOperationManifestSchema(manifest);
+  assert.deepEqual(handoffResult.diagnostics, []);
+  assert.deepEqual(manifestResult.diagnostics, []);
+  assert.ok(handoffResult.ok);
+  assert.ok(manifestResult.ok);
+  assert.deepEqual(
+    validateManifest(handoffResult.value, manifestResult.value, undefined, false, {
+      requirePassedValidation: false,
+    }).filter(({ severity }) => severity === "error"),
+    [],
+  );
+
+  const state = (handoff.state as { blocked: unknown[] }).blocked;
+  assert.deepEqual(state, [{ reason: "<what is blocked>", needed: "<what unblocks it>" }]);
+  assert.match(
+    coordinator.content,
+    /state\.blocked holds objects, never strings; an empty array is the correct value/,
+  );
+  assert.match(
+    coordinator.content,
+    /candidate, targets, constraints, source_manifest, and project_root are not manifest fields/,
+  );
+
+  const preflight = coordinator.content.match(
+    /CONTRACT_PREFLIGHT_FIXTURE\r?\n([\s\S]+?)\r?\nEND_CONTRACT_PREFLIGHT_FIXTURE/,
+  );
+  assert.ok(preflight);
+  assert.match(preflight[1], /tool: sortie_check_contract \{ handoff_path: <exact absolute handoff path> \}/);
+  assert.match(preflight[1], /required_result: status=ok/);
+  assert.match(preflight[1], /timing: before Task dispatch and after every handoff regeneration/);
+  assert.match(preflight[1], /authorization: read-only report; never inspection, bind, or mutation/);
+  assert.match(preflight[1], /equivalent_command: sortie-dogs lint <handoff_path> --manifest <operation_manifest_path> requires exit 0/);
+  assert.match(preflight[1], /repair: fix the named pointer; an unchanged resend earns retry-exhausted/);
+  assert.match(worker.content, /denied Read[\s\S]+denied bind[\s\S]+exact JSON\s+pointer/i);
+  assert.match(worker.content, /Return those defect entries\s+verbatim to dog-coordinator/i);
+});
+
 test("runtime contract requires interactive continuation and deterministic recoverable handshake", () => {
   const coordinator = runtimeAssets.find((asset) => asset.name === "dog-coordinator");
   const worker = runtimeAssets.find((asset) => asset.name === "dog-worker");
@@ -881,9 +940,10 @@ test("runtime contract requires interactive continuation and deterministic recov
   );
   assert.ok(handshake);
   assert.match(handshake[1], /session-inactive \| session-expired \| handoff-uninspected \| handoff-mismatch/);
-    assert.match(handshake[1], /operation manifest -> Task child activation -> Task return\/session\.idle inspection -> same-session resume -> bind/);
-    assert.match(handshake[1], /same session-inactive bind failure twice, continue blocker-resolution/);
-    assert.match(handshake[1], /Read alone never counts; file\.edited or session\.idle is authoritative/);
+  assert.match(handshake[1], /operation manifest \+ valid registered handoff -> Task child activation -> built-in Read exact handoff_path -> bind in same turn/);
+  assert.match(handshake[1], /one recoverable retry only after state change; second unchanged denial -> retry-exhausted/);
+  assert.match(handshake[1], /successful built-in Read by binding child only; shell\/coordinator\/sibling\/file\.edited do not grant/);
+  assert.match(handshake[1], /retry_exhausted: nonrecoverable local blocker/);
   assert.match(handshake[1], /same manifest hash \+ mtime after reread -> idempotent bound/);
   assert.match(handshake[1], /changed path, hash, or mtime -> deny/);
   assert.match(handshake[1], /dog-coordinator regenerates registered handoff; worker never rewrites it/);
@@ -891,6 +951,7 @@ test("runtime contract requires interactive continuation and deterministic recov
   assert.match(handshake[1], /nonrecoverable_bind_signal: escalation\.action=follow-remedy; resume_session=false/);
   assert.match(handshake[1], /TRUE_BLOCKER absent -> blocker-resolution takeover on the same solSession/);
   assert.match(worker.content, /do not terminate and do not ask the\s+user/i);
+  assert.match(worker.content, /exact absolute handoff_path[\s\S]+built-in Read once on that path[\s\S]+same turn/i);
   assert.match(worker.content, /Only\s+dog-coordinator may regenerate a mismatched handoff/i);
   assert.match(worker.content, /Only a recoverable[\s\S]+resume_session=true[\s\S]+same solSession/i);
   assert.match(worker.content, /nonrecoverable denial[\s\S]+existing remedy[\s\S]+never same-session resume/i);
@@ -1017,10 +1078,37 @@ async function bindWriteGate(
   await readFile(handoffPath, "utf8").catch(async () => {
     await writeFile(handoffPath, JSON.stringify(writeGateHandoff(directory, manifestPath)));
   });
-  const event = hooks.event;
-  assert.ok(event);
-  await event({ event: { type: "file.edited", properties: { file: handoffPath, sessionID } } });
+  // Some denial fixtures intentionally provide an invalid handoff or manifest and assert the bind
+  // result rather than the read-hook error. Production callers see the inspection error directly.
+  await inspectHandoffWithRead(hooks, handoffPath, sessionID).catch(() => undefined);
   return await executeBindWriteGate(hooks, directory, sessionID, manifestPath);
+}
+
+async function inspectHandoffWithRead(
+  hooks: Awaited<ReturnType<typeof SortieDogsPlugin>>,
+  handoffPath: string,
+  sessionID: string,
+): Promise<void> {
+  const before = hooks["tool.execute.before"];
+  const after = hooks["tool.execute.after"];
+  assert.ok(before);
+  assert.ok(after);
+  const args = { filePath: handoffPath };
+  await before({ tool: "read", sessionID, callID: `read-${sessionID}` }, { args });
+  await after({ tool: "read", sessionID, callID: `read-${sessionID}`, args }, { output: "read" });
+}
+
+async function readDenialMessage(
+  hooks: Awaited<ReturnType<typeof SortieDogsPlugin>>,
+  handoffPath: string,
+  sessionID = "plugin-session",
+): Promise<string> {
+  try {
+    await inspectHandoffWithRead(hooks, handoffPath, sessionID);
+  } catch (error) {
+    return (error as Error).message;
+  }
+  assert.fail("expected the registered handoff read to be denied");
 }
 
 async function executeBindWriteGate(
@@ -1475,16 +1563,8 @@ test("passive coordinator lineage activates only its Task child without inheriti
       resume_session: true,
       true_blocker: false,
     });
-    await before(
-      { tool: "read", sessionID: "child", callID: "read-only" },
-      { args: { filePath: join(directory, "handoff.json") } },
-    );
-    assert.equal((await executeBindWriteGate(hooks, directory, "child")).reason, "handoff-uninspected");
-    await event({ event: { type: "session.idle", properties: { sessionID: "child" } } });
-    await chat(
-      { sessionID: "child", agent: "renamed-worker" },
-      { message: { agent: "renamed-worker", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: "same-session resume" }] },
-    );
+    await inspectHandoffWithRead(hooks, join(directory, "handoff.json"), "child");
+    // Inspection is deterministic in the same tool turn; no idle/resume timing dependency remains.
     assert.equal((await executeBindWriteGate(hooks, directory, "child")).status, "bound");
     await before(
       { tool: "write", sessionID: "child", callID: "child-write" },
@@ -1554,7 +1634,7 @@ test("same-fingerprint inspection cannot cross coordinator root lineage", async 
       { sessionID: "owner-child", agent: "renamed-worker" },
       { message: { agent: "renamed-worker", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: `role=implementation\nprojectRoot=${directory}\ncandidate=child\nsource_manifest=[src/a.ts]\nacceptance: safe change` }] },
     );
-    await event({ event: { type: "session.idle", properties: { sessionID: "owner-child" } } });
+    await inspectHandoffWithRead(hooks, join(directory, "handoff.json"), "owner-child");
     assert.equal((await executeBindWriteGate(hooks, directory, "owner-child")).status, "bound");
     await event({ event: { type: "session.created", properties: { info: { id: "fallback-child", parentID: "root-b", directory } } } });
     await chat(
@@ -1562,6 +1642,373 @@ test("same-fingerprint inspection cannot cross coordinator root lineage", async 
       { message: { agent: "renamed-worker", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: `role=implementation\nprojectRoot=${directory}\ncandidate=child\nsource_manifest=[src/a.ts]\nacceptance: safe change` }] },
     );
     assert.equal((await executeBindWriteGate(hooks, directory, "fallback-child")).reason, "handoff-uninspected");
+  });
+});
+
+test("a nested candidate binds from its own default handoff after one successful Read", async () => {
+  await withProject("nested-candidate-read-inspection", async (directory) => {
+    const candidateRoot = join(directory, "candidate");
+    await mkdir(candidateRoot);
+    await writeFile(
+      join(candidateRoot, "candidate-manifest.json"),
+      JSON.stringify(operationManifest(["allowed.txt"])),
+    );
+    const handoffPath = join(candidateRoot, "handoff.json");
+    const pendingHandoff = writeGateHandoff(candidateRoot, "candidate-manifest.json");
+    pendingHandoff.verification = (pendingHandoff.verification as Array<Record<string, unknown>>).map(
+      (entry) => ({ ...entry, status: "not_run", exit_code: null, summary: "Pending worker bind" }),
+    );
+    await writeFile(
+      handoffPath,
+      JSON.stringify(pendingHandoff),
+    );
+
+    // The plugin runs at the parent workspace and keeps its default handoffPaths=["handoff.json"].
+    const hooks = await SortieDogsPlugin({ directory });
+    const chat = hooks["chat.message"];
+    const event = hooks.event;
+    assert.ok(chat);
+    assert.ok(event);
+    await chat(
+      { sessionID: "nested-parent", agent: "dog-coordinator" },
+      { message: { agent: "dog-coordinator", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: "ordinary" }] },
+    );
+    await event({ event: { type: "session.created", properties: { info: { id: "nested-child", parentID: "nested-parent", directory } } } });
+    await chat(
+      { sessionID: "nested-child", agent: "dog-worker" },
+      {
+        message: { agent: "dog-worker", model: { providerID: "host", modelID: "selected" } },
+        parts: [{
+          type: "text",
+          text: `role=implementation\nproject_root=${candidateRoot}\noperation_manifest=candidate-manifest.json\nacceptance=safe change`,
+        }],
+      },
+    );
+
+    await inspectHandoffWithRead(hooks, handoffPath, "nested-child");
+    const binding = await executeBindWriteGate(
+      hooks,
+      candidateRoot,
+      "nested-child",
+      join(candidateRoot, "candidate-manifest.json"),
+    );
+    assert.deepEqual(
+      { status: binding.status, manifest_path: binding.manifest_path },
+      { status: "bound", manifest_path: "candidate-manifest.json" },
+    );
+    assert.match(String(binding.manifest_hash), /^[0-9a-f]{64}$/u);
+  });
+});
+
+test("a denied handoff read reports the document, pointer, and rule that must be repaired", async () => {
+  await withProject("handoff-denial-defects", async (directory) => {
+    const hooks = await configuredHooks(directory);
+    await activate(hooks);
+    const handoffPath = join(directory, "handoff.json");
+    const denial = async (handoff: Record<string, unknown>): Promise<string> => {
+      await writeFile(handoffPath, JSON.stringify(handoff));
+      return await readDenialMessage(hooks, handoffPath);
+    };
+
+    // A blocker list holds objects. Bare strings are the defect that stalled real candidates.
+    const stringBlocked = writeGateHandoff(directory, "operation-manifest.json");
+    stringBlocked.state = { done: [], next: ["bind"], blocked: ["waiting on the coordinator"] };
+    assert.match(
+      await denial(stringBlocked),
+      /Defects: handoff \/state\/blocked\/0 schema_type\. Correct the registered handoff/u,
+    );
+
+    const missingRoot = writeGateHandoff(directory, "operation-manifest.json");
+    missingRoot.ext = { "sortie-dogs/write-gate": { operation_manifest: "operation-manifest.json" } };
+    assert.match(
+      await denial(missingRoot),
+      /handoff \/ext\/sortie-dogs~1write-gate\/project_root ext_project_root_missing/u,
+    );
+
+    const undeclaredCheck = writeGateHandoff(directory, "operation-manifest.json");
+    undeclaredCheck.verification = [
+      { check: "npm test", status: "not_run", exit_code: null, summary: "Pending bind" },
+    ];
+    assert.match(
+      await denial(undeclaredCheck),
+      /contract \/verification\/0\/check M004_VERIFICATION_NOT_DECLARED/u,
+    );
+
+    // An operation manifest with an invented shape reports the manifest, never its content.
+    await writeFile(
+      join(directory, "invented-manifest.json"),
+      JSON.stringify({ candidate: "PVTI_x", targets: [{ path: "allowed.txt" }], constraints: [] }),
+    );
+    const inventedMessage = await denial(writeGateHandoff(directory, "invented-manifest.json"));
+    assert.match(inventedMessage, /manifest \/@unknown schema_additionalProperties/u);
+    assert.match(inventedMessage, /manifest \/read schema_required/u);
+    assert.ok(!inventedMessage.includes("PVTI_x"));
+
+    // Every unknown property collapses into one redacted pointer, so authored names never leak.
+    assert.equal(inventedMessage.match(/schema_additionalProperties/gu)?.length, 1);
+
+    const manyDefects = writeGateHandoff(directory, "operation-manifest.json");
+    manyDefects.profile = "full";
+    manyDefects.scope = { paths: Array.from({ length: 10 }, (_, index) => `undeclared-${index}.txt`) };
+    manyDefects.sources = [{ path: "allowed.txt", rev: "r1" }];
+    assert.match(await denial(manyDefects), /contract \/scope\/paths\/7 M002_SCOPE_NOT_ALLOWED; \+2 more\./u);
+
+    await writeFile(handoffPath, "{ not json");
+    assert.match(await readDenialMessage(hooks, handoffPath), /handoff \/ input_invalid_json/u);
+  });
+});
+
+test("the contract preflight reports gate defects without granting inspection", async () => {
+  await withProject("contract-preflight", async (directory) => {
+    const hooks = await configuredHooks(directory);
+    const check = hooks.tool?.sortie_check_contract as unknown as {
+      execute(args: { handoff_path: string }, context: { sessionID: string }): Promise<string>;
+    } | undefined;
+    assert.ok(check);
+    const report = async (handoffPath: string): Promise<Record<string, unknown>> =>
+      JSON.parse(await check.execute({ handoff_path: handoffPath }, { sessionID: "plugin-session" }));
+
+    const handoffPath = join(directory, "handoff.json");
+    const defective = writeGateHandoff(directory, "operation-manifest.json");
+    defective.state = { done: [], next: ["bind"], blocked: ["still waiting"] };
+    await writeFile(handoffPath, JSON.stringify(defective));
+    assert.deepEqual(await report(handoffPath), {
+      status: "defective",
+      reason: "schema-invalid",
+      defects: ["handoff /state/blocked/0 schema_type"],
+      remedy: "Repair each reported pointer in the named document, then check it again.",
+    });
+
+    // An unregistered path is a defect, never a silent pass that a dispatch could trust.
+    const unregistered = join(directory, "elsewhere.json");
+    await writeFile(unregistered, JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
+    assert.equal((await report(unregistered)).status, "defective");
+    assert.deepEqual((await report(unregistered)).defects, ["handoff / handoff_path_not_registered"]);
+
+    await writeFile(handoffPath, JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
+    assert.deepEqual(await report(handoffPath), { status: "ok", defects: [] });
+
+    // A passing report must not stand in for the binding child's own Read.
+    await activate(hooks);
+    const denied = await executeBindWriteGate(hooks, directory);
+    assert.equal(denied.reason, "handoff-uninspected");
+  });
+});
+
+test("a denied bind carries the same defect evidence the coordinator must repair", async () => {
+  await withProject("bind-denial-defects", async (directory) => {
+    const hooks = await configuredHooks(directory);
+    await activate(hooks);
+    const handoffPath = join(directory, "handoff.json");
+    await writeFile(
+      join(directory, "invented-manifest.json"),
+      JSON.stringify({ candidate: "PVTI_x", targets: [] }),
+    );
+    await writeFile(
+      handoffPath,
+      JSON.stringify(writeGateHandoff(directory, "invented-manifest.json")),
+    );
+    await inspectHandoffWithRead(hooks, handoffPath, "plugin-session").catch(() => undefined);
+
+    const denied = await executeBindWriteGate(
+      hooks,
+      directory,
+      "plugin-session",
+      "invented-manifest.json",
+    );
+    assert.equal(denied.status, "denied");
+    assert.equal(denied.reason, "manifest-invalid");
+    const defects = denied.defects as string[];
+    assert.ok(defects.includes("manifest /read schema_required"));
+    assert.ok(defects.includes("manifest /@unknown schema_additionalProperties"));
+    assert.ok(defects.length <= 8);
+    assert.ok(!JSON.stringify(denied).includes("PVTI_x"));
+  });
+});
+
+test("unchanged bind denial stops across fresh children until inspection changes state", async () => {
+  await withProject("binding-no-progress", async (directory) => {
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+    const handoffPath = join(directory, "handoff.json");
+    await writeFile(handoffPath, JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
+    const hooks = await SortieDogsPlugin({ directory });
+    const chat = hooks["chat.message"];
+    const event = hooks.event;
+    assert.ok(chat);
+    assert.ok(event);
+    await chat(
+      { sessionID: "retry-root", agent: "dog-coordinator" },
+      { message: { agent: "dog-coordinator", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: "ordinary" }] },
+    );
+    const task = `role=implementation\nproject_root=${directory}\noperation_manifest=operation-manifest.json\nacceptance=safe change`;
+    for (const sessionID of ["retry-child", "reader-child", "fresh-retry-child"]) {
+      await event({ event: { type: "session.created", properties: { info: { id: sessionID, parentID: "retry-root", directory } } } });
+      await chat(
+        { sessionID, agent: "dog-worker" },
+        { message: { agent: "dog-worker", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: task }] },
+      );
+    }
+
+    assert.equal(
+      (await executeBindWriteGate(hooks, directory, "retry-child")).reason,
+      "handoff-uninspected",
+    );
+    // A sibling may inspect for itself, but it cannot erase the denial owned by retry-child.
+    await inspectHandoffWithRead(hooks, handoffPath, "reader-child");
+    const changedHandoff = writeGateHandoff(directory, "operation-manifest.json");
+    changedHandoff.task = { title: "Changed", objective: "Create a distinct mismatch signature." };
+    await writeFile(handoffPath, JSON.stringify(changedHandoff));
+    assert.equal(
+      (await executeBindWriteGate(hooks, directory, "reader-child")).reason,
+      "handoff-mismatch",
+    );
+    await event({ event: { type: "file.edited", properties: { file: handoffPath } } });
+    const stopped = await executeBindWriteGate(hooks, directory, "fresh-retry-child");
+    assert.deepEqual(
+      {
+        reason: stopped.reason,
+        recoverable: stopped.recoverable,
+        escalation: stopped.escalation,
+      },
+      {
+        reason: "retry-exhausted",
+        recoverable: false,
+        escalation: { action: "follow-remedy", resume_session: false, true_blocker: true },
+      },
+    );
+
+    // A successful child-owned inspection is real progress and clears the root-lineage stop state.
+    await inspectHandoffWithRead(hooks, handoffPath, "retry-child");
+    assert.equal((await executeBindWriteGate(hooks, directory, "retry-child")).status, "bound");
+  });
+});
+
+test("another candidate cannot erase a root lineage no-progress denial", async () => {
+  await withProject("binding-no-progress-interleaved", async (directory) => {
+    const roots: Record<string, string> = {};
+    for (const name of ["candidate-a", "candidate-b"]) {
+      const root = join(directory, name);
+      roots[name] = root;
+      await mkdir(root);
+      await writeFile(join(root, "manifest.json"), JSON.stringify(operationManifest(["allowed.txt"])));
+    }
+    const hooks = await SortieDogsPlugin({ directory });
+    const chat = hooks["chat.message"];
+    const event = hooks.event;
+    assert.ok(chat);
+    assert.ok(event);
+    await chat(
+      { sessionID: "interleaved-root", agent: "dog-coordinator" },
+      { message: { agent: "dog-coordinator", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: "ordinary" }] },
+    );
+    for (const [sessionID, root] of [
+      ["candidate-a-first", roots["candidate-a"]],
+      ["candidate-b-first", roots["candidate-b"]],
+      ["candidate-a-fresh", roots["candidate-a"]],
+    ] as const) {
+      await event({ event: { type: "session.created", properties: { info: { id: sessionID, parentID: "interleaved-root", directory } } } });
+      await chat(
+        { sessionID, agent: "dog-worker" },
+        {
+          message: { agent: "dog-worker", model: { providerID: "host", modelID: "selected" } },
+          parts: [{ type: "text", text: `role=implementation\nproject_root=${root}\noperation_manifest=manifest.json\nacceptance=safe change` }],
+        },
+      );
+    }
+    assert.equal(
+      (await executeBindWriteGate(hooks, roots["candidate-a"], "candidate-a-first", "manifest.json")).reason,
+      "handoff-uninspected",
+    );
+    assert.equal(
+      (await executeBindWriteGate(hooks, roots["candidate-b"], "candidate-b-first", "manifest.json")).reason,
+      "handoff-uninspected",
+    );
+    assert.equal(
+      (await executeBindWriteGate(hooks, roots["candidate-a"], "candidate-a-fresh", "manifest.json")).reason,
+      "retry-exhausted",
+    );
+  });
+});
+
+test("a successful sibling bind cannot erase another child's mismatch history", async () => {
+  await withProject("binding-no-progress-owner-isolation", async (directory) => {
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+    const handoffPath = join(directory, "handoff.json");
+    const originalHandoff = writeGateHandoff(directory, "operation-manifest.json");
+    const changedHandoff = writeGateHandoff(directory, "operation-manifest.json");
+    changedHandoff.task = { title: "Changed", objective: "Repeat one exact mismatch fingerprint." };
+    await writeFile(handoffPath, JSON.stringify(originalHandoff));
+    const hooks = await SortieDogsPlugin({ directory });
+    const chat = hooks["chat.message"];
+    const event = hooks.event;
+    assert.ok(chat);
+    assert.ok(event);
+    await chat(
+      { sessionID: "owner-root", agent: "dog-coordinator" },
+      { message: { agent: "dog-coordinator", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: "ordinary" }] },
+    );
+    const task = `role=implementation\nproject_root=${directory}\noperation_manifest=operation-manifest.json\nacceptance=safe change`;
+    for (const sessionID of ["mismatch-owner", "successful-sibling", "replay-sibling"]) {
+      await event({ event: { type: "session.created", properties: { info: { id: sessionID, parentID: "owner-root", directory } } } });
+      await chat(
+        { sessionID, agent: "dog-worker" },
+        { message: { agent: "dog-worker", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: task }] },
+      );
+    }
+
+    await inspectHandoffWithRead(hooks, handoffPath, "mismatch-owner");
+    await writeFile(handoffPath, JSON.stringify(changedHandoff));
+    assert.equal(
+      (await executeBindWriteGate(hooks, directory, "mismatch-owner")).reason,
+      "handoff-mismatch",
+    );
+    await inspectHandoffWithRead(hooks, handoffPath, "successful-sibling");
+    assert.equal((await executeBindWriteGate(hooks, directory, "successful-sibling")).status, "bound");
+
+    await writeFile(handoffPath, JSON.stringify(originalHandoff));
+    await inspectHandoffWithRead(hooks, handoffPath, "replay-sibling");
+    await writeFile(handoffPath, JSON.stringify(changedHandoff));
+    assert.equal(
+      (await executeBindWriteGate(hooks, directory, "replay-sibling")).reason,
+      "retry-exhausted",
+    );
+  });
+});
+
+test("file edits revoke authorization and never grant inspection even with a session ID", async () => {
+  await withProject("sessionless-file-edit", async (directory) => {
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+    const handoffPath = join(directory, "handoff.json");
+    await writeFile(handoffPath, JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
+    const hooks = await SortieDogsPlugin({ directory });
+    await activate(hooks, "event-owner");
+    await inspectHandoffWithRead(hooks, handoffPath, "event-owner");
+    assert.equal((await executeBindWriteGate(hooks, directory, "event-owner")).status, "bound");
+    const event = hooks.event;
+    const before = hooks["tool.execute.before"];
+    assert.ok(event);
+    assert.ok(before);
+
+    await event({ event: { type: "file.edited", properties: { file: handoffPath } } });
+    await expectMessage(
+      () => before(
+        { tool: "write", sessionID: "event-owner", callID: "revoked" },
+        { args: { file: "allowed.txt", content: "not-written" } },
+      ),
+      'Write denied for "<unknown>": operation manifest unavailable.',
+      "manifest-unavailable",
+    );
+    assert.equal(
+      (await executeBindWriteGate(hooks, directory, "event-owner")).reason,
+      "handoff-uninspected",
+    );
+    await inspectHandoffWithRead(hooks, handoffPath, "event-owner");
+    assert.equal((await executeBindWriteGate(hooks, directory, "event-owner")).status, "bound");
+    await event({ event: { type: "file.edited", properties: { file: handoffPath, sessionID: "event-owner" } } });
+    assert.equal(
+      (await executeBindWriteGate(hooks, directory, "event-owner")).reason,
+      "handoff-uninspected",
+    );
   });
 });
 
@@ -1614,11 +2061,11 @@ test("root and inspection TTLs stop new inheritance without revoking existing ch
         { sessionID: "authorized-child", agent: "dog-worker" },
         { message: { agent: "dog-worker", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: task }] },
       );
-      await event({ event: { type: "session.idle", properties: { sessionID: "authorized-child" } } });
+      await inspectHandoffWithRead(hooks, join(directory, "handoff.json"), "authorized-child");
       assert.equal((await executeBindWriteGate(hooks, directory, "authorized-child")).status, "bound");
 
       await activate(hooks, "inspection-ttl");
-      await event({ event: { type: "file.edited", properties: { file: "handoff.json", sessionID: "inspection-ttl" } } });
+      await inspectHandoffWithRead(hooks, join(directory, "handoff.json"), "inspection-ttl");
       now += 20 * 60 * 1000;
       for (const sessionID of ["authorized-child", "inspection-ttl"]) {
         await chat(
@@ -1642,6 +2089,17 @@ test("root and inspection TTLs stop new inheritance without revoking existing ch
       await before(
         { tool: "write", sessionID: "authorized-child", callID: "post-root-expiry" },
         { args: { file: "allowed.txt", content: "not-written" } },
+      );
+      // The inspection entry has expired, but authorization still pins its handoff path and must
+      // therefore be suspended by the host's session-less file event.
+      await event({ event: { type: "file.edited", properties: { file: join(directory, "handoff.json") } } });
+      await expectMessage(
+        () => before(
+          { tool: "write", sessionID: "authorized-child", callID: "edited-after-inspection-ttl" },
+          { args: { file: "allowed.txt", content: "not-written" } },
+        ),
+        'Write denied for "<unknown>": operation manifest unavailable.',
+        "manifest-unavailable",
       );
     } finally {
       Date.now = originalNow;
@@ -1822,7 +2280,7 @@ test("plugin reloads a missing or invalid manifest after repair in the same sess
   });
 });
 
-test("plugin recovers after a loaded manifest becomes temporarily invalid", async () => {
+test("a repaired manifest remains pinned to the original hash and mtime", async () => {
   await withProject("loaded-manifest-repair", async (directory) => {
     const manifestPath = join(directory, "operation-manifest.json");
     await writeFile(manifestPath, JSON.stringify(fixture.manifest));
@@ -1837,7 +2295,10 @@ test("plugin recovers after a loaded manifest becomes temporarily invalid", asyn
     );
 
     await writeFile(manifestPath, JSON.stringify(fixture.manifest));
-    await invokeWrite(hooks, "allowed.txt", directory);
+    await inspectHandoffWithRead(hooks, join(directory, "handoff.json"), "plugin-session");
+    const replay = await executeBindWriteGate(hooks, directory, "plugin-session");
+    assert.equal(replay.reason, "binding-replay");
+    assert.equal(replay.recoverable, false);
   });
 });
 
@@ -1860,7 +2321,6 @@ test("handoff write authorization uses its candidate root when the parent worktr
     const before = hooks["tool.execute.before"];
     assert.ok(event);
     assert.ok(before);
-    await event({ event: { type: "file.edited", properties: { file: "handoff.json", sessionID: "candidate" } } });
     await before(
       { tool: "write", sessionID: "candidate", callID: "candidate-allowed" },
       { args: { file: "allowed.txt", content: "not-written" } },
@@ -2038,7 +2498,7 @@ test("write-gate binding requires a matching inspected Task handoff", async () =
     assert.match(String(uninspected.remedy), /exact registered handoff path/i);
     const event = hooks.event;
     assert.ok(event);
-    await event({ event: { type: "file.edited", properties: { file: "handoff.json", sessionID: "binding-inspection" } } });
+    await inspectHandoffWithRead(hooks, handoffPath, "binding-inspection");
     await writeFile(handoffPath, JSON.stringify({
       ...writeGateHandoff(directory, "operation-manifest.json"),
       created_at: "2035-01-02T03:04:06Z",
@@ -2050,7 +2510,49 @@ test("write-gate binding requires a matching inspected Task handoff", async () =
   });
 });
 
-test("inactive file events stay passive and only active lifecycle inspection enables binding", async () => {
+test("an inspected schema-invalid handoff exhausts an unchanged bind retry", async () => {
+  await withProject("binding-invalid-handoff-retry", async (directory) => {
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+    const handoffPath = join(directory, "handoff.json");
+    await writeFile(handoffPath, JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
+    const hooks = await SortieDogsPlugin({ directory });
+    await activate(hooks, "invalid-handoff-retry");
+    await inspectHandoffWithRead(hooks, handoffPath, "invalid-handoff-retry");
+    await writeFile(handoffPath, JSON.stringify(fixture.handoffs.invalid));
+
+    assert.equal(
+      (await executeBindWriteGate(hooks, directory, "invalid-handoff-retry")).reason,
+      "handoff-mismatch",
+    );
+    assert.equal(
+      (await executeBindWriteGate(hooks, directory, "invalid-handoff-retry")).reason,
+      "retry-exhausted",
+    );
+  });
+});
+
+test("an inspected unreadable handoff exhausts an unchanged bind retry", async () => {
+  await withProject("binding-unreadable-handoff-retry", async (directory) => {
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+    const handoffPath = join(directory, "handoff.json");
+    await writeFile(handoffPath, JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
+    const hooks = await SortieDogsPlugin({ directory });
+    await activate(hooks, "unreadable-handoff-retry");
+    await inspectHandoffWithRead(hooks, handoffPath, "unreadable-handoff-retry");
+    await writeFile(handoffPath, "{invalid-json");
+
+    assert.equal(
+      (await executeBindWriteGate(hooks, directory, "unreadable-handoff-retry")).reason,
+      "handoff-mismatch",
+    );
+    assert.equal(
+      (await executeBindWriteGate(hooks, directory, "unreadable-handoff-retry")).reason,
+      "retry-exhausted",
+    );
+  });
+});
+
+test("inactive file events stay passive and only an active child Read enables binding", async () => {
   await withProject("inactive-inspection", async (directory) => {
     await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
     const handoffPath = join(directory, "handoff.json");
@@ -2068,6 +2570,8 @@ test("inactive file events stay passive and only active lifecycle inspection ena
     await activate(hooks, "inactive");
     assert.equal((await executeBindWriteGate(hooks, directory, "inactive")).reason, "handoff-uninspected");
     await event({ event: { type: "session.idle", properties: { sessionID: "inactive" } } });
+    assert.equal((await executeBindWriteGate(hooks, directory, "inactive")).reason, "retry-exhausted");
+    await inspectHandoffWithRead(hooks, handoffPath, "inactive");
     assert.equal((await executeBindWriteGate(hooks, directory, "inactive")).status, "bound");
 
     await event({ event: { type: "file.edited", properties: { file: join(directory, "other.json"), sessionID: "off-path" } } });
@@ -2096,7 +2600,6 @@ test("session idle keeps activation but revokes authorization when handoff inspe
     assert.ok(event);
     assert.ok(before);
     assert.equal((await bindWriteGate(hooks, directory, "idle-failure", "candidate-manifest.json")).status, "bound");
-    await event({ event: { type: "file.edited", properties: { file: "handoff.json", sessionID: "idle-failure" } } });
     await before(
       { tool: "write", sessionID: "idle-failure", callID: "authorized" },
       { args: { file: "allowed.txt", content: "not-written" } },
@@ -2123,7 +2626,7 @@ test("session idle keeps activation but revokes authorization when handoff inspe
   });
 });
 
-test("explicit binding is idempotent only for the same pinned manifest and ignores handoff replacement", async () => {
+test("handoff edits suspend writes without releasing the pinned manifest identity", async () => {
   await withProject("candidate-replacement", async (directory) => {
     await writeFile(join(directory, "manifest-a.json"), JSON.stringify(operationManifest(["old.txt"])));
     await writeFile(join(directory, "manifest-b.json"), JSON.stringify(operationManifest(["new.txt"])));
@@ -2131,8 +2634,10 @@ test("explicit binding is idempotent only for the same pinned manifest and ignor
     await writeFile(handoffPath, JSON.stringify(writeGateHandoff(directory, "manifest-a.json")));
     const hooks = await SortieDogsPlugin({ directory });
     await activate(hooks, "replacement");
+    const chat = hooks["chat.message"];
     const event = hooks.event;
     const before = hooks["tool.execute.before"];
+    assert.ok(chat);
     assert.ok(event);
     assert.ok(before);
     assert.equal((await bindWriteGate(hooks, directory, "replacement", "manifest-a.json")).status, "bound");
@@ -2158,15 +2663,53 @@ test("explicit binding is idempotent only for the same pinned manifest and ignor
       { args: { file, content: "not-written" } },
     );
     await event(edited);
-    await write("old.txt");
-    await writeFile(handoffPath, JSON.stringify(writeGateHandoff(directory, "manifest-b.json")));
-    await event(edited);
     await expectMessage(
-      () => write("new.txt"),
-      'Write denied for "new.txt": operation manifest write scope.',
-      "manifest-scope",
+      () => write("old.txt"),
+      'Write denied for "<unknown>": operation manifest unavailable.',
+      "manifest-unavailable",
     );
-    await write("old.txt");
+    const originalNow = Date.now;
+    let now = Date.now();
+    Date.now = () => now;
+    try {
+      now += 20 * 60 * 1000;
+      await chat(
+        { sessionID: "replacement", agent: "dog-worker" },
+        { message: { agent: "dog-worker", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: "keep session active" }] },
+      );
+      now += 11 * 60 * 1000;
+      await expectMessage(
+        () => before(
+          { tool: "apply_patch", sessionID: "replacement", callID: "expired-auth-pinned" },
+          { args: { patchText: "*** Begin Patch\n*** Update File: old.txt\n@@\n-old\n+new\n*** End Patch" } },
+        ),
+        'Write denied for "<unknown>": operation manifest unavailable.',
+        "manifest-unavailable",
+      );
+      await inspectHandoffWithRead(hooks, handoffPath, "replacement");
+      assert.equal(
+        (await executeBindWriteGate(hooks, directory, "replacement", "manifest-b.json")).reason,
+        "binding-replay",
+        "authorization TTL expiry must not release the session binding pin",
+      );
+      now += 31 * 60 * 1000;
+      assert.equal(
+        (await executeBindWriteGate(hooks, directory, "replacement", "manifest-b.json")).reason,
+        "session-expired",
+      );
+      await chat(
+        { sessionID: "replacement", agent: "dog-worker" },
+        { message: { agent: "dog-worker", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: "/sortie resume" }] },
+      );
+      await inspectHandoffWithRead(hooks, handoffPath, "replacement");
+      assert.equal(
+        (await executeBindWriteGate(hooks, directory, "replacement", "manifest-b.json")).reason,
+        "binding-replay",
+        "session reactivation must not release the original manifest pin",
+      );
+    } finally {
+      Date.now = originalNow;
+    }
   });
 });
 
@@ -2189,7 +2732,6 @@ test("failed candidate handoff inspection revokes authorization without falling 
       { args: { file: "old.txt", content: "not-written" } },
     );
 
-    await event(edited);
     await write();
     await writeFile(handoffPath, fixture.invalidManifestJson);
     await event(edited);
@@ -2215,7 +2757,6 @@ test("candidate authorization fails closed when its operation manifest becomes s
     assert.ok(before);
     const originalManifest = await stat(manifestPath);
     assert.equal((await bindWriteGate(hooks, directory, "stale-manifest", "candidate-manifest.json")).status, "bound");
-    await event({ event: { type: "file.edited", properties: { file: "handoff.json", sessionID: "stale-manifest" } } });
     const write = (file: string) => before(
       { tool: "write", sessionID: "stale-manifest", callID: file },
       { args: { file, content: "not-written" } },
@@ -2352,7 +2893,6 @@ test("git commit normalizes cached paths relative to a candidate subdirectory", 
     const before = hooks["tool.execute.before"];
     assert.ok(event);
     assert.ok(before);
-    await event({ event: { type: "file.edited", properties: { file: "handoff.json", sessionID: "candidate-commit" } } });
     await before(
       { tool: "bash", sessionID: "candidate-commit", callID: "candidate-commit" },
       { args: { command: "git commit -m gate" } },
@@ -2644,6 +3184,7 @@ test("plugin fixture accepts warning-only handoff state and dedupes per session"
     // Missing changed-path evidence produces only M007; the plugin rejects errors, not warnings.
     await event(edited);
     await event({ event: { type: "session.idle", properties: { sessionID: "one" } } });
+    assert.equal((await executeBindWriteGate(hooks, directory, "one")).status, "bound");
     await expectMessage(
       () => before(
         { tool: "write", sessionID: "one", callID: "idle-still-bound" },

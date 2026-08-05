@@ -1,4 +1,4 @@
-import { open } from "node:fs/promises";
+import { open, realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -217,12 +217,6 @@ function changedPathLines(buffer: Buffer): string[] {
   return buffer.toString("utf8").split(/\r?\n/u).filter((line) => line.length > 0);
 }
 
-function safeSchemaPointer(diagnostic: SchemaDiagnostic): string {
-  if (diagnostic.code !== "schema_additionalProperties") return diagnostic.pointer;
-  const slash = diagnostic.pointer.lastIndexOf("/");
-  return `${diagnostic.pointer.slice(0, Math.max(0, slash))}/@unknown`;
-}
-
 function associate(
   file: string,
   input: readonly (Diagnostic | SchemaDiagnostic)[],
@@ -232,7 +226,7 @@ function associate(
     code: diagnostic.code,
     severity: diagnostic.severity,
     pointer: diagnostic.code.startsWith("schema_")
-      ? safeSchemaPointer(diagnostic as SchemaDiagnostic)
+      ? core.safeSchemaPointer(diagnostic as SchemaDiagnostic)
       : diagnostic.pointer,
     message: diagnostic.message,
   }));
@@ -371,6 +365,21 @@ export async function run(argv: readonly string[]): Promise<number> {
   return hasFailure ? 1 : 0;
 }
 
-if (process.argv[1] !== undefined && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
+/*
+ * This module is the packaged bin entry and is deliberately absent from the package exports, so the
+ * only way to satisfy the check below is for this file to be the process entry itself.
+ * Node resolves an entry module to its real path, so comparing the raw argument alone silently
+ * disables the CLI whenever the install path crosses a symlink or a Windows junction, which is the
+ * normal shape of a global or linked install. Accept the real path and the literal path, because
+ * --preserve-symlinks keeps the literal one.
+ */
+async function isEntrypoint(entry: string): Promise<boolean> {
+  const literal = resolve(entry);
+  const real = await realpath(literal).catch(() => literal);
+  return pathToFileURL(literal).href === import.meta.url ||
+    pathToFileURL(real).href === import.meta.url;
+}
+
+if (process.argv[1] !== undefined && await isEntrypoint(process.argv[1])) {
   process.exitCode = await run(process.argv.slice(2));
 }

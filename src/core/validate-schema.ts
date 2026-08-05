@@ -219,6 +219,16 @@ function diagnosticsFor(errors: readonly ErrorObject[]): SchemaDiagnostic[] {
     .sort(compareDiagnostics);
 }
 
+/**
+ * A pointer is safe to report because every segment is schema-derived, except the trailing segment
+ * of an unknown-property diagnostic, which is authored input and is replaced instead of echoed.
+ */
+export function safeSchemaPointer(diagnostic: SchemaDiagnostic): string {
+  if (diagnostic.code !== "schema_additionalProperties") return diagnostic.pointer;
+  const slash = diagnostic.pointer.lastIndexOf("/");
+  return `${diagnostic.pointer.slice(0, Math.max(0, slash))}/@unknown`;
+}
+
 /** Validate structure only. The input object is returned unchanged and is never mutated. */
 export function validateSchema<T>(
   kind: SchemaKind,

@@ -36,6 +36,10 @@
       "types": "./dist/plugin/opencode.d.ts",
       "import": "./dist/plugin/opencode.js"
     },
+    "./server": {
+      "types": "./dist/plugin/opencode.d.ts",
+      "import": "./dist/plugin/opencode.js"
+    },
     "./assets": {
       "types": "./dist/runtime-assets.d.ts",
       "import": "./dist/runtime-assets.js"
