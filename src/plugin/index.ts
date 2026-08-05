@@ -440,6 +440,7 @@ function loadConfigured(
       global: config.globalModelRouting,
       catalog: config.modelCatalog,
       dedicated: config.dedicatedWorkerModel,
+      freeTierFallbackModels: config.freeTierFallbackModels,
     }, client)
     : undefined;
   return {

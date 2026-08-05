@@ -1,6 +1,7 @@
 import {
   BUILT_IN_MODEL_CATALOG,
   DEFAULT_DEDICATED_WORKER_TARGET,
+  DEFAULT_FREE_TIER_FALLBACK_MODELS,
   RECOMMENDED_ROLE_ROUTING,
   dedicatedWorkerRouting,
   isFixedModelRole,
@@ -33,6 +34,8 @@ export interface SortieDogsPluginOptions {
   dedicatedWorkerModel?: ModelTarget;
   modelRouting?: ModelRoutingConfig;
   modelCatalog?: ModelCatalog;
+  /** Ordered, global last-resort models. An empty list disables free-tier fallback. */
+  freeTierFallbackModels?: readonly string[];
   consultation?: ConsultationPolicyInput;
   /**
    * Bounded batch continuation. The shipped defaults already resolve to a working route, so a host
@@ -90,6 +93,7 @@ export interface ConfiguredPlugin {
   dedicatedWorkerModel: ModelTarget;
   modelRouting: ModelRoutingConfig;
   modelCatalog: ModelCatalog;
+  freeTierFallbackModels: readonly string[];
   consultation: ConsultationPolicy;
   continuation: ContinuationConfiguration;
 }
@@ -115,6 +119,7 @@ export const DEFAULT_PLUGIN_OPTIONS: Readonly<
   dedicatedWorkerModel: DEFAULT_DEDICATED_WORKER_TARGET,
   modelRouting: RECOMMENDED_ROLE_ROUTING,
   modelCatalog: BUILT_IN_MODEL_CATALOG,
+  freeTierFallbackModels: DEFAULT_FREE_TIER_FALLBACK_MODELS,
   consultation: Object.freeze({
     strategy: Object.freeze({
       agent: CONSULTATION_ROLE_POLICY.strategy,
@@ -279,6 +284,12 @@ function parseModelCatalog(value: unknown): ModelCatalog | undefined {
   };
 }
 
+function validOpenCodeModelID(value: unknown): value is string {
+  if (!nonEmptyString(value) || /\s/u.test(value)) return false;
+  const separator = value.indexOf("/");
+  return separator > 0 && separator < value.length - 1;
+}
+
 function mergeCatalogModels(
   builtIn: readonly CatalogModel[],
   configured: readonly CatalogModel[],
@@ -310,7 +321,7 @@ function parseLayer(value: unknown): SortieDogsPluginOptions | undefined {
   if (Object.keys(value).some(
     (key) => ![
       "operationManifestPath", "handoffPaths", "readOnlyTools", "dedicatedWorkerModel",
-      "modelRouting", "modelCatalog", "consultation", "continuation",
+      "modelRouting", "modelCatalog", "freeTierFallbackModels", "consultation", "continuation",
     ].includes(key),
   )) {
     return undefined;
@@ -329,6 +340,7 @@ function parseLayer(value: unknown): SortieDogsPluginOptions | undefined {
   const modelCatalog = value.modelCatalog === undefined
     ? undefined
     : parseModelCatalog(value.modelCatalog);
+  const freeTierFallbackModels = value.freeTierFallbackModels;
   const consultation = value.consultation === undefined
     ? undefined
     : parseConsultationPolicy(value.consultation);
@@ -353,6 +365,10 @@ function parseLayer(value: unknown): SortieDogsPluginOptions | undefined {
   }
   if (value.modelRouting !== undefined && modelRouting === undefined) return undefined;
   if (value.modelCatalog !== undefined && modelCatalog === undefined) return undefined;
+  if (
+    freeTierFallbackModels !== undefined &&
+    (!Array.isArray(freeTierFallbackModels) || freeTierFallbackModels.some((model) => !validOpenCodeModelID(model)))
+  ) return undefined;
   if (value.consultation !== undefined && consultation === undefined) return undefined;
   if (value.continuation !== undefined && continuation === undefined) return undefined;
   return {
@@ -362,6 +378,7 @@ function parseLayer(value: unknown): SortieDogsPluginOptions | undefined {
     dedicatedWorkerModel,
     modelRouting,
     modelCatalog,
+    freeTierFallbackModels: freeTierFallbackModels as readonly string[] | undefined,
     consultation,
     continuation,
   };
@@ -375,6 +392,7 @@ export function resolvePluginConfiguration(...values: readonly unknown[]): Plugi
   let dedicatedWorkerModel = DEFAULT_PLUGIN_OPTIONS.dedicatedWorkerModel;
   let modelRouting = DEFAULT_PLUGIN_OPTIONS.modelRouting;
   let modelCatalog = DEFAULT_PLUGIN_OPTIONS.modelCatalog;
+  let freeTierFallbackModels = DEFAULT_PLUGIN_OPTIONS.freeTierFallbackModels;
   let consultation = DEFAULT_PLUGIN_OPTIONS.consultation;
   let continuation = DEFAULT_PLUGIN_OPTIONS.continuation;
   const configuredRoles = new Set<string>();
@@ -400,6 +418,9 @@ export function resolvePluginConfiguration(...values: readonly unknown[]): Plugi
           ),
         }),
       };
+    }
+    if (layer.freeTierFallbackModels !== undefined) {
+      freeTierFallbackModels = Object.freeze([...layer.freeTierFallbackModels]);
     }
     if (layer.consultation !== undefined) {
       consultation = Object.freeze({
@@ -438,6 +459,7 @@ export function resolvePluginConfiguration(...values: readonly unknown[]): Plugi
     dedicatedWorkerModel,
     modelRouting,
     modelCatalog,
+    freeTierFallbackModels,
     consultation,
     continuation,
   };

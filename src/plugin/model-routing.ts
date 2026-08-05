@@ -27,6 +27,11 @@ export const DEDICATED_SOL_ROLES = [
   "dog-worker",
 ] as const;
 
+/** Ordered last-resort targets used only when the host proves a policy target unavailable. */
+export const DEFAULT_FREE_TIER_FALLBACK_MODELS: readonly string[] = Object.freeze([
+  "opencode/deepseek-v4-flash-free",
+]);
+
 const dedicatedSolRoleSet = new Set<string>(DEDICATED_SOL_ROLES);
 
 /** The dedicated worker target this build ships with when a host declares no target of its own. */

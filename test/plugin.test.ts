@@ -17,6 +17,7 @@ import {
   DEDICATED_SOL_MODEL,
   DEDICATED_SOL_VARIANT,
   DEDICATED_SOL_ROLES,
+  DEFAULT_FREE_TIER_FALLBACK_MODELS,
   RECOMMENDED_CONSULTATION_MODEL,
   RECOMMENDED_CONSULTATION_ROLES,
   parseModelRoutingConfig,
@@ -88,13 +89,18 @@ test("model routing configuration is strict and merges roles by layer", () => {
     },
   };
   const parsed = resolvePluginConfiguration(
-    { modelRouting: project, modelCatalog: { global: [{ model: "provider/primary" }] } },
-    { modelRouting: host },
+    {
+      modelRouting: project,
+      modelCatalog: { global: [{ model: "provider/primary" }] },
+      freeTierFallbackModels: ["project/free"],
+    },
+    { modelRouting: host, freeTierFallbackModels: ["host/free"] },
   );
   assert.equal(parsed.kind, "configured");
   if (parsed.kind === "configured") {
     assert.deepEqual(parsed.modelRouting.reviewer, project.reviewer);
     assert.deepEqual(parsed.modelRouting.implementer, host.implementer);
+    assert.deepEqual(parsed.freeTierFallbackModels, ["host/free"]);
     for (const role of DEDICATED_SOL_ROLES) {
       assert.deepEqual(parsed.modelRouting[role], {
         preferred: { model: DEDICATED_SOL_MODEL, variant: DEDICATED_SOL_VARIANT },
@@ -108,6 +114,14 @@ test("model routing configuration is strict and merges roles by layer", () => {
   );
   assert.equal(parseModelRoutingConfig({ reviewer: { model: "x", fallback: [] } }), undefined);
   assert.deepEqual(resolvePluginConfiguration({ unknown: true }), { kind: "invalid" });
+  assert.deepEqual(resolvePluginConfiguration({ freeTierFallbackModels: [""] }), { kind: "invalid" });
+  for (const invalidModel of ["provider", "/model", "provider/", "provider /model"]) {
+    assert.deepEqual(resolvePluginConfiguration({ freeTierFallbackModels: [invalidModel] }), { kind: "invalid" });
+  }
+  const disabled = resolvePluginConfiguration({ freeTierFallbackModels: [] });
+  assert.equal(disabled.kind, "configured");
+  if (disabled.kind === "configured") assert.deepEqual(disabled.freeTierFallbackModels, []);
+  assert.deepEqual(DEFAULT_FREE_TIER_FALLBACK_MODELS, ["opencode/deepseek-v4-flash-free"]);
   assert.deepEqual(resolvePluginConfiguration({
     modelRouting: host,
     modelCatalog: { global: [{ model: "" }] },
@@ -1258,7 +1272,14 @@ test("chat message hook applies explicit catalog routing and fails closed with o
         },
       },
     }));
-    const hooks = await SortieDogsPlugin({ directory }, {
+    const client = { config: { providers: async () => ({ data: { providers: [
+      { id: "provider", models: { "local-primary": { id: "local-primary" } } },
+      { id: "openai", models: {
+        "gpt-5.6-luna": { id: "gpt-5.6-luna" },
+        "gpt-5.6-sol": { id: "gpt-5.6-sol" },
+      } },
+    ] } }) } };
+    const hooks = await SortieDogsPlugin({ directory, client }, {
       modelRouting: {
         implementer: { preferred: { model: "provider/global-primary", variant: "thinking" } },
         reviewer: {
@@ -1359,42 +1380,91 @@ test("model routing rewrites only targets present in the cached host provider li
   });
 });
 
-test("model routing preserves the host model and warns once when its target is unavailable", async () => {
+test("model routing refreshes a missing cached target at most once per minute before degrading", async () => {
+  await withProject("model-routing-host-refresh", async (directory) => {
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+    let providerQueries = 0;
+    const client = { config: { providers: async () => {
+      providerQueries += 1;
+      return { data: { providers: [{ id: "provider", models: providerQueries === 1
+        ? { free: { id: "free" } }
+        : { target: { id: "target" }, free: { id: "free" } } }] } };
+    } } };
+    const hooks = await SortieDogsPlugin({ directory, client }, {
+      modelRouting: { implementer: { preferred: { model: "provider/target" } } },
+      modelCatalog: { global: [{ model: "provider/target" }] },
+      freeTierFallbackModels: ["provider/free"],
+    });
+    const chat = hooks["chat.message"];
+    assert.ok(chat);
+    let now = 1_000;
+    const originalNow = Date.now;
+    const originalWarn = console.warn;
+    Date.now = () => now;
+    console.warn = () => {};
+    try {
+      const first = { message: { agent: "implementer", model: { providerID: "host", modelID: "selected" } }, parts: [] };
+      await chat({ sessionID: "refresh-1", agent: "implementer" }, first);
+      assert.deepEqual(first.message.model, { providerID: "provider", modelID: "free" });
+      now += 59_999;
+      await chat({ sessionID: "refresh-2", agent: "implementer" }, first);
+      assert.equal(providerQueries, 1);
+      now += 1;
+      const refreshed = { message: { agent: "implementer", model: { providerID: "host", modelID: "selected" } }, parts: [] };
+      await chat({ sessionID: "refresh-3", agent: "implementer" }, refreshed);
+      assert.deepEqual(refreshed.message.model, { providerID: "provider", modelID: "target" });
+      assert.equal(providerQueries, 2);
+    } finally {
+      Date.now = originalNow;
+      console.warn = originalWarn;
+    }
+  });
+});
+
+test("model routing uses the literal free fallback for fixed roles, drops variants, and warns per role per session", async () => {
   await withProject("model-routing-host-absent", async (directory) => {
     await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
     const warnings: unknown[][] = [];
     const originalWarn = console.warn;
     console.warn = (...arguments_: unknown[]) => { warnings.push(arguments_); };
     try {
-      const hooks = await SortieDogsPlugin({
-        directory,
-        client: { config: { providers: async () => ({
-          data: { providers: [{ id: "different", models: { target: { id: "target" } } }] },
-        }) } },
-      }, {
-        modelRouting: { implementer: { preferred: { model: "provider/target", variant: "thinking" } } },
-        modelCatalog: { global: [{ model: "provider/target", variants: ["thinking"] }] },
-      });
+       const hooks = await SortieDogsPlugin({
+         directory,
+         client: { config: { providers: async () => ({
+           data: { providers: [{ id: "opencode", models: {
+             "deepseek-v4-flash-free": { id: "deepseek-v4-flash-free" },
+           } }] },
+         }) } },
+       });
       const chat = hooks["chat.message"];
       assert.ok(chat);
       const output = {
-        message: { agent: "implementer", model: { providerID: "host", modelID: "selected", variant: "host" } },
+         message: { agent: "dog-worker", model: { providerID: "host", modelID: "selected", variant: "host" } },
         parts: [],
       };
-      const originalModel = output.message.model;
-      await chat({ sessionID: "host-absent-1", agent: "implementer" }, output);
-      await chat({ sessionID: "host-absent-2", agent: "implementer" }, output);
-      assert.strictEqual(output.message.model, originalModel);
-      assert.equal(warnings.length, 1);
-      assert.match(String(warnings[0][0]), /implementer/u);
-      assert.match(String(warnings[0][0]), /provider\/target/u);
+       await chat({ sessionID: "host-absent-1", agent: "dog-worker" }, output);
+       await chat({ sessionID: "host-absent-1", agent: "dog-worker" }, output);
+       assert.deepEqual(output.message.model, {
+         providerID: "opencode",
+         modelID: "deepseek-v4-flash-free",
+       });
+       const otherRole = {
+         message: { agent: "implementation", model: { providerID: "host", modelID: "selected", variant: "host" } },
+         parts: [],
+       };
+       await chat({ sessionID: "host-absent-1", agent: "implementation" }, otherRole);
+       await chat({ sessionID: "host-absent-2", agent: "dog-worker" }, output);
+       assert.equal(warnings.length, 3);
+       assert.match(String(warnings[0][0]), /Degraded model routing/u);
+       assert.match(String(warnings[0][0]), /dog-worker/u);
+       assert.match(String(warnings[0][0]), /opencode\/deepseek-v4-flash-free/u);
     } finally {
       console.warn = originalWarn;
     }
   });
 });
 
-test("model routing keeps rewriting when host availability cannot be determined", async () => {
+test("model routing fails open when host availability cannot be determined", async () => {
   await withProject("model-routing-host-unknown", async (directory) => {
     await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
     let providerQueries = 0;
@@ -1415,15 +1485,126 @@ test("model routing keeps rewriting when host availability cannot be determined"
       parts: [],
     };
     await chat({ sessionID: "host-unknown", agent: "implementer" }, output);
-    assert.deepEqual(output.message.model, { providerID: "provider", modelID: "target" });
+     assert.deepEqual(output.message.model, { providerID: "host", modelID: "selected" });
     assert.equal(providerQueries, 1);
+  });
+});
+
+test("model routing discovers a deterministically sorted free model after configured literal misses", async () => {
+  await withProject("model-routing-free-discovery", async (directory) => {
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+    const hooks = await SortieDogsPlugin({
+      directory,
+      client: { config: { providers: async () => ({ data: { providers: [{
+        id: "provider",
+        models: {
+          "z-free": { id: "z-free" },
+          "a-free": { id: "a-free" },
+        },
+      }, {
+        id: "aaa",
+        models: { "0-free": { id: "0-free" } },
+      }] } }) } },
+    }, {
+      modelRouting: { implementer: { preferred: { model: "provider/target", variant: "thinking" } } },
+      modelCatalog: { global: [{ model: "provider/target", variants: ["thinking"] }] },
+      freeTierFallbackModels: ["provider/not-hosted-free"],
+    });
+    const chat = hooks["chat.message"];
+    assert.ok(chat);
+    const output = {
+      message: { agent: "implementer", model: { providerID: "host", modelID: "selected", variant: "host" } },
+      parts: [],
+    };
+    const originalWarn = console.warn;
+    console.warn = () => {};
+    try {
+      await chat({ sessionID: "free-discovery", agent: "implementer" }, output);
+    } finally {
+      console.warn = originalWarn;
+    }
+    assert.deepEqual(output.message.model, { providerID: "provider", modelID: "a-free" });
+  });
+});
+
+test("model routing treats missing and empty host model lists as unknown", async () => {
+  await withProject("model-routing-host-list-unknown", async (directory) => {
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+    const options = {
+      modelRouting: { implementer: { preferred: { model: "provider/target" } } },
+      modelCatalog: { global: [{ model: "provider/target" }] },
+    };
+    const withoutClient = await SortieDogsPlugin({ directory }, options);
+    const emptyClient = await SortieDogsPlugin({
+      directory,
+      client: { config: { providers: async () => ({ data: { providers: [] } }) } },
+    }, options);
+    const warnings: unknown[][] = [];
+    const originalWarn = console.warn;
+    console.warn = (...arguments_: unknown[]) => { warnings.push(arguments_); };
+    try {
+      for (const [name, hooks] of [["missing", withoutClient], ["empty", emptyClient]] as const) {
+        const chat = hooks["chat.message"];
+        assert.ok(chat);
+        const output = {
+          message: { agent: "implementer", model: { providerID: "host", modelID: name, variant: "host" } },
+          parts: [],
+        };
+        const originalModel = output.message.model;
+        await chat({ sessionID: `host-list-${name}`, agent: "implementer" }, output);
+        await chat({ sessionID: `host-list-${name}-again`, agent: "implementer" }, output);
+        assert.strictEqual(output.message.model, originalModel);
+      }
+    } finally {
+      console.warn = originalWarn;
+    }
+    assert.equal(warnings.length, 1);
+    assert.match(String(warnings[0][0]), /implementer/u);
+  });
+});
+
+test("an explicitly empty free fallback list disables degraded routing", async () => {
+  await withProject("model-routing-free-disabled", async (directory) => {
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+    const hooks = await SortieDogsPlugin({
+      directory,
+      client: { config: { providers: async () => ({ data: { providers: [{
+        id: "opencode",
+        models: { "deepseek-v4-flash-free": { id: "deepseek-v4-flash-free" } },
+      }] } }) } },
+    }, {
+      modelRouting: { implementer: { preferred: { model: "provider/target" } } },
+      modelCatalog: { global: [{ model: "provider/target" }] },
+      freeTierFallbackModels: [],
+    });
+    const chat = hooks["chat.message"];
+    assert.ok(chat);
+    const output = {
+      message: { agent: "implementer", model: { providerID: "host", modelID: "selected" } },
+      parts: [],
+    };
+    const originalWarn = console.warn;
+    console.warn = () => {};
+    try {
+      await chat({ sessionID: "free-disabled", agent: "implementer" }, output);
+    } finally {
+      console.warn = originalWarn;
+    }
+    assert.deepEqual(output.message.model, { providerID: "host", modelID: "selected" });
   });
 });
 
 test("every packaged role is routed even when its session never activates the write gate", async () => {
   await withProject("model-routing-inactive", async (directory) => {
     await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
-    const hooks = await SortieDogsPlugin({ directory });
+    const client = { config: { providers: async () => ({ data: { providers: [{
+      id: "openai",
+      models: {
+        "gpt-5.6-luna": { id: "gpt-5.6-luna" },
+        "gpt-5.6-sol": { id: "gpt-5.6-sol" },
+      },
+    }] } }) } };
+    const hooks = await SortieDogsPlugin({ directory, client });
     const chat = hooks["chat.message"];
     assert.ok(chat);
     const expected: Record<string, { providerID: string; modelID: string; variant?: string }> = {

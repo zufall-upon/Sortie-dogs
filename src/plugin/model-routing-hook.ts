@@ -32,6 +32,7 @@ export interface ModelRoutingHookConfiguration {
   readonly global?: ModelRoutingConfig;
   readonly catalog: ModelCatalog;
   readonly dedicated?: ModelTarget;
+  readonly freeTierFallbackModels: readonly string[];
 }
 
 /** The narrow OpenCode SDK surface used to discover models configured on the current host. */
@@ -108,7 +109,10 @@ export function createModelRoutingHook(
   client?: OpenCodeModelAvailabilityClient,
 ): OpenCodeChatMessageHook {
   let hostModels: Promise<ReadonlySet<string> | undefined> | undefined;
+  let hostModelsReadAt = 0;
   const warnedUnavailableTargets = new Set<string>();
+  const warnedDegradedRoutes = new Set<string>();
+  const freeTierFallbackModels = config.freeTierFallbackModels;
 
   return async (input, output): Promise<void> => {
     const role = input.agent && input.agent.length > 0
@@ -131,15 +135,69 @@ export function createModelRoutingHook(
 
     const model = openCodeModel(resolution.model);
     if (model === undefined) throw new InvalidModelTargetError();
-    hostModels ??= readHostModels(client);
-    const availableModels = await hostModels;
-    if (availableModels !== undefined && !availableModels.has(resolution.model)) {
-      if (!warnedUnavailableTargets.has(resolution.model)) {
-        warnedUnavailableTargets.add(resolution.model);
-        console.warn(
-          `Model routing target unavailable for role "${role}": ${resolution.model}. Configure modelRouting for this host.`,
-        );
+    if (hostModels === undefined) {
+      hostModelsReadAt = Date.now();
+      hostModels = readHostModels(client);
+    }
+    let availableModels = await hostModels;
+    if (
+      availableModels !== undefined &&
+      !availableModels.has(resolution.model) &&
+      Date.now() - hostModelsReadAt >= 60_000
+    ) {
+      hostModelsReadAt = Date.now();
+      hostModels = readHostModels(client);
+      availableModels = await hostModels;
+    }
+    const unavailableWarningKey = JSON.stringify([role, resolution.model]);
+    const warnUnavailable = (): void => {
+      if (warnedUnavailableTargets.has(unavailableWarningKey)) return;
+      warnedUnavailableTargets.add(unavailableWarningKey);
+      console.warn(
+        `Model routing target unavailable for role "${role}": ${resolution.model}. Configure modelRouting for this host.`,
+      );
+    };
+    if (availableModels === undefined) return;
+    if (availableModels.size === 0) {
+      warnUnavailable();
+      return;
+    }
+    if (!availableModels.has(resolution.model)) {
+      const literalFallback = freeTierFallbackModels.length === 0
+        ? undefined
+        : freeTierFallbackModels.find((candidate) => availableModels.has(candidate));
+      const configuredProviderIDs = new Set(freeTierFallbackModels.flatMap((candidate) => {
+        const parsed = openCodeModel(candidate);
+        return parsed === undefined ? [] : [parsed.providerID];
+      }));
+      const discoveredFallback = freeTierFallbackModels.length > 0 && literalFallback === undefined
+        ? [...availableModels]
+          .map((candidate) => ({ candidate, parsed: openCodeModel(candidate) }))
+          .filter(({ parsed }) => parsed !== undefined &&
+            parsed.modelID.endsWith("-free") && configuredProviderIDs.has(parsed.providerID))
+          .sort((left, right) => {
+            if (left.parsed!.modelID !== right.parsed!.modelID) {
+              return left.parsed!.modelID < right.parsed!.modelID ? -1 : 1;
+            }
+            return left.candidate < right.candidate ? -1 : left.candidate > right.candidate ? 1 : 0;
+          })[0]?.candidate
+        : undefined;
+      const fallback = literalFallback ?? discoveredFallback;
+      if (fallback !== undefined) {
+        const fallbackModel = openCodeModel(fallback);
+        if (fallbackModel !== undefined) {
+          output.message.model = fallbackModel;
+          const warningKey = JSON.stringify([input.sessionID, role]);
+          if (!warnedDegradedRoutes.has(warningKey)) {
+            warnedDegradedRoutes.add(warningKey);
+            console.warn(
+              `Degraded model routing for role "${role}": ${resolution.model} unavailable; using free-tier fallback ${fallback}.`,
+            );
+          }
+          return;
+        }
       }
+      warnUnavailable();
       return;
     }
     output.message.model = resolution.variant === undefined
