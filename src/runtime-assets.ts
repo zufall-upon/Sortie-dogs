@@ -399,13 +399,16 @@ is denied as stale and requires a new candidate session. For handoff-mismatch, o
 regenerates the registered handoff; the same worker reads it once after same-session resume. One
 recoverable denial permits one retry only after handoff or manifest state changes. A second unchanged
 denial returns retry-exhausted; stop the candidate and checkpoint the local blocker. Never replace
-the child merely to repeat the same bind.
+the child merely to repeat the same bind. The redispatch-worker signal is different: never resume
+the denied session or report a true blocker; dispatch a fresh worker whose prompt carries the inline
+handoff fields so activation occurs before bind.
 
 RECOVERABLE_HANDSHAKE_FIXTURE
     denial_shape: { status: denied, reason: <reason>, recoverable: true, remedy: <short action> }
     recoverable_reasons: session-inactive | session-expired | handoff-uninspected | handoff-mismatch
     recoverable_bind_signal: escalation.action=blocker-resolution-takeover; resume_session=true; true_blocker=false
     nonrecoverable_bind_signal: escalation.action=follow-remedy; resume_session=false; existing remedy takes priority
+    redispatch_bind_signal: escalation.action=redispatch-worker; resume_session=false; true_blocker=false; never resume denied session or report true blocker; dispatch a fresh worker whose prompt carries inline role, project_root, source_manifest or operation_manifest, and acceptance or validation fields so activation precedes bind
     normal_worker_blocked: TRUE_BLOCKER absent -> blocker-resolution takeover on the same solSession
     sequence: operation manifest + valid registered handoff -> Task child activation -> built-in Read exact handoff_path -> bind in same turn
     attempt_limit: one recoverable retry only after state change; second unchanged denial -> retry-exhausted and checkpoint
@@ -600,10 +603,11 @@ never use file.edited or session.idle as implicit authorization. Do not retry th
 command after the same failure phase occurs twice. Never stage outside exact manifest paths, use
 git add -A, amend, push, or perform coordinator-owned commit work.
 
-For a recoverable session-inactive, handoff-uninspected, or handoff-mismatch result, do not terminate and do not ask the
-user. Classify session-inactive as a local handoff defect and return its structured reason and remedy
-to dog-coordinator. Accept one same-session resume only after the coordinator changes the stated
-handoff or manifest state, Read the exact handoff_path again, and make one handshake bind attempt. If
+For a recoverable session-inactive result, do not terminate and do not ask the user. Classify it as a
+local handoff defect and return its structured reason, remedy, and redispatch-worker escalation
+unchanged to dog-coordinator; never resume the denied session. For a recoverable handoff-uninspected
+or handoff-mismatch result, accept one same-session resume only after the coordinator changes the
+stated handoff or manifest state, Read the exact handoff_path again, and make one handshake bind attempt. If
 the plugin returns retry-exhausted, stop the candidate and return that nonrecoverable local blocker;
 never replace the child to repeat it. A confirmed
 idempotent bound result may continue; a changed manifest binding remains fail-closed. Only

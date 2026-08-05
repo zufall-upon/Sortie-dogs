@@ -481,7 +481,13 @@ function textPart(part: unknown): string | undefined {
  * indented or list-prefixed, while host wrappers emit flat `key=value`. Both forms describe the
  * same contract, so a single line parser accepts either separator instead of one fixed layout.
  */
-const HANDOFF_ENTRY = /^[\t ]*(?:[-*][\t ]+)?([A-Za-z_][A-Za-z0-9_]*)[\t ]*[=:][\t ]*(.*)$/u;
+const HANDOFF_ENTRY = /^[\t ]*(?:[-*][\t ]+)?(?:(\*\*|__|\*|_|`)([A-Za-z_][A-Za-z0-9_]*)(?:\1[\t ]*[=:]|[\t ]*[=:]\1)|([A-Za-z_][A-Za-z0-9_]*)[\t ]*[=:])[\t ]*(.*)$/u;
+
+function unwrapMarkdownValue(value: string): string {
+  const trimmed = value.trim();
+  const wrapped = /^(\*\*|__|\*|_|`)([\s\S]*)\1$/u.exec(trimmed);
+  return wrapped === null ? trimmed : wrapped[2].trim();
+}
 
 const HANDOFF_KEYS = {
   role: ["role"],
@@ -495,9 +501,9 @@ function handoffEntries(text: string): Map<string, string> {
   for (const line of text.split(/\r?\n/u)) {
     const match = HANDOFF_ENTRY.exec(line);
     if (match === null) continue;
-    const key = match[1].toLowerCase();
+    const key = (match[2] ?? match[3]).toLowerCase();
     if (entries.has(key)) continue;
-    entries.set(key, match[2].trim());
+    entries.set(key, unwrapMarkdownValue(match[4]));
   }
   return entries;
 }
@@ -926,7 +932,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const remedies: Record<string, { recoverable: boolean; remedy: string }> = {
       "session-inactive": {
         recoverable: true,
-        remedy: "Inspect the exact registered handoff path, then resume this worker session once.",
+        remedy: "Freshly redispatch this worker with prompt text containing role, project_root, source_manifest or operation_manifest, and acceptance or validation fields; a bare resume or file read cannot activate the session.",
       },
       "session-expired": {
         recoverable: true,
@@ -955,7 +961,13 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         remedy: "Correct the reported contract defect before starting a new bind flow.",
       };
       const reported = normalizeDefects(defects).slice(0, CONTRACT_DEFECTS.limit);
-      const escalation = detail.recoverable
+      const escalation = reason === "session-inactive"
+        ? {
+          action: "redispatch-worker",
+          resume_session: false,
+          true_blocker: false,
+        }
+        : detail.recoverable
         ? {
           action: "blocker-resolution-takeover",
           resume_session: true,

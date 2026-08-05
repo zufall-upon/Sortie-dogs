@@ -926,7 +926,7 @@ test("shipped document fixtures satisfy the schemas the write gate enforces", ()
   assert.match(worker.content, /Return those defect entries\s+verbatim to dog-coordinator/i);
 });
 
-test("runtime contract requires interactive continuation and deterministic recoverable handshake", () => {
+test("runtime contract requires interactive continuation and deterministic recoverable handshake", async () => {
   const coordinator = runtimeAssets.find((asset) => asset.name === "dog-coordinator");
   const worker = runtimeAssets.find((asset) => asset.name === "dog-worker");
   assert.ok(coordinator);
@@ -954,12 +954,22 @@ test("runtime contract requires interactive continuation and deterministic recov
   assert.match(handshake[1], /dog-coordinator regenerates registered handoff; worker never rewrites it/);
   assert.match(handshake[1], /recoverable_bind_signal: escalation\.action=blocker-resolution-takeover/);
   assert.match(handshake[1], /nonrecoverable_bind_signal: escalation\.action=follow-remedy; resume_session=false/);
+  assert.match(handshake[1], /redispatch_bind_signal: escalation\.action=redispatch-worker; resume_session=false; true_blocker=false/);
   assert.match(handshake[1], /TRUE_BLOCKER absent -> blocker-resolution takeover on the same solSession/);
   assert.match(worker.content, /do not terminate and do not ask the\s+user/i);
   assert.match(worker.content, /exact absolute handoff_path[\s\S]+built-in Read once on that path[\s\S]+same turn/i);
   assert.match(worker.content, /Only\s+dog-coordinator may regenerate a mismatched handoff/i);
   assert.match(worker.content, /Only a recoverable[\s\S]+resume_session=true[\s\S]+same solSession/i);
   assert.match(worker.content, /nonrecoverable denial[\s\S]+existing remedy[\s\S]+never same-session resume/i);
+  assert.match(worker.content, /redispatch-worker escalation[\s\S]+unchanged[\s\S]+never resume the denied session/i);
+
+  const pluginSource = await readFile(new URL("../src/plugin/index.ts", import.meta.url), "utf8");
+  const bindSource = /async function bindWriteGate[\s\S]+?(?=\n  async function sessionGate)/u.exec(pluginSource)?.[0];
+  assert.ok(bindSource);
+  const emittedActions = [...bindSource.matchAll(/\baction: "([^"]+)"/gu)].map((match) => match[1]);
+  const namedActions = [...handshake[1].matchAll(/\w+_bind_signal: escalation\.action=([^;\s]+)/gu)]
+    .map((match) => match[1]);
+  assert.deepEqual([...new Set(namedActions)].sort(), [...new Set(emittedActions)].sort());
 
   const batch = coordinator.content.match(
     /BATCH_CONTINUATION_FIXTURE\r?\n([\s\S]+?)\r?\nEND_BATCH_CONTINUATION_FIXTURE/,
@@ -1585,6 +1595,18 @@ test("worker activation accepts both inline digest and flat wrapper dispatch for
   assert.equal(isExplicitTaskHandoff(flatWrapper), true);
 });
 
+test("worker activation accepts symmetrically decorated handoff keys and values", () => {
+  const decorated = [
+    "- **role**: **implementation**",
+    "**project_root:** `C:\\candidate`",
+    "`source_manifest`: `[src/a.ts]`",
+    "_acceptance_: __safe change__",
+  ].join("\n");
+  assert.equal(isExplicitTaskHandoff(decorated), true);
+  assert.equal(isExplicitTaskHandoff("**role** implementation"), false);
+  assert.equal(isExplicitTaskHandoff("ordinary prose about **role** and project_root"), false);
+});
+
 test("worker activation rejects dispatches without a complete worker contract", () => {
   const unknownRole = [
     "context_digest:",
@@ -1762,6 +1784,51 @@ test("passive coordinator lineage activates only its Task child without inheriti
       { message: { agent: "renamed-worker", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: task }] },
     );
     assert.equal((await executeBindWriteGate(hooks, directory, "deleted-parent-child")).reason, "session-inactive");
+  });
+});
+
+test("session-inactive recovery requires a fresh inline-handoff dispatch", async () => {
+  await withProject("inactive-redispatch", async (directory) => {
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+    const handoffPath = join(directory, "handoff.json");
+    await writeFile(handoffPath, JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
+    const hooks = await SortieDogsPlugin({ directory });
+    const chat = hooks["chat.message"];
+    assert.ok(chat);
+    await chat(
+      { sessionID: "recovery-parent", agent: "dog-coordinator" },
+      { message: { agent: "dog-coordinator", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: "dispatch worker" }] },
+    );
+
+    await inspectHandoffWithRead(hooks, handoffPath, "recovery-child");
+    const inactive = await executeBindWriteGate(hooks, directory, "recovery-child");
+    assert.equal(
+      inactive.remedy,
+      "Freshly redispatch this worker with prompt text containing role, project_root, source_manifest or operation_manifest, and acceptance or validation fields; a bare resume or file read cannot activate the session.",
+    );
+    assert.deepEqual(inactive.escalation, {
+      action: "redispatch-worker",
+      resume_session: false,
+      true_blocker: false,
+    });
+
+    await chat(
+      { sessionID: "recovery-child", parentID: "recovery-parent", agent: "renamed-worker" },
+      { message: { agent: "renamed-worker", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: "resume without handoff fields" }] },
+    );
+    assert.equal((await executeBindWriteGate(hooks, directory, "recovery-child")).reason, "session-inactive");
+
+    const dispatch = [
+      "- **role**: **implementation**",
+      `**project_root:** \`${directory}\``,
+      "`source_manifest`: `[src/a.ts]`",
+      "_acceptance_: __safe change__",
+    ].join("\n");
+    await chat(
+      { sessionID: "recovery-child", parentID: "recovery-parent", agent: "renamed-worker" },
+      { message: { agent: "renamed-worker", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: dispatch }] },
+    );
+    assert.equal((await bindWriteGate(hooks, directory, "recovery-child")).status, "bound");
   });
 });
 
