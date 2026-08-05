@@ -148,6 +148,19 @@ export interface ContinuationPolicy {
  */
 export type ContinuationPolicySource = ContinuationPolicy | (() => ContinuationPolicy);
 
+/**
+ * The plugin already learns which sessions run the coordinator as a root from its own message hook.
+ * Trusting that observation first keeps continuation working on a host whose session lookup answers
+ * without an agent field, or answers for a different directory, instead of failing silently.
+ */
+export type LocalIdentitySource = (sessionID: string) => ContinuationIdentity | undefined;
+
+export type RolloverAbort =
+  | "identity-unavailable"
+  | "child-session"
+  | "summarize-unavailable"
+  | "terminal-identity-rejected";
+
 export interface ContinuationToolContext {
   readonly sessionID: string;
   readonly agent?: string | undefined;
@@ -269,8 +282,22 @@ export function createContinuationHooks(
   directory: string,
   policySource: ContinuationPolicySource,
   timings: ContinuationTimings = DEFAULT_TIMINGS,
+  localIdentity?: LocalIdentitySource,
 ): ContinuationHooks {
   const sessions = new Map<string, SessionState>();
+  const warned = new Set<string>();
+
+  /**
+   * A rollover that cannot start is otherwise indistinguishable from a coordinator that never asked
+   * for one, so every abort names its own reason exactly once per session.
+   */
+  function warnRollover(sessionID: string, reason: RolloverAbort): void {
+    const key = `${sessionID}:${reason}`;
+    if (warned.has(key)) return;
+    if (warned.size >= MAX_TRACKED_SESSIONS) warned.clear();
+    warned.add(key);
+    console.warn(`[sortie-continuation] rollover skipped ${sessionID}: ${reason}`);
+  }
 
   function policy(): ContinuationPolicy {
     return typeof policySource === "function" ? policySource() : policySource;
@@ -311,10 +338,17 @@ export function createContinuationHooks(
   }
 
   async function readIdentity(sessionID: string): Promise<ContinuationIdentity | undefined> {
+    const local = localIdentity?.(sessionID);
+    if (local !== undefined && nonEmpty(local.agent)) return local;
     const read = client?.session?.get;
     if (read === undefined) return undefined;
     try {
-      return sessionInfo(await read.call(client!.session, { path: { id: sessionID } }));
+      // Without the directory the host resolves the lookup against its own default project, so a
+      // session opened elsewhere answers with an error and the rollover would abort unexplained.
+      return sessionInfo(await read.call(client!.session, {
+        path: { id: sessionID },
+        query: { directory },
+      }));
     } catch {
       // An unreadable session identity is never a reason to resume something on the user's behalf.
       return undefined;
@@ -331,7 +365,10 @@ export function createContinuationHooks(
     const state = sessions.get(sessionID);
     if (state === undefined || !state.pendingRollover || state.active) return false;
     const summarize = client?.session?.summarize;
-    if (summarize === undefined) return false;
+    if (summarize === undefined) {
+      warnRollover(sessionID, "summarize-unavailable");
+      return false;
+    }
 
     const cooldownRemaining = state.lastRollover === undefined
       ? 0
@@ -349,7 +386,14 @@ export function createContinuationHooks(
 
     // A child session must never compact or resume its parent's batch.
     const identity = await readIdentity(sessionID);
-    if (identity === undefined || nonEmpty(identity.parentID)) return false;
+    if (identity === undefined || !nonEmpty(identity.agent)) {
+      warnRollover(sessionID, "identity-unavailable");
+      return false;
+    }
+    if (nonEmpty(identity.parentID)) {
+      warnRollover(sessionID, "child-session");
+      return false;
+    }
 
     const continueReport = state.continueReport;
     state.active = true;
@@ -493,6 +537,20 @@ export function createContinuationHooks(
       const state = sessions.get(input.sessionID);
       try {
         if (output.text.includes(ROLLOVER_MARKER)) {
+          /*
+           * A terminal rollover still compacts a real session, so it needs the same identity proof
+           * the resuming path requires. Without it any root session that merely quoted the marker
+           * would have its own history summarized away.
+           */
+          const active = policy();
+          const identity = await readIdentity(input.sessionID);
+          if (
+            !active.enabled || identity === undefined || !nonEmpty(identity.agent) ||
+            nonEmpty(identity.parentID) || identity.agent !== active.agent
+          ) {
+            warnRollover(input.sessionID, "terminal-identity-rejected");
+            return;
+          }
           // A terminal batch compacts without resuming, and its continuation budget resets.
           const report = output.text.replaceAll(ROLLOVER_MARKER, "").trim();
           const terminal = stateFor(input.sessionID);

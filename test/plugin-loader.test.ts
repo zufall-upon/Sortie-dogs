@@ -9,6 +9,12 @@ import { promisify } from "node:util";
 import { RUNTIME_ASSET_VERSION } from "../dist/asset-version.js";
 import { DEDICATED_SOL_MODEL, DEDICATED_SOL_VARIANT } from "../dist/plugin/model-routing.js";
 
+/*
+ * The environment layer is a real configuration source, so a host that declares one would silently
+ * change every packaged default this suite asserts. Tests observe the package, not the machine.
+ */
+delete process.env.SORTIE_DOGS_CONFIG;
+
 const testEnvironment = fileURLToPath(new URL("../_testenv/", import.meta.url));
 const projectRoot = fileURLToPath(new URL("../", import.meta.url));
 const execFileAsync = promisify(execFile);
@@ -421,7 +427,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(initialHandoff[1], /task_id:/);
     assert.match(initialHandoff[1], /context_digest:/);
     assert.match(initialHandoff[1], /project_root:/);
-    assert.match(initialHandoff[1], /handoff_path:\s*<absolute registered candidate handoff; operational work only>/);
+    assert.match(initialHandoff[1], /handoff_path:\s*<absolute registered candidate handoff; every mutating dispatch>/);
     assert.match(initialHandoff[1], /acceptance:/);
     assert.match(initialHandoff[1], /role:\s*implementation/);
     assert.match(initialHandoff[1], /validation:\s*\{\s*level:\s*full,\s*command:/);
@@ -737,7 +743,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(coordinator.content, /undeclared write or mutation must be reported as rejected/i);
     assert.match(
       coordinator.content,
-      /source-only work, keep operation_manifest=none,[\s\S]{0,180}?do\s+not invent or bind an operation manifest/i,
+      /read-only work, keep operation_manifest=none,[\s\S]{0,180}?do\s+not invent or bind an operation manifest/i,
     );
     const writeGateHandoff = coordinator.content.match(
       /WRITE_GATE_HANDOFF_FIXTURE\r?\n([\s\S]+?)\r?\nEND_WRITE_GATE_HANDOFF_FIXTURE/,
@@ -781,9 +787,18 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       terminalEvidence[1],
       /scout:\s*\{ attempted: <boolean>, revision: <revision>, blocker_owner: <owner>, reason: <exact decision reason> \}/,
     );
+    // A dispatched worker is gated by its session, so source work needs the same authorization.
     assert.match(
       worker.content,
-      /source-only work with operation_manifest=none,[\s\S]{0,180}?never invent an operation manifest or call\s+sortie_bind_write_gate[\s\S]{0,180}?every source write to source_manifest/i,
+      /Every mutating dispatch, source work included, carries an exact absolute handoff_path and an\s+operation_manifest/i,
+    );
+    assert.match(
+      worker.content,
+      /operation_manifest=none the dispatch is read-only:[\s\S]{0,180}?never invent an operation manifest, never call\s+sortie_bind_write_gate/i,
+    );
+    assert.match(
+      coordinator.content,
+      /Never dispatch source-changing work with operation_manifest none[\s\S]{0,120}?denied every mutating tool/i,
     );
     assert.match(
       worker.content,
@@ -1179,7 +1194,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(sortie.content, /never route a worker to the user/i);
 
     for (const asset of loaded.runtimeAssets) {
-      assert.equal(asset.version, "0.2.3-card10");
+      assert.equal(asset.version, "0.2.5-card11");
       const frontmatter = asset.content.match(/^---\r?\n([\s\S]+?)\r?\n---\r?\n/);
       assert.ok(frontmatter, `${asset.name} must have frontmatter`);
       const entries = Object.fromEntries(

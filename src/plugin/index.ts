@@ -630,6 +630,15 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     input.client,
     input.worktree ?? input.directory,
     () => loaded?.continuation ?? DEFAULT_PLUGIN_OPTIONS.continuation,
+    undefined,
+    /*
+     * The message hook already proved which session runs the coordinator as a root, so continuation
+     * trusts that observation before asking the host, whose session lookup may answer without an
+     * agent field or for a different directory.
+     */
+    (sessionID) => isCoordinatorSession(sessionID)
+      ? { agent: COORDINATOR_AGENT, parentID: undefined }
+      : undefined,
   );
 
   async function ensureLoaded(): Promise<void> {

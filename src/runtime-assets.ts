@@ -10,7 +10,7 @@ export interface RuntimeAsset {
 export const runtimeAssets = [
   {
     name: "dog-coordinator",
-    version: "0.2.3-card10",
+    version: "0.2.5-card11",
     installPath: "agent/dog-coordinator.md",
     content: `---
 description: Canonical MkII coordinator packaged by Sortie-dogs
@@ -198,7 +198,7 @@ INITIAL_HANDOFF_FIXTURE
     task_id: task-06
     context_digest:
       project_root: <absolute project root>
-      handoff_path: <absolute registered candidate handoff; operational work only>
+      handoff_path: <absolute registered candidate handoff; every mutating dispatch>
       acceptance: <fixed acceptance criteria>
       role: implementation
       validation: { level: full, command: <exact command> }
@@ -411,10 +411,10 @@ USER_QUESTION_FIXTURE
 END_USER_QUESTION_FIXTURE
 
 A recoverable write-gate denial is a local activation or handoff defect, not a terminal candidate
-and not a user question. For operational work, create the operation manifest and valid registered
-handoff before Task dispatch, and include its exact absolute handoff_path in the worker digest.
-For source-only work, keep operation_manifest=none, authorize only the exact source_manifest, and do
-not invent or bind an operation manifest. The Task activates only the child session. In that same
+and not a user question. For every mutating dispatch, source work included, create the operation
+manifest and valid registered handoff before Task dispatch, and include its exact absolute
+handoff_path in the worker digest. For a read-only work, keep operation_manifest=none, authorize
+only the exact source_manifest, and do not invent or bind an operation manifest. The Task activates only the child session. In that same
 child turn, the worker uses the built-in Read tool once on the exact handoff_path; successful Read
 performs child-owned inspection, then the worker immediately calls sortie_bind_write_gate. Shell
 reads, coordinator or sibling reads, failed reads, and file.edited events never grant inspection.
@@ -431,7 +431,7 @@ handoff fields so activation occurs before bind. For session-inactive redispatch
 effective candidate handoff and send it completely inline to the fresh session; never send a
 same-task resume_delta by itself. Fold current findings into the full digest and set resume_delta to
 none. The fresh prompt must include role, project_root, the applicable source_manifest or
-operation_manifest, acceptance, and validation. Preserve source-only operation_manifest=none and
+operation_manifest, acceptance, and validation. Preserve read-only operation_manifest=none and
 operational source_manifest=none plus the exact handoff_path.
 
 FRESH_REDISPATCH_HANDOFF_FIXTURE
@@ -440,7 +440,7 @@ FRESH_REDISPATCH_HANDOFF_FIXTURE
     task_id: task-06
     context_digest:
       project_root: <absolute project root>
-      handoff_path: <absolute registered candidate handoff; operational work only>
+      handoff_path: <absolute registered candidate handoff; every mutating dispatch>
       acceptance: <fixed acceptance criteria>
       role: implementation
       validation: { level: full, command: <exact command> }
@@ -448,8 +448,9 @@ FRESH_REDISPATCH_HANDOFF_FIXTURE
       relevant_constraints: [<applicable instruction>]
       resume_delta: none
     source_manifest: [<exact source path>]
-    operation_manifest: none
+    operation_manifest: <exact absolute operation manifest>
     required_inline_fields: role + project_root + applicable source_manifest or operation_manifest + acceptance + validation
+    readonly_variant: operation_manifest=none; no handoff_path; inspection-only dispatch that may not mutate
     operational_variant: source_manifest=none; operation_manifest=<exact absolute operation manifest>; context_digest.handoff_path=<exact absolute handoff>
 END_FRESH_REDISPATCH_HANDOFF_FIXTURE
 
@@ -476,7 +477,11 @@ END_RECOVERABLE_HANDSHAKE_FIXTURE
 Choose manifests by mutation type. Source-changing work requires an exact source_manifest;
 operational work requires an exact operation_manifest describing targets and mutations. Mark
 the unused manifest none; when acceptance explicitly requires both mutation types, declare
-both. Before dispatch and before each action, match every source write or operational mutation
+both. A dispatched worker is write-gated by its session, not by the manifest kind, so every
+mutating dispatch also needs the write-gate extension and an exact operation_manifest covering the
+paths it may write. Never dispatch source-changing work with operation_manifest none and expect the
+worker to write: that worker is denied every mutating tool, and none stays reserved for the unused
+manifest of a genuinely read-only or non-source dispatch. Before dispatch and before each action, match every source write or operational mutation
 to its manifest. Missing, ambiguous, or out-of-scope entries are rejected before mutation and
 fail closed. Never infer permission from acceptance alone.
 
@@ -484,9 +489,11 @@ MANIFEST_SCOPE_FIXTURE
     source_manifest: [src/declared.ts]
     allowed: write src/declared.ts
     rejected: write src/undeclared.ts -> fail closed before mutation
+    mutating_dispatch: write-gate extension + exact operation_manifest required, source work included
+    operation_manifest_none: read-only or non-mutating dispatch only
 END_MANIFEST_SCOPE_FIXTURE
 
-For every operational handoff, generate the standard Handoff extension below from the current
+For every mutating handoff, generate the standard Handoff extension below from the current
 candidate before any mutation:
 
 ext["sortie-dogs/write-gate"] = { operation_manifest: <candidate-root-relative-path>, project_root: <candidate-root-absolute-path> }
@@ -564,6 +571,9 @@ unchanged document.
 CONTRACT_PREFLIGHT_FIXTURE
     tool: sortie_check_contract { handoff_path: <exact absolute handoff path> }
     required_result: status=ok
+    handoff_path_rule: configured registered candidate-relative path only; a per-candidate filename earns handoff_path_not_registered
+    scope: every mutating dispatch, source work included; write-gate extension and operation_manifest required
+    ext_write_gate_missing: register the write-gate extension; never retry the same source-only shape
     defective_result: { status: defective, reason: <reason>, defects: [<document> <json-pointer> <rule>] }
     timing: before Task dispatch and after every handoff regeneration
     authorization: read-only report; never inspection, bind, or mutation
@@ -626,7 +636,7 @@ END_TERMINAL_EVIDENCE_FIXTURE
   },
   {
     name: "dog-worker",
-    version: "0.2.3-card10",
+    version: "0.2.5-card11",
     installPath: "agent/dog-worker.md",
     content: `---
 description: Dedicated worker for the canonical Sortie-dogs coordinator
@@ -646,10 +656,11 @@ the coordinator can relay it without translating. Keep identifiers, paths, comma
 enum values, and code verbatim. Put each returned statement on its own line instead of one run-on
 line.
 
-Before Task, require the applicable exact manifest and an explicit none for the unused manifest. For
-source-only work with operation_manifest=none, never invent an operation manifest or call
-sortie_bind_write_gate; constrain every source write to source_manifest. For operational work, require
-an exact absolute handoff_path. After child activation, use built-in Read once on that path, then call
+Before Task, require the applicable exact manifest and an explicit none for the unused manifest.
+Every mutating dispatch, source work included, carries an exact absolute handoff_path and an
+operation_manifest; constrain source writes to source_manifest inside that authorization. With
+operation_manifest=none the dispatch is read-only: never invent an operation manifest, never call
+sortie_bind_write_gate, and return the missing authorization instead of attempting a mutation. After child activation, use built-in Read once on that path, then call
 sortie_bind_write_gate in the same turn with the candidate project_root and operation manifest path.
 Prefer the project-relative manifest path; an exact absolute path is accepted only when it resolves
 inside that same candidate root and is normalized to the same relative identity.
@@ -685,7 +696,7 @@ the user.
   },
   {
     name: "dog-scout",
-    version: "0.2.3-card10",
+    version: "0.2.5-card11",
     installPath: "agent/dog-scout.md",
     content: `---
 description: Bounded evidence scout for dog-coordinator
@@ -735,7 +746,7 @@ prose; keep the keys, paths, commands, and identifiers verbatim.
   },
   {
     name: "dog-reviewer",
-    version: "0.2.3-card10",
+    version: "0.2.5-card11",
     installPath: "agent/dog-reviewer.md",
     content: `---
 description: Independent source reviewer for dog-coordinator
@@ -759,7 +770,7 @@ or transport.
   },
   {
     name: "dog-advisor",
-    version: "0.2.3-card10",
+    version: "0.2.5-card11",
     installPath: "agent/dog-advisor.md",
     content: `---
 description: Focused technical advisor for dog-coordinator
@@ -783,7 +794,7 @@ provider, vendor, model, variant, or transport.
   },
   {
     name: "sortie",
-    version: "0.2.3-card10",
+    version: "0.2.5-card11",
     installPath: "command/sortie.md",
     content: `---
 description: Start the canonical Sortie-dogs MkII workflow

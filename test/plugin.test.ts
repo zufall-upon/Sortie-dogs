@@ -51,6 +51,12 @@ import {
   type ReviewVerdict,
 } from "../dist/core/consultation.js";
 
+/*
+ * The environment layer is a real configuration source, so a host that declares one would silently
+ * change every packaged default this suite asserts. Tests observe the package, not the machine.
+ */
+delete process.env.SORTIE_DOGS_CONFIG;
+
 interface PluginCase {
   name: string;
   target?: string;

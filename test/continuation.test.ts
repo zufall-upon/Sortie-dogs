@@ -50,14 +50,19 @@ interface FakeHost {
   readonly client: ContinuationClient;
   readonly summarizeCalls: SummarizeCall[];
   readonly promptCalls: PromptCall[];
+  readonly getCalls: Array<{ id: string; directory?: string }>;
 }
 
 function fakeHost(session: { agent?: string; parentID?: string } | undefined): FakeHost {
   const summarizeCalls: SummarizeCall[] = [];
   const promptCalls: PromptCall[] = [];
+  const getCalls: Array<{ id: string; directory?: string }> = [];
   const client: ContinuationClient = {
     session: {
-      get: async () => (session === undefined ? { data: undefined } : { data: session }),
+      get: async (request) => {
+        getCalls.push({ id: request.path.id, directory: request.query?.directory });
+        return session === undefined ? { data: undefined } : { data: session };
+      },
       summarize: async (request) => {
         summarizeCalls.push({ id: request.path.id, body: request.body });
         return { data: true };
@@ -72,7 +77,7 @@ function fakeHost(session: { agent?: string; parentID?: string } | undefined): F
       },
     },
   };
-  return { client, summarizeCalls, promptCalls };
+  return { client, summarizeCalls, promptCalls, getCalls };
 }
 
 /** The scheduled rollover runs on a timer, so drain the macrotask queue before asserting. */
@@ -244,6 +249,57 @@ test("the stop marker compacts without resuming and clears the continuation budg
     await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR }),
     "SORTIE_COMPACT_AND_CONTINUE_QUEUED",
   );
+});
+
+test("the stop marker compacts only a session whose identity is the configured coordinator", async () => {
+  // A foreign root that merely emitted the marker must never have its own history summarized away.
+  const foreign = fakeHost({ agent: "another-coordinator" });
+  const foreignHooks = createContinuationHooks(foreign.client, "/project", POLICY, FAST);
+  await foreignHooks.textComplete({ sessionID: "ses_other" }, { text: `stop\n${ROLLOVER_MARKER}` });
+  await settle();
+  assert.deepEqual(foreign.summarizeCalls, []);
+
+  const child = fakeHost({ agent: COORDINATOR, parentID: "ses_parent" });
+  const childHooks = createContinuationHooks(child.client, "/project", POLICY, FAST);
+  await childHooks.textComplete({ sessionID: "ses_child" }, { text: `stop\n${ROLLOVER_MARKER}` });
+  await settle();
+  assert.deepEqual(child.summarizeCalls, []);
+
+  const unknown = fakeHost(undefined);
+  const unknownHooks = createContinuationHooks(unknown.client, "/project", POLICY, FAST);
+  await unknownHooks.textComplete({ sessionID: "ses_root" }, { text: `stop\n${ROLLOVER_MARKER}` });
+  await settle();
+  assert.deepEqual(unknown.summarizeCalls, []);
+});
+
+test("a session lookup is scoped to the plugin directory and yields to the local identity", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
+  await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR });
+  await settle();
+  assert.ok(host.getCalls.length > 0);
+  for (const call of host.getCalls) assert.equal(call.directory, "/project");
+
+  /*
+   * A host whose lookup cannot answer for this session used to abort every rollover silently. The
+   * plugin already observed the coordinator root, so that observation is authoritative.
+   */
+  const blind = fakeHost(undefined);
+  const local = createContinuationHooks(
+    blind.client,
+    "/project",
+    POLICY,
+    FAST,
+    (sessionID) => sessionID === "ses_root" ? { agent: COORDINATOR, parentID: undefined } : undefined,
+  );
+  await local.textComplete({ sessionID: "ses_root" }, { text: `stop\n${ROLLOVER_MARKER}` });
+  await settle();
+  assert.deepEqual(blind.summarizeCalls.map(({ id }) => id), ["ses_root"]);
+  assert.deepEqual(blind.getCalls, [], "the local identity must answer without a host call");
+
+  await local.textComplete({ sessionID: "ses_unknown" }, { text: `stop\n${ROLLOVER_MARKER}` });
+  await settle();
+  assert.deepEqual(blind.summarizeCalls.map(({ id }) => id), ["ses_root"]);
 });
 
 test("an exhausted step budget is treated as a continuation request", async () => {
