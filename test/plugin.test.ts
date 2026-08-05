@@ -1753,6 +1753,32 @@ test("worker activation accepts the dispatch layout the shipped coordinator asse
   assert.equal(isExplicitTaskHandoff(dispatch), true);
 });
 
+test("session-inactive redispatch fixture is a complete fresh worker handoff", () => {
+  const coordinator = runtimeAssets.find((asset) => asset.name === "dog-coordinator");
+  assert.ok(coordinator);
+  const dispatch = /FRESH_REDISPATCH_HANDOFF_FIXTURE\r?\n([\s\S]*?)END_FRESH_REDISPATCH_HANDOFF_FIXTURE/u
+    .exec(coordinator.content)?.[1];
+  assert.ok(dispatch);
+  assert.equal(isExplicitTaskHandoff(dispatch), true);
+  assert.match(dispatch, /^\s*role:\s*implementation\s*$/mu);
+  assert.match(dispatch, /^\s*project_root:\s*<absolute project root>\s*$/mu);
+  assert.match(dispatch, /^\s*source_manifest:\s*\[<exact source path>\]\s*$/mu);
+  assert.match(dispatch, /^\s*acceptance:\s*<fixed acceptance criteria>\s*$/mu);
+  assert.match(dispatch, /^\s*validation:\s*\{ level: full, command: <exact command> \}\s*$/mu);
+  assert.match(dispatch, /^\s*resume_delta:\s*none\s*$/mu);
+  assert.match(dispatch, /operational_variant: source_manifest=none; operation_manifest=<exact absolute operation manifest>/u);
+
+  const resumeOnly = [
+    "task_id: task-06",
+    "context_digest:",
+    "  mode: same-task-resume",
+    "  resume_delta:",
+    "    next_action: retry bind",
+  ].join("\n");
+  assert.equal(isExplicitTaskHandoff(resumeOnly), false);
+  assert.equal(isExplicitTaskHandoff(dispatch.replace(/^\s*role:.*(?:\r?\n|$)/mu, "")), false);
+});
+
 test("worker activation accepts both inline digest and flat wrapper dispatch forms", () => {
   const inlineDigest = [
     "Continue the current candidate and return structured evidence only.",

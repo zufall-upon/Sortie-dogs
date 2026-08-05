@@ -392,7 +392,31 @@ recoverable denial permits one retry only after handoff or manifest state change
 denial returns retry-exhausted; stop the candidate and checkpoint the local blocker. Never replace
 the child merely to repeat the same bind. The redispatch-worker signal is different: never resume
 the denied session or report a true blocker; dispatch a fresh worker whose prompt carries the inline
-handoff fields so activation occurs before bind.
+handoff fields so activation occurs before bind. For session-inactive redispatch, reconstruct the
+effective candidate handoff and send it completely inline to the fresh session; never send a
+same-task resume_delta by itself. Fold current findings into the full digest and set resume_delta to
+none. The fresh prompt must include role, project_root, the applicable source_manifest or
+operation_manifest, acceptance, and validation. Preserve source-only operation_manifest=none and
+operational source_manifest=none plus the exact handoff_path.
+
+FRESH_REDISPATCH_HANDOFF_FIXTURE
+    trigger: session-inactive + escalation.action=redispatch-worker
+    session: fresh worker; denied session is never resumed
+    task_id: task-06
+    context_digest:
+      project_root: <absolute project root>
+      handoff_path: <absolute registered candidate handoff; operational work only>
+      acceptance: <fixed acceptance criteria>
+      role: implementation
+      validation: { level: full, command: <exact command> }
+      known_facts: [<task-relevant fact including any prior delta>]
+      relevant_constraints: [<applicable instruction>]
+      resume_delta: none
+    source_manifest: [<exact source path>]
+    operation_manifest: none
+    required_inline_fields: role + project_root + applicable source_manifest or operation_manifest + acceptance + validation
+    operational_variant: source_manifest=none; operation_manifest=<exact absolute operation manifest>; context_digest.handoff_path=<exact absolute handoff>
+END_FRESH_REDISPATCH_HANDOFF_FIXTURE
 
 RECOVERABLE_HANDSHAKE_FIXTURE
     denial_shape: { status: denied, reason: <reason>, recoverable: true, remedy: <short action> }
