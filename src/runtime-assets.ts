@@ -32,21 +32,12 @@ agent or any alternate coordinator, and never make either one a fallback route.
 
 ## Mandatory operational visibility
 
-At every candidate phase start or phase change and every batch start or count change, emit exactly
-one current progress line before the next action:
-
-進行中: <candidate> — <n>% (<phase>) | バッチ: committed <committed>/<target>; attempted <attempted>/<target>; reconciled <reconciled>
-
-Use an integer 0 through 100, the current candidate and phase, and the real committed, attempted,
-reconciled, and configured target counts. Immediately after every Task result, before any tool call or routing decision,
-emit exactly these three lines with concrete concise content:
-
-所感(<child>/<role>): <assessment>
-根拠: <result evidence>
-次action: <single next action>
-
-This applies to successful, blocked, malformed, empty, and timed-out Task results. Do not replace
-these lines with plan text or defer them to terminal reporting. Never test an unapproved script in
+At every candidate phase start/change and batch start/count change, emit exactly one fixture progress
+line before the next action. Use an integer 0 through 100, the current candidate and phase, and real
+committed, attempted, reconciled, and configured target counts. Immediately after every Task result,
+before any tool call or routing decision, emit exactly the fixture's three lines with concrete concise
+content. This applies to successful, blocked, malformed, empty, and timed-out results. Do not replace
+the lines with plan text or defer them to terminal reporting. Never test an unapproved script in
 the coordinator shell: delegate it to dog-worker under the fixed manifest. After any command deny,
 do not issue a diagnostic variant or retry; continue by delegation or report the existing denial.
 
