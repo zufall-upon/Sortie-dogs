@@ -1319,6 +1319,97 @@ test("chat message hook applies explicit catalog routing and fails closed with o
   });
 });
 
+test("model routing rewrites only targets present in the cached host provider list", async () => {
+  await withProject("model-routing-host-present", async (directory) => {
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+    let providerQueries = 0;
+    const client = {
+      config: {
+        providers: async () => {
+          providerQueries += 1;
+          return { data: { providers: [{ id: "provider", models: { target: { id: "target" } } }] } };
+        },
+      },
+    };
+    const hooks = await SortieDogsPlugin({ directory, client }, {
+      modelRouting: { implementer: { preferred: { model: "provider/target" } } },
+      modelCatalog: { global: [{ model: "provider/target" }] },
+    });
+    const chat = hooks["chat.message"];
+    assert.ok(chat);
+    for (const sessionID of ["host-present-1", "host-present-2"]) {
+      const output = {
+        message: { agent: "implementer", model: { providerID: "host", modelID: "selected" } },
+        parts: [],
+      };
+      await chat({ sessionID, agent: "implementer" }, output);
+      assert.deepEqual(output.message.model, { providerID: "provider", modelID: "target" });
+    }
+    assert.equal(providerQueries, 1);
+  });
+});
+
+test("model routing preserves the host model and warns once when its target is unavailable", async () => {
+  await withProject("model-routing-host-absent", async (directory) => {
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+    const warnings: unknown[][] = [];
+    const originalWarn = console.warn;
+    console.warn = (...arguments_: unknown[]) => { warnings.push(arguments_); };
+    try {
+      const hooks = await SortieDogsPlugin({
+        directory,
+        client: { config: { providers: async () => ({
+          data: { providers: [{ id: "different", models: { target: { id: "target" } } }] },
+        }) } },
+      }, {
+        modelRouting: { implementer: { preferred: { model: "provider/target", variant: "thinking" } } },
+        modelCatalog: { global: [{ model: "provider/target", variants: ["thinking"] }] },
+      });
+      const chat = hooks["chat.message"];
+      assert.ok(chat);
+      const output = {
+        message: { agent: "implementer", model: { providerID: "host", modelID: "selected", variant: "host" } },
+        parts: [],
+      };
+      const originalModel = output.message.model;
+      await chat({ sessionID: "host-absent-1", agent: "implementer" }, output);
+      await chat({ sessionID: "host-absent-2", agent: "implementer" }, output);
+      assert.strictEqual(output.message.model, originalModel);
+      assert.equal(warnings.length, 1);
+      assert.match(String(warnings[0][0]), /implementer/u);
+      assert.match(String(warnings[0][0]), /provider\/target/u);
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
+});
+
+test("model routing keeps rewriting when host availability cannot be determined", async () => {
+  await withProject("model-routing-host-unknown", async (directory) => {
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+    let providerQueries = 0;
+    const hooks = await SortieDogsPlugin({
+      directory,
+      client: { config: { providers: async () => {
+        providerQueries += 1;
+        throw new Error("provider listing unavailable");
+      } } },
+    }, {
+      modelRouting: { implementer: { preferred: { model: "provider/target" } } },
+      modelCatalog: { global: [{ model: "provider/target" }] },
+    });
+    const chat = hooks["chat.message"];
+    assert.ok(chat);
+    const output = {
+      message: { agent: "implementer", model: { providerID: "host", modelID: "selected" } },
+      parts: [],
+    };
+    await chat({ sessionID: "host-unknown", agent: "implementer" }, output);
+    assert.deepEqual(output.message.model, { providerID: "provider", modelID: "target" });
+    assert.equal(providerQueries, 1);
+  });
+});
+
 test("every packaged role is routed even when its session never activates the write gate", async () => {
   await withProject("model-routing-inactive", async (directory) => {
     await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));

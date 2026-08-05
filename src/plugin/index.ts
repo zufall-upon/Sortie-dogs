@@ -41,6 +41,7 @@ import {
 import {
   createModelRoutingHook,
   type OpenCodeChatMessageHook,
+  type OpenCodeModelAvailabilityClient,
 } from "./model-routing-hook.js";
 import {
   createTaskResultRepairHook,
@@ -62,7 +63,7 @@ export interface OpenCodePluginInput {
   directory: string;
   worktree?: string;
   /** The host SDK client. Absent in hosts that construct the plugin without one. */
-  client?: SessionMessageReader & ContinuationClient;
+  client?: SessionMessageReader & ContinuationClient & OpenCodeModelAvailabilityClient;
   [key: string]: unknown;
 }
 
@@ -421,6 +422,7 @@ function readEnvironmentConfig(): unknown {
 function loadConfigured(
   config: ConfiguredPluginSources,
   handoffBase: string,
+  client?: OpenCodeModelAvailabilityClient,
 ): LoadedConfiguration {
   const handoffPaths = config.handoffPaths.map((path) => resolve(handoffBase, path));
   const handoffRelativePaths = config.handoffPaths.flatMap((path) => {
@@ -438,7 +440,7 @@ function loadConfigured(
       global: config.globalModelRouting,
       catalog: config.modelCatalog,
       dedicated: config.dedicatedWorkerModel,
-    })
+    }, client)
     : undefined;
   return {
     operationManifestPath: config.operationManifestPath,
@@ -634,7 +636,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         const environmentConfig = readEnvironmentConfig();
         const parsed = resolvePluginConfigurationSources(projectConfig, environmentConfig, options);
         if (parsed.kind === "invalid") throw new WriteDeniedError("manifest-unavailable", "<unknown>");
-        loaded = loadConfigured(parsed, input.worktree ?? project.root);
+        loaded = loadConfigured(parsed, input.worktree ?? project.root, input.client);
         const manifestPath = await project.toRelativePath(loaded.operationManifestPath);
         loaded.operationManifestAbsolutePath = project.absolute(manifestPath);
         let manifestValue: unknown;

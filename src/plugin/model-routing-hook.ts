@@ -34,6 +34,13 @@ export interface ModelRoutingHookConfiguration {
   readonly dedicated?: ModelTarget;
 }
 
+/** The narrow OpenCode SDK surface used to discover models configured on the current host. */
+export interface OpenCodeModelAvailabilityClient {
+  readonly config?: {
+    readonly providers?: () => Promise<unknown>;
+  };
+}
+
 export class ModelRoutingDeniedError extends Error {
   readonly reason = "unresolved-role";
   readonly role: string;
@@ -63,8 +70,46 @@ export function openCodeModel(model: string): { providerID: string; modelID: str
   return { providerID: model.slice(0, separator), modelID: model.slice(separator + 1) };
 }
 
-/** Deterministic structural OpenCode hook; all availability comes from the supplied catalog. */
-export function createModelRoutingHook(config: ModelRoutingHookConfiguration): OpenCodeChatMessageHook {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function configuredHostModels(response: unknown): ReadonlySet<string> | undefined {
+  const envelope = isRecord(response) && Object.prototype.hasOwnProperty.call(response, "data")
+    ? response.data
+    : response;
+  if (!isRecord(envelope) || !Array.isArray(envelope.providers)) return undefined;
+
+  const models = new Set<string>();
+  for (const provider of envelope.providers) {
+    if (!isRecord(provider) || typeof provider.id !== "string" || !isRecord(provider.models)) continue;
+    for (const [modelKey, modelValue] of Object.entries(provider.models)) {
+      const modelID = isRecord(modelValue) && typeof modelValue.id === "string" ? modelValue.id : modelKey;
+      models.add(`${provider.id}/${modelID}`);
+    }
+  }
+  return models;
+}
+
+async function readHostModels(
+  client: OpenCodeModelAvailabilityClient | undefined,
+): Promise<ReadonlySet<string> | undefined> {
+  if (client?.config?.providers === undefined) return undefined;
+  try {
+    return configuredHostModels(await client.config.providers());
+  } catch {
+    return undefined;
+  }
+}
+
+/** Resolve package policy first, then fail open when the host proves that target is unavailable. */
+export function createModelRoutingHook(
+  config: ModelRoutingHookConfiguration,
+  client?: OpenCodeModelAvailabilityClient,
+): OpenCodeChatMessageHook {
+  let hostModels: Promise<ReadonlySet<string> | undefined> | undefined;
+  const warnedUnavailableTargets = new Set<string>();
+
   return async (input, output): Promise<void> => {
     const role = input.agent && input.agent.length > 0
       ? input.agent
@@ -86,6 +131,17 @@ export function createModelRoutingHook(config: ModelRoutingHookConfiguration): O
 
     const model = openCodeModel(resolution.model);
     if (model === undefined) throw new InvalidModelTargetError();
+    hostModels ??= readHostModels(client);
+    const availableModels = await hostModels;
+    if (availableModels !== undefined && !availableModels.has(resolution.model)) {
+      if (!warnedUnavailableTargets.has(resolution.model)) {
+        warnedUnavailableTargets.add(resolution.model);
+        console.warn(
+          `Model routing target unavailable for role "${role}": ${resolution.model}. Configure modelRouting for this host.`,
+        );
+      }
+      return;
+    }
     output.message.model = resolution.variant === undefined
       ? model
       : { ...model, variant: resolution.variant };
