@@ -1026,6 +1026,16 @@ test("runtime contract requires interactive continuation and deterministic recov
   assert.match(question[1], /context_line_5:/);
   assert.match(question[1], /invoke question tool; plain-text final forbidden/);
   assert.match(question[1], /automatically resume the same candidate flow/);
+  /*
+   * Scoping the tool to blocked external state left every design or scope choice as a prose question,
+   * which ends the turn without the selectable options the user asked to answer.
+   */
+  assert.match(question[1], /^ {4}trigger: any user question, including [\s\S]*design or scope choice/m);
+  assert.match(question[1], /^ {4}payload: \{ question: .+ options: \[\{ label: <choice; recommended first>/m);
+  assert.match(
+    coordinator.content,
+    /Every question you put to the user goes through the question tool[\s\S]+Never end a turn with a question written as prose/,
+  );
 
   const handshake = coordinator.content.match(
     /RECOVERABLE_HANDSHAKE_FIXTURE\r?\n([\s\S]+?)\r?\nEND_RECOVERABLE_HANDSHAKE_FIXTURE/,

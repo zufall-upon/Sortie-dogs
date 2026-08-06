@@ -10,7 +10,7 @@ export interface RuntimeAsset {
 export const runtimeAssets = [
   {
     name: "dog-coordinator",
-    version: "0.2.6-card12",
+    version: "0.2.9-card13",
     installPath: "agent/dog-coordinator.md",
     content: `---
 description: Canonical MkII coordinator packaged by Sortie-dogs
@@ -405,18 +405,24 @@ END_BACKLOG_DRAIN_FIXTURE
 
 ## Interactive continuation and recoverable worker handshake
 
-When progress depends on user-controlled external state such as authentication material, an
-executable location, access authorization, connection details, or an unavailable external service,
-invoke the question tool with exactly five concise context lines. Do not emit a plain-text final.
+Every question you put to the user goes through the question tool, whatever its subject. That
+includes user-controlled external state such as authentication material, an executable location,
+access authorization, connection details, or an unavailable external service; it equally includes a
+choice between candidate designs, scopes, or orderings, an acceptance criterion that reads two ways,
+and approval for a risky or irreversible action. Carry the same five concise context lines into the
+tool payload, and when the question is a choice, make each option one selectable entry with the
+recommended option first. Never end a turn with a question written as prose: a prose question leaves
+the user answering a plain message, which is exactly the interaction the tool exists to replace.
 After the answer, resume the same candidate flow automatically without repeating completed work.
 
 USER_QUESTION_FIXTURE
-    trigger: user-controlled external state blocks the next required action
+    trigger: any user question, including blocked external state, design or scope choice, ambiguous acceptance, or risky-action approval
     context_line_1: candidate and blocked action
-    context_line_2: exact failed capability
+    context_line_2: exact failed capability or undecided point
     context_line_3: concise command, exit, or diagnostic
-    context_line_4: information required from the user
+    context_line_4: information or choice required from the user
     context_line_5: action that will resume after the answer
+    payload: { question: <context lines 1 through 4>, header: <short subject>, options: [{ label: <choice; recommended first>, description: <consequence> }] }
     action: invoke question tool; plain-text final forbidden
     after_answer: automatically resume the same candidate flow
 END_USER_QUESTION_FIXTURE
@@ -647,7 +653,7 @@ END_TERMINAL_EVIDENCE_FIXTURE
   },
   {
     name: "dog-worker",
-    version: "0.2.6-card12",
+    version: "0.2.9-card13",
     installPath: "agent/dog-worker.md",
     content: `---
 description: Dedicated worker for the canonical Sortie-dogs coordinator
@@ -707,7 +713,7 @@ the user.
   },
   {
     name: "dog-scout",
-    version: "0.2.6-card12",
+    version: "0.2.9-card13",
     installPath: "agent/dog-scout.md",
     content: `---
 description: Bounded evidence scout for dog-coordinator
@@ -757,7 +763,7 @@ prose; keep the keys, paths, commands, and identifiers verbatim.
   },
   {
     name: "dog-reviewer",
-    version: "0.2.6-card12",
+    version: "0.2.9-card13",
     installPath: "agent/dog-reviewer.md",
     content: `---
 description: Independent source reviewer for dog-coordinator
@@ -781,7 +787,7 @@ or transport.
   },
   {
     name: "dog-advisor",
-    version: "0.2.6-card12",
+    version: "0.2.9-card13",
     installPath: "agent/dog-advisor.md",
     content: `---
 description: Focused technical advisor for dog-coordinator
@@ -805,7 +811,7 @@ provider, vendor, model, variant, or transport.
   },
   {
     name: "sortie",
-    version: "0.2.6-card12",
+    version: "0.2.9-card13",
     installPath: "command/sortie.md",
     content: `---
 description: Start the canonical Sortie-dogs MkII workflow
