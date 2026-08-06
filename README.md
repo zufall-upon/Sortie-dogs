@@ -60,8 +60,9 @@ to the `plugin` array of the OpenCode configuration the agents run under —
 Restart OpenCode afterwards. A `plugin` entry must name the package, not a
 subpath: `sortie-dogs/plugin` is an import specifier, not a plugin specifier.
 
-`dog-coordinator` and `dog-scout` default to `openai/gpt-5.6-luna`. To use a
-different model for both roles, save this as `.opencode/sortie-dogs.json`:
+`dog-coordinator` keeps whichever model you select for the session. `dog-scout`
+defaults to `openai/gpt-5.6-luna`. To pin either role to another model, save this
+as `.opencode/sortie-dogs.json`:
 
 ```json
 {
@@ -263,13 +264,17 @@ published cost curves put a cheap model at high effort above an expensive model
 at mid effort on both solve rate and price. Sortie-dogs therefore buys effort,
 not model tiers, wherever the work allows it.
 
-`dog-coordinator` defaults to `openai/gpt-5.6-luna` with the `max` variant. The
-coordinator produces dispatches rather than code, and one malformed dispatch
-discards an entire worker session, so top effort here costs less than the work it
-protects. `dog-scout` defaults to the same model with the `high` variant, since
+`dog-coordinator` has no built-in route. It is the one agent you drive directly
+and pick a model for in the session, so it keeps the model you selected; a
+shipped default there would silently revert your choice instead of filling an
+absent one. Declare `modelRouting` for `dog-coordinator` if you do want a fixed
+coordinator model.
+
+`dog-scout` defaults to `openai/gpt-5.6-luna` with the `high` variant, since
 gathering bounded evidence is retrieval rather than reasoning and that tier is
-where the curve gives the most per unit of cost. Project-local routing can
-override either default.
+where the curve gives the most per unit of cost. Nobody selects a model for a
+session the loop spawns, which is why delegated roles carry defaults and the
+coordinator does not. Project-local routing can override this default.
 
 The `implementation`, `remediation`, `blocker-resolution`, and `dog-worker`
 roles always use the dedicated worker target, `openai/gpt-5.6-luna` with the

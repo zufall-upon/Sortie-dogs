@@ -20,7 +20,6 @@ import {
   DEFAULT_FREE_TIER_FALLBACK_MODELS,
   ESCALATION_WORKER_MODEL,
   ESCALATION_WORKER_VARIANT,
-  RECOMMENDED_COORDINATOR_VARIANT,
   RECOMMENDED_SCOUT_VARIANT,
   RECOMMENDED_CONSULTATION_MODEL,
   RECOMMENDED_CONSULTATION_ROLES,
@@ -276,20 +275,18 @@ test("recommended Luna routes cover exact installed roles and remain below proje
   assert.deepEqual(defaults.modelCatalog.global, [
     {
       model: DEDICATED_WORKER_MODEL,
-      variants: [
-        DEDICATED_WORKER_VARIANT,
-        RECOMMENDED_COORDINATOR_VARIANT,
-        RECOMMENDED_SCOUT_VARIANT,
-        "xhigh",
-      ].filter((variant, index, all) => all.indexOf(variant) === index),
+      variants: [DEDICATED_WORKER_VARIANT, RECOMMENDED_SCOUT_VARIANT, "xhigh"]
+        .filter((variant, index, all) => all.indexOf(variant) === index),
     },
     { model: ESCALATION_WORKER_MODEL, variants: [ESCALATION_WORKER_VARIANT, CONSULTATION_FALLBACK_VARIANT] },
     { model: "provider/custom" },
   ]);
-  // Dispatch quality and evidence gathering are not the same workload, so they do not share one effort.
-  assert.notEqual(RECOMMENDED_COORDINATOR_VARIANT, RECOMMENDED_SCOUT_VARIANT);
+  /*
+   * The coordinator is the session the user drives and selects a model for, so shipping a default
+   * route for it would overwrite that selection instead of filling an absent one.
+   */
+  assert.equal(defaults.modelRouting["dog-coordinator"], undefined);
   const lunaRoleVariants = {
-    "dog-coordinator": RECOMMENDED_COORDINATOR_VARIANT,
     "dog-scout": RECOMMENDED_SCOUT_VARIANT,
   };
   assert.deepEqual(Object.keys(lunaRoleVariants).map((role) => ({
@@ -1684,11 +1681,6 @@ test("every packaged role is routed even when its session never activates the wr
     const chat = hooks["chat.message"];
     assert.ok(chat);
     const expected: Record<string, { providerID: string; modelID: string; variant?: string }> = {
-      "dog-coordinator": {
-        providerID: "openai",
-        modelID: "gpt-5.6-luna",
-        variant: RECOMMENDED_COORDINATOR_VARIANT,
-      },
       "dog-scout": { providerID: "openai", modelID: "gpt-5.6-luna", variant: RECOMMENDED_SCOUT_VARIANT },
       "dog-worker": { providerID: "openai", modelID: "gpt-5.6-luna", variant: DEDICATED_WORKER_VARIANT },
       "dog-reviewer": { providerID: "openai", modelID: "gpt-5.6-sol", variant: CONSULTATION_FALLBACK_VARIANT },
@@ -1709,6 +1701,47 @@ test("every packaged role is routed even when its session never activates the wr
     };
     await chat({ sessionID: "inactive-plan", agent: "plan" }, unrouted);
     assert.deepEqual(unrouted.message.model, { providerID: "host", modelID: "session-default" });
+
+    /*
+     * The user selects the coordinator's model in the session they drive. Overriding it would revert
+     * that selection with no visible cause, so the coordinator keeps whatever the session resolved.
+     */
+    const chosen = {
+      message: { agent: "dog-coordinator", model: { providerID: "anthropic", modelID: "claude-opus-5" } },
+      parts: [{ type: "text", text: "continue the batch" }],
+    };
+    await chat({ sessionID: "inactive-dog-coordinator", agent: "dog-coordinator" }, chosen);
+    assert.deepEqual(chosen.message.model, { providerID: "anthropic", modelID: "claude-opus-5" });
+  });
+});
+
+test("a declared coordinator route still applies, because the host asked for it", async () => {
+  await withProject("coordinator-route-declared", async (directory) => {
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+    await mkdir(join(directory, ".opencode"), { recursive: true });
+    await writeFile(
+      join(directory, ".opencode", "sortie-dogs.json"),
+      JSON.stringify({
+        modelRouting: { "dog-coordinator": { preferred: { model: "openai/gpt-5.6-luna", variant: "max" } } },
+        modelCatalog: { project: [{ model: "openai/gpt-5.6-luna", variants: ["max"] }] },
+      }),
+    );
+    const client = { config: { providers: async () => ({ data: { providers: [
+      { id: "openai", models: { "gpt-5.6-luna": { id: "gpt-5.6-luna" } } },
+    ] } }) } };
+    const hooks = await SortieDogsPlugin({ directory, client });
+    const chat = hooks["chat.message"];
+    assert.ok(chat);
+    const declared = {
+      message: { agent: "dog-coordinator", model: { providerID: "anthropic", modelID: "claude-opus-5" } },
+      parts: [{ type: "text", text: "continue the batch" }],
+    };
+    await chat({ sessionID: "declared-coordinator", agent: "dog-coordinator" }, declared);
+    assert.deepEqual(declared.message.model, {
+      providerID: "openai",
+      modelID: "gpt-5.6-luna",
+      variant: "max",
+    });
   });
 });
 

@@ -84,15 +84,17 @@ const fixedModelRoleSet = new Set<string>(Object.keys(FIXED_MODEL_ROUTING));
 export const RECOMMENDED_LUNA_MODEL = "openai/gpt-5.6-luna";
 
 /**
- * Dispatch quality, not code output, is what the coordinator spends effort on, and one malformed
- * dispatch discards an entire worker session, so the coordinator runs at the top of the cheap model's
- * range where that whole session costs less than the work it protects. Evidence gathering is retrieval
- * rather than reasoning, so the scout sits one tier lower where the cost curve is steepest per point.
+ * The coordinator has no built-in route on purpose. It is the one agent the user drives directly and
+ * picks a model for in the session, so a shipped default here does not choose between models for an
+ * undecided user: it silently discards a choice the user already made and cannot see being reverted.
+ * Delegated roles are the opposite, because nobody selects a model for a session the loop spawns.
+ * A host that does want a fixed coordinator model still declares one through modelRouting.
+ *
+ * Evidence gathering is retrieval rather than reasoning, so the scout sits one effort tier below the
+ * worker, where the published cost curve returns the most per unit of cost.
  */
-export const RECOMMENDED_COORDINATOR_VARIANT = "max";
 export const RECOMMENDED_SCOUT_VARIANT = "high";
 export const RECOMMENDED_LUNA_ROLE_VARIANTS = Object.freeze({
-  "dog-coordinator": RECOMMENDED_COORDINATOR_VARIANT,
   "dog-scout": RECOMMENDED_SCOUT_VARIANT,
 } as const);
 export const RECOMMENDED_LUNA_ROLES = Object.freeze(
@@ -208,11 +210,10 @@ export const BUILT_IN_MODEL_CATALOG: ModelCatalog = Object.freeze({
   global: Object.freeze([
     Object.freeze({
       model: DEDICATED_WORKER_MODEL,
-      variants: Object.freeze([
-        DEDICATED_WORKER_VARIANT,
-        RECOMMENDED_COORDINATOR_VARIANT,
-        RECOMMENDED_SCOUT_VARIANT,
-      ].filter((variant, index, all) => all.indexOf(variant) === index)),
+      variants: Object.freeze(
+        [DEDICATED_WORKER_VARIANT, RECOMMENDED_SCOUT_VARIANT]
+          .filter((variant, index, all) => all.indexOf(variant) === index),
+      ),
     }),
     Object.freeze({
       model: ESCALATION_WORKER_MODEL,
