@@ -1,6 +1,6 @@
 {
   "version": "0.1.0",
-  "task_id": "global-reflection-autocompaction-fix-01",
+  "task_id": "real-host-compaction-bounds-fix-01",
   "read": [
     "operation-manifest.json",
     "package.json",

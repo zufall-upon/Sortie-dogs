@@ -1635,6 +1635,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
        */
       await ensureLoaded();
       await loaded?.modelRoutingHook?.(chatInput, output);
+      if (coordinatorOrigin) continuation.observeModel(chatInput.sessionID, output.message.model);
     },
     ...(reflectionStartup ? { "experimental.chat.system.transform": async (transformInput: { sessionID: string }, transformOutput: { system?: string[] }): Promise<void> => {
       if (!(await beginReflection(transformInput.sessionID))) return;
@@ -1681,7 +1682,12 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       await inspectSuccessfulRead(toolInput);
     },
     "tool.execute.before": async (toolInput, output): Promise<void> => {
-      if (isCoordinatorSession(toolInput.sessionID)) return;
+      if (isCoordinatorSession(toolInput.sessionID)) {
+        if (continuation.blocksTool(toolInput.sessionID)) {
+          throw new Error("SORTIE_ROLLOVER_PENDING: stop this turn and wait for compaction");
+        }
+        return;
+      }
       const status = activeSessionStatus(toolInput.sessionID);
       if (status === "inactive") return;
       if (status === "expired") {

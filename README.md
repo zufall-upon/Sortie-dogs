@@ -146,7 +146,7 @@ Optional settings in `.opencode/sortie-dogs.json`:
   "handoffPaths": ["handoff.json"],
   "readOnlyTools": ["my_mcp_search"],
   "dedicatedWorkerModel": { "model": "provider/model", "variant": "deep" },
-  "continuation": { "enabled": true, "maxAutoContinues": 3 },
+  "continuation": { "enabled": true, "maxAutoContinues": 2 },
   "reflection": {
     "enabled": false,
     "layers": { "run": true, "project": true, "global": false }
@@ -180,9 +180,9 @@ global file for durable global settings.
   and resumes the same root session on the next independent unit. Only a root
   `dog-coordinator` session is ever resumed: a child session is never promoted and
   another coordinator is never adopted. Set `enabled` to `false` to keep every
-  batch manual, raise or lower `maxAutoContinues` (default `3`, maximum `10`) to
-  change the ceiling, and set `summarizeModel` to pin the compaction model when
-  the host default is unsuitable. Normal OpenCode auto-compaction keeps the
+  batch manual, raise or lower `maxAutoContinues` (default `2`, maximum `10`) to
+  change the ceiling, and set `summarizeModel` to override the latest coordinator
+  model used for compaction. Normal OpenCode auto-compaction keeps the
   host's auto-continue behavior; Sortie suppresses it only while its own
   explicitly queued rollover owns the resume.
 - `reflection` is an opt-in process-prevention companion for an activated root

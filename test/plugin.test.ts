@@ -1188,7 +1188,7 @@ test("continuation configuration ships a working default and rejects an unsafe o
       enabled: true,
       agent: "dog-coordinator",
       capability: CONTINUATION_CAPABILITY,
-      maxAutoContinues: 3,
+      maxAutoContinues: 2,
     });
   }
 

@@ -25,7 +25,7 @@ export const ROLLOVER_MARKER = "<!-- SORTIE_COMPACT -->";
 export const AUTO_CONTINUE_PREFIX = "SORTIE_AUTO_CONTINUE";
 /** First line the rollover summary must emit, mirroring the batch target of three attempts. */
 export const ROLLOVER_TOKEN = "SORTIE_ROLLOVER_COMPACTED";
-export const DEFAULT_MAX_AUTO_CONTINUES = 3;
+export const DEFAULT_MAX_AUTO_CONTINUES = 2;
 
 /**
  * A coordinator that exhausted its step budget reports remaining work instead of continuing. That
@@ -42,8 +42,8 @@ const DEFAULT_TIMINGS = {
   cooldownMilliseconds: 60_000,
   /** Let the new summary's token state settle before a fresh turn can trigger overflow compaction. */
   settleMilliseconds: 1_500,
-  /** A rollover that cannot start yet is retried on a short backoff rather than dropped. */
-  scheduleMilliseconds: 1_500,
+  /** Session idle starts rollover normally; this delayed path only recovers a missing idle event. */
+  scheduleMilliseconds: 30_000,
   scheduleAttempts: 2,
 } as const;
 
@@ -56,7 +56,8 @@ export type ContinuationRejection =
   | "capability-unavailable"
   | "continuation-disabled"
   | "limit-reached"
-  | "pending-autocontinue";
+  | "pending-autocontinue"
+  | "summarize-model-unavailable";
 
 export interface ContinuationIdentity {
   readonly agent?: string | undefined;
@@ -119,7 +120,7 @@ export interface ContinuationClient {
     readonly summarize?: (request: {
       path: { id: string };
       query?: { directory?: string };
-      body?: { providerID: string; modelID: string };
+      body: { providerID: string; modelID: string };
     }) => Promise<unknown>;
     readonly promptAsync?: (request: {
       path: { id: string };
@@ -159,6 +160,7 @@ export type RolloverAbort =
   | "identity-unavailable"
   | "child-session"
   | "summarize-unavailable"
+  | "summarize-model-unavailable"
   | "retries-exhausted"
   | "terminal-identity-rejected";
 
@@ -184,6 +186,8 @@ export interface ContinuationHooks {
     input: { sessionID: string; overflow?: boolean },
     output: { enabled: boolean },
   ): Promise<void>;
+  observeModel(sessionID: string, model: { providerID: string; modelID: string }): void;
+  blocksTool(sessionID: string): boolean;
   sessionIdle(sessionID: string): Promise<void>;
   forgetSession(sessionID: string): void;
 }
@@ -241,8 +245,12 @@ interface SessionState {
   latestReport?: string | undefined;
   /** A rollover is executing right now. */
   active: boolean;
+  /** Summarize succeeded; a failed synthetic resume must not summarize the same state again. */
+  compactedRollover: boolean;
   /** A rollover-shaped compaction prompt is still owed to the host. */
   promptPending: boolean;
+  /** Latest coordinator model; the host requires it in every summarize payload. */
+  model?: { providerID: string; modelID: string } | undefined;
   /** The direct capability already ran in this turn, so the marker must not run too. */
   directUsed: boolean;
   lastRollover?: number | undefined;
@@ -329,6 +337,7 @@ export function createContinuationHooks(
       attempts: 0,
       pendingRollover: false,
       active: false,
+      compactedRollover: false,
       promptPending: false,
       directUsed: false,
       touched: Date.now(),
@@ -356,10 +365,25 @@ export function createContinuationHooks(
     }
   }
 
-  function summarizeBody(): { providerID: string; modelID: string } | undefined {
+  function summarizeBody(state: SessionState): { providerID: string; modelID: string } | undefined {
     const summarizeModel = policy().summarizeModel;
-    if (summarizeModel === undefined) return undefined;
-    return openCodeModel(summarizeModel.model);
+    return summarizeModel === undefined ? state.model : openCodeModel(summarizeModel.model);
+  }
+
+  function summarizeCallSucceeded(response: unknown): boolean {
+    if (response === true) return true;
+    if (response === null || typeof response !== "object" || !("data" in response)) return false;
+    return (response as { data?: unknown }).data === true;
+  }
+
+  function promptCallSucceeded(response: unknown): boolean {
+    if (response === undefined || response === true) return true;
+    if (response === null || typeof response !== "object") return false;
+    const result = response as { error?: unknown; response?: { ok?: unknown; status?: unknown } };
+    if (result.error !== undefined) return false;
+    if (result.response?.ok === false) return false;
+    if (typeof result.response?.status === "number" && result.response.status >= 400) return false;
+    return true;
   }
 
   async function runRollover(sessionID: string): Promise<boolean> {
@@ -371,52 +395,64 @@ export function createContinuationHooks(
       return false;
     }
 
-    const cooldownRemaining = state.lastRollover === undefined
-      ? 0
-      : timings.cooldownMilliseconds - (Date.now() - state.lastRollover);
-    if (cooldownRemaining > 0) {
-      if (state.cooldownTimer === undefined) {
-        state.cooldownTimer = unrefTimer(setTimeout(() => {
-          const current = sessions.get(sessionID);
-          if (current !== undefined) current.cooldownTimer = undefined;
-          void runRollover(sessionID);
-        }, cooldownRemaining));
-      }
-      return false;
-    }
-
-    // A child session must never compact or resume its parent's batch.
-    const identity = await readIdentity(sessionID);
-    if (identity === undefined || !nonEmpty(identity.agent)) {
-      warnRollover(sessionID, "identity-unavailable");
-      return false;
-    }
-    if (nonEmpty(identity.parentID)) {
-      warnRollover(sessionID, "child-session");
-      return false;
-    }
-
-    const continueReport = state.continueReport;
+    // Acquire the session lock before the first await so idle and fallback timers cannot overlap.
     state.active = true;
-    state.promptPending = true;
-    let summarized = false;
+    let compactionStarted = false;
+    let compactionSucceeded = false;
     try {
-      const body = summarizeBody();
-      await summarize.call(client!.session, {
-        path: { id: sessionID },
-        query: { directory },
-        ...(body === undefined ? {} : { body }),
-      });
-      summarized = true;
-      state.lastRollover = Date.now();
-      state.pendingRollover = false;
-      state.continueReport = undefined;
-      if (continueReport === undefined) return true;
+      const cooldownRemaining = state.lastRollover === undefined || state.compactedRollover
+        ? 0
+        : timings.cooldownMilliseconds - (Date.now() - state.lastRollover);
+      if (cooldownRemaining > 0) {
+        if (state.cooldownTimer === undefined) {
+          state.cooldownTimer = unrefTimer(setTimeout(() => {
+            const current = sessions.get(sessionID);
+            if (current !== undefined) current.cooldownTimer = undefined;
+            void runRollover(sessionID);
+          }, cooldownRemaining));
+        }
+        return false;
+      }
+
+      // A child session must never compact or resume its parent's batch.
+      const identity = await readIdentity(sessionID);
+      if (identity === undefined || !nonEmpty(identity.agent)) {
+        warnRollover(sessionID, "identity-unavailable");
+        return false;
+      }
+      if (nonEmpty(identity.parentID)) {
+        warnRollover(sessionID, "child-session");
+        return false;
+      }
+      if (!state.compactedRollover) {
+        const body = summarizeBody(state);
+        if (body === undefined) {
+          warnRollover(sessionID, "summarize-model-unavailable");
+          return false;
+        }
+        state.promptPending = true;
+        compactionStarted = true;
+        const summarizedResponse = await summarize.call(client!.session, {
+          path: { id: sessionID },
+          query: { directory },
+          body,
+        });
+        if (!summarizeCallSucceeded(summarizedResponse)) throw new Error("summarize request rejected");
+        state.compactedRollover = true;
+        compactionSucceeded = true;
+        state.lastRollover = Date.now();
+      }
+      const continueReport = state.continueReport;
+      if (continueReport === undefined) {
+        state.pendingRollover = false;
+        state.compactedRollover = false;
+        return true;
+      }
 
       const resume = client?.session?.promptAsync;
-      if (resume === undefined) return true;
-      await new Promise((settle) => unrefTimer(setTimeout(settle, timings.settleMilliseconds)));
-      await resume.call(client!.session, {
+      if (resume === undefined) throw new Error("resume capability unavailable");
+      await new Promise((settle) => setTimeout(settle, timings.settleMilliseconds));
+      const resumed = await resume.call(client!.session, {
         path: { id: sessionID },
         query: { directory },
         body: {
@@ -429,6 +465,10 @@ export function createContinuationHooks(
           }],
         },
       });
+      if (!promptCallSucceeded(resumed)) throw new Error("resume request rejected");
+      state.pendingRollover = false;
+      state.compactedRollover = false;
+      state.continueReport = undefined;
       return true;
     } catch (error) {
       console.error("[sortie-continuation] rollover failed", sessionID, error);
@@ -437,7 +477,7 @@ export function createContinuationHooks(
       const current = sessions.get(sessionID);
       if (current !== undefined) {
         current.active = false;
-        if (!summarized) current.promptPending = false;
+        if (compactionStarted && !compactionSucceeded) current.promptPending = false;
       }
     }
   }
@@ -451,6 +491,7 @@ export function createContinuationHooks(
         scheduleRollover(sessionID, attempt + 1);
       } else if (!completed && state?.pendingRollover === true) {
         state.pendingRollover = false;
+        state.compactedRollover = false;
         state.promptPending = false;
         state.continueReport = undefined;
         warnRollover(sessionID, "retries-exhausted");
@@ -461,6 +502,7 @@ export function createContinuationHooks(
   function queueRollover(sessionID: string, report: string, resume: boolean): void {
     const state = stateFor(sessionID);
     state.pendingRollover = true;
+    state.compactedRollover = false;
     state.latestReport = report;
     state.continueReport = resume ? report : undefined;
     if (resume) state.attempts += 1;
@@ -523,6 +565,12 @@ export function createContinuationHooks(
         pendingAutoContinue: state.pendingRollover,
       });
       if (!resolution.compact) return `SORTIE_CONTINUATION_REJECTED: ${resolution.reason}`;
+      if (client?.session?.summarize === undefined) {
+        return "SORTIE_CONTINUATION_REJECTED: capability-unavailable";
+      }
+      if (summarizeBody(state) === undefined) {
+        return "SORTIE_CONTINUATION_REJECTED: summarize-model-unavailable";
+      }
       // The direct capability and the marker fallback are mutually exclusive within one turn.
       state.directUsed = true;
       queueRollover(
@@ -607,6 +655,16 @@ export function createContinuationHooks(
         ) return;
       }
       if (pending) output.enabled = false;
+    },
+
+    observeModel(sessionID, model): void {
+      if (!nonEmpty(model.providerID) || !nonEmpty(model.modelID)) return;
+      stateFor(sessionID).model = { providerID: model.providerID, modelID: model.modelID };
+    },
+
+    blocksTool(sessionID): boolean {
+      const state = sessions.get(sessionID);
+      return state?.pendingRollover === true || state?.active === true || state?.promptPending === true;
     },
 
     async sessionIdle(sessionID): Promise<void> {

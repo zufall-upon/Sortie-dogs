@@ -61,7 +61,7 @@ export interface ContinuationConfiguration {
   readonly agent: string;
   readonly capability: string;
   readonly maxAutoContinues: number;
-  /** Absent means the host picks the compaction model; this package never pins one. */
+  /** Absent reuses the latest coordinator model observed for this session. */
   readonly summarizeModel?: ModelTarget;
 }
 
