@@ -10,7 +10,7 @@ export interface RuntimeAsset {
 export const runtimeAssets = [
   {
     name: "dog-coordinator",
-    version: "0.2.10-card14",
+    version: "0.2.11-card15",
     installPath: "agent/dog-coordinator.md",
     content: `---
 description: Canonical MkII coordinator packaged by Sortie-dogs
@@ -135,6 +135,31 @@ path never resets Scout state or authorizes a retry. Record scoutAttempted, scou
 owner, and the exact skip or retry reason in the initial worker handoff, checkpoint decisions[], and
 resume_delta. Supplied known_paths
 remain the worker read boundary when no Scout read occurs.
+
+Pure local artifact production has a shorter route. A request qualifies only when current evidence
+already fixes every input path and exact output file, source_manifest is none, the operation manifest
+writes only those user-requested output files, validation is full, and the work changes no source,
+dependency, configuration, permission, secret material, network, process, deployment, installation, or
+external state. For this shape, skip Scout, prepare one compact handoff and operation manifest, and
+dispatch exactly one dog-worker. Put the exact direct build command and every required static or
+artifact-content check in manifest.validation before dispatch; keep commands single-line and avoid a
+nested shell or multiline script in JSON. After all declared commands pass, return the artifact
+directly: do not stage, commit, run SourceReview, create an evidence-only worker, or ask another agent
+to reformat evidence. Require a digest only when the user requests one or when release, publication,
+transfer, or integrity acceptance explicitly needs one. A local test archive does not acquire a
+digest or independent review merely because an operation manifest exists.
+
+ARTIFACT_ONLY_FAST_PATH_FIXTURE
+    qualifies: source_manifest=none + exact local output files + full validation + no source/config/external-state mutation
+    scout: skipped; current evidence fixes inputs, outputs, validation, and owner
+    contract: one compact handoff + one operation manifest; all build and content-check commands declared before dispatch
+    route: dog-coordinator -> one dog-worker -> dog-coordinator
+    success: all declared commands exit 0 + exact artifact paths and content evidence returned
+    digest: only user-requested or required by release, publication, transfer, or integrity acceptance
+    review: skipped; artifact-only low-risk
+    stage_commit: forbidden; return artifact directly
+    follow_up_agents: forbidden for evidence formatting, hash transcription, or redundant verification
+END_ARTIFACT_ONLY_FAST_PATH_FIXTURE
 
 SCOUT_SKIP_FIXTURE
     required_evidence: exact manifest + canonical validation + blocker owner all fixed
@@ -616,10 +641,11 @@ stages or commits. Return reviewer findings through dog-coordinator and fail clo
 unreviewed. If dog-reviewer is unavailable or does not return PASS, fail closed before staging.
 
 GATE_POLICY_FIXTURE
-    risk_rule: high when operation_manifest is non-empty, any source_manifest entry is outside test/, or validation level is targeted; otherwise low
+    risk_rule: high when source_manifest has an entry outside test/, validation level is targeted, or operation_manifest mutates non-artifact state; a qualifying artifact-only candidate is low-risk despite operation_manifest
     canonical_validation_nonzero: staging rejected; commit rejected
     worker_stage_or_commit: rejected and reported
     low_risk_validated: independent_review skipped and recorded; staging allowed
+    artifact_only_validated: independent_review skipped; staging and commit forbidden; return artifact
     high_risk_unreviewed: staging rejected; commit rejected
     high_risk_reviewer_unavailable: staging rejected; commit rejected
     high_risk_validated_reviewed: staging allowed
@@ -659,7 +685,7 @@ END_TERMINAL_EVIDENCE_FIXTURE
   },
   {
     name: "dog-worker",
-    version: "0.2.10-card14",
+    version: "0.2.11-card15",
     installPath: "agent/dog-worker.md",
     content: `---
 description: Dedicated worker for the canonical Sortie-dogs coordinator
@@ -727,7 +753,7 @@ the user.
   },
   {
     name: "dog-scout",
-    version: "0.2.10-card14",
+    version: "0.2.11-card15",
     installPath: "agent/dog-scout.md",
     content: `---
 description: Bounded evidence scout for dog-coordinator
@@ -777,7 +803,7 @@ prose; keep the keys, paths, commands, and identifiers verbatim.
   },
   {
     name: "dog-reviewer",
-    version: "0.2.10-card14",
+    version: "0.2.11-card15",
     installPath: "agent/dog-reviewer.md",
     content: `---
 description: Independent source reviewer for dog-coordinator
@@ -801,7 +827,7 @@ or transport.
   },
   {
     name: "dog-advisor",
-    version: "0.2.10-card14",
+    version: "0.2.11-card15",
     installPath: "agent/dog-advisor.md",
     content: `---
 description: Focused technical advisor for dog-coordinator
@@ -825,7 +851,7 @@ provider, vendor, model, variant, or transport.
   },
   {
     name: "sortie",
-    version: "0.2.10-card14",
+    version: "0.2.11-card15",
     installPath: "command/sortie.md",
     content: `---
 description: Start the canonical Sortie-dogs MkII workflow

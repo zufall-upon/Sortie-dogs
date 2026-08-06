@@ -498,6 +498,21 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(scoutSkip[1], /known_paths:\s*worker read boundary even without Scout read/);
     assert.match(scoutSkip[1], /action:\s*route directly to dog-worker/);
 
+    const artifactFastPath = coordinator.content.match(
+      /ARTIFACT_ONLY_FAST_PATH_FIXTURE\r?\n([\s\S]+?)\r?\nEND_ARTIFACT_ONLY_FAST_PATH_FIXTURE/,
+    );
+    assert.ok(artifactFastPath, "coordinator needs a bounded path for source-free local artifacts");
+    assert.match(artifactFastPath[1], /source_manifest=none \+ exact local output files \+ full validation/);
+    assert.match(artifactFastPath[1], /scout:\s*skipped/);
+    assert.match(artifactFastPath[1], /route:\s*dog-coordinator -> one dog-worker -> dog-coordinator/);
+    assert.match(artifactFastPath[1], /review:\s*skipped; artifact-only low-risk/);
+    assert.match(artifactFastPath[1], /stage_commit:\s*forbidden; return artifact directly/);
+    assert.match(artifactFastPath[1], /follow_up_agents:\s*forbidden for evidence formatting, hash transcription, or redundant verification/);
+    assert.match(
+      coordinator.content,
+      /Require a digest only when the user requests one or when release, publication,\s*transfer, or integrity acceptance explicitly needs one/i,
+    );
+
     type ScoutSkipEvidence = {
       exactManifest: boolean;
       canonicalValidation: boolean;
@@ -826,7 +841,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.ok(gatePolicy, "coordinator needs deterministic validation and review gates");
     assert.match(
       gatePolicy[1],
-      /risk_rule: high when operation_manifest is non-empty, any source_manifest entry is outside test\/, or validation level is targeted; otherwise low/,
+      /risk_rule: high when source_manifest has an entry outside test\/, validation level is targeted, or operation_manifest mutates non-artifact state; a qualifying artifact-only candidate is low-risk despite operation_manifest/,
     );
     assert.match(gatePolicy[1], /canonical_validation_nonzero: staging rejected; commit rejected/);
     assert.match(gatePolicy[1], /worker_stage_or_commit: rejected and reported/);
@@ -1194,7 +1209,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(sortie.content, /never route a worker to the user/i);
 
     for (const asset of loaded.runtimeAssets) {
-      assert.equal(asset.version, "0.2.10-card14");
+      assert.equal(asset.version, "0.2.11-card15");
       const frontmatter = asset.content.match(/^---\r?\n([\s\S]+?)\r?\n---\r?\n/);
       assert.ok(frontmatter, `${asset.name} must have frontmatter`);
       const entries = Object.fromEntries(
