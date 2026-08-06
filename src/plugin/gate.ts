@@ -418,7 +418,7 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
 }
 
 function issuePath(issue: CommandIssue): string {
-  return `segment=${issue.segment}; cause=${issue.cause}; hint=${issue.hint}`;
+  return `segment=${issue.segment}; cause=${issue.cause}; hint=${issue.hint}; retry=false; action=return-denial-to-coordinator`;
 }
 
 export function describeUnclassifiedCommand(tool: string, args: unknown): string | undefined {

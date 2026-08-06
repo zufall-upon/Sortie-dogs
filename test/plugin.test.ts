@@ -957,6 +957,23 @@ test("generated assets require the user's language, per-line output, and emoji-m
     assert.match(asset.content, /in the language the\s+(?:supplied|dispatch uses)/i, name);
     assert.match(asset.content, /verbatim/i, name);
   }
+
+  // A tool-free reviewer cannot recover evidence the coordinator omitted from its inline artifact.
+  assert.match(
+    coordinator.content,
+    /Before SourceReview dispatch[\s\S]+acceptance criteria, exact manifest, a concise summary of the changed logic, and\s+canonical validation command\/exit\/fingerprint/i,
+  );
+  assert.match(coordinator.content, /A path where the reviewer could obtain a diff[\s\S]+is not a diff summary/i);
+
+  const worker = runtimeAssets.find((candidate) => candidate.name === "dog-worker");
+  assert.ok(worker);
+  assert.match(worker.content, /Any command or tool denial is terminal evidence for that attempted operation/i);
+  assert.match(
+    worker.content,
+    /not retry with another executable spelling, absolute path, shell wrapper, quoting style, narrowed\s+argument, direct probe, or diagnostic substitute/i,
+  );
+  assert.match(worker.content, /Run only the exact canonical validation command\s+from the handoff/i);
+  assert.match(worker.content, /denied optional check remains\s+DENIED evidence and never justifies another tool step/i);
 });
 
 test("shipped document fixtures satisfy the schemas the write gate enforces", () => {

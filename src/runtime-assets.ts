@@ -10,7 +10,7 @@ export interface RuntimeAsset {
 export const runtimeAssets = [
   {
     name: "dog-coordinator",
-    version: "0.2.9-card13",
+    version: "0.2.10-card14",
     installPath: "agent/dog-coordinator.md",
     content: `---
 description: Canonical MkII coordinator packaged by Sortie-dogs
@@ -103,6 +103,12 @@ Each consultation covers one candidate and one capability. Send only a focused q
 acceptance criteria, exact manifest, constraints, and concise evidence needed for that capability;
 exclude raw logs, full source files, secrets, and unrelated history. Require one concise response:
 Strategy returns options and one recommendation; SourceReview returns PASS or concrete findings.
+Before SourceReview dispatch, verify that its inline artifact itself contains all four inputs the
+reviewer can use: acceptance criteria, exact manifest, a concise summary of the changed logic, and
+canonical validation command/exit/fingerprint. A path where the reviewer could obtain a diff, a
+statement that the working tree contains the diff, or an intent summary is not a diff summary: the
+reviewer is tool-free and treats only the supplied artifact as evidence. Do not spend the review call
+until all four inputs are present.
 Do not encode a provider, vendor, model, variant, or transport in the request, response, or
 consultation agent frontmatter. ConsultationAdapter is the sole explicit transport boundary;
 the host adapter owns it and supplies execution independently.
@@ -653,7 +659,7 @@ END_TERMINAL_EVIDENCE_FIXTURE
   },
   {
     name: "dog-worker",
-    version: "0.2.9-card13",
+    version: "0.2.10-card14",
     installPath: "agent/dog-worker.md",
     content: `---
 description: Dedicated worker for the canonical Sortie-dogs coordinator
@@ -686,6 +692,14 @@ never use file.edited or session.idle as implicit authorization. Do not retry th
 command after the same failure phase occurs twice. Never stage outside exact manifest paths, use
 git add -A, amend, push, or perform coordinator-owned commit work.
 
+Any command or tool denial is terminal evidence for that attempted operation. Record it once and do
+not retry with another executable spelling, absolute path, shell wrapper, quoting style, narrowed
+argument, direct probe, or diagnostic substitute. Run only the exact canonical validation command
+from the handoff; do not add a syntax check, curl probe, Test-Path probe, single-browser variant, or
+other command that the operation manifest did not declare. If the canonical command itself is
+denied, return its structured denial to dog-coordinator immediately. A denied optional check remains
+DENIED evidence and never justifies another tool step.
+
 For a recoverable session-inactive result, do not terminate and do not ask the user. Classify it as a
 local handoff defect and return its structured reason, remedy, and redispatch-worker escalation
 unchanged to dog-coordinator; never resume the denied session. For a recoverable handoff-uninspected
@@ -713,7 +727,7 @@ the user.
   },
   {
     name: "dog-scout",
-    version: "0.2.9-card13",
+    version: "0.2.10-card14",
     installPath: "agent/dog-scout.md",
     content: `---
 description: Bounded evidence scout for dog-coordinator
@@ -763,7 +777,7 @@ prose; keep the keys, paths, commands, and identifiers verbatim.
   },
   {
     name: "dog-reviewer",
-    version: "0.2.9-card13",
+    version: "0.2.10-card14",
     installPath: "agent/dog-reviewer.md",
     content: `---
 description: Independent source reviewer for dog-coordinator
@@ -787,7 +801,7 @@ or transport.
   },
   {
     name: "dog-advisor",
-    version: "0.2.9-card13",
+    version: "0.2.10-card14",
     installPath: "agent/dog-advisor.md",
     content: `---
 description: Focused technical advisor for dog-coordinator
@@ -811,7 +825,7 @@ provider, vendor, model, variant, or transport.
   },
   {
     name: "sortie",
-    version: "0.2.9-card13",
+    version: "0.2.10-card14",
     installPath: "command/sortie.md",
     content: `---
 description: Start the canonical Sortie-dogs MkII workflow
