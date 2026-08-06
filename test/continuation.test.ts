@@ -347,7 +347,7 @@ test("the compaction prompt preserves batch state and names no legacy workflow",
   assert.equal(untracked.prompt, undefined, "an untracked session keeps the host compaction prompt");
 });
 
-test("host auto-continue is disabled while a rollover is pending", async () => {
+test("host auto-continue is disabled only while a Sortie rollover is pending", async () => {
   const host = fakeHost({ agent: COORDINATOR });
   const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
 
@@ -357,12 +357,59 @@ test("host auto-continue is disabled while a rollover is pending", async () => {
 
   const nonOverflow = { enabled: true };
   await hooks.compactionAutoContinue({ sessionID: "ses_root", overflow: false }, nonOverflow);
-  assert.equal(nonOverflow.enabled, false);
+  assert.equal(nonOverflow.enabled, true, "normal host auto-compaction keeps its continuation");
 
   await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR });
   const pending = { enabled: true };
   await hooks.compactionAutoContinue({ sessionID: "ses_root", overflow: true }, pending);
   assert.equal(pending.enabled, false, "continuation owns the resume while it is pending");
+  const pendingNormal = { enabled: true };
+  await hooks.compactionAutoContinue({ sessionID: "ses_root", overflow: false }, pendingNormal);
+  assert.equal(pendingNormal.enabled, false, "pending Sortie rollover owns normal compaction too");
+  await settle();
+  await hooks.sessionCompacting({ sessionID: "ses_root" }, {});
+  const completed = { enabled: true };
+  await hooks.compactionAutoContinue({ sessionID: "ses_root", overflow: false }, completed);
+  assert.equal(completed.enabled, true, "completed Sortie rollover releases host auto-continue");
+});
+
+test("exhausted rollover retries release host auto-continue", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  host.client.session!.summarize = async () => {
+    throw new Error("injected summarize failure");
+  };
+  const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
+  const originalError = console.error;
+  const originalWarn = console.warn;
+  try {
+    console.error = () => undefined;
+    console.warn = () => undefined;
+    await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR });
+    await settle();
+    const output = { enabled: true };
+    await hooks.compactionAutoContinue({ sessionID: "ses_root", overflow: false }, output);
+    assert.equal(output.enabled, true);
+  } finally {
+    console.error = originalError;
+    console.warn = originalWarn;
+  }
+});
+
+test("cooldown defers a queued rollover without exhausting it", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  const hooks = createContinuationHooks(host.client, "/project", POLICY, {
+    cooldownMilliseconds: 50,
+    settleMilliseconds: 0,
+    scheduleMilliseconds: 0,
+    scheduleAttempts: 0,
+  });
+  await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR });
+  await settle();
+  assert.equal(host.summarizeCalls.length, 1);
+
+  await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR });
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.equal(host.summarizeCalls.length, 2, "the cooldown timer retains and runs the queued rollover");
 });
 
 test("host auto-continue stays untouched for sessions the loop never owns", async () => {

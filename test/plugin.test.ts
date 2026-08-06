@@ -11,6 +11,7 @@ import { ModelRoutingDeniedError, SortieDogsPlugin, isExplicitTaskHandoff } from
 import {
   resolvePluginConfiguration,
   resolvePluginConfigurationSources,
+  resolvePluginConfigurationSourcesWithGlobal,
 } from "../dist/plugin/config.js";
 import {
   CONSULTATION_FALLBACK_VARIANT,
@@ -136,6 +137,21 @@ test("model routing configuration is strict and merges roles by layer", () => {
   const partialReflection = resolvePluginConfiguration({ reflection: { layers: { global: true }, maxInjectedTokens: 100 } });
   assert.equal(partialReflection.kind, "configured");
   if (partialReflection.kind === "configured") assert.deepEqual(partialReflection.reflection.layers, { run: true, project: true, global: true });
+  const globalSources = resolvePluginConfigurationSourcesWithGlobal(
+    { reflection: { enabled: true, maxInjectedEntries: 1, layers: { global: true } } },
+    { reflection: { maxInjectedEntries: 2 } },
+    { reflection: { maxInjectedTokens: 100 } },
+    { reflection: { layers: { global: false } } },
+  );
+  assert.equal(globalSources.kind, "configured");
+  if (globalSources.kind === "configured") {
+    assert.deepEqual(globalSources.reflection, {
+      enabled: true,
+      layers: { run: true, project: true, global: false },
+      maxInjectedEntries: 2,
+      maxInjectedTokens: 100,
+    });
+  }
   assert.deepEqual(resolvePluginConfiguration({ freeTierFallbackModels: [""] }), { kind: "invalid" });
   for (const invalidModel of ["provider", "/model", "provider/", "provider /model"]) {
     assert.deepEqual(resolvePluginConfiguration({ freeTierFallbackModels: [invalidModel] }), { kind: "invalid" });
@@ -1235,6 +1251,82 @@ async function configuredHooks(directory: string) {
   await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
   return await SortieDogsPlugin({ directory });
 }
+
+test("global Sortie config enables reflection without plugin tuple options", async () => {
+  await withProject("reflection-global-config", async (directory) => {
+    const oldXdg = process.env.XDG_CONFIG_HOME;
+    const oldConfig = process.env.SORTIE_DOGS_CONFIG;
+    const oldReflection = process.env.SORTIE_REFLECTION;
+    const xdg = await mkdtemp(join(testEnvironment, "reflection-global-xdg-"));
+    try {
+      process.env.XDG_CONFIG_HOME = xdg;
+      delete process.env.SORTIE_DOGS_CONFIG;
+      delete process.env.SORTIE_REFLECTION;
+      await mkdir(join(xdg, "opencode"), { recursive: true });
+      await writeFile(join(xdg, "opencode", "sortie-dogs.json"), JSON.stringify({
+        reflection: { enabled: true, layers: { run: true, project: true, global: false } },
+      }));
+      const global = await SortieDogsPlugin({ directory });
+      assert.ok(global.tool?.sortie_reflection);
+      assert.ok(global["experimental.chat.system.transform"]);
+
+      await mkdir(join(directory, ".opencode"), { recursive: true });
+      await writeFile(join(directory, ".opencode", "sortie-dogs.json"), JSON.stringify({
+        reflection: { enabled: false },
+      }));
+      const project = await SortieDogsPlugin({ directory });
+      assert.equal(project.tool?.sortie_reflection, undefined);
+
+      process.env.SORTIE_DOGS_CONFIG = JSON.stringify({ reflection: { enabled: true } });
+      const environment = await SortieDogsPlugin({ directory });
+      assert.ok(environment.tool?.sortie_reflection);
+      const host = await SortieDogsPlugin({ directory }, { reflection: { enabled: false } });
+      assert.equal(host.tool?.sortie_reflection, undefined);
+    } finally {
+      if (oldXdg === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = oldXdg;
+      if (oldConfig === undefined) delete process.env.SORTIE_DOGS_CONFIG; else process.env.SORTIE_DOGS_CONFIG = oldConfig;
+      if (oldReflection === undefined) delete process.env.SORTIE_REFLECTION; else process.env.SORTIE_REFLECTION = oldReflection;
+      await rm(xdg, { recursive: true, force: true });
+    }
+  });
+});
+
+test("invalid global Sortie config fails reflection closed without removing core tools", async () => {
+  await withProject("reflection-invalid-global", async (directory) => {
+    const oldXdg = process.env.XDG_CONFIG_HOME;
+    const xdg = await mkdtemp(join(testEnvironment, "reflection-invalid-global-xdg-"));
+    const warnings: unknown[][] = [];
+    const originalWarn = console.warn;
+    try {
+      process.env.XDG_CONFIG_HOME = xdg;
+      await mkdir(join(xdg, "opencode"), { recursive: true });
+      await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+      await writeFile(join(xdg, "opencode", "sortie-dogs.json"), "{bad");
+      console.warn = (...args: unknown[]) => warnings.push(args);
+      const hooks = await SortieDogsPlugin({ directory });
+      assert.equal(hooks.tool?.sortie_reflection, undefined);
+      assert.deepEqual(Object.keys(hooks.tool ?? {}).sort(), [
+        "sortie_bind_write_gate",
+        "sortie_check_contract",
+        "sortie_compact_and_continue",
+      ]);
+      assert.equal(warnings.length, 1);
+      await activate(hooks, "invalid-json-global");
+      assert.equal((await bindWriteGate(hooks, directory, "invalid-json-global")).status, "bound");
+
+      await writeFile(join(xdg, "opencode", "sortie-dogs.json"), JSON.stringify({ unknown: true }));
+      const schemaHooks = await SortieDogsPlugin({ directory });
+      assert.equal(schemaHooks.tool?.sortie_reflection, undefined);
+      assert.equal(warnings.length, 2);
+      await activate(schemaHooks, "invalid-schema-global");
+      assert.equal((await bindWriteGate(schemaHooks, directory, "invalid-schema-global")).status, "bound");
+    } finally {
+      console.warn = originalWarn;
+      if (oldXdg === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = oldXdg;
+      await rm(xdg, { recursive: true, force: true });
+    }
+  });
+});
 
 test("reflection integration is opt-in, layered, guarded, kill-switchable, and deletes root runs", async () => {
   await withProject("reflection-integration", async (directory) => {

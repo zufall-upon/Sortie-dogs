@@ -250,7 +250,10 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
           }),
         }));`,
       ],
-      { cwd: consumer },
+      {
+        cwd: consumer,
+        env: { ...process.env, XDG_CONFIG_HOME: join(fixture, "xdg") },
+      },
     );
     const loaded = JSON.parse(stdout) as {
       pluginType: string;

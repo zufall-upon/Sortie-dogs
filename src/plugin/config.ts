@@ -497,17 +497,31 @@ export function resolvePluginConfigurationSources(
   environmentValue: unknown,
   hostValue: unknown,
 ): PluginConfigurationSources {
-  const configured = resolvePluginConfiguration(projectValue, environmentValue, hostValue);
+  return resolvePluginConfigurationSourcesWithGlobal(undefined, projectValue, environmentValue, hostValue);
+}
+
+export function resolvePluginConfigurationSourcesWithGlobal(
+  globalValue: unknown,
+  projectValue: unknown,
+  environmentValue: unknown,
+  hostValue: unknown,
+): PluginConfigurationSources {
+  const configured = resolvePluginConfiguration(globalValue, projectValue, environmentValue, hostValue);
   if (configured.kind === "invalid") return configured;
 
+  const globalLayer = parseLayer(globalValue);
   const projectLayer = parseLayer(projectValue);
   const environmentLayer = parseLayer(environmentValue);
   const hostLayer = parseLayer(hostValue);
-  if (projectLayer === undefined || environmentLayer === undefined || hostLayer === undefined) {
+  if (
+    globalLayer === undefined || projectLayer === undefined ||
+    environmentLayer === undefined || hostLayer === undefined
+  ) {
     return { kind: "invalid" };
   }
   const globalModelRouting = Object.fromEntries(Object.entries({
     ...recommendedRoleRouting(configured.dedicatedWorkerModel),
+    ...(globalLayer.modelRouting ?? {}),
     ...(environmentLayer.modelRouting ?? {}),
     ...(hostLayer.modelRouting ?? {}),
   }).filter(([role]) => !isFixedModelRole(role)));

@@ -182,9 +182,18 @@ tool を使う。inspection も bind も行わずに同じ defect を報告す�
   "operationManifestPath": "operation-manifest.json",
   "handoffPaths": ["handoff.json"],
   "readOnlyTools": ["my_mcp_search"],
-  "dedicatedWorkerModel": { "model": "provider/model", "variant": "deep" }
+  "dedicatedWorkerModel": { "model": "provider/model", "variant": "deep" },
+  "reflection": {
+    "enabled": false,
+    "layers": { "run": true, "project": true, "global": false }
+  }
 }
 ```
+
+同じ schema を global の `~/.config/opencode/sortie-dogs.json`（Windows は
+`%USERPROFILE%\.config\opencode\sortie-dogs.json`）にも保存できる。優先順は built-in default、
+global file、project file、`SORTIE_DOGS_CONFIG`、plugin factory options。OpenCode の plugin
+正規化で factory options が失われる環境では、global file を使う。
 
 - `operationManifestPath`: manifest の位置。project 相対。
 - `handoffPaths`: plugin が検査する handoff file。worker はこの検査を通過して初めて bind できる。
@@ -196,6 +205,11 @@ tool を使う。inspection も bind も行わずに同じ defect を報告す�
 - `dedicatedWorkerModel`: 全 worker role が解決する単一 model。既定は `openai/gpt-5.6-sol` /
   variant `medium`。この model を使えない環境、または別の worker effort を使いたい場合は自分の
   model を宣言する。worker role は常にこの単一 target に解決され、role ごとの routing はできない。
+- `reflection`: activated root `dog-coordinator` だけが使える process prevention。既定無効。
+  opt-in 後の run / project layer は既定有効、project 間で共有する global storage layer は明示的に
+  有効化しない限り無効。child / 他 agent は拒否され、`SORTIE_REFLECTION=0` で即時停止する。
+- 通常の OpenCode auto-compaction は host の auto-continue を維持する。Sortie が明示的に queue
+  した rollover の処理中だけ、二重継続を防ぐため host auto-continue を抑止する。
 
 ## セッション lifecycle
 

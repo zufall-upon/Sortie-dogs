@@ -173,9 +173,18 @@ handoff 与 operation manifest 在检查和绑定之前都会做 schema 校验�
   "operationManifestPath": "operation-manifest.json",
   "handoffPaths": ["handoff.json"],
   "readOnlyTools": ["my_mcp_search"],
-  "dedicatedWorkerModel": { "model": "provider/model", "variant": "deep" }
+  "dedicatedWorkerModel": { "model": "provider/model", "variant": "deep" },
+  "reflection": {
+    "enabled": false,
+    "layers": { "run": true, "project": true, "global": false }
+  }
 }
 ```
+
+同一 schema 也可保存到全局 `~/.config/opencode/sortie-dogs.json`（Windows 为
+`%USERPROFILE%\.config\opencode\sortie-dogs.json`）。优先级依次为内置默认值、全局文件、
+项目文件、`SORTIE_DOGS_CONFIG`、plugin factory options。若 OpenCode 的 plugin 规范化会丢失
+factory options，请使用全局文件保存持久的全局设置。
 
 - `operationManifestPath`：manifest 的位置，相对于项目根目录。
 - `handoffPaths`：插件检查的 handoff 文件。worker 只有通过其中一个文件的检查后才能绑定，
@@ -187,6 +196,11 @@ handoff 与 operation manifest 在检查和绑定之前都会做 schema 校验�
 - `dedicatedWorkerModel`：所有 worker 角色解析到的唯一模型。默认为 `openai/gpt-5.6-sol`
   与变体 `medium`；当该模型不可用、或你想要不同的 worker effort 时，请声明自己的模型。worker 角色始终解析到这一个目标，
   无法按角色分别路由。
+- `reflection`：仅供已激活的 root `dog-coordinator` 使用的 process prevention，默认关闭。
+  opt-in 后 run / project 层默认开启；跨项目共享的 global storage 层只有显式开启才生效。
+  child 与其他 agent 会被拒绝，`SORTIE_REFLECTION=0` 可立即停止该功能。
+- 普通 OpenCode auto-compaction 保留 host 的 auto-continue。只有 Sortie 已显式排队自己的
+  rollover 时，才会抑制 host auto-continue，避免双重继续。
 
 ## 会话生命周期
 

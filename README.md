@@ -146,9 +146,20 @@ Optional settings in `.opencode/sortie-dogs.json`:
   "handoffPaths": ["handoff.json"],
   "readOnlyTools": ["my_mcp_search"],
   "dedicatedWorkerModel": { "model": "provider/model", "variant": "deep" },
-  "continuation": { "enabled": true, "maxAutoContinues": 3 }
+  "continuation": { "enabled": true, "maxAutoContinues": 3 },
+  "reflection": {
+    "enabled": false,
+    "layers": { "run": true, "project": true, "global": false }
+  }
 }
 ```
+
+The same schema may be saved globally as
+`~/.config/opencode/sortie-dogs.json` (on Windows,
+`%USERPROFILE%\.config\opencode\sortie-dogs.json`). Precedence is built-in
+defaults, global file, project file, `SORTIE_DOGS_CONFIG`, then plugin factory
+options. OpenCode plugin normalization may omit factory options, so use the
+global file for durable global settings.
 
 - `operationManifestPath` moves the manifest; the path is project-relative.
 - `handoffPaths` lists the handoff files the plugin inspects. A worker can only
@@ -171,7 +182,14 @@ Optional settings in `.opencode/sortie-dogs.json`:
   another coordinator is never adopted. Set `enabled` to `false` to keep every
   batch manual, raise or lower `maxAutoContinues` (default `3`, maximum `10`) to
   change the ceiling, and set `summarizeModel` to pin the compaction model when
-  the host default is unsuitable.
+  the host default is unsuitable. Normal OpenCode auto-compaction keeps the
+  host's auto-continue behavior; Sortie suppresses it only while its own
+  explicitly queued rollover owns the resume.
+- `reflection` is an opt-in process-prevention companion for an activated root
+  `dog-coordinator`. It is disabled by default. Run and project layers default
+  to enabled after opt-in; the cross-project global storage layer remains
+  disabled unless explicitly enabled. Child and non-coordinator sessions fail
+  closed, and `SORTIE_REFLECTION=0` is an immediate kill switch.
 
 ## Why Sortie-dogs
 

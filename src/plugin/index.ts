@@ -14,7 +14,7 @@ import {
 import {
   DEFAULT_PLUGIN_OPTIONS,
   resolvePluginConfiguration,
-  resolvePluginConfigurationSources,
+  resolvePluginConfigurationSourcesWithGlobal,
   type ConfiguredPluginSources,
   type ContinuationConfiguration,
   type SortieDogsPluginOptions,
@@ -413,6 +413,21 @@ async function readOptionalProjectConfig(project: ProjectPaths): Promise<unknown
   }
 }
 
+async function readOptionalGlobalConfig(): Promise<unknown> {
+  try {
+    const value = await readJson(join(configRoot(), "sortie-dogs.json"), INPUT_LIMITS.config);
+    if (resolvePluginConfiguration(value).kind === "invalid") {
+      console.warn("[sortie-dogs] global configuration ignored: invalid or unavailable");
+      return undefined;
+    }
+    return value;
+  } catch (error) {
+    if (isAbsentPathError(error)) return undefined;
+    console.warn("[sortie-dogs] global configuration ignored: invalid or unavailable");
+    return undefined;
+  }
+}
+
 function readEnvironmentConfig(): unknown {
   const source = process.env[ENV_CONFIG];
   if (source === undefined || source.length === 0) return undefined;
@@ -658,12 +673,14 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   let loading: Promise<void> | undefined;
   let manifestAbsent = false;
   let assetVersionReported = false;
+  const globalConfig = await readOptionalGlobalConfig();
 
   // Project config read is required discovery for its opt-in; no reflection storage/version read
   // occurs unless that resolved config enables reflection. It stays isolated from write-gate load.
   try {
     project = await createProjectPaths(resolveProjectRoot(input));
-    const probed = resolvePluginConfigurationSources(
+    const probed = resolvePluginConfigurationSourcesWithGlobal(
+      globalConfig,
       await readOptionalProjectConfig(project),
       readEnvironmentConfig(),
       options,
@@ -714,7 +731,12 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         await reportAssetVersionSkew(project);
         const projectConfig = await readOptionalProjectConfig(project);
         const environmentConfig = readEnvironmentConfig();
-        const parsed = resolvePluginConfigurationSources(projectConfig, environmentConfig, options);
+        const parsed = resolvePluginConfigurationSourcesWithGlobal(
+          globalConfig,
+          projectConfig,
+          environmentConfig,
+          options,
+        );
         if (parsed.kind === "invalid") throw new WriteDeniedError("manifest-unavailable", "<unknown>");
         loaded = loadConfigured(parsed, input.worktree ?? project.root, input.client);
         const manifestPath = await project.toRelativePath(loaded.operationManifestPath);

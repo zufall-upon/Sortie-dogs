@@ -159,6 +159,7 @@ export type RolloverAbort =
   | "identity-unavailable"
   | "child-session"
   | "summarize-unavailable"
+  | "retries-exhausted"
   | "terminal-identity-rejected";
 
 export interface ContinuationToolContext {
@@ -445,8 +446,14 @@ export function createContinuationHooks(
     unrefTimer(setTimeout(async () => {
       const completed = await runRollover(sessionID);
       const state = sessions.get(sessionID);
+      if (!completed && (state?.cooldownTimer !== undefined || state?.active === true)) return;
       if (!completed && state?.pendingRollover === true && attempt < timings.scheduleAttempts) {
         scheduleRollover(sessionID, attempt + 1);
+      } else if (!completed && state?.pendingRollover === true) {
+        state.pendingRollover = false;
+        state.promptPending = false;
+        state.continueReport = undefined;
+        warnRollover(sessionID, "retries-exhausted");
       }
     }, timings.scheduleMilliseconds * (attempt + 1)));
   }
@@ -599,7 +606,7 @@ export function createContinuationHooks(
           identity.agent !== policy().agent
         ) return;
       }
-      if (input.overflow !== true || pending) output.enabled = false;
+      if (pending) output.enabled = false;
     },
 
     async sessionIdle(sessionID): Promise<void> {
