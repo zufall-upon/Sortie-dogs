@@ -208,6 +208,8 @@ global file、project file、`SORTIE_DOGS_CONFIG`、plugin factory options。Ope
 - `reflection`: activated root `dog-coordinator` だけが使える process prevention。既定無効。
   opt-in 後の run / project layer は既定有効、project 間で共有する global storage layer は明示的に
   有効化しない限り無効。child / 他 agent は拒否され、`SORTIE_REFLECTION=0` で即時停止する。
+  解決済みblocker / review defect後とterminal unit時だけ評価し、1 run最大3件。通常のcode bugや
+  外部障害は記録しない。
 - 通常の OpenCode auto-compaction は host の auto-continue を維持する。Sortie が明示的に queue
   した rollover の処理中だけ、二重継続を防ぐため host auto-continue を抑止する。
 

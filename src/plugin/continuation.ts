@@ -630,9 +630,20 @@ export function createContinuationHooks(
 
     async sessionCompacting(input, output): Promise<void> {
       const state = sessions.get(input.sessionID);
-      if (state === undefined || (!state.active && !state.promptPending)) return;
-      state.promptPending = false;
-      output.prompt = state.latestReport === undefined
+      if (state === undefined || (!state.active && !state.promptPending)) {
+        /*
+         * OpenCode may execute summarize through another plugin instance. In-memory rollover state
+         * is therefore enrichment, not authorization: durable host identity is the fallback gate.
+         * Ordinary sessions retain the host prompt byte-for-byte.
+         */
+        const identity = await readIdentity(input.sessionID);
+        if (
+          identity === undefined || !nonEmpty(identity.agent) || nonEmpty(identity.parentID) ||
+          identity.agent !== policy().agent
+        ) return;
+      }
+      if (state !== undefined) state.promptPending = false;
+      output.prompt = state?.latestReport === undefined
         ? ROLLOVER_PROMPT
         : `${ROLLOVER_PROMPT}\n\nExact latest coordinator final report (authoritative):\n${state.latestReport}`;
     },

@@ -355,8 +355,26 @@ test("the compaction prompt preserves batch state and names no legacy workflow",
   assert.doesNotMatch(prompt, /MK2A2|MKII|MK4|MK5|MK6/);
 
   const untracked: { prompt?: string } = {};
-  await hooks.sessionCompacting({ sessionID: "ses_other" }, untracked);
+  const foreign = fakeHost({ agent: "build" });
+  const foreignHooks = createContinuationHooks(foreign.client, "/project", POLICY, FAST);
+  await foreignHooks.sessionCompacting({ sessionID: "ses_other" }, untracked);
   assert.equal(untracked.prompt, undefined, "an untracked session keeps the host compaction prompt");
+});
+
+test("a root coordinator gets the Sortie prompt without shared in-memory rollover state", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
+  const output = { prompt: "host prompt" };
+  await hooks.sessionCompacting({ sessionID: "ses_root" }, output);
+  assert.ok(output.prompt.includes(ROLLOVER_TOKEN));
+  assert.match(output.prompt, /## batch counters/);
+  assert.match(output.prompt, /batchTarget:/);
+
+  const child = fakeHost({ agent: COORDINATOR, parentID: "ses_root" });
+  const childHooks = createContinuationHooks(child.client, "/project", POLICY, FAST);
+  const unchanged = { prompt: "host child prompt" };
+  await childHooks.sessionCompacting({ sessionID: "ses_child" }, unchanged);
+  assert.equal(unchanged.prompt, "host child prompt");
 });
 
 test("host auto-continue is disabled only while a Sortie rollover is pending", async () => {
@@ -556,7 +574,7 @@ test("forgetting a session clears its continuation budget", async () => {
   const compacting: { prompt?: string } = {};
   hooks.forgetSession("ses_root");
   await hooks.sessionCompacting({ sessionID: "ses_root" }, compacting);
-  assert.equal(compacting.prompt, undefined);
+  assert.ok(compacting.prompt?.includes(ROLLOVER_TOKEN));
 });
 
 test("a session lookup without an agent field still trusts the reported parent link", async () => {

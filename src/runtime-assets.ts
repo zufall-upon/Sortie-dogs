@@ -10,7 +10,7 @@ export interface RuntimeAsset {
 export const runtimeAssets = [
   {
     name: "dog-coordinator",
-    version: "0.2.12-card16",
+    version: "0.2.16-card17",
     installPath: "agent/dog-coordinator.md",
     content: `---
 description: Canonical MkII coordinator packaged by Sortie-dogs
@@ -116,6 +116,38 @@ the host adapter owns it and supplies execution independently.
 Consultation is advisory and cannot mutate the candidate or dispatch work. Keep implementation,
 remediation, and blocker-resolution work on dog-worker. Findings from every subagent return through
 dog-coordinator; subagents never report to each other or the user.
+
+## Bounded process reflection
+
+Reflection is an opt-in prevention checkpoint, not routine journaling. If the
+sortie_reflection capability is unavailable, continue without it and never block the task. When
+available, consider it only after a blocker or review defect is resolved and at a unit's terminal
+checkpoint. Make no call when no qualifying evidence occurred since the previous checkpoint.
+
+Record only user-correction, repeated-process-failure, review-artifact-defect, or
+retry-policy-violation evidence. Code bugs, ordinary validation failures, expected review findings,
+external/network/rate-limit failures, transient tool interruption, and task-specific discoveries are
+not reflection. Use a stable lowercase ASCII scope with no task-specific noun. Default to layer=run;
+use layer=project only when that scope recurred in at least two units in this run. Never use the
+global layer. Make at most one record call per triggering event and at most three per run. Do not
+repeat a scope already injected or recorded in this run. Reflections are injected automatically at
+turn start; never spend a tool call reading them and never add a reflection-only text step.
+
+REFLECTION_POLICY_FIXTURE
+    checkpoints: resolved blocker or review defect | terminal unit
+    capability_absent: continue without reflection; never block
+    allowed_evidence: user-correction | repeated-process-failure | review-artifact-defect | retry-policy-violation
+    non_triggers: code bug | ordinary validation failure | expected review finding | external or transient failure | task discovery
+    default_layer: run
+    project_layer: same stable scope recurred in at least two units in this run
+    global_layer: forbidden
+    scope: stable lowercase ASCII process key; no task-specific noun
+    call_limit: one per triggering event; three per run
+    duplicate_scope: injected or already recorded in this run -> no call
+    call: sortie_reflection { action: record, layer: <run|project>, scope: <scope>, trigger: <event>, cause: <verified process cause>, prevention: <one reusable imperative>, evidence: <allowed enum>, evidenceRef: <short non-path reference> }
+    read: automatic injection at turn start; explicit read forbidden
+    extra_step: reflection-only text or tool step forbidden
+END_REFLECTION_POLICY_FIXTURE
 
 ## Conditional scout routing
 
@@ -716,7 +748,7 @@ END_TERMINAL_EVIDENCE_FIXTURE
   },
   {
     name: "dog-worker",
-    version: "0.2.12-card16",
+    version: "0.2.16-card17",
     installPath: "agent/dog-worker.md",
     content: `---
 description: Dedicated worker for the canonical Sortie-dogs coordinator
@@ -784,7 +816,7 @@ the user.
   },
   {
     name: "dog-scout",
-    version: "0.2.12-card16",
+    version: "0.2.16-card17",
     installPath: "agent/dog-scout.md",
     content: `---
 description: Bounded evidence scout for dog-coordinator
@@ -834,7 +866,7 @@ prose; keep the keys, paths, commands, and identifiers verbatim.
   },
   {
     name: "dog-reviewer",
-    version: "0.2.12-card16",
+    version: "0.2.16-card17",
     installPath: "agent/dog-reviewer.md",
     content: `---
 description: Independent source reviewer for dog-coordinator
@@ -858,7 +890,7 @@ or transport.
   },
   {
     name: "dog-advisor",
-    version: "0.2.12-card16",
+    version: "0.2.16-card17",
     installPath: "agent/dog-advisor.md",
     content: `---
 description: Focused technical advisor for dog-coordinator
@@ -882,7 +914,7 @@ provider, vendor, model, variant, or transport.
   },
   {
     name: "sortie",
-    version: "0.2.12-card16",
+    version: "0.2.16-card17",
     installPath: "command/sortie.md",
     content: `---
 description: Start the canonical Sortie-dogs MkII workflow

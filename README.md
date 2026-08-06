@@ -189,7 +189,10 @@ global file for durable global settings.
   `dog-coordinator`. It is disabled by default. Run and project layers default
   to enabled after opt-in; the cross-project global storage layer remains
   disabled unless explicitly enabled. Child and non-coordinator sessions fail
-  closed, and `SORTIE_REFLECTION=0` is an immediate kill switch.
+  closed, and `SORTIE_REFLECTION=0` is an immediate kill switch. The coordinator
+  evaluates it only after a resolved blocker/review defect and at a terminal
+  unit, with a maximum of three records per run; routine bugs and external
+  failures are never journaled.
 
 ## Why Sortie-dogs
 

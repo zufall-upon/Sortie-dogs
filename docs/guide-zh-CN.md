@@ -198,7 +198,8 @@ factory options，请使用全局文件保存持久的全局设置。
   无法按角色分别路由。
 - `reflection`：仅供已激活的 root `dog-coordinator` 使用的 process prevention，默认关闭。
   opt-in 后 run / project 层默认开启；跨项目共享的 global storage 层只有显式开启才生效。
-  child 与其他 agent 会被拒绝，`SORTIE_REFLECTION=0` 可立即停止该功能。
+  child 与其他 agent 会被拒绝，`SORTIE_REFLECTION=0` 可立即停止该功能。仅在已解决的 blocker / review
+  defect 之后及 terminal unit 时评估，每个 run 最多记录3条；普通代码缺陷与外部故障不会写入。
 - 普通 OpenCode auto-compaction 保留 host 的 auto-continue。只有 Sortie 已显式排队自己的
   rollover 时，才会抑制 host auto-continue，避免双重继续。
 

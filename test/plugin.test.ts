@@ -1165,6 +1165,20 @@ test("runtime contract requires interactive continuation and deterministic recov
     new RegExp(`configured continuation capability is\\s+the plugin tool ${CONTINUATION_CAPABILITY}`, "i"),
   );
 
+  const reflection = coordinator.content.match(
+    /REFLECTION_POLICY_FIXTURE\r?\n([\s\S]+?)\r?\nEND_REFLECTION_POLICY_FIXTURE/,
+  );
+  assert.ok(reflection);
+  assert.match(reflection[1], /checkpoints: resolved blocker or review defect \| terminal unit/);
+  assert.match(
+    reflection[1],
+    /allowed_evidence: user-correction \| repeated-process-failure \| review-artifact-defect \| retry-policy-violation/,
+  );
+  assert.match(reflection[1], /global_layer: forbidden/);
+  assert.match(reflection[1], /call_limit: one per triggering event; three per run/);
+  assert.match(reflection[1], /non_triggers: code bug \| ordinary validation failure/);
+  assert.match(reflection[1], /call: sortie_reflection \{ action: record/);
+
   const drain = coordinator.content.match(
     /BACKLOG_DRAIN_FIXTURE\r?\n([\s\S]+?)\r?\nEND_BACKLOG_DRAIN_FIXTURE/,
   );
