@@ -912,7 +912,16 @@ test("generated assets require the user's language, per-line output, and emoji-m
     coordinator.content,
     /Detect the language of the user's latest request[\s\S]+prose\s+fields of every handoff, checkpoint, and consultation payload in that same language/i,
   );
-  assert.match(coordinator.content, /Translate the fixture labels below into that language/i);
+  assert.match(
+    coordinator.content,
+    /Translate the user-facing display labels of the fixtures below into that language/i,
+  );
+  // A localized digest key hides the value the write gate reads, so key form is not a prose choice.
+  assert.match(
+    coordinator.content,
+    /field key is a protocol token the\s+write gate reads[\s\S]+exact ASCII form/i,
+  );
+  assert.match(readable[1], /^ {4}protocol_keys: dispatch, handoff, checkpoint, consultation field keys stay verbatim ASCII$/m);
   const visibility = coordinator.content.match(
     /OPERATIONAL_VISIBILITY_FIXTURE\r?\n([\s\S]+?)\r?\nEND_OPERATIONAL_VISIBILITY_FIXTURE/,
   );
@@ -1857,6 +1866,28 @@ test("worker activation accepts symmetrically decorated handoff keys and values"
   assert.equal(isExplicitTaskHandoff(decorated), true);
   assert.equal(isExplicitTaskHandoff("**role** implementation"), false);
   assert.equal(isExplicitTaskHandoff("ordinary prose about **role** and project_root"), false);
+});
+
+test("worker activation survives a localized role label", () => {
+  // A Japanese request makes the coordinator localize its labels; the role value stays a protocol token.
+  const localized = [
+    "候補: 本番ライフサイクルE2E",
+    "役割: blocker-resolution",
+    "",
+    "context_digest:",
+    "- task_id: task-production-lifecycle-e2e",
+    "- project_root: O:\\candidate",
+    "- handoff_path: O:\\candidate\\handoff.json",
+    "- acceptance: canonical E2Eを完遂する",
+    "- operation_manifest: candidate.operation-manifest.json",
+  ].join("\n");
+  assert.equal(isExplicitTaskHandoff(localized), true);
+  // The role token alone is never a dispatch; the remaining contract keys stay mandatory.
+  assert.equal(isExplicitTaskHandoff("役割: blocker-resolution"), false);
+  assert.equal(
+    isExplicitTaskHandoff("同一solSessionをrole=blocker-resolutionで再開する。\nproject_root: O:\\c"),
+    false,
+  );
 });
 
 test("worker activation rejects dispatches without a complete worker contract", () => {

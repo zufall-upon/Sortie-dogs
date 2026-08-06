@@ -586,6 +586,19 @@ export function createContinuationHooks(
       const state = sessions.get(input.sessionID);
       const pending = state?.pendingRollover === true || state?.active === true ||
         state?.promptPending === true;
+      /*
+       * Auto-continue is a host behaviour every ordinary session relies on. Suppressing it is a
+       * coordinator policy, so an untracked session must first prove it is a coordinator root before
+       * this hook changes anything; otherwise installing the plugin would silently alter unrelated
+       * sessions that never invoked the loop.
+       */
+      if (state === undefined) {
+        const identity = await readIdentity(input.sessionID);
+        if (
+          identity === undefined || !nonEmpty(identity.agent) || nonEmpty(identity.parentID) ||
+          identity.agent !== policy().agent
+        ) return;
+      }
       if (input.overflow !== true || pending) output.enabled = false;
     },
 

@@ -525,9 +525,29 @@ function unquoteValue(value: string): string {
     : trimmed;
 }
 
+/*
+ * The dispatching coordinator writes user-facing prose in the user's own language, so its role label
+ * is the one digest key a localized dispatch is most likely to translate. The role value itself is a
+ * protocol token that never localizes, so an unrecognized label still yields the role from any line
+ * whose entire value is one of those tokens. Every other required key still has to be present, so a
+ * bare resume or an unrelated message cannot activate a session through this path.
+ */
+const LABELLED_VALUE = /^[\t ]*(?:[-*][\t ]+)?[^\r\n:=]{1,64}[\t ]*[=:][\t ]*(.*)$/u;
+
+function roleTokenValue(text: string): string | undefined {
+  for (const line of text.split(/\r?\n/u)) {
+    const match = LABELLED_VALUE.exec(line);
+    if (match === null) continue;
+    const value = unquoteValue(unwrapMarkdownValue(match[1])).toLowerCase();
+    if (TASK_ROLES.has(value)) return value;
+  }
+  return undefined;
+}
+
 export function isExplicitTaskHandoff(text: string): boolean {
   const entries = handoffEntries(text);
-  const role = handoffValue(entries, HANDOFF_KEYS.role)?.toLowerCase();
+  const labelled = handoffValue(entries, HANDOFF_KEYS.role)?.toLowerCase();
+  const role = labelled !== undefined && TASK_ROLES.has(labelled) ? labelled : roleTokenValue(text);
   return role !== undefined && TASK_ROLES.has(role) &&
     handoffValue(entries, HANDOFF_KEYS.projectRoot) !== undefined &&
     handoffValue(entries, HANDOFF_KEYS.manifest) !== undefined &&

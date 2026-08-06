@@ -365,6 +365,25 @@ test("host auto-continue is disabled while a rollover is pending", async () => {
   assert.equal(pending.enabled, false, "continuation owns the resume while it is pending");
 });
 
+test("host auto-continue stays untouched for sessions the loop never owns", async () => {
+  const foreign = fakeHost({ agent: "build" });
+  const foreignHooks = createContinuationHooks(foreign.client, "/project", POLICY, FAST);
+  const untouched = { enabled: true };
+  await foreignHooks.compactionAutoContinue({ sessionID: "ses_plain", overflow: false }, untouched);
+  assert.equal(untouched.enabled, true, "an unrelated agent keeps the host auto-continue");
+
+  const child = fakeHost({ agent: COORDINATOR, parentID: "ses_root" });
+  const childHooks = createContinuationHooks(child.client, "/project", POLICY, FAST);
+  const childOutput = { enabled: true };
+  await childHooks.compactionAutoContinue({ sessionID: "ses_child", overflow: false }, childOutput);
+  assert.equal(childOutput.enabled, true, "a child session keeps the host auto-continue");
+
+  const blind = createContinuationHooks(undefined, "/project", POLICY, FAST);
+  const blindOutput = { enabled: true };
+  await blind.compactionAutoContinue({ sessionID: "ses_unknown", overflow: false }, blindOutput);
+  assert.equal(blindOutput.enabled, true, "an unreadable identity never changes host behaviour");
+});
+
 test("forgetting a session clears its continuation budget", async () => {
   const host = fakeHost({ agent: COORDINATOR });
   const hooks = createContinuationHooks(host.client, "/project", { ...POLICY, maxAutoContinues: 1 }, FAST);

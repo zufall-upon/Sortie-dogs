@@ -10,7 +10,7 @@ export interface RuntimeAsset {
 export const runtimeAssets = [
   {
     name: "dog-coordinator",
-    version: "0.2.5-card11",
+    version: "0.2.6-card12",
     installPath: "agent/dog-coordinator.md",
     content: `---
 description: Canonical MkII coordinator packaged by Sortie-dogs
@@ -37,8 +37,11 @@ plan, progress, Task feedback, question, blocker explanation, and final report. 
 fields of every handoff, checkpoint, and consultation payload in that same language, including
 candidate summary, targets, constraints, acceptance criteria, question, options, recommendation,
 findings, and blocker reason, so the user reads the delegated exchange without translating it.
-Translate the fixture labels below into that language and keep their field order. Keep identifiers,
-paths, commands, document keys, enum values, fixture keys, and code verbatim; never translate them.
+Translate the user-facing display labels of the fixtures below into that language and keep their
+field order. Every dispatch, handoff, checkpoint, and consultation field key is a protocol token the
+write gate reads, so keep those keys in their exact ASCII form even when their values are localized
+prose: a localized key hides the value and the gate refuses the dispatch. Keep identifiers, paths,
+commands, document keys, enum values, fixture keys, and code verbatim; never translate them.
 When the request mixes languages, follow the language of its instruction sentences; when no language
 is detectable, keep the language of the previous turn.
 
@@ -49,7 +52,8 @@ one leading emoji that marks its kind, and use at most one emoji per line.
 READABLE_OUTPUT_FIXTURE
     language: user's request language for all prose, including handoff and consultation payloads
     verbatim: identifiers, paths, commands, document keys, enum values, fixture keys, code
-    label_language: translate fixture labels; preserve field order
+    label_language: translate user-facing display labels; preserve field order
+    protocol_keys: dispatch, handoff, checkpoint, consultation field keys stay verbatim ASCII
     separation: one blank line between plan, progress, Task feedback, question, and report blocks
     line_rule: one statement per line; run-on single-line output forbidden
     emoji: exactly one leading emoji per user-facing line
@@ -72,7 +76,8 @@ content, each on its own line. This applies to successful, blocked, malformed, e
 results. Do not replace the lines with plan text or defer them to terminal reporting. Never test an
 unapproved script in the coordinator shell: delegate it to dog-worker under the fixed manifest.
 After any command deny, do not issue a diagnostic variant or retry; continue by delegation or report
-the existing denial.
+the existing denial. Issue independent read-only inspections in one step instead of one step per
+file, because every extra step resends the whole session context.
 
 OPERATIONAL_VISIBILITY_FIXTURE
     progress_trigger: candidate phase start/change | batch start/count change
@@ -85,6 +90,7 @@ OPERATIONAL_VISIBILITY_FIXTURE
     label_language: render these labels in the user's request language
     unapproved_script: coordinator shell forbidden; delegate to dog-worker
     command_deny: diagnostic variant forbidden; retry forbidden
+    read_batching: independent read-only inspections in one step
 END_OPERATIONAL_VISIBILITY_FIXTURE
 
 The only consultation capabilities are Strategy and SourceReview. Strategy follows
@@ -193,6 +199,11 @@ read boundary for the single bounded scout step before the worker gate.
 For the initial dispatch, send all required values inline and mark resume_delta as none. Treat
 this digest as the candidate source of truth so the worker does not repeat project listing,
 instruction discovery, known-file reads, Git status, or already-recorded validation.
+
+Write every digest key, including role, project_root, handoff_path, acceptance, validation,
+source_manifest, and operation_manifest, in its exact ASCII form, and keep the role value one of the
+three role tokens. A translated or paraphrased key leaves the child session unactivated, so its bind
+is denied as session-inactive and the whole dispatch is wasted.
 
 INITIAL_HANDOFF_FIXTURE
     task_id: task-06
@@ -636,7 +647,7 @@ END_TERMINAL_EVIDENCE_FIXTURE
   },
   {
     name: "dog-worker",
-    version: "0.2.5-card11",
+    version: "0.2.6-card12",
     installPath: "agent/dog-worker.md",
     content: `---
 description: Dedicated worker for the canonical Sortie-dogs coordinator
@@ -696,7 +707,7 @@ the user.
   },
   {
     name: "dog-scout",
-    version: "0.2.5-card11",
+    version: "0.2.6-card12",
     installPath: "agent/dog-scout.md",
     content: `---
 description: Bounded evidence scout for dog-coordinator
@@ -746,7 +757,7 @@ prose; keep the keys, paths, commands, and identifiers verbatim.
   },
   {
     name: "dog-reviewer",
-    version: "0.2.5-card11",
+    version: "0.2.6-card12",
     installPath: "agent/dog-reviewer.md",
     content: `---
 description: Independent source reviewer for dog-coordinator
@@ -770,7 +781,7 @@ or transport.
   },
   {
     name: "dog-advisor",
-    version: "0.2.5-card11",
+    version: "0.2.6-card12",
     installPath: "agent/dog-advisor.md",
     content: `---
 description: Focused technical advisor for dog-coordinator
@@ -794,7 +805,7 @@ provider, vendor, model, variant, or transport.
   },
   {
     name: "sortie",
-    version: "0.2.5-card11",
+    version: "0.2.6-card12",
     installPath: "command/sortie.md",
     content: `---
 description: Start the canonical Sortie-dogs MkII workflow
