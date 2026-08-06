@@ -2694,6 +2694,55 @@ test("root and inspection TTLs stop new inheritance without revoking existing ch
   });
 });
 
+test("a late child re-proves expired coordinator lineage from host session identity", async () => {
+  await withProject("lineage-host-recovery", async (directory) => {
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+    await writeFile(
+      join(directory, "handoff.json"),
+      JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")),
+    );
+    const identities: Record<string, { agent: string; parentID?: string }> = {
+      "host-root": { agent: "dog-coordinator" },
+      "late-host-child": { agent: "dog-worker", parentID: "host-root" },
+    };
+    const client = {
+      session: {
+        get: async ({ path }: { path: { id: string } }) => ({ data: identities[path.id] }),
+      },
+    };
+    const hooks = await SortieDogsPlugin({ directory, client });
+    const chat = hooks["chat.message"];
+    assert.ok(chat);
+    await chat(
+      { sessionID: "host-root", agent: "dog-coordinator" },
+      {
+        message: { agent: "dog-coordinator", model: { providerID: "host", modelID: "selected" } },
+        parts: [{ type: "text", text: "ordinary" }],
+      },
+    );
+
+    const originalNow = Date.now;
+    const started = originalNow();
+    Date.now = () => started + 30 * 60 * 1000 + 1;
+    try {
+      await chat(
+        { sessionID: "late-host-child", agent: "dog-worker" },
+        {
+          message: { agent: "dog-worker", model: { providerID: "host", modelID: "selected" } },
+          parts: [{
+            type: "text",
+            text: `role=implementation\nproject_root=${directory}\noperation_manifest=operation-manifest.json\nacceptance=safe change`,
+          }],
+        },
+      );
+      await inspectHandoffWithRead(hooks, join(directory, "handoff.json"), "late-host-child");
+      assert.equal((await executeBindWriteGate(hooks, directory, "late-host-child")).status, "bound");
+    } finally {
+      Date.now = originalNow;
+    }
+  });
+});
+
 test("plugin fixture allows a manifest-scoped write", async () => {
   const candidate = fixtureCase("allow-write");
   await withProject(candidate.name, async (directory) => {

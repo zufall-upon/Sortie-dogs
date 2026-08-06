@@ -1381,6 +1381,44 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     sessionParents.set(sessionID, parentID);
   }
 
+  async function hostSessionIdentity(
+    sessionID: string,
+  ): Promise<{ agent?: string; parentID?: string } | undefined> {
+    const get = input.client?.session?.get;
+    if (get === undefined) return undefined;
+    try {
+      const response = await get.call(input.client!.session, {
+        path: { id: sessionID },
+        query: { directory: input.directory },
+      });
+      const payload = isRecord(response) && "data" in response ? response.data : response;
+      if (!isRecord(payload)) return undefined;
+      return {
+        ...(typeof payload.agent === "string" ? { agent: payload.agent } : {}),
+        ...(typeof payload.parentID === "string" ? { parentID: payload.parentID } : {}),
+      };
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * A long worker or visual validation can outlive the bounded lineage cache, and hosts may deliver a
+   * child's first chat message before its session.created event. In both cases the inline handoff is
+   * complete but the child looks inactive. Rebuild only the one lineage the host proves: child ->
+   * parent root, where that parent is the configured coordinator and itself has no parent. An absent
+   * client or incomplete identity remains fail-closed.
+   */
+  async function recoverCoordinatorLineage(sessionID: string): Promise<string | undefined> {
+    const child = await hostSessionIdentity(sessionID);
+    if (child?.parentID === undefined) return undefined;
+    const parent = await hostSessionIdentity(child.parentID);
+    if (parent?.agent !== COORDINATOR_AGENT || parent.parentID !== undefined) return undefined;
+    await rememberCoordinatorRoot(child.parentID);
+    rememberParent(sessionID, child.parentID);
+    return child.parentID;
+  }
+
   function clearSessionLinks(sessionID: string): void {
     sessionParents.delete(sessionID);
     sessionRoots.delete(sessionID);
@@ -1453,9 +1491,13 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         await rememberCoordinatorRoot(chatInput.sessionID);
       } else {
         const taskText = explicitTaskText(output);
-        const inheritedRoot = taskText === undefined
+        let inheritedRoot = taskText === undefined
           ? undefined
           : await inheritedTaskRoot(chatInput.sessionID, taskText);
+        if (taskText !== undefined && inheritedRoot === undefined) {
+          await recoverCoordinatorLineage(chatInput.sessionID);
+          inheritedRoot = await inheritedTaskRoot(chatInput.sessionID, taskText);
+        }
         if (inheritedRoot !== undefined) {
           sessionRoots.set(chatInput.sessionID, inheritedRoot);
           activateSession(chatInput.sessionID);

@@ -513,6 +513,18 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       /Require a digest only when the user requests one or when release, publication,\s*transfer, or integrity acceptance explicitly needs one/i,
     );
 
+    const visualCapture = coordinator.content.match(
+      /VISUAL_EVIDENCE_CAPTURE_FIXTURE\r?\n([\s\S]+?)\r?\nEND_VISUAL_EVIDENCE_CAPTURE_FIXTURE/,
+    );
+    assert.ok(visualCapture, "coordinator needs a bounded capture protocol");
+    assert.match(visualCapture[1], /preflight:\s*exact process \+ visible window handle\/title \+ nonzero client bounds \+ one target visual anchor/);
+    assert.match(visualCapture[1], /preflight_failure:\s*repair harness only; no video or full screenshot set/);
+    assert.match(visualCapture[1], /full_capture_limit:\s*one per attempt_key/);
+    assert.match(visualCapture[1], /valid_evidence_visual_fail:\s*return to source remediation; same-source recapture forbidden/);
+    assert.match(visualCapture[1], /corrected_harness:\s*one new revision \+ one final capture/);
+    assert.match(visualCapture[1], /second_invalid_capture:\s*terminal capture blocker; no third capture/);
+    assert.match(visualCapture[1], /duplicate_pixel_review:\s*no additional worker to reread or reformat the same images/);
+
     type ScoutSkipEvidence = {
       exactManifest: boolean;
       canonicalValidation: boolean;
@@ -1209,7 +1221,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(sortie.content, /never route a worker to the user/i);
 
     for (const asset of loaded.runtimeAssets) {
-      assert.equal(asset.version, "0.2.11-card15");
+      assert.equal(asset.version, "0.2.12-card16");
       const frontmatter = asset.content.match(/^---\r?\n([\s\S]+?)\r?\n---\r?\n/);
       assert.ok(frontmatter, `${asset.name} must have frontmatter`);
       const entries = Object.fromEntries(

@@ -10,7 +10,7 @@ export interface RuntimeAsset {
 export const runtimeAssets = [
   {
     name: "dog-coordinator",
-    version: "0.2.11-card15",
+    version: "0.2.12-card16",
     installPath: "agent/dog-coordinator.md",
     content: `---
 description: Canonical MkII coordinator packaged by Sortie-dogs
@@ -160,6 +160,37 @@ ARTIFACT_ONLY_FAST_PATH_FIXTURE
     stage_commit: forbidden; return artifact directly
     follow_up_agents: forbidden for evidence formatting, hash transcription, or redundant verification
 END_ARTIFACT_ONLY_FAST_PATH_FIXTURE
+
+Visual evidence capture is a bounded validation operation, not an open-ended search for a pleasing
+frame. Before recording a video or a full screenshot set, run one cheap probe that proves the exact
+target process and window identity, visible nonzero client bounds, and one project-specific visual
+anchor inside those bounds. A desktop image, fixed startup delay, expected title string without a
+visible handle, or successful capture command does not prove target readiness. If the probe fails,
+repair the harness without recording the full evidence set. Derive every requested frame from one
+successful recording and let dog-coordinator read each frame at most once.
+
+Key an attempt by source revision, capture-harness revision, exact command, and output set. Permit one
+full capture for that key. Valid target evidence that fails visual acceptance returns visual FAIL and
+routes back to source remediation; repeating the same capture cannot improve the source. Invalid
+evidence such as the desktop, wrong window, blank bounds, or missing overlay permits one corrected
+harness revision only after the failed readiness predicate and its concrete fix are recorded. That
+corrected revision gets one final capture; if it is still invalid, stop the candidate with the exact
+capture blocker. Do not dispatch another worker merely to reread the same pixels or restate that the
+target was absent.
+
+VISUAL_EVIDENCE_CAPTURE_FIXTURE
+    preflight: exact process + visible window handle/title + nonzero client bounds + one target visual anchor
+    preflight_failure: repair harness only; no video or full screenshot set
+    attempt_key: source revision + harness revision + exact command + output set
+    full_capture_limit: one per attempt_key
+    frame_source: all requested frames derive from one successful recording
+    frame_read_limit: dog-coordinator reads each frame once
+    valid_evidence_visual_fail: return to source remediation; same-source recapture forbidden
+    invalid_evidence: record failed readiness predicate + concrete harness fix
+    corrected_harness: one new revision + one final capture
+    second_invalid_capture: terminal capture blocker; no third capture
+    duplicate_pixel_review: no additional worker to reread or reformat the same images
+END_VISUAL_EVIDENCE_CAPTURE_FIXTURE
 
 SCOUT_SKIP_FIXTURE
     required_evidence: exact manifest + canonical validation + blocker owner all fixed
@@ -685,7 +716,7 @@ END_TERMINAL_EVIDENCE_FIXTURE
   },
   {
     name: "dog-worker",
-    version: "0.2.11-card15",
+    version: "0.2.12-card16",
     installPath: "agent/dog-worker.md",
     content: `---
 description: Dedicated worker for the canonical Sortie-dogs coordinator
@@ -753,7 +784,7 @@ the user.
   },
   {
     name: "dog-scout",
-    version: "0.2.11-card15",
+    version: "0.2.12-card16",
     installPath: "agent/dog-scout.md",
     content: `---
 description: Bounded evidence scout for dog-coordinator
@@ -803,7 +834,7 @@ prose; keep the keys, paths, commands, and identifiers verbatim.
   },
   {
     name: "dog-reviewer",
-    version: "0.2.11-card15",
+    version: "0.2.12-card16",
     installPath: "agent/dog-reviewer.md",
     content: `---
 description: Independent source reviewer for dog-coordinator
@@ -827,7 +858,7 @@ or transport.
   },
   {
     name: "dog-advisor",
-    version: "0.2.11-card15",
+    version: "0.2.12-card16",
     installPath: "agent/dog-advisor.md",
     content: `---
 description: Focused technical advisor for dog-coordinator
@@ -851,7 +882,7 @@ provider, vendor, model, variant, or transport.
   },
   {
     name: "sortie",
-    version: "0.2.11-card15",
+    version: "0.2.12-card16",
     installPath: "command/sortie.md",
     content: `---
 description: Start the canonical Sortie-dogs MkII workflow
