@@ -12,14 +12,25 @@ export interface RoleModelRoute {
 
 export type ModelRoutingConfig = Readonly<Record<string, RoleModelRoute>>;
 
-export const DEDICATED_SOL_MODEL = "openai/gpt-5.6-sol";
 /**
- * Worker reasoning effort is deliberately below the review effort. Source review is mandatory and
- * returns findings the worker must remediate, so the loop already re-runs weak implementation work;
- * paying top-of-range effort on the first attempt buys accuracy the reviewer would otherwise supply.
+ * The published DeepSWE cost curve settles the worker target: the cheap model at top reasoning effort
+ * solves more than the expensive model at mid effort while costing a fraction of it, so paying for the
+ * expensive model by default bought a lower solve rate. Worker effort therefore sits at the top of the
+ * cheap model's range, and review effort stays above it on a stronger model, which is what the
+ * mandatory source review is for.
  */
-export const DEDICATED_SOL_VARIANT = "medium";
-export const DEDICATED_SOL_ROLES = [
+export const DEDICATED_WORKER_MODEL = "openai/gpt-5.6-luna";
+export const DEDICATED_WORKER_VARIANT = "max";
+
+/**
+ * The stronger, far more expensive worker target a host may still select deliberately. It is no longer
+ * a default route: it stays declared so an explicit dedicatedWorkerModel resolves against the catalog
+ * without extra host configuration.
+ */
+export const ESCALATION_WORKER_MODEL = "openai/gpt-5.6-sol";
+export const ESCALATION_WORKER_VARIANT = "medium";
+
+export const DEDICATED_WORKER_ROLES = [
   "implementation",
   "remediation",
   "blocker-resolution",
@@ -32,12 +43,18 @@ export const DEFAULT_FREE_TIER_FALLBACK_MODELS: readonly string[] = Object.freez
   "opencode/deepseek-v4-flash-free",
 ]);
 
-const dedicatedSolRoleSet = new Set<string>(DEDICATED_SOL_ROLES);
+const dedicatedWorkerRoleSet = new Set<string>(DEDICATED_WORKER_ROLES);
 
 /** The dedicated worker target this build ships with when a host declares no target of its own. */
 export const DEFAULT_DEDICATED_WORKER_TARGET: ModelTarget = Object.freeze({
-  model: DEDICATED_SOL_MODEL,
-  variant: DEDICATED_SOL_VARIANT,
+  model: DEDICATED_WORKER_MODEL,
+  variant: DEDICATED_WORKER_VARIANT,
+});
+
+/** The declared escalation target for a host that chooses to pay for the stronger worker model. */
+export const ESCALATION_WORKER_TARGET: ModelTarget = Object.freeze({
+  model: ESCALATION_WORKER_MODEL,
+  variant: ESCALATION_WORKER_VARIANT,
 });
 
 /**
@@ -48,7 +65,7 @@ export function dedicatedWorkerRouting(
   target: ModelTarget = DEFAULT_DEDICATED_WORKER_TARGET,
 ): ModelRoutingConfig {
   return Object.freeze(Object.fromEntries(
-    DEDICATED_SOL_ROLES.map((role) => [role, Object.freeze({
+    DEDICATED_WORKER_ROLES.map((role) => [role, Object.freeze({
       preferred: Object.freeze(
         target.variant === undefined
           ? { model: target.model }
@@ -58,22 +75,36 @@ export function dedicatedWorkerRouting(
   ));
 }
 
-export const DEDICATED_SOL_ROUTING: ModelRoutingConfig = dedicatedWorkerRouting();
+export const DEDICATED_WORKER_ROUTING: ModelRoutingConfig = dedicatedWorkerRouting();
 
-export const FIXED_MODEL_ROUTING: ModelRoutingConfig = DEDICATED_SOL_ROUTING;
+export const FIXED_MODEL_ROUTING: ModelRoutingConfig = DEDICATED_WORKER_ROUTING;
 
 const fixedModelRoleSet = new Set<string>(Object.keys(FIXED_MODEL_ROUTING));
 
 export const RECOMMENDED_LUNA_MODEL = "openai/gpt-5.6-luna";
-export const RECOMMENDED_LUNA_VARIANT = "xhigh";
-export const RECOMMENDED_LUNA_ROLES = ["dog-coordinator", "dog-scout"] as const;
+
+/**
+ * Dispatch quality, not code output, is what the coordinator spends effort on, and one malformed
+ * dispatch discards an entire worker session, so the coordinator runs at the top of the cheap model's
+ * range where that whole session costs less than the work it protects. Evidence gathering is retrieval
+ * rather than reasoning, so the scout sits one tier lower where the cost curve is steepest per point.
+ */
+export const RECOMMENDED_COORDINATOR_VARIANT = "max";
+export const RECOMMENDED_SCOUT_VARIANT = "high";
+export const RECOMMENDED_LUNA_ROLE_VARIANTS = Object.freeze({
+  "dog-coordinator": RECOMMENDED_COORDINATOR_VARIANT,
+  "dog-scout": RECOMMENDED_SCOUT_VARIANT,
+} as const);
+export const RECOMMENDED_LUNA_ROLES = Object.freeze(
+  Object.keys(RECOMMENDED_LUNA_ROLE_VARIANTS),
+) as readonly string[];
 
 /** Configurable MkII defaults. Project-local and global configuration may override these routes. */
 export const RECOMMENDED_LUNA_ROUTING: ModelRoutingConfig = Object.freeze(Object.fromEntries(
-  RECOMMENDED_LUNA_ROLES.map((role) => [role, Object.freeze({
+  Object.entries(RECOMMENDED_LUNA_ROLE_VARIANTS).map(([role, variant]) => [role, Object.freeze({
     preferred: Object.freeze({
       model: RECOMMENDED_LUNA_MODEL,
-      variant: RECOMMENDED_LUNA_VARIANT,
+      variant,
     }),
   })]),
 ));
@@ -89,12 +120,16 @@ export const RECOMMENDED_CONSULTATION_ROLES = Object.freeze(
 );
 
 /** Review and advice carry the reasoning effort the worker target intentionally does not spend. */
-export const CONSULTATION_SOL_VARIANT = "xhigh";
+export const CONSULTATION_FALLBACK_VARIANT = "xhigh";
 
-/** The shipped consultation fallback; higher effort than the worker target on the same model. */
+/**
+ * The shipped consultation fallback. Review has to be able to reject work the worker just produced, so
+ * it stays on the stronger model even though the worker no longer defaults to it; a fallback equal to
+ * the worker target would review that work with exactly the capability that produced it.
+ */
 export const DEFAULT_CONSULTATION_FALLBACK_TARGET: ModelTarget = Object.freeze({
-  model: DEDICATED_SOL_MODEL,
-  variant: CONSULTATION_SOL_VARIANT,
+  model: ESCALATION_WORKER_MODEL,
+  variant: CONSULTATION_FALLBACK_VARIANT,
 });
 
 function frozenTarget(target: ModelTarget): ModelTarget {
@@ -149,8 +184,8 @@ export function recommendedRoleRouting(
 
 export const RECOMMENDED_ROLE_ROUTING: ModelRoutingConfig = recommendedRoleRouting();
 
-export function isDedicatedSolRole(role: string): boolean {
-  return dedicatedSolRoleSet.has(role);
+export function isDedicatedWorkerRole(role: string): boolean {
+  return dedicatedWorkerRoleSet.has(role);
 }
 
 export function isFixedModelRole(role: string): boolean {
@@ -172,12 +207,16 @@ export interface ModelCatalog {
 export const BUILT_IN_MODEL_CATALOG: ModelCatalog = Object.freeze({
   global: Object.freeze([
     Object.freeze({
-      model: DEDICATED_SOL_MODEL,
-      variants: Object.freeze([DEDICATED_SOL_VARIANT, CONSULTATION_SOL_VARIANT]),
+      model: DEDICATED_WORKER_MODEL,
+      variants: Object.freeze([
+        DEDICATED_WORKER_VARIANT,
+        RECOMMENDED_COORDINATOR_VARIANT,
+        RECOMMENDED_SCOUT_VARIANT,
+      ].filter((variant, index, all) => all.indexOf(variant) === index)),
     }),
     Object.freeze({
-      model: RECOMMENDED_LUNA_MODEL,
-      variants: Object.freeze([RECOMMENDED_LUNA_VARIANT]),
+      model: ESCALATION_WORKER_MODEL,
+      variants: Object.freeze([ESCALATION_WORKER_VARIANT, CONSULTATION_FALLBACK_VARIANT]),
     }),
   ]),
 });

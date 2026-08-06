@@ -13,11 +13,15 @@ import {
   resolvePluginConfigurationSources,
 } from "../dist/plugin/config.js";
 import {
-  CONSULTATION_SOL_VARIANT,
-  DEDICATED_SOL_MODEL,
-  DEDICATED_SOL_VARIANT,
-  DEDICATED_SOL_ROLES,
+  CONSULTATION_FALLBACK_VARIANT,
+  DEDICATED_WORKER_MODEL,
+  DEDICATED_WORKER_VARIANT,
+  DEDICATED_WORKER_ROLES,
   DEFAULT_FREE_TIER_FALLBACK_MODELS,
+  ESCALATION_WORKER_MODEL,
+  ESCALATION_WORKER_VARIANT,
+  RECOMMENDED_COORDINATOR_VARIANT,
+  RECOMMENDED_SCOUT_VARIANT,
   RECOMMENDED_CONSULTATION_MODEL,
   RECOMMENDED_CONSULTATION_ROLES,
   parseModelRoutingConfig,
@@ -107,9 +111,9 @@ test("model routing configuration is strict and merges roles by layer", () => {
     assert.deepEqual(parsed.modelRouting.reviewer, project.reviewer);
     assert.deepEqual(parsed.modelRouting.implementer, host.implementer);
     assert.deepEqual(parsed.freeTierFallbackModels, ["host/free"]);
-    for (const role of DEDICATED_SOL_ROLES) {
+    for (const role of DEDICATED_WORKER_ROLES) {
       assert.deepEqual(parsed.modelRouting[role], {
-        preferred: { model: DEDICATED_SOL_MODEL, variant: DEDICATED_SOL_VARIANT },
+        preferred: { model: DEDICATED_WORKER_MODEL, variant: DEDICATED_WORKER_VARIANT },
       });
     }
   }
@@ -138,7 +142,7 @@ test("model routing configuration is strict and merges roles by layer", () => {
   assert.equal(fixed.kind, "configured");
   if (fixed.kind === "configured") {
     assert.deepEqual(fixed.modelRouting.implementation, {
-      preferred: { model: DEDICATED_SOL_MODEL, variant: DEDICATED_SOL_VARIANT },
+      preferred: { model: DEDICATED_WORKER_MODEL, variant: DEDICATED_WORKER_VARIANT },
     });
   }
 });
@@ -152,7 +156,7 @@ test("a host may declare which single model every dedicated worker role resolves
   );
   assert.equal(configured.kind, "configured");
   if (configured.kind !== "configured") return;
-  for (const role of DEDICATED_SOL_ROLES) {
+  for (const role of DEDICATED_WORKER_ROLES) {
     assert.deepEqual(configured.modelRouting[role], { preferred: target }, `${role} follows the declared target`);
     assert.deepEqual(resolveModelRoute({
       role,
@@ -268,12 +272,27 @@ test("recommended Luna routes cover exact installed roles and remain below proje
   });
   assert.equal(defaults.kind, "configured");
   if (defaults.kind !== "configured") return;
+  // The host declared another variant of the shipped worker model, so it joins that catalog entry.
   assert.deepEqual(defaults.modelCatalog.global, [
-    { model: DEDICATED_SOL_MODEL, variants: [DEDICATED_SOL_VARIANT, CONSULTATION_SOL_VARIANT] },
-    { model: "openai/gpt-5.6-luna", variants: ["xhigh"] },
+    {
+      model: DEDICATED_WORKER_MODEL,
+      variants: [
+        DEDICATED_WORKER_VARIANT,
+        RECOMMENDED_COORDINATOR_VARIANT,
+        RECOMMENDED_SCOUT_VARIANT,
+        "xhigh",
+      ].filter((variant, index, all) => all.indexOf(variant) === index),
+    },
+    { model: ESCALATION_WORKER_MODEL, variants: [ESCALATION_WORKER_VARIANT, CONSULTATION_FALLBACK_VARIANT] },
     { model: "provider/custom" },
   ]);
-  assert.deepEqual(["dog-coordinator", "dog-scout"].map((role) => ({
+  // Dispatch quality and evidence gathering are not the same workload, so they do not share one effort.
+  assert.notEqual(RECOMMENDED_COORDINATOR_VARIANT, RECOMMENDED_SCOUT_VARIANT);
+  const lunaRoleVariants = {
+    "dog-coordinator": RECOMMENDED_COORDINATOR_VARIANT,
+    "dog-scout": RECOMMENDED_SCOUT_VARIANT,
+  };
+  assert.deepEqual(Object.keys(lunaRoleVariants).map((role) => ({
     configured: defaults.modelRouting[role],
     resolved: resolveModelRoute({
       role,
@@ -281,15 +300,15 @@ test("recommended Luna routes cover exact installed roles and remain below proje
       global: defaults.globalModelRouting,
       catalog: defaults.modelCatalog,
     }),
-  })), ["dog-coordinator", "dog-scout"].map((role) => ({
-    configured: { preferred: { model: "openai/gpt-5.6-luna", variant: "xhigh" } },
+  })), Object.entries(lunaRoleVariants).map(([role, variant]) => ({
+    configured: { preferred: { model: DEDICATED_WORKER_MODEL, variant } },
     resolved: {
       ok: true,
       role,
       source: "global",
       catalog: "global",
-      model: "openai/gpt-5.6-luna",
-      variant: "xhigh",
+      model: DEDICATED_WORKER_MODEL,
+      variant,
     },
   })));
 
@@ -341,8 +360,11 @@ test("consultation never inherits the caller model and stays host-configurable",
   assert.equal(relocated.kind, "configured");
   if (relocated.kind !== "configured") return;
 
-  // Review effort must stay above the deliberately reduced worker effort on the shipped model.
-  assert.notEqual(CONSULTATION_SOL_VARIANT, DEDICATED_SOL_VARIANT);
+  /*
+   * Review has to be able to reject what the worker produced, so the fallback stays on the stronger
+   * model rather than matching the cheap worker target the cost curve selected.
+   */
+  assert.notEqual(ESCALATION_WORKER_MODEL, DEDICATED_WORKER_MODEL);
 
   for (const role of RECOMMENDED_CONSULTATION_ROLES) {
     assert.deepEqual(resolveFor(defaults, role), {
@@ -350,8 +372,8 @@ test("consultation never inherits the caller model and stays host-configurable",
       role,
       source: "global",
       catalog: "global",
-      model: DEDICATED_SOL_MODEL,
-      variant: CONSULTATION_SOL_VARIANT,
+      model: ESCALATION_WORKER_MODEL,
+      variant: CONSULTATION_FALLBACK_VARIANT,
     });
     assert.deepEqual(resolveFor(declared, role), {
       ok: true,
@@ -417,7 +439,7 @@ test("MkII worker routes stay fixed while consultation roles remain host configu
   assert.equal(configured.kind, "configured");
   if (configured.kind !== "configured") return;
 
-  assert.deepEqual([...DEDICATED_SOL_ROLES], [
+  assert.deepEqual([...DEDICATED_WORKER_ROLES], [
     "implementation",
     "remediation",
     "blocker-resolution",
@@ -431,17 +453,17 @@ test("MkII worker routes stay fixed while consultation roles remain host configu
     global: configured.globalModelRouting,
     catalog: configured.modelCatalog,
   });
-  for (const role of DEDICATED_SOL_ROLES) {
+  for (const role of DEDICATED_WORKER_ROLES) {
     const expected = {
       ok: true,
       role,
       source: "fixed",
       catalog: "global",
-      model: DEDICATED_SOL_MODEL,
-      variant: DEDICATED_SOL_VARIANT,
+      model: DEDICATED_WORKER_MODEL,
+      variant: DEDICATED_WORKER_VARIANT,
     };
     assert.deepEqual(configured.modelRouting[role], {
-      preferred: { model: DEDICATED_SOL_MODEL, variant: DEDICATED_SOL_VARIANT },
+      preferred: { model: DEDICATED_WORKER_MODEL, variant: DEDICATED_WORKER_VARIANT },
     }, `${role} public route must remain authoritative`);
     assert.deepEqual(resolveRole(role), expected);
     assert.deepEqual(resolveModelRoute({
@@ -501,7 +523,7 @@ test("MkII worker routes stay fixed while consultation roles remain host configu
     ...configured,
     modelCatalog: { global: [{ model: canonicalModel }] },
   };
-  for (const role of DEDICATED_SOL_ROLES) {
+  for (const role of DEDICATED_WORKER_ROLES) {
     assert.deepEqual(resolveModelRoute({
       role,
       local: missingSol.localModelRouting,
@@ -513,7 +535,7 @@ test("MkII worker routes stay fixed while consultation roles remain host configu
       reason: "unresolved-role",
       attempts: [{
         source: "fixed",
-        target: { model: DEDICATED_SOL_MODEL, variant: DEDICATED_SOL_VARIANT },
+        target: { model: DEDICATED_WORKER_MODEL, variant: DEDICATED_WORKER_VARIANT },
         reason: "model-unavailable",
       }],
     });
@@ -875,7 +897,7 @@ mode: subagent
 `));
   // Pinning an unavailable model in the asset would stop the agent from loading at all, so the
   // dedicated target stays a routing decision that a host can redeclare.
-  assert.equal(dogWorker.content.includes(DEDICATED_SOL_MODEL), false);
+  assert.equal(dogWorker.content.includes(DEDICATED_WORKER_MODEL), false);
 });
 
 test("generated coordinator requires progress, immediate Task feedback, and deny-safe delegation", () => {
@@ -1373,7 +1395,7 @@ test("chat message hook applies explicit catalog routing and fails closed with o
     assert.deepEqual(recommended.message.model, {
       providerID: "openai",
       modelID: "gpt-5.6-luna",
-      variant: "xhigh",
+      variant: RECOMMENDED_SCOUT_VARIANT,
     });
     for (const role of RECOMMENDED_CONSULTATION_ROLES) {
       const consultation = {
@@ -1662,11 +1684,15 @@ test("every packaged role is routed even when its session never activates the wr
     const chat = hooks["chat.message"];
     assert.ok(chat);
     const expected: Record<string, { providerID: string; modelID: string; variant?: string }> = {
-      "dog-coordinator": { providerID: "openai", modelID: "gpt-5.6-luna", variant: "xhigh" },
-      "dog-scout": { providerID: "openai", modelID: "gpt-5.6-luna", variant: "xhigh" },
-      "dog-worker": { providerID: "openai", modelID: "gpt-5.6-sol", variant: DEDICATED_SOL_VARIANT },
-      "dog-reviewer": { providerID: "openai", modelID: "gpt-5.6-sol", variant: CONSULTATION_SOL_VARIANT },
-      "dog-advisor": { providerID: "openai", modelID: "gpt-5.6-sol", variant: CONSULTATION_SOL_VARIANT },
+      "dog-coordinator": {
+        providerID: "openai",
+        modelID: "gpt-5.6-luna",
+        variant: RECOMMENDED_COORDINATOR_VARIANT,
+      },
+      "dog-scout": { providerID: "openai", modelID: "gpt-5.6-luna", variant: RECOMMENDED_SCOUT_VARIANT },
+      "dog-worker": { providerID: "openai", modelID: "gpt-5.6-luna", variant: DEDICATED_WORKER_VARIANT },
+      "dog-reviewer": { providerID: "openai", modelID: "gpt-5.6-sol", variant: CONSULTATION_FALLBACK_VARIANT },
+      "dog-advisor": { providerID: "openai", modelID: "gpt-5.6-sol", variant: CONSULTATION_FALLBACK_VARIANT },
     };
     for (const [role, target] of Object.entries(expected)) {
       // A consultation or evidence session carries no /sortie trigger and no worker handoff.

@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import { RUNTIME_ASSET_VERSION } from "../dist/asset-version.js";
-import { DEDICATED_SOL_MODEL, DEDICATED_SOL_VARIANT } from "../dist/plugin/model-routing.js";
+import { DEDICATED_WORKER_MODEL, DEDICATED_WORKER_VARIANT } from "../dist/plugin/model-routing.js";
 
 /*
  * The environment layer is a real configuration source, so a host that declares one would silently
@@ -338,8 +338,8 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       assert.equal(asset.version, RUNTIME_ASSET_VERSION, `${asset.name} version must match the shared marker`);
     }
     assert.equal(/^---\r?\n[\s\S]*?\r?\n---/u.exec(worker.content)?.[0].includes("model:"), false);
-    assert.equal(worker.content.includes(DEDICATED_SOL_MODEL), false);
-    assert.equal(worker.content.includes(DEDICATED_SOL_VARIANT), false);
+    assert.equal(worker.content.includes(DEDICATED_WORKER_MODEL), false);
+    assert.equal(worker.content.includes(DEDICATED_WORKER_VARIANT), false);
 
     assert.match(scout.content, /^---\r?\n[\s\S]*\nsteps:\s*8\r?\n/);
     const deniedScoutTools = [

@@ -160,7 +160,7 @@ Optional settings in `.opencode/sortie-dogs.json`:
 - `readOnlyTools` adds host-specific tool names that never change files, such as
   MCP tools. Unknown tools are denied for a bound session by default.
 - `dedicatedWorkerModel` selects the single model every worker role resolves to.
-  It defaults to `openai/gpt-5.6-sol` with variant `medium`; declare your own when
+  It defaults to `openai/gpt-5.6-luna` with variant `max`; declare your own when
   that model is unavailable or when you want a different worker effort. Worker
   roles always resolve to this one target and cannot be routed per role.
 - `continuation` bounds the batch loop. After a terminal unit and its checkpoint,
@@ -180,7 +180,7 @@ Optional settings in `.opencode/sortie-dogs.json`:
   exactly three bounded scouts before implementation begins.
 - **Writes stay inside the assignment.** Exact source or operation manifests
   gate edits and handoffs.
-- **One accountable implementation path.** A dedicated Sol worker handles
+- **One accountable implementation path.** One dedicated worker handles
   implementation, remediation, and blocker resolution.
 - **Evidence before completion.** Canonical validation, risk-based review, and
   terminal evidence gate coordinator-owned completion and commits.
@@ -207,8 +207,8 @@ dog-coordinator: completion evidence accepted
    criteria, a write manifest, and validation requirements.
 2. **Exactly three scouts** — bounded, read-only investigation collects
    complementary evidence without expanding the write scope.
-3. **Dedicated worker** — the Sol worker implements only the approved manifest
-   and also owns scoped remediation or blocker resolution.
+3. **Dedicated worker** — the dedicated worker implements only the approved
+   manifest and also owns scoped remediation or blocker resolution.
 4. **Canonical validation** — the declared test or build command must produce
    acceptable evidence.
 5. **Risk-based review** — high-risk candidates receive independent review;
@@ -258,19 +258,26 @@ untouched.
 
 ## Model routing
 
-`dog-coordinator` and `dog-scout` default to `openai/gpt-5.6-luna` with the
-`xhigh` variant. This is the recommended balance: bounded prompts, concise
-scout evidence, and fewer unnecessary context or tool turns can reduce token
-use while preserving quality. Project-local routing can override either
-default.
+Every default route is one model at a different reasoning effort, because
+published cost curves put a cheap model at high effort above an expensive model
+at mid effort on both solve rate and price. Sortie-dogs therefore buys effort,
+not model tiers, wherever the work allows it.
+
+`dog-coordinator` defaults to `openai/gpt-5.6-luna` with the `max` variant. The
+coordinator produces dispatches rather than code, and one malformed dispatch
+discards an entire worker session, so top effort here costs less than the work it
+protects. `dog-scout` defaults to the same model with the `high` variant, since
+gathering bounded evidence is retrieval rather than reasoning and that tier is
+where the curve gives the most per unit of cost. Project-local routing can
+override either default.
 
 The `implementation`, `remediation`, `blocker-resolution`, and `dog-worker`
-roles always use the dedicated worker target, `openai/gpt-5.6-sol` with the
-`medium` variant. Worker effort is deliberately below review effort: source
-review is mandatory for risky candidates and returns findings the worker must
-remediate, so the loop already re-runs weak implementation work and top-of-range
-first-attempt effort mostly buys accuracy the reviewer supplies anyway. Raise
-`dedicatedWorkerModel` when you would rather pay for it up front. `modelRouting`
+roles always use the dedicated worker target, `openai/gpt-5.6-luna` with the
+`max` variant. Worker effort stays at the top of that model's range while review
+effort stays above it on a stronger model, which is what mandatory source review
+is for. Declare `dedicatedWorkerModel` as `openai/gpt-5.6-sol` when you would
+rather pay for the stronger worker model up front; that target stays in the
+built-in catalog for exactly this reason. `modelRouting`
 cannot replace those routes, and only `dedicatedWorkerModel` moves them. For other explicitly
 routed roles, resolution is deterministic: Sortie-dogs tries the preferred
 target, then ordered fallbacks. Roles without either a built-in default or an
@@ -280,7 +287,9 @@ explicit route keep OpenCode's already selected model.
 review and strategy lose their value when they run on the model that produced
 the candidate. Both default to `anthropic/claude-opus-5` when the catalog
 declares it, and otherwise fall back to `openai/gpt-5.6-sol` with the `xhigh`
-variant, one effort step above the worker target. A host that redeclares
+variant. That fallback stays on the stronger model rather than matching the
+worker target, because review has to be able to reject work the worker just
+produced. A host that redeclares
 `dedicatedWorkerModel` keeps that target as its first fallback, since such a
 host may not serve the shipped model at all. Nothing here requires a particular
 vendor: both roles stay fully configurable, so declare whichever model you can
@@ -290,10 +299,10 @@ actually serve.
 {
   "modelRouting": {
     "dog-coordinator": {
-      "preferred": { "model": "openai/gpt-5.6-luna", "variant": "xhigh" }
+      "preferred": { "model": "openai/gpt-5.6-luna", "variant": "max" }
     },
     "dog-scout": {
-      "preferred": { "model": "openai/gpt-5.6-luna", "variant": "xhigh" }
+      "preferred": { "model": "openai/gpt-5.6-luna", "variant": "high" }
     },
     "dog-reviewer": {
       "preferred": { "model": "anthropic/claude-opus-5" },
@@ -306,7 +315,7 @@ actually serve.
   "modelCatalog": {
     "project": [
       { "model": "openai/gpt-5.6-sol", "variants": ["medium", "xhigh"] },
-      { "model": "openai/gpt-5.6-luna", "variants": ["xhigh"] },
+      { "model": "openai/gpt-5.6-luna", "variants": ["max", "high"] },
       { "model": "anthropic/claude-opus-5" }
     ]
   }
