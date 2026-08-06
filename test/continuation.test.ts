@@ -523,6 +523,117 @@ test("a queued rollover blocks later coordinator tools until compaction starts",
   assert.equal(hooks.blocksTool("ses_root"), false);
 });
 
+test("root coordinator idle compacts each observed turn once without resuming", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  const hooks = createContinuationHooks(host.client, "/project", UNPINNED_POLICY, FAST);
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-luna" });
+  await hooks.sessionIdle("ses_root");
+  assert.equal(host.summarizeCalls.length, 1);
+  assert.equal(host.promptCalls.length, 0);
+
+  await hooks.sessionIdle("ses_root");
+  assert.equal(host.summarizeCalls.length, 1, "duplicate idle cannot compact the same turn twice");
+
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-luna" });
+  await hooks.sessionIdle("ses_root");
+  assert.equal(host.summarizeCalls.length, 2);
+
+  const foreign = fakeHost({ agent: "build" });
+  const foreignHooks = createContinuationHooks(foreign.client, "/project", UNPINNED_POLICY, FAST);
+  foreignHooks.observeModel("ses_plain", { providerID: "openai", modelID: "gpt-5.6-luna" });
+  await foreignHooks.sessionIdle("ses_plain");
+  assert.equal(foreign.summarizeCalls.length, 0);
+});
+
+test("automatic idle compaction bypasses rollover cooldown without blocking tools", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  const hooks = createContinuationHooks(host.client, "/project", UNPINNED_POLICY, {
+    ...FAST,
+    cooldownMilliseconds: 60_000,
+  });
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-luna" });
+  await hooks.sessionIdle("ses_root");
+  await hooks.sessionCompacting({ sessionID: "ses_root" }, {});
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-luna" });
+  const second = hooks.sessionIdle("ses_root");
+  assert.equal(hooks.blocksTool("ses_root"), false);
+  await second;
+  assert.equal(host.summarizeCalls.length, 2);
+});
+
+test("automatic stop clears stale reports and resets the continuation budget", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  const hooks = createContinuationHooks(
+    host.client,
+    "/project",
+    { ...UNPINNED_POLICY, maxAutoContinues: 1 },
+    FAST,
+  );
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-luna" });
+  assert.equal(
+    await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR }),
+    "SORTIE_COMPACT_AND_CONTINUE_QUEUED",
+  );
+  await settle();
+  await hooks.sessionCompacting({ sessionID: "ses_root" }, {});
+
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-luna" });
+  await hooks.sessionIdle("ses_root");
+  const prompt = { prompt: "host" };
+  await hooks.sessionCompacting({ sessionID: "ses_root" }, prompt);
+  assert.doesNotMatch(prompt.prompt, /Exact latest coordinator final report/);
+  assert.equal(
+    await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR }),
+    "SORTIE_COMPACT_AND_CONTINUE_QUEUED",
+  );
+});
+
+test("an explicit continuation marker wins when idle arrives during marker resolution", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  let releaseIdentity!: () => void;
+  const identityReady = new Promise<void>((resolve) => { releaseIdentity = resolve; });
+  const hooks = createContinuationHooks(host.client, "/project", UNPINNED_POLICY, FAST);
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-luna" });
+  host.client.session!.get = async () => {
+    await identityReady;
+    return { data: { agent: COORDINATOR } };
+  };
+  const completing = hooks.textComplete(
+    { sessionID: "ses_root" },
+    { text: `terminal\n${CONTINUATION_MARKER}` },
+  );
+  await hooks.sessionIdle("ses_root");
+  releaseIdentity();
+  await completing;
+  await settle();
+  assert.equal(host.summarizeCalls.length, 1);
+  assert.equal(host.promptCalls.length, 1);
+});
+
+test("a turn started during compaction remains eligible for its own idle compaction", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  let releaseSummary!: () => void;
+  const summaryReady = new Promise<void>((resolve) => { releaseSummary = resolve; });
+  host.client.session!.summarize = async (request) => {
+    host.summarizeCalls.push({ id: request.path.id, body: request.body });
+    await summaryReady;
+    return { data: true };
+  };
+  const hooks = createContinuationHooks(host.client, "/project", UNPINNED_POLICY, {
+    ...FAST,
+    scheduleMilliseconds: 60_000,
+  });
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-luna" });
+  const firstIdle = hooks.sessionIdle("ses_root");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-luna" });
+  await hooks.sessionIdle("ses_root");
+  releaseSummary();
+  await firstIdle;
+  await settle();
+  assert.equal(host.summarizeCalls.length, 2);
+});
+
 test("cooldown defers a queued rollover without exhausting it", async () => {
   const host = fakeHost({ agent: COORDINATOR });
   const hooks = createContinuationHooks(host.client, "/project", POLICY, {

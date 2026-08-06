@@ -10,7 +10,7 @@ export interface RuntimeAsset {
 export const runtimeAssets = [
   {
     name: "dog-coordinator",
-    version: "0.2.16-card17",
+    version: "0.2.17-card18",
     installPath: "agent/dog-coordinator.md",
     content: `---
 description: Canonical MkII coordinator packaged by Sortie-dogs
@@ -376,6 +376,12 @@ project-local durable artifact instead; never treat a missing tracker as a block
 install or configure one on your own. The same applies to every shell form named below: use the
 shell this host actually provides.
 
+Read the project's tracker guide once and use every exact API shape it supplies. Never introspect a
+known schema. For three or more tracker mutations, create one secret-free UTF-8 script under the
+project temp directory, syntax-check it locally, then execute that same file. On a parser defect,
+patch only that file; never regenerate a multi-kilobyte inline command. Delete the script after the
+mutation and bounded verification. Authentication material remains process-only and never enters the script.
+
 This normal bounded-batch section applies only while backlogDrain.enabled=false.
 Use one bounded sequential batch per fresh session. Keep batchAttempted, batchCommitted, and
 batchReconciled as separate counters; the legacy combined done counter is forbidden because it conflates outcomes. A
@@ -432,7 +438,7 @@ COMPACTION_IDENTITY_FIXTURE
     direct_preference: configured direct capability when available
     marker_fallback: only when direct capability unavailable; never combine direct tool and marker
     compact_guard: batchAttempted < batchTarget and independent next candidate exists
-    final_unit: no compaction
+    final_unit: compact without resume through stop marker
     pending_host_autocontinue: no compaction
     continuation_agent: dog-coordinator
     direct_capability: sortie_compact_and_continue
@@ -448,6 +454,11 @@ appended to the final report only when that tool is unavailable or returns an er
 with a tool call and never after a successful one. When the batch itself stops, append
 <!-- SORTIE_COMPACT --> instead so the run compacts without resuming. A rejected continuation returns
 a reason; report that reason instead of silently ending the batch.
+
+This stop compaction is universal for every terminal root dog-coordinator response that does not
+invoke continuation, including a read-only answer, completed user request, blocked unit with no
+independent next candidate, no-work result, and a turn waiting for a question-tool answer. Never
+carry a completed turn's accumulated file and tracker outputs into the next user request.
 
 Backlog drain is a configurable, explicit opt-in only. Unless the task entry sets
 backlogDrain.enabled to true and supplies a positive backlogDrain.maxUnits guard, use the
@@ -748,7 +759,7 @@ END_TERMINAL_EVIDENCE_FIXTURE
   },
   {
     name: "dog-worker",
-    version: "0.2.16-card17",
+    version: "0.2.17-card18",
     installPath: "agent/dog-worker.md",
     content: `---
 description: Dedicated worker for the canonical Sortie-dogs coordinator
@@ -816,7 +827,7 @@ the user.
   },
   {
     name: "dog-scout",
-    version: "0.2.16-card17",
+    version: "0.2.17-card18",
     installPath: "agent/dog-scout.md",
     content: `---
 description: Bounded evidence scout for dog-coordinator
@@ -866,7 +877,7 @@ prose; keep the keys, paths, commands, and identifiers verbatim.
   },
   {
     name: "dog-reviewer",
-    version: "0.2.16-card17",
+    version: "0.2.17-card18",
     installPath: "agent/dog-reviewer.md",
     content: `---
 description: Independent source reviewer for dog-coordinator
@@ -890,7 +901,7 @@ or transport.
   },
   {
     name: "dog-advisor",
-    version: "0.2.16-card17",
+    version: "0.2.17-card18",
     installPath: "agent/dog-advisor.md",
     content: `---
 description: Focused technical advisor for dog-coordinator
@@ -914,7 +925,7 @@ provider, vendor, model, variant, or transport.
   },
   {
     name: "sortie",
-    version: "0.2.16-card17",
+    version: "0.2.17-card18",
     installPath: "command/sortie.md",
     content: `---
 description: Start the canonical Sortie-dogs MkII workflow

@@ -185,6 +185,9 @@ global file for durable global settings.
   model used for compaction. Normal OpenCode auto-compaction keeps the
   host's auto-continue behavior; Sortie suppresses it only while its own
   explicitly queued rollover owns the resume.
+  Every terminal root-coordinator response that does not resume another unit
+  compacts without auto-continuing, so completed tool output is not carried into
+  the next user request.
 - `reflection` is an opt-in process-prevention companion for an activated root
   `dog-coordinator`. It is disabled by default. Run and project layers default
   to enabled after opt-in; the cross-project global storage layer remains

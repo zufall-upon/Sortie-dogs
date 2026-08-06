@@ -251,6 +251,22 @@ interface SessionState {
   promptPending: boolean;
   /** Latest coordinator model; the host requires it in every summarize payload. */
   model?: { providerID: string; modelID: string } | undefined;
+  /** Coordinator user turns observed by chat.message. */
+  turnRevision: number;
+  /** Latest observed turn that completed compaction. */
+  compactedRevision: number;
+  /** Serializes identity lookup for automatic idle compaction. */
+  idlePreparing: boolean;
+  /** Turn revision owned by the active rollover. */
+  activeRevision: number;
+  /** A newer turn became idle while an older rollover was still active. */
+  idleDeferred: boolean;
+  /** The current rollover was queued automatically at a root idle boundary. */
+  autoIdle: boolean;
+  /** Invalidates retry timers when a newer rollover supersedes their state. */
+  rolloverEpoch: number;
+  /** Prevents idle fallback from racing an explicit marker being resolved. */
+  textCompleting: boolean;
   /** The direct capability already ran in this turn, so the marker must not run too. */
   directUsed: boolean;
   lastRollover?: number | undefined;
@@ -339,6 +355,14 @@ export function createContinuationHooks(
       active: false,
       compactedRollover: false,
       promptPending: false,
+      turnRevision: 0,
+      compactedRevision: -1,
+      idlePreparing: false,
+      activeRevision: -1,
+      idleDeferred: false,
+      autoIdle: false,
+      rolloverEpoch: 0,
+      textCompleting: false,
       directUsed: false,
       touched: Date.now(),
     };
@@ -397,10 +421,12 @@ export function createContinuationHooks(
 
     // Acquire the session lock before the first await so idle and fallback timers cannot overlap.
     state.active = true;
+    state.activeRevision = state.turnRevision;
     let compactionStarted = false;
     let compactionSucceeded = false;
+    let compactionRevision = state.turnRevision;
     try {
-      const cooldownRemaining = state.lastRollover === undefined || state.compactedRollover
+      const cooldownRemaining = state.lastRollover === undefined || state.compactedRollover || state.autoIdle
         ? 0
         : timings.cooldownMilliseconds - (Date.now() - state.lastRollover);
       if (cooldownRemaining > 0) {
@@ -425,6 +451,7 @@ export function createContinuationHooks(
         return false;
       }
       if (!state.compactedRollover) {
+        compactionRevision = state.turnRevision;
         const body = summarizeBody(state);
         if (body === undefined) {
           warnRollover(sessionID, "summarize-model-unavailable");
@@ -440,12 +467,16 @@ export function createContinuationHooks(
         if (!summarizeCallSucceeded(summarizedResponse)) throw new Error("summarize request rejected");
         state.compactedRollover = true;
         compactionSucceeded = true;
+        state.compactedRevision = Math.max(state.compactedRevision, compactionRevision);
         state.lastRollover = Date.now();
       }
       const continueReport = state.continueReport;
       if (continueReport === undefined) {
         state.pendingRollover = false;
         state.compactedRollover = false;
+        state.autoIdle = false;
+        state.attempts = 0;
+        state.latestReport = undefined;
         return true;
       }
 
@@ -469,6 +500,8 @@ export function createContinuationHooks(
       state.pendingRollover = false;
       state.compactedRollover = false;
       state.continueReport = undefined;
+      state.autoIdle = false;
+      state.latestReport = undefined;
       return true;
     } catch (error) {
       console.error("[sortie-continuation] rollover failed", sessionID, error);
@@ -478,22 +511,30 @@ export function createContinuationHooks(
       if (current !== undefined) {
         current.active = false;
         if (compactionStarted && !compactionSucceeded) current.promptPending = false;
+        if (current.idleDeferred) {
+          current.idleDeferred = false;
+          queueMicrotask(() => { void handleSessionIdle(sessionID); });
+        }
       }
     }
   }
 
-  function scheduleRollover(sessionID: string, attempt = 0): void {
+  function scheduleRollover(sessionID: string, attempt = 0, epoch = sessions.get(sessionID)?.rolloverEpoch): void {
     unrefTimer(setTimeout(async () => {
+      if (epoch === undefined || sessions.get(sessionID)?.rolloverEpoch !== epoch) return;
       const completed = await runRollover(sessionID);
       const state = sessions.get(sessionID);
+      if (state?.rolloverEpoch !== epoch) return;
       if (!completed && (state?.cooldownTimer !== undefined || state?.active === true)) return;
       if (!completed && state?.pendingRollover === true && attempt < timings.scheduleAttempts) {
-        scheduleRollover(sessionID, attempt + 1);
+        scheduleRollover(sessionID, attempt + 1, epoch);
       } else if (!completed && state?.pendingRollover === true) {
         state.pendingRollover = false;
         state.compactedRollover = false;
         state.promptPending = false;
         state.continueReport = undefined;
+        state.latestReport = undefined;
+        state.autoIdle = false;
         warnRollover(sessionID, "retries-exhausted");
       }
     }, timings.scheduleMilliseconds * (attempt + 1)));
@@ -503,10 +544,12 @@ export function createContinuationHooks(
     const state = stateFor(sessionID);
     state.pendingRollover = true;
     state.compactedRollover = false;
+    state.autoIdle = false;
+    state.rolloverEpoch += 1;
     state.latestReport = report;
     state.continueReport = resume ? report : undefined;
     if (resume) state.attempts += 1;
-    scheduleRollover(sessionID);
+    scheduleRollover(sessionID, 0, state.rolloverEpoch);
   }
 
   async function requestContinuation(
@@ -589,7 +632,8 @@ export function createContinuationHooks(
     tool,
 
     async textComplete(input, output): Promise<void> {
-      const state = sessions.get(input.sessionID);
+      const state = stateFor(input.sessionID);
+      state.textCompleting = true;
       try {
         if (output.text.includes(ROLLOVER_MARKER)) {
           /*
@@ -624,7 +668,14 @@ export function createContinuationHooks(
         }
       } finally {
         const current = sessions.get(input.sessionID);
-        if (current !== undefined) current.directUsed = false;
+        if (current !== undefined) {
+          current.directUsed = false;
+          current.textCompleting = false;
+          if (current.idleDeferred) {
+            current.idleDeferred = false;
+            queueMicrotask(() => { void handleSessionIdle(input.sessionID); });
+          }
+        }
       }
     },
 
@@ -670,18 +721,61 @@ export function createContinuationHooks(
 
     observeModel(sessionID, model): void {
       if (!nonEmpty(model.providerID) || !nonEmpty(model.modelID)) return;
-      stateFor(sessionID).model = { providerID: model.providerID, modelID: model.modelID };
+      const state = stateFor(sessionID);
+      state.model = { providerID: model.providerID, modelID: model.modelID };
+      state.turnRevision += 1;
     },
 
     blocksTool(sessionID): boolean {
       const state = sessions.get(sessionID);
+      if (state?.autoIdle === true) return false;
       return state?.pendingRollover === true || state?.active === true || state?.promptPending === true;
     },
 
-    async sessionIdle(sessionID): Promise<void> {
-      await runRollover(sessionID);
-    },
+    sessionIdle: handleSessionIdle,
 
     forgetSession,
   };
+
+  async function handleSessionIdle(sessionID: string): Promise<void> {
+      const state = sessions.get(sessionID);
+      if (state?.textCompleting === true) {
+        state.idleDeferred = true;
+        return;
+      }
+      if (state?.active === true) {
+        if (state.turnRevision > state.activeRevision) state.idleDeferred = true;
+        return;
+      }
+      if (state?.pendingRollover === true) {
+        await runRollover(sessionID);
+        return;
+      }
+      if (
+        state === undefined || state.active || state.idlePreparing || !policy().enabled ||
+        state.turnRevision <= state.compactedRevision || client?.session?.summarize === undefined ||
+        summarizeBody(state) === undefined
+      ) return;
+      state.idlePreparing = true;
+      try {
+        const identity = await readIdentity(sessionID);
+        if (
+          identity === undefined || !nonEmpty(identity.agent) || nonEmpty(identity.parentID) ||
+          identity.agent !== policy().agent
+        ) return;
+        state.pendingRollover = true;
+        state.compactedRollover = false;
+        state.continueReport = undefined;
+        state.latestReport = undefined;
+        state.autoIdle = true;
+        state.rolloverEpoch += 1;
+      } finally {
+        state.idlePreparing = false;
+      }
+      const epoch = state.rolloverEpoch;
+      const completed = await runRollover(sessionID);
+      if (!completed && state.pendingRollover && state.rolloverEpoch === epoch) {
+        scheduleRollover(sessionID, 0, epoch);
+      }
+  }
 }

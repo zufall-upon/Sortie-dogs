@@ -710,7 +710,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       "the packed plugin must register the capability the coordinator asset names",
     );
     assert.doesNotMatch(coordinator.content, /MK2A2|MKII_|MK4_|MK5_|MK6_/);
-    assert.match(compactionIdentity[1], /final_unit:\s*no compaction/);
+    assert.match(compactionIdentity[1], /final_unit:\s*compact without resume through stop marker/);
     assert.match(compactionIdentity[1], /pending_host_autocontinue:\s*no compaction/);
     assert.match(compactionIdentity[1], /same-turn stop; no tool \| Task \| analysis \| final/);
 
@@ -1224,7 +1224,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(sortie.content, /never route a worker to the user/i);
 
     for (const asset of loaded.runtimeAssets) {
-      assert.equal(asset.version, "0.2.16-card17");
+      assert.equal(asset.version, "0.2.17-card18");
       const frontmatter = asset.content.match(/^---\r?\n([\s\S]+?)\r?\n---\r?\n/);
       assert.ok(frontmatter, `${asset.name} must have frontmatter`);
       const entries = Object.fromEntries(
