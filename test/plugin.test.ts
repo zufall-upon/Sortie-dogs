@@ -27,6 +27,7 @@ import {
   resolveModelRoute,
 } from "../dist/plugin/model-routing.js";
 import { lastAssistantText } from "../dist/plugin/task-result-repair.js";
+import { ReflectionStore } from "../dist/reflection/index.js";
 import {
   CONTINUATION_CAPABILITY,
   CONTINUATION_MARKER,
@@ -123,6 +124,18 @@ test("model routing configuration is strict and merges roles by layer", () => {
   );
   assert.equal(parseModelRoutingConfig({ reviewer: { model: "x", fallback: [] } }), undefined);
   assert.deepEqual(resolvePluginConfiguration({ unknown: true }), { kind: "invalid" });
+  const reflectionDefaults = resolvePluginConfiguration();
+  assert.equal(reflectionDefaults.kind, "configured");
+  if (reflectionDefaults.kind === "configured") {
+    assert.deepEqual(reflectionDefaults.reflection, { enabled: false, layers: { run: true, project: true, global: false }, maxInjectedEntries: 3, maxInjectedTokens: 500 });
+  }
+  assert.equal(resolvePluginConfiguration({ reflection: { enabled: "yes" } }).kind, "invalid");
+  assert.equal(resolvePluginConfiguration({ reflection: { maxInjectedEntries: 4 } }).kind, "invalid");
+  assert.equal(resolvePluginConfiguration({ reflection: { maxInjectedTokens: 501 } }).kind, "invalid");
+  assert.equal(resolvePluginConfiguration({ reflection: { layers: { unknown: true } } }).kind, "invalid");
+  const partialReflection = resolvePluginConfiguration({ reflection: { layers: { global: true }, maxInjectedTokens: 100 } });
+  assert.equal(partialReflection.kind, "configured");
+  if (partialReflection.kind === "configured") assert.deepEqual(partialReflection.reflection.layers, { run: true, project: true, global: true });
   assert.deepEqual(resolvePluginConfiguration({ freeTierFallbackModels: [""] }), { kind: "invalid" });
   for (const invalidModel of ["provider", "/model", "provider/", "provider /model"]) {
     assert.deepEqual(resolvePluginConfiguration({ freeTierFallbackModels: [invalidModel] }), { kind: "invalid" });
@@ -1222,6 +1235,136 @@ async function configuredHooks(directory: string) {
   await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
   return await SortieDogsPlugin({ directory });
 }
+
+test("reflection integration is opt-in, layered, guarded, kill-switchable, and deletes root runs", async () => {
+  await withProject("reflection-integration", async (directory) => {
+    const oldXdg = process.env.XDG_CONFIG_HOME;
+    const oldConfig = process.env.SORTIE_DOGS_CONFIG;
+    const oldReflection = process.env.SORTIE_REFLECTION;
+    const xdg = await mkdtemp(join(testEnvironment, "reflection-xdg-"));
+    try {
+      process.env.XDG_CONFIG_HOME = xdg;
+      process.env.SORTIE_DOGS_CONFIG = JSON.stringify({ reflection: { maxInjectedEntries: 1, maxInjectedTokens: 500 } });
+      delete process.env.SORTIE_REFLECTION;
+      await mkdir(join(directory, ".opencode"), { recursive: true });
+      await writeFile(join(directory, ".opencode", "sortie-dogs.json"), JSON.stringify({ reflection: { enabled: true, layers: { run: true, project: true, global: false } } }));
+      const logs: unknown[] = [];
+      const hooks = await SortieDogsPlugin({ directory, client: { app: { log: (event: unknown) => logs.push(event) }, session: { get: async () => ({ data: { agent: "dog-coordinator" } }) } } as never }, { reflection: { maxInjectedEntries: 2 } });
+      assert.ok(hooks.tool?.sortie_reflection);
+      assert.ok(hooks["experimental.chat.system.transform"]);
+      assert.ok(Object.keys(hooks.tool!.sortie_reflection.args).includes("id"));
+      assert.ok(Object.keys(hooks.tool!.sortie_reflection.args).includes("promotedRef"));
+      assert.ok(Math.ceil(Buffer.byteLength(JSON.stringify(hooks.tool!.sortie_reflection.args), "utf8") / 4) <= 150);
+      const rootSession = "reflection-root";
+      await mkdir(join(xdg, "opencode", "sortie-dogs", "reflection", "runs"), { recursive: true });
+      await writeFile(join(xdg, "opencode", "sortie-dogs", "reflection", "runs", `${rootSession}.json`), "{bad");
+      await hooks["chat.message"]!({ sessionID: rootSession, agent: "dog-coordinator" }, { message: { model: {} }, parts: [{ type: "text", text: "root" }] });
+      const empty = { system: ["base"] };
+      await hooks["experimental.chat.system.transform"]!({ sessionID: rootSession }, empty);
+      assert.deepEqual(empty.system, ["base"]);
+      assert.deepEqual(logs, [{ level: "warn", service: "sortie-dogs", message: "reflection_corrupt_json" }]);
+      const execute = hooks.tool!.sortie_reflection.execute;
+      const recorded = JSON.parse(await execute({ action: "record", layer: "run", scope: "integration", trigger: "trigger", cause: "cause", prevention: "Prevent this.", evidence: "user-correction", evidenceRef: "ref" }, { sessionID: rootSession, agent: "dog-coordinator" }));
+      const injected = { system: [] as string[] };
+      await hooks["experimental.chat.system.transform"]!({ sessionID: rootSession }, injected);
+      assert.deepEqual(injected.system, ["- integration: Prevent this."]);
+      const compacted = { context: [] as string[], prompt: "" };
+      await hooks["experimental.session.compacting"]!({ sessionID: rootSession }, compacted);
+      const afterCompaction = { system: [] as string[] };
+      await hooks["experimental.chat.system.transform"]!({ sessionID: rootSession }, afterCompaction);
+      assert.deepEqual(afterCompaction.system, injected.system);
+      assert.equal(await execute({ action: "promote", layer: "run", id: recorded.id, promotedRef: "fix", }, { sessionID: rootSession, agent: "dog-coordinator" }), "promoted");
+      assert.equal(await execute({ action: "clear", layer: "run" }, { sessionID: rootSession, agent: "dog-coordinator" }), "cleared");
+      await execute({ action: "record", layer: "run", scope: "survive", trigger: "trigger", cause: "cause", prevention: "Keep this.", evidence: "user-correction", evidenceRef: "ref" }, { sessionID: rootSession, agent: "dog-coordinator" });
+      await execute({ action: "record", layer: "project", scope: "project", trigger: "trigger", cause: "cause", prevention: "Keep project.", evidence: "user-correction", evidenceRef: "ref" }, { sessionID: rootSession, agent: "dog-coordinator" });
+      const layered = { system: [] as string[] };
+      await hooks["experimental.chat.system.transform"]!({ sessionID: rootSession }, layered);
+      assert.equal(layered.system[0]?.split("\n").length, 2);
+      const child = await execute({ action: "clear", layer: "run" }, { sessionID: "child", agent: "dog-coordinator" });
+      assert.equal(child, "reflection_not_permitted");
+      assert.equal(await execute({ action: "clear", layer: "run" }, { sessionID: rootSession, agent: "other-agent" }), "reflection_not_permitted");
+      assert.equal(await execute({ action: "record", layer: "global", scope: "global", trigger: "t", cause: "c", prevention: "p", evidence: "user-correction", evidenceRef: "r" }, { sessionID: rootSession, agent: "dog-coordinator" }), "reflection_not_permitted");
+      process.env.SORTIE_REFLECTION = "0";
+      const killed = await SortieDogsPlugin({ directory }, { reflection: { enabled: true } });
+      assert.equal(killed.tool?.sortie_reflection, undefined);
+      assert.equal(killed["experimental.chat.system.transform"], undefined);
+      assert.equal(await execute({ action: "clear", layer: "run" }, { sessionID: rootSession, agent: "dog-coordinator" }), "reflection_not_permitted");
+      const unchanged = { system: ["base"] };
+      await hooks["experimental.chat.system.transform"]!({ sessionID: rootSession }, unchanged);
+      assert.deepEqual(unchanged.system, ["base"]);
+      delete process.env.SORTIE_REFLECTION;
+       const originalNow = Date.now;
+       Date.now = () => originalNow() + 30 * 60 * 1000 + 1;
+       try { await hooks.event!({ event: { type: "session.deleted", properties: { sessionID: rootSession } } }); } finally { Date.now = originalNow; }
+      const reflectionRoot = join(xdg, "opencode", "sortie-dogs", "reflection");
+      assert.equal(await stat(join(reflectionRoot, "runs", `${rootSession}.json`)).catch(() => undefined), undefined);
+    } finally {
+      if (oldXdg === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = oldXdg;
+      if (oldConfig === undefined) delete process.env.SORTIE_DOGS_CONFIG; else process.env.SORTIE_DOGS_CONFIG = oldConfig;
+      if (oldReflection === undefined) delete process.env.SORTIE_REFLECTION; else process.env.SORTIE_REFLECTION = oldReflection;
+      await rm(xdg, { recursive: true, force: true });
+    }
+  });
+});
+
+test("reflection host identity failures and children leave storage absent", async () => {
+  await withProject("reflection-host-identity", async (directory) => {
+    const oldXdg = process.env.XDG_CONFIG_HOME; const xdg = await mkdtemp(join(testEnvironment, "reflection-host-xdg-"));
+    try {
+      process.env.XDG_CONFIG_HOME = xdg; await mkdir(join(directory, ".opencode"), { recursive: true });
+      await writeFile(join(directory, ".opencode", "sortie-dogs.json"), JSON.stringify({ reflection: { enabled: true } }));
+      const cases: Array<[string, unknown, string]> = [
+        ["absent", undefined, "root-absent"],
+        ["throw", { session: { get: async () => { throw new Error("unavailable"); } } }, "root-throw"],
+        ["incomplete", { session: { get: async () => ({ data: {} }) } }, "root-incomplete"],
+        ["child", { session: { get: async ({ path }: { path: { id: string } }) => ({ data: path.id === "child" ? { agent: "dog-coordinator", parentID: "root" } : { agent: "dog-coordinator" } }) } }, "child"],
+      ];
+      for (const [_name, client, sessionID] of cases) {
+        const hooks = await SortieDogsPlugin({ directory, ...(client === undefined ? {} : { client: client as never }) });
+        if (sessionID === "child") await hooks.event!({ event: { type: "session.created", properties: { info: { id: "child", parentID: "root" } } } });
+        await hooks["chat.message"]!({ sessionID, agent: "dog-coordinator" }, { message: { model: {} }, parts: [{ type: "text", text: "root" }] });
+        const runFile = join(xdg, "opencode", "sortie-dogs", "reflection", "runs", `${sessionID}.json`); const original = "{\"sentinel\":true}";
+        await mkdir(join(xdg, "opencode", "sortie-dogs", "reflection", "runs"), { recursive: true }); await writeFile(runFile, original);
+        assert.equal(await hooks.tool!.sortie_reflection.execute({ action: "record", layer: "run", scope: "identity", trigger: "t", cause: "c", prevention: "p", evidence: "user-correction", evidenceRef: "r" }, { sessionID, agent: "dog-coordinator" }), "reflection_not_permitted");
+        const system = { system: ["base"] }; await hooks["experimental.chat.system.transform"]!({ sessionID }, system);
+        assert.deepEqual(system.system, ["base"]); assert.equal(await readFile(runFile, "utf8"), original);
+      }
+    } finally { if (oldXdg === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = oldXdg; await rm(xdg, { recursive: true, force: true }); }
+  });
+});
+
+test("reflection deletion closes a root before deleting its completed in-flight record", async () => {
+  await withProject("reflection-delete-barrier", async (directory) => {
+    const oldXdg = process.env.XDG_CONFIG_HOME, xdg = await mkdtemp(join(testEnvironment, "reflection-delete-xdg-")); let unblock!: () => void, begun!: () => void;
+    const blocked = new Promise<void>((resolve) => { unblock = resolve; }), started = new Promise<void>((resolve) => { begun = resolve; }); const original = ReflectionStore.prototype.record;
+    try {
+      process.env.XDG_CONFIG_HOME = xdg; await mkdir(join(directory, ".opencode"), { recursive: true }); await writeFile(join(directory, ".opencode", "sortie-dogs.json"), JSON.stringify({ reflection: { enabled: true } }));
+      ReflectionStore.prototype.record = async function (...args: Parameters<ReflectionStore["record"]>) { begun(); await blocked; return await original.apply(this, args); };
+      const hooks = await SortieDogsPlugin({ directory, client: { session: { get: async () => ({ data: { agent: "dog-coordinator" } }) } } as never }); const root = "delete-root";
+      await hooks["chat.message"]!({ sessionID: root, agent: "dog-coordinator" }, { message: { model: {} }, parts: [{ type: "text", text: "root" }] }); const execute = hooks.tool!.sortie_reflection.execute;
+      const recording = execute({ action: "record", layer: "run", scope: "delete", trigger: "t", cause: "c", prevention: "p", evidence: "user-correction", evidenceRef: "r" }, { sessionID: root, agent: "dog-coordinator" }); await started;
+      const deleting = hooks.event!({ event: { type: "session.deleted", properties: { sessionID: root } } });
+      assert.equal(await execute({ action: "record", layer: "run", scope: "late", trigger: "t", cause: "c", prevention: "p", evidence: "user-correction", evidenceRef: "r" }, { sessionID: root, agent: "dog-coordinator" }), "reflection_not_permitted");
+      unblock(); await recording; await deleting;
+      assert.equal(await stat(join(xdg, "opencode", "sortie-dogs", "reflection", "runs", `${root}.json`)).catch(() => undefined), undefined);
+    } finally { ReflectionStore.prototype.record = original; if (oldXdg === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = oldXdg; await rm(xdg, { recursive: true, force: true }); }
+  });
+});
+
+test("reflection remains byte and storage passive when disabled", async () => {
+  await withProject("reflection-disabled", async (directory) => {
+    const oldXdg = process.env.XDG_CONFIG_HOME;
+    try {
+      const xdg = await mkdtemp(join(testEnvironment, "reflection-disabled-xdg-")); process.env.XDG_CONFIG_HOME = xdg;
+      const hooks = await SortieDogsPlugin({ directory });
+      assert.equal(hooks.tool?.sortie_reflection, undefined);
+      assert.equal(hooks["experimental.chat.system.transform"], undefined);
+      await hooks["chat.message"]!({ sessionID: "disabled", agent: "dog-coordinator" }, { message: { model: {} }, parts: [{ type: "text", text: "unchanged" }] });
+      assert.equal(await stat(join(xdg, "opencode", "sortie-dogs", "reflection")).catch(() => undefined), undefined);
+      await rm(xdg, { recursive: true, force: true });
+    } finally { if (oldXdg === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = oldXdg; }
+  });
+});
 
 function operationManifest(write: string[]): Record<string, unknown> {
   return { ...fixture.manifest, write };

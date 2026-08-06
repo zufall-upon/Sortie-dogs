@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
-import { isAbsolute, resolve, sep } from "node:path";
+import { isAbsolute, join, resolve, sep } from "node:path";
 
 import { RUNTIME_ASSET_VERSION } from "../asset-version.js";
 import { normalizeRelativePath, RelativePathError } from "../core/path.js";
@@ -13,6 +13,7 @@ import {
 } from "../core/validate-schema.js";
 import {
   DEFAULT_PLUGIN_OPTIONS,
+  resolvePluginConfiguration,
   resolvePluginConfigurationSources,
   type ConfiguredPluginSources,
   type ContinuationConfiguration,
@@ -47,6 +48,7 @@ import {
   createTaskResultRepairHook,
   type SessionMessageReader,
 } from "./task-result-repair.js";
+import { configRoot, nearestPackageVersion, reflectionEnabled, ReflectionError, ReflectionStore } from "../reflection/index.js";
 
 const INPUT_LIMITS = { config: 64 * 1024, manifest: 512 * 1024, handoff: 2 * 1024 * 1024 } as const;
 const INSPECTION_CACHE = { maximum: 256, ttlMilliseconds: 30 * 60 * 1000 } as const;
@@ -87,6 +89,7 @@ export interface OpenCodeHooks {
     output: TaskResultRepairOutput,
   ) => Promise<void>;
   "chat.message"?: OpenCodeChatMessageHook;
+  "experimental.chat.system.transform"?: (input: { sessionID: string }, output: { system?: string[]; model?: unknown }) => Promise<void>;
   /** Continuation observes the coordinator's completed final text to honour its fallback markers. */
   "experimental.text.complete"?: (
     input: { sessionID: string },
@@ -262,6 +265,7 @@ interface LoadedConfiguration {
   readOnlyTools: ReadonlySet<string>;
   modelRoutingHook?: OpenCodeChatMessageHook;
   continuation: ContinuationConfiguration;
+  reflection: ConfiguredPluginSources["reflection"];
 }
 
 interface TaskToolExecuteAfterInput {
@@ -326,7 +330,7 @@ interface OpenCodeToolDefinition {
 
 interface OpenCodeToolFactory {
   (definition: OpenCodeToolDefinition): OpenCodeToolDefinition;
-  schema: { string(): unknown };
+  schema: { string(): unknown; optional?(value: unknown): unknown };
 }
 
 interface PinnedJson {
@@ -450,6 +454,7 @@ function loadConfigured(
     readOnlyTools: new Set(config.readOnlyTools.map((tool) => tool.toLowerCase())),
     modelRoutingHook,
     continuation: config.continuation,
+    reflection: config.reflection,
   };
 }
 
@@ -636,12 +641,51 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     (definition: OpenCodeToolDefinition) => definition,
     { schema: { string: () => ({ type: "string" }) } },
   );
+  const optionalString = () => {
+    const stringSchema = defineTool.schema.string();
+    if (isRecord(stringSchema) && typeof stringSchema.optional === "function") {
+      return (stringSchema.optional as () => unknown)();
+    }
+    return typeof defineTool.schema.optional === "function" ? defineTool.schema.optional(stringSchema) : stringSchema;
+  };
   let project: ProjectPaths | undefined;
+  let reflectionStartup = false;
+  let reflectionConfiguration: ConfiguredPluginSources["reflection"] | undefined;
+  let reflectionVersion: string | undefined;
+  let reflectionStore: ReflectionStore | undefined;
   let loaded: LoadedConfiguration | undefined;
   let loadFailure: unknown;
   let loading: Promise<void> | undefined;
   let manifestAbsent = false;
   let assetVersionReported = false;
+
+  // Project config read is required discovery for its opt-in; no reflection storage/version read
+  // occurs unless that resolved config enables reflection. It stays isolated from write-gate load.
+  try {
+    project = await createProjectPaths(resolveProjectRoot(input));
+    const probed = resolvePluginConfigurationSources(
+      await readOptionalProjectConfig(project),
+      readEnvironmentConfig(),
+      options,
+    );
+    if (probed.kind === "configured" && reflectionEnabled(probed.reflection)) {
+      reflectionVersion = await nearestPackageVersion();
+      reflectionConfiguration = probed.reflection;
+      reflectionStore = new ReflectionStore(join(configRoot(), "sortie-dogs", "reflection"), project.root, {
+        warn: (code) => {
+          const log = (input.client as Record<string, unknown> | undefined)?.app;
+          if (!isRecord(log) || typeof log.log !== "function") return;
+          try { (log.log as (value: unknown) => unknown)({ level: "warn", service: "sortie-dogs", message: code }); } catch { /* host logging is best effort */ }
+        },
+      });
+      reflectionStartup = true;
+    }
+  } catch {
+    reflectionStartup = false;
+    reflectionConfiguration = undefined;
+    reflectionVersion = undefined;
+    reflectionStore = undefined;
+  }
   /*
    * Continuation must be callable before the first lazy configuration load completes, so it reads
    * the effective policy at call time and falls back to the shipped default until then.
@@ -730,6 +774,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   const bindingPins = new Map<string, BindingPin>();
   const activeSessions = new Map<string, ActiveSessionState>();
   const coordinatorRoots = new Map<string, CoordinatorRootLineage>();
+  const reflectionOwnedRoots = new Set<string>();
+  const reflectionClosingRoots = new Set<string>();
+  const reflectionInFlight = new Map<string, number>();
+  const reflectionWaiters = new Map<string, Array<() => void>>();
   const bindingDenials = new Map<
     string,
     Map<string, Map<string, string>>
@@ -1383,7 +1431,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
 
   async function hostSessionIdentity(
     sessionID: string,
-  ): Promise<{ agent?: string; parentID?: string } | undefined> {
+  ): Promise<{ agent?: string; parentID?: string; parentPresent: boolean } | undefined> {
     const get = input.client?.session?.get;
     if (get === undefined) return undefined;
     try {
@@ -1396,6 +1444,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       return {
         ...(typeof payload.agent === "string" ? { agent: payload.agent } : {}),
         ...(typeof payload.parentID === "string" ? { parentID: payload.parentID } : {}),
+        parentPresent: "parentID" in payload,
       };
     } catch {
       return undefined;
@@ -1413,7 +1462,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const child = await hostSessionIdentity(sessionID);
     if (child?.parentID === undefined) return undefined;
     const parent = await hostSessionIdentity(child.parentID);
-    if (parent?.agent !== COORDINATOR_AGENT || parent.parentID !== undefined) return undefined;
+    if (parent?.agent !== COORDINATOR_AGENT || parent.parentPresent) return undefined;
     await rememberCoordinatorRoot(child.parentID);
     rememberParent(sessionID, child.parentID);
     return child.parentID;
@@ -1430,7 +1479,42 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     }
   }
 
-  return {
+  async function reflectionPermitted(sessionID: string, agent?: string): Promise<boolean> {
+    if (!reflectionStartup || reflectionStore === undefined || reflectionVersion === undefined || process.env.SORTIE_REFLECTION === "0") return false;
+    if (agent !== undefined && agent !== COORDINATOR_AGENT) return false;
+    if (!isCoordinatorSession(sessionID) || coordinatorRootForSession(sessionID) !== sessionID || sessionParents.has(sessionID)) return false;
+    const identity = await hostSessionIdentity(sessionID);
+    if (identity?.agent !== COORDINATOR_AGENT || identity.parentPresent) return false;
+    return true;
+  }
+
+  async function beginReflection(sessionID: string, agent?: string): Promise<boolean> {
+    if (!(await reflectionPermitted(sessionID, agent)) || reflectionClosingRoots.has(sessionID)) return false;
+    reflectionOwnedRoots.add(sessionID);
+    reflectionInFlight.set(sessionID, (reflectionInFlight.get(sessionID) ?? 0) + 1);
+    return true;
+  }
+
+  function endReflection(sessionID: string): void {
+    const remaining = (reflectionInFlight.get(sessionID) ?? 1) - 1;
+    if (remaining > 0) { reflectionInFlight.set(sessionID, remaining); return; }
+    reflectionInFlight.delete(sessionID);
+    for (const resolve of reflectionWaiters.get(sessionID) ?? []) resolve();
+    reflectionWaiters.delete(sessionID);
+  }
+
+  async function waitForReflections(sessionID: string): Promise<void> {
+    if ((reflectionInFlight.get(sessionID) ?? 0) === 0) return;
+    await new Promise<void>((resolve) => (reflectionWaiters.get(sessionID) ?? reflectionWaiters.set(sessionID, []).get(sessionID)!).push(resolve));
+  }
+
+  function reflectionWarning(code: string): void {
+    const log = (input.client as Record<string, unknown> | undefined)?.app;
+    if (!isRecord(log) || typeof log.log !== "function") return;
+    try { (log.log as (value: unknown) => unknown)({ level: "warn", service: "sortie-dogs", message: code }); } catch { /* host logging is best effort */ }
+  }
+
+  const hooks: OpenCodeHooks = {
     tool: {
       sortie_bind_write_gate: defineTool({
         description: "Bind this active session to one project-relative operation manifest without changing files.",
@@ -1472,6 +1556,24 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           return await continuation.tool.execute({}, context);
         },
       }),
+      ...(reflectionStartup ? {
+        sortie_reflection: defineTool({
+          description: "Record, promote, or clear a bounded process reflection.",
+          args: { action: defineTool.schema.string(), layer: defineTool.schema.string(), scope: optionalString(), trigger: optionalString(), cause: optionalString(), prevention: optionalString(), evidence: optionalString(), evidenceRef: optionalString(), id: optionalString(), promotedRef: optionalString(), confirmation: optionalString() },
+          async execute(args, context): Promise<string> {
+            if (!(await beginReflection(context.sessionID, context.agent))) return "reflection_not_permitted";
+            const layer = args.layer as "run" | "project" | "global";
+            try {
+              if (!["run", "project", "global"].includes(layer)) return "reflection_invalid_layer";
+              if (!(reflectionConfiguration?.layers[layer] ?? false)) return "reflection_not_permitted";
+              if (args.action === "record") return JSON.stringify(await reflectionStore!.record(layer, context.sessionID, args, reflectionVersion!));
+              if (args.action === "promote") return await reflectionStore!.promote(layer, context.sessionID, args.id, args.promotedRef, reflectionVersion!);
+              if (args.action === "clear") return await reflectionStore!.clear(layer, context.sessionID, args.confirmation, reflectionVersion!);
+              return "reflection_invalid_action";
+            } catch (error) { return error instanceof ReflectionError ? error.code : "reflection_storage_error"; } finally { endReflection(context.sessionID); }
+          },
+        }),
+      } : {}),
     },
     "experimental.text.complete": async (textInput, textOutput): Promise<void> => {
       await continuation.textComplete(textInput, textOutput);
@@ -1512,6 +1614,18 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       await ensureLoaded();
       await loaded?.modelRoutingHook?.(chatInput, output);
     },
+    ...(reflectionStartup ? { "experimental.chat.system.transform": async (transformInput: { sessionID: string }, transformOutput: { system?: string[] }): Promise<void> => {
+      if (!(await beginReflection(transformInput.sessionID))) return;
+      const config = reflectionConfiguration;
+      try {
+        if (!config) return;
+        const buckets = (["run", "project", "global"] as const)
+          .filter((layer) => config.layers[layer])
+          .map((layer) => ({ layer, ...(layer === "global" ? {} : { run: transformInput.sessionID }) }));
+        const text = await reflectionStore!.injectBuckets(buckets, config.maxInjectedEntries, config.maxInjectedTokens, reflectionVersion);
+        if (text) transformOutput.system = [...(transformOutput.system ?? []), text];
+      } catch { /* reflection is strictly non-invasive */ } finally { endReflection(transformInput.sessionID); }
+    } } : {}),
     "permission.ask": async (permission): Promise<void> => {
       if (permission.permission !== "edit") return;
       // Without a session identity no gate can be attributed; tool.execute.before still enforces.
@@ -1608,6 +1722,18 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         return;
       }
       if (event.type === "session.deleted") {
+        if (reflectionStore !== undefined && reflectionConfiguration?.layers.run && reflectionOwnedRoots.has(eventSessionID)) {
+          reflectionClosingRoots.add(eventSessionID);
+          await waitForReflections(eventSessionID);
+          let deleted = false;
+          for (const delay of [0, 50, 250, 1_000, 5_000]) {
+            if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+            try { await reflectionStore.deleteRun(eventSessionID); deleted = true; } catch { /* bounded retry below */ }
+            if (deleted) break;
+          }
+          if (deleted) { reflectionOwnedRoots.delete(eventSessionID); reflectionClosingRoots.delete(eventSessionID); }
+          else reflectionWarning("reflection_cleanup_failed");
+        }
         evictSession(eventSessionID);
         continuation.forgetSession(eventSessionID);
         return;
@@ -1632,6 +1758,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       }
     },
   };
+  return hooks;
 };
 
 export type { SortieDogsPluginOptions } from "./config.js";

@@ -19,6 +19,14 @@ import {
   DEFAULT_MAX_AUTO_CONTINUES,
 } from "./continuation.js";
 
+export interface ReflectionConfiguration {
+  readonly enabled: boolean;
+  readonly layers: { readonly run: boolean; readonly project: boolean; readonly global: boolean };
+  readonly maxInjectedEntries: number;
+  readonly maxInjectedTokens: number;
+}
+export type ReflectionPolicyInput = Partial<Omit<ReflectionConfiguration, "layers">> & { layers?: Partial<ReflectionConfiguration["layers"]> };
+
 export interface SortieDogsPluginOptions {
   operationManifestPath?: string;
   handoffPaths?: readonly string[];
@@ -42,6 +50,7 @@ export interface SortieDogsPluginOptions {
    * only states this to raise the ceiling, choose a compaction model, or switch continuation off.
    */
   continuation?: ContinuationPolicyInput;
+  reflection?: ReflectionPolicyInput;
 }
 
 export type ContinuationPolicyInput = Partial<ContinuationConfiguration>;
@@ -96,6 +105,7 @@ export interface ConfiguredPlugin {
   freeTierFallbackModels: readonly string[];
   consultation: ConsultationPolicy;
   continuation: ContinuationConfiguration;
+  reflection: ReflectionConfiguration;
 }
 
 export type PluginConfiguration = ConfiguredPlugin | { kind: "invalid" };
@@ -140,6 +150,7 @@ export const DEFAULT_PLUGIN_OPTIONS: Readonly<
     capability: CONTINUATION_CAPABILITY,
     maxAutoContinues: DEFAULT_MAX_AUTO_CONTINUES,
   }),
+  reflection: Object.freeze({ enabled: false, layers: Object.freeze({ run: true, project: true, global: false }), maxInjectedEntries: 3, maxInjectedTokens: 500 }),
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -321,7 +332,7 @@ function parseLayer(value: unknown): SortieDogsPluginOptions | undefined {
   if (Object.keys(value).some(
     (key) => ![
       "operationManifestPath", "handoffPaths", "readOnlyTools", "dedicatedWorkerModel",
-      "modelRouting", "modelCatalog", "freeTierFallbackModels", "consultation", "continuation",
+      "modelRouting", "modelCatalog", "freeTierFallbackModels", "consultation", "continuation", "reflection",
     ].includes(key),
   )) {
     return undefined;
@@ -347,6 +358,17 @@ function parseLayer(value: unknown): SortieDogsPluginOptions | undefined {
   const continuation = value.continuation === undefined
     ? undefined
     : parseContinuationPolicy(value.continuation);
+  const reflectionValue = value.reflection;
+  let reflection: ReflectionPolicyInput | undefined;
+  if (reflectionValue !== undefined) {
+    if (!isRecord(reflectionValue) || Object.keys(reflectionValue).some((key) => !["enabled", "layers", "maxInjectedEntries", "maxInjectedTokens"].includes(key))) return undefined;
+    const layers = reflectionValue.layers;
+    if (layers !== undefined && (!isRecord(layers) || Object.keys(layers).some((key) => !["run", "project", "global"].includes(key)) || Object.values(layers).some((item) => typeof item !== "boolean"))) return undefined;
+    if (reflectionValue.enabled !== undefined && typeof reflectionValue.enabled !== "boolean") return undefined;
+    if (reflectionValue.maxInjectedEntries !== undefined && (!positiveInteger(reflectionValue.maxInjectedEntries) || reflectionValue.maxInjectedEntries > 3)) return undefined;
+    if (reflectionValue.maxInjectedTokens !== undefined && (!positiveInteger(reflectionValue.maxInjectedTokens) || reflectionValue.maxInjectedTokens > 500)) return undefined;
+    reflection = { ...(reflectionValue.enabled === undefined ? {} : { enabled: reflectionValue.enabled }), ...(layers === undefined ? {} : { layers: layers as ReflectionConfiguration["layers"] }), ...(reflectionValue.maxInjectedEntries === undefined ? {} : { maxInjectedEntries: reflectionValue.maxInjectedEntries }), ...(reflectionValue.maxInjectedTokens === undefined ? {} : { maxInjectedTokens: reflectionValue.maxInjectedTokens }) };
+  }
   if (manifestPath !== undefined && (typeof manifestPath !== "string" || manifestPath.length === 0)) {
     return undefined;
   }
@@ -381,6 +403,7 @@ function parseLayer(value: unknown): SortieDogsPluginOptions | undefined {
     freeTierFallbackModels: freeTierFallbackModels as readonly string[] | undefined,
     consultation,
     continuation,
+    reflection,
   };
 }
 
@@ -395,6 +418,7 @@ export function resolvePluginConfiguration(...values: readonly unknown[]): Plugi
   let freeTierFallbackModels = DEFAULT_PLUGIN_OPTIONS.freeTierFallbackModels;
   let consultation = DEFAULT_PLUGIN_OPTIONS.consultation;
   let continuation = DEFAULT_PLUGIN_OPTIONS.continuation;
+  let reflection: ReflectionConfiguration = DEFAULT_PLUGIN_OPTIONS.reflection as ReflectionConfiguration;
   const configuredRoles = new Set<string>();
   for (const value of values) {
     const layer = parseLayer(value);
@@ -431,6 +455,7 @@ export function resolvePluginConfiguration(...values: readonly unknown[]): Plugi
     if (layer.continuation !== undefined) {
       continuation = Object.freeze({ ...continuation, ...layer.continuation });
     }
+    if (layer.reflection !== undefined) reflection = Object.freeze({ ...reflection, ...layer.reflection, layers: Object.freeze({ ...reflection.layers, ...(layer.reflection.layers ?? {}) }) });
   }
   modelRouting = {
     ...Object.fromEntries(Object.entries(modelRouting).filter(([role]) => !isFixedModelRole(role))),
@@ -462,6 +487,7 @@ export function resolvePluginConfiguration(...values: readonly unknown[]): Plugi
     freeTierFallbackModels,
     consultation,
     continuation,
+    reflection,
   };
 }
 
