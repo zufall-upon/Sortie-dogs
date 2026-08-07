@@ -12,11 +12,55 @@ test("reflection store is bounded and deduplicates promotable entries", async ()
   try {
     const store = new ReflectionStore(root, join(root, "project"));
     const first = await store.record("run", "r1", input, "0.2.12");
-    const second = await store.record("run", "r1", input, "0.2.12");
+    const second = await store.record("run", "r1", {
+      ...input,
+      trigger: "new recurrence",
+      cause: "must not replace the accepted cause",
+      prevention: "Must not replace the accepted prevention.",
+    }, "0.2.12");
     assert.equal(first.id, second.id);
     assert.equal(second.hits, 2);
+    assert.equal(second.trigger, "new recurrence");
+    assert.equal(second.cause, input.cause);
+    assert.equal(second.prevention, input.prevention);
     assert.equal((await store.read("run", "r1")).updatedAt, second.lastSeen);
-    assert.match(await store.inject("run", "r1", 3, 500, "0.2.12"), /retry-policy/);
+    assert.match(await store.inject("run", "r1", 3, 500, "0.2.12"), new RegExp(`\\[${first.id}\\] retry-policy \\(hits=2\\)`));
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("reflection list, replace, and forget preserve narrow entry ownership", async () => {
+  const root = await mkdtemp(join(tmpdir(), "sortie-reflection-"));
+  let now = Date.now();
+  try {
+    const store = new ReflectionStore(root, join(root, "project"), { now: () => now });
+    const entry = await store.record("project", undefined, input, "0.3.0");
+    const before = await store.inject("project", undefined, 3, 500, "0.3.0");
+    assert.match(before, new RegExp(`\\[${entry.id}\\] retry-policy \\(hits=1\\)`));
+    now += 1000;
+    const replaced = await store.replace("project", undefined, entry.id, {
+      scope: "retry-policy",
+      trigger: "corrected trigger",
+      cause: "corrected cause",
+      prevention: "Use the corrected prevention.",
+    }, "0.3.0");
+    assert.equal(replaced.id, entry.id);
+    assert.equal(replaced.hits, 2);
+    assert.equal(replaced.firstSeen, entry.firstSeen);
+    assert.ok(replaced.lastSeen > entry.lastSeen);
+    assert.equal((await store.list("project", undefined, "0.3.0")).entries[0]?.prevention, "Use the corrected prevention.");
+    await assert.rejects(
+      () => store.replace("project", undefined, entry.id, { scope: "retry-policy", trigger: "t", cause: "c", prevention: "api key secret" }, "0.3.0"),
+      (error: unknown) => error instanceof ReflectionError && error.code === "reflection_invalid_input",
+    );
+    await assert.rejects(
+      () => store.replace("run", "other", entry.id, { scope: "retry-policy", trigger: "t", cause: "c", prevention: "p" }, "0.3.0"),
+      (error: unknown) => error instanceof ReflectionError && error.code === "reflection_not_found",
+    );
+    assert.equal(await store.forget("run", "other", entry.id, "0.3.0"), "not-found");
+    assert.equal((await store.list("project", undefined, "0.3.0")).entries[0]?.id, entry.id);
+    assert.equal(await store.forget("project", undefined, "unknown", "0.3.0"), "not-found");
+    assert.equal(await store.forget("project", undefined, entry.id, "0.3.0"), "forgotten");
+    assert.deepEqual((await store.list("project", undefined, "0.3.0")).entries, []);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -31,6 +75,29 @@ test("invalid evidence and unsafe content do not mutate storage", async () => {
     assert.equal(prose.prevention, "See private.txt now");
     await assert.rejects(() => store.record("project", "r3", { ...input, evidenceRef: "logs/run.log:12" }, "0.2.12"), ReflectionError);
     await assert.rejects(() => store.record("project", "r4", { ...input, evidenceRef: "C:\\logs\\run" }, "0.2.12"), ReflectionError);
+    const before = await store.list("project", undefined, "0.2.12");
+    await assert.rejects(() => store.record("project", undefined, { ...input, trigger: "api key secret" }, "0.2.12"), ReflectionError);
+    await assert.rejects(() => store.record("project", undefined, { ...input, evidence: "user-correction", evidenceRef: "logs/run.log:12" }, "0.2.12"), ReflectionError);
+    assert.deepEqual(await store.list("project", undefined, "0.2.12"), before);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("0.2 v1 buckets support list, injection, and replacement without migration", async () => {
+  const root = await mkdtemp(join(tmpdir(), "sortie-reflection-"));
+  try {
+    const project = join(root, "project");
+    const directory = join(root, "projects");
+    const file = join(directory, `${projectKey(project)}.json`);
+    const seen = new Date().toISOString();
+    const entry = { id: "01J00000000000000000000000", ...input, hits: 2, firstSeen: seen, lastSeen: seen, status: "promotable" };
+    await mkdir(directory, { recursive: true });
+    await writeFile(file, JSON.stringify({ v: 1, updatedAt: seen, entries: [entry] }));
+    const store = new ReflectionStore(root, project);
+    assert.equal((await store.list("project", undefined, "0.3.0")).entries[0]?.id, entry.id);
+    assert.match(await store.inject("project", undefined, 3, 500, "0.3.0"), new RegExp(`\\[${entry.id}\\] retry-policy \\(hits=2\\)`));
+    const replaced = await store.replace("project", undefined, entry.id, { scope: entry.scope, trigger: "updated", cause: entry.cause, prevention: entry.prevention }, "0.3.0");
+    assert.equal(replaced.id, entry.id);
+    assert.equal(replaced.hits, 3);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -61,7 +128,7 @@ test("config root, ULID, promote, clear, and active injection are deterministic"
     assert.match(entry.id, /^[0-9A-HJKMNP-TV-Z]{26}$/u);
     assert.equal(await store.promote("run", "r", entry.id, "fix-1", "1.0.0"), "promoted");
     assert.equal((await store.read("run", "r", "1.0.0")).entries[0].promotedRef, "fix-1");
-    assert.match(await store.inject("run", "r", 3, 500, "1.0.0"), /- retry-policy: /);
+    assert.match(await store.inject("run", "r", 3, 500, "1.0.0"), new RegExp(`- \\[${entry.id}\\] retry-policy \\(hits=2\\): `));
     await assert.rejects(() => store.clear("project", "r", "wrong", "1.0.0"), /reflection_confirmation_required/);
     assert.equal(await store.clear("run", "r", "", "1.0.0"), "cleared");
   } finally { if (old === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = old; await rm(root, { recursive: true, force: true }); }
@@ -131,7 +198,7 @@ test("clear and retained-layer reads remove eligible bucket artifacts", async ()
 });
 
 test("prohibited input is rejected without creating or changing storage", async () => {
-  const fixtures = ["a\nb", "a\tb", "\u0001", "```code```", "api key: x", "password=x", "secret=x", "token=x", "private key", "https://user:pass@example.test", "https://example.test", "abcdef0123456789abcdef0123456789", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "--- a/file"];
+  const fixtures = ["a\nb", "a\tb", "\u0001", "```code```", "api key: x", "password=x", "secret=x", "token=x", "private key", "https://user:pass@example.test", "https://example.test", "PVTI_internal123", "DI_internal123", "abcdef0123456789abcdef0123456789", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "--- a/file"];
   const root = await mkdtemp(join(tmpdir(), "sortie-reflection-"));
   try { const store = new ReflectionStore(root, root); for (const value of fixtures) { await assert.rejects(() => store.record("run", `r-${fixtures.indexOf(value)}`, { ...input, prevention: value }, "1.0.0"), ReflectionError); } assert.equal(await stat(join(root, "runs")).catch(() => undefined), undefined); } finally { await rm(root, { recursive: true, force: true }); }
 });
@@ -142,7 +209,8 @@ test("caps, total injection budget, and concurrent records preserve successful s
     const store = new ReflectionStore(root, root); const results = await Promise.allSettled(Array.from({ length: 8 }, (_, i) => store.record("run", "concurrent", { ...input, scope: `scope-${i}`, prevention: `prevention-${i}` }, "1.0.0")));
     const successful = results.filter((result): result is PromiseFulfilledResult<unknown> => result.status === "fulfilled"); for (const result of results) if (result.status === "rejected") assert.equal((result.reason as ReflectionError).code, "reflection_lock_timeout"); const bucket = await store.read("run", "concurrent"); assert.equal(bucket.entries.length, successful.length); for (const result of successful) assert.ok(bucket.entries.some((entry) => entry.id === (result.value as { id: string }).id));
     for (let i = 0; i < 14; i++) await store.record("run", "cap", { ...input, scope: `cap-${i}`, prevention: `p-${i}` }, "1.0.0"); assert.equal((await store.read("run", "cap")).entries.length, 12);
-    const output = await store.injectBuckets([{ layer: "run", run: "cap" }], 3, 600, "1.0.0"); assert.ok(estimateInjectionTokens(`${output}漢字`) <= 600); assert.equal(output, await store.injectBuckets([{ layer: "run", run: "cap" }], 3, 600, "1.0.0")); assert.match(output, /^- [a-z0-9-]+: /u);
+    const output = await store.injectBuckets([{ layer: "run", run: "cap" }], 3, 600, "1.0.0"); assert.ok(estimateInjectionTokens(`${output}漢字`) <= 600); assert.equal(output, await store.injectBuckets([{ layer: "run", run: "cap" }], 3, 600, "1.0.0")); assert.match(output, /^- \[[0-9A-HJKMNP-TV-Z]{26}\] [a-z0-9-]+ \(hits=\d+\): /u);
+    const firstLine = output.split("\n")[0]; const exactBudget = estimateInjectionTokens(firstLine); assert.equal(await store.injectBuckets([{ layer: "run", run: "cap" }], 1, exactBudget, "1.0.0"), firstLine); assert.equal(await store.injectBuckets([{ layer: "run", run: "cap" }], 1, exactBudget - 1, "1.0.0"), ""); assert.equal(await store.injectBuckets([{ layer: "run", run: "cap" }], 1, 0, "1.0.0"), "");
     const duplicate = await store.injectBuckets([{ layer: "run", run: "cap" }, { layer: "run", run: "concurrent" }], 20, 5000, "1.0.0"); assert.equal(new Set(duplicate.split("\n").map((line) => line.split(":")[0])).size, duplicate.split("\n").length);
   } finally { await rm(root, { recursive: true, force: true }); }
 });

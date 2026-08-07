@@ -1103,7 +1103,9 @@ test("runtime contract requires interactive continuation and deterministic recov
   assert.match(handshake[1], /redispatch_bind_signal: escalation\.action=redispatch-worker; resume_session=false; true_blocker=false/);
   assert.match(handshake[1], /TRUE_BLOCKER absent -> blocker-resolution takeover on the same solSession/);
   assert.match(worker.content, /do not terminate and do not ask the\s+user/i);
-  assert.match(worker.content, /exact absolute handoff_path[\s\S]+built-in Read once on that path[\s\S]+same turn/i);
+  assert.match(worker.content, /mutating dispatch[\s\S]+exact absolute handoff_path[\s\S]+built-in Read once on that handoff_path[\s\S]+same turn/i);
+  assert.match(worker.content, /operation_manifest=none the dispatch is read-only:[\s\S]+require no\s+handoff_path[\s\S]+never inspect a handoff[\s\S]+never call sortie_bind_write_gate/i);
+  assert.match(worker.content, /structured\s+session-inactive denial proves an invalid dispatch/i);
   assert.match(worker.content, /Only\s+dog-coordinator may regenerate a mismatched handoff/i);
   assert.match(worker.content, /Only a recoverable[\s\S]+resume_session=true[\s\S]+same solSession/i);
   assert.match(worker.content, /nonrecoverable denial[\s\S]+existing remedy[\s\S]+never same-session resume/i);
@@ -1171,6 +1173,20 @@ test("runtime contract requires interactive continuation and deterministic recov
     coordinator.content,
     /For three or more tracker mutations,[\s\S]+secret-free UTF-8 script[\s\S]+syntax-check it locally/i,
   );
+  const direct = coordinator.content.match(
+    /COORDINATOR_DIRECT_OPERATION_FIXTURE\r?\n([\s\S]+?)\r?\nEND_COORDINATOR_DIRECT_OPERATION_FIXTURE/,
+  );
+  assert.ok(direct);
+  for (const contract of [
+    "known_executable_probe: one batched direct depth-one read-only command; no Task",
+    "executable_absent: question tool; no worker discovery or recursive search",
+    "project_inventory: one direct read-only tracker command; no Task",
+    "project_item_identity: same direct inventory evidence; no identity-only worker",
+    "terminal_checkpoint: at most two tracker mutations -> one coordinator-owned direct tracker command",
+    "local_checkpoint_file: excluded from tracker mutation count",
+    "direct_operation_artifacts: no handoff | operation manifest | generated script | child session",
+    "tracker_unavailable: project-local checkpoint fallback; never a worker retry loop",
+  ]) assert.ok(direct[1].includes(contract), contract);
   assert.match(
     coordinator.content,
     new RegExp(`configured continuation capability is\\s+the plugin tool ${CONTINUATION_CAPABILITY}`, "i"),
@@ -1186,9 +1202,21 @@ test("runtime contract requires interactive continuation and deterministic recov
     /allowed_evidence: user-correction \| repeated-process-failure \| review-artifact-defect \| retry-policy-violation/,
   );
   assert.match(reflection[1], /global_layer: forbidden/);
-  assert.match(reflection[1], /call_limit: one per triggering event; three per run/);
+  assert.match(reflection[1], /attribution: before\/after state or exact command evidence required/);
+  assert.match(reflection[1], /tracker_privacy: no item\/node\/draft ID \| URL \| title \| body \| field value \| status \| inventory payload/);
+  assert.match(reflection[1], /user_correction_layer: project immediately/);
+  assert.match(reflection[1], /project_layer: same stable scope recurred in a later unit or was injected from an earlier run/);
+  assert.match(reflection[1], /dedup: same scope updates trigger and hits; cause and prevention change only through replace/);
+  assert.match(reflection[1], /call_limit: one record per triggering event; three record calls per run/);
+  assert.match(reflection[1], /injected_project_recurrence: record project once to increment hits/);
   assert.match(reflection[1], /non_triggers: code bug \| ordinary validation failure/);
   assert.match(reflection[1], /call: sortie_reflection \{ action: record/);
+  assert.match(reflection[1], /list: never at task start; once before mutation only when target scope or id is absent/);
+  assert.match(reflection[1], /correction: improved cause or prevention -> replace; disproved attribution -> forget/);
+  assert.match(reflection[1], /forget_confirmation: none; exact entry id is the deletion boundary/);
+  assert.match(reflection[1], /durable_fix: hits>=2 or policy-related user correction -> create durable-fix candidate/);
+  assert.match(reflection[1], /promotion: durable fix committed -> promote/);
+  assert.match(reflection[1], /read: automatic injection with id and hits under SORTIE_PROCESS_REFLECTIONS/);
 
   const drain = coordinator.content.match(
     /BACKLOG_DRAIN_FIXTURE\r?\n([\s\S]+?)\r?\nEND_BACKLOG_DRAIN_FIXTURE/,
@@ -1366,7 +1394,8 @@ test("reflection integration is opt-in, layered, guarded, kill-switchable, and d
       await mkdir(join(directory, ".opencode"), { recursive: true });
       await writeFile(join(directory, ".opencode", "sortie-dogs.json"), JSON.stringify({ reflection: { enabled: true, layers: { run: true, project: true, global: false } } }));
       const logs: unknown[] = [];
-      const hooks = await SortieDogsPlugin({ directory, client: { app: { log: (event: unknown) => logs.push(event) }, session: { get: async () => ({ data: { agent: "dog-coordinator" } }) } } as never }, { reflection: { maxInjectedEntries: 2 } });
+      const client = { app: { log: (event: unknown) => logs.push(event) }, session: { get: async () => ({ data: { agent: "dog-coordinator" } }) } } as never;
+      const hooks = await SortieDogsPlugin({ directory, client }, { reflection: { maxInjectedEntries: 2 } });
       assert.ok(hooks.tool?.sortie_reflection);
       assert.ok(hooks["experimental.chat.system.transform"]);
       assert.ok(Object.keys(hooks.tool!.sortie_reflection.args).includes("id"));
@@ -1384,23 +1413,51 @@ test("reflection integration is opt-in, layered, guarded, kill-switchable, and d
       const recorded = JSON.parse(await execute({ action: "record", layer: "run", scope: "integration", trigger: "trigger", cause: "cause", prevention: "Prevent this.", evidence: "user-correction", evidenceRef: "ref" }, { sessionID: rootSession, agent: "dog-coordinator" }));
       const injected = { system: [] as string[] };
       await hooks["experimental.chat.system.transform"]!({ sessionID: rootSession }, injected);
-      assert.deepEqual(injected.system, ["- integration: Prevent this."]);
+      assert.match(injected.system[0] ?? "", new RegExp(`^SORTIE_PROCESS_REFLECTIONS\\n- \\[${recorded.id}\\] integration \\(hits=1\\): Prevent this\\.$`, "u"));
+      const listed = JSON.parse(await execute({ action: "list", layer: "run" }, { sessionID: rootSession, agent: "dog-coordinator" }));
+      assert.equal(listed.entries[0].id, recorded.id);
+      const replaced = JSON.parse(await execute({ action: "replace", layer: "run", id: recorded.id, scope: "integration", trigger: "new trigger", cause: "new cause", prevention: "Use the improved prevention." }, { sessionID: rootSession, agent: "dog-coordinator" }));
+      assert.equal(replaced.id, recorded.id);
+      assert.equal(replaced.hits, 2);
+      assert.equal(await execute({ action: "forget", layer: "run", id: "unknown" }, { sessionID: rootSession, agent: "dog-coordinator" }), "not-found");
+      const forgotten = JSON.parse(await execute({ action: "record", layer: "run", scope: "forget-me", trigger: "trigger", cause: "cause", prevention: "Remove this.", evidence: "user-correction", evidenceRef: "ref" }, { sessionID: rootSession, agent: "dog-coordinator" }));
+      assert.equal(await execute({ action: "forget", layer: "run", id: forgotten.id }, { sessionID: rootSession, agent: "dog-coordinator" }), "forgotten");
       const compacted = { context: [] as string[], prompt: "" };
       await hooks["experimental.session.compacting"]!({ sessionID: rootSession }, compacted);
       const afterCompaction = { system: [] as string[] };
       await hooks["experimental.chat.system.transform"]!({ sessionID: rootSession }, afterCompaction);
-      assert.deepEqual(afterCompaction.system, injected.system);
+      assert.match(afterCompaction.system[0] ?? "", new RegExp(`^SORTIE_PROCESS_REFLECTIONS\\n- \\[${recorded.id}\\] integration \\(hits=2\\): Use the improved prevention\\.$`, "u"));
       assert.equal(await execute({ action: "promote", layer: "run", id: recorded.id, promotedRef: "fix", }, { sessionID: rootSession, agent: "dog-coordinator" }), "promoted");
       assert.equal(await execute({ action: "clear", layer: "run" }, { sessionID: rootSession, agent: "dog-coordinator" }), "cleared");
       await execute({ action: "record", layer: "run", scope: "survive", trigger: "trigger", cause: "cause", prevention: "Keep this.", evidence: "user-correction", evidenceRef: "ref" }, { sessionID: rootSession, agent: "dog-coordinator" });
-      await execute({ action: "record", layer: "project", scope: "project", trigger: "trigger", cause: "cause", prevention: "Keep project.", evidence: "user-correction", evidenceRef: "ref" }, { sessionID: rootSession, agent: "dog-coordinator" });
+      const projectEntry = JSON.parse(await execute({ action: "record", layer: "project", scope: "project", trigger: "trigger", cause: "cause", prevention: "Keep project.", evidence: "user-correction", evidenceRef: "ref" }, { sessionID: rootSession, agent: "dog-coordinator" }));
+      assert.equal(await execute({ action: "clear", layer: "project", confirmation: "wrong" }, { sessionID: rootSession, agent: "dog-coordinator" }), "reflection_confirmation_required");
+      assert.equal(JSON.parse(await execute({ action: "list", layer: "project" }, { sessionID: rootSession, agent: "dog-coordinator" })).entries[0].id, projectEntry.id);
       const layered = { system: [] as string[] };
       await hooks["experimental.chat.system.transform"]!({ sessionID: rootSession }, layered);
-      assert.equal(layered.system[0]?.split("\n").length, 2);
+      assert.equal(layered.system[0]?.split("\n").length, 3);
       const child = await execute({ action: "clear", layer: "run" }, { sessionID: "child", agent: "dog-coordinator" });
       assert.equal(child, "reflection_not_permitted");
       assert.equal(await execute({ action: "clear", layer: "run" }, { sessionID: rootSession, agent: "other-agent" }), "reflection_not_permitted");
       assert.equal(await execute({ action: "record", layer: "global", scope: "global", trigger: "t", cause: "c", prevention: "p", evidence: "user-correction", evidenceRef: "r" }, { sessionID: rootSession, agent: "dog-coordinator" }), "reflection_not_permitted");
+      assert.equal(await execute({ action: "promote", layer: "global", id: projectEntry.id, promotedRef: "fix" }, { sessionID: rootSession, agent: "dog-coordinator" }), "reflection_not_permitted");
+      assert.equal(await execute({ action: "clear", layer: "project", confirmation: "CLEAR_REFLECTIONS" }, { sessionID: rootSession, agent: "dog-coordinator" }), "cleared");
+      assert.deepEqual(JSON.parse(await execute({ action: "list", layer: "project" }, { sessionID: rootSession, agent: "dog-coordinator" })).entries, []);
+
+      const globalHooks = await SortieDogsPlugin({ directory, client }, { reflection: { enabled: true, layers: { global: true } } });
+      const globalRoot = "reflection-global-root";
+      await globalHooks["chat.message"]!({ sessionID: globalRoot, agent: "dog-coordinator" }, { message: { model: {} }, parts: [{ type: "text", text: "root" }] });
+      const globalExecute = globalHooks.tool!.sortie_reflection.execute;
+      const globalEntry = JSON.parse(await globalExecute({ action: "record", layer: "global", scope: "global-enabled", trigger: "t", cause: "c", prevention: "p", evidence: "user-correction", evidenceRef: "r" }, { sessionID: globalRoot, agent: "dog-coordinator" }));
+      assert.equal(await globalExecute({ action: "promote", layer: "global", id: globalEntry.id, promotedRef: "fix" }, { sessionID: globalRoot, agent: "dog-coordinator" }), "promoted");
+
+      const tinyHooks = await SortieDogsPlugin({ directory, client }, { reflection: { enabled: true, maxInjectedTokens: 1 } });
+      const tinyRoot = "reflection-tiny-root";
+      await tinyHooks["chat.message"]!({ sessionID: tinyRoot, agent: "dog-coordinator" }, { message: { model: {} }, parts: [{ type: "text", text: "root" }] });
+      await tinyHooks.tool!.sortie_reflection.execute({ action: "record", layer: "run", scope: "tiny", trigger: "t", cause: "c", prevention: "p", evidence: "user-correction", evidenceRef: "r" }, { sessionID: tinyRoot, agent: "dog-coordinator" });
+      const headingDoesNotFit = { system: [] as string[] };
+      await tinyHooks["experimental.chat.system.transform"]!({ sessionID: tinyRoot }, headingDoesNotFit);
+      assert.deepEqual(headingDoesNotFit.system, []);
       process.env.SORTIE_REFLECTION = "0";
       const killed = await SortieDogsPlugin({ directory }, { reflection: { enabled: true } });
       assert.equal(killed.tool?.sortie_reflection, undefined);
@@ -3987,9 +4044,10 @@ test("plugin shell gate allows explicit reads and denies unknown executables", a
   });
 });
 
-test("unbound sessions allow only known read-only tools and complete read-only shell commands", async () => {
+test("read-only operation_manifest=none sessions need no handoff and deny every mutation", async () => {
   await withProject("unbound-reverse-allowlist", async (directory) => {
     const hooks = await configuredHooks(directory);
+    // No inspected handoff or bound manifest is the runtime shape of operation_manifest=none.
     await activate(hooks, "unbound");
     const before = hooks["tool.execute.before"];
     assert.ok(before);

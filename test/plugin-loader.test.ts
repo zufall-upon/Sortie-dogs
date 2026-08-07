@@ -88,8 +88,10 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       [npmCli, "pack", "--ignore-scripts", "--json", "--pack-destination", fixture],
       { cwd: projectRoot },
     );
-    const packed = JSON.parse(packOutput) as Array<{ filename: string }>;
+    const packed = JSON.parse(packOutput) as Array<{ filename: string; files?: Array<{ path: string }> }>;
     assert.equal(packed.length, 1);
+    assert.ok(packed[0].files);
+    assert.equal(packed[0].files.some(({ path }) => /(?:^|\/)reflection\/seed\.(?:js|d\.ts)$/u.test(path)), false);
     const tarball = join(fixture, packed[0].filename);
 
     const consumer = join(fixture, "consumer");
@@ -113,6 +115,15 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
         tarball,
       ],
       { cwd: projectRoot },
+    );
+
+    const installedPackage = JSON.parse(await readFile(
+      join(consumer, "node_modules", "sortie-dogs", "package.json"),
+      "utf8",
+    )) as { scripts?: { prebuild?: string } };
+    assert.equal(
+      installedPackage.scripts?.prebuild,
+      "node --input-type=module --eval \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true });\"",
     );
 
     const rootDeclaration = await readFile(
@@ -773,8 +784,15 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(coordinator.content, /undeclared write or mutation must be reported as rejected/i);
     assert.match(
       coordinator.content,
-      /read-only work, keep operation_manifest=none,[\s\S]{0,180}?do\s+not invent or bind an operation manifest/i,
+      /For read-only work, keep operation_manifest=none,[\s\S]{0,220}?omit\s+handoff_path,[\s\S]{0,120}?never inspect a handoff or call sortie_bind_write_gate/i,
     );
+    const directOperations = coordinator.content.match(
+      /COORDINATOR_DIRECT_OPERATION_FIXTURE\r?\n([\s\S]+?)\r?\nEND_COORDINATOR_DIRECT_OPERATION_FIXTURE/,
+    );
+    assert.ok(directOperations, "coordinator needs bounded direct operations");
+    assert.match(directOperations[1], /known_executable_probe:\s*one batched direct depth-one read-only command; no Task/);
+    assert.match(directOperations[1], /project_inventory:\s*one direct read-only tracker command; no Task/);
+    assert.match(directOperations[1], /terminal_checkpoint:\s*at most two tracker mutations -> one coordinator-owned direct tracker command/);
     const writeGateHandoff = coordinator.content.match(
       /WRITE_GATE_HANDOFF_FIXTURE\r?\n([\s\S]+?)\r?\nEND_WRITE_GATE_HANDOFF_FIXTURE/,
     );
@@ -824,7 +842,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     );
     assert.match(
       worker.content,
-      /operation_manifest=none the dispatch is read-only:[\s\S]{0,180}?never invent an operation manifest, never call\s+sortie_bind_write_gate/i,
+      /operation_manifest=none the dispatch is read-only:[\s\S]{0,220}?require no\s+handoff_path,[\s\S]{0,120}?never inspect a handoff, never call sortie_bind_write_gate/i,
     );
     assert.match(
       coordinator.content,
@@ -1224,7 +1242,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(sortie.content, /never route a worker to the user/i);
 
     for (const asset of loaded.runtimeAssets) {
-      assert.equal(asset.version, "0.2.19-card20");
+      assert.equal(asset.version, "0.3.0-card22");
       const frontmatter = asset.content.match(/^---\r?\n([\s\S]+?)\r?\n---\r?\n/);
       assert.ok(frontmatter, `${asset.name} must have frontmatter`);
       const entries = Object.fromEntries(

@@ -1,6 +1,6 @@
 {
   "name": "sortie-dogs",
-  "version": "0.2.19",
+  "version": "0.3.0",
   "description": "Bounded, validated orchestration loop plugin for OpenCode",
   "keywords": [
     "opencode",
@@ -49,6 +49,7 @@
     "sortie-dogs": "dist/cli/main.js"
   },
   "scripts": {
+    "prebuild": "node --input-type=module --eval \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true });\"",
     "build": "tsc -p tsconfig.json",
     "postbuild": "node --input-type=module --eval \"import fs from 'node:fs'; const path = 'dist/cli/main.js'; const source = fs.readFileSync(path, 'utf8'); if (!source.startsWith('#!')) fs.writeFileSync(path, '#!/usr/bin/env node\\n' + source); if (process.platform !== 'win32') fs.chmodSync(path, 0o755);\"",
     "prepack": "npm run build",

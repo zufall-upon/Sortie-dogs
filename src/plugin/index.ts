@@ -1580,7 +1580,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       }),
       ...(reflectionStartup ? {
         sortie_reflection: defineTool({
-          description: "Record, promote, or clear a bounded process reflection.",
+          description: "List, record, replace, forget, promote, or clear a bounded process reflection.",
           args: { action: defineTool.schema.string(), layer: defineTool.schema.string(), scope: optionalString(), trigger: optionalString(), cause: optionalString(), prevention: optionalString(), evidence: optionalString(), evidenceRef: optionalString(), id: optionalString(), promotedRef: optionalString(), confirmation: optionalString() },
           async execute(args, context): Promise<string> {
             if (!(await beginReflection(context.sessionID, context.agent))) return "reflection_not_permitted";
@@ -1588,7 +1588,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
             try {
               if (!["run", "project", "global"].includes(layer)) return "reflection_invalid_layer";
               if (!(reflectionConfiguration?.layers[layer] ?? false)) return "reflection_not_permitted";
+              if (args.action === "list") return JSON.stringify(await reflectionStore!.list(layer, context.sessionID, reflectionVersion!));
               if (args.action === "record") return JSON.stringify(await reflectionStore!.record(layer, context.sessionID, args, reflectionVersion!));
+              if (args.action === "replace") return JSON.stringify(await reflectionStore!.replace(layer, context.sessionID, args.id, args, reflectionVersion!));
+              if (args.action === "forget") return await reflectionStore!.forget(layer, context.sessionID, args.id, reflectionVersion!);
               if (args.action === "promote") return await reflectionStore!.promote(layer, context.sessionID, args.id, args.promotedRef, reflectionVersion!);
               if (args.action === "clear") return await reflectionStore!.clear(layer, context.sessionID, args.confirmation, reflectionVersion!);
               return "reflection_invalid_action";
@@ -1642,11 +1645,13 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       const config = reflectionConfiguration;
       try {
         if (!config) return;
+        const heading = "SORTIE_PROCESS_REFLECTIONS";
         const buckets = (["run", "project", "global"] as const)
           .filter((layer) => config.layers[layer])
           .map((layer) => ({ layer, ...(layer === "global" ? {} : { run: transformInput.sessionID }) }));
-        const text = await reflectionStore!.injectBuckets(buckets, config.maxInjectedEntries, config.maxInjectedTokens, reflectionVersion);
-        if (text) transformOutput.system = [...(transformOutput.system ?? []), text];
+        const budget = Math.max(0, config.maxInjectedTokens - Buffer.byteLength(`${heading}\n`, "utf8"));
+        const text = await reflectionStore!.injectBuckets(buckets, config.maxInjectedEntries, budget, reflectionVersion);
+        if (text) transformOutput.system = [...(transformOutput.system ?? []), `${heading}\n${text}`];
       } catch { /* reflection is strictly non-invasive */ } finally { endReflection(transformInput.sessionID); }
     } } : {}),
     "permission.ask": async (permission): Promise<void> => {

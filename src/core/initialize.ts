@@ -143,7 +143,11 @@ function classifyVersionTransition(installedValue: string, currentValue: string)
   // SemVer-compatible update line: stable releases share a major; 0.x releases also share a minor.
   const sameLine = installed.major === current.major &&
     (installed.major !== 0 || installed.minor === current.minor);
-  return sameLine ? "compatible-update" : "incompatible";
+  // The installed marker is the runtime-asset version. An adjacent 0.x line is the only supported
+  // cross-minor migration; skipped lines still fail closed instead of bypassing migration steps.
+  const adjacentPreOneLine = installed.major === 0 && current.major === 0 &&
+    current.minor === installed.minor + 1;
+  return sameLine || adjacentPreOneLine ? "compatible-update" : "incompatible";
 }
 
 async function metadata(path: string): Promise<Awaited<ReturnType<typeof lstat>> | undefined> {

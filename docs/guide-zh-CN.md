@@ -274,7 +274,7 @@ canonical validation 后独立审查高风险候选项。二者都不负责实�
 
 ## 更新与迁移
 
-[Release v0.2.19](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.2.19)
+[Release v0.3.0](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.3.0)
 
 将依赖替换为新版 Release asset 后，在目标项目根目录再次运行：
 
