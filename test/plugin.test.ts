@@ -29,6 +29,7 @@ import {
 } from "../dist/plugin/model-routing.js";
 import { lastAssistantText } from "../dist/plugin/task-result-repair.js";
 import { ReflectionStore } from "../dist/reflection/index.js";
+import { configRoot } from "../dist/reflection/config.js";
 import {
   CONTINUATION_CAPABILITY,
   CONTINUATION_MARKER,
@@ -57,8 +58,8 @@ import {
 } from "../dist/core/consultation.js";
 
 /*
- * The environment layer is a real configuration source, so a host that declares one would silently
- * change every packaged default this suite asserts. Tests observe the package, not the machine.
+ * Environment and global-file layers are real configuration sources, so machine settings would
+ * silently change every packaged default this suite asserts. Tests observe the package, not the machine.
  */
 delete process.env.SORTIE_DOGS_CONFIG;
 
@@ -87,6 +88,8 @@ const fixture = JSON.parse(
 ) as PluginFixture;
 const cases = new Map(fixture.cases.map((candidate) => [candidate.name, candidate]));
 const testEnvironment = fileURLToPath(new URL("../_testenv/", import.meta.url));
+process.env.XDG_CONFIG_HOME = join(testEnvironment, "plugin-default-xdg");
+assert.equal(configRoot(), join(testEnvironment, "plugin-default-xdg", "opencode"));
 const execFileAsync = promisify(execFile);
 
 test("model routing configuration is strict and merges roles by layer", () => {

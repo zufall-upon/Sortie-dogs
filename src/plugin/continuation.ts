@@ -23,6 +23,9 @@ export const CONTINUATION_MARKER = "<!-- SORTIE_CONTINUE -->";
 export const ROLLOVER_MARKER = "<!-- SORTIE_COMPACT -->";
 /** First token of the synthetic resume prompt, so the coordinator can recognize its own resume. */
 export const AUTO_CONTINUE_PREFIX = "SORTIE_AUTO_CONTINUE";
+const TOOL_REQUESTED_REPORT =
+  "Tool-requested Sortie rollover. Preserve task identity, both manifests, validation history, " +
+  "batch counters, blocker state, and the exact next action from the latest messages.";
 /** First line the rollover summary must emit, mirroring the batch target of three attempts. */
 export const ROLLOVER_TOKEN = "SORTIE_ROLLOVER_COMPACTED";
 export const DEFAULT_MAX_AUTO_CONTINUES = 2;
@@ -244,6 +247,8 @@ interface SessionState {
   continueReport?: string | undefined;
   /** Latest authoritative coordinator report, handed to the compaction prompt. */
   latestReport?: string | undefined;
+  /** Latest non-compaction coordinator text observed during the current user turn. */
+  latestCoordinatorReport?: string | undefined;
   /** A rollover is executing right now. */
   active: boolean;
   /** Summarize succeeded; a failed synthetic resume must not summarize the same state again. */
@@ -254,22 +259,18 @@ interface SessionState {
   model?: { providerID: string; modelID: string } | undefined;
   /** Coordinator user turns observed by chat.message. */
   turnRevision: number;
-  /** Latest observed turn that completed compaction. */
-  compactedRevision: number;
-  /** Serializes identity lookup for automatic idle compaction. */
-  idlePreparing: boolean;
   /** Turn revision owned by the active rollover. */
   activeRevision: number;
   /** A newer turn became idle while an older rollover was still active. */
   idleDeferred: boolean;
-  /** The current rollover was queued automatically at a root idle boundary. */
-  autoIdle: boolean;
   /** Invalidates retry timers when a newer rollover supersedes their state. */
   rolloverEpoch: number;
   /** Epoch currently issuing its resume from the host's compacted event. */
   resumeIssuingEpoch?: number | undefined;
   /** Epoch whose resume was accepted before the summarize request returned. */
   resumeIssuedEpoch?: number | undefined;
+  /** Rollover epoch whose compaction prompt hook has started. */
+  compactingEpoch?: number | undefined;
   /** Prevents idle fallback from racing an explicit marker being resolved. */
   textCompleting: boolean;
   /** The direct capability already ran in this turn, so the marker must not run too. */
@@ -361,11 +362,8 @@ export function createContinuationHooks(
       compactedRollover: false,
       promptPending: false,
       turnRevision: 0,
-      compactedRevision: -1,
-      idlePreparing: false,
       activeRevision: -1,
       idleDeferred: false,
-      autoIdle: false,
       rolloverEpoch: 0,
       textCompleting: false,
       directUsed: false,
@@ -444,11 +442,11 @@ export function createContinuationHooks(
       await issueResume(sessionID, report);
       if (sessions.get(sessionID) !== state || state.rolloverEpoch !== epoch) return;
       state.resumeIssuedEpoch = epoch;
+      state.compactingEpoch = undefined;
       state.pendingRollover = false;
       state.compactedRollover = false;
       state.promptPending = false;
       state.continueReport = undefined;
-      state.autoIdle = false;
       state.latestReport = undefined;
       // The accepted prompt now belongs to the host loop, not this rollover request.
       state.active = false;
@@ -477,9 +475,8 @@ export function createContinuationHooks(
     state.activeRevision = state.turnRevision;
     let compactionStarted = false;
     let compactionSucceeded = false;
-    let compactionRevision = state.turnRevision;
     try {
-      const cooldownRemaining = state.lastRollover === undefined || state.compactedRollover || state.autoIdle
+      const cooldownRemaining = state.lastRollover === undefined || state.compactedRollover
         ? 0
         : timings.cooldownMilliseconds - (Date.now() - state.lastRollover);
       if (cooldownRemaining > 0) {
@@ -504,7 +501,6 @@ export function createContinuationHooks(
         return false;
       }
       if (!state.compactedRollover) {
-        compactionRevision = state.turnRevision;
         const body = summarizeBody(state);
         if (body === undefined) {
           warnRollover(sessionID, "summarize-model-unavailable");
@@ -524,7 +520,6 @@ export function createContinuationHooks(
         // Clear the local lock even when another plugin instance handled that hook.
         state.promptPending = false;
         state.compactedRollover = true;
-        state.compactedRevision = Math.max(state.compactedRevision, compactionRevision);
         state.lastRollover = Date.now();
       }
       if (
@@ -538,7 +533,6 @@ export function createContinuationHooks(
       if (continueReport === undefined) {
         state.pendingRollover = false;
         state.compactedRollover = false;
-        state.autoIdle = false;
         state.attempts = 0;
         state.latestReport = undefined;
         return true;
@@ -549,7 +543,6 @@ export function createContinuationHooks(
       state.pendingRollover = false;
       state.compactedRollover = false;
       state.continueReport = undefined;
-      state.autoIdle = false;
       state.latestReport = undefined;
       return true;
     } catch (error) {
@@ -559,7 +552,10 @@ export function createContinuationHooks(
       const current = sessions.get(sessionID);
       if (current === state && current.rolloverEpoch === operationEpoch) {
         current.active = false;
-        if (compactionStarted && !compactionSucceeded) current.promptPending = false;
+        if (compactionStarted && !compactionSucceeded) {
+          current.promptPending = false;
+          current.compactingEpoch = undefined;
+        }
         if (current.idleDeferred) {
           current.idleDeferred = false;
           queueMicrotask(() => { void handleSessionIdle(sessionID); });
@@ -583,7 +579,6 @@ export function createContinuationHooks(
         state.promptPending = false;
         state.continueReport = undefined;
         state.latestReport = undefined;
-        state.autoIdle = false;
         warnRollover(sessionID, "retries-exhausted");
       }
     }, timings.scheduleMilliseconds * (attempt + 1)));
@@ -593,12 +588,13 @@ export function createContinuationHooks(
     const state = stateFor(sessionID);
     state.pendingRollover = true;
     state.compactedRollover = false;
-    state.autoIdle = false;
     state.rolloverEpoch += 1;
     state.resumeIssuingEpoch = undefined;
     state.resumeIssuedEpoch = undefined;
+    state.compactingEpoch = undefined;
     state.latestReport = report;
     state.continueReport = resume ? report : undefined;
+    state.latestCoordinatorReport = undefined;
     if (resume) state.attempts += 1;
     const epoch = state.rolloverEpoch;
     // session.idle can be lost when a one-shot CLI host exits. Keep this zero-delay timer referenced
@@ -682,8 +678,7 @@ export function createContinuationHooks(
       state.directUsed = true;
       queueRollover(
         context.sessionID,
-        "Tool-requested Sortie rollover. Preserve task identity, both manifests, validation history, " +
-          "batch counters, blocker state, and the exact next action from the latest messages.",
+        state.latestCoordinatorReport ?? TOOL_REQUESTED_REPORT,
         resolution.continue,
       );
       return resolution.continue
@@ -699,15 +694,27 @@ export function createContinuationHooks(
       const state = stateFor(input.sessionID);
       state.textCompleting = true;
       try {
+        const trimmed = output.text.trimStart();
+        const ownedCompactionSummary = state.compactingEpoch === state.rolloverEpoch &&
+          (state.active || state.pendingRollover);
+        if (ownedCompactionSummary) state.compactingEpoch = undefined;
         /*
          * One-shot CLI hosts can exit as soon as the compaction assistant finishes, before the
          * compacted event or summarize response. Its text-complete hook is the last awaited boundary
          * where the summary message already exists and a resume prompt can still join the same loop.
          */
-        if (output.text.startsWith(ROLLOVER_TOKEN)) {
+        if (ownedCompactionSummary || trimmed.startsWith(ROLLOVER_TOKEN)) {
           await resumeAtCompactionBoundary(input.sessionID, state);
           if (state.resumeIssuedEpoch === state.rolloverEpoch) return;
         }
+        if (
+          !state.pendingRollover && !state.active && !state.promptPending &&
+          trimmed.length > 0 && !trimmed.startsWith(ROLLOVER_TOKEN) &&
+          !trimmed.startsWith(AUTO_CONTINUE_PREFIX)
+        ) {
+          state.latestCoordinatorReport = output.text.trim();
+        }
+        if (state.directUsed && output.text.includes(ROLLOVER_MARKER)) return;
         if (output.text.includes(ROLLOVER_MARKER)) {
           /*
            * A terminal rollover still compacts a real session, so it needs the same identity proof
@@ -742,7 +749,6 @@ export function createContinuationHooks(
       } finally {
         const current = sessions.get(input.sessionID);
         if (current !== undefined) {
-          current.directUsed = false;
           current.textCompleting = false;
           if (current.idleDeferred) {
             current.idleDeferred = false;
@@ -754,6 +760,9 @@ export function createContinuationHooks(
 
     async sessionCompacting(input, output): Promise<void> {
       const state = sessions.get(input.sessionID);
+      if (state?.pendingRollover === true && (state.active || state.promptPending)) {
+        state.compactingEpoch = state.rolloverEpoch;
+      }
       if (state === undefined || (!state.active && !state.promptPending)) {
         /*
          * OpenCode may execute summarize through another plugin instance. In-memory rollover state
@@ -800,13 +809,15 @@ export function createContinuationHooks(
     observeModel(sessionID, model): void {
       if (!nonEmpty(model.providerID) || !nonEmpty(model.modelID)) return;
       const state = stateFor(sessionID);
+      state.directUsed = false;
+      state.latestCoordinatorReport = undefined;
+      state.compactingEpoch = undefined;
       state.model = { providerID: model.providerID, modelID: model.modelID };
       state.turnRevision += 1;
     },
 
     blocksTool(sessionID): boolean {
       const state = sessions.get(sessionID);
-      if (state?.autoIdle === true) return false;
       return state?.pendingRollover === true || state?.active === true || state?.promptPending === true;
     },
 
@@ -827,33 +838,6 @@ export function createContinuationHooks(
       }
       if (state?.pendingRollover === true) {
         await runRollover(sessionID);
-        return;
-      }
-      if (
-        state === undefined || state.active || state.idlePreparing || !policy().enabled ||
-        state.turnRevision <= state.compactedRevision || client?.session?.summarize === undefined ||
-        summarizeBody(state) === undefined
-      ) return;
-      state.idlePreparing = true;
-      try {
-        const identity = await readIdentity(sessionID);
-        if (
-          identity === undefined || !nonEmpty(identity.agent) || nonEmpty(identity.parentID) ||
-          identity.agent !== policy().agent
-        ) return;
-        state.pendingRollover = true;
-        state.compactedRollover = false;
-        state.continueReport = undefined;
-        state.latestReport = undefined;
-        state.autoIdle = true;
-        state.rolloverEpoch += 1;
-      } finally {
-        state.idlePreparing = false;
-      }
-      const epoch = state.rolloverEpoch;
-      const completed = await runRollover(sessionID);
-      if (!completed && state.pendingRollover && state.rolloverEpoch === epoch) {
-        scheduleRollover(sessionID, 0, epoch);
       }
   }
 }

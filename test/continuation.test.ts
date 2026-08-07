@@ -141,6 +141,10 @@ test("the direct capability compacts the root coordinator and resumes the same s
   const host = fakeHost({ agent: COORDINATOR });
   const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
 
+  await hooks.textComplete(
+    { sessionID: "ses_root" },
+    { text: "batchAttempted=2 batchCommitted=1 batchReconciled=1; next=card-3" },
+  );
   const result = await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR });
   assert.equal(result, "SORTIE_COMPACT_AND_CONTINUE_QUEUED");
   await settle();
@@ -154,7 +158,70 @@ test("the direct capability compacts the root coordinator and resumes the same s
   assert.equal(host.promptCalls.length, 1);
   assert.equal(host.promptCalls[0]!.agent, COORDINATOR);
   assert.ok(host.promptCalls[0]!.text.startsWith(AUTO_CONTINUE_PREFIX));
-  assert.match(host.promptCalls[0]!.text, /batchAttempted\/batchCommitted\/batchReconciled/);
+  assert.match(host.promptCalls[0]!.text, /batchAttempted=2 batchCommitted=1 batchReconciled=1; next=card-3/);
+  assert.doesNotMatch(host.promptCalls[0]!.text, /Tool-requested Sortie rollover/);
+});
+
+test("the direct capability uses the current report in both compaction and resume prompts", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  let hooks!: ReturnType<typeof createContinuationHooks>;
+  let compactionPrompt = "";
+  host.client.session!.summarize = async (request) => {
+    host.summarizeCalls.push({ id: request.path.id, body: request.body });
+    const output: { prompt?: string } = {};
+    await hooks.sessionCompacting({ sessionID: request.path.id }, output);
+    compactionPrompt = output.prompt ?? "";
+    return { data: true };
+  };
+  hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
+  const report = "batchAttempted=1 batchCommitted=1 batchReconciled=0; next=visual-check";
+  await hooks.textComplete({ sessionID: "ses_root" }, { text: report });
+  await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR });
+  await settle();
+  assert.match(compactionPrompt, new RegExp(report));
+  assert.match(host.promptCalls[0]!.text, new RegExp(report));
+});
+
+test("the direct capability keeps its generic fallback when no current report exists", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
+  await hooks.textComplete({ sessionID: "ses_root" }, { text: `${ROLLOVER_TOKEN}\nsummary` });
+  await hooks.textComplete({ sessionID: "ses_root" }, { text: `${AUTO_CONTINUE_PREFIX}\nrequest` });
+  await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR });
+  await settle();
+  assert.match(host.promptCalls[0]!.text, /Tool-requested Sortie rollover/);
+});
+
+test("a second direct capability call in the same turn is rejected without another rollover", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
+  assert.equal(
+    await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR }),
+    "SORTIE_COMPACT_AND_CONTINUE_QUEUED",
+  );
+  assert.equal(
+    await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR }),
+    "SORTIE_CONTINUATION_REJECTED: pending-autocontinue",
+  );
+  await settle();
+  assert.equal(host.summarizeCalls.length, 1);
+  assert.equal(host.promptCalls.length, 1);
+});
+
+test("a second rollover carries the checkpoint from its resumed user turn", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
+  await hooks.textComplete({ sessionID: "ses_root" }, { text: "first checkpoint" });
+  await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR });
+  await settle();
+
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-luna" });
+  await hooks.textComplete({ sessionID: "ses_root" }, { text: "second checkpoint; next=unit-3" });
+  await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR });
+  await settle();
+  assert.equal(host.promptCalls.length, 2);
+  assert.match(host.promptCalls[1]!.text, /second checkpoint; next=unit-3/);
+  assert.doesNotMatch(host.promptCalls[1]!.text, /Tool-requested Sortie rollover/);
 });
 
 test("the direct capability starts before its delayed idle-event fallback", async () => {
@@ -193,7 +260,8 @@ test("the compaction summary issues the resume before a one-shot host can exit",
   let hooks!: ReturnType<typeof createContinuationHooks>;
   host.client.session!.summarize = async (request) => {
     host.summarizeCalls.push({ id: request.path.id, body: request.body });
-    await hooks.textComplete({ sessionID: request.path.id }, { text: `${ROLLOVER_TOKEN}\nsummary` });
+    await hooks.sessionCompacting({ sessionID: request.path.id }, {});
+    await hooks.textComplete({ sessionID: request.path.id }, { text: "## 目的\nsummary without rollover token" });
     return { data: true };
   };
   hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
@@ -204,6 +272,31 @@ test("the compaction summary issues the resume before a one-shot host can exit",
   assert.equal(host.promptCalls.length, 1, "post-summary fallback must not duplicate the early resume");
   assert.ok(host.promptCalls[0]!.text.startsWith(AUTO_CONTINUE_PREFIX));
   assert.equal(hooks.blocksTool("ses_root"), false);
+});
+
+test("a new user turn clears an armed compaction boundary before ordinary text completes", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  let hooks!: ReturnType<typeof createContinuationHooks>;
+  let summaryStarted!: () => void;
+  const started = new Promise<void>((resolve) => { summaryStarted = resolve; });
+  let releaseSummary!: () => void;
+  const summaryReady = new Promise<void>((resolve) => { releaseSummary = resolve; });
+  host.client.session!.summarize = async (request) => {
+    host.summarizeCalls.push({ id: request.path.id, body: request.body });
+    await hooks.sessionCompacting({ sessionID: request.path.id }, {});
+    summaryStarted();
+    await summaryReady;
+    return { data: true };
+  };
+  hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
+  await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR });
+  await started;
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-luna" });
+  await hooks.textComplete({ sessionID: "ses_root" }, { text: "ordinary next-turn text" });
+  assert.equal(host.promptCalls.length, 0);
+  releaseSummary();
+  await settle();
+  assert.equal(host.promptCalls.length, 1, "post-summary fallback still resumes exactly once");
 });
 
 test("an in-flight compaction-boundary resume is not duplicated after summarize resolves", async () => {
@@ -379,6 +472,14 @@ test("the marker fallback continues only when the direct capability did not run"
   // Exactly one continuation mechanism may act on one turn.
   assert.equal(both.summarizeCalls.length, 1);
   assert.equal(both.promptCalls.length, 1);
+
+  bothHooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-luna" });
+  await bothHooks.textComplete(
+    { sessionID: "ses_root" },
+    { text: `next turn terminal\n${CONTINUATION_MARKER}` },
+  );
+  await settle();
+  assert.equal(both.summarizeCalls.length, 2, "the next user turn clears the direct-tool flag");
 });
 
 test("the stop marker compacts without resuming and clears the continuation budget", async () => {
@@ -387,6 +488,7 @@ test("the stop marker compacts without resuming and clears the continuation budg
 
   await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR });
   await settle();
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-luna" });
   await hooks.textComplete({ sessionID: "ses_root" }, { text: `batch stop\n${ROLLOVER_MARKER}` });
   await settle();
   assert.equal(host.promptCalls.length, 1, "the stop marker must not resume the batch");
@@ -655,45 +757,31 @@ test("a queued rollover blocks later coordinator tools until compaction complete
   assert.equal(hooks.blocksTool("ses_root"), false);
 });
 
-test("root coordinator idle compacts each observed turn once without resuming", async () => {
+test("root coordinator idle never starts an implicit rollover", async () => {
   const host = fakeHost({ agent: COORDINATOR });
   const hooks = createContinuationHooks(host.client, "/project", UNPINNED_POLICY, FAST);
   hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-luna" });
   await hooks.sessionIdle("ses_root");
-  assert.equal(host.summarizeCalls.length, 1);
+  await hooks.sessionIdle("ses_root");
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-luna" });
+  await hooks.sessionIdle("ses_root");
+  assert.equal(host.summarizeCalls.length, 0);
   assert.equal(host.promptCalls.length, 0);
-
-  await hooks.sessionIdle("ses_root");
-  assert.equal(host.summarizeCalls.length, 1, "duplicate idle cannot compact the same turn twice");
-
-  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-luna" });
-  await hooks.sessionIdle("ses_root");
-  assert.equal(host.summarizeCalls.length, 2);
-
-  const foreign = fakeHost({ agent: "build" });
-  const foreignHooks = createContinuationHooks(foreign.client, "/project", UNPINNED_POLICY, FAST);
-  foreignHooks.observeModel("ses_plain", { providerID: "openai", modelID: "gpt-5.6-luna" });
-  await foreignHooks.sessionIdle("ses_plain");
-  assert.equal(foreign.summarizeCalls.length, 0);
 });
 
-test("automatic idle compaction bypasses rollover cooldown without blocking tools", async () => {
+test("idle starts an explicitly queued rollover before its delayed fallback", async () => {
   const host = fakeHost({ agent: COORDINATOR });
-  const hooks = createContinuationHooks(host.client, "/project", UNPINNED_POLICY, {
+  const hooks = createContinuationHooks(host.client, "/project", POLICY, {
     ...FAST,
-    cooldownMilliseconds: 60_000,
+    scheduleMilliseconds: 60_000,
   });
-  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-luna" });
+  await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR });
   await hooks.sessionIdle("ses_root");
-  await hooks.sessionCompacting({ sessionID: "ses_root" }, {});
-  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-luna" });
-  const second = hooks.sessionIdle("ses_root");
-  assert.equal(hooks.blocksTool("ses_root"), false);
-  await second;
-  assert.equal(host.summarizeCalls.length, 2);
+  assert.equal(host.summarizeCalls.length, 1);
+  assert.equal(host.promptCalls.length, 1);
 });
 
-test("automatic stop clears stale reports and resets the continuation budget", async () => {
+test("the stop marker clears stale reports and resets the continuation budget", async () => {
   const host = fakeHost({ agent: COORDINATOR });
   const hooks = createContinuationHooks(
     host.client,
@@ -707,10 +795,9 @@ test("automatic stop clears stale reports and resets the continuation budget", a
     "SORTIE_COMPACT_AND_CONTINUE_QUEUED",
   );
   await settle();
-  await hooks.sessionCompacting({ sessionID: "ses_root" }, {});
-
   hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-luna" });
-  await hooks.sessionIdle("ses_root");
+  await hooks.textComplete({ sessionID: "ses_root" }, { text: `terminal\n${ROLLOVER_MARKER}` });
+  await settle();
   const prompt = { prompt: "host" };
   await hooks.sessionCompacting({ sessionID: "ses_root" }, prompt);
   assert.doesNotMatch(prompt.prompt, /Exact latest coordinator final report/);
@@ -740,30 +827,6 @@ test("an explicit continuation marker wins when idle arrives during marker resol
   await settle();
   assert.equal(host.summarizeCalls.length, 1);
   assert.equal(host.promptCalls.length, 1);
-});
-
-test("a turn started during compaction remains eligible for its own idle compaction", async () => {
-  const host = fakeHost({ agent: COORDINATOR });
-  let releaseSummary!: () => void;
-  const summaryReady = new Promise<void>((resolve) => { releaseSummary = resolve; });
-  host.client.session!.summarize = async (request) => {
-    host.summarizeCalls.push({ id: request.path.id, body: request.body });
-    await summaryReady;
-    return { data: true };
-  };
-  const hooks = createContinuationHooks(host.client, "/project", UNPINNED_POLICY, {
-    ...FAST,
-    scheduleMilliseconds: 60_000,
-  });
-  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-luna" });
-  const firstIdle = hooks.sessionIdle("ses_root");
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-luna" });
-  await hooks.sessionIdle("ses_root");
-  releaseSummary();
-  await firstIdle;
-  await settle();
-  assert.equal(host.summarizeCalls.length, 2);
 });
 
 test("cooldown defers a queued rollover without exhausting it", async () => {
