@@ -20,7 +20,7 @@ OpenCode 標準のエージェントや設定は置き換えない。
   OpenCode セッションには影響しない。
 - **過剰に広がらない並列調査** — 各 worker handoff の前に境界付き scout を必ず3体だけ使う。
 - **厳密な変更範囲** — source manifest または operation manifest が編集と handoff を制限。
-- **実装責任を一本化** — 専用 Sol worker が implementation、remediation、
+- **実装責任を一本化** — 専用 worker が implementation、remediation、
   blocker-resolution を担当。
 - **証拠を伴う完了** — canonical validation、リスク別レビュー、terminal evidence の gate 後、
   coordinator だけが完了と commit を管理。
@@ -101,8 +101,8 @@ global asset なら `~/.config/opencode/opencode.json`、project なら `.openco
 追加後は OpenCode を再起動する。`plugin` エントリには package 名を指定する。
 `sortie-dogs/plugin` は import specifier であり plugin specifier ではない。
 
-`dog-coordinator` と `dog-scout` のデフォルト model は `openai/gpt-5.6-luna`。両 role で
-別の model を使う場合、次を `.opencode/sortie-dogs.json` に保存する。
+`dog-coordinator` は session で選択した model を維持する。`dog-scout` のデフォルト model は
+`openai/gpt-5.6-luna`。いずれかの role を固定する場合、次を `.opencode/sortie-dogs.json` に保存する。
 
 ```json
 {
@@ -202,8 +202,8 @@ global file、project file、`SORTIE_DOGS_CONFIG`、plugin factory options。Ope
   作成して絶対 path を渡し、bind する child 自身が直前に built-in Read で読む。
 - `readOnlyTools`: MCP tool など、file を変更しない host 固有 tool 名を追加する。
   未知の tool は bind 済み session では既定で拒否される。
-- `dedicatedWorkerModel`: 全 worker role が解決する単一 model。既定は `openai/gpt-5.6-sol` /
-  variant `medium`。この model を使えない環境、または別の worker effort を使いたい場合は自分の
+- `dedicatedWorkerModel`: 全 worker role が解決する単一 model。既定は `openai/gpt-5.6-luna` /
+  variant `max`。この model を使えない環境、または別の worker effort を使いたい場合は自分の
   model を宣言する。worker role は常にこの単一 target に解決され、role ごとの routing はできない。
 - `reflection`: activated root `dog-coordinator` だけが使える process prevention。既定無効。
   opt-in 後の run / project layer は既定有効、project 間で共有する global storage layer は明示的に
@@ -230,16 +230,13 @@ host 側の欠陥を 1 つだけ in-place で修復する。subagent の結果�
 
 ## モデルルーティング
 
-`dog-coordinator` と `dog-scout` のデフォルトは `openai/gpt-5.6-luna` の `xhigh`
-variant。この構成を推奨する。境界付き prompt、簡潔な scout evidence、不要な context / tool turn
-の削減により、品質維持に配慮しつつ token 使用量を抑えられる可能性がある。Project-local routing
-で両 role のデフォルトを上書き可能。
+`dog-coordinator` には built-in route がなく、session で選択した model を維持する。
+`dog-scout` のデフォルトは `openai/gpt-5.6-luna` の `high` variant。Project-local routing で
+どちらの role も明示的に固定できる。
 
 `implementation`、`remediation`、`blocker-resolution`、`dog-worker` は専用 worker target
-`openai/gpt-5.6-sol` の `medium` variant に固定される。worker effort は review effort より意図的に
-低い。risk の高い候補には source review が必須で、worker は返された finding を remediation する。
-つまり loop 側が弱い実装をやり直す設計なので、初回から最大 effort を払っても reviewer が供給する
-精度を先払いするだけになりやすい。先払いしたい場合は `dedicatedWorkerModel` を引き上げる。
+`openai/gpt-5.6-luna` の `max` variant に固定される。強い worker model を先に使う場合は
+`dedicatedWorkerModel` に `openai/gpt-5.6-sol` を宣言する。
 `modelRouting` では置換できず、移動できるのは `dedicatedWorkerModel` のみ。その他の明示
 route は Preferred target から順序付き fallback へ決定的に解決する。Built-in default も明示 route
 もない role は、OpenCode で選択済みの model を維持する。
@@ -255,10 +252,10 @@ route は Preferred target から順序付き fallback へ決定的に解決す�
 {
   "modelRouting": {
     "dog-coordinator": {
-      "preferred": { "model": "openai/gpt-5.6-luna", "variant": "xhigh" }
+      "preferred": { "model": "openai/gpt-5.6-luna", "variant": "max" }
     },
     "dog-scout": {
-      "preferred": { "model": "openai/gpt-5.6-luna", "variant": "xhigh" }
+      "preferred": { "model": "openai/gpt-5.6-luna", "variant": "high" }
     },
     "dog-reviewer": {
       "preferred": { "model": "anthropic/claude-opus-5" },
@@ -271,7 +268,7 @@ route は Preferred target から順序付き fallback へ決定的に解決す�
   "modelCatalog": {
     "project": [
       { "model": "openai/gpt-5.6-sol", "variants": ["medium", "xhigh"] },
-      { "model": "openai/gpt-5.6-luna", "variants": ["xhigh"] },
+      { "model": "openai/gpt-5.6-luna", "variants": ["max", "high"] },
       { "model": "anthropic/claude-opus-5" }
     ]
   }
@@ -289,7 +286,7 @@ stage、commit、ユーザー対応を行わない。
 
 ## 更新と移行
 
-[Release v0.3.3](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.3.3)
+[Release v0.3.4](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.3.4)
 
 依存 asset を新しい release に更新後、対象 project root で再実行する。
 

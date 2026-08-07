@@ -111,6 +111,7 @@ export interface ReviewArtifact {
   readonly candidateId: string;
   readonly sourceFingerprint: string;
   readonly acceptance: readonly string[];
+  readonly changedLogicSummary: readonly string[];
   readonly manifest: readonly string[];
   readonly riskTags: readonly SourceReviewRiskTag[];
   readonly riskBearingHunks: readonly string[];
@@ -209,6 +210,10 @@ function isStringList(value: unknown): value is readonly string[] {
   return Array.isArray(value) && value.every(isNonEmptyString);
 }
 
+function isNonEmptyStringList(value: unknown): value is readonly string[] {
+  return isStringList(value) && value.length > 0;
+}
+
 /** Strict bounded schema; unknown fields and opaque/raw payloads are rejected. */
 export function validateReviewArtifact(
   value: unknown,
@@ -231,6 +236,7 @@ export function validateReviewArtifact(
     "candidateId",
     "sourceFingerprint",
     "acceptance",
+    "changedLogicSummary",
     "manifest",
     "riskTags",
     "riskBearingHunks",
@@ -242,6 +248,7 @@ export function validateReviewArtifact(
     !isNonEmptyString(value.candidateId) ||
     !isNonEmptyString(value.sourceFingerprint) ||
     !isStringList(value.acceptance) ||
+    !isNonEmptyStringList(value.changedLogicSummary) ||
     !isStringList(value.manifest) ||
     !Array.isArray(value.riskTags) ||
     !value.riskTags.every(isSourceReviewRiskTag) ||
@@ -359,6 +366,7 @@ function sameReviewScope(initial: ReviewArtifact, verification: ReviewArtifact):
   return initial.schemaVersion === verification.schemaVersion &&
     initial.candidateId === verification.candidateId &&
     sameStringList(initial.acceptance, verification.acceptance) &&
+    sameStringList(initial.changedLogicSummary, verification.changedLogicSummary) &&
     sameStringList(initial.manifest, verification.manifest) &&
     sameStringList(initial.riskTags, verification.riskTags) &&
     sameStringList(initial.riskBearingHunks, verification.riskBearingHunks) &&

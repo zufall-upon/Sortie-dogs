@@ -682,6 +682,7 @@ function reviewArtifact(overrides: Partial<ReviewArtifact> = {}): ReviewArtifact
     candidateId: "candidate-1",
     sourceFingerprint: "source-v1",
     acceptance: ["preserve behavior"],
+    changedLogicSummary: ["consultation.ts: validate the strict review artifact schema before dispatch"],
     manifest: ["src/core/consultation.ts"],
     riskTags: ["public-api"],
     riskBearingHunks: ["src/core/consultation.ts:1-20"],
@@ -724,9 +725,22 @@ test("review artifact and verdict validators reject extra, raw, oversized, and i
     ...reviewArtifact(),
     validation: { command: "package test", exit: 0, fingerprint: "" },
   }), { ok: false, code: "ARTIFACT_SCHEMA_INVALID" });
+  const { changedLogicSummary: omittedChangedLogicSummary, ...withoutChangedLogicSummary } = reviewArtifact();
   const { riskBearingHunks: omittedRiskHunks, ...withoutRiskHunks } = reviewArtifact();
   const { invariants: omittedInvariants, ...withoutInvariants } = reviewArtifact();
-  assert.ok(omittedRiskHunks.length > 0 && omittedInvariants.length > 0);
+  assert.ok(omittedChangedLogicSummary.length > 0 && omittedRiskHunks.length > 0 && omittedInvariants.length > 0);
+  assert.deepEqual(validateReviewArtifact(withoutChangedLogicSummary), {
+    ok: false,
+    code: "ARTIFACT_SCHEMA_INVALID",
+  });
+  assert.deepEqual(validateReviewArtifact(reviewArtifact({ changedLogicSummary: [] })), {
+    ok: false,
+    code: "ARTIFACT_SCHEMA_INVALID",
+  });
+  assert.deepEqual(validateReviewArtifact(reviewArtifact({ changedLogicSummary: [""] })), {
+    ok: false,
+    code: "ARTIFACT_SCHEMA_INVALID",
+  });
   assert.deepEqual(validateReviewArtifact(withoutRiskHunks), {
     ok: false,
     code: "ARTIFACT_SCHEMA_INVALID",
@@ -822,6 +836,7 @@ test("review gate rejects stale, mismatched, and reused fingerprints and allows 
   }), { ok: false, code: "REVIEW_SCOPE_MISMATCH" });
   for (const artifact of [
     reviewArtifact({ sourceFingerprint: "source-v2", acceptance: [] }),
+    reviewArtifact({ sourceFingerprint: "source-v2", changedLogicSummary: ["different logic scope"] }),
     reviewArtifact({ sourceFingerprint: "source-v2", riskTags: [] }),
     reviewArtifact({ sourceFingerprint: "source-v2", riskBearingHunks: [] }),
     reviewArtifact({ sourceFingerprint: "source-v2", invariants: [] }),
@@ -991,11 +1006,20 @@ test("generated assets require the user's language, per-line output, and emoji-m
   }
 
   // A tool-free reviewer cannot recover evidence the coordinator omitted from its inline artifact.
-  assert.match(
-    coordinator.content,
-    /Before SourceReview dispatch[\s\S]+acceptance criteria, exact manifest, a concise summary of the changed logic, and\s+canonical validation command\/exit\/fingerprint/i,
+  const sourceReviewPreflight = coordinator.content.match(
+    /SOURCE_REVIEW_PREFLIGHT_FIXTURE\r?\n([\s\S]+?)\r?\nEND_SOURCE_REVIEW_PREFLIGHT_FIXTURE/,
   );
-  assert.match(coordinator.content, /A path where the reviewer could obtain a diff[\s\S]+is not a diff summary/i);
+  assert.ok(sourceReviewPreflight);
+  assert.match(sourceReviewPreflight[1], /required_artifact: acceptance \+ exact manifest \+ non-empty changedLogicSummary \+ canonical validation command\/exit\/fingerprint/);
+  assert.match(sourceReviewPreflight[1], /acceptance_coverage: every acceptance item explicitly maps to at least one changedLogicSummary entry/);
+  assert.match(sourceReviewPreflight[1], /dispatch_guard: dispatch dog-reviewer only when required_artifact and acceptance_coverage are complete/);
+  assert.match(sourceReviewPreflight[1], /incomplete_action: fail closed before SourceReview dispatch/);
+  assert.match(coordinator.content, /A path where the reviewer could obtain a diff[\s\S]+is not a changed logic summary/i);
+
+  const reviewer = runtimeAssets.find((asset) => asset.name === "dog-reviewer");
+  assert.ok(reviewer);
+  assert.match(reviewer.content, /Confirm every acceptance item explicitly\s+maps to at least one changedLogicSummary entry/i);
+  assert.match(reviewer.content, /Missing or incomplete coverage is a concrete finding, never PASS/i);
 
   const worker = runtimeAssets.find((candidate) => candidate.name === "dog-worker");
   assert.ok(worker);

@@ -19,7 +19,7 @@ Sortie-dogs 是一个按需启用的 OpenCode 编排插件。它把任务依次�
   普通 OpenCode 会话不受影响。
 - **并行调研不会失控** — 每次 worker handoff 前固定使用三个有边界的 scout，不会无限扩散。
 - **写入范围精确可控** — source manifest 或 operation manifest 约束编辑和 handoff。
-- **实现责任集中** — 专用 Sol worker 负责 implementation、remediation 和 blocker-resolution。
+- **实现责任集中** — 专用 worker 负责 implementation、remediation 和 blocker-resolution。
 - **先验证，后完成** — canonical validation、按风险 review 和 terminal evidence 共同控制由
   coordinator 负责的完成与 commit。
 - **长任务能够恢复** — restart recovery 与有界 compaction 沿用 handoff context，不会静默重来。
@@ -98,8 +98,8 @@ plugin bridge。
 随后重启 OpenCode。`plugin` 条目必须写 package 名称；`sortie-dogs/plugin` 是 import specifier，
 不是 plugin specifier。
 
-`dog-coordinator` 和 `dog-scout` 默认使用 `openai/gpt-5.6-luna`。如需为这两个角色改用其他模型，
-请将以下配置保存为 `.opencode/sortie-dogs.json`：
+`dog-coordinator` 保留你为会话选择的模型，`dog-scout` 默认使用 `openai/gpt-5.6-luna`。
+如需固定任一角色的模型，请将以下配置保存为 `.opencode/sortie-dogs.json`：
 
 ```json
 {
@@ -193,8 +193,8 @@ factory options，请使用全局文件保存持久的全局设置。
   必须在 bind 前立即使用 built-in Read 读取该文件。
 - `readOnlyTools`：追加不会修改文件的宿主专用工具名，例如 MCP 工具。
   对已绑定的会话，未知工具默认被拒绝。
-- `dedicatedWorkerModel`：所有 worker 角色解析到的唯一模型。默认为 `openai/gpt-5.6-sol`
-  与变体 `medium`；当该模型不可用、或你想要不同的 worker effort 时，请声明自己的模型。worker 角色始终解析到这一个目标，
+- `dedicatedWorkerModel`：所有 worker 角色解析到的唯一模型。默认为 `openai/gpt-5.6-luna`
+  与变体 `max`；当该模型不可用、或你想要不同的 worker effort 时，请声明自己的模型。worker 角色始终解析到这一个目标，
   无法按角色分别路由。
 - `reflection`：仅供已激活的 root `dog-coordinator` 使用的 process prevention，默认关闭。
   opt-in 后 run / project 层默认开启；跨项目共享的 global storage 层只有显式开启才生效。
@@ -219,15 +219,12 @@ OpenCode 的标准智能体、角色、设置和其他会话均保持原样。
 
 ## 模型路由
 
-`dog-coordinator` 和 `dog-scout` 默认使用 `openai/gpt-5.6-luna` 的 `xhigh` variant，这是推荐的
-平衡方案：有边界的 prompt、简洁的 scout evidence，以及减少不必要的 context / tool turn，可以在
-保持质量的同时降低 token 使用量。项目级 routing 可以覆盖这两个角色的默认设置。
+`dog-coordinator` 没有 built-in route，会保留会话中选择的模型。`dog-scout` 默认使用
+`openai/gpt-5.6-luna` 的 `high` variant。项目级 routing 可以显式固定这两个角色。
 
 `implementation`、`remediation`、`blocker-resolution` 和 `dog-worker` 始终使用专用 worker
-target，即 `openai/gpt-5.6-sol` 的 `medium` variant。worker effort 被刻意设置在 review effort 之下：
-高风险候选必须经过 source review，worker 需要修复返回的 finding，也就是说这套循环本来就会重跑质量不足的
-实现；首轮就付出最高 effort，往往只是提前买下 reviewer 会提供的准确性。想要提前支付时，请调高
-`dedicatedWorkerModel`。`modelRouting` 不能替换这些路由，只有 `dedicatedWorkerModel` 能移动它们。其他显式配置的路由
+target，即 `openai/gpt-5.6-luna` 的 `max` variant。若要预先使用更强的 worker 模型，请将
+`dedicatedWorkerModel` 声明为 `openai/gpt-5.6-sol`。`modelRouting` 不能替换这些路由，只有 `dedicatedWorkerModel` 能移动它们。其他显式配置的路由
 会依次尝试 preferred target 和有序 fallback。没有 built-in default 或显式路由的角色会保留 OpenCode
 已选择的模型。
 
@@ -241,10 +238,10 @@ target，即 `openai/gpt-5.6-sol` 的 `medium` variant。worker effort 被刻意
 {
   "modelRouting": {
     "dog-coordinator": {
-      "preferred": { "model": "openai/gpt-5.6-luna", "variant": "xhigh" }
+      "preferred": { "model": "openai/gpt-5.6-luna", "variant": "max" }
     },
     "dog-scout": {
-      "preferred": { "model": "openai/gpt-5.6-luna", "variant": "xhigh" }
+      "preferred": { "model": "openai/gpt-5.6-luna", "variant": "high" }
     },
     "dog-reviewer": {
       "preferred": { "model": "anthropic/claude-opus-5" },
@@ -257,7 +254,7 @@ target，即 `openai/gpt-5.6-sol` 的 `medium` variant。worker effort 被刻意
   "modelCatalog": {
     "project": [
       { "model": "openai/gpt-5.6-sol", "variants": ["medium", "xhigh"] },
-      { "model": "openai/gpt-5.6-luna", "variants": ["xhigh"] },
+      { "model": "openai/gpt-5.6-luna", "variants": ["max", "high"] },
       { "model": "anthropic/claude-opus-5" }
     ]
   }
@@ -274,7 +271,7 @@ canonical validation 后独立审查高风险候选项。二者都不负责实�
 
 ## 更新与迁移
 
-[Release v0.3.3](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.3.3)
+[Release v0.3.4](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.3.4)
 
 将依赖替换为新版 Release asset 后，在目标项目根目录再次运行：
 

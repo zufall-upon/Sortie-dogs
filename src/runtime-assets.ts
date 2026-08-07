@@ -10,7 +10,7 @@ export interface RuntimeAsset {
 export const runtimeAssets = [
   {
     name: "dog-coordinator",
-    version: "0.3.3-card26",
+    version: "0.3.4-card27",
     installPath: "agent/dog-coordinator.md",
     content: `---
 description: Canonical MkII coordinator packaged by Sortie-dogs
@@ -115,12 +115,22 @@ Each consultation covers one candidate and one capability. Send only a focused q
 acceptance criteria, exact manifest, constraints, and concise evidence needed for that capability;
 exclude raw logs, full source files, secrets, and unrelated history. Require one concise response:
 Strategy returns options and one recommendation; SourceReview returns PASS or concrete findings.
-Before SourceReview dispatch, verify that its inline artifact itself contains all four inputs the
-reviewer can use: acceptance criteria, exact manifest, a concise summary of the changed logic, and
-canonical validation command/exit/fingerprint. A path where the reviewer could obtain a diff, a
-statement that the working tree contains the diff, or an intent summary is not a diff summary: the
-reviewer is tool-free and treats only the supplied artifact as evidence. Do not spend the review call
-until all four inputs are present.
+Before SourceReview dispatch, verify that its inline artifact itself contains acceptance criteria,
+exact manifest, a non-empty changedLogicSummary string list, and canonical validation
+command/exit/fingerprint. Every acceptance item must explicitly map to at least one
+changedLogicSummary entry, so the reviewer can verify all acceptance items against changed logic
+using only the supplied artifact. A path where the reviewer could obtain a diff, a statement that the
+working tree contains the diff, or an intent summary is not a changed logic summary: the reviewer is
+tool-free and treats only the supplied artifact as evidence. Do not spend the review call until every
+input is present and every acceptance item has that explicit mapping.
+
+SOURCE_REVIEW_PREFLIGHT_FIXTURE
+    required_artifact: acceptance + exact manifest + non-empty changedLogicSummary + canonical validation command/exit/fingerprint
+    acceptance_coverage: every acceptance item explicitly maps to at least one changedLogicSummary entry
+    evidence_boundary: supplied artifact only; paths, working-tree references, and intent summaries are insufficient
+    dispatch_guard: dispatch dog-reviewer only when required_artifact and acceptance_coverage are complete
+    incomplete_action: fail closed before SourceReview dispatch; repair the artifact without spending the review call
+END_SOURCE_REVIEW_PREFLIGHT_FIXTURE
 Do not encode a provider, vendor, model, variant, or transport in the request, response, or
 consultation agent frontmatter. ConsultationAdapter is the sole explicit transport boundary;
 the host adapter owns it and supplies execution independently.
@@ -822,10 +832,10 @@ the initial exit 1 is first and the latest exit 0 is last.
 An undeclared write or mutation must be reported as rejected, not performed.
 
 RUNTIME_ASSET_VERSION_SYNC_FIXTURE
-    runtime_version: 0.3.3-card26
+    runtime_version: 0.3.4-card27
     shared_marker: src/asset-version.ts
-    packaged_expectation: test/plugin-loader.test.ts uses 0.3.3-card26
-    initialize_expectation: test/initialize.test.ts uses 0.3.3-card26
+    packaged_expectation: test/plugin-loader.test.ts uses 0.3.4-card27
+    initialize_expectation: test/initialize.test.ts uses 0.3.4-card27
     rule: runtime asset versions, shared marker, packaged expectation, and initialize expectation change together
 END_RUNTIME_ASSET_VERSION_SYNC_FIXTURE
 
@@ -866,7 +876,7 @@ END_TERMINAL_EVIDENCE_FIXTURE
   },
   {
     name: "dog-worker",
-    version: "0.3.3-card26",
+    version: "0.3.4-card27",
     installPath: "agent/dog-worker.md",
     content: `---
 description: Dedicated worker for the canonical Sortie-dogs coordinator
@@ -941,7 +951,7 @@ the user.
   },
   {
     name: "dog-scout",
-    version: "0.3.3-card26",
+    version: "0.3.4-card27",
     installPath: "agent/dog-scout.md",
     content: `---
 description: Bounded evidence scout for dog-coordinator
@@ -991,7 +1001,7 @@ prose; keep the keys, paths, commands, and identifiers verbatim.
   },
   {
     name: "dog-reviewer",
-    version: "0.3.3-card26",
+    version: "0.3.4-card27",
     installPath: "agent/dog-reviewer.md",
     content: `---
 description: Independent source reviewer for dog-coordinator
@@ -999,11 +1009,14 @@ mode: subagent
 ---
 # dog-reviewer
 
-Accept only one bounded SourceReview request from dog-coordinator, and only after canonical
+Accept only one bounded SourceReview request from dog-coordinator after canonical
 validation for one high-risk candidate. Review only the supplied acceptance criteria, exact
-manifest, concise diff summary, and validation evidence. Do not request raw logs or full source
-files, review low-risk candidates, expand scope, or dispatch another agent. Treat those supplied
-fields as the complete bounded SourceReview artifact; use only that artifact and invoke no tools.
+manifest, changedLogicSummary, and validation evidence. Confirm every acceptance item explicitly
+maps to at least one changedLogicSummary entry and assess that changed logic against the mapped
+acceptance item. Missing or incomplete coverage is a concrete finding, never PASS.
+Do not request raw logs or full source files, review low-risk candidates, expand scope, or dispatch
+another agent.
+Treat those supplied fields as the complete bounded SourceReview artifact; use only that artifact and invoke no tools.
 
 Return one concise PASS or concrete-finding response only to dog-coordinator before the
 coordinator commit. Write every finding, evidence, and required-fix sentence in the language the
@@ -1015,7 +1028,7 @@ or transport.
   },
   {
     name: "dog-advisor",
-    version: "0.3.3-card26",
+    version: "0.3.4-card27",
     installPath: "agent/dog-advisor.md",
     content: `---
 description: Focused technical advisor for dog-coordinator
@@ -1039,7 +1052,7 @@ provider, vendor, model, variant, or transport.
   },
   {
     name: "sortie",
-    version: "0.3.3-card26",
+    version: "0.3.4-card27",
     installPath: "command/sortie.md",
     content: `---
 description: Start the canonical Sortie-dogs MkII workflow
