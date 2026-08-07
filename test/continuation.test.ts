@@ -274,6 +274,44 @@ test("the compaction summary issues the resume before a one-shot host can exit",
   assert.equal(hooks.blocksTool("ses_root"), false);
 });
 
+test("fake host event permutations converge on one compaction and one same-root resume", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  let hooks!: ReturnType<typeof createContinuationHooks>;
+  host.client.session!.summarize = async (request) => {
+    host.summarizeCalls.push({ id: request.path.id, body: request.body });
+    await hooks.sessionCompacting({ sessionID: request.path.id }, {});
+    await hooks.sessionIdle(request.path.id);
+    await hooks.sessionCompacted(request.path.id);
+    await hooks.textComplete(
+      { sessionID: request.path.id },
+      { text: `${ROLLOVER_TOKEN}\nsummary` },
+    );
+    return { data: true };
+  };
+  hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
+  const report = [
+    "task_id=task-batch-continuation-r1",
+    "source_manifest=src/plugin/continuation.ts,test/continuation.test.ts",
+    "operation_manifest=operation-manifest.json",
+    "validation=npm test|exit 0|fingerprint-a;git diff --check|exit 0|fingerprint-b",
+    "batchTarget=3 batchAttempted=2 batchCommitted=1 batchReconciled=1",
+    "blocker=none next=independent-unit-3",
+  ].join("\n");
+  await hooks.textComplete({ sessionID: "ses_root" }, { text: report });
+  await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR });
+  await settle();
+
+  await Promise.all([
+    hooks.sessionIdle("ses_root"),
+    hooks.sessionCompacted("ses_root"),
+    hooks.textComplete({ sessionID: "ses_root" }, { text: `${ROLLOVER_TOKEN}\nlate duplicate` }),
+  ]);
+  assert.equal(host.summarizeCalls.length, 1);
+  assert.equal(host.promptCalls.length, 1);
+  assert.equal(host.promptCalls[0]!.id, "ses_root");
+  assert.match(host.promptCalls[0]!.text, new RegExp(report.replaceAll(/[.*+?^${}()|[\]\\]/gu, "\\$&")));
+});
+
 test("a new user turn clears an armed compaction boundary before ordinary text completes", async () => {
   const host = fakeHost({ agent: COORDINATOR });
   let hooks!: ReturnType<typeof createContinuationHooks>;
@@ -385,6 +423,24 @@ test("compacted events cannot resume child, foreign, or untracked sessions", asy
   );
 });
 
+test("child and foreign sessions reject every resume trigger without promotion", async () => {
+  for (const [id, identity, contextAgent] of [
+    ["ses_child", { agent: COORDINATOR, parentID: "ses_root" }, COORDINATOR],
+    ["ses_foreign", { agent: "foreign-coordinator" }, "foreign-coordinator"],
+  ] as const) {
+    const host = fakeHost(identity);
+    const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
+    const result = await hooks.tool.execute({}, { sessionID: id, agent: contextAgent });
+    assert.match(result, /^SORTIE_CONTINUATION_REJECTED:/u);
+    await hooks.textComplete({ sessionID: id }, { text: `blocked checkpoint\n${CONTINUATION_MARKER}` });
+    await Promise.all([hooks.sessionIdle(id), hooks.sessionCompacted(id)]);
+    await hooks.textComplete({ sessionID: id }, { text: `${ROLLOVER_TOKEN}\nforeign summary` });
+    await settle();
+    assert.deepEqual(host.summarizeCalls, [], `${id} must not compact`);
+    assert.deepEqual(host.promptCalls, [], `${id} must not resume or become root`);
+  }
+});
+
 test("the latest coordinator model is sent when no summarize override is configured", async () => {
   const host = fakeHost({ agent: COORDINATOR });
   const hooks = createContinuationHooks(host.client, "/project", UNPINNED_POLICY, FAST);
@@ -447,6 +503,56 @@ test("continuation stops resuming at its ceiling but still compacts", async () =
 
   assert.equal(host.summarizeCalls.length, 3);
   assert.equal(host.promptCalls.length, 2);
+  assert.equal(
+    await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR }),
+    "SORTIE_CONTINUATION_REJECTED: limit-reached",
+    "a fourth dispatch in the same synthetic batch stays rejected",
+  );
+  await settle();
+  assert.equal(host.summarizeCalls.length, 3);
+  assert.equal(host.promptCalls.length, 2);
+});
+
+test("blocked units continue only by preserving the coordinator report below batchTarget", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  const hooks = createContinuationHooks(host.client, "/project", { ...POLICY, maxAutoContinues: 2 }, FAST);
+  const reports = [
+    "batchTarget=3 batchAttempted=1 batchCommitted=0 batchReconciled=0 blocker=unit-1 blocked next=independent-unit-2",
+    "batchTarget=3 batchAttempted=2 batchCommitted=1 batchReconciled=0 blocker=unit-1 blocked next=independent-unit-3",
+  ];
+  for (const report of reports) {
+    await hooks.textComplete({ sessionID: "ses_root" }, { text: report });
+    assert.equal(
+      await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR }),
+      "SORTIE_COMPACT_AND_CONTINUE_QUEUED",
+    );
+    await settle();
+    hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-luna" }, true);
+  }
+  assert.equal(host.promptCalls.length, 2);
+  assert.match(host.promptCalls[0]!.text, /blocker=unit-1 blocked next=independent-unit-2/);
+  assert.match(host.promptCalls[1]!.text, /blocker=unit-1 blocked next=independent-unit-3/);
+});
+
+test("resume payload preserves every authoritative checkpoint field and validation order", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
+  const fields = [
+    "task_id: task-batch-continuation-r1",
+    "source_manifest: src/plugin/continuation.ts,test/continuation.test.ts",
+    "operation_manifest: M:\\_work\\_Sortie-dogs\\operation-manifest.json",
+    "validation[0]: npm test|exit 0|fingerprint-test",
+    "validation[1]: git diff --check|exit 0|fingerprint-diff",
+    "batchTarget: 3 / batchAttempted: 2 / batchCommitted: 1 / batchReconciled: 1",
+    "blocker: unit-1|owner=dog-worker|reason=external",
+    "next_action: independent-unit-3",
+  ];
+  await hooks.textComplete({ sessionID: "ses_root" }, { text: fields.join("\n") });
+  await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR });
+  await settle();
+  const payload = host.promptCalls[0]!.text;
+  for (const field of fields) assert.ok(payload.includes(field), `missing checkpoint field: ${field}`);
+  assert.ok(payload.indexOf(fields[3]!) < payload.indexOf(fields[4]!), "validation history order changed");
 });
 
 test("the marker fallback continues only when the direct capability did not run", async () => {
@@ -659,7 +765,15 @@ test("host auto-continue is disabled only while a Sortie rollover is pending", a
   await hooks.sessionCompacting({ sessionID: "ses_root" }, {});
   const completed = { enabled: true };
   await hooks.compactionAutoContinue({ sessionID: "ses_root", overflow: false }, completed);
-  assert.equal(completed.enabled, true, "completed Sortie rollover releases host auto-continue");
+  assert.equal(completed.enabled, false, "the owned compaction cannot race a duplicate host resume");
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-luna" }, true);
+  const stillOwned = { enabled: true };
+  await hooks.compactionAutoContinue({ sessionID: "ses_root", overflow: false }, stillOwned);
+  assert.equal(stillOwned.enabled, false, "synthetic prompt observation cannot reopen the race");
+  await hooks.textComplete({ sessionID: "ses_root" }, { text: "resumed unit checkpoint" });
+  const resumed = { enabled: true };
+  await hooks.compactionAutoContinue({ sessionID: "ses_root", overflow: false }, resumed);
+  assert.equal(resumed.enabled, true, "the observed resumed turn releases host auto-continue");
 });
 
 test("exhausted rollover retries release host auto-continue", async () => {
@@ -752,6 +866,35 @@ test("a resolved resume error retries only the resume after one compaction", asy
     assert.equal(host.promptCalls.length, 1);
   } finally {
     console.error = originalError;
+  }
+});
+
+test("fake host prompt rejection has a bounded retry budget and never recompacts", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  let attempts = 0;
+  host.client.session!.promptAsync = async () => {
+    attempts += 1;
+    return { error: { message: "injected rejection" } };
+  };
+  const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
+  const originalError = console.error;
+  const originalWarn = console.warn;
+  try {
+    console.error = () => undefined;
+    console.warn = () => undefined;
+    await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR });
+    await settle();
+    assert.equal(host.summarizeCalls.length, 1);
+    assert.equal(attempts, FAST.scheduleAttempts + 1);
+    assert.equal(hooks.blocksTool("ses_root"), false);
+    const autoContinue = { enabled: true };
+    await hooks.compactionAutoContinue({ sessionID: "ses_root", overflow: false }, autoContinue);
+    assert.equal(autoContinue.enabled, true, "retry exhaustion releases host auto-continue");
+    await Promise.all([hooks.sessionIdle("ses_root"), hooks.sessionCompacted("ses_root")]);
+    assert.equal(attempts, FAST.scheduleAttempts + 1, "late host events cannot restart retries");
+  } finally {
+    console.error = originalError;
+    console.warn = originalWarn;
   }
 });
 

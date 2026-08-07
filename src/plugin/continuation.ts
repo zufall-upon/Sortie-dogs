@@ -245,6 +245,10 @@ interface SessionState {
   pendingRollover: boolean;
   /** Set only when the queued rollover must resume the session afterwards. */
   continueReport?: string | undefined;
+  /** A deliberate terminal marker starts a fresh batch; a limit-reached compaction does not. */
+  resetAttemptsAfterCompaction: boolean;
+  /** The terminal unit at the continuation ceiling was already compacted. */
+  limitCompacted: boolean;
   /** Latest authoritative coordinator report, handed to the compaction prompt. */
   latestReport?: string | undefined;
   /** Latest non-compaction coordinator text observed during the current user turn. */
@@ -269,6 +273,10 @@ interface SessionState {
   resumeIssuingEpoch?: number | undefined;
   /** Epoch whose resume was accepted before the summarize request returned. */
   resumeIssuedEpoch?: number | undefined;
+  /** Resume attempts made for the current epoch, bounded by the configured scheduler budget. */
+  resumeAttempts: number;
+  /** This compaction belongs to Sortie until the resumed turn is observed. */
+  ownsHostContinuation: boolean;
   /** Rollover epoch whose compaction prompt hook has started. */
   compactingEpoch?: number | undefined;
   /** Prevents idle fallback from racing an explicit marker being resolved. */
@@ -358,6 +366,8 @@ export function createContinuationHooks(
     const created: SessionState = {
       attempts: 0,
       pendingRollover: false,
+      resetAttemptsAfterCompaction: false,
+      limitCompacted: false,
       active: false,
       compactedRollover: false,
       promptPending: false,
@@ -365,6 +375,8 @@ export function createContinuationHooks(
       activeRevision: -1,
       idleDeferred: false,
       rolloverEpoch: 0,
+      resumeAttempts: 0,
+      ownsHostContinuation: false,
       textCompleting: false,
       directUsed: false,
       touched: Date.now(),
@@ -432,26 +444,34 @@ export function createContinuationHooks(
     if (!promptCallSucceeded(resumed)) throw new Error("resume request rejected");
   }
 
-  async function resumeAtCompactionBoundary(sessionID: string, state: SessionState): Promise<void> {
-    if (!state.pendingRollover || !state.active || state.continueReport === undefined) return;
+  /**
+   * Single resume arbiter. Host events and timers may arrive in any order, but none of them may call
+   * promptAsync directly. The epoch lock makes concurrent compacted/text/idle signals idempotent.
+   */
+  async function arbitrateResume(sessionID: string, state: SessionState): Promise<boolean> {
+    if (!state.pendingRollover || !state.active || state.continueReport === undefined) return false;
     const epoch = state.rolloverEpoch;
-    if (state.resumeIssuingEpoch === epoch || state.resumeIssuedEpoch === epoch) return;
+    if (state.resumeIssuedEpoch === epoch) return true;
+    if (state.resumeIssuingEpoch === epoch) return false;
+    if (state.resumeAttempts > timings.scheduleAttempts) return false;
     const report = state.continueReport;
     state.resumeIssuingEpoch = epoch;
+    state.resumeAttempts += 1;
     try {
       await issueResume(sessionID, report);
-      if (sessions.get(sessionID) !== state || state.rolloverEpoch !== epoch) return;
+      if (sessions.get(sessionID) !== state || state.rolloverEpoch !== epoch) return false;
       state.resumeIssuedEpoch = epoch;
       state.compactingEpoch = undefined;
       state.pendingRollover = false;
       state.compactedRollover = false;
       state.promptPending = false;
       state.continueReport = undefined;
-      state.latestReport = undefined;
       // The accepted prompt now belongs to the host loop, not this rollover request.
       state.active = false;
+      return true;
     } catch (error) {
-      console.error("[sortie-continuation] compaction-boundary resume failed", sessionID, error);
+      console.error("[sortie-continuation] resume arbiter failed", sessionID, error);
+      return false;
     } finally {
       const current = sessions.get(sessionID);
       if (current === state && current.rolloverEpoch === epoch) {
@@ -533,18 +553,16 @@ export function createContinuationHooks(
       if (continueReport === undefined) {
         state.pendingRollover = false;
         state.compactedRollover = false;
-        state.attempts = 0;
+        state.ownsHostContinuation = false;
+        if (state.resetAttemptsAfterCompaction) state.attempts = 0;
+        state.limitCompacted = !state.resetAttemptsAfterCompaction;
+        state.resetAttemptsAfterCompaction = false;
         state.latestReport = undefined;
         return true;
       }
 
       await new Promise((settle) => setTimeout(settle, timings.settleMilliseconds));
-      await issueResume(sessionID, continueReport);
-      state.pendingRollover = false;
-      state.compactedRollover = false;
-      state.continueReport = undefined;
-      state.latestReport = undefined;
-      return true;
+      return await arbitrateResume(sessionID, state);
     } catch (error) {
       console.error("[sortie-continuation] rollover failed", sessionID, error);
       return false;
@@ -579,21 +597,30 @@ export function createContinuationHooks(
         state.promptPending = false;
         state.continueReport = undefined;
         state.latestReport = undefined;
+        state.ownsHostContinuation = false;
         warnRollover(sessionID, "retries-exhausted");
       }
     }, timings.scheduleMilliseconds * (attempt + 1)));
   }
 
-  function queueRollover(sessionID: string, report: string, resume: boolean): void {
+  function queueRollover(
+    sessionID: string,
+    report: string,
+    resume: boolean,
+    resetAttemptsAfterCompaction = false,
+  ): void {
     const state = stateFor(sessionID);
     state.pendingRollover = true;
     state.compactedRollover = false;
     state.rolloverEpoch += 1;
     state.resumeIssuingEpoch = undefined;
     state.resumeIssuedEpoch = undefined;
+    state.resumeAttempts = 0;
+    state.ownsHostContinuation = true;
     state.compactingEpoch = undefined;
     state.latestReport = report;
     state.continueReport = resume ? report : undefined;
+    state.resetAttemptsAfterCompaction = resetAttemptsAfterCompaction;
     state.latestCoordinatorReport = undefined;
     if (resume) state.attempts += 1;
     const epoch = state.rolloverEpoch;
@@ -629,6 +656,9 @@ export function createContinuationHooks(
       maxAutoContinues: active.maxAutoContinues,
       pendingAutoContinue: state.pendingRollover,
     });
+    if (resolution.reason === "limit-reached" && state.limitCompacted) {
+      return reject("limit-reached");
+    }
     if (resolution.compact) queueRollover(sessionID, report, resolution.continue);
     return resolution;
   }
@@ -667,6 +697,9 @@ export function createContinuationHooks(
         // A tool call is the request itself, so an already pending rollover is the only conflict.
         pendingAutoContinue: state.pendingRollover,
       });
+      if (resolution.reason === "limit-reached" && state.limitCompacted) {
+        return "SORTIE_CONTINUATION_REJECTED: limit-reached";
+      }
       if (!resolution.compact) return `SORTIE_CONTINUATION_REJECTED: ${resolution.reason}`;
       if (client?.session?.summarize === undefined) {
         return "SORTIE_CONTINUATION_REJECTED: capability-unavailable";
@@ -704,7 +737,7 @@ export function createContinuationHooks(
          * where the summary message already exists and a resume prompt can still join the same loop.
          */
         if (ownedCompactionSummary || trimmed.startsWith(ROLLOVER_TOKEN)) {
-          await resumeAtCompactionBoundary(input.sessionID, state);
+          await arbitrateResume(input.sessionID, state);
           if (state.resumeIssuedEpoch === state.rolloverEpoch) return;
         }
         if (
@@ -713,6 +746,9 @@ export function createContinuationHooks(
           !trimmed.startsWith(AUTO_CONTINUE_PREFIX)
         ) {
           state.latestCoordinatorReport = output.text.trim();
+          // The resumed coordinator completed a turn, so no late event from its prior compaction can
+          // compete with the next host-managed compaction.
+          state.ownsHostContinuation = false;
         }
         if (state.directUsed && output.text.includes(ROLLOVER_MARKER)) return;
         if (output.text.includes(ROLLOVER_MARKER)) {
@@ -734,7 +770,7 @@ export function createContinuationHooks(
           const report = output.text.replaceAll(ROLLOVER_MARKER, "").trim();
           const terminal = stateFor(input.sessionID);
           terminal.attempts = 0;
-          queueRollover(input.sessionID, report, false);
+          queueRollover(input.sessionID, report, false, true);
           return;
         }
         if (state?.directUsed === true) return;
@@ -783,7 +819,7 @@ export function createContinuationHooks(
 
     async sessionCompacted(sessionID): Promise<void> {
       const state = sessions.get(sessionID);
-      if (state !== undefined) await resumeAtCompactionBoundary(sessionID, state);
+      if (state !== undefined) await arbitrateResume(sessionID, state);
     },
 
     async compactionAutoContinue(input, output): Promise<void> {
@@ -803,7 +839,7 @@ export function createContinuationHooks(
           identity.agent !== policy().agent
         ) return;
       }
-      if (pending) output.enabled = false;
+      if (pending || state?.ownsHostContinuation === true) output.enabled = false;
     },
 
     observeModel(sessionID, model, synthetic = false): void {
@@ -815,6 +851,10 @@ export function createContinuationHooks(
       state.compactingEpoch = undefined;
       state.model = { providerID: model.providerID, modelID: model.modelID };
       state.turnRevision += 1;
+      if (!synthetic) {
+        state.ownsHostContinuation = false;
+        state.limitCompacted = false;
+      }
     },
 
     blocksTool(sessionID): boolean {
