@@ -10,7 +10,7 @@ export interface RuntimeAsset {
 export const runtimeAssets = [
   {
     name: "dog-coordinator",
-    version: "0.3.3-card25",
+    version: "0.3.3-card26",
     installPath: "agent/dog-coordinator.md",
     content: `---
 description: Canonical MkII coordinator packaged by Sortie-dogs
@@ -803,10 +803,51 @@ COMMIT_SCOPE_FIXTURE
     mismatch: commit rejected
 END_COMMIT_SCOPE_FIXTURE
 
-At each checkpoint and terminal return, require concise evidence only. Terminal evidence must
-contain status, task_id, manifest, decisions, ordered validation entries with exact command,
-exit, and fingerprint, raw_status, diff summary, stale_paths, new_findings, and next_action.
+At each checkpoint and terminal return, require concise evidence only. Render every user-facing
+terminal return as two layers. The standard view is exactly four lines: status with task_id, a short
+decisions projection, an ordered validation PASS/FAIL projection, then next_action. Follow it with
+one blank line and the fixed heading Evidence. The Evidence layer retains every canonical field and
+every ordered validation command, exit, and fingerprint; the standard view is a projection, never a
+replacement for Evidence. Apply the readable-output one-statement-per-line, blank-separation,
+leading-emoji, and exact-ASCII protocol-key rules to both layers. Each standard-view line is one
+statement; its first line is one status statement combining status and task identity. Each Evidence
+line is one canonical field statement. Keep no blank line inside either layer and exactly one blank
+line between them. Keep status, task_id, decisions, validation, next_action, and every Evidence key
+in exact ASCII. Validation history is append-only and ordered: retain every attempt with its exact
+command, exit, and fingerprint, including an initial failure followed by a final pass.
+The terminal fixture below fixes the standard-view order as status plus task_id, decisions,
+validation, then next_action; exactly one blank separator must lead directly to the fixed Evidence
+heading. Its Evidence validation array demonstrates the complete entry key set and append order:
+the initial exit 1 is first and the latest exit 0 is last.
 An undeclared write or mutation must be reported as rejected, not performed.
+
+RUNTIME_ASSET_VERSION_SYNC_FIXTURE
+    runtime_version: 0.3.3-card26
+    shared_marker: src/asset-version.ts
+    packaged_expectation: test/plugin-loader.test.ts uses 0.3.3-card26
+    initialize_expectation: test/initialize.test.ts uses 0.3.3-card26
+    rule: runtime asset versions, shared marker, packaged expectation, and initialize expectation change together
+END_RUNTIME_ASSET_VERSION_SYNC_FIXTURE
+
+TERMINAL_OUTPUT_TEMPLATE
+✅ status: <DONE | BLOCKED | NEED_DECISION>; task_id: <stable task id>
+🐕 decisions: <short decision summary>
+🔍 validation: <ordered PASS/FAIL summary>
+➡️ next_action: <single action or none>
+
+🔍 Evidence
+🔍 status: <DONE | BLOCKED | NEED_DECISION>
+🔍 task_id: <stable task id>
+🔍 manifest: { source_manifest: <exact entries or none>, operation_manifest: <exact path or none> }
+🔍 decisions: [<autonomous decision>]
+🔍 validation: [{ command: npm test, exit: 1, fingerprint: initial failure }, { command: npm test, exit: 0, fingerprint: final pass }]
+🔍 scout: { attempted: <boolean>, revision: <revision>, blocker_owner: <owner>, reason: <exact decision reason> }
+🔍 raw_status: <unmodified status evidence>
+🔍 diff: <concise diff summary>
+🔍 stale_paths: [<path or none>]
+🔍 new_findings: [<finding or none>]
+➡️ next_action: <single action or none>
+END_TERMINAL_OUTPUT_TEMPLATE
 
 TERMINAL_EVIDENCE_FIXTURE
     status: DONE | BLOCKED | NEED_DECISION
@@ -825,7 +866,7 @@ END_TERMINAL_EVIDENCE_FIXTURE
   },
   {
     name: "dog-worker",
-    version: "0.3.3-card25",
+    version: "0.3.3-card26",
     installPath: "agent/dog-worker.md",
     content: `---
 description: Dedicated worker for the canonical Sortie-dogs coordinator
@@ -900,7 +941,7 @@ the user.
   },
   {
     name: "dog-scout",
-    version: "0.3.3-card25",
+    version: "0.3.3-card26",
     installPath: "agent/dog-scout.md",
     content: `---
 description: Bounded evidence scout for dog-coordinator
@@ -950,7 +991,7 @@ prose; keep the keys, paths, commands, and identifiers verbatim.
   },
   {
     name: "dog-reviewer",
-    version: "0.3.3-card25",
+    version: "0.3.3-card26",
     installPath: "agent/dog-reviewer.md",
     content: `---
 description: Independent source reviewer for dog-coordinator
@@ -974,7 +1015,7 @@ or transport.
   },
   {
     name: "dog-advisor",
-    version: "0.3.3-card25",
+    version: "0.3.3-card26",
     installPath: "agent/dog-advisor.md",
     content: `---
 description: Focused technical advisor for dog-coordinator
@@ -998,7 +1039,7 @@ provider, vendor, model, variant, or transport.
   },
   {
     name: "sortie",
-    version: "0.3.3-card25",
+    version: "0.3.3-card26",
     installPath: "command/sortie.md",
     content: `---
 description: Start the canonical Sortie-dogs MkII workflow
