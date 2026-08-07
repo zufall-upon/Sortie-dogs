@@ -157,6 +157,141 @@ test("the direct capability compacts the root coordinator and resumes the same s
   assert.match(host.promptCalls[0]!.text, /batchAttempted\/batchCommitted\/batchReconciled/);
 });
 
+test("the direct capability starts before its delayed idle-event fallback", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  const hooks = createContinuationHooks(host.client, "/project", POLICY, {
+    ...FAST,
+    scheduleMilliseconds: 60_000,
+  });
+
+  await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR });
+  await settle();
+  assert.equal(host.summarizeCalls.length, 1);
+  assert.equal(host.promptCalls.length, 1);
+});
+
+test("the compacted event issues the resume before the summarize request returns", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  let hooks!: ReturnType<typeof createContinuationHooks>;
+  host.client.session!.summarize = async (request) => {
+    host.summarizeCalls.push({ id: request.path.id, body: request.body });
+    await hooks.sessionCompacted(request.path.id);
+    return { data: true };
+  };
+  hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
+
+  await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR });
+  await settle();
+  assert.equal(host.summarizeCalls.length, 1);
+  assert.equal(host.promptCalls.length, 1, "post-summary fallback must not duplicate the event resume");
+  assert.ok(host.promptCalls[0]!.text.startsWith(AUTO_CONTINUE_PREFIX));
+  assert.equal(hooks.blocksTool("ses_root"), false);
+});
+
+test("the compaction summary issues the resume before a one-shot host can exit", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  let hooks!: ReturnType<typeof createContinuationHooks>;
+  host.client.session!.summarize = async (request) => {
+    host.summarizeCalls.push({ id: request.path.id, body: request.body });
+    await hooks.textComplete({ sessionID: request.path.id }, { text: `${ROLLOVER_TOKEN}\nsummary` });
+    return { data: true };
+  };
+  hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
+
+  await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR });
+  await settle();
+  assert.equal(host.summarizeCalls.length, 1);
+  assert.equal(host.promptCalls.length, 1, "post-summary fallback must not duplicate the early resume");
+  assert.ok(host.promptCalls[0]!.text.startsWith(AUTO_CONTINUE_PREFIX));
+  assert.equal(hooks.blocksTool("ses_root"), false);
+});
+
+test("an in-flight compaction-boundary resume is not duplicated after summarize resolves", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  let hooks!: ReturnType<typeof createContinuationHooks>;
+  let releaseResume!: () => void;
+  const resumeReady = new Promise<void>((resolve) => { releaseResume = resolve; });
+  host.client.session!.promptAsync = async (request) => {
+    await resumeReady;
+    host.promptCalls.push({
+      id: request.path.id,
+      agent: request.body.agent,
+      text: request.body.parts[0]!.text,
+    });
+    return { data: true };
+  };
+  let boundary!: Promise<void>;
+  host.client.session!.summarize = async (request) => {
+    host.summarizeCalls.push({ id: request.path.id, body: request.body });
+    boundary = hooks.textComplete(
+      { sessionID: request.path.id },
+      { text: `${ROLLOVER_TOKEN}\nsummary` },
+    );
+    return { data: true };
+  };
+  hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
+
+  await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  releaseResume();
+  await boundary;
+  await settle();
+  assert.equal(host.promptCalls.length, 1);
+});
+
+test("a rejected compaction-boundary resume falls back after summarize", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  let hooks!: ReturnType<typeof createContinuationHooks>;
+  let attempts = 0;
+  host.client.session!.promptAsync = async (request) => {
+    attempts += 1;
+    if (attempts === 1) return { error: { message: "injected rejection" } };
+    host.promptCalls.push({
+      id: request.path.id,
+      agent: request.body.agent,
+      text: request.body.parts[0]!.text,
+    });
+    return { data: true };
+  };
+  host.client.session!.summarize = async (request) => {
+    host.summarizeCalls.push({ id: request.path.id, body: request.body });
+    await hooks.textComplete({ sessionID: request.path.id }, { text: `${ROLLOVER_TOKEN}\nsummary` });
+    return { data: true };
+  };
+  hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
+  const originalError = console.error;
+  try {
+    console.error = () => undefined;
+    await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR });
+    await settle();
+    assert.equal(attempts, 2);
+    assert.equal(host.promptCalls.length, 1);
+  } finally {
+    console.error = originalError;
+  }
+});
+
+test("compacted events cannot resume child, foreign, or untracked sessions", async () => {
+  const child = fakeHost({ agent: COORDINATOR, parentID: "ses_parent" });
+  const childHooks = createContinuationHooks(child.client, "/project", POLICY, FAST);
+  await childHooks.tool.execute({}, { sessionID: "ses_child", agent: COORDINATOR });
+  await childHooks.sessionCompacted("ses_child");
+
+  const foreign = fakeHost({ agent: "another-coordinator" });
+  const foreignHooks = createContinuationHooks(foreign.client, "/project", POLICY, FAST);
+  await foreignHooks.tool.execute({}, { sessionID: "ses_foreign", agent: "another-coordinator" });
+  await foreignHooks.sessionCompacted("ses_foreign");
+
+  const untracked = fakeHost(undefined);
+  const untrackedHooks = createContinuationHooks(untracked.client, "/project", POLICY, FAST);
+  await untrackedHooks.sessionCompacted("ses_unknown");
+  await settle();
+  assert.deepEqual(
+    [child.promptCalls.length, foreign.promptCalls.length, untracked.promptCalls.length],
+    [0, 0, 0],
+  );
+});
+
 test("the latest coordinator model is sent when no summarize override is configured", async () => {
   const host = fakeHost({ agent: COORDINATOR });
   const hooks = createContinuationHooks(host.client, "/project", UNPINNED_POLICY, FAST);
@@ -496,7 +631,7 @@ test("a resolved resume error retries only the resume after one compaction", asy
   }
 });
 
-test("a 204-style prompt response with no data completes the resume", async () => {
+test("a 204-style prompt response completes the resume and releases the compaction lock", async () => {
   const host = fakeHost({ agent: COORDINATOR });
   host.client.session!.promptAsync = async () => ({
     data: undefined,
@@ -507,19 +642,16 @@ test("a 204-style prompt response with no data completes the resume", async () =
   await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR });
   await settle();
   assert.equal(host.summarizeCalls.length, 1);
-  assert.equal(hooks.blocksTool("ses_root"), true, "the compaction prompt hook is still owed");
-  await hooks.sessionCompacting({ sessionID: "ses_root" }, {});
   assert.equal(hooks.blocksTool("ses_root"), false);
 });
 
-test("a queued rollover blocks later coordinator tools until compaction starts", async () => {
+test("a queued rollover blocks later coordinator tools until compaction completes", async () => {
   const host = fakeHost({ agent: COORDINATOR });
   const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
   assert.equal(hooks.blocksTool("ses_root"), false);
   await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR });
   assert.equal(hooks.blocksTool("ses_root"), true);
   await settle();
-  await hooks.sessionCompacting({ sessionID: "ses_root" }, {});
   assert.equal(hooks.blocksTool("ses_root"), false);
 });
 

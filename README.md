@@ -20,6 +20,8 @@ Requirements: Node.js 22.6 or newer, npm, and OpenCode.
 
 Guides: [日本語](docs/guide-ja.md) · [简体中文](docs/guide-zh-CN.md)
 
+Release: [v0.2.18](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.2.18)
+
 ## Quick start
 
 Install the public npm package in the project and generate the project-local

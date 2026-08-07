@@ -42,7 +42,7 @@ const DEFAULT_TIMINGS = {
   cooldownMilliseconds: 60_000,
   /** Let the new summary's token state settle before a fresh turn can trigger overflow compaction. */
   settleMilliseconds: 1_500,
-  /** Session idle starts rollover normally; this delayed path only recovers a missing idle event. */
+  /** A delayed retry backs up the immediate rollover kick and the normal session-idle path. */
   scheduleMilliseconds: 30_000,
   scheduleAttempts: 2,
 } as const;
@@ -182,6 +182,7 @@ export interface ContinuationHooks {
     input: { sessionID: string },
     output: { context?: string[]; prompt?: string },
   ): Promise<void>;
+  sessionCompacted(sessionID: string): Promise<void>;
   compactionAutoContinue(
     input: { sessionID: string; overflow?: boolean },
     output: { enabled: boolean },
@@ -265,6 +266,10 @@ interface SessionState {
   autoIdle: boolean;
   /** Invalidates retry timers when a newer rollover supersedes their state. */
   rolloverEpoch: number;
+  /** Epoch currently issuing its resume from the host's compacted event. */
+  resumeIssuingEpoch?: number | undefined;
+  /** Epoch whose resume was accepted before the summarize request returned. */
+  resumeIssuedEpoch?: number | undefined;
   /** Prevents idle fallback from racing an explicit marker being resolved. */
   textCompleting: boolean;
   /** The direct capability already ran in this turn, so the marker must not run too. */
@@ -410,6 +415,53 @@ export function createContinuationHooks(
     return true;
   }
 
+  async function issueResume(sessionID: string, report: string): Promise<void> {
+    const resume = client?.session?.promptAsync;
+    if (resume === undefined) throw new Error("resume capability unavailable");
+    const resumed = await resume.call(client!.session, {
+      path: { id: sessionID },
+      query: { directory },
+      body: {
+        agent: policy().agent,
+        parts: [{
+          type: "text",
+          synthetic: true,
+          text: `${AUTO_CONTINUE_PREFIX}\n直前最終報告（最新正本）:\n${report}\n` +
+            "batchAttempted/batchCommitted/batchReconciledを保持し、terminal unitを再実行せず次の独立unitから同rootで継続。",
+        }],
+      },
+    });
+    if (!promptCallSucceeded(resumed)) throw new Error("resume request rejected");
+  }
+
+  async function resumeAtCompactionBoundary(sessionID: string, state: SessionState): Promise<void> {
+    if (!state.pendingRollover || !state.active || state.continueReport === undefined) return;
+    const epoch = state.rolloverEpoch;
+    if (state.resumeIssuingEpoch === epoch || state.resumeIssuedEpoch === epoch) return;
+    const report = state.continueReport;
+    state.resumeIssuingEpoch = epoch;
+    try {
+      await issueResume(sessionID, report);
+      if (sessions.get(sessionID) !== state || state.rolloverEpoch !== epoch) return;
+      state.resumeIssuedEpoch = epoch;
+      state.pendingRollover = false;
+      state.compactedRollover = false;
+      state.promptPending = false;
+      state.continueReport = undefined;
+      state.autoIdle = false;
+      state.latestReport = undefined;
+      // The accepted prompt now belongs to the host loop, not this rollover request.
+      state.active = false;
+    } catch (error) {
+      console.error("[sortie-continuation] compaction-boundary resume failed", sessionID, error);
+    } finally {
+      const current = sessions.get(sessionID);
+      if (current === state && current.rolloverEpoch === epoch) {
+        current.resumeIssuingEpoch = undefined;
+      }
+    }
+  }
+
   async function runRollover(sessionID: string): Promise<boolean> {
     const state = sessions.get(sessionID);
     if (state === undefined || !state.pendingRollover || state.active) return false;
@@ -421,6 +473,7 @@ export function createContinuationHooks(
 
     // Acquire the session lock before the first await so idle and fallback timers cannot overlap.
     state.active = true;
+    const operationEpoch = state.rolloverEpoch;
     state.activeRevision = state.turnRevision;
     let compactionStarted = false;
     let compactionSucceeded = false;
@@ -465,10 +518,21 @@ export function createContinuationHooks(
           body,
         });
         if (!summarizeCallSucceeded(summarizedResponse)) throw new Error("summarize request rejected");
-        state.compactedRollover = true;
         compactionSucceeded = true;
+        if (sessions.get(sessionID) !== state || state.rolloverEpoch !== operationEpoch) return true;
+        // A successful summarize response means the host already ran the compaction prompt hook.
+        // Clear the local lock even when another plugin instance handled that hook.
+        state.promptPending = false;
+        state.compactedRollover = true;
         state.compactedRevision = Math.max(state.compactedRevision, compactionRevision);
         state.lastRollover = Date.now();
+      }
+      if (
+        state.resumeIssuingEpoch === operationEpoch ||
+        state.resumeIssuedEpoch === operationEpoch
+      ) {
+        state.compactedRollover = false;
+        return true;
       }
       const continueReport = state.continueReport;
       if (continueReport === undefined) {
@@ -480,23 +544,8 @@ export function createContinuationHooks(
         return true;
       }
 
-      const resume = client?.session?.promptAsync;
-      if (resume === undefined) throw new Error("resume capability unavailable");
       await new Promise((settle) => setTimeout(settle, timings.settleMilliseconds));
-      const resumed = await resume.call(client!.session, {
-        path: { id: sessionID },
-        query: { directory },
-        body: {
-          agent: policy().agent,
-          parts: [{
-            type: "text",
-            synthetic: true,
-            text: `${AUTO_CONTINUE_PREFIX}\n直前最終報告（最新正本）:\n${continueReport}\n` +
-              "batchAttempted/batchCommitted/batchReconciledを保持し、terminal unitを再実行せず次の独立unitから同rootで継続。",
-          }],
-        },
-      });
-      if (!promptCallSucceeded(resumed)) throw new Error("resume request rejected");
+      await issueResume(sessionID, continueReport);
       state.pendingRollover = false;
       state.compactedRollover = false;
       state.continueReport = undefined;
@@ -508,7 +557,7 @@ export function createContinuationHooks(
       return false;
     } finally {
       const current = sessions.get(sessionID);
-      if (current !== undefined) {
+      if (current === state && current.rolloverEpoch === operationEpoch) {
         current.active = false;
         if (compactionStarted && !compactionSucceeded) current.promptPending = false;
         if (current.idleDeferred) {
@@ -546,10 +595,25 @@ export function createContinuationHooks(
     state.compactedRollover = false;
     state.autoIdle = false;
     state.rolloverEpoch += 1;
+    state.resumeIssuingEpoch = undefined;
+    state.resumeIssuedEpoch = undefined;
     state.latestReport = report;
     state.continueReport = resume ? report : undefined;
     if (resume) state.attempts += 1;
-    scheduleRollover(sessionID, 0, state.rolloverEpoch);
+    const epoch = state.rolloverEpoch;
+    // session.idle can be lost when a one-shot CLI host exits. Keep this zero-delay timer referenced
+    // so the rollover reaches the host after the current plugin hook returns but before process exit.
+    setTimeout(async () => {
+      if (sessions.get(sessionID)?.rolloverEpoch !== epoch) return;
+      await runRollover(sessionID);
+      const current = sessions.get(sessionID);
+      if (
+        current?.pendingRollover === true && current.rolloverEpoch === epoch &&
+        current.resumeIssuingEpoch !== epoch
+      ) {
+        scheduleRollover(sessionID, 0, epoch);
+      }
+    }, 0);
   }
 
   async function requestContinuation(
@@ -635,6 +699,15 @@ export function createContinuationHooks(
       const state = stateFor(input.sessionID);
       state.textCompleting = true;
       try {
+        /*
+         * One-shot CLI hosts can exit as soon as the compaction assistant finishes, before the
+         * compacted event or summarize response. Its text-complete hook is the last awaited boundary
+         * where the summary message already exists and a resume prompt can still join the same loop.
+         */
+        if (output.text.startsWith(ROLLOVER_TOKEN)) {
+          await resumeAtCompactionBoundary(input.sessionID, state);
+          if (state.resumeIssuedEpoch === state.rolloverEpoch) return;
+        }
         if (output.text.includes(ROLLOVER_MARKER)) {
           /*
            * A terminal rollover still compacts a real session, so it needs the same identity proof
@@ -697,6 +770,11 @@ export function createContinuationHooks(
       output.prompt = state?.latestReport === undefined
         ? ROLLOVER_PROMPT
         : `${ROLLOVER_PROMPT}\n\nExact latest coordinator final report (authoritative):\n${state.latestReport}`;
+    },
+
+    async sessionCompacted(sessionID): Promise<void> {
+      const state = sessions.get(sessionID);
+      if (state !== undefined) await resumeAtCompactionBoundary(sessionID, state);
     },
 
     async compactionAutoContinue(input, output): Promise<void> {

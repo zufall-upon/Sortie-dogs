@@ -1770,6 +1770,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
        * The coordinator root is deliberately not a write-gate session, so continuation must run
        * before the active-session guard below or the batch could never resume itself.
        */
+      if (event.type === "session.compacted") await continuation.sessionCompacted(eventSessionID);
       if (event.type === "session.idle") await continuation.sessionIdle(eventSessionID);
       if (!isActiveSession(eventSessionID)) return;
       if (event.type !== "session.idle") touchActiveSession(eventSessionID);
