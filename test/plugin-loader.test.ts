@@ -713,7 +713,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(compactionIdentity[1], /continuation_agent:\s*dog-coordinator/);
     assert.match(compactionIdentity[1], /direct_capability:\s*sortie_compact_and_continue/);
     assert.match(compactionIdentity[1], /marker_literal:\s*<!-- SORTIE_CONTINUE -->/);
-    assert.match(compactionIdentity[1], /stop_marker_literal:\s*<!-- SORTIE_COMPACT -->/);
+    assert.match(compactionIdentity[1], /legacy_stop_marker_literal:\s*<!-- SORTIE_COMPACT -->; runtime compatibility only; normal policy never emits it/);
     assert.ok(
       loaded.packedTools.includes(
         /direct_capability:\s*(\S+)/.exec(compactionIdentity[1])![1]!,
@@ -721,9 +721,11 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       "the packed plugin must register the capability the coordinator asset names",
     );
     assert.doesNotMatch(coordinator.content, /MK2A2|MKII_|MK4_|MK5_|MK6_/);
-    assert.match(compactionIdentity[1], /final_unit:\s*compact without resume through stop marker/);
+    assert.match(compactionIdentity[1], /final_unit:\s*terminal response with no forced compaction or resume/);
     assert.match(compactionIdentity[1], /pending_host_autocontinue:\s*no compaction/);
     assert.match(compactionIdentity[1], /same-turn stop; no tool \| Task \| analysis \| final/);
+    assert.match(coordinator.content, /OpenCode owns token-limit automatic compaction; leave its auto-continue\s+enabled/);
+    assert.doesNotMatch(coordinator.content, /stop compaction is universal/i);
 
     const backlogDrain = coordinator.content.match(
       /BACKLOG_DRAIN_FIXTURE\r?\n([\s\S]+?)\r?\nEND_BACKLOG_DRAIN_FIXTURE/,
@@ -1242,7 +1244,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(sortie.content, /never route a worker to the user/i);
 
     for (const asset of loaded.runtimeAssets) {
-      assert.equal(asset.version, "0.3.1-card23");
+      assert.equal(asset.version, "0.3.2-card24");
       const frontmatter = asset.content.match(/^---\r?\n([\s\S]+?)\r?\n---\r?\n/);
       assert.ok(frontmatter, `${asset.name} must have frontmatter`);
       const entries = Object.fromEntries(

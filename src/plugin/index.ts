@@ -1639,7 +1639,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
        */
       await ensureLoaded();
       await loaded?.modelRoutingHook?.(chatInput, output);
-      if (coordinatorOrigin) continuation.observeModel(chatInput.sessionID, output.message.model);
+      if (coordinatorOrigin) {
+        const synthetic = output.parts.some((part) => isRecord(part) && part.synthetic === true);
+        continuation.observeModel(chatInput.sessionID, output.message.model, synthetic);
+      }
     },
     ...(reflectionStartup ? { "experimental.chat.system.transform": async (transformInput: { sessionID: string }, transformOutput: { system?: string[] }): Promise<void> => {
       if (!(await beginReflection(transformInput.sessionID))) return;

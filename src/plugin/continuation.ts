@@ -190,7 +190,7 @@ export interface ContinuationHooks {
     input: { sessionID: string; overflow?: boolean },
     output: { enabled: boolean },
   ): Promise<void>;
-  observeModel(sessionID: string, model: { providerID: string; modelID: string }): void;
+  observeModel(sessionID: string, model: { providerID: string; modelID: string }, synthetic?: boolean): void;
   blocksTool(sessionID: string): boolean;
   sessionIdle(sessionID: string): Promise<void>;
   forgetSession(sessionID: string): void;
@@ -806,9 +806,10 @@ export function createContinuationHooks(
       if (pending) output.enabled = false;
     },
 
-    observeModel(sessionID, model): void {
+    observeModel(sessionID, model, synthetic = false): void {
       if (!nonEmpty(model.providerID) || !nonEmpty(model.modelID)) return;
       const state = stateFor(sessionID);
+      if (!synthetic && !state.pendingRollover && !state.active && !state.promptPending) state.attempts = 0;
       state.directUsed = false;
       state.latestCoordinatorReport = undefined;
       state.compactingEpoch = undefined;

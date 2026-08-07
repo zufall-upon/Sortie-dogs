@@ -482,6 +482,28 @@ test("the marker fallback continues only when the direct capability did not run"
   assert.equal(both.summarizeCalls.length, 2, "the next user turn clears the direct-tool flag");
 });
 
+test("ordinary terminal text does not force compaction and real user turns reset the continuation budget", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  const hooks = createContinuationHooks(host.client, "/project", { ...POLICY, maxAutoContinues: 1 }, FAST);
+  await hooks.textComplete({ sessionID: "ses_root" }, { text: "terminal with no continuation" });
+  await settle();
+  assert.deepEqual([host.summarizeCalls.length, host.promptCalls.length], [0, 0]);
+
+  assert.equal(await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR }), "SORTIE_COMPACT_AND_CONTINUE_QUEUED");
+  await settle();
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-luna" }, false);
+  assert.equal(await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR }), "SORTIE_COMPACT_AND_CONTINUE_QUEUED");
+});
+
+test("synthetic continuation turns do not reset the continuation budget", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  const hooks = createContinuationHooks(host.client, "/project", { ...POLICY, maxAutoContinues: 1 }, FAST);
+  assert.equal(await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR }), "SORTIE_COMPACT_AND_CONTINUE_QUEUED");
+  await settle();
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-luna" }, true);
+  assert.equal(await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR }), "SORTIE_COMPACT_QUEUED: auto-continue limit reached");
+});
+
 test("the stop marker compacts without resuming and clears the continuation budget", async () => {
   const host = fakeHost({ agent: COORDINATOR });
   const hooks = createContinuationHooks(host.client, "/project", { ...POLICY, maxAutoContinues: 1 }, FAST);

@@ -1152,23 +1152,21 @@ test("runtime contract requires interactive continuation and deterministic recov
     "child_promotion: child session -> root rejected",
     "unavailable_identity: automatic continuation disabled",
     "marker_fallback: only when direct capability unavailable; never combine direct tool and marker",
-    "final_unit: compact without resume through stop marker",
+    "final_unit: terminal response with no forced compaction or resume",
     "pending_host_autocontinue: no compaction",
     "post_call: same-turn stop; no tool | Task | analysis | final",
     // Abstract policy alone left the coordinator with nothing to invoke, so the route is named.
     "continuation_agent: dog-coordinator",
     `direct_capability: ${CONTINUATION_CAPABILITY}`,
     `marker_literal: ${CONTINUATION_MARKER}`,
-    `stop_marker_literal: ${ROLLOVER_MARKER}`,
+    `legacy_stop_marker_literal: ${ROLLOVER_MARKER}; runtime compatibility only; normal policy never emits it`,
   ]) assert.ok(compaction[1].includes(contract), contract);
   assert.match(
     coordinator.content,
     /marker fallback\s+only when the direct capability is unavailable, never in addition to or after a direct call/i,
   );
-  assert.match(
-    coordinator.content,
-    /stop compaction is universal for every terminal root dog-coordinator response/i,
-  );
+  assert.match(coordinator.content, /OpenCode owns token-limit automatic compaction; leave its auto-continue\s+enabled/i);
+  assert.doesNotMatch(coordinator.content, /stop compaction is universal/i);
   assert.match(
     coordinator.content,
     /For three or more tracker mutations,[\s\S]+secret-free UTF-8 script[\s\S]+syntax-check it locally/i,
