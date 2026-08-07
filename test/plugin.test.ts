@@ -1393,9 +1393,14 @@ test("reflection integration is opt-in, layered, guarded, kill-switchable, and d
       delete process.env.SORTIE_REFLECTION;
       await mkdir(join(directory, ".opencode"), { recursive: true });
       await writeFile(join(directory, ".opencode", "sortie-dogs.json"), JSON.stringify({ reflection: { enabled: true, layers: { run: true, project: true, global: false } } }));
+      const staleStartupLock = join(xdg, "opencode", "sortie-dogs", "reflection", "runs", "startup.json.lock");
+      await mkdir(join(xdg, "opencode", "sortie-dogs", "reflection", "runs"), { recursive: true });
+      await writeFile(staleStartupLock, JSON.stringify({ pid: 999999, token: "dead" }));
+      await utimes(staleStartupLock, new Date(Date.now() - 6001), new Date(Date.now() - 6001));
       const logs: unknown[] = [];
       const client = { app: { log: (event: unknown) => logs.push(event) }, session: { get: async () => ({ data: { agent: "dog-coordinator" } }) } } as never;
       const hooks = await SortieDogsPlugin({ directory, client }, { reflection: { maxInjectedEntries: 2 } });
+      assert.equal(await stat(staleStartupLock).catch(() => undefined), undefined);
       assert.ok(hooks.tool?.sortie_reflection);
       assert.ok(hooks["experimental.chat.system.transform"]);
       assert.ok(Object.keys(hooks.tool!.sortie_reflection.args).includes("id"));

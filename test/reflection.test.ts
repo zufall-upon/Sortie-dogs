@@ -189,6 +189,21 @@ test("a live lock is not stolen after its stale threshold, and stale guards reco
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("startup cleanup removes stale locks across layers and preserves live locks", async () => {
+  const root = await mkdtemp(join(tmpdir(), "sortie-reflection-")); let now = Date.now();
+  try {
+    const store = new ReflectionStore(root, root, { now: () => now, sleep: async () => undefined, processAlive: () => false });
+    const runs = join(root, "runs"), projects = join(root, "projects"); await mkdir(runs); await mkdir(projects);
+    const stale = [join(root, "global.json.lock"), join(runs, "stale.json.lock"), join(runs, "orphan.json.lock.guard"), join(projects, "project.json.lock")];
+    for (const path of stale) { await writeFile(path, JSON.stringify({ pid: 4242, token: "dead" })); await utimes(path, new Date(now - 6001), new Date(now - 6001)); }
+    const live = await (store as any).lock(join(runs, "live.json")); now += 6001;
+    assert.equal(await store.cleanupStaleLocks(), stale.length);
+    for (const path of stale) assert.equal(await stat(path).catch(() => undefined), undefined);
+    assert.ok(await stat(join(runs, "live.json.lock")));
+    await (store as any).release(live);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("clear and retained-layer reads remove eligible bucket artifacts", async () => {
   const root = await mkdtemp(join(tmpdir(), "sortie-reflection-")); let now = Date.now();
   try {

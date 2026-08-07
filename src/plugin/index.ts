@@ -695,6 +695,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           try { (log.log as (value: unknown) => unknown)({ level: "warn", service: "sortie-dogs", message: code }); } catch { /* host logging is best effort */ }
         },
       });
+      await reflectionStore.cleanupStaleLocks();
       reflectionStartup = true;
     }
   } catch {
