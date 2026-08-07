@@ -1071,6 +1071,13 @@ test("runtime contract requires interactive continuation and deterministic recov
     /USER_QUESTION_FIXTURE\r?\n([\s\S]+?)\r?\nEND_USER_QUESTION_FIXTURE/,
   );
   assert.ok(question);
+  assert.match(
+    coordinator.content,
+    /^permission:\r?\n  question: allow\r?\n  task:\r?\n    "\*": deny\r?\n    dog-worker: allow\r?\n    dog-scout: allow\r?\n    dog-reviewer: allow\r?\n    dog-advisor: allow\r?\ntools:\r?\n  question: true\r?\n  task: true$/mu,
+  );
+  for (const denied of ["build", "implementer", "fixer", "reviewer", "explore", "general", "coordinator"]) {
+    assert.doesNotMatch(coordinator.content, new RegExp(`^    ${denied}: allow$`, "m"));
+  }
   assert.match(question[1], /context_line_1:/);
   assert.match(question[1], /context_line_5:/);
   assert.match(question[1], /invoke question tool; plain-text final forbidden/);

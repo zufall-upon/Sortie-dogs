@@ -120,7 +120,8 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     const installedPackage = JSON.parse(await readFile(
       join(consumer, "node_modules", "sortie-dogs", "package.json"),
       "utf8",
-    )) as { scripts?: { prebuild?: string } };
+    )) as { version?: string; scripts?: { prebuild?: string } };
+    assert.equal(installedPackage.version, "0.3.3");
     assert.equal(
       installedPackage.scripts?.prebuild,
       "node --input-type=module --eval \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true });\"",
@@ -346,6 +347,13 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.ok(coordinator);
     assert.ok(worker);
     assert.ok(sortie);
+    assert.match(
+      coordinator.content,
+      /^permission:\r?\n  question: allow\r?\n  task:\r?\n    "\*": deny\r?\n    dog-worker: allow\r?\n    dog-scout: allow\r?\n    dog-reviewer: allow\r?\n    dog-advisor: allow\r?\ntools:\r?\n  question: true\r?\n  task: true$/mu,
+    );
+    for (const denied of ["build", "implementer", "fixer", "reviewer", "explore", "general", "coordinator"]) {
+      assert.doesNotMatch(coordinator.content, new RegExp(`^    ${denied}: allow$`, "m"));
+    }
     // The worker model is resolved by dedicated routing, not pinned in the asset, so a host that
     // cannot serve the shipped target can still load and run this agent.
     for (const asset of loaded.runtimeAssets) {
@@ -432,7 +440,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(coordinator.content, /no more than three lines/i);
     assert.match(coordinator.content, /canonical MkII order/i);
     assert.match(coordinator.content, /all required context inline/i);
-    assert.match(coordinator.content, /never invoke the build\s+agent or any alternate coordinator/i);
+    assert.match(coordinator.content, /Every other target, including generic build,\s+implementer, fixer, reviewer, explore, general, and alternate coordinators, is denied fail-closed/i);
 
     const initialHandoff = coordinator.content.match(
       /INITIAL_HANDOFF_FIXTURE\r?\n([\s\S]+?)\r?\nEND_INITIAL_HANDOFF_FIXTURE/,
@@ -1244,7 +1252,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(sortie.content, /never route a worker to the user/i);
 
     for (const asset of loaded.runtimeAssets) {
-      assert.equal(asset.version, "0.3.2-card24");
+      assert.equal(asset.version, "0.3.3-card25");
       const frontmatter = asset.content.match(/^---\r?\n([\s\S]+?)\r?\n---\r?\n/);
       assert.ok(frontmatter, `${asset.name} must have frontmatter`);
       const entries = Object.fromEntries(

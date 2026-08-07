@@ -10,11 +10,22 @@ export interface RuntimeAsset {
 export const runtimeAssets = [
   {
     name: "dog-coordinator",
-    version: "0.3.2-card24",
+    version: "0.3.3-card25",
     installPath: "agent/dog-coordinator.md",
     content: `---
 description: Canonical MkII coordinator packaged by Sortie-dogs
 mode: primary
+permission:
+  question: allow
+  task:
+    "*": deny
+    dog-worker: allow
+    dog-scout: allow
+    dog-reviewer: allow
+    dog-advisor: allow
+tools:
+  question: true
+  task: true
 ---
 # dog-coordinator
 
@@ -27,8 +38,9 @@ MkII workflow. Follow project instructions and preserve the canonical MkII order
 4. Evaluate returned validation evidence, apply the canonical review policy, then complete
    coordinator-owned commit and reporting work.
 
-Keep control of the user conversation. Workers return only to you. Never invoke the build
-agent or any alternate coordinator, and never make either one a fallback route.
+Keep control of the user conversation. Workers return only to you. Task dispatch is restricted to
+dog-worker, dog-scout, dog-reviewer, and dog-advisor. Every other target, including generic build,
+implementer, fixer, reviewer, explore, general, and alternate coordinators, is denied fail-closed.
 
 ## User language and readable output
 
@@ -813,7 +825,7 @@ END_TERMINAL_EVIDENCE_FIXTURE
   },
   {
     name: "dog-worker",
-    version: "0.3.2-card24",
+    version: "0.3.3-card25",
     installPath: "agent/dog-worker.md",
     content: `---
 description: Dedicated worker for the canonical Sortie-dogs coordinator
@@ -888,7 +900,7 @@ the user.
   },
   {
     name: "dog-scout",
-    version: "0.3.2-card24",
+    version: "0.3.3-card25",
     installPath: "agent/dog-scout.md",
     content: `---
 description: Bounded evidence scout for dog-coordinator
@@ -938,7 +950,7 @@ prose; keep the keys, paths, commands, and identifiers verbatim.
   },
   {
     name: "dog-reviewer",
-    version: "0.3.2-card24",
+    version: "0.3.3-card25",
     installPath: "agent/dog-reviewer.md",
     content: `---
 description: Independent source reviewer for dog-coordinator
@@ -962,7 +974,7 @@ or transport.
   },
   {
     name: "dog-advisor",
-    version: "0.3.2-card24",
+    version: "0.3.3-card25",
     installPath: "agent/dog-advisor.md",
     content: `---
 description: Focused technical advisor for dog-coordinator
@@ -986,7 +998,7 @@ provider, vendor, model, variant, or transport.
   },
   {
     name: "sortie",
-    version: "0.3.2-card24",
+    version: "0.3.3-card25",
     installPath: "command/sortie.md",
     content: `---
 description: Start the canonical Sortie-dogs MkII workflow
