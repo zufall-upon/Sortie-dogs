@@ -222,7 +222,7 @@ test("an out-of-line update is rejected before any mutation", async () => {
   }
 });
 
-test("package 0.3.3 runtime card26 migrates to package 0.3.6 runtime card29", async () => {
+test("package 0.3.3 runtime card26 migrates to package 0.3.7 runtime card29", async () => {
   const project = await fixtureDirectory();
   try {
     await initializeProject(project);

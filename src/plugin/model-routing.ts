@@ -22,6 +22,9 @@ export type ModelRoutingConfig = Readonly<Record<string, RoleModelRoute>>;
 export const DEDICATED_WORKER_MODEL = "openai/gpt-5.6-luna";
 export const DEDICATED_WORKER_VARIANT = "max";
 
+/** The coordinator balances stronger instruction adherence against the cost of repeated root context. */
+export const DEFAULT_COORDINATOR_MODEL = "openai/gpt-5.6-terra";
+
 /**
  * The stronger, far more expensive worker target a host may still select deliberately. It is no longer
  * a default route: it stays declared so an explicit dedicatedWorkerModel resolves against the catalog
@@ -83,16 +86,14 @@ const fixedModelRoleSet = new Set<string>(Object.keys(FIXED_MODEL_ROUTING));
 
 export const RECOMMENDED_LUNA_MODEL = "openai/gpt-5.6-luna";
 
-/**
- * The coordinator has no built-in route on purpose. It is the one agent the user drives directly and
- * picks a model for in the session, so a shipped default here does not choose between models for an
- * undecided user: it silently discards a choice the user already made and cannot see being reverted.
- * Delegated roles are the opposite, because nobody selects a model for a session the loop spawns.
- * A host that does want a fixed coordinator model still declares one through modelRouting.
- *
- * Evidence gathering is retrieval rather than reasoning, so the scout sits one effort tier below the
- * worker, where the published cost curve returns the most per unit of cost.
- */
+/** Coordinator state and routing use Terra; evidence retrieval remains on the cheaper Luna tier. */
+export const DEFAULT_COORDINATOR_ROUTING: ModelRoutingConfig = Object.freeze({
+  "dog-coordinator": Object.freeze({
+    preferred: Object.freeze({ model: DEFAULT_COORDINATOR_MODEL }),
+  }),
+});
+
+/** Evidence gathering is retrieval rather than reasoning, so the scout stays one effort tier lower. */
 export const RECOMMENDED_SCOUT_VARIANT = "high";
 export const RECOMMENDED_LUNA_ROLE_VARIANTS = Object.freeze({
   "dog-scout": RECOMMENDED_SCOUT_VARIANT,
@@ -168,6 +169,7 @@ export function recommendedRoleRouting(
   fallbackTarget: ModelTarget = DEFAULT_DEDICATED_WORKER_TARGET,
 ): ModelRoutingConfig {
   return Object.freeze({
+    ...DEFAULT_COORDINATOR_ROUTING,
     ...RECOMMENDED_LUNA_ROUTING,
     ...recommendedConsultationRouting(fallbackTarget),
   });
@@ -197,6 +199,7 @@ export interface ModelCatalog {
 /** Built-in availability metadata for source-level recommendations; no provider probing required. */
 export const BUILT_IN_MODEL_CATALOG: ModelCatalog = Object.freeze({
   global: Object.freeze([
+    Object.freeze({ model: DEFAULT_COORDINATOR_MODEL }),
     Object.freeze({
       model: DEDICATED_WORKER_MODEL,
       variants: Object.freeze(

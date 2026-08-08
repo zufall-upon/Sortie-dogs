@@ -1,6 +1,6 @@
 {
   "version": "0.1.0",
-  "task_id": "release-routine-ownership-01",
+  "task_id": "terra-coordinator-default-01",
   "read": [
     "AGENTS.md",
     "package.json",
@@ -8,9 +8,10 @@
     "README.md",
     "docs/guide-ja.md",
     "docs/guide-zh-CN.md",
-    "src/asset-version.ts",
-    "src/runtime-assets.ts",
+    "src/plugin/config.ts",
+    "src/plugin/model-routing.ts",
     "test/initialize.test.ts",
+    "test/plugin.test.ts",
     "test/plugin-loader.test.ts"
   ],
   "write": [
@@ -20,9 +21,9 @@
     "README.md",
     "docs/guide-ja.md",
     "docs/guide-zh-CN.md",
-    "src/asset-version.ts",
-    "src/runtime-assets.ts",
+    "src/plugin/model-routing.ts",
     "test/initialize.test.ts",
+    "test/plugin.test.ts",
     "test/plugin-loader.test.ts",
     "dist",
     "_testenv"

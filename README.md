@@ -20,7 +20,7 @@ Requirements: Node.js 22.6 or newer, npm, and OpenCode.
 
 Guides: [日本語](docs/guide-ja.md) · [简体中文](docs/guide-zh-CN.md)
 
-Release: [v0.3.6](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.3.6)
+Release: [v0.3.7](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.3.7)
 
 ## Quick start
 
@@ -62,8 +62,8 @@ to the `plugin` array of the OpenCode configuration the agents run under —
 Restart OpenCode afterwards. A `plugin` entry must name the package, not a
 subpath: `sortie-dogs/plugin` is an import specifier, not a plugin specifier.
 
-`dog-coordinator` keeps whichever model you select for the session. `dog-scout`
-defaults to `openai/gpt-5.6-luna`. To pin either role to another model, save this
+`dog-coordinator` defaults to `openai/gpt-5.6-terra`; `dog-scout` defaults to
+`openai/gpt-5.6-luna`. To pin either role to another model, save this
 as `.opencode/sortie-dogs.json`:
 
 ```json
@@ -285,16 +285,16 @@ untouched.
 
 ## Model routing
 
-Every default route is one model at a different reasoning effort, because
-published cost curves put a cheap model at high effort above an expensive model
-at mid effort on both solve rate and price. Sortie-dogs therefore buys effort,
-not model tiers, wherever the work allows it.
+Default routes split work by required capability and repeated-context cost.
+Sortie-dogs keeps retrieval on Luna, coordinator state and routing on Terra,
+and independent review on Sol unless the host declares another target.
 
-`dog-coordinator` has no built-in route. It is the one agent you drive directly
-and pick a model for in the session, so it keeps the model you selected; a
-shipped default there would silently revert your choice instead of filling an
-absent one. Declare `modelRouting` for `dog-coordinator` if you do want a fixed
-coordinator model.
+`dog-coordinator` defaults to `openai/gpt-5.6-terra`. Coordinator work repeatedly
+processes the root context but is primarily state management and routing, so
+Terra is the cost-conscious middle tier between Luna and Sol. Project or global
+`modelRouting` can override this default. If the host proves Terra unavailable,
+the existing availability policy uses a configured free-tier fallback when present
+and otherwise preserves the session model.
 
 `dog-scout` defaults to `openai/gpt-5.6-luna` with the `high` variant, since
 gathering bounded evidence is retrieval rather than reasoning and that tier is
@@ -330,7 +330,7 @@ actually serve.
 {
   "modelRouting": {
     "dog-coordinator": {
-      "preferred": { "model": "openai/gpt-5.6-luna", "variant": "max" }
+      "preferred": { "model": "openai/gpt-5.6-terra" }
     },
     "dog-scout": {
       "preferred": { "model": "openai/gpt-5.6-luna", "variant": "high" }
@@ -345,6 +345,7 @@ actually serve.
   },
   "modelCatalog": {
     "project": [
+      { "model": "openai/gpt-5.6-terra" },
       { "model": "openai/gpt-5.6-sol", "variants": ["medium", "xhigh"] },
       { "model": "openai/gpt-5.6-luna", "variants": ["max", "high"] },
       { "model": "anthropic/claude-opus-5" }
