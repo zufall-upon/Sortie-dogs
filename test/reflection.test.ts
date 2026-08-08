@@ -28,6 +28,23 @@ test("reflection store is bounded and deduplicates promotable entries", async ()
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("reflection accepts a concise real-run correction entry", async () => {
+  const root = await mkdtemp(join(tmpdir(), "sortie-reflection-"));
+  try {
+    const store = new ReflectionStore(root, join(root, "project"));
+    const entry = await store.record("project", undefined, {
+      scope: "task-intake-validation",
+      trigger: "user marked an in-progress backlog candidate unnecessary",
+      cause: "candidate relevance was inferred from a bulk list without confirming user endorsement before tracker activation",
+      prevention: "confirm candidate relevance before changing tracker status or dispatching work",
+      evidence: "user-correction",
+      evidenceRef: "candidate relevance correction",
+    }, "0.3.9");
+    assert.equal(entry.status, "promotable");
+    assert.equal((await store.list("project", undefined, "0.3.9")).entries[0]?.scope, entry.scope);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("reflection list, replace, and forget preserve narrow entry ownership", async () => {
   const root = await mkdtemp(join(tmpdir(), "sortie-reflection-"));
   let now = Date.now();

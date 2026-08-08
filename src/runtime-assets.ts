@@ -10,7 +10,7 @@ export interface RuntimeAsset {
 export const runtimeAssets = [
   {
     name: "dog-coordinator",
-    version: "0.3.4-card30",
+    version: "0.3.4-card31",
     installPath: "agent/dog-coordinator.md",
     content: `---
 description: Canonical MkII coordinator packaged by Sortie-dogs
@@ -181,11 +181,13 @@ write the global layer. Record user-correction directly at layer=project. For ot
 layer=run on the first occurrence and layer=project only when the scope recurs in a later unit or was
 injected from an earlier run. Scope is the dedup key: recording it again updates trigger and hits but
 preserves cause and prevention. Use replace only to improve those fields deliberately. Reflections are
-injected automatically at turn start under SORTIE_PROCESS_REFLECTIONS with entry id and hits. Never
-list at task start. Immediately before record, replace, or forget, call list once only when the target
-scope or id is absent from the bounded injection. If later evidence disproves attribution, forget that
-entry. Forget needs no confirmation because its exact entry id is the deletion boundary; clear keeps
-its layer confirmation rules. Never clear merely because a task or session ended.
+injected automatically at turn start under SORTIE_PROCESS_REFLECTIONS with entry id and hits. Record
+directly because scope is the store's dedup key; never list before record. Before replace, forget, or
+promote, call list once only when the target id is absent from the bounded injection. Keep every
+reflection field concise ASCII English and keep scope + trigger + cause + prevention + evidenceRef
+within 400 characters total. If later evidence disproves attribution, forget that entry. Forget needs
+no confirmation because its exact entry id is the deletion boundary; clear keeps its layer confirmation
+rules. Never clear merely because a task or session ended.
 
 Make at most one record call per triggering event and at most three record calls per run. When hits
 reach two, or a user correction identifies a defect in runtime policy, project docs, an agent contract,
@@ -210,7 +212,8 @@ REFLECTION_POLICY_FIXTURE
     call_limit: one record per triggering event; three record calls per run
     duplicate_scope: same event or same layer in one unit -> no call
     injected_project_recurrence: record project once to increment hits
-    list: never at task start; once before mutation only when target scope or id is absent from bounded injection
+    field_budget: concise ASCII English; scope + trigger + cause + prevention + evidenceRef <=400 characters total
+    list: never before record; once before replace | forget | promote only when target id is absent from bounded injection
     call: sortie_reflection { action: record, layer: <run|project>, scope: <scope>, trigger: <event>, cause: <verified process cause>, prevention: <one reusable imperative>, evidence: <allowed enum>, evidenceRef: <short non-path reference> }
     correction: improved cause or prevention -> replace; disproved attribution -> forget
     forget_confirmation: none; exact entry id is the deletion boundary
@@ -461,12 +464,22 @@ status update, is also coordinator-owned and uses one direct tracker command; a 
 file does not increase that tracker-mutation count. These direct operations create no handoff, operation
 manifest, generated script, or child session. If a known executable candidate is absent, ask the user
 through the question tool. If tracker access is unavailable, write the project-local checkpoint fallback.
+Reuse a successful inventory until a tracker mutation, compact resume, or relevant user scope change
+invalidates it; an identical inventory retry before then is forbidden. Before the first status mutation
+for a candidate, read its full body and prove it remains required by current user scope and project
+evidence. Title, order, or bulk inventory status alone is insufficient. If relevance remains ambiguous,
+ask once before mutation or dispatch.
 
 COORDINATOR_DIRECT_OPERATION_FIXTURE
     known_executable_probe: one batched direct depth-one read-only command; no Task
     executable_absent: question tool; no worker discovery or recursive search
     project_inventory: one direct read-only tracker command; no Task
     project_item_identity: same direct inventory evidence; no identity-only worker
+    inventory_reuse: successful result reused until tracker mutation | compact resume | relevant user scope change
+    identical_inventory_retry: forbidden before invalidation
+    candidate_body: read full body before first status mutation
+    relevance_gate: current user scope + project evidence required; title | order | bulk status insufficient
+    relevance_ambiguous: one question before mutation or dispatch
     terminal_checkpoint: at most two tracker mutations -> one coordinator-owned direct tracker command
     local_checkpoint_file: excluded from tracker mutation count
     direct_operation_artifacts: no handoff | operation manifest | generated script | child session
@@ -869,10 +882,10 @@ the initial exit 1 is first and the latest exit 0 is last.
 An undeclared write or mutation must be reported as rejected, not performed.
 
 RUNTIME_ASSET_VERSION_SYNC_FIXTURE
-    runtime_version: 0.3.4-card30
+    runtime_version: 0.3.4-card31
     shared_marker: src/asset-version.ts
-    packaged_expectation: test/plugin-loader.test.ts uses 0.3.4-card30
-    initialize_expectation: test/initialize.test.ts uses 0.3.4-card30
+    packaged_expectation: test/plugin-loader.test.ts uses 0.3.4-card31
+    initialize_expectation: test/initialize.test.ts uses 0.3.4-card31
     rule: runtime asset versions, shared marker, packaged expectation, and initialize expectation change together
 END_RUNTIME_ASSET_VERSION_SYNC_FIXTURE
 
@@ -913,7 +926,7 @@ END_TERMINAL_EVIDENCE_FIXTURE
   },
   {
     name: "dog-worker",
-    version: "0.3.4-card30",
+    version: "0.3.4-card31",
     installPath: "agent/dog-worker.md",
     content: `---
 description: Dedicated worker for the canonical Sortie-dogs coordinator
@@ -988,7 +1001,7 @@ the user.
   },
   {
     name: "dog-scout",
-    version: "0.3.4-card30",
+    version: "0.3.4-card31",
     installPath: "agent/dog-scout.md",
     content: `---
 description: Bounded evidence scout for dog-coordinator
@@ -1038,7 +1051,7 @@ prose; keep the keys, paths, commands, and identifiers verbatim.
   },
   {
     name: "dog-reviewer",
-    version: "0.3.4-card30",
+    version: "0.3.4-card31",
     installPath: "agent/dog-reviewer.md",
     content: `---
 description: Independent source reviewer for dog-coordinator
@@ -1065,7 +1078,7 @@ or transport.
   },
   {
     name: "dog-advisor",
-    version: "0.3.4-card30",
+    version: "0.3.4-card31",
     installPath: "agent/dog-advisor.md",
     content: `---
 description: Focused technical advisor for dog-coordinator
@@ -1089,7 +1102,7 @@ provider, vendor, model, variant, or transport.
   },
   {
     name: "sortie",
-    version: "0.3.4-card30",
+    version: "0.3.4-card31",
     installPath: "command/sortie.md",
     content: `---
 description: Start the canonical Sortie-dogs MkII workflow

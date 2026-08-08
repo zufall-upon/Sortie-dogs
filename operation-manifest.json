@@ -1,6 +1,6 @@
 {
   "version": "0.1.0",
-  "task_id": "terra-medium-ui-default-01",
+  "task_id": "terra-run-efficiency-audit-01",
   "read": [
     "AGENTS.md",
     "package.json",
@@ -8,13 +8,13 @@
     "README.md",
     "docs/guide-ja.md",
     "docs/guide-zh-CN.md",
-    "src/plugin/config.ts",
-    "src/plugin/model-routing.ts",
     "src/asset-version.ts",
+    "src/reflection/store.ts",
     "src/runtime-assets.ts",
     "test/initialize.test.ts",
     "test/plugin.test.ts",
-    "test/plugin-loader.test.ts"
+    "test/plugin-loader.test.ts",
+    "test/reflection.test.ts"
   ],
   "write": [
     "operation-manifest.json",
@@ -23,12 +23,13 @@
     "README.md",
     "docs/guide-ja.md",
     "docs/guide-zh-CN.md",
-    "src/plugin/model-routing.ts",
     "src/asset-version.ts",
+    "src/reflection/store.ts",
     "src/runtime-assets.ts",
     "test/initialize.test.ts",
     "test/plugin.test.ts",
     "test/plugin-loader.test.ts",
+    "test/reflection.test.ts",
     "dist",
     "_testenv"
   ],

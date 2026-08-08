@@ -1340,6 +1340,11 @@ test("runtime contract requires interactive continuation and deterministic recov
     "executable_absent: question tool; no worker discovery or recursive search",
     "project_inventory: one direct read-only tracker command; no Task",
     "project_item_identity: same direct inventory evidence; no identity-only worker",
+    "inventory_reuse: successful result reused until tracker mutation | compact resume | relevant user scope change",
+    "identical_inventory_retry: forbidden before invalidation",
+    "candidate_body: read full body before first status mutation",
+    "relevance_gate: current user scope + project evidence required; title | order | bulk status insufficient",
+    "relevance_ambiguous: one question before mutation or dispatch",
     "terminal_checkpoint: at most two tracker mutations -> one coordinator-owned direct tracker command",
     "local_checkpoint_file: excluded from tracker mutation count",
     "direct_operation_artifacts: no handoff | operation manifest | generated script | child session",
@@ -1369,7 +1374,8 @@ test("runtime contract requires interactive continuation and deterministic recov
   assert.match(reflection[1], /injected_project_recurrence: record project once to increment hits/);
   assert.match(reflection[1], /non_triggers: code bug \| ordinary validation failure/);
   assert.match(reflection[1], /call: sortie_reflection \{ action: record/);
-  assert.match(reflection[1], /list: never at task start; once before mutation only when target scope or id is absent/);
+  assert.match(reflection[1], /field_budget: concise ASCII English; scope \+ trigger \+ cause \+ prevention \+ evidenceRef <=400 characters total/);
+  assert.match(reflection[1], /list: never before record; once before replace \| forget \| promote only when target id is absent/);
   assert.match(reflection[1], /correction: improved cause or prevention -> replace; disproved attribution -> forget/);
   assert.match(reflection[1], /forget_confirmation: none; exact entry id is the deletion boundary/);
   assert.match(reflection[1], /durable_fix: hits>=2 or policy-related user correction -> create durable-fix candidate/);
