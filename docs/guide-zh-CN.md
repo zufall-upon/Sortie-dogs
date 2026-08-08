@@ -98,7 +98,7 @@ plugin bridge。
 随后重启 OpenCode。`plugin` 条目必须写 package 名称；`sortie-dogs/plugin` 是 import specifier，
 不是 plugin specifier。
 
-`dog-coordinator` 默认使用 `openai/gpt-5.6-terra`，`dog-scout` 默认使用 `openai/gpt-5.6-luna`。
+`dog-coordinator` 默认使用 `openai/gpt-5.6-terra` 的 `medium` variant，`dog-scout` 默认使用 `openai/gpt-5.6-luna`。
 如需更改任一角色的模型，请将以下配置保存为 `.opencode/sortie-dogs.json`：
 
 ```json
@@ -219,7 +219,7 @@ OpenCode 的标准智能体、角色、设置和其他会话均保持原样。
 
 ## 模型路由
 
-`dog-coordinator` 的 built-in route 是 `openai/gpt-5.6-terra`。协调工作会反复处理 root context，
+`dog-coordinator` 的 built-in route 是 `openai/gpt-5.6-terra` 的 `medium` variant。协调工作会反复处理 root context，
 但主要承担状态管理和 routing，因此默认采用介于 Luna 与 Sol 之间的成本层级。若宿主确认 Terra 不可用，
 routing hook 会先使用已配置的免费层 fallback；若没有，则保留会话模型。`dog-scout` 默认使用
 `openai/gpt-5.6-luna` 的 `high` variant。项目级 routing 可以覆盖这两个角色。
@@ -240,7 +240,7 @@ target，即 `openai/gpt-5.6-luna` 的 `max` variant。若要预先使用更强�
 {
   "modelRouting": {
     "dog-coordinator": {
-      "preferred": { "model": "openai/gpt-5.6-terra" }
+      "preferred": { "model": "openai/gpt-5.6-terra", "variant": "medium" }
     },
     "dog-scout": {
       "preferred": { "model": "openai/gpt-5.6-luna", "variant": "high" }
@@ -255,7 +255,7 @@ target，即 `openai/gpt-5.6-luna` 的 `max` variant。若要预先使用更强�
   },
   "modelCatalog": {
     "project": [
-      { "model": "openai/gpt-5.6-terra" },
+      { "model": "openai/gpt-5.6-terra", "variants": ["medium"] },
       { "model": "openai/gpt-5.6-sol", "variants": ["medium", "xhigh"] },
       { "model": "openai/gpt-5.6-luna", "variants": ["max", "high"] },
       { "model": "anthropic/claude-opus-5" }
@@ -274,7 +274,7 @@ canonical validation 后独立审查高风险候选项。二者都不负责实�
 
 ## 更新与迁移
 
-[Release v0.3.7](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.3.7)
+[Release v0.3.8](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.3.8)
 
 将依赖替换为新版 Release asset 后，在目标项目根目录再次运行：
 

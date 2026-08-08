@@ -121,7 +121,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       join(consumer, "node_modules", "sortie-dogs", "package.json"),
       "utf8",
     )) as { version?: string; scripts?: { prebuild?: string } };
-    assert.equal(installedPackage.version, "0.3.7");
+    assert.equal(installedPackage.version, "0.3.8");
     assert.equal(
       installedPackage.scripts?.prebuild,
       "node --input-type=module --eval \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true });\"",
@@ -360,7 +360,11 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     for (const asset of loaded.runtimeAssets) {
       assert.equal(asset.version, RUNTIME_ASSET_VERSION, `${asset.name} version must match the shared marker`);
     }
-    assert.equal(RUNTIME_ASSET_VERSION, "0.3.4-card29");
+    assert.equal(RUNTIME_ASSET_VERSION, "0.3.4-card30");
+    const coordinatorFrontmatter = /^---\r?\n([\s\S]*?)\r?\n---/u.exec(coordinator.content)?.[1];
+    assert.ok(coordinatorFrontmatter);
+    assert.match(coordinatorFrontmatter, /^model: openai\/gpt-5\.6-terra$/m);
+    assert.match(coordinatorFrontmatter, /^variant: medium$/m);
     assert.equal(/^---\r?\n[\s\S]*?\r?\n---/u.exec(worker.content)?.[0].includes("model:"), false);
     assert.equal(worker.content.includes(DEDICATED_WORKER_MODEL), false);
     assert.equal(worker.content.includes(DEDICATED_WORKER_VARIANT), false);
@@ -424,7 +428,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(advisor.content, /Reject every SourceReview request[\s\S]+SourceReview is\s+dog-reviewer-only work/i);
     assert.doesNotMatch(advisor.content, /Accept[^.]*SourceReview/i);
     assert.ok(advisor.content.length >= 350, "dog-advisor needs a substantive consultation role");
-    for (const consultationAsset of [coordinator, reviewer, advisor]) {
+    for (const consultationAsset of [reviewer, advisor]) {
       const frontmatter = consultationAsset.content.match(/^---\r?\n([\s\S]+?)\r?\n---/)?.[1];
       assert.ok(frontmatter, `${consultationAsset.name} needs frontmatter`);
       assert.doesNotMatch(frontmatter, /^(?:model|variant):/m);
@@ -1276,7 +1280,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(sortie.content, /never route a worker to the user/i);
 
     for (const asset of loaded.runtimeAssets) {
-      assert.equal(asset.version, "0.3.4-card29");
+      assert.equal(asset.version, "0.3.4-card30");
       const frontmatter = asset.content.match(/^---\r?\n([\s\S]+?)\r?\n---\r?\n/);
       assert.ok(frontmatter, `${asset.name} must have frontmatter`);
       const entries = Object.fromEntries(

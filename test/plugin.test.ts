@@ -16,6 +16,7 @@ import {
 import {
   CONSULTATION_FALLBACK_VARIANT,
   DEFAULT_COORDINATOR_MODEL,
+  DEFAULT_COORDINATOR_VARIANT,
   DEDICATED_WORKER_MODEL,
   DEDICATED_WORKER_VARIANT,
   DEDICATED_WORKER_ROLES,
@@ -309,7 +310,7 @@ test("recommended coordinator and Luna routes cover exact installed roles and re
   if (defaults.kind !== "configured") return;
   // The host declared another variant of the shipped worker model, so it joins that catalog entry.
   assert.deepEqual(defaults.modelCatalog.global, [
-    { model: DEFAULT_COORDINATOR_MODEL },
+    { model: DEFAULT_COORDINATOR_MODEL, variants: [DEFAULT_COORDINATOR_VARIANT] },
     {
       model: DEDICATED_WORKER_MODEL,
       variants: [DEDICATED_WORKER_VARIANT, RECOMMENDED_SCOUT_VARIANT, "xhigh"]
@@ -319,7 +320,7 @@ test("recommended coordinator and Luna routes cover exact installed roles and re
     { model: "provider/custom" },
   ]);
   assert.deepEqual(defaults.modelRouting["dog-coordinator"], {
-    preferred: { model: DEFAULT_COORDINATOR_MODEL },
+    preferred: { model: DEFAULT_COORDINATOR_MODEL, variant: DEFAULT_COORDINATOR_VARIANT },
   });
   assert.deepEqual(resolveModelRoute({
     role: "dog-coordinator",
@@ -332,6 +333,7 @@ test("recommended coordinator and Luna routes cover exact installed roles and re
     source: "global",
     catalog: "global",
     model: DEFAULT_COORDINATOR_MODEL,
+    variant: DEFAULT_COORDINATOR_VARIANT,
   });
   const lunaRoleVariants = {
     "dog-scout": RECOMMENDED_SCOUT_VARIANT,
@@ -937,13 +939,17 @@ test("consultation adapter is provider-neutral and model names do not affect cor
     coordinator.content,
     /ConsultationAdapter is the sole explicit transport boundary;\s+the host adapter owns it/i,
   );
-  for (const name of ["dog-coordinator", "dog-advisor", "dog-reviewer"]) {
+  for (const name of ["dog-advisor", "dog-reviewer"]) {
     const asset = runtimeAssets.find((candidate) => candidate.name === name);
     assert.ok(asset);
     const frontmatter = asset.content.match(/^---\r?\n([\s\S]+?)\r?\n---/)?.[1];
     assert.ok(frontmatter);
     assert.doesNotMatch(frontmatter, /^(?:provider|vendor|model|variant|transport):/m);
   }
+  const coordinatorFrontmatter = coordinator.content.match(/^---\r?\n([\s\S]+?)\r?\n---/)?.[1];
+  assert.ok(coordinatorFrontmatter);
+  assert.match(coordinatorFrontmatter, new RegExp(`^model: ${DEFAULT_COORDINATOR_MODEL}$`, "m"));
+  assert.match(coordinatorFrontmatter, new RegExp(`^variant: ${DEFAULT_COORDINATOR_VARIANT}$`, "m"));
 });
 
 test("generated dog-worker runtime asset leaves its model to dedicated routing", () => {
@@ -1904,6 +1910,7 @@ test("chat message hook applies explicit catalog routing and fails closed with o
     assert.deepEqual(coordinator.message.model, {
       providerID: "openai",
       modelID: "gpt-5.6-terra",
+      variant: DEFAULT_COORDINATOR_VARIANT,
     });
     for (const role of RECOMMENDED_CONSULTATION_ROLES) {
       const consultation = {
@@ -2234,7 +2241,11 @@ test("every packaged role follows default routing independently of write-gate ac
     const chat = hooks["chat.message"];
     assert.ok(chat);
     const expected: Record<string, { providerID: string; modelID: string; variant?: string }> = {
-      "dog-coordinator": { providerID: "openai", modelID: "gpt-5.6-terra" },
+      "dog-coordinator": {
+        providerID: "openai",
+        modelID: "gpt-5.6-terra",
+        variant: DEFAULT_COORDINATOR_VARIANT,
+      },
       "dog-scout": { providerID: "openai", modelID: "gpt-5.6-luna", variant: RECOMMENDED_SCOUT_VARIANT },
       "dog-worker": { providerID: "openai", modelID: "gpt-5.6-luna", variant: DEDICATED_WORKER_VARIANT },
       "dog-reviewer": { providerID: "openai", modelID: "gpt-5.6-sol", variant: CONSULTATION_FALLBACK_VARIANT },

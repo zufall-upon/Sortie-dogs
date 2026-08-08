@@ -24,6 +24,7 @@ export const DEDICATED_WORKER_VARIANT = "max";
 
 /** The coordinator balances stronger instruction adherence against the cost of repeated root context. */
 export const DEFAULT_COORDINATOR_MODEL = "openai/gpt-5.6-terra";
+export const DEFAULT_COORDINATOR_VARIANT = "medium";
 
 /**
  * The stronger, far more expensive worker target a host may still select deliberately. It is no longer
@@ -89,7 +90,10 @@ export const RECOMMENDED_LUNA_MODEL = "openai/gpt-5.6-luna";
 /** Coordinator state and routing use Terra; evidence retrieval remains on the cheaper Luna tier. */
 export const DEFAULT_COORDINATOR_ROUTING: ModelRoutingConfig = Object.freeze({
   "dog-coordinator": Object.freeze({
-    preferred: Object.freeze({ model: DEFAULT_COORDINATOR_MODEL }),
+    preferred: Object.freeze({
+      model: DEFAULT_COORDINATOR_MODEL,
+      variant: DEFAULT_COORDINATOR_VARIANT,
+    }),
   }),
 });
 
@@ -199,7 +203,10 @@ export interface ModelCatalog {
 /** Built-in availability metadata for source-level recommendations; no provider probing required. */
 export const BUILT_IN_MODEL_CATALOG: ModelCatalog = Object.freeze({
   global: Object.freeze([
-    Object.freeze({ model: DEFAULT_COORDINATOR_MODEL }),
+    Object.freeze({
+      model: DEFAULT_COORDINATOR_MODEL,
+      variants: Object.freeze([DEFAULT_COORDINATOR_VARIANT]),
+    }),
     Object.freeze({
       model: DEDICATED_WORKER_MODEL,
       variants: Object.freeze(

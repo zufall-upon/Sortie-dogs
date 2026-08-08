@@ -101,7 +101,7 @@ global asset なら `~/.config/opencode/opencode.json`、project なら `.openco
 追加後は OpenCode を再起動する。`plugin` エントリには package 名を指定する。
 `sortie-dogs/plugin` は import specifier であり plugin specifier ではない。
 
-`dog-coordinator` のデフォルト model は `openai/gpt-5.6-terra`、`dog-scout` は
+`dog-coordinator` のデフォルト model は `openai/gpt-5.6-terra` の `medium` variant、`dog-scout` は
 `openai/gpt-5.6-luna`。いずれかの role を変更する場合、次を `.opencode/sortie-dogs.json` に保存する。
 
 ```json
@@ -230,7 +230,7 @@ host 側の欠陥を 1 つだけ in-place で修復する。subagent の結果�
 
 ## モデルルーティング
 
-`dog-coordinator` の built-in route は `openai/gpt-5.6-terra`。root context を反復処理する一方、
+`dog-coordinator` の built-in route は `openai/gpt-5.6-terra` の `medium` variant。root context を反復処理する一方、
 主処理は状態管理と routing なので、Luna と Sol の中間 cost tier を既定にする。host が Terra unavailable と
 証明した場合は設定済みfree-tier fallbackを使い、それもなければsession modelを維持する。`dog-scout` のデフォルトは
 `openai/gpt-5.6-luna` の `high` variant。Project-local routing でどちらも上書きできる。
@@ -253,7 +253,7 @@ route は Preferred target から順序付き fallback へ決定的に解決す�
 {
   "modelRouting": {
     "dog-coordinator": {
-      "preferred": { "model": "openai/gpt-5.6-terra" }
+      "preferred": { "model": "openai/gpt-5.6-terra", "variant": "medium" }
     },
     "dog-scout": {
       "preferred": { "model": "openai/gpt-5.6-luna", "variant": "high" }
@@ -268,7 +268,7 @@ route は Preferred target から順序付き fallback へ決定的に解決す�
   },
   "modelCatalog": {
     "project": [
-      { "model": "openai/gpt-5.6-terra" },
+      { "model": "openai/gpt-5.6-terra", "variants": ["medium"] },
       { "model": "openai/gpt-5.6-sol", "variants": ["medium", "xhigh"] },
       { "model": "openai/gpt-5.6-luna", "variants": ["max", "high"] },
       { "model": "anthropic/claude-opus-5" }
@@ -288,7 +288,7 @@ stage、commit、ユーザー対応を行わない。
 
 ## 更新と移行
 
-[Release v0.3.7](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.3.7)
+[Release v0.3.8](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.3.8)
 
 依存 asset を新しい release に更新後、対象 project root で再実行する。
 
