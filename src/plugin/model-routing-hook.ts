@@ -25,7 +25,8 @@ export interface OpenCodeChatMessageOutput {
 export type OpenCodeChatMessageHook = (
   input: OpenCodeChatMessageInput,
   output: OpenCodeChatMessageOutput,
-) => Promise<void>;
+  options?: { readonly skipPreferred?: boolean },
+) => Promise<boolean | void>;
 
 export interface ModelRoutingHookConfiguration {
   readonly local?: ModelRoutingConfig;
@@ -37,8 +38,16 @@ export interface ModelRoutingHookConfiguration {
 
 /** The narrow OpenCode SDK surface used to discover models configured on the current host. */
 export interface OpenCodeModelAvailabilityClient {
+  readonly v2?: {
+    readonly model?: {
+      readonly list?: () => Promise<unknown>;
+    };
+  };
   readonly config?: {
     readonly providers?: () => Promise<unknown>;
+  };
+  readonly provider?: {
+    readonly list?: () => Promise<unknown>;
   };
 }
 
@@ -92,15 +101,83 @@ function configuredHostModels(response: unknown): ReadonlySet<string> | undefine
   return models;
 }
 
+function connectedHostModels(response: unknown): ReadonlySet<string> | undefined {
+  const envelope = isRecord(response) && Object.prototype.hasOwnProperty.call(response, "data")
+    ? response.data
+    : response;
+  if (
+    !isRecord(envelope) || !Array.isArray(envelope.all) || !Array.isArray(envelope.connected) ||
+    envelope.connected.some((providerID) => typeof providerID !== "string")
+  ) return undefined;
+
+  const connected = new Set(envelope.connected as string[]);
+  const models = new Set<string>();
+  for (const provider of envelope.all) {
+    if (
+      !isRecord(provider) || typeof provider.id !== "string" ||
+      !connected.has(provider.id) || !isRecord(provider.models)
+    ) continue;
+    for (const [modelKey, modelValue] of Object.entries(provider.models)) {
+      const modelID = isRecord(modelValue) && typeof modelValue.id === "string" ? modelValue.id : modelKey;
+      models.add(`${provider.id}/${modelID}`);
+    }
+  }
+  return models;
+}
+
+function enabledHostModels(response: unknown): ReadonlySet<string> | undefined {
+  const envelope = isRecord(response) && Array.isArray(response.data)
+    ? response
+    : isRecord(response) && isRecord(response.data)
+      ? response.data
+      : response;
+  if (!isRecord(envelope) || !Array.isArray(envelope.data)) return undefined;
+
+  const models = new Set<string>();
+  for (const model of envelope.data) {
+    if (
+      !isRecord(model) || model.enabled !== true ||
+      typeof model.providerID !== "string" || typeof model.id !== "string"
+    ) continue;
+    models.add(`${model.providerID}/${model.id}`);
+  }
+  return models;
+}
+
 async function readHostModels(
   client: OpenCodeModelAvailabilityClient | undefined,
 ): Promise<ReadonlySet<string> | undefined> {
+  if (client?.v2?.model?.list !== undefined) {
+    try {
+      const models = enabledHostModels(await client.v2.model.list());
+      if (models !== undefined) return models;
+    } catch {
+      // Older hosts may expose the method before the endpoint is usable.
+    }
+  }
+  if (client?.provider?.list !== undefined) {
+    try {
+      const models = connectedHostModels(await client.provider.list());
+      if (models !== undefined) return models;
+    } catch {
+      // Older hosts may expose only configured-provider discovery.
+    }
+  }
   if (client?.config?.providers === undefined) return undefined;
   try {
     return configuredHostModels(await client.config.providers());
   } catch {
     return undefined;
   }
+}
+
+function catalogAvailableOnHost(catalog: ModelCatalog, hostModels: ReadonlySet<string>): ModelCatalog {
+  const available = (models: ModelCatalog["project"]): ModelCatalog["project"] =>
+    models?.filter((candidate) => hostModels.has(candidate.model));
+  return {
+    project: available(catalog.project),
+    global: available(catalog.global),
+  };
 }
 
 /** Resolve package policy first, then fail open when the host proves that target is unavailable. */
@@ -114,27 +191,28 @@ export function createModelRoutingHook(
   const warnedDegradedRoutes = new Set<string>();
   const freeTierFallbackModels = config.freeTierFallbackModels;
 
-  return async (input, output): Promise<void> => {
+  return async (input, output, options): Promise<boolean> => {
     const role = input.agent && input.agent.length > 0
       ? input.agent
       : output.message.agent && output.message.agent.length > 0
         ? output.message.agent
         : undefined;
-    if (role === undefined) return;
+    if (role === undefined) return false;
     const hasRoute = Object.prototype.hasOwnProperty.call(config.local ?? {}, role) ||
       Object.prototype.hasOwnProperty.call(config.global ?? {}, role);
-    if (!hasRoute) return;
-    const resolution = resolveModelRoute({
+    if (!hasRoute) return false;
+    let resolution = resolveModelRoute({
       role,
       local: config.local,
       global: config.global,
       catalog: config.catalog,
       dedicated: config.dedicated,
+      skipPreferred: options?.skipPreferred,
     });
     if (!resolution.ok) throw new ModelRoutingDeniedError(resolution.role, resolution.attempts);
-
-    const model = openCodeModel(resolution.model);
+    let model = openCodeModel(resolution.model);
     if (model === undefined) throw new InvalidModelTargetError();
+
     if (hostModels === undefined) {
       hostModelsReadAt = Date.now();
       hostModels = readHostModels(client);
@@ -149,20 +227,40 @@ export function createModelRoutingHook(
       hostModels = readHostModels(client);
       availableModels = await hostModels;
     }
-    const unavailableWarningKey = JSON.stringify([role, resolution.model]);
+    const initiallyResolvedModel = resolution.model;
+    const unavailableWarningKey = JSON.stringify([role, initiallyResolvedModel]);
     const warnUnavailable = (): void => {
       if (warnedUnavailableTargets.has(unavailableWarningKey)) return;
       warnedUnavailableTargets.add(unavailableWarningKey);
       console.warn(
-        `Model routing target unavailable for role "${role}": ${resolution.model}. Configure modelRouting for this host.`,
+        `Model routing target unavailable for role "${role}": ${initiallyResolvedModel}. Configure modelRouting for this host.`,
       );
     };
-    if (availableModels === undefined) return;
+    if (availableModels === undefined) return false;
     if (availableModels.size === 0) {
       warnUnavailable();
-      return;
+      return false;
     }
     if (!availableModels.has(resolution.model)) {
+      const hostResolution = resolveModelRoute({
+        role,
+        local: config.local,
+        global: config.global,
+        catalog: catalogAvailableOnHost(config.catalog, availableModels),
+        dedicated: config.dedicated,
+        skipPreferred: options?.skipPreferred,
+      });
+      if (hostResolution.ok) {
+        resolution = hostResolution;
+        model = openCodeModel(resolution.model);
+        if (model === undefined) throw new InvalidModelTargetError();
+      }
+    }
+    if (!availableModels.has(resolution.model)) {
+      if (options?.skipPreferred === true) {
+        warnUnavailable();
+        return false;
+      }
       const literalFallback = freeTierFallbackModels.length === 0
         ? undefined
         : freeTierFallbackModels.find((candidate) => availableModels.has(candidate));
@@ -194,14 +292,15 @@ export function createModelRoutingHook(
               `Degraded model routing for role "${role}": ${resolution.model} unavailable; using free-tier fallback ${fallback}.`,
             );
           }
-          return;
+          return true;
         }
       }
       warnUnavailable();
-      return;
+      return false;
     }
     output.message.model = resolution.variant === undefined
       ? model
       : { ...model, variant: resolution.variant };
+    return true;
   };
 }

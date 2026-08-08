@@ -46,6 +46,7 @@ import {
 } from "./model-routing-hook.js";
 import {
   createTaskResultRepairHook,
+  markConsultationFallbackRetry,
   type SessionMessageReader,
 } from "./task-result-repair.js";
 import { configRoot, nearestPackageVersion, reflectionEnabled, ReflectionError, ReflectionStore } from "../reflection/index.js";
@@ -58,6 +59,10 @@ const PROJECT_CONFIG_PATH = ".opencode/sortie-dogs.json";
 const PROJECT_VERSION_MARKER = ".opencode/sortie-dogs.version";
 const ENV_CONFIG = "SORTIE_DOGS_CONFIG";
 const COORDINATOR_AGENT = "dog-coordinator";
+const REVIEWER_AGENT = "dog-reviewer";
+const ADVISOR_AGENT = "dog-advisor";
+const CONSULTATION_AGENTS = new Set([REVIEWER_AGENT, ADVISOR_AGENT]);
+type ConsultationAgent = typeof REVIEWER_AGENT | typeof ADVISOR_AGENT;
 const SORTIE_TRIGGER = /^\/sortie(?:\s|$)/;
 const TASK_ROLES = new Set(["implementation", "remediation", "blocker-resolution"]);
 
@@ -808,6 +813,11 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   const expiredSessions = new Set<string>();
   const sessionParents = new Map<string, string>();
   const sessionRoots = new Map<string, string>();
+  const consultationRetries = new Map<
+    string,
+    { readonly phase: "pending" | "routing" | "consumed"; readonly retryChildSessionID?: string }
+  >();
+  const taskResultRepair = createTaskResultRepairHook(input.client);
 
   function hasSessionEnforcementState(sessionID: string): boolean {
     return sessionAuthorizations.has(sessionID) || bindingPins.has(sessionID);
@@ -1474,6 +1484,30 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     }
   }
 
+  function consultationRetryKey(parentID: string, role: ConsultationAgent): string {
+    return `${parentID}\u0000${role}`;
+  }
+
+  function consultationAgent(value: unknown): ConsultationAgent | undefined {
+    return typeof value === "string" && CONSULTATION_AGENTS.has(value)
+      ? value as ConsultationAgent
+      : undefined;
+  }
+
+  async function reserveConsultationFallbackRetry(
+    chatInput: Parameters<OpenCodeChatMessageHook>[0],
+    output: Parameters<OpenCodeChatMessageHook>[1],
+  ): Promise<{ readonly key: string; readonly childSessionID: string } | undefined> {
+    const role = consultationAgent(chatInput.agent ?? output.message.agent);
+    if (role === undefined) return undefined;
+    const identity = await hostSessionIdentity(chatInput.sessionID);
+    if (identity?.agent !== role || identity.parentID === undefined) return undefined;
+    const key = consultationRetryKey(identity.parentID, role);
+    if (consultationRetries.get(key)?.phase !== "pending") return undefined;
+    consultationRetries.set(key, { phase: "routing" });
+    return { key, childSessionID: chatInput.sessionID };
+  }
+
   /**
    * A long worker or visual validation can outlive the bounded lineage cache, and hosts may deliver a
    * child's first chat message before its session.created event. In both cases the inline handoff is
@@ -1638,7 +1672,25 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
        * them silently inheriting the caller's model instead of its own configured route.
        */
       await ensureLoaded();
-      await loaded?.modelRoutingHook?.(chatInput, output);
+      const consultationFallbackRetry = await reserveConsultationFallbackRetry(chatInput, output);
+      try {
+        const routed = await loaded?.modelRoutingHook?.(chatInput, output, {
+          skipPreferred: consultationFallbackRetry !== undefined,
+        });
+        if (consultationFallbackRetry !== undefined && routed === true) {
+          consultationRetries.set(consultationFallbackRetry.key, {
+            phase: "consumed",
+            retryChildSessionID: consultationFallbackRetry.childSessionID,
+          });
+        }
+      } finally {
+        if (
+          consultationFallbackRetry !== undefined &&
+          consultationRetries.get(consultationFallbackRetry.key)?.phase === "routing"
+        ) {
+          consultationRetries.set(consultationFallbackRetry.key, { phase: "pending" });
+        }
+      }
       if (coordinatorOrigin) {
         const synthetic = output.parts.some((part) => isRecord(part) && part.synthetic === true);
         continuation.observeModel(chatInput.sessionID, output.message.model, synthetic);
@@ -1687,7 +1739,22 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
      * erases an answer the worker already produced and the coordinator re-dispatches the same work.
      */
     "tool.execute.after": async (toolInput, output): Promise<void> => {
-      await createTaskResultRepairHook(input.client)(toolInput, output);
+      const repair = await taskResultRepair(toolInput, output);
+      if (
+        repair.kind === "unrecoverable-empty" && toolInput.sessionID !== undefined
+      ) {
+        const identity = await hostSessionIdentity(repair.childSessionID);
+        const role = consultationAgent(identity?.agent);
+        if (role !== undefined && identity?.parentID === toolInput.sessionID) {
+          const key = consultationRetryKey(toolInput.sessionID, role);
+          if (
+            !consultationRetries.has(key) &&
+            markConsultationFallbackRetry(output, role)
+          ) {
+            consultationRetries.set(key, { phase: "pending" });
+          }
+        }
+      }
       await inspectSuccessfulRead(toolInput);
     },
     "tool.execute.before": async (toolInput, output): Promise<void> => {
@@ -1772,6 +1839,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           else reflectionWarning("reflection_cleanup_failed");
         }
         evictSession(eventSessionID);
+        for (const role of [REVIEWER_AGENT, ADVISOR_AGENT] as const) {
+          const key = consultationRetryKey(eventSessionID, role);
+          consultationRetries.delete(key);
+        }
         continuation.forgetSession(eventSessionID);
         return;
       }

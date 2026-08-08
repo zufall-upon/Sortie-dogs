@@ -35,7 +35,12 @@ function collectManifestPaths(
 ): Set<string> {
   const normalizedPaths = new Set<string>();
   paths.forEach((path, index) => {
-    const normalized = normalizePath(path);
+    let normalized: ReturnType<typeof pathUtils.normalizeManifestPath> | undefined;
+    try {
+      normalized = pathUtils.normalizeManifestPath(path);
+    } catch (error) {
+      if (!(error instanceof pathUtils.RelativePathError)) throw error;
+    }
     if (normalized === undefined) {
       diagnostics.push({
         code: "H001_PATH_RELATIVE",
@@ -43,8 +48,10 @@ function collectManifestPaths(
         pointer: `/manifest/${pointer}/${index}`,
         message: MESSAGES.H001_PATH_RELATIVE,
       });
-    } else {
-      normalizedPaths.add(normalized);
+    } else if (normalized.kind === "relative") {
+      // Absolute manifest targets authorize tools only. Handoff scope/source and Git paths remain
+      // repository-relative and therefore never compare equal to an external target.
+      normalizedPaths.add(normalized.path);
     }
   });
   return normalizedPaths;

@@ -121,7 +121,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       join(consumer, "node_modules", "sortie-dogs", "package.json"),
       "utf8",
     )) as { version?: string; scripts?: { prebuild?: string } };
-    assert.equal(installedPackage.version, "0.3.4");
+    assert.equal(installedPackage.version, "0.3.5");
     assert.equal(
       installedPackage.scripts?.prebuild,
       "node --input-type=module --eval \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true });\"",
@@ -360,7 +360,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     for (const asset of loaded.runtimeAssets) {
       assert.equal(asset.version, RUNTIME_ASSET_VERSION, `${asset.name} version must match the shared marker`);
     }
-    assert.equal(RUNTIME_ASSET_VERSION, "0.3.4-card27");
+    assert.equal(RUNTIME_ASSET_VERSION, "0.3.4-card28");
     assert.equal(/^---\r?\n[\s\S]*?\r?\n---/u.exec(worker.content)?.[0].includes("model:"), false);
     assert.equal(worker.content.includes(DEDICATED_WORKER_MODEL), false);
     assert.equal(worker.content.includes(DEDICATED_WORKER_VARIANT), false);
@@ -904,6 +904,14 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     );
     assert.match(coordinator.content, /low-risk candidate,\s+explicitly record dog-reviewer skipped/i);
     assert.match(coordinator.content, /dog-reviewer is unavailable or does not return PASS, fail closed before staging/i);
+    const reviewRetry = coordinator.content.match(
+      /CONSULTATION_FALLBACK_RETRY_FIXTURE\r?\n([\s\S]+?)\r?\nEND_CONSULTATION_FALLBACK_RETRY_FIXTURE/,
+    );
+    assert.ok(reviewRetry);
+    assert.match(reviewRetry[1], /same validated SourceReview artifact exactly once/);
+    assert.match(reviewRetry[1], /same Strategy request exactly once/);
+    assert.match(reviewRetry[1], /parent_scope:\s*consume one retry for this parent coordinator and exact role/);
+    assert.match(reviewRetry[1], /second_marker_or_empty_retry:\s*fail closed; no further retry/);
 
     const commitScope = coordinator.content.match(
       /COMMIT_SCOPE_FIXTURE\r?\n([\s\S]+?)\r?\nEND_COMMIT_SCOPE_FIXTURE/,
@@ -1258,7 +1266,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(sortie.content, /never route a worker to the user/i);
 
     for (const asset of loaded.runtimeAssets) {
-      assert.equal(asset.version, "0.3.4-card27");
+      assert.equal(asset.version, "0.3.4-card28");
       const frontmatter = asset.content.match(/^---\r?\n([\s\S]+?)\r?\n---\r?\n/);
       assert.ok(frontmatter, `${asset.name} must have frontmatter`);
       const entries = Object.fromEntries(

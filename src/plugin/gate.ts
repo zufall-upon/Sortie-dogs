@@ -3,7 +3,7 @@ import { lstat, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 
-import { RelativePathError, normalizeRelativePath } from "../core/path.js";
+import { RelativePathError, normalizeManifestPath, normalizeRelativePath } from "../core/path.js";
 import type { OperationManifest } from "../core/types.js";
 import { validateOperationManifestSchema } from "../core/validate-schema.js";
 
@@ -520,6 +520,15 @@ async function nearestExistingRealPath(path: string): Promise<string> {
   }
 }
 
+async function isSymbolicLink(path: string): Promise<boolean> {
+  try {
+    return (await lstat(path)).isSymbolicLink();
+  } catch (error) {
+    if (isRecord(error) && error.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
 function isWithin(root: string, target: string): boolean {
   const path = relative(root, target);
   return path === "" || (!path.startsWith("..") && !isAbsolute(path));
@@ -555,7 +564,20 @@ export async function createWriteGate(project: ProjectPaths, value: unknown): Pr
   // path extraction. The manifest already declares the commands this candidate is allowed to run,
   // so an exact match against that declaration is the only accepted form.
   const declaredValidation = new Set(manifest.validation.map(normalizeCommand));
-  const writable = new Set(manifest.write.map((path) => normalizeRelativePath(path)));
+  const writable = new Set<string>();
+  const externalEntries: string[] = [];
+  try {
+    for (const entry of manifest.write) {
+      const normalized = normalizeManifestPath(entry);
+      if (normalized.kind === "relative") writable.add(normalized.path);
+      else {
+        if (!isAbsolute(normalized.path)) throw new RelativePathError("absolute");
+        externalEntries.push(resolve(normalized.path));
+      }
+    }
+  } catch (error) {
+    throw new WriteDeniedError("manifest-unavailable", "<unknown>", { cause: error });
+  }
   const writableDirectories: { path: string; realPath: string }[] = [];
   for (const path of writable) {
     try {
@@ -580,10 +602,84 @@ export async function createWriteGate(project: ProjectPaths, value: unknown): Pr
       return false;
     }
   };
+  const externalDirectories: { path: string; realPath: string }[] = [];
+  const externalFiles: { path: string; realPath?: string; anchorRealPath: string }[] = [];
+  for (const path of externalEntries) {
+    try {
+      const metadata = await lstat(path);
+      if (metadata.isSymbolicLink()) {
+        throw new WriteDeniedError("manifest-unavailable", "<unknown>");
+      }
+      if (metadata.isDirectory()) {
+        externalDirectories.push({ path, realPath: await realpath(path) });
+      } else {
+        externalFiles.push({ path, realPath: await realpath(path), anchorRealPath: await realpath(resolve(path, "..")) });
+      }
+    } catch (error) {
+      if (error instanceof WriteDeniedError) throw error;
+      if (!isRecord(error) || error.code !== "ENOENT") {
+        throw new WriteDeniedError("manifest-unavailable", "<unknown>", { cause: error });
+      }
+      externalFiles.push({ path, anchorRealPath: await nearestExistingRealPath(resolve(path, "..")) });
+    }
+  }
+  const matchingExternalScopes = (absolute: string) => ({
+    files: externalFiles.filter((scope) => scope.path === absolute),
+    directories: externalDirectories.filter((scope) => isWithin(scope.path, absolute)),
+  });
+  const isExternalWritable = async (absolute: string): Promise<boolean> => {
+    const scopes = matchingExternalScopes(absolute);
+    for (const scope of scopes.files) {
+      if (await isSymbolicLink(absolute)) return false;
+      try {
+        const targetRealPath = await realpath(absolute);
+        if (scope.realPath !== undefined) return isWithin(scope.realPath, targetRealPath) && isWithin(targetRealPath, scope.realPath);
+        return isWithin(scope.anchorRealPath, targetRealPath);
+      } catch (error) {
+        if (!isRecord(error) || error.code !== "ENOENT") return false;
+        try {
+          return isWithin(scope.anchorRealPath, await nearestExistingRealPath(resolve(absolute, "..")));
+        } catch {
+          return false;
+        }
+      }
+    }
+    if (scopes.directories.length === 0) return false;
+    try {
+      const realTarget = await nearestExistingRealPath(absolute);
+      return scopes.directories.some((scope) => isWithin(scope.realPath, realTarget));
+    } catch {
+      return false;
+    }
+  };
   const checkPath = async (path: string): Promise<void> => {
+    let manifestPath: ReturnType<typeof normalizeManifestPath>;
+    try {
+      manifestPath = normalizeManifestPath(path);
+    } catch (error) {
+      if (error instanceof RelativePathError) {
+        throw new WriteDeniedError("project-boundary", path, { cause: error });
+      }
+      throw error;
+    }
+    if (manifestPath.kind === "absolute") {
+      if (!isAbsolute(manifestPath.path)) throw new WriteDeniedError("project-boundary", path);
+      const absolute = resolve(manifestPath.path);
+      if (await project.contains(absolute)) {
+        const normalized = await project.toRelativePath(absolute);
+        if (!await isWritable(normalized)) throw new WriteDeniedError("manifest-scope", normalized);
+        return;
+      }
+      const scopes = matchingExternalScopes(absolute);
+      if (scopes.files.length === 0 && scopes.directories.length === 0) {
+        throw new WriteDeniedError("project-boundary", path);
+      }
+      if (!await isExternalWritable(absolute)) throw new WriteDeniedError("manifest-scope", path);
+      return;
+    }
     let normalized: string;
     try {
-      normalized = await project.toRelativePath(path);
+      normalized = await project.toRelativePath(manifestPath.path);
     } catch (error) {
       if (error instanceof WriteDeniedError) throw error;
       if (error instanceof RelativePathError) {

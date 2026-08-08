@@ -10,7 +10,7 @@ export interface RuntimeAsset {
 export const runtimeAssets = [
   {
     name: "dog-coordinator",
-    version: "0.3.4-card27",
+    version: "0.3.4-card28",
     installPath: "agent/dog-coordinator.md",
     content: `---
 description: Canonical MkII coordinator packaged by Sortie-dogs
@@ -124,6 +124,13 @@ working tree contains the diff, or an intent summary is not a changed logic summ
 tool-free and treats only the supplied artifact as evidence. Do not spend the review call until every
 input is present and every acceptance item has that explicit mapping.
 
+If a dog-reviewer or dog-advisor task result contains the exact marker token
+SORTIE_CONSULTATION_FALLBACK_RETRY and its exact role, redispatch that same role exactly once. Reuse
+the same validated SourceReview artifact for dog-reviewer or the same Strategy request for
+dog-advisor; do not alter or rebuild it. The retry is scoped to that parent and role. A second marker
+or empty retry result fails closed without another dispatch. Ordinary empty worker or scout results,
+repaired trailing-empty results, and non-empty results keep their existing handling.
+
 SOURCE_REVIEW_PREFLIGHT_FIXTURE
     required_artifact: acceptance + exact manifest + non-empty changedLogicSummary + canonical validation command/exit/fingerprint
     acceptance_coverage: every acceptance item explicitly maps to at least one changedLogicSummary entry
@@ -131,6 +138,14 @@ SOURCE_REVIEW_PREFLIGHT_FIXTURE
     dispatch_guard: dispatch dog-reviewer only when required_artifact and acceptance_coverage are complete
     incomplete_action: fail closed before SourceReview dispatch; repair the artifact without spending the review call
 END_SOURCE_REVIEW_PREFLIGHT_FIXTURE
+CONSULTATION_FALLBACK_RETRY_FIXTURE
+    marker: SORTIE_CONSULTATION_FALLBACK_RETRY role=<dog-reviewer | dog-advisor>
+    reviewer_action: redispatch dog-reviewer with the same validated SourceReview artifact exactly once
+    advisor_action: redispatch dog-advisor with the same Strategy request exactly once
+    parent_scope: consume one retry for this parent coordinator and exact role
+    second_marker_or_empty_retry: fail closed; no further retry
+    non_consultation_or_nonempty: existing behavior unchanged
+END_CONSULTATION_FALLBACK_RETRY_FIXTURE
 Do not encode a provider, vendor, model, variant, or transport in the request, response, or
 consultation agent frontmatter. ConsultationAdapter is the sole explicit transport boundary;
 the host adapter owns it and supplies execution independently.
@@ -832,10 +847,10 @@ the initial exit 1 is first and the latest exit 0 is last.
 An undeclared write or mutation must be reported as rejected, not performed.
 
 RUNTIME_ASSET_VERSION_SYNC_FIXTURE
-    runtime_version: 0.3.4-card27
+    runtime_version: 0.3.4-card28
     shared_marker: src/asset-version.ts
-    packaged_expectation: test/plugin-loader.test.ts uses 0.3.4-card27
-    initialize_expectation: test/initialize.test.ts uses 0.3.4-card27
+    packaged_expectation: test/plugin-loader.test.ts uses 0.3.4-card28
+    initialize_expectation: test/initialize.test.ts uses 0.3.4-card28
     rule: runtime asset versions, shared marker, packaged expectation, and initialize expectation change together
 END_RUNTIME_ASSET_VERSION_SYNC_FIXTURE
 
@@ -876,7 +891,7 @@ END_TERMINAL_EVIDENCE_FIXTURE
   },
   {
     name: "dog-worker",
-    version: "0.3.4-card27",
+    version: "0.3.4-card28",
     installPath: "agent/dog-worker.md",
     content: `---
 description: Dedicated worker for the canonical Sortie-dogs coordinator
@@ -951,7 +966,7 @@ the user.
   },
   {
     name: "dog-scout",
-    version: "0.3.4-card27",
+    version: "0.3.4-card28",
     installPath: "agent/dog-scout.md",
     content: `---
 description: Bounded evidence scout for dog-coordinator
@@ -1001,7 +1016,7 @@ prose; keep the keys, paths, commands, and identifiers verbatim.
   },
   {
     name: "dog-reviewer",
-    version: "0.3.4-card27",
+    version: "0.3.4-card28",
     installPath: "agent/dog-reviewer.md",
     content: `---
 description: Independent source reviewer for dog-coordinator
@@ -1028,7 +1043,7 @@ or transport.
   },
   {
     name: "dog-advisor",
-    version: "0.3.4-card27",
+    version: "0.3.4-card28",
     installPath: "agent/dog-advisor.md",
     content: `---
 description: Focused technical advisor for dog-coordinator
@@ -1052,7 +1067,7 @@ provider, vendor, model, variant, or transport.
   },
   {
     name: "sortie",
-    version: "0.3.4-card27",
+    version: "0.3.4-card28",
     installPath: "command/sortie.md",
     content: `---
 description: Start the canonical Sortie-dogs MkII workflow

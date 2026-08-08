@@ -142,28 +142,17 @@ function frozenTarget(target: ModelTarget): ModelTarget {
   );
 }
 
-function sameTarget(left: ModelTarget, right: ModelTarget): boolean {
-  return left.model === right.model && left.variant === right.variant;
-}
-
 /**
  * Consultation prefers the strongest declared reasoning model. A host that relocated the dedicated
- * worker target keeps that target as its first fallback, because such a host may not serve the
- * shipped model at all. Every route then ends at the shipped high-effort target, so a host on the
- * shipped defaults reviews above worker effort instead of inheriting the reduced worker effort.
+ * worker target does not alter consultation policy: every default route ends at the shipped
+ * high-effort target, so review effort cannot silently collapse to the worker's effort or variant.
  * Every consultation route stays configurable, so a host without the preferred model may declare any
  * role model it can actually serve.
  */
 export function recommendedConsultationRouting(
-  fallbackTarget: ModelTarget = DEFAULT_DEDICATED_WORKER_TARGET,
+  _fallbackTarget: ModelTarget = DEFAULT_DEDICATED_WORKER_TARGET,
 ): ModelRoutingConfig {
-  const relocated = !sameTarget(fallbackTarget, DEFAULT_DEDICATED_WORKER_TARGET) &&
-    !sameTarget(fallbackTarget, DEFAULT_CONSULTATION_FALLBACK_TARGET);
-  const fallback = Object.freeze(
-    relocated
-      ? [frozenTarget(fallbackTarget), frozenTarget(DEFAULT_CONSULTATION_FALLBACK_TARGET)]
-      : [frozenTarget(DEFAULT_CONSULTATION_FALLBACK_TARGET)],
-  );
+  const fallback = Object.freeze([frozenTarget(DEFAULT_CONSULTATION_FALLBACK_TARGET)]);
   return Object.freeze(Object.fromEntries(
     RECOMMENDED_CONSULTATION_ROLES.map((role) => [role, Object.freeze({
       preferred: Object.freeze({ model: RECOMMENDED_CONSULTATION_MODEL }),
@@ -231,6 +220,8 @@ export interface ResolveModelRouteInput {
   readonly catalog: ModelCatalog;
   /** The single target every dedicated worker role resolves to. Defaults to the shipped target. */
   readonly dedicated?: ModelTarget;
+  /** Consultation retry only: ignore each configured preferred target and begin at its fallback. */
+  readonly skipPreferred?: boolean;
 }
 
 export interface ResolvedModelRoute {
@@ -355,7 +346,9 @@ export function resolveModelRoute(input: ResolveModelRouteInput): ModelRouteReso
     if (routeOrTargets === undefined) continue;
     const targets = source === "fixed"
       ? routeOrTargets
-      : [routeOrTargets.preferred, ...(routeOrTargets.fallback ?? [])];
+      : input.skipPreferred === true
+        ? routeOrTargets.fallback ?? []
+        : [routeOrTargets.preferred, ...(routeOrTargets.fallback ?? [])];
     for (const target of targets) {
       const availability = findAvailable(target, input.catalog);
       if (typeof availability === "object") {

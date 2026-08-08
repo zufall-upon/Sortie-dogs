@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
+import { normalizeManifestPath } from "../src/core/path.ts";
 import { validateManifest } from "../src/core/validate-manifest.ts";
 import type { Handoff, OperationManifest } from "../src/core/types.ts";
+import { WriteDeniedError, createProjectPaths, createWriteGate } from "../dist/plugin/gate.js";
 
 function makeHandoff(profile: Handoff["profile"] = "full"): Handoff {
   return {
@@ -139,7 +143,7 @@ test("malformed handoff paths fail closed at their original indices", () => {
   );
 });
 
-test("malformed manifest read and write paths produce deterministic manifest-side diagnostics", () => {
+test("absolute manifest paths are accepted while traversal produces deterministic diagnostics", () => {
   const manifest = makeManifest();
   manifest.read = ["/absolute-read", "safe/../read"];
   manifest.write = ["/absolute-write", "safe/../write"];
@@ -150,17 +154,7 @@ test("malformed manifest read and write paths produce deterministic manifest-sid
     [
       {
         code: "H001_PATH_RELATIVE",
-        pointer: "/manifest/read/0",
-        message: "Manifest path must be a valid repository-relative path.",
-      },
-      {
-        code: "H001_PATH_RELATIVE",
         pointer: "/manifest/read/1",
-        message: "Manifest path must be a valid repository-relative path.",
-      },
-      {
-        code: "H001_PATH_RELATIVE",
-        pointer: "/manifest/write/0",
         message: "Manifest path must be a valid repository-relative path.",
       },
       {
@@ -172,6 +166,86 @@ test("malformed manifest read and write paths produce deterministic manifest-sid
   );
   assert.equal(JSON.stringify(diagnostics).includes("absolute"), false);
   assert.equal(JSON.stringify(diagnostics).includes("../"), false);
+});
+
+test("accepts normalized drive, UNC, and POSIX absolute manifest entries without adding them to repository sets", () => {
+  assert.deepEqual(normalizeManifestPath("c:\\global\\.\\asset.txt"), { kind: "absolute", path: "C:/global/asset.txt" });
+  assert.deepEqual(normalizeManifestPath("\\\\server\\share\\agent"), { kind: "absolute", path: "//server/share/agent" });
+  assert.deepEqual(normalizeManifestPath("/opt/sortie/asset"), { kind: "absolute", path: "/opt/sortie/asset" });
+
+  const manifest = makeManifest();
+  manifest.read.push("/external/read-only.txt");
+  manifest.write.push("/external/write.txt");
+  assert.deepEqual(validateManifest(makeHandoff(), manifest, ["src/core.ts"], true), []);
+});
+
+test("rejects traversal in absolute manifest entries", () => {
+  const manifest = makeManifest();
+  manifest.write = ["/external/../escape.txt"];
+  assert.deepEqual(
+    validateManifest(makeHandoff("minimal"), manifest, [], true).map(({ code, pointer }) => ({ code, pointer })),
+    [{ code: "H001_PATH_RELATIVE", pointer: "/manifest/write/0" }],
+  );
+});
+
+test("external write scope allows exact files and directory descendants but denies unlisted targets", async () => {
+  const root = await mkdtemp(join(tmpdir(), "sortie-project-"));
+  const external = await mkdtemp(join(tmpdir(), "sortie-external-"));
+  try {
+    const exact = join(external, "exact.txt");
+    const directory = join(external, "directory");
+    await writeFile(exact, "existing");
+    await mkdir(directory);
+    const gate = await createWriteGate(await createProjectPaths(root), {
+      ...makeManifest(),
+      write: [exact, directory],
+    });
+
+    await gate.checkPath(exact);
+    await gate.checkPath(join(directory, "nested", "result.txt"));
+    await assert.rejects(
+      gate.checkPath(join(external, "unlisted.txt")),
+      (error: unknown) => error instanceof WriteDeniedError && error.reason === "project-boundary",
+    );
+    await assert.rejects(
+      gate.checkPath(join(directory, "..", "escape.txt")),
+      (error: unknown) => error instanceof WriteDeniedError && error.reason === "project-boundary",
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(external, { recursive: true, force: true });
+  }
+});
+
+test("external directory scope rejects symlink escape when the host permits symlink creation", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "sortie-project-"));
+  const external = await mkdtemp(join(tmpdir(), "sortie-external-"));
+  try {
+    const directory = join(external, "directory");
+    const outside = join(external, "outside");
+    await mkdir(directory);
+    await mkdir(outside);
+    try {
+      await symlink(outside, join(directory, "link"), process.platform === "win32" ? "junction" : "dir");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EPERM") {
+        context.skip("host does not permit symlink creation");
+        return;
+      }
+      throw error;
+    }
+    const gate = await createWriteGate(await createProjectPaths(root), {
+      ...makeManifest(),
+      write: [directory],
+    });
+    await assert.rejects(
+      gate.checkPath(join(directory, "link", "escaped.txt")),
+      (error: unknown) => error instanceof WriteDeniedError && error.reason === "manifest-scope",
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(external, { recursive: true, force: true });
+  }
 });
 
 test("sorts numeric JSON-pointer segments numerically beyond index 9", () => {

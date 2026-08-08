@@ -27,7 +27,10 @@ import {
   parseModelRoutingConfig,
   resolveModelRoute,
 } from "../dist/plugin/model-routing.js";
-import { lastAssistantText } from "../dist/plugin/task-result-repair.js";
+import {
+  CONSULTATION_FALLBACK_RETRY_MARKER,
+  lastAssistantText,
+} from "../dist/plugin/task-result-repair.js";
 import { ReflectionStore } from "../dist/reflection/index.js";
 import { configRoot } from "../dist/reflection/config.js";
 import {
@@ -382,7 +385,7 @@ test("consultation never inherits the caller model and stays host-configurable",
   assert.equal(declared.kind, "configured");
   if (declared.kind !== "configured") return;
 
-  // A host that redeclares the dedicated target keeps a resolvable consultation fallback.
+  // A host that redeclares the dedicated target cannot reduce the consultation fallback effort.
   const relocated = resolvePluginConfigurationSources(undefined, undefined, {
     dedicatedWorkerModel: { model: "provider/host-worker", variant: "deep" },
   });
@@ -416,8 +419,8 @@ test("consultation never inherits the caller model and stays host-configurable",
       role,
       source: "global",
       catalog: "global",
-      model: "provider/host-worker",
-      variant: "deep",
+      model: ESCALATION_WORKER_MODEL,
+      variant: CONSULTATION_FALLBACK_VARIANT,
     });
 
     // Any host may assign its own model to a consultation role.
@@ -1939,6 +1942,47 @@ test("model routing rewrites only targets present in the cached host provider li
   });
 });
 
+test("consultation routing uses Sol xhigh before free tier when Opus is absent from the host", async () => {
+  await withProject("model-routing-consultation-host-fallback", async (directory) => {
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+    const hooks = await SortieDogsPlugin({
+      directory,
+      client: {
+        // The legacy configured-provider catalog can contain models hidden from the current picker.
+        config: { providers: async () => ({ data: { providers: [
+          { id: "anthropic", models: { "claude-opus-5": { id: "claude-opus-5" } } },
+          { id: "openai", models: { "gpt-5.6-sol": { id: "gpt-5.6-sol" } } },
+        ] } }) },
+        provider: { list: async () => ({ data: {
+          all: [
+            { id: "anthropic", models: { "claude-opus-5": { id: "claude-opus-5" } } },
+            { id: "openai", models: { "gpt-5.6-sol": { id: "gpt-5.6-sol" } } },
+            { id: "opencode", models: { "deepseek-v4-flash-free": { id: "deepseek-v4-flash-free" } } },
+          ],
+          connected: ["openai", "opencode"],
+        } }) },
+      },
+    }, {
+      dedicatedWorkerModel: { model: "openai/gpt-5.6-sol" },
+      modelCatalog: { global: [{ model: RECOMMENDED_CONSULTATION_MODEL }] },
+    });
+    const chat = hooks["chat.message"];
+    assert.ok(chat);
+    for (const role of RECOMMENDED_CONSULTATION_ROLES) {
+      const output = {
+        message: { agent: role, model: { providerID: "host", modelID: "selected" } },
+        parts: [],
+      };
+      await chat({ sessionID: `consultation-host-fallback-${role}`, agent: role }, output);
+      assert.deepEqual(output.message.model, {
+        providerID: "openai",
+        modelID: "gpt-5.6-sol",
+        variant: CONSULTATION_FALLBACK_VARIANT,
+      });
+    }
+  });
+});
+
 test("model routing refreshes a missing cached target at most once per minute before degrading", async () => {
   await withProject("model-routing-host-refresh", async (directory) => {
     await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
@@ -2350,6 +2394,197 @@ test("worker activation accepts the dispatch layout the shipped coordinator asse
     .exec(coordinator.content)?.[1];
   assert.ok(dispatch);
   assert.equal(isExplicitTaskHandoff(dispatch), true);
+});
+
+test("proven silent consultation agents get isolated parent-scoped fallback retries", async () => {
+  await withProject("silent-review-fallback", async (directory) => {
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+    const identities: Record<string, Record<string, unknown>> = {
+      review1: { agent: "dog-reviewer", parentID: "parent" },
+      review2: { agent: "dog-reviewer", parentID: "parent" },
+      advisor1: { agent: "dog-advisor", parentID: "parent" },
+      advisor2: { agent: "dog-advisor", parentID: "parent" },
+      worker1: { agent: "dog-worker", parentID: "parent-worker" },
+      unknown1: { parentID: "parent-unknown" },
+    };
+    const client = {
+      config: { providers: async () => ({ data: { providers: [
+        { id: "anthropic", models: { "claude-opus-5": { id: "claude-opus-5" } } },
+        { id: "openai", models: { "gpt-5.6-sol": { id: "gpt-5.6-sol" } } },
+      ] } }) },
+      session: {
+        get: async ({ path }: { path: { id: string } }) => ({ data: identities[path.id] }),
+        messages: async () => ({ data: [{ info: { role: "assistant" }, parts: [
+          { type: "reasoning" }, { type: "text", text: "" },
+        ] }] }),
+      },
+    };
+    const hooks = await SortieDogsPlugin({ directory, client }, {
+      modelCatalog: { global: [
+        { model: RECOMMENDED_CONSULTATION_MODEL },
+        { model: "openai/gpt-5.6-sol", variants: [CONSULTATION_FALLBACK_VARIANT] },
+      ] },
+    });
+    const chat = hooks["chat.message"]!;
+    const after = hooks["tool.execute.after"]!;
+    const emptyTask = (child: string, parent: string) => ({
+      output: `<task><task_result>\n\n</task_result></task>`,
+      metadata: { sessionId: child, parentSessionId: parent },
+    });
+    for (const [role, firstChild, retryChild] of [
+      ["dog-reviewer", "review1", "review2"],
+      ["dog-advisor", "advisor1", "advisor2"],
+    ] as const) {
+      const firstDispatch = {
+        message: { agent: role, model: { providerID: "host", modelID: "selected" } },
+        parts: [],
+      };
+      await chat({ sessionID: firstChild, agent: role, parentID: "parent" } as never, firstDispatch);
+      assert.deepEqual(firstDispatch.message.model, { providerID: "anthropic", modelID: "claude-opus-5" });
+
+      const firstSilent = emptyTask(firstChild, "parent");
+      await after({ tool: "task", sessionID: "parent" }, firstSilent);
+      assert.equal(firstSilent.output.includes(CONSULTATION_FALLBACK_RETRY_MARKER), true);
+      assert.equal(firstSilent.output.includes(`role=${role}`), true);
+
+      const retryDispatch = {
+        message: { agent: role, model: { providerID: "host", modelID: "selected" } },
+        parts: [],
+      };
+      await chat({ sessionID: retryChild, agent: role, parentID: "parent" } as never, retryDispatch);
+      assert.deepEqual(retryDispatch.message.model, {
+        providerID: "openai",
+        modelID: "gpt-5.6-sol",
+        variant: CONSULTATION_FALLBACK_VARIANT,
+      });
+      const secondSilent = emptyTask(retryChild, "parent");
+      const secondOriginal = secondSilent.output;
+      await after({ tool: "task", sessionID: "parent" }, secondSilent);
+      assert.equal(secondSilent.output, secondOriginal);
+    }
+
+    for (const [child, parent] of [["worker1", "parent-worker"], ["unknown1", "parent-unknown"]]) {
+      const unchanged = emptyTask(child, parent);
+      const original = unchanged.output;
+      await after({ tool: "task", sessionID: parent }, unchanged);
+      assert.equal(unchanged.output, original);
+    }
+  });
+});
+
+test("parallel silent consultation results emit at most one marker per parent and role", async () => {
+  await withProject("parallel-silent-consultation", async (directory) => {
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+    const identities = {
+      first: { agent: "dog-advisor", parentID: "parent" },
+      second: { agent: "dog-advisor", parentID: "parent" },
+    };
+    const hooks = await SortieDogsPlugin({
+      directory,
+      client: { session: {
+        get: async ({ path }: { path: { id: keyof typeof identities } }) => ({ data: identities[path.id] }),
+        messages: async () => ({ data: [{ info: { role: "assistant" }, parts: [{ type: "text", text: "" }] }] }),
+      } },
+    });
+    const empty = (child: keyof typeof identities) => ({
+      output: "<task><task_result>\n\n</task_result></task>",
+      metadata: { sessionId: child },
+    });
+    const outputs = [empty("first"), empty("second")];
+    await Promise.all(outputs.map((output) =>
+      hooks["tool.execute.after"]!({ tool: "task", sessionID: "parent" }, output)
+    ));
+    assert.equal(outputs.filter((output) => output.output.includes(CONSULTATION_FALLBACK_RETRY_MARKER)).length, 1);
+  });
+});
+
+test("consultation retry tombstones survive unrelated active parents", async () => {
+  await withProject("consultation-retry-tombstones", async (directory) => {
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+    const hooks = await SortieDogsPlugin({
+      directory,
+      client: { session: {
+        get: async ({ path }: { path: { id: string } }) => {
+          const parentID = path.id.startsWith("repeat-") ? path.id.slice("repeat-".length) : path.id.slice("child-".length);
+          return { data: { agent: "dog-reviewer", parentID } };
+        },
+        messages: async () => ({ data: [{ info: { role: "assistant" }, parts: [{ type: "text", text: "" }] }] }),
+      } },
+    });
+    const after = hooks["tool.execute.after"]!;
+    for (let index = 0; index < 257; index += 1) {
+      const parent = `parent-${index}`;
+      const output = { output: "<task><task_result>\n\n</task_result></task>", metadata: { sessionId: `child-${parent}` } };
+      await after({ tool: "task", sessionID: parent }, output);
+      assert.equal(output.output.includes(CONSULTATION_FALLBACK_RETRY_MARKER), true);
+    }
+    const repeated = { output: "<task><task_result>\n\n</task_result></task>", metadata: { sessionId: "repeat-parent-0" } };
+    const original = repeated.output;
+    await after({ tool: "task", sessionID: "parent-0" }, repeated);
+    assert.equal(repeated.output, original);
+  });
+});
+
+test("failed consultation fallback routing rolls back its one-shot reservation", async () => {
+  await withProject("consultation-fallback-rollback", async (directory) => {
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+    const identities = {
+      initial: { agent: "dog-advisor", parentID: "parent" },
+      retry1: { agent: "dog-advisor", parentID: "parent" },
+      retry2: { agent: "dog-advisor", parentID: "parent" },
+    };
+    const hooks = await SortieDogsPlugin({
+      directory,
+      client: { session: {
+        get: async ({ path }: { path: { id: keyof typeof identities } }) => ({ data: identities[path.id] }),
+        messages: async () => ({ data: [{ info: { role: "assistant" }, parts: [{ type: "text", text: "" }] }] }),
+      } },
+    }, {
+      modelRouting: { "dog-advisor": {
+        preferred: { model: "provider/primary" },
+        fallback: [{ model: "provider/missing" }],
+      } },
+      modelCatalog: { project: [{ model: "provider/primary" }] },
+    });
+    const silent = { output: "<task><task_result>\n\n</task_result></task>", metadata: { sessionId: "initial" } };
+    await hooks["tool.execute.after"]!({ tool: "task", sessionID: "parent" }, silent);
+    assert.equal(silent.output.includes(CONSULTATION_FALLBACK_RETRY_MARKER), true);
+
+    for (const child of ["retry1", "retry2"] as const) {
+      const output = { message: { agent: "dog-advisor", model: { providerID: "host", modelID: "selected" } }, parts: [] };
+      await assert.rejects(
+        () => hooks["chat.message"]!({ sessionID: child, agent: "dog-advisor", parentID: "parent" } as never, output),
+        ModelRoutingDeniedError,
+      );
+    }
+  });
+});
+
+test("silent reviewer retry respects the first configured consultation fallback", async () => {
+  const resolution = resolveModelRoute({
+    role: "dog-reviewer",
+    local: { "dog-reviewer": {
+      preferred: { model: "vendor/preferred" },
+      fallback: [
+        { model: "vendor/fallback", variant: "deep" },
+        { model: "vendor/later" },
+      ],
+    } },
+    catalog: { project: [
+      { model: "vendor/preferred" },
+      { model: "vendor/fallback", variants: ["deep"] },
+      { model: "vendor/later" },
+    ] },
+    skipPreferred: true,
+  });
+  assert.deepEqual(resolution, {
+    ok: true,
+    role: "dog-reviewer",
+    source: "local",
+    catalog: "project",
+    model: "vendor/fallback",
+    variant: "deep",
+  });
 });
 
 test("session-inactive redispatch fixture is a complete fresh worker handoff", () => {

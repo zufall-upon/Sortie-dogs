@@ -49,7 +49,14 @@ export interface SessionMessageReader {
 export type TaskResultRepairHook = (
   input: TaskToolExecuteInput,
   output: TaskToolExecuteOutput,
-) => Promise<void>;
+) => Promise<TaskResultRepairOutcome>;
+
+export type TaskResultRepairOutcome =
+  | { readonly kind: "unchanged" }
+  | { readonly kind: "recovered"; readonly childSessionID: string }
+  | { readonly kind: "unrecoverable-empty"; readonly childSessionID: string };
+
+export const CONSULTATION_FALLBACK_RETRY_MARKER = "SORTIE_CONSULTATION_FALLBACK_RETRY";
 
 function messageRole(message: SessionMessage): unknown {
   return message.info?.role ?? message.role;
@@ -100,26 +107,42 @@ function toMessages(response: unknown): readonly SessionMessage[] | undefined {
  * session holds real assistant text. Everything else is left byte-identical.
  */
 export function createTaskResultRepairHook(client: SessionMessageReader | undefined): TaskResultRepairHook {
-  return async (input, output): Promise<void> => {
-    if (input.tool !== TASK_TOOL) return;
+  return async (input, output): Promise<TaskResultRepairOutcome> => {
+    const unchanged = { kind: "unchanged" } as const;
+    if (input.tool !== TASK_TOOL) return unchanged;
     const read = client?.session?.messages;
-    if (read === undefined) return;
+    if (read === undefined) return unchanged;
     const match = emptyResultMatch(output);
-    if (match === undefined) return;
+    if (match === undefined) return unchanged;
     const sessionID = childSessionID(output);
-    if (sessionID === undefined) return;
+    if (sessionID === undefined) return unchanged;
 
     let recovered: string | undefined;
     try {
       recovered = lastAssistantText(toMessages(await read.call(client!.session, { path: { id: sessionID } })) ?? []);
     } catch {
       // An unreadable child session is not a reason to damage an otherwise valid tool result.
-      return;
+      return unchanged;
     }
-    if (recovered === undefined) return;
+    if (recovered === undefined) return { kind: "unrecoverable-empty", childSessionID: sessionID };
     output.output = (output.output as string).replace(
       TASK_RESULT_PATTERN,
       () => `${match[1]!}\n${recovered}\n${match[3]!}`,
     );
+    return { kind: "recovered", childSessionID: sessionID };
   };
+}
+
+/** Replace only a still-empty task result with one bounded protocol marker for a proven role. */
+export function markConsultationFallbackRetry(
+  output: TaskToolExecuteOutput,
+  role: "dog-reviewer" | "dog-advisor",
+): boolean {
+  const match = emptyResultMatch(output);
+  if (match === undefined) return false;
+  output.output = (output.output as string).replace(
+    TASK_RESULT_PATTERN,
+    () => `${match[1]!}\n<!-- ${CONSULTATION_FALLBACK_RETRY_MARKER} role=${role} -->\n${match[3]!}`,
+  );
+  return true;
 }
