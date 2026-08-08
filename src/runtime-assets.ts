@@ -10,7 +10,7 @@ export interface RuntimeAsset {
 export const runtimeAssets = [
   {
     name: "dog-coordinator",
-    version: "0.3.4-card28",
+    version: "0.3.4-card29",
     installPath: "agent/dog-coordinator.md",
     content: `---
 description: Canonical MkII coordinator packaged by Sortie-dogs
@@ -36,7 +36,7 @@ MkII workflow. Follow project instructions and preserve the canonical MkII order
 2. Fix the acceptance criteria, editable manifest, worker role, and validation command.
 3. Delegate implementation work to dog-worker with all required context inline.
 4. Evaluate returned validation evidence, apply the canonical review policy, then complete
-   coordinator-owned commit and reporting work.
+   coordinator-owned commit, release, publication, and reporting work.
 
 Keep control of the user conversation. Workers return only to you. Task dispatch is restricted to
 dog-worker, dog-scout, dog-reviewer, and dog-advisor. Every other target, including generic build,
@@ -471,6 +471,26 @@ COORDINATOR_DIRECT_OPERATION_FIXTURE
     tracker_unavailable: project-local checkpoint fallback; never a worker retry loop
 END_COORDINATOR_DIRECT_OPERATION_FIXTURE
 
+Remote Git and publication mutations are coordinator-owned direct operations. Never dispatch push,
+tag creation, release creation, or registry publication to a worker, and never create a handoff or
+operation manifest to authorize them. A worker denial for one of these operations proves a routing
+defect: continue from dog-coordinator with the project release routine instead of changing the write
+gate allowlist, rebinding, or redispatching. Before changing a release version, check the project's
+tag, release, and package registries; if any already contains that version, select the next permitted
+version. Treat an explicit user release request as publication authorization subject to project
+instructions. Preserve any project-defined manual publication boundary.
+
+RELEASE_OWNERSHIP_FIXTURE
+    owner: dog-coordinator direct; no Task
+    operations: remote push | annotated tag creation and push | release creation | registry publication
+    authorization: explicit user release request + project instructions
+    manifest: none; no handoff | operation manifest | worker bind
+    version_collision: existing tag | release | registry version -> select next permitted version before commit
+    worker_denial: routing defect -> coordinator direct; no allowlist change | rebind | redispatch
+    sequence: project release validation -> package -> commit -> push -> tag -> release -> exact remote verification
+    manual_boundary: preserve project-defined manual publication step
+END_RELEASE_OWNERSHIP_FIXTURE
+
 This normal bounded-batch section applies only while backlogDrain.enabled=false.
 Use one bounded sequential batch per fresh session. Keep batchAttempted, batchCommitted, and
 batchReconciled as separate counters; the legacy combined done counter is forbidden because it conflates outcomes. A
@@ -847,10 +867,10 @@ the initial exit 1 is first and the latest exit 0 is last.
 An undeclared write or mutation must be reported as rejected, not performed.
 
 RUNTIME_ASSET_VERSION_SYNC_FIXTURE
-    runtime_version: 0.3.4-card28
+    runtime_version: 0.3.4-card29
     shared_marker: src/asset-version.ts
-    packaged_expectation: test/plugin-loader.test.ts uses 0.3.4-card28
-    initialize_expectation: test/initialize.test.ts uses 0.3.4-card28
+    packaged_expectation: test/plugin-loader.test.ts uses 0.3.4-card29
+    initialize_expectation: test/initialize.test.ts uses 0.3.4-card29
     rule: runtime asset versions, shared marker, packaged expectation, and initialize expectation change together
 END_RUNTIME_ASSET_VERSION_SYNC_FIXTURE
 
@@ -891,7 +911,7 @@ END_TERMINAL_EVIDENCE_FIXTURE
   },
   {
     name: "dog-worker",
-    version: "0.3.4-card28",
+    version: "0.3.4-card29",
     installPath: "agent/dog-worker.md",
     content: `---
 description: Dedicated worker for the canonical Sortie-dogs coordinator
@@ -966,7 +986,7 @@ the user.
   },
   {
     name: "dog-scout",
-    version: "0.3.4-card28",
+    version: "0.3.4-card29",
     installPath: "agent/dog-scout.md",
     content: `---
 description: Bounded evidence scout for dog-coordinator
@@ -1016,7 +1036,7 @@ prose; keep the keys, paths, commands, and identifiers verbatim.
   },
   {
     name: "dog-reviewer",
-    version: "0.3.4-card28",
+    version: "0.3.4-card29",
     installPath: "agent/dog-reviewer.md",
     content: `---
 description: Independent source reviewer for dog-coordinator
@@ -1043,7 +1063,7 @@ or transport.
   },
   {
     name: "dog-advisor",
-    version: "0.3.4-card28",
+    version: "0.3.4-card29",
     installPath: "agent/dog-advisor.md",
     content: `---
 description: Focused technical advisor for dog-coordinator
@@ -1067,7 +1087,7 @@ provider, vendor, model, variant, or transport.
   },
   {
     name: "sortie",
-    version: "0.3.4-card28",
+    version: "0.3.4-card29",
     installPath: "command/sortie.md",
     content: `---
 description: Start the canonical Sortie-dogs MkII workflow

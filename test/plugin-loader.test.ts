@@ -121,7 +121,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       join(consumer, "node_modules", "sortie-dogs", "package.json"),
       "utf8",
     )) as { version?: string; scripts?: { prebuild?: string } };
-    assert.equal(installedPackage.version, "0.3.5");
+    assert.equal(installedPackage.version, "0.3.6");
     assert.equal(
       installedPackage.scripts?.prebuild,
       "node --input-type=module --eval \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true });\"",
@@ -360,7 +360,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     for (const asset of loaded.runtimeAssets) {
       assert.equal(asset.version, RUNTIME_ASSET_VERSION, `${asset.name} version must match the shared marker`);
     }
-    assert.equal(RUNTIME_ASSET_VERSION, "0.3.4-card28");
+    assert.equal(RUNTIME_ASSET_VERSION, "0.3.4-card29");
     assert.equal(/^---\r?\n[\s\S]*?\r?\n---/u.exec(worker.content)?.[0].includes("model:"), false);
     assert.equal(worker.content.includes(DEDICATED_WORKER_MODEL), false);
     assert.equal(worker.content.includes(DEDICATED_WORKER_VARIANT), false);
@@ -809,6 +809,16 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(directOperations[1], /known_executable_probe:\s*one batched direct depth-one read-only command; no Task/);
     assert.match(directOperations[1], /project_inventory:\s*one direct read-only tracker command; no Task/);
     assert.match(directOperations[1], /terminal_checkpoint:\s*at most two tracker mutations -> one coordinator-owned direct tracker command/);
+    const releaseOwnership = coordinator.content.match(
+      /RELEASE_OWNERSHIP_FIXTURE\r?\n([\s\S]+?)\r?\nEND_RELEASE_OWNERSHIP_FIXTURE/,
+    );
+    assert.ok(releaseOwnership, "coordinator needs explicit release-operation ownership");
+    assert.match(releaseOwnership[1], /owner:\s*dog-coordinator direct; no Task/);
+    assert.match(releaseOwnership[1], /remote push \| annotated tag creation and push \| release creation \| registry publication/);
+    assert.match(releaseOwnership[1], /manifest:\s*none; no handoff \| operation manifest \| worker bind/);
+    assert.match(releaseOwnership[1], /existing tag \| release \| registry version -> select next permitted version before commit/);
+    assert.match(releaseOwnership[1], /routing defect -> coordinator direct; no allowlist change \| rebind \| redispatch/);
+    assert.match(releaseOwnership[1], /manual_boundary:\s*preserve project-defined manual publication step/);
     const writeGateHandoff = coordinator.content.match(
       /WRITE_GATE_HANDOFF_FIXTURE\r?\n([\s\S]+?)\r?\nEND_WRITE_GATE_HANDOFF_FIXTURE/,
     );
@@ -1266,7 +1276,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(sortie.content, /never route a worker to the user/i);
 
     for (const asset of loaded.runtimeAssets) {
-      assert.equal(asset.version, "0.3.4-card28");
+      assert.equal(asset.version, "0.3.4-card29");
       const frontmatter = asset.content.match(/^---\r?\n([\s\S]+?)\r?\n---\r?\n/);
       assert.ok(frontmatter, `${asset.name} must have frontmatter`);
       const entries = Object.fromEntries(
