@@ -1345,6 +1345,10 @@ test("runtime contract requires interactive continuation and deterministic recov
     "candidate_body: read full body before first status mutation",
     "relevance_gate: current user scope + project evidence required; title | order | bulk status insufficient",
     "relevance_ambiguous: one question before mutation or dispatch",
+    "active_project_root: immutable for the session",
+    "external_implementation_root: hold | reassign | switch owning project; no inspect | dispatch | mutation",
+    "cross_project_recommendation: forbidden; recommend project-local option or hold",
+    "explicit_external_selection: identifies next owning-project task; never continues under current root",
     "terminal_checkpoint: at most two tracker mutations -> one coordinator-owned direct tracker command",
     "local_checkpoint_file: excluded from tracker mutation count",
     "direct_operation_artifacts: no handoff | operation manifest | generated script | child session",
@@ -1359,7 +1363,7 @@ test("runtime contract requires interactive continuation and deterministic recov
     /REFLECTION_POLICY_FIXTURE\r?\n([\s\S]+?)\r?\nEND_REFLECTION_POLICY_FIXTURE/,
   );
   assert.ok(reflection);
-  assert.match(reflection[1], /checkpoints: resolved blocker or review defect \| terminal unit/);
+  assert.match(reflection[1], /checkpoints: user correction immediately \| other evidence after resolved blocker or review defect \| terminal unit/);
   assert.match(
     reflection[1],
     /allowed_evidence: user-correction \| repeated-process-failure \| review-artifact-defect \| retry-policy-violation/,

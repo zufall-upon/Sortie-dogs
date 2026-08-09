@@ -121,7 +121,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       join(consumer, "node_modules", "sortie-dogs", "package.json"),
       "utf8",
     )) as { version?: string; scripts?: { prebuild?: string } };
-    assert.equal(installedPackage.version, "0.3.9");
+    assert.equal(installedPackage.version, "0.3.10");
     assert.equal(
       installedPackage.scripts?.prebuild,
       "node --input-type=module --eval \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true });\"",
@@ -360,7 +360,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     for (const asset of loaded.runtimeAssets) {
       assert.equal(asset.version, RUNTIME_ASSET_VERSION, `${asset.name} version must match the shared marker`);
     }
-    assert.equal(RUNTIME_ASSET_VERSION, "0.3.4-card31");
+    assert.equal(RUNTIME_ASSET_VERSION, "0.3.4-card32");
     const coordinatorFrontmatter = /^---\r?\n([\s\S]*?)\r?\n---/u.exec(coordinator.content)?.[1];
     assert.ok(coordinatorFrontmatter);
     assert.match(coordinatorFrontmatter, /^model: openai\/gpt-5\.6-terra$/m);
@@ -822,6 +822,11 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(releaseOwnership[1], /manifest:\s*none; no handoff \| operation manifest \| worker bind/);
     assert.match(releaseOwnership[1], /existing tag \| release \| registry version -> select next permitted version before commit/);
     assert.match(releaseOwnership[1], /routing defect -> coordinator direct; no allowlist change \| rebind \| redispatch/);
+    assert.match(releaseOwnership[1], /source \| package-content assertions are preflight only; not runtime acceptance/);
+    assert.match(releaseOwnership[1], /exact staged package \+ real deployment or update path \+ requested behavior or controlling asset provenance/);
+    assert.match(releaseOwnership[1], /runtime_unavailable:\s*stop before promotion with exact needed evidence/);
+    assert.match(releaseOwnership[1], /approval_boundary:\s*authorizes mutation; never waives acceptance/);
+    assert.match(releaseOwnership[1], /actual installed or running target identity \+ behavior before DONE/);
     assert.match(releaseOwnership[1], /manual_boundary:\s*preserve project-defined manual publication step/);
     const writeGateHandoff = coordinator.content.match(
       /WRITE_GATE_HANDOFF_FIXTURE\r?\n([\s\S]+?)\r?\nEND_WRITE_GATE_HANDOFF_FIXTURE/,
@@ -1280,7 +1285,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(sortie.content, /never route a worker to the user/i);
 
     for (const asset of loaded.runtimeAssets) {
-      assert.equal(asset.version, "0.3.4-card31");
+      assert.equal(asset.version, "0.3.4-card32");
       const frontmatter = asset.content.match(/^---\r?\n([\s\S]+?)\r?\n---\r?\n/);
       assert.ok(frontmatter, `${asset.name} must have frontmatter`);
       const entries = Object.fromEntries(

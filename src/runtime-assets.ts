@@ -10,7 +10,7 @@ export interface RuntimeAsset {
 export const runtimeAssets = [
   {
     name: "dog-coordinator",
-    version: "0.3.4-card31",
+    version: "0.3.4-card32",
     installPath: "agent/dog-coordinator.md",
     content: `---
 description: Canonical MkII coordinator packaged by Sortie-dogs
@@ -160,8 +160,10 @@ dog-coordinator; subagents never report to each other or the user.
 
 Reflection is an opt-in prevention checkpoint, not routine journaling. If the
 sortie_reflection capability is unavailable, continue without it and never block the task. When
-available, consider it only after a blocker or review defect is resolved and at a unit's terminal
-checkpoint. Make no call when no qualifying evidence occurred since the previous checkpoint.
+available, record a user correction immediately after acknowledging it and constraining the current
+remediation, even when that remediation remains open. Consider other evidence only after a blocker or
+review defect is resolved and at a unit's terminal checkpoint. Make no call when no qualifying evidence
+occurred since the previous checkpoint.
 
 Record only user-correction, repeated-process-failure, review-artifact-defect, or
 retry-policy-violation evidence. A resolved handoff or routing review blocker and a rescue caused by
@@ -197,7 +199,7 @@ forget it instead only when the lesson was false or no runtime judgment remains.
 always non-blocking, and no reflection-only text step is allowed.
 
 REFLECTION_POLICY_FIXTURE
-    checkpoints: resolved blocker or review defect | terminal unit
+    checkpoints: user correction immediately | other evidence after resolved blocker or review defect | terminal unit
     capability_absent: continue without reflection; never block
     allowed_evidence: user-correction | repeated-process-failure | review-artifact-defect | retry-policy-violation
     non_triggers: code bug | ordinary validation failure | expected review finding | external or transient failure | task discovery
@@ -469,6 +471,12 @@ invalidates it; an identical inventory retry before then is forbidden. Before th
 for a candidate, read its full body and prove it remains required by current user scope and project
 evidence. Title, order, or bulk inventory status alone is insufficient. If relevance remains ambiguous,
 ask once before mutation or dispatch.
+Treat the active project root as immutable for the session. A candidate whose implementation root is
+outside it is not actionable in the current batch: hold or reassign the candidate and ask the user to
+open or switch to the owning project. Do not inspect, dispatch into, or mutate the external root from
+the active session. Never mark a cross-project implementation option as recommended; recommend the
+project-local option or hold when no project-local implementation exists. Even an explicit cross-project
+selection identifies the next owning-project task, not permission to continue it under the current root.
 
 COORDINATOR_DIRECT_OPERATION_FIXTURE
     known_executable_probe: one batched direct depth-one read-only command; no Task
@@ -480,6 +488,10 @@ COORDINATOR_DIRECT_OPERATION_FIXTURE
     candidate_body: read full body before first status mutation
     relevance_gate: current user scope + project evidence required; title | order | bulk status insufficient
     relevance_ambiguous: one question before mutation or dispatch
+    active_project_root: immutable for the session
+    external_implementation_root: hold | reassign | switch owning project; no inspect | dispatch | mutation
+    cross_project_recommendation: forbidden; recommend project-local option or hold
+    explicit_external_selection: identifies next owning-project task; never continues under current root
     terminal_checkpoint: at most two tracker mutations -> one coordinator-owned direct tracker command
     local_checkpoint_file: excluded from tracker mutation count
     direct_operation_artifacts: no handoff | operation manifest | generated script | child session
@@ -494,6 +506,12 @@ gate allowlist, rebinding, or redispatching. Before changing a release version, 
 tag, release, and package registries; if any already contains that version, select the next permitted
 version. Treat an explicit user release request as publication authorization subject to project
 instructions. Preserve any project-defined manual publication boundary.
+For a release intended to fix user-visible deployed behavior, source and package-content assertions are
+preflight evidence, not runtime acceptance. Before public promotion, exercise the exact staged package
+through its real deployment or update path and prove the requested behavior or the runtime asset
+provenance that controls it. If that environment is unavailable, stop before promotion with the exact
+runtime evidence needed. User approval authorizes the mutation but never waives acceptance. After
+promotion, verify the actual installed or running target identity and behavior before reporting DONE.
 
 RELEASE_OWNERSHIP_FIXTURE
     owner: dog-coordinator direct; no Task
@@ -503,6 +521,11 @@ RELEASE_OWNERSHIP_FIXTURE
     version_collision: existing tag | release | registry version -> select next permitted version before commit
     worker_denial: routing defect -> coordinator direct; no allowlist change | rebind | redispatch
     sequence: project release validation -> package -> commit -> push -> tag -> release -> exact remote verification
+    deployed_behavior_fix: source | package-content assertions are preflight only; not runtime acceptance
+    prepromotion_gate: exact staged package + real deployment or update path + requested behavior or controlling asset provenance
+    runtime_unavailable: stop before promotion with exact needed evidence
+    approval_boundary: authorizes mutation; never waives acceptance
+    postpromotion_gate: actual installed or running target identity + behavior before DONE
     manual_boundary: preserve project-defined manual publication step
 END_RELEASE_OWNERSHIP_FIXTURE
 
@@ -882,10 +905,10 @@ the initial exit 1 is first and the latest exit 0 is last.
 An undeclared write or mutation must be reported as rejected, not performed.
 
 RUNTIME_ASSET_VERSION_SYNC_FIXTURE
-    runtime_version: 0.3.4-card31
+    runtime_version: 0.3.4-card32
     shared_marker: src/asset-version.ts
-    packaged_expectation: test/plugin-loader.test.ts uses 0.3.4-card31
-    initialize_expectation: test/initialize.test.ts uses 0.3.4-card31
+    packaged_expectation: test/plugin-loader.test.ts uses 0.3.4-card32
+    initialize_expectation: test/initialize.test.ts uses 0.3.4-card32
     rule: runtime asset versions, shared marker, packaged expectation, and initialize expectation change together
 END_RUNTIME_ASSET_VERSION_SYNC_FIXTURE
 
@@ -926,7 +949,7 @@ END_TERMINAL_EVIDENCE_FIXTURE
   },
   {
     name: "dog-worker",
-    version: "0.3.4-card31",
+    version: "0.3.4-card32",
     installPath: "agent/dog-worker.md",
     content: `---
 description: Dedicated worker for the canonical Sortie-dogs coordinator
@@ -1001,7 +1024,7 @@ the user.
   },
   {
     name: "dog-scout",
-    version: "0.3.4-card31",
+    version: "0.3.4-card32",
     installPath: "agent/dog-scout.md",
     content: `---
 description: Bounded evidence scout for dog-coordinator
@@ -1051,7 +1074,7 @@ prose; keep the keys, paths, commands, and identifiers verbatim.
   },
   {
     name: "dog-reviewer",
-    version: "0.3.4-card31",
+    version: "0.3.4-card32",
     installPath: "agent/dog-reviewer.md",
     content: `---
 description: Independent source reviewer for dog-coordinator
@@ -1078,7 +1101,7 @@ or transport.
   },
   {
     name: "dog-advisor",
-    version: "0.3.4-card31",
+    version: "0.3.4-card32",
     installPath: "agent/dog-advisor.md",
     content: `---
 description: Focused technical advisor for dog-coordinator
@@ -1102,7 +1125,7 @@ provider, vendor, model, variant, or transport.
   },
   {
     name: "sortie",
-    version: "0.3.4-card31",
+    version: "0.3.4-card32",
     installPath: "command/sortie.md",
     content: `---
 description: Start the canonical Sortie-dogs MkII workflow

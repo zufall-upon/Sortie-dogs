@@ -1,6 +1,6 @@
 {
   "version": "0.1.0",
-  "task_id": "terra-run-efficiency-audit-01",
+  "task_id": "v039-session-audit-remediation-01",
   "read": [
     "AGENTS.md",
     "package.json",
@@ -9,12 +9,10 @@
     "docs/guide-ja.md",
     "docs/guide-zh-CN.md",
     "src/asset-version.ts",
-    "src/reflection/store.ts",
     "src/runtime-assets.ts",
     "test/initialize.test.ts",
     "test/plugin.test.ts",
-    "test/plugin-loader.test.ts",
-    "test/reflection.test.ts"
+    "test/plugin-loader.test.ts"
   ],
   "write": [
     "operation-manifest.json",
@@ -24,12 +22,10 @@
     "docs/guide-ja.md",
     "docs/guide-zh-CN.md",
     "src/asset-version.ts",
-    "src/reflection/store.ts",
     "src/runtime-assets.ts",
     "test/initialize.test.ts",
     "test/plugin.test.ts",
     "test/plugin-loader.test.ts",
-    "test/reflection.test.ts",
     "dist",
     "_testenv"
   ],
