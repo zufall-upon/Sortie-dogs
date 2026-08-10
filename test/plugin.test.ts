@@ -1370,6 +1370,9 @@ test("runtime contract requires interactive continuation and deterministic recov
     "same_turn_progression: scout union | advisor result | successful contract check -> invoke the next required tool in the same turn",
     "progress_only_final: forbidden before worker dispatch or a terminal handoff",
     "permitted_turn_stop: question awaiting user answer | explicit user stop | whole-candidate blocker after required consultation",
+    "idle_recovery: non-terminal progress with next_action -> synthetic SORTIE_STEP_CONTINUE",
+    "idle_recovery_limit: at most 2 per real user turn; real user turn resets budget",
+    "idle_terminal_guard: DONE | BLOCKED | NEED_DECISION never auto-resumes",
   ]) assert.ok(scoutFanout[1].includes(contract), contract);
   assert.match(
     coordinator.content,

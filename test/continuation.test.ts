@@ -8,6 +8,7 @@ import {
   DEFAULT_MAX_AUTO_CONTINUES,
   ROLLOVER_MARKER,
   ROLLOVER_TOKEN,
+  STEP_CONTINUE_PREFIX,
   STEP_EXHAUSTED_PATTERN,
   createContinuationHooks,
   resolveContinuation,
@@ -729,6 +730,91 @@ test("the compaction prompt preserves batch state and names no legacy workflow",
   const foreignHooks = createContinuationHooks(foreign.client, "/project", POLICY, FAST);
   await foreignHooks.sessionCompacting({ sessionID: "ses_other" }, untracked);
   assert.equal(untracked.prompt, undefined, "an untracked session keeps the host compaction prompt");
+});
+
+test("session idle resumes non-terminal progress at most twice per user turn", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" });
+
+  await hooks.textComplete(
+    { sessionID: "ses_root" },
+    { text: "📊 進行中: task — 45%\n➡️ 次action: workerをdispatchする" },
+  );
+  await hooks.sessionIdle("ses_root");
+  assert.equal(host.promptCalls.length, 1);
+  assert.ok(host.promptCalls[0]!.text.startsWith(STEP_CONTINUE_PREFIX));
+
+  for (const percent of [55, 65]) {
+    hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" }, true);
+    await hooks.textComplete(
+      { sessionID: "ses_root" },
+      { text: `📊 進行中: task — ${percent}%\n➡️ 次action: 次toolを実行する` },
+    );
+    await hooks.sessionIdle("ses_root");
+  }
+  assert.equal(host.promptCalls.length, 2, "one user turn has a bounded recovery budget");
+
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" });
+  await hooks.textComplete(
+    { sessionID: "ses_root" },
+    { text: "➡️ next_action: resume after the new user turn" },
+  );
+  await hooks.sessionIdle("ses_root");
+  assert.equal(host.promptCalls.length, 3, "a real user turn resets the recovery budget");
+});
+
+test("session idle never resumes a terminal checkpoint", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" });
+  await hooks.textComplete(
+    { sessionID: "ses_root" },
+    { text: "✅ status: BLOCKED; task_id: task\n➡️ next_action: user approval" },
+  );
+  await hooks.sessionIdle("ses_root");
+  assert.equal(host.promptCalls.length, 0);
+});
+
+test("session idle never invents work for progress without a next action", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" });
+  await hooks.textComplete(
+    { sessionID: "ses_root" },
+    { text: "📊 進行中: task — 45%" },
+  );
+  await hooks.sessionIdle("ses_root");
+  assert.equal(host.promptCalls.length, 0);
+});
+
+test("session idle never promotes a child or foreign session into the coordinator", async () => {
+  for (const session of [
+    { agent: COORDINATOR, parentID: "ses_parent" },
+    { agent: "dog-worker" },
+  ]) {
+    const host = fakeHost(session);
+    const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
+    hooks.observeModel("ses_other", { providerID: "openai", modelID: "gpt-5.6-terra" });
+    await hooks.textComplete(
+      { sessionID: "ses_other" },
+      { text: "➡️ next_action: continue foreign work" },
+    );
+    await hooks.sessionIdle("ses_other");
+    assert.equal(host.promptCalls.length, 0);
+  }
+});
+
+test("session idle leaves step recovery disabled with continuation policy", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  const hooks = createContinuationHooks(host.client, "/project", { ...POLICY, enabled: false }, FAST);
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" });
+  await hooks.textComplete(
+    { sessionID: "ses_root" },
+    { text: "➡️ next_action: must remain manual" },
+  );
+  await hooks.sessionIdle("ses_root");
+  assert.equal(host.promptCalls.length, 0);
 });
 
 test("a root coordinator gets the Sortie prompt without shared in-memory rollover state", async () => {

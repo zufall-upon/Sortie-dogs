@@ -23,6 +23,7 @@ export const CONTINUATION_MARKER = "<!-- SORTIE_CONTINUE -->";
 export const ROLLOVER_MARKER = "<!-- SORTIE_COMPACT -->";
 /** First token of the synthetic resume prompt, so the coordinator can recognize its own resume. */
 export const AUTO_CONTINUE_PREFIX = "SORTIE_AUTO_CONTINUE";
+export const STEP_CONTINUE_PREFIX = "SORTIE_STEP_CONTINUE";
 const TOOL_REQUESTED_REPORT =
   "Tool-requested Sortie rollover. Preserve task identity, both manifests, validation history, " +
   "batch counters, blocker state, and the exact next action from the latest messages.";
@@ -39,6 +40,7 @@ export const STEP_EXHAUSTED_PATTERN =
   /(?:最大step(?:s|数)?(?:に)?到達|step(?:s)?\s*(?:limit|budget)\s*(?:reached|exhausted)|maximum\s+steps?\s+reached)[\s\S]{0,2500}(?:残作業|未完了|未完|次action|next\s+action|remaining\s+work)/iu;
 
 const MAX_TRACKED_SESSIONS = 256;
+const MAX_STEP_CONTINUES_PER_TURN = 2;
 
 const DEFAULT_TIMINGS = {
   /** Compaction is expensive; one rollover per minute per session is the canonical ceiling. */
@@ -284,6 +286,9 @@ interface SessionState {
   textCompleting: boolean;
   /** The direct capability already ran in this turn, so the marker must not run too. */
   directUsed: boolean;
+  /** Bounded recovery when the coordinator ends on non-terminal progress instead of its next tool. */
+  stepContinueCount: number;
+  stepContinueIssuing: boolean;
   lastRollover?: number | undefined;
   cooldownTimer?: unknown;
   touched: number;
@@ -380,6 +385,8 @@ export function createContinuationHooks(
       ownsHostContinuation: false,
       textCompleting: false,
       directUsed: false,
+      stepContinueCount: 0,
+      stepContinueIssuing: false,
       touched: Date.now(),
     };
     sessions.set(sessionID, created);
@@ -444,6 +451,50 @@ export function createContinuationHooks(
       },
     });
     if (!promptCallSucceeded(resumed)) throw new Error("resume request rejected");
+  }
+
+  function nonTerminalProgress(text: string): boolean {
+    if (text.startsWith(STEP_CONTINUE_PREFIX) || text.startsWith(AUTO_CONTINUE_PREFIX)) return false;
+    if (/\bstatus:\s*(?:DONE|BLOCKED|NEED_DECISION)\b/iu.test(text)) return false;
+    return /➡️\s*(?:次action|next_action)\s*:\s*\S/iu.test(text);
+  }
+
+  async function issueStepContinue(
+    sessionID: string,
+    state: SessionState,
+    report: string,
+    agent: string,
+  ): Promise<void> {
+    const resume = client?.session?.promptAsync;
+    const active = policy();
+    if (
+      resume === undefined || !active.enabled || active.agent !== agent || state.stepContinueIssuing ||
+      state.stepContinueCount >= MAX_STEP_CONTINUES_PER_TURN
+    ) return;
+    state.stepContinueIssuing = true;
+    state.stepContinueCount += 1;
+    state.latestCoordinatorReport = undefined;
+    try {
+      const resumed = await resume.call(client!.session, {
+        path: { id: sessionID },
+        query: { directory },
+        body: {
+          agent,
+          parts: [{
+            type: "text",
+            synthetic: true,
+            text: `${STEP_CONTINUE_PREFIX}\n直前出力は非terminal進捗。繰り返さず、同じcandidateのnext_actionを今すぐtoolで実行する。\n${report}`,
+          }],
+        },
+      });
+      if (!promptCallSucceeded(resumed)) throw new Error("step continuation request rejected");
+    } catch (error) {
+      state.stepContinueCount -= 1;
+      state.latestCoordinatorReport = report;
+      console.error("[sortie-continuation] step resume failed", sessionID, error);
+    } finally {
+      state.stepContinueIssuing = false;
+    }
   }
 
   /**
@@ -862,6 +913,7 @@ export function createContinuationHooks(
       state.model = { providerID: model.providerID, modelID: model.modelID };
       state.turnRevision += 1;
       if (!synthetic) {
+        state.stepContinueCount = 0;
         state.ownsHostContinuation = false;
         state.limitCompacted = false;
       }
@@ -889,6 +941,21 @@ export function createContinuationHooks(
       }
       if (state?.pendingRollover === true) {
         await runRollover(sessionID);
+        return;
+      }
+      if (
+        state !== undefined && !state.stepContinueIssuing &&
+        state.latestCoordinatorReport !== undefined &&
+        nonTerminalProgress(state.latestCoordinatorReport)
+      ) {
+        const report = state.latestCoordinatorReport;
+        const revision = state.turnRevision;
+        const identity = await readIdentity(sessionID);
+        const active = policy();
+        if (
+          active.enabled && identity !== undefined && identity.agent === active.agent && !nonEmpty(identity.parentID) &&
+          state.turnRevision === revision && state.latestCoordinatorReport === report
+        ) await issueStepContinue(sessionID, state, report, active.agent);
       }
   }
 }
