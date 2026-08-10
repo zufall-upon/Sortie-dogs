@@ -1373,6 +1373,7 @@ test("runtime contract requires interactive continuation and deterministic recov
     "progress_only_final: forbidden before worker dispatch or a terminal handoff",
     "permitted_turn_stop: question awaiting user answer | explicit user stop | whole-candidate blocker after required consultation",
     "idle_recovery: non-terminal progress, including missing next_action, -> synthetic SORTIE_STEP_CONTINUE",
+    "text_complete_fallback: referenced zero-delay recovery when host omits session.idle",
     "checkpoint_recovery: 100% progress + attempted < target -> runtime compaction and same-root continuation",
     "idle_recovery_limit: at most 2 per real user turn; real user turn resets budget",
     "idle_terminal_guard: DONE | BLOCKED | NEED_DECISION never auto-resumes",

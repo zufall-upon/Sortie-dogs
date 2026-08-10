@@ -332,6 +332,8 @@ interface SessionState {
   /** Bounded recovery when the coordinator ends on non-terminal progress instead of its next tool. */
   stepContinueCount: number;
   stepContinueIssuing: boolean;
+  /** Referenced fallback because one-shot CLI can exit without emitting session.idle. */
+  stepRecoveryTimer?: unknown;
   lastRollover?: number | undefined;
   cooldownTimer?: unknown;
   touched: number;
@@ -815,8 +817,26 @@ export function createContinuationHooks(
 
   function forgetSession(sessionID: string): void {
     const state = sessions.get(sessionID);
-    if (state !== undefined) clearTimer(state.cooldownTimer);
+    if (state !== undefined) {
+      clearTimer(state.cooldownTimer);
+      clearTimer(state.stepRecoveryTimer);
+    }
     sessions.delete(sessionID);
+  }
+
+  function scheduleStepRecovery(sessionID: string, state: SessionState, report: string): void {
+    clearTimer(state.stepRecoveryTimer);
+    const revision = state.turnRevision;
+    state.stepRecoveryTimer = setTimeout(() => {
+      const current = sessions.get(sessionID);
+      if (current !== state) return;
+      current.stepRecoveryTimer = undefined;
+      if (
+        current.turnRevision !== revision || current.latestCoordinatorReport !== report ||
+        current.pendingRollover || current.active || current.promptPending
+      ) return;
+      void handleSessionIdle(sessionID);
+    }, 0);
   }
 
   const tool: ContinuationTool = {
@@ -913,6 +933,9 @@ export function createContinuationHooks(
           !trimmed.startsWith(AUTO_CONTINUE_PREFIX)
         ) {
           state.latestCoordinatorReport = output.text.trim();
+          if (nonTerminalProgress(state.latestCoordinatorReport)) {
+            scheduleStepRecovery(input.sessionID, state, state.latestCoordinatorReport);
+          }
           // The resumed coordinator completed a turn, so no late event from its prior compaction can
           // compete with the next host-managed compaction.
           state.ownsHostContinuation = false;
@@ -1023,6 +1046,8 @@ export function createContinuationHooks(
     observeModel(sessionID, model, synthetic = false): void {
       if (!nonEmpty(model.providerID) || !nonEmpty(model.modelID)) return;
       const state = stateFor(sessionID);
+      clearTimer(state.stepRecoveryTimer);
+      state.stepRecoveryTimer = undefined;
       if (!synthetic && !state.pendingRollover && !state.active && !state.promptPending) state.attempts = 0;
       state.directUsed = false;
       state.latestCoordinatorReport = undefined;
@@ -1071,7 +1096,8 @@ export function createContinuationHooks(
         const active = policy();
         if (
           active.enabled && identity !== undefined && identity.agent === active.agent && !nonEmpty(identity.parentID) &&
-          state.turnRevision === revision && state.latestCoordinatorReport === report
+          sessions.get(sessionID) === state && state.turnRevision === revision &&
+          state.latestCoordinatorReport === report
         ) {
           if (batchCheckpointNeedsContinuation(report)) {
             const recoveredReport = /➡️\s*(?:次action|next_action)\s*:\s*\S/iu.test(report)

@@ -764,6 +764,57 @@ test("session idle resumes non-terminal progress at most twice per user turn", a
   assert.equal(host.promptCalls.length, 3, "a real user turn resets the recovery budget");
 });
 
+test("text completion recovers when a one-shot host omits session idle", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
+  hooks.observeModel("ses_cli", { providerID: "openai", modelID: "gpt-5.6-terra" });
+  await hooks.textComplete(
+    { sessionID: "ses_cli" },
+    { text: "📊 進行中: CLI fixture — 45% (deterministic pause) | committed 0/3; attempted 0/3; reconciled 0 | continuation: none" },
+  );
+  await settle();
+  assert.equal(host.promptCalls.length, 1);
+  assert.ok(host.promptCalls[0]!.text.startsWith(STEP_CONTINUE_PREFIX));
+
+  const eventHost = fakeHost({ agent: COORDINATOR });
+  const eventHooks = createContinuationHooks(eventHost.client, "/project", POLICY, FAST);
+  eventHooks.observeModel("ses_event", { providerID: "openai", modelID: "gpt-5.6-terra" });
+  await eventHooks.textComplete(
+    { sessionID: "ses_event" },
+    { text: "📊 進行中: event fixture — 45% | committed 0/3; attempted 0/3; reconciled 0 | continuation: none" },
+  );
+  await eventHooks.sessionIdle("ses_event");
+  await settle();
+  assert.equal(eventHost.promptCalls.length, 1, "real idle and fallback share one recovery state");
+});
+
+test("forgotten session cannot resume after delayed identity lookup", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  let markIdentityStarted!: () => void;
+  let releaseIdentity!: () => void;
+  const identityStarted = new Promise<void>((resolve) => { markIdentityStarted = resolve; });
+  const identityReleased = new Promise<void>((resolve) => { releaseIdentity = resolve; });
+  const mutableSession = host.client.session as {
+    get: NonNullable<NonNullable<ContinuationClient["session"]>["get"]>;
+  };
+  mutableSession.get = async () => {
+    markIdentityStarted();
+    await identityReleased;
+    return { data: { agent: COORDINATOR } };
+  };
+  const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
+  hooks.observeModel("ses_forgotten", { providerID: "openai", modelID: "gpt-5.6-terra" });
+  await hooks.textComplete(
+    { sessionID: "ses_forgotten" },
+    { text: "📊 進行中: forgotten — 45% | attempted 0/3 | continuation: none" },
+  );
+  await identityStarted;
+  hooks.forgetSession("ses_forgotten");
+  releaseIdentity();
+  await settle();
+  assert.equal(host.promptCalls.length, 0);
+});
+
 test("session idle never resumes a terminal checkpoint", async () => {
   const host = fakeHost({ agent: COORDINATOR });
   const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
