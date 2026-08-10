@@ -1209,6 +1209,9 @@ test("shipped document fixtures satisfy the schemas the write gate enforces", ()
   assert.match(preflight[1], /required_result: status=ok/);
   assert.match(preflight[1], /timing: before Task dispatch and after every handoff regeneration/);
   assert.match(preflight[1], /authorization: read-only report; never inspection, bind, or mutation/);
+  assert.match(preflight[1], /configured fixed path or scoped sibling handoff\.<id>\.json with filename id exactly equal to handoff id/);
+  assert.match(preflight[1], /<id>\.operation-manifest\.json is unique to the same active coordinator contract/);
+  assert.match(preflight[1], /arbitrary filename or filename\/id mismatch -> defective before dispatch/);
   assert.match(preflight[1], /equivalent_command: sortie-dogs lint <handoff_path> --manifest <operation_manifest_path> requires exit 0/);
   assert.match(preflight[1], /repair: fix the named pointer; an unchanged resend earns retry-exhausted/);
   assert.match(worker.content, /denied Read[\s\S]+denied bind[\s\S]+exact JSON\s+pointer/i);
@@ -3434,6 +3437,89 @@ test("root and inspection TTLs stop new inheritance without revoking existing ch
     } finally {
       Date.now = originalNow;
     }
+  });
+});
+
+test("two coordinator threads bind isolated task-scoped handoffs in one project", async () => {
+  await withProject("parallel-scoped-handoffs", async (directory) => {
+    const contracts = ["thread-a", "thread-b"] as const;
+    for (const id of contracts) {
+      const manifestPath = `${id}.operation-manifest.json`;
+      await writeFile(join(directory, manifestPath), JSON.stringify(fixture.manifest));
+      const handoff = writeGateHandoff(directory, manifestPath);
+      handoff.id = id;
+      await writeFile(join(directory, `handoff.${id}.json`), JSON.stringify(handoff));
+    }
+    const hooks = await SortieDogsPlugin({ directory });
+    const chat = hooks["chat.message"];
+    const event = hooks.event;
+    const before = hooks["tool.execute.before"];
+    assert.ok(chat);
+    assert.ok(event);
+    assert.ok(before);
+
+    for (const id of contracts) {
+      await chat(
+        { sessionID: `root-${id}`, agent: "dog-coordinator" },
+        { message: { agent: "dog-coordinator", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: "ordinary" }] },
+      );
+      await event({ event: { type: "session.created", properties: { info: { id: `child-${id}`, parentID: `root-${id}`, directory } } } });
+      await chat(
+        { sessionID: `child-${id}`, agent: "dog-worker" },
+        {
+          message: { agent: "dog-worker", model: { providerID: "host", modelID: "selected" } },
+          parts: [{ type: "text", text: `role=implementation\nproject_root=${directory}\noperation_manifest=${id}.operation-manifest.json\nacceptance=safe change` }],
+        },
+      );
+      await inspectHandoffWithRead(hooks, join(directory, `handoff.${id}.json`), `child-${id}`);
+      assert.equal(
+        (await executeBindWriteGate(hooks, directory, `child-${id}`, `${id}.operation-manifest.json`)).status,
+        "bound",
+      );
+      await before(
+        { tool: "write", sessionID: `child-${id}`, callID: `write-${id}` },
+        { args: { file: "allowed.txt", content: "not-written" } },
+      );
+    }
+
+    const changed = writeGateHandoff(directory, "thread-b.operation-manifest.json");
+    changed.id = "thread-b";
+    changed.task = { title: "Changed B", objective: "Invalidate only thread B." };
+    const changedPath = join(directory, "handoff.thread-b.json");
+    await writeFile(changedPath, JSON.stringify(changed));
+    await event({ event: { type: "file.edited", properties: { file: changedPath } } });
+
+    await before(
+      { tool: "write", sessionID: "child-thread-a", callID: "thread-a-still-bound" },
+      { args: { file: "allowed.txt", content: "not-written" } },
+    );
+    await expectMessage(
+      () => before(
+        { tool: "write", sessionID: "child-thread-b", callID: "thread-b-revoked" },
+        { args: { file: "allowed.txt", content: "not-written" } },
+      ),
+      'Write denied for "<unknown>": operation manifest unavailable.',
+      "manifest-unavailable",
+    );
+  });
+});
+
+test("a task-scoped handoff filename must equal the handoff id", async () => {
+  await withProject("scoped-handoff-id-mismatch", async (directory) => {
+    await writeFile(join(directory, "thread-a.operation-manifest.json"), JSON.stringify(fixture.manifest));
+    const handoff = writeGateHandoff(directory, "thread-a.operation-manifest.json");
+    handoff.id = "thread-b";
+    const handoffPath = join(directory, "handoff.thread-a.json");
+    await writeFile(handoffPath, JSON.stringify(handoff));
+    const hooks = await SortieDogsPlugin({ directory });
+    const check = hooks.tool?.sortie_check_contract as unknown as {
+      execute(args: { handoff_path: string }, context: { sessionID: string }): Promise<string>;
+    };
+    const result = JSON.parse(await check.execute(
+      { handoff_path: handoffPath },
+      { sessionID: "preflight" },
+    ));
+    assert.deepEqual(result.defects, ["handoff /id handoff_path_scope_mismatch"]);
   });
 });
 

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
-import { isAbsolute, join, resolve, sep } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 
 import { RUNTIME_ASSET_VERSION } from "../asset-version.js";
 import { normalizeRelativePath, RelativePathError } from "../core/path.js";
@@ -491,13 +491,6 @@ function sameRelativePath(left: string, right: string): boolean {
     : normalize(left) === normalize(right);
 }
 
-function hasRelativePathSuffix(path: string, relativePath: string): boolean {
-  const platformPath = relativePath.replaceAll("/", sep);
-  const candidate = process.platform === "win32" ? resolve(path).toLowerCase() : resolve(path);
-  const suffix = process.platform === "win32" ? platformPath.toLowerCase() : platformPath;
-  return candidate === suffix || candidate.endsWith(`${sep}${suffix}`);
-}
-
 function textPart(part: unknown): string | undefined {
   return isRecord(part) && typeof part.text === "string" ? part.text : undefined;
 }
@@ -513,6 +506,44 @@ function unwrapMarkdownValue(value: string): string {
   const trimmed = value.trim();
   const wrapped = /^(\*\*|__|\*|_|`)([\s\S]*)\1$/u.exec(trimmed);
   return wrapped === null ? trimmed : wrapped[2].trim();
+}
+
+interface HandoffPathRegistration {
+  readonly scopedID?: string;
+}
+
+/** Accept a task-scoped sibling of a registered handoff without opening arbitrary directories. */
+function relativeHandoffRegistration(
+  actualPath: string,
+  registeredPath: string,
+): HandoffPathRegistration | undefined {
+  const normalize = (value: string) => value.replaceAll("\\", "/");
+  const actual = normalize(actualPath).split("/");
+  const registered = normalize(registeredPath).split("/");
+  if (actual.length !== registered.length) return undefined;
+  if (!actual.slice(0, -1).every((segment, index) => sameRelativePath(segment, registered[index]!))) {
+    return undefined;
+  }
+  const actualName = actual.at(-1)!;
+  const registeredName = registered.at(-1)!;
+  if (sameRelativePath(actualName, registeredName)) return {};
+  const extensionIndex = registeredName.lastIndexOf(".");
+  const stem = extensionIndex > 0 ? registeredName.slice(0, extensionIndex) : registeredName;
+  const extension = extensionIndex > 0 ? registeredName.slice(extensionIndex) : "";
+  const prefix = `${stem}.`;
+  if (!actualName.startsWith(prefix) || !actualName.endsWith(extension)) return undefined;
+  const scopedID = actualName.slice(prefix.length, extension.length === 0 ? undefined : -extension.length);
+  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(scopedID) ? { scopedID } : undefined;
+}
+
+function absoluteHandoffRegistration(
+  path: string,
+  registeredPath: string,
+): HandoffPathRegistration | undefined {
+  const actual = path.replaceAll("\\", "/").split("/");
+  const registered = registeredPath.replaceAll("\\", "/").split("/");
+  if (actual.length < registered.length) return undefined;
+  return relativeHandoffRegistration(actual.slice(-registered.length).join("/"), registered.join("/"));
 }
 
 const HANDOFF_KEYS = {
@@ -899,10 +930,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       ? resolve(path)
       : resolve(input.worktree ?? project.root, path);
     const exactRegisteredPath = loaded.handoffPaths.some((candidate) => samePath(candidate, absolutePath));
-    const candidateRelativePath = loaded.handoffRelativePaths.find((candidate) =>
-      hasRelativePathSuffix(absolutePath, candidate)
+    const candidateRegistration = loaded.handoffRelativePaths.find((candidate) =>
+      absoluteHandoffRegistration(absolutePath, candidate) !== undefined
     );
-    if (!exactRegisteredPath && candidateRelativePath === undefined) {
+    if (!exactRegisteredPath && candidateRegistration === undefined) {
       unregistered("handoff_path_not_registered");
       return;
     }
@@ -976,12 +1007,17 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         if (!containment.some(Boolean)) throw new WriteDeniedError("project-boundary", "<candidate-root>");
         const candidateProject = await createProjectPaths(extension.project_root);
         const relativeHandoffPath = await candidateProject.toRelativePath(absolutePath);
-        if (
-          !exactRegisteredPath &&
-          !loaded.handoffRelativePaths.some((candidate) => sameRelativePath(candidate, relativeHandoffPath))
-        ) {
+        const registration = loaded.handoffRelativePaths
+          .map((candidate) => relativeHandoffRegistration(relativeHandoffPath, candidate))
+          .find((candidate) => candidate !== undefined);
+        if (!exactRegisteredPath && registration === undefined) {
           unregistered("handoff_path_not_registered");
           return;
+        }
+        if (registration?.scopedID !== undefined && registration.scopedID !== validation.value.id) {
+          throw new HandoffDeniedError("contract-invalid", path, {
+            defects: [contractDefect("handoff", "/id", "handoff_path_scope_mismatch")],
+          });
         }
         const relativeManifestPath = await candidateProject.toRelativePath(extension.operation_manifest);
         manifestPath = candidateProject.absolute(relativeManifestPath);

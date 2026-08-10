@@ -10,7 +10,7 @@ export interface RuntimeAsset {
 export const runtimeAssets = [
   {
     name: "dog-coordinator",
-    version: "0.3.4-card35",
+    version: "0.3.4-card36",
     installPath: "agent/dog-coordinator.md",
     content: `---
 description: Canonical MkII coordinator packaged by Sortie-dogs
@@ -772,24 +772,32 @@ MANIFEST_SCOPE_FIXTURE
     operation_manifest_none: read-only or non-mutating dispatch only
 END_MANIFEST_SCOPE_FIXTURE
 
-For every mutating handoff, generate the standard Handoff extension below from the current
-candidate before any mutation:
+For every mutating handoff, derive one stable contract_id from the handoff id and keep it unique
+among active coordinator roots in that project. Generate the standard Handoff extension below from
+the current candidate before any mutation:
 
 ext["sortie-dogs/write-gate"] = { operation_manifest: <candidate-root-relative-path>, project_root: <candidate-root-absolute-path> }
 
-Write it to the configured candidate-relative handoff path (handoff.json by default), include that
-exact absolute handoff_path in the worker digest, and bind it before mutation. Authorize it only for
-the current session and candidate.
+Write it to the task-scoped sibling path handoff.<contract_id>.json and write its manifest to
+<contract_id>.operation-manifest.json. The scoped filename id must exactly equal the handoff id.
+Include the exact absolute handoff_path in the worker digest and bind it before mutation. Authorize it
+only for the current session and candidate. Never write a new mutating contract to the shared legacy
+handoff.json or operation-manifest.json; those fixed names remain read-compatible only. Keep both
+scoped paths immutable for the candidate lifetime. A second coordinator root uses its own contract_id
+and files, so regenerating or editing one thread's handoff never invalidates another thread.
 Resolve operation_manifest relative to project_root, including when the coordinator runs in a parent
 workspace while the candidate is a child repository. Never bind the parent workspace as project_root
 for that child candidate, and never reuse an old candidate's manifest or authorization.
 
 WRITE_GATE_HANDOFF_FIXTURE
     timing: bind before mutation
-    creation: valid registered handoff exists before Task dispatch
-    handoff_path: exact absolute candidate handoff path included in worker digest
+    contract_id: exact handoff id; safe [A-Za-z0-9._-] token; unique among active coordinator roots
+    creation: handoff.<contract_id>.json + <contract_id>.operation-manifest.json exist before Task dispatch
+    handoff_path: exact absolute task-scoped candidate handoff path included in worker digest
     extension: ext["sortie-dogs/write-gate"] = { operation_manifest: <candidate-root-relative-path>, project_root: <candidate-root-absolute-path> }
     authorization: current session + current candidate only
+    legacy_fixed_paths: handoff.json + operation-manifest.json are read-compatible only; never emitted for new mutating work
+    concurrent_roots: distinct contract_id + distinct files; one thread regeneration never revokes another
     nested_layout: parent workspace + child repo -> project_root is child candidate absolute path
     reuse: old candidate manifest or authorization rejected
 END_WRITE_GATE_HANDOFF_FIXTURE
@@ -808,7 +816,7 @@ HANDOFF_DOCUMENT_FIXTURE
       "profile": "full",
       "id": "task-example-r1",
       "created_at": "2026-01-01T00:00:00Z",
-      "ext": { "sortie-dogs/write-gate": { "operation_manifest": "example.operation-manifest.json", "project_root": "<candidate-root-absolute-path>" } },
+      "ext": { "sortie-dogs/write-gate": { "operation_manifest": "task-example-r1.operation-manifest.json", "project_root": "<candidate-root-absolute-path>" } },
       "task": { "title": "<short title>", "objective": "<objective>" },
       "scope": { "paths": ["src/declared.ts"] },
       "sources": [{ "path": "src/declared.ts", "rev": "r1" }],
@@ -830,7 +838,7 @@ END_HANDOFF_DOCUMENT_FIXTURE
 OPERATION_MANIFEST_DOCUMENT_FIXTURE
     {
       "version": "0.1.0",
-      "task_id": "task-example",
+      "task_id": "task-example-r1",
       "read": ["AGENTS.md", "src/declared.ts"],
       "write": ["src/declared.ts"],
       "validation": ["npm test"]
@@ -850,7 +858,9 @@ unchanged document.
 CONTRACT_PREFLIGHT_FIXTURE
     tool: sortie_check_contract { handoff_path: <exact absolute handoff path> }
     required_result: status=ok
-    handoff_path_rule: configured registered candidate-relative path only; a per-candidate filename earns handoff_path_not_registered
+    handoff_path_rule: configured fixed path or scoped sibling handoff.<id>.json with filename id exactly equal to handoff id
+    scoped_manifest_rule: <id>.operation-manifest.json is unique to the same active coordinator contract
+    mismatch: arbitrary filename or filename/id mismatch -> defective before dispatch
     scope: every mutating dispatch, source work included; write-gate extension and operation_manifest required
     ext_write_gate_missing: register the write-gate extension; never retry the same source-only shape
     defective_result: { status: defective, reason: <reason>, defects: [<document> <json-pointer> <rule>] }
@@ -913,10 +923,10 @@ the initial exit 1 is first and the latest exit 0 is last.
 An undeclared write or mutation must be reported as rejected, not performed.
 
 RUNTIME_ASSET_VERSION_SYNC_FIXTURE
-    runtime_version: 0.3.4-card35
+    runtime_version: 0.3.4-card36
     shared_marker: src/asset-version.ts
-    packaged_expectation: test/plugin-loader.test.ts uses 0.3.4-card35
-    initialize_expectation: test/initialize.test.ts uses 0.3.4-card35
+    packaged_expectation: test/plugin-loader.test.ts uses 0.3.4-card36
+    initialize_expectation: test/initialize.test.ts uses 0.3.4-card36
     rule: runtime asset versions, shared marker, packaged expectation, and initialize expectation change together
 END_RUNTIME_ASSET_VERSION_SYNC_FIXTURE
 
@@ -957,7 +967,7 @@ END_TERMINAL_EVIDENCE_FIXTURE
   },
   {
     name: "dog-worker",
-    version: "0.3.4-card35",
+    version: "0.3.4-card36",
     installPath: "agent/dog-worker.md",
     content: `---
 description: Dedicated worker for the canonical Sortie-dogs coordinator
@@ -1032,7 +1042,7 @@ the user.
   },
   {
     name: "dog-scout",
-    version: "0.3.4-card35",
+    version: "0.3.4-card36",
     installPath: "agent/dog-scout.md",
     content: `---
 description: Bounded evidence scout for dog-coordinator
@@ -1082,7 +1092,7 @@ prose; keep the keys, paths, commands, and identifiers verbatim.
   },
   {
     name: "dog-reviewer",
-    version: "0.3.4-card35",
+    version: "0.3.4-card36",
     installPath: "agent/dog-reviewer.md",
     content: `---
 description: Independent source reviewer for dog-coordinator
@@ -1109,7 +1119,7 @@ or transport.
   },
   {
     name: "dog-advisor",
-    version: "0.3.4-card35",
+    version: "0.3.4-card36",
     installPath: "agent/dog-advisor.md",
     content: `---
 description: Focused technical advisor for dog-coordinator
@@ -1133,7 +1143,7 @@ provider, vendor, model, variant, or transport.
   },
   {
     name: "sortie",
-    version: "0.3.4-card35",
+    version: "0.3.4-card36",
     installPath: "command/sortie.md",
     content: `---
 description: Start the canonical Sortie-dogs MkII workflow
