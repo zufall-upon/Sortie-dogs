@@ -10,7 +10,7 @@ export interface RuntimeAsset {
 export const runtimeAssets = [
   {
     name: "dog-coordinator",
-    version: "0.3.4-card34",
+    version: "0.3.4-card35",
     installPath: "agent/dog-coordinator.md",
     content: `---
 description: Canonical MkII coordinator packaged by Sortie-dogs
@@ -496,6 +496,10 @@ COORDINATOR_DIRECT_OPERATION_FIXTURE
     external_implementation_root: hold | reassign | switch owning project; no inspect | dispatch | mutation
     cross_project_recommendation: forbidden; recommend project-local option or hold
     explicit_external_selection: identifies next owning-project task; never continues under current root
+    canonical_validation: exact accepted handoff or manifest command + project authorization -> coordinator-owned fallback
+    worker_validation_denial: executable-not-allowlisted -> no redispatch | no blocker-resolution worker
+    validation_fallback: coordinator direct exactly once; external approval required -> one question
+    denial_classification: routing defect; not external blocker | not validation failure
     terminal_checkpoint: at most two tracker mutations -> one coordinator-owned direct tracker command
     local_checkpoint_file: excluded from tracker mutation count
     direct_operation_artifacts: no handoff | operation manifest | generated script | child session
@@ -909,10 +913,10 @@ the initial exit 1 is first and the latest exit 0 is last.
 An undeclared write or mutation must be reported as rejected, not performed.
 
 RUNTIME_ASSET_VERSION_SYNC_FIXTURE
-    runtime_version: 0.3.4-card34
+    runtime_version: 0.3.4-card35
     shared_marker: src/asset-version.ts
-    packaged_expectation: test/plugin-loader.test.ts uses 0.3.4-card34
-    initialize_expectation: test/initialize.test.ts uses 0.3.4-card34
+    packaged_expectation: test/plugin-loader.test.ts uses 0.3.4-card35
+    initialize_expectation: test/initialize.test.ts uses 0.3.4-card35
     rule: runtime asset versions, shared marker, packaged expectation, and initialize expectation change together
 END_RUNTIME_ASSET_VERSION_SYNC_FIXTURE
 
@@ -953,7 +957,7 @@ END_TERMINAL_EVIDENCE_FIXTURE
   },
   {
     name: "dog-worker",
-    version: "0.3.4-card34",
+    version: "0.3.4-card35",
     installPath: "agent/dog-worker.md",
     content: `---
 description: Dedicated worker for the canonical Sortie-dogs coordinator
@@ -1028,7 +1032,7 @@ the user.
   },
   {
     name: "dog-scout",
-    version: "0.3.4-card34",
+    version: "0.3.4-card35",
     installPath: "agent/dog-scout.md",
     content: `---
 description: Bounded evidence scout for dog-coordinator
@@ -1078,7 +1082,7 @@ prose; keep the keys, paths, commands, and identifiers verbatim.
   },
   {
     name: "dog-reviewer",
-    version: "0.3.4-card34",
+    version: "0.3.4-card35",
     installPath: "agent/dog-reviewer.md",
     content: `---
 description: Independent source reviewer for dog-coordinator
@@ -1105,7 +1109,7 @@ or transport.
   },
   {
     name: "dog-advisor",
-    version: "0.3.4-card34",
+    version: "0.3.4-card35",
     installPath: "agent/dog-advisor.md",
     content: `---
 description: Focused technical advisor for dog-coordinator
@@ -1129,7 +1133,7 @@ provider, vendor, model, variant, or transport.
   },
   {
     name: "sortie",
-    version: "0.3.4-card34",
+    version: "0.3.4-card35",
     installPath: "command/sortie.md",
     content: `---
 description: Start the canonical Sortie-dogs MkII workflow
