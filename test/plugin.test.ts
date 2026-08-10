@@ -1375,6 +1375,7 @@ test("runtime contract requires interactive continuation and deterministic recov
     "idle_recovery: non-terminal progress, including missing next_action, -> synthetic SORTIE_STEP_CONTINUE",
     "text_complete_fallback: referenced zero-delay recovery when host omits session.idle",
     "checkpoint_recovery: 100% progress + attempted < target -> runtime compaction and same-root continuation",
+    "summary_compatibility: Sortie rollover token format | OpenCode native compaction headings",
     "idle_recovery_limit: at most 2 per real user turn; real user turn resets budget",
     "idle_terminal_guard: DONE | BLOCKED | NEED_DECISION never auto-resumes",
   ]) assert.ok(scoutFanout[1].includes(contract), contract);

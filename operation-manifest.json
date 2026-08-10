@@ -1,6 +1,6 @@
 {
   "version": "0.1.0",
-  "task_id": "release-v0.3.18-cli-continuation-recovery",
+  "task_id": "release-v0.3.19-native-compaction-resume",
   "read": [
     "AGENTS.md",
     "package.json",

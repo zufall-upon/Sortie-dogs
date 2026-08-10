@@ -262,23 +262,45 @@ const ROLLOVER_HEADINGS = [
   "## 次action",
 ] as const;
 
-function validRecoveryCompactionSummary(text: string): boolean {
-  const lines = text.trim().split(/\r?\n/u);
-  if (lines[0] !== ROLLOVER_TOKEN) return false;
-  let previous = 0;
+function orderedHeadingIndices(lines: readonly string[], headings: readonly string[]): number[] | undefined {
+  let previous = -1;
   const indices: number[] = [];
-  for (const heading of ROLLOVER_HEADINGS) {
+  for (const heading of headings) {
     const index = lines.indexOf(heading, previous + 1);
-    if (index < 0) return false;
+    if (index < 0) return undefined;
     indices.push(index);
     previous = index;
   }
-  for (const headingIndex of [0, ROLLOVER_HEADINGS.length - 1]) {
-    const start = indices[headingIndex]! + 1;
-    const end = indices[headingIndex + 1] ?? lines.length;
-    if (!lines.slice(start, end).some((line) => line.startsWith("- ") && line !== "- なし")) return false;
+  return indices;
+}
+
+function sectionHasWork(lines: readonly string[], indices: readonly number[], headingIndex: number): boolean {
+  const start = indices[headingIndex]! + 1;
+  const end = indices[headingIndex + 1] ?? lines.length;
+  return lines.slice(start, end).some((line) => {
+    if (!line.startsWith("- ")) return false;
+    const content = line.slice(2).trim();
+    return content.length > 0 && content !== "なし";
+  });
+}
+
+function validRecoveryCompactionSummary(text: string): boolean {
+  const lines = text.trim().split(/\r?\n/u);
+  if (lines[0] === ROLLOVER_TOKEN) {
+    const indices = orderedHeadingIndices(lines, ROLLOVER_HEADINGS);
+    return indices !== undefined && sectionHasWork(lines, indices, 0) &&
+      sectionHasWork(lines, indices, ROLLOVER_HEADINGS.length - 1);
   }
-  return true;
+  const nativeHeadings = lines
+    .map((line, index) => ({ heading: line.trim(), index }))
+    .filter(({ heading }) => heading.startsWith("## "));
+  if (nativeHeadings.length < 6 || nativeHeadings.length > 8 || nativeHeadings[0]?.index !== 0) return false;
+  const sourceIndex = nativeHeadings.findIndex(({ heading }) => heading === "## source_manifest");
+  if (sourceIndex < 1 || sourceIndex > 3) return false;
+  const nextIndex = nativeHeadings.length - 2;
+  if (sourceIndex + 1 >= nextIndex) return false;
+  const indices = nativeHeadings.map(({ index }) => index);
+  return sectionHasWork(lines, indices, sourceIndex + 1) && sectionHasWork(lines, indices, nextIndex);
 }
 
 interface SessionState {
@@ -903,7 +925,9 @@ export function createContinuationHooks(
         if (ownedCompactionSummary) state.compactingEpoch = undefined;
         const malformedRecoverySummary = ownedCompactionSummary && state.preserveCompactionScope &&
           !validRecoveryCompactionSummary(trimmed);
-        if (ownedCompactionSummary && (!trimmed.startsWith(ROLLOVER_TOKEN) || malformedRecoverySummary)) {
+        const malformedStandardSummary = ownedCompactionSummary && !state.preserveCompactionScope &&
+          !trimmed.startsWith(ROLLOVER_TOKEN);
+        if (malformedRecoverySummary || malformedStandardSummary) {
           warnRollover(input.sessionID, "compaction-summary-malformed");
           if (state.preserveCompactionScope) {
             state.pendingRollover = false;

@@ -926,36 +926,107 @@ test("session idle compacts a terminal unit checkpoint below the batch target", 
   assert.equal(validationHost.promptCalls.length, 1);
   assert.ok(validationHost.promptCalls[0]!.text.startsWith(STEP_CONTINUE_PREFIX));
 
-  const malformedHost = fakeHost({ agent: COORDINATOR });
-  let markSummaryStarted!: () => void;
-  let releaseSummary!: () => void;
-  const summaryStarted = new Promise<void>((resolve) => { markSummaryStarted = resolve; });
-  const summaryReleased = new Promise<void>((resolve) => { releaseSummary = resolve; });
-  const mutableSession = malformedHost.client.session as {
+  const nativeHost = fakeHost({ agent: COORDINATOR });
+  let markNativeSummaryStarted!: () => void;
+  let releaseNativeSummary!: () => void;
+  const nativeSummaryStarted = new Promise<void>((resolve) => { markNativeSummaryStarted = resolve; });
+  const nativeSummaryReleased = new Promise<void>((resolve) => { releaseNativeSummary = resolve; });
+  const mutableNativeSession = nativeHost.client.session as {
     summarize: NonNullable<NonNullable<ContinuationClient["session"]>["summarize"]>;
   };
-  mutableSession.summarize = async (request) => {
-    malformedHost.summarizeCalls.push({ id: request.path.id, body: request.body });
-    markSummaryStarted();
-    await summaryReleased;
+  mutableNativeSession.summarize = async (request) => {
+    nativeHost.summarizeCalls.push({ id: request.path.id, body: request.body });
+    markNativeSummaryStarted();
+    await nativeSummaryReleased;
     return { data: true };
   };
-  const malformedHooks = createContinuationHooks(malformedHost.client, "/project", POLICY, FAST);
-  malformedHooks.observeModel("ses_malformed", { providerID: "openai", modelID: "gpt-5.6-terra" });
-  await malformedHooks.textComplete(
-    { sessionID: "ses_malformed" },
-    { text: "📊 進行中: Release 03 — 100% (Project checkpoint) | committed 1/3; attempted 1/3; reconciled 0 | continuation: required" },
+  const nativeHooks = createContinuationHooks(nativeHost.client, "/project", POLICY, FAST);
+  nativeHooks.observeModel("ses_native", { providerID: "openai", modelID: "gpt-5.6-terra" });
+  await nativeHooks.textComplete(
+    { sessionID: "ses_native" },
+    { text: "📊 進行中: native — 100% (Project checkpoint) | committed 1/3; attempted 1/3; reconciled 0 | continuation: required" },
   );
-  await malformedHooks.sessionIdle("ses_malformed");
-  await summaryStarted;
-  await malformedHooks.sessionCompacting({ sessionID: "ses_malformed" }, {});
-  await malformedHooks.textComplete(
-    { sessionID: "ses_malformed" },
-    { text: `${ROLLOVER_TOKEN}\nsummary without required recovery headings` },
+  await nativeHooks.sessionIdle("ses_native");
+  await nativeSummaryStarted;
+  await nativeHooks.sessionCompacting({ sessionID: "ses_native" }, {});
+  await nativeHooks.textComplete(
+    { sessionID: "ses_native" },
+    { text: `## Purpose
+- ordered sequenceを完了する
+
+## Decisions
+- current checkpoint完了
+
+## source_manifest
+- fixture.txt | read-only | fixture | preserve scope | unchanged
+
+## Remaining
+- next independent candidate | pending | same rootで継続
+
+## Validation
+- none | fixture | none | pending
+
+## Next action
+- next independent candidateへ進む
+
+## Files read
+- fixture.txt | fixture` },
   );
-  releaseSummary();
+  releaseNativeSummary();
   await settle();
-  assert.equal(malformedHost.promptCalls.length, 0, "recovery cannot resume from a malformed scope summary");
+  assert.equal(nativeHost.promptCalls.length, 1, "OpenCode native compaction summary resumes recovery");
+  assert.ok(nativeHost.promptCalls[0]!.text.startsWith(AUTO_CONTINUE_PREFIX));
+
+  async function assertMalformedRecovery(summary: string, sessionID: string): Promise<void> {
+    const malformedHost = fakeHost({ agent: COORDINATOR });
+    let markSummaryStarted!: () => void;
+    let releaseSummary!: () => void;
+    const summaryStarted = new Promise<void>((resolve) => { markSummaryStarted = resolve; });
+    const summaryReleased = new Promise<void>((resolve) => { releaseSummary = resolve; });
+    const mutableSession = malformedHost.client.session as {
+      summarize: NonNullable<NonNullable<ContinuationClient["session"]>["summarize"]>;
+    };
+    mutableSession.summarize = async (request) => {
+      malformedHost.summarizeCalls.push({ id: request.path.id, body: request.body });
+      markSummaryStarted();
+      await summaryReleased;
+      return { data: true };
+    };
+    const malformedHooks = createContinuationHooks(malformedHost.client, "/project", POLICY, FAST);
+    malformedHooks.observeModel(sessionID, { providerID: "openai", modelID: "gpt-5.6-terra" });
+    await malformedHooks.textComplete(
+      { sessionID },
+      { text: "📊 進行中: malformed — 100% (Project checkpoint) | attempted 1/3 | continuation: required" },
+    );
+    await malformedHooks.sessionIdle(sessionID);
+    await summaryStarted;
+    await malformedHooks.sessionCompacting({ sessionID }, {});
+    await malformedHooks.textComplete({ sessionID }, { text: summary });
+    releaseSummary();
+    await settle();
+    assert.equal(malformedHost.promptCalls.length, 0, "recovery cannot resume from malformed scope");
+  }
+  await assertMalformedRecovery(
+    `${ROLLOVER_TOKEN}\nsummary without required recovery headings`,
+    "ses_malformed_sortie",
+  );
+  await assertMalformedRecovery(
+    `## Purpose
+- ordered work
+## Decision
+- checkpoint done
+## source_manifest
+- fixture.txt
+## Remaining
+${"- "}
+## Validation
+- none
+## Next
+${"- "}
+## Files read
+- fixture.txt`,
+    "ses_malformed_native",
+  );
 
   const finalHost = fakeHost({ agent: COORDINATOR });
   const finalHooks = createContinuationHooks(finalHost.client, "/project", POLICY, FAST);

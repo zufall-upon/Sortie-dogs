@@ -1,6 +1,6 @@
 {
   "name": "sortie-dogs",
-  "version": "0.3.18",
+  "version": "0.3.19",
   "description": "Bounded, validated orchestration loop plugin for OpenCode",
   "keywords": [
     "opencode",
