@@ -29,7 +29,7 @@ const TOOL_REQUESTED_REPORT =
   "batch counters, blocker state, and the exact next action from the latest messages.";
 /** First line the rollover summary must emit, mirroring the batch target of three attempts. */
 export const ROLLOVER_TOKEN = "SORTIE_ROLLOVER_COMPACTED";
-export const DEFAULT_MAX_AUTO_CONTINUES = 2;
+export const DEFAULT_MAX_AUTO_CONTINUES = 10;
 
 /**
  * A coordinator that exhausted its step budget reports remaining work instead of continuing. That
@@ -242,12 +242,55 @@ const ROLLOVER_PROMPT = [
   "- <次に着手する1手順>",
 ].join("\n");
 
+const RECOVERY_ROLLOVER_PROMPT = ROLLOVER_PROMPT
+  .replace(
+    "The coordinator final report immediately before compaction is the newest source of truth. Its outcomes and next action override older context.",
+    "The recovery report overrides only terminal outcomes and batch counters. Preserve unmet user requirements, ordered scope, no-stop constraints, and the exact next unit from the conversation.",
+  )
+  .replace(
+    "Preserve task identity, every accepted fact, both manifests, ordered validation history, batchTarget, batchAttempted, batchCommitted, batchReconciled, blocker state, and the exact next action. If a value is absent, write なし; never guess one.",
+    "Preserve task identity, every accepted fact, both manifests, ordered validation history, batchTarget, batchAttempted, batchCommitted, batchReconciled, blocker state, unmet ordered scope, and the exact next unit. If a value is absent, write なし; never guess one.",
+  );
+
+const ROLLOVER_HEADINGS = [
+  "## 未達のユーザー要求",
+  "## task identity と制約",
+  "## manifest",
+  "## validation履歴",
+  "## batch counters",
+  "## 未解決blocker",
+  "## 次action",
+] as const;
+
+function validRecoveryCompactionSummary(text: string): boolean {
+  const lines = text.trim().split(/\r?\n/u);
+  if (lines[0] !== ROLLOVER_TOKEN) return false;
+  let previous = 0;
+  const indices: number[] = [];
+  for (const heading of ROLLOVER_HEADINGS) {
+    const index = lines.indexOf(heading, previous + 1);
+    if (index < 0) return false;
+    indices.push(index);
+    previous = index;
+  }
+  for (const headingIndex of [0, ROLLOVER_HEADINGS.length - 1]) {
+    const start = indices[headingIndex]! + 1;
+    const end = indices[headingIndex + 1] ?? lines.length;
+    if (!lines.slice(start, end).some((line) => line.startsWith("- ") && line !== "- なし")) return false;
+  }
+  return true;
+}
+
 interface SessionState {
   /** Continuations already granted to this session. */
   attempts: number;
   pendingRollover: boolean;
   /** Set only when the queued rollover must resume the session afterwards. */
   continueReport?: string | undefined;
+  /** Recovery rollover keeps unmet user scope from the compaction summary. */
+  preserveCompactionScope: boolean;
+  /** Recovery cannot resume until this instance observes a structurally complete summary. */
+  recoverySummaryValidated: boolean;
   /** A deliberate terminal marker starts a fresh batch; a limit-reached compaction does not. */
   resetAttemptsAfterCompaction: boolean;
   /** The terminal unit at the continuation ceiling was already compacted. */
@@ -372,6 +415,8 @@ export function createContinuationHooks(
     const created: SessionState = {
       attempts: 0,
       pendingRollover: false,
+      preserveCompactionScope: false,
+      recoverySummaryValidated: false,
       resetAttemptsAfterCompaction: false,
       limitCompacted: false,
       active: false,
@@ -433,7 +478,11 @@ export function createContinuationHooks(
     return true;
   }
 
-  async function issueResume(sessionID: string, report: string): Promise<void> {
+  async function issueResume(
+    sessionID: string,
+    report: string,
+    preserveCompactionScope: boolean,
+  ): Promise<void> {
     const resume = client?.session?.promptAsync;
     if (resume === undefined) throw new Error("resume capability unavailable");
     const resumed = await resume.call(client!.session, {
@@ -444,19 +493,54 @@ export function createContinuationHooks(
         parts: [{
           type: "text",
           synthetic: true,
-          text: `${AUTO_CONTINUE_PREFIX}\n直前のcompaction summaryは破棄する。矛盾時だけでなく全面的に参照禁止。\n` +
-            `以下の直前最終報告だけをpost-compaction状態の正本として再構築する:\n${report}\n` +
-            "batchAttempted/batchCommitted/batchReconciledを保持し、terminal unitを再実行せず次の独立unitから同rootで継続。",
+          text: preserveCompactionScope
+            ? `${AUTO_CONTINUE_PREFIX}\n直前compaction summaryの未達user要求・ordered scope・no-stop制約を保持する。\n` +
+              `以下の回復reportはterminal outcomeとbatch counterだけを上書きする:\n${report}\n` +
+              "terminal unitを再実行せず、summaryが保持した順序の次の独立unitから同rootで継続。"
+            : `${AUTO_CONTINUE_PREFIX}\n直前のcompaction summaryは破棄する。矛盾時だけでなく全面的に参照禁止。\n` +
+              `以下の直前最終報告だけをpost-compaction状態の正本として再構築する:\n${report}\n` +
+              "batchAttempted/batchCommitted/batchReconciledを保持し、terminal unitを再実行せず次の独立unitから同rootで継続。",
         }],
       },
     });
     if (!promptCallSucceeded(resumed)) throw new Error("resume request rejected");
   }
 
+  function terminalCheckpoint(text: string): boolean {
+    return /\bstatus:\s*(?:DONE|BLOCKED|NEED_DECISION)\b/iu.test(text);
+  }
+
+  function latestProgressLine(text: string): string | undefined {
+    return text.split(/\r?\n/u).filter((line) => line.includes("📊")).at(-1);
+  }
+
+  function latestProgressPercent(text: string): number | undefined {
+    const value = Number(/📊[^\n]*?(\d{1,3})\s*%/u.exec(latestProgressLine(text) ?? "")?.[1]);
+    return Number.isInteger(value) && value >= 0 && value <= 100 ? value : undefined;
+  }
+
+  function batchHasIndependentRemainder(text: string): boolean {
+    const latest = /\battempted\s+(\d+)\s*\/\s*(\d+)/iu.exec(latestProgressLine(text) ?? "");
+    if (latest === null) return false;
+    const attempted = Number(latest[1]);
+    const target = Number(latest[2]);
+    return Number.isInteger(attempted) && Number.isInteger(target) && attempted >= 0 && attempted < target;
+  }
+
+  function batchCheckpointNeedsContinuation(text: string): boolean {
+    const line = latestProgressLine(text) ?? "";
+    const explicit = /\bcontinuation\s*:\s*(required|none)\b/iu.exec(line)?.[1]?.toLowerCase();
+    const legacy = explicit === undefined && /\(\s*Project checkpoint\s*\)/iu.test(line);
+    return !terminalCheckpoint(text) && latestProgressPercent(text) === 100 &&
+      batchHasIndependentRemainder(text) && (explicit === "required" || legacy);
+  }
+
   function nonTerminalProgress(text: string): boolean {
     if (text.startsWith(STEP_CONTINUE_PREFIX) || text.startsWith(AUTO_CONTINUE_PREFIX)) return false;
-    if (/\bstatus:\s*(?:DONE|BLOCKED|NEED_DECISION)\b/iu.test(text)) return false;
-    return /➡️\s*(?:次action|next_action)\s*:\s*\S/iu.test(text);
+    if (terminalCheckpoint(text)) return false;
+    if (/➡️\s*(?:次action|next_action)\s*:\s*\S/iu.test(text)) return true;
+    const percent = latestProgressPercent(text);
+    return percent !== undefined && (percent < 100 || batchHasIndependentRemainder(text));
   }
 
   async function issueStepContinue(
@@ -483,7 +567,7 @@ export function createContinuationHooks(
           parts: [{
             type: "text",
             synthetic: true,
-            text: `${STEP_CONTINUE_PREFIX}\n直前出力は非terminal進捗。繰り返さず、同じcandidateのnext_actionを今すぐtoolで実行する。\n${report}`,
+            text: `${STEP_CONTINUE_PREFIX}\n直前出力は非terminal進捗。進捗報告を繰り返さず、明示next_actionが欠落していれば最新の未達user要求とbatch counterから次の必要toolを特定して同じturnで実行する。\n${report}`,
           }],
         },
       });
@@ -503,6 +587,7 @@ export function createContinuationHooks(
    */
   async function arbitrateResume(sessionID: string, state: SessionState): Promise<boolean> {
     if (!state.pendingRollover || !state.active || state.continueReport === undefined) return false;
+    if (state.preserveCompactionScope && !state.recoverySummaryValidated) return false;
     const epoch = state.rolloverEpoch;
     if (state.resumeIssuedEpoch === epoch) return true;
     if (state.resumeIssuingEpoch === epoch) return false;
@@ -511,7 +596,7 @@ export function createContinuationHooks(
     state.resumeIssuingEpoch = epoch;
     state.resumeAttempts += 1;
     try {
-      await issueResume(sessionID, report);
+      await issueResume(sessionID, report, state.preserveCompactionScope);
       if (sessions.get(sessionID) !== state || state.rolloverEpoch !== epoch) return false;
       state.resumeIssuedEpoch = epoch;
       state.compactingEpoch = undefined;
@@ -519,6 +604,8 @@ export function createContinuationHooks(
       state.compactedRollover = false;
       state.promptPending = false;
       state.continueReport = undefined;
+      state.preserveCompactionScope = false;
+      state.recoverySummaryValidated = false;
       // The accepted prompt now belongs to the host loop, not this rollover request.
       state.active = false;
       return true;
@@ -607,6 +694,8 @@ export function createContinuationHooks(
         state.pendingRollover = false;
         state.compactedRollover = false;
         state.ownsHostContinuation = false;
+        state.preserveCompactionScope = false;
+        state.recoverySummaryValidated = false;
         if (state.resetAttemptsAfterCompaction) state.attempts = 0;
         state.limitCompacted = !state.resetAttemptsAfterCompaction;
         state.resetAttemptsAfterCompaction = false;
@@ -651,6 +740,8 @@ export function createContinuationHooks(
         state.continueReport = undefined;
         state.latestReport = undefined;
         state.ownsHostContinuation = false;
+        state.preserveCompactionScope = false;
+        state.recoverySummaryValidated = false;
         warnRollover(sessionID, "retries-exhausted");
       }
     }, timings.scheduleMilliseconds * (attempt + 1)));
@@ -661,6 +752,7 @@ export function createContinuationHooks(
     report: string,
     resume: boolean,
     resetAttemptsAfterCompaction = false,
+    preserveCompactionScope = false,
   ): void {
     const state = stateFor(sessionID);
     state.pendingRollover = true;
@@ -673,6 +765,8 @@ export function createContinuationHooks(
     state.compactingEpoch = undefined;
     state.latestReport = report;
     state.continueReport = resume ? report : undefined;
+    state.preserveCompactionScope = preserveCompactionScope;
+    state.recoverySummaryValidated = false;
     state.resetAttemptsAfterCompaction = resetAttemptsAfterCompaction;
     state.latestCoordinatorReport = undefined;
     if (resume) state.attempts += 1;
@@ -696,6 +790,7 @@ export function createContinuationHooks(
     sessionID: string,
     identity: ContinuationIdentity | undefined,
     report: string,
+    preserveCompactionScope = false,
   ): Promise<ContinuationResolution> {
     const state = stateFor(sessionID);
     const active = policy();
@@ -712,7 +807,9 @@ export function createContinuationHooks(
     if (resolution.reason === "limit-reached" && state.limitCompacted) {
       return reject("limit-reached");
     }
-    if (resolution.compact) queueRollover(sessionID, report, resolution.continue);
+    if (resolution.compact) {
+      queueRollover(sessionID, report, resolution.continue, false, preserveCompactionScope);
+    }
     return resolution;
   }
 
@@ -784,8 +881,22 @@ export function createContinuationHooks(
         const ownedCompactionSummary = state.compactingEpoch === state.rolloverEpoch &&
           (state.active || state.pendingRollover);
         if (ownedCompactionSummary) state.compactingEpoch = undefined;
-        if (ownedCompactionSummary && !trimmed.startsWith(ROLLOVER_TOKEN)) {
+        const malformedRecoverySummary = ownedCompactionSummary && state.preserveCompactionScope &&
+          !validRecoveryCompactionSummary(trimmed);
+        if (ownedCompactionSummary && (!trimmed.startsWith(ROLLOVER_TOKEN) || malformedRecoverySummary)) {
           warnRollover(input.sessionID, "compaction-summary-malformed");
+          if (state.preserveCompactionScope) {
+            state.pendingRollover = false;
+            state.promptPending = false;
+            state.continueReport = undefined;
+            state.ownsHostContinuation = false;
+            state.preserveCompactionScope = false;
+            state.recoverySummaryValidated = false;
+            return;
+          }
+        }
+        if (ownedCompactionSummary && state.preserveCompactionScope) {
+          state.recoverySummaryValidated = true;
         }
         /*
          * One-shot CLI hosts can exit as soon as the compaction assistant finishes, before the
@@ -869,13 +980,19 @@ export function createContinuationHooks(
       }
       if (state !== undefined) state.promptPending = false;
       const report = state?.latestReport;
+      const recovery = state?.preserveCompactionScope === true;
       const authority = report === undefined
         ? "Sortie rollover policy is authoritative. Preserve only facts supported by the latest coordinator final report."
+        : state?.preserveCompactionScope === true
+        ? "Preserve unmet user requirements, ordered scope, and no-stop constraints from the conversation. The recovery report overrides only terminal outcomes and counters:\n" + report
         : "Sortie authoritative latest coordinator final report follows. It overrides all older context; copy its terminal outcomes, counters, and next action exactly:\n" + report;
       output.context = [...(output.context ?? []), authority];
+      const rolloverPrompt = recovery ? RECOVERY_ROLLOVER_PROMPT : ROLLOVER_PROMPT;
       output.prompt = report === undefined
-        ? ROLLOVER_PROMPT
-        : `${ROLLOVER_PROMPT}\n\nExact latest coordinator final report (authoritative):\n${report}`;
+        ? rolloverPrompt
+        : recovery
+        ? `${rolloverPrompt}\n\nRecovery report (terminal outcomes and counters only):\n${report}`
+        : `${rolloverPrompt}\n\nExact latest coordinator final report (authoritative):\n${report}`;
     },
 
     async sessionCompacted(sessionID): Promise<void> {
@@ -955,7 +1072,16 @@ export function createContinuationHooks(
         if (
           active.enabled && identity !== undefined && identity.agent === active.agent && !nonEmpty(identity.parentID) &&
           state.turnRevision === revision && state.latestCoordinatorReport === report
-        ) await issueStepContinue(sessionID, state, report, active.agent);
+        ) {
+          if (batchCheckpointNeedsContinuation(report)) {
+            const recoveredReport = /➡️\s*(?:次action|next_action)\s*:\s*\S/iu.test(report)
+              ? report
+              : `${report}\n➡️ 次action: 未達user要求の次の独立candidateへ進む`;
+            await requestContinuation(sessionID, identity, recoveredReport, true);
+          } else {
+            await issueStepContinue(sessionID, state, report, active.agent);
+          }
+        }
       }
   }
 }

@@ -776,7 +776,7 @@ test("session idle never resumes a terminal checkpoint", async () => {
   assert.equal(host.promptCalls.length, 0);
 });
 
-test("session idle never invents work for progress without a next action", async () => {
+test("session idle recovers in-progress output without a next action", async () => {
   const host = fakeHost({ agent: COORDINATOR });
   const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
   hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" });
@@ -785,7 +785,138 @@ test("session idle never invents work for progress without a next action", async
     { text: "📊 進行中: task — 45%" },
   );
   await hooks.sessionIdle("ses_root");
-  assert.equal(host.promptCalls.length, 0);
+  assert.equal(host.promptCalls.length, 1);
+  assert.ok(host.promptCalls[0]!.text.startsWith(STEP_CONTINUE_PREFIX));
+  assert.match(host.promptCalls[0]!.text, /next_actionが欠落していれば/);
+});
+
+test("session idle compacts a terminal unit checkpoint below the batch target", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  let markMainSummaryStarted!: () => void;
+  let releaseMainSummary!: () => void;
+  const mainSummaryStarted = new Promise<void>((resolve) => { markMainSummaryStarted = resolve; });
+  const mainSummaryReleased = new Promise<void>((resolve) => { releaseMainSummary = resolve; });
+  const mutableMainSession = host.client.session as {
+    summarize: NonNullable<NonNullable<ContinuationClient["session"]>["summarize"]>;
+  };
+  mutableMainSession.summarize = async (request) => {
+    host.summarizeCalls.push({ id: request.path.id, body: request.body });
+    markMainSummaryStarted();
+    await mainSummaryReleased;
+    return { data: true };
+  };
+  const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" });
+  await hooks.textComplete(
+    { sessionID: "ses_root" },
+    { text: "📊 進行中: Release 03 — 100% (Project checkpoint) | バッチ: committed 1/3; attempted 1/3; reconciled 0" },
+  );
+  await hooks.sessionIdle("ses_root");
+  await mainSummaryStarted;
+  const compacting: { context?: string[]; prompt?: string } = {};
+  await hooks.sessionCompacting({ sessionID: "ses_root" }, compacting);
+  assert.match((compacting.context ?? []).join("\n"), /Preserve unmet user requirements, ordered scope, and no-stop constraints/);
+  assert.match(compacting.prompt ?? "", /recovery report overrides only terminal outcomes and batch counters/i);
+  assert.doesNotMatch(compacting.prompt ?? "", /outcomes and next action override older context/i);
+  await hooks.textComplete(
+    { sessionID: "ses_root" },
+    { text: `${ROLLOVER_TOKEN}
+
+## 未達のユーザー要求
+- Release 04から10を順次停止せず完了
+
+## task identity と制約
+- release-program-r1 /project
+
+## manifest
+- source_manifest: none
+
+## validation履歴
+- なし
+
+## batch counters
+- batchTarget: 10 / batchAttempted: 1 / batchCommitted: 1 / batchReconciled: 0
+
+## 未解決blocker
+- なし
+
+## 次action
+- Release 04へ進む` },
+  );
+  releaseMainSummary();
+  await settle();
+  assert.equal(host.summarizeCalls.length, 1);
+  assert.equal(host.promptCalls.length, 1);
+  assert.ok(host.promptCalls[0]!.text.startsWith(AUTO_CONTINUE_PREFIX));
+  assert.match(host.promptCalls[0]!.text, /compaction summaryの未達user要求・ordered scope・no-stop制約を保持/);
+  assert.match(host.promptCalls[0]!.text, /➡️ 次action: 未達user要求の次の独立candidateへ進む/);
+
+  const markerHost = fakeHost({ agent: COORDINATOR });
+  const markerHooks = createContinuationHooks(markerHost.client, "/project", POLICY, FAST);
+  markerHooks.observeModel("ses_marker", { providerID: "openai", modelID: "gpt-5.6-terra" });
+  await markerHooks.textComplete(
+    { sessionID: "ses_marker" },
+    { text: "📊 处理中: Release 04 — 100% (项目检查点) | committed 2/10; attempted 2/10; reconciled 0 | continuation: required" },
+  );
+  await markerHooks.sessionIdle("ses_marker");
+  await settle();
+  assert.equal(markerHost.summarizeCalls.length, 1, "protocol keys survive localized labels");
+
+  const validationHost = fakeHost({ agent: COORDINATOR });
+  const validationHooks = createContinuationHooks(validationHost.client, "/project", POLICY, FAST);
+  validationHooks.observeModel("ses_validation", { providerID: "openai", modelID: "gpt-5.6-terra" });
+  await validationHooks.textComplete(
+    { sessionID: "ses_validation" },
+    { text: "📊 進行中: old — 100% (Project checkpoint) | committed 1/3; attempted 1/3; reconciled 0 | continuation: required\n📊 進行中: Release 03 — 100% (Project checkpoint) | committed 1/3; attempted 1/3; reconciled 0 | continuation: none" },
+  );
+  await validationHooks.sessionIdle("ses_validation");
+  await settle();
+  assert.equal(validationHost.summarizeCalls.length, 0, "non-checkpoint 100% cannot compact");
+  assert.equal(validationHost.promptCalls.length, 1);
+  assert.ok(validationHost.promptCalls[0]!.text.startsWith(STEP_CONTINUE_PREFIX));
+
+  const malformedHost = fakeHost({ agent: COORDINATOR });
+  let markSummaryStarted!: () => void;
+  let releaseSummary!: () => void;
+  const summaryStarted = new Promise<void>((resolve) => { markSummaryStarted = resolve; });
+  const summaryReleased = new Promise<void>((resolve) => { releaseSummary = resolve; });
+  const mutableSession = malformedHost.client.session as {
+    summarize: NonNullable<NonNullable<ContinuationClient["session"]>["summarize"]>;
+  };
+  mutableSession.summarize = async (request) => {
+    malformedHost.summarizeCalls.push({ id: request.path.id, body: request.body });
+    markSummaryStarted();
+    await summaryReleased;
+    return { data: true };
+  };
+  const malformedHooks = createContinuationHooks(malformedHost.client, "/project", POLICY, FAST);
+  malformedHooks.observeModel("ses_malformed", { providerID: "openai", modelID: "gpt-5.6-terra" });
+  await malformedHooks.textComplete(
+    { sessionID: "ses_malformed" },
+    { text: "📊 進行中: Release 03 — 100% (Project checkpoint) | committed 1/3; attempted 1/3; reconciled 0 | continuation: required" },
+  );
+  await malformedHooks.sessionIdle("ses_malformed");
+  await summaryStarted;
+  await malformedHooks.sessionCompacting({ sessionID: "ses_malformed" }, {});
+  await malformedHooks.textComplete(
+    { sessionID: "ses_malformed" },
+    { text: `${ROLLOVER_TOKEN}\nsummary without required recovery headings` },
+  );
+  releaseSummary();
+  await settle();
+  assert.equal(malformedHost.promptCalls.length, 0, "recovery cannot resume from a malformed scope summary");
+
+  const finalHost = fakeHost({ agent: COORDINATOR });
+  const finalHooks = createContinuationHooks(finalHost.client, "/project", POLICY, FAST);
+  finalHooks.observeModel("ses_final", { providerID: "openai", modelID: "gpt-5.6-terra" });
+  await finalHooks.textComplete(
+    { sessionID: "ses_final" },
+    { text: "📊 進行中: Release 05 — 100% (Project checkpoint) | バッチ: committed 3/3; attempted 3/3; reconciled 0 | continuation: none" },
+  );
+  await finalHooks.sessionIdle("ses_final");
+  await settle();
+  assert.equal(finalHost.summarizeCalls.length, 0, "a complete batch remains terminal");
+  assert.equal(finalHost.promptCalls.length, 0);
 });
 
 test("session idle never promotes a child or foreign session into the coordinator", async () => {

@@ -20,7 +20,7 @@ Requirements: Node.js 22.6 or newer, npm, and OpenCode.
 
 Guides: [日本語](docs/guide-ja.md) · [简体中文](docs/guide-zh-CN.md) · [CLI testing](docs/cli-testing.md)
 
-Release: [v0.3.16](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.3.16)
+Release: [v0.3.17](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.3.17)
 
 ## Quick start
 
@@ -148,7 +148,7 @@ Optional settings in `.opencode/sortie-dogs.json`:
   "handoffPaths": ["handoff.json"],
   "readOnlyTools": ["my_mcp_search"],
   "dedicatedWorkerModel": { "model": "provider/model", "variant": "deep" },
-  "continuation": { "enabled": true, "maxAutoContinues": 2 },
+  "continuation": { "enabled": true, "maxAutoContinues": 10 },
   "reflection": {
     "enabled": false,
     "layers": { "run": true, "project": true, "global": false }
@@ -182,8 +182,8 @@ global file for durable global settings.
   and resumes the same root session on the next independent unit. Only a root
   `dog-coordinator` session is ever resumed: a child session is never promoted and
   another coordinator is never adopted. Set `enabled` to `false` to keep every
-  batch manual, raise or lower `maxAutoContinues` (default `2`, maximum `10`) to
-  change the ceiling, and set `summarizeModel` to override the latest coordinator
+  batch manual, lower `maxAutoContinues` (default and maximum `10`) to change the
+  ceiling, and set `summarizeModel` to override the latest coordinator
   model used for compaction. Normal OpenCode auto-compaction keeps the
   host's auto-continue behavior; Sortie suppresses it only while its own
   explicitly queued rollover owns the resume.

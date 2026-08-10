@@ -121,7 +121,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       join(consumer, "node_modules", "sortie-dogs", "package.json"),
       "utf8",
     )) as { version?: string; scripts?: { prebuild?: string } };
-    assert.equal(installedPackage.version, "0.3.16");
+    assert.equal(installedPackage.version, "0.3.17");
     assert.equal(
       installedPackage.scripts?.prebuild,
       "node --input-type=module --eval \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true });\"",
@@ -361,7 +361,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     for (const asset of loaded.runtimeAssets) {
       assert.equal(asset.version, RUNTIME_ASSET_VERSION, `${asset.name} version must match the shared marker`);
     }
-    assert.equal(RUNTIME_ASSET_VERSION, "0.3.4-card38");
+    assert.equal(RUNTIME_ASSET_VERSION, "0.3.4-card39");
     const coordinatorFrontmatter = /^---\r?\n([\s\S]*?)\r?\n---/u.exec(coordinator.content)?.[1];
     assert.ok(coordinatorFrontmatter);
     assert.match(coordinatorFrontmatter, /^model: openai\/gpt-5\.6-terra$/m);
@@ -659,6 +659,8 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(scoutFanout[1], /malformed \| timeout \| empty -> discard without retry/);
     assert.match(scoutFanout[1], /after_dispatch:\s*scoutAttempted=true for current scoutRevision even when evidence remains unresolved/);
     assert.match(scoutFanout[1], /implementation -> one dog-worker or eligible parallel dog-worker fan-out/);
+    assert.match(scoutFanout[1], /idle_recovery:\s*non-terminal progress, including missing next_action, -> synthetic SORTIE_STEP_CONTINUE/);
+    assert.match(scoutFanout[1], /checkpoint_recovery:\s*100% progress \+ attempted < target -> runtime compaction and same-root continuation/);
 
     const parallelImplementation = coordinator.content.match(
       /PARALLEL_IMPLEMENTATION_FIXTURE\r?\n([\s\S]+?)\r?\nEND_PARALLEL_IMPLEMENTATION_FIXTURE/,
@@ -775,6 +777,11 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       backlogDrain[1],
       /opt_in_required:\s*backlogDrain\.enabled=true; backlogDrain\.maxUnits=<positive integer>/,
     );
+    assert.match(
+      backlogDrain[1],
+      /natural_language_opt_in:\s*explicit ordered 4\.\.11 units \+ sequential no-stop instruction -> enabled=true; maxUnits=exact named count/,
+    );
+    assert.match(backlogDrain[1], /over_ceiling:\s*12\+ named units -> ask user to split; never claim one-session no-stop execution/);
     assert.match(backlogDrain[1], /execution:\s*sequential; coordinator_authority=unchanged; per_unit_gates=unchanged/);
     assert.match(
       backlogDrain[1],
@@ -1309,7 +1316,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(sortie.content, /never route a worker to the user/i);
 
     for (const asset of loaded.runtimeAssets) {
-      assert.equal(asset.version, "0.3.4-card38");
+      assert.equal(asset.version, "0.3.4-card39");
       const frontmatter = asset.content.match(/^---\r?\n([\s\S]+?)\r?\n---\r?\n/);
       assert.ok(frontmatter, `${asset.name} must have frontmatter`);
       const entries = Object.fromEntries(

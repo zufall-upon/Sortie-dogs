@@ -1014,6 +1014,8 @@ test("generated assets require the user's language, per-line output, and emoji-m
   );
   assert.ok(visibility);
   assert.match(visibility[1], /^ {4}progress_line: 📊 進行中:/m);
+  assert.match(visibility[1], /continuation: <required\|none>/);
+  assert.match(visibility[1], /protocol_keys: committed \| attempted \| reconciled \| continuation are never translated/);
   assert.match(visibility[1], /^ {4}task_line_1: 🐕 所感/m);
   assert.match(visibility[1], /^ {4}task_line_2: 🔍 根拠/m);
   assert.match(visibility[1], /^ {4}task_line_3: ➡️ 次action/m);
@@ -1370,7 +1372,8 @@ test("runtime contract requires interactive continuation and deterministic recov
     "same_turn_progression: scout union | advisor result | successful contract check -> invoke the next required tool in the same turn",
     "progress_only_final: forbidden before worker dispatch or a terminal handoff",
     "permitted_turn_stop: question awaiting user answer | explicit user stop | whole-candidate blocker after required consultation",
-    "idle_recovery: non-terminal progress with next_action -> synthetic SORTIE_STEP_CONTINUE",
+    "idle_recovery: non-terminal progress, including missing next_action, -> synthetic SORTIE_STEP_CONTINUE",
+    "checkpoint_recovery: 100% progress + attempted < target -> runtime compaction and same-root continuation",
     "idle_recovery_limit: at most 2 per real user turn; real user turn resets budget",
     "idle_terminal_guard: DONE | BLOCKED | NEED_DECISION never auto-resumes",
   ]) assert.ok(scoutFanout[1].includes(contract), contract);
@@ -1429,7 +1432,7 @@ test("continuation configuration ships a working default and rejects an unsafe o
       enabled: true,
       agent: "dog-coordinator",
       capability: CONTINUATION_CAPABILITY,
-      maxAutoContinues: 2,
+      maxAutoContinues: 10,
     });
   }
 

@@ -10,7 +10,7 @@ export interface RuntimeAsset {
 export const runtimeAssets = [
   {
     name: "dog-coordinator",
-    version: "0.3.4-card38",
+    version: "0.3.4-card39",
     installPath: "agent/dog-coordinator.md",
     content: `---
 description: Canonical MkII coordinator packaged by Sortie-dogs
@@ -93,10 +93,14 @@ unapproved script in the coordinator shell: delegate it to dog-worker under the 
 After any command deny, do not issue a diagnostic variant or retry; continue by delegation or report
 the existing denial. Issue independent read-only inspections in one step instead of one step per
 file, because every extra step resends the whole session context.
+Keep committed, attempted, reconciled, and continuation as untranslated protocol keys. Set
+continuation: required only after a terminal handoff and Project checkpoint when an independent next
+candidate exists below the configured target; use continuation: none everywhere else.
 
 OPERATIONAL_VISIBILITY_FIXTURE
     progress_trigger: candidate phase start/change | batch start/count change
-    progress_line: 📊 進行中: <candidate> — <n>% (<phase>) | バッチ: committed <committed>/<target>; attempted <attempted>/<target>; reconciled <reconciled>
+    progress_line: 📊 進行中: <candidate> — <n>% (<phase>) | バッチ: committed <committed>/<target>; attempted <attempted>/<target>; reconciled <reconciled> | continuation: <required|none>
+    protocol_keys: committed | attempted | reconciled | continuation are never translated
     task_return_immediate: exactly three separate lines before any tool or routing action
     task_line_1: 🐕 所感(<child>/<role>): <assessment>
     task_line_2: 🔍 根拠: <result evidence>
@@ -356,7 +360,8 @@ SCOUT_FANOUT_FIXTURE
     same_turn_progression: scout union | advisor result | successful contract check -> invoke the next required tool in the same turn
     progress_only_final: forbidden before worker dispatch or a terminal handoff
     permitted_turn_stop: question awaiting user answer | explicit user stop | whole-candidate blocker after required consultation
-    idle_recovery: non-terminal progress with next_action -> synthetic SORTIE_STEP_CONTINUE
+    idle_recovery: non-terminal progress, including missing next_action, -> synthetic SORTIE_STEP_CONTINUE
+    checkpoint_recovery: 100% progress + attempted < target -> runtime compaction and same-root continuation
     idle_recovery_limit: at most 2 per real user turn; real user turn resets budget
     idle_terminal_guard: DONE | BLOCKED | NEED_DECISION never auto-resumes
 END_SCOUT_FANOUT_FIXTURE
@@ -673,6 +678,14 @@ unchanged bounded batch above with batchTarget=3. Drain mode remains sequential 
 same worker handoff, manifest, validation, review, checkpoint, and coordinator-owned commit
 gates for every unit.
 
+A user instruction that explicitly names or numbers four through eleven ordered independent units and
+requires them to proceed sequentially without stopping is the task-entry opt-in: set
+backlogDrain.enabled=true and backlogDrain.maxUnits to the exact named-unit count. Natural-language
+intent is sufficient; never require the user to spell configuration keys. Announce the derived bound
+once before execution. Twelve or more units exceed one session's continuation ceiling: ask the user
+to split the run before claiming no-stop execution. A vague request to continue, or an unbounded
+backlog, does not opt in.
+
 At drain start and after each compact resume, inventory all non-Done Project items. Request
 items(first:100), inspect pageInfo, and continue from endCursor while hasNextPage is true; never
 treat a first page or a capped count as complete inventory. Select the next independent item
@@ -697,6 +710,8 @@ independent work.
 BACKLOG_DRAIN_FIXTURE
     default_config: batchTarget=3; backlogDrain.enabled=false
     opt_in_required: backlogDrain.enabled=true; backlogDrain.maxUnits=<positive integer>
+    natural_language_opt_in: explicit ordered 4..11 units + sequential no-stop instruction -> enabled=true; maxUnits=exact named count
+    over_ceiling: 12+ named units -> ask user to split; never claim one-session no-stop execution
     execution: sequential; coordinator_authority=unchanged; per_unit_gates=unchanged
     drain_counts: batchAttempted=terminal handoffs; batchCommitted=new commits; batchReconciled=accepted existing commits
     display: committed <batchCommitted>/<backlogDrain.maxUnits>; attempted <batchAttempted>/<backlogDrain.maxUnits>; reconciled <batchReconciled>
@@ -974,10 +989,10 @@ the initial exit 1 is first and the latest exit 0 is last.
 An undeclared write or mutation must be reported as rejected, not performed.
 
 RUNTIME_ASSET_VERSION_SYNC_FIXTURE
-    runtime_version: 0.3.4-card38
+    runtime_version: 0.3.4-card39
     shared_marker: src/asset-version.ts
-    packaged_expectation: test/plugin-loader.test.ts uses 0.3.4-card38
-    initialize_expectation: test/initialize.test.ts uses 0.3.4-card38
+    packaged_expectation: test/plugin-loader.test.ts uses 0.3.4-card39
+    initialize_expectation: test/initialize.test.ts uses 0.3.4-card39
     rule: runtime asset versions, shared marker, packaged expectation, and initialize expectation change together
 END_RUNTIME_ASSET_VERSION_SYNC_FIXTURE
 
@@ -1018,7 +1033,7 @@ END_TERMINAL_EVIDENCE_FIXTURE
   },
   {
     name: "dog-worker",
-    version: "0.3.4-card38",
+    version: "0.3.4-card39",
     installPath: "agent/dog-worker.md",
     content: `---
 description: Dedicated worker for the canonical Sortie-dogs coordinator
@@ -1103,7 +1118,7 @@ the user.
   },
   {
     name: "dog-scout",
-    version: "0.3.4-card38",
+    version: "0.3.4-card39",
     installPath: "agent/dog-scout.md",
     content: `---
 description: Bounded evidence scout for dog-coordinator
@@ -1153,7 +1168,7 @@ prose; keep the keys, paths, commands, and identifiers verbatim.
   },
   {
     name: "dog-reviewer",
-    version: "0.3.4-card38",
+    version: "0.3.4-card39",
     installPath: "agent/dog-reviewer.md",
     content: `---
 description: Independent source reviewer for dog-coordinator
@@ -1180,7 +1195,7 @@ or transport.
   },
   {
     name: "dog-advisor",
-    version: "0.3.4-card38",
+    version: "0.3.4-card39",
     installPath: "agent/dog-advisor.md",
     content: `---
 description: Focused technical advisor for dog-coordinator
@@ -1204,7 +1219,7 @@ provider, vendor, model, variant, or transport.
   },
   {
     name: "sortie",
-    version: "0.3.4-card38",
+    version: "0.3.4-card39",
     installPath: "command/sortie.md",
     content: `---
 description: Start the canonical Sortie-dogs MkII workflow
