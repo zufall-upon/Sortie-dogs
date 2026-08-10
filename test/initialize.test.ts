@@ -60,11 +60,11 @@ test("fresh init installs every runtime asset and preserves project settings", a
     const result = await initializeProject(project);
 
     assert.equal(result.status, "installed");
-    assert.equal(result.version, "0.3.4-card33");
+    assert.equal(result.version, "0.3.4-card34");
     for (const asset of runtimeAssets) {
       assert.equal(await readFile(join(project, ".opencode", asset.installPath), "utf8"), asset.content);
     }
-    assert.equal(await readFile(join(project, MARKER), "utf8"), "0.3.4-card33\n");
+    assert.equal(await readFile(join(project, MARKER), "utf8"), "0.3.4-card34\n");
     assert.equal(await readFile(config, "utf8"), "{\"userSetting\":true}\n");
   } finally {
     await clean(project);
@@ -116,7 +116,7 @@ test("compatible update replaces owned drift, preserves user files, then becomes
     const marker = join(project, MARKER);
     const ownedAsset = join(project, ".opencode", runtimeAssets[0].installPath);
     const userFile = join(project, ".opencode", "sortie-dogs.json");
-    await writeFile(marker, (await readFile(marker, "utf8")).replace("0.3.4-card33", "0.2.19-card20"));
+    await writeFile(marker, (await readFile(marker, "utf8")).replace("0.3.4-card34", "0.2.19-card20"));
     await writeFile(ownedAsset, "old RPT-owned content\n");
     await writeFile(userFile, "{\"userOwned\":true}\n");
 
@@ -151,7 +151,7 @@ test("rename migration removes a byte-matched owned legacy file", async () => {
     assert.equal(result.status, "installed");
     assert.deepEqual(result.preservedLegacyPaths, []);
     assert.equal(await lstat(legacyWorker).then(() => true, () => false), false);
-    assert.equal(await readFile(join(project, MARKER), "utf8"), "0.3.4-card33\n");
+    assert.equal(await readFile(join(project, MARKER), "utf8"), "0.3.4-card34\n");
   } finally {
     await clean(project);
   }
@@ -180,7 +180,7 @@ test("a recognized current-version marker repairs a partial install and then bec
   try {
     const firstAsset = runtimeAssets[0];
     await mkdir(join(project, ".opencode", "agent"), { recursive: true });
-    await writeFile(join(project, MARKER), "0.3.4-card33\n");
+    await writeFile(join(project, MARKER), "0.3.4-card34\n");
     await writeFile(join(project, ".opencode", firstAsset.installPath), firstAsset.content);
 
     const repaired = await initializeProject(project);
@@ -222,7 +222,7 @@ test("an out-of-line update is rejected before any mutation", async () => {
   }
 });
 
-test("package 0.3.3 runtime card26 migrates to package 0.3.11 runtime card33", async () => {
+test("package 0.3.3 runtime card26 migrates to package 0.3.12 runtime card34", async () => {
   const project = await fixtureDirectory();
   try {
     await initializeProject(project);
@@ -232,7 +232,7 @@ test("package 0.3.3 runtime card26 migrates to package 0.3.11 runtime card33", a
     await writeFile(ownedAsset, "card26 content\n");
     const updated = await initializeProject(project);
     assert.equal(updated.status, "installed");
-    assert.equal(await readFile(marker, "utf8"), "0.3.4-card33\n");
+    assert.equal(await readFile(marker, "utf8"), "0.3.4-card34\n");
     assert.equal(await readFile(ownedAsset, "utf8"), runtimeAssets[0].content);
   } finally {
     await clean(project);
@@ -379,12 +379,12 @@ test("CLI init supports an explicit project root, repeated init, and help", asyn
     });
     assert.deepEqual(await runCli(["init", project]), {
       exit: 0,
-      stdout: "Initialized Sortie-dogs 0.3.4-card33.\n",
+      stdout: "Initialized Sortie-dogs 0.3.4-card34.\n",
       stderr: "",
     });
     assert.deepEqual(await runCli(["init", project]), {
       exit: 0,
-      stdout: "Sortie-dogs 0.3.4-card33 is already initialized.\n",
+      stdout: "Sortie-dogs 0.3.4-card34 is already initialized.\n",
       stderr: "",
     });
   } finally {
@@ -511,13 +511,13 @@ test("CLI global init reports its target, legacy preservation, and invalid combi
     const env = { OPENCODE_CONFIG_DIR: globalRoot };
     assert.deepEqual(await runCli(["init", "--global"], env), {
       exit: 0,
-      stdout: `Initialized Sortie-dogs 0.3.4-card33 globally at ${globalRoot}.\n` +
+      stdout: `Initialized Sortie-dogs 0.3.4-card34 globally at ${globalRoot}.\n` +
         "Preserved legacy runtime files: agent/coordinator-mk2a2.md.\n",
       stderr: "",
     });
     assert.deepEqual(await runCli(["init", "--global"], env), {
       exit: 0,
-      stdout: `Sortie-dogs 0.3.4-card33 is already initialized globally at ${globalRoot}.\n` +
+      stdout: `Sortie-dogs 0.3.4-card34 is already initialized globally at ${globalRoot}.\n` +
         "Preserved legacy runtime files: agent/coordinator-mk2a2.md.\n",
       stderr: "",
     });

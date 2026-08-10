@@ -10,7 +10,7 @@ export interface RuntimeAsset {
 export const runtimeAssets = [
   {
     name: "dog-coordinator",
-    version: "0.3.4-card33",
+    version: "0.3.4-card34",
     installPath: "agent/dog-coordinator.md",
     content: `---
 description: Canonical MkII coordinator packaged by Sortie-dogs
@@ -351,6 +351,9 @@ SCOUT_FANOUT_FIXTURE
     invalid: malformed | timeout | empty -> discard without retry
     after_dispatch: scoutAttempted=true for current scoutRevision even when evidence remains unresolved
     next_route: implementation | remediation | blocker-resolution -> dog-worker only
+    same_turn_progression: scout union | advisor result | successful contract check -> invoke the next required tool in the same turn
+    progress_only_final: forbidden before worker dispatch or a terminal handoff
+    permitted_turn_stop: question awaiting user answer | explicit user stop | whole-candidate blocker after required consultation
 END_SCOUT_FANOUT_FIXTURE
 
 ## Worker handoff contract
@@ -906,10 +909,10 @@ the initial exit 1 is first and the latest exit 0 is last.
 An undeclared write or mutation must be reported as rejected, not performed.
 
 RUNTIME_ASSET_VERSION_SYNC_FIXTURE
-    runtime_version: 0.3.4-card33
+    runtime_version: 0.3.4-card34
     shared_marker: src/asset-version.ts
-    packaged_expectation: test/plugin-loader.test.ts uses 0.3.4-card33
-    initialize_expectation: test/initialize.test.ts uses 0.3.4-card33
+    packaged_expectation: test/plugin-loader.test.ts uses 0.3.4-card34
+    initialize_expectation: test/initialize.test.ts uses 0.3.4-card34
     rule: runtime asset versions, shared marker, packaged expectation, and initialize expectation change together
 END_RUNTIME_ASSET_VERSION_SYNC_FIXTURE
 
@@ -950,7 +953,7 @@ END_TERMINAL_EVIDENCE_FIXTURE
   },
   {
     name: "dog-worker",
-    version: "0.3.4-card33",
+    version: "0.3.4-card34",
     installPath: "agent/dog-worker.md",
     content: `---
 description: Dedicated worker for the canonical Sortie-dogs coordinator
@@ -1025,7 +1028,7 @@ the user.
   },
   {
     name: "dog-scout",
-    version: "0.3.4-card33",
+    version: "0.3.4-card34",
     installPath: "agent/dog-scout.md",
     content: `---
 description: Bounded evidence scout for dog-coordinator
@@ -1075,7 +1078,7 @@ prose; keep the keys, paths, commands, and identifiers verbatim.
   },
   {
     name: "dog-reviewer",
-    version: "0.3.4-card33",
+    version: "0.3.4-card34",
     installPath: "agent/dog-reviewer.md",
     content: `---
 description: Independent source reviewer for dog-coordinator
@@ -1102,7 +1105,7 @@ or transport.
   },
   {
     name: "dog-advisor",
-    version: "0.3.4-card33",
+    version: "0.3.4-card34",
     installPath: "agent/dog-advisor.md",
     content: `---
 description: Focused technical advisor for dog-coordinator
@@ -1126,7 +1129,7 @@ provider, vendor, model, variant, or transport.
   },
   {
     name: "sortie",
-    version: "0.3.4-card33",
+    version: "0.3.4-card34",
     installPath: "command/sortie.md",
     content: `---
 description: Start the canonical Sortie-dogs MkII workflow

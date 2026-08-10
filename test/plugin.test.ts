@@ -1355,6 +1355,15 @@ test("runtime contract requires interactive continuation and deterministic recov
     "direct_operation_artifacts: no handoff | operation manifest | generated script | child session",
     "tracker_unavailable: project-local checkpoint fallback; never a worker retry loop",
   ]) assert.ok(direct[1].includes(contract), contract);
+  const scoutFanout = coordinator.content.match(
+    /SCOUT_FANOUT_FIXTURE\r?\n([\s\S]+?)\r?\nEND_SCOUT_FANOUT_FIXTURE/,
+  );
+  assert.ok(scoutFanout);
+  for (const contract of [
+    "same_turn_progression: scout union | advisor result | successful contract check -> invoke the next required tool in the same turn",
+    "progress_only_final: forbidden before worker dispatch or a terminal handoff",
+    "permitted_turn_stop: question awaiting user answer | explicit user stop | whole-candidate blocker after required consultation",
+  ]) assert.ok(scoutFanout[1].includes(contract), contract);
   assert.match(
     coordinator.content,
     new RegExp(`configured continuation capability is\\s+the plugin tool ${CONTINUATION_CAPABILITY}`, "i"),

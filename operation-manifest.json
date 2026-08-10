@@ -1,6 +1,6 @@
 {
   "version": "0.1.0",
-  "task_id": "v039-session-audit-remediation-02",
+  "task_id": "v0311-compaction-audit-remediation-01",
   "read": [
     "AGENTS.md",
     "package.json",
@@ -9,7 +9,9 @@
     "docs/guide-ja.md",
     "docs/guide-zh-CN.md",
     "src/asset-version.ts",
+    "src/plugin/continuation.ts",
     "src/runtime-assets.ts",
+    "test/continuation.test.ts",
     "test/initialize.test.ts",
     "test/plugin.test.ts",
     "test/plugin-loader.test.ts"
@@ -22,7 +24,9 @@
     "docs/guide-ja.md",
     "docs/guide-zh-CN.md",
     "src/asset-version.ts",
+    "src/plugin/continuation.ts",
     "src/runtime-assets.ts",
+    "test/continuation.test.ts",
     "test/initialize.test.ts",
     "test/plugin.test.ts",
     "test/plugin-loader.test.ts",

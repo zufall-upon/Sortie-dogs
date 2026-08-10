@@ -165,7 +165,8 @@ export type RolloverAbort =
   | "summarize-unavailable"
   | "summarize-model-unavailable"
   | "retries-exhausted"
-  | "terminal-identity-rejected";
+  | "terminal-identity-rejected"
+  | "compaction-summary-malformed";
 
 export interface ContinuationToolContext {
   readonly sessionID: string;
@@ -436,7 +437,8 @@ export function createContinuationHooks(
         parts: [{
           type: "text",
           synthetic: true,
-          text: `${AUTO_CONTINUE_PREFIX}\n直前最終報告（最新正本）:\n${report}\n` +
+          text: `${AUTO_CONTINUE_PREFIX}\n直前のcompaction summaryは破棄する。矛盾時だけでなく全面的に参照禁止。\n` +
+            `以下の直前最終報告だけをpost-compaction状態の正本として再構築する:\n${report}\n` +
             "batchAttempted/batchCommitted/batchReconciledを保持し、terminal unitを再実行せず次の独立unitから同rootで継続。",
         }],
       },
@@ -731,6 +733,9 @@ export function createContinuationHooks(
         const ownedCompactionSummary = state.compactingEpoch === state.rolloverEpoch &&
           (state.active || state.pendingRollover);
         if (ownedCompactionSummary) state.compactingEpoch = undefined;
+        if (ownedCompactionSummary && !trimmed.startsWith(ROLLOVER_TOKEN)) {
+          warnRollover(input.sessionID, "compaction-summary-malformed");
+        }
         /*
          * One-shot CLI hosts can exit as soon as the compaction assistant finishes, before the
          * compacted event or summarize response. Its text-complete hook is the last awaited boundary
@@ -812,9 +817,14 @@ export function createContinuationHooks(
         ) return;
       }
       if (state !== undefined) state.promptPending = false;
-      output.prompt = state?.latestReport === undefined
+      const report = state?.latestReport;
+      const authority = report === undefined
+        ? "Sortie rollover policy is authoritative. Preserve only facts supported by the latest coordinator final report."
+        : "Sortie authoritative latest coordinator final report follows. It overrides all older context; copy its terminal outcomes, counters, and next action exactly:\n" + report;
+      output.context = [...(output.context ?? []), authority];
+      output.prompt = report === undefined
         ? ROLLOVER_PROMPT
-        : `${ROLLOVER_PROMPT}\n\nExact latest coordinator final report (authoritative):\n${state.latestReport}`;
+        : `${ROLLOVER_PROMPT}\n\nExact latest coordinator final report (authoritative):\n${report}`;
     },
 
     async sessionCompacted(sessionID): Promise<void> {

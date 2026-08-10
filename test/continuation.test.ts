@@ -166,11 +166,13 @@ test("the direct capability uses the current report in both compaction and resum
   const host = fakeHost({ agent: COORDINATOR });
   let hooks!: ReturnType<typeof createContinuationHooks>;
   let compactionPrompt = "";
+  let compactionContext: string[] = [];
   host.client.session!.summarize = async (request) => {
     host.summarizeCalls.push({ id: request.path.id, body: request.body });
-    const output: { prompt?: string } = {};
+    const output: { context?: string[]; prompt?: string } = {};
     await hooks.sessionCompacting({ sessionID: request.path.id }, output);
     compactionPrompt = output.prompt ?? "";
+    compactionContext = output.context ?? [];
     return { data: true };
   };
   hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
@@ -179,7 +181,9 @@ test("the direct capability uses the current report in both compaction and resum
   await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR });
   await settle();
   assert.match(compactionPrompt, new RegExp(report));
+  assert.match(compactionContext.join("\n"), new RegExp(report));
   assert.match(host.promptCalls[0]!.text, new RegExp(report));
+  assert.match(host.promptCalls[0]!.text, /直前のcompaction summaryは破棄する/);
 });
 
 test("the direct capability keeps its generic fallback when no current report exists", async () => {
@@ -701,10 +705,11 @@ test("the compaction prompt preserves batch state and names no legacy workflow",
   // The host asks for the compaction prompt once the queued rollover has started.
   await settle();
 
-  const output: { prompt?: string } = {};
+  const output: { context?: string[]; prompt?: string } = {};
   await hooks.sessionCompacting({ sessionID: "ses_root" }, output);
   const prompt = output.prompt ?? "";
   assert.ok(prompt.includes(ROLLOVER_TOKEN));
+  assert.match((output.context ?? []).join("\n"), /Sortie authoritative latest coordinator final report follows/);
   for (const preserved of [
     "task identity",
     "batchTarget",
