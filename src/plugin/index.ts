@@ -27,13 +27,18 @@ import {
 } from "./continuation.js";
 import {
   WriteDeniedError,
+  canonicalManifestReadScopes,
+  canonicalManifestWriteScopes,
   createProjectPaths,
   createWriteGate,
   describeUnclassifiedCommand,
+  isGitMutation,
   isKnownReadOnlyTool,
+  isRemoteMutation,
   normalizeCommand,
   resolveProjectRoot,
   safePath,
+  writeScopesOverlap,
   type ProjectPaths,
   type ToolExecuteBeforeInput,
   type ToolExecuteBeforeOutput,
@@ -304,8 +309,11 @@ interface SessionAuthorization {
   manifestMtimeMs: number;
   manifestPath: string;
   projectRoot: string;
+  readScopes: readonly string[];
   rootSessionID: string;
   suspended: boolean;
+  validationCommands: ReadonlySet<string>;
+  writeScopes: readonly string[];
 }
 
 interface BindingPin {
@@ -317,6 +325,9 @@ interface BindingPin {
 interface ActiveSessionState {
   deniedSignatures: Set<string>;
   expiresAt: number;
+  inFlightCalls: Set<string>;
+  parallel: "none" | "valid" | "invalid";
+  released: boolean;
 }
 
 interface CoordinatorRootLineage {
@@ -619,6 +630,19 @@ function taskProjectRoot(text: string): string | undefined {
   return value === undefined ? undefined : unquoteValue(value);
 }
 
+function parallelTaskMode(text: string): ActiveSessionState["parallel"] {
+  const entries = handoffEntries(text);
+  const group = handoffValue(entries, ["parallel_group"]);
+  const unit = handoffValue(entries, ["parallel_unit"]);
+  const countValue = handoffValue(entries, ["parallel_units"]);
+  if (group === undefined && unit === undefined && countValue === undefined) return "none";
+  const count = Number(countValue);
+  if (group?.toLowerCase() === "none" && unit?.toLowerCase() === "none" && count === 1) return "none";
+  return group !== undefined && group.toLowerCase() !== "none" &&
+    unit !== undefined && unit.toLowerCase() !== "none" &&
+    Number.isInteger(count) && count >= 2 && count <= 3 ? "valid" : "invalid";
+}
+
 function chatParentID(input: Parameters<OpenCodeChatMessageHook>[0]): string | undefined {
   const candidate = input as typeof input & { parentID?: unknown; parentId?: unknown };
   return typeof candidate.parentID === "string" ? candidate.parentID
@@ -669,8 +693,19 @@ function pruneInspectionCache(
   while (cache.size > limit) cache.delete(cache.keys().next().value!);
 }
 
-function pruneSessionAuthorizations(cache: Map<string, SessionAuthorization>, now: number): void {
-  for (const [key, entry] of cache) if (entry.expiresAt <= now) cache.delete(key);
+function pruneSessionAuthorizations(
+  cache: Map<string, SessionAuthorization>,
+  active: Map<string, ActiveSessionState>,
+  now: number,
+): void {
+  for (const [key, entry] of cache) {
+    if (entry.expiresAt > now) continue;
+    if ((active.get(key)?.inFlightCalls.size ?? 0) > 0) {
+      entry.expiresAt = now + ACTIVE_SESSION_CACHE.ttlMilliseconds;
+    } else {
+      cache.delete(key);
+    }
+  }
   while (cache.size >= INSPECTION_CACHE.maximum) cache.delete(cache.keys().next().value!);
 }
 
@@ -831,6 +866,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   const inspected = new Map<string, InspectionCacheEntry>();
   const sessionAuthorizations = new Map<string, SessionAuthorization>();
   const bindingPins = new Map<string, BindingPin>();
+  const bindingOperations = new Set<string>();
   const activeSessions = new Map<string, ActiveSessionState>();
   const coordinatorRoots = new Map<string, CoordinatorRootLineage>();
   const reflectionOwnedRoots = new Set<string>();
@@ -1068,7 +1104,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       rootSessionID,
     });
     clearBindingDenial(rootSessionID, inspectedProjectRoot, manifestPath, sessionID);
-    pruneSessionAuthorizations(sessionAuthorizations, now);
+    pruneSessionAuthorizations(sessionAuthorizations, activeSessions, now);
   }
 
   async function bindWriteGate(
@@ -1096,6 +1132,18 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       "binding-replay": {
         recoverable: false,
         remedy: "Start a new candidate session; do not replace an existing binding.",
+      },
+      "binding-in-flight": {
+        recoverable: true,
+        remedy: "Wait for the current bind or release operation in this session to finish, then retry once.",
+      },
+      "manifest-overlap": {
+        recoverable: true,
+        remedy: "Wait for the conflicting worker to release its write gate, or repartition the parallel units into non-overlapping manifests before resuming this session.",
+      },
+      "parallel-contract-invalid": {
+        recoverable: false,
+        remedy: "Redispatch a fresh worker with parallel_group, parallel_unit, and parallel_units=2..3 all present, or omit all three fields for serial work.",
       },
       "retry-exhausted": {
         recoverable: false,
@@ -1133,14 +1181,19 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         escalation,
       });
     };
+    if (bindingOperations.has(sessionID)) return deny("binding-in-flight");
+    bindingOperations.add(sessionID);
     try {
       const sessionStatus = activeSessionStatus(sessionID);
       if (sessionStatus !== "active") {
         return deny(sessionStatus === "expired" ? "session-expired" : "session-inactive");
       }
+      if (activeSessions.get(sessionID)?.parallel === "invalid") {
+        return deny("parallel-contract-invalid");
+      }
       touchActiveSession(sessionID);
       const now = Date.now();
-      pruneSessionAuthorizations(sessionAuthorizations, now);
+      pruneSessionAuthorizations(sessionAuthorizations, activeSessions, now);
       if (!isAbsolute(projectRoot)) return deny("path-invalid");
 
       project ??= await createProjectPaths(resolveProjectRoot(input));
@@ -1220,9 +1273,29 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         diagnostics.some(({ severity }) => severity === "error") ||
         inspectionFingerprint(handoffValidation.value, diagnostics, validation.value) !== inspectedEntry.fingerprint
       ) return denyHandoffMismatch(handoffValue, contractDefects(diagnostics));
+      const conflictsWithActiveAuthorization = (
+        writeScopes: readonly string[],
+        readScopes: readonly string[],
+      ): boolean =>
+        [...sessionAuthorizations.entries()].some(([ownerSessionID, authorization]) =>
+          ownerSessionID !== sessionID && !authorization.suspended &&
+          (writeScopesOverlap(writeScopes, authorization.writeScopes) ||
+            writeScopesOverlap(writeScopes, authorization.readScopes) ||
+            writeScopesOverlap(readScopes, authorization.writeScopes))
+        );
       if (existingAuthorization !== undefined) {
+        if (conflictsWithActiveAuthorization(
+          existingAuthorization.writeScopes,
+          existingAuthorization.readScopes,
+        )) {
+          return deny("manifest-overlap", [
+            contractDefect("manifest", "/write", "parallel_write_scope_overlap"),
+          ]);
+        }
         existingAuthorization.expiresAt = now + ACTIVE_SESSION_CACHE.ttlMilliseconds;
         existingAuthorization.suspended = false;
+        const activeState = activeSessions.get(sessionID);
+        if (activeState !== undefined) activeState.released = false;
         return JSON.stringify({
           status: "bound",
           manifest_hash: pinned.hash,
@@ -1231,6 +1304,14 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         });
       }
       const gate = await createWriteGate(candidate, validation.value);
+      const readScopes = await canonicalManifestReadScopes(candidate, validation.value);
+      const writeScopes = await canonicalManifestWriteScopes(candidate, validation.value);
+      // Keep conflict detection and registration in one JavaScript turn so competing binds fail closed.
+      if (conflictsWithActiveAuthorization(writeScopes, readScopes)) {
+        return deny("manifest-overlap", [
+          contractDefect("manifest", "/write", "parallel_write_scope_overlap"),
+        ]);
+      }
       bindingPins.set(sessionID, {
         manifestHash: pinned.hash,
         manifestMtimeMs: pinned.mtimeMs,
@@ -1244,9 +1325,14 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         manifestMtimeMs: pinned.mtimeMs,
         manifestPath,
         projectRoot: candidate.root,
+        readScopes,
         rootSessionID: inspectedEntry.rootSessionID,
         suspended: false,
+        validationCommands: new Set(validation.value.validation.map(normalizeCommand)),
+        writeScopes,
       });
+      const activeState = activeSessions.get(sessionID);
+      if (activeState !== undefined) activeState.released = false;
       clearBindingDenial(inspectedEntry.rootSessionID, candidate.root, manifestPath, sessionID);
       return JSON.stringify({
         status: "bound",
@@ -1260,12 +1346,33 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       }
       if (error instanceof PluginInputError) return deny("manifest-unavailable");
       return deny("binding-failed");
+    } finally {
+      bindingOperations.delete(sessionID);
     }
+  }
+
+  function releaseWriteGate(sessionID: string): string {
+    if (bindingOperations.has(sessionID)) {
+      return JSON.stringify({ status: "denied", reason: "binding-in-flight" });
+    }
+    const authorization = sessionAuthorizations.get(sessionID);
+    if (authorization === undefined) return JSON.stringify({ status: "unbound" });
+    if ((activeSessions.get(sessionID)?.inFlightCalls.size ?? 0) > 0) {
+      return JSON.stringify({ status: "denied", reason: "tools-in-flight" });
+    }
+    const idempotent = authorization.suspended;
+    authorization.suspended = true;
+    for (const key of inspected.keys()) {
+      if (key.startsWith(`${sessionID}\u0000`)) inspected.delete(key);
+    }
+    const activeState = activeSessions.get(sessionID);
+    if (activeState !== undefined) activeState.released = true;
+    return JSON.stringify({ status: "released", ...(idempotent ? { idempotent: true } : {}) });
   }
 
   async function sessionGate(sessionID: string | undefined): Promise<WriteGate | undefined> {
     const now = Date.now();
-    pruneSessionAuthorizations(sessionAuthorizations, now);
+    pruneSessionAuthorizations(sessionAuthorizations, activeSessions, now);
     if (sessionID === undefined) return undefined;
       const authorization = sessionAuthorizations.get(sessionID);
       if (authorization === undefined) return undefined;
@@ -1291,7 +1398,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
 
   function pruneActiveSessions(now: number, reserveSlot = false): void {
     for (const [sessionID, state] of activeSessions) {
-      if (state.expiresAt <= now) expireSession(sessionID);
+      if (state.expiresAt > now) continue;
+      if (state.inFlightCalls.size > 0) state.expiresAt = now + ACTIVE_SESSION_CACHE.ttlMilliseconds;
+      else expireSession(sessionID);
     }
     const limit = ACTIVE_SESSION_CACHE.maximum - (reserveSlot ? 1 : 0);
     while (activeSessions.size > limit) expireSession(activeSessions.keys().next().value!);
@@ -1299,7 +1408,12 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
 
   function pruneCoordinatorRoots(now: number, reserveSlot = false): void {
     for (const [sessionID, state] of coordinatorRoots) {
-      if (state.expiresAt <= now) coordinatorRoots.delete(sessionID);
+      if (state.expiresAt > now) continue;
+      const hasInFlightChild = [...sessionRoots.entries()].some(([childID, rootID]) =>
+        rootID === sessionID && (activeSessions.get(childID)?.inFlightCalls.size ?? 0) > 0
+      );
+      if (hasInFlightChild) state.expiresAt = now + ACTIVE_SESSION_CACHE.ttlMilliseconds;
+      else coordinatorRoots.delete(sessionID);
     }
     const limit = ACTIVE_SESSION_CACHE.maximum - (reserveSlot ? 1 : 0);
     while (coordinatorRoots.size > limit) coordinatorRoots.delete(coordinatorRoots.keys().next().value!);
@@ -1381,7 +1495,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     }
   }
 
-  function activateSession(sessionID: string): void {
+  function activateSession(sessionID: string, parallel: ActiveSessionState["parallel"] = "none"): void {
     const now = Date.now();
     pruneActiveSessions(now);
     const existing = activeSessions.get(sessionID);
@@ -1391,6 +1505,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     activeSessions.set(sessionID, {
       deniedSignatures: existing?.deniedSignatures ?? new Set<string>(),
       expiresAt: now + ACTIVE_SESSION_CACHE.ttlMilliseconds,
+      inFlightCalls: existing?.inFlightCalls ?? new Set<string>(),
+      parallel: existing?.parallel === "valid" ? "valid" : parallel,
+      released: existing?.released ?? false,
     });
   }
 
@@ -1619,6 +1736,13 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           return await bindWriteGate(context.sessionID, args.project_root, args.manifest_path);
         },
       }),
+      sortie_release_write_gate: defineTool({
+        description: "Release this session's bound write scope after a parallel implementation unit has stopped all tools and subprocesses.",
+        args: {},
+        async execute(_args, context): Promise<string> {
+          return releaseWriteGate(context.sessionID);
+        },
+      }),
       sortie_check_contract: defineTool({
         description:
           "Report handoff and operation manifest contract defects before dispatch. Read-only: it never inspects, binds, or authorizes.",
@@ -1698,8 +1822,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         }
         if (inheritedRoot !== undefined) {
           sessionRoots.set(chatInput.sessionID, inheritedRoot);
-          activateSession(chatInput.sessionID);
-        } else if (activatesSession(chatInput, output)) activateSession(chatInput.sessionID);
+          activateSession(chatInput.sessionID, parallelTaskMode(taskText!));
+        } else if (activatesSession(chatInput, output)) {
+          activateSession(chatInput.sessionID, taskText === undefined ? "none" : parallelTaskMode(taskText));
+        }
         touchActiveSession(chatInput.sessionID);
       }
       /*
@@ -1775,23 +1901,27 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
      * erases an answer the worker already produced and the coordinator re-dispatches the same work.
      */
     "tool.execute.after": async (toolInput, output): Promise<void> => {
-      const repair = await taskResultRepair(toolInput, output);
-      if (
-        repair.kind === "unrecoverable-empty" && toolInput.sessionID !== undefined
-      ) {
-        const identity = await hostSessionIdentity(repair.childSessionID);
-        const role = consultationAgent(identity?.agent);
-        if (role !== undefined && identity?.parentID === toolInput.sessionID) {
-          const key = consultationRetryKey(toolInput.sessionID, role);
-          if (
-            !consultationRetries.has(key) &&
-            markConsultationFallbackRetry(output, role)
-          ) {
-            consultationRetries.set(key, { phase: "pending" });
+      try {
+        const repair = await taskResultRepair(toolInput, output);
+        if (
+          repair.kind === "unrecoverable-empty" && toolInput.sessionID !== undefined
+        ) {
+          const identity = await hostSessionIdentity(repair.childSessionID);
+          const role = consultationAgent(identity?.agent);
+          if (role !== undefined && identity?.parentID === toolInput.sessionID) {
+            const key = consultationRetryKey(toolInput.sessionID, role);
+            if (
+              !consultationRetries.has(key) &&
+              markConsultationFallbackRetry(output, role)
+            ) {
+              consultationRetries.set(key, { phase: "pending" });
+            }
           }
         }
+        await inspectSuccessfulRead(toolInput);
+      } finally {
+        activeSessions.get(toolInput.sessionID ?? "")?.inFlightCalls.delete(toolInput.callID ?? "");
       }
-      await inspectSuccessfulRead(toolInput);
     },
     "tool.execute.before": async (toolInput, output): Promise<void> => {
       if (isCoordinatorSession(toolInput.sessionID)) {
@@ -1808,8 +1938,25 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         throw new WriteDeniedError("session-expired", "<expired-session>");
       }
       touchActiveSession(toolInput.sessionID);
-      if (toolInput.tool === "sortie_bind_write_gate") return;
+      if (toolInput.tool === "sortie_bind_write_gate" || toolInput.tool === "sortie_release_write_gate") return;
+      const activeState = activeSessions.get(toolInput.sessionID);
+      activeState?.inFlightCalls.add(toolInput.callID);
       try {
+        if (activeState?.parallel === "valid" && isGitMutation(toolInput.tool, output.args)) {
+          throw new WriteDeniedError("parallel-git-mutation", "<parallel-unit>");
+        }
+        if (activeState?.parallel === "valid" && isRemoteMutation(toolInput.tool, output.args)) {
+          throw new WriteDeniedError("parallel-remote-mutation", "<parallel-unit>");
+        }
+        if (activeState?.released === true) {
+          const authorization = sessionAuthorizations.get(toolInput.sessionID);
+          const filePath = isRecord(output.args) && typeof output.args.filePath === "string"
+            ? resolve(input.worktree ?? input.directory, output.args.filePath)
+            : undefined;
+          const exactHandoffRead = toolInput.tool.toLowerCase() === "read" && filePath !== undefined &&
+            authorization !== undefined && samePath(filePath, authorization.handoffPath);
+          if (!exactHandoffRead) throw new WriteDeniedError("session-released", "<released-session>");
+        }
         const gate = await authorizedGate(toolInput.sessionID);
         if (gate === undefined) {
           if (!hasSessionEnforcementState(toolInput.sessionID) && await isUnconfiguredProject()) return;
@@ -1825,8 +1972,17 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           }
           return;
         }
+        const authorization = sessionAuthorizations.get(toolInput.sessionID);
+        const command = isRecord(output.args) && typeof output.args.command === "string"
+          ? normalizeCommand(output.args.command)
+          : undefined;
+        if (
+          activeState?.parallel === "valid" && command !== undefined &&
+          authorization?.validationCommands.has(command) === true
+        ) throw new WriteDeniedError("parallel-validation", "<parallel-unit>");
         await gate.check(toolInput, output);
       } catch (error) {
+        activeState?.inFlightCalls.delete(toolInput.callID);
         if (!(error instanceof WriteDeniedError) || error.reason === "repeated-denial") throw error;
         const signature = denialSignature(toolInput, output, error.reason);
         const activeSession = activeSessions.get(toolInput.sessionID);
@@ -1891,14 +2047,22 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       if (!isActiveSession(eventSessionID)) return;
       if (event.type !== "session.idle") touchActiveSession(eventSessionID);
       if (event.type === "session.idle" && eventSessionID !== undefined) {
+        activeSessions.get(eventSessionID)?.inFlightCalls.clear();
         const authorization = sessionAuthorizations.get(eventSessionID);
         if (authorization === undefined) return;
         try {
-          // Idle can revalidate a handoff already pinned by a successful bind, but it can never
-          // create the first inspection or authorize an unbound child.
+          // Idle revalidates the pinned handoff but always releases write ownership. A resumed
+          // worker must bind again, so a completed serial worker cannot block later work.
           await inspect(authorization.handoffPath, eventSessionID);
         } catch {
+          // Suspension below is fail-closed for both valid and invalid handoffs.
+        } finally {
           authorization.suspended = true;
+          for (const key of inspected.keys()) {
+            if (key.startsWith(`${eventSessionID}\u0000`)) inspected.delete(key);
+          }
+          const activeState = activeSessions.get(eventSessionID);
+          if (activeState !== undefined) activeState.released = true;
         }
       }
     },

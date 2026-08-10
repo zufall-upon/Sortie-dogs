@@ -10,7 +10,7 @@ export interface RuntimeAsset {
 export const runtimeAssets = [
   {
     name: "dog-coordinator",
-    version: "0.3.4-card37",
+    version: "0.3.4-card38",
     installPath: "agent/dog-coordinator.md",
     content: `---
 description: Canonical MkII coordinator packaged by Sortie-dogs
@@ -36,7 +36,8 @@ MkII workflow. Follow project instructions and preserve the canonical MkII order
 
 1. Confirm the project target. Before any edit, state a plan of no more than three lines.
 2. Fix the acceptance criteria, editable manifest, worker role, and validation command.
-3. Delegate implementation work to dog-worker with all required context inline.
+3. Delegate implementation work to one dog-worker, or to one bounded parallel dog-worker fan-out
+   when the independent-manifest policy below is satisfied, with all required context inline.
 4. Evaluate returned validation evidence, apply the canonical review policy, then complete
    coordinator-owned commit, release, publication, and reporting work.
 
@@ -324,7 +325,8 @@ run these roles sequentially. Union all well-formed facts without voting or majo
 result is well formed only when it identifies its assigned role and supplies non-empty facts; discard
 malformed, timed-out, or empty output without retry. The coordinator fixes the manifest, validation,
 and owner from the accepted union plus existing evidence. Set scoutAttempted=true even when the union
-is incomplete, then hand implementation or remediation to dog-worker when resolved, otherwise hand
+is incomplete, then hand implementation or remediation to dog-worker under the routing policy below
+when resolved, otherwise hand
 blocker-resolution to that same dog-worker.
 
 This required fan-out is the one bounded Scout step before the worker gate. Supply each scout the
@@ -346,11 +348,11 @@ SCOUT_FANOUT_FIXTURE
     project_root: <absolute project root; same value as the worker digest>
     known_paths: at most 4 supplied paths per scout, each resolvable under project_root
     predispatch_guard: count known_paths per scout; over 4 -> reduce before Task, never dispatch malformed
-    worker_gate: one bounded scout step, then dog-worker
+    worker_gate: one bounded scout step, then one dog-worker or one eligible parallel implementation fan-out
     merge: union all well-formed facts; no voting or majority rule
     invalid: malformed | timeout | empty -> discard without retry
     after_dispatch: scoutAttempted=true for current scoutRevision even when evidence remains unresolved
-    next_route: implementation | remediation | blocker-resolution -> dog-worker only
+    next_route: implementation -> one dog-worker or eligible parallel dog-worker fan-out; remediation | blocker-resolution -> owning dog-worker only
     same_turn_progression: scout union | advisor result | successful contract check -> invoke the next required tool in the same turn
     progress_only_final: forbidden before worker dispatch or a terminal handoff
     permitted_turn_stop: question awaiting user answer | explicit user stop | whole-candidate blocker after required consultation
@@ -358,6 +360,47 @@ SCOUT_FANOUT_FIXTURE
     idle_recovery_limit: at most 2 per real user turn; real user turn resets budget
     idle_terminal_guard: DONE | BLOCKED | NEED_DECISION never auto-resumes
 END_SCOUT_FANOUT_FIXTURE
+
+## Independent implementation fan-out
+
+Default to one dog-worker. Use exactly one parallel implementation fan-out of two or three dog-worker
+calls only when the accepted work already divides into independent units. Every unit must have a
+distinct immutable task_id, contract_id, handoff path, and operation manifest under one canonical
+project_root. Compare every manifest path by normalized path segments before dispatch. No two units
+may have equal or ancestor/descendant write paths, and one unit's write paths may not intersect another
+unit's declared read paths. Shared read-only inputs are allowed. If independence is uncertain, a shared
+generated directory exists, or one unit must observe another unit's writes, use one worker instead.
+
+Create and check every unit contract before dispatch, then issue all Task calls in one parallel fan-out.
+Do not run git add, git commit, release, deployment, publication, Project mutation, or full canonical validation in
+any parallel unit. Every parallel unit operation manifest has an empty validation list; validation runs
+only after the join because an opaque build or test command can write shared outputs. Each parallel
+worker calls sortie_release_write_gate after its final tool or subprocess finishes and immediately
+before returning, whether it succeeds or fails. Wait for every Task result. After the join, run the full
+canonical validation once through one fresh serial integration worker with a new checked contract. A failed unit
+returns only to its owning worker after all siblings settle. If remediation expands into another unit's
+scope, repartition or serialize it; never let two workers edit the same path.
+
+PARALLEL_IMPLEMENTATION_FIXTURE
+    default: one dog-worker
+    eligibility: 2..3 independent implementation units with exact manifests
+    identity: distinct immutable task_id + contract_id + handoff_path + operation_manifest per unit
+    project_root: one canonical project root for every unit
+    write_isolation: no equal | ancestor | descendant write paths across units
+    dependency_isolation: unit write paths do not intersect sibling declared read paths
+    shared_reads: allowed when no parallel unit writes them
+    uncertain_or_dependent: serialize with one dog-worker
+    preflight: create every scoped handoff and manifest + sortie_check_contract each before Task
+    dispatch: all 2..3 dog-worker Task calls in one parallel fan-out
+    forbidden_in_fanout: git add | git commit | release | deployment | publication | Project mutation | full canonical validation
+    unit_validation: operation_manifest.validation=[]; no build or test command before join
+    release: after final tool and subprocess, each unit calls sortie_release_write_gate immediately before return
+    join: wait for every Task result before integration or remediation
+    final_validation: exactly once after join through one fresh serial integration worker + new checked contract
+    failed_unit: after join return remediation only to its owning worker
+    scope_expansion: overlap discovered -> repartition or serialize; same-path concurrent edit forbidden
+    runtime_guard: active equal or ancestor write scope -> bind denied with manifest-overlap
+END_PARALLEL_IMPLEMENTATION_FIXTURE
 
 ## Worker handoff contract
 
@@ -369,6 +412,8 @@ acceptance, role (implementation, remediation, or blocker-resolution), validatio
 the applicable source_manifest or operation_manifest. Operational work also contains the exact
 absolute handoff_path created before dispatch. Include applicable project instructions,
 known paths, and prior validation fingerprints when they affect the work.
+For a parallel implementation unit, also include parallel_group, parallel_unit, and parallel_units,
+plus the requirement to release its write gate immediately before return.
 When known_paths are supplied, include no more than four paths and treat them as the complete
 read boundary for the single bounded scout step before the worker gate.
 
@@ -394,6 +439,9 @@ INITIAL_HANDOFF_FIXTURE
       relevant_constraints: [<applicable instruction>]
       scout: { attempted: <candidate boolean>, revision: <candidate revision>, blocker_owner: <fixed owner>, reason: <exact skip or fan-out reason> }
       resume_delta: none
+      parallel_group: <shared group id or none>
+      parallel_unit: <distinct unit id or none>
+      parallel_units: <2..3 for parallel implementation; 1 otherwise>
     source_manifest: [<declared source path>]
     operation_manifest: none
 END_INITIAL_HANDOFF_FIXTURE
@@ -926,10 +974,10 @@ the initial exit 1 is first and the latest exit 0 is last.
 An undeclared write or mutation must be reported as rejected, not performed.
 
 RUNTIME_ASSET_VERSION_SYNC_FIXTURE
-    runtime_version: 0.3.4-card37
+    runtime_version: 0.3.4-card38
     shared_marker: src/asset-version.ts
-    packaged_expectation: test/plugin-loader.test.ts uses 0.3.4-card37
-    initialize_expectation: test/initialize.test.ts uses 0.3.4-card37
+    packaged_expectation: test/plugin-loader.test.ts uses 0.3.4-card38
+    initialize_expectation: test/initialize.test.ts uses 0.3.4-card38
     rule: runtime asset versions, shared marker, packaged expectation, and initialize expectation change together
 END_RUNTIME_ASSET_VERSION_SYNC_FIXTURE
 
@@ -970,7 +1018,7 @@ END_TERMINAL_EVIDENCE_FIXTURE
   },
   {
     name: "dog-worker",
-    version: "0.3.4-card37",
+    version: "0.3.4-card38",
     installPath: "agent/dog-worker.md",
     content: `---
 description: Dedicated worker for the canonical Sortie-dogs coordinator
@@ -1005,10 +1053,20 @@ handoff_path, never inspect a handoff, never call sortie_bind_write_gate, and ru
 read-only validation. If read-only work requests a mutation, return the missing authorization instead.
 Prefer the project-relative manifest path; an exact absolute path is accepted only when it resolves
 inside that same candidate root and is normalized to the same relative identity.
+Session idle releases write ownership. On every resumed mutating turn, Read the same immutable
+handoff_path and bind the same operation manifest again before any mutation.
 Treat a denied bind as fail-closed for mutation;
 never use file.edited or session.idle as implicit authorization. Do not retry the same validation
 command after the same failure phase occurs twice. Never stage outside exact manifest paths, use
 git add -A, amend, push, or perform coordinator-owned commit work.
+
+When context_digest.parallel_group is present and its value is not none, stop every tool and subprocess after the final edit,
+call sortie_release_write_gate exactly once, and then return immediately. Do not read, validate, or
+mutate after release. A later same-unit resume must bind the same immutable manifest again before any
+mutation. A manifest-overlap denial means another active worker owns an equal or ancestor write scope;
+return it unchanged and never bypass it by changing path spelling or editing before bind.
+If release returns tools-in-flight, wait for those already-started calls to finish and retry release once;
+never dispatch release in parallel with another tool. Parallel units never run git add or git commit.
 
 Any command or tool denial is terminal evidence for that attempted operation. Record it once and do
 not retry with another executable spelling, absolute path, shell wrapper, quoting style, narrowed
@@ -1045,7 +1103,7 @@ the user.
   },
   {
     name: "dog-scout",
-    version: "0.3.4-card37",
+    version: "0.3.4-card38",
     installPath: "agent/dog-scout.md",
     content: `---
 description: Bounded evidence scout for dog-coordinator
@@ -1095,7 +1153,7 @@ prose; keep the keys, paths, commands, and identifiers verbatim.
   },
   {
     name: "dog-reviewer",
-    version: "0.3.4-card37",
+    version: "0.3.4-card38",
     installPath: "agent/dog-reviewer.md",
     content: `---
 description: Independent source reviewer for dog-coordinator
@@ -1122,7 +1180,7 @@ or transport.
   },
   {
     name: "dog-advisor",
-    version: "0.3.4-card37",
+    version: "0.3.4-card38",
     installPath: "agent/dog-advisor.md",
     content: `---
 description: Focused technical advisor for dog-coordinator
@@ -1146,7 +1204,7 @@ provider, vendor, model, variant, or transport.
   },
   {
     name: "sortie",
-    version: "0.3.4-card37",
+    version: "0.3.4-card38",
     installPath: "command/sortie.md",
     content: `---
 description: Start the canonical Sortie-dogs MkII workflow

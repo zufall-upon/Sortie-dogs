@@ -1,6 +1,6 @@
 {
   "version": "0.1.0",
-  "task_id": "nonterminal-idle-resume-01",
+  "task_id": "release-v0.3.16-parallel-implementation",
   "read": [
     "AGENTS.md",
     "package.json",
@@ -11,6 +11,7 @@
     "docs/guide-zh-CN.md",
     "src/asset-version.ts",
     "src/plugin/continuation.ts",
+    "src/plugin/gate.ts",
     "src/plugin/index.ts",
     "src/runtime-assets.ts",
     "test/continuation.test.ts",
@@ -28,6 +29,7 @@
     "docs/guide-zh-CN.md",
     "src/asset-version.ts",
     "src/plugin/continuation.ts",
+    "src/plugin/gate.ts",
     "src/plugin/index.ts",
     "src/runtime-assets.ts",
     "test/continuation.test.ts",

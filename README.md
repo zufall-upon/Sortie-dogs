@@ -12,7 +12,7 @@
 ![Sortie-dogs coordinating a bounded implementation workflow](https://raw.githubusercontent.com/zufall-upon/Sortie-dogs/main/docs/assets/sortie-workflow.gif)
 
 Sortie-dogs is an opt-in OpenCode orchestration plugin. It turns a task into a
-scoped plan, parallel investigation, dedicated implementation, canonical
+scoped plan, parallel investigation, bounded independent implementation, canonical
 validation, and evidence-backed completion—while preserving standard OpenCode
 agents and settings.
 
@@ -20,7 +20,7 @@ Requirements: Node.js 22.6 or newer, npm, and OpenCode.
 
 Guides: [日本語](docs/guide-ja.md) · [简体中文](docs/guide-zh-CN.md) · [CLI testing](docs/cli-testing.md)
 
-Release: [v0.3.15](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.3.15)
+Release: [v0.3.16](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.3.16)
 
 ## Quick start
 
@@ -207,8 +207,10 @@ global file for durable global settings.
   exactly three bounded scouts before implementation begins.
 - **Writes stay inside the assignment.** Exact source or operation manifests
   gate edits and handoffs.
-- **One accountable implementation path.** One dedicated worker handles
-  implementation, remediation, and blocker resolution.
+- **Safe implementation fan-out.** Independent units may use two or three workers
+  with non-overlapping write manifests; dependent or same-path work stays on one worker.
+- **Runtime overlap protection.** Active equal or ancestor write scopes are rejected
+  before mutation, and full validation waits until every parallel unit joins.
 - **Evidence before completion.** Canonical validation, risk-based review, and
   terminal evidence gate coordinator-owned completion and commits.
 - **Long work can recover.** Restart recovery and bounded compaction continue

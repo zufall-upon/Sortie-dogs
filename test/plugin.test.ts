@@ -1550,6 +1550,7 @@ test("invalid global Sortie config fails reflection closed without removing core
         "sortie_bind_write_gate",
         "sortie_check_contract",
         "sortie_compact_and_continue",
+        "sortie_release_write_gate",
       ]);
       assert.equal(warnings.length, 1);
       await activate(hooks, "invalid-json-global");
@@ -1819,6 +1820,17 @@ async function executeBindWriteGate(
     { project_root: directory, manifest_path: manifestPath },
     { sessionID },
   )) as Record<string, unknown>;
+}
+
+async function executeReleaseWriteGate(
+  hooks: Awaited<ReturnType<typeof SortieDogsPlugin>>,
+  sessionID: string,
+): Promise<Record<string, unknown>> {
+  const release = hooks.tool?.sortie_release_write_gate as unknown as {
+    execute(args: Record<string, never>, context: { sessionID: string }): Promise<string>;
+  } | undefined;
+  assert.ok(release);
+  return JSON.parse(await release.execute({}, { sessionID })) as Record<string, unknown>;
 }
 
 async function invokeWrite(
@@ -2867,6 +2879,10 @@ test("passive coordinator lineage activates only its Task child without inheriti
       { sessionID: "child", agent: "renamed-worker" },
       { message: { agent: "renamed-worker", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: "resume completed child" }] },
     );
+    await inspectHandoffWithRead(hooks, join(directory, "handoff.json"), "child");
+    const resumedBinding = await executeBindWriteGate(hooks, directory, "child");
+    assert.equal(resumedBinding.status, "bound");
+    assert.equal(resumedBinding.idempotent, true);
     await before(
       { tool: "write", sessionID: "child", callID: "resumed-child-write" },
       { args: { file: "allowed.txt", content: "not-written" } },
@@ -3372,7 +3388,7 @@ test("sibling inspection fallback requires the same inspected fingerprint", asyn
   });
 });
 
-test("root and inspection TTLs stop new inheritance without revoking existing child authorization", async () => {
+test("in-flight authorization retains root lineage while inspection TTL still expires", async () => {
   await withProject("lineage-ttl", async (directory) => {
     await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
     await writeFile(join(directory, "handoff.json"), JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
@@ -3421,7 +3437,7 @@ test("root and inspection TTLs stop new inheritance without revoking existing ch
         { sessionID: "late-child", agent: "dog-worker" },
         { message: { agent: "dog-worker", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: task }] },
       );
-      assert.equal((await executeBindWriteGate(hooks, directory, "late-child")).reason, "session-inactive");
+      assert.equal((await executeBindWriteGate(hooks, directory, "late-child")).reason, "handoff-uninspected");
       await before(
         { tool: "write", sessionID: "authorized-child", callID: "post-root-expiry" },
         { args: { file: "allowed.txt", content: "not-written" } },
@@ -3448,7 +3464,10 @@ test("two coordinator threads bind isolated task-scoped handoffs in one project"
     const contracts = ["thread-a", "thread-b"] as const;
     for (const id of contracts) {
       const manifestPath = `${id}.operation-manifest.json`;
-      await writeFile(join(directory, manifestPath), JSON.stringify(fixture.manifest));
+      await writeFile(join(directory, manifestPath), JSON.stringify({
+        ...operationManifest([`allowed-${id}.txt`]),
+        task_id: id,
+      }));
       const handoff = writeGateHandoff(directory, manifestPath);
       handoff.id = id;
       await writeFile(join(directory, `handoff.${id}.json`), JSON.stringify(handoff));
@@ -3481,7 +3500,7 @@ test("two coordinator threads bind isolated task-scoped handoffs in one project"
       );
       await before(
         { tool: "write", sessionID: `child-${id}`, callID: `write-${id}` },
-        { args: { file: "allowed.txt", content: "not-written" } },
+        { args: { file: `allowed-${id}.txt`, content: "not-written" } },
       );
     }
 
@@ -3494,7 +3513,7 @@ test("two coordinator threads bind isolated task-scoped handoffs in one project"
 
     await before(
       { tool: "write", sessionID: "child-thread-a", callID: "thread-a-still-bound" },
-      { args: { file: "allowed.txt", content: "not-written" } },
+      { args: { file: "allowed-thread-a.txt", content: "not-written" } },
     );
     await expectMessage(
       () => before(
@@ -4020,6 +4039,263 @@ test("an inspected unreadable handoff exhausts an unchanged bind retry", async (
   });
 });
 
+test("parallel worker bindings allow disjoint scopes and reject equal or ancestor scopes", async () => {
+  await withProject("parallel-write-scopes", async (directory) => {
+    await mkdir(join(directory, "src"));
+    const contracts = [
+      { id: "unit-a", write: ["src/a.ts"] },
+      { id: "unit-b", write: ["src/b.ts"] },
+      { id: "unit-equal", write: ["src/a.ts"] },
+      { id: "unit-case", write: ["src/A.ts"] },
+      { id: "unit-ancestor", write: ["src"] },
+      { id: "unit-reader", write: ["src/c.ts"], read: ["src/a.ts"] },
+      { id: "unit-segment", write: ["src/a.tsx"], validation: ["npm test"] },
+      { id: "unit-invalid", write: ["src/invalid.ts"] },
+      { id: "unit-serial", write: ["src/serial.ts"] },
+    ] as const;
+    const hooks = await SortieDogsPlugin({ directory });
+    const chat = hooks["chat.message"];
+    const event = hooks.event;
+    assert.ok(chat);
+    assert.ok(event);
+    await chat(
+      { sessionID: "parallel-root", agent: "dog-coordinator" },
+      { message: { agent: "dog-coordinator", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: "ordinary" }] },
+    );
+    for (const contract of contracts) {
+      const { id, write } = contract;
+      const manifestPath = `${id}.operation-manifest.json`;
+      const handoffPath = join(directory, `handoff.${id}.json`);
+      await writeFile(join(directory, manifestPath), JSON.stringify({
+        ...operationManifest([...write]),
+        task_id: id,
+        read: "read" in contract ? [...contract.read] : [],
+        validation: "validation" in contract ? [...contract.validation] : [],
+      }));
+      await writeFile(handoffPath, JSON.stringify({
+        ...writeGateHandoff(directory, manifestPath),
+        id,
+      }));
+      await event({ event: { type: "session.created", properties: { info: { id, parentID: "parallel-root", directory } } } });
+      const parallelFields = id === "unit-invalid"
+        ? "parallel_group=group-one"
+        : id === "unit-serial"
+        ? "parallel_group=none\nparallel_unit=none\nparallel_units=1"
+        : `parallel_group=group-one\nparallel_unit=${id}\nparallel_units=3`;
+      await chat(
+        { sessionID: id, agent: "dog-worker" },
+        {
+          message: { agent: "dog-worker", model: { providerID: "host", modelID: "selected" } },
+          parts: [{
+            type: "text",
+            text: `role=implementation\nproject_root=${directory}\noperation_manifest=${manifestPath}\nacceptance=safe parallel unit\n${parallelFields}`,
+          }],
+        },
+      );
+      await inspectHandoffWithRead(hooks, handoffPath, id);
+    }
+
+    const before = hooks["tool.execute.before"];
+    const after = hooks["tool.execute.after"];
+    assert.ok(before);
+    assert.ok(after);
+    await expectMessage(
+      () => before(
+        { tool: "bash", sessionID: "unit-segment", callID: "unbound-parallel-graphql" },
+        { args: { command: "gh api graphql --input mutation.json" } },
+      ),
+      'Write denied for "<parallel-unit>": parallel implementation workers cannot mutate shared remote state.',
+      "parallel-remote-mutation",
+    );
+    assert.equal((await executeBindWriteGate(hooks, directory, "unit-a", "unit-a.operation-manifest.json")).status, "bound");
+    assert.equal((await executeBindWriteGate(hooks, directory, "unit-b", "unit-b.operation-manifest.json")).status, "bound");
+    assert.equal((await executeBindWriteGate(hooks, directory, "unit-segment", "unit-segment.operation-manifest.json")).status, "bound");
+    assert.equal((await executeBindWriteGate(hooks, directory, "unit-serial", "unit-serial.operation-manifest.json")).status, "bound");
+    await expectMessage(
+      () => before(
+        { tool: "bash", sessionID: "unit-segment", callID: "parallel-validation" },
+        { args: { command: "npm test" } },
+      ),
+      'Write denied for "<parallel-unit>": parallel implementation validation must run after the worker join.',
+      "parallel-validation",
+    );
+    await expectMessage(
+      () => before(
+        { tool: "bash", sessionID: "unit-segment", callID: "parallel-git-add" },
+        { args: { command: "git add -- src/a.tsx" } },
+      ),
+      'Write denied for "<parallel-unit>": parallel implementation workers cannot mutate shared Git state.',
+      "parallel-git-mutation",
+    );
+    await expectMessage(
+      () => before(
+        { tool: "powershell", sessionID: "unit-segment", callID: "parallel-project-edit" },
+        { args: { command: "gh project item-edit --id item --project-id project --field-id field --single-select-option-id option" } },
+      ),
+      'Write denied for "<parallel-unit>": parallel implementation workers cannot mutate shared remote state.',
+      "parallel-remote-mutation",
+    );
+    await expectMessage(
+      () => before(
+        { tool: "bash", sessionID: "unit-segment", callID: "parallel-graphql-mutation" },
+        { args: { command: "gh api graphql -f 'query=mutation($id:ID!){deleteProjectV2(input:{projectV2Id:$id}){projectV2{id}}}'" } },
+      ),
+      'Write denied for "<parallel-unit>": parallel implementation workers cannot mutate shared remote state.',
+      "parallel-remote-mutation",
+    );
+    const deniedUnits = ["unit-equal", "unit-ancestor", "unit-reader"];
+    if (process.platform === "win32") deniedUnits.push("unit-case");
+    for (const id of deniedUnits) {
+      const denied = await executeBindWriteGate(hooks, directory, id, `${id}.operation-manifest.json`);
+      assert.equal(denied.reason, "manifest-overlap");
+      assert.equal(denied.recoverable, true);
+      assert.deepEqual(denied.defects, ["manifest /write parallel_write_scope_overlap"]);
+      assert.deepEqual(denied.escalation, {
+        action: "blocker-resolution-takeover",
+        resume_session: true,
+        true_blocker: false,
+      });
+    }
+    const invalidParallel = await executeBindWriteGate(
+      hooks,
+      directory,
+      "unit-invalid",
+      "unit-invalid.operation-manifest.json",
+    );
+    assert.equal(invalidParallel.reason, "parallel-contract-invalid");
+    assert.equal(invalidParallel.recoverable, false);
+
+    const inFlightInput = { tool: "write", sessionID: "unit-a", callID: "in-flight-write", args: { file: "src/a.ts", content: "not-written" } };
+    await before(inFlightInput, { args: inFlightInput.args });
+    const originalNow = Date.now;
+    let now = Date.now();
+    Date.now = () => now;
+    try {
+      now += 31 * 60 * 1000;
+      const lateID = "unit-late";
+      const equalManifest = `${lateID}.operation-manifest.json`;
+      await writeFile(join(directory, equalManifest), JSON.stringify({
+        ...operationManifest(["src/a.ts"]),
+        task_id: lateID,
+        validation: [],
+      }));
+      await writeFile(join(directory, `handoff.${lateID}.json`), JSON.stringify({
+        ...writeGateHandoff(directory, equalManifest),
+        id: lateID,
+      }));
+      await chat(
+        { sessionID: lateID, agent: "dog-worker" },
+        {
+          message: { agent: "dog-worker", model: { providerID: "host", modelID: "selected" } },
+          parts: [{ type: "text", text: `/sortie\nrole=implementation\nproject_root=${directory}\noperation_manifest=${equalManifest}\nacceptance=safe parallel unit\nparallel_group=group-one\nparallel_unit=${lateID}\nparallel_units=3` }],
+        },
+      );
+      await inspectHandoffWithRead(hooks, join(directory, `handoff.${lateID}.json`), lateID);
+      const longRunningConflict = await executeBindWriteGate(hooks, directory, lateID, equalManifest);
+      assert.equal(longRunningConflict.reason, "manifest-overlap");
+    } finally {
+      Date.now = originalNow;
+    }
+    assert.deepEqual(await executeReleaseWriteGate(hooks, "unit-a"), { status: "denied", reason: "tools-in-flight" });
+    await after(inFlightInput, { output: "not-written" });
+    assert.deepEqual(await executeReleaseWriteGate(hooks, "unit-a"), { status: "released" });
+    assert.deepEqual(await executeReleaseWriteGate(hooks, "unit-a"), { status: "released", idempotent: true });
+    await expectMessage(
+      () => before(
+        { tool: "read", sessionID: "unit-a", callID: "released-source-read" },
+        { args: { filePath: join(directory, "src", "a.ts") } },
+      ),
+      'Write denied for "<released-session>": released session must re-read only its handoff and bind before further work.',
+      "session-released",
+    );
+    assert.equal(
+      (await executeBindWriteGate(hooks, directory, "unit-a", "unit-a.operation-manifest.json")).reason,
+      "handoff-uninspected",
+    );
+    await activate(hooks, "unit-equal");
+    await inspectHandoffWithRead(hooks, join(directory, "handoff.unit-equal.json"), "unit-equal");
+    assert.equal((await executeBindWriteGate(hooks, directory, "unit-equal", "unit-equal.operation-manifest.json")).status, "bound");
+    await inspectHandoffWithRead(hooks, join(directory, "handoff.unit-a.json"), "unit-a");
+    const blockedResume = await executeBindWriteGate(hooks, directory, "unit-a", "unit-a.operation-manifest.json");
+    assert.equal(blockedResume.reason, "manifest-overlap");
+    await executeReleaseWriteGate(hooks, "unit-equal");
+    const resumed = await executeBindWriteGate(hooks, directory, "unit-a", "unit-a.operation-manifest.json");
+    assert.equal(resumed.status, "bound");
+    assert.equal(resumed.idempotent, true);
+  });
+});
+
+test("competing parallel binds atomically grant one overlapping scope", async () => {
+  await withProject("parallel-write-atomic", async (directory) => {
+    const hooks = await SortieDogsPlugin({ directory });
+    const chat = hooks["chat.message"];
+    const event = hooks.event;
+    assert.ok(chat);
+    assert.ok(event);
+    await chat(
+      { sessionID: "atomic-root", agent: "dog-coordinator" },
+      { message: { agent: "dog-coordinator", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: "ordinary" }] },
+    );
+    for (const id of ["unit-one", "unit-two"]) {
+      const manifestPath = `${id}.operation-manifest.json`;
+      const handoffPath = join(directory, `handoff.${id}.json`);
+      await writeFile(join(directory, manifestPath), JSON.stringify({
+        ...operationManifest(["shared.ts"]),
+        task_id: id,
+      }));
+      await writeFile(handoffPath, JSON.stringify({
+        ...writeGateHandoff(directory, manifestPath),
+        id,
+      }));
+      await event({ event: { type: "session.created", properties: { info: { id, parentID: "atomic-root", directory } } } });
+      await chat(
+        { sessionID: id, agent: "dog-worker" },
+        {
+          message: { agent: "dog-worker", model: { providerID: "host", modelID: "selected" } },
+          parts: [{ type: "text", text: `role=implementation\nproject_root=${directory}\noperation_manifest=${manifestPath}\nacceptance=safe parallel unit\nparallel_group=atomic-group\nparallel_unit=${id}\nparallel_units=2` }],
+        },
+      );
+      await inspectHandoffWithRead(hooks, handoffPath, id);
+    }
+    const results = await Promise.all([
+      executeBindWriteGate(hooks, directory, "unit-one", "unit-one.operation-manifest.json"),
+      executeBindWriteGate(hooks, directory, "unit-two", "unit-two.operation-manifest.json"),
+    ]);
+    assert.deepEqual(results.map((result) => result.status).sort(), ["bound", "denied"]);
+    assert.deepEqual(
+      results.filter((result) => result.status === "denied").map((result) => result.reason),
+      ["manifest-overlap"],
+    );
+  });
+});
+
+test("same-session bind and release operations are serialized", async () => {
+  await withProject("binding-operation-serialization", async (directory) => {
+    const id = "serialized";
+    const manifestPath = `${id}.operation-manifest.json`;
+    const handoffPath = join(directory, `handoff.${id}.json`);
+    await writeFile(join(directory, manifestPath), JSON.stringify({
+      ...operationManifest(["serialized.ts"]),
+      task_id: id,
+    }));
+    await writeFile(handoffPath, JSON.stringify({
+      ...writeGateHandoff(directory, manifestPath),
+      id,
+    }));
+    const hooks = await SortieDogsPlugin({ directory });
+    await activate(hooks, id);
+    await inspectHandoffWithRead(hooks, handoffPath, id);
+    const concurrent = await Promise.all([
+      executeBindWriteGate(hooks, directory, id, manifestPath),
+      executeBindWriteGate(hooks, directory, id, manifestPath),
+      executeReleaseWriteGate(hooks, id),
+    ]);
+    assert.equal(concurrent.filter((result) => result.status === "bound").length, 1);
+    assert.ok(concurrent.some((result) => result.reason === "binding-in-flight"));
+    assert.equal((await executeBindWriteGate(hooks, directory, id, manifestPath)).status, "bound");
+  });
+});
+
 test("inactive file events stay passive and only an active child Read enables binding", async () => {
   await withProject("inactive-inspection", async (directory) => {
     await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
@@ -4055,6 +4331,35 @@ test("inactive file events stay passive and only an active child Read enables bi
   });
 });
 
+test("session idle releases a valid binding and resume must bind again", async () => {
+  await withProject("idle-release", async (directory) => {
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+    const handoffPath = join(directory, "handoff.json");
+    await writeFile(handoffPath, JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
+    const hooks = await SortieDogsPlugin({ directory });
+    await activate(hooks, "idle-release");
+    await inspectHandoffWithRead(hooks, handoffPath, "idle-release");
+    assert.equal((await executeBindWriteGate(hooks, directory, "idle-release")).status, "bound");
+    const event = hooks.event;
+    const before = hooks["tool.execute.before"];
+    assert.ok(event);
+    assert.ok(before);
+    await event({ event: { type: "session.idle", properties: { sessionID: "idle-release" } } });
+    await expectMessage(
+      () => before(
+        { tool: "write", sessionID: "idle-release", callID: "released-write" },
+        { args: { file: "allowed.txt", content: "not-written" } },
+      ),
+      'Write denied for "<released-session>": released session must re-read only its handoff and bind before further work.',
+      "session-released",
+    );
+    await inspectHandoffWithRead(hooks, handoffPath, "idle-release");
+    const resumed = await executeBindWriteGate(hooks, directory, "idle-release");
+    assert.equal(resumed.status, "bound");
+    assert.equal(resumed.idempotent, true);
+  });
+});
+
 test("session idle keeps activation but revokes authorization when handoff inspection fails", async () => {
   await withProject("idle-failed-handoff", async (directory) => {
     await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
@@ -4079,8 +4384,8 @@ test("session idle keeps activation but revokes authorization when handoff inspe
         { tool: "write", sessionID: "idle-failure", callID: "still-active-after-idle" },
         { args: { file: "outside.txt", content: "not-written" } },
       ),
-      'Write denied for "<unknown>": operation manifest unavailable.',
-      "manifest-unavailable",
+      'Write denied for "<released-session>": released session must re-read only its handoff and bind before further work.',
+      "session-released",
     );
     await activate(hooks, "idle-failure");
     await expectMessage(
@@ -4088,8 +4393,8 @@ test("session idle keeps activation but revokes authorization when handoff inspe
         { tool: "write", sessionID: "idle-failure", callID: "authorization-evicted" },
         { args: { file: "allowed.txt", content: "not-written" } },
       ),
-      'Write denied for "<unknown>": operation manifest unavailable.',
-      "manifest-unavailable",
+      'Write denied for "<released-session>": released session must re-read only its handoff and bind before further work.',
+      "session-released",
     );
   });
 });
@@ -4491,6 +4796,11 @@ test("plugin shell gate allows explicit reads and denies unknown executables", a
       'Write denied for "blocked.txt": operation manifest write scope.',
       "manifest-scope",
     );
+    await expectMessage(
+      () => invoke("true & rm blocked-background.txt"),
+      'Write denied for "blocked-background.txt": operation manifest write scope.',
+      "manifest-scope",
+    );
     for (const command of [
       "git ls-files | ForEach-Object { Remove-Item $_ }",
       "Get-Content allowed.txt | Where-Object { $_ }",
@@ -4653,6 +4963,7 @@ test("plugin fixture accepts warning-only handoff state and dedupes per session"
     // Missing changed-path evidence produces only M007; the plugin rejects errors, not warnings.
     await event(edited);
     await event({ event: { type: "session.idle", properties: { sessionID: "one" } } });
+    await inspectHandoffWithRead(hooks, handoffPath, "one");
     assert.equal((await executeBindWriteGate(hooks, directory, "one")).status, "bound");
     await expectMessage(
       () => before(

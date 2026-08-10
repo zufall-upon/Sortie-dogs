@@ -7,7 +7,7 @@
 _画像を選択するとワークフローのアニメーションを再生できる。_
 
 Sortie-dogs は、必要なセッションだけで動く OpenCode オーケストレーションプラグイン。
-タスクを明確な計画、並列調査、専任実装、canonical validation、証拠付き完了へつなげる。
+タスクを明確な計画、並列調査、安全な独立実装、canonical validation、証拠付き完了へつなげる。
 OpenCode 標準のエージェントや設定は置き換えない。
 
 要件: Node.js 22.6 以降、npm、OpenCode。
@@ -20,8 +20,10 @@ OpenCode 標準のエージェントや設定は置き換えない。
   OpenCode セッションには影響しない。
 - **過剰に広がらない並列調査** — 各 worker handoff の前に境界付き scout を必ず3体だけ使う。
 - **厳密な変更範囲** — source manifest または operation manifest が編集と handoff を制限。
-- **実装責任を一本化** — 専用 worker が implementation、remediation、
-  blocker-resolution を担当。
+- **安全な実装並列化** — 独立unitだけを、write manifestが重複しない2〜3体のworkerへ分割。
+  同じpathや依存関係がある変更は1体のworkerへ直列化。
+- **runtime競合防止** — 同一または祖先・子孫write scopeの同時bindを変更前に拒否。
+  全parallel unitのjoin後にfull validationを1回実行。
 - **証拠を伴う完了** — canonical validation、リスク別レビュー、terminal evidence の gate 後、
   coordinator だけが完了と commit を管理。
 - **中断から継続可能** — restart recovery と境界付き compaction が handoff context を保持。
@@ -30,7 +32,7 @@ OpenCode 標準のエージェントや設定は置き換えない。
 
 1. **Brief / plan** — `dog-coordinator` が acceptance criteria、変更 manifest、検証条件を確定。
 2. **3体の scout** — read-only の限定調査を並列実行し、異なる観点の evidence を収集。
-3. **専用 worker** — 承認済み manifest 内だけを実装。範囲内の修正と blocker 解消も担当。
+3. **専用 worker** — 通常は1体。独立unitが確定した場合だけ、非重複manifestを持つ2〜3体を並列実行。
 4. **Canonical validation** — 指定された test / build command の結果を evidence 化。
 5. **リスク別 review** — 高リスク候補だけ独立 review。低リスク候補は validation 後に省略可能。
 6. **Coordinator 完了** — manifest、validation、review、evidence gate 通過後だけ完了と commit を管理。
@@ -44,7 +46,7 @@ OpenCode 標準のエージェントや設定は置き換えない。
 利用者: /sortie 要求された動作を追加する
 dog-coordinator: manifest 確定
 dog-scout ×3: 調査完了
-dog-worker: 実装完了
+dog-worker ×2: 非重複unitの実装完了
 validation: npm test — PASS
 review: 省略 — 低リスク
 dog-coordinator: 完了 evidence 承認
@@ -288,7 +290,7 @@ stage、commit、ユーザー対応を行わない。
 
 ## 更新と移行
 
-[Release v0.3.15](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.3.15)
+[Release v0.3.16](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.3.16)
 
 依存 asset を新しい release に更新後、対象 project root で再実行する。
 

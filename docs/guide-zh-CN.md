@@ -7,7 +7,7 @@
 _点击图片可播放工作流动画。_
 
 Sortie-dogs 是一个按需启用的 OpenCode 编排插件。它把任务依次推进到明确规划、并行调研、
-专职实现、canonical validation 和证据完备的收尾，同时保留 OpenCode 的标准智能体与设置。
+安全的独立实现、canonical validation 和证据完备的收尾，同时保留 OpenCode 的标准智能体与设置。
 
 要求：Node.js 22.6 或更高版本、npm 和 OpenCode。
 
@@ -19,7 +19,10 @@ Sortie-dogs 是一个按需启用的 OpenCode 编排插件。它把任务依次�
   普通 OpenCode 会话不受影响。
 - **并行调研不会失控** — 每次 worker handoff 前固定使用三个有边界的 scout，不会无限扩散。
 - **写入范围精确可控** — source manifest 或 operation manifest 约束编辑和 handoff。
-- **实现责任集中** — 专用 worker 负责 implementation、remediation 和 blocker-resolution。
+- **安全并行实现** — 只有独立单元可分配给两个或三个 write manifest 不重叠的 worker；
+  同一路径或存在依赖的变更仍由一个 worker 串行处理。
+- **运行时冲突保护** — 在修改前拒绝相同或祖先/后代 write scope 的并发绑定；
+  所有并行单元 join 后只运行一次 full validation。
 - **先验证，后完成** — canonical validation、按风险 review 和 terminal evidence 共同控制由
   coordinator 负责的完成与 commit。
 - **长任务能够恢复** — restart recovery 与有界 compaction 沿用 handoff context，不会静默重来。
@@ -28,7 +31,7 @@ Sortie-dogs 是一个按需启用的 OpenCode 编排插件。它把任务依次�
 
 1. **Brief / plan** — `dog-coordinator` 明确 acceptance criteria、写入 manifest 和验证要求。
 2. **三个 scout** — 固定三个只读、范围受限的 scout 并行收集互补 evidence。
-3. **专用 worker** — 仅在已批准 manifest 内实现，并处理范围内修正或 blocker。
+3. **专用 worker** — 默认一个；仅在独立单元已确定时，并行运行两个或三个非重叠 manifest worker。
 4. **Canonical validation** — 运行声明的 test / build command，保留可核验结果。
 5. **按风险 review** — 高风险候选项接受独立 review；低风险项通过验证后可跳过额外审查。
 6. **Coordinator 收尾** — 只有 manifest、validation、review 和 evidence gate 全部通过，
@@ -43,7 +46,7 @@ Sortie-dogs 是一个按需启用的 OpenCode 编排插件。它把任务依次�
 用户：/sortie 添加所需行为
 dog-coordinator：manifest 已确认
 dog-scout ×3：调研完成
-dog-worker：实现完成
+dog-worker ×2：非重叠单元实现完成
 validation：npm test — PASS
 review：已跳过 — 低风险
 dog-coordinator：完成 evidence 已接受
@@ -274,7 +277,7 @@ canonical validation 后独立审查高风险候选项。二者都不负责实�
 
 ## 更新与迁移
 
-[Release v0.3.15](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.3.15)
+[Release v0.3.16](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.3.16)
 
 将依赖替换为新版 Release asset 后，在目标项目根目录再次运行：
 

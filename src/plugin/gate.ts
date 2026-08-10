@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { lstat, realpath } from "node:fs/promises";
-import { isAbsolute, relative, resolve } from "node:path";
+import { basename, isAbsolute, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import { RelativePathError, normalizeManifestPath, normalizeRelativePath } from "../core/path.js";
@@ -24,6 +24,10 @@ export type WriteDenialReason =
   | "path-required"
   | "project-boundary"
   | "manifest-scope"
+  | "parallel-git-mutation"
+  | "parallel-remote-mutation"
+  | "parallel-validation"
+  | "session-released"
   | "repeated-denial";
 
 export class WriteDeniedError extends Error {
@@ -37,6 +41,10 @@ export class WriteDeniedError extends Error {
       "path-required": "write path must be explicit.",
       "project-boundary": "project-root-relative path required.",
       "manifest-scope": "operation manifest write scope.",
+      "parallel-git-mutation": "parallel implementation workers cannot mutate shared Git state.",
+      "parallel-remote-mutation": "parallel implementation workers cannot mutate shared remote state.",
+      "parallel-validation": "parallel implementation validation must run after the worker join.",
+      "session-released": "released session must re-read only its handoff and bind before further work.",
       "repeated-denial": "same command and denial reason already denied in this session; retry blocked.",
     };
     super(`Write denied for "${safePath(path)}": ${messages[reason]}`, options);
@@ -63,6 +71,8 @@ interface Extraction {
   ambiguous: boolean;
   paths: string[];
   gitCommit?: boolean;
+  gitMutation?: boolean;
+  remoteMutation?: boolean;
   issue?: CommandIssue;
 }
 
@@ -183,6 +193,15 @@ function isRemoteOnlyGitHubCommand(tokens: readonly string[]): boolean {
   return command === "project" || (command === "api" && tokens[2]?.toLowerCase() === "graphql");
 }
 
+function isRemoteGitHubMutation(tokens: readonly string[]): boolean {
+  const command = tokens[1]?.toLowerCase();
+  if (command === "project") {
+    return !new Set(["field-list", "item-list", "list", "view"]).has(tokens[2]?.toLowerCase() ?? "");
+  }
+  // GraphQL transport can hide mutations in variables, files, or stdin; parallel workers fail closed.
+  return command === "api" && tokens[2]?.toLowerCase() === "graphql";
+}
+
 function isReadOnlyGitCommand(tokens: readonly string[]): boolean {
   const command = tokens[1]?.toLowerCase() ?? "";
   return READ_ONLY_GIT_COMMANDS.has(command) ||
@@ -282,9 +301,14 @@ function shellSegments(command: string, dialect: ShellDialect): string[] {
   for (let index = 0; index < masked.length; index += 1) {
     const character = masked[index];
     const pair = masked.slice(index, index + 2);
+    const segmentBefore = masked.slice(start, index).trim();
+    const hasCommandBefore = segmentBefore.length > 0;
+    const powershellCallOperator = dialect === "powershell" &&
+      (segmentBefore.length === 0 || segmentBefore.endsWith("="));
     const separator = pair === "&&" || pair === "||" ? 2
       : character === ";" || character === "\n" || character === "\r" ||
-          (character === "|" && command[index - 1] !== ">") ? 1 : 0;
+          (character === "|" && command[index - 1] !== ">") ||
+          (character === "&" && hasCommandBefore && command[index - 1] !== ">" && !powershellCallOperator) ? 1 : 0;
     if (separator === 0) continue;
     segments.push(command.slice(start, index));
     index += separator - 1;
@@ -309,6 +333,8 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
   let applies = false;
   let ambiguous = false;
   let gitCommit = false;
+  let gitMutation = false;
+  let remoteMutation = false;
   let issue: CommandIssue | undefined;
   const redirection = /(?<![<>=!])(?:&|\d*)?(?:>>|>\||>)(?![=])/gu;
   const redirectionTarget = /^\s*("(?:\\.|[^"])*"|'[^']*'|&?\d+|[^\s;&|]+)/u;
@@ -383,17 +409,20 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
       paths.push(...selected);
     } else if (executable === "git" && tokens[1]?.toLowerCase() === "add") {
       applies = true;
+      gitMutation = true;
       const selected = exactGitAddPaths(tokens);
       if (selected === undefined) ambiguous = true;
       else paths.push(...selected);
     } else if (executable === "git" && tokens[1]?.toLowerCase() === "commit") {
       applies = true;
+      gitMutation = true;
       if (isSafeGitCommit(tokens)) gitCommit = true;
       else ambiguous = true;
     } else if (executable === "git" && isReadOnlyGitCommand(tokens)) {
       // Explicitly read-only git subcommands.
     } else if (/^gh(?:\.exe)?$/u.test(executable) && isRemoteOnlyGitHubCommand(tokens)) {
-      // GitHub Project commands mutate remote state, not project files. Redirections remain gated above.
+      // Remote operations are pathless, but parallel workers must distinguish reads from mutations.
+      remoteMutation ||= isRemoteGitHubMutation(tokens);
     } else if (depth === 0 && /^(?:pwsh|powershell)(?:\.exe)?$/u.test(executable)) {
       const literal = depthOnePowerShellLiteral(source);
       if (literal === undefined) {
@@ -406,6 +435,8 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
         ambiguous ||= nested.ambiguous;
         paths.push(...nested.paths);
         gitCommit ||= nested.gitCommit === true;
+        gitMutation ||= nested.gitMutation === true;
+        remoteMutation ||= nested.remoteMutation === true;
         issue ??= nested.issue;
       }
     } else if (!READ_ONLY_COMMANDS.has(executable)) {
@@ -414,7 +445,15 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
       issue ??= commandIssue(source, "executable-not-allowlisted", "use a direct allowlisted read-only command");
     }
   }
-  return { applies, ambiguous, paths, ...(gitCommit ? { gitCommit: true } : {}), ...(issue ? { issue } : {}) };
+  return {
+    applies,
+    ambiguous,
+    paths,
+    ...(gitCommit ? { gitCommit: true } : {}),
+    ...(gitMutation ? { gitMutation: true } : {}),
+    ...(remoteMutation ? { remoteMutation: true } : {}),
+    ...(issue ? { issue } : {}),
+  };
 }
 
 function issuePath(issue: CommandIssue): string {
@@ -457,10 +496,20 @@ export function extractWritePaths(tool: string, args: unknown): Extraction {
       ambiguous: extracted.ambiguous,
       paths: [...paths, ...extracted.paths],
       ...(extracted.gitCommit ? { gitCommit: true } : {}),
+      ...(extracted.gitMutation ? { gitMutation: true } : {}),
+      ...(extracted.remoteMutation ? { remoteMutation: true } : {}),
       ...(extracted.issue ? { issue: extracted.issue } : {}),
     };
   }
   return { applies: false, ambiguous: false, paths: [] };
+}
+
+export function isGitMutation(tool: string, args: unknown): boolean {
+  return extractWritePaths(tool, args).gitMutation === true;
+}
+
+export function isRemoteMutation(tool: string, args: unknown): boolean {
+  return extractWritePaths(tool, args).remoteMutation === true;
 }
 
 /**
@@ -520,6 +569,59 @@ async function nearestExistingRealPath(path: string): Promise<string> {
   }
 }
 
+function toggledCaseProbe(path: string): { original: string; alternate: string } | undefined {
+  let candidate = resolve(path);
+  while (true) {
+    const name = basename(candidate);
+    const index = [...name].findIndex((character) => /[A-Za-z]/u.test(character));
+    if (index >= 0) {
+      const characters = [...name];
+      const character = characters[index]!;
+      characters[index] = character === character.toLowerCase()
+        ? character.toUpperCase()
+        : character.toLowerCase();
+      return {
+        original: candidate,
+        alternate: resolve(candidate, "..", characters.join("")),
+      };
+    }
+    const parent = resolve(candidate, "..");
+    if (parent === candidate) return undefined;
+    candidate = parent;
+  }
+}
+
+async function isCaseInsensitivePath(path: string): Promise<boolean> {
+  if (process.platform === "win32") return true;
+  const probe = toggledCaseProbe(path);
+  if (probe === undefined || probe.alternate === probe.original) return false;
+  try {
+    return resolve(await realpath(probe.alternate)) === resolve(await realpath(probe.original));
+  } catch {
+    return false;
+  }
+}
+
+async function canonicalPotentialPath(path: string): Promise<string> {
+  let candidate = resolve(path);
+  const missing: string[] = [];
+  while (true) {
+    try {
+      const realCandidate = await realpath(candidate);
+      const canonical = resolve(realCandidate, ...missing);
+      return await isCaseInsensitivePath(candidate)
+        ? canonical.toLowerCase()
+        : canonical;
+    } catch (error) {
+      if (!isRecord(error) || error.code !== "ENOENT") throw error;
+      const parent = resolve(candidate, "..");
+      if (parent === candidate) throw error;
+      missing.unshift(basename(candidate));
+      candidate = parent;
+    }
+  }
+}
+
 async function isSymbolicLink(path: string): Promise<boolean> {
   try {
     return (await lstat(path)).isSymbolicLink();
@@ -532,6 +634,41 @@ async function isSymbolicLink(path: string): Promise<boolean> {
 function isWithin(root: string, target: string): boolean {
   const path = relative(root, target);
   return path === "" || (!path.startsWith("..") && !isAbsolute(path));
+}
+
+async function canonicalManifestScopes(
+  project: ProjectPaths,
+  entries: readonly string[],
+): Promise<readonly string[]> {
+  const scopes = await Promise.all(entries.map(async (entry) => {
+    const normalized = normalizeManifestPath(entry);
+    const absolute = normalized.kind === "relative"
+      ? project.absolute(normalized.path)
+      : resolve(normalized.path);
+    return await canonicalPotentialPath(absolute);
+  }));
+  return [...new Set(scopes)];
+}
+
+/** Canonical scopes let sibling worker bindings reject equal or ancestor ownership. */
+export async function canonicalManifestWriteScopes(
+  project: ProjectPaths,
+  manifest: OperationManifest,
+): Promise<readonly string[]> {
+  return await canonicalManifestScopes(project, manifest.write);
+}
+
+export async function canonicalManifestReadScopes(
+  project: ProjectPaths,
+  manifest: OperationManifest,
+): Promise<readonly string[]> {
+  return await canonicalManifestScopes(project, manifest.read);
+}
+
+export function writeScopesOverlap(left: readonly string[], right: readonly string[]): boolean {
+  return left.some((leftPath) =>
+    right.some((rightPath) => isWithin(leftPath, rightPath) || isWithin(rightPath, leftPath))
+  );
 }
 
 export async function createProjectPaths(rootCandidate: string): Promise<ProjectPaths> {

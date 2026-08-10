@@ -121,7 +121,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       join(consumer, "node_modules", "sortie-dogs", "package.json"),
       "utf8",
     )) as { version?: string; scripts?: { prebuild?: string } };
-    assert.equal(installedPackage.version, "0.3.15");
+    assert.equal(installedPackage.version, "0.3.16");
     assert.equal(
       installedPackage.scripts?.prebuild,
       "node --input-type=module --eval \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true });\"",
@@ -310,6 +310,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       "sortie_bind_write_gate",
       "sortie_check_contract",
       "sortie_compact_and_continue",
+      "sortie_release_write_gate",
     ]);
     assert.deepEqual(loaded.packedHookKeys, [
       "experimental.compaction.autocontinue",
@@ -360,7 +361,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     for (const asset of loaded.runtimeAssets) {
       assert.equal(asset.version, RUNTIME_ASSET_VERSION, `${asset.name} version must match the shared marker`);
     }
-    assert.equal(RUNTIME_ASSET_VERSION, "0.3.4-card37");
+    assert.equal(RUNTIME_ASSET_VERSION, "0.3.4-card38");
     const coordinatorFrontmatter = /^---\r?\n([\s\S]*?)\r?\n---/u.exec(coordinator.content)?.[1];
     assert.ok(coordinatorFrontmatter);
     assert.match(coordinatorFrontmatter, /^model: openai\/gpt-5\.6-terra$/m);
@@ -653,11 +654,31 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       scoutFanout[1],
       /predispatch_guard:\s*count known_paths per scout; over 4 -> reduce before Task, never dispatch malformed/,
     );
-    assert.match(scoutFanout[1], /worker_gate:\s*one bounded scout step, then dog-worker/);
+    assert.match(scoutFanout[1], /worker_gate:\s*one bounded scout step, then one dog-worker or one eligible parallel implementation fan-out/);
     assert.match(scoutFanout[1], /union all well-formed facts; no voting or majority rule/);
     assert.match(scoutFanout[1], /malformed \| timeout \| empty -> discard without retry/);
     assert.match(scoutFanout[1], /after_dispatch:\s*scoutAttempted=true for current scoutRevision even when evidence remains unresolved/);
-    assert.match(scoutFanout[1], /implementation \| remediation \| blocker-resolution -> dog-worker only/);
+    assert.match(scoutFanout[1], /implementation -> one dog-worker or eligible parallel dog-worker fan-out/);
+
+    const parallelImplementation = coordinator.content.match(
+      /PARALLEL_IMPLEMENTATION_FIXTURE\r?\n([\s\S]+?)\r?\nEND_PARALLEL_IMPLEMENTATION_FIXTURE/,
+    );
+    assert.ok(parallelImplementation, "coordinator needs bounded independent implementation fan-out");
+    for (const contract of [
+      "default: one dog-worker",
+      "eligibility: 2..3 independent implementation units with exact manifests",
+      "identity: distinct immutable task_id + contract_id + handoff_path + operation_manifest per unit",
+      "write_isolation: no equal | ancestor | descendant write paths across units",
+      "dependency_isolation: unit write paths do not intersect sibling declared read paths",
+      "dispatch: all 2..3 dog-worker Task calls in one parallel fan-out",
+      "forbidden_in_fanout: git add | git commit | release | deployment | publication | Project mutation | full canonical validation",
+      "unit_validation: operation_manifest.validation=[]; no build or test command before join",
+      "release: after final tool and subprocess, each unit calls sortie_release_write_gate immediately before return",
+      "join: wait for every Task result before integration or remediation",
+      "final_validation: exactly once after join through one fresh serial integration worker + new checked contract",
+      "runtime_guard: active equal or ancestor write scope -> bind denied with manifest-overlap",
+    ]) assert.ok(parallelImplementation[1].includes(contract), contract);
+    assert.match(worker.content, /parallel_group is present and its value is not none[\s\S]+sortie_release_write_gate exactly once[\s\S]+Do not read, validate, or\s+mutate after release/i);
     assert.match(coordinator.content, /only consultation capabilities are Strategy and SourceReview/);
     assert.match(coordinator.content, /Strategy follows\s+dog-coordinator -> dog-advisor -> dog-coordinator/);
     assert.match(coordinator.content, /SourceReview follows\s+dog-coordinator -> dog-reviewer -> dog-coordinator only after canonical validation/);
@@ -1288,7 +1309,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(sortie.content, /never route a worker to the user/i);
 
     for (const asset of loaded.runtimeAssets) {
-      assert.equal(asset.version, "0.3.4-card37");
+      assert.equal(asset.version, "0.3.4-card38");
       const frontmatter = asset.content.match(/^---\r?\n([\s\S]+?)\r?\n---\r?\n/);
       assert.ok(frontmatter, `${asset.name} must have frontmatter`);
       const entries = Object.fromEntries(
