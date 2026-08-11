@@ -81,7 +81,7 @@ export function lastAssistantText(messages: readonly SessionMessage[]): string |
   return undefined;
 }
 
-function childSessionID(output: TaskToolExecuteOutput): string | undefined {
+export function taskChildSessionID(output: TaskToolExecuteOutput): string | undefined {
   const metadata = output.metadata;
   if (metadata === null || typeof metadata !== "object") return undefined;
   const id = (metadata as { sessionId?: unknown }).sessionId;
@@ -114,7 +114,7 @@ export function createTaskResultRepairHook(client: SessionMessageReader | undefi
     if (read === undefined) return unchanged;
     const match = emptyResultMatch(output);
     if (match === undefined) return unchanged;
-    const sessionID = childSessionID(output);
+    const sessionID = taskChildSessionID(output);
     if (sessionID === undefined) return unchanged;
 
     let recovered: string | undefined;

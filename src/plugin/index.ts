@@ -21,6 +21,8 @@ import {
 } from "./config.js";
 import {
   CONTINUATION_CAPABILITY,
+  CONTINUATION_MARKER,
+  ROLLOVER_MARKER,
   createContinuationHooks,
   type ContinuationClient,
   type ContinuationHooks,
@@ -44,6 +46,7 @@ import {
   type ToolExecuteBeforeOutput,
   type WriteGate,
 } from "./gate.js";
+import { BACKLOG_DRAIN_CAPABILITY, FastLaneController } from "./fast-lane.js";
 import {
   createModelRoutingHook,
   type OpenCodeChatMessageHook,
@@ -52,6 +55,7 @@ import {
 import {
   createTaskResultRepairHook,
   markConsultationFallbackRetry,
+  taskChildSessionID,
   type SessionMessageReader,
 } from "./task-result-repair.js";
 import { configRoot, nearestPackageVersion, reflectionEnabled, ReflectionError, ReflectionStore } from "../reflection/index.js";
@@ -869,6 +873,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   const bindingOperations = new Set<string>();
   const activeSessions = new Map<string, ActiveSessionState>();
   const coordinatorRoots = new Map<string, CoordinatorRootLineage>();
+  const coordinatorTaskCalls = new Map<string, Set<string>>();
   const reflectionOwnedRoots = new Set<string>();
   const reflectionClosingRoots = new Set<string>();
   const reflectionInFlight = new Map<string, number>();
@@ -885,6 +890,33 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     { readonly phase: "pending" | "routing" | "consumed"; readonly retryChildSessionID?: string }
   >();
   const taskResultRepair = createTaskResultRepairHook(input.client);
+  const fastLane = new FastLaneController();
+
+  function beginCoordinatorTask(sessionID: string, callID: string): void {
+    const calls = coordinatorTaskCalls.get(sessionID) ?? new Set<string>();
+    calls.add(callID);
+    coordinatorTaskCalls.set(sessionID, calls);
+  }
+
+  function finishCoordinatorTask(sessionID: string | undefined, callID: string | undefined): void {
+    if (sessionID === undefined || callID === undefined) return;
+    const calls = coordinatorTaskCalls.get(sessionID);
+    if (calls === undefined) return;
+    calls.delete(callID);
+    if (calls.size === 0) coordinatorTaskCalls.delete(sessionID);
+  }
+
+  function childHasInFlightParentTask(sessionID: string): boolean {
+    const parentID = sessionParents.get(sessionID);
+    return parentID !== undefined && (coordinatorTaskCalls.get(parentID)?.size ?? 0) > 0;
+  }
+
+  function abortCoordinatorTasks(sessionID: string): void {
+    if (!coordinatorTaskCalls.delete(sessionID)) return;
+    for (const [childID, parentID] of [...sessionParents]) {
+      if (parentID === sessionID) evictSession(childID);
+    }
+  }
 
   function hasSessionEnforcementState(sessionID: string): boolean {
     return sessionAuthorizations.has(sessionID) || bindingPins.has(sessionID);
@@ -1770,7 +1802,20 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         async execute(_args, context): Promise<string> {
           // A configuration failure must not remove the loop; the shipped default still resolves.
           await ensureLoaded().catch(() => undefined);
-          return await continuation.tool.execute({}, context);
+          const result = await continuation.tool.execute({}, context);
+          if (result === "SORTIE_COMPACT_AND_CONTINUE_QUEUED") {
+            fastLane.continuationQueued(context.sessionID);
+          }
+          return result;
+        },
+      }),
+      [BACKLOG_DRAIN_CAPABILITY]: defineTool({
+        description: "Enable one explicit bounded backlog drain before its first worker dispatch.",
+        args: { max_units: defineTool.schema.string() },
+        async execute(args, context): Promise<string> {
+          const maxUnits = Number(args.max_units);
+          fastLane.enableBacklogDrain(context.sessionID, maxUnits);
+          return JSON.stringify({ status: "enabled", max_units: maxUnits });
         },
       }),
       ...(reflectionStartup ? {
@@ -1796,7 +1841,19 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       } : {}),
     },
     "experimental.text.complete": async (textInput, textOutput): Promise<void> => {
+      const backlogMarker = fastLane.backlogContinuationAllowed(textInput.sessionID) &&
+        textOutput.text.includes(CONTINUATION_MARKER);
+      if (fastLane.manualCompactionForbidden(textInput.sessionID)) {
+        textOutput.text = textOutput.text
+          .replaceAll(ROLLOVER_MARKER, "")
+          .replaceAll(CONTINUATION_MARKER, "")
+          .trimEnd();
+        return;
+      }
       await continuation.textComplete(textInput, textOutput);
+      if (backlogMarker && continuation.blocksTool(textInput.sessionID)) {
+        fastLane.continuationQueued(textInput.sessionID);
+      }
     },
     "experimental.session.compacting": async (compactInput, compactOutput): Promise<void> => {
       await continuation.sessionCompacting(compactInput, compactOutput);
@@ -1806,9 +1863,11 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     },
     "chat.message": async (chatInput, output): Promise<void> => {
       const parentID = chatParentID(chatInput);
+      const synthetic = output.parts.some((part) => isRecord(part) && part.synthetic === true);
       if (parentID !== undefined) rememberParent(chatInput.sessionID, parentID);
       const coordinatorOrigin = chatInput.agent === COORDINATOR_AGENT || output.message.agent === COORDINATOR_AGENT;
       if (coordinatorOrigin) {
+        fastLane.beginTurn(chatInput.sessionID, synthetic);
         releaseSessionEnforcement(chatInput.sessionID);
         await rememberCoordinatorRoot(chatInput.sessionID);
       } else {
@@ -1854,12 +1913,17 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         }
       }
       if (coordinatorOrigin) {
-        const synthetic = output.parts.some((part) => isRecord(part) && part.synthetic === true);
         continuation.observeModel(chatInput.sessionID, output.message.model, synthetic);
       }
     },
-    ...(reflectionStartup ? { "experimental.chat.system.transform": async (transformInput: { sessionID: string }, transformOutput: { system?: string[] }): Promise<void> => {
-      if (!(await beginReflection(transformInput.sessionID))) return;
+    "experimental.chat.system.transform": async (transformInput: { sessionID: string }, transformOutput: { system?: string[] }): Promise<void> => {
+      if (fastLane.manualCompactionForbidden(transformInput.sessionID)) {
+        transformOutput.system = [...(transformOutput.system ?? []),
+          "SORTIE_FAST_LANE_TERMINAL\nA worker was already dispatched in this normal lane. " +
+          "Do not call a compaction capability or emit a continuation marker. " +
+          "After any required risk-based review or coordinator-owned finalization, return the terminal report and stop."];
+      }
+      if (!reflectionStartup || !(await beginReflection(transformInput.sessionID))) return;
       const config = reflectionConfiguration;
       try {
         if (!config) return;
@@ -1871,7 +1935,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         const text = await reflectionStore!.injectBuckets(buckets, config.maxInjectedEntries, budget, reflectionVersion);
         if (text) transformOutput.system = [...(transformOutput.system ?? []), `${heading}\n${text}`];
       } catch { /* reflection is strictly non-invasive */ } finally { endReflection(transformInput.sessionID); }
-    } } : {}),
+    },
     "permission.ask": async (permission): Promise<void> => {
       if (permission.permission !== "edit") return;
       // Without a session identity no gate can be attributed; tool.execute.before still enforces.
@@ -1901,6 +1965,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
      * erases an answer the worker already produced and the coordinator re-dispatches the same work.
      */
     "tool.execute.after": async (toolInput, output): Promise<void> => {
+      const completedChildSessionID = toolInput.tool === "task" ? taskChildSessionID(output) : undefined;
       try {
         const repair = await taskResultRepair(toolInput, output);
         if (
@@ -1921,12 +1986,26 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         await inspectSuccessfulRead(toolInput);
       } finally {
         activeSessions.get(toolInput.sessionID ?? "")?.inFlightCalls.delete(toolInput.callID ?? "");
+        if (toolInput.tool === "task") finishCoordinatorTask(toolInput.sessionID, toolInput.callID);
+        if (completedChildSessionID !== undefined) evictSession(completedChildSessionID);
       }
     },
     "tool.execute.before": async (toolInput, output): Promise<void> => {
       if (isCoordinatorSession(toolInput.sessionID)) {
         if (continuation.blocksTool(toolInput.sessionID)) {
           throw new Error("SORTIE_ROLLOVER_PENDING: stop this turn and wait for compaction");
+        }
+        const taskRole = isRecord(output.args) && typeof output.args.subagent_type === "string"
+          ? output.args.subagent_type
+          : undefined;
+        const role = consultationAgent(taskRole);
+        const consultationFallbackAuthorized = role !== undefined &&
+          consultationRetries.get(consultationRetryKey(toolInput.sessionID, role))?.phase === "pending";
+        fastLane.beforeTool(toolInput.sessionID, toolInput.tool, output.args, {
+          consultationFallbackAuthorized,
+        });
+        if (toolInput.tool === "task" && taskRole === "dog-worker") {
+          beginCoordinatorTask(toolInput.sessionID, toolInput.callID);
         }
         return;
       }
@@ -2018,6 +2097,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         return;
       }
       if (event.type === "session.deleted") {
+        fastLane.forget(eventSessionID);
+        abortCoordinatorTasks(eventSessionID);
         if (reflectionStore !== undefined && reflectionConfiguration?.layers.run && reflectionOwnedRoots.has(eventSessionID)) {
           reflectionClosingRoots.add(eventSessionID);
           await waitForReflections(eventSessionID);
@@ -2044,15 +2125,21 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
        */
       if (event.type === "session.compacted") await continuation.sessionCompacted(eventSessionID);
       if (event.type === "session.idle") await continuation.sessionIdle(eventSessionID);
+      if (event.type === "session.idle" && isCoordinatorSession(eventSessionID)) {
+        abortCoordinatorTasks(eventSessionID);
+      }
       if (!isActiveSession(eventSessionID)) return;
       if (event.type !== "session.idle") touchActiveSession(eventSessionID);
       if (event.type === "session.idle" && eventSessionID !== undefined) {
         activeSessions.get(eventSessionID)?.inFlightCalls.clear();
+        if (childHasInFlightParentTask(eventSessionID)) {
+          touchActiveSession(eventSessionID);
+          return;
+        }
         const authorization = sessionAuthorizations.get(eventSessionID);
         if (authorization === undefined) return;
         try {
-          // Idle revalidates the pinned handoff but always releases write ownership. A resumed
-          // worker must bind again, so a completed serial worker cannot block later work.
+          // Idle is the abnormal-exit fallback when the parent Task completion hook never arrives.
           await inspect(authorization.handoffPath, eventSessionID);
         } catch {
           // Suspension below is fail-closed for both valid and invalid handoffs.

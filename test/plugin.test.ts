@@ -965,15 +965,14 @@ mode: subagent
   assert.equal(dogWorker.content.includes(DEDICATED_WORKER_MODEL), false);
 });
 
-test("generated coordinator requires progress, immediate Task feedback, and deny-safe delegation", () => {
+test("generated coordinator requires bounded progress, one Task evidence line, and deny-safe delegation", () => {
   const coordinator = runtimeAssets.find((asset) => asset.name === "dog-coordinator");
   assert.ok(coordinator);
   const content = coordinator.content.replace(/\s+/gu, " ");
   for (const required of [
-    "進行中: <candidate> — <n>% (<phase>) | バッチ: committed <committed>/<target>; attempted <attempted>/<target>; reconciled <reconciled>",
-    "所感(<child>/<role>): <assessment>",
-    "根拠: <result evidence>",
-    "次action: <single next action>",
+    "進行中: <candidate> — worker dispatch",
+    "根拠(<child>/<role>): <result evidence>",
+    "no duplicate assessment or next-action projection",
     "Never test an unapproved script in the coordinator shell",
     "After any command deny",
   ]) assert.ok(content.includes(required), required);
@@ -1014,12 +1013,8 @@ test("generated assets require the user's language, per-line output, and emoji-m
   );
   assert.ok(visibility);
   assert.match(visibility[1], /^ {4}progress_line: 📊 進行中:/m);
-  assert.match(visibility[1], /continuation: <required\|none>/);
-  assert.match(visibility[1], /protocol_keys: committed \| attempted \| reconciled \| continuation are never translated/);
-  assert.match(visibility[1], /^ {4}task_line_1: 🐕 所感/m);
-  assert.match(visibility[1], /^ {4}task_line_2: 🔍 根拠/m);
-  assert.match(visibility[1], /^ {4}task_line_3: ➡️ 次action/m);
-  assert.match(visibility[1], /^ {4}task_line_format: one line each, never joined into one line/m);
+  assert.match(visibility[1], /^ {4}task_line: 🔍 根拠/m);
+  assert.match(visibility[1], /^ {4}task_line_format: one line; no duplicate assessment or next-action projection/m);
 
   for (const name of ["dog-worker", "dog-scout", "dog-reviewer", "dog-advisor"]) {
     const asset = runtimeAssets.find((candidate) => candidate.name === name);
@@ -1056,8 +1051,8 @@ test("generated assets require the user's language, per-line output, and emoji-m
   );
   assert.match(worker.content, /Own the bounded implementation loop inside one Task invocation/i);
   assert.match(worker.content, /Do not return an\s+intermediate progress checkpoint merely to ask dog-coordinator to resume the same work/i);
-  assert.match(worker.content, /Across the whole candidate, including same-task resumes,\s+permit at most four canonical validation executions and one execution of the optional diagnostic/i);
-  assert.match(worker.content, /A fifth canonical attempt or second diagnostic is\s+forbidden/i);
+  assert.match(worker.content, /Across the whole candidate,\s+including same-task resumes, permit at most two canonical validation executions and one execution of\s+the optional diagnostic/i);
+  assert.match(worker.content, /A third canonical attempt\s+or second diagnostic is forbidden/i);
   assert.match(worker.content, /using the one diagnostic does not block a subsequent allowed canonical rerun/i);
   assert.match(worker.content, /Coordinator resume or\s+fresh-worker redispatch never resets the counts/i);
   assert.match(worker.content, /Run only the exact canonical validation command\s+and its optional single diagnostic command predeclared in the handoff and operation manifest/i);
@@ -1299,22 +1294,11 @@ test("runtime contract requires interactive continuation and deterministic recov
     /BATCH_CONTINUATION_FIXTURE\r?\n([\s\S]+?)\r?\nEND_BATCH_CONTINUATION_FIXTURE/,
   );
   assert.ok(batch);
-  assert.match(batch[1], /terminal_order: establish terminal handoff first; then increment batchAttempted/);
-  assert.match(batch[1], /new_successful_commit: increment batchCommitted only/);
-  assert.match(batch[1], /existing_commit_accepted: increment batchReconciled only/);
-  assert.match(
-    batch[1],
-    /blocked_unit: increment batchAttempted only; record blocker with concrete needed action; continue to next independent unit/,
-  );
-  assert.match(batch[1], /local_handoff_defect: recover in the same candidate flow; never stop or count the unit terminal/);
-  assert.match(batch[1], /compact_guard: batchAttempted < batchTarget and independent next candidate exists/);
-  assert.match(batch[1], /compact_action: after checkpoint invoke configured continuation; then same-turn stop/);
-  // The observed field defect was a blocked unit ending the batch at attempted 1 of 3.
-  assert.match(
-    batch[1],
-    /blocked_unit_continuation: required while batchAttempted < batchTarget and an independent next candidate exists/,
-  );
-  assert.match(batch[1], /plain_final_instead_of_continuation: defect/);
+  assert.match(batch[1], /mode=runtime single-worker lane/);
+  assert.match(batch[1], /top_level_request: one accepted scope -> one worker/);
+  assert.match(batch[1], /worker_return: deterministic evidence verification -> terminal report/);
+  assert.match(batch[1], /normal_path_forbidden: second worker \| manual compaction \| synthetic continuation \| critical-path tracker call/);
+  assert.match(batch[1], /native_compaction: host overflow only/);
 
   const compaction = coordinator.content.match(
     /COMPACTION_IDENTITY_FIXTURE\r?\n([\s\S]+?)\r?\nEND_COMPACTION_IDENTITY_FIXTURE/,
@@ -1387,15 +1371,12 @@ test("runtime contract requires interactive continuation and deterministic recov
   );
   assert.ok(scoutFanout);
   for (const contract of [
-    "same_turn_progression: scout union | advisor result | successful contract check -> invoke the next required tool in the same turn",
-    "progress_only_final: forbidden before worker dispatch or a terminal handoff",
-    "permitted_turn_stop: question awaiting user answer | explicit user stop | whole-candidate blocker after required consultation",
-    "idle_recovery: non-terminal progress, including missing next_action, -> synthetic SORTIE_STEP_CONTINUE",
-    "text_complete_fallback: referenced zero-delay recovery when host omits session.idle",
-    "checkpoint_recovery: 100% progress + attempted < target -> runtime compaction and same-root continuation",
-    "summary_compatibility: Sortie rollover token format | OpenCode native compaction headings",
-    "idle_recovery_limit: at most 2 per compaction segment and 4 per real user turn; compaction resets only the segment and a real user turn resets both",
-    "idle_terminal_guard: DONE | BLOCKED | NEED_DECISION never auto-resumes",
+    "decision: exceptional; one concrete evidence key blocks safe worker dispatch",
+    "dispatch_guard: no prior Scout and no worker dispatch in the real user turn",
+    "dispatch: exactly one bounded dog-scout call",
+    "role: resolve only missing_evidence_code",
+    "invalid: malformed | timeout | empty -> exact blocker without retry",
+    "next_route: resolved -> one dog-worker; unresolved -> question | blocker",
   ]) assert.ok(scoutFanout[1].includes(contract), contract);
   assert.match(
     coordinator.content,
@@ -1578,6 +1559,7 @@ test("invalid global Sortie config fails reflection closed without removing core
         "sortie_bind_write_gate",
         "sortie_check_contract",
         "sortie_compact_and_continue",
+        "sortie_enable_backlog_drain",
         "sortie_release_write_gate",
       ]);
       assert.equal(warnings.length, 1);
@@ -1683,7 +1665,7 @@ test("reflection integration is opt-in, layered, guarded, kill-switchable, and d
       process.env.SORTIE_REFLECTION = "0";
       const killed = await SortieDogsPlugin({ directory }, { reflection: { enabled: true } });
       assert.equal(killed.tool?.sortie_reflection, undefined);
-      assert.equal(killed["experimental.chat.system.transform"], undefined);
+      assert.ok(killed["experimental.chat.system.transform"]);
       assert.equal(await execute({ action: "clear", layer: "run" }, { sessionID: rootSession, agent: "dog-coordinator" }), "reflection_not_permitted");
       const unchanged = { system: ["base"] };
       await hooks["experimental.chat.system.transform"]!({ sessionID: rootSession }, unchanged);
@@ -1754,7 +1736,7 @@ test("reflection remains byte and storage passive when disabled", async () => {
       const xdg = await mkdtemp(join(testEnvironment, "reflection-disabled-xdg-")); process.env.XDG_CONFIG_HOME = xdg;
       const hooks = await SortieDogsPlugin({ directory });
       assert.equal(hooks.tool?.sortie_reflection, undefined);
-      assert.equal(hooks["experimental.chat.system.transform"], undefined);
+      assert.ok(hooks["experimental.chat.system.transform"]);
       await hooks["chat.message"]!({ sessionID: "disabled", agent: "dog-coordinator" }, { message: { model: {} }, parts: [{ type: "text", text: "unchanged" }] });
       assert.equal(await stat(join(xdg, "opencode", "sortie-dogs", "reflection")).catch(() => undefined), undefined);
       await rm(xdg, { recursive: true, force: true });
@@ -1787,6 +1769,45 @@ async function activate(
   await chat(
     { sessionID },
     { message: { model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: "/sortie task" }] },
+  );
+}
+
+async function beginTrackedTaskChild(
+  hooks: Awaited<ReturnType<typeof SortieDogsPlugin>>,
+  directory: string,
+  parentID: string,
+  childID: string,
+  callID: string,
+): Promise<void> {
+  const chat = hooks["chat.message"]!;
+  const before = hooks["tool.execute.before"]!;
+  const task = [
+    "context_digest:",
+    `  project_root: ${directory}`,
+    "  acceptance: safe change",
+    "  role: implementation",
+    "  source_manifest: [allowed.txt]",
+  ].join("\n");
+  await chat(
+    { sessionID: parentID, agent: "dog-coordinator" },
+    {
+      message: { agent: "dog-coordinator", model: { providerID: "host", modelID: "selected" } },
+      parts: [{ type: "text", text: "tracked task" }],
+    },
+  );
+  await before(
+    { tool: "task", sessionID: parentID, callID },
+    { args: { subagent_type: "dog-worker", prompt: task } },
+  );
+  await hooks.event!({
+    event: { type: "session.created", properties: { info: { id: childID, parentID, directory } } },
+  });
+  await chat(
+    { sessionID: childID, agent: "dog-worker", parentID } as never,
+    {
+      message: { agent: "dog-worker", model: { providerID: "host", modelID: "selected" } },
+      parts: [{ type: "text", text: task }],
+    },
   );
 }
 
@@ -2489,6 +2510,94 @@ test("worker activation accepts the dispatch layout the shipped coordinator asse
     .exec(coordinator.content)?.[1];
   assert.ok(dispatch);
   assert.equal(isExplicitTaskHandoff(dispatch), true);
+});
+
+test("coordinator task hooks enforce the single-worker fast lane across synthetic turns", async () => {
+  await withProject("single-worker-fast-lane", async (directory) => {
+    const hooks = await SortieDogsPlugin({ directory });
+    const chat = hooks["chat.message"]!;
+    const before = hooks["tool.execute.before"]!;
+    const turn = (synthetic = false) => chat(
+      { sessionID: "root", agent: "dog-coordinator" },
+      {
+        message: { agent: "dog-coordinator", model: { providerID: "host", modelID: "selected" } },
+        parts: [{ type: "text", text: "task", ...(synthetic ? { synthetic: true } : {}) }],
+      },
+    );
+    const dispatch = (callID: string) => before(
+      { tool: "task", sessionID: "root", callID },
+      { args: { subagent_type: "dog-worker", prompt: "role: implementation" } },
+    );
+
+    await turn();
+    await dispatch("worker-1");
+    await assert.rejects(() => dispatch("worker-2"), /SORTIE_FAST_LANE_DENIED: WORKER_LIMIT/u);
+    await turn(true);
+    await assert.rejects(() => dispatch("worker-3"), /SORTIE_FAST_LANE_DENIED: WORKER_LIMIT/u);
+    await turn();
+    await dispatch("worker-4");
+  });
+});
+
+test("a dispatched fast-lane worker suppresses legacy terminal compaction", async () => {
+  await withProject("single-worker-terminal-marker", async (directory) => {
+    const hooks = await SortieDogsPlugin({ directory });
+    await hooks["chat.message"]!(
+      { sessionID: "root", agent: "dog-coordinator" },
+      {
+        message: { agent: "dog-coordinator", model: { providerID: "host", modelID: "selected" } },
+        parts: [{ type: "text", text: "task" }],
+      },
+    );
+    await hooks["tool.execute.before"]!(
+      { tool: "task", sessionID: "root", callID: "worker" },
+      { args: { subagent_type: "dog-worker", prompt: "role: implementation" } },
+    );
+    const system = { system: [] as string[] };
+    await hooks["experimental.chat.system.transform"]!({ sessionID: "root" }, system);
+    assert.match(system.system[0]!, /SORTIE_FAST_LANE_TERMINAL/u);
+    assert.match(system.system[0]!, /Do not call a compaction capability/u);
+    const completed = { text: `terminal\n${ROLLOVER_MARKER}\n${CONTINUATION_MARKER}` };
+    await hooks["experimental.text.complete"]!({ sessionID: "root" }, completed);
+    assert.equal(completed.text, "terminal");
+    await hooks["tool.execute.before"]!(
+      { tool: "read", sessionID: "root", callID: "terminal-read" },
+      { args: {} },
+    );
+  });
+});
+
+test("typed backlog opt-in permits continuation only before its first worker", async () => {
+  await withProject("backlog-drain-opt-in", async (directory) => {
+    const hooks = await SortieDogsPlugin({ directory });
+    await hooks["chat.message"]!(
+      { sessionID: "root", agent: "dog-coordinator" },
+      {
+        message: { agent: "dog-coordinator", model: { providerID: "host", modelID: "selected" } },
+        parts: [{ type: "text", text: "four-unit drain" }],
+      },
+    );
+    const enabled = await hooks.tool!.sortie_enable_backlog_drain!.execute(
+      { max_units: "4" },
+      { sessionID: "root", agent: "dog-coordinator" },
+    );
+    assert.deepEqual(JSON.parse(enabled), { status: "enabled", max_units: 4 });
+    await hooks["tool.execute.before"]!(
+      { tool: "task", sessionID: "root", callID: "worker" },
+      { args: { subagent_type: "dog-worker", prompt: "role: implementation" } },
+    );
+    await hooks["tool.execute.before"]!(
+      { tool: "sortie_compact_and_continue", sessionID: "root", callID: "continue" },
+      { args: {} },
+    );
+    await assert.rejects(
+      () => hooks.tool!.sortie_enable_backlog_drain!.execute(
+        { max_units: "4" },
+        { sessionID: "root", agent: "dog-coordinator" },
+      ),
+      /SORTIE_FAST_LANE_DENIED: BACKLOG_DRAIN_TOO_LATE/u,
+    );
+  });
 });
 
 test("proven silent consultation agents get isolated parent-scoped fallback retries", async () => {
@@ -4361,7 +4470,7 @@ test("inactive file events stay passive and only an active child Read enables bi
   });
 });
 
-test("session idle releases a valid binding and resume must bind again", async () => {
+test("session idle releases a valid binding when parent Task completion is unavailable", async () => {
   await withProject("idle-release", async (directory) => {
     await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
     const handoffPath = join(directory, "handoff.json");
@@ -4390,7 +4499,99 @@ test("session idle releases a valid binding and resume must bind again", async (
   });
 });
 
-test("session idle keeps activation but revokes authorization when handoff inspection fails", async () => {
+test("child idle retains authorization only while its parent Task call is in flight", async () => {
+  await withProject("task-in-flight-idle", async (directory) => {
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+    const handoffPath = join(directory, "handoff.json");
+    await writeFile(handoffPath, JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
+    const hooks = await SortieDogsPlugin({ directory });
+    await beginTrackedTaskChild(hooks, directory, "parent", "child", "task-call");
+    await inspectHandoffWithRead(hooks, handoffPath, "child");
+    assert.equal((await executeBindWriteGate(hooks, directory, "child")).status, "bound");
+
+    await hooks.event!({ event: { type: "session.idle", properties: { sessionID: "child" } } });
+    await hooks["tool.execute.before"]!(
+      { tool: "write", sessionID: "child", callID: "held-write" },
+      { args: { file: "allowed.txt", content: "not-written" } },
+    );
+
+    await hooks["tool.execute.after"]!(
+      { tool: "task", sessionID: "parent", callID: "task-call" },
+      { output: "<task><task_result>done</task_result></task>", metadata: { sessionId: "child" } },
+    );
+    await activate(hooks, "child");
+    await expectMessage(
+      () => hooks["tool.execute.before"]!(
+        { tool: "write", sessionID: "child", callID: "completed-write" },
+        { args: { file: "allowed.txt", content: "not-written" } },
+      ),
+      'Write denied for "<unknown>": operation manifest unavailable.',
+      "manifest-unavailable",
+    );
+  });
+});
+
+test("an unrelated consultation Task cannot retain worker authorization", async () => {
+  await withProject("task-lineage-isolation", async (directory) => {
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+    const handoffPath = join(directory, "handoff.json");
+    await writeFile(handoffPath, JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
+    const hooks = await SortieDogsPlugin({ directory });
+    await beginTrackedTaskChild(hooks, directory, "parent", "child", "worker-call");
+    await inspectHandoffWithRead(hooks, handoffPath, "child");
+    assert.equal((await executeBindWriteGate(hooks, directory, "child")).status, "bound");
+
+    await hooks["tool.execute.before"]!(
+      { tool: "task", sessionID: "parent", callID: "review-call" },
+      {
+        args: {
+          subagent_type: "dog-reviewer",
+          prompt: "review_phase: initial\ncanonical_validation_exit: 0\nrisk_tags: [write-gate]",
+        },
+      },
+    );
+    await hooks["tool.execute.after"]!(
+      { tool: "task", sessionID: "parent", callID: "worker-call" },
+      { output: "<task><task_result>done</task_result></task>" },
+    );
+    await hooks.event!({ event: { type: "session.idle", properties: { sessionID: "child" } } });
+
+    await expectMessage(
+      () => hooks["tool.execute.before"]!(
+        { tool: "write", sessionID: "child", callID: "unrelated-task-write" },
+        { args: { file: "allowed.txt", content: "not-written" } },
+      ),
+      'Write denied for "<released-session>": released session must re-read only its handoff and bind before further work.',
+      "session-released",
+    );
+  });
+});
+
+test("parent idle evicts authorization left by an interrupted Task call", async () => {
+  await withProject("task-interrupted-idle", async (directory) => {
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+    const handoffPath = join(directory, "handoff.json");
+    await writeFile(handoffPath, JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
+    const hooks = await SortieDogsPlugin({ directory });
+    await beginTrackedTaskChild(hooks, directory, "parent", "child", "task-call");
+    await inspectHandoffWithRead(hooks, handoffPath, "child");
+    assert.equal((await executeBindWriteGate(hooks, directory, "child")).status, "bound");
+    await hooks.event!({ event: { type: "session.idle", properties: { sessionID: "child" } } });
+
+    await hooks.event!({ event: { type: "session.idle", properties: { sessionID: "parent" } } });
+    await activate(hooks, "child");
+    await expectMessage(
+      () => hooks["tool.execute.before"]!(
+        { tool: "write", sessionID: "child", callID: "interrupted-write" },
+        { args: { file: "allowed.txt", content: "not-written" } },
+      ),
+      'Write denied for "<unknown>": operation manifest unavailable.',
+      "manifest-unavailable",
+    );
+  });
+});
+
+test("session idle revokes authorization even when handoff revalidation fails", async () => {
   await withProject("idle-failed-handoff", async (directory) => {
     await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
     await writeFile(join(directory, "candidate-manifest.json"), JSON.stringify(operationManifest(["allowed.txt"])));
@@ -4411,20 +4612,37 @@ test("session idle keeps activation but revokes authorization when handoff inspe
     await event({ event: { type: "session.idle", properties: { sessionID: "idle-failure" } } });
     await expectMessage(
       () => before(
-        { tool: "write", sessionID: "idle-failure", callID: "still-active-after-idle" },
-        { args: { file: "outside.txt", content: "not-written" } },
-      ),
-      'Write denied for "<released-session>": released session must re-read only its handoff and bind before further work.',
-      "session-released",
-    );
-    await activate(hooks, "idle-failure");
-    await expectMessage(
-      () => before(
-        { tool: "write", sessionID: "idle-failure", callID: "authorization-evicted" },
+        { tool: "write", sessionID: "idle-failure", callID: "released-after-idle" },
         { args: { file: "allowed.txt", content: "not-written" } },
       ),
       'Write denied for "<released-session>": released session must re-read only its handoff and bind before further work.',
       "session-released",
+    );
+  });
+});
+
+test("parent Task completion releases the child authorization", async () => {
+  await withProject("task-completion-release", async (directory) => {
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+    const handoffPath = join(directory, "handoff.json");
+    await writeFile(handoffPath, JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
+    const hooks = await SortieDogsPlugin({ directory });
+    await activate(hooks, "child");
+    await inspectHandoffWithRead(hooks, handoffPath, "child");
+    assert.equal((await executeBindWriteGate(hooks, directory, "child")).status, "bound");
+
+    await hooks["tool.execute.after"]!(
+      { tool: "task", sessionID: "parent", callID: "parent-task" },
+      { output: "<task><task_result>done</task_result></task>", metadata: { sessionId: "child" } },
+    );
+    await activate(hooks, "child");
+    await expectMessage(
+      () => hooks["tool.execute.before"]!(
+        { tool: "write", sessionID: "child", callID: "after-completion" },
+        { args: { file: "allowed.txt", content: "not-written" } },
+      ),
+      'Write denied for "<unknown>": operation manifest unavailable.',
+      "manifest-unavailable",
     );
   });
 });

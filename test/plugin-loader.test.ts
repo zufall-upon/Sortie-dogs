@@ -121,7 +121,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       join(consumer, "node_modules", "sortie-dogs", "package.json"),
       "utf8",
     )) as { version?: string; scripts?: { prebuild?: string } };
-    assert.equal(installedPackage.version, "0.3.21");
+    assert.equal(installedPackage.version, "0.4.0");
     assert.equal(
       installedPackage.scripts?.prebuild,
       "node --input-type=module --eval \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true });\"",
@@ -310,9 +310,11 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       "sortie_bind_write_gate",
       "sortie_check_contract",
       "sortie_compact_and_continue",
+      "sortie_enable_backlog_drain",
       "sortie_release_write_gate",
     ]);
     assert.deepEqual(loaded.packedHookKeys, [
+      "experimental.chat.system.transform",
       "experimental.compaction.autocontinue",
       "experimental.session.compacting",
       "experimental.text.complete",
@@ -361,7 +363,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     for (const asset of loaded.runtimeAssets) {
       assert.equal(asset.version, RUNTIME_ASSET_VERSION, `${asset.name} version must match the shared marker`);
     }
-    assert.equal(RUNTIME_ASSET_VERSION, "0.3.6-card43");
+    assert.equal(RUNTIME_ASSET_VERSION, "0.3.7-fast-lane-v1");
     const coordinatorFrontmatter = /^---\r?\n([\s\S]*?)\r?\n---/u.exec(coordinator.content)?.[1];
     assert.ok(coordinatorFrontmatter);
     assert.match(coordinatorFrontmatter, /^model: openai\/gpt-5\.6-terra$/m);
@@ -392,21 +394,21 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.doesNotMatch(scout.content, /^  read: (?:deny|false)$/im);
     assert.match(
       scout.content,
-      /assigned parallel role A \(manifest\), B \(canonical validation\), or C \(blocker owner\)[\s\S]+known_paths list of at most four paths[\s\S]+Use Read only[\s\S]+at most 120 lines per read[\s\S]+no more than one read per path[\s\S]+Do not explore for more paths, invoke another tool, retry/i,
+      /one concrete missing_evidence_code: manifest, validation, or owner-risk[\s\S]+known_paths list of at most four paths[\s\S]+Use Read only[\s\S]+at most 120 lines[\s\S]+no more than one read per supplied path[\s\S]+Do not resolve a second key, explore, invoke another tool, retry/i,
     );
     // A scout resolving supplied paths against the session directory wastes the whole fan-out when
     // the session sits above the candidate repository.
     assert.match(
       scout.content,
-      /explicit absolute project_root[\s\S]+Resolve every supplied path under that project_root; never resolve one against the\s+session directory/i,
+      /explicit absolute project_root[\s\S]+Resolve only that evidence key from those paths under project_root; never resolve a path against the\s+session directory/i,
     );
     assert.match(
       scout.content,
-      /When project_root is missing, or a supplied path does not resolve under it, or a resolved path is\s+unreadable, report that dispatch defect as the facts for your role and name the exact paths/i,
+      /When project_root is missing, or a supplied path does not resolve under it, or a resolved path is\s+unreadable, report that dispatch defect as the facts for the requested key and name the exact paths/i,
     );
     assert.match(
       scout.content,
-      /exactly one concise JSON object of at most 800 characters with exactly these keys: role,\s+facts, evidence_paths, risks[\s\S]+no Markdown, code fence, commentary, or raw log/i,
+      /exactly one concise JSON object of at most 800 characters with exactly these keys:\s+missing_evidence_code, facts, evidence_paths, risks[\s\S]+no Markdown, code fence, commentary, or raw log/i,
     );
     assert.ok(scout.content.length >= 350, "dog-scout needs a substantive bounded role");
     assert.match(
@@ -521,18 +523,11 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     );
     assert.ok(scoutSkip, "coordinator needs the Scout skip branch");
     assert.match(scoutSkip[1], /exact manifest \+ canonical validation \+ blocker owner all fixed/);
-    assert.match(scoutSkip[1], /candidate_default:\s*at most one Scout fan-out/);
-    assert.match(scoutSkip[1], /first_handoff_skip:\s*simple <=2 files \| compact resume/);
-    assert.match(scoutSkip[1], /scoutAttempted:\s*true when same-candidate Scout evidence exists/);
-    assert.match(scoutSkip[1], /revision_guard:\s*same scoutRevision may not fan-out twice/);
-    assert.match(scoutSkip[1], /no re-Scout even when manifest, validation, or owner remains unresolved/);
-    assert.match(scoutSkip[1], /route same dog-worker with role=blocker-resolution/);
-    assert.match(scoutSkip[1], /new revision \+ stale_paths that actually invalidate manifest, validation, or owner/);
-    assert.match(scoutSkip[1], /unrelated_stale_path:\s*retain scoutAttempted; no retry/);
-    assert.match(
-      scoutSkip[1],
-      /worker handoff \+ checkpoint decisions\[\] \+ resume_delta record scoutAttempted \+ scoutRevision \+ blocker owner \+ exact skip or retry reason/,
-    );
+    assert.match(scoutSkip[1], /candidate_default:\s*Scout 0/);
+    assert.match(scoutSkip[1], /allowed_gap:\s*manifest \| validation \| owner-risk/);
+    assert.match(scoutSkip[1], /dispatch:\s*one dog-scout maximum before worker/);
+    assert.match(scoutSkip[1], /prompt_field:\s*missing_evidence_code: <allowed gap>/);
+    assert.match(scoutSkip[1], /unresolved_action:\s*question or exact blocker; no second Scout/);
     assert.match(scoutSkip[1], /known_paths:\s*worker read boundary even without Scout read/);
     assert.match(scoutSkip[1], /action:\s*route directly to dog-worker/);
 
@@ -546,6 +541,10 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(artifactFastPath[1], /review:\s*skipped; artifact-only low-risk/);
     assert.match(artifactFastPath[1], /stage_commit:\s*forbidden; return artifact directly/);
     assert.match(artifactFastPath[1], /follow_up_agents:\s*forbidden for evidence formatting, hash transcription, or redundant verification/);
+    assert.match(
+      coordinator.content,
+      /Handoff sources are revision evidence, not mutation classification[\s\S]+artifact-only dispatch uses source_manifest none/i,
+    );
     assert.match(
       coordinator.content,
       /Require a digest only when the user requests one or when release, publication,\s*transfer, or integrity acceptance explicitly needs one/i,
@@ -563,131 +562,36 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(visualCapture[1], /second_invalid_capture:\s*terminal capture blocker; no third capture/);
     assert.match(visualCapture[1], /duplicate_pixel_review:\s*no additional worker to reread or reformat the same images/);
 
-    type ScoutSkipEvidence = {
-      exactManifest: boolean;
-      canonicalValidation: boolean;
-      blockerOwner: boolean;
-      editableFiles: number;
-      compactResume?: boolean;
-      scoutAttempted?: boolean;
-      revision: string;
-      scoutAttemptedRevision?: string;
-      stalePathsInvalidateDecision?: boolean;
-    };
-    const shouldSkipScout = (evidence: ScoutSkipEvidence): boolean => {
-      const exactEvidence = evidence.exactManifest && evidence.canonicalValidation && evidence.blockerOwner;
-      if (evidence.scoutAttempted === true) {
-        if (evidence.scoutAttemptedRevision === evidence.revision) return true;
-        return evidence.stalePathsInvalidateDecision !== true;
-      }
-      return exactEvidence && (evidence.editableFiles <= 2 || evidence.compactResume === true);
-    };
-    const exactEvidence = {
-      exactManifest: true,
-      canonicalValidation: true,
-      blockerOwner: true,
-      revision: "r1",
-    };
-    assert.equal(shouldSkipScout({ ...exactEvidence, editableFiles: 2 }), true);
-    assert.equal(shouldSkipScout({ ...exactEvidence, editableFiles: 3, compactResume: true }), true);
-    assert.equal(
-      shouldSkipScout({
-        exactManifest: false,
-        canonicalValidation: false,
-        blockerOwner: false,
-        editableFiles: 3,
-        scoutAttempted: true,
-        revision: "r1",
-        scoutAttemptedRevision: "r1",
-      }),
-      true,
-    );
-    assert.equal(shouldSkipScout({ ...exactEvidence, editableFiles: 3 }), false);
-    assert.equal(
-      shouldSkipScout({
-        ...exactEvidence,
-        editableFiles: 3,
-        scoutAttempted: true,
-        scoutAttemptedRevision: "r1",
-        stalePathsInvalidateDecision: true,
-      }),
-      true,
-    );
-    assert.equal(
-      shouldSkipScout({
-        ...exactEvidence,
-        editableFiles: 3,
-        scoutAttempted: true,
-        revision: "r2",
-        scoutAttemptedRevision: "r1",
-        stalePathsInvalidateDecision: true,
-      }),
-      false,
-    );
-    assert.equal(
-      shouldSkipScout({
-        ...exactEvidence,
-        editableFiles: 3,
-        scoutAttempted: true,
-        revision: "r2",
-        scoutAttemptedRevision: "r1",
-        stalePathsInvalidateDecision: false,
-      }),
-      true,
-    );
-    for (const absent of ["exactManifest", "canonicalValidation", "blockerOwner"] as const) {
-      assert.equal(shouldSkipScout({ ...exactEvidence, [absent]: false, editableFiles: 2 }), false);
-    }
-
     const scoutFanout = coordinator.content.match(
       /SCOUT_FANOUT_FIXTURE\r?\n([\s\S]+?)\r?\nEND_SCOUT_FANOUT_FIXTURE/,
     );
-    assert.ok(scoutFanout, "coordinator needs the required three-role scout fan-out");
-    assert.match(scoutFanout[1], /required for unresolved or complex candidate not skipped/);
-    assert.match(scoutFanout[1], /dispatch_guard:\s*scoutAttempted=false for current scoutRevision/);
-    assert.match(scoutFanout[1], /exactly three bounded dog-scout calls in one parallel fan-out/);
-    assert.match(scoutFanout[1], /role_A:\s*determine exact source_manifest or operation_manifest/);
-    assert.match(scoutFanout[1], /role_B:\s*determine exact canonical validation command/);
-    assert.match(scoutFanout[1], /role_C:\s*identify blocker owner/);
+    assert.ok(scoutFanout, "coordinator needs the exceptional one-Scout lane");
+    assert.match(scoutFanout[1], /decision:\s*exceptional; one concrete evidence key blocks safe worker dispatch/);
+    assert.match(scoutFanout[1], /dispatch_guard:\s*no prior Scout and no worker dispatch in the real user turn/);
+    assert.match(scoutFanout[1], /dispatch:\s*exactly one bounded dog-scout call/);
+    assert.match(scoutFanout[1], /role:\s*resolve only missing_evidence_code/);
     // Scouts inherit no project context, so the dispatch must carry the same root as the worker.
     assert.match(scoutFanout[1], /project_root:\s*<absolute project root; same value as the worker digest>/);
     assert.match(
       scoutFanout[1],
-      /known_paths:\s*at most 4 supplied paths per scout, each resolvable under project_root/,
+      /known_paths:\s*at most 4 supplied paths, each resolvable under project_root/,
     );
-    assert.match(
-      scoutFanout[1],
-      /predispatch_guard:\s*count known_paths per scout; over 4 -> reduce before Task, never dispatch malformed/,
-    );
-    assert.match(scoutFanout[1], /worker_gate:\s*one bounded scout step, then one dog-worker or one eligible parallel implementation fan-out/);
-    assert.match(scoutFanout[1], /union all well-formed facts; no voting or majority rule/);
-    assert.match(scoutFanout[1], /malformed \| timeout \| empty -> discard without retry/);
-    assert.match(scoutFanout[1], /after_dispatch:\s*scoutAttempted=true for current scoutRevision even when evidence remains unresolved/);
-    assert.match(scoutFanout[1], /implementation -> one dog-worker or eligible parallel dog-worker fan-out/);
-    assert.match(scoutFanout[1], /idle_recovery:\s*non-terminal progress, including missing next_action, -> synthetic SORTIE_STEP_CONTINUE/);
-    assert.match(scoutFanout[1], /text_complete_fallback:\s*referenced zero-delay recovery when host omits session.idle/);
-    assert.match(scoutFanout[1], /checkpoint_recovery:\s*100% progress \+ attempted < target -> runtime compaction and same-root continuation/);
-    assert.match(scoutFanout[1], /summary_compatibility:\s*Sortie rollover token format \| OpenCode native compaction headings/);
+    assert.match(scoutFanout[1], /malformed \| timeout \| empty -> exact blocker without retry/);
+    assert.match(scoutFanout[1], /resolved -> one dog-worker; unresolved -> question \| blocker/);
 
     const parallelImplementation = coordinator.content.match(
       /PARALLEL_IMPLEMENTATION_FIXTURE\r?\n([\s\S]+?)\r?\nEND_PARALLEL_IMPLEMENTATION_FIXTURE/,
     );
-    assert.ok(parallelImplementation, "coordinator needs bounded independent implementation fan-out");
+    assert.ok(parallelImplementation, "coordinator needs the runtime single-worker lane");
     for (const contract of [
       "default: one dog-worker",
-      "eligibility: 2..3 independent implementation units with exact manifests",
-      "identity: distinct immutable task_id + contract_id + handoff_path + operation_manifest per unit",
-      "write_isolation: no equal | ancestor | descendant write paths across units",
-      "dependency_isolation: unit write paths do not intersect sibling declared read paths",
-      "dispatch: all 2..3 dog-worker Task calls in one parallel fan-out",
-      "forbidden_in_fanout: git add | git commit | release | deployment | publication | Project mutation | full canonical validation",
-      "unit_validation: operation_manifest.validation=[]; no build or test command before join",
-      "release: after final tool and subprocess, each unit calls sortie_release_write_gate immediately before return",
-      "join: wait for every Task result before integration or remediation",
-      "final_validation: exactly once after join through one fresh serial integration worker + new checked contract",
-      "runtime_guard: active equal or ancestor write scope -> bind denied with manifest-overlap",
+      "route: dog-coordinator -> one dog-worker -> deterministic evidence verification -> DONE",
+      "ownership: one worker owns inspect | edit | targeted checks | canonical validation | remediation once",
+      "second_worker: runtime denied in the same real user turn",
+      "synthetic_turn: never resets worker limit",
+      "scope_gap: return typed gap; no manifest expansion | replacement worker",
+      "parallel_fanout: forbidden on normal lane",
     ]) assert.ok(parallelImplementation[1].includes(contract), contract);
-    assert.match(worker.content, /parallel_group is present and its value is not none[\s\S]+sortie_release_write_gate exactly once[\s\S]+Do not read, validate, or\s+mutate after release/i);
     assert.match(coordinator.content, /only consultation capabilities are Strategy and SourceReview/);
     assert.match(coordinator.content, /Strategy follows\s+dog-coordinator -> dog-advisor -> dog-coordinator/);
     assert.match(coordinator.content, /SourceReview follows\s+dog-coordinator -> dog-reviewer -> dog-coordinator only after canonical validation/);
@@ -708,46 +612,18 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     const batchContinuation = coordinator.content.match(
       /BATCH_CONTINUATION_FIXTURE\r?\n([\s\S]+?)\r?\nEND_BATCH_CONTINUATION_FIXTURE/,
     );
-    assert.ok(batchContinuation, "coordinator needs bounded batch continuation policy");
+    assert.ok(batchContinuation, "coordinator needs the single-worker terminal policy");
+    assert.match(batchContinuation[1], /scope:\s*backlogDrain\.enabled=false; mode=runtime single-worker lane/);
+    assert.match(batchContinuation[1], /top_level_request:\s*one accepted scope -> one worker/);
+    assert.match(batchContinuation[1], /worker_return:\s*deterministic evidence verification -> terminal report/);
+    assert.match(batchContinuation[1], /normal_path_forbidden:\s*second worker \| manual compaction \| synthetic continuation \| critical-path tracker call/);
+    assert.match(batchContinuation[1], /native_compaction:\s*host overflow only/);
+    assert.match(batchContinuation[1], /tracker_update:\s*after DONE; noncritical path/);
     assert.match(
-      batchContinuation[1],
-      /scope:\s*backlogDrain\.enabled=false; mode=normal bounded batch/,
+      coordinator.content,
+      /structured worker result containing the declared canonical command, exit 0, and a concise\s+fingerprint as deterministic evidence/i,
     );
-    assert.match(
-      batchContinuation[1],
-      /top_level_request:\s*initialize once with max_units=3; batchAttempted=0; batchCommitted=0; batchReconciled=0/,
-    );
-    assert.match(batchContinuation[1], /no_reset:\s*question answer \| synthetic continuation \| compaction resume \| worker return \| terminal unit/);
-    assert.match(
-      batchContinuation[1],
-      /display:\s*committed <batchCommitted>\/<batchTarget>; attempted <batchAttempted>\/<batchTarget>; reconciled <batchReconciled>/,
-    );
-    assert.match(batchContinuation[1], /order:\s*sequential/);
-    assert.match(batchContinuation[1], /unit_N_plus_1_start:\s*only after unit N terminal handoff/);
-    assert.match(batchContinuation[1], /terminal_unit:\s*increment batchAttempted; record session checkpoint; append pendingTrackerUpdates; no external tracker call/);
-    assert.match(batchContinuation[1], /new_successful_commit:\s*increment batchCommitted only/);
-    assert.match(batchContinuation[1], /existing_commit_accepted:\s*increment batchReconciled only/);
-    assert.match(
-      batchContinuation[1],
-      /blocked_unit:\s*increment batchAttempted only; record blocker with concrete needed action; continue to next independent unit/,
-    );
-    assert.match(
-      batchContinuation[1],
-      /compact_guard:\s*batchAttempted < batchTarget and independent next candidate exists/,
-    );
-    assert.match(batchContinuation[1], /compact_action:\s*after checkpoint invoke configured continuation; then same-turn stop/);
-    assert.match(
-      batchContinuation[1],
-      /blocked_unit_continuation:\s*required while batchAttempted < batchTarget and an independent next candidate exists/,
-    );
-    assert.match(batchContinuation[1], /plain_final_instead_of_continuation:\s*defect/);
-    assert.match(batchContinuation[1], /early_stop:\s*only whole-batch blocker or user question/);
-    assert.match(batchContinuation[1], /fourth_unit:\s*rejected/);
-    assert.match(batchContinuation[1], /tracker_flush:\s*exactly once when terminal batch stops; never after each unit/);
-    assert.match(batchContinuation[1], /question_suspend:\s*not a terminal batch stop; preserve pendingTrackerUpdates and do not flush/);
-    assert.match(batchContinuation[1], /target_reached:\s*terminal batch report; no inventory \| selection \| reconciliation \| activation until a new top-level user request/);
-    assert.match(batchContinuation[1], /noncomplete_handoff:\s*exact next action required/);
-    assert.match(batchContinuation[1], /completed handoff:\s*completion evidence required/);
+    assert.match(coordinator.content, /Do not reread source, inspect Git, or rerun validation unless/i);
     assert.doesNotMatch(coordinator.content, /\bbatchDone\b/);
 
     const compactionIdentity = coordinator.content.match(
@@ -761,6 +637,13 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(compactionIdentity[1], /child session -> root rejected/);
     assert.match(compactionIdentity[1], /automatic continuation disabled/);
     assert.match(compactionIdentity[1], /only when direct capability unavailable; never combine direct tool and marker/);
+    assert.match(coordinator.content, /Only when the continuation guard proves an independent\s+next candidate/i);
+    assert.match(
+      coordinator.content,
+      /normal single-worker terminal result has no independent next\s+candidate: do not call a compaction tool and do not emit either continuation marker/i,
+    );
+    assert.match(coordinator.content, /sortie_enable_backlog_drain exactly once/);
+    assert.match(coordinator.content, /typed runtime opt-in is mandatory/i);
     // Every literal below must match a capability the packed plugin actually registers.
     assert.match(compactionIdentity[1], /continuation_agent:\s*dog-coordinator/);
     assert.match(compactionIdentity[1], /direct_capability:\s*sortie_compact_and_continue/);
@@ -783,7 +666,9 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       /BACKLOG_DRAIN_FIXTURE\r?\n([\s\S]+?)\r?\nEND_BACKLOG_DRAIN_FIXTURE/,
     );
     assert.ok(backlogDrain, "coordinator needs an explicit backlog-drain policy");
-    assert.match(backlogDrain[1], /default_config:\s*batchTarget=3; backlogDrain\.enabled=false/);
+    assert.match(backlogDrain[1], /default_config:\s*batchTarget=1; backlogDrain\.enabled=false; one accepted scope -> one worker/);
+    assert.match(backlogDrain[1], /normal_multi_item:\s*1\.\.3 related requested items -> one accepted scope; no sequential worker units/);
+    assert.doesNotMatch(coordinator.content, /default_config:\s*batchTarget=3/);
     assert.match(
       backlogDrain[1],
       /opt_in_required:\s*backlogDrain\.enabled=true; backlogDrain\.maxUnits=<positive integer>/,
@@ -1306,12 +1191,9 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       await rm(highRiskRepo, { recursive: true, force: true });
     }
 
-    assert.match(sortie.content, /preflight/i);
-    assert.match(sortie.content, /\.opencode\/sortie-dogs\.version/i);
-    for (const name of ["dog-coordinator", "dog-worker", "dog-scout", "dog-reviewer", "dog-advisor"]) {
-      assert.match(sortie.content, new RegExp(`${name}\\.md`, "i"));
-    }
-    assert.match(sortie.content, /command\/sortie\.md/i);
+    assert.match(sortie.content, /Do not preflight installed runtime assets/i);
+    assert.match(sortie.content, /plugin reports version skew without adding model\s+turns/i);
+    assert.doesNotMatch(sortie.content, /\.opencode\/sortie-dogs\.version/i);
     assert.match(sortie.content, /\$ARGUMENTS/);
     assert.match(sortie.content, /if \$ARGUMENTS is empty, request task context and stop/i);
     assert.ok(sortie.content.length < 900, "sortie command should remain concise");
@@ -1333,7 +1215,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(sortie.content, /never route a worker to the user/i);
 
     for (const asset of loaded.runtimeAssets) {
-      assert.equal(asset.version, "0.3.6-card43");
+      assert.equal(asset.version, "0.3.7-fast-lane-v1");
       const frontmatter = asset.content.match(/^---\r?\n([\s\S]+?)\r?\n---\r?\n/);
       assert.ok(frontmatter, `${asset.name} must have frontmatter`);
       const entries = Object.fromEntries(
