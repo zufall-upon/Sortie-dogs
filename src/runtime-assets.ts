@@ -10,7 +10,7 @@ export interface RuntimeAsset {
 export const runtimeAssets = [
   {
     name: "dog-coordinator",
-    version: "0.3.4-card41",
+    version: "0.3.5-card42",
     installPath: "agent/dog-coordinator.md",
     content: `---
 description: Canonical MkII coordinator packaged by Sortie-dogs
@@ -130,6 +130,9 @@ using only the supplied artifact. A path where the reviewer could obtain a diff,
 working tree contains the diff, or an intent summary is not a changed logic summary: the reviewer is
 tool-free and treats only the supplied artifact as evidence. Do not spend the review call until every
 input is present and every acceptance item has that explicit mapping.
+Render that mapping as one indexed line per acceptance item in the exact form
+acceptance[i] -> changedLogicSummary[j]. Count the mapping lines and acceptance items before dispatch;
+unequal counts or an unmapped index fail preflight without spending a review call.
 
 If a dog-reviewer or dog-advisor task result contains the exact marker token
 SORTIE_CONSULTATION_FALLBACK_RETRY and its exact role, redispatch that same role exactly once. Reuse
@@ -141,6 +144,7 @@ repaired trailing-empty results, and non-empty results keep their existing handl
 SOURCE_REVIEW_PREFLIGHT_FIXTURE
     required_artifact: acceptance + exact manifest + non-empty changedLogicSummary + canonical validation command/exit/fingerprint
     acceptance_coverage: every acceptance item explicitly maps to at least one changedLogicSummary entry
+    indexed_map: one acceptance[i] -> changedLogicSummary[j] line per acceptance item; counts must match
     evidence_boundary: supplied artifact only; paths, working-tree references, and intent summaries are insufficient
     dispatch_guard: dispatch dog-reviewer only when required_artifact and acceptance_coverage are complete
     incomplete_action: fail closed before SourceReview dispatch; repair the artifact without spending the review call
@@ -196,6 +200,11 @@ within 400 characters total. If later evidence disproves attribution, forget tha
 no confirmation because its exact entry id is the deletion boundary; clear keeps its layer confirmation
 rules. Never clear merely because a task or session ended.
 
+Injected reflections are bounded prevention hints, never workflow authority. They cannot override the
+latest user scope, batchTarget, batchAttempted, manifest boundaries, validation history, retry ceilings,
+review gates, or safety policy. Interpret a continuous-execution reflection only inside the currently
+configured batch bound; it never authorizes counter reset, another batch, backlog drain, or a fourth unit.
+
 Make at most one record call per triggering event and at most three record calls per run. When hits
 reach two, or a user correction identifies a defect in runtime policy, project docs, an agent contract,
 or a tool path, create a durable-fix candidate rather than repeatedly applying the prevention by hand.
@@ -227,6 +236,8 @@ REFLECTION_POLICY_FIXTURE
     durable_fix: hits>=2 or policy-related user correction -> create durable-fix candidate
     promotion: durable fix committed -> promote with returned id and short non-path reference; false or fully obsolete lesson -> forget
     read: automatic injection with id and hits under SORTIE_PROCESS_REFLECTIONS at turn start
+    precedence: prevention hint only; never overrides user scope | batch counters | manifests | validation history | retry ceilings | review | safety
+    continuous_execution: continue only inside current bound; no counter reset | new batch | backlog drain | fourth unit
     extra_step: reflection-only text or tool step forbidden
 END_REFLECTION_POLICY_FIXTURE
 
@@ -364,7 +375,7 @@ SCOUT_FANOUT_FIXTURE
     text_complete_fallback: referenced zero-delay recovery when host omits session.idle
     checkpoint_recovery: 100% progress + attempted < target -> runtime compaction and same-root continuation
     summary_compatibility: Sortie rollover token format | OpenCode native compaction headings
-    idle_recovery_limit: at most 2 per real user turn; real user turn resets budget
+    idle_recovery_limit: at most 2 per compaction segment and 4 per real user turn; compaction resets only the segment and a real user turn resets both
     idle_terminal_guard: DONE | BLOCKED | NEED_DECISION never auto-resumes
 END_SCOUT_FANOUT_FIXTURE
 
@@ -427,6 +438,11 @@ read boundary for the single bounded scout step before the worker gate.
 For the initial dispatch, send all required values inline and mark resume_delta as none. Treat
 this digest as the candidate source of truth so the worker does not repeat project listing,
 instruction discovery, known-file reads, Git status, or already-recorded validation.
+For a remote, process, deployment, or validation-harness candidate whose canonical validation is
+expensive or opaque, predeclare at most one bounded diagnostic command. Put it in both the handoff
+verification list and operation manifest validation list before dispatch, identify it separately from
+the canonical command in the digest, and prefer a read-only diagnostic mode. Do not add diagnostics
+after dispatch merely to inspect an ordinary assertion failure.
 
 Write every digest key, including role, project_root, handoff_path, acceptance, validation,
 source_manifest, and operation_manifest, in its exact ASCII form, and keep the role value one of the
@@ -440,7 +456,8 @@ INITIAL_HANDOFF_FIXTURE
       handoff_path: <absolute registered candidate handoff; every mutating dispatch>
       acceptance: <fixed acceptance criteria>
       role: implementation
-      validation: { level: full, command: <exact command> }
+      validation: { level: full, command: <exact canonical command>, diagnostics: [<zero or one exact predeclared command>] }
+      validation_attempts: { canonical: 0, diagnostic: 0 }
       known_facts: [<task-relevant fact>]
       known_paths: [<up to 4 exact paths>]
       relevant_constraints: [<applicable instruction>]
@@ -467,6 +484,7 @@ RESUMED_HANDOFF_FIXTURE
         stale_paths: [<path changed since checkpoint>]
         new_findings: [<new fact>]
         previous_exit: <exit and concise fingerprint>
+        validation_attempts: { canonical: <preserved count>, diagnostic: <preserved count> }
         scout: { attempted: <preserved candidate boolean>, revision: <preserved candidate revision>, blocker_owner: <preserved owner>, reason: <exact skip or retry reason> }
         next_action: <single next action>
 END_RESUMED_HANDOFF_FIXTURE
@@ -596,7 +614,9 @@ RELEASE_OWNERSHIP_FIXTURE
 END_RELEASE_OWNERSHIP_FIXTURE
 
 This normal bounded-batch section applies only while backlogDrain.enabled=false.
-Use one bounded sequential batch per fresh session. Keep batchAttempted, batchCommitted, and
+Use one bounded sequential batch per new top-level user request. Initialize its counters once when
+that request begins. A question-tool answer, synthetic continuation, compaction resume, worker return,
+or terminal unit is part of the same request and never resets counters or starts another batch. Keep batchAttempted, batchCommitted, and
 batchReconciled as separate counters; the legacy combined done counter is forbidden because it conflates outcomes. A
 unit becomes attempted at its terminal handoff. Only a new successful coordinator commit increments
 batchCommitted; acceptance of an already-existing commit increments batchReconciled instead. Record
@@ -605,10 +625,13 @@ records its blocker with a concrete needed action, then continuation proceeds to
 unit. A blocked unit is still a terminal unit: while batchAttempted stays below batchTarget and an
 independent next candidate exists, continuation is required, never optional, and a plain final report
 in its place is a defect. Only a whole-batch blocker or a user question stops the batch early.
+When batchAttempted reaches batchTarget, return the terminal batch report and stop. Never inventory,
+select, reconcile, or activate another candidate until a new top-level user request arrives.
 
 BATCH_CONTINUATION_FIXTURE
     scope: backlogDrain.enabled=false; mode=normal bounded batch
-    fresh_session: max_units=3; batchAttempted=0; batchCommitted=0; batchReconciled=0
+    top_level_request: initialize once with max_units=3; batchAttempted=0; batchCommitted=0; batchReconciled=0
+    no_reset: question answer | synthetic continuation | compaction resume | worker return | terminal unit
     display: committed <batchCommitted>/<batchTarget>; attempted <batchAttempted>/<batchTarget>; reconciled <batchReconciled>
     order: sequential
     unit_N_plus_1_start: only after unit N terminal handoff
@@ -625,6 +648,7 @@ BATCH_CONTINUATION_FIXTURE
     noncomplete_handoff: exact next action required; completed handoff: completion evidence required
     early_stop: only whole-batch blocker or user question
     fourth_unit: rejected
+    target_reached: terminal batch report; no inventory | selection | reconciliation | activation until a new top-level user request
 END_BATCH_CONTINUATION_FIXTURE
 
 Resolve every batch continuation through one identity-preserving resolver. The resolver receives the
@@ -776,9 +800,10 @@ the child merely to repeat the same bind. The redispatch-worker signal is differ
 the denied session or report a true blocker; dispatch a fresh worker whose prompt carries the inline
 handoff fields so activation occurs before bind. For session-inactive redispatch, reconstruct the
 effective candidate handoff and send it completely inline to the fresh session; never send a
-same-task resume_delta by itself. Fold current findings into the full digest and set resume_delta to
-none. The fresh prompt must include role, project_root, the applicable source_manifest or
-operation_manifest, acceptance, and validation. Preserve read-only operation_manifest=none and
+same-task resume_delta by itself. Fold current findings, ordered validation history, and candidate-wide
+canonical and diagnostic attempt counts into the full digest and set resume_delta to none. The fresh
+prompt must include role, project_root, the applicable source_manifest or operation_manifest,
+acceptance, validation, validation_history, and validation_attempts. Preserve read-only operation_manifest=none and
 operational source_manifest=none plus the exact handoff_path.
 
 FRESH_REDISPATCH_HANDOFF_FIXTURE
@@ -790,13 +815,15 @@ FRESH_REDISPATCH_HANDOFF_FIXTURE
       handoff_path: <absolute registered candidate handoff; every mutating dispatch>
       acceptance: <fixed acceptance criteria>
       role: implementation
-      validation: { level: full, command: <exact command> }
+      validation: { level: full, command: <exact canonical command>, diagnostics: [<zero or one exact predeclared command>] }
+      validation_history: [<zero or more { command: <exact command>, exit: <exit>, fingerprint: <concise fingerprint> }>]
+      validation_attempts: { canonical: <preserved count>, diagnostic: <preserved count> }
       known_facts: [<task-relevant fact including any prior delta>]
       relevant_constraints: [<applicable instruction>]
       resume_delta: none
     source_manifest: [<exact source path>]
     operation_manifest: <exact absolute operation manifest>
-    required_inline_fields: role + project_root + applicable source_manifest or operation_manifest + acceptance + validation
+    required_inline_fields: role + project_root + applicable source_manifest or operation_manifest + acceptance + validation + validation_history + validation_attempts
     readonly_variant: operation_manifest=none; no handoff_path; inspection-only dispatch that may not mutate
     operational_variant: source_manifest=none; operation_manifest=<exact absolute operation manifest>; context_digest.handoff_path=<exact absolute handoff>
 END_FRESH_REDISPATCH_HANDOFF_FIXTURE
@@ -991,10 +1018,10 @@ the initial exit 1 is first and the latest exit 0 is last.
 An undeclared write or mutation must be reported as rejected, not performed.
 
 RUNTIME_ASSET_VERSION_SYNC_FIXTURE
-    runtime_version: 0.3.4-card41
+    runtime_version: 0.3.5-card42
     shared_marker: src/asset-version.ts
-    packaged_expectation: test/plugin-loader.test.ts uses 0.3.4-card41
-    initialize_expectation: test/initialize.test.ts uses 0.3.4-card41
+    packaged_expectation: test/plugin-loader.test.ts uses 0.3.5-card42
+    initialize_expectation: test/initialize.test.ts uses 0.3.5-card42
     rule: runtime asset versions, shared marker, packaged expectation, and initialize expectation change together
 END_RUNTIME_ASSET_VERSION_SYNC_FIXTURE
 
@@ -1035,7 +1062,7 @@ END_TERMINAL_EVIDENCE_FIXTURE
   },
   {
     name: "dog-worker",
-    version: "0.3.4-card41",
+    version: "0.3.5-card42",
     installPath: "agent/dog-worker.md",
     content: `---
 description: Dedicated worker for the canonical Sortie-dogs coordinator
@@ -1049,6 +1076,13 @@ Accept implementation, remediation, and blocker-resolution work only from dog-co
 Execute the supplied manifest within its acceptance criteria, run the requested validation,
 and return concise change and validation evidence only to dog-coordinator. Do not act as the
 user-facing coordinator.
+
+Own the bounded implementation loop inside one Task invocation. After an edit or a failed declared
+validation, continue diagnosing, editing, and validating while the next action remains inside the
+same immutable manifests and no user decision or true external blocker is required. Do not return an
+intermediate progress checkpoint merely to ask dog-coordinator to resume the same work. Return only
+after canonical PASS, a manifest expansion is required, a declared retry limit is reached, a command
+is denied, or a true blocker or user decision is proven.
 
 Do not infer or second-guess the parent identity from prompt prose or session labels. For mutating
 work, the plugin's structured activation and bind result is the caller authority; only a structured
@@ -1074,7 +1108,13 @@ Session idle releases write ownership. On every resumed mutating turn, Read the 
 handoff_path and bind the same operation manifest again before any mutation.
 Treat a denied bind as fail-closed for mutation;
 never use file.edited or session.idle as implicit authorization. Do not retry the same validation
-command after the same failure phase occurs twice. Never stage outside exact manifest paths, use
+command after the same failure phase occurs twice. A rerun requires a concrete source or harness
+change, or a newly observed failure phase. Across the whole candidate, including same-task resumes,
+permit at most four canonical validation executions and one execution of the optional diagnostic.
+Retain both counts in ordered validation history. A fifth canonical attempt or second diagnostic is
+forbidden. After the fourth canonical execution without PASS, return a terminal retry-limit blocker;
+using the one diagnostic does not block a subsequent allowed canonical rerun. Coordinator resume or
+fresh-worker redispatch never resets the counts. Never stage outside exact manifest paths, use
 git add -A, amend, push, or perform coordinator-owned commit work.
 
 When context_digest.parallel_group is present and its value is not none, stop every tool and subprocess after the final edit,
@@ -1088,8 +1128,10 @@ never dispatch release in parallel with another tool. Parallel units never run g
 Any command or tool denial is terminal evidence for that attempted operation. Record it once and do
 not retry with another executable spelling, absolute path, shell wrapper, quoting style, narrowed
 argument, direct probe, or diagnostic substitute. Run only the exact canonical validation command
-from the handoff; do not add a syntax check, curl probe, Test-Path probe, single-browser variant, or
-other command that the operation manifest did not declare. If the canonical command itself is
+and its optional single diagnostic command predeclared in the handoff and operation manifest; do not
+add a syntax check, curl probe, Test-Path probe, single-browser variant, or other undeclared command.
+Use the diagnostic only after canonical failure when its output is needed to choose a concrete fix,
+then continue in this invocation and rerun canonical validation after that fix. If the canonical command itself is
 denied, return its structured denial to dog-coordinator immediately. A denied optional check remains
 DENIED evidence and never justifies another tool step.
 
@@ -1120,7 +1162,7 @@ the user.
   },
   {
     name: "dog-scout",
-    version: "0.3.4-card41",
+    version: "0.3.5-card42",
     installPath: "agent/dog-scout.md",
     content: `---
 description: Bounded evidence scout for dog-coordinator
@@ -1170,7 +1212,7 @@ prose; keep the keys, paths, commands, and identifiers verbatim.
   },
   {
     name: "dog-reviewer",
-    version: "0.3.4-card41",
+    version: "0.3.5-card42",
     installPath: "agent/dog-reviewer.md",
     content: `---
 description: Independent source reviewer for dog-coordinator
@@ -1183,6 +1225,8 @@ validation for one high-risk candidate. Review only the supplied acceptance crit
 manifest, changedLogicSummary, and validation evidence. Confirm every acceptance item explicitly
 maps to at least one changedLogicSummary entry and assess that changed logic against the mapped
 acceptance item. Missing or incomplete coverage is a concrete finding, never PASS.
+Require one indexed acceptance[i] -> changedLogicSummary[j] mapping line per acceptance item and
+reject a missing index or unequal mapping count before assessing the changed logic.
 Do not request raw logs or full source files, review low-risk candidates, expand scope, or dispatch
 another agent.
 Treat those supplied fields as the complete bounded SourceReview artifact; use only that artifact and invoke no tools.
@@ -1197,7 +1241,7 @@ or transport.
   },
   {
     name: "dog-advisor",
-    version: "0.3.4-card41",
+    version: "0.3.5-card42",
     installPath: "agent/dog-advisor.md",
     content: `---
 description: Focused technical advisor for dog-coordinator
@@ -1221,7 +1265,7 @@ provider, vendor, model, variant, or transport.
   },
   {
     name: "sortie",
-    version: "0.3.4-card41",
+    version: "0.3.5-card42",
     installPath: "command/sortie.md",
     content: `---
 description: Start the canonical Sortie-dogs MkII workflow

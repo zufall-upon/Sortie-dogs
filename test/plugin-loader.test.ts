@@ -121,7 +121,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       join(consumer, "node_modules", "sortie-dogs", "package.json"),
       "utf8",
     )) as { version?: string; scripts?: { prebuild?: string } };
-    assert.equal(installedPackage.version, "0.3.19");
+    assert.equal(installedPackage.version, "0.3.20");
     assert.equal(
       installedPackage.scripts?.prebuild,
       "node --input-type=module --eval \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true });\"",
@@ -361,7 +361,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     for (const asset of loaded.runtimeAssets) {
       assert.equal(asset.version, RUNTIME_ASSET_VERSION, `${asset.name} version must match the shared marker`);
     }
-    assert.equal(RUNTIME_ASSET_VERSION, "0.3.4-card41");
+    assert.equal(RUNTIME_ASSET_VERSION, "0.3.5-card42");
     const coordinatorFrontmatter = /^---\r?\n([\s\S]*?)\r?\n---/u.exec(coordinator.content)?.[1];
     assert.ok(coordinatorFrontmatter);
     assert.match(coordinatorFrontmatter, /^model: openai\/gpt-5\.6-terra$/m);
@@ -421,6 +421,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       reviewer.content,
       /every acceptance item explicitly\s+maps to at least one changedLogicSummary entry[\s\S]+Missing or incomplete coverage is a concrete finding, never PASS/i,
     );
+    assert.match(reviewer.content, /indexed acceptance\[i\] -> changedLogicSummary\[j\] mapping line per acceptance item/i);
     assert.ok(reviewer.content.length >= 350, "dog-reviewer needs a substantive risk-gated role");
     assert.match(
       advisor.content,
@@ -464,6 +465,8 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(initialHandoff[1], /acceptance:/);
     assert.match(initialHandoff[1], /role:\s*implementation/);
     assert.match(initialHandoff[1], /validation:\s*\{\s*level:\s*full,\s*command:/);
+    assert.match(initialHandoff[1], /validation:\s*\{ level: full, command: <exact canonical command>, diagnostics: \[<zero or one exact predeclared command>\] \}/);
+    assert.match(initialHandoff[1], /validation_attempts:\s*\{ canonical: 0, diagnostic: 0 \}/);
     assert.match(initialHandoff[1], /known_facts:/);
     assert.match(initialHandoff[1], /known_paths:\s*\[<up to 4 exact paths>\]/);
     assert.match(initialHandoff[1], /relevant_constraints:/);
@@ -710,8 +713,9 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     );
     assert.match(
       batchContinuation[1],
-      /fresh_session:\s*max_units=3; batchAttempted=0; batchCommitted=0; batchReconciled=0/,
+      /top_level_request:\s*initialize once with max_units=3; batchAttempted=0; batchCommitted=0; batchReconciled=0/,
     );
+    assert.match(batchContinuation[1], /no_reset:\s*question answer \| synthetic continuation \| compaction resume \| worker return \| terminal unit/);
     assert.match(
       batchContinuation[1],
       /display:\s*committed <batchCommitted>\/<batchTarget>; attempted <batchAttempted>\/<batchTarget>; reconciled <batchReconciled>/,
@@ -737,6 +741,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(batchContinuation[1], /plain_final_instead_of_continuation:\s*defect/);
     assert.match(batchContinuation[1], /early_stop:\s*only whole-batch blocker or user question/);
     assert.match(batchContinuation[1], /fourth_unit:\s*rejected/);
+    assert.match(batchContinuation[1], /target_reached:\s*terminal batch report; no inventory \| selection \| reconciliation \| activation until a new top-level user request/);
     assert.match(batchContinuation[1], /noncomplete_handoff:\s*exact next action required/);
     assert.match(batchContinuation[1], /completed handoff:\s*completion evidence required/);
     assert.doesNotMatch(coordinator.content, /\bbatchDone\b/);
@@ -1318,7 +1323,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(sortie.content, /never route a worker to the user/i);
 
     for (const asset of loaded.runtimeAssets) {
-      assert.equal(asset.version, "0.3.4-card41");
+      assert.equal(asset.version, "0.3.5-card42");
       const frontmatter = asset.content.match(/^---\r?\n([\s\S]+?)\r?\n---\r?\n/);
       assert.ok(frontmatter, `${asset.name} must have frontmatter`);
       const entries = Object.fromEntries(

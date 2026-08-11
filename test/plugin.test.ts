@@ -1035,9 +1035,12 @@ test("generated assets require the user's language, per-line output, and emoji-m
   assert.ok(sourceReviewPreflight);
   assert.match(sourceReviewPreflight[1], /required_artifact: acceptance \+ exact manifest \+ non-empty changedLogicSummary \+ canonical validation command\/exit\/fingerprint/);
   assert.match(sourceReviewPreflight[1], /acceptance_coverage: every acceptance item explicitly maps to at least one changedLogicSummary entry/);
+  assert.match(sourceReviewPreflight[1], /indexed_map: one acceptance\[i\] -> changedLogicSummary\[j\] line per acceptance item; counts must match/);
   assert.match(sourceReviewPreflight[1], /dispatch_guard: dispatch dog-reviewer only when required_artifact and acceptance_coverage are complete/);
   assert.match(sourceReviewPreflight[1], /incomplete_action: fail closed before SourceReview dispatch/);
   assert.match(coordinator.content, /A path where the reviewer could obtain a diff[\s\S]+is not a changed logic summary/i);
+  assert.match(coordinator.content, /Injected reflections are bounded prevention hints, never workflow authority/i);
+  assert.match(coordinator.content, /continuous-execution reflection only inside the currently\s+configured batch bound/i);
 
   const reviewer = runtimeAssets.find((asset) => asset.name === "dog-reviewer");
   assert.ok(reviewer);
@@ -1051,7 +1054,13 @@ test("generated assets require the user's language, per-line output, and emoji-m
     worker.content,
     /not retry with another executable spelling, absolute path, shell wrapper, quoting style, narrowed\s+argument, direct probe, or diagnostic substitute/i,
   );
-  assert.match(worker.content, /Run only the exact canonical validation command\s+from the handoff/i);
+  assert.match(worker.content, /Own the bounded implementation loop inside one Task invocation/i);
+  assert.match(worker.content, /Do not return an\s+intermediate progress checkpoint merely to ask dog-coordinator to resume the same work/i);
+  assert.match(worker.content, /Across the whole candidate, including same-task resumes,\s+permit at most four canonical validation executions and one execution of the optional diagnostic/i);
+  assert.match(worker.content, /A fifth canonical attempt or second diagnostic is\s+forbidden/i);
+  assert.match(worker.content, /using the one diagnostic does not block a subsequent allowed canonical rerun/i);
+  assert.match(worker.content, /Coordinator resume or\s+fresh-worker redispatch never resets the counts/i);
+  assert.match(worker.content, /Run only the exact canonical validation command\s+and its optional single diagnostic command predeclared in the handoff and operation manifest/i);
   assert.match(worker.content, /denied optional check remains\s+DENIED evidence and never justifies another tool step/i);
 });
 
@@ -1376,7 +1385,7 @@ test("runtime contract requires interactive continuation and deterministic recov
     "text_complete_fallback: referenced zero-delay recovery when host omits session.idle",
     "checkpoint_recovery: 100% progress + attempted < target -> runtime compaction and same-root continuation",
     "summary_compatibility: Sortie rollover token format | OpenCode native compaction headings",
-    "idle_recovery_limit: at most 2 per real user turn; real user turn resets budget",
+    "idle_recovery_limit: at most 2 per compaction segment and 4 per real user turn; compaction resets only the segment and a real user turn resets both",
     "idle_terminal_guard: DONE | BLOCKED | NEED_DECISION never auto-resumes",
   ]) assert.ok(scoutFanout[1].includes(contract), contract);
   assert.match(
@@ -2670,7 +2679,9 @@ test("session-inactive redispatch fixture is a complete fresh worker handoff", (
   assert.match(dispatch, /^\s*project_root:\s*<absolute project root>\s*$/mu);
   assert.match(dispatch, /^\s*source_manifest:\s*\[<exact source path>\]\s*$/mu);
   assert.match(dispatch, /^\s*acceptance:\s*<fixed acceptance criteria>\s*$/mu);
-  assert.match(dispatch, /^\s*validation:\s*\{ level: full, command: <exact command> \}\s*$/mu);
+  assert.match(dispatch, /^\s*validation:\s*\{ level: full, command: <exact canonical command>, diagnostics: \[<zero or one exact predeclared command>\] \}\s*$/mu);
+  assert.match(dispatch, /^\s*validation_history:\s*\[<zero or more \{ command: <exact command>, exit: <exit>, fingerprint: <concise fingerprint> \}>\]\s*$/mu);
+  assert.match(dispatch, /^\s*validation_attempts:\s*\{ canonical: <preserved count>, diagnostic: <preserved count> \}\s*$/mu);
   assert.match(dispatch, /^\s*resume_delta:\s*none\s*$/mu);
   assert.match(dispatch, /operational_variant: source_manifest=none; operation_manifest=<exact absolute operation manifest>/u);
 

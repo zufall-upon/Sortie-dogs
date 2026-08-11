@@ -732,7 +732,7 @@ test("the compaction prompt preserves batch state and names no legacy workflow",
   assert.equal(untracked.prompt, undefined, "an untracked session keeps the host compaction prompt");
 });
 
-test("session idle resumes non-terminal progress at most twice per user turn", async () => {
+test("session idle resumes non-terminal progress at most twice per context segment", async () => {
   const host = fakeHost({ agent: COORDINATOR });
   const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
   hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" });
@@ -753,7 +753,7 @@ test("session idle resumes non-terminal progress at most twice per user turn", a
     );
     await hooks.sessionIdle("ses_root");
   }
-  assert.equal(host.promptCalls.length, 2, "one user turn has a bounded recovery budget");
+  assert.equal(host.promptCalls.length, 2, "one context segment has a bounded recovery budget");
 
   hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" });
   await hooks.textComplete(
@@ -762,6 +762,67 @@ test("session idle resumes non-terminal progress at most twice per user turn", a
   );
   await hooks.sessionIdle("ses_root");
   assert.equal(host.promptCalls.length, 3, "a real user turn resets the recovery budget");
+});
+
+test("a successful compaction resume refreshes the bounded step recovery segment", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" });
+
+  for (const percent of [35, 45, 55]) {
+    await hooks.textComplete(
+      { sessionID: "ses_root" },
+      { text: `📊 進行中: task — ${percent}%\n➡️ 次action: 次toolを実行する` },
+    );
+    await hooks.sessionIdle("ses_root");
+    hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" }, true);
+  }
+  assert.equal(host.promptCalls.length, 2, "the first context segment exhausts its two recoveries");
+
+  await hooks.textComplete(
+    { sessionID: "ses_root" },
+    { text: "📊 進行中: task — 100% | committed 1/3; attempted 1/3; reconciled 0 | continuation: required" },
+  );
+  assert.equal(
+    await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR }),
+    "SORTIE_COMPACT_AND_CONTINUE_QUEUED",
+  );
+  await settle();
+  assert.equal(host.promptCalls.length, 3);
+  assert.ok(host.promptCalls[2]!.text.startsWith(AUTO_CONTINUE_PREFIX));
+
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" }, true);
+  await hooks.textComplete(
+    { sessionID: "ses_root" },
+    { text: "📊 進行中: next task — 80%\n➡️ 次action: commit後のterminal reportを出す" },
+  );
+  await hooks.sessionIdle("ses_root");
+  assert.equal(host.promptCalls.length, 4, "the post-compaction segment receives a fresh bounded recovery");
+  assert.ok(host.promptCalls[3]!.text.startsWith(STEP_CONTINUE_PREFIX));
+
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" }, true);
+  await hooks.textComplete(
+    { sessionID: "ses_root" },
+    { text: "📊 進行中: next task — 85%\n➡️ 次action: terminal reportを準備する" },
+  );
+  await hooks.sessionIdle("ses_root");
+  assert.equal(host.promptCalls.length, 5, "the real user turn permits four step recoveries total");
+
+  assert.equal(
+    await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR }),
+    "SORTIE_COMPACT_AND_CONTINUE_QUEUED",
+  );
+  await settle();
+  assert.equal(host.promptCalls.length, 6);
+  assert.ok(host.promptCalls[5]!.text.startsWith(AUTO_CONTINUE_PREFIX));
+
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" }, true);
+  await hooks.textComplete(
+    { sessionID: "ses_root" },
+    { text: "📊 進行中: final segment — 90%\n➡️ 次action: fifth recovery must stay blocked" },
+  );
+  await hooks.sessionIdle("ses_root");
+  assert.equal(host.promptCalls.length, 6, "another compaction cannot bypass the per-turn total");
 });
 
 test("text completion recovers when a one-shot host omits session idle", async () => {
