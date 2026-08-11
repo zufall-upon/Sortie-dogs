@@ -10,7 +10,7 @@ export interface RuntimeAsset {
 export const runtimeAssets = [
   {
     name: "dog-coordinator",
-    version: "0.3.5-card42",
+    version: "0.3.6-card43",
     installPath: "agent/dog-coordinator.md",
     content: `---
 description: Canonical MkII coordinator packaged by Sortie-dogs
@@ -94,7 +94,7 @@ After any command deny, do not issue a diagnostic variant or retry; continue by 
 the existing denial. Issue independent read-only inspections in one step instead of one step per
 file, because every extra step resends the whole session context.
 Keep committed, attempted, reconciled, and continuation as untranslated protocol keys. Set
-continuation: required only after a terminal handoff and Project checkpoint when an independent next
+continuation: required only after a terminal handoff and session checkpoint when an independent next
 candidate exists below the configured target; use continuation: none everywhere else.
 
 OPERATIONAL_VISIBILITY_FIXTURE
@@ -207,8 +207,13 @@ configured batch bound; it never authorizes counter reset, another batch, backlo
 
 Make at most one record call per triggering event and at most three record calls per run. When hits
 reach two, or a user correction identifies a defect in runtime policy, project docs, an agent contract,
-or a tool path, create a durable-fix candidate rather than repeatedly applying the prevention by hand.
-After that fix is committed, promote the entry with its returned id and a short non-path promotedRef;
+or a tool path, identify a durable-fix follow-up rather than repeatedly applying the prevention by hand.
+During an active user batch, record only the reflection: never turn that follow-up into a candidate,
+edit project instructions for it, dispatch a worker or reviewer for it, consume a batch unit, mutate its
+tracker, or commit it. Report the follow-up after the user batch and require a new explicit top-level
+user request before implementation. Reuse an injected scope when trigger, cause, or prevention names
+the same process failure; inventing a synonym scope for equivalent evidence is forbidden.
+After an explicitly requested durable fix is committed, promote the entry with its returned id and a short non-path promotedRef;
 forget it instead only when the lesson was false or no runtime judgment remains. Reflection failure is
 always non-blocking, and no reflection-only text step is allowed.
 
@@ -224,7 +229,7 @@ REFLECTION_POLICY_FIXTURE
     project_layer: same stable scope recurred in a later unit or was injected from an earlier run
     global_layer: forbidden
     scope: stable lowercase ASCII process key; no task-specific noun
-    dedup: same scope updates trigger and hits; cause and prevention change only through replace
+    dedup: same scope updates trigger and hits; equivalent evidence reuses the injected scope; synonym scopes forbidden
     call_limit: one record per triggering event; three record calls per run
     duplicate_scope: same event or same layer in one unit -> no call
     injected_project_recurrence: record project once to increment hits
@@ -233,7 +238,8 @@ REFLECTION_POLICY_FIXTURE
     call: sortie_reflection { action: record, layer: <run|project>, scope: <scope>, trigger: <event>, cause: <verified process cause>, prevention: <one reusable imperative>, evidence: <allowed enum>, evidenceRef: <short non-path reference> }
     correction: improved cause or prevention -> replace; disproved attribution -> forget
     forget_confirmation: none; exact entry id is the deletion boundary
-    durable_fix: hits>=2 or policy-related user correction -> create durable-fix candidate
+    durable_fix: hits>=2 or policy-related user correction -> report follow-up after active batch; new explicit top-level request required
+    active_batch_quarantine: no process-only candidate | instruction edit | Task | review | batch unit | tracker mutation | commit
     promotion: durable fix committed -> promote with returned id and short non-path reference; false or fully obsolete lesson -> forget
     read: automatic injection with id and hits under SORTIE_PROCESS_REFLECTIONS at turn start
     precedence: prevention hint only; never overrides user scope | batch counters | manifests | validation history | retry ceilings | review | safety
@@ -496,18 +502,28 @@ task context from current project-local durable artifacts plus the latest bounde
 checkpoint supplied with the request. Prefer the latest checkpoint for task progress, but
 reconcile its paths with the current project before acting. Preserve the exact source_manifest
 and operation_manifest, including an explicit none, and preserve validation history in attempt
-order with command, exit, and fingerprint. Do not repeat a recorded successful validation unless
+order with command, exit, and fingerprint. Reconstruct inventoryFingerprint, candidateQueue,
+pendingTrackerUpdates, and trackerFlushState from durable OpenCode session messages and the latest
+compaction summary. Do not repeat a recorded successful validation unless
 relevant source changed after that attempt.
+
+When restart enters a new session and tracker state is stale or unavailable, reconcile every queued
+candidate against current Git history, source state, matching acceptanceFingerprint and acceptanceHashes, and
+durable handoff before dispatch. A matching committed or already-accepted outcome increments
+batchReconciled and queues tracker repair; never reimplement it merely because the external tracker
+still says non-Done.
 
 Continue the same task through dog-coordinator. Dispatch implementation only to dog-worker using the
 same-task resume contract and the smallest resume_delta needed for stale paths, new findings,
 and next action. Never route a worker directly to the user.
 
 RESTART_RECOVERY_FIXTURE
-    reconstruction: project-local durable artifacts + latest bounded handoff/checkpoint
-    preserve: [source_manifest, operation_manifest, validation_history]
+    reconstruction: project-local durable artifacts + durable OpenCode session messages + latest compaction summary + bounded handoff/checkpoint
+    preserve: [source_manifest, operation_manifest, validation_history, inventoryFingerprint, candidateQueue, pendingTrackerUpdates, trackerFlushState]
     validation_history_entry: { command: <exact command>, exit: <exit>, fingerprint: <concise fingerprint> }
     reconcile: checkpoint paths against current project
+    new_session_reconcile: git history + source state + matching acceptanceFingerprint and acceptanceHashes + durable handoff before dispatch
+    stale_tracker_commit: batchReconciled + queued tracker repair; reimplementation forbidden
     resume_route: dog-coordinator -> dog-worker
     user_route: dog-coordinator only
 END_RESTART_RECOVERY_FIXTURE
@@ -525,31 +541,60 @@ END_TAKEOVER_FIXTURE
 
 ## Bounded batch continuation
 
-A Project checkpoint means whichever task tracker this project actually uses. When no external
-tracker is configured or its tooling is unavailable, record the same checkpoint content in a
-project-local durable artifact instead; never treat a missing tracker as a blocker, and never
-install or configure one on your own. The same applies to every shell form named below: use the
-shell this host actually provides.
+A Project checkpoint means whichever task tracker this project actually uses. Keep tracker metadata
+session-only: never write item identifiers, bodies, inventory payloads, or pending tracker mutations to
+source, reflection, or a project-local artifact. When no external tracker is configured, keep a redacted
+terminal checkpoint in the session and continue; never install or configure tracker tooling.
 
-Read the project's tracker guide once and use every exact API shape it supplies. Never introspect a
-known schema. For three or more tracker mutations, create one secret-free UTF-8 script under the
-project temp directory, syntax-check it locally, then execute that same file. On a parser defect,
-patch only that file; never regenerate a multi-kilobyte inline command. Delete the script after the
-mutation and bounded verification. Authentication material remains process-only and never enters the script.
+Read the project's tracker guide once and use every exact API shape it supplies. Never introspect or
+rewrite a known schema. Acquire one complete tracker snapshot per top-level user request through one
+direct client invocation that performs every pagination request internally. The snapshot must include
+the full body, status, ordering fields, implementation root, and identity needed to select up to the
+configured batch bound. Evaluate each selected full body once, derive a bounded acceptance digest and
+fingerprint, then discard the raw body. Normalize body and criterion strings to Unicode NFC and LF
+newlines without trimming content. Set acceptanceFingerprint to lowercase hex SHA-256 of the normalized
+full body. Extract acceptance criteria only through the tracker guide's declared structure, preserve
+their order, and store lowercase hex SHA-256 for each normalized criterion as acceptanceHashes.
+The bounded prose acceptanceDigest is display and routing context only, never equality evidence.
+Limit it to 300 characters after removing credentials, secrets, personal data, URLs, tracker item
+identifiers, titles, status values, and raw body excerpts. If useful acceptance cannot survive that
+redaction, mark the queued candidate requires_user_decision instead of retaining sensitive prose.
+Store only identity, status, ordering, implementation root, acceptance fingerprint, acceptanceHashes,
+bounded acceptance digest, and the inventory fingerprint in durable OpenCode
+session messages and compaction summaries. Every terminal Evidence block repeats that bounded state,
+pending updates, and flush state. Compaction, worker return, and coordinator-owned tracker mutations never
+invalidate the snapshot. Apply every successful mutation to the session snapshot locally, then recompute
+inventoryFingerprint with the same canonical algorithm before any compaction or next selection.
+
+Derive inventoryFingerprint from canonical JSON with keys in this exact order:
+identity, status, ordering, implementationRoot, acceptanceFingerprint, acceptanceHashes. Sort entries
+by tracker ordering and then identity, normalize every string to Unicode NFC and LF newlines without
+trimming, serialize with no insignificant whitespace, and hash the UTF-8 bytes as lowercase hex SHA-256.
+
+Do not mutate the external tracker at candidate start or after each unit. Append each terminal outcome
+to pendingTrackerUpdates and flush all pending updates once, in one direct client invocation, when the
+batch stops for completion, an explicit user stop, or a whole-batch blocker. Build the bounded flush
+payload in process memory from pendingTrackerUpdates; never write it or tracker metadata to a script
+or file. Authentication material remains process-only.
+If the flush fails, source outcomes remain authoritative; report tracker reconciliation pending and do
+not retry in the same top-level request.
 
 Keep coordinator-owned direct operations out of Task. Check a bounded list of already-known absolute
 executable candidates in one direct depth-one read-only command; never dispatch a worker merely to
-discover an executable. Run Project inventory and item-identity lookup as one direct read-only tracker
-command. A terminal checkpoint with at most two tracker mutations, such as one body update plus one
-status update, is also coordinator-owned and uses one direct tracker command; a project-local checkpoint
-file does not increase that tracker-mutation count. These direct operations create no handoff, operation
-manifest, generated script, or child session. If a known executable candidate is absent, ask the user
-through the question tool. If tracker access is unavailable, write the project-local checkpoint fallback.
-Reuse a successful inventory until a tracker mutation, compact resume, or relevant user scope change
-invalidates it; an identical inventory retry before then is forbidden. Before the first status mutation
-for a candidate, read its full body and prove it remains required by current user scope and project
-evidence. Title, order, or bulk inventory status alone is insufficient. If relevance remains ambiguous,
-ask once before mutation or dispatch.
+discover an executable. Project inventory, pagination, item identity, and bounded queue construction
+share one direct read-only tracker invocation. Before dispatch, use the selected full body or its queued
+acceptance digest after compaction to prove the
+candidate remains required by current user scope and project evidence. Title, order, or bulk status
+alone is insufficient. If relevance remains ambiguous, ask once without refreshing inventory.
+
+For GitHub Projects, use only the project-approved gh client and literal \`gh api graphql\` shape from the
+tracker guide. When the guide requires stored gh authentication, clear GITHUB_TOKEN and GH_TOKEN only
+for that child process; never read a credential value, extract Git credentials, call api.github.com
+through Invoke-WebRequest or Invoke-RestMethod, or switch authentication routes. Perform at most one
+local auth preflight and one inventory invocation. An authentication, rate-limit, transport, or query
+error is a whole-batch blocker for that top-level request: no retry, alternate executable, direct REST
+call, credential extraction, query rewrite, or diagnostic API call. A later real user request may retry
+only after the external condition or approved query changed.
 Treat the active project root as immutable for the session. A candidate whose implementation root is
 outside it is not actionable in the current batch: hold or reassign the candidate and ask the user to
 open or switch to the owning project. Do not inspect, dispatch into, or mutate the external root from
@@ -560,11 +605,15 @@ selection identifies the next owning-project task, not permission to continue it
 COORDINATOR_DIRECT_OPERATION_FIXTURE
     known_executable_probe: one batched direct depth-one read-only command; no Task
     executable_absent: question tool; no worker discovery or recursive search
-    project_inventory: one direct read-only tracker command; no Task
-    project_item_identity: same direct inventory evidence; no identity-only worker
-    inventory_reuse: successful result reused until tracker mutation | compact resume | relevant user scope change
-    identical_inventory_retry: forbidden before invalidation
-    candidate_body: read full body before first status mutation
+    project_inventory: exactly one complete snapshot per top-level user request in one direct client invocation; no Task
+    pagination: all pages inside that invocation until pageInfo.hasNextPage=false; no model turn per page
+    candidate_queue: snapshot selects at most configured batch bound; evaluate full body once then retain identity | status | ordering | implementation root | acceptance fingerprint | acceptance hashes | bounded acceptance digest; raw body discarded
+    fingerprint_algorithm: Unicode NFC + CRLF/CR to LF + no trim; lowercase hex SHA-256 full body and each ordered criterion
+    inventory_fingerprint_algorithm: fixed key order identity,status,ordering,implementationRoot,acceptanceFingerprint,acceptanceHashes + sort ordering then identity + NFC/LF + compact canonical JSON + lowercase hex SHA-256
+    digest_role: acceptanceDigest <=300 chars; routing only; strip secrets | personal data | URLs | item metadata | raw excerpts; redaction failure -> requires_user_decision
+    inventory_reuse: compaction | worker return | local tracker mutation never invalidate; apply successful mutations locally then recompute canonical inventoryFingerprint before compaction or selection
+    inventory_retry: forbidden in the same top-level request
+    candidate_body: full body evaluated at snapshot acquisition; queued acceptance digest is sufficient after compaction
     relevance_gate: current user scope + project evidence required; title | order | bulk status insufficient
     relevance_ambiguous: one question before mutation or dispatch
     active_project_root: most specific task + tracker + project-instruction owner; immutable for the session
@@ -576,10 +625,15 @@ COORDINATOR_DIRECT_OPERATION_FIXTURE
     worker_validation_denial: executable-not-allowlisted -> no redispatch | no blocker-resolution worker
     validation_fallback: coordinator direct exactly once; external approval required -> one question
     denial_classification: routing defect; not external blocker | not validation failure
-    terminal_checkpoint: at most two tracker mutations -> one coordinator-owned direct tracker command
-    local_checkpoint_file: excluded from tracker mutation count
-    direct_operation_artifacts: no handoff | operation manifest | generated script | child session
-    tracker_unavailable: project-local checkpoint fallback; never a worker retry loop
+    terminal_checkpoint: append session-only pendingTrackerUpdates; no external tracker call per unit
+    batch_flush: one coordinator-owned direct tracker invocation when batch stops; apply every pending update
+    durable_session_state: terminal Evidence + compaction summary preserve inventoryFingerprint | candidateQueue | pendingTrackerUpdates | trackerFlushState
+    restart_reconcile: stale tracker -> require git + source + matching acceptanceFingerprint and acceptanceHashes + durable handoff; accepted commit becomes batchReconciled, never reimplemented
+    flush_failure: source outcomes authoritative + reconciliation pending; no same-request retry
+    github_auth: approved gh only + child-process GITHUB_TOKEN/GH_TOKEN clear when guide requires stored auth; credential extraction forbidden
+    github_failure: auth | rate-limit | transport | query -> whole-batch blocker; no retry | REST fallback | query rewrite | diagnostic API
+    direct_operation_artifacts: no handoff | operation manifest | generated script | child session; inventory and flush payloads stay process-only
+    tracker_unavailable: redacted session checkpoint; never a worker or API retry loop
 END_COORDINATOR_DIRECT_OPERATION_FIXTURE
 
 Remote Git and publication mutations are coordinator-owned direct operations. Never dispatch push,
@@ -620,13 +674,14 @@ or terminal unit is part of the same request and never resets counters or starts
 batchReconciled as separate counters; the legacy combined done counter is forbidden because it conflates outcomes. A
 unit becomes attempted at its terminal handoff. Only a new successful coordinator commit increments
 batchCommitted; acceptance of an already-existing commit increments batchReconciled instead. Record
-a Project status checkpoint for every terminal unit. A blocked unit increments only batchAttempted,
+a session-local terminal checkpoint and queue its tracker update for every terminal unit. A blocked unit increments only batchAttempted,
 records its blocker with a concrete needed action, then continuation proceeds to the next independent
 unit. A blocked unit is still a terminal unit: while batchAttempted stays below batchTarget and an
 independent next candidate exists, continuation is required, never optional, and a plain final report
 in its place is a defect. Only a whole-batch blocker or a user question stops the batch early.
-When batchAttempted reaches batchTarget, return the terminal batch report and stop. Never inventory,
-select, reconcile, or activate another candidate until a new top-level user request arrives.
+When batchAttempted reaches batchTarget, flush pending tracker updates once, return the terminal batch
+report, and stop. Never inventory, select, reconcile, or activate another candidate until a new
+top-level user request arrives.
 
 BATCH_CONTINUATION_FIXTURE
     scope: backlogDrain.enabled=false; mode=normal bounded batch
@@ -635,7 +690,7 @@ BATCH_CONTINUATION_FIXTURE
     display: committed <batchCommitted>/<batchTarget>; attempted <batchAttempted>/<batchTarget>; reconciled <batchReconciled>
     order: sequential
     unit_N_plus_1_start: only after unit N terminal handoff
-    terminal_unit: increment batchAttempted; record Project status checkpoint
+    terminal_unit: increment batchAttempted; record session checkpoint; append pendingTrackerUpdates; no external tracker call
     terminal_order: establish terminal handoff first; then increment batchAttempted
     new_successful_commit: increment batchCommitted only
     existing_commit_accepted: increment batchReconciled only
@@ -648,6 +703,8 @@ BATCH_CONTINUATION_FIXTURE
     noncomplete_handoff: exact next action required; completed handoff: completion evidence required
     early_stop: only whole-batch blocker or user question
     fourth_unit: rejected
+    tracker_flush: exactly once when terminal batch stops; never after each unit
+    question_suspend: not a terminal batch stop; preserve pendingTrackerUpdates and do not flush
     target_reached: terminal batch report; no inventory | selection | reconciliation | activation until a new top-level user request
 END_BATCH_CONTINUATION_FIXTURE
 
@@ -685,7 +742,7 @@ COMPACTION_IDENTITY_FIXTURE
 END_COMPACTION_IDENTITY_FIXTURE
 
 The configured continuation agent is dog-coordinator and the configured continuation capability is
-the plugin tool sortie_compact_and_continue. After the terminal handoff and its Project checkpoint,
+the plugin tool sortie_compact_and_continue. After the terminal handoff and its session checkpoint,
 call that tool exactly once and end the assistant turn immediately. Use the marker <!-- SORTIE_CONTINUE -->
 appended to the final report only when that tool is unavailable or returns an error, never together
 with a tool call and never after a successful one. When the batch itself stops, return the terminal
@@ -712,24 +769,23 @@ once before execution. Twelve or more units exceed one session's continuation ce
 to split the run before claiming no-stop execution. A vague request to continue, or an unbounded
 backlog, does not opt in.
 
-At drain start and after each compact resume, inventory all non-Done Project items. Request
-items(first:100), inspect pageInfo, and continue from endCursor while hasNextPage is true; never
-treat a first page or a capped count as complete inventory. Select the next independent item
-from that complete inventory. After each terminal handoff and checkpoint, compact the context,
-resume through dog-coordinator, reinventory, and continue until a stop condition applies. Every
+At drain start, acquire the same single complete snapshot and select a bounded queue of at most
+backlogDrain.maxUnits. Request items(first:100), inspect pageInfo, and continue from endCursor while
+hasNextPage is true inside that one client invocation; never treat a first page or capped count as
+complete inventory. After each terminal handoff and session checkpoint, update the queue locally,
+compact, resume through dog-coordinator without tracker access, and continue until a stop condition applies. Every
 drain continuation uses the same identity-preserving resolver defined above: preserve the root source
 agent identity, reject child-to-root promotion and pending host auto-continue, and keep direct
 capability invocation exclusive from marker fallback.
-Run Project inventory as one direct read-only command of the tracker's own client, with a quoted
-literal query. On GitHub Projects that command is \`gh api graphql\`. If an encoded command, nested
-shell, script file, or probe form is denied, do not retry it; convert the request to that direct
-command. A wrapped shell invocation is acceptable only for a provably read-only depth-one
-diagnostic, never for Project inventory.
+Run Project inventory through the tracker snapshot lease above. If the bounded queue is exhausted,
+stop the drain without refreshing it; the next top-level user request may acquire a new snapshot.
+Flush all pending tracker updates once when the drain stops. A wrapped shell invocation is acceptable
+only for a provably read-only depth-one diagnostic, never for Project inventory.
 Track a progress fingerprint from the completed inventory and terminal outcomes. Stop rather
 than loop when a full resume cycle changes neither inventory nor outcomes, when user input is
 required, when a proven external blocker prevents the drain, or before attempted units would
 exceed backlogDrain.maxUnits. The attempted-unit count survives every compact resume, is carried
-in both the Project checkpoint and resume_delta, and never resets during the drain run; the max
+in both the session checkpoint and resume_delta, and never resets during the drain run; the max
 guard counts attempted units across that whole run. A blocked item alone does not stop
 independent work.
 
@@ -741,17 +797,21 @@ BACKLOG_DRAIN_FIXTURE
     execution: sequential; coordinator_authority=unchanged; per_unit_gates=unchanged
     drain_counts: batchAttempted=terminal handoffs; batchCommitted=new commits; batchReconciled=accepted existing commits
     display: committed <batchCommitted>/<backlogDrain.maxUnits>; attempted <batchAttempted>/<backlogDrain.maxUnits>; reconciled <batchReconciled>
+    inventory_acquisition: once at drain start in one client invocation; never after compaction
     inventory_page_1: items(first:100)
-    inventory_next_page: while pageInfo.hasNextPage; after=pageInfo.endCursor
+    inventory_next_page: inside same invocation while pageInfo.hasNextPage; after=pageInfo.endCursor
     inventory_filter: include every item whose status is not Done
-    continuation: terminal handoff -> Project checkpoint -> same identity-preserving resolver -> compact resume -> complete reinventory
+    candidate_queue: at most backlogDrain.maxUnits; deterministic acceptance fingerprint + hashes + bounded digest + required selection fields; raw body discarded
+    continuation: terminal handoff -> session checkpoint -> local queue update -> compact resume; no tracker access
     source_identity: preserve root source agent identity across drain compaction
     child_promotion: child session -> root rejected
     pending_host_autocontinue: drain compaction rejected
     fallback_exclusivity: direct capability or marker fallback; never both
-    attempted_count: survive every compact resume; carry in Project checkpoint and resume_delta
+    attempted_count: survive every compact resume; carry in session checkpoint and resume_delta
     max_guard_scope: count attempted units across the whole drain run; never reset on resume
-    progress: compare complete inventory and terminal outcomes across a full resume cycle
+    tracker_flush: once when drain stops; all pending updates in one direct invocation
+    queue_exhausted: stop without inventory refresh; next top-level request may reacquire
+    progress: compare bounded queue and terminal outcomes across a full resume cycle
     stop: no progress | user decision | proven external blocker | backlogDrain.maxUnits reached
     blocked_item: continue with next independent item
 END_BACKLOG_DRAIN_FIXTURE
@@ -1018,10 +1078,10 @@ the initial exit 1 is first and the latest exit 0 is last.
 An undeclared write or mutation must be reported as rejected, not performed.
 
 RUNTIME_ASSET_VERSION_SYNC_FIXTURE
-    runtime_version: 0.3.5-card42
+    runtime_version: 0.3.6-card43
     shared_marker: src/asset-version.ts
-    packaged_expectation: test/plugin-loader.test.ts uses 0.3.5-card42
-    initialize_expectation: test/initialize.test.ts uses 0.3.5-card42
+    packaged_expectation: test/plugin-loader.test.ts uses 0.3.6-card43
+    initialize_expectation: test/initialize.test.ts uses 0.3.6-card43
     rule: runtime asset versions, shared marker, packaged expectation, and initialize expectation change together
 END_RUNTIME_ASSET_VERSION_SYNC_FIXTURE
 
@@ -1038,6 +1098,7 @@ TERMINAL_OUTPUT_TEMPLATE
 🔍 decisions: [<autonomous decision>]
 🔍 validation: [{ command: npm test, exit: 1, fingerprint: initial failure }, { command: npm test, exit: 0, fingerprint: final pass }]
 🔍 scout: { attempted: <boolean>, revision: <revision>, blocker_owner: <owner>, reason: <exact decision reason> }
+🔍 tracker: { inventory_fingerprint: <fingerprint or none>, candidate_queue: [<bounded identities + acceptance fingerprints + acceptance hashes + redacted acceptance digests>], pending_updates: [<terminal outcomes or none>], flush_state: <pending | flushed | reconciliation-required | none> }
 🔍 raw_status: <unmodified status evidence>
 🔍 diff: <concise diff summary>
 🔍 stale_paths: [<path or none>]
@@ -1052,6 +1113,7 @@ TERMINAL_EVIDENCE_FIXTURE
     decisions: [<autonomous decision>]
     validation: [{ command: <exact command>, exit: <exit>, fingerprint: <concise fingerprint> }]
     scout: { attempted: <boolean>, revision: <revision>, blocker_owner: <owner>, reason: <exact decision reason> }
+    tracker: { inventory_fingerprint: <fingerprint or none>, candidate_queue: [<bounded identities + acceptance fingerprints + acceptance hashes + redacted acceptance digests>], pending_updates: [<terminal outcomes or none>], flush_state: <pending | flushed | reconciliation-required | none> }
     raw_status: <unmodified status evidence>
     diff: <concise diff summary>
     stale_paths: [<path or none>]
@@ -1062,7 +1124,7 @@ END_TERMINAL_EVIDENCE_FIXTURE
   },
   {
     name: "dog-worker",
-    version: "0.3.5-card42",
+    version: "0.3.6-card43",
     installPath: "agent/dog-worker.md",
     content: `---
 description: Dedicated worker for the canonical Sortie-dogs coordinator
@@ -1162,7 +1224,7 @@ the user.
   },
   {
     name: "dog-scout",
-    version: "0.3.5-card42",
+    version: "0.3.6-card43",
     installPath: "agent/dog-scout.md",
     content: `---
 description: Bounded evidence scout for dog-coordinator
@@ -1212,7 +1274,7 @@ prose; keep the keys, paths, commands, and identifiers verbatim.
   },
   {
     name: "dog-reviewer",
-    version: "0.3.5-card42",
+    version: "0.3.6-card43",
     installPath: "agent/dog-reviewer.md",
     content: `---
 description: Independent source reviewer for dog-coordinator
@@ -1241,7 +1303,7 @@ or transport.
   },
   {
     name: "dog-advisor",
-    version: "0.3.5-card42",
+    version: "0.3.6-card43",
     installPath: "agent/dog-advisor.md",
     content: `---
 description: Focused technical advisor for dog-coordinator
@@ -1265,7 +1327,7 @@ provider, vendor, model, variant, or transport.
   },
   {
     name: "sortie",
-    version: "0.3.5-card42",
+    version: "0.3.6-card43",
     installPath: "command/sortie.md",
     content: `---
 description: Start the canonical Sortie-dogs MkII workflow

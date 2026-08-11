@@ -361,7 +361,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     for (const asset of loaded.runtimeAssets) {
       assert.equal(asset.version, RUNTIME_ASSET_VERSION, `${asset.name} version must match the shared marker`);
     }
-    assert.equal(RUNTIME_ASSET_VERSION, "0.3.5-card42");
+    assert.equal(RUNTIME_ASSET_VERSION, "0.3.6-card43");
     const coordinatorFrontmatter = /^---\r?\n([\s\S]*?)\r?\n---/u.exec(coordinator.content)?.[1];
     assert.ok(coordinatorFrontmatter);
     assert.match(coordinatorFrontmatter, /^model: openai\/gpt-5\.6-terra$/m);
@@ -504,14 +504,16 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.ok(restartRecovery, "coordinator needs restart recovery policy");
     assert.match(
       restartRecovery[1],
-      /reconstruction:\s*project-local durable artifacts \+ latest bounded handoff\/checkpoint/,
+      /reconstruction:\s*project-local durable artifacts \+ durable OpenCode session messages \+ latest compaction summary \+ bounded handoff\/checkpoint/,
     );
-    assert.match(restartRecovery[1], /preserve:\s*\[source_manifest, operation_manifest, validation_history\]/);
+    assert.match(restartRecovery[1], /preserve:\s*\[source_manifest, operation_manifest, validation_history, inventoryFingerprint, candidateQueue, pendingTrackerUpdates, trackerFlushState\]/);
     assert.match(
       restartRecovery[1],
       /validation_history_entry:\s*\{ command: <exact command>, exit: <exit>, fingerprint: <concise fingerprint> \}/,
     );
     assert.match(restartRecovery[1], /resume_route:\s*dog-coordinator -> dog-worker/);
+    assert.match(restartRecovery[1], /new_session_reconcile:\s*git history \+ source state \+ matching acceptanceFingerprint and acceptanceHashes \+ durable handoff before dispatch/);
+    assert.match(restartRecovery[1], /stale_tracker_commit:\s*batchReconciled \+ queued tracker repair; reimplementation forbidden/);
     assert.match(restartRecovery[1], /user_route:\s*dog-coordinator only/);
     assert.match(coordinator.content, /dispatch implementation only to dog-worker/i);
     const scoutSkip = coordinator.content.match(
@@ -722,7 +724,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     );
     assert.match(batchContinuation[1], /order:\s*sequential/);
     assert.match(batchContinuation[1], /unit_N_plus_1_start:\s*only after unit N terminal handoff/);
-    assert.match(batchContinuation[1], /terminal_unit:\s*increment batchAttempted; record Project status checkpoint/);
+    assert.match(batchContinuation[1], /terminal_unit:\s*increment batchAttempted; record session checkpoint; append pendingTrackerUpdates; no external tracker call/);
     assert.match(batchContinuation[1], /new_successful_commit:\s*increment batchCommitted only/);
     assert.match(batchContinuation[1], /existing_commit_accepted:\s*increment batchReconciled only/);
     assert.match(
@@ -741,6 +743,8 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(batchContinuation[1], /plain_final_instead_of_continuation:\s*defect/);
     assert.match(batchContinuation[1], /early_stop:\s*only whole-batch blocker or user question/);
     assert.match(batchContinuation[1], /fourth_unit:\s*rejected/);
+    assert.match(batchContinuation[1], /tracker_flush:\s*exactly once when terminal batch stops; never after each unit/);
+    assert.match(batchContinuation[1], /question_suspend:\s*not a terminal batch stop; preserve pendingTrackerUpdates and do not flush/);
     assert.match(batchContinuation[1], /target_reached:\s*terminal batch report; no inventory \| selection \| reconciliation \| activation until a new top-level user request/);
     assert.match(batchContinuation[1], /noncomplete_handoff:\s*exact next action required/);
     assert.match(batchContinuation[1], /completed handoff:\s*completion evidence required/);
@@ -798,15 +802,17 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       backlogDrain[1],
       /display:\s*committed <batchCommitted>\/<backlogDrain\.maxUnits>; attempted <batchAttempted>\/<backlogDrain\.maxUnits>; reconciled <batchReconciled>/,
     );
+    assert.match(backlogDrain[1], /inventory_acquisition:\s*once at drain start in one client invocation; never after compaction/);
     assert.match(backlogDrain[1], /inventory_page_1:\s*items\(first:100\)/);
     assert.match(
       backlogDrain[1],
-      /inventory_next_page:\s*while pageInfo\.hasNextPage; after=pageInfo\.endCursor/,
+      /inventory_next_page:\s*inside same invocation while pageInfo\.hasNextPage; after=pageInfo\.endCursor/,
     );
     assert.match(backlogDrain[1], /inventory_filter:\s*include every item whose status is not Done/);
+    assert.match(backlogDrain[1], /candidate_queue:\s*at most backlogDrain\.maxUnits; deterministic acceptance fingerprint \+ hashes \+ bounded digest \+ required selection fields; raw body discarded/);
     assert.match(
       backlogDrain[1],
-      /continuation:\s*terminal handoff -> Project checkpoint -> same identity-preserving resolver -> compact resume -> complete reinventory/,
+      /continuation:\s*terminal handoff -> session checkpoint -> local queue update -> compact resume; no tracker access/,
     );
     assert.match(backlogDrain[1], /source_identity:\s*preserve root source agent identity across drain compaction/);
     assert.match(backlogDrain[1], /child_promotion:\s*child session -> root rejected/);
@@ -814,18 +820,20 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(backlogDrain[1], /fallback_exclusivity:\s*direct capability or marker fallback; never both/);
     assert.match(
       backlogDrain[1],
-      /attempted_count:\s*survive every compact resume; carry in Project checkpoint and resume_delta/,
+      /attempted_count:\s*survive every compact resume; carry in session checkpoint and resume_delta/,
     );
     assert.match(
       backlogDrain[1],
       /max_guard_scope:\s*count attempted units across the whole drain run; never reset on resume/,
     );
-    assert.match(backlogDrain[1], /progress:\s*compare complete inventory and terminal outcomes across a full resume cycle/);
+    assert.match(backlogDrain[1], /progress:\s*compare bounded queue and terminal outcomes across a full resume cycle/);
     assert.match(
       backlogDrain[1],
       /stop:\s*no progress \| user decision \| proven external blocker \| backlogDrain\.maxUnits reached/,
     );
     assert.match(backlogDrain[1], /blocked_item:\s*continue with next independent item/);
+    assert.match(backlogDrain[1], /tracker_flush:\s*once when drain stops; all pending updates in one direct invocation/);
+    assert.match(backlogDrain[1], /queue_exhausted:\s*stop without inventory refresh; next top-level request may reacquire/);
     assert.doesNotMatch(coordinator.content, /\b(?:PVT|PVTI|PVTSF|PVTSSF)_[A-Za-z0-9]+\b/);
 
     const manifestScope = coordinator.content.match(
@@ -846,8 +854,9 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     );
     assert.ok(directOperations, "coordinator needs bounded direct operations");
     assert.match(directOperations[1], /known_executable_probe:\s*one batched direct depth-one read-only command; no Task/);
-    assert.match(directOperations[1], /project_inventory:\s*one direct read-only tracker command; no Task/);
-    assert.match(directOperations[1], /terminal_checkpoint:\s*at most two tracker mutations -> one coordinator-owned direct tracker command/);
+    assert.match(directOperations[1], /project_inventory:\s*exactly one complete snapshot per top-level user request in one direct client invocation; no Task/);
+    assert.match(directOperations[1], /terminal_checkpoint:\s*append session-only pendingTrackerUpdates; no external tracker call per unit/);
+    assert.match(directOperations[1], /batch_flush:\s*one coordinator-owned direct tracker invocation when batch stops; apply every pending update/);
     const releaseOwnership = coordinator.content.match(
       /RELEASE_OWNERSHIP_FIXTURE\r?\n([\s\S]+?)\r?\nEND_RELEASE_OWNERSHIP_FIXTURE/,
     );
@@ -891,6 +900,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       "decisions",
       "validation",
       "scout",
+      "tracker",
       "raw_status",
       "diff",
       "stale_paths",
@@ -1323,7 +1333,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(sortie.content, /never route a worker to the user/i);
 
     for (const asset of loaded.runtimeAssets) {
-      assert.equal(asset.version, "0.3.5-card42");
+      assert.equal(asset.version, "0.3.6-card43");
       const frontmatter = asset.content.match(/^---\r?\n([\s\S]+?)\r?\n---\r?\n/);
       assert.ok(frontmatter, `${asset.name} must have frontmatter`);
       const entries = Object.fromEntries(

@@ -717,6 +717,16 @@ test("the compaction prompt preserves batch state and names no legacy workflow",
     "batchAttempted",
     "batchCommitted",
     "batchReconciled",
+    "inventory fingerprint",
+    "bounded candidate queue",
+    "status",
+    "ordering",
+    "implementation root",
+    "acceptance fingerprint",
+    "acceptance hashes",
+    "acceptance digest",
+    "pending tracker updates",
+    "tracker flush state",
     "source_manifest",
     "operation_manifest",
     "validation",
@@ -948,6 +958,10 @@ test("session idle compacts a terminal unit checkpoint below the batch target", 
 
 ## batch counters
 - batchTarget: 10 / batchAttempted: 1 / batchCommitted: 1 / batchReconciled: 0
+
+## tracker batch state
+- inventoryFingerprint: inv-1 / candidateQueue: Release 04 | status ready | ordering 4 | implementation root /project | acceptance fingerprint fp-4 | acceptance hashes h-4 | redacted acceptance digest ship release
+- pendingTrackerUpdates: Release 03 done / flushState: pending
 
 ## 未解決blocker
 - なし

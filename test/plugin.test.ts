@@ -1119,6 +1119,7 @@ test("generated coordinator renders a four-line standard view without dropping c
     "decisions",
     "validation",
     "scout",
+    "tracker",
     "raw_status",
     "diff",
     "stale_paths",
@@ -1132,6 +1133,7 @@ test("generated coordinator renders a four-line standard view without dropping c
   );
   assert.match(evidence, /^🔍 manifest: /mu, "Evidence retains the exact ASCII manifest key");
   assert.match(evidence, /^🔍 decisions: /mu, "Evidence retains the exact ASCII decisions key");
+  assert.match(evidence, /^🔍 tracker: /mu, "Evidence retains durable tracker batch state");
   assert.match(evidence, /^🔍 raw_status: /mu, "Evidence retains the exact ASCII raw_status key");
   assert.match(evidence, /^🔍 diff: /mu, "Evidence retains the exact ASCII diff key");
   assert.match(evidence, /^🔍 stale_paths: /mu, "Evidence retains the exact ASCII stale_paths key");
@@ -1341,10 +1343,8 @@ test("runtime contract requires interactive continuation and deterministic recov
   );
   assert.match(coordinator.content, /OpenCode owns token-limit automatic compaction; leave its auto-continue\s+enabled/i);
   assert.doesNotMatch(coordinator.content, /stop compaction is universal/i);
-  assert.match(
-    coordinator.content,
-    /For three or more tracker mutations,[\s\S]+secret-free UTF-8 script[\s\S]+syntax-check it locally/i,
-  );
+  assert.match(coordinator.content, /Build the bounded flush\s+payload in process memory from pendingTrackerUpdates/i);
+  assert.match(coordinator.content, /never write it or tracker metadata to a script\s+or file/i);
   const direct = coordinator.content.match(
     /COORDINATOR_DIRECT_OPERATION_FIXTURE\r?\n([\s\S]+?)\r?\nEND_COORDINATOR_DIRECT_OPERATION_FIXTURE/,
   );
@@ -1352,11 +1352,15 @@ test("runtime contract requires interactive continuation and deterministic recov
   for (const contract of [
     "known_executable_probe: one batched direct depth-one read-only command; no Task",
     "executable_absent: question tool; no worker discovery or recursive search",
-    "project_inventory: one direct read-only tracker command; no Task",
-    "project_item_identity: same direct inventory evidence; no identity-only worker",
-    "inventory_reuse: successful result reused until tracker mutation | compact resume | relevant user scope change",
-    "identical_inventory_retry: forbidden before invalidation",
-    "candidate_body: read full body before first status mutation",
+    "project_inventory: exactly one complete snapshot per top-level user request in one direct client invocation; no Task",
+    "pagination: all pages inside that invocation until pageInfo.hasNextPage=false; no model turn per page",
+    "candidate_queue: snapshot selects at most configured batch bound; evaluate full body once then retain identity | status | ordering | implementation root | acceptance fingerprint | acceptance hashes | bounded acceptance digest; raw body discarded",
+    "fingerprint_algorithm: Unicode NFC + CRLF/CR to LF + no trim; lowercase hex SHA-256 full body and each ordered criterion",
+    "inventory_fingerprint_algorithm: fixed key order identity,status,ordering,implementationRoot,acceptanceFingerprint,acceptanceHashes + sort ordering then identity + NFC/LF + compact canonical JSON + lowercase hex SHA-256",
+    "digest_role: acceptanceDigest <=300 chars; routing only; strip secrets | personal data | URLs | item metadata | raw excerpts; redaction failure -> requires_user_decision",
+    "inventory_reuse: compaction | worker return | local tracker mutation never invalidate; apply successful mutations locally then recompute canonical inventoryFingerprint before compaction or selection",
+    "inventory_retry: forbidden in the same top-level request",
+    "candidate_body: full body evaluated at snapshot acquisition; queued acceptance digest is sufficient after compaction",
     "relevance_gate: current user scope + project evidence required; title | order | bulk status insufficient",
     "relevance_ambiguous: one question before mutation or dispatch",
     "active_project_root: most specific task + tracker + project-instruction owner; immutable for the session",
@@ -1368,10 +1372,15 @@ test("runtime contract requires interactive continuation and deterministic recov
     "worker_validation_denial: executable-not-allowlisted -> no redispatch | no blocker-resolution worker",
     "validation_fallback: coordinator direct exactly once; external approval required -> one question",
     "denial_classification: routing defect; not external blocker | not validation failure",
-    "terminal_checkpoint: at most two tracker mutations -> one coordinator-owned direct tracker command",
-    "local_checkpoint_file: excluded from tracker mutation count",
-    "direct_operation_artifacts: no handoff | operation manifest | generated script | child session",
-    "tracker_unavailable: project-local checkpoint fallback; never a worker retry loop",
+    "terminal_checkpoint: append session-only pendingTrackerUpdates; no external tracker call per unit",
+    "batch_flush: one coordinator-owned direct tracker invocation when batch stops; apply every pending update",
+    "durable_session_state: terminal Evidence + compaction summary preserve inventoryFingerprint | candidateQueue | pendingTrackerUpdates | trackerFlushState",
+    "restart_reconcile: stale tracker -> require git + source + matching acceptanceFingerprint and acceptanceHashes + durable handoff; accepted commit becomes batchReconciled, never reimplemented",
+    "flush_failure: source outcomes authoritative + reconciliation pending; no same-request retry",
+    "github_auth: approved gh only + child-process GITHUB_TOKEN/GH_TOKEN clear when guide requires stored auth; credential extraction forbidden",
+    "github_failure: auth | rate-limit | transport | query -> whole-batch blocker; no retry | REST fallback | query rewrite | diagnostic API",
+    "direct_operation_artifacts: no handoff | operation manifest | generated script | child session; inventory and flush payloads stay process-only",
+    "tracker_unavailable: redacted session checkpoint; never a worker or API retry loop",
   ]) assert.ok(direct[1].includes(contract), contract);
   const scoutFanout = coordinator.content.match(
     /SCOUT_FANOUT_FIXTURE\r?\n([\s\S]+?)\r?\nEND_SCOUT_FANOUT_FIXTURE/,
@@ -1407,7 +1416,7 @@ test("runtime contract requires interactive continuation and deterministic recov
   assert.match(reflection[1], /tracker_privacy: no item\/node\/draft ID \| URL \| title \| body \| field value \| status \| inventory payload/);
   assert.match(reflection[1], /user_correction_layer: project immediately/);
   assert.match(reflection[1], /project_layer: same stable scope recurred in a later unit or was injected from an earlier run/);
-  assert.match(reflection[1], /dedup: same scope updates trigger and hits; cause and prevention change only through replace/);
+  assert.match(reflection[1], /dedup: same scope updates trigger and hits; equivalent evidence reuses the injected scope; synonym scopes forbidden/);
   assert.match(reflection[1], /call_limit: one record per triggering event; three record calls per run/);
   assert.match(reflection[1], /injected_project_recurrence: record project once to increment hits/);
   assert.match(reflection[1], /non_triggers: code bug \| ordinary validation failure/);
@@ -1416,7 +1425,8 @@ test("runtime contract requires interactive continuation and deterministic recov
   assert.match(reflection[1], /list: never before record; once before replace \| forget \| promote only when target id is absent/);
   assert.match(reflection[1], /correction: improved cause or prevention -> replace; disproved attribution -> forget/);
   assert.match(reflection[1], /forget_confirmation: none; exact entry id is the deletion boundary/);
-  assert.match(reflection[1], /durable_fix: hits>=2 or policy-related user correction -> create durable-fix candidate/);
+  assert.match(reflection[1], /durable_fix: hits>=2 or policy-related user correction -> report follow-up after active batch; new explicit top-level request required/);
+  assert.match(reflection[1], /active_batch_quarantine: no process-only candidate \| instruction edit \| Task \| review \| batch unit \| tracker mutation \| commit/);
   assert.match(reflection[1], /promotion: durable fix committed -> promote/);
   assert.match(reflection[1], /read: automatic injection with id and hits under SORTIE_PROCESS_REFLECTIONS/);
 
@@ -1426,7 +1436,11 @@ test("runtime contract requires interactive continuation and deterministic recov
   assert.ok(drain);
   for (const contract of [
     "drain_counts: batchAttempted=terminal handoffs; batchCommitted=new commits; batchReconciled=accepted existing commits",
-    "continuation: terminal handoff -> Project checkpoint -> same identity-preserving resolver -> compact resume -> complete reinventory",
+    "inventory_acquisition: once at drain start in one client invocation; never after compaction",
+    "candidate_queue: at most backlogDrain.maxUnits; deterministic acceptance fingerprint + hashes + bounded digest + required selection fields; raw body discarded",
+    "continuation: terminal handoff -> session checkpoint -> local queue update -> compact resume; no tracker access",
+    "tracker_flush: once when drain stops; all pending updates in one direct invocation",
+    "queue_exhausted: stop without inventory refresh; next top-level request may reacquire",
     "source_identity: preserve root source agent identity across drain compaction",
     "child_promotion: child session -> root rejected",
     "pending_host_autocontinue: drain compaction rejected",

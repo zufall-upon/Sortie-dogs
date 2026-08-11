@@ -213,7 +213,7 @@ const ROLLOVER_PROMPT = [
   "The coordinator final report immediately before compaction is the newest source of truth. Its outcomes and next action override older context.",
   "Never list a unit as uncommitted or next when that final report says it was committed or completed.",
   "Drop the finished unit's conversation, raw logs, diffs, and tool output.",
-  "Preserve task identity, every accepted fact, both manifests, ordered validation history, batchTarget, batchAttempted, batchCommitted, batchReconciled, blocker state, and the exact next action. If a value is absent, write なし; never guess one.",
+  "Preserve task identity, every accepted fact, both manifests, ordered validation history, batchTarget, batchAttempted, batchCommitted, batchReconciled, inventory fingerprint, bounded candidate queue, pending tracker updates, tracker flush state, blocker state, and the exact next action. If a value is absent, write なし; never guess one.",
   "Never write credentials, API keys, tokens, personal data, or source code.",
   "Never output an HTML comment.",
   "",
@@ -236,6 +236,10 @@ const ROLLOVER_PROMPT = [
   "## batch counters",
   "- batchTarget: <n> / batchAttempted: <n> / batchCommitted: <n> / batchReconciled: <n>",
   "",
+  "## tracker batch state",
+  "- inventoryFingerprint: <fingerprint> / candidateQueue: <bounded identity, status, ordering, implementation root, acceptance fingerprint, acceptance hashes, and redacted acceptance digest records>",
+  "- pendingTrackerUpdates: <terminal outcomes awaiting flush> / flushState: <pending | flushed | reconciliation-required>",
+  "",
   "## 未解決blocker",
   "- <blocker> | <解消条件>",
   "",
@@ -249,8 +253,8 @@ const RECOVERY_ROLLOVER_PROMPT = ROLLOVER_PROMPT
     "The recovery report overrides only terminal outcomes and batch counters. Preserve unmet user requirements, ordered scope, no-stop constraints, and the exact next unit from the conversation.",
   )
   .replace(
-    "Preserve task identity, every accepted fact, both manifests, ordered validation history, batchTarget, batchAttempted, batchCommitted, batchReconciled, blocker state, and the exact next action. If a value is absent, write なし; never guess one.",
-    "Preserve task identity, every accepted fact, both manifests, ordered validation history, batchTarget, batchAttempted, batchCommitted, batchReconciled, blocker state, unmet ordered scope, and the exact next unit. If a value is absent, write なし; never guess one.",
+    "Preserve task identity, every accepted fact, both manifests, ordered validation history, batchTarget, batchAttempted, batchCommitted, batchReconciled, inventory fingerprint, bounded candidate queue, pending tracker updates, tracker flush state, blocker state, and the exact next action. If a value is absent, write なし; never guess one.",
+    "Preserve task identity, every accepted fact, both manifests, ordered validation history, batchTarget, batchAttempted, batchCommitted, batchReconciled, inventory fingerprint, bounded candidate queue, pending tracker updates, tracker flush state, blocker state, unmet ordered scope, and the exact next unit. If a value is absent, write なし; never guess one.",
   );
 
 const ROLLOVER_HEADINGS = [
@@ -259,6 +263,7 @@ const ROLLOVER_HEADINGS = [
   "## manifest",
   "## validation履歴",
   "## batch counters",
+  "## tracker batch state",
   "## 未解決blocker",
   "## 次action",
 ] as const;
