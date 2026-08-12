@@ -102,6 +102,15 @@ test("review dispatch requires canonical PASS and recognized risk tags", () => {
   );
 });
 
+test("review dispatch accepts public API privacy and transaction risks", () => {
+  const lane = new FastLaneController();
+  lane.beginTurn("root", false);
+  lane.beforeTool("root", "task", {
+    subagent_type: "dog-reviewer",
+    prompt: "review_phase: initial\ncanonical_validation_exit: 0\nrisk_tags: [public-api, privacy, transaction]",
+  });
+});
+
 test("typed evidence fields reject duplicates, case changes, and unbracketed risks", () => {
   const invalidPrompts = [
     "missing_evidence_code: manifest\nmissing_evidence_code: validation",

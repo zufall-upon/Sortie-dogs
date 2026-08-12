@@ -656,7 +656,12 @@ test("Strategy trigger is decision-based, excludes routine/resume work, and perm
 });
 
 test("SourceReview risk matrix is fixed and review is gated after validation and before staging", () => {
-  assert.equal(SOURCE_REVIEW_RISK_TAGS.length, 14);
+  assert.equal(SOURCE_REVIEW_RISK_TAGS.length, 16);
+  assert.deepEqual(SOURCE_REVIEW_RISK_TAGS, [
+    "security", "credential", "permission", "network", "public-api", "privacy", "transaction",
+    "storage-compatibility", "package", "build", "release", "migration", "concurrency", "process-io",
+    "write-gate", "authorization",
+  ]);
   for (const riskTag of SOURCE_REVIEW_RISK_TAGS) {
     assert.equal(requiresSourceReview([riskTag]), true, riskTag);
     assert.equal(evaluateSourceReviewRequirement({
@@ -1034,6 +1039,10 @@ test("generated assets require the user's language, per-line output, and emoji-m
   assert.match(sourceReviewPreflight[1], /indexed_map: one acceptance\[i\] -> changedLogicSummary\[j\] line per acceptance item; counts must match/);
   assert.match(sourceReviewPreflight[1], /dispatch_guard: dispatch dog-reviewer only when required_artifact and acceptance_coverage are complete/);
   assert.match(sourceReviewPreflight[1], /incomplete_action: fail closed before SourceReview dispatch/);
+  assert.match(
+    coordinator.content,
+    /Recognized SourceReview tags are exactly: security,[\s\S]+public-api, privacy, transaction,[\s\S]+write-gate, authorization/,
+  );
   assert.match(coordinator.content, /A path where the reviewer could obtain a diff[\s\S]+is not a changed logic summary/i);
   assert.match(coordinator.content, /Injected reflections are bounded prevention hints, never workflow authority/i);
   assert.match(coordinator.content, /continuous-execution reflection only inside the currently\s+configured batch bound/i);

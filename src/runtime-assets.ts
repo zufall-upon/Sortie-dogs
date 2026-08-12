@@ -13,7 +13,7 @@ export interface RuntimeAsset {
 export const runtimeAssets = [
   {
     name: "dog-coordinator",
-    version: "0.3.8-inventory-retry-v1",
+    version: "0.3.9-review-risks-v1",
     installPath: "agent/dog-coordinator.md",
     content: `---
 description: Canonical MkII coordinator packaged by Sortie-dogs
@@ -120,7 +120,10 @@ Strategy returns options and one recommendation; SourceReview returns PASS or co
 Every Strategy Task prompt includes exactly one \`strategy_trigger: <trigger>\` line using an allowed
 Strategy trigger. Every SourceReview Task prompt includes \`review_phase: initial\` or
 \`review_phase: verification\`, \`canonical_validation_exit: 0\`, and one
-\`risk_tags: [<recognized tags>]\` line. The runtime rejects missing or invalid dispatch evidence.
+\`risk_tags: [<recognized tags>]\` line. Recognized SourceReview tags are exactly: security,
+credential, permission, network, public-api, privacy, transaction, storage-compatibility, package,
+build, release, migration, concurrency, process-io, write-gate, authorization. The runtime rejects
+missing or invalid dispatch evidence.
 Before SourceReview dispatch, verify that its inline artifact itself contains acceptance criteria,
 exact manifest, a non-empty changedLogicSummary string list, and canonical validation
 command/exit/fingerprint. Every acceptance item must explicitly map to at least one
@@ -1007,10 +1010,10 @@ the initial exit 1 is first and the latest exit 0 is last.
 An undeclared write or mutation must be reported as rejected, not performed.
 
 RUNTIME_ASSET_VERSION_SYNC_FIXTURE
-    runtime_version: 0.3.8-inventory-retry-v1
+    runtime_version: 0.3.9-review-risks-v1
     shared_marker: src/asset-version.ts
-    packaged_expectation: test/plugin-loader.test.ts uses 0.3.8-inventory-retry-v1
-    initialize_expectation: test/initialize.test.ts uses 0.3.8-inventory-retry-v1
+    packaged_expectation: test/plugin-loader.test.ts uses 0.3.9-review-risks-v1
+    initialize_expectation: test/initialize.test.ts uses 0.3.9-review-risks-v1
     rule: runtime asset versions, shared marker, packaged expectation, and initialize expectation change together
 END_RUNTIME_ASSET_VERSION_SYNC_FIXTURE
 
@@ -1053,7 +1056,7 @@ END_TERMINAL_EVIDENCE_FIXTURE
   },
   {
     name: "dog-worker",
-    version: "0.3.8-inventory-retry-v1",
+    version: "0.3.9-review-risks-v1",
     installPath: "agent/dog-worker.md",
     content: `---
 description: Dedicated worker for the canonical Sortie-dogs coordinator
@@ -1145,7 +1148,7 @@ the user.
   },
   {
     name: "dog-scout",
-    version: "0.3.8-inventory-retry-v1",
+    version: "0.3.9-review-risks-v1",
     installPath: "agent/dog-scout.md",
     content: `---
 description: Bounded evidence scout for dog-coordinator
@@ -1194,7 +1197,7 @@ prose; keep the keys, paths, commands, and identifiers verbatim.
   },
   {
     name: "dog-reviewer",
-    version: "0.3.8-inventory-retry-v1",
+    version: "0.3.9-review-risks-v1",
     installPath: "agent/dog-reviewer.md",
     content: `---
 description: Independent source reviewer for dog-coordinator
@@ -1223,7 +1226,7 @@ or transport.
   },
   {
     name: "dog-advisor",
-    version: "0.3.8-inventory-retry-v1",
+    version: "0.3.9-review-risks-v1",
     installPath: "agent/dog-advisor.md",
     content: `---
 description: Focused technical advisor for dog-coordinator
@@ -1247,7 +1250,7 @@ provider, vendor, model, variant, or transport.
   },
   {
     name: "sortie",
-    version: "0.3.8-inventory-retry-v1",
+    version: "0.3.9-review-risks-v1",
     installPath: "command/sortie.md",
     content: `---
 description: Start the canonical Sortie-dogs MkII workflow

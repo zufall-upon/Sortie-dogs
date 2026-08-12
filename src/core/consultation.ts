@@ -40,6 +40,8 @@ export const SOURCE_REVIEW_RISK_TAGS = [
   "permission",
   "network",
   "public-api",
+  "privacy",
+  "transaction",
   "storage-compatibility",
   "package",
   "build",
