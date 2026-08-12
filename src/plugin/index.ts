@@ -642,7 +642,7 @@ function parallelTaskMode(text: string): ActiveSessionState["parallel"] {
   const countValue = handoffValue(entries, ["parallel_units"]);
   if (group === undefined && unit === undefined && countValue === undefined) return "none";
   const count = Number(countValue);
-  if (group?.toLowerCase() === "none" && unit?.toLowerCase() === "none" && count === 1) return "none";
+  if (group?.toLowerCase() === "none" && unit !== undefined && count === 1) return "none";
   return group !== undefined && group.toLowerCase() !== "none" &&
     unit !== undefined && unit.toLowerCase() !== "none" &&
     Number.isInteger(count) && count >= 2 && count <= 3 ? "valid" : "invalid";
@@ -1907,6 +1907,12 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         releaseSessionEnforcement(chatInput.sessionID);
         await rememberCoordinatorRoot(chatInput.sessionID);
       } else {
+        if (!synthetic && isCoordinatorSession(chatInput.sessionID)) {
+          fastLane.forget(chatInput.sessionID);
+          abortCoordinatorTasks(chatInput.sessionID);
+          continuation.forgetSession(chatInput.sessionID);
+          evictSession(chatInput.sessionID);
+        }
         const taskText = explicitTaskText(output);
         let inheritedRoot = taskText === undefined
           ? undefined

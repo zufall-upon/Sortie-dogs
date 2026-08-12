@@ -2541,6 +2541,41 @@ test("coordinator task hooks enforce the single-worker fast lane across syntheti
   });
 });
 
+test("an explicit real build turn relinquishes an in-memory coordinator route", async () => {
+  await withProject("coordinator-route-relinquished", async (directory) => {
+    const hooks = await SortieDogsPlugin({ directory });
+    const chat = hooks["chat.message"]!;
+    const before = hooks["tool.execute.before"]!;
+    await chat(
+      { sessionID: "shared", agent: "dog-coordinator" },
+      {
+        message: { agent: "dog-coordinator", model: { providerID: "host", modelID: "selected" } },
+        parts: [{ type: "text", text: "sortie task" }],
+      },
+    );
+    await before(
+      { tool: "task", sessionID: "shared", callID: "sortie-worker" },
+      { args: { subagent_type: "dog-worker", prompt: "role: implementation" } },
+    );
+    await chat(
+      { sessionID: "shared", agent: "build" },
+      {
+        message: { agent: "build", model: { providerID: "host", modelID: "selected" } },
+        parts: [{ type: "text", text: "continue directly" }],
+      },
+    );
+
+    await before(
+      { tool: "task", sessionID: "shared", callID: "generic-sol" },
+      { args: { subagent_type: "agent-mk2a2-sol", prompt: "bounded implementation" } },
+    );
+    await before(
+      { tool: "task", sessionID: "shared", callID: "generic-terra" },
+      { args: { subagent_type: "implementer", prompt: "second generic task" } },
+    );
+  });
+});
+
 test("a dispatched fast-lane worker suppresses legacy terminal compaction", async () => {
   await withProject("single-worker-terminal-marker", async (directory) => {
     const hooks = await SortieDogsPlugin({ directory });
@@ -3772,6 +3807,41 @@ test("a restarted plugin recovers a command-routed coordinator from its latest p
       { args: { subagent_type: "dog-worker", prompt } },
     );
     await hooks.event!({ event: { type: "session.created", properties: { info: { id: "child", parentID: "root", directory } } } });
+    await hooks["chat.message"]!(
+      { sessionID: "child", agent: "dog-worker", parentID: "root" } as never,
+      {
+        message: { agent: "dog-worker", model: { providerID: "host", modelID: "selected" } },
+        parts: [{ type: "text", text: prompt }],
+      },
+    );
+    await inspectHandoffWithRead(hooks, handoffPath, "child");
+    assert.equal((await executeBindWriteGate(hooks, directory, "child")).status, "bound");
+  });
+});
+
+test("serial handoff accepts a unit label when group is none and count is one", async () => {
+  await withProject("serial-unit-label", async (directory) => {
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+    const handoffPath = join(directory, "handoff.json");
+    await writeFile(handoffPath, JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
+    const hooks = await SortieDogsPlugin({ directory });
+    await hooks["chat.message"]!(
+      { sessionID: "root", agent: "dog-coordinator" },
+      {
+        message: { agent: "dog-coordinator", model: { providerID: "host", modelID: "selected" } },
+        parts: [{ type: "text", text: "dispatch" }],
+      },
+    );
+    await hooks.event!({ event: { type: "session.created", properties: { info: { id: "child", parentID: "root", directory } } } });
+    const prompt = [
+      `project_root: ${directory}`,
+      "acceptance: safe change",
+      "role: implementation",
+      "operation_manifest: operation-manifest.json",
+      "parallel_group: none",
+      "parallel_unit: serial-task-id",
+      "parallel_units: 1",
+    ].join("\n");
     await hooks["chat.message"]!(
       { sessionID: "child", agent: "dog-worker", parentID: "root" } as never,
       {
