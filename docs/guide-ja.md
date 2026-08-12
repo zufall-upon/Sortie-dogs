@@ -290,7 +290,7 @@ stage、commit、ユーザー対応を行わない。
 
 ## 更新と移行
 
-[Release v0.4.6](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.4.6)
+[Release v0.4.7](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.4.7)
 
 依存 asset を新しい release に更新後、対象 project root で再実行する。
 

@@ -47,6 +47,10 @@ interface FastLaneTurnState {
   totalWorkerDispatches: number;
   workerLimit: number;
   workerDispatches: number;
+  workerResumeSessionID?: string;
+  workerResumeTaskID?: string;
+  workerResumeUsed: boolean;
+  workerTaskID?: string;
 }
 
 interface ReviewCandidateState {
@@ -67,7 +71,8 @@ function taskArgument(args: unknown, key: string): string | undefined {
 }
 
 function lineValue(prompt: string, key: string): string | undefined {
-  const values = [...prompt.matchAll(new RegExp(`^\\s*${key}\\s*:\\s*(.+?)\\s*$`, "gmu"))];
+  const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  const values = [...prompt.matchAll(new RegExp(`^\\s*${escapedKey}\\s*:\\s*(.+?)\\s*$`, "gmu"))];
   return values.length === 1 ? values[0]![1] : undefined;
 }
 
@@ -91,6 +96,7 @@ function freshState(): FastLaneTurnState {
     totalWorkerDispatches: 0,
     workerLimit: 1,
     workerDispatches: 0,
+    workerResumeUsed: false,
   };
 }
 
@@ -105,6 +111,7 @@ function lockedState(): FastLaneTurnState {
     totalWorkerDispatches: 1,
     workerLimit: 1,
     workerDispatches: 1,
+    workerResumeUsed: true,
   };
 }
 
@@ -147,6 +154,10 @@ export class FastLaneController {
         state.reviewsLocked = false;
         state.scoutDispatches = 0;
         state.workerDispatches = 0;
+        delete state.workerResumeSessionID;
+        delete state.workerResumeTaskID;
+        state.workerResumeUsed = false;
+        delete state.workerTaskID;
       }
       return;
     }
@@ -201,7 +212,16 @@ export class FastLaneController {
     }
   }
 
-  beforeTool(sessionID: string, tool: string, args: unknown, options: FastLaneToolOptions = {}): void {
+  authorizeRecoverableWorkerResume(sessionID: string, taskID: string, childSessionID: string): boolean {
+    const state = this.sessions.get(sessionID);
+    if (state === undefined || state.workerDispatches !== 1 || state.workerResumeUsed ||
+      state.workerTaskID === undefined || taskID !== state.workerTaskID) return false;
+    state.workerResumeSessionID = childSessionID;
+    state.workerResumeTaskID = state.workerTaskID;
+    return true;
+  }
+
+  beforeTool(sessionID: string, tool: string, args: unknown, options: FastLaneToolOptions = {}): string | undefined {
     const state = this.sessions.get(sessionID);
     if (state === undefined) {
       if (tool === "task" || MANUAL_COMPACTION_TOOLS.has(tool)) {
@@ -220,11 +240,23 @@ export class FastLaneController {
     const role = taskArgument(args, "subagent_type");
     const prompt = taskArgument(args, "prompt") ?? "";
     if (role === "dog-worker") {
+      const taskID = lineValue(prompt, "task_id");
+      if (state.workerDispatches >= 1 && state.workerResumeTaskID !== undefined &&
+        state.workerResumeSessionID !== undefined &&
+        !state.workerResumeUsed && lineValue(prompt, "mode") === "same-task-resume" &&
+        taskID === state.workerResumeTaskID &&
+        taskArgument(args, "task_id") === state.workerResumeSessionID) {
+        state.workerResumeUsed = true;
+        delete state.workerResumeSessionID;
+        delete state.workerResumeTaskID;
+        return taskArgument(args, "task_id");
+      }
       if (state.workerDispatches >= 1 || state.totalWorkerDispatches >= state.workerLimit) {
         throw new FastLaneDeniedError("WORKER_LIMIT");
       }
       state.workerDispatches += 1;
       state.totalWorkerDispatches += 1;
+      state.workerTaskID = taskID;
       return;
     }
     if (role === "dog-scout") {

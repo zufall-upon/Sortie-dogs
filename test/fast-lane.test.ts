@@ -27,6 +27,57 @@ test("normal turns permit one worker and reset only on a real turn", () => {
   lane.beforeTool("root", "task", worker);
 });
 
+test("one exact handoff-uninspected result permits one same-task worker resume", () => {
+  const lane = new FastLaneController();
+  lane.beginTurn("root", false);
+  lane.beforeTool("root", "task", {
+    subagent_type: "dog-worker",
+    prompt: "task_id: task-a\nrole: implementation",
+  });
+  assert.equal(lane.authorizeRecoverableWorkerResume("root", "task-a", "child-a"), true);
+  lane.beforeTool("root", "task", {
+    subagent_type: "dog-worker",
+    task_id: "child-a",
+    prompt: "task_id: task-a\nmode: same-task-resume\nrole: implementation",
+  });
+  expectDenial(
+    () => lane.beforeTool("root", "task", {
+      subagent_type: "dog-worker",
+      prompt: "task_id: task-a\nmode: same-task-resume\nrole: implementation",
+    }),
+    "WORKER_LIMIT",
+  );
+});
+
+test("worker resume stays scoped to the original task and one use", () => {
+  const lane = new FastLaneController();
+  lane.beginTurn("root", false);
+  lane.beforeTool("root", "task", { subagent_type: "dog-worker", prompt: "task_id: task-a" });
+  assert.equal(lane.authorizeRecoverableWorkerResume("root", "task-a", "child-a"), true);
+  expectDenial(
+    () => lane.beforeTool("root", "task", {
+      subagent_type: "dog-worker",
+      prompt: "task_id: task-b\nmode: same-task-resume",
+    }),
+    "WORKER_LIMIT",
+  );
+});
+
+test("worker resume rejects a different child with the same task identity", () => {
+  const lane = new FastLaneController();
+  lane.beginTurn("root", false);
+  lane.beforeTool("root", "task", { subagent_type: "dog-worker", prompt: "task_id: task-a" });
+  assert.equal(lane.authorizeRecoverableWorkerResume("root", "task-a", "child-a"), true);
+  expectDenial(
+    () => lane.beforeTool("root", "task", {
+      subagent_type: "dog-worker",
+      task_id: "child-b",
+      prompt: "task_id: task-a\nmode: same-task-resume",
+    }),
+    "WORKER_LIMIT",
+  );
+});
+
 test("scout requires one concrete pre-worker evidence gap", () => {
   const lane = new FastLaneController();
   lane.beginTurn("root", false);

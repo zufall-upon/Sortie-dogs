@@ -1791,11 +1791,13 @@ async function beginTrackedTaskChild(
   parentID: string,
   childID: string,
   callID: string,
+  taskID?: string,
 ): Promise<void> {
   const chat = hooks["chat.message"]!;
   const before = hooks["tool.execute.before"]!;
   const task = [
     "context_digest:",
+    ...(taskID === undefined ? [] : [`  task_id: ${taskID}`]),
     `  project_root: ${directory}`,
     "  acceptance: safe change",
     "  role: implementation",
@@ -4793,6 +4795,62 @@ test("parent idle evicts authorization left by an interrupted Task call", async 
       'Write denied for "<unknown>": operation manifest unavailable.',
       "manifest-unavailable",
     );
+  });
+});
+
+test("parent idle retains only a recoverable worker until its same-child resume", async () => {
+  await withProject("recoverable-task-idle", async (directory) => {
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+    await writeFile(join(directory, "handoff.json"), JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
+    const hooks = await SortieDogsPlugin({ directory });
+    const task = [
+      "context_digest:",
+      "  task_id: task-a",
+      `  project_root: ${directory}`,
+      "  acceptance: safe change",
+      "  role: implementation",
+      "  source_manifest: [allowed.txt]",
+    ].join("\n");
+    await hooks["chat.message"]!(
+      { sessionID: "parent", agent: "dog-coordinator" },
+      { message: { agent: "dog-coordinator", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: "tracked task" }] },
+    );
+    await hooks["tool.execute.before"]!(
+      { tool: "task", sessionID: "parent", callID: "first-task" },
+      { args: { subagent_type: "dog-worker", prompt: task } },
+    );
+    await hooks.event!({ event: { type: "session.created", properties: { info: { id: "child", parentID: "parent", directory } } } });
+    await hooks["chat.message"]!(
+      { sessionID: "child", agent: "dog-worker", parentID: "parent" } as never,
+      { message: { agent: "dog-worker", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: task }] },
+    );
+    assert.equal((await executeBindWriteGate(hooks, directory, "child")).reason, "handoff-uninspected");
+    await hooks["tool.execute.after"]!(
+      { tool: "task", sessionID: "parent", callID: "first-task" },
+      { output: "<task><task_result>denied</task_result></task>", metadata: { sessionId: "child" } },
+    );
+
+    await hooks.event!({ event: { type: "session.idle", properties: { sessionID: "parent" } } });
+    await hooks["tool.execute.before"]!(
+      { tool: "task", sessionID: "parent", callID: "resume-task" },
+      { args: { subagent_type: "dog-worker", task_id: "child", prompt: `${task}\nmode: same-task-resume` } },
+    );
+    await inspectHandoffWithRead(hooks, join(directory, "handoff.json"), "child");
+    assert.equal((await executeBindWriteGate(hooks, directory, "child")).status, "bound");
+    await hooks["tool.execute.after"]!(
+      { tool: "task", sessionID: "parent", callID: "resume-task" },
+      { output: "<task><task_result>bound</task_result></task>", metadata: { sessionId: "child" } },
+    );
+    assert.equal((await executeBindWriteGate(hooks, directory, "child")).reason, "session-inactive");
+
+    await beginTrackedTaskChild(hooks, directory, "deleted-parent", "deleted-child", "deleted-task", "task-delete");
+    assert.equal((await executeBindWriteGate(hooks, directory, "deleted-child")).reason, "handoff-uninspected");
+    await hooks["tool.execute.after"]!(
+      { tool: "task", sessionID: "deleted-parent", callID: "deleted-task" },
+      { output: "<task><task_result>denied</task_result></task>", metadata: { sessionId: "deleted-child" } },
+    );
+    await hooks.event!({ event: { type: "session.deleted", properties: { sessionID: "deleted-parent" } } });
+    assert.equal((await executeBindWriteGate(hooks, directory, "deleted-child")).reason, "session-inactive");
   });
 });
 

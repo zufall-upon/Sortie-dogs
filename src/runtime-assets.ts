@@ -13,7 +13,7 @@ export interface RuntimeAsset {
 export const runtimeAssets = [
   {
     name: "dog-coordinator",
-    version: "0.3.10-review-candidates-v1",
+    version: "0.3.11-worker-resume-v1",
     installPath: "agent/dog-coordinator.md",
     content: `---
 description: Canonical MkII coordinator packaged by Sortie-dogs
@@ -824,7 +824,7 @@ FRESH_REDISPATCH_HANDOFF_FIXTURE
 END_FRESH_REDISPATCH_HANDOFF_FIXTURE
 
 RECOVERABLE_HANDSHAKE_FIXTURE
-    denial_shape: { status: denied, reason: <reason>, recoverable: true, remedy: <short action> }
+    denial_shape: { "denial": { "status": "denied", "reason": "<reason>", "recoverable": true, "remedy": "<short action>", "escalation": { "action": "<action>", "resume_session": <boolean>, "true_blocker": <boolean> } }, "provenance": { "task_id": "<stable task id>", "source_manifest": <exact entries or "none">, "operation_manifest": "<exact path or none>", "validation": [], "scout": { "attempted": <boolean>, "revision": "<revision>", "blocker_owner": "<owner>", "reason": "<exact decision reason>" }, "changes": "none" } }
     recoverable_reasons: session-inactive | session-expired | handoff-uninspected | handoff-mismatch
     recoverable_bind_signal: escalation.action=blocker-resolution-takeover; resume_session=true; true_blocker=false
     nonrecoverable_bind_signal: escalation.action=follow-remedy; resume_session=false; existing remedy takes priority
@@ -835,7 +835,7 @@ RECOVERABLE_HANDSHAKE_FIXTURE
     inspection_authority: successful built-in Read by binding child only; shell/coordinator/sibling/file.edited do not grant
     idle_revalidation: already bound handoff only; never creates initial inspection
     inactive_authorization: session activation denied; write gate denied; mutation denied
-    worker_return: structured denial unchanged + bounded candidate provenance to dog-coordinator; terminal and question forbidden
+    worker_return: exactly one JSON object matching denial_shape; no wrapper key changes, prose, markdown fence, terminal, or question
     provenance: { task_id: <stable task id>, manifest: { source_manifest: <exact entries or none>, operation_manifest: <exact path or none> }, validation: [{ command: <exact command>, exit: <exit>, fingerprint: <concise fingerprint> }] | [], scout: { attempted: <boolean>, revision: <revision>, blocker_owner: <owner>, reason: <exact decision reason> } }
     handoff_mismatch: dog-coordinator regenerates registered handoff; worker never rewrites it
     retry_exhausted: nonrecoverable local blocker; never replace child to repeat same bind
@@ -1013,10 +1013,10 @@ the initial exit 1 is first and the latest exit 0 is last.
 An undeclared write or mutation must be reported as rejected, not performed.
 
 RUNTIME_ASSET_VERSION_SYNC_FIXTURE
-    runtime_version: 0.3.10-review-candidates-v1
+    runtime_version: 0.3.11-worker-resume-v1
     shared_marker: src/asset-version.ts
-    packaged_expectation: test/plugin-loader.test.ts uses 0.3.10-review-candidates-v1
-    initialize_expectation: test/initialize.test.ts uses 0.3.10-review-candidates-v1
+    packaged_expectation: test/plugin-loader.test.ts uses 0.3.11-worker-resume-v1
+    initialize_expectation: test/initialize.test.ts uses 0.3.11-worker-resume-v1
     rule: runtime asset versions, shared marker, packaged expectation, and initialize expectation change together
 END_RUNTIME_ASSET_VERSION_SYNC_FIXTURE
 
@@ -1059,7 +1059,7 @@ END_TERMINAL_EVIDENCE_FIXTURE
   },
   {
     name: "dog-worker",
-    version: "0.3.10-review-candidates-v1",
+    version: "0.3.11-worker-resume-v1",
     installPath: "agent/dog-worker.md",
     content: `---
 description: Dedicated worker for the canonical Sortie-dogs coordinator
@@ -1151,7 +1151,7 @@ the user.
   },
   {
     name: "dog-scout",
-    version: "0.3.10-review-candidates-v1",
+    version: "0.3.11-worker-resume-v1",
     installPath: "agent/dog-scout.md",
     content: `---
 description: Bounded evidence scout for dog-coordinator
@@ -1200,7 +1200,7 @@ prose; keep the keys, paths, commands, and identifiers verbatim.
   },
   {
     name: "dog-reviewer",
-    version: "0.3.10-review-candidates-v1",
+    version: "0.3.11-worker-resume-v1",
     installPath: "agent/dog-reviewer.md",
     content: `---
 description: Independent source reviewer for dog-coordinator
@@ -1229,7 +1229,7 @@ or transport.
   },
   {
     name: "dog-advisor",
-    version: "0.3.10-review-candidates-v1",
+    version: "0.3.11-worker-resume-v1",
     installPath: "agent/dog-advisor.md",
     content: `---
 description: Focused technical advisor for dog-coordinator
@@ -1253,7 +1253,7 @@ provider, vendor, model, variant, or transport.
   },
   {
     name: "sortie",
-    version: "0.3.10-review-candidates-v1",
+    version: "0.3.11-worker-resume-v1",
     installPath: "command/sortie.md",
     content: `---
 description: Start the canonical Sortie-dogs MkII workflow

@@ -886,6 +886,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   const expiredSessions = new Set<string>();
   const sessionParents = new Map<string, string>();
   const sessionRoots = new Map<string, string>();
+  const sessionTaskIDs = new Map<string, string>();
+  const recoverableWorkerChildren = new Set<string>();
   const consultationRetries = new Map<
     string,
     { readonly phase: "pending" | "routing" | "consumed"; readonly retryChildSessionID?: string }
@@ -912,10 +914,12 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     return parentID !== undefined && (coordinatorTaskCalls.get(parentID)?.size ?? 0) > 0;
   }
 
-  function abortCoordinatorTasks(sessionID: string): void {
-    if (!coordinatorTaskCalls.delete(sessionID)) return;
+  function abortCoordinatorTasks(sessionID: string, preserveRecoverable = false): void {
+    coordinatorTaskCalls.delete(sessionID);
     for (const [childID, parentID] of [...sessionParents]) {
-      if (parentID === sessionID) evictSession(childID);
+      if (parentID === sessionID && (!preserveRecoverable || !recoverableWorkerChildren.has(childID))) {
+        evictSession(childID);
+      }
     }
   }
 
@@ -1590,6 +1594,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     expiredSessions.delete(sessionID);
     coordinatorRoots.delete(sessionID);
     bindingDenials.delete(sessionID);
+    sessionTaskIDs.delete(sessionID);
+    recoverableWorkerChildren.delete(sessionID);
     clearSessionLinks(sessionID);
   }
 
@@ -1801,7 +1807,21 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           manifest_path: defineTool.schema.string(),
         },
         async execute(args, context): Promise<string> {
-          return await bindWriteGate(context.sessionID, args.project_root, args.manifest_path);
+          const result = await bindWriteGate(context.sessionID, args.project_root, args.manifest_path);
+          try {
+            const denial = JSON.parse(result) as { reason?: unknown };
+            const parentID = sessionParents.get(context.sessionID);
+            const taskID = sessionTaskIDs.get(context.sessionID);
+            if (denial.reason === "handoff-uninspected" && parentID !== undefined && taskID !== undefined &&
+              fastLane.authorizeRecoverableWorkerResume(parentID, taskID, context.sessionID)) {
+              recoverableWorkerChildren.add(context.sessionID);
+            } else if (denial.reason !== "handoff-uninspected") {
+              recoverableWorkerChildren.delete(context.sessionID);
+            }
+          } catch {
+            recoverableWorkerChildren.delete(context.sessionID);
+          }
+          return result;
         },
       }),
       sortie_release_write_gate: defineTool({
@@ -1914,6 +1934,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           evictSession(chatInput.sessionID);
         }
         const taskText = explicitTaskText(output);
+        if (taskText !== undefined) {
+          const taskID = handoffValue(handoffEntries(taskText), ["task_id"]);
+          if (taskID !== undefined) sessionTaskIDs.set(chatInput.sessionID, unquoteValue(taskID));
+        }
         let inheritedRoot = taskText === undefined
           ? undefined
           : await inheritedTaskRoot(chatInput.sessionID, taskText);
@@ -2029,7 +2053,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       } finally {
         activeSessions.get(toolInput.sessionID ?? "")?.inFlightCalls.delete(toolInput.callID ?? "");
         if (toolInput.tool === "task") finishCoordinatorTask(toolInput.sessionID, toolInput.callID);
-        if (completedChildSessionID !== undefined) evictSession(completedChildSessionID);
+        if (completedChildSessionID !== undefined && !recoverableWorkerChildren.has(completedChildSessionID)) {
+          evictSession(completedChildSessionID);
+        }
       }
     },
     "tool.execute.before": async (toolInput, output): Promise<void> => {
@@ -2048,9 +2074,12 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         const role = consultationAgent(taskRole);
         const consultationFallbackAuthorized = role !== undefined &&
           consultationRetries.get(consultationRetryKey(toolInput.sessionID, role))?.phase === "pending";
-        fastLane.beforeTool(toolInput.sessionID, toolInput.tool, output.args, {
+        const resumedWorkerSessionID = fastLane.beforeTool(toolInput.sessionID, toolInput.tool, output.args, {
           consultationFallbackAuthorized,
         });
+        if (resumedWorkerSessionID !== undefined) {
+          recoverableWorkerChildren.delete(resumedWorkerSessionID);
+        }
         if (toolInput.tool === "task" && taskRole === "dog-worker") {
           beginCoordinatorTask(toolInput.sessionID, toolInput.callID);
         }
@@ -2173,12 +2202,16 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       if (event.type === "session.compacted") await continuation.sessionCompacted(eventSessionID);
       if (event.type === "session.idle") await continuation.sessionIdle(eventSessionID);
       if (event.type === "session.idle" && isCoordinatorSession(eventSessionID)) {
-        abortCoordinatorTasks(eventSessionID);
+        abortCoordinatorTasks(eventSessionID, true);
       }
       if (!isActiveSession(eventSessionID)) return;
       if (event.type !== "session.idle") touchActiveSession(eventSessionID);
       if (event.type === "session.idle" && eventSessionID !== undefined) {
         activeSessions.get(eventSessionID)?.inFlightCalls.clear();
+        if (recoverableWorkerChildren.has(eventSessionID)) {
+          touchActiveSession(eventSessionID);
+          return;
+        }
         if (childHasInFlightParentTask(eventSessionID)) {
           touchActiveSession(eventSessionID);
           return;
