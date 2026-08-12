@@ -56,6 +56,7 @@ import {
   createTaskResultRepairHook,
   markConsultationFallbackRetry,
   taskChildSessionID,
+  type SessionMessage,
   type SessionMessageReader,
 } from "./task-result-repair.js";
 import { configRoot, nearestPackageVersion, reflectionEnabled, ReflectionError, ReflectionStore } from "../reflection/index.js";
@@ -1669,6 +1670,43 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     }
   }
 
+  async function hostSessionUserTurn(
+    sessionID: string,
+  ): Promise<{ readonly agent: string; readonly synthetic: boolean } | undefined> {
+    const messages = input.client?.session?.messages;
+    if (messages === undefined) return undefined;
+    try {
+      const response = await messages.call(input.client!.session, { path: { id: sessionID } });
+      const payload = isRecord(response) && "data" in response ? response.data : response;
+      if (!Array.isArray(payload)) return undefined;
+      for (let index = payload.length - 1; index >= 0; index -= 1) {
+        const message = payload[index] as SessionMessage;
+        if ((message.info?.role ?? message.role) !== "user") continue;
+        const agent = message.info?.agent ?? message.agent;
+        if (typeof agent !== "string") return undefined;
+        return {
+          agent,
+          synthetic: (message.parts ?? []).some((part) => part.synthetic === true),
+        };
+      }
+      return undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  async function recoverCoordinatorRoot(sessionID: string): Promise<boolean> {
+    if (isCoordinatorSession(sessionID)) return true;
+    const identity = await hostSessionIdentity(sessionID);
+    if (identity === undefined || identity.parentPresent) return false;
+    const persistedTurn = await hostSessionUserTurn(sessionID);
+    if (persistedTurn?.agent !== COORDINATOR_AGENT) return false;
+    await rememberCoordinatorRoot(sessionID);
+    releaseSessionEnforcement(sessionID);
+    fastLane.beginTurn(sessionID, persistedTurn?.synthetic ?? false);
+    return true;
+  }
+
   function consultationRetryKey(parentID: string, role: ConsultationAgent): string {
     return `${parentID}\u0000${role}`;
   }
@@ -1703,9 +1741,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   async function recoverCoordinatorLineage(sessionID: string): Promise<string | undefined> {
     const child = await hostSessionIdentity(sessionID);
     if (child?.parentID === undefined) return undefined;
-    const parent = await hostSessionIdentity(child.parentID);
-    if (parent?.agent !== COORDINATOR_AGENT || parent.parentPresent) return undefined;
-    await rememberCoordinatorRoot(child.parentID);
+    if (!await recoverCoordinatorRoot(child.parentID)) return undefined;
     rememberParent(sessionID, child.parentID);
     return child.parentID;
   }
@@ -1991,7 +2027,12 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       }
     },
     "tool.execute.before": async (toolInput, output): Promise<void> => {
-      if (isCoordinatorSession(toolInput.sessionID)) {
+      const coordinatorCapability = toolInput.tool === "task" ||
+        toolInput.tool === CONTINUATION_CAPABILITY || toolInput.tool === BACKLOG_DRAIN_CAPABILITY;
+      if (
+        isCoordinatorSession(toolInput.sessionID) ||
+        (coordinatorCapability && await recoverCoordinatorRoot(toolInput.sessionID))
+      ) {
         if (continuation.blocksTool(toolInput.sessionID)) {
           throw new Error("SORTIE_ROLLOVER_PENDING: stop this turn and wait for compaction");
         }

@@ -32,6 +32,7 @@ import {
 import {
   CONSULTATION_FALLBACK_RETRY_MARKER,
   lastAssistantText,
+  type SessionMessage,
 } from "../dist/plugin/task-result-repair.js";
 import { ReflectionStore } from "../dist/reflection/index.js";
 import { configRoot } from "../dist/reflection/config.js";
@@ -3698,6 +3699,10 @@ test("a late child re-proves expired coordinator lineage from host session ident
     const client = {
       session: {
         get: async ({ path }: { path: { id: string } }) => ({ data: identities[path.id] }),
+        messages: async ({ path }: { path: { id: string } }) => ({ data: path.id === "host-root" ? [{
+          info: { role: "user", agent: "dog-coordinator" },
+          parts: [{ type: "text", text: "continue" }],
+        }] : [] }),
       },
     };
     const hooks = await SortieDogsPlugin({ directory, client });
@@ -3730,6 +3735,96 @@ test("a late child re-proves expired coordinator lineage from host session ident
     } finally {
       Date.now = originalNow;
     }
+  });
+});
+
+test("a restarted plugin recovers a command-routed coordinator from its latest persisted user turn", async () => {
+  await withProject("lineage-command-restart", async (directory) => {
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+    const handoffPath = join(directory, "handoff.json");
+    await writeFile(handoffPath, JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
+    const identities: Record<string, { agent: string; parentID?: string }> = {
+      root: { agent: "build" },
+      child: { agent: "dog-worker", parentID: "root" },
+    };
+    const messages: Record<string, SessionMessage[]> = {
+      root: [{
+        info: { role: "user", agent: "dog-coordinator" },
+        parts: [{ type: "text", text: "continue after restart" }],
+      }],
+      child: [],
+    };
+    const hooks = await SortieDogsPlugin({ directory, client: { session: {
+      get: async ({ path }: { path: { id: string } }) => ({ data: identities[path.id] }),
+      messages: async ({ path }: { path: { id: string } }) => ({ data: messages[path.id] }),
+    } } as never });
+    const prompt = [
+      `project_root: ${directory}`,
+      "acceptance: safe change",
+      "role: implementation",
+      "source_manifest: [allowed.txt]",
+      "operation_manifest: operation-manifest.json",
+    ].join("\n");
+
+    await hooks["tool.execute.before"]!(
+      { tool: "task", sessionID: "root", callID: "restarted-task" },
+      { args: { subagent_type: "dog-worker", prompt } },
+    );
+    await hooks.event!({ event: { type: "session.created", properties: { info: { id: "child", parentID: "root", directory } } } });
+    await hooks["chat.message"]!(
+      { sessionID: "child", agent: "dog-worker", parentID: "root" } as never,
+      {
+        message: { agent: "dog-worker", model: { providerID: "host", modelID: "selected" } },
+        parts: [{ type: "text", text: prompt }],
+      },
+    );
+    await inspectHandoffWithRead(hooks, handoffPath, "child");
+    assert.equal((await executeBindWriteGate(hooks, directory, "child")).status, "bound");
+  });
+});
+
+test("restart recovery rejects a stale coordinator route and a cold synthetic turn", async () => {
+  await withProject("lineage-command-restart-denied", async (directory) => {
+    const identities = { root: { agent: "build" } };
+    const plugin = async (agent: string, synthetic: boolean) => await SortieDogsPlugin({
+      directory,
+      client: { session: {
+        get: async () => ({ data: identities.root }),
+        messages: async () => ({ data: [{
+          info: { role: "user", agent },
+          parts: [{ type: "text", text: "resume", ...(synthetic ? { synthetic: true } : {}) }],
+        }] }),
+      } } as never,
+    });
+    const dispatch = async (hooks: Awaited<ReturnType<typeof SortieDogsPlugin>>, callID: string) =>
+      await hooks["tool.execute.before"]!(
+        { tool: "task", sessionID: "root", callID },
+        { args: { subagent_type: "dog-worker", prompt: "role: implementation" } },
+      );
+
+    await dispatch(await plugin("build", false), "stale-route");
+    const synthetic = await plugin("dog-coordinator", true);
+    await expectMessage(
+      () => dispatch(synthetic, "synthetic-route"),
+      "SORTIE_FAST_LANE_DENIED: WORKER_LIMIT",
+    );
+
+    const staleDedicated = await SortieDogsPlugin({ directory, client: { session: {
+      get: async () => ({ data: { agent: "dog-coordinator" } }),
+      messages: async () => ({ data: [{
+        info: { role: "user", agent: "build" },
+        parts: [{ type: "text", text: "switched agent" }],
+      }] }),
+    } } as never });
+    await dispatch(staleDedicated, "dedicated-stale-one");
+    await dispatch(staleDedicated, "dedicated-stale-two");
+
+    const unreadableHistory = await SortieDogsPlugin({ directory, client: { session: {
+      get: async () => ({ data: { agent: "dog-coordinator" } }),
+      messages: async () => { throw new Error("unavailable"); },
+    } } as never });
+    await dispatch(unreadableHistory, "unreadable-one");
+    await dispatch(unreadableHistory, "unreadable-two");
   });
 });
 

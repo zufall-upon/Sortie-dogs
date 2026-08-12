@@ -32,8 +32,9 @@ export interface SessionMessagePart {
 }
 
 export interface SessionMessage {
-  readonly info?: { readonly role?: unknown } | undefined;
+  readonly info?: { readonly role?: unknown; readonly agent?: unknown } | undefined;
   readonly role?: unknown;
+  readonly agent?: unknown;
   readonly parts?: readonly SessionMessagePart[] | undefined;
 }
 
