@@ -2613,6 +2613,34 @@ test("a dispatched fast-lane worker suppresses legacy terminal compaction", asyn
   });
 });
 
+test("a review-only normal lane suppresses legacy terminal compaction", async () => {
+  await withProject("review-only-terminal-marker", async (directory) => {
+    const hooks = await SortieDogsPlugin({ directory });
+    await hooks["chat.message"]!(
+      { sessionID: "root", agent: "dog-coordinator" },
+      {
+        message: { agent: "dog-coordinator", model: { providerID: "host", modelID: "selected" } },
+        parts: [{ type: "text", text: "review only" }],
+      },
+    );
+    await hooks["tool.execute.before"]!(
+      { tool: "task", sessionID: "root", callID: "review" },
+      {
+        args: {
+          subagent_type: "dog-reviewer",
+          prompt: "review_phase: initial\ncanonical_validation_exit: 0\nrisk_tags: [public-api, privacy, transaction]",
+        },
+      },
+    );
+    const system = { system: [] as string[] };
+    await hooks["experimental.chat.system.transform"]!({ sessionID: "root" }, system);
+    assert.match(system.system[0]!, /normal single-unit lane/u);
+    const completed = { text: `review PASS\n${ROLLOVER_MARKER}\n${CONTINUATION_MARKER}` };
+    await hooks["experimental.text.complete"]!({ sessionID: "root" }, completed);
+    assert.equal(completed.text, "review PASS");
+  });
+});
+
 test("typed backlog opt-in permits continuation only before its first worker", async () => {
   await withProject("backlog-drain-opt-in", async (directory) => {
     const hooks = await SortieDogsPlugin({ directory });

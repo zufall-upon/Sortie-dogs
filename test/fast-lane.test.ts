@@ -145,6 +145,8 @@ test("typed evidence fields reject duplicates, case changes, and unbracketed ris
 test("advisor requires a strategy trigger and manual worker compaction is denied", () => {
   const lane = new FastLaneController();
   lane.beginTurn("root", false);
+  assert.equal(lane.manualCompactionForbidden("root"), true);
+  assert.equal(lane.terminalInstructionRequired("root"), false);
   expectDenial(
     () => lane.beforeTool("root", "sortie_compact_and_continue", {}),
     "MANUAL_COMPACTION_FORBIDDEN",
@@ -157,6 +159,7 @@ test("advisor requires a strategy trigger and manual worker compaction is denied
     subagent_type: "dog-advisor",
     prompt: "strategy_trigger: architecture-choice",
   });
+  assert.equal(lane.terminalInstructionRequired("root"), true);
   expectDenial(
     () => lane.beforeTool("root", "task", {
       subagent_type: "dog-advisor",

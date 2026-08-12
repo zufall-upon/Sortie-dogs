@@ -146,8 +146,16 @@ export class FastLaneController {
 
   manualCompactionForbidden(sessionID: string): boolean {
     const state = this.sessions.get(sessionID);
-    return state !== undefined && state.workerDispatches > 0 &&
+    return state !== undefined &&
       (!state.backlogDrain || state.totalWorkerDispatches >= state.workerLimit);
+  }
+
+  terminalInstructionRequired(sessionID: string): boolean {
+    const state = this.sessions.get(sessionID);
+    return state !== undefined && !state.backlogDrain && (
+      state.workerDispatches > 0 || state.scoutDispatches > 0 || state.advisorDispatches > 0 ||
+      state.initialReviewDispatches > 0 || state.verificationReviewDispatches > 0
+    );
   }
 
   backlogDrainEnabled(sessionID: string): boolean {

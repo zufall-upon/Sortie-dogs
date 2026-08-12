@@ -1959,11 +1959,11 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       }
     },
     "experimental.chat.system.transform": async (transformInput: { sessionID: string }, transformOutput: { system?: string[] }): Promise<void> => {
-      if (fastLane.manualCompactionForbidden(transformInput.sessionID)) {
+      if (fastLane.terminalInstructionRequired(transformInput.sessionID)) {
         transformOutput.system = [...(transformOutput.system ?? []),
-          "SORTIE_FAST_LANE_TERMINAL\nA worker was already dispatched in this normal lane. " +
-          "Do not call a compaction capability or emit a continuation marker. " +
-          "After any required risk-based review or coordinator-owned finalization, return the terminal report and stop."];
+          "SORTIE_FAST_LANE_TERMINAL\nThis is a normal single-unit lane. " +
+          "Dispatch at most the one allowed worker, perform any required risk-based review or coordinator-owned finalization, " +
+          "then return the terminal report and stop. Do not call a compaction capability or emit a continuation marker."];
       }
       if (!reflectionStartup || !(await beginReflection(transformInput.sessionID))) return;
       const config = reflectionConfiguration;
