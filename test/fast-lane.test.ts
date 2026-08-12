@@ -111,6 +111,21 @@ test("review dispatch accepts public API privacy and transaction risks", () => {
   });
 });
 
+test("distinct review candidates have independent phases and retry budgets", () => {
+  const lane = new FastLaneController();
+  lane.beginTurn("root", false);
+  lane.beforeTool("root", "task", {
+    subagent_type: "dog-reviewer",
+    prompt: "candidate_id: candidate-a\nreview_phase: final\ncanonical_validation_exit: 0\nrisk_tags: [time, timezone, public-logic]",
+  });
+  const candidateB = {
+    subagent_type: "dog-reviewer",
+    prompt: "candidate_id: candidate-b\nreview_phase: initial\ncanonical_validation_exit: 0\nrisk_tags: [storage-compatibility]",
+  };
+  lane.beforeTool("root", "task", candidateB);
+  expectDenial(() => lane.beforeTool("root", "task", candidateB), "CONSULTATION_RETRY_INVALID");
+});
+
 test("typed evidence fields reject duplicates, case changes, and unbracketed risks", () => {
   const invalidPrompts = [
     "missing_evidence_code: manifest\nmissing_evidence_code: validation",

@@ -1,6 +1,7 @@
 import { isSourceReviewRiskTag, STRATEGY_TRIGGERS } from "../core/consultation.js";
 
 const MAX_SESSIONS = 256;
+const MAX_REVIEW_CANDIDATES = 11;
 const GAP_CODES = new Set(["manifest", "validation", "owner-risk"]);
 const STRATEGY_TRIGGER_SET = new Set<string>(STRATEGY_TRIGGERS);
 const MANUAL_COMPACTION_TOOLS = new Set(["compact_and_continue", "sortie_compact_and_continue"]);
@@ -38,16 +39,21 @@ export class FastLaneDeniedError extends Error {
 interface FastLaneTurnState {
   advisorDispatches: number;
   advisorPrompt?: string;
-  initialReviewDispatches: number;
-  initialReviewPrompt?: string;
-  verificationReviewDispatches: number;
-  verificationReviewPrompt?: string;
+  reviewCandidates: Map<string, ReviewCandidateState>;
+  reviewsLocked: boolean;
   scoutDispatches: number;
   backlogDrain: boolean;
   continuationPending: boolean;
   totalWorkerDispatches: number;
   workerLimit: number;
   workerDispatches: number;
+}
+
+interface ReviewCandidateState {
+  initialDispatches: number;
+  initialPrompt?: string;
+  verificationDispatches: number;
+  verificationPrompt?: string;
 }
 
 export interface FastLaneToolOptions {
@@ -79,8 +85,8 @@ function freshState(): FastLaneTurnState {
     advisorDispatches: 0,
     backlogDrain: false,
     continuationPending: false,
-    initialReviewDispatches: 0,
-    verificationReviewDispatches: 0,
+    reviewCandidates: new Map(),
+    reviewsLocked: false,
     scoutDispatches: 0,
     totalWorkerDispatches: 0,
     workerLimit: 1,
@@ -93,8 +99,8 @@ function lockedState(): FastLaneTurnState {
     advisorDispatches: 2,
     backlogDrain: false,
     continuationPending: false,
-    initialReviewDispatches: 2,
-    verificationReviewDispatches: 2,
+    reviewCandidates: new Map(),
+    reviewsLocked: true,
     scoutDispatches: 1,
     totalWorkerDispatches: 1,
     workerLimit: 1,
@@ -108,6 +114,15 @@ function fallbackBasis(prompt: string): string {
     .filter((line) => !/^\s*fallback_retry\s*:\s*true\s*$/u.test(line))
     .join("\n")
     .trimEnd();
+}
+
+function reviewCandidateBasis(prompt: string): string {
+  const explicit = lineValue(prompt, "candidate_id") ?? lineValue(prompt, "candidateId") ??
+    lineValue(prompt, "task_id");
+  if (explicit !== undefined) return `id:${explicit}`;
+  return `artifact:${fallbackBasis(prompt).split("\n")
+    .filter((line) => !/^\s*review_phase\s*:/u.test(line))
+    .join("\n")}`;
 }
 
 export class FastLaneController {
@@ -128,10 +143,8 @@ export class FastLaneController {
         state.advisorDispatches = 0;
         delete state.advisorPrompt;
         state.continuationPending = false;
-        state.initialReviewDispatches = 0;
-        delete state.initialReviewPrompt;
-        state.verificationReviewDispatches = 0;
-        delete state.verificationReviewPrompt;
+        state.reviewCandidates.clear();
+        state.reviewsLocked = false;
         state.scoutDispatches = 0;
         state.workerDispatches = 0;
       }
@@ -154,7 +167,7 @@ export class FastLaneController {
     const state = this.sessions.get(sessionID);
     return state !== undefined && !state.backlogDrain && (
       state.workerDispatches > 0 || state.scoutDispatches > 0 || state.advisorDispatches > 0 ||
-      state.initialReviewDispatches > 0 || state.verificationReviewDispatches > 0
+      state.reviewCandidates.size > 0
     );
   }
 
@@ -224,17 +237,28 @@ export class FastLaneController {
     }
     if (role === "dog-reviewer") {
       if (!hasReviewEvidence(prompt)) throw new FastLaneDeniedError("REVIEW_EVIDENCE_REQUIRED");
-      const phase = lineValue(prompt, "review_phase");
+      const requestedPhase = lineValue(prompt, "review_phase");
+      const phase = requestedPhase === "final" ? "initial" : requestedPhase;
       if (phase !== "initial" && phase !== "verification") {
         throw new FastLaneDeniedError("REVIEW_PHASE_INVALID");
       }
+      if (state.reviewsLocked) throw new FastLaneDeniedError("REVIEW_LIMIT");
+      const candidateKey = reviewCandidateBasis(prompt);
+      let candidate = state.reviewCandidates.get(candidateKey);
+      if (candidate === undefined) {
+        if (state.reviewCandidates.size >= MAX_REVIEW_CANDIDATES) {
+          throw new FastLaneDeniedError("REVIEW_LIMIT");
+        }
+        candidate = { initialDispatches: 0, verificationDispatches: 0 };
+        state.reviewCandidates.set(candidateKey, candidate);
+      }
       const retry = lineValue(prompt, "fallback_retry");
-      const count = phase === "initial" ? state.initialReviewDispatches : state.verificationReviewDispatches;
-      const previousPrompt = phase === "initial" ? state.initialReviewPrompt : state.verificationReviewPrompt;
-      if (phase === "initial" && state.verificationReviewDispatches > 0) {
+      const count = phase === "initial" ? candidate.initialDispatches : candidate.verificationDispatches;
+      const previousPrompt = phase === "initial" ? candidate.initialPrompt : candidate.verificationPrompt;
+      if (phase === "initial" && candidate.verificationDispatches > 0) {
         throw new FastLaneDeniedError("REVIEW_PHASE_INVALID");
       }
-      if (phase === "verification" && state.initialReviewDispatches === 0) {
+      if (phase === "verification" && candidate.initialDispatches === 0) {
         throw new FastLaneDeniedError("REVIEW_PHASE_INVALID");
       }
       if ((count === 0 && retry !== undefined) || (count === 1 && retry !== "true")) {
@@ -248,11 +272,11 @@ export class FastLaneController {
       }
       if (count >= 2) throw new FastLaneDeniedError("REVIEW_LIMIT");
       if (phase === "initial") {
-        state.initialReviewPrompt ??= fallbackBasis(prompt);
-        state.initialReviewDispatches += 1;
+        candidate.initialPrompt ??= fallbackBasis(prompt);
+        candidate.initialDispatches += 1;
       } else {
-        state.verificationReviewPrompt ??= fallbackBasis(prompt);
-        state.verificationReviewDispatches += 1;
+        candidate.verificationPrompt ??= fallbackBasis(prompt);
+        candidate.verificationDispatches += 1;
       }
       return;
     }
