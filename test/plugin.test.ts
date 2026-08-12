@@ -1344,7 +1344,7 @@ test("runtime contract requires interactive continuation and deterministic recov
     "inventory_fingerprint_algorithm: fixed key order identity,status,ordering,implementationRoot,acceptanceFingerprint,acceptanceHashes + sort ordering then identity + NFC/LF + compact canonical JSON + lowercase hex SHA-256",
     "digest_role: acceptanceDigest <=300 chars; routing only; strip secrets | personal data | URLs | item metadata | raw excerpts; redaction failure -> requires_user_decision",
     "inventory_reuse: compaction | worker return | local tracker mutation never invalidate; apply successful mutations locally then recompute canonical inventoryFingerprint before compaction or selection",
-    "inventory_retry: forbidden in the same top-level request",
+    "inventory_retry: external failure -> forbidden; local construction | JSON decode defect -> one corrected approved-client invocation; unchanged payload forbidden; total invocations <=2",
     "candidate_body: full body evaluated at snapshot acquisition; queued acceptance digest is sufficient after compaction",
     "relevance_gate: current user scope + project evidence required; title | order | bulk status insufficient",
     "relevance_ambiguous: one question before mutation or dispatch",
@@ -1363,7 +1363,8 @@ test("runtime contract requires interactive continuation and deterministic recov
     "restart_reconcile: stale tracker -> require git + source + matching acceptanceFingerprint and acceptanceHashes + durable handoff; accepted commit becomes batchReconciled, never reimplemented",
     "flush_failure: source outcomes authoritative + reconciliation pending; no same-request retry",
     "github_auth: approved gh only + child-process GITHUB_TOKEN/GH_TOKEN clear when guide requires stored auth; credential extraction forbidden",
-    "github_failure: auth | rate-limit | transport | query -> whole-batch blocker; no retry | REST fallback | query rewrite | diagnostic API",
+    "github_failure: auth | rate-limit | transport | API GraphQL error -> whole-batch blocker; no retry | REST fallback | query rewrite | diagnostic API",
+    "local_inventory_defect: quoting | variable binding | stdout JSON decode before valid API result -> name defect; one corrected same-client same-query-shape invocation; no direct HTTP",
     "direct_operation_artifacts: no handoff | operation manifest | generated script | child session; inventory and flush payloads stay process-only",
     "tracker_unavailable: redacted session checkpoint; never a worker or API retry loop",
   ]) assert.ok(direct[1].includes(contract), contract);

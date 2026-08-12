@@ -13,7 +13,7 @@ export interface RuntimeAsset {
 export const runtimeAssets = [
   {
     name: "dog-coordinator",
-    version: "0.3.7-fast-lane-v1",
+    version: "0.3.8-inventory-retry-v1",
     installPath: "agent/dog-coordinator.md",
     content: `---
 description: Canonical MkII coordinator packaged by Sortie-dogs
@@ -523,10 +523,15 @@ For GitHub Projects, use only the project-approved gh client and literal \`gh ap
 tracker guide. When the guide requires stored gh authentication, clear GITHUB_TOKEN and GH_TOKEN only
 for that child process; never read a credential value, extract Git credentials, call api.github.com
 through Invoke-WebRequest or Invoke-RestMethod, or switch authentication routes. Perform at most one
-local auth preflight and one inventory invocation. An authentication, rate-limit, transport, or query
-error is a whole-batch blocker for that top-level request: no retry, alternate executable, direct REST
-call, credential extraction, query rewrite, or diagnostic API call. A later real user request may retry
-only after the external condition or approved query changed.
+local auth preflight and one successful inventory invocation. Authentication, rate-limit, transport, or
+an API-returned GraphQL error is a whole-batch blocker for that top-level request: no retry, alternate
+executable, direct REST call, credential extraction, query rewrite, or diagnostic API call. A local
+invocation-construction or stdout JSON-decoding defect before a valid API result may receive exactly one
+corrected inventory invocation after naming the concrete defect. The correction must keep the approved
+client, authentication route, tracker-guide query shape, and requested snapshot scope; it may repair only
+local quoting, variable binding, or output decoding. Never repeat an unchanged payload, exceed two total
+inventory invocations, or use direct HTTP as fallback. A later real user request may retry an external
+failure only after the external condition or approved query changed.
 Treat the active project root as immutable for the session. A candidate whose implementation root is
 outside it is not actionable in the current batch: hold or reassign the candidate and ask the user to
 open or switch to the owning project. Do not inspect, dispatch into, or mutate the external root from
@@ -544,7 +549,7 @@ COORDINATOR_DIRECT_OPERATION_FIXTURE
     inventory_fingerprint_algorithm: fixed key order identity,status,ordering,implementationRoot,acceptanceFingerprint,acceptanceHashes + sort ordering then identity + NFC/LF + compact canonical JSON + lowercase hex SHA-256
     digest_role: acceptanceDigest <=300 chars; routing only; strip secrets | personal data | URLs | item metadata | raw excerpts; redaction failure -> requires_user_decision
     inventory_reuse: compaction | worker return | local tracker mutation never invalidate; apply successful mutations locally then recompute canonical inventoryFingerprint before compaction or selection
-    inventory_retry: forbidden in the same top-level request
+    inventory_retry: external failure -> forbidden; local construction | JSON decode defect -> one corrected approved-client invocation; unchanged payload forbidden; total invocations <=2
     candidate_body: full body evaluated at snapshot acquisition; queued acceptance digest is sufficient after compaction
     relevance_gate: current user scope + project evidence required; title | order | bulk status insufficient
     relevance_ambiguous: one question before mutation or dispatch
@@ -563,7 +568,8 @@ COORDINATOR_DIRECT_OPERATION_FIXTURE
     restart_reconcile: stale tracker -> require git + source + matching acceptanceFingerprint and acceptanceHashes + durable handoff; accepted commit becomes batchReconciled, never reimplemented
     flush_failure: source outcomes authoritative + reconciliation pending; no same-request retry
     github_auth: approved gh only + child-process GITHUB_TOKEN/GH_TOKEN clear when guide requires stored auth; credential extraction forbidden
-    github_failure: auth | rate-limit | transport | query -> whole-batch blocker; no retry | REST fallback | query rewrite | diagnostic API
+    github_failure: auth | rate-limit | transport | API GraphQL error -> whole-batch blocker; no retry | REST fallback | query rewrite | diagnostic API
+    local_inventory_defect: quoting | variable binding | stdout JSON decode before valid API result -> name defect; one corrected same-client same-query-shape invocation; no direct HTTP
     direct_operation_artifacts: no handoff | operation manifest | generated script | child session; inventory and flush payloads stay process-only
     tracker_unavailable: redacted session checkpoint; never a worker or API retry loop
 END_COORDINATOR_DIRECT_OPERATION_FIXTURE
@@ -1001,10 +1007,10 @@ the initial exit 1 is first and the latest exit 0 is last.
 An undeclared write or mutation must be reported as rejected, not performed.
 
 RUNTIME_ASSET_VERSION_SYNC_FIXTURE
-    runtime_version: 0.3.7-fast-lane-v1
+    runtime_version: 0.3.8-inventory-retry-v1
     shared_marker: src/asset-version.ts
-    packaged_expectation: test/plugin-loader.test.ts uses 0.3.7-fast-lane-v1
-    initialize_expectation: test/initialize.test.ts uses 0.3.7-fast-lane-v1
+    packaged_expectation: test/plugin-loader.test.ts uses 0.3.8-inventory-retry-v1
+    initialize_expectation: test/initialize.test.ts uses 0.3.8-inventory-retry-v1
     rule: runtime asset versions, shared marker, packaged expectation, and initialize expectation change together
 END_RUNTIME_ASSET_VERSION_SYNC_FIXTURE
 
@@ -1047,7 +1053,7 @@ END_TERMINAL_EVIDENCE_FIXTURE
   },
   {
     name: "dog-worker",
-    version: "0.3.7-fast-lane-v1",
+    version: "0.3.8-inventory-retry-v1",
     installPath: "agent/dog-worker.md",
     content: `---
 description: Dedicated worker for the canonical Sortie-dogs coordinator
@@ -1139,7 +1145,7 @@ the user.
   },
   {
     name: "dog-scout",
-    version: "0.3.7-fast-lane-v1",
+    version: "0.3.8-inventory-retry-v1",
     installPath: "agent/dog-scout.md",
     content: `---
 description: Bounded evidence scout for dog-coordinator
@@ -1188,7 +1194,7 @@ prose; keep the keys, paths, commands, and identifiers verbatim.
   },
   {
     name: "dog-reviewer",
-    version: "0.3.7-fast-lane-v1",
+    version: "0.3.8-inventory-retry-v1",
     installPath: "agent/dog-reviewer.md",
     content: `---
 description: Independent source reviewer for dog-coordinator
@@ -1217,7 +1223,7 @@ or transport.
   },
   {
     name: "dog-advisor",
-    version: "0.3.7-fast-lane-v1",
+    version: "0.3.8-inventory-retry-v1",
     installPath: "agent/dog-advisor.md",
     content: `---
 description: Focused technical advisor for dog-coordinator
@@ -1241,7 +1247,7 @@ provider, vendor, model, variant, or transport.
   },
   {
     name: "sortie",
-    version: "0.3.7-fast-lane-v1",
+    version: "0.3.8-inventory-retry-v1",
     installPath: "command/sortie.md",
     content: `---
 description: Start the canonical Sortie-dogs MkII workflow
