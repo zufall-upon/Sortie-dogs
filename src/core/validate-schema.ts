@@ -11,6 +11,7 @@ import type {
   SchemaDiagnosticCode,
   SchemaKind,
   SchemaValidationResult,
+  WorktreeParallelContract,
 } from "./types.js";
 
 type JsonSchema = Record<string, unknown>;
@@ -160,6 +161,81 @@ const OPERATION_MANIFEST_SCHEMA: JsonSchema = {
   },
 };
 
+const WORKTREE_PARALLEL_SCHEMA: JsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["version", "mode", "max_workers", "tasks", "artifacts", "failure", "baseline_metrics"],
+  properties: {
+    version: { const: "0.1.0" },
+    mode: { enum: ["parallel", "single-worker"] },
+    max_workers: { type: "integer", minimum: 1, maximum: 3 },
+    tasks: { type: "array", minItems: 1, maxItems: 64, items: { $ref: "#/$defs/task" } },
+    artifacts: { type: "array", maxItems: 64, items: { $ref: "#/$defs/artifact" } },
+    failure: { anyOf: [{ type: "null" }, { $ref: "#/$defs/failure" }] },
+    baseline_metrics: { anyOf: [{ type: "null" }, { $ref: "#/$defs/metrics" }] },
+  },
+  $defs: {
+    id: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+    sha: { type: "string", pattern: "^(?:[a-f0-9]{40}|[a-f0-9]{64})$" },
+    path: { type: "string", minLength: 1, maxLength: 512, pattern: "^[^\\u0000-\\u001F\\u007F]+$" },
+    task: {
+      type: "object",
+      additionalProperties: false,
+      required: ["task_id", "worktree", "branch", "base_sha", "depends_on", "scope"],
+      properties: {
+        task_id: { $ref: "#/$defs/id" },
+        worktree: { $ref: "#/$defs/id" },
+        branch: { type: "string", minLength: 1, maxLength: 256 },
+        base_sha: { $ref: "#/$defs/sha" },
+        depends_on: { type: "array", uniqueItems: true, maxItems: 63, items: { $ref: "#/$defs/id" } },
+        scope: {
+          type: "object",
+          additionalProperties: false,
+          required: ["read", "write"],
+          properties: {
+            read: { type: "array", uniqueItems: true, maxItems: 256, items: { $ref: "#/$defs/path" } },
+            write: { type: "array", uniqueItems: true, minItems: 1, maxItems: 256, items: { $ref: "#/$defs/path" } },
+          },
+        },
+      },
+    },
+    artifact: {
+      type: "object",
+      additionalProperties: false,
+      required: ["task_id", "base_sha", "commit_sha", "changed_paths"],
+      properties: {
+        task_id: { $ref: "#/$defs/id" },
+        base_sha: { $ref: "#/$defs/sha" },
+        commit_sha: { $ref: "#/$defs/sha" },
+        changed_paths: { type: "array", uniqueItems: true, minItems: 1, maxItems: 256, items: { $ref: "#/$defs/path" } },
+      },
+    },
+    failure: {
+      type: "object",
+      additionalProperties: false,
+      required: ["code", "task_id", "fallback", "detail"],
+      properties: {
+        code: { enum: ["stale-base", "scope-overlap", "dirty-tree", "abandoned-worker", "merge-conflict"] },
+        task_id: { $ref: "#/$defs/id" },
+        fallback: { enum: ["stop", "single-worker"] },
+        detail: { type: "string", minLength: 1, maxLength: 1000 },
+      },
+    },
+    metrics: {
+      type: "object",
+      additionalProperties: false,
+      required: ["wall_clock_ms", "total_tokens", "estimated_cost_usd", "conflict_count", "validation_count"],
+      properties: {
+        wall_clock_ms: { type: "number", minimum: 0 },
+        total_tokens: { type: ["integer", "null"], minimum: 0 },
+        estimated_cost_usd: { type: ["number", "null"], minimum: 0 },
+        conflict_count: { type: "integer", minimum: 0 },
+        validation_count: { type: "integer", minimum: 0 },
+      },
+    },
+  },
+};
+
 const MESSAGES: Readonly<Record<string, string>> = {
   additionalProperties: "Unknown property is not allowed.",
   const: "Value is not allowed.",
@@ -174,6 +250,9 @@ const MESSAGES: Readonly<Record<string, string>> = {
   required: "Required property is missing.",
   type: "Value has an invalid type.",
   uniqueItems: "Array items must be unique.",
+  anyOf: "Value does not match an allowed shape.",
+  maximum: "Value is outside the allowed range.",
+  minimum: "Value is outside the allowed range.",
 };
 
 const ajv = new Ajv2020({
@@ -186,6 +265,7 @@ addFormats(ajv);
 const validators: Readonly<Record<SchemaKind, ValidateFunction>> = {
   handoff: ajv.compile(HANDOFF_SCHEMA),
   "operation-manifest": ajv.compile(OPERATION_MANIFEST_SCHEMA),
+  "worktree-parallel": ajv.compile(WORKTREE_PARALLEL_SCHEMA),
 };
 
 function escapePointerSegment(segment: string): string {
@@ -254,4 +334,10 @@ export function validateOperationManifestSchema(
   value: unknown,
 ): SchemaValidationResult<OperationManifest> {
   return validateSchema<OperationManifest>("operation-manifest", value);
+}
+
+export function validateWorktreeParallelSchema(
+  value: unknown,
+): SchemaValidationResult<WorktreeParallelContract> {
+  return validateSchema<WorktreeParallelContract>("worktree-parallel", value);
 }

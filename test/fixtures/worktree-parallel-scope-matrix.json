@@ -1,0 +1,54 @@
+{
+  "base_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "cases": [
+    {
+      "name": "disjoint write scopes",
+      "left": { "read": [], "write": ["src/a.ts"] },
+      "right": { "read": [], "write": ["src/b.ts"] },
+      "ok": true
+    },
+    {
+      "name": "same file write/write",
+      "left": { "read": [], "write": ["src/a.ts"] },
+      "right": { "read": [], "write": ["src/a.ts"] },
+      "ok": false
+    },
+    {
+      "name": "ancestor write/write",
+      "left": { "read": [], "write": ["src"] },
+      "right": { "read": [], "write": ["src/a.ts"] },
+      "ok": false
+    },
+    {
+      "name": "write/read overlap",
+      "left": { "read": [], "write": ["src/a.ts"] },
+      "right": { "read": ["src"], "write": ["test/b.ts"] },
+      "ok": false
+    },
+    {
+      "name": "read/write overlap",
+      "left": { "read": ["src/a.ts"], "write": ["test/a.ts"] },
+      "right": { "read": [], "write": ["src"] },
+      "ok": false
+    },
+    {
+      "name": "read/read overlap",
+      "left": { "read": ["src"], "write": ["test/a.ts"] },
+      "right": { "read": ["src/a.ts"], "write": ["test/b.ts"] },
+      "ok": true
+    },
+    {
+      "name": "segment siblings",
+      "left": { "read": [], "write": ["src/a.ts"] },
+      "right": { "read": [], "write": ["src/a.tsx"] },
+      "ok": true
+    },
+    {
+      "name": "dependent tasks still overlap",
+      "depends_on_left": true,
+      "left": { "read": [], "write": ["src/a.ts"] },
+      "right": { "read": [], "write": ["src/a.ts"] },
+      "ok": false
+    }
+  ]
+}

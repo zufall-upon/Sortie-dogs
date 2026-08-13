@@ -1,4 +1,6 @@
 export { lintHandoff } from "./core/validate-semantics.js";
+export { validateWorktreeParallelContract } from "./core/validate-worktree-parallel.js";
+export { validateWorktreeParallelSchema } from "./core/validate-schema.js";
 export {
   initializeProject,
   ProjectInitializationError,

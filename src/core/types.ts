@@ -70,7 +70,83 @@ export interface OperationManifest {
   validation: string[];
 }
 
-export type SchemaKind = "handoff" | "operation-manifest";
+export type WorktreeParallelVersion = "0.1.0";
+export type WorktreeParallelMode = "parallel" | "single-worker";
+export type WorktreeParallelFailureCode =
+  | "stale-base"
+  | "scope-overlap"
+  | "dirty-tree"
+  | "abandoned-worker"
+  | "merge-conflict";
+
+export interface WorktreeFileScope {
+  read: string[];
+  write: string[];
+}
+
+export interface WorktreeParallelTask {
+  task_id: string;
+  worktree: string;
+  branch: string;
+  base_sha: string;
+  depends_on: string[];
+  scope: WorktreeFileScope;
+}
+
+export interface WorktreeCommitArtifact {
+  task_id: string;
+  base_sha: string;
+  commit_sha: string;
+  changed_paths: string[];
+}
+
+export interface WorktreeParallelMetrics {
+  wall_clock_ms: number;
+  total_tokens: number | null;
+  estimated_cost_usd: number | null;
+  conflict_count: number;
+  validation_count: number;
+}
+
+export interface WorktreeParallelFailure {
+  code: WorktreeParallelFailureCode;
+  task_id: string;
+  fallback: "stop" | "single-worker";
+  detail: string;
+}
+
+export interface WorktreeParallelContract {
+  version: WorktreeParallelVersion;
+  mode: WorktreeParallelMode;
+  max_workers: number;
+  tasks: WorktreeParallelTask[];
+  artifacts: WorktreeCommitArtifact[];
+  failure: WorktreeParallelFailure | null;
+  baseline_metrics: WorktreeParallelMetrics | null;
+}
+
+export type SchemaKind = "handoff" | "operation-manifest" | "worktree-parallel";
+
+export type WorktreeParallelContractIssueCode =
+  | "WTP001_DUPLICATE_IDENTITY"
+  | "WTP002_DEPENDENCY_UNKNOWN"
+  | "WTP003_DEPENDENCY_CYCLE"
+  | "WTP004_MODE_WORKER_MISMATCH"
+  | "WTP005_PATH_INVALID"
+  | "WTP006_SCOPE_OVERLAP"
+  | "WTP007_ARTIFACT_MISMATCH"
+  | "WTP008_FAILURE_POLICY";
+
+export interface WorktreeParallelContractIssue {
+  code: WorktreeParallelContractIssueCode;
+  pointer: string;
+  message: string;
+}
+
+export interface WorktreeParallelContractValidationResult {
+  ok: boolean;
+  diagnostics: WorktreeParallelContractIssue[];
+}
 
 export type SchemaDiagnosticCode = `schema_${string}`;
 
