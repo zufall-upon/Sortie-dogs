@@ -37,6 +37,22 @@ function pathWithinWrites(path: string, writes: readonly string[]): boolean {
   return writes.some((write) => path === write || path.startsWith(`${write}/`));
 }
 
+function isLowercaseGitHash(value: unknown): value is string {
+  return typeof value === "string" && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(value);
+}
+
+function isFingerprint(value: unknown): value is string {
+  return typeof value === "string" && /^[a-f0-9]{64}$/u.test(value);
+}
+
+function isBoundedCommandPart(value: unknown): value is string {
+  return typeof value === "string" && value.length >= 1 && value.length <= 1000 && !/[\u0000-\u001F\u007F]/u.test(value);
+}
+
+function isAbsoluteExecutable(value: unknown): value is string {
+  return isBoundedCommandPart(value) && /^(?:\/|[A-Za-z]:[\\/]|\\\\)/u.test(value);
+}
+
 function taskScopes(task: WorktreeParallelTask): { read: string[]; write: string[] } | undefined {
   const read = task.scope.read.map(normalizeScope);
   const write = task.scope.write.map(normalizeScope);
@@ -120,10 +136,20 @@ export function validateWorktreeParallelContract(
     const entry = tasks.get(artifact.task_id);
     const changedPaths = artifact.changed_paths.map(normalizeScope);
     const invalidPath = changedPaths.some((path) => path === undefined);
+    const duplicatePath = new Set(changedPaths.filter((path): path is string => path !== undefined)).size !== changedPaths.length;
     if (invalidPath) diagnostics.push(issue("WTP005_PATH_INVALID", `/artifacts/${index}/changed_paths`, MESSAGES.path));
+    if (duplicatePath) diagnostics.push(issue("WTP005_PATH_INVALID", `/artifacts/${index}/changed_paths`, MESSAGES.path));
+    const validation = artifact.validation;
+    const invalidArtifact =
+      !isLowercaseGitHash(artifact.base_sha) || !isLowercaseGitHash(artifact.commit_sha) ||
+      !isFingerprint(artifact.change_fingerprint) || !isFingerprint(validation?.validation_fingerprint) ||
+      !Array.isArray(validation?.command) || validation.command.length < 1 || validation.command.length > 129 ||
+      !validation.command.every(isBoundedCommandPart) || !isAbsoluteExecutable(validation.command[0]) ||
+      validation.exit_code !== 0;
     if (
       artifactTasks.has(artifact.task_id) || entry === undefined || artifact.base_sha !== entry.task.base_sha ||
-      (!invalidPath && changedPaths.some((path) => !pathWithinWrites(path!, entry.scopes?.write ?? [])))
+      artifact.branch !== entry.task.branch || invalidArtifact ||
+      (!invalidPath && !duplicatePath && changedPaths.some((path) => !pathWithinWrites(path!, entry.scopes?.write ?? [])))
     ) diagnostics.push(issue("WTP007_ARTIFACT_MISMATCH", `/artifacts/${index}`, MESSAGES.artifact));
     artifactTasks.add(artifact.task_id);
   });

@@ -10,6 +10,23 @@ import { validateWorktreeParallelContract } from "../dist/core/validate-worktree
 
 const SHA_A = "a".repeat(40);
 const SHA_B = "b".repeat(40);
+const FINGERPRINT = "f".repeat(64);
+
+function artifact(): WorktreeParallelContract["artifacts"][number] {
+  return {
+    task_id: "left",
+    base_sha: SHA_A,
+    commit_sha: SHA_B,
+    branch: "sortie/left",
+    changed_paths: ["src/a.ts"],
+    change_fingerprint: FINGERPRINT,
+    validation: {
+      command: ["/usr/bin/node", "--test"],
+      exit_code: 0,
+      validation_fingerprint: FINGERPRINT,
+    },
+  };
+}
 
 function contract(
   left: WorktreeFileScope,
@@ -104,7 +121,7 @@ test("DAG identity, cycle, path, mode, artifact, and metrics boundaries fail clo
   candidate.tasks[0]!.depends_on = ["right"];
   candidate.tasks[1]!.depends_on = ["left"];
   candidate.tasks[1]!.scope.write = ["../escape"];
-  candidate.artifacts = [{ task_id: "left", base_sha: SHA_B, commit_sha: SHA_B, changed_paths: ["src/b.ts"] }];
+  candidate.artifacts = [{ ...artifact(), base_sha: SHA_B, changed_paths: ["src/b.ts"] }];
 
   const result = validateWorktreeParallelContract(candidate);
   assert.equal(result.ok, false);
@@ -150,10 +167,7 @@ test("DAG identity, cycle, path, mode, artifact, and metrics boundaries fail clo
 test("commit artifacts stay on the task base and inside declared write scope", () => {
   const candidate = contract({ read: [], write: ["src"] }, { read: [], write: ["test"] });
   candidate.artifacts = [{
-    task_id: "left",
-    base_sha: SHA_A,
-    commit_sha: SHA_B,
-    changed_paths: ["src/a.ts"],
+    ...artifact(),
   }];
   assert.equal(validateWorktreeParallelContract(candidate).ok, true);
 
@@ -161,4 +175,34 @@ test("commit artifacts stay on the task base and inside declared write scope", (
   assert.deepEqual(validateWorktreeParallelContract(candidate).diagnostics.map(({ code }) => code), [
     "WTP007_ARTIFACT_MISMATCH",
   ]);
+});
+
+test("commit artifacts require the immutable evidence shape and semantic identity", () => {
+  const candidate = contract({ read: [], write: ["src"] }, { read: [], write: ["test"] });
+  candidate.artifacts = [artifact()];
+  assert.equal(validateWorktreeParallelSchema(candidate).ok, true);
+  assert.equal(validateWorktreeParallelContract(candidate).ok, true);
+
+  candidate.artifacts[0]!.branch = "sortie/right";
+  assert.ok(validateWorktreeParallelContract(candidate).diagnostics.some(({ code }) => code === "WTP007_ARTIFACT_MISMATCH"));
+  candidate.artifacts[0]!.branch = "sortie/left";
+  candidate.artifacts.push({ ...artifact(), task_id: "left", changed_paths: ["src/a.ts"] });
+  assert.ok(validateWorktreeParallelContract(candidate).diagnostics.some(({ code }) => code === "WTP007_ARTIFACT_MISMATCH"));
+
+  const schemaCases: Array<(value: Record<string, unknown>) => void> = [
+    (value) => { value.validation = { ...value.validation as object, exit_code: 1 }; },
+    (value) => { value.change_fingerprint = "F".repeat(64); },
+    (value) => { value.raw_log = "forbidden"; },
+  ];
+  for (const mutate of schemaCases) {
+    const malformed = structuredClone(artifact()) as Record<string, unknown>;
+    mutate(malformed);
+    const subject = contract({ read: [], write: ["src"] }, { read: [], write: ["test"] });
+    subject.artifacts = [malformed as WorktreeParallelContract["artifacts"][number]];
+    assert.equal(validateWorktreeParallelSchema(subject).ok, false);
+  }
+
+  const relative = contract({ read: [], write: ["src"] }, { read: [], write: ["test"] });
+  relative.artifacts = [{ ...artifact(), validation: { ...artifact().validation, command: ["node"] } }];
+  assert.ok(validateWorktreeParallelContract(relative).diagnostics.some(({ code }) => code === "WTP007_ARTIFACT_MISMATCH"));
 });

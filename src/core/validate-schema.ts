@@ -202,12 +202,29 @@ const WORKTREE_PARALLEL_SCHEMA: JsonSchema = {
     artifact: {
       type: "object",
       additionalProperties: false,
-      required: ["task_id", "base_sha", "commit_sha", "changed_paths"],
+      required: ["task_id", "base_sha", "commit_sha", "branch", "changed_paths", "change_fingerprint", "validation"],
       properties: {
         task_id: { $ref: "#/$defs/id" },
         base_sha: { $ref: "#/$defs/sha" },
         commit_sha: { $ref: "#/$defs/sha" },
+        branch: { type: "string", minLength: 1, maxLength: 256, pattern: "^[^\\u0000-\\u001F\\u007F]+$" },
         changed_paths: { type: "array", uniqueItems: true, minItems: 1, maxItems: 256, items: { $ref: "#/$defs/path" } },
+        change_fingerprint: { type: "string", pattern: "^[a-f0-9]{64}$" },
+        validation: {
+          type: "object",
+          additionalProperties: false,
+          required: ["command", "exit_code", "validation_fingerprint"],
+          properties: {
+            command: {
+              type: "array",
+              minItems: 1,
+              maxItems: 129,
+              items: { type: "string", minLength: 1, maxLength: 1000, pattern: "^[^\\u0000-\\u001F\\u007F]+$" },
+            },
+            exit_code: { const: 0 },
+            validation_fingerprint: { type: "string", pattern: "^[a-f0-9]{64}$" },
+          },
+        },
       },
     },
     failure: {

@@ -9,6 +9,7 @@ import {
   ParallelDispatchCoordinator,
   ParallelDispatchError,
 } from "../dist/core/worktree-parallel-dispatch.js";
+import { produceWorktreeCommitArtifact } from "../dist/core/worktree-commit-artifact.js";
 import { WorktreeLifecycle } from "../dist/core/worktree-lifecycle.js";
 import type {
   ParallelDispatchDescriptor,
@@ -29,10 +30,13 @@ async function fixture(name: string): Promise<{ root: string; repository: string
   const repository = join(root, "repository");
   await mkdir(repository);
   await writeFile(join(repository, "base.txt"), "base\n");
+  await writeFile(join(repository, "a.txt"), "base-a\n");
+  await writeFile(join(repository, "b.txt"), "base-b\n");
+  await writeFile(join(repository, "c.txt"), "base-c\n");
   await run(repository, "init", "-q");
   await run(repository, "config", "user.name", "Sortie Test");
   await run(repository, "config", "user.email", "sortie@example.invalid");
-  await run(repository, "add", "base.txt");
+  await run(repository, "add", "base.txt", "a.txt", "b.txt", "c.txt");
   await run(repository, "commit", "-q", "-m", "base");
   return { root, repository, sha: (await run(repository, "rev-parse", "HEAD")).trim() };
 }
@@ -61,6 +65,28 @@ async function errorCode(operation: Promise<unknown>, code: ParallelDispatchErro
   await assert.rejects(operation, (error: unknown) => error instanceof ParallelDispatchError && error.code === code);
 }
 
+async function acceptAndComplete(
+  coordinator: ParallelDispatchCoordinator,
+  descriptor: ParallelDispatchDescriptor,
+  callID: string,
+  childSessionID: string,
+) {
+  await writeFile(join(descriptor.managed_path, `${descriptor.task_id}.txt`), `${descriptor.task_id}\n`);
+  const artifact = await produceWorktreeCommitArtifact({
+    descriptor,
+    managed_path: descriptor.managed_path,
+    validation: { executable: process.execPath, args: ["-e", "process.exit(0)"] },
+  });
+  await coordinator.acceptArtifact("root", callID, childSessionID, descriptor, artifact);
+  return {
+    artifact,
+    snapshot: await coordinator.completeCall("root", callID, childSessionID, "completed", {
+      run_id: descriptor.run_id,
+      dispatch_id: descriptor.dispatch_id,
+    }),
+  };
+}
+
 test("fork/join reserves only DAG-ready tasks and supports three bounded workers", async () => {
   const value = await fixture("join");
   try {
@@ -77,15 +103,9 @@ test("fork/join reserves only DAG-ready tasks and supports three bounded workers
     await coordinator.bindDispatch("root", "call-a", a!);
     await coordinator.bindDispatch("root", "call-c", c!);
     assert.equal((await coordinator.snapshot("root"))!.ready.length, 0);
-    await coordinator.completeCall("root", "call-c", "child-c", "completed", {
-      run_id: c!.run_id,
-      dispatch_id: c!.dispatch_id,
-    });
+    await acceptAndComplete(coordinator, c!, "call-c", "child-c");
     assert.equal((await coordinator.snapshot("root"))!.ready.length, 0);
-    const joined = await coordinator.completeCall("root", "call-a", "child-a", "completed", {
-      run_id: a!.run_id,
-      dispatch_id: a!.dispatch_id,
-    });
+    const { snapshot: joined } = await acceptAndComplete(coordinator, a!, "call-a", "child-a");
     assert.deepEqual(joined!.ready.map(({ task_id }) => task_id), ["b"]);
     assert.equal(joined!.tasks.find(({ descriptor }) => descriptor.task_id === "a")!.outcome, "completed");
   } finally {
@@ -127,11 +147,17 @@ test("descriptor replay, wrong descriptor, duplicate and late outcomes fail clos
     await errorCode(coordinator.bindDispatch("root", "call-wrong", wrong), "descriptor-mismatch");
     await coordinator.bindDispatch("root", "call", descriptor);
     await errorCode(coordinator.bindDispatch("root", "other-call", descriptor), "descriptor-replay");
-    const first = await coordinator.completeCall("root", "call", "child", "completed");
-    const duplicate = await coordinator.completeCall("root", "call", "child", "completed");
+    const { snapshot: first } = await acceptAndComplete(coordinator, descriptor, "call", "child");
+    const duplicate = await coordinator.completeCall("root", "call", "child", "completed", {
+      run_id: descriptor.run_id,
+      dispatch_id: descriptor.dispatch_id,
+    });
     assert.deepEqual(duplicate, first);
     await errorCode(coordinator.completeCall("root", "call", "child", "failed"), "outcome-conflict");
-    await errorCode(coordinator.completeCall("root", "call", "other-child", "completed"), "outcome-conflict");
+    await errorCode(coordinator.completeCall("root", "call", "other-child", "completed", {
+      run_id: descriptor.run_id,
+      dispatch_id: descriptor.dispatch_id,
+    }), "outcome-conflict");
   } finally {
     await rm(value.root, { recursive: true, force: true });
   }
@@ -181,7 +207,7 @@ test("preflight fallback creates no worktree while schema, dirty, stale and corr
     const stale = contract("a".repeat(40), [[], []]);
     await errorCode(coordinator.prepare(stale, "root"), "stale-base");
 
-    const statePath = join(value.repository, ".git", "sortie-dogs", "parallel-dispatch-v2", "state.json");
+    const statePath = join(value.repository, ".git", "sortie-dogs", "parallel-dispatch-v3", "state.json");
     await writeFile(statePath, "{corrupt");
     await errorCode(coordinator.snapshot("root"), "corrupt-state");
   } finally {
@@ -210,7 +236,7 @@ test("separate coordinator instances serialize prepare and retain one immutable 
     );
     await errorCode(right.prepare(candidate, "other-root"), "active-run");
     const source = JSON.parse(await readFile(
-      join(value.repository, ".git", "sortie-dogs", "parallel-dispatch-v2", "state.json"),
+      join(value.repository, ".git", "sortie-dogs", "parallel-dispatch-v3", "state.json"),
       "utf8",
     )) as { run: { tasks: unknown[] } };
     assert.equal(source.run.tasks.length, 2);
@@ -259,7 +285,9 @@ test("terminal and cancelled runs archive ownership and release the active slot"
     if (first.status !== "prepared") return;
     for (const [index, descriptor] of first.snapshot.ready.entries()) {
       await coordinator.bindDispatch("root", `call-${index}`, descriptor);
-      const terminal = await coordinator.completeCall("root", `call-${index}`, `child-${index}`, "completed");
+      const { snapshot: terminal } = await acceptAndComplete(
+        coordinator, descriptor, `call-${index}`, `child-${index}`,
+      );
       if (index === first.snapshot.ready.length - 1) {
         assert.equal(terminal!.archived, true);
         assert.equal(terminal!.terminal_reason, "completed");
@@ -317,6 +345,241 @@ test("cancellation preserves running join and archives only after its outcome", 
     const next = await coordinator.prepare(nextContract, "root");
     assert.equal(next.status, "prepared");
     if (next.status === "prepared") assert.notEqual(next.snapshot.run_id, prepared.snapshot.run_id);
+  } finally {
+    await rm(value.root, { recursive: true, force: true });
+  }
+});
+
+test("verified artifacts survive restart and archive as bounded deeply frozen evidence", async () => {
+  const value = await fixture("artifact-archive");
+  try {
+    const coordinator = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const prepared = await coordinator.prepare(contract(value.sha, [[], []]), "root");
+    assert.equal(prepared.status, "prepared");
+    if (prepared.status !== "prepared") return;
+    const [first, second] = prepared.snapshot.ready;
+    await coordinator.bindDispatch("root", "call-a", first!);
+    await writeFile(join(first!.managed_path, "a.txt"), "accepted\n");
+    const artifact = await produceWorktreeCommitArtifact({
+      descriptor: first!,
+      managed_path: first!.managed_path,
+      validation: { executable: process.execPath, args: ["-e", "process.exit(0)"] },
+    });
+    const accepted = await coordinator.acceptArtifact("root", "call-a", "child-a", first!, artifact);
+    const evidence = accepted.tasks.find(({ descriptor }) => descriptor.dispatch_id === first!.dispatch_id)!.artifact!;
+    assert.deepEqual(evidence, artifact);
+    assert.equal(Object.isFrozen(evidence), true);
+    assert.equal(Object.isFrozen(evidence.changed_paths), true);
+    assert.equal(Object.isFrozen(evidence.validation), true);
+    assert.equal(Object.isFrozen(evidence.validation.command), true);
+    assert.deepEqual(Object.keys(evidence).sort(), [
+      "base_sha", "branch", "change_fingerprint", "changed_paths", "commit_sha", "task_id", "validation",
+    ]);
+
+    const restarted = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const reopened = await restarted.snapshot("root", prepared.snapshot.run_id);
+    assert.deepEqual(reopened!.tasks.find(({ descriptor }) => descriptor.dispatch_id === first!.dispatch_id)!.artifact, artifact);
+    await restarted.acceptArtifact("root", "call-a", "child-a", first!, artifact);
+    await errorCode(restarted.acceptArtifact("root", "call-a", "child-a", first!, {
+      ...artifact,
+      change_fingerprint: "f".repeat(64),
+    }), "outcome-conflict");
+    await restarted.completeCall("root", "call-a", "child-a", "completed", {
+      run_id: first!.run_id,
+      dispatch_id: first!.dispatch_id,
+    });
+    await restarted.bindDispatch("root", "call-b", second!);
+    const { snapshot: terminal } = await acceptAndComplete(restarted, second!, "call-b", "child-b");
+    assert.equal(terminal!.archived, true);
+    const archived = (await restarted.archives("root")).find(({ run_id }) => run_id === prepared.snapshot.run_id)!;
+    const archivedArtifact = archived.tasks.find(({ dispatch_id }) => dispatch_id === first!.dispatch_id)!.artifact!;
+    assert.deepEqual(archivedArtifact, artifact);
+    assert.equal(Object.isFrozen(archivedArtifact.changed_paths), true);
+    assert.equal(Object.isFrozen(archivedArtifact.validation.command), true);
+  } finally {
+    await rm(value.root, { recursive: true, force: true });
+  }
+});
+
+test("artifact acceptance survives both lifecycle crash windows and completion cannot consume provisional evidence", async () => {
+  const value = await fixture("artifact-two-phase");
+  const original = WorktreeLifecycle.prototype.acceptCommit;
+  let lifecycleCalls = 0;
+  WorktreeLifecycle.prototype.acceptCommit = async function (...args): Promise<void> {
+    lifecycleCalls += 1;
+    if (lifecycleCalls === 1) throw new Error("injected process exit before lifecycle acceptance");
+    await original.apply(this, args);
+    if (lifecycleCalls === 3 || lifecycleCalls === 5) throw new Error("injected process exit after lifecycle acceptance");
+  };
+  try {
+    const coordinator = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const prepared = await coordinator.prepare(contract(value.sha, [[], [], []]), "root");
+    assert.equal(prepared.status, "prepared");
+    if (prepared.status !== "prepared") return;
+    const [first, second, third] = prepared.snapshot.ready;
+    await coordinator.bindDispatch("root", "call-a", first!);
+    await writeFile(join(first!.managed_path, "a.txt"), "first\n");
+    const firstArtifact = await produceWorktreeCommitArtifact({
+      descriptor: first!, managed_path: first!.managed_path,
+      validation: { executable: process.execPath, args: ["-e", "process.exit(0)"] },
+    });
+    await errorCode(coordinator.acceptArtifact("root", "call-a", "child-a", first!, firstArtifact), "lifecycle-failed");
+    const statePath = join(value.repository, ".git", "sortie-dogs", "parallel-dispatch-v3", "state.json");
+    const provisional = JSON.parse(await readFile(statePath, "utf8")) as {
+      run: { tasks: Array<{ artifact: unknown; artifact_accepted: boolean }> };
+    };
+    assert.deepEqual(provisional.run.tasks[0]!.artifact, firstArtifact);
+    assert.equal(provisional.run.tasks[0]!.artifact_accepted, false);
+
+    await coordinator.acceptArtifact("root", "call-a", "child-a", first!, firstArtifact);
+    const restarted = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    await restarted.completeCall("root", "call-a", "child-a", "completed", {
+      run_id: first!.run_id, dispatch_id: first!.dispatch_id,
+    });
+
+    await restarted.bindDispatch("root", "call-b", second!);
+    await writeFile(join(second!.managed_path, "b.txt"), "second\n");
+    const secondArtifact = await produceWorktreeCommitArtifact({
+      descriptor: second!, managed_path: second!.managed_path,
+      validation: { executable: process.execPath, args: ["-e", "process.exit(0)"] },
+    });
+    await errorCode(restarted.acceptArtifact("root", "call-b", "child-b", second!, secondArtifact), "lifecycle-failed");
+    const secondRestart = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    await secondRestart.acceptArtifact("root", "call-b", "child-b", second!, secondArtifact);
+    await secondRestart.completeCall("root", "call-b", "child-b", "completed", {
+      run_id: second!.run_id, dispatch_id: second!.dispatch_id,
+    });
+
+    await secondRestart.bindDispatch("root", "call-c", third!);
+    await writeFile(join(third!.managed_path, "c.txt"), "third\n");
+    const thirdArtifact = await produceWorktreeCommitArtifact({
+      descriptor: third!, managed_path: third!.managed_path,
+      validation: { executable: process.execPath, args: ["-e", "process.exit(0)"] },
+    });
+    await errorCode(secondRestart.acceptArtifact("root", "call-c", "child-c", third!, thirdArtifact), "lifecycle-failed");
+    const terminal = await secondRestart.completeCall("root", "call-c", "child-c", "completed", {
+      run_id: third!.run_id, dispatch_id: third!.dispatch_id,
+    });
+    const failed = terminal!.tasks.find(({ descriptor }) => descriptor.dispatch_id === third!.dispatch_id)!;
+    assert.equal(failed.phase, "failed");
+    assert.equal(failed.outcome, "failed");
+    assert.deepEqual(failed.artifact, thirdArtifact);
+    assert.equal(terminal!.archived, true);
+
+    const reopened = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const archive = await reopened.snapshot("root", prepared.snapshot.run_id);
+    assert.equal(archive!.terminal_reason, "failed");
+    assert.deepEqual(archive!.tasks.find(({ descriptor }) => descriptor.dispatch_id === third!.dispatch_id)!.artifact, thirdArtifact);
+  } finally {
+    WorktreeLifecycle.prototype.acceptCommit = original;
+    await rm(value.root, { recursive: true, force: true });
+  }
+});
+
+test("durable artifact parser rejects semantic corruption without consulting the checkout", async () => {
+  const value = await fixture("artifact-corrupt");
+  try {
+    const coordinator = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const candidate = contract(value.sha, [[], []]);
+    candidate.tasks[0]!.scope.write = ["upper"];
+    const prepared = await coordinator.prepare(candidate, "root");
+    assert.equal(prepared.status, "prepared");
+    if (prepared.status !== "prepared") return;
+    const descriptor = prepared.snapshot.ready[0]!;
+    await coordinator.bindDispatch("root", "call", descriptor);
+    await mkdir(join(descriptor.managed_path, "upper"));
+    await writeFile(join(descriptor.managed_path, "upper", "A.txt"), "accepted\n");
+    const artifact = await produceWorktreeCommitArtifact({
+      descriptor, managed_path: descriptor.managed_path,
+      validation: { executable: process.execPath, args: ["-e", "process.exit(0)"] },
+    });
+    await coordinator.acceptArtifact("root", "call", "child", descriptor, artifact);
+    assert.deepEqual(artifact.changed_paths, ["upper/A.txt"]);
+    const statePath = join(value.repository, ".git", "sortie-dogs", "parallel-dispatch-v3", "state.json");
+    const pristine = JSON.parse(await readFile(statePath, "utf8")) as Record<string, any>;
+    assert.deepEqual((await (await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository }))
+      .snapshot("root", prepared.snapshot.run_id))!.tasks[0]!.artifact, artifact);
+    const corruptions: Array<(state: Record<string, any>) => void> = [
+      (state) => { state.run.tasks[0].artifact.validation.command[0] = "node"; },
+      (state) => { state.run.tasks[0].artifact.changed_paths = ["outside.txt"]; },
+      (state) => { state.run.tasks[0].artifact.changed_paths = ["./a.txt"]; },
+      (state) => { state.run.tasks[0].artifact.changed_paths = ["a.txt", "A.txt"]; },
+      (state) => { state.run.tasks[0].artifact.validation.validation_fingerprint = "f".repeat(64); },
+      (state) => { state.run.tasks[0].artifact = null; },
+      (state) => { delete state.run.tasks[0].artifact_accepted; },
+    ];
+    for (const corrupt of corruptions) {
+      const state = structuredClone(pristine);
+      corrupt(state);
+      await writeFile(statePath, JSON.stringify(state));
+      const reopened = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+      await errorCode(reopened.snapshot("root", prepared.snapshot.run_id), "corrupt-state");
+    }
+  } finally {
+    await rm(value.root, { recursive: true, force: true });
+  }
+});
+
+test("completion without artifact fails and tampering is rejected before lifecycle acceptance", async () => {
+  const value = await fixture("artifact-failclosed");
+  try {
+    const coordinator = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const prepared = await coordinator.prepare(contract(value.sha, [[], []]), "root");
+    assert.equal(prepared.status, "prepared");
+    if (prepared.status !== "prepared") return;
+    const [first, second] = prepared.snapshot.ready;
+    await coordinator.bindDispatch("root", "missing-call", first!);
+    const failed = await coordinator.completeCall("root", "missing-call", "missing-child", "completed", {
+      run_id: first!.run_id,
+      dispatch_id: first!.dispatch_id,
+    });
+    const failedTask = failed!.tasks.find(({ descriptor }) => descriptor.dispatch_id === first!.dispatch_id)!;
+    assert.equal(failedTask.phase, "failed");
+    assert.equal(failedTask.outcome, "failed");
+    assert.equal(failedTask.artifact, null);
+
+    await coordinator.bindDispatch("root", "tamper-call", second!);
+    await writeFile(join(second!.managed_path, "b.txt"), "candidate\n");
+    const artifact = await produceWorktreeCommitArtifact({
+      descriptor: second!,
+      managed_path: second!.managed_path,
+      validation: { executable: process.execPath, args: ["-e", "process.exit(0)"] },
+    });
+    await errorCode(coordinator.acceptArtifact("root", "tamper-call", "tamper-child", second!, {
+      ...artifact,
+      commit_sha: "a".repeat(40),
+    }), "artifact-invalid");
+    const beforeFailure = await coordinator.snapshot("root", prepared.snapshot.run_id);
+    assert.equal(beforeFailure!.tasks.find(({ descriptor }) => descriptor.dispatch_id === second!.dispatch_id)!.artifact, null);
+    const terminal = await coordinator.completeCall("root", "tamper-call", "tamper-child", "failed");
+    assert.equal(terminal!.tasks.find(({ descriptor }) => descriptor.dispatch_id === second!.dispatch_id)!.artifact, null);
+  } finally {
+    await rm(value.root, { recursive: true, force: true });
+  }
+});
+
+test("reconciliation retains accepted artifact evidence on abandonment without releasing descendants", async () => {
+  const value = await fixture("artifact-abandon");
+  try {
+    const coordinator = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const prepared = await coordinator.prepare(contract(value.sha, [[], ["a"]]), "root");
+    assert.equal(prepared.status, "prepared");
+    if (prepared.status !== "prepared") return;
+    const descriptor = prepared.snapshot.ready[0]!;
+    await coordinator.bindDispatch("root", "call", descriptor);
+    await writeFile(join(descriptor.managed_path, "a.txt"), "durable\n");
+    const artifact = await produceWorktreeCommitArtifact({
+      descriptor,
+      managed_path: descriptor.managed_path,
+      validation: { executable: process.execPath, args: ["-e", "process.exit(0)"] },
+    });
+    await coordinator.acceptArtifact("root", "call", "child", descriptor, artifact);
+    const abandoned = await coordinator.reconcile("root", new Set(), prepared.snapshot.run_id);
+    const task = abandoned!.tasks.find(({ descriptor: entry }) => entry.dispatch_id === descriptor.dispatch_id)!;
+    assert.equal(task.phase, "abandoned");
+    assert.deepEqual(task.artifact, artifact);
+    assert.equal(abandoned!.ready.length, 0);
+    assert.equal(abandoned!.tasks.find(({ descriptor: entry }) => entry.task_id === "b")!.phase, "suppressed");
   } finally {
     await rm(value.root, { recursive: true, force: true });
   }

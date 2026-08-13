@@ -311,6 +311,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       "sortie_cancel_parallel_dispatch",
       "sortie_check_contract",
       "sortie_compact_and_continue",
+      "sortie_create_parallel_commit_artifact",
       "sortie_enable_backlog_drain",
       "sortie_parallel_dispatch_status",
       "sortie_prepare_parallel_dispatch",
@@ -366,7 +367,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     for (const asset of loaded.runtimeAssets) {
       assert.equal(asset.version, RUNTIME_ASSET_VERSION, `${asset.name} version must match the shared marker`);
     }
-    assert.equal(RUNTIME_ASSET_VERSION, "0.3.14-parallel-lifecycle-v2");
+    assert.equal(RUNTIME_ASSET_VERSION, "0.3.15-parallel-commit-artifact-v1");
     const coordinatorFrontmatter = /^---\r?\n([\s\S]*?)\r?\n---/u.exec(coordinator.content)?.[1];
     assert.ok(coordinatorFrontmatter);
     assert.match(coordinatorFrontmatter, /^model: openai\/gpt-5\.6-terra$/m);
@@ -589,6 +590,18 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       "scope_gap: return typed gap; no manifest expansion | replacement worker",
       "parallel_fanout: forbidden on normal lane",
     ]) assert.ok(parallelImplementation[1].includes(contract), contract);
+    const parallelContract = coordinator.content.match(
+      /DEPENDENCY_PARALLEL_DISPATCH_FIXTURE\r?\n([\s\S]+?)\r?\nEND_DEPENDENCY_PARALLEL_DISPATCH_FIXTURE/,
+    );
+    assert.ok(parallelContract, "coordinator needs the immutable parallel artifact contract");
+    assert.match(parallelContract[1], /artifact_exception:\s*active bound parallel dog-worker -> sortie_create_parallel_commit_artifact exactly once -> durable artifact acceptance before return -> immediate gate release/);
+    assert.match(parallelContract[1], /artifact_restart:\s*durable running-task artifact -> exact replay; never create a second commit/);
+    assert.match(parallelContract[1], /artifact_result:\s*targeted validation \| exact scoped A\/M\/D stage \| one managed-branch commit \| verified direct child\/object\/artifact \| bounded result/);
+    assert.match(parallelContract[1], /artifact_failure:\s*retain edits\/worktree \| release gate \| failed \| blocked marker; raw output forbidden/);
+    assert.match(parallelContract[1], /terminal_marker:\s*release complete and no tools\/subprocess in flight -> SORTIE_PARALLEL_OUTCOME strict bounded JSON/);
+    assert.match(worker.content, /After editing only scope_write, call sortie_create_parallel_commit_artifact exactly once while the lease\s+is held with run_id, dispatch_id, validation_executable, optional validation_args_json, and optional\s+timeout_ms/);
+    assert.match(worker.content, /Immediately call sortie_release_write_gate after that capability, including producer failure/);
+    assert.match(worker.content, /This exception applies only to the\s+parallel lane; the normal single-worker lane remains unchanged/);
     assert.match(coordinator.content, /only consultation capabilities are Strategy and SourceReview/);
     assert.match(coordinator.content, /Strategy follows\s+dog-coordinator -> dog-advisor -> dog-coordinator/);
     assert.match(coordinator.content, /SourceReview follows\s+dog-coordinator -> dog-reviewer -> dog-coordinator only after canonical validation/);
@@ -1221,7 +1234,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(sortie.content, /never route a worker to the user/i);
 
     for (const asset of loaded.runtimeAssets) {
-      assert.equal(asset.version, "0.3.14-parallel-lifecycle-v2");
+      assert.equal(asset.version, "0.3.15-parallel-commit-artifact-v1");
       const frontmatter = asset.content.match(/^---\r?\n([\s\S]+?)\r?\n---\r?\n/);
       assert.ok(frontmatter, `${asset.name} must have frontmatter`);
       const entries = Object.fromEntries(

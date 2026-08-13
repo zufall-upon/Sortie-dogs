@@ -5,6 +5,7 @@ const BACKLOG_DRAIN_CAPABILITY = "sortie_enable_backlog_drain";
 const PARALLEL_PREPARE_CAPABILITY = "sortie_prepare_parallel_dispatch";
 const PARALLEL_STATUS_CAPABILITY = "sortie_parallel_dispatch_status";
 const PARALLEL_CANCEL_CAPABILITY = "sortie_cancel_parallel_dispatch";
+const PARALLEL_COMMIT_ARTIFACT_CAPABILITY = "sortie_create_parallel_commit_artifact";
 
 export interface RuntimeAsset {
   readonly name: string;
@@ -16,7 +17,7 @@ export interface RuntimeAsset {
 export const runtimeAssets = [
   {
     name: "dog-coordinator",
-    version: "0.3.14-parallel-lifecycle-v2",
+    version: "0.3.15-parallel-commit-artifact-v1",
     installPath: "agent/dog-coordinator.md",
     content: `---
 description: Canonical MkII coordinator packaged by Sortie-dogs
@@ -378,11 +379,14 @@ parallel_units, attempt, and contract_fingerprint. Join returns through Task; th
 ${PARALLEL_STATUS_CAPABILITY} after each return and dispatch only newly ready descriptors. Never
 redispatch a running task after restart. Use status with reconcile=true only when host continuation
 identity cannot prove a running call; abandoned-worker is terminal. No automatic retry, serial fallback
-after first dispatch, worker Git mutation, remote mutation, canonical validation, or direct main write.
+after first dispatch, normal worker Git mutation, remote mutation, canonical validation, or direct main write.
 To stop the run, call ${PARALLEL_CANCEL_CAPABILITY}. Cancellation suppresses pending or reserved work,
 never force-stops running workers, and never removes worktrees. Running work remains join-required until
-its outcome or abandoned-worker reconciliation. Terminal runs enter bounded durable archive; status
-retains task, dispatch, worktree, branch, path, and base identities for Card 05/06. Session idle never
+its outcome or abandoned-worker reconciliation. A bound active parallel dog-worker may produce one
+immutable commit artifact only through ${PARALLEL_COMMIT_ARTIFACT_CAPABILITY}; all other Git mutation
+remains forbidden. That capability durably accepts the verified artifact before it returns, so restart
+can replay the exact running-task artifact without another commit. Terminal runs enter bounded durable archive; status and archive retain verified
+bounded artifacts with task, dispatch, worktree, branch, path, and base identities. Session idle never
 cancels; coordinator session deletion requests the same bounded cancellation.
 Each worker's final response ends with exactly one line:
 SORTIE_PARALLEL_OUTCOME {"run_id":"<run_id>","dispatch_id":"<dispatch_id>","status":"<completed|failed|blocked|cancelled>"}
@@ -394,10 +398,14 @@ DEPENDENCY_PARALLEL_DISPATCH_FIXTURE
     join: Task return -> sortie_parallel_dispatch_status -> newly ready descriptors only
     failure: suppress descendants; independent branches continue; no retry | post-dispatch serial fallback
     restart: running never redispatched; explicit reconcile without provable host call -> abandoned-worker stop
-    worker_limits: no Git mutation | remote mutation | canonical validation | direct main write
-    terminal_marker: SORTIE_PARALLEL_OUTCOME strict bounded JSON
+    worker_limits: normal Git mutation forbidden | remote mutation | canonical validation | direct main write
+    artifact_exception: active bound parallel dog-worker -> ${PARALLEL_COMMIT_ARTIFACT_CAPABILITY} exactly once -> durable artifact acceptance before return -> immediate gate release
+    artifact_result: targeted validation | exact scoped A/M/D stage | one managed-branch commit | verified direct child/object/artifact | bounded result
+    artifact_restart: durable running-task artifact -> exact replay; never create a second commit
+    artifact_failure: retain edits/worktree | release gate | failed | blocked marker; raw output forbidden
+    terminal_marker: release complete and no tools/subprocess in flight -> SORTIE_PARALLEL_OUTCOME strict bounded JSON
     cancel: sortie_cancel_parallel_dispatch; coordinator root only; running join-required
-    cleanup: Card 04 never removes worktrees; archived ownership passes to Card 05/06
+    cleanup: worktree cleanup remains Card 06
 END_DEPENDENCY_PARALLEL_DISPATCH_FIXTURE
 
 ## Worker handoff contract
@@ -1052,10 +1060,10 @@ the initial exit 1 is first and the latest exit 0 is last.
 An undeclared write or mutation must be reported as rejected, not performed.
 
 RUNTIME_ASSET_VERSION_SYNC_FIXTURE
-    runtime_version: 0.3.14-parallel-lifecycle-v2
+    runtime_version: 0.3.15-parallel-commit-artifact-v1
     shared_marker: src/asset-version.ts
-    packaged_expectation: test/plugin-loader.test.ts uses 0.3.14-parallel-lifecycle-v2
-    initialize_expectation: test/initialize.test.ts uses 0.3.14-parallel-lifecycle-v2
+    packaged_expectation: test/plugin-loader.test.ts uses 0.3.15-parallel-commit-artifact-v1
+    initialize_expectation: test/initialize.test.ts uses 0.3.15-parallel-commit-artifact-v1
     rule: runtime asset versions, shared marker, packaged expectation, and initialize expectation change together
 END_RUNTIME_ASSET_VERSION_SYNC_FIXTURE
 
@@ -1098,7 +1106,7 @@ END_TERMINAL_EVIDENCE_FIXTURE
   },
   {
     name: "dog-worker",
-    version: "0.3.14-parallel-lifecycle-v2",
+    version: "0.3.15-parallel-commit-artifact-v1",
     installPath: "agent/dog-worker.md",
     content: `---
 description: Dedicated worker for the canonical Sortie-dogs coordinator
@@ -1153,6 +1161,20 @@ using the one diagnostic does not block a subsequent allowed canonical rerun. Co
 fresh-worker redispatch never resets the counts. Never stage outside exact manifest paths, use
 git add -A, amend, push, or perform coordinator-owned commit work.
 
+## Parallel immutable commit artifact
+
+Only an active parallel dog-worker with its bound write gate and lease may use the exception below.
+After editing only scope_write, call ${PARALLEL_COMMIT_ARTIFACT_CAPABILITY} exactly once while the lease
+is held with run_id, dispatch_id, validation_executable, optional validation_args_json, and optional
+timeout_ms. It performs targeted validation, stages only exact scoped A/M/D paths, creates one
+managed-branch commit, verifies its direct child, object, and artifact, and returns only the bounded
+verified artifact. Do not use shell Git, remote mutation, direct main, or canonical validation.
+Immediately call sortie_release_write_gate after that capability, including producer failure. Failed
+production retains edits and worktree; after release return a failed or blocked marker with no raw
+stdout, stderr, diff, or log. Only after release and no tools or subprocesses remain in flight, end
+with exactly one strict SORTIE_PARALLEL_OUTCOME completed marker. This exception applies only to the
+parallel lane; the normal single-worker lane remains unchanged.
+
 Any command or tool denial is terminal evidence for that attempted operation. Record it once and do
 not retry with another executable spelling, absolute path, shell wrapper, quoting style, narrowed
 argument, direct probe, or diagnostic substitute. Run only the exact canonical validation command
@@ -1190,7 +1212,7 @@ the user.
   },
   {
     name: "dog-scout",
-    version: "0.3.14-parallel-lifecycle-v2",
+    version: "0.3.15-parallel-commit-artifact-v1",
     installPath: "agent/dog-scout.md",
     content: `---
 description: Bounded evidence scout for dog-coordinator
@@ -1239,7 +1261,7 @@ prose; keep the keys, paths, commands, and identifiers verbatim.
   },
   {
     name: "dog-reviewer",
-    version: "0.3.14-parallel-lifecycle-v2",
+    version: "0.3.15-parallel-commit-artifact-v1",
     installPath: "agent/dog-reviewer.md",
     content: `---
 description: Independent source reviewer for dog-coordinator
@@ -1268,7 +1290,7 @@ or transport.
   },
   {
     name: "dog-advisor",
-    version: "0.3.14-parallel-lifecycle-v2",
+    version: "0.3.15-parallel-commit-artifact-v1",
     installPath: "agent/dog-advisor.md",
     content: `---
 description: Focused technical advisor for dog-coordinator
@@ -1292,7 +1314,7 @@ provider, vendor, model, variant, or transport.
   },
   {
     name: "sortie",
-    version: "0.3.14-parallel-lifecycle-v2",
+    version: "0.3.15-parallel-commit-artifact-v1",
     installPath: "command/sortie.md",
     content: `---
 description: Start the canonical Sortie-dogs MkII workflow

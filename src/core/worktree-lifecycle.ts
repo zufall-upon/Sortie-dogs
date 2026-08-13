@@ -491,6 +491,41 @@ export class WorktreeLifecycle {
     });
   }
 
+  async acceptCommit(
+    worktreeId: string,
+    managedPath: string,
+    baseSha: string,
+    commitSha: string,
+    branch: string,
+  ): Promise<void> {
+    if (!validText(worktreeId) || !validText(managedPath, MAX_PATH) || !isAbsolute(managedPath) ||
+      !validText(branch) || !SHA.test(baseSha) || !SHA.test(commitSha) || baseSha === commitSha) {
+      throw new WorktreeLifecycleError("invalid-request", "Commit acceptance request is invalid.");
+    }
+    const id = identity(worktreeId);
+    if (this.inFlight.has(id)) throw new WorktreeLifecycleError("unsafe-cleanup", "Worktree operation is still in flight.");
+    await this.assertRootIdentity();
+    await this.withInventoryTransaction(async () => {
+      if (this.inFlight.has(id)) throw new WorktreeLifecycleError("unsafe-cleanup", "Worktree operation is still in flight.");
+      const record = this.inventory.records.find((entry) => entry.identity === id);
+      if (record === undefined || record.phase !== "ready" || !record.branchOwned || record.branch !== branch ||
+        record.baseSha !== baseSha || pathIdentity(record.path) !== pathIdentity(managedPath) ||
+        (record.expectedSha !== baseSha && record.expectedSha !== commitSha)) {
+        throw new WorktreeLifecycleError("unsafe-cleanup", "Commit acceptance does not match owned inventory state.");
+      }
+      if (await this.exactEntry(record, undefined, true, commitSha) === undefined || !(await this.isClean(record.path))) {
+        throw new WorktreeLifecycleError("unsafe-cleanup", "Accepted checkout path, branch, HEAD, or cleanliness is invalid.");
+      }
+      const parents = (await this.git(["rev-list", "--parents", "-n", "1", commitSha], record.path)).trim().split(" ");
+      if (parents.length !== 2 || parents[0] !== commitSha || parents[1] !== baseSha) {
+        throw new WorktreeLifecycleError("unsafe-cleanup", "Accepted commit is not a direct single-parent child of the expected base.");
+      }
+      if (record.expectedSha === commitSha) return;
+      record.expectedSha = commitSha;
+      await this.saveInventory();
+    });
+  }
+
   async reconcile(): Promise<readonly ManagedWorktree[]> {
     await this.assertRootIdentity();
     return this.withInventoryTransaction(async () => {
@@ -733,12 +768,13 @@ export class WorktreeLifecycle {
     record: InventoryRecord,
     known?: GitWorktree,
     requireLock = true,
+    expectedSha = record.expectedSha,
   ): Promise<GitWorktree | undefined> {
     const entry = known ?? (await this.listWorktrees()).find((candidate) =>
       pathIdentity(candidate.path) === pathIdentity(record.path));
-    if (entry === undefined || entry.bare || entry.detached || entry.prunable || entry.head !== record.expectedSha ||
+    if (entry === undefined || entry.bare || entry.detached || entry.prunable || entry.head !== expectedSha ||
       entry.branch !== `refs/heads/${record.branch}` || (requireLock && entry.locked !== record.lockReason) ||
-      (await this.refSha(record.branch)) !== record.expectedSha) return undefined;
+      (await this.refSha(record.branch)) !== expectedSha) return undefined;
     const actualPath = await realpath(record.path).catch(() => undefined);
     const listedPath = await realpath(entry.path).catch(() => undefined);
     if (actualPath === undefined || pathIdentity(actualPath) !== pathIdentity(record.path) ||
@@ -928,7 +964,7 @@ export class WorktreeLifecycle {
           typeof value.pathNonce !== "string" || !UUID.test(value.pathNonce) ||
           !validText(value.branch) || branches.has(value.branch.toLowerCase()) || typeof value.baseSha !== "string" ||
           !SHA.test(value.baseSha) || typeof value.expectedSha !== "string" || !SHA.test(value.expectedSha) ||
-          value.expectedSha !== value.baseSha || typeof value.ownershipNonce !== "string" || !UUID.test(value.ownershipNonce) ||
+          typeof value.ownershipNonce !== "string" || !UUID.test(value.ownershipNonce) ||
           value.lockReason !== `sortie-dogs:${value.identity.slice(0, 16)}:${value.ownershipNonce}` ||
           typeof value.branchOwned !== "boolean" ||
           !(value.targetDev === null || safeStoredFileID(value.targetDev)) ||
@@ -939,6 +975,10 @@ export class WorktreeLifecycle {
         if (!this.isDirectManagedRecord(typed) ||
           ((typed.phase === "setting-up" || typed.phase === "ready" || typed.phase === "removing") &&
             typed.targetDev === null)) throw new Error();
+        if (typed.expectedSha !== typed.baseSha) {
+          const parents = (await this.git(["rev-list", "--parents", "-n", "1", typed.expectedSha])).trim().split(" ");
+          if (parents.length !== 2 || parents[0] !== typed.expectedSha || parents[1] !== typed.baseSha) throw new Error();
+        }
         identities.add(value.identity);
         branches.add(value.branch.toLowerCase());
         records.push(value as InventoryRecord);

@@ -94,10 +94,40 @@ export interface WorktreeParallelTask {
 }
 
 export interface WorktreeCommitArtifact {
-  task_id: string;
-  base_sha: string;
-  commit_sha: string;
-  changed_paths: string[];
+  readonly task_id: string;
+  readonly base_sha: string;
+  readonly commit_sha: string;
+  readonly branch: string;
+  readonly changed_paths: readonly string[];
+  readonly change_fingerprint: string;
+  readonly validation: WorktreeCommitValidationEvidence;
+}
+
+export interface WorktreeCommitValidationEvidence {
+  /** Absolute executable followed by its bounded argument vector. */
+  readonly command: readonly string[];
+  readonly exit_code: 0;
+  readonly validation_fingerprint: string;
+}
+
+export interface WorktreeCommitValidationRequest {
+  readonly executable: string;
+  readonly args?: readonly string[];
+  readonly timeout_ms?: number;
+}
+
+export interface WorktreeCommitProduceRequest {
+  readonly descriptor: ParallelDispatchDescriptor;
+  readonly managed_path: string;
+  readonly validation: WorktreeCommitValidationRequest;
+  readonly git_path?: string;
+}
+
+export interface WorktreeCommitVerifyRequest {
+  readonly descriptor: ParallelDispatchDescriptor;
+  readonly managed_path: string;
+  readonly artifact: WorktreeCommitArtifact;
+  readonly git_path?: string;
 }
 
 export interface WorktreeParallelMetrics {
@@ -183,6 +213,7 @@ export interface ParallelDispatchTaskSnapshot {
   readonly call_id: string | null;
   readonly child_session_id: string | null;
   readonly outcome: ParallelDispatchOutcome | null;
+  readonly artifact: WorktreeCommitArtifact | null;
 }
 
 export interface ParallelDispatchSnapshot {
@@ -209,6 +240,7 @@ export interface ParallelDispatchArchiveTask {
   readonly call_id: string | null;
   readonly child_session_id: string | null;
   readonly outcome: ParallelDispatchOutcome | null;
+  readonly artifact: WorktreeCommitArtifact | null;
 }
 
 export interface ParallelDispatchArchive {

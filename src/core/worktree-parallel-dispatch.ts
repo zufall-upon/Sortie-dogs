@@ -5,6 +5,8 @@ import { isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import { ScopeLeaseError, ScopeLeaseRegistry, type ScopeLease } from "./scope-lease-registry.js";
+import { verifyWorktreeCommitArtifact } from "./worktree-commit-artifact.js";
+import { normalizeRelativePath } from "./path.js";
 import type {
   ParallelDispatchArchive,
   ParallelDispatchDescriptor,
@@ -12,17 +14,20 @@ import type {
   ParallelDispatchSnapshot,
   ParallelDispatchTaskPhase,
   WorktreeParallelContract,
+  WorktreeCommitArtifact,
   WorktreeParallelTask,
 } from "./types.js";
 import { validateWorktreeParallelSchema } from "./validate-schema.js";
 import { validateWorktreeParallelContract } from "./validate-worktree-parallel.js";
 import { WorktreeLifecycle, WorktreeLifecycleError, type ManagedWorktree } from "./worktree-lifecycle.js";
 
-const VERSION = 2;
+const VERSION = 3;
 const MAX_STATE_BYTES = 1024 * 1024;
 const MAX_TASKS = 3;
 const MAX_ARCHIVES = 16;
 const MAX_TEXT = 4096;
+const MAX_COMMAND_ITEMS = 129;
+const MAX_COMMAND_TEXT = 1000;
 const LOCK_TIMEOUT_MS = 30_000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const HASH = /^[0-9a-f]{64}$/u;
@@ -43,6 +48,7 @@ export type ParallelDispatchErrorCode =
   | "descriptor-mismatch"
   | "descriptor-replay"
   | "outcome-conflict"
+  | "artifact-invalid"
   | "corrupt-state"
   | "state-locked"
   | "lifecycle-failed";
@@ -68,6 +74,8 @@ type StoredTask = {
   call_id: string | null;
   child_session_id: string | null;
   outcome: ParallelDispatchOutcome | null;
+  artifact: WorktreeCommitArtifact | null;
+  artifact_accepted: boolean;
 };
 
 type StoredRun = {
@@ -118,7 +126,12 @@ type StoredPreparationArchive = {
 };
 
 type StoredArchive = StoredRunArchive | StoredPreparationArchive;
-type State = { version: 2; revision: number; run: StoredRun | StoredPreparation | null; archived: StoredArchive[] };
+type State = { version: 3; revision: number; run: StoredRun | StoredPreparation | null; archived: StoredArchive[] };
+
+export interface ParallelDispatchClaim {
+  readonly run_id: string;
+  readonly dispatch_id: string;
+}
 
 export interface ParallelDispatchCoordinatorOptions {
   readonly repositoryRoot: string;
@@ -169,6 +182,68 @@ function cloneDescriptor(value: ParallelDispatchDescriptor): ParallelDispatchDes
   });
 }
 
+function cloneArtifact(value: WorktreeCommitArtifact): WorktreeCommitArtifact {
+  return Object.freeze({
+    task_id: value.task_id,
+    base_sha: value.base_sha,
+    commit_sha: value.commit_sha,
+    branch: value.branch,
+    changed_paths: Object.freeze([...value.changed_paths]),
+    change_fingerprint: value.change_fingerprint,
+    validation: Object.freeze({
+      command: Object.freeze([...value.validation.command]),
+      exit_code: 0,
+      validation_fingerprint: value.validation.validation_fingerprint,
+    }),
+  });
+}
+
+function validArtifact(value: unknown, descriptor: ParallelDispatchDescriptor): value is WorktreeCommitArtifact {
+  if (!isRecord(value) || !exactKeys(value, [
+    "base_sha", "branch", "change_fingerprint", "changed_paths", "commit_sha", "task_id", "validation",
+  ]) || value.task_id !== descriptor.task_id || value.base_sha !== descriptor.base_sha || value.branch !== descriptor.branch ||
+    typeof value.base_sha !== "string" || !SHA.test(value.base_sha) ||
+    typeof value.commit_sha !== "string" || !SHA.test(value.commit_sha) || !validText(value.branch, 256) ||
+    !validStringList(value.changed_paths, 256) || value.changed_paths.length === 0 || typeof value.change_fingerprint !== "string" ||
+    !HASH.test(value.change_fingerprint) || !isRecord(value.validation) || !exactKeys(value.validation, [
+      "command", "exit_code", "validation_fingerprint",
+    ]) || !Array.isArray(value.validation.command) || value.validation.command.length === 0 ||
+    value.validation.command.length > MAX_COMMAND_ITEMS ||
+    !value.validation.command.every((entry) => validText(entry, MAX_COMMAND_TEXT)) ||
+    value.validation.exit_code !== 0 || typeof value.validation.validation_fingerprint !== "string" ||
+    !HASH.test(value.validation.validation_fingerprint)) return false;
+  const paths = value.changed_paths;
+  const identities = new Set<string>();
+  for (let index = 0; index < paths.length; index += 1) {
+    const path = paths[index]!;
+    let normalized: string;
+    try { normalized = normalizeRelativePath(path); } catch { return false; }
+    const previous = index === 0 ? undefined : paths[index - 1]!;
+    if (normalized !== path || (previous !== undefined && previous >= path)) return false;
+    const identity = normalized.toLowerCase();
+    if (identities.has(identity) || !descriptor.scope_write.some((write) =>
+      identity === write || identity.startsWith(`${write}/`))) return false;
+    identities.add(identity);
+  }
+  const command = value.validation.command;
+  const validationFingerprint = createHash("sha256").update(JSON.stringify({
+    version: 1,
+    command,
+    exit_code: 0,
+    task_id: descriptor.task_id,
+    base_sha: descriptor.base_sha,
+    change_fingerprint: value.change_fingerprint,
+  })).digest("hex");
+  if (!isAbsolute(command[0]!) || value.validation.validation_fingerprint !== validationFingerprint) return false;
+  return true;
+}
+
+function validClaim(value: unknown): value is ParallelDispatchClaim {
+  return isRecord(value) && exactKeys(value, ["dispatch_id", "run_id"]) &&
+    typeof value.run_id === "string" && UUID.test(value.run_id) &&
+    typeof value.dispatch_id === "string" && UUID.test(value.dispatch_id);
+}
+
 function validStringList(value: unknown, maximum = MAX_TASKS): value is string[] {
   return Array.isArray(value) && value.length <= maximum && value.every((entry) => validText(entry, 512));
 }
@@ -209,12 +284,14 @@ function parseRun(raw: unknown): StoredRun {
   const tasks: StoredTask[] = [];
   const rawTasks = raw.tasks as unknown[];
   for (const value of rawTasks) {
-    if (!isRecord(value) || !exactKeys(value, ["call_id", "child_session_id", "descriptor", "outcome", "phase", "worktree_id"]) ||
+    if (!isRecord(value) || !exactKeys(value, ["artifact", "artifact_accepted", "call_id", "child_session_id", "descriptor", "outcome", "phase", "worktree_id"]) ||
       !validText(value.worktree_id, 256) || !validDescriptor(value.descriptor) || ids.has(value.descriptor.task_id) ||
       dispatches.has(value.descriptor.dispatch_id) || typeof value.phase !== "string" ||
       !PHASES.has(value.phase as ParallelDispatchTaskPhase) || !(value.call_id === null || validText(value.call_id, 256)) ||
       !(value.child_session_id === null || validText(value.child_session_id, 256)) ||
-      !(value.outcome === null || (typeof value.outcome === "string" && OUTCOMES.has(value.outcome as ParallelDispatchOutcome)))) {
+      !(value.outcome === null || (typeof value.outcome === "string" && OUTCOMES.has(value.outcome as ParallelDispatchOutcome))) ||
+      typeof value.artifact_accepted !== "boolean" ||
+      !(value.artifact === null || validArtifact(value.artifact, value.descriptor))) {
       throw new Error("task");
     }
     const task = value as unknown as StoredTask;
@@ -226,11 +303,17 @@ function parseRun(raw: unknown): StoredRun {
       (task.phase === "running" && (task.call_id === null || task.outcome !== null)) ||
       (["completed", "failed"].includes(task.phase) && (task.call_id === null || task.outcome === null)) ||
       (task.phase === "abandoned" && task.outcome !== null) || !suppressedOutcomeValid ||
+      (task.artifact === null && task.artifact_accepted) ||
+      (task.artifact !== null && task.child_session_id === null) ||
+      (["pending", "reserved", "suppressed"].includes(task.phase) && (task.artifact !== null || task.artifact_accepted)) ||
+      (task.phase === "completed" && (task.outcome !== "completed" || task.artifact === null || !task.artifact_accepted)) ||
+      (task.phase === "failed" && task.outcome === "completed") ||
       (task.call_id !== null && calls.has(task.call_id))) throw new Error("task-state");
     ids.add(task.descriptor.task_id);
     dispatches.add(task.descriptor.dispatch_id);
     if (task.call_id !== null) calls.add(task.call_id);
-    tasks.push({ ...task, descriptor: cloneDescriptor(task.descriptor) });
+    tasks.push({ ...task, descriptor: cloneDescriptor(task.descriptor),
+      artifact: task.artifact === null ? null : cloneArtifact(task.artifact) });
   }
   if (tasks.some((task) => task.descriptor.depends_on.some((dependency) => !ids.has(dependency)))) throw new Error("dependency");
   return { ...(raw as unknown as StoredRun), tasks };
@@ -295,7 +378,7 @@ function parseState(raw: unknown): State {
   const archived = raw.archived.map(parseArchive);
   const runIDs = archived.map((entry) => entry.kind === "run" ? entry.run.run_id : entry.preparation.run_id);
   if (new Set(runIDs).size !== runIDs.length || (run !== null && runIDs.includes(run.run_id))) throw new Error("archive-identity");
-  return { version: 2, revision: raw.revision as number, run, archived };
+  return { version: 3, revision: raw.revision as number, run, archived };
 }
 
 export class ParallelDispatchCoordinator {
@@ -330,7 +413,7 @@ export class ParallelDispatchCoordinator {
     } catch {
       throw new ParallelDispatchError("invalid-contract", "Git common directory is unavailable.");
     }
-    const stateRoot = join(common, "sortie-dogs", "parallel-dispatch-v2");
+    const stateRoot = join(common, "sortie-dogs", "parallel-dispatch-v3");
     await mkdir(stateRoot, { recursive: true, mode: 0o700 });
     await chmod(stateRoot, 0o700).catch(() => undefined);
     return new ParallelDispatchCoordinator(repositoryRoot, lifecycle, stateRoot);
@@ -444,15 +527,135 @@ export class ParallelDispatchCoordinator {
     });
   }
 
+  async acceptArtifact(
+    ownerRoot: string,
+    callID: string,
+    childSessionID: string,
+    descriptor: ParallelDispatchDescriptor,
+    artifact: WorktreeCommitArtifact,
+  ): Promise<ParallelDispatchSnapshot> {
+    if (!validText(ownerRoot, 256) || !validText(callID, 256) || !validText(childSessionID, 256) ||
+      !validDescriptor(descriptor) || !isRecord(artifact)) {
+      throw new ParallelDispatchError("artifact-invalid", "Commit artifact claim is invalid.");
+    }
+    await this.recoverWithAuthority();
+    const authorized = await this.transaction((state) => {
+      const archived = state.run === null ? this.findRunArchive(state, ownerRoot, descriptor.run_id) : undefined;
+      if (archived !== undefined) {
+        const task = archived.run.tasks.find((entry) => entry.descriptor.dispatch_id === descriptor.dispatch_id);
+        if (task !== undefined && task.call_id === callID && task.child_session_id === childSessionID &&
+          task.artifact_accepted && task.artifact !== null && fingerprint(task.artifact) === fingerprint(artifact)) {
+          return { result: undefined, changed: false };
+        }
+        throw new ParallelDispatchError("outcome-conflict", "Archived dispatch artifact does not match.");
+      }
+      const run = this.requireRun(state, ownerRoot, descriptor.run_id);
+      const task = run.tasks.find((entry) => entry.descriptor.dispatch_id === descriptor.dispatch_id);
+      if (task === undefined || fingerprint(task.descriptor) !== fingerprint(descriptor)) {
+        throw new ParallelDispatchError("descriptor-mismatch", "Artifact descriptor does not match durable state.");
+      }
+      if (task.artifact !== null) {
+        if (task.artifact_accepted && (task.phase === "running" || task.phase === "completed") && task.call_id === callID &&
+          task.child_session_id === childSessionID &&
+          fingerprint(task.artifact) === fingerprint(artifact)) {
+          return { result: undefined, changed: false };
+        }
+        if (task.phase !== "running" || task.call_id !== callID || task.child_session_id !== childSessionID ||
+          fingerprint(task.artifact) !== fingerprint(artifact)) {
+          throw new ParallelDispatchError("outcome-conflict", "A different artifact or outcome was already recorded.");
+        }
+      }
+      if (task.phase !== "running" || task.call_id !== callID ||
+        (task.child_session_id !== null && task.child_session_id !== childSessionID)) {
+        throw new ParallelDispatchError("descriptor-replay", "Artifact is not authorized for the active dispatch.");
+      }
+      return { result: { worktreeID: task.worktree_id, descriptor: cloneDescriptor(task.descriptor) }, changed: false };
+    });
+    if (authorized === undefined) {
+      const snapshot = await this.snapshot(ownerRoot, descriptor.run_id);
+      if (snapshot === undefined) throw new ParallelDispatchError("outcome-conflict", "Artifact outcome disappeared.");
+      return snapshot;
+    }
+    if (!validArtifact(artifact, descriptor)) {
+      throw new ParallelDispatchError("artifact-invalid", "Commit artifact claim is invalid.");
+    }
+    try {
+      await verifyWorktreeCommitArtifact({
+        descriptor: authorized.descriptor,
+        managed_path: authorized.descriptor.managed_path,
+        artifact,
+      });
+    } catch {
+      throw new ParallelDispatchError("artifact-invalid", "Commit artifact verification failed.");
+    }
+    const preAccepted = await this.transaction((state) => {
+      if (state.run === null || state.run.kind !== "run" || state.run.owner_root !== ownerRoot ||
+        state.run.run_id !== descriptor.run_id) {
+        throw new ParallelDispatchError("outcome-conflict", "Dispatch changed while its artifact was being accepted.");
+      }
+      const run = state.run;
+      const task = run.tasks.find((entry) => entry.descriptor.dispatch_id === descriptor.dispatch_id);
+      if (task === undefined || fingerprint(task.descriptor) !== fingerprint(descriptor) ||
+        task.phase !== "running" || task.call_id !== callID ||
+        (task.child_session_id !== null && task.child_session_id !== childSessionID)) {
+        throw new ParallelDispatchError("outcome-conflict", "Dispatch changed while its artifact was being accepted.");
+      }
+      if (task.artifact !== null && fingerprint(task.artifact) !== fingerprint(artifact)) {
+        throw new ParallelDispatchError("outcome-conflict", "A competing artifact was already recorded.");
+      }
+      if (task.artifact_accepted) return { result: true, changed: false };
+      if (task.artifact !== null) return { result: false, changed: false };
+      task.child_session_id = childSessionID;
+      task.artifact = cloneArtifact(artifact);
+      task.artifact_accepted = false;
+      return { result: false, changed: true };
+    });
+    if (preAccepted) {
+      const snapshot = await this.snapshot(ownerRoot, descriptor.run_id);
+      if (snapshot === undefined) throw new ParallelDispatchError("outcome-conflict", "Artifact outcome disappeared.");
+      return snapshot;
+    }
+    try {
+      await this.lifecycle.acceptCommit(
+        authorized.worktreeID,
+        authorized.descriptor.managed_path,
+        authorized.descriptor.base_sha,
+        artifact.commit_sha,
+        authorized.descriptor.branch,
+      );
+    } catch {
+      throw new ParallelDispatchError("lifecycle-failed", "Verified commit could not be accepted by worktree lifecycle.");
+    }
+    return this.transaction((state) => {
+      if (state.run === null || state.run.kind !== "run" || state.run.owner_root !== ownerRoot ||
+        state.run.run_id !== descriptor.run_id) {
+        throw new ParallelDispatchError("outcome-conflict", "Dispatch changed while its artifact was being accepted.");
+      }
+      const run = this.requireRun(state, ownerRoot, descriptor.run_id);
+      const task = run.tasks.find((entry) => entry.descriptor.dispatch_id === descriptor.dispatch_id);
+      if (task === undefined || fingerprint(task.descriptor) !== fingerprint(descriptor) ||
+        task.phase !== "running" || task.call_id !== callID || task.child_session_id !== childSessionID) {
+        throw new ParallelDispatchError("outcome-conflict", "Dispatch changed while its artifact was being accepted.");
+      }
+      if (task.artifact === null || fingerprint(task.artifact) !== fingerprint(artifact)) {
+        throw new ParallelDispatchError("outcome-conflict", "A competing artifact was already recorded.");
+      }
+      if (task.artifact_accepted) return { result: this.publicSnapshot(run), changed: false };
+      task.artifact_accepted = true;
+      return { result: this.publicSnapshot(run), changed: true };
+    });
+  }
+
   async completeCall(
     ownerRoot: string,
     callID: string,
     childSessionID: string | undefined,
     outcome: ParallelDispatchOutcome,
-    claimed?: { readonly run_id: string; readonly dispatch_id: string },
+    claimed?: ParallelDispatchClaim,
   ): Promise<ParallelDispatchSnapshot | undefined> {
     if (!validText(ownerRoot, 256) || !validText(callID, 256) ||
-      (childSessionID !== undefined && !validText(childSessionID, 256)) || !OUTCOMES.has(outcome)) {
+      (childSessionID !== undefined && !validText(childSessionID, 256)) || !OUTCOMES.has(outcome) ||
+      (claimed !== undefined && !validClaim(claimed))) {
       throw new ParallelDispatchError("outcome-conflict", "Parallel outcome is invalid.");
     }
     await this.recoverWithAuthority();
@@ -462,8 +665,10 @@ export class ParallelDispatchCoordinator {
           entry.run.owner_root === ownerRoot && entry.run.tasks.some((task) => task.call_id === callID));
         if (archived === undefined) return { result: undefined, changed: false };
         const task = archived.run.tasks.find((entry) => entry.call_id === callID)!;
-        const effective = claimed !== undefined &&
-          (claimed.run_id !== archived.run.run_id || claimed.dispatch_id !== task.descriptor.dispatch_id) ? "failed" : outcome;
+        let effective = outcome;
+        if (effective === "completed" && (claimed === undefined || claimed.run_id !== archived.run.run_id ||
+          claimed.dispatch_id !== task.descriptor.dispatch_id || childSessionID === undefined ||
+          task.child_session_id !== childSessionID || task.artifact === null || !task.artifact_accepted)) effective = "failed";
         if (task.outcome !== effective || (childSessionID !== undefined && task.child_session_id !== childSessionID)) {
           throw new ParallelDispatchError("outcome-conflict", "A different terminal outcome was already recorded.");
         }
@@ -472,8 +677,10 @@ export class ParallelDispatchCoordinator {
       const run = state.run;
       const task = run.tasks.find((entry) => entry.call_id === callID);
       if (task === undefined) return { result: undefined, changed: false };
-      const effective = claimed !== undefined &&
-        (claimed.run_id !== run.run_id || claimed.dispatch_id !== task.descriptor.dispatch_id) ? "failed" : outcome;
+      let effective = outcome;
+      if (effective === "completed" && (claimed === undefined || claimed.run_id !== run.run_id ||
+        claimed.dispatch_id !== task.descriptor.dispatch_id || childSessionID === undefined ||
+        task.child_session_id !== childSessionID || task.artifact === null || !task.artifact_accepted)) effective = "failed";
       if (task.phase === "completed" || task.phase === "failed") {
         if (task.outcome !== effective || (childSessionID !== undefined && task.child_session_id !== childSessionID)) {
           throw new ParallelDispatchError("outcome-conflict", "A different terminal outcome was already recorded.");
@@ -679,6 +886,8 @@ export class ParallelDispatchCoordinator {
         call_id: null,
         child_session_id: null,
         outcome: null,
+        artifact: null,
+        artifact_accepted: false,
       })),
     };
   }
@@ -778,6 +987,7 @@ export class ParallelDispatchCoordinator {
       call_id: task.call_id,
       child_session_id: task.child_session_id,
       outcome: task.outcome,
+      artifact: task.artifact === null ? null : cloneArtifact(task.artifact),
     })) : archive.preparation.tasks.map((task, index) => ({
       task_id: task.task_id,
       worktree_id: task.worktree_id,
@@ -789,6 +999,7 @@ export class ParallelDispatchCoordinator {
       call_id: null,
       child_session_id: null,
       outcome: null,
+      artifact: null,
     }));
     return Object.freeze({
       run_id: source.run_id,
@@ -812,6 +1023,7 @@ export class ParallelDispatchCoordinator {
       call_id: task.call_id,
       child_session_id: task.child_session_id,
       outcome: task.outcome,
+      artifact: task.artifact === null ? null : cloneArtifact(task.artifact),
     }));
     return Object.freeze({
       run_id: run.run_id,
@@ -833,7 +1045,7 @@ export class ParallelDispatchCoordinator {
       if (source.byteLength > MAX_STATE_BYTES) throw new Error("oversized");
       return parseState(JSON.parse(source.toString("utf8")) as unknown);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return { version: 2, revision: 0, run: null, archived: [] };
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return { version: 3, revision: 0, run: null, archived: [] };
       throw new ParallelDispatchError("corrupt-state", "Parallel dispatch state is corrupt or unsupported.");
     }
   }

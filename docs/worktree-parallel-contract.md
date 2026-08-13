@@ -1,8 +1,7 @@
 # Worktree Parallel Contract v0.1
 
-This document fixes the contract for the `0.5.x` isolated implementation loop. Card 01 defines the
-data and policy envelope. Card 03 owns isolated linked-worktree and branch lifecycle. Card 04 owns
-dependency-aware dispatch; commits and integration remain outside this contract.
+This document fixes the contract for the `0.5.x` isolated implementation loop. Card 05 completes
+typed worker-only commit artifact production. Card 06 owns cleanup and serial integration.
 
 ## Envelope
 
@@ -10,7 +9,7 @@ dependency-aware dispatch; commits and integration remain outside this contract.
 - `mode`: `parallel` or `single-worker`.
 - `max_workers`: `1` for single-worker; `2..3` for parallel.
 - `tasks`: bounded DAG nodes with stable task, worktree, branch, base SHA, dependencies, and scope.
-- `artifacts`: worker commit evidence tied to the task and its exact base SHA.
+- `artifacts`: immutable worker commit evidence tied to the task, exact base SHA, and branch.
 - `failure`: one typed failure or `null`.
 - `baseline_metrics`: measured values or `null` when no baseline was captured.
 
@@ -34,8 +33,19 @@ write-related scopes remain invalid and must run through a serial contract inste
 - disjoint scopes: allowed.
 - comparisons are case-insensitive so one contract stays safe across Windows and WSL.
 
-An artifact's `changed_paths` must stay inside that task's declared write scope. Parallel tasks do not
-run canonical validation independently; combined validation belongs to the serial integration phase.
+## Card 05 Commit Artifacts
+
+Only the typed worker produces an artifact. Its exact fields are task ID, base SHA, direct-child
+managed branch, commit SHA, canonical unique changed paths, change fingerprint, and validation
+evidence. Validation evidence is an absolute executable plus up to 128 arguments, successful exit
+code, and fingerprint. It never includes raw diff, logs, stdout, or stderr.
+
+The producer re-verifies the commit object and accepts scoped A/M/D changes only. Changed paths must
+stay inside that task's declared write scope. Dirty, outside-scope, staged, wrong-base, wrong-branch,
+process, and lease failures reject the artifact. Ignored control and dependency files may exist but
+are never committed or evidenced. Normal Git, remote, and main mutations are forbidden. Before lease
+release, all subprocesses and tools must be terminal. Parallel tasks do not run canonical validation
+independently; combined validation belongs to serial integration.
 
 ## Typed Failures
 
@@ -105,7 +115,10 @@ models, worker bound, validation conditions, and measurement window.
   suppressed and no task is reserved or running. Up to sixteen bounded archives retain task, dispatch,
   worktree, branch, path, base, call, child-session, and outcome identities for Card 05/06 artifact and
   cleanup ownership; a distinct contract may then prepare a new run. Session idle never cancels.
-- Card 05: commit artifact production.
-- Card 06: serial integration and stale rejection.
+- Card 05: completed commit artifact production.
+  The typed producer durably accepts the verified artifact before returning it to the worker. A restart
+  may replay that exact running-task artifact but never creates a second commit. Parent completion only
+  changes the task phase after write-gate release and process/tool quiescence are proven.
+- Card 06: cleanup, serial integration, and stale rejection.
 - Card 07: conflict remediation and combined validation.
 - Card 08: Windows/WSL RPT and efficiency audit.

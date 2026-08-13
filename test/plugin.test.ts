@@ -1584,6 +1584,7 @@ test("invalid global Sortie config fails reflection closed without removing core
         "sortie_cancel_parallel_dispatch",
         "sortie_check_contract",
         "sortie_compact_and_continue",
+        "sortie_create_parallel_commit_artifact",
         "sortie_enable_backlog_drain",
         "sortie_parallel_dispatch_status",
         "sortie_prepare_parallel_dispatch",
@@ -2688,7 +2689,7 @@ test("typed parallel prepare is the only path to reserved dependency-aware worke
         { output: `<task_result>\nSORTIE_PARALLEL_OUTCOME ${JSON.stringify({
           run_id: descriptor.run_id,
           dispatch_id: descriptor.dispatch_id,
-          status: "completed",
+          status: "failed",
         })}\n</task_result>`, metadata: { sessionId: `child-${index}` } },
       );
     }
@@ -2696,7 +2697,7 @@ test("typed parallel prepare is the only path to reserved dependency-aware worke
       { run_id: prepared.run_id, reconcile: "false" },
       { sessionID: "root", agent: "dog-coordinator" },
     )) as { tasks: Array<{ phase: string }> };
-    assert.deepEqual(status.tasks.map(({ phase }) => phase), ["completed", "completed"]);
+    assert.deepEqual(status.tasks.map(({ phase }) => phase), ["failed", "failed"]);
 
     const client = { session: {
       get: async () => ({ data: { agent: "dog-coordinator" } }),
@@ -2707,6 +2708,141 @@ test("typed parallel prepare is the only path to reserved dependency-aware worke
     await restarted["experimental.chat.system.transform"]!({ sessionID: "root" }, system);
     assert.match(system.system.join("\n"), /SORTIE_PARALLEL_DISPATCH_STATE/u);
     assert.doesNotMatch(system.system.join("\n"), /SORTIE_PARALLEL_OUTCOME/u);
+  });
+});
+
+test("parallel worker artifact capability enforces exact lineage, terminal release, and bounded archive evidence", async () => {
+  await withProject("parallel-artifact-capability", async (directory) => {
+    await writeFile(join(directory, ".gitignore"), "parallel-contract.json\noperation-manifest.json\nhandoff.json\n");
+    await writeFile(join(directory, "base.txt"), "base\n");
+    await execFileAsync("git", ["init", "-q"], { cwd: directory });
+    await execFileAsync("git", ["config", "user.name", "Sortie Test"], { cwd: directory });
+    await execFileAsync("git", ["config", "user.email", "sortie@example.invalid"], { cwd: directory });
+    await execFileAsync("git", ["add", ".gitignore", "base.txt"], { cwd: directory });
+    await execFileAsync("git", ["commit", "-q", "-m", "base"], { cwd: directory });
+    const sha = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: directory })).stdout.trim();
+    const contractPath = join(directory, "parallel-contract.json");
+    await writeFile(contractPath, JSON.stringify({
+      version: "0.1.0", mode: "parallel", max_workers: 2,
+      tasks: ["a", "b"].map((taskID) => ({ task_id: taskID, worktree: `artifact-${taskID}`,
+        branch: `sortie/artifact-${taskID}`, base_sha: sha, depends_on: [],
+        scope: { read: ["base.txt"], write: [`${taskID}.txt`] } })),
+      artifacts: [], failure: null, baseline_metrics: null,
+    }));
+    const hooks = await SortieDogsPlugin({ directory });
+    await hooks["chat.message"]!(
+      { sessionID: "root", agent: "dog-coordinator" },
+      { message: { agent: "dog-coordinator", model: {} }, parts: [{ type: "text", text: "parallel" }] },
+    );
+    const prepared = JSON.parse(await hooks.tool!.sortie_prepare_parallel_dispatch!.execute(
+      { contract_path: contractPath }, { sessionID: "root", agent: "dog-coordinator" },
+    )) as { run_id: string; ready: Array<Record<string, unknown>> };
+    const descriptor = prepared.ready[0]!;
+    const child = "artifact-child";
+    const callID = "artifact-call";
+    const manifestPath = "operation-manifest.json";
+    const managedPath = descriptor.managed_path as string;
+    await writeFile(join(managedPath, manifestPath), JSON.stringify({
+      ...operationManifest([`${descriptor.task_id}.txt`]), task_id: descriptor.task_id, validation: [],
+    }));
+    await writeFile(join(managedPath, "handoff.json"), JSON.stringify({
+      ...writeGateHandoff(managedPath, manifestPath), id: descriptor.task_id,
+    }));
+    const prompt = [
+      `task_id: ${descriptor.task_id}`, "role: implementation", `project_root: ${managedPath}`,
+      `handoff_path: ${join(managedPath, "handoff.json")}`, `source_manifest: [${descriptor.task_id}.txt]`,
+      `operation_manifest: ${manifestPath}`, "acceptance: create bounded artifact", "validation: typed capability",
+      ...Object.entries(descriptor).filter(([key]) => !["task_id", "managed_path"].includes(key))
+        .map(([key, value]) => `${key}: ${Array.isArray(value) ? JSON.stringify(value) : value}`),
+      `managed_path: ${managedPath}`,
+    ].join("\n");
+    await hooks["tool.execute.before"]!(
+      { tool: "task", sessionID: "root", callID },
+      { args: { subagent_type: "dog-worker", prompt } },
+    );
+    await hooks.event!({ event: { type: "session.created", properties: { info: { id: child, parentID: "root" } } } });
+    await hooks["chat.message"]!(
+      { sessionID: child, agent: "dog-worker", parentID: "root" } as never,
+      { message: { agent: "dog-worker", model: {} }, parts: [{ type: "text", text: prompt }] },
+    );
+    await inspectHandoffWithRead(hooks, join(managedPath, "handoff.json"), child);
+    assert.equal((await executeBindWriteGate(hooks, managedPath, child, manifestPath)).status, "bound");
+    await writeFile(join(managedPath, `${descriptor.task_id}.txt`), "artifact\n");
+    const capability = hooks.tool!.sortie_create_parallel_commit_artifact!;
+    const args = {
+      run_id: descriptor.run_id as string,
+      dispatch_id: descriptor.dispatch_id as string,
+      validation_executable: process.execPath,
+      validation_args_json: JSON.stringify(["-e", "process.exit(0)"]),
+    };
+    const malformed = JSON.parse(await capability.execute(
+      { ...args, validation_args_json: "{}" }, { sessionID: child, agent: "dog-worker" },
+    ));
+    assert.equal(malformed.reason, "invalid-request");
+    const deniedRoot = JSON.parse(await capability.execute(args, { sessionID: "root", agent: "dog-coordinator" }));
+    assert.equal(deniedRoot.reason, "worker-required");
+    await hooks["tool.execute.before"]!(
+      { tool: "sortie_create_parallel_commit_artifact", sessionID: child, callID: "artifact-tool" }, { args },
+    );
+    const originalAcceptArtifact = ParallelDispatchCoordinator.prototype.acceptArtifact;
+    let crashBeforeAcceptance = true;
+    ParallelDispatchCoordinator.prototype.acceptArtifact = async function (
+      ...acceptArgs: Parameters<ParallelDispatchCoordinator["acceptArtifact"]>
+    ) {
+      if (crashBeforeAcceptance) {
+        crashBeforeAcceptance = false;
+        throw new Error("simulated postcommit crash");
+      }
+      return await originalAcceptArtifact.apply(this, acceptArgs);
+    };
+    const crashed = JSON.parse(await capability.execute(args, { sessionID: child, agent: "dog-worker" }));
+    assert.equal(crashed.reason, "artifact-production-failed");
+    const postcommitHead = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: managedPath })).stdout.trim();
+    const wrongRecovery = JSON.parse(await capability.execute(
+      { ...args, validation_args_json: JSON.stringify(["-e", "process.exit(1)"]) },
+      { sessionID: child, agent: "dog-worker" },
+    ));
+    assert.equal(wrongRecovery.reason, "artifact-verification-failed");
+    let created: Record<string, unknown>;
+    try {
+      created = JSON.parse(await capability.execute(args, { sessionID: child, agent: "dog-worker" }));
+    } finally {
+      ParallelDispatchCoordinator.prototype.acceptArtifact = originalAcceptArtifact;
+    }
+    assert.equal(created.status, "created", JSON.stringify(created));
+    assert.equal(created.replay, true);
+    assert.equal((await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: managedPath })).stdout.trim(), postcommitHead);
+    assert.equal(JSON.stringify(created).match(/stdout|stderr|diff|log/gu), null);
+    const durable = JSON.parse(await hooks.tool!.sortie_parallel_dispatch_status!.execute(
+      { run_id: prepared.run_id }, { sessionID: "root", agent: "dog-coordinator" },
+    )) as { tasks: Array<{ phase: string; artifact: unknown }> };
+    assert.equal(durable.tasks[0]!.phase, "running");
+    assert.ok(durable.tasks[0]!.artifact);
+    assert.deepEqual(await executeReleaseWriteGate(hooks, child), { status: "denied", reason: "tools-in-flight" });
+    await hooks["tool.execute.after"]!(
+      { tool: "sortie_create_parallel_commit_artifact", sessionID: child, callID: "artifact-tool", args },
+      { output: JSON.stringify(created) },
+    );
+    const replay = JSON.parse(await capability.execute(args, { sessionID: child }));
+    assert.equal(replay.replay, true);
+    assert.equal(JSON.parse(await capability.execute(
+      { ...args, validation_args_json: JSON.stringify(["-e", "process.exit(1)"]) },
+      { sessionID: child, agent: "dog-worker" },
+    )).reason, "artifact-replay");
+    assert.equal(JSON.parse(await capability.execute(
+      { ...args, timeout_ms: "1" }, { sessionID: child, agent: "dog-worker" },
+    )).reason, "artifact-replay");
+    assert.deepEqual(await executeReleaseWriteGate(hooks, child), { status: "released" });
+    await hooks["tool.execute.after"]!(
+      { tool: "task", sessionID: "root", callID },
+      { output: `SORTIE_PARALLEL_OUTCOME ${JSON.stringify({ run_id: descriptor.run_id,
+        dispatch_id: descriptor.dispatch_id, status: "completed" })}`, metadata: { sessionId: child } },
+    );
+    const status = JSON.parse(await hooks.tool!.sortie_parallel_dispatch_status!.execute(
+      { run_id: prepared.run_id }, { sessionID: "root", agent: "dog-coordinator" },
+    )) as { tasks: Array<{ phase: string; artifact: unknown }> };
+    assert.equal(status.tasks[0]!.phase, "completed");
+    assert.ok(status.tasks[0]!.artifact);
   });
 });
 

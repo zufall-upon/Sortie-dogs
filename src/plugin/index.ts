@@ -1,10 +1,15 @@
 import { createHash } from "node:crypto";
-import { readFile, stat } from "node:fs/promises";
+import { readFile, realpath, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 
 import { RUNTIME_ASSET_VERSION } from "../asset-version.js";
 import { normalizeRelativePath, RelativePathError } from "../core/path.js";
 import { ScopeLeaseError, ScopeLeaseRegistry, type ScopeLease } from "../core/scope-lease-registry.js";
+import {
+  produceWorktreeCommitArtifact,
+  recoverWorktreeCommitArtifact,
+  WorktreeCommitArtifactError,
+} from "../core/worktree-commit-artifact.js";
 import { normalizeWorktreeScope } from "../core/worktree-scope.js";
 import {
   ParallelDispatchCoordinator,
@@ -18,6 +23,7 @@ import type {
   ParallelDispatchOutcome,
   ParallelDispatchSnapshot,
   SchemaDiagnostic,
+  WorktreeCommitArtifact,
   WorktreeParallelContract,
 } from "../core/types.js";
 import { validateManifest } from "../core/validate-manifest.js";
@@ -93,6 +99,7 @@ const SORTIE_TRIGGER = /^\/sortie(?:\s|$)/;
 const TASK_ROLES = new Set(["implementation", "remediation", "blocker-resolution"]);
 const GIT_POINTER_LIMIT = 4096;
 const PARALLEL_OUTCOME_MARKER = "SORTIE_PARALLEL_OUTCOME";
+export const PARALLEL_COMMIT_ARTIFACT_CAPABILITY = "sortie_create_parallel_commit_artifact";
 
 export interface OpenCodePluginInput {
   directory: string;
@@ -387,6 +394,17 @@ interface ActiveSessionState {
   inFlightCalls: Set<string>;
   parallel: "none" | "valid" | "invalid";
   released: boolean;
+}
+
+interface ParallelChildBinding {
+  readonly ownerRoot: string;
+  readonly descriptor: ParallelDispatchDescriptor;
+  readonly completionCallID: string;
+}
+
+interface PendingParallelArtifact {
+  readonly requestFingerprint: string;
+  readonly artifact: WorktreeCommitArtifact;
 }
 
 interface CoordinatorRootLineage {
@@ -814,6 +832,48 @@ function parallelDescriptor(text: string): ParallelDispatchDescriptor | undefine
   };
 }
 
+function sameParallelDescriptor(left: ParallelDispatchDescriptor, right: ParallelDispatchDescriptor): boolean {
+  return inspectionFingerprint(left, undefined) === inspectionFingerprint(right, undefined);
+}
+
+function parallelValidationRequest(args: Record<string, string>): {
+  readonly validation: { readonly executable: string; readonly args: readonly string[]; readonly timeout_ms?: number };
+  readonly fingerprint: string;
+} | undefined {
+  const keys = Object.keys(args).sort();
+  const allowed = new Set(["dispatch_id", "run_id", "timeout_ms", "validation_args_json", "validation_executable"]);
+  if (!keys.every((key) => allowed.has(key)) ||
+    !["dispatch_id", "run_id", "validation_executable"].every((key) => typeof args[key] === "string") ||
+    !isAbsolute(args.validation_executable!) || /[\u0000-\u001f\u007f]/u.test(args.validation_executable!)) return undefined;
+  let validationArgs: readonly string[] = [];
+  if (args.validation_args_json !== undefined) {
+    if (typeof args.validation_args_json !== "string" || args.validation_args_json.length > INPUT_LIMITS.parallel) return undefined;
+    try {
+      const parsed = JSON.parse(args.validation_args_json) as unknown;
+      if (!Array.isArray(parsed) || parsed.length > 128 || !parsed.every((value) =>
+        typeof value === "string" && value.length > 0 && value.length <= 1000 && !/[\u0000-\u001f\u007f]/u.test(value))) return undefined;
+      validationArgs = parsed;
+    } catch {
+      return undefined;
+    }
+  }
+  let timeout: number | undefined;
+  if (args.timeout_ms !== undefined) {
+    if (typeof args.timeout_ms !== "string" || !/^[1-9][0-9]{0,5}$/u.test(args.timeout_ms)) return undefined;
+    timeout = Number(args.timeout_ms);
+    if (!Number.isInteger(timeout) || timeout < 1 || timeout > 600_000) return undefined;
+  }
+  const validation = {
+    executable: args.validation_executable!,
+    args: validationArgs,
+    ...(timeout === undefined ? {} : { timeout_ms: timeout }),
+  };
+  return {
+    validation,
+    fingerprint: inspectionFingerprint({ run_id: args.run_id, dispatch_id: args.dispatch_id, validation }, undefined),
+  };
+}
+
 function parallelOutcome(output: unknown): {
   readonly outcome: ParallelDispatchOutcome;
   readonly claimed?: { readonly run_id: string; readonly dispatch_id: string };
@@ -1110,6 +1170,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     readonly descriptor: ParallelDispatchDescriptor;
     readonly completionCallID: string;
   }>();
+  const parallelChildBindings = new Map<string, ParallelChildBinding>();
+  const parallelArtifacts = new Map<string, PendingParallelArtifact>();
+  const parallelArtifactOperations = new Set<string>();
 
   async function getParallelCoordinator(): Promise<ParallelDispatchCoordinator> {
     project ??= await createProjectPaths(resolveProjectRoot(input));
@@ -1125,6 +1188,18 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       : undefined;
   }
 
+  function boundedParallelArtifact(artifact: WorktreeCommitArtifact | null): object | null {
+    return artifact === null ? null : {
+      task_id: artifact.task_id,
+      base_sha: artifact.base_sha,
+      commit_sha: artifact.commit_sha,
+      branch: artifact.branch,
+      changed_paths: artifact.changed_paths,
+      change_fingerprint: artifact.change_fingerprint,
+      validation: artifact.validation,
+    };
+  }
+
   function boundedParallelSnapshot(snapshot: ParallelDispatchSnapshot): object {
     return {
       run_id: snapshot.run_id,
@@ -1133,7 +1208,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       archived: snapshot.archived,
       terminal_reason: snapshot.terminal_reason,
       ready: snapshot.ready,
-      tasks: snapshot.tasks.map(({ descriptor, worktree_id, phase, call_id, child_session_id, outcome }) => ({
+      tasks: snapshot.tasks.map(({ descriptor, worktree_id, phase, call_id, child_session_id, outcome, artifact }) => ({
         task_id: descriptor.task_id,
         worktree_id,
         dispatch_id: descriptor.dispatch_id,
@@ -1144,6 +1219,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         call_id,
         child_session_id,
         outcome,
+        artifact: boundedParallelArtifact(artifact),
       })),
     };
   }
@@ -1155,10 +1231,84 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       cancelled: archive.cancelled,
       terminal_reason: archive.terminal_reason,
       tasks: archive.tasks.map(({ task_id, worktree_id, managed_path, branch, base_sha, dispatch_id, phase,
-        call_id, child_session_id, outcome }) => ({
+        call_id, child_session_id, outcome, artifact }) => ({
         task_id, worktree_id, managed_path, branch, base_sha, dispatch_id, phase, call_id, child_session_id, outcome,
+        artifact: boundedParallelArtifact(artifact),
       })),
     };
+  }
+
+  function pruneParallelChildMap<T>(map: Map<string, T>): void {
+    while (map.size > ACTIVE_SESSION_CACHE.maximum) map.delete(map.keys().next().value!);
+  }
+
+  async function createParallelCommitArtifact(
+    args: Record<string, string>,
+    context: { sessionID: string; agent?: string },
+  ): Promise<string> {
+    const deny = (reason: string): string => JSON.stringify({ status: "denied", reason });
+    const sessionID = context.sessionID;
+    if (context.agent !== undefined && context.agent !== "dog-worker") return deny("worker-required");
+    const request = parallelValidationRequest(args);
+    if (request === undefined) return deny("invalid-request");
+    const active = activeSessions.get(sessionID);
+    const binding = parallelChildBindings.get(sessionID);
+    const authorization = sessionAuthorizations.get(sessionID);
+    if (active === undefined || active.parallel !== "valid" || active.released || binding === undefined ||
+      coordinatorRootForSession(sessionID) !== binding.ownerRoot || sessionParents.get(sessionID) !== binding.ownerRoot ||
+      args.run_id !== binding.descriptor.run_id || args.dispatch_id !== binding.descriptor.dispatch_id) {
+      return deny("parallel-worker-required");
+    }
+    if (active.inFlightCalls.size > 1) return deny("tools-in-flight");
+    if (authorization === undefined || authorization.suspended || authorization.lease === undefined ||
+      authorization.rootSessionID !== binding.ownerRoot || !samePath(authorization.projectRoot, binding.descriptor.managed_path)) {
+      return deny("authorization-unavailable");
+    }
+    const existing = parallelArtifacts.get(sessionID);
+    if (existing !== undefined) {
+      return existing.requestFingerprint === request.fingerprint
+        ? JSON.stringify({ status: "created", replay: true, artifact: boundedParallelArtifact(existing.artifact) })
+        : deny("artifact-replay");
+    }
+    if (parallelArtifactOperations.has(sessionID)) return deny("artifact-replay");
+    try {
+      await authorization.lease.assertHeld();
+      const snapshot = await (await getParallelCoordinator()).snapshot(binding.ownerRoot, binding.descriptor.run_id);
+      const running = snapshot?.tasks.find((task) => task.phase === "running" &&
+        task.descriptor.dispatch_id === binding.descriptor.dispatch_id && sameParallelDescriptor(task.descriptor, binding.descriptor));
+      if (running === undefined) return deny("dispatch-inactive");
+      if (running.artifact !== null) {
+        const executable = await realpath(request.validation.executable).catch(() => undefined);
+        if (executable === undefined) return deny("invalid-request");
+        const requestedCommand = [executable, ...request.validation.args];
+        if (JSON.stringify(running.artifact.validation.command) !== JSON.stringify(requestedCommand)) {
+          return deny("artifact-replay");
+        }
+        await (await getParallelCoordinator()).acceptArtifact(binding.ownerRoot, binding.completionCallID,
+          sessionID, binding.descriptor, running.artifact);
+        parallelArtifacts.set(sessionID, { requestFingerprint: request.fingerprint, artifact: running.artifact });
+        pruneParallelChildMap(parallelArtifacts);
+        return JSON.stringify({ status: "created", replay: true, artifact: boundedParallelArtifact(running.artifact) });
+      }
+      parallelArtifactOperations.add(sessionID);
+      const produceRequest = {
+        descriptor: binding.descriptor,
+        managed_path: binding.descriptor.managed_path,
+        validation: request.validation,
+      };
+      const recovered = await recoverWorktreeCommitArtifact(produceRequest);
+      const artifact = recovered ?? await produceWorktreeCommitArtifact(produceRequest);
+      await (await getParallelCoordinator()).acceptArtifact(binding.ownerRoot, binding.completionCallID,
+        sessionID, binding.descriptor, artifact);
+      parallelArtifacts.set(sessionID, { requestFingerprint: request.fingerprint, artifact });
+      pruneParallelChildMap(parallelArtifacts);
+      return JSON.stringify({ status: "created", ...(recovered === undefined ? {} : { replay: true }),
+        artifact: boundedParallelArtifact(artifact) });
+    } catch (error) {
+      return deny(error instanceof WorktreeCommitArtifactError ? `artifact-${error.code}` : "artifact-production-failed");
+    } finally {
+      parallelArtifactOperations.delete(sessionID);
+    }
   }
 
   async function prepareParallelDispatch(sessionID: string, contractPath: string): Promise<string> {
@@ -1928,6 +2078,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     sessionAuthorizations.delete(sessionID);
     bindingPins.delete(sessionID);
     expiredSessions.delete(sessionID);
+    parallelChildBindings.delete(sessionID);
+    parallelArtifacts.delete(sessionID);
+    parallelArtifactOperations.delete(sessionID);
   }
 
   function isCoordinatorSession(sessionID: string): boolean {
@@ -2023,6 +2176,11 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     activeSessions.delete(sessionID);
     abandonSessionLease(sessionID);
     sessionAuthorizations.delete(sessionID);
+    if (!childHasInFlightParentTask(sessionID)) {
+      parallelChildBindings.delete(sessionID);
+      parallelArtifacts.delete(sessionID);
+      parallelArtifactOperations.delete(sessionID);
+    }
     for (const key of inspected.keys()) {
       if (key.startsWith(`${sessionID}\u0000`)) inspected.delete(key);
     }
@@ -2048,6 +2206,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     sessionTaskIDs.delete(sessionID);
     recoverableWorkerChildren.delete(sessionID);
     parallelRecoverableChildren.delete(sessionID);
+    parallelChildBindings.delete(sessionID);
+    parallelArtifacts.delete(sessionID);
+    parallelArtifactOperations.delete(sessionID);
     clearSessionLinks(sessionID);
   }
 
@@ -2341,6 +2502,19 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           return releaseWriteGate(context.sessionID);
         },
       }),
+      [PARALLEL_COMMIT_ARTIFACT_CAPABILITY]: defineTool({
+        description: "Validate and commit one exact active parallel worker unit, returning bounded artifact evidence only.",
+        args: {
+          run_id: defineTool.schema.string(),
+          dispatch_id: defineTool.schema.string(),
+          validation_executable: defineTool.schema.string(),
+          validation_args_json: optionalString(),
+          timeout_ms: optionalString(),
+        },
+        async execute(args, context): Promise<string> {
+          return createParallelCommitArtifact(args, context);
+        },
+      }),
       sortie_check_contract: defineTool({
         description:
           "Report handoff and operation manifest contract defects before dispatch. Read-only: it never inspects, binds, or authorizes.",
@@ -2493,6 +2667,21 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         if (inheritedRoot !== undefined) {
           sessionRoots.set(chatInput.sessionID, inheritedRoot);
           activateSession(chatInput.sessionID, parallelTaskMode(taskText!));
+          const descriptor = parallelDescriptor(taskText!);
+          const recordedAgent = chatInput.agent ?? output.message.agent;
+          const matchingCall = descriptor === undefined ? undefined : [...parallelCalls.values()].find((call) =>
+            call.ownerRoot === inheritedRoot && sameParallelDescriptor(call.descriptor, descriptor));
+          if (descriptor !== undefined && recordedAgent === "dog-worker" && matchingCall !== undefined &&
+            samePath(taskProjectRoot(taskText!) ?? "", descriptor.managed_path) && sessionParents.get(chatInput.sessionID) === inheritedRoot) {
+            parallelChildBindings.set(chatInput.sessionID, {
+              ownerRoot: inheritedRoot,
+              descriptor,
+              completionCallID: matchingCall.completionCallID,
+            });
+            pruneParallelChildMap(parallelChildBindings);
+          } else {
+            parallelChildBindings.delete(chatInput.sessionID);
+          }
         } else if (activatesSession(chatInput, output)) {
           activateSession(chatInput.sessionID, taskText === undefined ? "none" : parallelTaskMode(taskText));
         }
@@ -2635,13 +2824,40 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         } else if (toolInput.tool === "task" && parallel !== undefined && parallelCoordinator !== undefined &&
           toolInput.callID !== undefined) {
           const terminal = parallelOutcome(output.output);
+          let effectiveOutcome = terminal.outcome;
+          let terminalRecorded = false;
+          if (effectiveOutcome === "completed") {
+            const binding = completedChildSessionID === undefined ? undefined : parallelChildBindings.get(completedChildSessionID);
+            const childActive = completedChildSessionID === undefined ? undefined : activeSessions.get(completedChildSessionID);
+            const authorization = completedChildSessionID === undefined ? undefined : sessionAuthorizations.get(completedChildSessionID);
+            const artifactSnapshot = await parallelCoordinator.snapshot(parallel.ownerRoot, parallel.descriptor.run_id);
+            const durableArtifact = artifactSnapshot?.tasks.find(({ descriptor }) =>
+              descriptor.dispatch_id === parallel!.descriptor.dispatch_id)?.artifact ?? null;
+            const terminalGate = completedChildSessionID !== undefined && binding !== undefined && durableArtifact !== null &&
+              binding.ownerRoot === parallel.ownerRoot && sameParallelDescriptor(binding.descriptor, parallel.descriptor) &&
+              childActive?.released === true && childActive.inFlightCalls.size === 0 && authorization?.suspended === true &&
+              authorization.lease === undefined && !recoverableWorkerChildren.has(completedChildSessionID);
+            if (!terminalGate) {
+              effectiveOutcome = "failed";
+            }
+          }
           const snapshot = await parallelCoordinator.completeCall(
-            parallel.ownerRoot,
-            parallel.completionCallID,
-            completedChildSessionID,
-            terminal.outcome,
-            terminal.claimed,
-          );
+            parallel.ownerRoot, parallel.completionCallID, completedChildSessionID,
+            effectiveOutcome, terminal.claimed,
+          ).then((value) => { terminalRecorded = true; return value; }).catch(async () => {
+            if (effectiveOutcome !== "failed") {
+              return parallelCoordinator!.completeCall(parallel!.ownerRoot, parallel!.completionCallID,
+                completedChildSessionID, "failed", terminal.claimed).then((value) => {
+                terminalRecorded = true;
+                return value;
+              }).catch(() => undefined);
+            }
+            return undefined;
+          });
+          if (terminalRecorded && completedChildSessionID !== undefined) {
+            parallelArtifacts.delete(completedChildSessionID);
+            parallelChildBindings.delete(completedChildSessionID);
+          }
           if (snapshot !== undefined) {
             const dispatched = snapshot.tasks.filter(({ phase }) =>
               phase === "running" || phase === "completed" || phase === "failed" || phase === "abandoned").length;
@@ -2839,6 +3055,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         if (activeState?.parallel === "valid" && isRemoteMutation(toolInput.tool, output.args)) {
           throw new WriteDeniedError("parallel-remote-mutation", "<parallel-unit>");
         }
+        if (toolInput.tool === PARALLEL_COMMIT_ARTIFACT_CAPABILITY) return;
         if (activeState?.released === true) {
           const authorization = sessionAuthorizations.get(toolInput.sessionID);
           const filePath = isRecord(output.args) && typeof output.args.filePath === "string"
@@ -3023,7 +3240,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           touchActiveSession(eventSessionID);
           return;
         }
-        if (childHasInFlightParentTask(eventSessionID)) {
+        if (childHasInFlightParentTask(eventSessionID) && activeSessions.get(eventSessionID)?.parallel !== "valid") {
           touchActiveSession(eventSessionID);
           return;
         }

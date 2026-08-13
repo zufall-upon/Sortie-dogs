@@ -26,10 +26,12 @@ export {
   ParallelDispatchCoordinator,
   ParallelDispatchError,
 } from "./core/worktree-parallel-dispatch.js";
+export * from "./core/worktree-commit-artifact.js";
 export type {
   ParallelDispatchCoordinatorOptions,
   ParallelDispatchErrorCode,
   ParallelDispatchPrepareResult,
+  ParallelDispatchClaim,
 } from "./core/worktree-parallel-dispatch.js";
 export type {
   ManagedWorktree,
