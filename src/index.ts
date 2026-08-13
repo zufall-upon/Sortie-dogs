@@ -19,6 +19,19 @@ export {
 } from "./core/worktree-scope.js";
 export type { WorktreeScope } from "./core/worktree-scope.js";
 export {
+  WorktreeLifecycle,
+  WorktreeLifecycleError,
+} from "./core/worktree-lifecycle.js";
+export type {
+  ManagedWorktree,
+  WorktreeBasePin,
+  WorktreeCreateRequest,
+  WorktreeLifecycleErrorCode,
+  WorktreeLifecycleOptions,
+  WorktreeLifecyclePhase,
+  WorktreeSetupHook,
+} from "./core/worktree-lifecycle.js";
+export {
   initializeProject,
   ProjectInitializationError,
 } from "./core/initialize.js";

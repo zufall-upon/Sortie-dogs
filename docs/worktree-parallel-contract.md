@@ -1,7 +1,8 @@
 # Worktree Parallel Contract v0.1
 
-This document fixes the contract for the `0.5.x` isolated implementation loop. Card 01 defines data
-and policy only. It does not create worktrees, branches, commits, leases, subprocesses, or Git state.
+This document fixes the contract for the `0.5.x` isolated implementation loop. Card 01 defines the
+data and policy envelope. Card 03 now owns isolated linked-worktree and branch lifecycle; commits,
+dispatch, and integration remain outside this contract.
 
 ## Envelope
 
@@ -60,7 +61,34 @@ models, worker bound, validation conditions, and measurement window.
 ## Follow-on Ownership
 
 - Card 02: durable cross-process scope leases.
-- Card 03: worktree and branch lifecycle.
+- Card 03: completed. `WorktreeLifecycle` pins a clean primary checkout, creates two or three locked
+  linked worktrees from the exact pin, caps all managed inventory phases at three records globally,
+  persists restart-safe inventory under a durable cross-process authority in the Git common directory,
+  and only removes an unchanged, exactly owned worktree and branch through non-force Git operations.
+  Its worktree root is fixed at `sortie-dogs/managed-worktrees-v1` beneath that common directory;
+  caller-selected external roots are rejected. Each actual checkout is an unpredictable direct child
+  named from its deterministic identity prefix plus a full random ownership nonce. `pathPrefixFor()`
+  exposes only the deterministic prefix; callers obtain an existing exact path from create or inventory
+  results. Creation does not precreate the target: under inventory authority, Git adds directly into the
+  nonexistent nonce path, then the lifecycle verifies its real path, nonzero safe filesystem identity,
+  Git list entry, ref, HEAD, and lock before readiness.
+- Cleanup rechecks exact cleanliness and ownership, then moves the checkout to a new unpredictable
+  direct-child quarantine path with `git worktree move`. The lifecycle verifies that Git now lists the
+  quarantine path with the same filesystem identity, HEAD, ref, and lock ownership, persists the
+  removing path, unlocks, rechecks, and invokes non-force removal only on that quarantine path. Move or
+  verification failure marks the artifact orphaned without deleting unknown content. Durable nonces,
+  explicit branch ownership, and compare-and-delete refs retain branch protections.
+- Native filesystem device and inode identities must be available and nonzero. Values persisted in
+  inventory are bounded safe integers. Windows reports device zero and may expose inode values outside
+  JavaScript's safe integer range, so the lifecycle deterministically normalizes those native bigint
+  identities with a volume-bound SHA-256 token; a zero Windows inode still fails closed. Setup process
+  trees and hook count are bounded, hooks run without holding global inventory authority, and timeout
+  terminates the process tree. Setup failure, Git identity mutation, divergence, foreign ownership, root
+  replacement, or an ambiguous restart phase preserves the artifact for manual recovery.
+- The nonce prevents an untrusted writer from preparing a predictable target before the command or
+  replacing a predictable removal path after verification. Principals able to read and modify the Git
+  common directory during an operation remain trusted: they can discover nonce paths and already can
+  rewrite repository Git metadata. The lifecycle does not claim protection against that privilege.
 - Card 04: dependency-aware dispatch.
 - Card 05: commit artifact production.
 - Card 06: serial integration and stale rejection.
