@@ -528,6 +528,12 @@ interface HandoffPathRegistration {
   readonly scopedID?: string;
 }
 
+interface InspectedContractIdentity {
+  readonly explicitWriteGate: boolean;
+  readonly manifestPath: string;
+  readonly projectRoot: string;
+}
+
 /** Accept a task-scoped sibling of a registered handoff without opening arbitrary directories. */
 function relativeHandoffRegistration(
   actualPath: string,
@@ -597,6 +603,57 @@ function unquoteValue(value: string): string {
     : trimmed;
 }
 
+function handoffValues(text: string, keys: readonly string[]): string[] {
+  const accepted = new Set(keys);
+  const values: string[] = [];
+  for (const line of text.split(/\r?\n/u)) {
+    const match = HANDOFF_ENTRY.exec(line);
+    if (match === null || !accepted.has((match[2] ?? match[3]).toLowerCase())) continue;
+    values.push(unquoteValue(unwrapMarkdownValue(match[4])));
+  }
+  return values;
+}
+
+function hasIndentedFieldBody(text: string, key: string): boolean {
+  const escaped = key.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  return new RegExp(`^([\\t ]*)${escaped}[\\t ]*:[\\t ]*\\r?\\n\\1[\\t ]+\\S`, "mu").test(text);
+}
+
+function hasResumeContractShape(text: string): boolean {
+  const fields = text.split(/\r?\n/u).flatMap((line, index) => {
+    const match = HANDOFF_ENTRY.exec(line);
+    if (match === null) return [];
+    return [{
+      index,
+      indent: /^[\t ]*/u.exec(line)![0].replaceAll("\t", "  ").length,
+      key: (match[2] ?? match[3]).toLowerCase(),
+      value: unquoteValue(unwrapMarkdownValue(match[4])),
+    }];
+  });
+  const unique = (key: string) => fields.filter((field) => field.key === key);
+  const taskID = unique("task_id");
+  const digest = unique("context_digest");
+  const mode = unique("mode");
+  const delta = unique("resume_delta");
+  if (
+    taskID.length !== 1 || taskID[0]!.value.length === 0 ||
+    digest.length !== 1 || digest[0]!.value.length !== 0 ||
+    mode.length !== 1 || mode[0]!.value !== "same-task-resume" ||
+    delta.length !== 1 || delta[0]!.value.length !== 0
+  ) return false;
+  const directParent = (field: typeof fields[number]) => {
+    for (let index = fields.indexOf(field) - 1; index >= 0; index -= 1) {
+      if (fields[index]!.indent < field.indent) return fields[index];
+    }
+    return undefined;
+  };
+  const baseIndent = Math.min(...fields.map((field) => field.indent));
+  return taskID[0]!.indent === baseIndent && digest[0]!.indent === baseIndent &&
+    mode[0]!.index > digest[0]!.index && delta[0]!.index > mode[0]!.index &&
+    directParent(mode[0]!) === digest[0] && directParent(delta[0]!) === digest[0] &&
+    hasIndentedFieldBody(text, "resume_delta");
+}
+
 /*
  * The dispatching coordinator writes user-facing prose in the user's own language, so its role label
  * is the one digest key a localized dispatch is most likely to translate. The role value itself is a
@@ -606,20 +663,28 @@ function unquoteValue(value: string): string {
  */
 const LABELLED_VALUE = /^[\t ]*(?:[-*][\t ]+)?[^\r\n:=]{1,64}[\t ]*[=:][\t ]*(.*)$/u;
 
-function roleTokenValue(text: string): string | undefined {
+function roleTokenValues(text: string): string[] {
+  const values: string[] = [];
   for (const line of text.split(/\r?\n/u)) {
     const match = LABELLED_VALUE.exec(line);
     if (match === null) continue;
     const value = unquoteValue(unwrapMarkdownValue(match[1])).toLowerCase();
-    if (TASK_ROLES.has(value)) return value;
+    if (TASK_ROLES.has(value)) values.push(value);
   }
-  return undefined;
+  return values;
 }
 
 export function isExplicitTaskHandoff(text: string): boolean {
   const entries = handoffEntries(text);
-  const labelled = handoffValue(entries, HANDOFF_KEYS.role)?.toLowerCase();
-  const role = labelled !== undefined && TASK_ROLES.has(labelled) ? labelled : roleTokenValue(text);
+  const labelledRoles = handoffValues(text, HANDOFF_KEYS.role);
+  if (labelledRoles.length > 1) return false;
+  const labelled = labelledRoles[0]?.toLowerCase();
+  const localizedRoles = roleTokenValues(text);
+  const role = labelled === undefined
+    ? localizedRoles.length === 1 ? localizedRoles[0] : undefined
+    : TASK_ROLES.has(labelled) && localizedRoles.length === 1 && localizedRoles[0] === labelled
+      ? labelled
+      : undefined;
   return role !== undefined && TASK_ROLES.has(role) &&
     handoffValue(entries, HANDOFF_KEYS.projectRoot) !== undefined &&
     handoffValue(entries, HANDOFF_KEYS.manifest) !== undefined &&
@@ -633,6 +698,10 @@ function explicitTaskText(output: Parameters<OpenCodeChatMessageHook>[1]): strin
 function taskProjectRoot(text: string): string | undefined {
   const value = handoffValue(handoffEntries(text), HANDOFF_KEYS.projectRoot);
   return value === undefined ? undefined : unquoteValue(value);
+}
+
+function taskValues(text: string, keys: readonly string[]): string[] {
+  return handoffValues(text, keys);
 }
 
 function parallelTaskMode(text: string): ActiveSessionState["parallel"] {
@@ -988,7 +1057,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     path: string,
     sessionID: string | undefined,
     options: { readonly report?: boolean } = {},
-  ): Promise<void> {
+  ): Promise<InspectedContractIdentity | undefined> {
     const unregistered = (code: string): void => {
       if (!options.report) return;
       throw new HandoffDeniedError("path-invalid", path, {
@@ -1125,7 +1194,12 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       });
     }
 
-    if (sessionID === undefined) return;
+    const identity = {
+      explicitWriteGate: extension !== undefined,
+      manifestPath,
+      projectRoot: inspectedProjectRoot,
+    };
+    if (sessionID === undefined) return identity;
     const now = Date.now();
     const rootSessionID = inspectionRoot(sessionID, now);
     if (rootSessionID === undefined) return;
@@ -1142,6 +1216,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     });
     clearBindingDenial(rootSessionID, inspectedProjectRoot, manifestPath, sessionID);
     pruneSessionAuthorizations(sessionAuthorizations, activeSessions, now);
+    return identity;
   }
 
   async function bindWriteGate(
@@ -2074,6 +2149,105 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         const role = consultationAgent(taskRole);
         const consultationFallbackAuthorized = role !== undefined &&
           consultationRetries.get(consultationRetryKey(toolInput.sessionID, role))?.phase === "pending";
+        if (toolInput.tool === "task" && taskRole === "dog-worker" && isRecord(output.args)) {
+          const prompt = typeof output.args.prompt === "string" ? output.args.prompt : "";
+          const modes = taskValues(prompt, ["mode"]);
+          const resume = modes.length === 1 && modes[0] === "same-task-resume";
+          const handoffPaths = taskValues(prompt, ["handoff_path", "handoffpath"]);
+          const operationManifests = taskValues(prompt, ["operation_manifest", "operationmanifest"]);
+          const projectRoots = taskValues(prompt, ["project_root", "projectroot"]);
+          const sourceManifests = taskValues(prompt, ["source_manifest", "sourcemanifest"]);
+          const acceptanceValues = taskValues(prompt, ["acceptance"]);
+          const validationValues = taskValues(prompt, ["validation"]);
+          const taskIDs = taskValues(prompt, ["task_id"]);
+          const resumeDeltas = taskValues(prompt, ["resume_delta"]);
+          const resumeDeltaPresent = resumeDeltas.length === 1 && hasResumeContractShape(prompt);
+          const contractRedefinitions = [
+            ...taskValues(prompt, [
+              "role", "project_root", "projectroot", "source_manifest", "sourcemanifest",
+              "acceptance", "validation", "validation_history", "validation_attempts", "scout",
+              "known_facts", "known_paths", "relevant_constraints", "preserve",
+              "parallel_group", "parallel_unit", "parallel_units",
+            ]),
+            ...roleTokenValues(prompt),
+          ];
+          if (modes.length !== 0 && !resume) {
+            throw new HandoffDeniedError("contract-invalid", "<worker-dispatch>", {
+              defects: [contractDefect("contract", "/mode", "dispatch_mode_invalid")],
+            });
+          } else if (resume) {
+            // The one-use FastLane token already ties this preserve-only resume to its inspected contract.
+            if (
+              taskIDs.length !== 1 || taskIDs[0]!.length === 0 || !resumeDeltaPresent ||
+              handoffPaths.length !== 0 || operationManifests.length !== 0 || contractRedefinitions.length !== 0
+            ) {
+              throw new HandoffDeniedError("contract-invalid", "<worker-dispatch>", {
+                defects: [contractDefect("contract", "/", "resume_contract_redefinition")],
+              });
+            }
+          } else if (!isExplicitTaskHandoff(prompt)) {
+            throw new HandoffDeniedError("contract-invalid", "<worker-dispatch>", {
+              defects: [contractDefect("contract", "/", "dispatch_inline_handoff_incomplete")],
+            });
+          } else if (
+            acceptanceValues.length !== 1 || acceptanceValues[0]!.length === 0 ||
+            validationValues.length !== 1 || validationValues[0]!.length === 0
+          ) {
+            throw new HandoffDeniedError("contract-invalid", "<worker-dispatch>", {
+              defects: [contractDefect("contract", "/", "dispatch_acceptance_validation_ambiguous")],
+            });
+          } else if (operationManifests.length !== 1 || operationManifests[0]!.length === 0) {
+            throw new HandoffDeniedError("contract-invalid", "<worker-dispatch>", {
+              defects: [contractDefect("contract", "/operation_manifest", "dispatch_operation_manifest_unique")],
+            });
+          } else if (operationManifests[0]!.toLowerCase() === "none") {
+            if (projectRoots.length !== 1 || projectRoots[0]!.length === 0 || !isAbsolute(projectRoots[0]!)) {
+              throw new HandoffDeniedError("contract-invalid", "<worker-dispatch>", {
+                defects: [contractDefect("contract", "/project_root", "dispatch_project_root_unique_absolute")],
+              });
+            }
+            if (
+              sourceManifests.length !== 1 || sourceManifests[0]!.length === 0 ||
+              sourceManifests[0]!.toLowerCase() === "none"
+            ) {
+              throw new HandoffDeniedError("contract-invalid", "<worker-dispatch>", {
+                defects: [contractDefect("contract", "/source_manifest", "readonly_source_manifest_unique")],
+              });
+            }
+            if (handoffPaths.length !== 0) {
+              throw new HandoffDeniedError("contract-invalid", handoffPaths[0] || "<worker-dispatch>", {
+                defects: [contractDefect("contract", "/handoff_path", "readonly_handoff_forbidden")],
+              });
+            }
+          } else {
+            if (sourceManifests.length !== 1 || sourceManifests[0]!.length === 0) {
+              throw new HandoffDeniedError("contract-invalid", "<worker-dispatch>", {
+                defects: [contractDefect("contract", "/source_manifest", "dispatch_source_manifest_unique")],
+              });
+            }
+            if (projectRoots.length !== 1 || projectRoots[0]!.length === 0 || !isAbsolute(projectRoots[0]!)) {
+              throw new HandoffDeniedError("contract-invalid", "<worker-dispatch>", {
+                defects: [contractDefect("contract", "/project_root", "dispatch_project_root_unique_absolute")],
+              });
+            }
+            if (handoffPaths.length !== 1 || handoffPaths[0]!.length === 0 || !isAbsolute(handoffPaths[0]!)) {
+              throw new HandoffDeniedError("contract-invalid", "<worker-dispatch>", {
+                defects: [contractDefect("contract", "/handoff_path", "dispatch_handoff_path_unique_absolute")],
+              });
+            }
+            const identity = await inspect(handoffPaths[0]!, undefined, { report: true });
+            const promptManifestPath = resolve(projectRoots[0]!, operationManifests[0]!);
+            if (
+              identity === undefined || !identity.explicitWriteGate ||
+              !samePath(identity.projectRoot, projectRoots[0]!) ||
+              !samePath(identity.manifestPath, promptManifestPath)
+            ) {
+              throw new HandoffDeniedError("contract-invalid", handoffPaths[0]!, {
+                defects: [contractDefect("contract", "/", "dispatch_identity_mismatch")],
+              });
+            }
+          }
+        }
         const resumedWorkerSessionID = fastLane.beforeTool(toolInput.sessionID, toolInput.tool, output.args, {
           consultationFallbackAuthorized,
         });

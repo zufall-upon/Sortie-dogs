@@ -7,7 +7,12 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import { runtimeAssets } from "../dist/runtime-assets.js";
-import { ModelRoutingDeniedError, SortieDogsPlugin, isExplicitTaskHandoff } from "../dist/plugin/index.js";
+import {
+  HandoffDeniedError,
+  ModelRoutingDeniedError,
+  SortieDogsPlugin,
+  isExplicitTaskHandoff,
+} from "../dist/plugin/index.js";
 import {
   resolvePluginConfiguration,
   resolvePluginConfigurationSources,
@@ -1227,6 +1232,8 @@ test("shipped document fixtures satisfy the schemas the write gate enforces", ()
   assert.ok(preflight);
   assert.match(preflight[1], /tool: sortie_check_contract \{ handoff_path: <exact absolute handoff path> \}/);
   assert.match(preflight[1], /required_result: status=ok/);
+  assert.match(preflight[1], /defective_dispatch: forbidden/);
+  assert.match(preflight[1], /default_path: <project root>\/handoff\.<id>\.json/);
   assert.match(preflight[1], /timing: before Task dispatch and after every handoff regeneration/);
   assert.match(preflight[1], /authorization: read-only report; never inspection, bind, or mutation/);
   assert.match(preflight[1], /configured fixed path or scoped sibling handoff\.<id>\.json with filename id exactly equal to handoff id/);
@@ -1785,6 +1792,17 @@ async function activate(
   );
 }
 
+function readOnlyWorkerPrompt(directory: string): string {
+  return [
+    "role: implementation",
+    `project_root: ${directory}`,
+    "source_manifest: [AGENTS.md]",
+    "operation_manifest: none",
+    "acceptance: read only",
+    "validation: read only",
+  ].join("\n");
+}
+
 async function beginTrackedTaskChild(
   hooks: Awaited<ReturnType<typeof SortieDogsPlugin>>,
   directory: string,
@@ -1799,9 +1817,12 @@ async function beginTrackedTaskChild(
     "context_digest:",
     ...(taskID === undefined ? [] : [`  task_id: ${taskID}`]),
     `  project_root: ${directory}`,
+    `  handoff_path: ${join(directory, "handoff.json")}`,
     "  acceptance: safe change",
     "  role: implementation",
     "  source_manifest: [allowed.txt]",
+    "operation_manifest: operation-manifest.json",
+    "validation: npm test",
   ].join("\n");
   await chat(
     { sessionID: parentID, agent: "dog-coordinator" },
@@ -2541,7 +2562,7 @@ test("coordinator task hooks enforce the single-worker fast lane across syntheti
     );
     const dispatch = (callID: string) => before(
       { tool: "task", sessionID: "root", callID },
-      { args: { subagent_type: "dog-worker", prompt: "role: implementation" } },
+      { args: { subagent_type: "dog-worker", prompt: readOnlyWorkerPrompt(directory) } },
     );
 
     await turn();
@@ -2551,6 +2572,205 @@ test("coordinator task hooks enforce the single-worker fast lane across syntheti
     await assert.rejects(() => dispatch("worker-3"), /SORTIE_FAST_LANE_DENIED: WORKER_LIMIT/u);
     await turn();
     await dispatch("worker-4");
+  });
+});
+
+test("worker dispatch rejects an unregistered handoff before consuming the fast lane", async () => {
+  await withProject("worker-dispatch-preflight", async (directory) => {
+    await mkdir(join(directory, ".opencode"));
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+    const unregistered = join(directory, ".opencode", "handoff.task-a.json");
+    await writeFile(unregistered, JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
+    const registered = join(directory, "handoff.task-a.json");
+    await writeFile(registered, JSON.stringify({
+      ...writeGateHandoff(directory, "operation-manifest.json"),
+      id: "task-a",
+    }));
+    const hooks = await SortieDogsPlugin({ directory });
+    await hooks["chat.message"]!(
+      { sessionID: "root", agent: "dog-coordinator" },
+      {
+        message: { agent: "dog-coordinator", model: { providerID: "host", modelID: "selected" } },
+        parts: [{ type: "text", text: "task" }],
+      },
+    );
+    const dispatch = (handoffPath: string, callID: string) => hooks["tool.execute.before"]!(
+      { tool: "task", sessionID: "root", callID },
+      {
+        args: {
+          subagent_type: "dog-worker",
+          prompt: [
+            "task_id: task-a",
+            "role: implementation",
+            `project_root: ${directory}`,
+            `handoff_path: ${handoffPath}`,
+            "source_manifest: [allowed.txt]",
+            "operation_manifest: operation-manifest.json",
+            "acceptance: safe change",
+            "validation: npm test",
+          ].join("\n"),
+        },
+      },
+    );
+
+    await assert.rejects(
+      () => dispatch(unregistered, "bad-worker"),
+      (error: unknown) => {
+        assert.ok(error instanceof HandoffDeniedError);
+        assert.equal(error.reason, "path-invalid");
+        assert.deepEqual(error.defects, ["handoff / handoff_path_not_registered"]);
+        return true;
+      },
+    );
+    await assert.rejects(
+      () => hooks["tool.execute.before"]!(
+        { tool: "task", sessionID: "root", callID: "partial-worker" },
+        { args: { subagent_type: "dog-worker", prompt: "role: implementation" } },
+      ),
+      (error: unknown) => {
+        assert.ok(error instanceof HandoffDeniedError);
+        assert.deepEqual(error.defects, ["contract / dispatch_inline_handoff_incomplete"]);
+        return true;
+      },
+    );
+    await assert.rejects(
+      () => hooks["tool.execute.before"]!(
+        { tool: "task", sessionID: "root", callID: "partial-readonly-worker" },
+        { args: { subagent_type: "dog-worker", prompt: "role: implementation\noperation_manifest: none" } },
+      ),
+      (error: unknown) => {
+        assert.ok(error instanceof HandoffDeniedError);
+        assert.deepEqual(error.defects, ["contract / dispatch_inline_handoff_incomplete"]);
+        return true;
+      },
+    );
+    await assert.rejects(
+      () => hooks["tool.execute.before"]!(
+        { tool: "task", sessionID: "root", callID: "relative-readonly-worker" },
+        {
+          args: {
+            subagent_type: "dog-worker",
+            prompt: "role: implementation\nproject_root: .\nsource_manifest: [AGENTS.md]\noperation_manifest: none\nacceptance: read only\nvalidation: read only",
+          },
+        },
+      ),
+      (error: unknown) => {
+        assert.ok(error instanceof HandoffDeniedError);
+        assert.deepEqual(error.defects, ["contract /project_root dispatch_project_root_unique_absolute"]);
+        return true;
+      },
+    );
+    await assert.rejects(
+      () => hooks["tool.execute.before"]!(
+        { tool: "task", sessionID: "root", callID: "duplicate-readonly-worker" },
+        {
+          args: {
+            subagent_type: "dog-worker",
+            prompt: [
+              "role: implementation",
+              `project_root: ${directory}`,
+              "source_manifest: [AGENTS.md]",
+              "source_manifest: [README.md]",
+              "operation_manifest: none",
+              "acceptance: read only",
+              "validation: read only",
+            ].join("\n"),
+          },
+        },
+      ),
+      (error: unknown) => {
+        assert.ok(error instanceof HandoffDeniedError);
+        assert.deepEqual(error.defects, ["contract /source_manifest readonly_source_manifest_unique"]);
+        return true;
+      },
+    );
+    await assert.rejects(
+      () => hooks["tool.execute.before"]!(
+        { tool: "task", sessionID: "root", callID: "ambiguous-acceptance-worker" },
+        {
+          args: {
+            subagent_type: "dog-worker",
+            prompt: [
+              "role: implementation",
+              `project_root: ${directory}`,
+              "source_manifest: [AGENTS.md]",
+              "operation_manifest: none",
+              "acceptance: first",
+              "acceptance: second",
+              "validation: read only",
+            ].join("\n"),
+          },
+        },
+      ),
+      (error: unknown) => {
+        assert.ok(error instanceof HandoffDeniedError);
+        assert.deepEqual(error.defects, ["contract / dispatch_acceptance_validation_ambiguous"]);
+        return true;
+      },
+    );
+    await assert.rejects(
+      () => hooks["tool.execute.before"]!(
+        { tool: "task", sessionID: "root", callID: "duplicate-worker" },
+        {
+          args: {
+            subagent_type: "dog-worker",
+            prompt: [
+              "task_id: task-a",
+              "role: implementation",
+              `project_root: ${directory}`,
+              "handoff_path:",
+              `handoff_path: ${registered}`,
+              "source_manifest: [allowed.txt]",
+              "operation_manifest: operation-manifest.json",
+              "acceptance: safe change",
+              "validation: npm test",
+            ].join("\n"),
+          },
+        },
+      ),
+      (error: unknown) => {
+        assert.ok(error instanceof HandoffDeniedError);
+        assert.deepEqual(error.defects, ["contract /handoff_path dispatch_handoff_path_unique_absolute"]);
+        return true;
+      },
+    );
+    await assert.rejects(
+      () => hooks["tool.execute.before"]!(
+        { tool: "task", sessionID: "root", callID: "mismatch-worker" },
+        {
+          args: {
+            subagent_type: "dog-worker",
+            prompt: [
+              "task_id: task-a",
+              "role: implementation",
+              `project_root: ${directory}`,
+              `handoff_path: ${registered}`,
+              "source_manifest: [allowed.txt]",
+              "operation_manifest: other-manifest.json",
+              "acceptance: safe change",
+              "validation: npm test",
+            ].join("\n"),
+          },
+        },
+      ),
+      (error: unknown) => {
+        assert.ok(error instanceof HandoffDeniedError);
+        assert.deepEqual(error.defects, ["contract / dispatch_identity_mismatch"]);
+        return true;
+      },
+    );
+    const implicit = join(directory, "handoff.implicit.json");
+    const implicitHandoff = { ...fixture.handoffs.valid, id: "implicit" };
+    await writeFile(implicit, JSON.stringify(implicitHandoff));
+    await assert.rejects(
+      () => dispatch(implicit, "implicit-worker"),
+      (error: unknown) => {
+        assert.ok(error instanceof HandoffDeniedError);
+        assert.deepEqual(error.defects, ["handoff / ext_write_gate_missing"]);
+        return true;
+      },
+    );
+    await dispatch(registered, "good-worker");
   });
 });
 
@@ -2568,7 +2788,7 @@ test("an explicit real build turn relinquishes an in-memory coordinator route", 
     );
     await before(
       { tool: "task", sessionID: "shared", callID: "sortie-worker" },
-      { args: { subagent_type: "dog-worker", prompt: "role: implementation" } },
+      { args: { subagent_type: "dog-worker", prompt: readOnlyWorkerPrompt(directory) } },
     );
     await chat(
       { sessionID: "shared", agent: "build" },
@@ -2601,7 +2821,7 @@ test("a dispatched fast-lane worker suppresses legacy terminal compaction", asyn
     );
     await hooks["tool.execute.before"]!(
       { tool: "task", sessionID: "root", callID: "worker" },
-      { args: { subagent_type: "dog-worker", prompt: "role: implementation" } },
+      { args: { subagent_type: "dog-worker", prompt: readOnlyWorkerPrompt(directory) } },
     );
     const system = { system: [] as string[] };
     await hooks["experimental.chat.system.transform"]!({ sessionID: "root" }, system);
@@ -2662,7 +2882,7 @@ test("typed backlog opt-in permits continuation only before its first worker", a
     assert.deepEqual(JSON.parse(enabled), { status: "enabled", max_units: 4 });
     await hooks["tool.execute.before"]!(
       { tool: "task", sessionID: "root", callID: "worker" },
-      { args: { subagent_type: "dog-worker", prompt: "role: implementation" } },
+      { args: { subagent_type: "dog-worker", prompt: readOnlyWorkerPrompt(directory) } },
     );
     await hooks["tool.execute.before"]!(
       { tool: "sortie_compact_and_continue", sessionID: "root", callID: "continue" },
@@ -2952,6 +3172,13 @@ test("worker activation survives a localized role label", () => {
     isExplicitTaskHandoff("同一solSessionをrole=blocker-resolutionで再開する。\nproject_root: O:\\c"),
     false,
   );
+  assert.equal(isExplicitTaskHandoff([
+    "役割: implementation",
+    "担当: blocker-resolution",
+    "project_root: O:\\candidate",
+    "source_manifest: [src/a.ts]",
+    "acceptance: safe change",
+  ].join("\n")), false);
 });
 
 test("worker activation rejects dispatches without a complete worker contract", () => {
@@ -2978,6 +3205,27 @@ test("worker activation rejects dispatches without a complete worker contract", 
   assert.equal(isExplicitTaskHandoff(missingManifest), false);
   assert.equal(isExplicitTaskHandoff(missingRoot), false);
   assert.equal(isExplicitTaskHandoff("ordinary prose about role and acceptance"), false);
+  assert.equal(isExplicitTaskHandoff([
+    "role: reviewer",
+    "note: implementation",
+    "project_root: C:\\candidate",
+    "source_manifest: [src/a.ts]",
+    "acceptance: safe change",
+  ].join("\n")), false);
+  assert.equal(isExplicitTaskHandoff([
+    "role: implementation",
+    "role: blocker-resolution",
+    "project_root: C:\\candidate",
+    "source_manifest: [src/a.ts]",
+    "acceptance: safe change",
+  ].join("\n")), false);
+  assert.equal(isExplicitTaskHandoff([
+    "role: implementation",
+    "役割: remediation",
+    "project_root: C:\\candidate",
+    "source_manifest: [src/a.ts]",
+    "acceptance: safe change",
+  ].join("\n")), false);
 });
 
 test("session policy is passive until an exact trigger and deactivates only on end", async () => {
@@ -3837,10 +4085,12 @@ test("a restarted plugin recovers a command-routed coordinator from its latest p
     } } as never });
     const prompt = [
       `project_root: ${directory}`,
+      `handoff_path: ${handoffPath}`,
       "acceptance: safe change",
       "role: implementation",
       "source_manifest: [allowed.txt]",
       "operation_manifest: operation-manifest.json",
+      "validation: npm test",
     ].join("\n");
 
     await hooks["tool.execute.before"]!(
@@ -3911,7 +4161,7 @@ test("restart recovery rejects a stale coordinator route and a cold synthetic tu
     const dispatch = async (hooks: Awaited<ReturnType<typeof SortieDogsPlugin>>, callID: string) =>
       await hooks["tool.execute.before"]!(
         { tool: "task", sessionID: "root", callID },
-        { args: { subagent_type: "dog-worker", prompt: "role: implementation" } },
+        { args: { subagent_type: "dog-worker", prompt: readOnlyWorkerPrompt(directory) } },
       );
 
     await dispatch(await plugin("build", false), "stale-route");
@@ -4807,9 +5057,12 @@ test("parent idle retains only a recoverable worker until its same-child resume"
       "context_digest:",
       "  task_id: task-a",
       `  project_root: ${directory}`,
+      `  handoff_path: ${join(directory, "handoff.json")}`,
       "  acceptance: safe change",
       "  role: implementation",
       "  source_manifest: [allowed.txt]",
+      "operation_manifest: operation-manifest.json",
+      "validation: npm test",
     ].join("\n");
     await hooks["chat.message"]!(
       { sessionID: "parent", agent: "dog-coordinator" },
@@ -4831,9 +5084,185 @@ test("parent idle retains only a recoverable worker until its same-child resume"
     );
 
     await hooks.event!({ event: { type: "session.idle", properties: { sessionID: "parent" } } });
+    await assert.rejects(
+      () => hooks["tool.execute.before"]!(
+        { tool: "task", sessionID: "parent", callID: "malformed-resume-task" },
+        {
+          args: {
+            subagent_type: "dog-worker",
+            task_id: "child",
+            prompt: "task_id: task-a\nmode: same-task-resume\nrole: implementation",
+          },
+        },
+      ),
+      (error: unknown) => {
+        assert.ok(error instanceof HandoffDeniedError);
+        assert.deepEqual(error.defects, ["contract / resume_contract_redefinition"]);
+        return true;
+      },
+    );
+    await assert.rejects(
+      () => hooks["tool.execute.before"]!(
+        { tool: "task", sessionID: "parent", callID: "duplicate-mode-resume-task" },
+        {
+          args: {
+            subagent_type: "dog-worker",
+            task_id: "child",
+            prompt: "task_id: task-a\nmode: initial\nmode: same-task-resume",
+          },
+        },
+      ),
+      (error: unknown) => {
+        assert.ok(error instanceof HandoffDeniedError);
+        assert.deepEqual(error.defects, ["contract /mode dispatch_mode_invalid"]);
+        return true;
+      },
+    );
+    await assert.rejects(
+      () => hooks["tool.execute.before"]!(
+        { tool: "task", sessionID: "parent", callID: "redefined-facts-resume-task" },
+        {
+          args: {
+            subagent_type: "dog-worker",
+            task_id: "child",
+            prompt: "task_id: task-a\nmode: same-task-resume\nknown_facts: [changed]",
+          },
+        },
+      ),
+      (error: unknown) => {
+        assert.ok(error instanceof HandoffDeniedError);
+        assert.deepEqual(error.defects, ["contract / resume_contract_redefinition"]);
+        return true;
+      },
+    );
+    await assert.rejects(
+      () => hooks["tool.execute.before"]!(
+        { tool: "task", sessionID: "parent", callID: "redefined-history-resume-task" },
+        {
+          args: {
+            subagent_type: "dog-worker",
+            task_id: "child",
+            prompt: "task_id: task-a\nmode: same-task-resume\nvalidation_attempts: { canonical: 0, diagnostic: 0 }\nscout: { attempted: false }",
+          },
+        },
+      ),
+      (error: unknown) => {
+        assert.ok(error instanceof HandoffDeniedError);
+        assert.deepEqual(error.defects, ["contract / resume_contract_redefinition"]);
+        return true;
+      },
+    );
+    await assert.rejects(
+      () => hooks["tool.execute.before"]!(
+        { tool: "task", sessionID: "parent", callID: "missing-delta-resume-task" },
+        {
+          args: {
+            subagent_type: "dog-worker",
+            task_id: "child",
+            prompt: "task_id: task-a\nmode: same-task-resume",
+          },
+        },
+      ),
+      (error: unknown) => {
+        assert.ok(error instanceof HandoffDeniedError);
+        assert.deepEqual(error.defects, ["contract / resume_contract_redefinition"]);
+        return true;
+      },
+    );
+    await assert.rejects(
+      () => hooks["tool.execute.before"]!(
+        { tool: "task", sessionID: "parent", callID: "empty-delta-resume-task" },
+        {
+          args: {
+            subagent_type: "dog-worker",
+            task_id: "child",
+            prompt: "task_id: task-a\nmode: same-task-resume\nresume_delta: none",
+          },
+        },
+      ),
+      (error: unknown) => {
+        assert.ok(error instanceof HandoffDeniedError);
+        assert.deepEqual(error.defects, ["contract / resume_contract_redefinition"]);
+        return true;
+      },
+    );
+    await assert.rejects(
+      () => hooks["tool.execute.before"]!(
+        { tool: "task", sessionID: "parent", callID: "inline-delta-resume-task" },
+        {
+          args: {
+            subagent_type: "dog-worker",
+            task_id: "child",
+            prompt: "task_id: task-a\nmode: same-task-resume\nresume_delta: { acceptance: changed }",
+          },
+        },
+      ),
+      (error: unknown) => {
+        assert.ok(error instanceof HandoffDeniedError);
+        assert.deepEqual(error.defects, ["contract / resume_contract_redefinition"]);
+        return true;
+      },
+    );
+    await assert.rejects(
+      () => hooks["tool.execute.before"]!(
+        { tool: "task", sessionID: "parent", callID: "parallel-resume-task" },
+        {
+          args: {
+            subagent_type: "dog-worker",
+            task_id: "child",
+            prompt: "task_id: task-a\nmode: same-task-resume\nresume_delta:\nparallel_group: changed",
+          },
+        },
+      ),
+      (error: unknown) => {
+        assert.ok(error instanceof HandoffDeniedError);
+        assert.deepEqual(error.defects, ["contract / resume_contract_redefinition"]);
+        return true;
+      },
+    );
+    await assert.rejects(
+      () => hooks["tool.execute.before"]!(
+        { tool: "task", sessionID: "parent", callID: "nested-required-resume-task" },
+        {
+          args: {
+            subagent_type: "dog-worker",
+            task_id: "child",
+            prompt: "context_digest:\n  resume_delta:\n    task_id: task-a\n    mode: same-task-resume\n    resume_delta:\n      next_action: read then bind",
+          },
+        },
+      ),
+      (error: unknown) => {
+        assert.ok(error instanceof HandoffDeniedError);
+        assert.deepEqual(error.defects, ["contract / resume_contract_redefinition"]);
+        return true;
+      },
+    );
+    await assert.rejects(
+      () => hooks["tool.execute.before"]!(
+        { tool: "task", sessionID: "parent", callID: "indirect-required-resume-task" },
+        {
+          args: {
+            subagent_type: "dog-worker",
+            task_id: "child",
+            prompt: "task_id: task-a\ncontext_digest:\n  wrapper:\n    mode: same-task-resume\n    resume_delta:\n      next_action: read then bind",
+          },
+        },
+      ),
+      (error: unknown) => {
+        assert.ok(error instanceof HandoffDeniedError);
+        assert.deepEqual(error.defects, ["contract / resume_contract_redefinition"]);
+        return true;
+      },
+    );
     await hooks["tool.execute.before"]!(
       { tool: "task", sessionID: "parent", callID: "resume-task" },
-      { args: { subagent_type: "dog-worker", task_id: "child", prompt: `${task}\nmode: same-task-resume` } },
+      {
+        args: {
+          subagent_type: "dog-worker",
+          task_id: "child",
+          prompt: "task_id: task-a\ncontext_digest:\n  mode: same-task-resume\n  resume_delta:\n    next_action: read then bind",
+        },
+      },
     );
     await inspectHandoffWithRead(hooks, join(directory, "handoff.json"), "child");
     assert.equal((await executeBindWriteGate(hooks, directory, "child")).status, "bound");

@@ -13,7 +13,7 @@ export interface RuntimeAsset {
 export const runtimeAssets = [
   {
     name: "dog-coordinator",
-    version: "0.3.11-worker-resume-v1",
+    version: "0.3.12-dispatch-preflight-v1",
     installPath: "agent/dog-coordinator.md",
     content: `---
 description: Canonical MkII coordinator packaged by Sortie-dogs
@@ -411,7 +411,7 @@ INITIAL_HANDOFF_FIXTURE
       parallel_unit: <distinct unit id or none>
       parallel_units: <2..3 for parallel implementation; 1 otherwise>
     source_manifest: [<declared source path>]
-    operation_manifest: none
+    operation_manifest: <exact absolute operation manifest>
 END_INITIAL_HANDOFF_FIXTURE
 
 For a same-task resume, retain the prior effective digest. Send the same task_id and only a
@@ -423,13 +423,10 @@ RESUMED_HANDOFF_FIXTURE
     task_id: task-06
     context_digest:
       mode: same-task-resume
-      preserve: [acceptance, role, validation, known_facts, relevant_constraints, source_manifest, operation_manifest]
       resume_delta:
         stale_paths: [<path changed since checkpoint>]
         new_findings: [<new fact>]
         previous_exit: <exit and concise fingerprint>
-        validation_attempts: { canonical: <preserved count>, diagnostic: <preserved count> }
-        scout: { attempted: <preserved candidate boolean>, revision: <preserved candidate revision>, blocker_owner: <preserved owner>, reason: <exact skip or retry reason> }
         next_action: <single next action>
 END_RESUMED_HANDOFF_FIXTURE
 
@@ -943,12 +940,18 @@ denial. Call sortie_check_contract with the exact absolute handoff_path and requ
 read-only, grants no inspection, and reports the same defects the write gate enforces, so a checked
 document cannot fail the worker handshake for a contract reason. A contract denial names the failing
 document, the exact JSON pointer, and the failing rule, so repair that pointer and never resend an
-unchanged document.
+unchanged document. A defective result forbids Task dispatch. Repair and rerun preflight until status=ok;
+never dispatch a worker with that path and never ask the worker to repair coordinator-owned documents.
+With the default registration, create task-scoped handoffs as project-root siblings named
+handoff.<id>.json. A path under .opencode is unregistered unless project configuration explicitly
+registers that directory.
 
 CONTRACT_PREFLIGHT_FIXTURE
     tool: sortie_check_contract { handoff_path: <exact absolute handoff path> }
     required_result: status=ok
+    defective_dispatch: forbidden; repair coordinator-owned document and rerun preflight before Task
     handoff_path_rule: configured fixed path or scoped sibling handoff.<id>.json with filename id exactly equal to handoff id
+    default_path: <project root>/handoff.<id>.json; .opencode/handoff.<id>.json is unregistered unless explicitly configured
     scoped_manifest_rule: <id>.operation-manifest.json is unique to the same active coordinator contract
     mismatch: arbitrary filename or filename/id mismatch -> defective before dispatch
     scope: every mutating dispatch, source work included; write-gate extension and operation_manifest required
@@ -1013,10 +1016,10 @@ the initial exit 1 is first and the latest exit 0 is last.
 An undeclared write or mutation must be reported as rejected, not performed.
 
 RUNTIME_ASSET_VERSION_SYNC_FIXTURE
-    runtime_version: 0.3.11-worker-resume-v1
+    runtime_version: 0.3.12-dispatch-preflight-v1
     shared_marker: src/asset-version.ts
-    packaged_expectation: test/plugin-loader.test.ts uses 0.3.11-worker-resume-v1
-    initialize_expectation: test/initialize.test.ts uses 0.3.11-worker-resume-v1
+    packaged_expectation: test/plugin-loader.test.ts uses 0.3.12-dispatch-preflight-v1
+    initialize_expectation: test/initialize.test.ts uses 0.3.12-dispatch-preflight-v1
     rule: runtime asset versions, shared marker, packaged expectation, and initialize expectation change together
 END_RUNTIME_ASSET_VERSION_SYNC_FIXTURE
 
@@ -1059,7 +1062,7 @@ END_TERMINAL_EVIDENCE_FIXTURE
   },
   {
     name: "dog-worker",
-    version: "0.3.11-worker-resume-v1",
+    version: "0.3.12-dispatch-preflight-v1",
     installPath: "agent/dog-worker.md",
     content: `---
 description: Dedicated worker for the canonical Sortie-dogs coordinator
@@ -1151,7 +1154,7 @@ the user.
   },
   {
     name: "dog-scout",
-    version: "0.3.11-worker-resume-v1",
+    version: "0.3.12-dispatch-preflight-v1",
     installPath: "agent/dog-scout.md",
     content: `---
 description: Bounded evidence scout for dog-coordinator
@@ -1200,7 +1203,7 @@ prose; keep the keys, paths, commands, and identifiers verbatim.
   },
   {
     name: "dog-reviewer",
-    version: "0.3.11-worker-resume-v1",
+    version: "0.3.12-dispatch-preflight-v1",
     installPath: "agent/dog-reviewer.md",
     content: `---
 description: Independent source reviewer for dog-coordinator
@@ -1229,7 +1232,7 @@ or transport.
   },
   {
     name: "dog-advisor",
-    version: "0.3.11-worker-resume-v1",
+    version: "0.3.12-dispatch-preflight-v1",
     installPath: "agent/dog-advisor.md",
     content: `---
 description: Focused technical advisor for dog-coordinator
@@ -1253,7 +1256,7 @@ provider, vendor, model, variant, or transport.
   },
   {
     name: "sortie",
-    version: "0.3.11-worker-resume-v1",
+    version: "0.3.12-dispatch-preflight-v1",
     installPath: "command/sortie.md",
     content: `---
 description: Start the canonical Sortie-dogs MkII workflow

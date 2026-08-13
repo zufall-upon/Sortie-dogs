@@ -7,7 +7,7 @@
 _画像を選択するとワークフローのアニメーションを再生できる。_
 
 Sortie-dogs は、必要なセッションだけで動く OpenCode オーケストレーションプラグイン。
-タスクを明確な計画、並列調査、安全な独立実装、canonical validation、証拠付き完了へつなげる。
+タスクを明確な計画、必要時だけの限定調査、1つの境界付き実装、canonical validation、証拠付き完了へつなげる。
 OpenCode 標準のエージェントや設定は置き換えない。
 
 要件: Node.js 22.6 以降、npm、OpenCode。
@@ -18,10 +18,9 @@ OpenCode 標準のエージェントや設定は置き換えない。
 
 - **必要なときだけ起動** — `/sortie` または `dog-coordinator` 選択時だけ有効。他の
   OpenCode セッションには影響しない。
-- **過剰に広がらない並列調査** — 各 worker handoff の前に境界付き scout を必ず3体だけ使う。
+- **過剰に広がらない限定調査** — manifest・validation・ownerの具体的gapがある場合だけscoutを1体使う。
 - **厳密な変更範囲** — source manifest または operation manifest が編集と handoff を制限。
-- **安全な実装並列化** — 独立unitだけを、write manifestが重複しない2〜3体のworkerへ分割。
-  同じpathや依存関係がある変更は1体のworkerへ直列化。
+- **1つの境界付き実装unit** — 通常turnはworker 1体。明示backlog drainだけが独立unitを継続ごとに1件ずつ進める。
 - **runtime競合防止** — 同一または祖先・子孫write scopeの同時bindを変更前に拒否。
   全parallel unitのjoin後にfull validationを1回実行。
 - **証拠を伴う完了** — canonical validation、リスク別レビュー、terminal evidence の gate 後、
@@ -31,8 +30,8 @@ OpenCode 標準のエージェントや設定は置き換えない。
 ## 実際のループ
 
 1. **Brief / plan** — `dog-coordinator` が acceptance criteria、変更 manifest、検証条件を確定。
-2. **3体の scout** — read-only の限定調査を並列実行し、異なる観点の evidence を収集。
-3. **専用 worker** — 通常は1体。独立unitが確定した場合だけ、非重複manifestを持つ2〜3体を並列実行。
+2. **任意の scout** — pre-worker evidence gapが具体的にある場合だけ、read-only限定調査を1体実行。
+3. **専用 worker** — 通常turnで1体が承認済みmanifestだけを実装。
 4. **Canonical validation** — 指定された test / build command の結果を evidence 化。
 5. **リスク別 review** — 高リスク候補だけ独立 review。低リスク候補は validation 後に省略可能。
 6. **Coordinator 完了** — manifest、validation、review、evidence gate 通過後だけ完了と commit を管理。
@@ -45,8 +44,8 @@ OpenCode 標準のエージェントや設定は置き換えない。
 ```text
 利用者: /sortie 要求された動作を追加する
 dog-coordinator: manifest 確定
-dog-scout ×3: 調査完了
-dog-worker ×2: 非重複unitの実装完了
+dog-scout: 省略 — 具体的なevidence gapなし
+dog-worker: 実装完了
 validation: npm test — PASS
 review: 省略 — 低リスク
 dog-coordinator: 完了 evidence 承認
@@ -78,17 +77,16 @@ npm install --save-dev sortie-dogs
 npx sortie-dogs init .
 ```
 
-または CLI をグローバルインストールし、対象プロジェクトを初期化する。
+または CLI をグローバルインストールし、OpenCode のグローバル設定を初期化する。
 
 ```sh
 npm install --global sortie-dogs
-sortie-dogs init .
+sortie-dogs init --global
 ```
 
-グローバルインストールで `sortie-dogs` CLI が利用可能になる。`sortie-dogs init .` が
-書き込む OpenCode runtime file は引き続き対象プロジェクト内に置かれる。npm package の
-グローバルインストールだけでは対象プロジェクトは有効化されない。以下の project-local 設定と
-plugin bridge の作成も行う。
+`sortie-dogs init --global` は OpenCode のグローバル設定rootへ runtime fileを設置する。
+project-local運用では別途 `sortie-dogs init .` を実行し、以下のproject-local設定または
+plugin bridgeを使用する。
 
 runtime asset の設置だけでは plugin は読み込まれず、その場合すべての role が呼び出し元と
 同じ model で動作する。agent が動作する OpenCode 設定の `plugin` 配列へ package を追加する。
@@ -290,7 +288,7 @@ stage、commit、ユーザー対応を行わない。
 
 ## 更新と移行
 
-[Release v0.4.7](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.4.7)
+[Release v0.4.8](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.4.8)
 
 依存 asset を新しい release に更新後、対象 project root で再実行する。
 

@@ -12,7 +12,7 @@
 ![Sortie-dogs coordinating a bounded implementation workflow](https://raw.githubusercontent.com/zufall-upon/Sortie-dogs/main/docs/assets/sortie-workflow.gif)
 
 Sortie-dogs is an opt-in OpenCode orchestration plugin. It turns a task into a
-scoped plan, parallel investigation, bounded independent implementation, canonical
+scoped plan, optional evidence gathering, one bounded implementation unit, canonical
 validation, and evidence-backed completion—while preserving standard OpenCode
 agents and settings.
 
@@ -20,7 +20,7 @@ Requirements: Node.js 22.6 or newer, npm, and OpenCode.
 
 Guides: [日本語](docs/guide-ja.md) · [简体中文](docs/guide-zh-CN.md) · [CLI testing](docs/cli-testing.md)
 
-Release: [v0.4.7](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.4.7)
+Release: [v0.4.8](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.4.8)
 
 ## Quick start
 
@@ -203,12 +203,12 @@ global file for durable global settings.
 
 - **Focused when invited, invisible otherwise.** Activate it with `/sortie` or
   select `dog-coordinator`; ordinary OpenCode sessions remain unchanged.
-- **Parallel context without uncontrolled fan-out.** Every worker handoff uses
-  exactly three bounded scouts before implementation begins.
+- **Evidence gathering without uncontrolled fan-out.** One bounded scout runs only
+  when a concrete manifest, validation, or ownership gap exists before implementation.
 - **Writes stay inside the assignment.** Exact source or operation manifests
   gate edits and handoffs.
-- **Safe implementation fan-out.** Independent units may use two or three workers
-  with non-overlapping write manifests; dependent or same-path work stays on one worker.
+- **One bounded implementation unit.** A normal turn permits one worker; explicit
+  backlog drain advances later independent units one at a time across continuations.
 - **Runtime overlap protection.** Active equal or ancestor write scopes are rejected
   before mutation, and full validation waits until every parallel unit joins.
 - **Evidence before completion.** Canonical validation, risk-based review, and
@@ -223,7 +223,7 @@ An illustrative low-risk run stays bounded and reports its gates:
 ```text
 You: /sortie Add the requested behavior
 dog-coordinator: manifest confirmed
-dog-scout ×3: investigation complete
+dog-scout: skipped — no concrete evidence gap
 dog-worker: implementation complete
 validation: npm test — PASS
 review: skipped — low risk
@@ -234,8 +234,8 @@ dog-coordinator: completion evidence accepted
 
 1. **Brief and plan** — `dog-coordinator` turns the request into acceptance
    criteria, a write manifest, and validation requirements.
-2. **Exactly three scouts** — bounded, read-only investigation collects
-   complementary evidence without expanding the write scope.
+2. **Optional scout** — one bounded, read-only investigation runs only for a
+   concrete pre-worker evidence gap.
 3. **Dedicated worker** — the dedicated worker implements only the approved
    manifest and also owns scoped remediation or blocker resolution.
 4. **Canonical validation** — the declared test or build command must produce

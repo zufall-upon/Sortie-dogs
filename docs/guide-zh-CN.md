@@ -6,8 +6,8 @@
 
 _点击图片可播放工作流动画。_
 
-Sortie-dogs 是一个按需启用的 OpenCode 编排插件。它把任务依次推进到明确规划、并行调研、
-安全的独立实现、canonical validation 和证据完备的收尾，同时保留 OpenCode 的标准智能体与设置。
+Sortie-dogs 是一个按需启用的 OpenCode 编排插件。它把任务依次推进到明确规划、仅在必要时进行的限定调研、
+一个有边界的实现单元、canonical validation 和证据完备的收尾，同时保留 OpenCode 的标准智能体与设置。
 
 要求：Node.js 22.6 或更高版本、npm 和 OpenCode。
 
@@ -17,10 +17,9 @@ Sortie-dogs 是一个按需启用的 OpenCode 编排插件。它把任务依次�
 
 - **需要时启用，其余时间保持安静** — 使用 `/sortie` 或选择 `dog-coordinator` 才会激活；
   普通 OpenCode 会话不受影响。
-- **并行调研不会失控** — 每次 worker handoff 前固定使用三个有边界的 scout，不会无限扩散。
+- **限定调研不会失控** — 仅在 manifest、validation 或 owner 存在明确证据缺口时使用一个 scout。
 - **写入范围精确可控** — source manifest 或 operation manifest 约束编辑和 handoff。
-- **安全并行实现** — 只有独立单元可分配给两个或三个 write manifest 不重叠的 worker；
-  同一路径或存在依赖的变更仍由一个 worker 串行处理。
+- **一个有边界的实现单元** — 普通 turn 只允许一个 worker；显式 backlog drain 才会在后续 continuation 中逐个处理独立单元。
 - **运行时冲突保护** — 在修改前拒绝相同或祖先/后代 write scope 的并发绑定；
   所有并行单元 join 后只运行一次 full validation。
 - **先验证，后完成** — canonical validation、按风险 review 和 terminal evidence 共同控制由
@@ -30,8 +29,8 @@ Sortie-dogs 是一个按需启用的 OpenCode 编排插件。它把任务依次�
 ## 实际工作闭环
 
 1. **Brief / plan** — `dog-coordinator` 明确 acceptance criteria、写入 manifest 和验证要求。
-2. **三个 scout** — 固定三个只读、范围受限的 scout 并行收集互补 evidence。
-3. **专用 worker** — 默认一个；仅在独立单元已确定时，并行运行两个或三个非重叠 manifest worker。
+2. **可选 scout** — 仅在 pre-worker evidence gap 明确时运行一个只读、范围受限的 scout。
+3. **专用 worker** — 普通 turn 由一个 worker 只实现已批准的 manifest。
 4. **Canonical validation** — 运行声明的 test / build command，保留可核验结果。
 5. **按风险 review** — 高风险候选项接受独立 review；低风险项通过验证后可跳过额外审查。
 6. **Coordinator 收尾** — 只有 manifest、validation、review 和 evidence gate 全部通过，
@@ -45,8 +44,8 @@ Sortie-dogs 是一个按需启用的 OpenCode 编排插件。它把任务依次�
 ```text
 用户：/sortie 添加所需行为
 dog-coordinator：manifest 已确认
-dog-scout ×3：调研完成
-dog-worker ×2：非重叠单元实现完成
+dog-scout：已跳过 — 无明确 evidence gap
+dog-worker：实现完成
 validation：npm test — PASS
 review：已跳过 — 低风险
 dog-coordinator：完成 evidence 已接受
@@ -77,16 +76,15 @@ npm install --save-dev sortie-dogs
 npx sortie-dogs init .
 ```
 
-也可以全局安装 CLI，再初始化目标项目：
+也可以全局安装 CLI，再初始化 OpenCode 的全局配置：
 
 ```sh
 npm install --global sortie-dogs
-sortie-dogs init .
+sortie-dogs init --global
 ```
 
-全局安装会提供 `sortie-dogs` CLI；`sortie-dogs init .` 写入的 OpenCode runtime file 仍位于
-目标项目内。仅全局安装 npm package 不会激活目标项目，还需要继续完成下面的项目级配置和
-plugin bridge。
+`sortie-dogs init --global` 会把 runtime file 安装到 OpenCode 的全局配置根目录。
+若采用项目级配置，仍需另行运行 `sortie-dogs init .`，并使用下面的项目级配置或 plugin bridge。
 
 只安装 runtime asset 不会加载插件；未加载插件时，所有角色都会沿用调用方的模型。
 请把该 package 加入这些 agent 所在 OpenCode 配置的 `plugin` 数组：全局 asset 对应
@@ -277,7 +275,7 @@ canonical validation 后独立审查高风险候选项。二者都不负责实�
 
 ## 更新与迁移
 
-[Release v0.4.7](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.4.7)
+[Release v0.4.8](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.4.8)
 
 将依赖替换为新版 Release asset 后，在目标项目根目录再次运行：
 
