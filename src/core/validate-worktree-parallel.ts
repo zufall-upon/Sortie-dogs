@@ -1,4 +1,4 @@
-import { normalizeRelativePath } from "./path.js";
+import { normalizeWorktreeScopePath, worktreeScopesOverlap } from "./worktree-scope.js";
 import type {
   WorktreeParallelContract,
   WorktreeParallelContractIssue,
@@ -27,16 +27,10 @@ function issue(
 
 function normalizeScope(path: string): string | undefined {
   try {
-    if (/[\u0000-\u001F\u007F]/u.test(path)) return undefined;
-    const normalized = normalizeRelativePath(path);
-    return normalized === path ? normalized.toLowerCase() : undefined;
+    return normalizeWorktreeScopePath(path);
   } catch {
     return undefined;
   }
-}
-
-function scopesOverlap(left: string, right: string): boolean {
-  return left === right || left.startsWith(`${right}/`) || right.startsWith(`${left}/`);
 }
 
 function pathWithinWrites(path: string, writes: readonly string[]): boolean {
@@ -114,8 +108,8 @@ export function validateWorktreeParallelContract(
         const right = entries[rightIndex]!;
         if (right.scopes === undefined) continue;
         const overlaps = left.scopes.write.some((path) =>
-          [...right.scopes!.write, ...right.scopes!.read].some((other) => scopesOverlap(path, other))) ||
-          right.scopes.write.some((path) => left.scopes!.read.some((other) => scopesOverlap(path, other)));
+          [...right.scopes!.write, ...right.scopes!.read].some((other) => worktreeScopesOverlap(path, other))) ||
+          right.scopes.write.some((path) => left.scopes!.read.some((other) => worktreeScopesOverlap(path, other)));
         if (overlaps) diagnostics.push(issue("WTP006_SCOPE_OVERLAP", `/tasks/${right.index}/scope`, MESSAGES.overlap));
       }
     }

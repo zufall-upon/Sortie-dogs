@@ -1511,6 +1511,7 @@ async function withProject(
   await mkdir(testEnvironment, { recursive: true });
   const directory = await mkdtemp(join(testEnvironment, `plugin-${name}-`));
   try {
+    await mkdir(join(directory, ".git"));
     await run(directory);
   } finally {
     await rm(directory, { recursive: true, force: true });
@@ -5103,6 +5104,195 @@ test("competing parallel binds atomically grant one overlapping scope", async ()
       results.filter((result) => result.status === "denied").map((result) => result.reason),
       ["manifest-overlap"],
     );
+  });
+});
+
+test("separate plugin instances share the Git scope lease and release authority", async () => {
+  await withProject("parallel-write-cross-instance", async (directory) => {
+    await rm(join(directory, ".git"), { recursive: true });
+    const commonGit = join(directory, ".git-common");
+    const worktreeGit = join(commonGit, "worktrees", "candidate");
+    await mkdir(worktreeGit, { recursive: true });
+    await writeFile(join(directory, ".git"), `gitdir: ${worktreeGit}\n`);
+    await writeFile(join(worktreeGit, "commondir"), "../..\n");
+    const instances = await Promise.all([
+      SortieDogsPlugin({ directory }),
+      SortieDogsPlugin({ directory }),
+    ]);
+    const sessions = ["cross-instance-one", "cross-instance-two"];
+    for (let index = 0; index < instances.length; index += 1) {
+      const hooks = instances[index]!;
+      const sessionID = sessions[index]!;
+      const manifestPath = `${sessionID}.operation-manifest.json`;
+      const handoffPath = join(directory, `handoff.${sessionID}.json`);
+      await writeFile(join(directory, manifestPath), JSON.stringify({
+        ...operationManifest(["shared-cross-instance.ts"]),
+        task_id: sessionID,
+      }));
+      await writeFile(handoffPath, JSON.stringify({
+        ...writeGateHandoff(directory, manifestPath),
+        id: sessionID,
+      }));
+      await hooks["chat.message"]!(
+        { sessionID, agent: "dog-worker" },
+        {
+          message: { agent: "dog-worker", model: { providerID: "host", modelID: "selected" } },
+          parts: [{
+            type: "text",
+            text: `/sortie\nrole=implementation\nproject_root=${directory}\noperation_manifest=${manifestPath}\nacceptance=safe parallel unit\nparallel_group=cross-instance\nparallel_unit=${sessionID}\nparallel_units=2`,
+          }],
+        },
+      );
+      await inspectHandoffWithRead(hooks, handoffPath, sessionID);
+    }
+
+    const first = await executeBindWriteGate(
+      instances[0]!, directory, sessions[0]!, `${sessions[0]}.operation-manifest.json`,
+    );
+    const blocked = await executeBindWriteGate(
+      instances[1]!, directory, sessions[1]!, `${sessions[1]}.operation-manifest.json`,
+    );
+    assert.equal(first.status, "bound");
+    assert.equal(blocked.reason, "manifest-overlap");
+    const registry = await readFile(
+      join(commonGit, "sortie-dogs", "scope-leases", "scope-leases.json"),
+      "utf8",
+    );
+    assert.equal(registry.includes(sessions[0]!), false);
+    assert.equal(registry.includes(sessions[1]!), false);
+    assert.deepEqual(await executeReleaseWriteGate(instances[0]!, sessions[0]!), { status: "released" });
+    assert.equal((await executeBindWriteGate(
+      instances[1]!, directory, sessions[1]!, `${sessions[1]}.operation-manifest.json`,
+    )).status, "bound");
+    await executeReleaseWriteGate(instances[1]!, sessions[1]!);
+  });
+});
+
+test("transient durable release failure denies release and retains authority for retry", async () => {
+  await withProject("parallel-write-release-contention", async (directory) => {
+    const hooks = await SortieDogsPlugin({ directory });
+    const sessionID = "release-contention";
+    const manifestPath = `${sessionID}.operation-manifest.json`;
+    const handoffPath = join(directory, `handoff.${sessionID}.json`);
+    await writeFile(join(directory, manifestPath), JSON.stringify({
+      ...operationManifest(["release-contention.ts"]),
+      task_id: sessionID,
+    }));
+    await writeFile(handoffPath, JSON.stringify({
+      ...writeGateHandoff(directory, manifestPath),
+      id: sessionID,
+    }));
+    await hooks["chat.message"]!(
+      { sessionID, agent: "dog-worker" },
+      {
+        message: { agent: "dog-worker", model: { providerID: "host", modelID: "selected" } },
+        parts: [{
+          type: "text",
+          text: `/sortie\nrole=implementation\nproject_root=${directory}\noperation_manifest=${manifestPath}\nacceptance=safe parallel unit\nparallel_group=release-group\nparallel_unit=${sessionID}\nparallel_units=2`,
+        }],
+      },
+    );
+    await inspectHandoffWithRead(hooks, handoffPath, sessionID);
+    assert.equal((await executeBindWriteGate(hooks, directory, sessionID, manifestPath)).status, "bound");
+
+    const scopeRoot = join(directory, ".git", "sortie-dogs", "scope-leases");
+    const lock = join(scopeRoot, ".scope-leases.lock");
+    const blocker = "00000000-0000-4000-8000-000000000003";
+    await mkdir(lock);
+    await writeFile(join(lock, `owner.${blocker}`), blocker);
+    assert.deepEqual(await executeReleaseWriteGate(hooks, sessionID), {
+      status: "denied",
+      reason: "durable-scope-unavailable",
+    });
+    const assertedUnderContention = await executeBindWriteGate(hooks, directory, sessionID, manifestPath);
+    assert.equal(assertedUnderContention.reason, "durable-scope-unavailable");
+    const heldState = JSON.parse(await readFile(join(scopeRoot, "scope-leases.json"), "utf8")) as {
+      leases: unknown[];
+    };
+    assert.equal(heldState.leases.length, 1);
+
+    await rm(lock, { recursive: true });
+    const rebound = await executeBindWriteGate(hooks, directory, sessionID, manifestPath);
+    assert.equal(rebound.status, "bound");
+    assert.equal(rebound.idempotent, true);
+    await hooks["tool.execute.before"]!(
+      { tool: "write", sessionID, callID: "retained-authority" },
+      { args: { file: "release-contention.ts", content: "not-written" } },
+    );
+    await hooks["tool.execute.after"]!(
+      { tool: "write", sessionID, callID: "retained-authority" },
+      { output: "not-written" },
+    );
+    assert.deepEqual(await executeReleaseWriteGate(hooks, sessionID), { status: "released" });
+  });
+});
+
+test("session idle detaches after transient durable release failure and permits TTL reclaim", async () => {
+  await withProject("parallel-write-idle-release-contention", async (directory) => {
+    const first = await SortieDogsPlugin({ directory });
+    const second = await SortieDogsPlugin({ directory });
+    const sessions = ["idle-contention-owner", "idle-contention-replacement"];
+    for (const [index, hooks] of [first, second].entries()) {
+      const sessionID = sessions[index]!;
+      const manifestPath = `${sessionID}.operation-manifest.json`;
+      const handoffPath = join(directory, `handoff.${sessionID}.json`);
+      await writeFile(join(directory, manifestPath), JSON.stringify({
+        ...operationManifest(["idle-contention.ts"]),
+        task_id: sessionID,
+      }));
+      await writeFile(handoffPath, JSON.stringify({
+        ...writeGateHandoff(directory, manifestPath),
+        id: sessionID,
+      }));
+      await hooks["chat.message"]!(
+        { sessionID, agent: "dog-worker" },
+        {
+          message: { agent: "dog-worker", model: { providerID: "host", modelID: "selected" } },
+          parts: [{
+            type: "text",
+            text: `/sortie\nrole=implementation\nproject_root=${directory}\noperation_manifest=${manifestPath}\nacceptance=safe parallel unit\nparallel_group=idle-contention\nparallel_unit=${sessionID}\nparallel_units=2`,
+          }],
+        },
+      );
+      await inspectHandoffWithRead(hooks, handoffPath, sessionID);
+    }
+    assert.equal((await executeBindWriteGate(
+      first,
+      directory,
+      sessions[0]!,
+      `${sessions[0]}.operation-manifest.json`,
+    )).status, "bound");
+
+    const scopeRoot = join(directory, ".git", "sortie-dogs", "scope-leases");
+    const statePath = join(scopeRoot, "scope-leases.json");
+    const lock = join(scopeRoot, ".scope-leases.lock");
+    const blocker = "00000000-0000-4000-8000-000000000005";
+    await mkdir(lock);
+    await writeFile(join(lock, `owner.${blocker}`), blocker);
+    await first.event!({ event: { type: "session.idle", properties: { sessionID: sessions[0] } } });
+
+    const retained = JSON.parse(await readFile(statePath, "utf8")) as {
+      leases: Array<{ heartbeatAt: number; expiresAt: number }>;
+    };
+    assert.equal(retained.leases.length, 1);
+    await rm(lock, { recursive: true });
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    const unchanged = JSON.parse(await readFile(statePath, "utf8")) as typeof retained;
+    assert.deepEqual(unchanged.leases, retained.leases);
+
+    const originalNow = Date.now;
+    Date.now = () => retained.leases[0]!.expiresAt + 1;
+    try {
+      assert.equal((await executeBindWriteGate(
+        second,
+        directory,
+        sessions[1]!,
+        `${sessions[1]}.operation-manifest.json`,
+      )).status, "bound");
+    } finally {
+      Date.now = originalNow;
+    }
+    await executeReleaseWriteGate(second, sessions[1]!);
   });
 });
 

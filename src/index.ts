@@ -2,6 +2,23 @@ export { lintHandoff } from "./core/validate-semantics.js";
 export { validateWorktreeParallelContract } from "./core/validate-worktree-parallel.js";
 export { validateWorktreeParallelSchema } from "./core/validate-schema.js";
 export {
+  ScopeLeaseError,
+  ScopeLeaseRegistry,
+} from "./core/scope-lease-registry.js";
+export type {
+  ScopeLease,
+  ScopeLeaseAcquireRequest,
+  ScopeLeaseRegistryOptions,
+  ScopeLeaseErrorCode,
+} from "./core/scope-lease-registry.js";
+export {
+  normalizeWorktreeScope,
+  normalizeWorktreeScopePath,
+  worktreeScopesConflict,
+  worktreeScopesOverlap,
+} from "./core/worktree-scope.js";
+export type { WorktreeScope } from "./core/worktree-scope.js";
+export {
   initializeProject,
   ProjectInitializationError,
 } from "./core/initialize.js";

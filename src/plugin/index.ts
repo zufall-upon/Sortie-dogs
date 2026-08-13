@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
-import { isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 
 import { RUNTIME_ASSET_VERSION } from "../asset-version.js";
 import { normalizeRelativePath, RelativePathError } from "../core/path.js";
+import { ScopeLeaseError, ScopeLeaseRegistry, type ScopeLease } from "../core/scope-lease-registry.js";
+import { normalizeWorktreeScope } from "../core/worktree-scope.js";
 import type { ManifestDiagnostic, OperationManifest, SchemaDiagnostic } from "../core/types.js";
 import { validateManifest } from "../core/validate-manifest.js";
 import {
@@ -76,6 +78,7 @@ const CONSULTATION_AGENTS = new Set([REVIEWER_AGENT, ADVISOR_AGENT]);
 type ConsultationAgent = typeof REVIEWER_AGENT | typeof ADVISOR_AGENT;
 const SORTIE_TRIGGER = /^\/sortie(?:\s|$)/;
 const TASK_ROLES = new Set(["implementation", "remediation", "blocker-resolution"]);
+const GIT_POINTER_LIMIT = 4096;
 
 export interface OpenCodePluginInput {
   directory: string;
@@ -311,6 +314,7 @@ interface SessionAuthorization {
   gate: WriteGate;
   expiresAt: number;
   handoffPath: string;
+  lease?: ScopeLease;
   manifestHash: string;
   manifestMtimeMs: number;
   manifestPath: string;
@@ -320,6 +324,41 @@ interface SessionAuthorization {
   suspended: boolean;
   validationCommands: ReadonlySet<string>;
   writeScopes: readonly string[];
+}
+
+async function readGitMetadata(path: string): Promise<string | undefined> {
+  const metadata = await stat(path).catch(() => undefined);
+  if (metadata === undefined) return undefined;
+  if (!metadata.isFile() || metadata.size < 1 || metadata.size > GIT_POINTER_LIMIT) throw new Error("invalid-git-metadata");
+  const value = (await readFile(path, "utf8")).trim();
+  if (value.length === 0 || /[\u0000-\u001f\u007f]/u.test(value)) throw new Error("invalid-git-metadata");
+  return value;
+}
+
+/** Resolve one repository-wide lease location without invoking Git or trusting process-local state. */
+async function durableScopeRoot(projectRoot: string): Promise<string | undefined> {
+  try {
+    const dotGit = join(projectRoot, ".git");
+    const dotGitStat = await stat(dotGit);
+    let gitDirectory: string;
+    if (dotGitStat.isDirectory()) {
+      gitDirectory = dotGit;
+    } else if (dotGitStat.isFile()) {
+      const pointer = await readGitMetadata(dotGit);
+      const match = pointer === undefined ? undefined : /^gitdir:\s*(.+)$/u.exec(pointer);
+      if (match === undefined || match === null) return undefined;
+      gitDirectory = resolve(dirname(dotGit), match[1]!);
+      if (!(await stat(gitDirectory)).isDirectory()) return undefined;
+    } else {
+      return undefined;
+    }
+    const commonPointer = await readGitMetadata(join(gitDirectory, "commondir"));
+    const commonDirectory = commonPointer === undefined ? gitDirectory : resolve(gitDirectory, commonPointer);
+    if (!(await stat(commonDirectory)).isDirectory()) return undefined;
+    return join(commonDirectory, "sortie-dogs", "scope-leases");
+  } catch {
+    return undefined;
+  }
 }
 
 interface BindingPin {
@@ -783,10 +822,20 @@ function pruneSessionAuthorizations(
     if ((active.get(key)?.inFlightCalls.size ?? 0) > 0) {
       entry.expiresAt = now + ACTIVE_SESSION_CACHE.ttlMilliseconds;
     } else {
+      abandonDetachedLease(entry.lease);
       cache.delete(key);
     }
   }
-  while (cache.size >= INSPECTION_CACHE.maximum) cache.delete(cache.keys().next().value!);
+  while (cache.size >= INSPECTION_CACHE.maximum) {
+    const key = cache.keys().next().value!;
+    abandonDetachedLease(cache.get(key)?.lease);
+    cache.delete(key);
+  }
+}
+
+function abandonDetachedLease(lease: ScopeLease | undefined): void {
+  if (lease === undefined) return;
+  void lease.abandon().catch(() => lease.close());
 }
 
 /** Named OpenCode plugin export. Importing the package has no side effects; invoking it installs active gates. */
@@ -972,6 +1021,14 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   >();
   const taskResultRepair = createTaskResultRepairHook(input.client);
   const fastLane = new FastLaneController();
+
+  function abandonSessionLease(sessionID: string): void {
+    const authorization = sessionAuthorizations.get(sessionID);
+    if (authorization?.lease !== undefined) {
+      abandonDetachedLease(authorization.lease);
+      authorization.lease = undefined;
+    }
+  }
 
   async function completeContinuationText(sessionID: string, text: string): Promise<void> {
     await continuation.textComplete({
@@ -1276,6 +1333,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         recoverable: false,
         remedy: "Redispatch a fresh worker with parallel_group, parallel_unit, and parallel_units=2..3 all present, or omit all three fields for serial work.",
       },
+      "durable-scope-unavailable": {
+        recoverable: false,
+        remedy: "Use a Git worktree with readable .git metadata before starting parallel implementation.",
+      },
       "retry-exhausted": {
         recoverable: false,
         remedy: "No write-gate state changed after one retry; stop this candidate and record the local blocker.",
@@ -1414,6 +1475,22 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
             writeScopesOverlap(writeScopes, authorization.readScopes) ||
             writeScopesOverlap(readScopes, authorization.writeScopes))
         );
+      const acquireDurableLease = async (
+        readScopes: readonly string[],
+        writeScopes: readonly string[],
+      ): Promise<ScopeLease | undefined> => {
+        if (activeSessions.get(sessionID)?.parallel !== "valid") return undefined;
+        const scopeRoot = await durableScopeRoot(candidate.root);
+        if (scopeRoot === undefined) return undefined;
+        const relativeScope = normalizeWorktreeScope({
+          read: await Promise.all(readScopes.map((path) => candidate.toRelativePath(path))),
+          write: await Promise.all(writeScopes.map((path) => candidate.toRelativePath(path))),
+        });
+        return await new ScopeLeaseRegistry(scopeRoot).acquire({
+          ownerId: `${process.pid}:${sessionID}`,
+          scope: relativeScope,
+        });
+      };
       if (existingAuthorization !== undefined) {
         if (conflictsWithActiveAuthorization(
           existingAuthorization.writeScopes,
@@ -1422,6 +1499,28 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           return deny("manifest-overlap", [
             contractDefect("manifest", "/write", "parallel_write_scope_overlap"),
           ]);
+        }
+        if (activeSessions.get(sessionID)?.parallel === "valid") {
+          try {
+            if (existingAuthorization.lease === undefined) {
+              existingAuthorization.lease = await acquireDurableLease(
+                existingAuthorization.readScopes,
+                existingAuthorization.writeScopes,
+              );
+              if (existingAuthorization.lease === undefined) return deny("durable-scope-unavailable");
+            } else {
+              await existingAuthorization.lease.assertHeld();
+            }
+          } catch (error) {
+            if (error instanceof ScopeLeaseError && error.code === "not-held") {
+              existingAuthorization.lease = undefined;
+            }
+            return error instanceof ScopeLeaseError && error.code === "scope-conflict"
+              ? deny("manifest-overlap", [
+              contractDefect("manifest", "/write", "parallel_write_scope_overlap"),
+              ])
+              : deny("durable-scope-unavailable");
+          }
         }
         existingAuthorization.expiresAt = now + ACTIVE_SESSION_CACHE.ttlMilliseconds;
         existingAuthorization.suspended = false;
@@ -1443,25 +1542,50 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           contractDefect("manifest", "/write", "parallel_write_scope_overlap"),
         ]);
       }
-      bindingPins.set(sessionID, {
-        manifestHash: pinned.hash,
-        manifestMtimeMs: pinned.mtimeMs,
-        manifestPath,
-      });
-      sessionAuthorizations.set(sessionID, {
-        gate,
-        expiresAt: now + ACTIVE_SESSION_CACHE.ttlMilliseconds,
-        handoffPath: inspectedEntry.handoffPath,
-        manifestHash: pinned.hash,
-        manifestMtimeMs: pinned.mtimeMs,
-        manifestPath,
-        projectRoot: candidate.root,
-        readScopes,
-        rootSessionID: inspectedEntry.rootSessionID,
-        suspended: false,
-        validationCommands: new Set(validation.value.validation.map(normalizeCommand)),
-        writeScopes,
-      });
+      let lease: ScopeLease | undefined;
+      if (activeSessions.get(sessionID)?.parallel === "valid") {
+        const scopeRoot = await durableScopeRoot(candidate.root);
+        if (scopeRoot === undefined) return deny("durable-scope-unavailable");
+        try {
+          lease = await acquireDurableLease(readScopes, writeScopes);
+        } catch (error) {
+          return error instanceof ScopeLeaseError && error.code === "scope-conflict"
+            ? deny("manifest-overlap", [
+            contractDefect("manifest", "/write", "parallel_write_scope_overlap"),
+            ])
+            : deny("durable-scope-unavailable");
+        }
+        if (lease === undefined) return deny("durable-scope-unavailable");
+      }
+      try {
+        bindingPins.set(sessionID, {
+          manifestHash: pinned.hash,
+          manifestMtimeMs: pinned.mtimeMs,
+          manifestPath,
+        });
+        sessionAuthorizations.set(sessionID, {
+          gate,
+          expiresAt: now + ACTIVE_SESSION_CACHE.ttlMilliseconds,
+          handoffPath: inspectedEntry.handoffPath,
+          ...(lease === undefined ? {} : { lease }),
+          manifestHash: pinned.hash,
+          manifestMtimeMs: pinned.mtimeMs,
+          manifestPath,
+          projectRoot: candidate.root,
+          readScopes,
+          rootSessionID: inspectedEntry.rootSessionID,
+          suspended: false,
+          validationCommands: new Set(validation.value.validation.map(normalizeCommand)),
+          writeScopes,
+        });
+      } catch (error) {
+        bindingPins.delete(sessionID);
+        sessionAuthorizations.delete(sessionID);
+        if (lease !== undefined) {
+          await lease.abandon().catch(() => lease.close());
+        }
+        throw error;
+      }
       const activeState = activeSessions.get(sessionID);
       if (activeState !== undefined) activeState.released = false;
       clearBindingDenial(inspectedEntry.rootSessionID, candidate.root, manifestPath, sessionID);
@@ -1482,7 +1606,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     }
   }
 
-  function releaseWriteGate(sessionID: string): string {
+  async function releaseWriteGate(sessionID: string): Promise<string> {
     if (bindingOperations.has(sessionID)) {
       return JSON.stringify({ status: "denied", reason: "binding-in-flight" });
     }
@@ -1491,14 +1615,30 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     if ((activeSessions.get(sessionID)?.inFlightCalls.size ?? 0) > 0) {
       return JSON.stringify({ status: "denied", reason: "tools-in-flight" });
     }
-    const idempotent = authorization.suspended;
-    authorization.suspended = true;
-    for (const key of inspected.keys()) {
-      if (key.startsWith(`${sessionID}\u0000`)) inspected.delete(key);
+    bindingOperations.add(sessionID);
+    try {
+      const idempotent = authorization.suspended;
+      if (!idempotent && authorization.lease !== undefined) {
+        try {
+          await authorization.lease.release();
+          authorization.lease = undefined;
+        } catch (error) {
+          if (!(error instanceof ScopeLeaseError) || error.code !== "not-held") {
+            return JSON.stringify({ status: "denied", reason: "durable-scope-unavailable" });
+          }
+          authorization.lease = undefined;
+        }
+      }
+      authorization.suspended = true;
+      for (const key of inspected.keys()) {
+        if (key.startsWith(`${sessionID}\u0000`)) inspected.delete(key);
+      }
+      const activeState = activeSessions.get(sessionID);
+      if (activeState !== undefined) activeState.released = true;
+      return JSON.stringify({ status: "released", ...(idempotent ? { idempotent: true } : {}) });
+    } finally {
+      bindingOperations.delete(sessionID);
     }
-    const activeState = activeSessions.get(sessionID);
-    if (activeState !== undefined) activeState.released = true;
-    return JSON.stringify({ status: "released", ...(idempotent ? { idempotent: true } : {}) });
   }
 
   async function sessionGate(sessionID: string | undefined): Promise<WriteGate | undefined> {
@@ -1509,6 +1649,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       if (authorization === undefined) return undefined;
       if (authorization.suspended) return undefined;
     try {
+      await authorization.lease?.assertHeld();
       const pinned = await readPinnedJson(authorization.manifestPath, INPUT_LIMITS.manifest);
       const manifestValidation = validateOperationManifestSchema(pinned.value);
       if (!manifestValidation.ok) throw new Error("manifest-invalid");
@@ -1517,8 +1658,12 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       }
       authorization.expiresAt = now + ACTIVE_SESSION_CACHE.ttlMilliseconds;
       return authorization.gate;
-    } catch {
+    } catch (error) {
+      if (error instanceof ScopeLeaseError && error.code !== "not-held") return undefined;
       authorization.suspended = true;
+      const lease = authorization.lease;
+      if (lease !== undefined) await lease.abandon().catch(() => lease.close());
+      authorization.lease = undefined;
       return undefined;
     }
   }
@@ -1570,6 +1715,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
    */
   function releaseSessionEnforcement(sessionID: string): void {
     activeSessions.delete(sessionID);
+    abandonSessionLease(sessionID);
     sessionAuthorizations.delete(sessionID);
     bindingPins.delete(sessionID);
     expiredSessions.delete(sessionID);
@@ -1666,6 +1812,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
 
   function expireSession(sessionID: string): void {
     activeSessions.delete(sessionID);
+    abandonSessionLease(sessionID);
     sessionAuthorizations.delete(sessionID);
     for (const key of inspected.keys()) {
       if (key.startsWith(`${sessionID}\u0000`)) inspected.delete(key);
@@ -1680,6 +1827,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
 
   function evictSession(sessionID: string): void {
     activeSessions.delete(sessionID);
+    abandonSessionLease(sessionID);
     sessionAuthorizations.delete(sessionID);
     bindingPins.delete(sessionID);
     for (const key of inspected.keys()) {
@@ -2560,6 +2708,11 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           // Suspension below is fail-closed for both valid and invalid handoffs.
         } finally {
           authorization.suspended = true;
+          const lease = authorization.lease;
+          if (lease !== undefined) {
+            await lease.release().catch(() => lease.close());
+          }
+          authorization.lease = undefined;
           for (const key of inspected.keys()) {
             if (key.startsWith(`${eventSessionID}\u0000`)) inspected.delete(key);
           }
