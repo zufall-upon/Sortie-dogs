@@ -68,6 +68,7 @@ export type ContinuationRejection =
 export interface ContinuationIdentity {
   readonly agent?: string | undefined;
   readonly parentID?: string | undefined;
+  readonly parentPresent?: boolean | undefined;
 }
 
 export interface ContinuationResolution {
@@ -98,6 +99,10 @@ function reject(reason: ContinuationRejection): ContinuationResolution {
   return { compact: false, continue: false, reason };
 }
 
+function childIdentity(identity: ContinuationIdentity): boolean {
+  return identity.parentPresent === true || nonEmpty(identity.parentID);
+}
+
 /**
  * The single resolver every continuation path shares: the direct tool, the marker fallback, and the
  * step-exhausted fallback. Keeping it pure means the identity policy is provable without a host.
@@ -109,7 +114,7 @@ export function resolveContinuation(input: ContinuationResolutionInput): Continu
   }
   if (input.requestedCapability !== input.configuredCapability) return reject("capability-unavailable");
   if (input.identity === undefined || !nonEmpty(input.identity.agent)) return reject("identity-unavailable");
-  if (nonEmpty(input.identity.parentID)) return reject("child-session");
+  if (childIdentity(input.identity)) return reject("child-session");
   if (input.identity.agent !== input.configuredAgent) return reject("agent-mismatch");
   if (input.pendingAutoContinue) return reject("pending-autocontinue");
   // A batch that reached its continuation ceiling still compacts; it just stops resuming itself.
@@ -184,7 +189,10 @@ export interface ContinuationTool {
 
 export interface ContinuationHooks {
   readonly tool: ContinuationTool;
-  textComplete(input: { sessionID: string }, output: { text: string }): Promise<void>;
+  textComplete(
+    input: { sessionID: string; allowCheckpointContinuation?: boolean },
+    output: { text: string },
+  ): Promise<void>;
   sessionCompacting(
     input: { sessionID: string },
     output: { context?: string[]; prompt?: string },
@@ -384,10 +392,16 @@ function sessionInfo(response: unknown): ContinuationIdentity | undefined {
     ? (response as { data?: unknown }).data
     : response;
   if (payload === null || typeof payload !== "object") return undefined;
-  const record = payload as { agent?: unknown; parentID?: unknown };
+  const record = payload as { agent?: unknown; parentID?: unknown; parentId?: unknown };
+  const parentPresent = Object.prototype.hasOwnProperty.call(record, "parentID") ||
+    Object.prototype.hasOwnProperty.call(record, "parentId");
+  const parentID = typeof record.parentID === "string" ? record.parentID
+    : typeof record.parentId === "string" ? record.parentId
+      : undefined;
   return {
     agent: typeof record.agent === "string" ? record.agent : undefined,
-    parentID: typeof record.parentID === "string" ? record.parentID : undefined,
+    parentID,
+    parentPresent,
   };
 }
 
@@ -694,7 +708,7 @@ export function createContinuationHooks(
         warnRollover(sessionID, "identity-unavailable");
         return false;
       }
-      if (nonEmpty(identity.parentID)) {
+      if (childIdentity(identity)) {
         warnRollover(sessionID, "child-session");
         return false;
       }
@@ -887,8 +901,8 @@ export function createContinuationHooks(
       const reported = await readIdentity(context.sessionID);
       const identity: ContinuationIdentity | undefined = nonEmpty(reported?.agent)
         ? reported
-        : nonEmpty(context.agent)
-          ? { agent: context.agent, parentID: reported?.parentID }
+        : reported !== undefined && nonEmpty(context.agent)
+          ? { agent: context.agent, parentID: reported?.parentID, parentPresent: reported?.parentPresent }
           : reported;
       const state = stateFor(context.sessionID);
       const active = policy();
@@ -971,7 +985,17 @@ export function createContinuationHooks(
           !trimmed.startsWith(AUTO_CONTINUE_PREFIX)
         ) {
           state.latestCoordinatorReport = output.text.trim();
-          if (nonTerminalProgress(state.latestCoordinatorReport)) {
+          if (batchCheckpointNeedsContinuation(state.latestCoordinatorReport)) {
+            if (input.allowCheckpointContinuation === false) {
+              state.latestCoordinatorReport = undefined;
+            } else {
+              const identity = await readIdentity(input.sessionID);
+              const report = /➡️\s*(?:次action|next_action)\s*:\s*\S/iu.test(state.latestCoordinatorReport)
+                ? state.latestCoordinatorReport
+                : `${state.latestCoordinatorReport}\n➡️ 次action: 未達user要求の次の独立candidateへ進む`;
+              await requestContinuation(input.sessionID, identity, report, true);
+            }
+          } else if (nonTerminalProgress(state.latestCoordinatorReport)) {
             scheduleStepRecovery(input.sessionID, state, state.latestCoordinatorReport);
           }
           // The resumed coordinator completed a turn, so no late event from its prior compaction can
@@ -989,7 +1013,7 @@ export function createContinuationHooks(
           const identity = await readIdentity(input.sessionID);
           if (
             !active.enabled || identity === undefined || !nonEmpty(identity.agent) ||
-            nonEmpty(identity.parentID) || identity.agent !== active.agent
+            childIdentity(identity) || identity.agent !== active.agent
           ) {
             warnRollover(input.sessionID, "terminal-identity-rejected");
             return;
@@ -1002,12 +1026,12 @@ export function createContinuationHooks(
           return;
         }
         if (state?.directUsed === true) return;
-        if (output.text.includes(CONTINUATION_MARKER)) {
+        if (output.text.includes(CONTINUATION_MARKER) && input.allowCheckpointContinuation !== false) {
           const report = output.text.replaceAll(CONTINUATION_MARKER, "").trim();
           await requestContinuation(input.sessionID, await readIdentity(input.sessionID), report);
           return;
         }
-        if (STEP_EXHAUSTED_PATTERN.test(output.text)) {
+        if (STEP_EXHAUSTED_PATTERN.test(output.text) && input.allowCheckpointContinuation !== false) {
           await requestContinuation(input.sessionID, await readIdentity(input.sessionID), output.text.trim());
         }
       } finally {
@@ -1035,7 +1059,7 @@ export function createContinuationHooks(
          */
         const identity = await readIdentity(input.sessionID);
         if (
-          identity === undefined || !nonEmpty(identity.agent) || nonEmpty(identity.parentID) ||
+          identity === undefined || !nonEmpty(identity.agent) || childIdentity(identity) ||
           identity.agent !== policy().agent
         ) return;
       }
@@ -1074,7 +1098,7 @@ export function createContinuationHooks(
       if (state === undefined) {
         const identity = await readIdentity(input.sessionID);
         if (
-          identity === undefined || !nonEmpty(identity.agent) || nonEmpty(identity.parentID) ||
+          identity === undefined || !nonEmpty(identity.agent) || childIdentity(identity) ||
           identity.agent !== policy().agent
         ) return;
       }
@@ -1134,7 +1158,7 @@ export function createContinuationHooks(
         const identity = await readIdentity(sessionID);
         const active = policy();
         if (
-          active.enabled && identity !== undefined && identity.agent === active.agent && !nonEmpty(identity.parentID) &&
+          active.enabled && identity !== undefined && identity.agent === active.agent && !childIdentity(identity) &&
           sessions.get(sessionID) === state && state.turnRevision === revision &&
           state.latestCoordinatorReport === report
         ) {

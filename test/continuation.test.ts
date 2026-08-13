@@ -108,6 +108,11 @@ function resolution(overrides: Partial<Parameters<typeof resolveContinuation>[0]
 
 test("continuation resolver grants only a configured root coordinator", () => {
   assert.deepEqual(resolution(), { compact: true, continue: true });
+  assert.deepEqual(resolution({ identity: { agent: COORDINATOR, parentPresent: true } }), {
+    compact: false,
+    continue: false,
+    reason: "child-session",
+  });
 
   assert.deepEqual(resolution({ enabled: false }), {
     compact: false,
@@ -791,7 +796,7 @@ test("a successful compaction resume refreshes the bounded step recovery segment
 
   await hooks.textComplete(
     { sessionID: "ses_root" },
-    { text: "📊 進行中: task — 100% | committed 1/3; attempted 1/3; reconciled 0 | continuation: required" },
+    { text: "📊 進行中: task — 100% | committed 1/3; attempted 1/3; reconciled 0 | continuation: none" },
   );
   assert.equal(
     await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR }),
@@ -857,6 +862,42 @@ test("text completion recovers when a one-shot host omits session idle", async (
   await eventHooks.sessionIdle("ses_event");
   await settle();
   assert.equal(eventHost.promptCalls.length, 1, "real idle and fallback share one recovery state");
+});
+
+test("text completion compacts and resumes a checkpoint before a one-shot host can exit", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  let hooks!: ReturnType<typeof createContinuationHooks>;
+  host.client.session!.summarize = async (request) => {
+    host.summarizeCalls.push({ id: request.path.id, body: request.body });
+    await hooks.sessionCompacting({ sessionID: request.path.id }, {});
+    await hooks.textComplete(
+      { sessionID: request.path.id },
+      {
+        text: `${ROLLOVER_TOKEN}\n\n## 未達のユーザー要求\n- next candidate\n\n` +
+          "## task identity と制約\n- cli fixture\n\n## manifest\n- fixture.txt\n\n" +
+          "## validation履歴\n- none\n\n## batch counters\n- attempted 1/3\n\n" +
+          "## tracker batch state\n- none\n\n## 未解決blocker\n- none\n\n## 次action\n- continue",
+      },
+    );
+    return { data: true };
+  };
+  hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
+  hooks.observeModel("ses_cli_checkpoint", { providerID: "openai", modelID: "gpt-5.6-terra" });
+
+  await hooks.textComplete(
+    { sessionID: "ses_cli_checkpoint" },
+    {
+      text: "📊 進行中: CLI checkpoint — 100% (Project checkpoint) | " +
+        "バッチ: committed 1/3; attempted 1/3; reconciled 0 | continuation: required",
+    },
+  );
+  await settle();
+
+  assert.equal(host.summarizeCalls.length, 1);
+  assert.equal(host.promptCalls.length, 1);
+  assert.equal(host.promptCalls[0]!.id, "ses_cli_checkpoint");
+  assert.equal(host.promptCalls[0]!.agent, COORDINATOR);
+  assert.ok(host.promptCalls[0]!.text.startsWith(AUTO_CONTINUE_PREFIX));
 });
 
 test("forgotten session cannot resume after delayed identity lookup", async () => {
@@ -933,7 +974,6 @@ test("session idle compacts a terminal unit checkpoint below the batch target", 
     { sessionID: "ses_root" },
     { text: "📊 進行中: Release 03 — 100% (Project checkpoint) | バッチ: committed 1/3; attempted 1/3; reconciled 0" },
   );
-  await hooks.sessionIdle("ses_root");
   await mainSummaryStarted;
   const compacting: { context?: string[]; prompt?: string } = {};
   await hooks.sessionCompacting({ sessionID: "ses_root" }, compacting);
@@ -984,7 +1024,6 @@ test("session idle compacts a terminal unit checkpoint below the batch target", 
     { sessionID: "ses_marker" },
     { text: "📊 处理中: Release 04 — 100% (项目检查点) | committed 2/10; attempted 2/10; reconciled 0 | continuation: required" },
   );
-  await markerHooks.sessionIdle("ses_marker");
   await settle();
   assert.equal(markerHost.summarizeCalls.length, 1, "protocol keys survive localized labels");
 
@@ -1021,7 +1060,6 @@ test("session idle compacts a terminal unit checkpoint below the batch target", 
     { sessionID: "ses_native" },
     { text: "📊 進行中: native — 100% (Project checkpoint) | committed 1/3; attempted 1/3; reconciled 0 | continuation: required" },
   );
-  await nativeHooks.sessionIdle("ses_native");
   await nativeSummaryStarted;
   await nativeHooks.sessionCompacting({ sessionID: "ses_native" }, {});
   await nativeHooks.textComplete(
@@ -1073,7 +1111,6 @@ test("session idle compacts a terminal unit checkpoint below the batch target", 
       { sessionID },
       { text: "📊 進行中: malformed — 100% (Project checkpoint) | attempted 1/3 | continuation: required" },
     );
-    await malformedHooks.sessionIdle(sessionID);
     await summaryStarted;
     await malformedHooks.sessionCompacting({ sessionID }, {});
     await malformedHooks.textComplete({ sessionID }, { text: summary });
@@ -1259,6 +1296,18 @@ test("concurrent idle signals cannot start duplicate rollovers", async () => {
   await Promise.all([first, second]);
   assert.equal(host.summarizeCalls.length, 1);
   assert.equal(host.promptCalls.length, 1);
+});
+
+test("an exhausted step budget cannot bypass a disabled checkpoint continuation gate", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
+  await hooks.textComplete(
+    { sessionID: "ses_root", allowCheckpointContinuation: false },
+    { text: "最大step数に到達しました。残作業: 次の独立unit。" },
+  );
+  await settle();
+  assert.equal(host.summarizeCalls.length, 0);
+  assert.equal(host.promptCalls.length, 0);
 });
 
 test("a resolved resume error retries only the resume after one compaction", async () => {
@@ -1483,13 +1532,23 @@ test("a session lookup without an agent field still trusts the reported parent l
   );
   await settle();
   assert.deepEqual([nested.summarizeCalls.length, nested.promptCalls.length], [0, 0]);
+
+  const nullParent = fakeHost({ parentID: undefined });
+  (nullParent.client.session!.get as NonNullable<ContinuationClient["session"]>["get"]) = async () => ({
+    data: { parentID: null },
+  });
+  const nullParentHooks = createContinuationHooks(nullParent.client, "/project", POLICY, FAST);
+  assert.equal(
+    await nullParentHooks.tool.execute({}, { sessionID: "ses_null_child", agent: COORDINATOR }),
+    "SORTIE_CONTINUATION_REJECTED: child-session",
+  );
 });
 
 test("a host without the continuation client never resumes anything", async () => {
   const hooks = createContinuationHooks(undefined, "/project", POLICY, FAST);
   // The tool still answers deterministically instead of throwing into the coordinator turn.
   const answer = await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR });
-  assert.equal(answer, "SORTIE_CONTINUATION_REJECTED: capability-unavailable");
+  assert.equal(answer, "SORTIE_CONTINUATION_REJECTED: identity-unavailable");
   await settle();
   await hooks.sessionIdle("ses_root");
 });

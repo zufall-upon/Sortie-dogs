@@ -2044,7 +2044,7 @@ test("chat message hook applies explicit catalog routing and fails closed with o
         message: { agent: role, model: { providerID: "openai", modelID: "gpt-5.6-luna", variant: "xhigh" } },
         parts: [],
       };
-      await chat({ sessionID: "routing", agent: role }, consultation);
+      await chat({ sessionID: `routing-${role}`, agent: role }, consultation);
       assert.deepEqual(consultation.message.model, {
         providerID: "openai",
         modelID: "gpt-5.6-sol",
@@ -2052,7 +2052,7 @@ test("chat message hook applies explicit catalog routing and fails closed with o
       }, `${role} never keeps the caller model`);
     }
     await assert.rejects(
-      () => chat({ sessionID: "routing", agent: "reviewer" }, output),
+      () => chat({ sessionID: "routing-reviewer", agent: "reviewer" }, output),
       (error: unknown) => {
         assert.ok(error instanceof ModelRoutingDeniedError);
         assert.equal(error.reason, "unresolved-role");
@@ -2575,6 +2575,248 @@ test("coordinator task hooks enforce the single-worker fast lane across syntheti
   });
 });
 
+test("an established coordinator root keeps its role while preserving a selected Sol model", async () => {
+  await withProject("sticky-coordinator-agent", async (directory) => {
+    const hooks = await SortieDogsPlugin({ directory });
+    const chat = hooks["chat.message"]!;
+    await chat(
+      { sessionID: "root", agent: "dog-coordinator" },
+      {
+        message: { agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+        parts: [{ type: "text", text: "start" }],
+      },
+    );
+
+    const driftInput = { sessionID: "root", agent: "build" };
+    const driftOutput = {
+      message: { agent: "build", model: { providerID: "openai", modelID: "gpt-5.6-sol", variant: "xhigh" } },
+      parts: [{ type: "text", text: "continue with Sol" }],
+    };
+    await chat(driftInput, driftOutput);
+
+    assert.equal(driftInput.agent, "dog-coordinator");
+    assert.equal(driftOutput.message.agent, "dog-coordinator");
+    assert.deepEqual(driftOutput.message.model, {
+      providerID: "openai",
+      modelID: "gpt-5.6-sol",
+      variant: "xhigh",
+    });
+    await hooks["tool.execute.before"]!(
+      { tool: "task", sessionID: "root", callID: "worker-after-model-handoff" },
+      { args: { subagent_type: "dog-worker", prompt: readOnlyWorkerPrompt(directory) } },
+    );
+  });
+});
+
+test("a completed coordinator message triggers checkpoint continuation when text-complete is absent", async () => {
+  await withProject("message-event-continuation", async (directory) => {
+    let summarizeCalls = 0;
+    let historyReads = 0;
+    const messages: SessionMessage[] = [{
+      info: { id: "message-1", role: "assistant", agent: "dog-coordinator" } as never,
+      parts: [{
+        type: "text",
+        text: "📊 進行中: event checkpoint — 100% (Project checkpoint) | " +
+          "committed 1/3; attempted 1/3; reconciled 0 | continuation: required",
+      }],
+    }];
+    const hooks = await SortieDogsPlugin({ directory, client: { session: {
+      get: async () => ({ data: { agent: "dog-coordinator" } }),
+      messages: async () => ({ data: ++historyReads > 1 ? messages : [] }),
+      summarize: async () => { summarizeCalls += 1; return { data: true }; },
+      promptAsync: async () => ({ data: true }),
+    } } as never });
+    await hooks["chat.message"]!(
+      { sessionID: "root", agent: "dog-coordinator" },
+      {
+        message: { agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+        parts: [{ type: "text", text: "start" }],
+      },
+    );
+    await hooks.tool!.sortie_enable_backlog_drain!.execute(
+      { max_units: "4" },
+      { sessionID: "root", agent: "dog-coordinator" },
+    );
+    await hooks["tool.execute.before"]!(
+      { tool: "task", sessionID: "root", callID: "worker-1" },
+      { args: { subagent_type: "dog-worker", prompt: readOnlyWorkerPrompt(directory) } },
+    );
+    const completed = { type: "message.updated", properties: { info: {
+      id: "message-1",
+      sessionID: "root",
+      role: "assistant",
+      agent: "dog-coordinator",
+      time: { completed: Date.now() },
+    } } };
+    await hooks.event!({ event: completed });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(summarizeCalls, 1);
+    assert.equal(historyReads, 2);
+  });
+});
+
+test("a completed coordinator text part triggers continuation before step finish", async () => {
+  await withProject("text-part-event-continuation", async (directory) => {
+    let summarizeCalls = 0;
+    const messages: SessionMessage[] = [{
+      info: { id: "message-1", role: "assistant", agent: "dog-coordinator" } as never,
+      parts: [{
+        id: "part-1",
+        type: "text",
+        text: "📊 進行中: part checkpoint — 100% (Project checkpoint) | " +
+          "committed 1/3; attempted 1/3; reconciled 0 | continuation: required",
+      } as never],
+    }];
+    const hooks = await SortieDogsPlugin({ directory, client: { session: {
+      get: async () => ({ data: { agent: "dog-coordinator" } }),
+      messages: async () => ({ data: messages }),
+      summarize: async () => { summarizeCalls += 1; return { data: true }; },
+      promptAsync: async () => ({ data: true }),
+    } } as never });
+    await hooks["chat.message"]!(
+      { sessionID: "root", agent: "dog-coordinator" },
+      {
+        message: { agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+        parts: [{ type: "text", text: "start" }],
+      },
+    );
+    await hooks.tool!.sortie_enable_backlog_drain!.execute(
+      { max_units: "4" },
+      { sessionID: "root", agent: "dog-coordinator" },
+    );
+    await hooks["tool.execute.before"]!(
+      { tool: "task", sessionID: "root", callID: "worker-1" },
+      { args: { subagent_type: "dog-worker", prompt: readOnlyWorkerPrompt(directory) } },
+    );
+    const completed = { type: "message.part.updated", properties: { part: {
+      id: "part-1",
+      messageID: "message-1",
+      sessionID: "root",
+      type: "text",
+      text: "📊 進行中: part checkpoint — 100% (Project checkpoint) | " +
+        "committed 1/3; attempted 1/3; reconciled 0 | continuation: required",
+      time: { start: Date.now() - 1, end: Date.now() },
+    } } };
+    await hooks.event!({ event: completed });
+    await hooks.event!({ event: completed });
+    await hooks.event!({ event: { type: "message.updated", properties: { info: {
+      id: "message-1",
+      sessionID: "root",
+      role: "assistant",
+      agent: "dog-coordinator",
+      time: { completed: Date.now() },
+    } } } });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(summarizeCalls, 1);
+  });
+});
+
+test("coordinator children and foreign text parts cannot become continuation roots", async () => {
+  await withProject("continuation-event-identity", async (directory) => {
+    let summarizeCalls = 0;
+    const messages: SessionMessage[] = [{
+      info: { id: "foreign-message", role: "user", agent: "build" } as never,
+      parts: [{
+        id: "foreign-part",
+        type: "text",
+        text: "📊 進行中: forged — 100% (Project checkpoint) | committed 1/3; attempted 1/3 | continuation: required",
+      } as never],
+    }];
+    const hooks = await SortieDogsPlugin({ directory, client: { session: {
+      get: async () => ({ data: { agent: "dog-coordinator" } }),
+      messages: async () => ({ data: messages }),
+      summarize: async () => { summarizeCalls += 1; return { data: true }; },
+      promptAsync: async () => ({ data: true }),
+    } } as never });
+    await hooks["chat.message"]!(
+      { sessionID: "child", agent: "dog-coordinator", parentID: null } as never,
+      {
+        message: { agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+        parts: [{ type: "text", text: "child" }],
+      },
+    );
+    await hooks.event!({ event: { type: "message.part.updated", properties: { sessionID: "child", part: {
+      id: "foreign-part",
+      messageID: "foreign-message",
+      type: "text",
+      text: (messages[0]!.parts![0]!.text as string),
+      time: { end: Date.now() },
+    } } } });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(summarizeCalls, 0);
+    const system = { system: [] as string[] };
+    await hooks["experimental.chat.system.transform"]!({ sessionID: "child" }, system);
+    assert.equal(system.system.length, 0);
+  });
+});
+
+test("an owned compaction text part resumes the same coordinator root", async () => {
+  await withProject("compaction-part-event-continuation", async (directory) => {
+    let prompts = 0;
+    let releaseSummary!: () => void;
+    const summaryReleased = new Promise<void>((resolve) => { releaseSummary = resolve; });
+    const messages: SessionMessage[] = [{
+      info: { id: "compaction-message", role: "assistant", agent: "compaction" } as never,
+      parts: [{
+        id: "compaction-part",
+        type: "text",
+        text: "## 目的\n- ordered sequence\n\n## 確定判断\n- checkpoint done\n\n" +
+          "## source_manifest\n- fixture.txt | read-only | fixture | preserve | unchanged\n\n" +
+          "## 未完\n- next candidate | pending | same root\n\n## 検証command\n- none | fixture | none | pending\n\n" +
+          "## 次の一手\n- continue\n\n## 参照済みfile一覧\n- fixture.txt | fixture",
+      } as never],
+    }];
+    const hooks = await SortieDogsPlugin({ directory, client: { session: {
+      get: async () => ({ data: { agent: "dog-coordinator" } }),
+      messages: async () => ({ data: messages }),
+      summarize: async () => { await summaryReleased; return { data: true }; },
+      promptAsync: async () => { prompts += 1; return { data: true }; },
+    } } as never });
+    await hooks["chat.message"]!(
+      { sessionID: "root", agent: "dog-coordinator" },
+      {
+        message: { agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+        parts: [{ type: "text", text: "start" }],
+      },
+    );
+    await hooks.tool!.sortie_enable_backlog_drain!.execute(
+      { max_units: "4" },
+      { sessionID: "root", agent: "dog-coordinator" },
+    );
+    await hooks["tool.execute.before"]!(
+      { tool: "task", sessionID: "root", callID: "worker-1" },
+      { args: { subagent_type: "dog-worker", prompt: readOnlyWorkerPrompt(directory) } },
+    );
+    await hooks["experimental.text.complete"]!(
+      { sessionID: "root" },
+      { text: "📊 進行中: checkpoint — 100% (Project checkpoint) | committed 1/3; attempted 1/3 | continuation: required" },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await hooks["experimental.session.compacting"]!({ sessionID: "root" }, {});
+    await hooks.event!({ event: { type: "message.part.updated", properties: { sessionID: "root", part: {
+      id: "compaction-part",
+      messageID: "compaction-message",
+      type: "text",
+      text: messages[0]!.parts![0]!.text,
+      time: { end: Date.now() },
+    } } } });
+    releaseSummary();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(prompts, 1);
+    await hooks["chat.message"]!(
+      { sessionID: "root", agent: "dog-coordinator" },
+      {
+        message: { agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+        parts: [{ type: "text", text: "resume", synthetic: true }],
+      },
+    );
+    await hooks["tool.execute.before"]!(
+      { tool: "task", sessionID: "root", callID: "worker-2" },
+      { args: { subagent_type: "dog-worker", prompt: readOnlyWorkerPrompt(directory) } },
+    );
+  });
+});
+
 test("worker dispatch rejects an unregistered handoff before consuming the fast lane", async () => {
   await withProject("worker-dispatch-preflight", async (directory) => {
     await mkdir(join(directory, ".opencode"));
@@ -2774,7 +3016,7 @@ test("worker dispatch rejects an unregistered handoff before consuming the fast 
   });
 });
 
-test("an explicit real build turn relinquishes an in-memory coordinator route", async () => {
+test("an explicit real build turn cannot silently relinquish an in-memory coordinator route", async () => {
   await withProject("coordinator-route-relinquished", async (directory) => {
     const hooks = await SortieDogsPlugin({ directory });
     const chat = hooks["chat.message"]!;
@@ -2798,13 +3040,12 @@ test("an explicit real build turn relinquishes an in-memory coordinator route", 
       },
     );
 
-    await before(
-      { tool: "task", sessionID: "shared", callID: "generic-sol" },
-      { args: { subagent_type: "agent-mk2a2-sol", prompt: "bounded implementation" } },
-    );
-    await before(
-      { tool: "task", sessionID: "shared", callID: "generic-terra" },
-      { args: { subagent_type: "implementer", prompt: "second generic task" } },
+    await assert.rejects(
+      () => before(
+        { tool: "task", sessionID: "shared", callID: "generic-sol" },
+        { args: { subagent_type: "agent-mk2a2-sol", prompt: "bounded implementation" } },
+      ),
+      /SORTIE_FAST_LANE_DENIED: ROLE_FORBIDDEN/u,
     );
   });
 });

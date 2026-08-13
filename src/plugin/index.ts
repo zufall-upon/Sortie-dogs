@@ -54,6 +54,7 @@ import {
 } from "./model-routing-hook.js";
 import {
   createTaskResultRepairHook,
+  lastAssistantText,
   markConsultationFallbackRetry,
   taskChildSessionID,
   type SessionMessage,
@@ -724,6 +725,11 @@ function chatParentID(input: Parameters<OpenCodeChatMessageHook>[0]): string | u
       : undefined;
 }
 
+function chatParentPresent(input: Parameters<OpenCodeChatMessageHook>[0]): boolean {
+  return Object.prototype.hasOwnProperty.call(input, "parentID") ||
+    Object.prototype.hasOwnProperty.call(input, "parentId");
+}
+
 function activatesSession(input: Parameters<OpenCodeChatMessageHook>[0], output: Parameters<OpenCodeChatMessageHook>[1]): boolean {
   if (input.agent === COORDINATOR_AGENT || output.message.agent === COORDINATOR_AGENT) return false;
   return output.parts.some((part) => {
@@ -867,6 +873,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       ? { agent: COORDINATOR_AGENT, parentID: undefined }
       : undefined,
   );
+  const normalizedCoordinatorDrifts = new Set<string>();
+  const completedCoordinatorMessages = new Set<string>();
+  const completedCoordinatorParts = new Set<string>();
 
   async function ensureLoaded(): Promise<void> {
     if (loaded?.gate !== undefined) return;
@@ -963,6 +972,16 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   >();
   const taskResultRepair = createTaskResultRepairHook(input.client);
   const fastLane = new FastLaneController();
+
+  async function completeContinuationText(sessionID: string, text: string): Promise<void> {
+    await continuation.textComplete({
+      sessionID,
+      allowCheckpointContinuation: fastLane.backlogContinuationAllowed(sessionID),
+    }, { text });
+    if (fastLane.backlogContinuationAllowed(sessionID) && continuation.blocksTool(sessionID)) {
+      fastLane.continuationQueued(sessionID);
+    }
+  }
 
   function beginCoordinatorTask(sessionID: string, callID: string): void {
     const calls = coordinatorTaskCalls.get(sessionID) ?? new Set<string>();
@@ -1741,10 +1760,15 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       });
       const payload = isRecord(response) && "data" in response ? response.data : response;
       if (!isRecord(payload)) return undefined;
+      const parentPresent = Object.prototype.hasOwnProperty.call(payload, "parentID") ||
+        Object.prototype.hasOwnProperty.call(payload, "parentId");
+      const parentID = typeof payload.parentID === "string" ? payload.parentID
+        : typeof payload.parentId === "string" ? payload.parentId
+          : undefined;
       return {
         ...(typeof payload.agent === "string" ? { agent: payload.agent } : {}),
-        ...(typeof payload.parentID === "string" ? { parentID: payload.parentID } : {}),
-        parentPresent: "parentID" in payload,
+        ...(parentID === undefined ? {} : { parentID }),
+        parentPresent,
       };
     } catch {
       return undefined;
@@ -1774,6 +1798,57 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     } catch {
       return undefined;
     }
+  }
+
+  async function assistantMessageText(
+    sessionID: string,
+    messageID: string,
+    expectedAgent: string,
+    partID?: string,
+  ): Promise<string | undefined> {
+    const messages = input.client?.session?.messages;
+    if (messages === undefined) return undefined;
+    const response = await messages.call(input.client!.session, { path: { id: sessionID } });
+    const payload = isRecord(response) && "data" in response ? response.data : response;
+    if (!Array.isArray(payload)) return undefined;
+    const message = payload.find((candidate) => {
+      if (!isRecord(candidate)) return false;
+      const info = isRecord(candidate.info) ? candidate.info : undefined;
+      return (info?.id ?? candidate.id) === messageID;
+    });
+    if (!isRecord(message)) return undefined;
+    const info = isRecord(message.info) ? message.info : undefined;
+    if ((info?.role ?? message.role) !== "assistant" || (info?.agent ?? message.agent) !== expectedAgent) {
+      return undefined;
+    }
+    const parts = Array.isArray(message.parts) ? message.parts : [];
+    if (partID !== undefined) {
+      const part = parts.find((candidate) => isRecord(candidate) && candidate.id === partID);
+      if (!isRecord(part) || part.type !== "text" || part.synthetic === true || typeof part.text !== "string") {
+        return undefined;
+      }
+      const text = part.text.trim();
+      return text.length > 0 ? text : undefined;
+    }
+    return lastAssistantText([message as unknown as SessionMessage]);
+  }
+
+  async function eventAssistantMessageText(
+    sessionID: string,
+    messageID: string,
+    expectedAgent: string,
+    partID?: string,
+  ): Promise<string | undefined> {
+    for (const delay of [0, 10, 50]) {
+      if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+      try {
+        const text = await assistantMessageText(sessionID, messageID, expectedAgent, partID);
+        if (text !== undefined) return text;
+      } catch {
+        // The event can precede message-history persistence; retry within this single event delivery.
+      }
+    }
+    return undefined;
   }
 
   async function recoverCoordinatorRoot(sessionID: string): Promise<boolean> {
@@ -1972,8 +2047,6 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       } : {}),
     },
     "experimental.text.complete": async (textInput, textOutput): Promise<void> => {
-      const backlogMarker = fastLane.backlogContinuationAllowed(textInput.sessionID) &&
-        textOutput.text.includes(CONTINUATION_MARKER);
       if (fastLane.manualCompactionForbidden(textInput.sessionID)) {
         textOutput.text = textOutput.text
           .replaceAll(ROLLOVER_MARKER, "")
@@ -1981,10 +2054,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           .trimEnd();
         return;
       }
-      await continuation.textComplete(textInput, textOutput);
-      if (backlogMarker && continuation.blocksTool(textInput.sessionID)) {
-        fastLane.continuationQueued(textInput.sessionID);
-      }
+      await completeContinuationText(textInput.sessionID, textOutput.text);
     },
     "experimental.session.compacting": async (compactInput, compactOutput): Promise<void> => {
       await continuation.sessionCompacting(compactInput, compactOutput);
@@ -1996,7 +2066,26 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       const parentID = chatParentID(chatInput);
       const synthetic = output.parts.some((part) => isRecord(part) && part.synthetic === true);
       if (parentID !== undefined) rememberParent(chatInput.sessionID, parentID);
-      const coordinatorOrigin = chatInput.agent === COORDINATOR_AGENT || output.message.agent === COORDINATOR_AGENT;
+      const coordinatorRoot = isCoordinatorSession(chatInput.sessionID);
+      const requestedCoordinator = chatInput.agent === COORDINATOR_AGENT || output.message.agent === COORDINATOR_AGENT;
+      const normalizeCoordinatorDrift = coordinatorRoot && !requestedCoordinator;
+      if (normalizeCoordinatorDrift) {
+        /*
+         * OpenCode can switch both agent and model when the user only intends to hand the root from
+         * Terra to Sol. Letting that agent drift stand silently discards the coordinator prompt and
+         * every in-memory continuation guard. Keep the selected model, but make the established root
+         * role sticky; an actual workflow switch belongs in a new session.
+         */
+        chatInput.agent = COORDINATOR_AGENT;
+        output.message.agent = COORDINATOR_AGENT;
+        if (!normalizedCoordinatorDrifts.has(chatInput.sessionID)) {
+          normalizedCoordinatorDrifts.add(chatInput.sessionID);
+          console.warn(
+            `[sortie-coordinator] normalized agent drift for ${chatInput.sessionID}; selected model preserved`,
+          );
+        }
+      }
+      const coordinatorOrigin = !chatParentPresent(chatInput) && (requestedCoordinator || normalizeCoordinatorDrift);
       if (coordinatorOrigin) {
         fastLane.beginTurn(chatInput.sessionID, synthetic);
         releaseSessionEnforcement(chatInput.sessionID);
@@ -2036,9 +2125,11 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       await ensureLoaded();
       const consultationFallbackRetry = await reserveConsultationFallbackRetry(chatInput, output);
       try {
-        const routed = await loaded?.modelRoutingHook?.(chatInput, output, {
-          skipPreferred: consultationFallbackRetry !== undefined,
-        });
+        const routed = normalizeCoordinatorDrift
+          ? false
+          : await loaded?.modelRoutingHook?.(chatInput, output, {
+            skipPreferred: consultationFallbackRetry !== undefined,
+          });
         if (consultationFallbackRetry !== undefined && routed === true) {
           consultationRetries.set(consultationFallbackRetry.key, {
             phase: "consumed",
@@ -2327,8 +2418,11 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     },
     event: async ({ event }): Promise<void> => {
       const info = isRecord(event.properties?.info) ? event.properties.info : undefined;
+      const eventPart = isRecord(event.properties?.part) ? event.properties.part : undefined;
       const eventSessionID = typeof event.properties?.sessionID === "string" ? event.properties.sessionID
-        : typeof info?.id === "string" ? info.id
+        : event.type === "message.part.updated" && typeof eventPart?.sessionID === "string" ? eventPart.sessionID
+          : event.type === "message.updated" && typeof info?.sessionID === "string" ? info.sessionID
+            : typeof info?.id === "string" ? info.id
           : undefined;
       if (event.type === "file.edited" && typeof event.properties?.file === "string") {
         // Event session identity is absent in current hosts and cannot be trusted as proof of which
@@ -2337,6 +2431,72 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         return;
       }
       if (eventSessionID === undefined) return;
+      const eventPartTime = isRecord(eventPart?.time) ? eventPart.time : undefined;
+      if (
+        event.type === "message.part.updated" && isCoordinatorSession(eventSessionID) &&
+        !fastLane.manualCompactionForbidden(eventSessionID) &&
+        eventPart?.type === "text" && typeof eventPart.text === "string" && eventPart.text.trim().length > 0 &&
+        typeof eventPartTime?.end === "number" && typeof eventPart.id === "string" &&
+        typeof eventPart.messageID === "string" &&
+        !completedCoordinatorParts.has(eventPart.id)
+      ) {
+        completedCoordinatorParts.add(eventPart.id);
+        const text = await eventAssistantMessageText(
+          eventSessionID,
+          eventPart.messageID,
+          COORDINATOR_AGENT,
+          eventPart.id,
+        );
+        if (text !== undefined && text === eventPart.text.trim()) {
+          completedCoordinatorMessages.add(eventPart.messageID);
+          while (completedCoordinatorParts.size > ACTIVE_SESSION_CACHE.maximum) {
+            completedCoordinatorParts.delete(completedCoordinatorParts.values().next().value!);
+          }
+          while (completedCoordinatorMessages.size > ACTIVE_SESSION_CACHE.maximum) {
+            completedCoordinatorMessages.delete(completedCoordinatorMessages.values().next().value!);
+          }
+          await completeContinuationText(eventSessionID, text);
+          return;
+        }
+        completedCoordinatorParts.delete(eventPart.id);
+      }
+      if (
+        event.type === "message.part.updated" && isCoordinatorSession(eventSessionID) &&
+        continuation.blocksTool(eventSessionID) && eventPart?.type === "text" &&
+        typeof eventPart.text === "string" && eventPart.text.trim().length > 0 &&
+        typeof eventPartTime?.end === "number" && typeof eventPart.id === "string" &&
+        typeof eventPart.messageID === "string" && !completedCoordinatorParts.has(eventPart.id)
+      ) {
+        completedCoordinatorParts.add(eventPart.id);
+        const text = await eventAssistantMessageText(eventSessionID, eventPart.messageID, "compaction", eventPart.id);
+        if (text === undefined || text !== eventPart.text.trim()) {
+          completedCoordinatorParts.delete(eventPart.id);
+          return;
+        }
+        completedCoordinatorMessages.add(eventPart.messageID);
+        await completeContinuationText(eventSessionID, text);
+        return;
+      }
+      if (
+        event.type === "message.updated" && isCoordinatorSession(eventSessionID) &&
+        !fastLane.manualCompactionForbidden(eventSessionID) &&
+        info?.role === "assistant" && info.agent === COORDINATOR_AGENT && isRecord(info.time) &&
+        typeof info.time.completed === "number" && typeof info.id === "string" &&
+        !completedCoordinatorMessages.has(info.id)
+      ) {
+        completedCoordinatorMessages.add(info.id);
+        while (completedCoordinatorMessages.size > ACTIVE_SESSION_CACHE.maximum) {
+          completedCoordinatorMessages.delete(completedCoordinatorMessages.values().next().value!);
+        }
+        try {
+          const text = await eventAssistantMessageText(eventSessionID, info.id, COORDINATOR_AGENT);
+          if (text === undefined) completedCoordinatorMessages.delete(info.id);
+          else await completeContinuationText(eventSessionID, text);
+        } catch {
+          completedCoordinatorMessages.delete(info.id);
+        }
+        return;
+      }
       const eventParentID = typeof event.properties?.parentID === "string" ? event.properties.parentID
         : typeof info?.parentID === "string" ? info.parentID
           : undefined;
@@ -2347,6 +2507,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         return;
       }
       if (event.type === "session.deleted") {
+        normalizedCoordinatorDrifts.delete(eventSessionID);
         fastLane.forget(eventSessionID);
         abortCoordinatorTasks(eventSessionID);
         if (reflectionStore !== undefined && reflectionConfiguration?.layers.run && reflectionOwnedRoots.has(eventSessionID)) {
