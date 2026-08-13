@@ -148,6 +148,78 @@ export interface WorktreeParallelContractValidationResult {
   diagnostics: WorktreeParallelContractIssue[];
 }
 
+export type ParallelDispatchTaskPhase =
+  | "pending"
+  | "reserved"
+  | "running"
+  | "completed"
+  | "failed"
+  | "suppressed"
+  | "abandoned";
+
+export type ParallelDispatchOutcome = "completed" | "failed" | "blocked" | "cancelled";
+
+export interface ParallelDispatchDescriptor {
+  readonly run_id: string;
+  readonly dispatch_id: string;
+  readonly task_id: string;
+  readonly managed_path: string;
+  readonly branch: string;
+  readonly base_sha: string;
+  readonly depends_on: readonly string[];
+  readonly scope_read: readonly string[];
+  readonly scope_write: readonly string[];
+  readonly parallel_group: string;
+  readonly parallel_unit: string;
+  readonly parallel_units: number;
+  readonly attempt: 1;
+  readonly contract_fingerprint: string;
+}
+
+export interface ParallelDispatchTaskSnapshot {
+  readonly descriptor: ParallelDispatchDescriptor;
+  readonly worktree_id: string;
+  readonly phase: ParallelDispatchTaskPhase;
+  readonly call_id: string | null;
+  readonly child_session_id: string | null;
+  readonly outcome: ParallelDispatchOutcome | null;
+}
+
+export interface ParallelDispatchSnapshot {
+  readonly run_id: string;
+  readonly owner_root: string;
+  readonly project_root: string;
+  readonly contract_fingerprint: string;
+  readonly max_workers: number;
+  readonly cancelled: boolean;
+  readonly archived: boolean;
+  readonly terminal_reason: "completed" | "cancelled" | "failed" | null;
+  readonly tasks: readonly ParallelDispatchTaskSnapshot[];
+  readonly ready: readonly ParallelDispatchDescriptor[];
+}
+
+export interface ParallelDispatchArchiveTask {
+  readonly task_id: string;
+  readonly worktree_id: string;
+  readonly managed_path: string | null;
+  readonly branch: string;
+  readonly base_sha: string;
+  readonly dispatch_id: string;
+  readonly phase: ParallelDispatchTaskPhase;
+  readonly call_id: string | null;
+  readonly child_session_id: string | null;
+  readonly outcome: ParallelDispatchOutcome | null;
+}
+
+export interface ParallelDispatchArchive {
+  readonly run_id: string;
+  readonly owner_root: string;
+  readonly contract_fingerprint: string;
+  readonly cancelled: boolean;
+  readonly terminal_reason: "completed" | "cancelled" | "failed";
+  readonly tasks: readonly ParallelDispatchArchiveTask[];
+}
+
 export type SchemaDiagnosticCode = `schema_${string}`;
 
 /** A structural validation diagnostic, intentionally separate from semantic lint. */

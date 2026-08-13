@@ -6,7 +6,20 @@ import { RUNTIME_ASSET_VERSION } from "../asset-version.js";
 import { normalizeRelativePath, RelativePathError } from "../core/path.js";
 import { ScopeLeaseError, ScopeLeaseRegistry, type ScopeLease } from "../core/scope-lease-registry.js";
 import { normalizeWorktreeScope } from "../core/worktree-scope.js";
-import type { ManifestDiagnostic, OperationManifest, SchemaDiagnostic } from "../core/types.js";
+import {
+  ParallelDispatchCoordinator,
+  ParallelDispatchError,
+} from "../core/worktree-parallel-dispatch.js";
+import type {
+  ManifestDiagnostic,
+  OperationManifest,
+  ParallelDispatchArchive,
+  ParallelDispatchDescriptor,
+  ParallelDispatchOutcome,
+  ParallelDispatchSnapshot,
+  SchemaDiagnostic,
+  WorktreeParallelContract,
+} from "../core/types.js";
 import { validateManifest } from "../core/validate-manifest.js";
 import {
   safeSchemaPointer,
@@ -64,7 +77,7 @@ import {
 } from "./task-result-repair.js";
 import { configRoot, nearestPackageVersion, reflectionEnabled, ReflectionError, ReflectionStore } from "../reflection/index.js";
 
-const INPUT_LIMITS = { config: 64 * 1024, manifest: 512 * 1024, handoff: 2 * 1024 * 1024 } as const;
+const INPUT_LIMITS = { config: 64 * 1024, manifest: 512 * 1024, handoff: 2 * 1024 * 1024, parallel: 512 * 1024 } as const;
 const INSPECTION_CACHE = { maximum: 256, ttlMilliseconds: 30 * 60 * 1000 } as const;
 const ACTIVE_SESSION_CACHE = { maximum: 256, ttlMilliseconds: 30 * 60 * 1000 } as const;
 const SESSION_DENIAL_LIMIT = 256;
@@ -79,6 +92,7 @@ type ConsultationAgent = typeof REVIEWER_AGENT | typeof ADVISOR_AGENT;
 const SORTIE_TRIGGER = /^\/sortie(?:\s|$)/;
 const TASK_ROLES = new Set(["implementation", "remediation", "blocker-resolution"]);
 const GIT_POINTER_LIMIT = 4096;
+const PARALLEL_OUTCOME_MARKER = "SORTIE_PARALLEL_OUTCOME";
 
 export interface OpenCodePluginInput {
   directory: string;
@@ -757,6 +771,70 @@ function parallelTaskMode(text: string): ActiveSessionState["parallel"] {
     Number.isInteger(count) && count >= 2 && count <= 3 ? "valid" : "invalid";
 }
 
+function parseStringArray(value: string | undefined): readonly string[] | undefined {
+  if (value === undefined || value.length > 4096) return undefined;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed) && parsed.length <= 256 &&
+      parsed.every((entry) => typeof entry === "string" && entry.length > 0 && entry.length <= 512)
+      ? parsed
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function parallelDescriptor(text: string): ParallelDispatchDescriptor | undefined {
+  const unique = (key: string): string | undefined => {
+    const values = taskValues(text, [key]);
+    return values.length === 1 ? values[0] : undefined;
+  };
+  const runID = unique("run_id");
+  const dispatchID = unique("dispatch_id");
+  const taskID = unique("task_id");
+  const managedPath = unique("managed_path");
+  const branch = unique("branch");
+  const baseSHA = unique("base_sha");
+  const dependsOn = parseStringArray(unique("depends_on"));
+  const scopeRead = parseStringArray(unique("scope_read"));
+  const scopeWrite = parseStringArray(unique("scope_write"));
+  const group = unique("parallel_group");
+  const unit = unique("parallel_unit");
+  const units = Number(unique("parallel_units"));
+  const attempt = Number(unique("attempt"));
+  const contractFingerprint = unique("contract_fingerprint");
+  if ([runID, dispatchID, taskID, managedPath, branch, baseSHA, group, unit, contractFingerprint]
+    .some((value) => value === undefined) || dependsOn === undefined || scopeRead === undefined ||
+    scopeWrite === undefined || !Number.isInteger(units) || !Number.isInteger(attempt)) return undefined;
+  return {
+    run_id: runID!, dispatch_id: dispatchID!, task_id: taskID!, managed_path: managedPath!, branch: branch!,
+    base_sha: baseSHA!, depends_on: dependsOn, scope_read: scopeRead, scope_write: scopeWrite,
+    parallel_group: group!, parallel_unit: unit!, parallel_units: units, attempt: attempt as 1,
+    contract_fingerprint: contractFingerprint!,
+  };
+}
+
+function parallelOutcome(output: unknown): {
+  readonly outcome: ParallelDispatchOutcome;
+  readonly claimed?: { readonly run_id: string; readonly dispatch_id: string };
+} {
+  if (typeof output !== "string" || Buffer.byteLength(output, "utf8") > 64 * 1024) return { outcome: "failed" };
+  const matches = [...output.matchAll(new RegExp(`^${PARALLEL_OUTCOME_MARKER} ([^\\r\\n]{1,512})$`, "gmu"))];
+  if (matches.length !== 1) return { outcome: "failed" };
+  try {
+    const value = JSON.parse(matches[0]![1]!) as unknown;
+    if (!isRecord(value) || Object.keys(value).sort().join(",") !== "dispatch_id,run_id,status" ||
+      typeof value.run_id !== "string" || typeof value.dispatch_id !== "string" ||
+      !["completed", "failed", "blocked", "cancelled"].includes(value.status as string)) return { outcome: "failed" };
+    return {
+      outcome: value.status as ParallelDispatchOutcome,
+      claimed: { run_id: value.run_id, dispatch_id: value.dispatch_id },
+    };
+  } catch {
+    return { outcome: "failed" };
+  }
+}
+
 function chatParentID(input: Parameters<OpenCodeChatMessageHook>[0]): string | undefined {
   const candidate = input as typeof input & { parentID?: unknown; parentId?: unknown };
   return typeof candidate.parentID === "string" ? candidate.parentID
@@ -1021,6 +1099,137 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   >();
   const taskResultRepair = createTaskResultRepairHook(input.client);
   const fastLane = new FastLaneController();
+  let parallelCoordinator: ParallelDispatchCoordinator | undefined;
+  const parallelCalls = new Map<string, {
+    readonly ownerRoot: string;
+    readonly descriptor: ParallelDispatchDescriptor;
+    readonly completionCallID: string;
+  }>();
+  const parallelRecoverableChildren = new Map<string, {
+    readonly ownerRoot: string;
+    readonly descriptor: ParallelDispatchDescriptor;
+    readonly completionCallID: string;
+  }>();
+
+  async function getParallelCoordinator(): Promise<ParallelDispatchCoordinator> {
+    project ??= await createProjectPaths(resolveProjectRoot(input));
+    parallelCoordinator ??= await ParallelDispatchCoordinator.open({ repositoryRoot: project.root });
+    return parallelCoordinator;
+  }
+
+  async function parallelToolOwner(sessionID: string): Promise<string | undefined> {
+    if (!await recoverCoordinatorRoot(sessionID)) return undefined;
+    const identity = await hostSessionIdentity(sessionID);
+    return identity === undefined || (identity.agent === COORDINATOR_AGENT && !identity.parentPresent)
+      ? sessionID
+      : undefined;
+  }
+
+  function boundedParallelSnapshot(snapshot: ParallelDispatchSnapshot): object {
+    return {
+      run_id: snapshot.run_id,
+      max_workers: snapshot.max_workers,
+      cancelled: snapshot.cancelled,
+      archived: snapshot.archived,
+      terminal_reason: snapshot.terminal_reason,
+      ready: snapshot.ready,
+      tasks: snapshot.tasks.map(({ descriptor, worktree_id, phase, call_id, child_session_id, outcome }) => ({
+        task_id: descriptor.task_id,
+        worktree_id,
+        dispatch_id: descriptor.dispatch_id,
+        managed_path: descriptor.managed_path,
+        branch: descriptor.branch,
+        base_sha: descriptor.base_sha,
+        phase,
+        call_id,
+        child_session_id,
+        outcome,
+      })),
+    };
+  }
+
+  function boundedParallelArchive(archive: ParallelDispatchArchive): object {
+    return {
+      run_id: archive.run_id,
+      contract_fingerprint: archive.contract_fingerprint,
+      cancelled: archive.cancelled,
+      terminal_reason: archive.terminal_reason,
+      tasks: archive.tasks.map(({ task_id, worktree_id, managed_path, branch, base_sha, dispatch_id, phase,
+        call_id, child_session_id, outcome }) => ({
+        task_id, worktree_id, managed_path, branch, base_sha, dispatch_id, phase, call_id, child_session_id, outcome,
+      })),
+    };
+  }
+
+  async function prepareParallelDispatch(sessionID: string, contractPath: string): Promise<string> {
+    try {
+      const ownerRoot = await parallelToolOwner(sessionID);
+      project ??= await createProjectPaths(resolveProjectRoot(input));
+      if (ownerRoot === undefined || !isAbsolute(contractPath) ||
+        !await project.contains(contractPath)) return JSON.stringify({ status: "denied", reason: "project-boundary" });
+      const contract = await readJson(resolve(contractPath), INPUT_LIMITS.parallel) as WorktreeParallelContract;
+      const result = await (await getParallelCoordinator()).prepare(contract, ownerRoot);
+      if (result.status === "serial-fallback") return JSON.stringify(result);
+      const dispatched = result.snapshot.tasks.filter(({ phase }) =>
+        phase === "running" || phase === "completed" || phase === "failed" || phase === "abandoned").length;
+      const running = result.snapshot.tasks.filter(({ phase }) => phase === "running").length;
+      fastLane.enableParallelDispatch(ownerRoot, result.snapshot.max_workers, dispatched, running, result.snapshot.tasks.length);
+      return JSON.stringify({ status: "prepared", ...boundedParallelSnapshot(result.snapshot) });
+    } catch (error) {
+      const reason = error instanceof ParallelDispatchError ? error.code
+        : error instanceof PluginInputError ? `input-${error.reason}`
+          : "parallel-unavailable";
+      return JSON.stringify({ status: "denied", reason });
+    }
+  }
+
+  async function parallelDispatchStatus(sessionID: string, runID: string, reconcile: string): Promise<string> {
+    try {
+      const ownerRoot = await parallelToolOwner(sessionID);
+      if (ownerRoot === undefined) return JSON.stringify({ status: "denied", reason: "coordinator-root-required" });
+      const coordinator = await getParallelCoordinator();
+      const snapshot = reconcile === "true"
+        ? await coordinator.reconcile(ownerRoot, coordinatorTaskCalls.get(ownerRoot) ?? new Set(), runID || undefined)
+        : await coordinator.snapshot(ownerRoot, runID || undefined);
+      if (snapshot === undefined && !runID) {
+        const archived = await coordinator.archives(ownerRoot);
+        return JSON.stringify({ status: "ok", active: null, archived: archived.map(boundedParallelArchive) });
+      }
+      if (snapshot === undefined && runID) {
+        const archived = (await coordinator.archives(ownerRoot)).find((entry) => entry.run_id === runID);
+        return archived === undefined
+          ? JSON.stringify({ status: "absent" })
+          : JSON.stringify({ status: "archived", archive: boundedParallelArchive(archived) });
+      }
+      return snapshot === undefined
+        ? JSON.stringify({ status: "absent" })
+        : JSON.stringify({ status: "ok", ...boundedParallelSnapshot(snapshot),
+          ...(!runID && !snapshot.archived
+            ? { archived_history: (await coordinator.archives(ownerRoot)).map(boundedParallelArchive) }
+            : {}) });
+    } catch (error) {
+      return JSON.stringify({
+        status: "denied",
+        reason: error instanceof ParallelDispatchError ? error.code : "parallel-unavailable",
+      });
+    }
+  }
+
+  async function cancelParallelDispatch(sessionID: string, runID: string): Promise<string> {
+    try {
+      const ownerRoot = await parallelToolOwner(sessionID);
+      if (ownerRoot === undefined) return JSON.stringify({ status: "denied", reason: "coordinator-root-required" });
+      const snapshot = await (await getParallelCoordinator()).cancel(ownerRoot, runID || undefined);
+      return snapshot === undefined
+        ? JSON.stringify({ status: "absent" })
+        : JSON.stringify({ status: "cancelled", ...boundedParallelSnapshot(snapshot) });
+    } catch (error) {
+      return JSON.stringify({
+        status: "denied",
+        reason: error instanceof ParallelDispatchError ? error.code : "parallel-unavailable",
+      });
+    }
+  }
 
   function abandonSessionLease(sessionID: string): void {
     const authorization = sessionAuthorizations.get(sessionID);
@@ -1838,6 +2047,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     bindingDenials.delete(sessionID);
     sessionTaskIDs.delete(sessionID);
     recoverableWorkerChildren.delete(sessionID);
+    parallelRecoverableChildren.delete(sessionID);
     clearSessionLinks(sessionID);
   }
 
@@ -2115,9 +2325,11 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
               recoverableWorkerChildren.add(context.sessionID);
             } else if (denial.reason !== "handoff-uninspected") {
               recoverableWorkerChildren.delete(context.sessionID);
+              parallelRecoverableChildren.delete(context.sessionID);
             }
           } catch {
             recoverableWorkerChildren.delete(context.sessionID);
+            parallelRecoverableChildren.delete(context.sessionID);
           }
           return result;
         },
@@ -2170,6 +2382,27 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           const maxUnits = Number(args.max_units);
           fastLane.enableBacklogDrain(context.sessionID, maxUnits);
           return JSON.stringify({ status: "enabled", max_units: maxUnits });
+        },
+      }),
+      sortie_prepare_parallel_dispatch: defineTool({
+        description: "Prepare one validated two-to-three-task dependency-aware parallel dispatch run.",
+        args: { contract_path: defineTool.schema.string() },
+        async execute(args, context): Promise<string> {
+          return prepareParallelDispatch(context.sessionID, args.contract_path);
+        },
+      }),
+      sortie_parallel_dispatch_status: defineTool({
+        description: "Read or explicitly reconcile one bounded durable parallel dispatch snapshot.",
+        args: { run_id: optionalString(), reconcile: optionalString() },
+        async execute(args, context): Promise<string> {
+          return parallelDispatchStatus(context.sessionID, args.run_id ?? "", args.reconcile ?? "false");
+        },
+      }),
+      sortie_cancel_parallel_dispatch: defineTool({
+        description: "Cancel one owned parallel dispatch without forcing running workers or cleaning worktrees.",
+        args: { run_id: optionalString() },
+        async execute(args, context): Promise<string> {
+          return cancelParallelDispatch(context.sessionID, args.run_id ?? "");
         },
       }),
       ...(reflectionStartup ? {
@@ -2303,6 +2536,21 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           "Dispatch at most the one allowed worker, perform any required risk-based review or coordinator-owned finalization, " +
           "then return the terminal report and stop. Do not call a compaction capability or emit a continuation marker."];
       }
+      if (isCoordinatorSession(transformInput.sessionID) || await recoverCoordinatorRoot(transformInput.sessionID)) {
+        const coordinator = parallelCoordinator ?? await getParallelCoordinator().catch(() => undefined);
+        const snapshot = await coordinator?.snapshot(transformInput.sessionID).catch(() => undefined);
+        if (snapshot !== undefined) {
+          transformOutput.system = [...(transformOutput.system ?? []),
+            `SORTIE_PARALLEL_DISPATCH_STATE\n${JSON.stringify(boundedParallelSnapshot(snapshot))}`];
+        } else {
+          const archived = await coordinator?.archives(transformInput.sessionID).catch(() => undefined);
+          if ((archived?.length ?? 0) > 0) {
+            transformOutput.system = [...(transformOutput.system ?? []),
+              `SORTIE_PARALLEL_DISPATCH_STATE\n${JSON.stringify({ active: null,
+                archived: archived!.map(boundedParallelArchive) })}`];
+          }
+        }
+      }
       if (!reflectionStartup || !(await beginReflection(transformInput.sessionID))) return;
       const config = reflectionConfiguration;
       try {
@@ -2364,7 +2612,45 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           }
         }
         await inspectSuccessfulRead(toolInput);
+        let parallel = parallelCalls.get(toolInput.callID ?? "");
+        if (parallel === undefined && toolInput.tool === "task" && toolInput.sessionID !== undefined &&
+          toolInput.callID !== undefined &&
+          (isCoordinatorSession(toolInput.sessionID) || await recoverCoordinatorRoot(toolInput.sessionID))) {
+          const coordinator = await getParallelCoordinator().catch(() => undefined);
+          const snapshot = await coordinator?.snapshot(toolInput.sessionID).catch(() => undefined);
+          const running = snapshot?.tasks.find(({ phase, call_id }) =>
+            phase === "running" && call_id === toolInput.callID);
+          if (running !== undefined) {
+            parallelCoordinator = coordinator;
+            parallel = {
+              ownerRoot: toolInput.sessionID,
+              descriptor: running.descriptor,
+              completionCallID: toolInput.callID,
+            };
+          }
+        }
+        if (toolInput.tool === "task" && parallel !== undefined && completedChildSessionID !== undefined &&
+          recoverableWorkerChildren.has(completedChildSessionID)) {
+          parallelRecoverableChildren.set(completedChildSessionID, parallel);
+        } else if (toolInput.tool === "task" && parallel !== undefined && parallelCoordinator !== undefined &&
+          toolInput.callID !== undefined) {
+          const terminal = parallelOutcome(output.output);
+          const snapshot = await parallelCoordinator.completeCall(
+            parallel.ownerRoot,
+            parallel.completionCallID,
+            completedChildSessionID,
+            terminal.outcome,
+            terminal.claimed,
+          );
+          if (snapshot !== undefined) {
+            const dispatched = snapshot.tasks.filter(({ phase }) =>
+              phase === "running" || phase === "completed" || phase === "failed" || phase === "abandoned").length;
+            const running = snapshot.tasks.filter(({ phase }) => phase === "running").length;
+            fastLane.enableParallelDispatch(parallel.ownerRoot, snapshot.max_workers, dispatched, running, snapshot.tasks.length);
+          }
+        }
       } finally {
+        parallelCalls.delete(toolInput.callID ?? "");
         activeSessions.get(toolInput.sessionID ?? "")?.inFlightCalls.delete(toolInput.callID ?? "");
         if (toolInput.tool === "task") finishCoordinatorTask(toolInput.sessionID, toolInput.callID);
         if (completedChildSessionID !== undefined && !recoverableWorkerChildren.has(completedChildSessionID)) {
@@ -2374,7 +2660,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     },
     "tool.execute.before": async (toolInput, output): Promise<void> => {
       const coordinatorCapability = toolInput.tool === "task" ||
-        toolInput.tool === CONTINUATION_CAPABILITY || toolInput.tool === BACKLOG_DRAIN_CAPABILITY;
+        toolInput.tool === CONTINUATION_CAPABILITY || toolInput.tool === BACKLOG_DRAIN_CAPABILITY ||
+        toolInput.tool === "sortie_prepare_parallel_dispatch" || toolInput.tool === "sortie_parallel_dispatch_status" ||
+        toolInput.tool === "sortie_cancel_parallel_dispatch";
       if (
         isCoordinatorSession(toolInput.sessionID) ||
         (coordinatorCapability && await recoverCoordinatorRoot(toolInput.sessionID))
@@ -2388,8 +2676,19 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         const role = consultationAgent(taskRole);
         const consultationFallbackAuthorized = role !== undefined &&
           consultationRetries.get(consultationRetryKey(toolInput.sessionID, role))?.phase === "pending";
+        let parallelWorkerAuthorized = false;
+        let reservedParallelDescriptor: ParallelDispatchDescriptor | undefined;
         if (toolInput.tool === "task" && taskRole === "dog-worker" && isRecord(output.args)) {
           const prompt = typeof output.args.prompt === "string" ? output.args.prompt : "";
+          reservedParallelDescriptor = parallelDescriptor(prompt);
+          if (reservedParallelDescriptor !== undefined) {
+            const roots = taskValues(prompt, ["project_root", "projectroot"]);
+            if (roots.length !== 1 || !samePath(roots[0]!, reservedParallelDescriptor.managed_path)) {
+              throw new HandoffDeniedError("contract-invalid", "<worker-dispatch>", {
+                defects: [contractDefect("contract", "/managed_path", "parallel_descriptor_project_mismatch")],
+              });
+            }
+          }
           const modes = taskValues(prompt, ["mode"]);
           const resume = modes.length === 1 && modes[0] === "same-task-resume";
           const handoffPaths = taskValues(prompt, ["handoff_path", "handoffpath"]);
@@ -2487,14 +2786,38 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
             }
           }
         }
+        if (reservedParallelDescriptor !== undefined) {
+          const coordinator = await getParallelCoordinator();
+          const snapshot = await coordinator.snapshot(toolInput.sessionID, reservedParallelDescriptor.run_id);
+          if (snapshot === undefined) throw new ParallelDispatchError("descriptor-mismatch", "Parallel run is absent.");
+          const dispatched = snapshot.tasks.filter(({ phase }) =>
+            phase === "running" || phase === "completed" || phase === "failed" || phase === "abandoned").length;
+          const running = snapshot.tasks.filter(({ phase }) => phase === "running").length;
+          fastLane.enableParallelDispatch(toolInput.sessionID, snapshot.max_workers, dispatched, running, snapshot.tasks.length);
+          await coordinator.bindDispatch(toolInput.sessionID, toolInput.callID, reservedParallelDescriptor);
+          parallelWorkerAuthorized = true;
+        }
         const resumedWorkerSessionID = fastLane.beforeTool(toolInput.sessionID, toolInput.tool, output.args, {
           consultationFallbackAuthorized,
+          parallelWorkerAuthorized,
         });
         if (resumedWorkerSessionID !== undefined) {
+          const recoverableParallel = parallelRecoverableChildren.get(resumedWorkerSessionID);
+          if (recoverableParallel !== undefined) {
+            parallelCalls.set(toolInput.callID, recoverableParallel);
+            parallelRecoverableChildren.delete(resumedWorkerSessionID);
+          }
           recoverableWorkerChildren.delete(resumedWorkerSessionID);
         }
         if (toolInput.tool === "task" && taskRole === "dog-worker") {
           beginCoordinatorTask(toolInput.sessionID, toolInput.callID);
+          if (reservedParallelDescriptor !== undefined) {
+            parallelCalls.set(toolInput.callID, {
+              ownerRoot: toolInput.sessionID,
+              descriptor: reservedParallelDescriptor,
+              completionCallID: toolInput.callID,
+            });
+          }
         }
         return;
       }
@@ -2669,6 +2992,11 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           }
           if (deleted) { reflectionOwnedRoots.delete(eventSessionID); reflectionClosingRoots.delete(eventSessionID); }
           else reflectionWarning("reflection_cleanup_failed");
+        }
+        if (eventSessionID !== undefined) {
+          const coordinator = await getParallelCoordinator().catch(() => undefined);
+          const owned = await coordinator?.snapshot(eventSessionID).catch(() => undefined);
+          if (owned !== undefined) await coordinator?.cancel(eventSessionID, owned.run_id).catch(() => undefined);
         }
         evictSession(eventSessionID);
         for (const role of [REVIEWER_AGENT, ADVISOR_AGENT] as const) {

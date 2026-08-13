@@ -1,8 +1,8 @@
 # Worktree Parallel Contract v0.1
 
 This document fixes the contract for the `0.5.x` isolated implementation loop. Card 01 defines the
-data and policy envelope. Card 03 now owns isolated linked-worktree and branch lifecycle; commits,
-dispatch, and integration remain outside this contract.
+data and policy envelope. Card 03 owns isolated linked-worktree and branch lifecycle. Card 04 owns
+dependency-aware dispatch; commits and integration remain outside this contract.
 
 ## Envelope
 
@@ -89,7 +89,22 @@ models, worker bound, validation conditions, and measurement window.
   replacing a predictable removal path after verification. Principals able to read and modify the Git
   common directory during an operation remain trusted: they can discover nonce paths and already can
   rewrite repository Git metadata. The lifecycle does not claim protection against that privilege.
-- Card 04: dependency-aware dispatch.
+- Card 04: `ParallelDispatchCoordinator` first durably stores a normalized preparing intent under the
+  Git common directory, creates all two or three worktrees from one clean base outside dispatch-state
+  authority, then reloads and reconciles exact lifecycle identities before finalizing the run. Restart
+  adopts only the complete exact set; partial, ambiguous, or non-ready inventory archives a failed
+  preparation and never duplicates or removes lifecycle artifacts. It reserves only DAG-ready immutable descriptors,
+  and binds each random dispatch ID to one host call and optional child session. Its ScopeLeaseRegistry
+  authority serializes cross-process state transitions. Terminal outcomes are control-only. Failure
+  suppresses transitive descendants while independent branches continue. Cancellation suppresses only
+  not-yet-running work. Restart snapshots never redispatch running work; explicit reconciliation marks
+  an unprovable running call abandoned. Scope overlap or ambiguous dependencies return pre-creation
+  serial fallback; schema, cycle, stale base, dirty tree, corrupt state, and abandoned workers stop.
+  Cancellation is coordinator-root-only and suppresses pending or reserved tasks without force-stopping
+  running workers or cleaning worktrees. A run archives automatically after every task is terminal or
+  suppressed and no task is reserved or running. Up to sixteen bounded archives retain task, dispatch,
+  worktree, branch, path, base, call, child-session, and outcome identities for Card 05/06 artifact and
+  cleanup ownership; a distinct contract may then prepare a new run. Session idle never cancels.
 - Card 05: commit artifact production.
 - Card 06: serial integration and stale rejection.
 - Card 07: conflict remediation and combined validation.

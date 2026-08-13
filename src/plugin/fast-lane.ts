@@ -44,6 +44,7 @@ interface FastLaneTurnState {
   scoutDispatches: number;
   backlogDrain: boolean;
   continuationPending: boolean;
+  parallelWorkerLimit: number;
   totalWorkerDispatches: number;
   workerLimit: number;
   workerDispatches: number;
@@ -62,6 +63,7 @@ interface ReviewCandidateState {
 
 export interface FastLaneToolOptions {
   readonly consultationFallbackAuthorized?: boolean;
+  readonly parallelWorkerAuthorized?: boolean;
 }
 
 function taskArgument(args: unknown, key: string): string | undefined {
@@ -90,6 +92,7 @@ function freshState(): FastLaneTurnState {
     advisorDispatches: 0,
     backlogDrain: false,
     continuationPending: false,
+    parallelWorkerLimit: 1,
     reviewCandidates: new Map(),
     reviewsLocked: false,
     scoutDispatches: 0,
@@ -105,6 +108,7 @@ function lockedState(): FastLaneTurnState {
     advisorDispatches: 2,
     backlogDrain: false,
     continuationPending: false,
+    parallelWorkerLimit: 1,
     reviewCandidates: new Map(),
     reviewsLocked: true,
     scoutDispatches: 1,
@@ -205,6 +209,28 @@ export class FastLaneController {
     state.workerLimit = maxUnits;
   }
 
+  enableParallelDispatch(
+    sessionID: string,
+    maxWorkers: number,
+    dispatched: number,
+    running = dispatched,
+    totalTasks = maxWorkers,
+  ): void {
+    const state = this.sessions.get(sessionID);
+    if (state === undefined) throw new FastLaneDeniedError("TURN_STATE_REQUIRED");
+    if (state.backlogDrain || !Number.isInteger(maxWorkers) || maxWorkers < 2 || maxWorkers > 3 ||
+      !Number.isInteger(totalTasks) || totalTasks < maxWorkers || totalTasks > 3 ||
+      !Number.isInteger(dispatched) || dispatched < 0 || dispatched > totalTasks ||
+      !Number.isInteger(running) || running < 0 || running > maxWorkers ||
+      (state.totalWorkerDispatches > 0 && state.workerLimit !== totalTasks)) {
+      throw new FastLaneDeniedError("WORKER_LIMIT");
+    }
+    state.parallelWorkerLimit = maxWorkers;
+    state.workerLimit = totalTasks;
+    state.workerDispatches = running;
+    state.totalWorkerDispatches = Math.max(state.totalWorkerDispatches, dispatched);
+  }
+
   continuationQueued(sessionID: string): void {
     const state = this.sessions.get(sessionID);
     if (this.backlogContinuationAllowed(sessionID) && state !== undefined) {
@@ -251,7 +277,8 @@ export class FastLaneController {
         delete state.workerResumeTaskID;
         return taskArgument(args, "task_id");
       }
-      if (state.workerDispatches >= 1 || state.totalWorkerDispatches >= state.workerLimit) {
+      const workerTurnLimit = options.parallelWorkerAuthorized === true ? state.parallelWorkerLimit : 1;
+      if (state.workerDispatches >= workerTurnLimit || state.totalWorkerDispatches >= state.workerLimit) {
         throw new FastLaneDeniedError("WORKER_LIMIT");
       }
       state.workerDispatches += 1;

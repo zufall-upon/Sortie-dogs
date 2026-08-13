@@ -27,6 +27,20 @@ test("normal turns permit one worker and reset only on a real turn", () => {
   lane.beforeTool("root", "task", worker);
 });
 
+test("only a typed parallel authorization raises the worker bound to three", () => {
+  const lane = new FastLaneController();
+  lane.beginTurn("parallel", false);
+  lane.enableParallelDispatch("parallel", 3, 0, 0, 3);
+  lane.beforeTool("parallel", "task", worker, { parallelWorkerAuthorized: true });
+  expectDenial(() => lane.beforeTool("parallel", "task", worker), "WORKER_LIMIT");
+  lane.beforeTool("parallel", "task", worker, { parallelWorkerAuthorized: true });
+  lane.beforeTool("parallel", "task", worker, { parallelWorkerAuthorized: true });
+  expectDenial(
+    () => lane.beforeTool("parallel", "task", worker, { parallelWorkerAuthorized: true }),
+    "WORKER_LIMIT",
+  );
+});
+
 test("one exact handoff-uninspected result permits one same-task worker resume", () => {
   const lane = new FastLaneController();
   lane.beginTurn("root", false);

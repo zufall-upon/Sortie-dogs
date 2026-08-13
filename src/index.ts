@@ -22,6 +22,15 @@ export {
   WorktreeLifecycle,
   WorktreeLifecycleError,
 } from "./core/worktree-lifecycle.js";
+export {
+  ParallelDispatchCoordinator,
+  ParallelDispatchError,
+} from "./core/worktree-parallel-dispatch.js";
+export type {
+  ParallelDispatchCoordinatorOptions,
+  ParallelDispatchErrorCode,
+  ParallelDispatchPrepareResult,
+} from "./core/worktree-parallel-dispatch.js";
 export type {
   ManagedWorktree,
   WorktreeBasePin,

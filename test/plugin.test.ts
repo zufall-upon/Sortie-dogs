@@ -13,6 +13,9 @@ import {
   SortieDogsPlugin,
   isExplicitTaskHandoff,
 } from "../dist/plugin/index.js";
+import { ParallelDispatchError } from "../dist/core/worktree-parallel-dispatch.js";
+import { ParallelDispatchCoordinator } from "../dist/core/worktree-parallel-dispatch.js";
+import { WorktreeLifecycle } from "../dist/core/worktree-lifecycle.js";
 import {
   resolvePluginConfiguration,
   resolvePluginConfigurationSources,
@@ -1578,9 +1581,12 @@ test("invalid global Sortie config fails reflection closed without removing core
       assert.equal(hooks.tool?.sortie_reflection, undefined);
       assert.deepEqual(Object.keys(hooks.tool ?? {}).sort(), [
         "sortie_bind_write_gate",
+        "sortie_cancel_parallel_dispatch",
         "sortie_check_contract",
         "sortie_compact_and_continue",
         "sortie_enable_backlog_drain",
+        "sortie_parallel_dispatch_status",
+        "sortie_prepare_parallel_dispatch",
         "sortie_release_write_gate",
       ]);
       assert.equal(warnings.length, 1);
@@ -2573,6 +2579,213 @@ test("coordinator task hooks enforce the single-worker fast lane across syntheti
     await assert.rejects(() => dispatch("worker-3"), /SORTIE_FAST_LANE_DENIED: WORKER_LIMIT/u);
     await turn();
     await dispatch("worker-4");
+  });
+});
+
+test("typed parallel prepare is the only path to reserved dependency-aware worker dispatch", async () => {
+  await withProject("typed-parallel-dispatch", async (directory) => {
+    await writeFile(join(directory, ".gitignore"), "parallel-contract.json\n");
+    await writeFile(join(directory, "base.txt"), "base\n");
+    await execFileAsync("git", ["init", "-q"], { cwd: directory });
+    await execFileAsync("git", ["config", "user.name", "Sortie Test"], { cwd: directory });
+    await execFileAsync("git", ["config", "user.email", "sortie@example.invalid"], { cwd: directory });
+    await execFileAsync("git", ["add", ".gitignore", "base.txt"], { cwd: directory });
+    await execFileAsync("git", ["commit", "-q", "-m", "base"], { cwd: directory });
+    const { stdout } = await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: directory });
+    const sha = stdout.trim();
+    const contractPath = join(directory, "parallel-contract.json");
+    await writeFile(contractPath, JSON.stringify({
+      version: "0.1.0",
+      mode: "parallel",
+      max_workers: 2,
+      tasks: ["a", "b"].map((taskID) => ({
+        task_id: taskID,
+        worktree: `plugin-${taskID}`,
+        branch: `sortie/plugin-${taskID}`,
+        base_sha: sha,
+        depends_on: [],
+        scope: { read: ["base.txt"], write: [`${taskID}.txt`] },
+      })),
+      artifacts: [],
+      failure: null,
+      baseline_metrics: null,
+    }));
+
+    const hooks = await SortieDogsPlugin({ directory });
+    await hooks["chat.message"]!(
+      { sessionID: "literal-root", agent: "dog-coordinator" },
+      {
+        message: { agent: "dog-coordinator", model: { providerID: "host", modelID: "selected" } },
+        parts: [{ type: "text", text: "literal fields are not opt-in" }],
+      },
+    );
+    await hooks["chat.message"]!(
+      { sessionID: "root", agent: "dog-coordinator" },
+      {
+        message: { agent: "dog-coordinator", model: { providerID: "host", modelID: "selected" } },
+        parts: [{ type: "text", text: "parallel" }],
+      },
+    );
+    const before = hooks["tool.execute.before"]!;
+    await before(
+      { tool: "task", sessionID: "literal-root", callID: "literal-one" },
+      { args: { subagent_type: "dog-worker", prompt: readOnlyWorkerPrompt(directory) +
+        "\nparallel_group: literal\nparallel_unit: a\nparallel_units: 2" } },
+    );
+    await assert.rejects(
+      () => before(
+        { tool: "task", sessionID: "literal-root", callID: "literal-two" },
+        { args: { subagent_type: "dog-worker", prompt: readOnlyWorkerPrompt(directory) +
+          "\nparallel_group: literal\nparallel_unit: b\nparallel_units: 2" } },
+      ),
+      /SORTIE_FAST_LANE_DENIED: WORKER_LIMIT/u,
+    );
+
+    const prepared = JSON.parse(await hooks.tool!.sortie_prepare_parallel_dispatch!.execute(
+      { contract_path: contractPath },
+      { sessionID: "root", agent: "dog-coordinator" },
+    )) as { status: string; run_id: string; ready: Array<Record<string, unknown>> };
+    assert.equal(prepared.status, "prepared");
+    assert.equal(prepared.ready.length, 2);
+    const prompt = (descriptor: Record<string, unknown>) => [
+      `task_id: ${descriptor.task_id}`,
+      "role: implementation",
+      `project_root: ${descriptor.managed_path}`,
+      "source_manifest: [base.txt]",
+      "operation_manifest: none",
+      "acceptance: bounded parallel control outcome",
+      "validation: no canonical validation",
+      `run_id: ${descriptor.run_id}`,
+      `dispatch_id: ${descriptor.dispatch_id}`,
+      `managed_path: ${descriptor.managed_path}`,
+      `branch: ${descriptor.branch}`,
+      `base_sha: ${descriptor.base_sha}`,
+      `depends_on: ${JSON.stringify(descriptor.depends_on)}`,
+      `scope_read: ${JSON.stringify(descriptor.scope_read)}`,
+      `scope_write: ${JSON.stringify(descriptor.scope_write)}`,
+      `parallel_group: ${descriptor.parallel_group}`,
+      `parallel_unit: ${descriptor.parallel_unit}`,
+      `parallel_units: ${descriptor.parallel_units}`,
+      `attempt: ${descriptor.attempt}`,
+      `contract_fingerprint: ${descriptor.contract_fingerprint}`,
+    ].join("\n");
+    for (const [index, descriptor] of prepared.ready.entries()) {
+      await before(
+        { tool: "task", sessionID: "root", callID: `parallel-${index}` },
+        { args: { subagent_type: "dog-worker", prompt: prompt(descriptor) } },
+      );
+    }
+    await assert.rejects(
+      () => before(
+        { tool: "task", sessionID: "root", callID: "parallel-replay" },
+        { args: { subagent_type: "dog-worker", prompt: prompt(prepared.ready[0]!) } },
+      ),
+      (error: unknown) => error instanceof ParallelDispatchError && error.code === "descriptor-replay",
+    );
+    for (const [index, descriptor] of prepared.ready.entries()) {
+      await hooks["tool.execute.after"]!(
+        { tool: "task", sessionID: "root", callID: `parallel-${index}` },
+        { output: `<task_result>\nSORTIE_PARALLEL_OUTCOME ${JSON.stringify({
+          run_id: descriptor.run_id,
+          dispatch_id: descriptor.dispatch_id,
+          status: "completed",
+        })}\n</task_result>`, metadata: { sessionId: `child-${index}` } },
+      );
+    }
+    const status = JSON.parse(await hooks.tool!.sortie_parallel_dispatch_status!.execute(
+      { run_id: prepared.run_id, reconcile: "false" },
+      { sessionID: "root", agent: "dog-coordinator" },
+    )) as { tasks: Array<{ phase: string }> };
+    assert.deepEqual(status.tasks.map(({ phase }) => phase), ["completed", "completed"]);
+
+    const client = { session: {
+      get: async () => ({ data: { agent: "dog-coordinator" } }),
+      messages: async () => ({ data: [{ info: { role: "user", agent: "dog-coordinator" }, parts: [{ type: "text", text: "resume" }] }] }),
+    } } as never;
+    const restarted = await SortieDogsPlugin({ directory, client });
+    const system = { system: [] as string[] };
+    await restarted["experimental.chat.system.transform"]!({ sessionID: "root" }, system);
+    assert.match(system.system.join("\n"), /SORTIE_PARALLEL_DISPATCH_STATE/u);
+    assert.doesNotMatch(system.system.join("\n"), /SORTIE_PARALLEL_OUTCOME/u);
+  });
+});
+
+test("parallel cancellation is coordinator-only, survives running join, and session deletion cancels pending work", async () => {
+  await withProject("parallel-cancel", async (directory) => {
+    await writeFile(join(directory, ".gitignore"), "parallel-contract.json\n");
+    await writeFile(join(directory, "base.txt"), "base\n");
+    await execFileAsync("git", ["init", "-q"], { cwd: directory });
+    await execFileAsync("git", ["config", "user.name", "Sortie Test"], { cwd: directory });
+    await execFileAsync("git", ["config", "user.email", "sortie@example.invalid"], { cwd: directory });
+    await execFileAsync("git", ["add", ".gitignore", "base.txt"], { cwd: directory });
+    await execFileAsync("git", ["commit", "-q", "-m", "base"], { cwd: directory });
+    const { stdout } = await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: directory });
+    const contractPath = join(directory, "parallel-contract.json");
+    await writeFile(contractPath, JSON.stringify({
+      version: "0.1.0", mode: "parallel", max_workers: 2,
+      tasks: ["a", "b"].map((taskID) => ({ task_id: taskID, worktree: `cancel-${taskID}`,
+        branch: `sortie/cancel-${taskID}`, base_sha: stdout.trim(), depends_on: [],
+        scope: { read: ["base.txt"], write: [`${taskID}.txt`] } })),
+      artifacts: [], failure: null, baseline_metrics: null,
+    }));
+    const hooks = await SortieDogsPlugin({ directory });
+    await hooks["chat.message"]!(
+      { sessionID: "root", agent: "dog-coordinator" },
+      { message: { agent: "dog-coordinator", model: { providerID: "host", modelID: "selected" } },
+        parts: [{ type: "text", text: "parallel" }] },
+    );
+    const denied = JSON.parse(await hooks.tool!.sortie_cancel_parallel_dispatch!.execute(
+      {}, { sessionID: "child", agent: "dog-worker" },
+    )) as { status: string; reason: string };
+    assert.deepEqual(denied, { status: "denied", reason: "coordinator-root-required" });
+    const prepared = JSON.parse(await hooks.tool!.sortie_prepare_parallel_dispatch!.execute(
+      { contract_path: contractPath }, { sessionID: "root", agent: "dog-coordinator" },
+    )) as { run_id: string; ready: Array<Record<string, unknown>> };
+    const descriptor = prepared.ready[0]!;
+    const prompt = [
+      `task_id: ${descriptor.task_id}`, "role: implementation", `project_root: ${descriptor.managed_path}`,
+      "source_manifest: [base.txt]", "operation_manifest: none", "acceptance: bounded cancel",
+      "validation: no canonical validation", ...Object.entries(descriptor).filter(([key]) => !["task_id", "managed_path"].includes(key))
+        .map(([key, value]) => `${key}: ${Array.isArray(value) ? JSON.stringify(value) : value}`),
+      `managed_path: ${descriptor.managed_path}`,
+    ].join("\n");
+    await hooks["tool.execute.before"]!(
+      { tool: "task", sessionID: "root", callID: "running" },
+      { args: { subagent_type: "dog-worker", prompt } },
+    );
+    const cancelled = JSON.parse(await hooks.tool!.sortie_cancel_parallel_dispatch!.execute(
+      { run_id: prepared.run_id }, { sessionID: "root", agent: "dog-coordinator" },
+    )) as { archived: boolean; ready: unknown[]; tasks: Array<{ phase: string }> };
+    assert.equal(cancelled.archived, false);
+    assert.equal(cancelled.ready.length, 0);
+    assert.deepEqual(cancelled.tasks.map(({ phase }) => phase).sort(), ["running", "suppressed"]);
+    await hooks.event!({ event: { type: "session.idle", properties: { sessionID: "root" } } });
+    const idle = JSON.parse(await hooks.tool!.sortie_parallel_dispatch_status!.execute(
+      { run_id: prepared.run_id }, { sessionID: "root", agent: "dog-coordinator" },
+    )) as { cancelled: boolean };
+    assert.equal(idle.cancelled, true);
+    await hooks["tool.execute.after"]!(
+      { tool: "task", sessionID: "root", callID: "running" },
+      { output: `SORTIE_PARALLEL_OUTCOME ${JSON.stringify({ run_id: prepared.run_id,
+        dispatch_id: descriptor.dispatch_id, status: "completed" })}`, metadata: { sessionId: "child" } },
+    );
+    const archived = JSON.parse(await hooks.tool!.sortie_parallel_dispatch_status!.execute(
+      { run_id: prepared.run_id }, { sessionID: "root", agent: "dog-coordinator" },
+    )) as { archived: boolean; terminal_reason: string; tasks: Array<{ managed_path: string }> };
+    assert.equal(archived.archived, true);
+    assert.equal(archived.terminal_reason, "cancelled");
+    assert.ok(archived.tasks.every(({ managed_path }) => managed_path.length > 0));
+
+    const lifecycle = await WorktreeLifecycle.open({ repositoryRoot: directory });
+    for (const id of ["cancel-a", "cancel-b"]) await lifecycle.cleanup(id);
+    await writeFile(contractPath, (await readFile(contractPath, "utf8")).replaceAll("cancel-", "deleted-")
+      .replaceAll("sortie/cancel-", "sortie/deleted-"));
+    const next = JSON.parse(await hooks.tool!.sortie_prepare_parallel_dispatch!.execute(
+      { contract_path: contractPath }, { sessionID: "root", agent: "dog-coordinator" },
+    )) as { run_id: string };
+    await hooks.event!({ event: { type: "session.deleted", properties: { sessionID: "root" } } });
+    const reopened = await ParallelDispatchCoordinator.open({ repositoryRoot: directory });
+    assert.equal((await reopened.snapshot("root", next.run_id))!.terminal_reason, "cancelled");
   });
 });
 

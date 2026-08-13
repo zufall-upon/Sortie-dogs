@@ -2,6 +2,9 @@ import type { RuntimeAssetVersion } from "./asset-version.js";
 
 // Kept local so source-mode CLI execution does not load the plugin graph.
 const BACKLOG_DRAIN_CAPABILITY = "sortie_enable_backlog_drain";
+const PARALLEL_PREPARE_CAPABILITY = "sortie_prepare_parallel_dispatch";
+const PARALLEL_STATUS_CAPABILITY = "sortie_parallel_dispatch_status";
+const PARALLEL_CANCEL_CAPABILITY = "sortie_cancel_parallel_dispatch";
 
 export interface RuntimeAsset {
   readonly name: string;
@@ -13,7 +16,7 @@ export interface RuntimeAsset {
 export const runtimeAssets = [
   {
     name: "dog-coordinator",
-    version: "0.3.12-dispatch-preflight-v1",
+    version: "0.3.14-parallel-lifecycle-v2",
     installPath: "agent/dog-coordinator.md",
     content: `---
 description: Canonical MkII coordinator packaged by Sortie-dogs
@@ -363,6 +366,39 @@ PARALLEL_IMPLEMENTATION_FIXTURE
     scope_gap: return typed gap; no manifest expansion | replacement worker
     parallel_fanout: forbidden on normal lane
 END_PARALLEL_IMPLEMENTATION_FIXTURE
+
+Parallel dispatch is a separate explicit runtime lane. Enter it only when the user supplies a valid
+Worktree Parallel Contract with mode=parallel. Call ${PARALLEL_PREPARE_CAPABILITY} exactly once with
+the absolute contract_path. Literal parallel fields never opt in. If prepare returns serial-fallback,
+dispatch no parallel worker and use the normal lane. If prepare returns descriptors, dispatch only its
+ready descriptors, at most max_workers and never more than three total tasks. Copy every descriptor
+field exactly into the Task prompt: run_id, dispatch_id, task_id, managed_path as project_root, branch,
+base_sha, depends_on JSON, scope_read JSON, scope_write JSON, parallel_group, parallel_unit,
+parallel_units, attempt, and contract_fingerprint. Join returns through Task; then call
+${PARALLEL_STATUS_CAPABILITY} after each return and dispatch only newly ready descriptors. Never
+redispatch a running task after restart. Use status with reconcile=true only when host continuation
+identity cannot prove a running call; abandoned-worker is terminal. No automatic retry, serial fallback
+after first dispatch, worker Git mutation, remote mutation, canonical validation, or direct main write.
+To stop the run, call ${PARALLEL_CANCEL_CAPABILITY}. Cancellation suppresses pending or reserved work,
+never force-stops running workers, and never removes worktrees. Running work remains join-required until
+its outcome or abandoned-worker reconciliation. Terminal runs enter bounded durable archive; status
+retains task, dispatch, worktree, branch, path, and base identities for Card 05/06. Session idle never
+cancels; coordinator session deletion requests the same bounded cancellation.
+Each worker's final response ends with exactly one line:
+SORTIE_PARALLEL_OUTCOME {"run_id":"<run_id>","dispatch_id":"<dispatch_id>","status":"<completed|failed|blocked|cancelled>"}
+
+DEPENDENCY_PARALLEL_DISPATCH_FIXTURE
+    opt_in: mode=parallel contract + sortie_prepare_parallel_dispatch; literal fields alone forbidden
+    bounds: tasks=2..3; dispatch only returned ready descriptors; concurrency<=max_workers<=3
+    descriptor: exact run_id | dispatch_id | task_id | managed_path | branch | base_sha | depends_on | scope_read | scope_write | parallel_group | parallel_unit | parallel_units | attempt=1 | contract_fingerprint
+    join: Task return -> sortie_parallel_dispatch_status -> newly ready descriptors only
+    failure: suppress descendants; independent branches continue; no retry | post-dispatch serial fallback
+    restart: running never redispatched; explicit reconcile without provable host call -> abandoned-worker stop
+    worker_limits: no Git mutation | remote mutation | canonical validation | direct main write
+    terminal_marker: SORTIE_PARALLEL_OUTCOME strict bounded JSON
+    cancel: sortie_cancel_parallel_dispatch; coordinator root only; running join-required
+    cleanup: Card 04 never removes worktrees; archived ownership passes to Card 05/06
+END_DEPENDENCY_PARALLEL_DISPATCH_FIXTURE
 
 ## Worker handoff contract
 
@@ -1016,10 +1052,10 @@ the initial exit 1 is first and the latest exit 0 is last.
 An undeclared write or mutation must be reported as rejected, not performed.
 
 RUNTIME_ASSET_VERSION_SYNC_FIXTURE
-    runtime_version: 0.3.12-dispatch-preflight-v1
+    runtime_version: 0.3.14-parallel-lifecycle-v2
     shared_marker: src/asset-version.ts
-    packaged_expectation: test/plugin-loader.test.ts uses 0.3.12-dispatch-preflight-v1
-    initialize_expectation: test/initialize.test.ts uses 0.3.12-dispatch-preflight-v1
+    packaged_expectation: test/plugin-loader.test.ts uses 0.3.14-parallel-lifecycle-v2
+    initialize_expectation: test/initialize.test.ts uses 0.3.14-parallel-lifecycle-v2
     rule: runtime asset versions, shared marker, packaged expectation, and initialize expectation change together
 END_RUNTIME_ASSET_VERSION_SYNC_FIXTURE
 
@@ -1062,7 +1098,7 @@ END_TERMINAL_EVIDENCE_FIXTURE
   },
   {
     name: "dog-worker",
-    version: "0.3.12-dispatch-preflight-v1",
+    version: "0.3.14-parallel-lifecycle-v2",
     installPath: "agent/dog-worker.md",
     content: `---
 description: Dedicated worker for the canonical Sortie-dogs coordinator
@@ -1154,7 +1190,7 @@ the user.
   },
   {
     name: "dog-scout",
-    version: "0.3.12-dispatch-preflight-v1",
+    version: "0.3.14-parallel-lifecycle-v2",
     installPath: "agent/dog-scout.md",
     content: `---
 description: Bounded evidence scout for dog-coordinator
@@ -1203,7 +1239,7 @@ prose; keep the keys, paths, commands, and identifiers verbatim.
   },
   {
     name: "dog-reviewer",
-    version: "0.3.12-dispatch-preflight-v1",
+    version: "0.3.14-parallel-lifecycle-v2",
     installPath: "agent/dog-reviewer.md",
     content: `---
 description: Independent source reviewer for dog-coordinator
@@ -1232,7 +1268,7 @@ or transport.
   },
   {
     name: "dog-advisor",
-    version: "0.3.12-dispatch-preflight-v1",
+    version: "0.3.14-parallel-lifecycle-v2",
     installPath: "agent/dog-advisor.md",
     content: `---
 description: Focused technical advisor for dog-coordinator
@@ -1256,7 +1292,7 @@ provider, vendor, model, variant, or transport.
   },
   {
     name: "sortie",
-    version: "0.3.12-dispatch-preflight-v1",
+    version: "0.3.14-parallel-lifecycle-v2",
     installPath: "command/sortie.md",
     content: `---
 description: Start the canonical Sortie-dogs MkII workflow
