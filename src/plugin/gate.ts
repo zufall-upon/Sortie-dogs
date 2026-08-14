@@ -11,6 +11,7 @@ export interface ToolExecuteBeforeInput {
   tool: string;
   sessionID: string;
   callID: string;
+  agent?: string;
 }
 
 export interface ToolExecuteBeforeOutput {
@@ -502,6 +503,33 @@ export function extractWritePaths(tool: string, args: unknown): Extraction {
     };
   }
   return { applies: false, ambiguous: false, paths: [] };
+}
+
+/**
+ * Bootstrap is intentionally narrower than the normal write extractor: only one native Write or
+ * one single-file apply_patch envelope exposes enough structure to authorize a missing control file.
+ */
+export function bootstrapWritePaths(tool: string, args: unknown): readonly string[] | undefined {
+  const name = tool.toLowerCase();
+  if (name === "write") {
+    const paths = directPaths(args);
+    return paths.length === 1 ? paths : undefined;
+  }
+  if (name !== "apply_patch" || !isRecord(args) || typeof args.patchText !== "string") {
+    return undefined;
+  }
+  const paths: string[] = [];
+  let operationCount = 0;
+  for (const line of args.patchText.split(/\r?\n/u)) {
+    const operation = /^\*\*\* (Add|Update|Delete) File:\s*(.+?)\s*$/u.exec(line);
+    if (operation !== null) {
+      operationCount += 1;
+      if (operation[1] === "Delete") return undefined;
+      paths.push(operation[2]!);
+    }
+    if (/^\*\*\* Move to:/u.test(line) || /^\+\+\+\s/u.test(line)) return undefined;
+  }
+  return operationCount >= 1 && operationCount <= 2 && paths.length === operationCount ? paths : undefined;
 }
 
 export function isGitMutation(tool: string, args: unknown): boolean {

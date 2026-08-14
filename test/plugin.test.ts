@@ -3889,6 +3889,96 @@ test("session policy is passive until an exact trigger and deactivates only on e
   });
 });
 
+test("fresh coordinator bootstrap permits only exact missing configured control files", async () => {
+  await withProject("coordinator-bootstrap", async (directory) => {
+    const identities: Record<string, Record<string, unknown>> = {
+      root: { agent: "dog-coordinator" },
+      worker: { agent: "dog-worker", parentID: "root" },
+      reviewer: { agent: "dog-reviewer", parentID: "root" },
+      unrelated: { agent: "build" },
+    };
+    const hooks = await SortieDogsPlugin({
+      directory,
+      client: { session: { get: async ({ path }: { path: { id: string } }) => ({ data: identities[path.id] }) } } as never,
+    });
+    const chat = hooks["chat.message"]!;
+    const before = hooks["tool.execute.before"]!;
+    await chat(
+      { sessionID: "root", agent: "dog-coordinator" },
+      { message: { agent: "dog-coordinator", model: {} }, parts: [{ type: "text", text: "/sortie bootstrap" }] },
+    );
+    const invoke = (tool: string, args: unknown, callID: string, sessionID = "root", agent?: string) => before(
+      { tool, sessionID, callID, agent },
+      { args },
+    );
+    const manifestPath = join(directory, "operation-manifest.json");
+    const handoffPath = join(directory, "handoff.json");
+
+    for (const [sessionID, agent] of [["worker", "dog-worker"], ["reviewer", "dog-reviewer"], ["unrelated", "build"]]) {
+      await assert.rejects(
+        invoke("write", { file: manifestPath, content: "not-written" }, `deny-${sessionID}`, sessionID, agent),
+        (error: unknown) => error instanceof Error && /operation manifest unavailable/u.test(error.message),
+      );
+    }
+    await invoke("apply_patch", {
+      patchText: "*** Begin Patch\n*** Add File: task.operation-manifest.json\n+{}\n*** Add File: handoff.task.json\n+{}\n*** End Patch",
+    }, "allow-control-pair");
+    await writeFile(join(directory, "task.operation-manifest.json"), "{}");
+    await writeFile(join(directory, "handoff.task.json"), "{}");
+    await invoke("apply_patch", {
+      patchText: "*** Begin Patch\n*** Update File: task.operation-manifest.json\n@@\n-{}\n+{}\n*** Update File: handoff.task.json\n@@\n-{}\n+{}\n*** End Patch",
+    }, "repair-control-pair");
+    for (const [tool, args, callID] of [
+      ["write", { file: "src/plugin/index.ts", content: "not-written" }, "deny-source"],
+      ["write", { content: "not-written" }, "deny-unknown"],
+      ["bash", { command: `echo bad > ${manifestPath}` }, "deny-shell"],
+      ["apply_patch", { patchText: `*** Begin Patch\n*** Add File: operation-manifest.json\n+{}\n*** Add File: handoff.json\n+{}\n*** Add File: source.ts\n+bad\n*** End Patch` }, "deny-broad-patch"],
+    ] as const) {
+      await assert.rejects(
+        invoke(tool, args, callID),
+        (error: unknown) => error instanceof Error && /operation manifest unavailable/u.test(error.message),
+      );
+    }
+
+    await hooks["tool.execute.after"]!(
+      { tool: "sortie_check_contract", sessionID: "root", callID: "contract-check" },
+      { output: JSON.stringify({ status: "ok", defects: [] }) },
+    );
+    await invoke("bash", { command: "git status --short" }, "coordinator-finalize");
+  });
+});
+
+test("fresh coordinator bootstrap fails closed for malformed created control files and idles safely", async () => {
+  await withProject("coordinator-bootstrap-malformed", async (directory) => {
+    const hooks = await SortieDogsPlugin({
+      directory,
+      client: { session: { get: async () => ({ data: { agent: "dog-coordinator" } }) } } as never,
+    });
+    await hooks["chat.message"]!(
+      { sessionID: "root", agent: "dog-coordinator" },
+      { message: { agent: "dog-coordinator", model: {} }, parts: [{ type: "text", text: "/sortie bootstrap" }] },
+    );
+    await hooks.event!({ event: { type: "session.idle", properties: { sessionID: "root" } } });
+    const manifestPath = join(directory, "operation-manifest.json");
+    await hooks["tool.execute.before"]!(
+      { tool: "write", sessionID: "root", callID: "malformed-manifest", agent: "dog-coordinator" },
+      { args: { file: manifestPath, content: "{}" } },
+    );
+    await writeFile(manifestPath, "{}");
+    await hooks["tool.execute.before"]!(
+      { tool: "write", sessionID: "root", callID: "handoff-after-malformed", agent: "dog-coordinator" },
+      { args: { file: join(directory, "handoff.json"), content: "{}" } },
+    );
+    await assert.rejects(
+      hooks["tool.execute.before"]!(
+        { tool: "write", sessionID: "root", callID: "source-after-malformed", agent: "dog-coordinator" },
+        { args: { file: join(directory, "source.ts"), content: "bad" } },
+      ),
+      (error: unknown) => error instanceof Error && /operation manifest unavailable/u.test(error.message),
+    );
+  });
+});
+
 test("passive coordinator lineage activates only its Task child without inheriting authorization", async () => {
   await withProject("child-session-activation", async (directory) => {
     await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));

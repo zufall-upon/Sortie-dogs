@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFile, realpath, stat } from "node:fs/promises";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
 import { RUNTIME_ASSET_VERSION } from "../asset-version.js";
 import { normalizeRelativePath, RelativePathError } from "../core/path.js";
@@ -57,6 +57,7 @@ import {
   createProjectPaths,
   createWriteGate,
   describeUnclassifiedCommand,
+  bootstrapWritePaths,
   isGitMutation,
   isKnownReadOnlyTool,
   isRemoteMutation,
@@ -1012,6 +1013,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   let loadFailure: unknown;
   let loading: Promise<void> | undefined;
   let manifestAbsent = false;
+  let bootstrapRequired = false;
+  let bootstrapCompleted = false;
   let assetVersionReported = false;
   const globalConfig = await readOptionalGlobalConfig();
 
@@ -1090,6 +1093,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           manifestValue = await readJson(loaded.operationManifestAbsolutePath, INPUT_LIMITS.manifest);
         } catch (error) {
           manifestAbsent = isAbsentPathError(error);
+          if (manifestAbsent && !bootstrapCompleted) bootstrapRequired = true;
           throw error;
         }
         manifestAbsent = false;
@@ -1098,6 +1102,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         loaded.manifest = validation.value;
         loaded.manifestFingerprint = inspectionFingerprint(validation.value, undefined);
         loaded.gate = await createWriteGate(project, validation.value);
+        bootstrapRequired = false;
+        bootstrapCompleted = true;
         loadFailure = undefined;
       } catch (error) {
         loadFailure = error;
@@ -1141,6 +1147,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   const bindingOperations = new Set<string>();
   const activeSessions = new Map<string, ActiveSessionState>();
   const coordinatorRoots = new Map<string, CoordinatorRootLineage>();
+  const bootstrapIdleWarnings = new Set<string>();
   const coordinatorTaskCalls = new Map<string, Set<string>>();
   const reflectionOwnedRoots = new Set<string>();
   const reflectionClosingRoots = new Set<string>();
@@ -1176,6 +1183,81 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   const parallelChildBindings = new Map<string, ParallelChildBinding>();
   const parallelArtifacts = new Map<string, PendingParallelArtifact>();
   const parallelArtifactOperations = new Set<string>();
+
+  interface BootstrapControlState {
+    readonly controls: readonly string[];
+    readonly missing: readonly string[];
+    readonly usable: boolean;
+  }
+
+  async function bootstrapControlState(): Promise<BootstrapControlState | undefined> {
+    await ensureLoaded();
+    if (loaded === undefined || project === undefined || loaded.operationManifestAbsolutePath === undefined) {
+      return undefined;
+    }
+    const controls = [...new Set([
+      loaded.operationManifestAbsolutePath,
+      ...loaded.handoffPaths,
+    ].map((path) => resolve(path)))];
+    const missing: string[] = [];
+    for (const path of controls) {
+      if (!await project.contains(path)) return undefined;
+      try {
+        if (!(await stat(path)).isFile()) return undefined;
+      } catch (error) {
+        if (!isRecord(error) || (error.code !== "ENOENT" && error.code !== "ENOTDIR")) return undefined;
+        missing.push(path);
+      }
+    }
+    return { controls, missing, usable: loaded.gate !== undefined || manifestAbsent };
+  }
+
+  async function isExactCoordinatorRoot(toolInput: ToolExecuteBeforeInput): Promise<boolean> {
+    if (
+      !isCoordinatorSession(toolInput.sessionID) ||
+      coordinatorRootForSession(toolInput.sessionID) !== toolInput.sessionID ||
+      sessionParents.has(toolInput.sessionID) ||
+      (toolInput.agent !== undefined && toolInput.agent !== COORDINATOR_AGENT)
+    ) return false;
+    const identity = await hostSessionIdentity(toolInput.sessionID);
+    return identity === undefined || (
+      !identity.parentPresent &&
+      (identity.agent === undefined || identity.agent === COORDINATOR_AGENT)
+    );
+  }
+
+  async function permitsBootstrapWrite(
+    toolInput: ToolExecuteBeforeInput,
+    output: ToolExecuteBeforeOutput,
+    _state: BootstrapControlState,
+  ): Promise<boolean> {
+    if (!await isExactCoordinatorRoot(toolInput)) return false;
+    const targets = bootstrapWritePaths(toolInput.tool, output.args);
+    if (targets === undefined || project === undefined) return false;
+    const absolutes = targets.map((target) => isAbsolute(target)
+      ? resolve(target)
+      : resolve(input.worktree ?? input.directory, target));
+    if (new Set(absolutes.map((path) => process.platform === "win32" ? path.toLowerCase() : path)).size !== absolutes.length) return false;
+    let manifests = 0;
+    let handoffs = 0;
+    for (const absolute of absolutes) {
+      if (!await project.contains(absolute) || dirname(absolute) !== project.root) return false;
+      const name = basename(absolute);
+      if (name === "operation-manifest.json" || name.endsWith(".operation-manifest.json")) manifests += 1;
+      else if (name === "handoff.json" || (/^handoff[.-].+\.json$/u.test(name))) handoffs += 1;
+      else return false;
+    }
+    if (manifests > 1 || handoffs > 1 || manifests + handoffs !== absolutes.length) return false;
+    return true;
+  }
+
+  function successfulBootstrapContractCheck(value: unknown): boolean {
+    if (!isRecord(value) || typeof value.output !== "string") return false;
+    try {
+      const result = JSON.parse(value.output) as unknown;
+      return isRecord(result) && result.status === "ok" && Array.isArray(result.defects) && result.defects.length === 0;
+    } catch { return false; }
+  }
 
   async function getParallelCoordinator(): Promise<ParallelDispatchCoordinator> {
     project ??= await createProjectPaths(resolveProjectRoot(input));
@@ -2933,6 +3015,12 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     "tool.execute.after": async (toolInput, output): Promise<void> => {
       const completedChildSessionID = toolInput.tool === "task" ? taskChildSessionID(output) : undefined;
       try {
+        if (bootstrapRequired && toolInput.tool === "sortie_check_contract" && toolInput.sessionID !== undefined &&
+          isCoordinatorSession(toolInput.sessionID) && successfulBootstrapContractCheck(output)) {
+          bootstrapRequired = false;
+          bootstrapCompleted = true;
+          bootstrapIdleWarnings.delete(toolInput.sessionID);
+        }
         const repair = await taskResultRepair(toolInput, output);
         if (
           repair.kind === "unrecoverable-empty" && toolInput.sessionID !== undefined
@@ -3024,17 +3112,37 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       }
     },
     "tool.execute.before": async (toolInput, output): Promise<void> => {
+      const coordinatorRoot = isCoordinatorSession(toolInput.sessionID) || await recoverCoordinatorRoot(toolInput.sessionID);
       const coordinatorCapability = toolInput.tool === "task" ||
         toolInput.tool === CONTINUATION_CAPABILITY || toolInput.tool === BACKLOG_DRAIN_CAPABILITY ||
+        toolInput.tool === "sortie_check_contract" ||
         toolInput.tool === "sortie_prepare_parallel_dispatch" || toolInput.tool === "sortie_parallel_dispatch_status" ||
         toolInput.tool === "sortie_cancel_parallel_dispatch" ||
         toolInput.tool === "sortie_enqueue_parallel_integration" || toolInput.tool === "sortie_integrate_parallel_queue" ||
         toolInput.tool === "sortie_accept_parallel_integration" || toolInput.tool === "sortie_submit_integration_remediation" ||
         toolInput.tool === "sortie_parallel_integration_status";
-      if (
-        isCoordinatorSession(toolInput.sessionID) ||
-        (coordinatorCapability && await recoverCoordinatorRoot(toolInput.sessionID))
-      ) {
+      const sessionGateCapability = toolInput.tool === "sortie_bind_write_gate" ||
+        toolInput.tool === "sortie_release_write_gate" || toolInput.tool === PARALLEL_COMMIT_ARTIFACT_CAPABILITY;
+      const bootstrap = bootstrapRequired && !coordinatorCapability && !sessionGateCapability &&
+        !sessionAuthorizations.has(toolInput.sessionID) && (coordinatorRoot || coordinatorRoots.size > 0)
+        ? await bootstrapControlState()
+        : undefined;
+      if (coordinatorRoot && bootstrapRequired && !coordinatorCapability && !sessionGateCapability) {
+        if (bootstrap === undefined || bootstrap.missing.length > 0 || !bootstrap.usable) {
+          if (bootstrap !== undefined && await permitsBootstrapWrite(toolInput, output, bootstrap)) return;
+          if (isKnownReadOnlyTool(toolInput.tool, output.args, loaded?.readOnlyTools)) return;
+          if (!coordinatorCapability) {
+            throw new WriteDeniedError("manifest-unavailable", "<unknown>", { cause: loadFailure });
+          }
+        }
+      } else if (bootstrap?.usable === true && bootstrap.missing.length > 0) {
+        const targets = bootstrapWritePaths(toolInput.tool, output.args);
+        const absolutes = targets?.map((target) => isAbsolute(target) ? resolve(target) : resolve(input.worktree ?? input.directory, target));
+        if (absolutes?.some((absolute) => bootstrap.controls.some((path) => samePath(path, absolute)))) {
+          throw new WriteDeniedError("manifest-unavailable", "<unknown>", { cause: loadFailure });
+        }
+      }
+      if (coordinatorRoot) {
         if (continuation.blocksTool(toolInput.sessionID)) {
           throw new Error("SORTIE_ROLLOVER_PENDING: stop this turn and wait for compaction");
         }
@@ -3178,6 +3286,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           recoverableWorkerChildren.delete(resumedWorkerSessionID);
         }
         if (toolInput.tool === "task" && taskRole === "dog-worker") {
+          bootstrapRequired = false;
+          bootstrapCompleted = true;
+          bootstrapIdleWarnings.delete(toolInput.sessionID);
           beginCoordinatorTask(toolInput.sessionID, toolInput.callID);
           if (reservedParallelDescriptor !== undefined) {
             parallelCalls.set(toolInput.callID, {
@@ -3219,7 +3330,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         }
         const gate = await authorizedGate(toolInput.sessionID);
         if (gate === undefined) {
-          if (!hasSessionEnforcementState(toolInput.sessionID) && await isUnconfiguredProject()) return;
+          if (!hasSessionEnforcementState(toolInput.sessionID) &&
+            !(bootstrapRequired && coordinatorRoots.size > 0) && await isUnconfiguredProject()) return;
           if (!isKnownReadOnlyTool(toolInput.tool, output.args, loaded?.readOnlyTools)) {
             const detail = describeUnclassifiedCommand(toolInput.tool, output.args);
             if (detail !== undefined) throw new WriteDeniedError("unclassified-command", detail);
@@ -3380,6 +3492,15 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
        * before the active-session guard below or the batch could never resume itself.
        */
       if (event.type === "session.compacted") await continuation.sessionCompacted(eventSessionID);
+      if (event.type === "session.idle" && isCoordinatorSession(eventSessionID)) {
+        const bootstrap = await bootstrapControlState();
+        if (bootstrapRequired && bootstrap?.usable === true && bootstrap.missing.length > 0) {
+          if (!bootstrapIdleWarnings.has(eventSessionID)) {
+            bootstrapIdleWarnings.add(eventSessionID);
+            console.warn("[sortie-dogs] coordinator bootstrap paused: configured control files are missing");
+          }
+        }
+      }
       if (event.type === "session.idle") await continuation.sessionIdle(eventSessionID);
       if (event.type === "session.idle" && isCoordinatorSession(eventSessionID)) {
         abortCoordinatorTasks(eventSessionID, true);

@@ -297,8 +297,7 @@ export class FastLaneController {
     if (role === "dog-reviewer") {
       if (!hasReviewEvidence(prompt)) throw new FastLaneDeniedError("REVIEW_EVIDENCE_REQUIRED");
       const requestedPhase = lineValue(prompt, "review_phase");
-      const phase = requestedPhase === "final" ? "initial" : requestedPhase;
-      if (phase !== "initial" && phase !== "verification") {
+      if (requestedPhase !== "initial" && requestedPhase !== "verification" && requestedPhase !== "final") {
         throw new FastLaneDeniedError("REVIEW_PHASE_INVALID");
       }
       if (state.reviewsLocked) throw new FastLaneDeniedError("REVIEW_LIMIT");
@@ -310,6 +309,12 @@ export class FastLaneController {
         }
         candidate = { initialDispatches: 0, verificationDispatches: 0 };
         state.reviewCandidates.set(candidateKey, candidate);
+      }
+      const phase = requestedPhase === "final"
+        ? candidate.initialDispatches === 0 ? "initial" : "verification"
+        : requestedPhase;
+      if (requestedPhase === "final" && candidate.verificationDispatches > 0) {
+        throw new FastLaneDeniedError("REVIEW_LIMIT");
       }
       const retry = lineValue(prompt, "fallback_retry");
       const count = phase === "initial" ? candidate.initialDispatches : candidate.verificationDispatches;

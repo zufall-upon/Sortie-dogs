@@ -191,6 +191,28 @@ test("distinct review candidates have independent phases and retry budgets", () 
   expectDenial(() => lane.beforeTool("root", "task", candidateB), "CONSULTATION_RETRY_INVALID");
 });
 
+test("a final review after initial findings is the one verification review", () => {
+  const lane = new FastLaneController();
+  lane.beginTurn("root", false);
+  const evidence = "canonical_validation_exit: 0\nrisk_tags: [public-logic]\ncandidate_id: corrected";
+  lane.beforeTool("root", "task", {
+    subagent_type: "dog-reviewer",
+    prompt: `review_phase: initial\n${evidence}`,
+  });
+  lane.beforeTool("root", "task", {
+    subagent_type: "dog-reviewer",
+    prompt: `review_phase: final\n${evidence}`,
+  });
+  expectDenial(() => lane.beforeTool("root", "task", {
+    subagent_type: "dog-reviewer",
+    prompt: `review_phase: final\n${evidence}`,
+  }), "REVIEW_LIMIT");
+  expectDenial(() => lane.beforeTool("root", "task", {
+    subagent_type: "dog-reviewer",
+    prompt: `review_phase: final\n${evidence}\nfallback_retry: true`,
+  }, { consultationFallbackAuthorized: true }), "REVIEW_LIMIT");
+});
+
 test("typed evidence fields reject duplicates, case changes, and unbracketed risks", () => {
   const invalidPrompts = [
     "missing_evidence_code: manifest\nmissing_evidence_code: validation",
