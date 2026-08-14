@@ -134,4 +134,6 @@ models, worker bound, validation conditions, and measurement window.
   only `sortie_accept_parallel_integration(..., review=pass, review_fingerprint)` performs target CAS.
   Conflict, validation failure, review failure, or target race leaves the target unchanged. Automatic
   reviewer dispatch and bisection are deferred.
-- Card 08: Windows/WSL RPT and efficiency audit.
+- Card 08: Windows/WSL RPT and efficiency audit remains incomplete. Package and WSL configuration
+  evidence passed, but same-task efficiency and Windows Desktop evidence are missing. Parallel execution
+  remains explicit opt-in; see `docs/worktree-parallel-rpt-audit.md`.
