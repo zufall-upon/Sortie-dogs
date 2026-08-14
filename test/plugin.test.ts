@@ -3201,10 +3201,13 @@ test("worker dispatch rejects an unregistered handoff before consuming the fast 
             "role: implementation",
             `project_root: ${directory}`,
             `handoff_path: ${handoffPath}`,
-            "source_manifest: [allowed.txt]",
+            "source_manifest:",
+            "  - allowed.txt",
             "operation_manifest: operation-manifest.json",
-            "acceptance: safe change",
-            "validation: npm test",
+            "acceptance:",
+            "  - safe change",
+            "validation:",
+            "  command: npm test",
           ].join("\n"),
         },
       },
@@ -3366,6 +3369,23 @@ test("worker dispatch rejects an unregistered handoff before consuming the fast 
         assert.deepEqual(error.defects, ["handoff / ext_write_gate_missing"]);
         return true;
       },
+    );
+    await assert.rejects(
+      () => hooks["tool.execute.before"]!(
+        { tool: "task", sessionID: "root", callID: "empty-block-worker" },
+        { args: { subagent_type: "dog-worker", prompt: [
+          "task_id: task-a",
+          "role: implementation",
+          `project_root: ${directory}`,
+          `handoff_path: ${registered}`,
+          "  source_manifest:",
+          "operation_manifest: operation-manifest.json",
+          "  acceptance:",
+          "  validation:",
+        ].join("\n") } },
+      ),
+      (error: unknown) => error instanceof HandoffDeniedError &&
+        error.defects.includes("contract / dispatch_inline_handoff_incomplete"),
     );
     await dispatch(registered, "good-worker");
   });
@@ -3928,6 +3948,33 @@ test("fresh coordinator bootstrap permits only exact missing configured control 
     await invoke("apply_patch", {
       patchText: "*** Begin Patch\n*** Update File: task.operation-manifest.json\n@@\n-{}\n+{}\n*** Update File: handoff.task.json\n@@\n-{}\n+{}\n*** End Patch",
     }, "repair-control-pair");
+    await invoke("powershell", {
+      command: `& "M:\\@HyperV\\gh-cli\\bin\\gh.exe" api graphql -f 'query=query { viewer { login } }'`,
+    }, "bootstrap-project-query");
+    await assert.rejects(
+      invoke("powershell", {
+        command: `& "M:\\@HyperV\\gh-cli\\bin\\gh.exe" api graphql -f 'query=mutation { placeholder }'`,
+      }, "bootstrap-project-mutation"),
+      (error: unknown) => error instanceof Error && /operation manifest unavailable/u.test(error.message),
+    );
+    await assert.rejects(
+      invoke("powershell", {
+        command: `& "M:\\@HyperV\\gh-cli\\bin\\gh.exe" api graphql --field query=@payload.graphql`,
+      }, "bootstrap-project-query-file"),
+      (error: unknown) => error instanceof Error && /operation manifest unavailable/u.test(error.message),
+    );
+    await assert.rejects(
+      invoke("powershell", {
+        command: `& "M:\\@HyperV\\gh-cli\\bin\\gh.exe" api graphql -f=query=@payload.graphql`,
+      }, "bootstrap-project-query-file-equals"),
+      (error: unknown) => error instanceof Error && /operation manifest unavailable/u.test(error.message),
+    );
+    await assert.rejects(
+      invoke("powershell", {
+        command: `& "M:\\@HyperV\\gh-cli\\bin\\gh.exe" api graphql -fquery=@payload.graphql`,
+      }, "bootstrap-project-query-file-concatenated"),
+      (error: unknown) => error instanceof Error && /operation manifest unavailable/u.test(error.message),
+    );
     for (const [tool, args, callID] of [
       ["write", { file: "src/plugin/index.ts", content: "not-written" }, "deny-source"],
       ["write", { content: "not-written" }, "deny-unknown"],
@@ -6656,9 +6703,10 @@ test("plugin shell gate allows explicit reads and denies unknown executables", a
     ]) {
       await expectActionableCommandDenial(() => invokePowerShell(command), "active-expansion");
     }
-    await expectActionableCommandDenial(
+    await assert.rejects(
       () => invokePowerShell("$value = & Remove-Item C:\\out\\f.txt"),
-      "executable-not-allowlisted",
+      (error: unknown) => error instanceof Error &&
+        (error as Error & { reason?: string }).reason === "project-boundary",
     );
     await invoke("echo safe > allowed.txt");
     await expectMessage(

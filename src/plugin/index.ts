@@ -779,6 +779,37 @@ function taskValues(text: string, keys: readonly string[]): string[] {
   return handoffValues(text, keys);
 }
 
+function taskHeaderCount(text: string, keys: readonly string[]): number {
+  const aliases = keys.map((key) => key.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")).join("|");
+  return [...text.matchAll(new RegExp(`^\\s*(?:${aliases})\\s*:`, "gimu"))].length;
+}
+
+function taskInlineValues(text: string, keys: readonly string[]): readonly string[] {
+  const aliases = keys.map((key) => key.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")).join("|");
+  return [...text.matchAll(new RegExp(`^\\s*(?:${aliases})\\s*:\\s*(\\S.*?)\\s*$`, "gimu"))]
+    .map((match) => match[1]!);
+}
+
+function taskBlockHasContent(text: string, keys: readonly string[]): boolean {
+  const aliases = keys.map((key) => key.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")).join("|");
+  const lines = text.split(/\r?\n/u);
+  const header = new RegExp(`^(\\s*)(?:${aliases})\\s*:\\s*$`, "iu");
+  const matches = lines.flatMap((line, index) => {
+    const match = header.exec(line);
+    return match === null ? [] : [{ index, indent: match[1]!.length }];
+  });
+  if (matches.length !== 1) return false;
+  for (let index = matches[0]!.index + 1; index < lines.length; index += 1) {
+    const line = lines[index]!;
+    if (line.trim().length === 0) continue;
+    if (/^(?:task_id|role|project_root|projectroot|handoff_path|handoffpath|source_manifest|sourcemanifest|operation_manifest|operationmanifest|acceptance|validation)\s*:/iu.test(line.trim())) break;
+    const indent = /^\s*/u.exec(line)![0].length;
+    if (indent <= matches[0]!.indent) break;
+    return true;
+  }
+  return false;
+}
+
 function parallelTaskMode(text: string): ActiveSessionState["parallel"] {
   const entries = handoffEntries(text);
   const group = handoffValue(entries, ["parallel_group"]);
@@ -3173,6 +3204,22 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           const sourceManifests = taskValues(prompt, ["source_manifest", "sourcemanifest"]);
           const acceptanceValues = taskValues(prompt, ["acceptance"]);
           const validationValues = taskValues(prompt, ["validation"]);
+          const acceptanceHeaders = taskHeaderCount(prompt, ["acceptance"]);
+          const validationHeaders = taskHeaderCount(prompt, ["validation"]);
+          const sourceManifestHeaders = taskHeaderCount(prompt, ["source_manifest", "sourcemanifest"]);
+          const acceptanceInline = taskInlineValues(prompt, ["acceptance"]);
+          const validationInline = taskInlineValues(prompt, ["validation"]);
+          const sourceManifestInline = taskInlineValues(prompt, ["source_manifest", "sourcemanifest"]);
+          const roleValues = taskValues(prompt, ["role"]);
+          const acceptancePresent = acceptanceInline.length === 1 || taskBlockHasContent(prompt, ["acceptance"]);
+          const validationPresent = validationInline.length === 1 || taskBlockHasContent(prompt, ["validation"]);
+          const sourceManifestPresent = sourceManifestInline.length === 1 ||
+            taskBlockHasContent(prompt, ["source_manifest", "sourcemanifest"]);
+          const explicitBlockHandoff = roleValues.length === 1 && roleValues[0]!.length > 0 &&
+            acceptancePresent && validationPresent && sourceManifestPresent &&
+            acceptanceHeaders === 1 && validationHeaders === 1 &&
+            sourceManifestHeaders === 1 && taskHeaderCount(prompt, ["project_root", "projectroot"]) === 1 &&
+            taskHeaderCount(prompt, ["operation_manifest", "operationmanifest"]) === 1;
           const taskIDs = taskValues(prompt, ["task_id"]);
           const resumeDeltas = taskValues(prompt, ["resume_delta"]);
           const resumeDeltaPresent = resumeDeltas.length === 1 && hasResumeContractShape(prompt);
@@ -3199,22 +3246,21 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
                 defects: [contractDefect("contract", "/", "resume_contract_redefinition")],
               });
             }
-          } else if (!isExplicitTaskHandoff(prompt)) {
+          } else if (!isExplicitTaskHandoff(prompt) && !explicitBlockHandoff) {
             throw new HandoffDeniedError("contract-invalid", "<worker-dispatch>", {
               defects: [contractDefect("contract", "/", "dispatch_inline_handoff_incomplete")],
-            });
-          } else if (
-            acceptanceValues.length !== 1 || acceptanceValues[0]!.length === 0 ||
-            validationValues.length !== 1 || validationValues[0]!.length === 0
-          ) {
-            throw new HandoffDeniedError("contract-invalid", "<worker-dispatch>", {
-              defects: [contractDefect("contract", "/", "dispatch_acceptance_validation_ambiguous")],
             });
           } else if (operationManifests.length !== 1 || operationManifests[0]!.length === 0) {
             throw new HandoffDeniedError("contract-invalid", "<worker-dispatch>", {
               defects: [contractDefect("contract", "/operation_manifest", "dispatch_operation_manifest_unique")],
             });
           } else if (operationManifests[0]!.toLowerCase() === "none") {
+            if (acceptanceValues.length !== 1 || validationValues.length !== 1 ||
+              acceptanceHeaders !== 1 || validationHeaders !== 1) {
+              throw new HandoffDeniedError("contract-invalid", "<worker-dispatch>", {
+                defects: [contractDefect("contract", "/", "dispatch_acceptance_validation_ambiguous")],
+              });
+            }
             if (projectRoots.length !== 1 || projectRoots[0]!.length === 0 || !isAbsolute(projectRoots[0]!)) {
               throw new HandoffDeniedError("contract-invalid", "<worker-dispatch>", {
                 defects: [contractDefect("contract", "/project_root", "dispatch_project_root_unique_absolute")],
@@ -3234,7 +3280,13 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
               });
             }
           } else {
-            if (sourceManifests.length !== 1 || sourceManifests[0]!.length === 0) {
+            if (acceptanceHeaders !== 1 || validationHeaders !== 1 || !acceptancePresent || !validationPresent ||
+              acceptanceInline.length > 1 || validationInline.length > 1) {
+              throw new HandoffDeniedError("contract-invalid", "<worker-dispatch>", {
+                defects: [contractDefect("contract", "/", "dispatch_acceptance_validation_ambiguous")],
+              });
+            }
+            if (sourceManifestHeaders !== 1 || !sourceManifestPresent || sourceManifestInline.length > 1) {
               throw new HandoffDeniedError("contract-invalid", "<worker-dispatch>", {
                 defects: [contractDefect("contract", "/source_manifest", "dispatch_source_manifest_unique")],
               });

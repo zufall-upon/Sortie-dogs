@@ -199,8 +199,16 @@ function isRemoteGitHubMutation(tokens: readonly string[]): boolean {
   if (command === "project") {
     return !new Set(["field-list", "item-list", "list", "view"]).has(tokens[2]?.toLowerCase() ?? "");
   }
-  // GraphQL transport can hide mutations in variables, files, or stdin; parallel workers fail closed.
-  return command === "api" && tokens[2]?.toLowerCase() === "graphql";
+  if (command !== "api" || tokens[2]?.toLowerCase() !== "graphql") return false;
+  for (let index = 3; index < tokens.length; index += 1) {
+    const token = tokens[index]!.toLowerCase();
+    if (token === "--input" || token.startsWith("--input=")) return true;
+    if (/query=@/iu.test(tokens[index]!)) return true;
+    if (new Set(["-f", "-F", "--field", "--raw-field"]).has(tokens[index]!) &&
+      /^query=@/iu.test(tokens[index + 1] ?? "")) return true;
+  }
+  const payload = tokens.slice(3).join(" ");
+  return !/\bquery\b/iu.test(payload) || /\bmutation\b/iu.test(payload);
 }
 
 function isReadOnlyGitCommand(tokens: readonly string[]): boolean {
@@ -369,7 +377,8 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
       if (/^\$env:[A-Za-z_][A-Za-z0-9_]*$/iu.test(source) ||
           (assignment && isLiteralPowerShellAssignment(source))) continue;
     }
-    const tokens = unwrapEnvironmentCommand(words(source));
+    let tokens = unwrapEnvironmentCommand(words(source));
+    if (powershell && tokens[0] === "&") tokens = tokens.slice(1);
     if (tokens.length === 0) continue;
     const executable = tokens[0].replaceAll("\\", "/").split("/").at(-1)!.toLowerCase();
     const commandOperands = operands(tokens);
@@ -578,7 +587,7 @@ export function isKnownReadOnlyTool(
   if (READ_ONLY_TOOLS.has(name) || additionalReadOnlyTools.has(name)) return true;
   if (!/^(?:bash|shell|powershell|pwsh)(?:$|[_-])/u.test(name)) return false;
   const extraction = extractWritePaths(tool, args);
-  return !extraction.applies && !extraction.ambiguous;
+  return !extraction.applies && !extraction.ambiguous && extraction.remoteMutation !== true;
 }
 
 async function nearestExistingRealPath(path: string): Promise<string> {
