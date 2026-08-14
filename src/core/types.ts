@@ -253,7 +253,13 @@ export interface ParallelDispatchArchive {
   readonly tasks: readonly ParallelDispatchArchiveTask[];
 }
 
-export type IntegrationQueuePhase = "queued" | "integrating" | "integrated" | "failed";
+export type IntegrationQueuePhase =
+  | "queued"
+  | "preparing"
+  | "remediation-required"
+  | "prepared"
+  | "integrated"
+  | "failed";
 
 export type IntegrationQueueErrorCode =
   | "invalid-archive"
@@ -268,11 +274,69 @@ export type IntegrationQueueErrorCode =
   | "queue-owned"
   | "queue-lease"
   | "corrupt-state"
-  | "git-incompatible";
+  | "git-incompatible"
+  | "validation-failed"
+  | "review-failed"
+  | "remediation-exhausted";
+
+export type IntegrationQueueBlockerCode =
+  | "merge-conflict"
+  | "validation-failed"
+  | "review-failed"
+  | "remediation-exhausted";
+
+export interface IntegrationQueueBlocker {
+  readonly code: IntegrationQueueBlockerCode;
+  readonly task_id: string;
+  readonly candidate_base: string;
+  readonly conflict_paths: readonly string[];
+  readonly causal_task_ids: readonly string[];
+  readonly attempts_remaining: 0 | 1;
+}
+
+export interface IntegrationQueueValidationSnapshot {
+  readonly command: readonly string[];
+  readonly status: "pending" | "pass" | "fail";
+  readonly exit_code: number | null;
+  readonly fingerprint: string | null;
+  readonly candidate_head: string | null;
+}
+
+export interface IntegrationQueueReviewSnapshot {
+  readonly status: "pending" | "pass" | "fail";
+  readonly fingerprint: string | null;
+  readonly candidate_head: string | null;
+}
+
+export interface ContainedValidationRequest {
+  readonly executable: string;
+  readonly args?: readonly string[];
+  readonly cwd: string;
+  readonly timeout_ms: number;
+}
+
+export type ContainedValidationErrorCode = "invalid-request" | "execution-failed";
+
+export type ContainedValidationResult =
+  | {
+    readonly ok: true;
+    readonly command: readonly string[];
+    readonly exit_code: 0;
+    readonly fingerprint: string;
+    readonly error: null;
+  }
+  | {
+    readonly ok: false;
+    readonly command: readonly string[];
+    readonly exit_code: number | null;
+    readonly fingerprint: string;
+    readonly error: ContainedValidationErrorCode;
+  };
 
 export interface IntegrationQueueTaskSnapshot {
   readonly task_id: string;
   readonly source_commit: string;
+  readonly original_source_commit: string;
   readonly synthetic_commit: string | null;
   readonly integrated: boolean;
 }
@@ -284,7 +348,12 @@ export interface IntegrationQueueSnapshot {
   readonly target_base: string;
   readonly phase: IntegrationQueuePhase;
   readonly candidate_head: string | null;
+  readonly candidate_ref: string;
   readonly failure_code: IntegrationQueueErrorCode | null;
+  readonly validation: IntegrationQueueValidationSnapshot;
+  readonly review: IntegrationQueueReviewSnapshot;
+  readonly blocker: IntegrationQueueBlocker | null;
+  readonly remediation_attempts_used: 0 | 1;
   readonly tasks: readonly IntegrationQueueTaskSnapshot[];
   readonly cleanup_pending: readonly string[];
   readonly warnings: readonly string[];

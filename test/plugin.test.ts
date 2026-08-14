@@ -1580,6 +1580,7 @@ test("invalid global Sortie config fails reflection closed without removing core
       const hooks = await SortieDogsPlugin({ directory });
       assert.equal(hooks.tool?.sortie_reflection, undefined);
       assert.deepEqual(Object.keys(hooks.tool ?? {}).sort(), [
+        "sortie_accept_parallel_integration",
         "sortie_bind_write_gate",
         "sortie_cancel_parallel_dispatch",
         "sortie_check_contract",
@@ -1592,6 +1593,7 @@ test("invalid global Sortie config fails reflection closed without removing core
         "sortie_parallel_integration_status",
         "sortie_prepare_parallel_dispatch",
         "sortie_release_write_gate",
+        "sortie_submit_integration_remediation",
       ]);
       assert.equal(warnings.length, 1);
       await activate(hooks, "invalid-json-global");

@@ -4,6 +4,8 @@ import { lstat, realpath } from "node:fs/promises";
 import { isAbsolute, join, resolve, sep } from "node:path";
 import type {
   ParallelDispatchDescriptor,
+  ContainedValidationRequest,
+  ContainedValidationResult,
   WorktreeCommitArtifact,
   WorktreeCommitProduceRequest,
   WorktreeCommitValidationEvidence,
@@ -562,6 +564,40 @@ async function runBounded(
       `${kind === "git" ? "Git" : "Validation"} executable failed.`);
   } finally {
     clearTimeout(timer);
+  }
+}
+
+/** Runs one bounded command without exposing output or performing Git mutations. */
+export async function runContainedValidation(request: ContainedValidationRequest): Promise<ContainedValidationResult> {
+  const suppliedArgs = isRecord(request) && Array.isArray(request.args) ? request.args : [];
+  const fallbackCommand = Object.freeze([
+    isRecord(request) && typeof request.executable === "string" ? request.executable : "invalid",
+    ...suppliedArgs.filter((value): value is string => typeof value === "string"),
+  ]);
+  const failed = (command: readonly string[], exitCode: number | null, error: "invalid-request" | "execution-failed") =>
+    Object.freeze({ ok: false as const, command, exit_code: exitCode,
+      fingerprint: createHash("sha256").update(JSON.stringify([command, exitCode, error])).digest("hex"), error });
+  if (!isRecord(request) || !exactKeys(request, ["cwd", "executable", "timeout_ms", ...(request.args === undefined ? [] : ["args"])]) ||
+    !validText(request.executable, MAX_COMMAND_TEXT) || !isAbsolute(request.executable) ||
+    !validText(request.cwd, MAX_PATH) || !isAbsolute(request.cwd) ||
+    !Number.isInteger(request.timeout_ms) || request.timeout_ms < 1 || request.timeout_ms > MAX_TIMEOUT ||
+    !Array.isArray(suppliedArgs) || suppliedArgs.length > MAX_ARGUMENTS ||
+    !suppliedArgs.every((arg) => validText(arg, MAX_COMMAND_TEXT))) return failed(fallbackCommand, null, "invalid-request");
+  const [executable, cwd] = await Promise.all([
+    realpath(request.executable).catch(() => undefined), realpath(request.cwd).catch(() => undefined),
+  ]);
+  if (executable === undefined || cwd === undefined || !isAbsolute(executable) || !isAbsolute(cwd)) {
+    return failed(fallbackCommand, null, "invalid-request");
+  }
+  const command = Object.freeze([executable, ...suppliedArgs]);
+  try {
+    const result = await runBounded(executable, suppliedArgs, cwd, request.timeout_ms, "validation");
+    const fingerprint = createHash("sha256").update(JSON.stringify([command, result.code])).digest("hex");
+    return result.code === 0
+      ? Object.freeze({ ok: true as const, command, exit_code: 0 as const, fingerprint, error: null })
+      : Object.freeze({ ok: false as const, command, exit_code: result.code, fingerprint, error: "execution-failed" as const });
+  } catch {
+    return failed(command, null, "execution-failed");
   }
 }
 

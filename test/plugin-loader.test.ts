@@ -307,6 +307,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
      * names it. Text-only parity is exactly what let the batch loop ship inert.
      */
     assert.deepEqual(loaded.packedTools, [
+      "sortie_accept_parallel_integration",
       "sortie_bind_write_gate",
       "sortie_cancel_parallel_dispatch",
       "sortie_check_contract",
@@ -319,6 +320,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
         "sortie_parallel_integration_status",
       "sortie_prepare_parallel_dispatch",
       "sortie_release_write_gate",
+      "sortie_submit_integration_remediation",
     ]);
     assert.deepEqual(loaded.packedHookKeys, [
       "experimental.chat.system.transform",
@@ -370,7 +372,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     for (const asset of loaded.runtimeAssets) {
       assert.equal(asset.version, RUNTIME_ASSET_VERSION, `${asset.name} version must match the shared marker`);
     }
-    assert.equal(RUNTIME_ASSET_VERSION, "0.3.16-parallel-integration-queue-v1");
+    assert.equal(RUNTIME_ASSET_VERSION, "0.3.17-parallel-conflict-remediation-v1");
     const coordinatorFrontmatter = /^---\r?\n([\s\S]*?)\r?\n---/u.exec(coordinator.content)?.[1];
     assert.ok(coordinatorFrontmatter);
     assert.match(coordinatorFrontmatter, /^model: openai\/gpt-5\.6-terra$/m);
@@ -1237,7 +1239,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(sortie.content, /never route a worker to the user/i);
 
     for (const asset of loaded.runtimeAssets) {
-      assert.equal(asset.version, "0.3.16-parallel-integration-queue-v1");
+      assert.equal(asset.version, "0.3.17-parallel-conflict-remediation-v1");
       const frontmatter = asset.content.match(/^---\r?\n([\s\S]+?)\r?\n---\r?\n/);
       assert.ok(frontmatter, `${asset.name} must have frontmatter`);
       const entries = Object.fromEntries(

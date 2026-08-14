@@ -126,5 +126,12 @@ models, worker bound, validation conditions, and measurement window.
   merge conflict, and linked target worktree rejection leave the target unchanged. Source refs are
   adopted after accepted integration. Accepted integration owns cleanup; `cleanup_pending` permits
   exact integrate/status resumption without rollback. No raw patch or log exposure.
-- Card 07: conflict remediation and combined validation.
+- Card 07: completed. Integration first prepares a synthetic candidate and runs contained combined
+  canonical validation; preparation never updates the target. `remediation-required` exposes the
+  candidate base, conflict paths, causal tasks, original scope, and one remaining attempt. The
+  coordinator may dispatch exactly one scoped worker remediation, submit its Card 05 artifact, and
+  prepare once more. A fresh external high-risk review binds a typed pass or fail to that candidate;
+  only `sortie_accept_parallel_integration(..., review=pass, review_fingerprint)` performs target CAS.
+  Conflict, validation failure, review failure, or target race leaves the target unchanged. Automatic
+  reviewer dispatch and bisection are deferred.
 - Card 08: Windows/WSL RPT and efficiency audit.

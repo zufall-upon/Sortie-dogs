@@ -35,7 +35,8 @@ async function fixture(name: string) {
   return { root, repository, base };
 }
 
-async function artifact(repository: string, base: string, id: string, path: string, content: string): Promise<WorktreeCommitArtifact> {
+async function artifact(repository: string, base: string, id: string, path: string, content: string,
+  command: readonly string[] = [process.execPath]): Promise<WorktreeCommitArtifact> {
   await git(repository, "switch", "-q", "-C", `artifact-${id}`, base);
   await writeFile(join(repository, path), content);
   await git(repository, "add", path);
@@ -45,7 +46,7 @@ async function artifact(repository: string, base: string, id: string, path: stri
   return {
     task_id: id, base_sha: base, commit_sha: commit, branch: `sortie/${id}`,
     changed_paths: [path], change_fingerprint: "a".repeat(64),
-    validation: { command: [process.execPath], exit_code: 0, validation_fingerprint: "b".repeat(64) },
+    validation: { command, exit_code: 0, validation_fingerprint: "b".repeat(64) },
   };
 }
 
@@ -71,6 +72,18 @@ async function code(operation: Promise<unknown>, expected: IntegrationQueueError
   await assert.rejects(operation, (error: unknown) => error instanceof IntegrationQueueError && error.code === expected);
 }
 
+async function prepareAccept(queue: WorktreeIntegrationQueue, runID: string) {
+  const prepared = await queue.prepare("root", runID);
+  assert.equal(prepared.phase, "prepared");
+  return queue.accept("root", runID, {
+    candidate_head: prepared.candidate_head!, review: "pass", review_fingerprint: "d".repeat(64),
+  });
+}
+
+async function assertNoValidationWorktree(repository: string): Promise<void> {
+  assert.doesNotMatch(await git(repository, "worktree", "list", "--porcelain"), /integration-queue-v2[\\/]validation-/u);
+}
+
 test("plumbing integrates deterministic topo order with atomic target update and clean checkout", async () => {
   const value = await fixture("success");
   try {
@@ -81,7 +94,13 @@ test("plumbing integrates deterministic topo order with atomic target update and
     const queued = await queue.enqueue("root", archive(value.base, [c, b, a], { b: ["a"] }));
     assert.deepEqual(queued.tasks.map(({ task_id }) => task_id), ["a", "c", "b"]);
     assert.equal((await git(value.repository, "rev-parse", "target")).trim(), value.base);
-    const accepted = await queue.integrate("root", "run-card06");
+    const prepared = await queue.prepare("root", "run-card06");
+    assert.equal(prepared.phase, "prepared");
+    assert.equal(prepared.validation.status, "pass");
+    assert.equal((await git(value.repository, "rev-parse", "target")).trim(), value.base);
+    const accepted = await queue.accept("root", "run-card06", {
+      candidate_head: prepared.candidate_head!, review: "pass", review_fingerprint: "d".repeat(64),
+    });
     assert.equal(accepted.phase, "integrated");
     assert.equal((await git(value.repository, "rev-list", "--count", `${value.base}..target`)).trim(), "3");
     assert.match(await git(value.repository, "show", "target:a.txt"), /a/u);
@@ -89,20 +108,159 @@ test("plumbing integrates deterministic topo order with atomic target update and
     assert.match(await git(value.repository, "show", "target:c.txt"), /c/u);
     assert.equal(await git(value.repository, "status", "--porcelain"), "");
     assert.equal((await git(value.repository, "symbolic-ref", "--short", "HEAD")).trim(), "controller");
-    assert.equal((await queue.integrate("root", "run-card06")).candidate_head, accepted.candidate_head);
+    assert.equal((await queue.accept("root", "run-card06", {
+      candidate_head: accepted.candidate_head!, review: "pass", review_fingerprint: "d".repeat(64),
+    })).candidate_head, accepted.candidate_head);
   } finally { await rm(value.root, { recursive: true, force: true }); }
 });
 
-test("conflict fails closed and retains queue", async () => {
+test("conflict requests one bounded remediation and retains target", async () => {
   const value = await fixture("conflict");
   try {
     const a = await artifact(value.repository, value.base, "a", "shared.txt", "artifact-a\n");
     const b = await artifact(value.repository, value.base, "b", "shared.txt", "artifact-b\n");
     const queue = await WorktreeIntegrationQueue.open({ repositoryRoot: value.repository, targetBranch: "target" });
     await queue.enqueue("root", archive(value.base, [a, b]));
-    await code(queue.integrate("root", "run-card06"), "merge-conflict");
+    const stopped = await queue.prepare("root", "run-card06");
+    assert.equal(stopped.phase, "remediation-required");
+    assert.deepEqual(stopped.blocker?.conflict_paths, ["shared.txt"]);
+    assert.equal(stopped.blocker?.task_id, "b");
+    assert.deepEqual(stopped.blocker?.causal_task_ids, ["a"]);
+    assert.equal(stopped.blocker?.attempts_remaining, 1);
     assert.equal((await git(value.repository, "rev-parse", "target")).trim(), value.base);
     assert.equal((await queue.snapshot("root", "run-card06"))!.failure_code, "merge-conflict");
+  } finally { await rm(value.root, { recursive: true, force: true }); }
+});
+
+test("canonical validation command mismatch fails closed without moving target", async () => {
+  const value = await fixture("command-mismatch");
+  try {
+    const a = await artifact(value.repository, value.base, "a", "a.txt", "a\n");
+    const b = await artifact(value.repository, value.base, "b", "b.txt", "b\n",
+      [process.execPath, "-e", "process.exit(0)"]);
+    const queue = await WorktreeIntegrationQueue.open({ repositoryRoot: value.repository, targetBranch: "target" });
+    const queued = await queue.enqueue("root", archive(value.base, [a, b], {}, "run-command-mismatch"));
+    assert.equal(queued.phase, "failed");
+    assert.equal(queued.failure_code, "validation-failed");
+    assert.equal(queued.blocker?.code, "validation-failed");
+    await code(queue.prepare("root", "run-command-mismatch"), "validation-failed");
+    assert.equal((await git(value.repository, "rev-parse", "target")).trim(), value.base);
+  } finally { await rm(value.root, { recursive: true, force: true }); }
+});
+
+test("combined validation nonzero persists failure evidence and removes its temporary worktree", async () => {
+  const value = await fixture("validation-fail");
+  try {
+    const command = [process.execPath, "-e", "process.exit(7)"];
+    const a = await artifact(value.repository, value.base, "a", "a.txt", "a\n", command);
+    const b = await artifact(value.repository, value.base, "b", "b.txt", "b\n", command);
+    const queue = await WorktreeIntegrationQueue.open({ repositoryRoot: value.repository, targetBranch: "target" });
+    await queue.enqueue("root", archive(value.base, [a, b], {}, "run-validation-fail"));
+    const failed = await queue.prepare("root", "run-validation-fail");
+    assert.equal(failed.phase, "failed");
+    assert.equal(failed.failure_code, "validation-failed");
+    assert.equal(failed.blocker?.code, "validation-failed");
+    assert.equal(failed.validation.status, "fail");
+    assert.notEqual(failed.validation.exit_code, 0);
+    assert.match(failed.validation.fingerprint!, /^[0-9a-f]{64}$/u);
+    assert.equal(failed.validation.candidate_head, failed.candidate_head);
+    assert.equal((await git(value.repository, "rev-parse", "target")).trim(), value.base);
+    await assertNoValidationWorktree(value.repository);
+    const reopened = await WorktreeIntegrationQueue.open({ repositoryRoot: value.repository, targetBranch: "target" });
+    const persisted = await reopened.snapshot("root", "run-validation-fail");
+    assert.deepEqual(persisted?.validation, failed.validation);
+    assert.deepEqual(persisted?.blocker, failed.blocker);
+  } finally { await rm(value.root, { recursive: true, force: true }); }
+});
+
+test("line-start conflict markers fail before acceptance without moving target", async () => {
+  const value = await fixture("conflict-markers");
+  try {
+    const content = "before\n<<<<<<< ours\nleft\n=======\nright\n>>>>>>> theirs\nafter\n";
+    const a = await artifact(value.repository, value.base, "a", "markers.txt", content);
+    const queue = await WorktreeIntegrationQueue.open({ repositoryRoot: value.repository, targetBranch: "target" });
+    await queue.enqueue("root", archive(value.base, [a], {}, "run-conflict-markers"));
+    const failed = await queue.prepare("root", "run-conflict-markers");
+    assert.equal(failed.phase, "failed");
+    assert.equal(failed.failure_code, "validation-failed");
+    assert.equal(failed.blocker?.code, "validation-failed");
+    assert.equal(failed.validation.status, "fail");
+    assert.equal(failed.validation.exit_code, null);
+    assert.equal((await git(value.repository, "rev-parse", "target")).trim(), value.base);
+    await assertNoValidationWorktree(value.repository);
+  } finally { await rm(value.root, { recursive: true, force: true }); }
+});
+
+test("review failure survives reopen with evidence and leaves target unchanged", async () => {
+  const value = await fixture("review-fail");
+  try {
+    const reviewFingerprint = "e".repeat(64);
+    const a = await artifact(value.repository, value.base, "a", "a.txt", "a\n");
+    const queue = await WorktreeIntegrationQueue.open({ repositoryRoot: value.repository, targetBranch: "target" });
+    await queue.enqueue("root", archive(value.base, [a], {}, "run-review-fail"));
+    const prepared = await queue.prepare("root", "run-review-fail");
+    assert.equal(prepared.phase, "prepared");
+    await assertNoValidationWorktree(value.repository);
+    const failed = await queue.accept("root", "run-review-fail", {
+      candidate_head: prepared.candidate_head!, review: "fail", review_fingerprint: reviewFingerprint,
+    });
+    assert.equal(failed.phase, "failed");
+    assert.equal(failed.failure_code, "review-failed");
+    assert.equal(failed.blocker?.code, "review-failed");
+    assert.deepEqual(failed.review, {
+      status: "fail", fingerprint: reviewFingerprint, candidate_head: prepared.candidate_head,
+    });
+    assert.equal((await git(value.repository, "rev-parse", "target")).trim(), value.base);
+    const reopened = await WorktreeIntegrationQueue.open({ repositoryRoot: value.repository, targetBranch: "target" });
+    const persisted = await reopened.snapshot("root", "run-review-fail");
+    assert.deepEqual(persisted?.review, failed.review);
+    assert.equal(persisted?.failure_code, "review-failed");
+    assert.equal(persisted?.blocker?.code, "review-failed");
+  } finally { await rm(value.root, { recursive: true, force: true }); }
+});
+
+test("one direct-child remediation integrates with original provenance", async () => {
+  const value = await fixture("remediation-success");
+  try {
+    const a = await artifact(value.repository, value.base, "a", "shared.txt", "artifact-a\n");
+    const b = await artifact(value.repository, value.base, "b", "shared.txt", "artifact-b\n");
+    const queue = await WorktreeIntegrationQueue.open({ repositoryRoot: value.repository, targetBranch: "target" });
+    await queue.enqueue("root", archive(value.base, [a, b], {}, "run-remediation-success"));
+    const stopped = await queue.prepare("root", "run-remediation-success");
+    assert.equal(stopped.blocker?.task_id, "b");
+    assert.deepEqual(stopped.blocker?.conflict_paths, ["shared.txt"]);
+    assert.deepEqual(stopped.blocker?.causal_task_ids, ["a"]);
+    const replacement = await artifact(value.repository, stopped.blocker!.candidate_base, "b", "shared.txt", "resolved\n");
+    const resumed = await queue.submitRemediation("root", "run-remediation-success", replacement);
+    assert.equal(resumed.phase, "queued");
+    assert.equal(resumed.remediation_attempts_used, 1);
+    const prepared = await queue.prepare("root", "run-remediation-success");
+    assert.equal(prepared.phase, "prepared");
+    await assertNoValidationWorktree(value.repository);
+    const accepted = await queue.accept("root", "run-remediation-success", {
+      candidate_head: prepared.candidate_head!, review: "pass", review_fingerprint: "f".repeat(64),
+    });
+    assert.equal(accepted.phase, "integrated");
+    assert.equal(await git(value.repository, "show", "target:shared.txt"), "resolved\n");
+    assert.equal(accepted.tasks.find(({ task_id }) => task_id === "b")?.original_source_commit, b.commit_sha);
+  } finally { await rm(value.root, { recursive: true, force: true }); }
+});
+
+test("a second remediation submission is exhausted and cannot move target", async () => {
+  const value = await fixture("remediation-exhausted");
+  try {
+    const a = await artifact(value.repository, value.base, "a", "shared.txt", "artifact-a\n");
+    const b = await artifact(value.repository, value.base, "b", "shared.txt", "artifact-b\n");
+    const queue = await WorktreeIntegrationQueue.open({ repositoryRoot: value.repository, targetBranch: "target" });
+    await queue.enqueue("root", archive(value.base, [a, b], {}, "run-remediation-exhausted"));
+    const stopped = await queue.prepare("root", "run-remediation-exhausted");
+    const replacement = await artifact(value.repository, stopped.blocker!.candidate_base, "b", "shared.txt", "resolved\n");
+    await queue.submitRemediation("root", "run-remediation-exhausted", replacement);
+    await code(queue.submitRemediation("root", "run-remediation-exhausted", replacement), "remediation-exhausted");
+    const persisted = await queue.snapshot("root", "run-remediation-exhausted");
+    assert.equal(persisted?.phase, "queued");
+    assert.equal(persisted?.remediation_attempts_used, 1);
+    assert.equal((await git(value.repository, "rev-parse", "target")).trim(), value.base);
   } finally { await rm(value.root, { recursive: true, force: true }); }
 });
 
@@ -135,14 +293,39 @@ test("target movement before CAS rejects without overwrite", async () => {
     const a = await artifact(value.repository, value.base, "a", "a.txt", "a\n");
     const queue = await WorktreeIntegrationQueue.open({ repositoryRoot: value.repository, targetBranch: "target" });
     await queue.enqueue("root", archive(value.base, [a]));
+    const prepared = await queue.prepare("root", "run-card06");
     await git(value.repository, "switch", "-q", "target");
     await writeFile(join(value.repository, "target.txt"), "moved\n");
     await git(value.repository, "add", "target.txt");
     await git(value.repository, "commit", "-q", "-m", "move target");
     const moved = (await git(value.repository, "rev-parse", "HEAD")).trim();
     await git(value.repository, "switch", "-q", "controller");
-    await code(queue.integrate("root", "run-card06"), "stale-target");
+    const stopped = await queue.accept("root", "run-card06", {
+      candidate_head: prepared.candidate_head!, review: "pass", review_fingerprint: "d".repeat(64),
+    });
+    assert.equal(stopped.phase, "failed");
+    assert.equal(stopped.failure_code, "stale-target");
     assert.equal((await git(value.repository, "rev-parse", "target")).trim(), moved);
+    const reopened = await WorktreeIntegrationQueue.open({ repositoryRoot: value.repository, targetBranch: "target" });
+    assert.equal((await reopened.snapshot("root", "run-card06"))!.failure_code, "stale-target");
+  } finally { await rm(value.root, { recursive: true, force: true }); }
+});
+
+test("target movement after enqueue persists stale failure before prepare", async () => {
+  const value = await fixture("stale-before-prepare");
+  try {
+    const a = await artifact(value.repository, value.base, "a", "a.txt", "a\n");
+    const queue = await WorktreeIntegrationQueue.open({ repositoryRoot: value.repository, targetBranch: "target" });
+    await queue.enqueue("root", archive(value.base, [a]));
+    await git(value.repository, "switch", "-q", "target");
+    await writeFile(join(value.repository, "moved.txt"), "moved\n");
+    await git(value.repository, "add", "moved.txt");
+    await git(value.repository, "commit", "-q", "-m", "move before prepare");
+    await git(value.repository, "switch", "-q", "controller");
+    const stopped = await queue.prepare("root", "run-card06");
+    assert.equal(stopped.failure_code, "stale-target");
+    const reopened = await WorktreeIntegrationQueue.open({ repositoryRoot: value.repository, targetBranch: "target" });
+    assert.equal((await reopened.snapshot("root", "run-card06"))!.phase, "failed");
   } finally { await rm(value.root, { recursive: true, force: true }); }
 });
 
@@ -154,9 +337,11 @@ test("concurrent enqueue is serialized and restart is idempotent", async () => {
     const queue = await WorktreeIntegrationQueue.open({ repositoryRoot: value.repository, targetBranch: "target" });
     const results = await Promise.all([queue.enqueue("root", input), queue.enqueue("root", input)]);
     assert.deepEqual(results[0], results[1]);
-    const accepted = await queue.integrate("root", "run-card06");
+    const accepted = await prepareAccept(queue, "run-card06");
     const restarted = await WorktreeIntegrationQueue.open({ repositoryRoot: value.repository, targetBranch: "target" });
-    const resumed = await restarted.integrate("root", "run-card06");
+    const resumed = await restarted.accept("root", "run-card06", {
+      candidate_head: accepted.candidate_head!, review: "pass", review_fingerprint: "d".repeat(64),
+    });
     assert.equal(resumed.candidate_head, accepted.candidate_head);
     assert.equal((await git(value.repository, "rev-list", "--count", `${value.base}..target`)).trim(), "1");
   } finally { await rm(value.root, { recursive: true, force: true }); }
@@ -167,11 +352,11 @@ test("completed queue archives and releases its slot for a subsequent run", asyn
   try {
     const a = await artifact(value.repository, value.base, "a", "a.txt", "a\n");
     const queue = await WorktreeIntegrationQueue.open({ repositoryRoot: value.repository, targetBranch: "target" });
-    const first = await queue.integrate("root", (await queue.enqueue("root", archive(value.base, [a], {}, "run-one"))).run_id);
+    const first = await prepareAccept(queue, (await queue.enqueue("root", archive(value.base, [a], {}, "run-one"))).run_id);
     const nextBase = first.candidate_head!;
     const b = await artifact(value.repository, nextBase, "b", "b.txt", "b\n");
     await queue.enqueue("root", archive(nextBase, [b], {}, "run-two"));
-    const second = await queue.integrate("root", "run-two");
+    const second = await prepareAccept(queue, "run-two");
     assert.equal(second.phase, "integrated");
     assert.equal((await queue.snapshot("root", "run-one"))!.candidate_head, first.candidate_head);
     await code(queue.snapshot("other", "run-one"), "queue-owned");
@@ -243,7 +428,10 @@ test("cleanup reconciles lifecycle-complete worktrees after queue-save crash", a
     WorktreeIntegrationQueue.prototype.cleanup = async function(owner, runID) {
       return (await this.snapshot(owner, runID))!;
     };
-    await queue.integrate("root", "run-cleanup");
+    const prepared = await queue.prepare("root", "run-cleanup");
+    await queue.accept("root", "run-cleanup", {
+      candidate_head: prepared.candidate_head!, review: "pass", review_fingerprint: "d".repeat(64),
+    });
     WorktreeIntegrationQueue.prototype.cleanup = originalCleanup;
     await lifecycle.cleanup("worktree-a");
     await lifecycle.cleanup("worktree-b");

@@ -1212,8 +1212,19 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       run_id: snapshot.run_id,
       target_branch: targetBranch,
       phase: snapshot.phase,
+      candidate: snapshot.candidate_head,
+      blocker: snapshot.blocker,
+      validation: snapshot.validation,
+      review: snapshot.review,
+      remediation_attempts_used: snapshot.remediation_attempts_used,
       failure_code: snapshot.failure_code,
-      tasks: snapshot.tasks.map(({ task_id, integrated }) => ({ task_id, integrated })),
+      tasks: snapshot.tasks.map(({ task_id, source_commit, original_source_commit, synthetic_commit, integrated }) => ({
+        task_id,
+        source_commit,
+        original_source_commit,
+        synthetic_commit,
+        integrated,
+      })),
       cleanup_pending: snapshot.cleanup_pending.length,
       cleanup_pending_visible: snapshot.cleanup_pending.length > 0,
       warnings: snapshot.warnings.map((warning) => warning.startsWith("cleanup-pending:") ? "cleanup-pending" : "warning"),
@@ -1221,7 +1232,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   }
 
   async function parallelIntegration(
-    action: "enqueue" | "integrate" | "status",
+    action: "enqueue" | "prepare" | "accept" | "remediation" | "status",
     args: Record<string, string>,
     context: { sessionID: string; agent?: string },
   ): Promise<string> {
@@ -1243,7 +1254,37 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         if (archive === undefined) return deny("archive-required");
         return JSON.stringify({ status: "queued", ...boundedIntegrationSnapshot(await queue.enqueue(ownerRoot, archive), targetBranch!) });
       }
-      return JSON.stringify({ status: "ok", ...boundedIntegrationSnapshot(await queue.integrate(ownerRoot, runID!), targetBranch!) });
+      if (action === "prepare") {
+        const snapshot = await queue.prepare(ownerRoot, runID!);
+        return JSON.stringify({ status: snapshot.phase, ...boundedIntegrationSnapshot(snapshot, targetBranch!) });
+      }
+      if (action === "accept") {
+        const candidateHead = args.candidate_head;
+        const review = args.review;
+        const reviewFingerprint = args.review_fingerprint;
+        if (!validIntegrationInput(candidateHead ?? "", 128) || !["pass", "fail"].includes(review ?? "") ||
+          !/^[a-f0-9]{64}$/u.test(reviewFingerprint ?? "")) return deny("invalid-request");
+        const snapshot = await queue.accept(ownerRoot, runID!, {
+          candidate_head: candidateHead!,
+          review: review as "pass" | "fail",
+          review_fingerprint: reviewFingerprint!,
+        });
+        return JSON.stringify({ status: snapshot.phase, ...boundedIntegrationSnapshot(snapshot, targetBranch!) });
+      }
+      if (action === "remediation") {
+        const artifactJson = args.artifact_json;
+        if (typeof artifactJson !== "string" || Buffer.byteLength(artifactJson, "utf8") > 64 * 1024 ||
+          /[\u0000-\u001f\u007f]/u.test(artifactJson)) return deny("invalid-request");
+        let artifact: WorktreeCommitArtifact;
+        try {
+          artifact = JSON.parse(artifactJson) as WorktreeCommitArtifact;
+        } catch {
+          return deny("invalid-request");
+        }
+        const snapshot = await queue.submitRemediation(ownerRoot, runID!, artifact);
+        return JSON.stringify({ status: snapshot.phase, ...boundedIntegrationSnapshot(snapshot, targetBranch!) });
+      }
+      return deny("invalid-request");
     } catch (error) {
       return deny(error instanceof IntegrationQueueError ? error.code : "integration-unavailable");
     }
@@ -2656,10 +2697,28 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         },
       }),
       sortie_integrate_parallel_queue: defineTool({
-        description: "Integrate one queued parallel run into its requested target branch and attempt cleanup.",
+        description: "Prepare one queued parallel run with combined validation only; the target branch remains unchanged.",
         args: { run_id: defineTool.schema.string(), target_branch: defineTool.schema.string() },
         async execute(args, context): Promise<string> {
-          return parallelIntegration("integrate", args, context);
+          return parallelIntegration("prepare", args, context);
+        },
+      }),
+      sortie_accept_parallel_integration: defineTool({
+        description: "Accept or reject one prepared candidate after independent review; a passing review may update the target branch.",
+        args: {
+          run_id: defineTool.schema.string(), target_branch: defineTool.schema.string(),
+          candidate_head: defineTool.schema.string(), review: defineTool.schema.string(),
+          review_fingerprint: defineTool.schema.string(),
+        },
+        async execute(args, context): Promise<string> {
+          return parallelIntegration("accept", args, context);
+        },
+      }),
+      sortie_submit_integration_remediation: defineTool({
+        description: "Submit the one coordinator-owned remediation artifact for a remediation-required integration.",
+        args: { run_id: defineTool.schema.string(), target_branch: defineTool.schema.string(), artifact_json: defineTool.schema.string() },
+        async execute(args, context): Promise<string> {
+          return parallelIntegration("remediation", args, context);
         },
       }),
       sortie_parallel_integration_status: defineTool({
@@ -2970,6 +3029,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         toolInput.tool === "sortie_prepare_parallel_dispatch" || toolInput.tool === "sortie_parallel_dispatch_status" ||
         toolInput.tool === "sortie_cancel_parallel_dispatch" ||
         toolInput.tool === "sortie_enqueue_parallel_integration" || toolInput.tool === "sortie_integrate_parallel_queue" ||
+        toolInput.tool === "sortie_accept_parallel_integration" || toolInput.tool === "sortie_submit_integration_remediation" ||
         toolInput.tool === "sortie_parallel_integration_status";
       if (
         isCoordinatorSession(toolInput.sessionID) ||

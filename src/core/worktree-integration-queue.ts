@@ -1,18 +1,23 @@
 import { createHash, randomUUID } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import { chmod, mkdir, open, readFile, realpath, rename, rm } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 
 import { ScopeLeaseError, ScopeLeaseRegistry, type ScopeLease } from "./scope-lease-registry.js";
 import type {
+  ContainedValidationResult,
   IntegrationQueueErrorCode,
+  IntegrationQueueBlocker,
   IntegrationQueueSnapshot,
   ParallelDispatchArchive,
   ParallelDispatchArchiveTask,
+  WorktreeCommitArtifact,
 } from "./types.js";
+import { runContainedValidation } from "./worktree-commit-artifact.js";
+import { normalizeWorktreeScopePath } from "./worktree-scope.js";
 import { WorktreeLifecycle } from "./worktree-lifecycle.js";
 
-const VERSION = 2;
+const VERSION = 3;
 const MAX_ARCHIVED = 16;
 const MAX_STATE = 1024 * 1024;
 const MAX_PATCH = 16 * 1024 * 1024;
@@ -21,6 +26,10 @@ const GIT_TIMEOUT = 60_000;
 const SHA = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u;
 const HASH = /^[0-9a-f]{64}$/u;
 const REF = /^refs\/heads\/[A-Za-z0-9][A-Za-z0-9._\/-]{0,254}$/u;
+const MAX_COMMAND_PARTS = 129;
+const MAX_COMMAND_TEXT = 1000;
+const VALIDATION_TIMEOUT = 10 * 60_000;
+const LEASE_TTL = VALIDATION_TIMEOUT + 2 * 60_000;
 const LEASE_SCOPE = Object.freeze({ read: [] as string[], write: ["sortie-dogs/integration-queue-v2"] });
 
 type StoredTask = {
@@ -30,8 +39,24 @@ type StoredTask = {
   branch: string;
   base_sha: string;
   source_commit: string;
+  original_source_commit: string;
   changed_paths: string[];
+  validation_command: string[];
   synthetic_commit: string | null;
+};
+
+type StoredValidation = {
+  command: string[];
+  status: "pending" | "pass" | "fail";
+  exit_code: number | null;
+  fingerprint: string | null;
+  candidate_head: string | null;
+};
+
+type StoredReview = {
+  status: "pending" | "pass" | "fail";
+  fingerprint: string | null;
+  candidate_head: string | null;
 };
 
 type Queue = {
@@ -41,15 +66,24 @@ type Queue = {
   archive_fingerprint: string;
   target_ref: string;
   target_base: string;
-  phase: "queued" | "integrating" | "integrated" | "failed";
+  phase: "queued" | "preparing" | "remediation-required" | "prepared" | "integrated" | "failed";
   candidate_head: string | null;
+  candidate_ref: string;
   failure_code: IntegrationQueueErrorCode | null;
+  validation: StoredValidation;
+  review: StoredReview;
+  blocker: IntegrationQueueBlocker | null;
+  remediation_attempts_used: 0 | 1;
   tasks: StoredTask[];
   cleanup_pending: string[];
   warnings: string[];
 };
 
-type State = { version: 2; revision: number; active: Queue | null; archived: Queue[] };
+type State = { version: 3; revision: number; active: Queue | null; archived: Queue[] };
+
+class MergeConflictError extends Error {
+  constructor(readonly paths: string[]) { super("merge-conflict"); }
+}
 
 export interface WorktreeIntegrationQueueOptions {
   readonly repositoryRoot: string;
@@ -89,6 +123,40 @@ function fingerprint(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(canonical(value))).digest("hex");
 }
 
+function parseCommand(value: unknown): string[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_COMMAND_PARTS ||
+    !value.every((part) => text(part, MAX_COMMAND_TEXT)) || !isAbsolute(value[0] as string)) throw new Error("command");
+  return [...value] as string[];
+}
+
+function parseBlocker(value: unknown): IntegrationQueueBlocker | null {
+  if (value === null) return null;
+  const codes = ["merge-conflict", "validation-failed", "review-failed", "remediation-exhausted"];
+  if (!record(value) || !keys(value, ["attempts_remaining", "candidate_base", "causal_task_ids", "code", "conflict_paths", "task_id"]) ||
+    !codes.includes(value.code as string) || !text(value.task_id, 128) || typeof value.candidate_base !== "string" || !SHA.test(value.candidate_base) ||
+    !Array.isArray(value.conflict_paths) || value.conflict_paths.length > 256 || !value.conflict_paths.every((path) => text(path, 1024)) ||
+    !Array.isArray(value.causal_task_ids) || value.causal_task_ids.length > 3 || !value.causal_task_ids.every((id) => text(id, 128)) ||
+    ![0, 1].includes(value.attempts_remaining as number)) throw new Error("blocker");
+  return value as unknown as IntegrationQueueBlocker;
+}
+
+function parseValidation(value: unknown): StoredValidation {
+  if (!record(value) || !keys(value, ["candidate_head", "command", "exit_code", "fingerprint", "status"]) ||
+    !["pending", "pass", "fail"].includes(value.status as string) ||
+    !(value.exit_code === null || Number.isInteger(value.exit_code)) ||
+    !(value.fingerprint === null || (typeof value.fingerprint === "string" && HASH.test(value.fingerprint))) ||
+    !(value.candidate_head === null || (typeof value.candidate_head === "string" && SHA.test(value.candidate_head)))) throw new Error("validation");
+  return { command: parseCommand(value.command), status: value.status as StoredValidation["status"], exit_code: value.exit_code as number | null,
+    fingerprint: value.fingerprint as string | null, candidate_head: value.candidate_head as string | null };
+}
+
+function parseReview(value: unknown): StoredReview {
+  if (!record(value) || !keys(value, ["candidate_head", "fingerprint", "status"]) || !["pending", "pass", "fail"].includes(value.status as string) ||
+    !(value.fingerprint === null || (typeof value.fingerprint === "string" && HASH.test(value.fingerprint))) ||
+    !(value.candidate_head === null || (typeof value.candidate_head === "string" && SHA.test(value.candidate_head)))) throw new Error("review");
+  return value as unknown as StoredReview;
+}
+
 function cleanGitEnvironment(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   const env = { ...process.env };
   for (const key of Object.keys(env)) if (/^GIT_/iu.test(key)) delete env[key];
@@ -97,35 +165,38 @@ function cleanGitEnvironment(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
 
 function parseTask(value: unknown): StoredTask {
   if (!record(value) || !keys(value, [
-    "base_sha", "branch", "changed_paths", "depends_on", "source_commit", "synthetic_commit", "task_id", "worktree_id",
+    "base_sha", "branch", "changed_paths", "depends_on", "original_source_commit", "source_commit", "synthetic_commit", "task_id",
+    "validation_command", "worktree_id",
   ]) || !text(value.task_id, 128) || !text(value.worktree_id, 256) || !text(value.branch, 256) ||
     typeof value.base_sha !== "string" || !SHA.test(value.base_sha) ||
     typeof value.source_commit !== "string" || !SHA.test(value.source_commit) ||
+    typeof value.original_source_commit !== "string" || !SHA.test(value.original_source_commit) ||
     !(value.synthetic_commit === null || (typeof value.synthetic_commit === "string" && SHA.test(value.synthetic_commit))) ||
     !Array.isArray(value.depends_on) || value.depends_on.length > 3 || !value.depends_on.every((item) => text(item, 128)) ||
     !Array.isArray(value.changed_paths) || value.changed_paths.length > 256 ||
     !value.changed_paths.every((item) => text(item, 1024))) throw new Error("task");
-  return value as unknown as StoredTask;
+  return { ...value, validation_command: parseCommand(value.validation_command) } as unknown as StoredTask;
 }
 
 function parseQueue(value: unknown): Queue {
   const queue = value;
   if (!record(queue) || !keys(queue, [
-    "archive_fingerprint", "candidate_head", "cleanup_pending", "contract_fingerprint", "failure_code", "owner_root",
-    "phase", "run_id", "target_base", "target_ref", "tasks", "warnings",
+    "archive_fingerprint", "blocker", "candidate_head", "candidate_ref", "cleanup_pending", "contract_fingerprint", "failure_code", "owner_root",
+    "phase", "remediation_attempts_used", "review", "run_id", "target_base", "target_ref", "tasks", "validation", "warnings",
   ]) || !text(queue.owner_root, 256) || !text(queue.run_id, 128) || typeof queue.contract_fingerprint !== "string" ||
     !HASH.test(queue.contract_fingerprint) || typeof queue.archive_fingerprint !== "string" || !HASH.test(queue.archive_fingerprint) ||
     typeof queue.target_ref !== "string" || !REF.test(queue.target_ref) || typeof queue.target_base !== "string" ||
-    !SHA.test(queue.target_base) || !["queued", "integrating", "integrated", "failed"].includes(queue.phase as string) ||
+    !SHA.test(queue.target_base) || !["queued", "preparing", "remediation-required", "prepared", "integrated", "failed"].includes(queue.phase as string) ||
+    typeof queue.candidate_ref !== "string" || !/^refs\/sortie-dogs\/integration-candidates\/[0-9a-f]{16}$/u.test(queue.candidate_ref) ||
     !(queue.candidate_head === null || (typeof queue.candidate_head === "string" && SHA.test(queue.candidate_head))) ||
     !(queue.failure_code === null || text(queue.failure_code, 64)) || !Array.isArray(queue.tasks) ||
     queue.tasks.length === 0 || queue.tasks.length > 3 || !Array.isArray(queue.cleanup_pending) ||
     !queue.cleanup_pending.every((item) => text(item, 256)) || !Array.isArray(queue.warnings) ||
-    queue.warnings.length > 3 || !queue.warnings.every((item) => text(item, 512))) throw new Error("queue");
+    queue.warnings.length > 3 || !queue.warnings.every((item) => text(item, 512)) || ![0, 1].includes(queue.remediation_attempts_used as number)) throw new Error("queue");
   const tasks = queue.tasks.map(parseTask);
   if (new Set(tasks.map(({ task_id }) => task_id)).size !== tasks.length ||
     new Set(tasks.map(({ source_commit }) => source_commit)).size !== tasks.length) throw new Error("identities");
-  return { ...queue, tasks } as Queue;
+  return { ...queue, tasks, validation: parseValidation(queue.validation), review: parseReview(queue.review), blocker: parseBlocker(queue.blocker) } as Queue;
 }
 
 function parseState(value: unknown): State {
@@ -136,7 +207,7 @@ function parseState(value: unknown): State {
   const archived = value.archived.map(parseQueue);
   if (archived.some((queue) => queue.phase !== "integrated" || queue.cleanup_pending.length !== 0) ||
     new Set(archived.map(({ run_id }) => run_id)).size !== archived.length) throw new Error("archive");
-  return { version: 2, revision: value.revision as number, active, archived };
+  return { version: 3, revision: value.revision as number, active, archived };
 }
 
 function validateArchive(archive: ParallelDispatchArchive): void {
@@ -154,7 +225,8 @@ function validateArchive(archive: ParallelDispatchArchive): void {
       candidate.outcome !== "completed" || !record(candidate.artifact) ||
       candidate.artifact.task_id !== candidate.task_id || candidate.artifact.base_sha !== candidate.base_sha ||
       candidate.artifact.branch !== candidate.branch || typeof candidate.artifact.commit_sha !== "string" ||
-      !SHA.test(candidate.artifact.commit_sha)) {
+      !SHA.test(candidate.artifact.commit_sha) || !record(candidate.artifact.validation) ||
+      !Array.isArray(candidate.artifact.validation.command)) {
       throw new IntegrationQueueError("invalid-archive", "Archive task or artifact identity is invalid.");
     }
     const task = candidate as unknown as ParallelDispatchArchiveTask;
@@ -164,6 +236,9 @@ function validateArchive(archive: ParallelDispatchArchive): void {
       task.artifact === null || task.artifact.task_id !== task.task_id || task.artifact.base_sha !== task.base_sha ||
       task.artifact.branch !== task.branch || !SHA.test(task.artifact.commit_sha)) {
       throw new IntegrationQueueError("invalid-archive", "Archive task or artifact identity is invalid.");
+    }
+    try { parseCommand(task.artifact.validation.command); } catch {
+      throw new IntegrationQueueError("invalid-archive", "Artifact validation command is invalid.");
     }
     if (ids.has(task.task_id)) throw new IntegrationQueueError("invalid-archive", "Archive contains duplicate task IDs.");
     if (commits.has(task.artifact.commit_sha)) throw new IntegrationQueueError("duplicate-artifact", "Archive contains duplicate artifact commits.");
@@ -267,7 +342,12 @@ export class WorktreeIntegrationQueue {
         target_base: targetBase,
         phase: "queued",
         candidate_head: null,
+        candidate_ref: `refs/sortie-dogs/integration-candidates/${fingerprint(archive.run_id).slice(0, 16)}`,
         failure_code: null,
+        validation: { command: [...order[0]!.artifact!.validation.command], status: "pending", exit_code: null, fingerprint: null, candidate_head: null },
+        review: { status: "pending", fingerprint: null, candidate_head: null },
+        blocker: null,
+        remediation_attempts_used: 0,
         tasks: order.map((task) => ({
           task_id: task.task_id,
           depends_on: [...task.depends_on],
@@ -275,12 +355,20 @@ export class WorktreeIntegrationQueue {
           branch: task.branch,
           base_sha: task.base_sha,
           source_commit: task.artifact!.commit_sha,
+          original_source_commit: task.artifact!.commit_sha,
           changed_paths: [...task.artifact!.changed_paths],
+          validation_command: [...task.artifact!.validation.command],
           synthetic_commit: null,
         })),
         cleanup_pending: order.filter(({ managed_path }) => managed_path !== null).map(({ worktree_id }) => worktree_id),
         warnings: [],
       };
+      if (!queue.tasks.every(({ validation_command }) => JSON.stringify(validation_command) === JSON.stringify(queue.validation.command))) {
+        queue.phase = "failed";
+        queue.failure_code = "validation-failed";
+        queue.blocker = this.blocker("validation-failed", queue.tasks.find(({ validation_command }) =>
+          JSON.stringify(validation_command) !== JSON.stringify(queue.validation.command))!, queue.target_base, [], [], 0);
+      }
       for (const task of queue.tasks) {
         const sourceRef = `refs/sortie-dogs/integration-queue/${fingerprint(queue.run_id).slice(0, 16)}/${fingerprint(task.task_id).slice(0, 16)}`;
         await this.ensureSourceRef(sourceRef, task.source_commit);
@@ -290,23 +378,39 @@ export class WorktreeIntegrationQueue {
     });
   }
 
+  /** Compatibility entry point: builds and validates a candidate but never updates the target. */
   async integrate(ownerRoot: string, runID: string): Promise<IntegrationQueueSnapshot> {
-    let integrated: IntegrationQueueSnapshot;
-    try {
-      integrated = await this.transaction(async (state, lease) => {
-       const archived = this.findArchived(state, ownerRoot, runID);
-       if (archived !== undefined) return { result: this.publicSnapshot(archived), changed: false };
-       const queue = this.requireQueue(state, ownerRoot, runID);
-      const currentTarget = (await this.git(["rev-parse", "--verify", `${queue.target_ref}^{commit}`])).toString("utf8").trim();
-      if (queue.candidate_head !== null && currentTarget === queue.candidate_head) {
+    return this.prepare(ownerRoot, runID);
+  }
+
+  async prepare(ownerRoot: string, runID: string): Promise<IntegrationQueueSnapshot> {
+    return this.transaction(async (state, lease) => {
+      const archived = this.findArchived(state, ownerRoot, runID);
+      if (archived !== undefined) return { result: this.publicSnapshot(archived), changed: false };
+      const queue = this.requireQueue(state, ownerRoot, runID);
+      const currentTarget = await this.targetHead(queue);
+      if (queue.candidate_head !== null && currentTarget === queue.candidate_head && queue.review.status === "pass") {
         queue.phase = "integrated";
         queue.failure_code = null;
         return { result: this.publicSnapshot(queue), changed: true };
       }
-      if (queue.phase === "integrated") return { result: this.publicSnapshot(queue), changed: false };
-      if (queue.phase === "failed") throw new IntegrationQueueError(queue.failure_code!, "Integration previously failed closed.");
-      if (currentTarget !== queue.target_base) return this.fail(queue, "stale-target", "Target changed after enqueue.");
-      queue.phase = "integrating";
+      if (queue.phase === "integrated" || queue.phase === "prepared") return { result: this.publicSnapshot(queue), changed: false };
+      if (queue.phase === "failed" || queue.phase === "remediation-required") {
+        throw new IntegrationQueueError(queue.failure_code!, "Queue is not preparable in its current phase.");
+      }
+      if (currentTarget !== queue.target_base) {
+        queue.phase = "failed";
+        queue.failure_code = "stale-target";
+        return { result: this.publicSnapshot(queue), changed: true };
+      }
+      try { await this.assertTargetSafe(queue.target_base); }
+      catch (error) {
+        if (!(error instanceof IntegrationQueueError)) throw error;
+        queue.phase = "failed";
+        queue.failure_code = error.code;
+        return { result: this.publicSnapshot(queue), changed: true };
+      }
+      queue.phase = "preparing";
       await this.saveRevision(state, lease);
       let head = queue.target_base;
       for (let index = 0; index < queue.tasks.length; index += 1) {
@@ -319,38 +423,145 @@ export class WorktreeIntegrationQueue {
         try {
           head = await this.applyArtifact(queue, task, head, index);
         } catch (error) {
-          if (error instanceof IntegrationQueueError) return this.fail(queue, error.code, error.message);
+          if (error instanceof MergeConflictError) {
+            const exhausted = queue.remediation_attempts_used === 1;
+            queue.phase = exhausted ? "failed" : "remediation-required";
+            queue.failure_code = exhausted ? "remediation-exhausted" : "merge-conflict";
+            const conflicts = [...new Set(error.paths)].sort();
+            const causal = queue.tasks.slice(0, index).filter((prior) =>
+              prior.changed_paths.some((path) => conflicts.includes(path))).map(({ task_id }) => task_id);
+            queue.blocker = this.blocker(exhausted ? "remediation-exhausted" : "merge-conflict", task, head,
+              conflicts, causal, exhausted ? 0 : 1);
+            return { result: this.publicSnapshot(queue), changed: true };
+          }
+          if (error instanceof IntegrationQueueError) {
+            queue.phase = "failed";
+            queue.failure_code = error.code;
+            return { result: this.publicSnapshot(queue), changed: true };
+          }
           throw error;
         }
         task.synthetic_commit = head;
         await this.saveRevision(state, lease);
       }
       queue.candidate_head = head;
-      await this.saveRevision(state, lease);
-       await this.assertTargetSafe(queue.target_base);
-      const beforeCAS = (await this.git(["rev-parse", "--verify", `${queue.target_ref}^{commit}`])).toString("utf8").trim();
-      if (beforeCAS !== queue.target_base) return this.fail(queue, "stale-target", "Target changed before atomic acceptance.");
+      let validation: ContainedValidationResult;
       try {
-        await this.git(["update-ref", queue.target_ref, head, queue.target_base]);
-      } catch {
-        return this.fail(queue, "stale-target", "Atomic target comparison failed.");
-      }
-      queue.phase = "integrated";
-      queue.failure_code = null;
-      return { result: this.publicSnapshot(queue), changed: true };
-      });
-    } catch (error) {
-      if (error instanceof IntegrationQueueError && ["merge-conflict", "stale-target", "target-checked-out", "git-incompatible", "corrupt-state"].includes(error.code)) {
-        await this.transaction((state) => {
-          const queue = this.requireQueue(state, ownerRoot, runID);
+        await this.ensureSourceRef(queue.candidate_ref, head);
+        await this.saveRevision(state, lease);
+        if (await this.hasConflictMarkers(queue, head)) {
+          queue.validation = { ...queue.validation, status: "fail", exit_code: null,
+            fingerprint: fingerprint([head, "conflict-marker"]), candidate_head: head };
           queue.phase = "failed";
-          queue.failure_code = error.code;
-          return { result: undefined, changed: true };
-        });
+          queue.failure_code = "validation-failed";
+          queue.blocker = this.blocker("validation-failed", queue.tasks.at(-1)!, head, [], [], 0);
+          return { result: this.publicSnapshot(queue), changed: true };
+        }
+        validation = await this.validateCandidate(queue);
+      } catch (error) {
+        if (!(error instanceof IntegrationQueueError)) throw error;
+        queue.phase = "failed";
+        queue.failure_code = error.code;
+        return { result: this.publicSnapshot(queue), changed: true };
       }
-      throw error;
-    }
-    return integrated.phase === "integrated" ? this.cleanup(ownerRoot, runID) : integrated;
+      queue.validation = { command: [...validation.command], status: validation.ok ? "pass" : "fail",
+        exit_code: validation.exit_code, fingerprint: validation.fingerprint, candidate_head: head };
+      if (!validation.ok) {
+        queue.phase = "failed";
+        queue.failure_code = "validation-failed";
+        queue.blocker = this.blocker("validation-failed", queue.tasks.at(-1)!, head, [], [], 0);
+      } else {
+        queue.phase = "prepared";
+        queue.failure_code = null;
+        queue.blocker = null;
+      }
+      return { result: this.publicSnapshot(queue), changed: true };
+    });
+  }
+
+  async accept(ownerRoot: string, runID: string, decision: {
+    readonly candidate_head: string; readonly review: "pass" | "fail"; readonly review_fingerprint: string;
+  }): Promise<IntegrationQueueSnapshot> {
+    const accepted = await this.transaction(async (state, lease) => {
+      const archived = this.findArchived(state, ownerRoot, runID);
+      if (archived !== undefined) return { result: this.publicSnapshot(archived), changed: false };
+      const queue = this.requireQueue(state, ownerRoot, runID);
+      if (!record(decision) || !keys(decision, ["candidate_head", "review", "review_fingerprint"]) ||
+        typeof decision.candidate_head !== "string" || !SHA.test(decision.candidate_head) ||
+        !["pass", "fail"].includes(decision.review) || !HASH.test(decision.review_fingerprint)) {
+        throw new IntegrationQueueError("invalid-archive", "Review decision is invalid.");
+      }
+      const currentTarget = await this.targetHead(queue);
+      if (queue.candidate_head !== null && currentTarget === queue.candidate_head && queue.review.status === "pass") {
+        queue.phase = "integrated";
+        return { result: this.publicSnapshot(queue), changed: true };
+      }
+      if (queue.phase !== "prepared" || queue.candidate_head !== decision.candidate_head || queue.validation.status !== "pass" ||
+        queue.validation.candidate_head !== decision.candidate_head) throw new IntegrationQueueError("validation-failed", "Prepared validation evidence is absent.");
+      queue.review = { status: decision.review, fingerprint: decision.review_fingerprint, candidate_head: decision.candidate_head };
+      await this.saveRevision(state, lease);
+      if (decision.review === "fail") {
+        queue.phase = "failed"; queue.failure_code = "review-failed";
+        queue.blocker = this.blocker("review-failed", queue.tasks.at(-1)!, decision.candidate_head, [], [], 0);
+        return { result: this.publicSnapshot(queue), changed: true };
+      }
+      try { await this.assertTargetSafe(queue.target_base); }
+      catch (error) {
+        if (!(error instanceof IntegrationQueueError)) throw error;
+        queue.phase = "failed";
+        queue.failure_code = error.code;
+        return { result: this.publicSnapshot(queue), changed: true };
+      }
+      if (await this.targetHead(queue) !== queue.target_base) {
+        queue.phase = "failed";
+        queue.failure_code = "stale-target";
+        return { result: this.publicSnapshot(queue), changed: true };
+      }
+      try { await this.git(["update-ref", queue.target_ref, decision.candidate_head, queue.target_base]); }
+      catch {
+        queue.phase = "failed";
+        const afterFailure = await this.targetHead(queue).catch(() => undefined);
+        queue.failure_code = afterFailure === queue.target_base ? "git-incompatible" :
+          afterFailure === undefined ? "git-incompatible" : "stale-target";
+        return { result: this.publicSnapshot(queue), changed: true };
+      }
+      queue.phase = "integrated"; queue.failure_code = null; queue.blocker = null;
+      return { result: this.publicSnapshot(queue), changed: true };
+    });
+    return accepted.phase === "integrated" ? this.cleanup(ownerRoot, runID) : accepted;
+  }
+
+  async submitRemediation(ownerRoot: string, runID: string, artifact: WorktreeCommitArtifact): Promise<IntegrationQueueSnapshot> {
+    return this.transaction(async (state) => {
+      const queue = this.requireQueue(state, ownerRoot, runID);
+      const blocker = queue.blocker;
+      if (queue.phase !== "remediation-required" || blocker === null || blocker.attempts_remaining !== 1 ||
+        queue.remediation_attempts_used !== 0) throw new IntegrationQueueError("remediation-exhausted", "Remediation is unavailable.");
+      const taskIndex = queue.tasks.findIndex(({ task_id }) => task_id === blocker.task_id);
+      const task = queue.tasks[taskIndex];
+      if (task === undefined || !record(artifact) || artifact.task_id !== task.task_id || artifact.base_sha !== blocker.candidate_base ||
+        artifact.validation.exit_code !== 0 || JSON.stringify(artifact.validation.command) !== JSON.stringify(queue.validation.command) ||
+        !text(artifact.branch, 256) || !SHA.test(artifact.commit_sha) || !HASH.test(artifact.change_fingerprint) ||
+        artifact.changed_paths.length === 0 || artifact.changed_paths.length > 256) {
+        throw new IntegrationQueueError("invalid-archive", "Replacement artifact identity is invalid.");
+      }
+      const allowed = new Set(task.changed_paths.map(normalizeWorktreeScopePath));
+      let replacementPaths: string[];
+      try { replacementPaths = artifact.changed_paths.map((path) => { const normalized = normalizeWorktreeScopePath(path); if (!allowed.has(normalized)) throw new Error(); return path; }); }
+      catch { throw new IntegrationQueueError("invalid-archive", "Replacement broadens the failing task scope."); }
+      const replacement = { ...task, base_sha: artifact.base_sha, source_commit: artifact.commit_sha, branch: artifact.branch,
+        changed_paths: replacementPaths, validation_command: [...artifact.validation.command] };
+      await this.verifyStoredArtifact(replacement, blocker.candidate_base);
+      const replacementRef = `refs/sortie-dogs/integration-queue/${fingerprint(queue.run_id).slice(0, 16)}/${fingerprint(`${task.task_id}:remediation`).slice(0, 16)}`;
+      await this.ensureSourceRef(replacementRef, replacement.source_commit);
+      queue.tasks[taskIndex] = replacement;
+      for (let index = taskIndex; index < queue.tasks.length; index += 1) queue.tasks[index]!.synthetic_commit = null;
+      queue.candidate_head = null;
+      queue.validation = { ...queue.validation, status: "pending", exit_code: null, fingerprint: null, candidate_head: null };
+      queue.review = { status: "pending", fingerprint: null, candidate_head: null };
+      queue.remediation_attempts_used = 1; queue.phase = "queued"; queue.failure_code = null; queue.blocker = null;
+      return { result: this.publicSnapshot(queue), changed: true };
+    });
   }
 
   async cleanup(ownerRoot: string, runID: string): Promise<IntegrationQueueSnapshot> {
@@ -420,6 +631,18 @@ export class WorktreeIntegrationQueue {
     }
   }
 
+  private async verifyStoredArtifact(task: StoredTask, target: string): Promise<void> {
+    try {
+      await this.git(["cat-file", "-e", `${task.source_commit}^{commit}`]);
+      const parents = (await this.git(["rev-list", "--parents", "-n", "1", task.source_commit])).toString("utf8").trim().split(" ");
+      if (parents.length !== 2 || parents[0] !== task.source_commit || parents[1] !== task.base_sha) throw new Error();
+      const changed = (await this.git(["diff-tree", "--no-commit-id", "--name-only", "-z", task.base_sha, task.source_commit, "--"]))
+        .toString("utf8").split("\0").filter(Boolean).sort();
+      if (JSON.stringify(changed) !== JSON.stringify([...task.changed_paths].sort())) throw new Error();
+      if (await this.gitStatus(["merge-base", "--is-ancestor", task.base_sha, target]) !== 0) throw new Error();
+    } catch { throw new IntegrationQueueError("invalid-archive", "Replacement artifact Git identity is invalid."); }
+  }
+
   private async applyArtifact(queue: Queue, task: StoredTask, parent: string, _index: number): Promise<string> {
     const indexPath = join(this.stateRoot, `.index.${randomUUID()}`);
     const env = cleanGitEnvironment({ GIT_INDEX_FILE: indexPath });
@@ -429,7 +652,11 @@ export class WorktreeIntegrationQueue {
         task.base_sha, task.source_commit, "--"], undefined, MAX_PATCH);
       if (patch.byteLength > MAX_PATCH) throw new IntegrationQueueError("git-incompatible", "Artifact patch exceeds the practical bound.");
       const applied = await this.gitInput(["apply", "--cached", "--3way", "--binary", "-"], patch, env) as number;
-      if (applied !== 0) throw new IntegrationQueueError("merge-conflict", "Artifact does not apply cleanly to the synthetic tip.");
+      if (applied !== 0) {
+        const conflicts = (await this.git(["ls-files", "-u", "-z"], env)).toString("utf8").split("\0").filter(Boolean)
+          .map((entry) => entry.slice(entry.indexOf("\t") + 1)).filter((path) => text(path, 1024));
+        throw new MergeConflictError([...new Set(conflicts)].sort());
+      }
       const tree = (await this.git(["write-tree"], env)).toString("utf8").trim();
       const timestamp = (await this.git(["show", "-s", "--format=%ct", task.source_commit])).toString("utf8").trim();
       if (!/^\d{1,12}$/u.test(timestamp)) throw new IntegrationQueueError("git-incompatible", "Source timestamp is unavailable.");
@@ -465,10 +692,57 @@ export class WorktreeIntegrationQueue {
     }
   }
 
-  private fail(queue: Queue, code: IntegrationQueueErrorCode, message: string): never {
-    queue.phase = "failed";
-    queue.failure_code = code;
-    throw new IntegrationQueueError(code, message);
+  private blocker(code: IntegrationQueueBlocker["code"], task: StoredTask, candidateBase: string,
+    conflictPaths: string[], causalTaskIDs: string[], attempts: 0 | 1): IntegrationQueueBlocker {
+    return { code, task_id: task.task_id, candidate_base: candidateBase, conflict_paths: conflictPaths,
+      causal_task_ids: [...new Set(causalTaskIDs)], attempts_remaining: attempts };
+  }
+
+  private async targetHead(queue: Queue): Promise<string> {
+    return (await this.git(["rev-parse", "--verify", `${queue.target_ref}^{commit}`])).toString("utf8").trim();
+  }
+
+  private async hasConflictMarkers(queue: Queue, candidate: string): Promise<boolean> {
+    for (const path of [...new Set(queue.tasks.flatMap(({ changed_paths }) => changed_paths))]) {
+      const sizeText = (await this.git(["cat-file", "-s", `${candidate}:${path}`]).catch(() => Buffer.from("0"))).toString("utf8").trim();
+      const size = Number(sizeText);
+      if (!Number.isSafeInteger(size) || size <= 0 || size > 1024 * 1024) continue;
+      const content = await this.git(["show", `${candidate}:${path}`], undefined, 1024 * 1024);
+      if (/^(?:<<<<<<<|=======|>>>>>>>)(?: |$)/mu.test(content.toString("utf8"))) return true;
+    }
+    return false;
+  }
+
+  private async validateCandidate(queue: Queue): Promise<ContainedValidationResult> {
+    const path = join(this.stateRoot, `validation-${randomUUID()}`);
+    let added = false;
+    try {
+      await this.git(["worktree", "add", "--detach", path, queue.candidate_head!]);
+      added = true;
+      const beforeHead = (await WorktreeIntegrationQueue.runGitAt(this.gitPath, path, ["rev-parse", "--verify", "HEAD^{commit}"])).toString("utf8").trim();
+      const beforeStatus = await WorktreeIntegrationQueue.runGitAt(this.gitPath, path, ["status", "--porcelain=v1", "--untracked-files=normal"]);
+      if (beforeHead !== queue.candidate_head || beforeStatus.length !== 0) throw new IntegrationQueueError("validation-failed", "Validation worktree is not exact and clean.");
+      const result = await runContainedValidation({ executable: queue.validation.command[0]!, args: queue.validation.command.slice(1),
+        cwd: path, timeout_ms: VALIDATION_TIMEOUT });
+      const afterHead = (await WorktreeIntegrationQueue.runGitAt(this.gitPath, path, ["rev-parse", "--verify", "HEAD^{commit}"])).toString("utf8").trim();
+      const afterStatus = await WorktreeIntegrationQueue.runGitAt(this.gitPath, path, ["status", "--porcelain=v1", "--untracked-files=normal"]);
+      if (afterHead !== queue.candidate_head || afterStatus.length !== 0) {
+        return { ok: false, command: result.command, exit_code: result.exit_code,
+          fingerprint: result.fingerprint, error: "execution-failed" };
+      }
+      return result;
+    } finally {
+      if (added) {
+        const clean = await WorktreeIntegrationQueue.runGitAt(this.gitPath, path, ["status", "--porcelain=v1", "--untracked-files=normal"])
+          .then((output) => output.length === 0, () => false);
+        if (clean) {
+          try { await this.git(["worktree", "remove", path]); }
+          catch { throw new IntegrationQueueError("validation-failed", "Validation worktree removal failed."); }
+        } else {
+          throw new IntegrationQueueError("validation-failed", "Validation worktree was not clean after validation.");
+        }
+      }
+    }
   }
 
   private requireQueue(state: State, owner: string, runID: string): Queue {
@@ -490,8 +764,15 @@ export class WorktreeIntegrationQueue {
     return Object.freeze({
       owner_root: queue.owner_root, run_id: queue.run_id, target_ref: queue.target_ref, target_base: queue.target_base,
       phase: queue.phase, candidate_head: queue.candidate_head, failure_code: queue.failure_code,
+      candidate_ref: queue.candidate_ref,
+      validation: Object.freeze({ ...queue.validation, command: Object.freeze([...queue.validation.command]) }),
+      review: Object.freeze({ ...queue.review }),
+      blocker: queue.blocker === null ? null : Object.freeze({ ...queue.blocker,
+        conflict_paths: Object.freeze([...queue.blocker.conflict_paths]), causal_task_ids: Object.freeze([...queue.blocker.causal_task_ids]) }),
+      remediation_attempts_used: queue.remediation_attempts_used,
       tasks: Object.freeze(queue.tasks.map((task) => Object.freeze({
-        task_id: task.task_id, source_commit: task.source_commit, synthetic_commit: task.synthetic_commit,
+        task_id: task.task_id, source_commit: task.source_commit, original_source_commit: task.original_source_commit,
+        synthetic_commit: task.synthetic_commit,
         integrated: task.synthetic_commit !== null,
       }))),
       cleanup_pending: Object.freeze([...queue.cleanup_pending]), warnings: Object.freeze([...queue.warnings]),
@@ -601,7 +882,7 @@ export class WorktreeIntegrationQueue {
       if (source.byteLength > MAX_STATE) throw new Error("size");
       return parseState(JSON.parse(source.toString("utf8")) as unknown);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return { version: 2, revision: 0, active: null, archived: [] };
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return { version: 3, revision: 0, active: null, archived: [] };
       throw new IntegrationQueueError("corrupt-state", "Integration queue state is corrupt or unsupported.");
     }
   }
@@ -630,7 +911,7 @@ export class WorktreeIntegrationQueue {
 
   private async acquire(): Promise<ScopeLease> {
     try {
-      return await this.registry.acquire({ ownerId: `integration-queue:${process.pid}:${randomUUID()}`, scope: LEASE_SCOPE, ttlMs: 10 * 60_000 });
+      return await this.registry.acquire({ ownerId: `integration-queue:${process.pid}:${randomUUID()}`, scope: LEASE_SCOPE, ttlMs: LEASE_TTL });
     } catch (error) {
       if (error instanceof ScopeLeaseError) throw new IntegrationQueueError("queue-lease", "Queue authority is held by another operation.");
       throw error;
