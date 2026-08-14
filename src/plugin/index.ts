@@ -767,7 +767,8 @@ export function isExplicitTaskHandoff(text: string): boolean {
 }
 
 function explicitTaskText(output: Parameters<OpenCodeChatMessageHook>[1]): string | undefined {
-  return output.parts.map(textPart).find((text) => text !== undefined && isExplicitTaskHandoff(text));
+  return output.parts.map(textPart).find((text) =>
+    text !== undefined && (isExplicitTaskHandoff(text) || isBlockTaskHandoff(text)));
 }
 
 function taskProjectRoot(text: string): string | undefined {
@@ -808,6 +809,27 @@ function taskBlockHasContent(text: string, keys: readonly string[]): boolean {
     return true;
   }
   return false;
+}
+
+function isBlockTaskHandoff(text: string): boolean {
+  const inline = (keys: readonly string[]) => taskInlineValues(text, keys);
+  const present = (keys: readonly string[]) => inline(keys).length === 1 || taskBlockHasContent(text, keys);
+  const roles = taskValues(text, ["role"]);
+  const projectRoots = taskValues(text, ["project_root", "projectroot"]);
+  const handoffPaths = taskValues(text, ["handoff_path", "handoffpath"]);
+  const operationManifests = taskValues(text, ["operation_manifest", "operationmanifest"]);
+  const role = roles.length === 1 ? unquoteValue(unwrapMarkdownValue(roles[0])).toLowerCase() : undefined;
+  const operationManifest = operationManifests.length === 1 ? operationManifests[0] : undefined;
+  const readOnly = operationManifest?.toLowerCase() === "none";
+  const handoffValid = readOnly
+    ? handoffPaths.length === 0
+    : handoffPaths.length === 1 && handoffPaths[0]!.length > 0 && isAbsolute(handoffPaths[0]!);
+  return role !== undefined && TASK_ROLES.has(role) && projectRoots.length === 1 &&
+    projectRoots[0]!.length > 0 && isAbsolute(projectRoots[0]!) && handoffValid &&
+    operationManifest !== undefined && operationManifest.length > 0 &&
+    taskHeaderCount(text, ["source_manifest", "sourcemanifest"]) === 1 &&
+    taskHeaderCount(text, ["acceptance"]) === 1 && taskHeaderCount(text, ["validation"]) === 1 &&
+    present(["source_manifest", "sourcemanifest"]) && present(["acceptance"]) && present(["validation"]);
 }
 
 function parallelTaskMode(text: string): ActiveSessionState["parallel"] {
@@ -3210,16 +3232,11 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           const acceptanceInline = taskInlineValues(prompt, ["acceptance"]);
           const validationInline = taskInlineValues(prompt, ["validation"]);
           const sourceManifestInline = taskInlineValues(prompt, ["source_manifest", "sourcemanifest"]);
-          const roleValues = taskValues(prompt, ["role"]);
           const acceptancePresent = acceptanceInline.length === 1 || taskBlockHasContent(prompt, ["acceptance"]);
           const validationPresent = validationInline.length === 1 || taskBlockHasContent(prompt, ["validation"]);
           const sourceManifestPresent = sourceManifestInline.length === 1 ||
             taskBlockHasContent(prompt, ["source_manifest", "sourcemanifest"]);
-          const explicitBlockHandoff = roleValues.length === 1 && roleValues[0]!.length > 0 &&
-            acceptancePresent && validationPresent && sourceManifestPresent &&
-            acceptanceHeaders === 1 && validationHeaders === 1 &&
-            sourceManifestHeaders === 1 && taskHeaderCount(prompt, ["project_root", "projectroot"]) === 1 &&
-            taskHeaderCount(prompt, ["operation_manifest", "operationmanifest"]) === 1;
+          const explicitBlockHandoff = isBlockTaskHandoff(prompt);
           const taskIDs = taskValues(prompt, ["task_id"]);
           const resumeDeltas = taskValues(prompt, ["resume_delta"]);
           const resumeDeltaPresent = resumeDeltas.length === 1 && hasResumeContractShape(prompt);

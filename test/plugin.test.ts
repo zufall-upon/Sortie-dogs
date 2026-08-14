@@ -4161,6 +4161,60 @@ test("session-inactive recovery requires a fresh inline-handoff dispatch", async
       { message: { agent: "renamed-worker", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: dispatch }] },
     );
     assert.equal((await bindWriteGate(hooks, directory, "recovery-child")).status, "bound");
+    assert.deepEqual(await executeReleaseWriteGate(hooks, "recovery-child"), { status: "released" });
+
+    const blockDispatch = [
+      "task_id: block-task",
+      "role: implementation",
+      `project_root: ${directory}`,
+      `handoff_path: ${handoffPath}`,
+      "source_manifest:",
+      "  - allowed.txt",
+      "operation_manifest: operation-manifest.json",
+      "acceptance:",
+      "  - safe change",
+      "validation:",
+      "  command: npm test",
+    ].join("\n");
+    await chat(
+      { sessionID: "block-child", parentID: "recovery-parent", agent: "dog-worker" },
+      { message: { agent: "dog-worker", model: { providerID: "host", modelID: "selected" } },
+        parts: [{ type: "text", text: blockDispatch }] },
+    );
+    await inspectHandoffWithRead(hooks, handoffPath, "block-child");
+    const blockBind = await bindWriteGate(hooks, directory, "block-child");
+    assert.equal(blockBind.status, "bound", JSON.stringify(blockBind));
+    assert.deepEqual(await executeReleaseWriteGate(hooks, "block-child"), { status: "released" });
+
+    for (const [sessionID, roleLines] of [
+      ["unknown-role-child", ["role: unknown"]],
+      ["duplicate-role-child", ["role: implementation", "role: remediation"]],
+      ["mixed-duplicate-role-child", ["role: implementation", "- role: remediation"]],
+    ] as const) {
+      const invalidDispatch = blockDispatch.replace("role: implementation", roleLines.join("\n"));
+      await chat(
+        { sessionID, parentID: "recovery-parent", agent: "dog-worker" },
+        { message: { agent: "dog-worker", model: { providerID: "host", modelID: "selected" } },
+          parts: [{ type: "text", text: invalidDispatch }] },
+      );
+      await inspectHandoffWithRead(hooks, handoffPath, sessionID);
+      assert.equal((await executeBindWriteGate(hooks, directory, sessionID)).reason, "session-inactive");
+    }
+
+    for (const [sessionID, invalidDispatch] of [
+      ["relative-root-child", blockDispatch.replace(`project_root: ${directory}`, "project_root: .")],
+      ["relative-handoff-child", blockDispatch.replace(`handoff_path: ${handoffPath}`, "handoff_path: handoff.json")],
+      ["empty-operation-child", blockDispatch.replace(
+        "operation_manifest: operation-manifest.json", "operation_manifest:")],
+    ] as const) {
+      await chat(
+        { sessionID, parentID: "recovery-parent", agent: "dog-worker" },
+        { message: { agent: "dog-worker", model: { providerID: "host", modelID: "selected" } },
+          parts: [{ type: "text", text: invalidDispatch }] },
+      );
+      await inspectHandoffWithRead(hooks, handoffPath, sessionID);
+      assert.equal((await executeBindWriteGate(hooks, directory, sessionID)).reason, "session-inactive");
+    }
   });
 });
 
