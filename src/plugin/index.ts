@@ -15,7 +15,9 @@ import {
   ParallelDispatchCoordinator,
   ParallelDispatchError,
 } from "../core/worktree-parallel-dispatch.js";
+import { IntegrationQueueError, WorktreeIntegrationQueue } from "../core/worktree-integration-queue.js";
 import type {
+  IntegrationQueueSnapshot,
   ManifestDiagnostic,
   OperationManifest,
   ParallelDispatchArchive,
@@ -1160,6 +1162,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   const taskResultRepair = createTaskResultRepairHook(input.client);
   const fastLane = new FastLaneController();
   let parallelCoordinator: ParallelDispatchCoordinator | undefined;
+  const integrationQueues = new Map<string, WorktreeIntegrationQueue>();
   const parallelCalls = new Map<string, {
     readonly ownerRoot: string;
     readonly descriptor: ParallelDispatchDescriptor;
@@ -1178,6 +1181,72 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     project ??= await createProjectPaths(resolveProjectRoot(input));
     parallelCoordinator ??= await ParallelDispatchCoordinator.open({ repositoryRoot: project.root });
     return parallelCoordinator;
+  }
+
+  async function getIntegrationQueue(targetBranch: string): Promise<WorktreeIntegrationQueue> {
+    project ??= await createProjectPaths(resolveProjectRoot(input));
+    const key = `${project.root}\u0000${targetBranch}`;
+    const cached = integrationQueues.get(key);
+    if (cached !== undefined) return cached;
+    const queue = await WorktreeIntegrationQueue.open({ repositoryRoot: project.root, targetBranch });
+    while (integrationQueues.size >= 4) integrationQueues.delete(integrationQueues.keys().next().value!);
+    integrationQueues.set(key, queue);
+    return queue;
+  }
+
+  function validIntegrationInput(value: string, maximum = 256): boolean {
+    return value.length > 0 && value.length <= maximum && !/[\u0000-\u001f\u007f]/u.test(value);
+  }
+
+  async function integrationToolOwner(context: { sessionID: string; agent?: string }): Promise<string | undefined> {
+    if (context.agent !== undefined && context.agent !== COORDINATOR_AGENT) return undefined;
+    if (!await recoverCoordinatorRoot(context.sessionID) || coordinatorRootForSession(context.sessionID) !== context.sessionID) return undefined;
+    const identity = await hostSessionIdentity(context.sessionID);
+    return identity === undefined || (identity.agent === COORDINATOR_AGENT && !identity.parentPresent)
+      ? context.sessionID
+      : undefined;
+  }
+
+  function boundedIntegrationSnapshot(snapshot: IntegrationQueueSnapshot, targetBranch: string): object {
+    return {
+      run_id: snapshot.run_id,
+      target_branch: targetBranch,
+      phase: snapshot.phase,
+      failure_code: snapshot.failure_code,
+      tasks: snapshot.tasks.map(({ task_id, integrated }) => ({ task_id, integrated })),
+      cleanup_pending: snapshot.cleanup_pending.length,
+      cleanup_pending_visible: snapshot.cleanup_pending.length > 0,
+      warnings: snapshot.warnings.map((warning) => warning.startsWith("cleanup-pending:") ? "cleanup-pending" : "warning"),
+    };
+  }
+
+  async function parallelIntegration(
+    action: "enqueue" | "integrate" | "status",
+    args: Record<string, string>,
+    context: { sessionID: string; agent?: string },
+  ): Promise<string> {
+    const deny = (reason: string) => JSON.stringify({ status: "denied", reason });
+    const runID = args.run_id;
+    const targetBranch = args.target_branch;
+    if (!validIntegrationInput(runID ?? "", 64) || !validIntegrationInput(targetBranch ?? "")) return deny("invalid-request");
+    const ownerRoot = await integrationToolOwner(context);
+    if (ownerRoot === undefined) return deny("coordinator-root-required");
+    try {
+      const queue = await getIntegrationQueue(targetBranch!);
+      if (action === "status") {
+        const snapshot = await queue.snapshot(ownerRoot, runID!);
+        return snapshot === undefined ? JSON.stringify({ status: "absent" })
+          : JSON.stringify({ status: "ok", ...boundedIntegrationSnapshot(snapshot, targetBranch!) });
+      }
+      if (action === "enqueue") {
+        const archive = await (await getParallelCoordinator()).archive(ownerRoot, runID!);
+        if (archive === undefined) return deny("archive-required");
+        return JSON.stringify({ status: "queued", ...boundedIntegrationSnapshot(await queue.enqueue(ownerRoot, archive), targetBranch!) });
+      }
+      return JSON.stringify({ status: "ok", ...boundedIntegrationSnapshot(await queue.integrate(ownerRoot, runID!), targetBranch!) });
+    } catch (error) {
+      return deny(error instanceof IntegrationQueueError ? error.code : "integration-unavailable");
+    }
   }
 
   async function parallelToolOwner(sessionID: string): Promise<string | undefined> {
@@ -2579,6 +2648,27 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           return cancelParallelDispatch(context.sessionID, args.run_id ?? "");
         },
       }),
+      sortie_enqueue_parallel_integration: defineTool({
+        description: "Queue one archived completed parallel run for serial target-branch integration.",
+        args: { run_id: defineTool.schema.string(), target_branch: defineTool.schema.string() },
+        async execute(args, context): Promise<string> {
+          return parallelIntegration("enqueue", args, context);
+        },
+      }),
+      sortie_integrate_parallel_queue: defineTool({
+        description: "Integrate one queued parallel run into its requested target branch and attempt cleanup.",
+        args: { run_id: defineTool.schema.string(), target_branch: defineTool.schema.string() },
+        async execute(args, context): Promise<string> {
+          return parallelIntegration("integrate", args, context);
+        },
+      }),
+      sortie_parallel_integration_status: defineTool({
+        description: "Read bounded serial integration queue status for one target branch and run.",
+        args: { run_id: defineTool.schema.string(), target_branch: defineTool.schema.string() },
+        async execute(args, context): Promise<string> {
+          return parallelIntegration("status", args, context);
+        },
+      }),
       ...(reflectionStartup ? {
         sortie_reflection: defineTool({
           description: "List, record, replace, forget, promote, or clear a bounded process reflection.",
@@ -2878,7 +2968,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       const coordinatorCapability = toolInput.tool === "task" ||
         toolInput.tool === CONTINUATION_CAPABILITY || toolInput.tool === BACKLOG_DRAIN_CAPABILITY ||
         toolInput.tool === "sortie_prepare_parallel_dispatch" || toolInput.tool === "sortie_parallel_dispatch_status" ||
-        toolInput.tool === "sortie_cancel_parallel_dispatch";
+        toolInput.tool === "sortie_cancel_parallel_dispatch" ||
+        toolInput.tool === "sortie_enqueue_parallel_integration" || toolInput.tool === "sortie_integrate_parallel_queue" ||
+        toolInput.tool === "sortie_parallel_integration_status";
       if (
         isCoordinatorSession(toolInput.sessionID) ||
         (coordinatorCapability && await recoverCoordinatorRoot(toolInput.sessionID))

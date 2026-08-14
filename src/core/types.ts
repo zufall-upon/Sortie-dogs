@@ -231,6 +231,7 @@ export interface ParallelDispatchSnapshot {
 
 export interface ParallelDispatchArchiveTask {
   readonly task_id: string;
+  readonly depends_on: readonly string[];
   readonly worktree_id: string;
   readonly managed_path: string | null;
   readonly branch: string;
@@ -250,6 +251,43 @@ export interface ParallelDispatchArchive {
   readonly cancelled: boolean;
   readonly terminal_reason: "completed" | "cancelled" | "failed";
   readonly tasks: readonly ParallelDispatchArchiveTask[];
+}
+
+export type IntegrationQueuePhase = "queued" | "integrating" | "integrated" | "failed";
+
+export type IntegrationQueueErrorCode =
+  | "invalid-archive"
+  | "missing-dependency"
+  | "dependency-cycle"
+  | "duplicate-artifact"
+  | "stale-base"
+  | "merge-conflict"
+  | "stale-target"
+  | "dirty-tree"
+  | "target-checked-out"
+  | "queue-owned"
+  | "queue-lease"
+  | "corrupt-state"
+  | "git-incompatible";
+
+export interface IntegrationQueueTaskSnapshot {
+  readonly task_id: string;
+  readonly source_commit: string;
+  readonly synthetic_commit: string | null;
+  readonly integrated: boolean;
+}
+
+export interface IntegrationQueueSnapshot {
+  readonly owner_root: string;
+  readonly run_id: string;
+  readonly target_ref: string;
+  readonly target_base: string;
+  readonly phase: IntegrationQueuePhase;
+  readonly candidate_head: string | null;
+  readonly failure_code: IntegrationQueueErrorCode | null;
+  readonly tasks: readonly IntegrationQueueTaskSnapshot[];
+  readonly cleanup_pending: readonly string[];
+  readonly warnings: readonly string[];
 }
 
 export type SchemaDiagnosticCode = `schema_${string}`;

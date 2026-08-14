@@ -6,6 +6,9 @@ const PARALLEL_PREPARE_CAPABILITY = "sortie_prepare_parallel_dispatch";
 const PARALLEL_STATUS_CAPABILITY = "sortie_parallel_dispatch_status";
 const PARALLEL_CANCEL_CAPABILITY = "sortie_cancel_parallel_dispatch";
 const PARALLEL_COMMIT_ARTIFACT_CAPABILITY = "sortie_create_parallel_commit_artifact";
+const PARALLEL_ENQUEUE_INTEGRATION_CAPABILITY = "sortie_enqueue_parallel_integration";
+const PARALLEL_INTEGRATE_QUEUE_CAPABILITY = "sortie_integrate_parallel_queue";
+const PARALLEL_INTEGRATION_STATUS_CAPABILITY = "sortie_parallel_integration_status";
 
 export interface RuntimeAsset {
   readonly name: string;
@@ -17,7 +20,7 @@ export interface RuntimeAsset {
 export const runtimeAssets = [
   {
     name: "dog-coordinator",
-    version: "0.3.15-parallel-commit-artifact-v1",
+    version: "0.3.16-parallel-integration-queue-v1",
     installPath: "agent/dog-coordinator.md",
     content: `---
 description: Canonical MkII coordinator packaged by Sortie-dogs
@@ -387,7 +390,13 @@ immutable commit artifact only through ${PARALLEL_COMMIT_ARTIFACT_CAPABILITY}; a
 remains forbidden. That capability durably accepts the verified artifact before it returns, so restart
 can replay the exact running-task artifact without another commit. Terminal runs enter bounded durable archive; status and archive retain verified
 bounded artifacts with task, dispatch, worktree, branch, path, and base identities. Session idle never
-cancels; coordinator session deletion requests the same bounded cancellation.
+  outcomes are completed and their artifacts accepted, call ${PARALLEL_ENQUEUE_INTEGRATION_CAPABILITY}
+  with exact run_id and target_branch, then ${PARALLEL_INTEGRATE_QUEUE_CAPABILITY} once and inspect
+  ${PARALLEL_INTEGRATION_STATUS_CAPABILITY}. Never shell merge, cherry-pick, rebase, reset, checkout,
+  or push. stale-base, stale-target, merge-conflict, and target-checked-out stop for Card 07 or manual
+  resolution; never retry blindly. cleanup_pending permits exact integrate/status retry only and no
+  target rollback. Accepted integration owns cleanup; workers never clean worktrees. Session idle never
+  cancels; coordinator session deletion requests the same bounded cancellation.
 Each worker's final response ends with exactly one line:
 SORTIE_PARALLEL_OUTCOME {"run_id":"<run_id>","dispatch_id":"<dispatch_id>","status":"<completed|failed|blocked|cancelled>"}
 
@@ -405,7 +414,10 @@ DEPENDENCY_PARALLEL_DISPATCH_FIXTURE
     artifact_failure: retain edits/worktree | release gate | failed | blocked marker; raw output forbidden
     terminal_marker: release complete and no tools/subprocess in flight -> SORTIE_PARALLEL_OUTCOME strict bounded JSON
     cancel: sortie_cancel_parallel_dispatch; coordinator root only; running join-required
-    cleanup: worktree cleanup remains Card 06
+    integration: completed accepted artifacts -> sortie_enqueue_parallel_integration exact run_id + target_branch -> sortie_integrate_parallel_queue once -> sortie_parallel_integration_status bounded
+    integration_forbidden: shell merge | cherry-pick | rebase | reset | checkout | push
+    integration_stop: stale-base | stale-target | merge-conflict | target-checked-out -> Card 07 | manual resolution; no blind retry
+    cleanup: accepted integration owns cleanup; cleanup_pending permits exact integrate/status retry only; no target rollback; workers never clean
 END_DEPENDENCY_PARALLEL_DISPATCH_FIXTURE
 
 ## Worker handoff contract
@@ -1060,10 +1072,10 @@ the initial exit 1 is first and the latest exit 0 is last.
 An undeclared write or mutation must be reported as rejected, not performed.
 
 RUNTIME_ASSET_VERSION_SYNC_FIXTURE
-    runtime_version: 0.3.15-parallel-commit-artifact-v1
+    runtime_version: 0.3.16-parallel-integration-queue-v1
     shared_marker: src/asset-version.ts
-    packaged_expectation: test/plugin-loader.test.ts uses 0.3.15-parallel-commit-artifact-v1
-    initialize_expectation: test/initialize.test.ts uses 0.3.15-parallel-commit-artifact-v1
+    packaged_expectation: test/plugin-loader.test.ts uses 0.3.16-parallel-integration-queue-v1
+    initialize_expectation: test/initialize.test.ts uses 0.3.16-parallel-integration-queue-v1
     rule: runtime asset versions, shared marker, packaged expectation, and initialize expectation change together
 END_RUNTIME_ASSET_VERSION_SYNC_FIXTURE
 
@@ -1106,7 +1118,7 @@ END_TERMINAL_EVIDENCE_FIXTURE
   },
   {
     name: "dog-worker",
-    version: "0.3.15-parallel-commit-artifact-v1",
+    version: "0.3.16-parallel-integration-queue-v1",
     installPath: "agent/dog-worker.md",
     content: `---
 description: Dedicated worker for the canonical Sortie-dogs coordinator
@@ -1212,7 +1224,7 @@ the user.
   },
   {
     name: "dog-scout",
-    version: "0.3.15-parallel-commit-artifact-v1",
+    version: "0.3.16-parallel-integration-queue-v1",
     installPath: "agent/dog-scout.md",
     content: `---
 description: Bounded evidence scout for dog-coordinator
@@ -1261,7 +1273,7 @@ prose; keep the keys, paths, commands, and identifiers verbatim.
   },
   {
     name: "dog-reviewer",
-    version: "0.3.15-parallel-commit-artifact-v1",
+    version: "0.3.16-parallel-integration-queue-v1",
     installPath: "agent/dog-reviewer.md",
     content: `---
 description: Independent source reviewer for dog-coordinator
@@ -1290,7 +1302,7 @@ or transport.
   },
   {
     name: "dog-advisor",
-    version: "0.3.15-parallel-commit-artifact-v1",
+    version: "0.3.16-parallel-integration-queue-v1",
     installPath: "agent/dog-advisor.md",
     content: `---
 description: Focused technical advisor for dog-coordinator
@@ -1314,7 +1326,7 @@ provider, vendor, model, variant, or transport.
   },
   {
     name: "sortie",
-    version: "0.3.15-parallel-commit-artifact-v1",
+    version: "0.3.16-parallel-integration-queue-v1",
     installPath: "command/sortie.md",
     content: `---
 description: Start the canonical Sortie-dogs MkII workflow

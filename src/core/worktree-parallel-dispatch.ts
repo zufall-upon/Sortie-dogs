@@ -741,6 +741,18 @@ export class ParallelDispatchCoordinator {
     }));
   }
 
+  /** Return one terminal run archive without exposing active or preparation state as an archive. */
+  async archive(ownerRoot: string, runID: string): Promise<ParallelDispatchArchive | undefined> {
+    if (!validText(ownerRoot, 256) || !validText(runID, 64) || !UUID.test(runID)) {
+      throw new ParallelDispatchError("descriptor-mismatch", "Parallel run identity is invalid.");
+    }
+    await this.recoverWithAuthority();
+    return this.transaction((state) => {
+      const archive = this.findRunArchive(state, ownerRoot, runID);
+      return { result: archive === undefined ? undefined : this.publicArchive(archive), changed: false };
+    });
+  }
+
   async reconcile(
     ownerRoot: string,
     activeCallIDs: ReadonlySet<string>,
@@ -978,6 +990,7 @@ export class ParallelDispatchCoordinator {
     const source = archive.kind === "run" ? archive.run : archive.preparation;
     const tasks = archive.kind === "run" ? archive.run.tasks.map((task) => ({
       task_id: task.descriptor.task_id,
+      depends_on: Object.freeze([...task.descriptor.depends_on]),
       worktree_id: task.worktree_id,
       managed_path: task.descriptor.managed_path,
       branch: task.descriptor.branch,
@@ -990,6 +1003,7 @@ export class ParallelDispatchCoordinator {
       artifact: task.artifact === null ? null : cloneArtifact(task.artifact),
     })) : archive.preparation.tasks.map((task, index) => ({
       task_id: task.task_id,
+      depends_on: Object.freeze([...task.depends_on]),
       worktree_id: task.worktree_id,
       managed_path: archive.inventory[index]?.managed_path ?? null,
       branch: task.branch,

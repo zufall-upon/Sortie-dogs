@@ -26,6 +26,10 @@ export {
   ParallelDispatchCoordinator,
   ParallelDispatchError,
 } from "./core/worktree-parallel-dispatch.js";
+export {
+  WorktreeIntegrationQueue,
+  IntegrationQueueError,
+} from "./core/worktree-integration-queue.js";
 export * from "./core/worktree-commit-artifact.js";
 export type {
   ParallelDispatchCoordinatorOptions,

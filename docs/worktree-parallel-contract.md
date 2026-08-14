@@ -119,6 +119,12 @@ models, worker bound, validation conditions, and measurement window.
   The typed producer durably accepts the verified artifact before returning it to the worker. A restart
   may replay that exact running-task artifact but never creates a second commit. Parent completion only
   changes the task phase after write-gate release and process/tool quiescence are proven.
-- Card 06: cleanup, serial integration, and stale rejection.
+- Card 06: completed. `WorktreeIntegrationQueue` is the sole coordinator-owned durable serial queue.
+  It accepts only completed archives with verified artifacts, uses dependency then stable task order,
+  applies patch plumbing through a temporary index, creates synthetic provenance commits, and finishes
+  with target update-ref CAS. Crash resume keeps the queue durable; stale base, stale target,
+  merge conflict, and linked target worktree rejection leave the target unchanged. Source refs are
+  adopted after accepted integration. Accepted integration owns cleanup; `cleanup_pending` permits
+  exact integrate/status resumption without rollback. No raw patch or log exposure.
 - Card 07: conflict remediation and combined validation.
 - Card 08: Windows/WSL RPT and efficiency audit.

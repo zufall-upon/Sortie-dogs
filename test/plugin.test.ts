@@ -1586,7 +1586,10 @@ test("invalid global Sortie config fails reflection closed without removing core
         "sortie_compact_and_continue",
         "sortie_create_parallel_commit_artifact",
         "sortie_enable_backlog_drain",
+        "sortie_enqueue_parallel_integration",
+        "sortie_integrate_parallel_queue",
         "sortie_parallel_dispatch_status",
+        "sortie_parallel_integration_status",
         "sortie_prepare_parallel_dispatch",
         "sortie_release_write_gate",
       ]);

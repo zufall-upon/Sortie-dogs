@@ -491,6 +491,13 @@ export class WorktreeLifecycle {
     });
   }
 
+  async hasManagedWorktree(worktreeId: string): Promise<boolean> {
+    if (!validText(worktreeId)) throw new WorktreeLifecycleError("invalid-request", "Worktree ID is invalid.");
+    const id = identity(worktreeId);
+    await this.assertRootIdentity();
+    return this.withInventoryTransaction(async () => this.inventory.records.some((entry) => entry.identity === id));
+  }
+
   async acceptCommit(
     worktreeId: string,
     managedPath: string,
