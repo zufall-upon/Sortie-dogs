@@ -1,16 +1,16 @@
 # Worktree parallel RPT audit
 
-Observed 2026-08-14 for the unshipped 0.5.0 development line.
+Observed 2026-08-16 for the shipped 0.5.0 release line.
 
 ## Completed evidence
 
-- `npm test`: 433 tests passed after the dogfood bootstrap and bounded review-retry fixes.
+- `npm test`: 210 tests passed in the final 0.5.0 release worktree.
 - Windows focused integration queue: 18 tests passed after the final durable failure-state fixes.
 - `npm pack --pack-destination .\_testenv`: `sortie-dogs-0.5.0.tgz` created.
-- Package SHA-256: `01EB1AD8DBC6B5553CF6BD60A16DD6486CD931EFA0C077DED4AD27401D030A19`.
+- Package SHA-256: `548A6E44C5E1323797C1F0910AE956454B981EE21B36C23E73A9FDB316C3A903`.
 - WSL OpenCode CLI: version `1.18.11` resolved from the approved CLI path.
 - Fresh `_testenv/card08-wsl` install and packed CLI initialization completed with runtime asset marker
-  `0.3.17-parallel-conflict-remediation-v1`.
+  `0.3.32-terminal-outcome-v1`.
 - Fresh-project `opencode debug config` resolved `/sortie` to `dog-coordinator` and loaded the installed
   dog agent set.
 - A fresh packed-plugin WSL `/sortie` run reached terminal `DONE`: one scoped worker changed only
@@ -30,7 +30,7 @@ Observed 2026-08-14 for the unshipped 0.5.0 development line.
 
 ## Decision
 
-Normal serial `/sortie` is ready for dogfooding with the packed 0.5.0 candidate. Parallel worktree execution
+Normal serial `/sortie` is ready for dogfooding with the shipped 0.5.0 package. Parallel worktree execution
 remains explicit opt-in because same-task parallel efficiency and interactive Desktop evidence are incomplete.
 Revisit the parallel default only after the deterministic fixture passes the matching parallel WSL run and
 the Windows Desktop acceptance path.
