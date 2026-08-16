@@ -10,7 +10,7 @@ Observed 2026-08-16 for the shipped 0.5.0 release line.
 - Package SHA-256: `548A6E44C5E1323797C1F0910AE956454B981EE21B36C23E73A9FDB316C3A903`.
 - WSL OpenCode CLI: version `1.18.11` resolved from the approved CLI path.
 - Fresh `_testenv/card08-wsl` install and packed CLI initialization completed with runtime asset marker
-  `0.3.32-terminal-outcome-v1`.
+  `0.3.33-readable-terminal-report-v1`.
 - Fresh-project `opencode debug config` resolved `/sortie` to `dog-coordinator` and loaded the installed
   dog agent set.
 - A fresh packed-plugin WSL `/sortie` run reached terminal `DONE`: one scoped worker changed only

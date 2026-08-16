@@ -22,7 +22,7 @@ export interface RuntimeAsset {
 export const runtimeAssets = [
   {
     name: "dog-coordinator",
-    version: "0.3.32-terminal-outcome-v1",
+    version: "0.3.33-readable-terminal-report-v1",
     installPath: "agent/dog-coordinator.md",
     content: `---
 description: Canonical MkII coordinator packaged by Sortie-dogs
@@ -83,6 +83,8 @@ READABLE_OUTPUT_FIXTURE
     protocol_keys: dispatch, handoff, checkpoint, consultation field keys stay verbatim ASCII
     separation: one blank line between plan, progress, Task feedback, question, and report blocks
     line_rule: one statement per line; run-on single-line output forbidden
+    terminal_conclusion: first non-empty output; exactly three lines; never more than five; no preamble
+    terminal_evidence: one canonical field per line; structured entries use emoji-marked continuation lines
     emoji: exactly one leading emoji per user-facing line
     emoji_plan: 🎯
     emoji_progress: 📊
@@ -1180,21 +1182,26 @@ COMMIT_SCOPE_FIXTURE
 END_COMMIT_SCOPE_FIXTURE
 
 At each checkpoint and terminal return, require concise evidence only. Render every user-facing
-terminal return as two layers. The standard view is exactly four lines: status with task_id, a short
-decisions projection, an ordered validation PASS/FAIL projection, then next_action. Follow it with
-one blank line and the fixed heading Evidence. The Evidence layer retains every canonical field and
-every ordered validation command, exit, and fingerprint; the standard view is a projection, never a
-replacement for Evidence. Apply the readable-output one-statement-per-line, blank-separation,
-leading-emoji, and exact-ASCII protocol-key rules to both layers. Each standard-view line is one
-statement; its first line is one status statement combining status and task identity. Each Evidence
-line is one canonical field statement. Keep no blank line inside either layer and exactly one blank
-line between them. Keep status, task_id, decisions, validation, next_action, and every Evidence key
-in exact ASCII. Validation history is append-only and ordered: retain every attempt with its exact
-command, exit, and fingerprint, including an initial failure followed by a final pass.
-The terminal fixture below fixes the standard-view order as status plus task_id, decisions,
-validation, then next_action; exactly one blank separator must lead directly to the fixed Evidence
-heading. Its Evidence validation array demonstrates the complete entry key set and append order:
-the initial exit 1 is first and the latest exit 0 is last.
+terminal return as two layers. The first layer is the conclusion and MUST be the first non-empty
+output: no plan, progress, assessment, Evidence heading, or preamble may precede it. The conclusion
+view is exactly three non-empty lines and never exceeds five lines: a conclusion line combining
+status and task_id, an ordered validation summary, then next_action. Follow it with one blank line
+and the fixed heading Evidence. The conclusion is the user's answer; keep it short enough to scan
+without wrapping where possible. Apply the readable-output one-statement-per-line,
+blank-separation, leading-emoji, and exact-ASCII protocol-key rules to both layers.
+The Evidence layer retains every canonical field and every ordered validation command, exit, and
+fingerprint; it is a detail layer, never a replacement for the conclusion. Each canonical Evidence
+field starts on its own line. Structured values are expanded: put one array/object entry on each
+following continuation line beginning with the same leading emoji and two spaces. Never put two
+canonical fields or multiple validation entries on one physical line. Keep no blank line inside
+either layer and exactly one blank line between them. Keep status, task_id, decisions, validation,
+next_action, and every Evidence key in exact ASCII. Validation history is append-only and ordered:
+retain every attempt with its exact command, exit, and fingerprint, including an initial failure
+followed by a final pass.
+The terminal fixture below fixes the conclusion order as conclusion, validation, then next_action;
+exactly one blank separator must lead directly to the fixed Evidence heading. Its Evidence validation
+entries demonstrate the complete entry key set and append order: the initial exit 1 is first and the
+latest exit 0 is last.
 An undeclared write or mutation must be reported as rejected, not performed.
 
 TERMINAL_STATUS_SEMANTICS_FIXTURE
@@ -1206,53 +1213,85 @@ TERMINAL_STATUS_SEMANTICS_FIXTURE
 END_TERMINAL_STATUS_SEMANTICS_FIXTURE
 
 RUNTIME_ASSET_VERSION_SYNC_FIXTURE
-    runtime_version: 0.3.32-terminal-outcome-v1
+    runtime_version: 0.3.33-readable-terminal-report-v1
     shared_marker: src/asset-version.ts
-    packaged_expectation: test/plugin-loader.test.ts uses 0.3.32-terminal-outcome-v1
-    initialize_expectation: test/initialize.test.ts uses 0.3.32-terminal-outcome-v1
+    packaged_expectation: test/plugin-loader.test.ts uses 0.3.33-readable-terminal-report-v1
+    initialize_expectation: test/initialize.test.ts uses 0.3.33-readable-terminal-report-v1
     rule: runtime asset versions, shared marker, packaged expectation, and initialize expectation change together
 END_RUNTIME_ASSET_VERSION_SYNC_FIXTURE
 
 TERMINAL_OUTPUT_TEMPLATE
-✅ status: <DONE | BLOCKED | NEED_DECISION>; task_id: <stable task id>
-🐕 decisions: <short decision summary>
+✅ conclusion: status: <DONE | BLOCKED | NEED_DECISION>; task_id: <stable task id>; <short conclusion>
 🔍 validation: <ordered PASS/FAIL summary>
 ➡️ next_action: <single action or none>
 
 🔍 Evidence
 🔍 status: <DONE | BLOCKED | NEED_DECISION>
 🔍 task_id: <stable task id>
-🔍 manifest: { source_manifest: <exact entries or none>, operation_manifest: <exact path or none> }
-🔍 decisions: [<autonomous decision>]
-🔍 validation: [{ command: npm test, exit: 1, fingerprint: initial failure }, { command: npm test, exit: 0, fingerprint: final pass }]
-🔍 scout: { attempted: <boolean>, revision: <revision>, blocker_owner: <owner>, reason: <exact decision reason> }
-🔍 tracker: { inventory_fingerprint: <fingerprint or none>, candidate_queue: [<bounded identities + acceptance fingerprints + acceptance hashes + redacted acceptance digests>], pending_updates: [<terminal outcomes or none>], flush_state: <pending | flushed | reconciliation-required | none> }
+🔍 manifest:
+🔍   source_manifest: <exact entries or none>
+🔍   operation_manifest: <exact path or none>
+🔍 decisions:
+🔍   - <autonomous decision>
+🔍 validation:
+🔍   [1] command: npm test; exit: 1; fingerprint: initial failure
+🔍   [2] command: npm test; exit: 0; fingerprint: final pass
+🔍 scout:
+🔍   attempted: <boolean>
+🔍   revision: <revision>
+🔍   blocker_owner: <owner>
+🔍   reason: <exact decision reason>
+🔍 tracker:
+🔍   inventory_fingerprint: <fingerprint or none>
+🔍   candidate_queue:
+🔍     - <bounded identities + acceptance fingerprints + acceptance hashes + redacted acceptance digests>
+🔍   pending_updates:
+🔍     - <terminal outcomes or none>
+🔍   flush_state: <pending | flushed | reconciliation-required | none>
 🔍 raw_status: <unmodified status evidence>
 🔍 diff: <concise diff summary>
-🔍 stale_paths: [<path or none>]
-🔍 new_findings: [<finding or none>]
+🔍 stale_paths:
+🔍   - <path or none>
+🔍 new_findings:
+🔍   - <finding or none>
 ➡️ next_action: <single action or none>
 END_TERMINAL_OUTPUT_TEMPLATE
 
 TERMINAL_EVIDENCE_FIXTURE
     status: DONE | BLOCKED | NEED_DECISION
     task_id: <stable task id>
-    manifest: { source_manifest: <exact entries or none>, operation_manifest: <exact path or none> }
-    decisions: [<autonomous decision>]
-    validation: [{ command: <exact command>, exit: <exit>, fingerprint: <concise fingerprint> }]
-    scout: { attempted: <boolean>, revision: <revision>, blocker_owner: <owner>, reason: <exact decision reason> }
-    tracker: { inventory_fingerprint: <fingerprint or none>, candidate_queue: [<bounded identities + acceptance fingerprints + acceptance hashes + redacted acceptance digests>], pending_updates: [<terminal outcomes or none>], flush_state: <pending | flushed | reconciliation-required | none> }
+    manifest:
+      source_manifest: <exact entries or none>
+      operation_manifest: <exact path or none>
+    decisions:
+      - <autonomous decision>
+    validation:
+      - command: <exact command>; exit: <exit>; fingerprint: <concise fingerprint>
+    scout:
+      attempted: <boolean>
+      revision: <revision>
+      blocker_owner: <owner>
+      reason: <exact decision reason>
+    tracker:
+      inventory_fingerprint: <fingerprint or none>
+      candidate_queue:
+        - <bounded identities + acceptance fingerprints + acceptance hashes + redacted acceptance digests>
+      pending_updates:
+        - <terminal outcomes or none>
+      flush_state: <pending | flushed | reconciliation-required | none>
     raw_status: <unmodified status evidence>
     diff: <concise diff summary>
-    stale_paths: [<path or none>]
-    new_findings: [<finding or none>]
+    stale_paths:
+      - <path or none>
+    new_findings:
+      - <finding or none>
     next_action: <single action or none>
 END_TERMINAL_EVIDENCE_FIXTURE
 `,
   },
   {
     name: "dog-worker",
-    version: "0.3.32-terminal-outcome-v1",
+    version: "0.3.33-readable-terminal-report-v1",
     installPath: "agent/dog-worker.md",
     content: `---
 description: Dedicated worker for the canonical Sortie-dogs coordinator
@@ -1370,7 +1409,7 @@ the user.
   },
   {
     name: "dog-scout",
-    version: "0.3.32-terminal-outcome-v1",
+    version: "0.3.33-readable-terminal-report-v1",
     installPath: "agent/dog-scout.md",
     content: `---
 description: Bounded evidence scout for dog-coordinator
@@ -1419,7 +1458,7 @@ prose; keep the keys, paths, commands, and identifiers verbatim.
   },
   {
     name: "dog-reviewer",
-    version: "0.3.32-terminal-outcome-v1",
+    version: "0.3.33-readable-terminal-report-v1",
     installPath: "agent/dog-reviewer.md",
     content: `---
 description: Independent source reviewer for dog-coordinator
@@ -1448,7 +1487,7 @@ or transport.
   },
   {
     name: "dog-advisor",
-    version: "0.3.32-terminal-outcome-v1",
+    version: "0.3.33-readable-terminal-report-v1",
     installPath: "agent/dog-advisor.md",
     content: `---
 description: Focused technical advisor for dog-coordinator
@@ -1472,7 +1511,7 @@ provider, vendor, model, variant, or transport.
   },
   {
     name: "sortie",
-    version: "0.3.32-terminal-outcome-v1",
+    version: "0.3.33-readable-terminal-report-v1",
     installPath: "command/sortie.md",
     content: `---
 description: Start the canonical Sortie-dogs MkII workflow

@@ -1079,7 +1079,7 @@ test("generated assets require the user's language, per-line output, and emoji-m
   assert.match(worker.content, /denied optional check remains\s+DENIED evidence and never justifies another tool step/i);
 });
 
-test("generated coordinator renders a four-line standard view without dropping canonical Evidence", () => {
+test("generated coordinator renders a conclusion-first view with readable Evidence wrapping", () => {
   const coordinator = runtimeAssets.find((asset) => asset.name === "dog-coordinator");
   assert.ok(coordinator);
   const semantics = coordinator.content.match(
@@ -1097,31 +1097,30 @@ test("generated coordinator renders a four-line standard view without dropping c
   assert.match(
     output[1],
     /^➡️ next_action: <single action or none>\r?\n\r?\n🔍 Evidence\r?$/mu,
-    "exactly one blank line leads from the fourth standard line to the fixed Evidence heading",
+    "exactly one blank line leads from the conclusion block to the fixed Evidence heading",
   );
   const layers = output[1].split(/\r?\n\r?\n/);
   assert.equal(layers.length, 2);
   const [standard, evidence] = layers;
   assert.ok(evidence, "standard view and Evidence need one blank separator");
   const standardLines = standard.split(/\r?\n/);
-  assert.equal(standardLines.length, 4);
+  assert.equal(standardLines.length, 3);
   assert.ok(standardLines.every((line) => line.length > 0), "standard view has no internal blank line");
-  assert.match(standardLines[0], /^✅ status: .+; task_id: .+$/u);
-  assert.match(standardLines[1], /^🐕 decisions: <short decision summary>$/u);
-  assert.match(standardLines[2], /^🔍 validation: <ordered PASS\/FAIL summary>$/u);
-  assert.match(standardLines[3], /^➡️ next_action: <single action or none>$/u);
+  assert.match(standardLines[0], /^✅ conclusion: status: .+; task_id: .+; .+$/u);
+  assert.match(standardLines[1], /^🔍 validation: <ordered PASS\/FAIL summary>$/u);
+  assert.match(standardLines[2], /^➡️ next_action: <single action or none>$/u);
   assert.deepEqual(standardLines, [
-    "✅ status: <DONE | BLOCKED | NEED_DECISION>; task_id: <stable task id>",
-    "🐕 decisions: <short decision summary>",
+    "✅ conclusion: status: <DONE | BLOCKED | NEED_DECISION>; task_id: <stable task id>; <short conclusion>",
     "🔍 validation: <ordered PASS/FAIL summary>",
     "➡️ next_action: <single action or none>",
-  ], "standard view is exactly four lines in status+task_id, decisions, validation, next_action order");
+  ], "conclusion view is exactly three lines in conclusion, validation, next_action order");
   assert.deepEqual(
     standardLines.map((line) => /^\S+ ([a-z_]+):/u.exec(line)?.[1]),
-    ["status", "decisions", "validation", "next_action"],
+    ["conclusion", "validation", "next_action"],
     "standard protocol keys stay exact ASCII and ordered",
   );
-  assert.ok(standardLines[0].includes("; task_id: "), "task_id stays exact ASCII on the status statement");
+  assert.ok(standardLines[0].includes("status: "), "status stays exact ASCII on the conclusion statement");
+  assert.ok(standardLines[0].includes("; task_id: "), "task_id stays exact ASCII on the conclusion statement");
   assert.ok(
     standardLines.every((line) => /^(?:✅|🐕|🔍|➡️) [\x00-\x7F]/u.test(line)),
     "each standard line has exactly one leading emoji before an ASCII protocol key",
@@ -1148,52 +1147,60 @@ test("generated coordinator renders a four-line standard view without dropping c
     "new_findings",
     "next_action",
   ];
+  const evidenceFieldLines = evidenceLines.slice(1).filter((line) => /^(?:🔍|➡️) [a-z_]+:/u.test(line));
   assert.deepEqual(
-    evidenceLines.slice(1).map((line) => /^\S+ ([a-z_]+):/u.exec(line)?.[1]),
+    evidenceFieldLines.map((line) => /^\S+ ([a-z_]+):/u.exec(line)?.[1]),
     evidenceKeys,
     "Evidence protocol keys stay exact ASCII and ordered",
   );
-  assert.match(evidence, /^🔍 manifest: /mu, "Evidence retains the exact ASCII manifest key");
-  assert.match(evidence, /^🔍 decisions: /mu, "Evidence retains the exact ASCII decisions key");
-  assert.match(evidence, /^🔍 tracker: /mu, "Evidence retains durable tracker batch state");
+  assert.match(evidence, /^🔍 manifest:$/mu, "Evidence retains the exact ASCII manifest key");
+  assert.match(evidence, /^🔍 manifest:\r?\n🔍   source_manifest:/mu, "manifest entries use continuation lines");
+  assert.match(evidence, /^🔍 decisions:/mu, "Evidence retains the exact ASCII decisions key");
+  assert.match(evidence, /^🔍 scout:\r?\n🔍   attempted:/mu, "scout fields use continuation lines");
+  assert.match(evidence, /^🔍 tracker:$/mu, "Evidence retains durable tracker batch state");
+  assert.match(evidence, /^🔍 tracker:\r?\n🔍   inventory_fingerprint:/mu, "tracker fields use continuation lines");
   assert.match(evidence, /^🔍 raw_status: /mu, "Evidence retains the exact ASCII raw_status key");
   assert.match(evidence, /^🔍 diff: /mu, "Evidence retains the exact ASCII diff key");
-  assert.match(evidence, /^🔍 stale_paths: /mu, "Evidence retains the exact ASCII stale_paths key");
-  assert.match(evidence, /^🔍 new_findings: /mu, "Evidence retains the exact ASCII new_findings key");
+  assert.match(evidence, /^🔍 stale_paths:$/mu, "Evidence retains the exact ASCII stale_paths key");
+  assert.match(evidence, /^🔍 stale_paths:\r?\n🔍   - /mu, "stale paths use continuation lines");
+  assert.match(evidence, /^🔍 new_findings:$/mu, "Evidence retains the exact ASCII new_findings key");
+  assert.match(evidence, /^🔍 new_findings:\r?\n🔍   - /mu, "new findings use continuation lines");
   assert.match(evidence, /^➡️ next_action: /mu, "Evidence retains the exact ASCII next_action key");
   assert.ok(
     evidenceLines.every((line) => /^(?:🔍|➡️) [\x00-\x7F]/u.test(line)),
     "each Evidence line has exactly one leading emoji",
   );
   assert.ok(
-    evidenceLines.slice(1).every((line) => /^\S+ [a-z_]+: /u.test(line)),
-    "each Evidence line contains one canonical field statement",
+    evidenceLines.slice(1).every((line) => /^(?:🔍|➡️) (?:[a-z_]+:|  )/u.test(line)),
+    "each Evidence line contains one canonical field statement or continuation",
   );
   const validationLine = evidenceLines.find((line) => line.startsWith("🔍 validation:"));
-  assert.equal(
-    validationLine,
-    "🔍 validation: [{ command: npm test, exit: 1, fingerprint: initial failure }, " +
-      "{ command: npm test, exit: 0, fingerprint: final pass }]",
-    "ordered validation retains every command, exit, and fingerprint from initial failure through final pass",
-  );
-  const validationEntries = [...(validationLine ?? "").matchAll(
-    /\{ (command): ([^,]+), (exit): ([^,]+), (fingerprint): ([^}]+) \}/gu,
-  )].map((match) => ({
-    keys: [match[1], match[3], match[5]],
-    command: match[2],
-    exit: Number(match[4]),
-    fingerprint: match[6],
-  }));
+  assert.equal(validationLine, "🔍 validation:");
+  const validationEntries = evidenceLines
+    .filter((line) => /^🔍\s+\[\d+\] command:/u.test(line))
+    .map((line) => {
+      const match = /^🔍\s+\[(\d+)\] command: ([^;]+); exit: ([^;]+); fingerprint: (.+)$/u.exec(line);
+      assert.ok(match, `invalid validation continuation: ${line}`);
+      return {
+        index: Number(match[1]),
+        keys: ["command", "exit", "fingerprint"],
+        command: match[2],
+        exit: Number(match[3]),
+        fingerprint: match[4],
+      };
+    });
   assert.deepEqual(validationEntries, [
-    { keys: ["command", "exit", "fingerprint"], command: "npm test", exit: 1, fingerprint: "initial failure" },
-    { keys: ["command", "exit", "fingerprint"], command: "npm test", exit: 0, fingerprint: "final pass" },
+    { index: 1, keys: ["command", "exit", "fingerprint"], command: "npm test", exit: 1, fingerprint: "initial failure" },
+    { index: 2, keys: ["command", "exit", "fingerprint"], command: "npm test", exit: 0, fingerprint: "final pass" },
   ], "every Evidence validation entry retains exact ASCII command, exit, and fingerprint keys and values");
   assert.equal(validationEntries[0]?.exit, 1, "append-only validation history keeps initial exit=1 first");
   assert.equal(validationEntries.at(-1)?.exit, 0, "append-only validation history keeps latest exit=0 last");
   assert.match(
     coordinator.content,
-    /standard view is a projection, never a\s+replacement for Evidence/i,
+    /conclusion is the user's answer[\s\S]+detail layer, never a replacement for the conclusion/i,
   );
+  assert.match(coordinator.content, /first non-empty\s+output: no plan, progress, assessment, Evidence heading, or preamble may precede it/i);
+  assert.match(coordinator.content, /Never put two\s+canonical fields or multiple validation entries on one physical line/i);
 });
 
 test("shipped document fixtures satisfy the schemas the write gate enforces", () => {
