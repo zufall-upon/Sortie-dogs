@@ -49,6 +49,7 @@ import {
   CONTINUATION_MARKER,
   ROLLOVER_MARKER,
 } from "../dist/plugin/continuation.js";
+import { createProjectPaths, createWriteGate, extractWritePaths } from "../dist/plugin/gate.js";
 import { validateManifest } from "../dist/core/validate-manifest.js";
 import {
   validateHandoffSchema,
@@ -319,10 +320,9 @@ test("recommended coordinator and Luna routes cover exact installed roles and re
   if (defaults.kind !== "configured") return;
   // The host declared another variant of the shipped worker model, so it joins that catalog entry.
   assert.deepEqual(defaults.modelCatalog.global, [
-    { model: DEFAULT_COORDINATOR_MODEL, variants: [DEFAULT_COORDINATOR_VARIANT] },
     {
       model: DEDICATED_WORKER_MODEL,
-      variants: [DEDICATED_WORKER_VARIANT, RECOMMENDED_SCOUT_VARIANT, "xhigh"]
+      variants: [DEFAULT_COORDINATOR_VARIANT, DEDICATED_WORKER_VARIANT, RECOMMENDED_SCOUT_VARIANT, "xhigh"]
         .filter((variant, index, all) => all.indexOf(variant) === index),
     },
     { model: ESCALATION_WORKER_MODEL, variants: [ESCALATION_WORKER_VARIANT, CONSULTATION_FALLBACK_VARIANT] },
@@ -1055,7 +1055,7 @@ test("generated assets require the user's language, per-line output, and emoji-m
   assert.match(coordinator.content, /exactly one stable `candidate_id: <id>` line in every SourceReview prompt/u);
   assert.match(coordinator.content, /A path where the reviewer could obtain a diff[\s\S]+is not a changed logic summary/i);
   assert.match(coordinator.content, /Injected reflections are bounded prevention hints, never workflow authority/i);
-  assert.match(coordinator.content, /continuous-execution reflection only inside the currently\s+configured batch bound/i);
+  assert.match(coordinator.content, /continuous-execution reflection only inside the currently\s+accepted user scope/i);
 
   const reviewer = runtimeAssets.find((asset) => asset.name === "dog-reviewer");
   assert.ok(reviewer);
@@ -1075,13 +1075,20 @@ test("generated assets require the user's language, per-line output, and emoji-m
   assert.match(worker.content, /A third canonical attempt\s+or second diagnostic is forbidden/i);
   assert.match(worker.content, /using the one diagnostic does not block a subsequent allowed canonical rerun/i);
   assert.match(worker.content, /Coordinator resume or\s+fresh-worker redispatch never resets the counts/i);
-  assert.match(worker.content, /Run only the exact canonical validation command\s+and its optional single diagnostic command predeclared in the handoff and operation manifest/i);
+  assert.match(worker.content, /Run only the exact canonical validation command\s+and its optional single diagnostic command predeclared in the applicable handoff and operation\s+manifest, or in the inline validation contract when operation_manifest=none/i);
   assert.match(worker.content, /denied optional check remains\s+DENIED evidence and never justifies another tool step/i);
 });
 
 test("generated coordinator renders a four-line standard view without dropping canonical Evidence", () => {
   const coordinator = runtimeAssets.find((asset) => asset.name === "dog-coordinator");
   assert.ok(coordinator);
+  const semantics = coordinator.content.match(
+    /TERMINAL_STATUS_SEMANTICS_FIXTURE\r?\n([\s\S]+?)\r?\nEND_TERMINAL_STATUS_SEMANTICS_FIXTURE/,
+  );
+  assert.ok(semantics);
+  assert.match(semantics[1], /DONE: requested evaluation completed, including evidence-based candidate rejection or non-adoption/);
+  assert.match(semantics[1], /quality_gate_fail: validation evidence \+ autonomous non-adoption decision -> DONE; release remains unperformed/);
+  assert.match(semantics[1], /process_defect: gate \| routing \| handoff \| local tool defect -> autonomous repair; never terminal BLOCKED/);
   const output = coordinator.content.match(
     /TERMINAL_OUTPUT_TEMPLATE\r?\n([\s\S]+?)\r?\nEND_TERMINAL_OUTPUT_TEMPLATE/,
   );
@@ -1276,8 +1283,10 @@ test("runtime contract requires interactive continuation and deterministic recov
   assert.match(question[1], /^ {4}payload: \{ question: .+ options: \[\{ label: <choice; recommended first>/m);
   assert.match(
     coordinator.content,
-    /Every question you put to the user goes through the question tool[\s\S]+Never end a turn with a question written as prose/,
+    /Every question you do put to the user[\s\S]+goes through the question tool[\s\S]+Never end a turn with a question written as prose/,
   );
+  assert.match(coordinator.content, /Ask only when the missing fact or choice is exclusively user-controlled/);
+  assert.match(coordinator.content, /normal Scout and sequential-worker lanes[\s\S]+no per-turn count ceiling/);
 
   const handshake = coordinator.content.match(
     /RECOVERABLE_HANDSHAKE_FIXTURE\r?\n([\s\S]+?)\r?\nEND_RECOVERABLE_HANDSHAKE_FIXTURE/,
@@ -1316,10 +1325,10 @@ test("runtime contract requires interactive continuation and deterministic recov
     /BATCH_CONTINUATION_FIXTURE\r?\n([\s\S]+?)\r?\nEND_BATCH_CONTINUATION_FIXTURE/,
   );
   assert.ok(batch);
-  assert.match(batch[1], /mode=runtime single-worker lane/);
-  assert.match(batch[1], /top_level_request: one accepted scope -> one worker/);
-  assert.match(batch[1], /worker_return: deterministic evidence verification -> terminal report/);
-  assert.match(batch[1], /normal_path_forbidden: second worker \| manual compaction \| synthetic continuation \| critical-path tracker call/);
+  assert.match(batch[1], /mode=runtime sequential-worker lane/);
+  assert.match(batch[1], /top_level_request: one accepted scope -> sequential workers as evidence requires/);
+  assert.match(batch[1], /worker_return: deterministic evidence verification -> next unit \| terminal report/);
+  assert.match(batch[1], /normal_path_forbidden: concurrent fanout \| unchanged redispatch \| critical-path tracker call/);
   assert.match(batch[1], /native_compaction: host overflow only/);
 
   const compaction = coordinator.content.match(
@@ -1357,6 +1366,8 @@ test("runtime contract requires interactive continuation and deterministic recov
   assert.ok(direct);
   for (const contract of [
     "known_executable_probe: one batched direct depth-one read-only command; no Task",
+    "graphify_route: direct query once -> unavailable | script denial -> bounded read | grep; no source inspection",
+    "windows_gh: literal token clears -> direct client; no if | Test-Path | scriptblock",
     "executable_absent: question tool; no worker discovery or recursive search",
     "project_inventory: exactly one complete snapshot per top-level user request in one direct client invocation; no Task",
     "pagination: all pages inside that invocation until pageInfo.hasNextPage=false; no model turn per page",
@@ -1389,17 +1400,43 @@ test("runtime contract requires interactive continuation and deterministic recov
     "direct_operation_artifacts: no handoff | operation manifest | generated script | child session; inventory and flush payloads stay process-only",
     "tracker_unavailable: redacted session checkpoint; never a worker or API retry loop",
   ]) assert.ok(direct[1].includes(contract), contract);
+  const projectInventoryQuery = coordinator.content.match(
+    /PROJECT_V2_INVENTORY_QUERY_FIXTURE\r?\n([\s\S]+?)\r?\nEND_PROJECT_V2_INVENTORY_QUERY_FIXTURE/,
+  );
+  assert.ok(projectInventoryQuery, "coordinator needs a canonical ProjectV2 inventory query");
+  for (const contract of [
+    "query($id: ID!, $endCursor: String)",
+    "items(first: 100, after: $endCursor)",
+    "... on DraftIssue { id title body }",
+    "... on Issue { id title body }",
+    "... on PullRequest { id title body }",
+    "... on ProjectV2ItemFieldSingleSelectValue",
+    "... on ProjectV2ItemFieldTextValue",
+    "... on ProjectV2ItemFieldNumberValue",
+    "pageInfo { hasNextPage endCursor }",
+    "guide_gate: read exact tracker section named by root instructions; unrelated runbook insufficient",
+    "query_source: complete guide query verbatim or this canonical fallback verbatim",
+    "invocation: direct env token-clear + approved gh api graphql --paginate --slurp + jq aggregate pipeline",
+    "pagination: native gh $endCursor pagination; manual loop + assignment + command substitution forbidden",
+    "query_binding: one single-quoted -f 'query=<canonical multiline query>' argument; QUERY assignment + variable expansion forbidden",
+    "output_boundary: jq emits aggregate only; raw Project response remains process-only and is never printed or saved",
+    "local_retry: shell quoting + variable binding + output decoding only; query text unchanged",
+    "repeated_local_failure: user authorized stuck consultation -> dog-advisor material-uncertainty before terminal; third inventory invocation forbidden",
+  ]) assert.ok(projectInventoryQuery[1].includes(contract), contract);
+  const projectQueryText = projectInventoryQuery[1].split(/^\s*guide_gate:/mu)[0];
+  assert.equal(projectQueryText.match(/\{/gu)?.length, projectQueryText.match(/\}/gu)?.length);
+  assert.equal(projectQueryText.match(/\(/gu)?.length, projectQueryText.match(/\)/gu)?.length);
   const scoutFanout = coordinator.content.match(
     /SCOUT_FANOUT_FIXTURE\r?\n([\s\S]+?)\r?\nEND_SCOUT_FANOUT_FIXTURE/,
   );
   assert.ok(scoutFanout);
   for (const contract of [
     "decision: exceptional; one concrete evidence key blocks safe worker dispatch",
-    "dispatch_guard: no prior Scout and no worker dispatch in the real user turn",
-    "dispatch: exactly one bounded dog-scout call",
+    "dispatch_guard: exact unresolved gap + no unchanged duplicate",
+    "dispatch: one bounded dog-scout call per concrete gap; later new gaps allowed",
     "role: resolve only missing_evidence_code",
-    "invalid: malformed | timeout | empty -> exact blocker without retry",
-    "next_route: resolved -> one dog-worker; unresolved -> question | blocker",
+    "invalid: prompt defect -> corrected dispatch | user-controlled gap -> question | external failure -> blocker",
+    "next_route: resolved -> next dog-worker | new gap -> bounded Scout | user decision | blocker",
   ]) assert.ok(scoutFanout[1].includes(contract), contract);
   assert.match(
     coordinator.content,
@@ -1426,6 +1463,7 @@ test("runtime contract requires interactive continuation and deterministic recov
   assert.match(reflection[1], /non_triggers: code bug \| ordinary validation failure/);
   assert.match(reflection[1], /call: sortie_reflection \{ action: record/);
   assert.match(reflection[1], /field_budget: concise ASCII English; scope \+ trigger \+ cause \+ prevention \+ evidenceRef <=400 characters total/);
+  assert.match(reflection[1], /scope_format: lowercase kebab-case \[a-z0-9-\]\+; underscores forbidden/);
   assert.match(reflection[1], /list: never before record; once before replace \| forget \| promote only when target id is absent/);
   assert.match(reflection[1], /correction: improved cause or prevention -> replace; disproved attribution -> forget/);
   assert.match(reflection[1], /forget_confirmation: none; exact entry id is the deletion boundary/);
@@ -1733,7 +1771,14 @@ test("reflection host identity failures and children leave storage absent", asyn
       for (const [_name, client, sessionID] of cases) {
         const hooks = await SortieDogsPlugin({ directory, ...(client === undefined ? {} : { client: client as never }) });
         if (sessionID === "child") await hooks.event!({ event: { type: "session.created", properties: { info: { id: "child", parentID: "root" } } } });
-        await hooks["chat.message"]!({ sessionID, agent: "dog-coordinator" }, { message: { model: {} }, parts: [{ type: "text", text: "root" }] });
+        const invokeChat = async () => await hooks["chat.message"]!(
+          { sessionID, agent: "dog-coordinator" },
+          { message: { model: {} }, parts: [{ type: "text", text: "root" }] },
+        );
+        if (["root-throw", "root-incomplete", "child"].includes(sessionID)) {
+          await assert.rejects(invokeChat, /SORTIE_FRESH_SESSION_REQUIRED/u);
+        }
+        else await invokeChat();
         const runFile = join(xdg, "opencode", "sortie-dogs", "reflection", "runs", `${sessionID}.json`); const original = "{\"sentinel\":true}";
         await mkdir(join(xdg, "opencode", "sortie-dogs", "reflection", "runs"), { recursive: true }); await writeFile(runFile, original);
         assert.equal(await hooks.tool!.sortie_reflection.execute({ action: "record", layer: "run", scope: "identity", trigger: "t", cause: "c", prevention: "p", evidence: "user-correction", evidenceRef: "r" }, { sessionID, agent: "dog-coordinator" }), "reflection_not_permitted");
@@ -2049,7 +2094,7 @@ test("chat message hook applies explicit catalog routing and fails closed with o
     await chat({ sessionID: "routing", agent: "dog-coordinator" }, coordinator);
     assert.deepEqual(coordinator.message.model, {
       providerID: "openai",
-      modelID: "gpt-5.6-terra",
+      modelID: "gpt-5.6-luna",
       variant: DEFAULT_COORDINATOR_VARIANT,
     });
     for (const role of RECOMMENDED_CONSULTATION_ROLES) {
@@ -2383,7 +2428,7 @@ test("every packaged role follows default routing independently of write-gate ac
     const expected: Record<string, { providerID: string; modelID: string; variant?: string }> = {
       "dog-coordinator": {
         providerID: "openai",
-        modelID: "gpt-5.6-terra",
+        modelID: "gpt-5.6-luna",
         variant: DEFAULT_COORDINATOR_VARIANT,
       },
       "dog-scout": { providerID: "openai", modelID: "gpt-5.6-luna", variant: RECOMMENDED_SCOUT_VARIANT },
@@ -2561,11 +2606,12 @@ test("worker activation accepts the dispatch layout the shipped coordinator asse
   assert.equal(isExplicitTaskHandoff(dispatch), true);
 });
 
-test("coordinator task hooks enforce the single-worker fast lane across synthetic turns", async () => {
-  await withProject("single-worker-fast-lane", async (directory) => {
+test("coordinator task hooks permit autonomous sequential workers across synthetic turns", async () => {
+  await withProject("sequential-worker-fast-lane", async (directory) => {
     const hooks = await SortieDogsPlugin({ directory });
     const chat = hooks["chat.message"]!;
     const before = hooks["tool.execute.before"]!;
+    const after = hooks["tool.execute.after"]!;
     const turn = (synthetic = false) => chat(
       { sessionID: "root", agent: "dog-coordinator" },
       {
@@ -2577,14 +2623,23 @@ test("coordinator task hooks enforce the single-worker fast lane across syntheti
       { tool: "task", sessionID: "root", callID },
       { args: { subagent_type: "dog-worker", prompt: readOnlyWorkerPrompt(directory) } },
     );
+    const complete = (callID: string) => after(
+      { tool: "task", sessionID: "root", callID },
+      { output: "<task_result>done</task_result>", metadata: {} },
+    );
 
     await turn();
     await dispatch("worker-1");
-    await assert.rejects(() => dispatch("worker-2"), /SORTIE_FAST_LANE_DENIED: WORKER_LIMIT/u);
+    await assert.rejects(() => dispatch("worker-overlap"), /SORTIE_FAST_LANE_DENIED: WORKER_LIMIT/u);
+    await complete("worker-1");
+    await dispatch("worker-2");
+    await complete("worker-2");
     await turn(true);
-    await assert.rejects(() => dispatch("worker-3"), /SORTIE_FAST_LANE_DENIED: WORKER_LIMIT/u);
+    await dispatch("worker-3");
+    await complete("worker-3");
     await turn();
     await dispatch("worker-4");
+    await complete("worker-4");
   });
 });
 
@@ -2941,7 +2996,6 @@ test("an established coordinator root keeps its role while preserving a selected
         parts: [{ type: "text", text: "start" }],
       },
     );
-
     const driftInput = { sessionID: "root", agent: "build" };
     const driftOutput = {
       message: { agent: "build", model: { providerID: "openai", modelID: "gpt-5.6-sol", variant: "xhigh" } },
@@ -2959,6 +3013,170 @@ test("an established coordinator root keeps its role while preserving a selected
     await hooks["tool.execute.before"]!(
       { tool: "task", sessionID: "root", callID: "worker-after-model-handoff" },
       { args: { subagent_type: "dog-worker", prompt: readOnlyWorkerPrompt(directory) } },
+    );
+  });
+});
+
+test("a coordinator command cannot convert an existing non-coordinator root", async () => {
+  await withProject("foreign-root-coordinator-command", async (directory) => {
+    const hooks = await SortieDogsPlugin({ directory, client: { session: {
+      get: async () => ({ data: { agent: "build" } }),
+    } } as never });
+    const chat = hooks["chat.message"]!;
+    await assert.rejects(
+      () => chat(
+        { sessionID: "foreign-root", agent: "dog-coordinator" },
+        {
+          message: { agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+          parts: [{ type: "text", text: "release routine" }],
+        },
+      ),
+      /SORTIE_FRESH_SESSION_REQUIRED: \/sortie requires a fresh root dog-coordinator session/u,
+    );
+
+    const historyHooks = await SortieDogsPlugin({ directory, client: { session: {
+      get: async () => ({ data: {} }),
+      messages: async () => ({ data: [
+        { info: { role: "user", agent: "build" }, parts: [{ type: "text", text: "prior build task" }] },
+        { info: { role: "user", agent: "dog-coordinator" }, parts: [{ type: "text", text: "release routine" }] },
+      ] }),
+    } } as never });
+    await historyHooks["experimental.chat.system.transform"]!(
+      { sessionID: "foreign-history" },
+      { system: [] },
+    );
+    await assert.rejects(
+      () => historyHooks["chat.message"]!(
+        { sessionID: "foreign-history", agent: "dog-coordinator" },
+        {
+          message: { agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+          parts: [{ type: "text", text: "release routine" }],
+        },
+      ),
+      /SORTIE_FRESH_SESSION_REQUIRED: \/sortie requires a fresh root dog-coordinator session/u,
+    );
+
+    const partialClientHooks = await SortieDogsPlugin({ directory, client: { session: {
+      messages: async () => { throw new Error("unavailable"); },
+    } } as never });
+    await assert.rejects(
+      () => partialClientHooks["chat.message"]!(
+        { sessionID: "unverifiable-history", agent: "dog-coordinator" },
+        {
+          message: { agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+          parts: [{ type: "text", text: "release routine" }],
+        },
+      ),
+      /SORTIE_FRESH_SESSION_REQUIRED/u,
+    );
+
+    const missingAgentHooks = await SortieDogsPlugin({ directory, client: { session: {
+      get: async () => ({ data: {} }),
+      messages: async () => ({ data: [
+        { info: { role: "user" }, parts: [{ type: "text", text: "unknown prior turn" }] },
+      ] }),
+    } } as never });
+    await assert.rejects(
+      () => missingAgentHooks["chat.message"]!(
+        { sessionID: "missing-history-agent", agent: "dog-coordinator" },
+        {
+          message: { agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+          parts: [{ type: "text", text: "release routine" }],
+        },
+      ),
+      /SORTIE_FRESH_SESSION_REQUIRED/u,
+    );
+
+    const freshHistoryHooks = await SortieDogsPlugin({ directory, client: { session: {
+      get: async () => ({ data: {} }),
+      messages: async () => ({ data: [
+        { info: { role: "assistant", agent: "title" }, parts: [{ type: "text", text: "Release" }] },
+        { info: { role: "user", agent: "dog-coordinator" }, parts: [{ type: "text", text: "release routine" }] },
+      ] }),
+    } } as never });
+    await freshHistoryHooks["chat.message"]!(
+      { sessionID: "fresh-history", agent: "dog-coordinator" },
+      {
+        message: { agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+        parts: [{ type: "text", text: "release routine" }],
+      },
+    );
+
+    const trustedIdentityHooks = await SortieDogsPlugin({ directory, client: { session: {
+      get: async () => ({ data: { agent: "dog-coordinator" } }),
+      messages: async () => ({ data: [
+        { info: { role: "user", agent: "build" }, parts: [{ type: "text", text: "foreign history" }] },
+      ] }),
+    } } as never });
+    await assert.rejects(
+      () => trustedIdentityHooks["chat.message"]!(
+        { sessionID: "trusted-identity", agent: "dog-coordinator" },
+        {
+          message: { agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+          parts: [{ type: "text", text: "release routine" }],
+        },
+      ),
+      /SORTIE_FRESH_SESSION_REQUIRED/u,
+    );
+
+    const childHooks = await SortieDogsPlugin({ directory, client: { session: {
+      get: async () => ({ data: { agent: "dog-coordinator", parentID: "foreign-root" } }),
+    } } as never });
+    await assert.rejects(
+      () => childHooks["chat.message"]!(
+        { sessionID: "foreign-child", parentID: "foreign-root", agent: "dog-coordinator" } as never,
+        {
+          message: { agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+          parts: [{ type: "text", text: "release routine" }],
+        },
+      ),
+      /SORTIE_FRESH_SESSION_REQUIRED: \/sortie requires a fresh root dog-coordinator session/u,
+    );
+
+    const noClientHooks = await SortieDogsPlugin({ directory });
+    await assert.rejects(
+      () => noClientHooks["chat.message"]!(
+        { sessionID: "explicit-child", parentID: "foreign-root", agent: "dog-coordinator" } as never,
+        {
+          message: { agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+          parts: [{ type: "text", text: "release routine" }],
+        },
+      ),
+      /SORTIE_FRESH_SESSION_REQUIRED: \/sortie requires a fresh root dog-coordinator session/u,
+    );
+
+    await noClientHooks.event!({ event: { type: "session.created", properties: {
+      info: { id: "remembered-child", parentID: "foreign-root", directory },
+    } } });
+    await assert.rejects(
+      () => noClientHooks["chat.message"]!(
+        { sessionID: "remembered-child", agent: "dog-coordinator" },
+        {
+          message: { agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+          parts: [{ type: "text", text: "release routine" }],
+        },
+      ),
+      /SORTIE_FRESH_SESSION_REQUIRED: \/sortie requires a fresh root dog-coordinator session/u,
+    );
+
+    const nullRootHooks = await SortieDogsPlugin({ directory, client: { session: {
+      get: async () => ({ data: { agent: "dog-coordinator", parentID: null } }),
+    } } as never });
+    await nullRootHooks["chat.message"]!(
+      { sessionID: "null-root", parentID: null, agent: "dog-coordinator" } as never,
+      {
+        message: { agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+        parts: [{ type: "text", text: "release routine" }],
+      },
+    );
+    await nullRootHooks["tool.execute.before"]!(
+      { tool: "apply_patch", sessionID: "null-root", callID: "null-root-bootstrap", agent: "dog-coordinator" },
+      { args: { patchText: [
+        "*** Begin Patch",
+        "*** Add File: null-root.operation-manifest.json",
+        "+{}",
+        "*** End Patch",
+      ].join("\n") } },
     );
   });
 });
@@ -3083,12 +3301,15 @@ test("coordinator children and foreign text parts cannot become continuation roo
       summarize: async () => { summarizeCalls += 1; return { data: true }; },
       promptAsync: async () => ({ data: true }),
     } } as never });
-    await hooks["chat.message"]!(
-      { sessionID: "child", agent: "dog-coordinator", parentID: null } as never,
-      {
-        message: { agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
-        parts: [{ type: "text", text: "child" }],
-      },
+    await assert.rejects(
+      () => hooks["chat.message"]!(
+        { sessionID: "child", agent: "dog-coordinator", parentID: null } as never,
+        {
+          message: { agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+          parts: [{ type: "text", text: "child" }],
+        },
+      ),
+      /SORTIE_FRESH_SESSION_REQUIRED/u,
     );
     await hooks.event!({ event: { type: "message.part.updated", properties: { sessionID: "child", part: {
       id: "foreign-part",
@@ -3175,7 +3396,10 @@ test("an owned compaction text part resumes the same coordinator root", async ()
 test("worker dispatch rejects an unregistered handoff before consuming the fast lane", async () => {
   await withProject("worker-dispatch-preflight", async (directory) => {
     await mkdir(join(directory, ".opencode"));
-    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify({
+      ...fixture.manifest,
+      validation: ["npm test"],
+    }));
     const unregistered = join(directory, ".opencode", "handoff.task-a.json");
     await writeFile(unregistered, JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
     const registered = join(directory, "handoff.task-a.json");
@@ -3224,6 +3448,63 @@ test("worker dispatch rejects an unregistered handoff before consuming the fast 
     );
     await assert.rejects(
       () => hooks["tool.execute.before"]!(
+        { tool: "task", sessionID: "root", callID: "validation-manifest-mismatch" },
+        {
+          args: {
+            subagent_type: "dog-worker",
+            prompt: [
+              "task_id: task-a",
+              "context_digest:",
+              `  project_root: ${directory}`,
+              `  handoff_path: ${registered}`,
+              "  acceptance: safe change",
+              "  role: implementation",
+              "  validation: { level: full, command: npm run different, diagnostics: [] }",
+              "source_manifest: [allowed.txt]",
+              "operation_manifest: operation-manifest.json",
+            ].join("\n"),
+          },
+        },
+      ),
+      (error: unknown) => {
+        assert.ok(error instanceof HandoffDeniedError);
+        assert.deepEqual(error.defects, [
+          "contract /validation/command dispatch_validation_manifest_mismatch",
+        ]);
+        return true;
+      },
+    );
+    await assert.rejects(
+      () => hooks["tool.execute.before"]!(
+        { tool: "task", sessionID: "root", callID: "validation-block-manifest-mismatch" },
+        {
+          args: {
+            subagent_type: "dog-worker",
+            prompt: [
+              "task_id: task-a",
+              "context_digest:",
+              `  project_root: ${directory}`,
+              `  handoff_path: ${registered}`,
+              "  acceptance: safe change",
+              "  role: implementation",
+              "  validation:",
+              "    command: npm run different",
+              "source_manifest: [allowed.txt]",
+              "operation_manifest: operation-manifest.json",
+            ].join("\n"),
+          },
+        },
+      ),
+      (error: unknown) => {
+        assert.ok(error instanceof HandoffDeniedError);
+        assert.deepEqual(error.defects, [
+          "contract /validation/command dispatch_validation_manifest_mismatch",
+        ]);
+        return true;
+      },
+    );
+    await assert.rejects(
+      () => hooks["tool.execute.before"]!(
         { tool: "task", sessionID: "root", callID: "partial-worker" },
         { args: { subagent_type: "dog-worker", prompt: "role: implementation" } },
       ),
@@ -3232,6 +3513,32 @@ test("worker dispatch rejects an unregistered handoff before consuming the fast 
         assert.deepEqual(error.defects, ["contract / dispatch_inline_handoff_incomplete"]);
         return true;
       },
+    );
+    await hooks["tool.execute.before"]!(
+      { tool: "task", sessionID: "root", callID: "readonly-worker-with-output-schema" },
+      {
+        args: {
+          subagent_type: "dog-worker",
+          prompt: [
+            "task_id: readonly-a",
+            "context_digest:",
+            `  project_root: ${directory}`,
+            "  acceptance:",
+            "    - report one read-only identity",
+            "  role: implementation",
+            "  validation:",
+            "    command: git hash-object AGENTS.md",
+            "source_manifest: [AGENTS.md]",
+            "operation_manifest: none",
+            "return format:",
+            "validation: { command: exact, exit: 0, fingerprint: concise }",
+          ].join("\n"),
+        },
+      },
+    );
+    await hooks["tool.execute.after"]!(
+      { tool: "task", sessionID: "root", callID: "readonly-worker-with-output-schema" },
+      { output: "<task_result>done</task_result>", metadata: {} },
     );
     await assert.rejects(
       () => hooks["tool.execute.before"]!(
@@ -3951,6 +4258,15 @@ test("fresh coordinator bootstrap permits only exact missing configured control 
     await invoke("powershell", {
       command: `& "M:\\@HyperV\\gh-cli\\bin\\gh.exe" api graphql -f 'query=query { viewer { login } }'`,
     }, "bootstrap-project-query");
+    await invoke("bash", {
+      command: `& "M:\\@HyperV\\gh-cli\\bin\\gh.exe" api graphql -f 'query=query { viewer { login } }'`,
+    }, "bootstrap-project-query-bash");
+    await assert.rejects(
+      invoke("bash", {
+        command: `& "M:\\@HyperV\\gh-cli\\bin\\gh.exe" api graphql -f 'query=mutation { placeholder }'`,
+      }, "bootstrap-project-mutation-bash"),
+      (error: unknown) => error instanceof Error && /operation manifest unavailable/u.test(error.message),
+    );
     await assert.rejects(
       invoke("powershell", {
         command: `& "M:\\@HyperV\\gh-cli\\bin\\gh.exe" api graphql -f 'query=mutation { placeholder }'`,
@@ -4391,6 +4707,30 @@ test("the contract preflight reports gate defects without granting inspection", 
 
     await writeFile(handoffPath, JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
     assert.deepEqual(await report(handoffPath), { status: "ok", defects: [] });
+
+    const artifactManifest = {
+      ...fixture.manifest,
+      write: ["temp/artifact/archive.tar.gz", "temp/artifact/extracted"],
+      validation: [
+        "curl -fL https://example.test/archive.tar.gz -o temp/artifact/archive.tar.gz",
+        "tar -xzf temp/artifact/archive.tar.gz -C temp/artifact/extracted",
+      ],
+    };
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(artifactManifest));
+    assert.deepEqual((await report(handoffPath)).defects, [
+      "manifest /validation/0 artifact_directory_unprepared",
+    ]);
+    artifactManifest.validation.unshift("mkdir -p temp/artifact/extracted");
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(artifactManifest));
+    assert.deepEqual(await report(handoffPath), { status: "ok", defects: [] });
+    const validDownload = artifactManifest.validation[1]!;
+    artifactManifest.validation[1] = "curl -fLO https://example.test/archive.tar.gz";
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(artifactManifest));
+    assert.deepEqual((await report(handoffPath)).defects, [
+      "manifest /validation/1 artifact_command_unclassified",
+    ]);
+    artifactManifest.validation[1] = validDownload;
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(artifactManifest));
 
     // A passing report must not stand in for the binding child's own Read.
     await activate(hooks);
@@ -4850,7 +5190,7 @@ test("a late child re-proves expired coordinator lineage from host session ident
   });
 });
 
-test("a restarted plugin recovers a command-routed coordinator from its latest persisted user turn", async () => {
+test("a restarted plugin does not recover a coordinator over a foreign host root", async () => {
   await withProject("lineage-command-restart", async (directory) => {
     await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
     const handoffPath = join(directory, "handoff.json");
@@ -4893,7 +5233,13 @@ test("a restarted plugin recovers a command-routed coordinator from its latest p
       },
     );
     await inspectHandoffWithRead(hooks, handoffPath, "child");
-    assert.equal((await executeBindWriteGate(hooks, directory, "child")).status, "bound");
+    assert.deepEqual(await executeBindWriteGate(hooks, directory, "child"), {
+      status: "denied",
+      reason: "session-inactive",
+      recoverable: true,
+      remedy: "Freshly redispatch this worker with prompt text containing role, project_root, source_manifest or operation_manifest, and acceptance or validation fields; a bare resume or file read cannot activate the session.",
+      escalation: { action: "redispatch-worker", resume_session: false, true_blocker: false },
+    });
   });
 });
 
@@ -4932,7 +5278,7 @@ test("serial handoff accepts a unit label when group is none and count is one", 
   });
 });
 
-test("restart recovery rejects a stale coordinator route and a cold synthetic turn", async () => {
+test("restart recovery ignores a stale coordinator route and a cold synthetic turn", async () => {
   await withProject("lineage-command-restart-denied", async (directory) => {
     const identities = { root: { agent: "build" } };
     const plugin = async (agent: string, synthetic: boolean) => await SortieDogsPlugin({
@@ -4953,10 +5299,7 @@ test("restart recovery rejects a stale coordinator route and a cold synthetic tu
 
     await dispatch(await plugin("build", false), "stale-route");
     const synthetic = await plugin("dog-coordinator", true);
-    await expectMessage(
-      () => dispatch(synthetic, "synthetic-route"),
-      "SORTIE_FAST_LANE_DENIED: WORKER_LIMIT",
-    );
+    await dispatch(synthetic, "synthetic-route");
 
     const staleDedicated = await SortieDogsPlugin({ directory, client: { session: {
       get: async () => ({ data: { agent: "dog-coordinator" } }),
@@ -6783,6 +7126,73 @@ test("plugin shell gate allows explicit reads and denies unknown executables", a
     for (const command of fixture.shell.unknownWrites) {
       await expectActionableCommandDenial(() => invoke(command));
     }
+  });
+});
+
+test("shell gate extracts bounded artifact download and archive paths", () => {
+  assert.deepEqual(
+    extractWritePaths("bash", { command: "curl -fL --retry 0 --max-time 120 https://example.test/a.tar.gz -o temp/a.tar.gz" }),
+    { applies: true, ambiguous: false, paths: ["temp/a.tar.gz"], requiredDirectories: ["temp"] },
+  );
+  assert.deepEqual(
+    extractWritePaths("powershell", { command: "Invoke-WebRequest -Uri https://example.test/a.zip -OutFile temp/a.zip" }),
+    { applies: true, ambiguous: false, paths: ["temp/a.zip"], requiredDirectories: ["temp"] },
+  );
+  assert.deepEqual(
+    extractWritePaths("bash", { command: "tar -tzf temp/a.tar.gz" }),
+    { applies: false, ambiguous: false, paths: [] },
+  );
+  assert.deepEqual(
+    extractWritePaths("bash", { command: "tar -xzf temp/a.tar.gz -C temp/extracted" }),
+    { applies: true, ambiguous: false, paths: ["temp/extracted"], requiredDirectories: ["temp/extracted"] },
+  );
+  assert.deepEqual(
+    extractWritePaths("bash", { command: "find temp/extracted -type f -name libmoonshine.so -exec sha256sum {} \\;" }),
+    { applies: false, ambiguous: false, paths: [] },
+  );
+  assert.deepEqual(
+    extractWritePaths("bash", {
+      command: "env -u GITHUB_TOKEN -u GH_TOKEN /approved/gh.exe api graphql --paginate --slurp -F id=PVT -f 'query=query($id:ID!,$endCursor:String){node(id:$id){id}}' | jq -c '{count:length}'",
+    }),
+    { applies: false, ambiguous: false, paths: [] },
+  );
+  assert.deepEqual(
+    extractWritePaths("powershell", {
+      command: '$env:GITHUB_TOKEN = $null; $env:GH_TOKEN = $null; & "M:\\@HyperV\\gh-cli\\bin\\gh.exe" auth status',
+    }),
+    { applies: false, ambiguous: false, paths: [] },
+  );
+  for (const command of [
+    "curl -fLO https://example.test/a.tar.gz",
+    "curl https://example.test/a.tar.gz -o temp/a -D temp/headers",
+    "tar -xzf temp/a.tar.gz",
+    "tar -czf temp/a.tar.gz temp/input",
+    "tar -tzf temp/a.tar.gz --to-command=calc",
+    "tar -xzf temp/a.tar.gz -C temp/extracted --checkpoint-action=exec=calc",
+  ]) {
+    const result = extractWritePaths("bash", { command });
+    assert.equal(result.ambiguous, true, command);
+    assert.ok(result.issue, command);
+  }
+});
+
+test("declared recursive mkdir authorizes a missing future directory scope", async () => {
+  await withProject("future-directory-scope", async (directory) => {
+    const gate = await createWriteGate(await createProjectPaths(directory), {
+      version: "0.1.0",
+      task_id: "future-directory-scope",
+      read: [],
+      write: ["temp/artifact"],
+      validation: [
+        "mkdir -p temp/artifact",
+        "curl -fL https://example.test/archive.tar.gz -o temp/artifact/archive.tar.gz",
+      ],
+    });
+    await gate.checkPath("temp/artifact/archive.tar.gz");
+    await assert.rejects(
+      gate.checkPath("temp/sibling/archive.tar.gz"),
+      (error: unknown) => error instanceof Error && (error as Error & { reason?: string }).reason === "manifest-scope",
+    );
   });
 });
 

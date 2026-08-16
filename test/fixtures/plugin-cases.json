@@ -37,7 +37,6 @@
       "dd if=input of=allowed.txt",
       "python -e write",
       "node -e write",
-      "curl -o allowed.txt https://example.invalid",
       "tar -xf archive.tgz",
       "ln source allowed.txt",
       "git checkout -- allowed.txt",

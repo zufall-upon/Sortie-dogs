@@ -372,11 +372,11 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     for (const asset of loaded.runtimeAssets) {
       assert.equal(asset.version, RUNTIME_ASSET_VERSION, `${asset.name} version must match the shared marker`);
     }
-    assert.equal(RUNTIME_ASSET_VERSION, "0.3.17-parallel-conflict-remediation-v1");
+    assert.equal(RUNTIME_ASSET_VERSION, "0.3.32-terminal-outcome-v1");
     const coordinatorFrontmatter = /^---\r?\n([\s\S]*?)\r?\n---/u.exec(coordinator.content)?.[1];
     assert.ok(coordinatorFrontmatter);
-    assert.match(coordinatorFrontmatter, /^model: openai\/gpt-5\.6-terra$/m);
-    assert.match(coordinatorFrontmatter, /^variant: medium$/m);
+    assert.match(coordinatorFrontmatter, /^model: openai\/gpt-5\.6-luna$/m);
+    assert.match(coordinatorFrontmatter, /^variant: max$/m);
     assert.equal(/^---\r?\n[\s\S]*?\r?\n---/u.exec(worker.content)?.[0].includes("model:"), false);
     assert.equal(worker.content.includes(DEDICATED_WORKER_MODEL), false);
     assert.equal(worker.content.includes(DEDICATED_WORKER_VARIANT), false);
@@ -488,6 +488,20 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(initialHandoff[1], /resume_delta:\s*none/);
     assert.match(initialHandoff[1], /source_manifest:/);
     assert.match(initialHandoff[1], /operation_manifest:\s*<exact absolute operation manifest>/);
+    const executionClosure = coordinator.content.match(
+      /ONE_WORKER_EXECUTION_CLOSURE_FIXTURE\r?\n([\s\S]+?)\r?\nEND_ONE_WORKER_EXECUTION_CLOSURE_FIXTURE/,
+    );
+    assert.ok(executionClosure, "coordinator needs one-worker acceptance execution closure");
+    assert.match(executionClosure[1], /acceptance_map:\s*every acceptance item -> all acquisition \+ transform \+ verification operations/);
+    assert.match(executionClosure[1], /temp_writes:\s*download \+ extraction \+ generated manifest -> operation_manifest required/);
+    assert.match(executionClosure[1], /archive_member_hash:\s*initial handoff includes download \+ archive digest \+ extraction \+ member digest/);
+    assert.match(executionClosure[1], /worker_command_shape:\s*literal HTTPS curl -o with optional numeric timeout or Invoke-WebRequest -OutFile \+ tar list or extract with explicit -C \+ direct digest/);
+    assert.match(executionClosure[1], /directory_prerequisite:\s*every download parent \+ tar -C destination exists or has an earlier declared mkdir -p or directory New-Item command/);
+    assert.match(executionClosure[1], /future_directory_scope:\s*declared recursive directory creation makes that exact missing write entry a descendant scope after bind/);
+    assert.match(executionClosure[1], /unknown_member_prefix:\s*initial handoff uses strict find <extract-root> -type f -name <member> -exec sha256sum \{\} \\; instead of guessing a root-level member path/);
+    assert.match(executionClosure[1], /predispatch_gap:\s*repair initial handoff before Task; worker discovery of missing authorization forbidden/);
+    assert.match(executionClosure[1], /normal_lane_return:\s*verify result; accepted follow-up -> new fixed handoff \+ next sequential worker; unchanged redispatch forbidden/);
+    assert.match(executionClosure[1], /routing_omission:\s*coordinator repairs manifest and continues autonomously; never external blocker \+ never user-decision/);
 
     const resumedHandoff = coordinator.content.match(
       /RESUMED_HANDOFF_FIXTURE\r?\n([\s\S]+?)\r?\nEND_RESUMED_HANDOFF_FIXTURE/,
@@ -528,9 +542,9 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(scoutSkip[1], /exact manifest \+ canonical validation \+ blocker owner all fixed/);
     assert.match(scoutSkip[1], /candidate_default:\s*Scout 0/);
     assert.match(scoutSkip[1], /allowed_gap:\s*manifest \| validation \| owner-risk/);
-    assert.match(scoutSkip[1], /dispatch:\s*one dog-scout maximum before worker/);
+    assert.match(scoutSkip[1], /dispatch:\s*as needed before or after worker; no per-turn count or timing ceiling/);
     assert.match(scoutSkip[1], /prompt_field:\s*missing_evidence_code: <allowed gap>/);
-    assert.match(scoutSkip[1], /unresolved_action:\s*question or exact blocker; no second Scout/);
+    assert.match(scoutSkip[1], /unresolved_action:\s*changed evidence -> bounded Scout \| user-only decision -> question \| proven blocker/);
     assert.match(scoutSkip[1], /known_paths:\s*worker read boundary even without Scout read/);
     assert.match(scoutSkip[1], /action:\s*route directly to dog-worker/);
 
@@ -568,10 +582,10 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     const scoutFanout = coordinator.content.match(
       /SCOUT_FANOUT_FIXTURE\r?\n([\s\S]+?)\r?\nEND_SCOUT_FANOUT_FIXTURE/,
     );
-    assert.ok(scoutFanout, "coordinator needs the exceptional one-Scout lane");
+    assert.ok(scoutFanout, "coordinator needs bounded Scout routing without an arbitrary turn cap");
     assert.match(scoutFanout[1], /decision:\s*exceptional; one concrete evidence key blocks safe worker dispatch/);
-    assert.match(scoutFanout[1], /dispatch_guard:\s*no prior Scout and no worker dispatch in the real user turn/);
-    assert.match(scoutFanout[1], /dispatch:\s*exactly one bounded dog-scout call/);
+    assert.match(scoutFanout[1], /dispatch_guard:\s*exact unresolved gap \+ no unchanged duplicate/);
+    assert.match(scoutFanout[1], /dispatch:\s*one bounded dog-scout call per concrete gap; later new gaps allowed/);
     assert.match(scoutFanout[1], /role:\s*resolve only missing_evidence_code/);
     // Scouts inherit no project context, so the dispatch must carry the same root as the worker.
     assert.match(scoutFanout[1], /project_root:\s*<absolute project root; same value as the worker digest>/);
@@ -579,20 +593,21 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       scoutFanout[1],
       /known_paths:\s*at most 4 supplied paths, each resolvable under project_root/,
     );
-    assert.match(scoutFanout[1], /malformed \| timeout \| empty -> exact blocker without retry/);
-    assert.match(scoutFanout[1], /resolved -> one dog-worker; unresolved -> question \| blocker/);
+    assert.match(scoutFanout[1], /prompt defect -> corrected dispatch \| user-controlled gap -> question \| external failure -> blocker/);
+    assert.match(scoutFanout[1], /resolved -> next dog-worker \| new gap -> bounded Scout \| user decision \| blocker/);
 
     const parallelImplementation = coordinator.content.match(
       /PARALLEL_IMPLEMENTATION_FIXTURE\r?\n([\s\S]+?)\r?\nEND_PARALLEL_IMPLEMENTATION_FIXTURE/,
     );
-    assert.ok(parallelImplementation, "coordinator needs the runtime single-worker lane");
+    assert.ok(parallelImplementation, "coordinator needs the runtime sequential-worker lane");
     for (const contract of [
-      "default: one dog-worker",
-      "route: dog-coordinator -> one dog-worker -> deterministic evidence verification -> DONE",
-      "ownership: one worker owns inspect | edit | targeted checks | canonical validation | remediation once",
-      "second_worker: runtime denied in the same real user turn",
-      "synthetic_turn: never resets worker limit",
-      "scope_gap: return typed gap; no manifest expansion | replacement worker",
+      "default: sequential dog-workers as evidence requires",
+      "route: dog-coordinator -> dog-worker -> deterministic evidence verification -> next unit | DONE",
+      "ownership: one worker owns each fixed manifest unit",
+      "next_worker: allowed after verified return for accepted scope | user answer | changed evidence",
+      "hard_budget: none on normal sequential dispatch",
+      "denial_no_progress: same contract defect after one corrected handoff -> no third Task; diagnose coordinator | gate mismatch",
+      "scope_gap: coordinator refines manifest; question only for user-controlled decision",
       "parallel_fanout: forbidden on normal lane",
     ]) assert.ok(parallelImplementation[1].includes(contract), contract);
     const parallelContract = coordinator.content.match(
@@ -606,7 +621,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(parallelContract[1], /terminal_marker:\s*release complete and no tools\/subprocess in flight -> SORTIE_PARALLEL_OUTCOME strict bounded JSON/);
     assert.match(worker.content, /After editing only scope_write, call sortie_create_parallel_commit_artifact exactly once while the lease\s+is held with run_id, dispatch_id, validation_executable, optional validation_args_json, and optional\s+timeout_ms/);
     assert.match(worker.content, /Immediately call sortie_release_write_gate after that capability, including producer failure/);
-    assert.match(worker.content, /This exception applies only to the\s+parallel lane; the normal single-worker lane remains unchanged/);
+    assert.match(worker.content, /This exception applies only to the\s+parallel lane; the normal sequential-worker lane remains unchanged/);
     assert.match(coordinator.content, /only consultation capabilities are Strategy and SourceReview/);
     assert.match(coordinator.content, /Strategy follows\s+dog-coordinator -> dog-advisor -> dog-coordinator/);
     assert.match(coordinator.content, /SourceReview follows\s+dog-coordinator -> dog-reviewer -> dog-coordinator only after canonical validation/);
@@ -627,11 +642,11 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     const batchContinuation = coordinator.content.match(
       /BATCH_CONTINUATION_FIXTURE\r?\n([\s\S]+?)\r?\nEND_BATCH_CONTINUATION_FIXTURE/,
     );
-    assert.ok(batchContinuation, "coordinator needs the single-worker terminal policy");
-    assert.match(batchContinuation[1], /scope:\s*backlogDrain\.enabled=false; mode=runtime single-worker lane/);
-    assert.match(batchContinuation[1], /top_level_request:\s*one accepted scope -> one worker/);
-    assert.match(batchContinuation[1], /worker_return:\s*deterministic evidence verification -> terminal report/);
-    assert.match(batchContinuation[1], /normal_path_forbidden:\s*second worker \| manual compaction \| synthetic continuation \| critical-path tracker call/);
+    assert.ok(batchContinuation, "coordinator needs the sequential-worker terminal policy");
+    assert.match(batchContinuation[1], /scope:\s*backlogDrain\.enabled=false; mode=runtime sequential-worker lane/);
+    assert.match(batchContinuation[1], /top_level_request:\s*one accepted scope -> sequential workers as evidence requires/);
+    assert.match(batchContinuation[1], /worker_return:\s*deterministic evidence verification -> next unit \| terminal report/);
+    assert.match(batchContinuation[1], /normal_path_forbidden:\s*concurrent fanout \| unchanged redispatch \| critical-path tracker call/);
     assert.match(batchContinuation[1], /native_compaction:\s*host overflow only/);
     assert.match(batchContinuation[1], /tracker_update:\s*after DONE; noncritical path/);
     assert.match(
@@ -655,10 +670,10 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(coordinator.content, /Only when the continuation guard proves an independent\s+next candidate/i);
     assert.match(
       coordinator.content,
-      /normal single-worker terminal result has no independent next\s+candidate: do not call a compaction tool and do not emit either continuation marker/i,
+      /normal sequential terminal result with no independent next\s+candidate does not call a compaction tool or emit either continuation marker/i,
     );
-    assert.match(coordinator.content, /sortie_enable_backlog_drain exactly once/);
-    assert.match(coordinator.content, /typed runtime opt-in is mandatory/i);
+    assert.match(coordinator.content, /sortie_enable_backlog_drain once before the drain/);
+    assert.match(coordinator.content, /optional durable-queue optimization, never worker authorization/i);
     // Every literal below must match a capability the packed plugin actually registers.
     assert.match(compactionIdentity[1], /continuation_agent:\s*dog-coordinator/);
     assert.match(compactionIdentity[1], /direct_capability:\s*sortie_compact_and_continue/);
@@ -681,18 +696,18 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       /BACKLOG_DRAIN_FIXTURE\r?\n([\s\S]+?)\r?\nEND_BACKLOG_DRAIN_FIXTURE/,
     );
     assert.ok(backlogDrain, "coordinator needs an explicit backlog-drain policy");
-    assert.match(backlogDrain[1], /default_config:\s*batchTarget=1; backlogDrain\.enabled=false; one accepted scope -> one worker/);
-    assert.match(backlogDrain[1], /normal_multi_item:\s*1\.\.3 related requested items -> one accepted scope; no sequential worker units/);
-    assert.doesNotMatch(coordinator.content, /default_config:\s*batchTarget=3/);
+    assert.match(backlogDrain[1], /default_config:\s*backlogDrain\.enabled=false; normal sequential work remains autonomous/);
+    assert.match(backlogDrain[1], /normal_multi_item:\s*accepted related items -> sequential workers as evidence requires/);
+    assert.match(backlogDrain[1], /opt_in_purpose:\s*durable queue accounting \+ compaction; never worker authorization/);
     assert.match(
       backlogDrain[1],
       /opt_in_required:\s*backlogDrain\.enabled=true; backlogDrain\.maxUnits=<positive integer>/,
     );
     assert.match(
       backlogDrain[1],
-      /natural_language_opt_in:\s*explicit ordered 4\.\.11 units \+ sequential no-stop instruction -> enabled=true; maxUnits=exact named count/,
+      /natural_language_opt_in:\s*explicit ordered bounded units \+ durable no-stop queue intent -> enabled=true; maxUnits=exact named count/,
     );
-    assert.match(backlogDrain[1], /over_ceiling:\s*12\+ named units -> ask user to split; never claim one-session no-stop execution/);
+    assert.match(backlogDrain[1], /hard_ceiling:\s*none beyond exact accepted user scope and positive declared drain bound/);
     assert.match(backlogDrain[1], /execution:\s*sequential; coordinator_authority=unchanged; per_unit_gates=unchanged/);
     assert.match(
       backlogDrain[1],
@@ -754,6 +769,8 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     );
     assert.ok(directOperations, "coordinator needs bounded direct operations");
     assert.match(directOperations[1], /known_executable_probe:\s*one batched direct depth-one read-only command; no Task/);
+    assert.match(directOperations[1], /graphify_route:\s*direct query once -> unavailable \| script denial -> bounded read \| grep; no source inspection/);
+    assert.match(directOperations[1], /windows_gh:\s*literal token clears -> direct client; no if \| Test-Path \| scriptblock/);
     assert.match(directOperations[1], /project_inventory:\s*exactly one complete snapshot per top-level user request in one direct client invocation; no Task/);
     assert.match(
       directOperations[1],
@@ -797,6 +814,12 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(writeGateHandoff[1], /distinct contract_id \+ distinct files; one thread regeneration never revokes another/);
     assert.match(writeGateHandoff[1], /parent workspace \+ child repo -> project_root is child candidate absolute path/);
     assert.match(writeGateHandoff[1], /old candidate manifest or authorization rejected/);
+    const terminalSemantics = coordinator.content.match(
+      /TERMINAL_STATUS_SEMANTICS_FIXTURE\r?\n([\s\S]+?)\r?\nEND_TERMINAL_STATUS_SEMANTICS_FIXTURE/,
+    );
+    assert.ok(terminalSemantics, "coordinator needs unambiguous terminal status semantics");
+    assert.match(terminalSemantics[1], /BLOCKED:\s*accepted scope remains incomplete because a proven external dependency prevents progress/);
+    assert.match(terminalSemantics[1], /NEED_DECISION:\s*only an exclusively user-controlled product \| acceptance \| risk choice remains/);
     const terminalEvidence = coordinator.content.match(
       /TERMINAL_EVIDENCE_FIXTURE\r?\n([\s\S]+?)\r?\nEND_TERMINAL_EVIDENCE_FIXTURE/,
     );
@@ -835,6 +858,26 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       worker.content,
       /operation_manifest=none the dispatch is read-only:[\s\S]{0,220}?require no\s+handoff_path,[\s\S]{0,120}?never inspect a handoff, never call sortie_bind_write_gate/i,
     );
+    const readOnlyEvidence = coordinator.content.match(
+      /READ_ONLY_EVIDENCE_FIXTURE\r?\n([\s\S]+?)\r?\nEND_READ_ONLY_EVIDENCE_FIXTURE/,
+    );
+    assert.ok(readOnlyEvidence, "coordinator needs executable read-only acceptance coverage");
+    assert.match(readOnlyEvidence[1], /dispatch_gate:\s*every command-derived acceptance item is covered before Task/);
+    assert.match(readOnlyEvidence[1], /source_manifest_shape:\s*exactly one inline source_manifest array; multiline \+ block \+ repeated forbidden/);
+    assert.match(readOnlyEvidence[1], /worker_rule:\s*run optional_evidence once when acceptance requires it, including after canonical PASS/);
+    assert.match(readOnlyEvidence[1], /blocker_rule:\s*coordinator routing omission is not an external blocker/);
+    assert.match(worker.content, /optional diagnostic or evidence command[\s\S]{0,180}?including after canonical PASS/);
+    assert.match(worker.content, /inline validation contract when operation_manifest=none/);
+    const provenanceContinuity = coordinator.content.match(
+      /PROVENANCE_CONTINUITY_FIXTURE\r?\n([\s\S]+?)\r?\nEND_PROVENANCE_CONTINUITY_FIXTURE/,
+    );
+    assert.ok(provenanceContinuity, "coordinator needs cross-turn provenance evidence continuity");
+    assert.match(provenanceContinuity[1], /ledger_bounds:\s*max 12 entries \+ max 4096 UTF-8 bytes \+ latest verified value per field and role/);
+    assert.match(provenanceContinuity[1], /ledger_exclusions:\s*unrelated \+ stale \+ superseded child results/);
+    assert.match(provenanceContinuity[1], /comparison_roles:\s*preserve expected\/declaration \+ observed\/fetched separately when values differ/);
+    assert.match(provenanceContinuity[1], /preserve_exact:\s*URL \+ repository \+ asset name \+ tag \+ commit \+ digest \+ validation fingerprint/);
+    assert.match(provenanceContinuity[1], /missing_worker_field:\s*coordinator direct exact read-only fetch \+ continue; no second worker/);
+    assert.match(provenanceContinuity[1], /dog-advisor strategy_trigger=material-uncertainty before BLOCK/);
     assert.match(
       coordinator.content,
       /Never dispatch source-changing work with operation_manifest none[\s\S]{0,120}?denied every mutating tool/i,
@@ -1239,7 +1282,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(sortie.content, /never route a worker to the user/i);
 
     for (const asset of loaded.runtimeAssets) {
-      assert.equal(asset.version, "0.3.17-parallel-conflict-remediation-v1");
+      assert.equal(asset.version, "0.3.32-terminal-outcome-v1");
       const frontmatter = asset.content.match(/^---\r?\n([\s\S]+?)\r?\n---\r?\n/);
       assert.ok(frontmatter, `${asset.name} must have frontmatter`);
       const entries = Object.fromEntries(

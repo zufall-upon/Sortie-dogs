@@ -9,12 +9,12 @@ a real OpenCode CLI run.
 Run from the repository root:
 
 ```sh
-npm test
+npm run test:full
 ```
 
-`npm test` runs `pretest`, rebuilds `dist/`, then executes every
-`test/**/*.test.ts` file with Node's test runner. The CLI coverage is split
-across these files:
+`npm test` is the fast development gate for plugin, continuation, and fast-lane
+behavior. `npm run test:full` rebuilds `dist/`, then executes every
+`test/**/*.test.ts` file for release. CLI coverage is split across these files:
 
 - `test/cli.test.ts` starts the real TypeScript CLI entry in a child process and
   fixes stdout, stderr, exit codes, link resolution, handoff/manifest linting,
@@ -45,8 +45,8 @@ node --experimental-strip-types --test test/security.test.ts
 node --experimental-strip-types --test test/plugin-loader.test.ts
 ```
 
-`test/plugin-loader.test.ts` requires `npm_execpath`, so run it through
-`npm test` if a direct Node invocation reports that variable missing.
+`test/plugin-loader.test.ts` requires `npm_execpath`, so use
+`npm run test:full` if a direct Node invocation reports that variable missing.
 
 ## 2. Packed OpenCode CLI acceptance
 
@@ -54,7 +54,7 @@ This layer proves that OpenCode can load and execute the package produced for
 release. It is manual because it needs an installed OpenCode CLI, provider
 access, and a fresh process/session.
 
-1. Run `npm test`.
+1. Run `npm run test:full`.
 2. Create the tarball only under `_testenv`:
 
    ```powershell

@@ -7,7 +7,7 @@
 _画像を選択するとワークフローのアニメーションを再生できる。_
 
 Sortie-dogs は、必要なセッションだけで動く OpenCode オーケストレーションプラグイン。
-タスクを明確な計画、必要時だけの限定調査、1つの境界付き実装、canonical validation、証拠付き完了へつなげる。
+タスクを明確な計画、必要時だけの限定調査、自律的な逐次実装、canonical validation、証拠付き完了へつなげる。
 OpenCode 標準のエージェントや設定は置き換えない。
 
 要件: Node.js 22.6 以降、npm、OpenCode。
@@ -18,9 +18,9 @@ OpenCode 標準のエージェントや設定は置き換えない。
 
 - **必要なときだけ起動** — `/sortie` または `dog-coordinator` 選択時だけ有効。他の
   OpenCode セッションには影響しない。
-- **過剰に広がらない限定調査** — manifest・validation・ownerの具体的gapがある場合だけscoutを1体使う。
+- **過剰に広がらない限定調査** — manifest・validation・ownerの具体的gapごとに、発見時点を問わずscoutを使う。同一依頼は反復しない。
 - **厳密な変更範囲** — source manifest または operation manifest が編集と handoff を制限。
-- **1つの境界付き実装unit** — 通常turnはworker 1体。明示backlog drainだけが独立unitを継続ごとに1件ずつ進める。
+- **自律的な逐次実装** — accepted scopeに必要なworkerを1体ずつ継続実行。通常laneに回数上限なし。並列fan-outだけ明示contract必須。
 - **runtime競合防止** — 同一または祖先・子孫write scopeの同時bindを変更前に拒否。
   全parallel unitのjoin後にfull validationを1回実行。
 - **証拠を伴う完了** — canonical validation、リスク別レビュー、terminal evidence の gate 後、
@@ -30,8 +30,8 @@ OpenCode 標準のエージェントや設定は置き換えない。
 ## 実際のループ
 
 1. **Brief / plan** — `dog-coordinator` が acceptance criteria、変更 manifest、検証条件を確定。
-2. **任意の scout** — pre-worker evidence gapが具体的にある場合だけ、read-only限定調査を1体実行。
-3. **専用 worker** — 通常turnで1体が承認済みmanifestだけを実装。
+2. **任意の scout** — concrete evidence gapが発生した時点で、read-only限定調査を実行。
+3. **専用 worker** — accepted scope完了まで、固定manifest単位で逐次実装。
 4. **Canonical validation** — 指定された test / build command の結果を evidence 化。
 5. **リスク別 review** — 高リスク候補だけ独立 review。低リスク候補は validation 後に省略可能。
 6. **Coordinator 完了** — manifest、validation、review、evidence gate 通過後だけ完了と commit を管理。
@@ -101,7 +101,7 @@ global asset なら `~/.config/opencode/opencode.json`、project なら `.openco
 追加後は OpenCode を再起動する。`plugin` エントリには package 名を指定する。
 `sortie-dogs/plugin` は import specifier であり plugin specifier ではない。
 
-`dog-coordinator` のデフォルト model は `openai/gpt-5.6-terra` の `medium` variant、`dog-scout` は
+`dog-coordinator` のデフォルト model は `openai/gpt-5.6-luna` の `max` variant、`dog-scout` は
 `openai/gpt-5.6-luna`。いずれかの role を変更する場合、次を `.opencode/sortie-dogs.json` に保存する。
 
 ```json
@@ -230,8 +230,8 @@ host 側の欠陥を 1 つだけ in-place で修復する。subagent の結果�
 
 ## モデルルーティング
 
-`dog-coordinator` の built-in route は `openai/gpt-5.6-terra` の `medium` variant。root context を反復処理する一方、
-主処理は状態管理と routing なので、Luna と Sol の中間 cost tier を既定にする。host が Terra unavailable と
+`dog-coordinator` の built-in route は `openai/gpt-5.6-luna` の `max` variant。root context を反復処理しても、
+最大思考強度を維持しながら Terra の反復costを避ける。host が Luna unavailable と
 証明した場合は設定済みfree-tier fallbackを使い、それもなければsession modelを維持する。`dog-scout` のデフォルトは
 `openai/gpt-5.6-luna` の `high` variant。Project-local routing でどちらも上書きできる。
 
@@ -253,7 +253,7 @@ route は Preferred target から順序付き fallback へ決定的に解決す�
 {
   "modelRouting": {
     "dog-coordinator": {
-      "preferred": { "model": "openai/gpt-5.6-terra", "variant": "medium" }
+      "preferred": { "model": "openai/gpt-5.6-luna", "variant": "max" }
     },
     "dog-scout": {
       "preferred": { "model": "openai/gpt-5.6-luna", "variant": "high" }
@@ -268,7 +268,6 @@ route は Preferred target から順序付き fallback へ決定的に解決す�
   },
   "modelCatalog": {
     "project": [
-      { "model": "openai/gpt-5.6-terra", "variants": ["medium"] },
       { "model": "openai/gpt-5.6-sol", "variants": ["medium", "xhigh"] },
       { "model": "openai/gpt-5.6-luna", "variants": ["max", "high"] },
       { "model": "anthropic/claude-opus-5" }
@@ -288,7 +287,7 @@ stage、commit、ユーザー対応を行わない。
 
 ## 更新と移行
 
-[Release v0.4.8](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.4.8)
+[Release v0.5.0](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.5.0)
 
 依存 asset を新しい release に更新後、対象 project root で再実行する。
 

@@ -7,7 +7,7 @@
 _点击图片可播放工作流动画。_
 
 Sortie-dogs 是一个按需启用的 OpenCode 编排插件。它把任务依次推进到明确规划、仅在必要时进行的限定调研、
-一个有边界的实现单元、canonical validation 和证据完备的收尾，同时保留 OpenCode 的标准智能体与设置。
+自主顺序实现、canonical validation 和证据完备的收尾，同时保留 OpenCode 的标准智能体与设置。
 
 要求：Node.js 22.6 或更高版本、npm 和 OpenCode。
 
@@ -17,9 +17,9 @@ Sortie-dogs 是一个按需启用的 OpenCode 编排插件。它把任务依次�
 
 - **需要时启用，其余时间保持安静** — 使用 `/sortie` 或选择 `dog-coordinator` 才会激活；
   普通 OpenCode 会话不受影响。
-- **限定调研不会失控** — 仅在 manifest、validation 或 owner 存在明确证据缺口时使用一个 scout。
+- **限定调研不会失控** — 每当出现明确的 manifest、validation 或 owner 证据缺口时使用 scout；不重复未变化的请求。
 - **写入范围精确可控** — source manifest 或 operation manifest 约束编辑和 handoff。
-- **一个有边界的实现单元** — 普通 turn 只允许一个 worker；显式 backlog drain 才会在后续 continuation 中逐个处理独立单元。
+- **自主顺序实现** — accepted scope 所需的 worker 逐个执行，普通 lane 不设次数上限；并发 fan-out 仍需显式 contract。
 - **运行时冲突保护** — 在修改前拒绝相同或祖先/后代 write scope 的并发绑定；
   所有并行单元 join 后只运行一次 full validation。
 - **先验证，后完成** — canonical validation、按风险 review 和 terminal evidence 共同控制由
@@ -29,8 +29,8 @@ Sortie-dogs 是一个按需启用的 OpenCode 编排插件。它把任务依次�
 ## 实际工作闭环
 
 1. **Brief / plan** — `dog-coordinator` 明确 acceptance criteria、写入 manifest 和验证要求。
-2. **可选 scout** — 仅在 pre-worker evidence gap 明确时运行一个只读、范围受限的 scout。
-3. **专用 worker** — 普通 turn 由一个 worker 只实现已批准的 manifest。
+2. **可选 scout** — 明确 evidence gap 出现时运行只读、范围受限的 scout。
+3. **专用 worker** — 按固定 manifest 顺序执行，直到 accepted scope 完成。
 4. **Canonical validation** — 运行声明的 test / build command，保留可核验结果。
 5. **按风险 review** — 高风险候选项接受独立 review；低风险项通过验证后可跳过额外审查。
 6. **Coordinator 收尾** — 只有 manifest、validation、review 和 evidence gate 全部通过，
@@ -99,7 +99,7 @@ sortie-dogs init --global
 随后重启 OpenCode。`plugin` 条目必须写 package 名称；`sortie-dogs/plugin` 是 import specifier，
 不是 plugin specifier。
 
-`dog-coordinator` 默认使用 `openai/gpt-5.6-terra` 的 `medium` variant，`dog-scout` 默认使用 `openai/gpt-5.6-luna`。
+`dog-coordinator` 默认使用 `openai/gpt-5.6-luna` 的 `max` variant，`dog-scout` 默认使用 `openai/gpt-5.6-luna`。
 如需更改任一角色的模型，请将以下配置保存为 `.opencode/sortie-dogs.json`：
 
 ```json
@@ -220,8 +220,8 @@ OpenCode 的标准智能体、角色、设置和其他会话均保持原样。
 
 ## 模型路由
 
-`dog-coordinator` 的 built-in route 是 `openai/gpt-5.6-terra` 的 `medium` variant。协调工作会反复处理 root context，
-但主要承担状态管理和 routing，因此默认采用介于 Luna 与 Sol 之间的成本层级。若宿主确认 Terra 不可用，
+`dog-coordinator` 的 built-in route 是 `openai/gpt-5.6-luna` 的 `max` variant。协调工作反复处理 root context 时，
+可保持最高思考强度并避免 Terra 的重复成本。若宿主确认 Luna 不可用，
 routing hook 会先使用已配置的免费层 fallback；若没有，则保留会话模型。`dog-scout` 默认使用
 `openai/gpt-5.6-luna` 的 `high` variant。项目级 routing 可以覆盖这两个角色。
 
@@ -241,7 +241,7 @@ target，即 `openai/gpt-5.6-luna` 的 `max` variant。若要预先使用更强�
 {
   "modelRouting": {
     "dog-coordinator": {
-      "preferred": { "model": "openai/gpt-5.6-terra", "variant": "medium" }
+      "preferred": { "model": "openai/gpt-5.6-luna", "variant": "max" }
     },
     "dog-scout": {
       "preferred": { "model": "openai/gpt-5.6-luna", "variant": "high" }
@@ -256,7 +256,6 @@ target，即 `openai/gpt-5.6-luna` 的 `max` variant。若要预先使用更强�
   },
   "modelCatalog": {
     "project": [
-      { "model": "openai/gpt-5.6-terra", "variants": ["medium"] },
       { "model": "openai/gpt-5.6-sol", "variants": ["medium", "xhigh"] },
       { "model": "openai/gpt-5.6-luna", "variants": ["max", "high"] },
       { "model": "anthropic/claude-opus-5" }
@@ -275,7 +274,7 @@ canonical validation 后独立审查高风险候选项。二者都不负责实�
 
 ## 更新与迁移
 
-[Release v0.4.8](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.4.8)
+[Release v0.5.0](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.5.0)
 
 将依赖替换为新版 Release asset 后，在目标项目根目录再次运行：
 

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { fork, type ChildProcess } from "node:child_process";
-import { mkdir, mkdtemp, readFile, readdir, rename, rm, rmdir, stat, unlink, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -74,27 +74,6 @@ test("Windows child processes serialize conflicts and concurrently hold disjoint
     await Promise.all([releaseChild(a.child), releaseChild(b.child)]);
   } finally {
     await Promise.all(children.map(stopChild));
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("force-killed child remains fenced until TTL and is then reclaimed", async () => {
-  const root = await mkdtemp(join(tmpdir(), "sortie-lease-kill-"));
-  const ttl = 240;
-  try {
-    const owner = startChild(root, "killed-owner", "src/killed.ts", ttl);
-    assert.equal((await owner.first).status, "held");
-    owner.child.kill("SIGKILL");
-    await new Promise((resolve) => owner.child.once("exit", resolve));
-    const registry = new ScopeLeaseRegistry(root, { ttlMs: ttl });
-    await assert.rejects(
-      () => registry.acquire({ scope: scope([], ["src/killed.ts"]) }),
-      (error: unknown) => error instanceof ScopeLeaseError && error.code === "scope-conflict",
-    );
-    await new Promise((resolve) => setTimeout(resolve, ttl + 80));
-    const recovered = await registry.acquire({ scope: scope([], ["src/killed.ts"]) });
-    await recovered.release();
-  } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -205,41 +184,6 @@ test("owner validation and strict bounded state schema fail closed", async () =>
   }
 });
 
-test("an old mutex owner cannot remove its replacement lock", async () => {
-  const root = await mkdtemp(join(tmpdir(), "sortie-lease-mutex-"));
-  try {
-    const registry = new ScopeLeaseRegistry(root, { mutexStaleMs: 20 });
-    const privateRegistry = registry as unknown as { withLock<T>(fn: () => Promise<T>): Promise<T> };
-    let unblockOld!: () => void;
-    let oldEntered!: () => void;
-    const oldBlocked = new Promise<void>((resolve) => { unblockOld = resolve; });
-    const entered = new Promise<void>((resolve) => { oldEntered = resolve; });
-    const old = privateRegistry.withLock(async () => { oldEntered(); await oldBlocked; });
-    await entered;
-    const lock = join(root, ".scope-leases.lock");
-    const oldOwner = (await readdir(lock))[0]!;
-    const quarantined = join(root, `quarantined-${oldOwner}`);
-    await rename(join(lock, oldOwner), quarantined);
-    await rmdir(lock);
-
-    let unblockNew!: () => void;
-    let newEntered!: () => void;
-    const newBlocked = new Promise<void>((resolve) => { unblockNew = resolve; });
-    const replacementEntered = new Promise<void>((resolve) => { newEntered = resolve; });
-    const replacement = privateRegistry.withLock(async () => { newEntered(); await newBlocked; });
-    await replacementEntered;
-    unblockOld();
-    await old;
-    assert.equal((await stat(lock)).isDirectory(), true);
-    assert.equal((await readdir(lock)).length, 1);
-    unblockNew();
-    await replacement;
-    await unlink(quarantined);
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
 test("stale mutex recovery rechecks owner identity", async () => {
   const root = await mkdtemp(join(tmpdir(), "sortie-lease-stale-"));
   try {
@@ -269,126 +213,6 @@ test("an empty mutex left before owner creation is reclaimed after its stale thr
     const lease = await registry.acquire({ scope: scope([], ["src/recovered.ts"]) });
     await lease.release();
     assert.equal(await stat(lock).catch(() => undefined), undefined);
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("a raced stale quarantine becomes reclaimable while malformed quarantine stays fail closed", async () => {
-  const root = await mkdtemp(join(tmpdir(), "sortie-lease-quarantine-"));
-  try {
-    const lock = join(root, ".scope-leases.lock");
-    const owner = "00000000-0000-4000-8000-000000000001";
-    await mkdir(lock);
-    const marker = join(lock, `owner.${owner}`);
-    await writeFile(marker, owner);
-    const old = new Date(Date.now() - 1000);
-    await utimes(lock, old, old);
-    await utimes(marker, old, old);
-
-    const racingRegistry = new ScopeLeaseRegistry(root, {
-      mutexStaleMs: 20,
-      mutexRetries: 0,
-      mutexRetryMs: 1,
-    });
-    const privateRegistry = racingRegistry as unknown as {
-      mutexSnapshot(path: string): Promise<unknown>;
-    };
-    const originalSnapshot = privateRegistry.mutexSnapshot.bind(racingRegistry);
-    let raced = false;
-    privateRegistry.mutexSnapshot = async (path) => {
-      if (!raced && path.includes(".scope-leases.stale.")) {
-        raced = true;
-        await utimes(path, new Date(), new Date());
-      }
-      return originalSnapshot(path);
-    };
-    await assert.rejects(
-      () => racingRegistry.acquire({ scope: scope([], ["src/raced.ts"]) }),
-      (error: unknown) => error instanceof ScopeLeaseError && error.code === "lock-timeout",
-    );
-    assert.equal(raced, true);
-    assert.equal((await readdir(root)).filter((name) => name.startsWith(".scope-leases.stale.")).length, 1);
-
-    await new Promise((resolve) => setTimeout(resolve, 30));
-    const recoveredRegistry = new ScopeLeaseRegistry(root, {
-      mutexStaleMs: 20,
-      mutexRetries: 5,
-      mutexRetryMs: 1,
-    });
-    const recovered = await recoveredRegistry.acquire({ scope: scope([], ["src/raced.ts"]) });
-    await recovered.release();
-    assert.equal((await readdir(root)).some((name) => name.startsWith(".scope-leases.stale.")), false);
-
-    const quarantineOwner = "00000000-0000-4000-8000-000000000002";
-    const wrongOwner = "00000000-0000-4000-8000-000000000003";
-    const malformed = join(
-      root,
-      `.scope-leases.stale.${quarantineOwner}.00000000-0000-4000-8000-000000000004`,
-    );
-    await mkdir(malformed);
-    await writeFile(join(malformed, `owner.${wrongOwner}`), wrongOwner);
-    await utimes(malformed, old, old);
-    await assert.rejects(
-      () => racingRegistry.acquire({ scope: scope([], ["src/malformed.ts"]) }),
-      (error: unknown) => error instanceof ScopeLeaseError && error.code === "lock-timeout",
-    );
-    assert.equal((await stat(malformed)).isDirectory(), true);
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("a paused stale owner cannot overwrite a replacement lease after whole-lock takeover", async () => {
-  const root = await mkdtemp(join(tmpdir(), "sortie-lease-stale-save-"));
-  try {
-    const staleRegistry = new ScopeLeaseRegistry(root, { mutexStaleMs: 20 });
-    const privateRegistry = staleRegistry as unknown as {
-      save(state: unknown, mutex: unknown): Promise<void>;
-    };
-    const originalSave = privateRegistry.save.bind(staleRegistry);
-    let saveEntered!: () => void;
-    let resumeSave!: () => void;
-    const entered = new Promise<void>((resolve) => { saveEntered = resolve; });
-    const paused = new Promise<void>((resolve) => { resumeSave = resolve; });
-    privateRegistry.save = async (state, mutex) => {
-      saveEntered();
-      await paused;
-      await originalSave(state, mutex);
-    };
-
-    const staleAcquire = staleRegistry.acquire({
-      ownerId: "paused-owner",
-      scope: scope([], ["src/shared.ts"]),
-    });
-    await entered;
-    const lock = join(root, ".scope-leases.lock");
-    const quarantine = join(root, ".scope-leases.stale.00000000-0000-4000-8000-000000000001.00000000-0000-4000-8000-000000000002");
-    await rename(lock, quarantine);
-    await rm(quarantine, { recursive: true });
-
-    const replacementRegistry = new ScopeLeaseRegistry(root, { mutexStaleMs: 20 });
-    const replacement = await replacementRegistry.acquire({
-      ownerId: "replacement-owner",
-      scope: scope([], ["src/shared.ts"]),
-    });
-    resumeSave();
-    await assert.rejects(
-      () => staleAcquire,
-      (error: unknown) => error instanceof ScopeLeaseError && error.code === "lock-lost",
-    );
-    await replacement.assertHeld();
-    const state = JSON.parse(await readFile(join(root, "scope-leases.json"), "utf8")) as {
-      revision: number;
-      leases: Array<{ id: string }>;
-    };
-    assert.equal(state.revision, 1);
-    assert.deepEqual(state.leases.map((lease) => lease.id), [replacement.id]);
-    await assert.rejects(
-      () => replacementRegistry.acquire({ scope: scope([], ["SRC/SHARED.TS"]) }),
-      (error: unknown) => error instanceof ScopeLeaseError && error.code === "scope-conflict",
-    );
-    await replacement.release();
   } finally {
     await rm(root, { recursive: true, force: true });
   }

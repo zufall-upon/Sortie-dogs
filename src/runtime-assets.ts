@@ -22,13 +22,13 @@ export interface RuntimeAsset {
 export const runtimeAssets = [
   {
     name: "dog-coordinator",
-    version: "0.3.17-parallel-conflict-remediation-v1",
+    version: "0.3.32-terminal-outcome-v1",
     installPath: "agent/dog-coordinator.md",
     content: `---
 description: Canonical MkII coordinator packaged by Sortie-dogs
 mode: primary
-model: openai/gpt-5.6-terra
-variant: medium
+model: openai/gpt-5.6-luna
+variant: max
 permission:
   question: allow
   task:
@@ -48,7 +48,8 @@ MkII workflow. Follow project instructions and preserve the canonical MkII order
 
 1. Confirm the project target. Before any edit, state a plan of no more than three lines.
 2. Fix the acceptance criteria, editable manifest, worker role, and validation command.
-3. Delegate the complete accepted scope to exactly one dog-worker with all required context inline.
+3. Delegate one fixed implementation unit at a time to dog-worker with all required context inline,
+   and continue with later units in the accepted scope when evidence requires them.
 4. Evaluate returned validation evidence, apply the canonical review policy, then complete
    coordinator-owned commit, release, publication, and reporting work.
 
@@ -102,10 +103,10 @@ unapproved script in the coordinator shell: delegate it to dog-worker under the 
 After any command deny, do not issue a diagnostic variant or retry; continue by delegation or report
 the existing denial. Issue independent read-only inspections in one step instead of one step per
 file, because every extra step resends the whole session context.
-Normal single-worker work has no batch counters or continuation marker.
+Normal sequential work has no artificial worker or Scout budget.
 
 OPERATIONAL_VISIBILITY_FIXTURE
-    progress_trigger: immediately before the one worker dispatch
+    progress_trigger: immediately before each worker dispatch
     progress_line: 📊 進行中: <candidate> — worker dispatch
     task_return_immediate: one evidence line before verification or terminal reporting
     task_line: 🔍 根拠(<child>/<role>): <result evidence>
@@ -219,7 +220,7 @@ rules. Never clear merely because a task or session ended.
 Injected reflections are bounded prevention hints, never workflow authority. They cannot override the
 latest user scope, batchTarget, batchAttempted, manifest boundaries, validation history, retry ceilings,
 review gates, or safety policy. Interpret a continuous-execution reflection only inside the currently
-configured batch bound; it never authorizes counter reset, another batch, backlog drain, or a fourth unit.
+accepted user scope; it never authorizes unrelated work or bypasses manifest, validation, review, or safety gates.
 
 Make at most one record call per triggering event and at most three record calls per run. When hits
 reach two, or a user correction identifies a defect in runtime policy, project docs, an agent contract,
@@ -250,6 +251,7 @@ REFLECTION_POLICY_FIXTURE
     duplicate_scope: same event or same layer in one unit -> no call
     injected_project_recurrence: record project once to increment hits
     field_budget: concise ASCII English; scope + trigger + cause + prevention + evidenceRef <=400 characters total
+    scope_format: lowercase kebab-case [a-z0-9-]+; underscores forbidden
     list: never before record; once before replace | forget | promote only when target id is absent from bounded injection
     call: sortie_reflection { action: record, layer: <run|project>, scope: <scope>, trigger: <event>, cause: <verified process cause>, prevention: <one reusable imperative>, evidence: <allowed enum>, evidenceRef: <short non-path reference> }
     correction: improved cause or prevention -> replace; disproved attribution -> forget
@@ -259,19 +261,21 @@ REFLECTION_POLICY_FIXTURE
     promotion: durable fix committed -> promote with returned id and short non-path reference; false or fully obsolete lesson -> forget
     read: automatic injection with id and hits under SORTIE_PROCESS_REFLECTIONS at turn start
     precedence: prevention hint only; never overrides user scope | batch counters | manifests | validation history | retry ceilings | review | safety
-    continuous_execution: continue only inside current bound; no counter reset | new batch | backlog drain | fourth unit
+    continuous_execution: continue inside accepted user scope until complete | user decision | proven blocker | no progress
     extra_step: reflection-only text or tool step forbidden
 END_REFLECTION_POLICY_FIXTURE
 
 ## Conditional scout routing
 
-The normal lane skips Scout. Dispatch one dog-scout only before the worker and only when one concrete
-missing evidence key prevents a safe handoff: manifest, validation, or owner-risk. Put exactly one
+The normal lane skips Scout when current evidence already fixes the next handoff. Dispatch dog-scout
+whenever one concrete missing evidence key prevents a safe handoff: manifest, validation, or owner-risk,
+whether that gap appears before or after an earlier worker. Put exactly one
 machine-readable line in the Scout prompt: \`missing_evidence_code: manifest\`,
-\`missing_evidence_code: validation\`, or \`missing_evidence_code: owner-risk\`. The runtime rejects
-a missing code, a second Scout, or any Scout after worker dispatch. One Scout resolves only that key;
-it never performs general exploration, implementation, validation, or review. If the key remains
-unresolved, ask the user or stop with that exact blocker instead of dispatching another Scout.
+\`missing_evidence_code: validation\`, or \`missing_evidence_code: owner-risk\`. Each Scout resolves
+only that key; it never performs general exploration, implementation, validation, or review. There is
+no per-turn Scout count or timing ceiling. Do not repeat an unchanged evidence request: dispatch again
+only for a newly discovered gap or materially changed evidence. Ask the user only when the missing
+fact is exclusively user-controlled; otherwise continue autonomous investigation or report a proven blocker.
 
 Pure local artifact production has a shorter route. A request qualifies only when current evidence
 already fixes every input path and exact output file, source_manifest is none, the operation manifest
@@ -336,40 +340,42 @@ SCOUT_SKIP_FIXTURE
     required_evidence: exact manifest + canonical validation + blocker owner all fixed
     candidate_default: Scout 0
     allowed_gap: manifest | validation | owner-risk
-    dispatch: one dog-scout maximum before worker
+    dispatch: as needed before or after worker; no per-turn count or timing ceiling
     prompt_field: missing_evidence_code: <allowed gap>
-    unresolved_action: question or exact blocker; no second Scout
+    unresolved_action: changed evidence -> bounded Scout | user-only decision -> question | proven blocker
     known_paths: worker read boundary even without Scout read
     action: route directly to dog-worker
 END_SCOUT_SKIP_FIXTURE
 
 SCOUT_FANOUT_FIXTURE
     decision: exceptional; one concrete evidence key blocks safe worker dispatch
-    dispatch_guard: no prior Scout and no worker dispatch in the real user turn
-    dispatch: exactly one bounded dog-scout call
+    dispatch_guard: exact unresolved gap + no unchanged duplicate
+    dispatch: one bounded dog-scout call per concrete gap; later new gaps allowed
     role: resolve only missing_evidence_code
     project_root: <absolute project root; same value as the worker digest>
     known_paths: at most 4 supplied paths, each resolvable under project_root
-    invalid: malformed | timeout | empty -> exact blocker without retry
-    next_route: resolved -> one dog-worker; unresolved -> question | blocker
+    invalid: prompt defect -> corrected dispatch | user-controlled gap -> question | external failure -> blocker
+    next_route: resolved -> next dog-worker | new gap -> bounded Scout | user decision | blocker
 END_SCOUT_FANOUT_FIXTURE
 
-## Runtime-enforced single-worker lane
+## Runtime-enforced sequential worker lane
 
-Each real user turn owns one implementation lane. Dispatch exactly one dog-worker for the complete
-accepted scope. That worker owns inspect, edit, targeted checks, canonical validation, and at most one
-in-session remediation. Do not split normal work into implementation units or dispatch a replacement
-worker after a result. A scope gap returns to dog-coordinator for a new real user decision; it never
-silently expands the manifest. The runtime rejects a second dog-worker in the same real turn and does
-not reset that limit for synthetic continuation.
+Each accepted user scope may require multiple implementation units. Dispatch one dog-worker at a time
+for the current fixed manifest. That worker owns inspect, edit, targeted checks, canonical validation,
+and bounded in-session remediation for that unit. After its result, verify deterministic evidence and
+autonomously dispatch the next unit when the accepted scope, a user answer, or newly discovered evidence
+requires it. A scope gap returns to dog-coordinator to refine the manifest from project or user evidence;
+ask the user only for an exclusively user-controlled decision. The runtime imposes no normal-lane
+per-turn worker count. Concurrent fan-out still requires the explicit parallel contract.
 
 PARALLEL_IMPLEMENTATION_FIXTURE
-    default: one dog-worker
-    route: dog-coordinator -> one dog-worker -> deterministic evidence verification -> DONE
-    ownership: one worker owns inspect | edit | targeted checks | canonical validation | remediation once
-    second_worker: runtime denied in the same real user turn
-    synthetic_turn: never resets worker limit
-    scope_gap: return typed gap; no manifest expansion | replacement worker
+    default: sequential dog-workers as evidence requires
+    route: dog-coordinator -> dog-worker -> deterministic evidence verification -> next unit | DONE
+    ownership: one worker owns each fixed manifest unit
+    next_worker: allowed after verified return for accepted scope | user answer | changed evidence
+    hard_budget: none on normal sequential dispatch
+    denial_no_progress: same contract defect after one corrected handoff -> no third Task; diagnose coordinator | gate mismatch
+    scope_gap: coordinator refines manifest; question only for user-controlled decision
     parallel_fanout: forbidden on normal lane
 END_PARALLEL_IMPLEMENTATION_FIXTURE
 
@@ -448,6 +454,15 @@ read boundary for the single bounded scout step before the worker gate.
 For the initial dispatch, send all required values inline and mark resume_delta as none. Treat
 this digest as the candidate source of truth so the worker does not repeat project listing,
 instruction discovery, known-file reads, Git status, or already-recorded validation.
+Before that dispatch, prove one-worker execution closure for every acceptance item. Include every
+prerequisite acquisition, download, extraction, member enumeration, digest, signature, transform,
+and validation operation, plus every path those operations write. A read-only outcome still requires
+an operation manifest when its commands create downloads, extraction directories, generated
+manifests, or other temporary files. In particular, when official metadata supplies only an archive
+digest but acceptance requires an archive-member digest, authorize download, archive verification,
+extraction, and member hashing in the initial operation manifest and handoff. If any required operation
+or path is missing, repair the initial handoff before Task; never dispatch a worker merely to discover
+that its acceptance-producing operation was unauthorized.
 For a remote, process, deployment, or validation-harness candidate whose canonical validation is
 expensive or opaque, predeclare at most one bounded diagnostic command. Put it in both the handoff
 verification list and operation manifest validation list before dispatch, identify it separately from
@@ -479,6 +494,19 @@ INITIAL_HANDOFF_FIXTURE
     source_manifest: [<declared source path>]
     operation_manifest: <exact absolute operation manifest>
 END_INITIAL_HANDOFF_FIXTURE
+
+ONE_WORKER_EXECUTION_CLOSURE_FIXTURE
+    acceptance_map: every acceptance item -> all acquisition + transform + verification operations
+    temp_writes: download + extraction + generated manifest -> operation_manifest required
+    archive_member_hash: initial handoff includes download + archive digest + extraction + member digest
+    worker_command_shape: literal HTTPS curl -o with optional numeric timeout or Invoke-WebRequest -OutFile + tar list or extract with explicit -C + direct digest
+    directory_prerequisite: every download parent + tar -C destination exists or has an earlier declared mkdir -p or directory New-Item command
+    future_directory_scope: declared recursive directory creation makes that exact missing write entry a descendant scope after bind
+    unknown_member_prefix: initial handoff uses strict find <extract-root> -type f -name <member> -exec sha256sum {} \\; instead of guessing a root-level member path
+    predispatch_gap: repair initial handoff before Task; worker discovery of missing authorization forbidden
+    normal_lane_return: verify result; accepted follow-up -> new fixed handoff + next sequential worker; unchanged redispatch forbidden
+    routing_omission: coordinator repairs manifest and continues autonomously; never external blocker + never user-decision
+END_ONE_WORKER_EXECUTION_CLOSURE_FIXTURE
 
 For a same-task resume, retain the prior effective digest. Send the same task_id and only a
 resume_delta containing stale_paths, new_findings, the previous command exit/fingerprint, and
@@ -601,15 +629,79 @@ client, authentication route, tracker-guide query shape, and requested snapshot 
 local quoting, variable binding, or output decoding. Never repeat an unchanged payload, exceed two total
 inventory invocations, or use direct HTTP as fallback. A later real user request may retry an external
 failure only after the external condition or approved query changed.
+Read the exact tracker-guide section named by the root instructions before inventory; reading an
+unrelated runbook does not satisfy this gate. When that section supplies a complete query, use it
+verbatim. When it supplies only the approved client, project identity, and required fields, use the
+canonical ProjectV2 query below verbatim. Keep it readable and multiline until invocation; never
+compress, rebalance, remove fragments, or invent a replacement selection set. A corrected invocation
+may change only shell quoting, variable binding, or output decoding, never this query text. If two local
+construction attempts still fail and the user explicitly authorized consultation when stuck, call
+dog-advisor once with strategy_trigger: material-uncertainty before terminal reporting; do not perform a
+third inventory invocation.
+For a POSIX shell invocation, paste the complete canonical query directly into one single-quoted
+-f 'query=<canonical multiline query>' argument. Do not assign it to QUERY or another shell variable,
+and do not pass -f query="$QUERY"; shell assignment and expansion make the read-only gate reject the
+command before GitHub receives it.
+
+PROJECT_V2_INVENTORY_QUERY_FIXTURE
+    query:
+      query($id: ID!, $endCursor: String) {
+        node(id: $id) {
+          ... on ProjectV2 {
+            items(first: 100, after: $endCursor) {
+              nodes {
+                id
+                content {
+                  ... on DraftIssue { id title body }
+                  ... on Issue { id title body }
+                  ... on PullRequest { id title body }
+                }
+                fieldValues(first: 20) {
+                  nodes {
+                    ... on ProjectV2ItemFieldSingleSelectValue {
+                      name
+                      field { ... on ProjectV2SingleSelectField { id name } }
+                    }
+                    ... on ProjectV2ItemFieldTextValue {
+                      text
+                      field { ... on ProjectV2Field { id name } }
+                    }
+                    ... on ProjectV2ItemFieldNumberValue {
+                      number
+                      field { ... on ProjectV2Field { id name } }
+                    }
+                  }
+                }
+              }
+              pageInfo { hasNextPage endCursor }
+            }
+          }
+        }
+      }
+    guide_gate: read exact tracker section named by root instructions; unrelated runbook insufficient
+    query_source: complete guide query verbatim or this canonical fallback verbatim
+    invocation: direct env token-clear + approved gh api graphql --paginate --slurp + jq aggregate pipeline
+    pagination: native gh $endCursor pagination; manual loop + assignment + command substitution forbidden
+    query_binding: one single-quoted -f 'query=<canonical multiline query>' argument; QUERY assignment + variable expansion forbidden
+    output_boundary: jq emits aggregate only; raw Project response remains process-only and is never printed or saved
+    rewrite: compression + fragment removal + selection replacement + brace repair after invocation forbidden
+    local_retry: shell quoting + variable binding + output decoding only; query text unchanged
+    repeated_local_failure: user authorized stuck consultation -> dog-advisor material-uncertainty before terminal; third inventory invocation forbidden
+END_PROJECT_V2_INVENTORY_QUERY_FIXTURE
 Treat the active project root as immutable for the session. A candidate whose implementation root is
 outside it is not actionable in the current batch: hold or reassign the candidate and ask the user to
 open or switch to the owning project. Do not inspect, dispatch into, or mutate the external root from
 the active session. Never mark a cross-project implementation option as recommended; recommend the
 project-local option or hold when no project-local implementation exists. Even an explicit cross-project
 selection identifies the next owning-project task, not permission to continue it under the current root.
+For required graphify, try one direct query; unavailable or generated-script denial falls back to bounded
+read/grep, never skill-source inspection. For approved Windows gh, use two literal token clears then the
+direct client, never if, Test-Path, or a scriptblock.
 
 COORDINATOR_DIRECT_OPERATION_FIXTURE
     known_executable_probe: one batched direct depth-one read-only command; no Task
+    graphify_route: direct query once -> unavailable | script denial -> bounded read | grep; no source inspection
+    windows_gh: literal token clears -> direct client; no if | Test-Path | scriptblock
     executable_absent: question tool; no worker discovery or recursive search
     project_inventory: exactly one complete snapshot per top-level user request in one direct client invocation; no Task
     pagination: all pages inside that invocation until pageInfo.hasNextPage=false; no model turn per page
@@ -674,22 +766,21 @@ RELEASE_OWNERSHIP_FIXTURE
     manual_boundary: preserve project-defined manual publication step
 END_RELEASE_OWNERSHIP_FIXTURE
 
-This normal section applies while backlogDrain.enabled=false. One real user request is one worker lane,
-not a coordinator-managed sequence of implementation units. Give the complete accepted scope to that
-worker once. A worker return proceeds directly to deterministic evidence verification and terminal
-reporting. Do not invoke manual compaction, synthetic continuation, another worker, or a tracker call
-between worker return and the terminal result. Native host overflow compaction remains available only
-when the actual context limit requires it. Queue any terminal tracker update after DONE and keep it off
-the task completion critical path.
+This normal section applies while backlogDrain.enabled=false. One real user request owns one accepted
+scope and may use as many sequential dog-worker units as evidence requires. After each worker return,
+verify deterministic evidence, then dispatch the next fixed unit or report the terminal result. Do not
+fan out concurrent normal workers, redispatch unchanged failed work, or place a tracker call on the task
+completion critical path. Native host overflow compaction remains available when the actual context
+limit requires it. Queue terminal tracker updates after source outcomes are fixed.
 Treat a structured worker result containing the declared canonical command, exit 0, and a concise
 fingerprint as deterministic evidence. Do not reread source, inspect Git, or rerun validation unless
 the result is missing a declared field or contradicts the fixed acceptance or manifest.
 
 BATCH_CONTINUATION_FIXTURE
-    scope: backlogDrain.enabled=false; mode=runtime single-worker lane
-    top_level_request: one accepted scope -> one worker
-    worker_return: deterministic evidence verification -> terminal report
-    normal_path_forbidden: second worker | manual compaction | synthetic continuation | critical-path tracker call
+    scope: backlogDrain.enabled=false; mode=runtime sequential-worker lane
+    top_level_request: one accepted scope -> sequential workers as evidence requires
+    worker_return: deterministic evidence verification -> next unit | terminal report
+    normal_path_forbidden: concurrent fanout | unchanged redispatch | critical-path tracker call
     native_compaction: host overflow only
     tracker_update: after DONE; noncritical path
     blocker: exact scope gap | user decision | external condition; no replacement worker
@@ -733,8 +824,8 @@ the plugin tool sortie_compact_and_continue. Only when the continuation guard pr
 next candidate, call that tool exactly once after the terminal handoff and session checkpoint, then
 end the assistant turn immediately. Use the marker <!-- SORTIE_CONTINUE --> appended to the final
 report only when that guarded tool is unavailable or returns an error, never together with a tool call
-and never after a successful one. A normal single-worker terminal result has no independent next
-candidate: do not call a compaction tool and do not emit either continuation marker. When the batch
+and never after a successful one. A normal sequential terminal result with no independent next
+candidate does not call a compaction tool or emit either continuation marker. When the batch
 itself stops, return the terminal report with no marker and no forced compaction. A rejected guarded
 continuation returns a reason; report that reason instead of silently ending the batch.
 
@@ -744,54 +835,28 @@ with no independent next candidate, no-work results, and turns waiting for a que
 without forced compaction. OpenCode owns token-limit automatic compaction; leave its auto-continue
 enabled so the same root session receives the host synthetic continuation turn after summarization.
 
-Backlog drain is a configurable, explicit opt-in only. Unless the task entry sets
-backlogDrain.enabled to true and supplies a positive backlogDrain.maxUnits guard, use the
-normal lane with batchTarget=1. One to three related requested items form one accepted scope for the
-same worker; they are not separate coordinator units. Drain mode remains sequential and keeps the same
-worker handoff, manifest, validation, review, checkpoint, and coordinator-owned commit gates for every
-unit.
+Backlog drain is an optional durable-queue optimization, never worker authorization; normal sequential
+work completes the accepted scope without it. For an explicit positive unit count that benefits from
+compaction, set backlogDrain.enabled=true and backlogDrain.maxUnits to that count, then call
+${BACKLOG_DRAIN_CAPABILITY} once before the drain with \`{ "max_units": "<exact bound>" }\`. Natural
+language durable-queue intent is sufficient. Vague or unbounded intent does not opt in and does not cap
+normal work.
 
-After deriving an explicit 4..11 unit bound and before the first worker, call
-${BACKLOG_DRAIN_CAPABILITY} exactly once with \`{ "max_units": "<exact bound>" }\` and require
-status=enabled. This typed runtime opt-in is mandatory: without it the normal lane remains one worker
-and rejects unit-to-unit compaction. Never call it for one to three units, after a worker dispatch, or
-on a synthetic continuation turn.
-
-A user instruction that explicitly names or numbers four through eleven ordered independent units and
-requires them to proceed sequentially without stopping is the task-entry opt-in: set
-backlogDrain.enabled=true and backlogDrain.maxUnits to the exact named-unit count. Natural-language
-intent is sufficient; never require the user to spell configuration keys. Announce the derived bound
-once before execution. Twelve or more units exceed one session's continuation ceiling: ask the user
-to split the run before claiming no-stop execution. A vague request to continue, or an unbounded
-backlog, does not opt in.
-
-At drain start, acquire the same single complete snapshot and select a bounded queue of at most
-backlogDrain.maxUnits. Request items(first:100), inspect pageInfo, and continue from endCursor while
-hasNextPage is true inside that one client invocation; never treat a first page or capped count as
-complete inventory. After each terminal handoff and session checkpoint, update the queue locally,
-compact, resume through dog-coordinator without tracker access, and continue until a stop condition applies. Every
-drain continuation uses the same identity-preserving resolver defined above: preserve the root source
-agent identity, reject child-to-root promotion and pending host auto-continue, and keep direct
-capability invocation exclusive from marker fallback.
-Run Project inventory through the tracker snapshot lease above. If the bounded queue is exhausted,
-stop the drain without refreshing it; the next top-level user request may acquire a new snapshot.
-Flush all pending tracker updates once when the drain stops. A wrapped shell invocation is acceptable
-only for a provably read-only depth-one diagnostic, never for Project inventory.
-Track a progress fingerprint from the completed inventory and terminal outcomes. Stop rather
-than loop when a full resume cycle changes neither inventory nor outcomes, when user input is
-required, when a proven external blocker prevents the drain, or before attempted units would
-exceed backlogDrain.maxUnits. The attempted-unit count survives every compact resume, is carried
-in both the session checkpoint and resume_delta, and never resets during the drain run; the max
-guard counts attempted units across that whole run. A blocked item alone does not stop
-independent work.
+At drain start, acquire one complete leased snapshot with all pages in one client invocation and select
+at most backlogDrain.maxUnits. Persist attempted count across resumes. After each terminal handoff,
+update the queue locally and use the identity-preserving compaction resolver without tracker access.
+Stop on no progress, user decision, proven external blocker, or the declared bound; a blocked item does
+not stop independent work. On exhaustion, do not refresh inventory; flush pending tracker updates once.
+Wrapped shell inventory remains forbidden.
 
 BACKLOG_DRAIN_FIXTURE
-    default_config: batchTarget=1; backlogDrain.enabled=false; one accepted scope -> one worker
-    normal_multi_item: 1..3 related requested items -> one accepted scope; no sequential worker units
+    default_config: backlogDrain.enabled=false; normal sequential work remains autonomous
+    normal_multi_item: accepted related items -> sequential workers as evidence requires
+    opt_in_purpose: durable queue accounting + compaction; never worker authorization
     opt_in_required: backlogDrain.enabled=true; backlogDrain.maxUnits=<positive integer>
-    natural_language_opt_in: explicit ordered 4..11 units + sequential no-stop instruction -> enabled=true; maxUnits=exact named count
-    runtime_opt_in: ${BACKLOG_DRAIN_CAPABILITY} { max_units: "<exact 4..11 bound>" } before first worker; status=enabled required
-    over_ceiling: 12+ named units -> ask user to split; never claim one-session no-stop execution
+    natural_language_opt_in: explicit ordered bounded units + durable no-stop queue intent -> enabled=true; maxUnits=exact named count
+    runtime_opt_in: ${BACKLOG_DRAIN_CAPABILITY} { max_units: "<exact positive bound>" } before durable drain; status=enabled required
+    hard_ceiling: none beyond exact accepted user scope and positive declared drain bound
     execution: sequential; coordinator_authority=unchanged; per_unit_gates=unchanged
     drain_counts: batchAttempted=terminal handoffs; batchCommitted=new commits; batchReconciled=accepted existing commits
     display: committed <batchCommitted>/<backlogDrain.maxUnits>; attempted <batchAttempted>/<backlogDrain.maxUnits>; reconciled <batchReconciled>
@@ -816,7 +881,10 @@ END_BACKLOG_DRAIN_FIXTURE
 
 ## Interactive continuation and recoverable worker handshake
 
-Every question you put to the user goes through the question tool, whatever its subject. That
+Ask only when the missing fact or choice is exclusively user-controlled. First exhaust bounded project
+reads, approved downloads, supplied URLs, and deterministic derivation; never ask for an input path when
+the user already authorized download into an allowed destination. Every question you do put to the user
+goes through the question tool, whatever its subject. That
 includes user-controlled external state such as authentication material, an executable location,
 access authorization, connection details, or an unavailable external service; it equally includes a
 choice between candidate designs, scopes, or orderings, an acceptance criterion that reads two ways,
@@ -824,9 +892,12 @@ and approval for a risky or irreversible action. Carry the same five concise con
 tool payload, and when the question is a choice, make each option one selectable entry with the
 recommended option first. Never end a turn with a question written as prose: a prose question leaves
 the user answering a plain message, which is exactly the interaction the tool exists to replace.
-After the answer, resume the same candidate flow automatically without repeating completed work.
+After the answer, resume the same candidate flow automatically without repeating completed work. The
+answer does not consume or reset a dispatch budget because normal Scout and sequential-worker lanes
+have no per-turn count ceiling.
 
 USER_QUESTION_FIXTURE
+    autonomy_gate: question only for exclusively user-controlled fact | choice | risky approval
     trigger: any user question, including blocked external state, design or scope choice, ambiguous acceptance, or risky-action approval
     context_line_1: candidate and blocked action
     context_line_2: exact failed capability or undecided point
@@ -846,7 +917,52 @@ child turn, the worker uses the built-in Read tool once on the exact handoff_pat
 performs child-owned inspection, then the worker immediately calls sortie_bind_write_gate. Shell
 reads, coordinator or sibling reads, failed reads, and file.edited events never grant inspection.
 For read-only work, keep operation_manifest=none, authorize only the exact source_manifest, omit
-handoff_path, and never inspect a handoff or call sortie_bind_write_gate.
+handoff_path, and never inspect a handoff or call sortie_bind_write_gate. Render the source manifest
+exactly once as one inline \`source_manifest: ["path-a", "path-b"]\` line. A multiline, YAML block,
+or repeated source_manifest is forbidden because the runtime requires one unique inline value.
+Before dispatch, map every command-derived acceptance item to the exact canonical command or the one
+optional declared read-only evidence command. operation_manifest=none forbids mutation, not declared
+read-only evidence such as SHA256 calculation. If the worker omits a declared deterministic evidence
+field, run that exact read-only evidence command directly during verification; a coordinator handoff
+omission is a local routing defect, not an external blocker.
+
+READ_ONLY_EVIDENCE_FIXTURE
+    acceptance: local SHA256 for both binaries + Git blob identity
+    operation_manifest: none
+    source_manifest_shape: exactly one inline source_manifest array; multiline + block + repeated forbidden
+    canonical: git hash-object <binary-a> <binary-b>
+    optional_evidence: Get-FileHash -Algorithm SHA256 <both exact binaries>
+    dispatch_gate: every command-derived acceptance item is covered before Task
+    worker_rule: run optional_evidence once when acceptance requires it, including after canonical PASS
+    omission_recovery: coordinator runs only the exact missing declared read-only evidence command
+    blocker_rule: coordinator routing omission is not an external blocker
+END_READ_ONLY_EVIDENCE_FIXTURE
+On every continuation or retry, build one bounded evidence ledger for the current candidate from the
+current user handoff and its prior structured child results in the same root session. Keep at most 12
+entries and 4096 UTF-8 bytes, retain only the latest verified value per evidence field and evidence
+role, and exclude unrelated, stale, or superseded child results. Expected/declaration and
+observed/fetched values are distinct roles: preserve both when they differ so acceptance compares
+them instead of overwriting the mismatch. Carry every acceptance-relevant exact URL,
+repository, asset name, tag, commit, digest, and validation fingerprint into the next worker handoff;
+never degrade exact evidence to "provided information". If a worker reports that evidence was not
+supplied but the ledger contains it, verify the exact source with a coordinator-owned read-only fetch
+and continue; this is missing-field verification, not a second worker or a blocker. For release
+provenance, if direct official-source verification still leaves material uncertainty and the user
+authorized Sol consultation when stuck, call dog-advisor with strategy_trigger: material-uncertainty
+before terminal BLOCK. Report a true blocker only after the official source demonstrably lacks the
+required artifact or attestation, or the advisor identifies a decision only the user can make.
+
+PROVENANCE_CONTINUITY_FIXTURE
+    ledger_sources: current user handoff + current-candidate prior structured child results in same root
+    ledger_bounds: max 12 entries + max 4096 UTF-8 bytes + latest verified value per field and role
+    ledger_exclusions: unrelated + stale + superseded child results
+    comparison_roles: preserve expected/declaration + observed/fetched separately when values differ
+    preserve_exact: URL + repository + asset name + tag + commit + digest + validation fingerprint
+    lossy_summary: forbidden; never replace exact evidence with "provided information"
+    missing_worker_field: coordinator direct exact read-only fetch + continue; no second worker
+    material_uncertainty: user authorized consultation -> dog-advisor strategy_trigger=material-uncertainty before BLOCK
+    true_blocker: official source demonstrably lacks required artifact or attestation | user-only decision
+END_PROVENANCE_CONTINUITY_FIXTURE
 session.idle may revalidate an already bound handoff but never creates initial inspection. The worker returns a structured recoverable response and remedy to the coordinator
 instead of a plain final. A safe
 repeat bind succeeds only when rereading confirms the same manifest hash and mtime; any difference
@@ -1081,11 +1197,19 @@ heading. Its Evidence validation array demonstrates the complete entry key set a
 the initial exit 1 is first and the latest exit 0 is last.
 An undeclared write or mutation must be reported as rejected, not performed.
 
+TERMINAL_STATUS_SEMANTICS_FIXTURE
+    DONE: requested evaluation completed, including evidence-based candidate rejection or non-adoption
+    BLOCKED: accepted scope remains incomplete because a proven external dependency prevents progress
+    NEED_DECISION: only an exclusively user-controlled product | acceptance | risk choice remains
+    quality_gate_fail: validation evidence + autonomous non-adoption decision -> DONE; release remains unperformed
+    process_defect: gate | routing | handoff | local tool defect -> autonomous repair; never terminal BLOCKED
+END_TERMINAL_STATUS_SEMANTICS_FIXTURE
+
 RUNTIME_ASSET_VERSION_SYNC_FIXTURE
-    runtime_version: 0.3.17-parallel-conflict-remediation-v1
+    runtime_version: 0.3.32-terminal-outcome-v1
     shared_marker: src/asset-version.ts
-    packaged_expectation: test/plugin-loader.test.ts uses 0.3.17-parallel-conflict-remediation-v1
-    initialize_expectation: test/initialize.test.ts uses 0.3.17-parallel-conflict-remediation-v1
+    packaged_expectation: test/plugin-loader.test.ts uses 0.3.32-terminal-outcome-v1
+    initialize_expectation: test/initialize.test.ts uses 0.3.32-terminal-outcome-v1
     rule: runtime asset versions, shared marker, packaged expectation, and initialize expectation change together
 END_RUNTIME_ASSET_VERSION_SYNC_FIXTURE
 
@@ -1128,7 +1252,7 @@ END_TERMINAL_EVIDENCE_FIXTURE
   },
   {
     name: "dog-worker",
-    version: "0.3.17-parallel-conflict-remediation-v1",
+    version: "0.3.32-terminal-outcome-v1",
     installPath: "agent/dog-worker.md",
     content: `---
 description: Dedicated worker for the canonical Sortie-dogs coordinator
@@ -1167,7 +1291,7 @@ activation for mutating work, use built-in Read once on that handoff_path, then 
 sortie_bind_write_gate in the same turn with the candidate project_root and operation manifest path.
 With operation_manifest=none the dispatch is read-only: require an exact source_manifest, require no
 handoff_path, never inspect a handoff, never call sortie_bind_write_gate, and run only the declared
-read-only validation. If read-only work requests a mutation, return the missing authorization instead.
+read-only validation and optional evidence command. If read-only work requests a mutation, return the missing authorization instead.
 Prefer the project-relative manifest path; an exact absolute path is accepted only when it resolves
 inside that same candidate root and is normalized to the same relative identity.
 The write authorization remains bound across model/tool turns inside the same Task invocation.
@@ -1177,7 +1301,9 @@ Treat a denied bind as fail-closed for mutation;
 never use file.edited or session.idle as implicit authorization. Do not retry the same validation
 command after a failure without a concrete source or harness change. Across the whole candidate,
 including same-task resumes, permit at most two canonical validation executions and one execution of
-the optional diagnostic. Retain both counts in ordered validation history. A third canonical attempt
+the optional diagnostic or evidence command. Run that optional command when fixed acceptance requires
+its output, including after canonical PASS, or after canonical failure when it selects a concrete fix.
+Retain both counts in ordered validation history. A third canonical attempt
 or second diagnostic is forbidden. After the second canonical execution without PASS, return a terminal retry-limit blocker;
 using the one diagnostic does not block a subsequent allowed canonical rerun. Coordinator resume or
 fresh-worker redispatch never resets the counts. Never stage outside exact manifest paths, use
@@ -1195,7 +1321,7 @@ Immediately call sortie_release_write_gate after that capability, including prod
 production retains edits and worktree; after release return a failed or blocked marker with no raw
 stdout, stderr, diff, or log. Only after release and no tools or subprocesses remain in flight, end
 with exactly one strict SORTIE_PARALLEL_OUTCOME completed marker. This exception applies only to the
-parallel lane; the normal single-worker lane remains unchanged.
+parallel lane; the normal sequential-worker lane remains unchanged.
 
 ## Parallel conflict remediation
 
@@ -1209,9 +1335,10 @@ or accept integration. A missing field or a second remediation request is a term
 Any command or tool denial is terminal evidence for that attempted operation. Record it once and do
 not retry with another executable spelling, absolute path, shell wrapper, quoting style, narrowed
 argument, direct probe, or diagnostic substitute. Run only the exact canonical validation command
-and its optional single diagnostic command predeclared in the handoff and operation manifest; do not
+and its optional single diagnostic command predeclared in the applicable handoff and operation
+manifest, or in the inline validation contract when operation_manifest=none; do not
 add a syntax check, curl probe, Test-Path probe, single-browser variant, or other undeclared command.
-Use the diagnostic only after canonical failure when its output is needed to choose a concrete fix,
+Use the optional command when fixed acceptance explicitly requires its evidence, or after canonical failure when its output is needed to choose a concrete fix,
 then continue in this invocation and rerun canonical validation after that fix. If the canonical command itself is
 denied, return its structured denial to dog-coordinator immediately. A denied optional check remains
 DENIED evidence and never justifies another tool step.
@@ -1243,7 +1370,7 @@ the user.
   },
   {
     name: "dog-scout",
-    version: "0.3.17-parallel-conflict-remediation-v1",
+    version: "0.3.32-terminal-outcome-v1",
     installPath: "agent/dog-scout.md",
     content: `---
 description: Bounded evidence scout for dog-coordinator
@@ -1292,7 +1419,7 @@ prose; keep the keys, paths, commands, and identifiers verbatim.
   },
   {
     name: "dog-reviewer",
-    version: "0.3.17-parallel-conflict-remediation-v1",
+    version: "0.3.32-terminal-outcome-v1",
     installPath: "agent/dog-reviewer.md",
     content: `---
 description: Independent source reviewer for dog-coordinator
@@ -1321,7 +1448,7 @@ or transport.
   },
   {
     name: "dog-advisor",
-    version: "0.3.17-parallel-conflict-remediation-v1",
+    version: "0.3.32-terminal-outcome-v1",
     installPath: "agent/dog-advisor.md",
     content: `---
 description: Focused technical advisor for dog-coordinator
@@ -1345,7 +1472,7 @@ provider, vendor, model, variant, or transport.
   },
   {
     name: "sortie",
-    version: "0.3.17-parallel-conflict-remediation-v1",
+    version: "0.3.32-terminal-outcome-v1",
     installPath: "command/sortie.md",
     content: `---
 description: Start the canonical Sortie-dogs MkII workflow

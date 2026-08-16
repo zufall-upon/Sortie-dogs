@@ -1,7 +1,6 @@
 import { isSourceReviewRiskTag, STRATEGY_TRIGGERS } from "../core/consultation.js";
 
 const MAX_SESSIONS = 256;
-const MAX_REVIEW_CANDIDATES = 11;
 const GAP_CODES = new Set(["manifest", "validation", "owner-risk"]);
 const STRATEGY_TRIGGER_SET = new Set<string>(STRATEGY_TRIGGERS);
 const MANUAL_COMPACTION_TOOLS = new Set(["compact_and_continue", "sortie_compact_and_continue"]);
@@ -11,9 +10,8 @@ export type FastLaneDenialCode =
   | "TURN_STATE_REQUIRED"
   | "ROLE_FORBIDDEN"
   | "WORKER_LIMIT"
+  | "WORKER_RESUME_INVALID"
   | "SCOUT_GAP_REQUIRED"
-  | "SCOUT_LIMIT"
-  | "SCOUT_TOO_LATE"
   | "REVIEW_EVIDENCE_REQUIRED"
   | "REVIEW_PHASE_INVALID"
   | "REVIEW_LIMIT"
@@ -37,17 +35,19 @@ export class FastLaneDeniedError extends Error {
 }
 
 interface FastLaneTurnState {
-  advisorDispatches: number;
-  advisorPrompt?: string;
+  advisorRequests: Map<string, number>;
   reviewCandidates: Map<string, ReviewCandidateState>;
   reviewsLocked: boolean;
   scoutDispatches: number;
   backlogDrain: boolean;
   continuationPending: boolean;
+  dispatchLocked: boolean;
+  parallelMode: boolean;
   parallelWorkerLimit: number;
   totalWorkerDispatches: number;
   workerLimit: number;
   workerDispatches: number;
+  workerInFlight: boolean;
   workerResumeSessionID?: string;
   workerResumeTaskID?: string;
   workerResumeUsed: boolean;
@@ -89,9 +89,11 @@ function hasReviewEvidence(prompt: string): boolean {
 
 function freshState(): FastLaneTurnState {
   return {
-    advisorDispatches: 0,
+    advisorRequests: new Map(),
     backlogDrain: false,
     continuationPending: false,
+    dispatchLocked: false,
+    parallelMode: false,
     parallelWorkerLimit: 1,
     reviewCandidates: new Map(),
     reviewsLocked: false,
@@ -99,15 +101,18 @@ function freshState(): FastLaneTurnState {
     totalWorkerDispatches: 0,
     workerLimit: 1,
     workerDispatches: 0,
+    workerInFlight: false,
     workerResumeUsed: false,
   };
 }
 
 function lockedState(): FastLaneTurnState {
   return {
-    advisorDispatches: 2,
+    advisorRequests: new Map(),
     backlogDrain: false,
     continuationPending: false,
+    dispatchLocked: true,
+    parallelMode: false,
     parallelWorkerLimit: 1,
     reviewCandidates: new Map(),
     reviewsLocked: true,
@@ -115,6 +120,7 @@ function lockedState(): FastLaneTurnState {
     totalWorkerDispatches: 1,
     workerLimit: 1,
     workerDispatches: 1,
+    workerInFlight: false,
     workerResumeUsed: true,
   };
 }
@@ -151,13 +157,13 @@ export class FastLaneController {
       if (state === undefined) {
         this.setSession(sessionID, lockedState());
       } else if (state.backlogDrain && state.continuationPending) {
-        state.advisorDispatches = 0;
-        delete state.advisorPrompt;
+        state.advisorRequests.clear();
         state.continuationPending = false;
         state.reviewCandidates.clear();
         state.reviewsLocked = false;
         state.scoutDispatches = 0;
         state.workerDispatches = 0;
+        state.workerInFlight = false;
         delete state.workerResumeSessionID;
         delete state.workerResumeTaskID;
         state.workerResumeUsed = false;
@@ -181,7 +187,7 @@ export class FastLaneController {
   terminalInstructionRequired(sessionID: string): boolean {
     const state = this.sessions.get(sessionID);
     return state !== undefined && !state.backlogDrain && (
-      state.workerDispatches > 0 || state.scoutDispatches > 0 || state.advisorDispatches > 0 ||
+      state.workerDispatches > 0 || state.scoutDispatches > 0 || state.advisorRequests.size > 0 ||
       state.reviewCandidates.size > 0
     );
   }
@@ -199,7 +205,7 @@ export class FastLaneController {
   enableBacklogDrain(sessionID: string, maxUnits: number): void {
     const state = this.sessions.get(sessionID);
     if (state === undefined) throw new FastLaneDeniedError("TURN_STATE_REQUIRED");
-    if (!Number.isInteger(maxUnits) || maxUnits < 4 || maxUnits > 11) {
+    if (!Number.isSafeInteger(maxUnits) || maxUnits < 1) {
       throw new FastLaneDeniedError("BACKLOG_DRAIN_INVALID");
     }
     if (state.backlogDrain || state.totalWorkerDispatches > 0) {
@@ -226,6 +232,7 @@ export class FastLaneController {
       throw new FastLaneDeniedError("WORKER_LIMIT");
     }
     state.parallelWorkerLimit = maxWorkers;
+    state.parallelMode = true;
     state.workerLimit = totalTasks;
     state.workerDispatches = running;
     state.totalWorkerDispatches = Math.max(state.totalWorkerDispatches, dispatched);
@@ -240,11 +247,16 @@ export class FastLaneController {
 
   authorizeRecoverableWorkerResume(sessionID: string, taskID: string, childSessionID: string): boolean {
     const state = this.sessions.get(sessionID);
-    if (state === undefined || state.workerDispatches !== 1 || state.workerResumeUsed ||
+    if (state === undefined || state.dispatchLocked || state.workerDispatches < 1 || state.workerResumeUsed ||
       state.workerTaskID === undefined || taskID !== state.workerTaskID) return false;
     state.workerResumeSessionID = childSessionID;
     state.workerResumeTaskID = state.workerTaskID;
     return true;
+  }
+
+  workerCompleted(sessionID: string): void {
+    const state = this.sessions.get(sessionID);
+    if (state !== undefined) state.workerInFlight = false;
   }
 
   beforeTool(sessionID: string, tool: string, args: unknown, options: FastLaneToolOptions = {}): string | undefined {
@@ -262,6 +274,7 @@ export class FastLaneController {
       return;
     }
     if (tool !== "task") return;
+    if (state.dispatchLocked) throw new FastLaneDeniedError("TURN_STATE_REQUIRED");
 
     const role = taskArgument(args, "subagent_type");
     const prompt = taskArgument(args, "prompt") ?? "";
@@ -273,24 +286,35 @@ export class FastLaneController {
         taskID === state.workerResumeTaskID &&
         taskArgument(args, "task_id") === state.workerResumeSessionID) {
         state.workerResumeUsed = true;
+        state.workerInFlight = true;
         delete state.workerResumeSessionID;
         delete state.workerResumeTaskID;
         return taskArgument(args, "task_id");
       }
-      const workerTurnLimit = options.parallelWorkerAuthorized === true ? state.parallelWorkerLimit : 1;
-      if (state.workerDispatches >= workerTurnLimit || state.totalWorkerDispatches >= state.workerLimit) {
+      if (lineValue(prompt, "mode") === "same-task-resume") {
+        throw new FastLaneDeniedError("WORKER_RESUME_INVALID");
+      }
+      if (state.parallelMode) {
+        if (options.parallelWorkerAuthorized !== true || state.workerDispatches >= state.parallelWorkerLimit ||
+          state.totalWorkerDispatches >= state.workerLimit) throw new FastLaneDeniedError("WORKER_LIMIT");
+      } else if (state.backlogDrain &&
+        (state.workerDispatches >= 1 || state.totalWorkerDispatches >= state.workerLimit)) {
+        throw new FastLaneDeniedError("WORKER_LIMIT");
+      } else if (state.workerInFlight) {
         throw new FastLaneDeniedError("WORKER_LIMIT");
       }
       state.workerDispatches += 1;
       state.totalWorkerDispatches += 1;
+      state.workerInFlight = true;
       state.workerTaskID = taskID;
+      state.workerResumeUsed = false;
+      delete state.workerResumeSessionID;
+      delete state.workerResumeTaskID;
       return;
     }
     if (role === "dog-scout") {
-      if (state.workerDispatches > 0) throw new FastLaneDeniedError("SCOUT_TOO_LATE");
       const gap = lineValue(prompt, "missing_evidence_code");
       if (gap === undefined || !GAP_CODES.has(gap)) throw new FastLaneDeniedError("SCOUT_GAP_REQUIRED");
-      if (state.scoutDispatches >= 1) throw new FastLaneDeniedError("SCOUT_LIMIT");
       state.scoutDispatches += 1;
       return;
     }
@@ -304,9 +328,6 @@ export class FastLaneController {
       const candidateKey = reviewCandidateBasis(prompt);
       let candidate = state.reviewCandidates.get(candidateKey);
       if (candidate === undefined) {
-        if (state.reviewCandidates.size >= MAX_REVIEW_CANDIDATES) {
-          throw new FastLaneDeniedError("REVIEW_LIMIT");
-        }
         candidate = { initialDispatches: 0, verificationDispatches: 0 };
         state.reviewCandidates.set(candidateKey, candidate);
       }
@@ -349,20 +370,17 @@ export class FastLaneController {
       if (trigger === undefined || !STRATEGY_TRIGGER_SET.has(trigger)) {
         throw new FastLaneDeniedError("ADVISOR_TRIGGER_REQUIRED");
       }
+      const basis = fallbackBasis(prompt);
+      const dispatches = state.advisorRequests.get(basis) ?? 0;
       const retry = lineValue(prompt, "fallback_retry");
-      if ((state.advisorDispatches === 0 && retry !== undefined) ||
-        (state.advisorDispatches === 1 && retry !== "true")) {
+      if ((dispatches === 0 && retry !== undefined) || (dispatches === 1 && retry !== "true")) {
         throw new FastLaneDeniedError("CONSULTATION_RETRY_INVALID");
       }
-      if (state.advisorDispatches === 1 && options.consultationFallbackAuthorized !== true) {
+      if (dispatches === 1 && options.consultationFallbackAuthorized !== true) {
         throw new FastLaneDeniedError("CONSULTATION_RETRY_UNAUTHORIZED");
       }
-      if (state.advisorDispatches === 1 && state.advisorPrompt !== fallbackBasis(prompt)) {
-        throw new FastLaneDeniedError("CONSULTATION_RETRY_MISMATCH");
-      }
-      if (state.advisorDispatches >= 2) throw new FastLaneDeniedError("ADVISOR_LIMIT");
-      state.advisorPrompt ??= fallbackBasis(prompt);
-      state.advisorDispatches += 1;
+      if (dispatches >= 2) throw new FastLaneDeniedError("ADVISOR_LIMIT");
+      state.advisorRequests.set(basis, dispatches + 1);
       return;
     }
     throw new FastLaneDeniedError("ROLE_FORBIDDEN");

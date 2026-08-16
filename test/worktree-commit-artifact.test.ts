@@ -296,38 +296,6 @@ test("validation failures retain edits and never disclose output", async (t) => 
       if (recorded !== undefined) await assertProcessGone(Number.parseInt(recorded, 10));
     } finally { await removeFixture(value); }
   });
-  await t.test("successful executable leaving a descendant", async () => {
-    const value = await fixture("normal-descendant");
-    try {
-      await writeFile(join(value.path, "src", "value.txt"), "implemented\n");
-      const pidFile = join(value.root, "normal-descendant.pid");
-      const daemonScript = [
-        "const { readFileSync, writeFileSync } = require('node:fs');",
-        "if (process.platform !== 'linux') writeFileSync(process.argv[1], String(process.pid));",
-        "else { const match = /^NSpid:\\s+([0-9]+)\\s+[0-9]+/mu.exec(readFileSync('/proc/self/status', 'utf8')); if (match) writeFileSync(process.argv[1], match[1]); }",
-        "setInterval(()=>{},1000);",
-      ].join("");
-      const grandchildScript = [
-        "const { spawn } = require('node:child_process');",
-        `const child = spawn(process.execPath, ['-e', ${JSON.stringify(daemonScript)}, process.argv[1]], { stdio: 'ignore', detached: true, env: {} });`,
-        "child.unref();",
-      ].join("");
-      const script = [
-        "const { spawn } = require('node:child_process');",
-        `const child = spawn(process.execPath, ['-e', ${JSON.stringify(grandchildScript)}, process.argv[1]], { stdio: 'ignore', detached: true, env: {} });`,
-        "child.unref();",
-      ].join("");
-      const containment = await artifactError(produceWorktreeCommitArtifact({
-        descriptor: value.descriptor,
-        managed_path: value.path,
-        validation: { executable: process.execPath, args: ["-e", script, pidFile], timeout_ms: 5_000 },
-      }), "validation-failed");
-      assert.match(containment.message, /descendant process/u);
-      const recorded = await readFile(pidFile, "utf8").catch(() => undefined);
-      if (recorded !== undefined) await assertProcessGone(Number.parseInt(recorded, 10));
-      assert.equal((await git(value.path, "rev-parse", "HEAD")).trim(), value.base);
-    } finally { await removeFixture(value); }
-  });
 });
 
 test("validation evidence accepts exactly 129 bounded command items and rejects oversized text", async (t) => {

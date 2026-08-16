@@ -13,15 +13,19 @@ function expectDenial(action: () => void, code: FastLaneDeniedError["code"]): vo
   });
 }
 
-test("normal turns permit one worker and reset only on a real turn", () => {
+test("normal turns permit autonomous sequential workers across synthetic continuation", () => {
   const lane = new FastLaneController();
   expectDenial(() => lane.beforeTool("root", "task", worker), "TURN_STATE_REQUIRED");
   lane.beginTurn("root", false);
   lane.beforeTool("root", "task", worker);
   expectDenial(() => lane.beforeTool("root", "task", worker), "WORKER_LIMIT");
+  lane.workerCompleted("root");
+  lane.beforeTool("root", "task", worker);
 
   lane.beginTurn("root", true);
   expectDenial(() => lane.beforeTool("root", "task", worker), "WORKER_LIMIT");
+  lane.workerCompleted("root");
+  lane.beforeTool("root", "task", worker);
 
   lane.beginTurn("root", false);
   lane.beforeTool("root", "task", worker);
@@ -59,7 +63,7 @@ test("one exact handoff-uninspected result permits one same-task worker resume",
       subagent_type: "dog-worker",
       prompt: "task_id: task-a\nmode: same-task-resume\nrole: implementation",
     }),
-    "WORKER_LIMIT",
+    "WORKER_RESUME_INVALID",
   );
 });
 
@@ -73,7 +77,7 @@ test("worker resume stays scoped to the original task and one use", () => {
       subagent_type: "dog-worker",
       prompt: "task_id: task-b\nmode: same-task-resume",
     }),
-    "WORKER_LIMIT",
+    "WORKER_RESUME_INVALID",
   );
 });
 
@@ -88,11 +92,11 @@ test("worker resume rejects a different child with the same task identity", () =
       task_id: "child-b",
       prompt: "task_id: task-a\nmode: same-task-resume",
     }),
-    "WORKER_LIMIT",
+    "WORKER_RESUME_INVALID",
   );
 });
 
-test("scout requires one concrete pre-worker evidence gap", () => {
+test("scout requires a concrete gap and remains available after earlier scouts and workers", () => {
   const lane = new FastLaneController();
   lane.beginTurn("root", false);
   expectDenial(
@@ -103,22 +107,16 @@ test("scout requires one concrete pre-worker evidence gap", () => {
     subagent_type: "dog-scout",
     prompt: "missing_evidence_code: validation",
   });
-  expectDenial(
-    () => lane.beforeTool("root", "task", {
-      subagent_type: "dog-scout",
-      prompt: "missing_evidence_code: manifest",
-    }),
-    "SCOUT_LIMIT",
-  );
+  lane.beforeTool("root", "task", {
+    subagent_type: "dog-scout",
+    prompt: "missing_evidence_code: manifest",
+  });
   lane.beforeTool("root", "task", worker);
   assert.equal(lane.manualCompactionForbidden("root"), true);
-  expectDenial(
-    () => lane.beforeTool("root", "task", {
-      subagent_type: "dog-scout",
-      prompt: "missing_evidence_code: owner-risk",
-    }),
-    "SCOUT_TOO_LATE",
-  );
+  lane.beforeTool("root", "task", {
+    subagent_type: "dog-scout",
+    prompt: "missing_evidence_code: owner-risk",
+  });
 });
 
 test("review dispatch requires canonical PASS and recognized risk tags", () => {
@@ -262,13 +260,10 @@ test("advisor requires a strategy trigger and manual worker compaction is denied
     prompt: "strategy_trigger: architecture-choice",
   });
   assert.equal(lane.terminalInstructionRequired("root"), true);
-  expectDenial(
-    () => lane.beforeTool("root", "task", {
-      subagent_type: "dog-advisor",
-      prompt: "strategy_trigger: material-uncertainty",
-    }),
-    "CONSULTATION_RETRY_INVALID",
-  );
+  lane.beforeTool("root", "task", {
+    subagent_type: "dog-advisor",
+    prompt: "strategy_trigger: material-uncertainty",
+  });
   expectDenial(
     () => lane.beforeTool("root", "task", {
       subagent_type: "dog-advisor",
@@ -276,13 +271,10 @@ test("advisor requires a strategy trigger and manual worker compaction is denied
     }),
     "CONSULTATION_RETRY_UNAUTHORIZED",
   );
-  expectDenial(
-    () => lane.beforeTool("root", "task", {
-      subagent_type: "dog-advisor",
-      prompt: "strategy_trigger: material-uncertainty\nfallback_retry: true",
-    }, { consultationFallbackAuthorized: true }),
-    "CONSULTATION_RETRY_MISMATCH",
-  );
+  lane.beforeTool("root", "task", {
+    subagent_type: "dog-advisor",
+    prompt: "strategy_trigger: material-uncertainty\nfallback_retry: true",
+  }, { consultationFallbackAuthorized: true });
   lane.beforeTool("root", "task", {
     subagent_type: "dog-advisor",
     prompt: "strategy_trigger: architecture-choice\nfallback_retry: true",
@@ -312,7 +304,7 @@ test("advisor requires a strategy trigger and manual worker compaction is denied
 test("a cold synthetic resume is fail-closed until a real turn", () => {
   const lane = new FastLaneController();
   lane.beginTurn("cold", true);
-  expectDenial(() => lane.beforeTool("cold", "task", worker), "WORKER_LIMIT");
+  expectDenial(() => lane.beforeTool("cold", "task", worker), "TURN_STATE_REQUIRED");
   expectDenial(
     () => lane.beforeTool("cold", "sortie_compact_and_continue", {}),
     "MANUAL_COMPACTION_FORBIDDEN",
@@ -322,9 +314,13 @@ test("a cold synthetic resume is fail-closed until a real turn", () => {
 });
 
 test("explicit backlog drain permits one worker per synthetic unit up to its bound", () => {
+  const wider = new FastLaneController();
+  wider.beginTurn("wider", false);
+  wider.enableBacklogDrain("wider", 12);
+
   const lane = new FastLaneController();
   lane.beginTurn("drain", false);
-  expectDenial(() => lane.enableBacklogDrain("drain", 3), "BACKLOG_DRAIN_INVALID");
+  expectDenial(() => lane.enableBacklogDrain("drain", 0), "BACKLOG_DRAIN_INVALID");
   lane.enableBacklogDrain("drain", 4);
   expectDenial(() => lane.enableBacklogDrain("drain", 4), "BACKLOG_DRAIN_TOO_LATE");
   expectDenial(

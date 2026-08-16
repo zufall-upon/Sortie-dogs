@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFile, realpath, stat } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import { RUNTIME_ASSET_VERSION } from "../asset-version.js";
 import { normalizeRelativePath, RelativePathError } from "../core/path.js";
@@ -57,6 +57,7 @@ import {
   createProjectPaths,
   createWriteGate,
   describeUnclassifiedCommand,
+  extractWritePaths,
   bootstrapWritePaths,
   isGitMutation,
   isKnownReadOnlyTool,
@@ -607,6 +608,7 @@ interface InspectedContractIdentity {
   readonly explicitWriteGate: boolean;
   readonly manifestPath: string;
   readonly projectRoot: string;
+  readonly validationCommands: ReadonlySet<string>;
 }
 
 /** Accept a task-scoped sibling of a registered handoff without opening arbitrary directories. */
@@ -811,6 +813,68 @@ function taskBlockHasContent(text: string, keys: readonly string[]): boolean {
   return false;
 }
 
+function taskContractText(text: string): string {
+  const lines = text.split(/\r?\n/u);
+  const digestIndex = lines.findIndex((line) => /^\s*context_digest\s*:\s*$/iu.test(line));
+  if (digestIndex < 0) return text;
+  const digestIndent = /^\s*/u.exec(lines[digestIndex]!)![0].replaceAll("\t", "  ").length;
+  const contractKeys = new Set([
+    "task_id", "role", "project_root", "projectroot", "handoff_path", "handoffpath",
+    "source_manifest", "sourcemanifest", "operation_manifest", "operationmanifest",
+    "acceptance", "validation", "validation_history", "validation_attempts", "scout",
+    "known_facts", "known_paths", "relevant_constraints", "preserve", "resume_delta",
+    "parallel_group", "parallel_unit", "parallel_units",
+  ]);
+  for (let index = digestIndex + 1; index < lines.length; index += 1) {
+    const match = HANDOFF_ENTRY.exec(lines[index]!);
+    if (match === null) continue;
+    const indent = /^\s*/u.exec(lines[index]!)![0].replaceAll("\t", "  ").length;
+    const key = (match[2] ?? match[3]).toLowerCase();
+    if (indent <= digestIndent && (key === "operation_manifest" || key === "operationmanifest")) {
+      for (let end = index + 1; end < lines.length; end += 1) {
+        const line = lines[end]!;
+        if (line.trim().length === 0) continue;
+        const nextIndent = /^\s*/u.exec(line)![0].replaceAll("\t", "  ").length;
+        if (nextIndent > digestIndent) continue;
+        const next = HANDOFF_ENTRY.exec(line);
+        const nextKey = next === null ? undefined : (next[2] ?? next[3]).toLowerCase();
+        if (nextKey !== undefined && contractKeys.has(nextKey)) continue;
+        return lines.slice(0, end).join("\n");
+      }
+      return text;
+    }
+  }
+  return text;
+}
+
+function taskValidationCommand(text: string): string | undefined {
+  const values = taskInlineValues(text, ["validation"]);
+  if (values.length === 1) {
+    const value = values[0]!;
+    const start = /(?:^|[{,])\s*command\s*:\s*/iu.exec(value);
+    if (start !== null) {
+      const remainder = value.slice(start.index + start[0].length);
+      const end = remainder.search(/,\s*diagnostics\s*:/iu);
+      if (end >= 0) return unquoteValue(remainder.slice(0, end).trim());
+    }
+  }
+  const lines = text.split(/\r?\n/u);
+  const header = lines.findIndex((line) => /^\s*validation\s*:\s*$/iu.test(line));
+  if (header < 0) return undefined;
+  const baseIndent = /^\s*/u.exec(lines[header]!)![0].replaceAll("\t", "  ").length;
+  for (let index = header + 1; index < lines.length; index += 1) {
+    const line = lines[index]!;
+    if (line.trim().length === 0) continue;
+    const indent = /^\s*/u.exec(line)![0].replaceAll("\t", "  ").length;
+    if (indent <= baseIndent) break;
+    const match = HANDOFF_ENTRY.exec(line);
+    if (match !== null && (match[2] ?? match[3]).toLowerCase() === "command") {
+      return unquoteValue(unwrapMarkdownValue(match[4]));
+    }
+  }
+  return undefined;
+}
+
 function isBlockTaskHandoff(text: string): boolean {
   const inline = (keys: readonly string[]) => taskInlineValues(text, keys);
   const present = (keys: readonly string[]) => inline(keys).length === 1 || taskBlockHasContent(text, keys);
@@ -956,11 +1020,6 @@ function chatParentID(input: Parameters<OpenCodeChatMessageHook>[0]): string | u
   return typeof candidate.parentID === "string" ? candidate.parentID
     : typeof candidate.parentId === "string" ? candidate.parentId
       : undefined;
-}
-
-function chatParentPresent(input: Parameters<OpenCodeChatMessageHook>[0]): boolean {
-  return Object.prototype.hasOwnProperty.call(input, "parentID") ||
-    Object.prototype.hasOwnProperty.call(input, "parentId");
 }
 
 function activatesSession(input: Parameters<OpenCodeChatMessageHook>[0], output: Parameters<OpenCodeChatMessageHook>[1]): boolean {
@@ -1650,12 +1709,12 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     coordinatorTaskCalls.set(sessionID, calls);
   }
 
-  function finishCoordinatorTask(sessionID: string | undefined, callID: string | undefined): void {
-    if (sessionID === undefined || callID === undefined) return;
+  function finishCoordinatorTask(sessionID: string | undefined, callID: string | undefined): boolean {
+    if (sessionID === undefined || callID === undefined) return false;
     const calls = coordinatorTaskCalls.get(sessionID);
-    if (calls === undefined) return;
-    calls.delete(callID);
+    if (calls === undefined || !calls.delete(callID)) return false;
     if (calls.size === 0) coordinatorTaskCalls.delete(sessionID);
+    return true;
   }
 
   function childHasInFlightParentTask(sessionID: string): boolean {
@@ -1664,7 +1723,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   }
 
   function abortCoordinatorTasks(sessionID: string, preserveRecoverable = false): void {
-    coordinatorTaskCalls.delete(sessionID);
+    if (coordinatorTaskCalls.delete(sessionID)) fastLane.workerCompleted(sessionID);
     for (const [childID, parentID] of [...sessionParents]) {
       if (parentID === sessionID && (!preserveRecoverable || !recoverableWorkerChildren.has(childID))) {
         evictSession(childID);
@@ -1873,11 +1932,35 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         defects: contractDefects(diagnostics),
       });
     }
+    const preparedDirectories: string[] = [];
+    for (let index = 0; index < manifest.validation.length; index += 1) {
+      const command = manifest.validation[index];
+      const extraction = extractWritePaths("bash", { command });
+      if (extraction.ambiguous && /^\s*(?:curl(?:\.exe)?|invoke-webrequest|iwr|tar|find)\b/iu.test(command)) {
+        throw new HandoffDeniedError("contract-invalid", path, {
+          defects: [contractDefect("manifest", `/validation/${index}`, "artifact_command_unclassified")],
+        });
+      }
+      for (const required of extraction.requiredDirectories ?? []) {
+        const absolute = resolve(inspectedProjectRoot, required);
+        const exists = await stat(absolute).then((value) => value.isDirectory()).catch(() => false);
+        const prepared = preparedDirectories.some((candidate) =>
+          samePath(candidate, absolute) || relative(absolute, candidate).split(/[\\/]/u)[0] !== "..");
+        if (!exists && !prepared) {
+          throw new HandoffDeniedError("contract-invalid", path, {
+            defects: [contractDefect("manifest", `/validation/${index}`, "artifact_directory_unprepared")],
+          });
+        }
+      }
+      preparedDirectories.push(...(extraction.createdDirectories ?? []).map((directory) =>
+        resolve(inspectedProjectRoot, directory)));
+    }
 
     const identity = {
       explicitWriteGate: extension !== undefined,
       manifestPath,
       projectRoot: inspectedProjectRoot,
+      validationCommands: new Set(manifest.validation.map(normalizeCommand)),
     };
     if (sessionID === undefined) return identity;
     const now = Date.now();
@@ -2524,15 +2607,13 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       });
       const payload = isRecord(response) && "data" in response ? response.data : response;
       if (!isRecord(payload)) return undefined;
-      const parentPresent = Object.prototype.hasOwnProperty.call(payload, "parentID") ||
-        Object.prototype.hasOwnProperty.call(payload, "parentId");
       const parentID = typeof payload.parentID === "string" ? payload.parentID
         : typeof payload.parentId === "string" ? payload.parentId
           : undefined;
       return {
         ...(typeof payload.agent === "string" ? { agent: payload.agent } : {}),
         ...(parentID === undefined ? {} : { parentID }),
-        parentPresent,
+        parentPresent: parentID !== undefined,
       };
     } catch {
       return undefined;
@@ -2545,7 +2626,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const messages = input.client?.session?.messages;
     if (messages === undefined) return undefined;
     try {
-      const response = await messages.call(input.client!.session, { path: { id: sessionID } });
+      const response = await messages.call(input.client!.session, {
+        path: { id: sessionID },
+        query: { directory: input.directory },
+      });
       const payload = isRecord(response) && "data" in response ? response.data : response;
       if (!Array.isArray(payload)) return undefined;
       for (let index = payload.length - 1; index >= 0; index -= 1) {
@@ -2564,6 +2648,28 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     }
   }
 
+  async function hostSessionHasForeignUserTurn(sessionID: string): Promise<boolean | undefined> {
+    const messages = input.client?.session?.messages;
+    if (messages === undefined) return undefined;
+    try {
+      const response = await messages.call(input.client!.session, {
+        path: { id: sessionID },
+        query: { directory: input.directory },
+      });
+      const payload = isRecord(response) && "data" in response ? response.data : response;
+      if (!Array.isArray(payload)) return undefined;
+      for (const message of payload as SessionMessage[]) {
+        if ((message.info?.role ?? message.role) !== "user") continue;
+        const agent = message.info?.agent ?? message.agent;
+        if (typeof agent !== "string") return undefined;
+        if (agent !== COORDINATOR_AGENT) return true;
+      }
+      return false;
+    } catch {
+      return undefined;
+    }
+  }
+
   async function assistantMessageText(
     sessionID: string,
     messageID: string,
@@ -2572,7 +2678,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   ): Promise<string | undefined> {
     const messages = input.client?.session?.messages;
     if (messages === undefined) return undefined;
-    const response = await messages.call(input.client!.session, { path: { id: sessionID } });
+    const response = await messages.call(input.client!.session, {
+      path: { id: sessionID },
+      query: { directory: input.directory },
+    });
     const payload = isRecord(response) && "data" in response ? response.data : response;
     if (!Array.isArray(payload)) return undefined;
     const message = payload.find((candidate) => {
@@ -2619,6 +2728,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     if (isCoordinatorSession(sessionID)) return true;
     const identity = await hostSessionIdentity(sessionID);
     if (identity === undefined || identity.parentPresent) return false;
+    if (identity.agent !== undefined && identity.agent !== COORDINATOR_AGENT) return false;
+    if (await hostSessionHasForeignUserTurn(sessionID) !== false) return false;
     const persistedTurn = await hostSessionUserTurn(sessionID);
     if (persistedTurn?.agent !== COORDINATOR_AGENT) return false;
     await rememberCoordinatorRoot(sessionID);
@@ -2907,6 +3018,28 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       if (parentID !== undefined) rememberParent(chatInput.sessionID, parentID);
       const coordinatorRoot = isCoordinatorSession(chatInput.sessionID);
       const requestedCoordinator = chatInput.agent === COORDINATOR_AGENT || output.message.agent === COORDINATOR_AGENT;
+      if (requestedCoordinator && !coordinatorRoot) {
+        const explicitChild = parentID !== undefined || sessionParents.has(chatInput.sessionID);
+        const identity = input.client?.session?.get === undefined
+          ? undefined
+          : await hostSessionIdentity(chatInput.sessionID);
+        const foreignRoot = identity?.agent !== undefined && identity.agent !== COORDINATOR_AGENT;
+        const foreignHistory = await hostSessionHasForeignUserTurn(chatInput.sessionID);
+        const unverifiableRoot =
+          (input.client?.session?.get !== undefined && (
+            identity === undefined ||
+            (identity.agent === undefined && input.client?.session?.messages === undefined)
+          )) ||
+          (input.client?.session?.messages !== undefined && foreignHistory === undefined);
+        if (
+          explicitChild || identity?.parentPresent === true || foreignRoot ||
+          foreignHistory === true || unverifiableRoot
+        ) {
+          throw new Error(
+            "SORTIE_FRESH_SESSION_REQUIRED: /sortie requires a fresh root dog-coordinator session; it cannot convert another agent or promote a child",
+          );
+        }
+      }
       const normalizeCoordinatorDrift = coordinatorRoot && !requestedCoordinator;
       if (normalizeCoordinatorDrift) {
         /*
@@ -2924,7 +3057,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           );
         }
       }
-      const coordinatorOrigin = !chatParentPresent(chatInput) && (requestedCoordinator || normalizeCoordinatorDrift);
+      const coordinatorOrigin = parentID === undefined && (requestedCoordinator || normalizeCoordinatorDrift);
       if (coordinatorOrigin) {
         fastLane.beginTurn(chatInput.sessionID, synthetic);
         releaseSessionEnforcement(chatInput.sessionID);
@@ -3158,7 +3291,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       } finally {
         parallelCalls.delete(toolInput.callID ?? "");
         activeSessions.get(toolInput.sessionID ?? "")?.inFlightCalls.delete(toolInput.callID ?? "");
-        if (toolInput.tool === "task") finishCoordinatorTask(toolInput.sessionID, toolInput.callID);
+        if (toolInput.tool === "task" && finishCoordinatorTask(toolInput.sessionID, toolInput.callID)) {
+          fastLane.workerCompleted(toolInput.sessionID!);
+        }
         if (completedChildSessionID !== undefined && !recoverableWorkerChildren.has(completedChildSessionID)) {
           evictSession(completedChildSessionID);
         }
@@ -3209,45 +3344,46 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         let reservedParallelDescriptor: ParallelDispatchDescriptor | undefined;
         if (toolInput.tool === "task" && taskRole === "dog-worker" && isRecord(output.args)) {
           const prompt = typeof output.args.prompt === "string" ? output.args.prompt : "";
+          const contractPrompt = taskContractText(prompt);
           reservedParallelDescriptor = parallelDescriptor(prompt);
           if (reservedParallelDescriptor !== undefined) {
-            const roots = taskValues(prompt, ["project_root", "projectroot"]);
+            const roots = taskValues(contractPrompt, ["project_root", "projectroot"]);
             if (roots.length !== 1 || !samePath(roots[0]!, reservedParallelDescriptor.managed_path)) {
               throw new HandoffDeniedError("contract-invalid", "<worker-dispatch>", {
                 defects: [contractDefect("contract", "/managed_path", "parallel_descriptor_project_mismatch")],
               });
             }
           }
-          const modes = taskValues(prompt, ["mode"]);
+          const modes = taskValues(contractPrompt, ["mode"]);
           const resume = modes.length === 1 && modes[0] === "same-task-resume";
-          const handoffPaths = taskValues(prompt, ["handoff_path", "handoffpath"]);
-          const operationManifests = taskValues(prompt, ["operation_manifest", "operationmanifest"]);
-          const projectRoots = taskValues(prompt, ["project_root", "projectroot"]);
-          const sourceManifests = taskValues(prompt, ["source_manifest", "sourcemanifest"]);
-          const acceptanceValues = taskValues(prompt, ["acceptance"]);
-          const validationValues = taskValues(prompt, ["validation"]);
-          const acceptanceHeaders = taskHeaderCount(prompt, ["acceptance"]);
-          const validationHeaders = taskHeaderCount(prompt, ["validation"]);
-          const sourceManifestHeaders = taskHeaderCount(prompt, ["source_manifest", "sourcemanifest"]);
-          const acceptanceInline = taskInlineValues(prompt, ["acceptance"]);
-          const validationInline = taskInlineValues(prompt, ["validation"]);
-          const sourceManifestInline = taskInlineValues(prompt, ["source_manifest", "sourcemanifest"]);
-          const acceptancePresent = acceptanceInline.length === 1 || taskBlockHasContent(prompt, ["acceptance"]);
-          const validationPresent = validationInline.length === 1 || taskBlockHasContent(prompt, ["validation"]);
+          const handoffPaths = taskValues(contractPrompt, ["handoff_path", "handoffpath"]);
+          const operationManifests = taskValues(contractPrompt, ["operation_manifest", "operationmanifest"]);
+          const projectRoots = taskValues(contractPrompt, ["project_root", "projectroot"]);
+          const sourceManifests = taskValues(contractPrompt, ["source_manifest", "sourcemanifest"]);
+          const acceptanceValues = taskValues(contractPrompt, ["acceptance"]);
+          const validationValues = taskValues(contractPrompt, ["validation"]);
+          const acceptanceHeaders = taskHeaderCount(contractPrompt, ["acceptance"]);
+          const validationHeaders = taskHeaderCount(contractPrompt, ["validation"]);
+          const sourceManifestHeaders = taskHeaderCount(contractPrompt, ["source_manifest", "sourcemanifest"]);
+          const acceptanceInline = taskInlineValues(contractPrompt, ["acceptance"]);
+          const validationInline = taskInlineValues(contractPrompt, ["validation"]);
+          const sourceManifestInline = taskInlineValues(contractPrompt, ["source_manifest", "sourcemanifest"]);
+          const acceptancePresent = acceptanceInline.length === 1 || taskBlockHasContent(contractPrompt, ["acceptance"]);
+          const validationPresent = validationInline.length === 1 || taskBlockHasContent(contractPrompt, ["validation"]);
           const sourceManifestPresent = sourceManifestInline.length === 1 ||
-            taskBlockHasContent(prompt, ["source_manifest", "sourcemanifest"]);
-          const explicitBlockHandoff = isBlockTaskHandoff(prompt);
-          const taskIDs = taskValues(prompt, ["task_id"]);
-          const resumeDeltas = taskValues(prompt, ["resume_delta"]);
-          const resumeDeltaPresent = resumeDeltas.length === 1 && hasResumeContractShape(prompt);
+            taskBlockHasContent(contractPrompt, ["source_manifest", "sourcemanifest"]);
+          const explicitBlockHandoff = isBlockTaskHandoff(contractPrompt);
+          const taskIDs = taskValues(contractPrompt, ["task_id"]);
+          const resumeDeltas = taskValues(contractPrompt, ["resume_delta"]);
+          const resumeDeltaPresent = resumeDeltas.length === 1 && hasResumeContractShape(contractPrompt);
           const contractRedefinitions = [
-            ...taskValues(prompt, [
+            ...taskValues(contractPrompt, [
               "role", "project_root", "projectroot", "source_manifest", "sourcemanifest",
               "acceptance", "validation", "validation_history", "validation_attempts", "scout",
               "known_facts", "known_paths", "relevant_constraints", "preserve",
               "parallel_group", "parallel_unit", "parallel_units",
             ]),
-            ...roleTokenValues(prompt),
+            ...roleTokenValues(contractPrompt),
           ];
           if (modes.length !== 0 && !resume) {
             throw new HandoffDeniedError("contract-invalid", "<worker-dispatch>", {
@@ -3263,7 +3399,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
                 defects: [contractDefect("contract", "/", "resume_contract_redefinition")],
               });
             }
-          } else if (!isExplicitTaskHandoff(prompt) && !explicitBlockHandoff) {
+          } else if (!isExplicitTaskHandoff(contractPrompt) && !explicitBlockHandoff) {
             throw new HandoffDeniedError("contract-invalid", "<worker-dispatch>", {
               defects: [contractDefect("contract", "/", "dispatch_inline_handoff_incomplete")],
             });
@@ -3327,6 +3463,13 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
             ) {
               throw new HandoffDeniedError("contract-invalid", handoffPaths[0]!, {
                 defects: [contractDefect("contract", "/", "dispatch_identity_mismatch")],
+              });
+            }
+            const validationCommand = taskValidationCommand(contractPrompt);
+            if (validationCommand !== undefined &&
+              !identity.validationCommands.has(normalizeCommand(validationCommand))) {
+              throw new HandoffDeniedError("contract-invalid", handoffPaths[0]!, {
+                defects: [contractDefect("contract", "/validation/command", "dispatch_validation_manifest_mismatch")],
               });
             }
           }

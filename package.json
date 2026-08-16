@@ -54,7 +54,9 @@
     "postbuild": "node --input-type=module --eval \"import fs from 'node:fs'; const path = 'dist/cli/main.js'; const source = fs.readFileSync(path, 'utf8'); if (!source.startsWith('#!')) fs.writeFileSync(path, '#!/usr/bin/env node\\n' + source); if (process.platform !== 'win32') fs.chmodSync(path, 0o755);\"",
     "prepack": "npm run build",
     "pretest": "npm run build",
-    "test": "node --experimental-strip-types --test \"test/**/*.test.ts\""
+    "test": "node --experimental-strip-types --test \"test/plugin.test.ts\" \"test/continuation.test.ts\" \"test/fast-lane.test.ts\"",
+    "pretest:full": "npm run build",
+    "test:full": "node --experimental-strip-types --test \"test/**/*.test.ts\""
   },
   "dependencies": {
     "ajv": "^8.17.1",

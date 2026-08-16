@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { lstat, realpath } from "node:fs/promises";
-import { basename, isAbsolute, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import { RelativePathError, normalizeManifestPath, normalizeRelativePath } from "../core/path.js";
@@ -71,6 +71,8 @@ interface Extraction {
   applies: boolean;
   ambiguous: boolean;
   paths: string[];
+  createdDirectories?: string[];
+  requiredDirectories?: string[];
   gitCommit?: boolean;
   gitMutation?: boolean;
   remoteMutation?: boolean;
@@ -92,7 +94,7 @@ const ALL_OPERAND_COMMANDS = new Set(["mkdir", "rm", "rmdir", "touch", "truncate
 const LAST_OPERAND_COMMANDS = new Set(["cp", "install"]);
 const READ_ONLY_COMMANDS = new Set([
   "cat", "echo", "false", "get-childitem", "get-content", "get-date", "grep", "head", "ls", "pwd",
-  "measure-object", "rg", "select-object", "stat", "tail", "test-path", "true", "type",
+  "get-filehash", "jq", "measure-object", "printf", "rg", "select-object", "sha256sum", "stat", "tail", "test-path", "true", "type",
   "where-object", "wc",
 ]);
 const READ_ONLY_GIT_COMMANDS = new Set(["diff", "log", "ls-files", "rev-parse", "show", "status"]);
@@ -189,9 +191,101 @@ function unwrapEnvironmentCommand(tokens: readonly string[]): readonly string[] 
   return tokens.slice(index);
 }
 
+function curlOutput(tokens: readonly string[]): string | undefined {
+  let output: string | undefined;
+  let urls = 0;
+  for (let index = 1; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (/^-[fLsS]+$/u.test(token) || /^(?:--fail|--fail-with-body|--location|--silent|--show-error)$/u.test(token)) continue;
+    if (token === "--retry" || token === "--max-time" || token === "--connect-timeout") {
+      if (!/^\d+$/u.test(tokens[++index] ?? "")) return undefined;
+      continue;
+    }
+    if (token === "-o" || token === "--output") {
+      const candidate = tokens[++index];
+      if (candidate === undefined || candidate.startsWith("-") || output !== undefined) return undefined;
+      output = candidate;
+      continue;
+    }
+    const inline = /^--output=(.+)$/u.exec(token)?.[1];
+    if (inline !== undefined) {
+      if (inline.length === 0 || output !== undefined) return undefined;
+      output = inline;
+      continue;
+    }
+    if (/^https:\/\/[^\s]+$/u.test(token)) {
+      urls += 1;
+      continue;
+    }
+    return undefined;
+  }
+  return urls === 1 ? output : undefined;
+}
+
+function powerShellDownloadOutput(tokens: readonly string[]): string | undefined {
+  let output: string | undefined;
+  let uri = false;
+  for (let index = 1; index < tokens.length; index += 1) {
+    const token = tokens[index].toLowerCase();
+    if (token === "-usebasicparsing") continue;
+    if (token === "-uri") {
+      const value = tokens[++index];
+      if (value === undefined || !/^https:\/\/[^\s]+$/u.test(value) || uri) return undefined;
+      uri = true;
+      continue;
+    }
+    if (token === "-outfile") {
+      const value = tokens[++index];
+      if (value === undefined || value.startsWith("-") || output !== undefined) return undefined;
+      output = value;
+      continue;
+    }
+    return undefined;
+  }
+  return uri ? output : undefined;
+}
+
+function tarMode(tokens: readonly string[]): { extractTo?: string; readOnly: boolean } | undefined {
+  const options = tokens.slice(1).filter((token) => token.startsWith("-"));
+  if (options.some((token) => !(
+    token === "--" || token === "-C" || /^-[xtzjJvf]+$/u.test(token) ||
+    new Set([
+      "--extract", "--get", "--list", "--file", "--directory", "--gzip", "--bzip2", "--xz",
+      "--verbose", "--no-same-owner", "--no-same-permissions",
+    ]).has(token) ||
+    /^--(?:file|directory)=.+$/u.test(token) || /^--strip-components=\d+$/u.test(token)
+  ))) return undefined;
+  const extract = options.some((token) => token === "--extract" || token === "--get" || /^-[^-]*x/u.test(token));
+  const list = options.some((token) => token === "--list" || /^-[^-]*t/u.test(token));
+  const writeArchive = options.some((token) => /^(?:--create|--append|--update|--delete)$/u.test(token) || /^-[^-]*[crudA]/u.test(token));
+  if (writeArchive || (extract && list) || (!extract && !list)) return undefined;
+  if (list) return { readOnly: true };
+  let destination: string | undefined;
+  for (let index = 1; index < tokens.length; index += 1) {
+    if (tokens[index] === "-C" || tokens[index] === "--directory") {
+      if (destination !== undefined || tokens[index + 1] === undefined) return undefined;
+      destination = tokens[++index];
+    } else {
+      const inline = /^--directory=(.+)$/u.exec(tokens[index])?.[1];
+      if (inline !== undefined) {
+        if (destination !== undefined) return undefined;
+        destination = inline;
+      }
+    }
+  }
+  return destination === undefined ? undefined : { extractTo: destination, readOnly: false };
+}
+
+function isDirectFindHash(tokens: readonly string[]): boolean {
+  return tokens.length === 10 && tokens[1].length > 0 && tokens[2] === "-type" && tokens[3] === "f" &&
+    tokens[4] === "-name" && tokens[5].length > 0 && tokens[6] === "-exec" &&
+    tokens[7] === "sha256sum" && tokens[8] === "{}" && /^(?:\\;|;)$/u.test(tokens[9]);
+}
+
 function isRemoteOnlyGitHubCommand(tokens: readonly string[]): boolean {
   const command = tokens[1]?.toLowerCase();
-  return command === "project" || (command === "api" && tokens[2]?.toLowerCase() === "graphql");
+  return command === "project" || (command === "api" && tokens[2]?.toLowerCase() === "graphql") ||
+    (command === "auth" && tokens.length === 3 && tokens[2]?.toLowerCase() === "status");
 }
 
 function isRemoteGitHubMutation(tokens: readonly string[]): boolean {
@@ -314,10 +408,11 @@ function shellSegments(command: string, dialect: ShellDialect): string[] {
     const hasCommandBefore = segmentBefore.length > 0;
     const powershellCallOperator = dialect === "powershell" &&
       (segmentBefore.length === 0 || segmentBefore.endsWith("="));
+    const escapedPosixSeparator = dialect === "posix" && command[index - 1] === "\\";
     const separator = pair === "&&" || pair === "||" ? 2
-      : character === ";" || character === "\n" || character === "\r" ||
+      : !escapedPosixSeparator && (character === ";" || character === "\n" || character === "\r" ||
           (character === "|" && command[index - 1] !== ">") ||
-          (character === "&" && hasCommandBefore && command[index - 1] !== ">" && !powershellCallOperator) ? 1 : 0;
+          (character === "&" && hasCommandBefore && command[index - 1] !== ">" && !powershellCallOperator)) ? 1 : 0;
     if (separator === 0) continue;
     segments.push(command.slice(start, index));
     index += separator - 1;
@@ -344,6 +439,8 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
   let gitCommit = false;
   let gitMutation = false;
   let remoteMutation = false;
+  const createdDirectories: string[] = [];
+  const requiredDirectories: string[] = [];
   let issue: CommandIssue | undefined;
   const redirection = /(?<![<>=!])(?:&|\d*)?(?:>>|>\||>)(?![=])/gu;
   const redirectionTarget = /^\s*("(?:\\.|[^"])*"|'[^']*'|&?\d+|[^\s;&|]+)/u;
@@ -390,6 +487,9 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
     } else if (ALL_OPERAND_COMMANDS.has(executable)) {
       applies = true;
       paths.push(...commandOperands);
+      if (executable === "mkdir" && tokens.some((token) => token === "-p" || token === "--parents")) {
+        createdDirectories.push(...commandOperands);
+      }
     } else if (LAST_OPERAND_COMMANDS.has(executable)) {
       applies = true;
       const destination = commandOperands.at(-1);
@@ -403,6 +503,35 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
       applies = true;
       if (commandOperands.length === 0) ambiguous = true;
       paths.push(...commandOperands);
+    } else if (/^curl(?:\.exe)?$/u.test(executable)) {
+      applies = true;
+      const destination = curlOutput(tokens);
+      if (destination === undefined) {
+        ambiguous = true;
+        issue ??= commandIssue(source, "unsupported-curl-form", "use one literal HTTPS URL and one explicit -o output path");
+      } else paths.push(destination);
+      if (destination !== undefined) requiredDirectories.push(dirname(destination));
+    } else if (/^(?:invoke-webrequest|iwr)$/u.test(executable)) {
+      applies = true;
+      const destination = powerShellDownloadOutput(tokens);
+      if (destination === undefined) {
+        ambiguous = true;
+        issue ??= commandIssue(source, "unsupported-webrequest-form", "use one literal HTTPS -Uri and one explicit -OutFile path");
+      } else paths.push(destination);
+      if (destination !== undefined) requiredDirectories.push(dirname(destination));
+    } else if (executable === "tar") {
+      const mode = tarMode(tokens);
+      if (mode === undefined) {
+        applies = true;
+        ambiguous = true;
+        issue ??= commandIssue(source, "unsupported-tar-form", "use literal tar listing or extraction with one explicit -C directory");
+      } else if (!mode.readOnly) {
+        applies = true;
+        paths.push(mode.extractTo!);
+        requiredDirectories.push(mode.extractTo!);
+      }
+    } else if (executable === "find" && isDirectFindHash(tokens)) {
+      // Exact member lookup plus sha256sum is read-only; a following tee owns any output path.
     } else if (POWERSHELL_WRITE_COMMANDS.has(executable)) {
       applies = true;
       const named: string[] = [];
@@ -412,6 +541,10 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
       const selected = named.length > 0 ? named : commandOperands.slice(0, 1);
       if (selected.length === 0) ambiguous = true;
       paths.push(...selected);
+      if (executable === "new-item" && tokens.some((token, index) =>
+        token.toLowerCase() === "-itemtype" && tokens[index + 1]?.toLowerCase() === "directory")) {
+        createdDirectories.push(...selected);
+      }
     } else if (/^(?:apply_?patch)$/iu.test(executable)) {
       applies = true;
       const selected = patchPaths(segment);
@@ -447,6 +580,8 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
         gitCommit ||= nested.gitCommit === true;
         gitMutation ||= nested.gitMutation === true;
         remoteMutation ||= nested.remoteMutation === true;
+        createdDirectories.push(...(nested.createdDirectories ?? []));
+        requiredDirectories.push(...(nested.requiredDirectories ?? []));
         issue ??= nested.issue;
       }
     } else if (!READ_ONLY_COMMANDS.has(executable)) {
@@ -459,6 +594,8 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
     applies,
     ambiguous,
     paths,
+    ...(createdDirectories.length > 0 ? { createdDirectories } : {}),
+    ...(requiredDirectories.length > 0 ? { requiredDirectories } : {}),
     ...(gitCommit ? { gitCommit: true } : {}),
     ...(gitMutation ? { gitMutation: true } : {}),
     ...(remoteMutation ? { remoteMutation: true } : {}),
@@ -500,11 +637,15 @@ export function extractWritePaths(tool: string, args: unknown): Extraction {
         } : {}),
       };
     }
-    const extracted = shellPaths(command, /^(?:powershell|pwsh)(?:$|[_-])/u.test(name));
+    const powershell = /^(?:powershell|pwsh)(?:$|[_-])/u.test(name) ||
+      /^\s*&\s+(?:"[^"]+"|'[^']+'|\S+)/u.test(command);
+    const extracted = shellPaths(command, powershell);
     return {
       applies: extracted.applies || paths.length > 0,
       ambiguous: extracted.ambiguous,
       paths: [...paths, ...extracted.paths],
+      ...(extracted.createdDirectories ? { createdDirectories: extracted.createdDirectories } : {}),
+      ...(extracted.requiredDirectories ? { requiredDirectories: extracted.requiredDirectories } : {}),
       ...(extracted.gitCommit ? { gitCommit: true } : {}),
       ...(extracted.gitMutation ? { gitMutation: true } : {}),
       ...(extracted.remoteMutation ? { remoteMutation: true } : {}),
@@ -738,6 +879,17 @@ export async function createWriteGate(project: ProjectPaths, value: unknown): Pr
   // path extraction. The manifest already declares the commands this candidate is allowed to run,
   // so an exact match against that declaration is the only accepted form.
   const declaredValidation = new Set(manifest.validation.map(normalizeCommand));
+  const declaredDirectories = new Set<string>();
+  for (const command of manifest.validation) {
+    for (const directory of extractWritePaths("bash", { command }).createdDirectories ?? []) {
+      try {
+        const normalized = normalizeManifestPath(directory);
+        if (normalized.kind === "relative") declaredDirectories.add(normalized.path);
+      } catch {
+        // Invalid command paths remain governed by normal extraction and manifest checks.
+      }
+    }
+  }
   const writable = new Set<string>();
   const externalEntries: string[] = [];
   try {
@@ -759,8 +911,11 @@ export async function createWriteGate(project: ProjectPaths, value: unknown): Pr
       if (metadata.isDirectory()) {
         writableDirectories.push({ path, realPath: await realpath(project.absolute(path)) });
       }
-    } catch {
-      // Missing, inaccessible, and concurrently changed paths remain exact-only scopes.
+    } catch (error) {
+      if (declaredDirectories.has(path) && isRecord(error) && error.code === "ENOENT") {
+        writableDirectories.push({ path, realPath: await nearestExistingRealPath(project.absolute(path)) });
+      }
+      // Other missing, inaccessible, and concurrently changed paths remain exact-only scopes.
     }
   }
   const writableDirectoryPaths = new Set(writableDirectories.map(({ path }) => path));
