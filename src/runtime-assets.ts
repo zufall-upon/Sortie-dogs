@@ -22,7 +22,7 @@ export interface RuntimeAsset {
 export const runtimeAssets = [
   {
     name: "dog-coordinator",
-    version: "0.3.33-readable-terminal-report-v1",
+    version: "0.3.34-parallel-host-contract-v1",
     installPath: "agent/dog-coordinator.md",
     content: `---
 description: Canonical MkII coordinator packaged by Sortie-dogs
@@ -386,9 +386,15 @@ Worktree Parallel Contract with mode=parallel. Call ${PARALLEL_PREPARE_CAPABILIT
 the absolute contract_path. Literal parallel fields never opt in. If prepare returns serial-fallback,
 dispatch no parallel worker and use the normal lane. If prepare returns descriptors, dispatch only its
 ready descriptors, at most max_workers and never more than three total tasks. Copy every descriptor
-field exactly into the Task prompt: run_id, dispatch_id, task_id, managed_path as project_root, branch,
-base_sha, depends_on JSON, scope_read JSON, scope_write JSON, parallel_group, parallel_unit,
-parallel_units, attempt, and contract_fingerprint. Join returns through Task; then call
+field exactly into the Task prompt: run_id, dispatch_id, task_id, managed_path as the digest's single
+project_root field, branch, base_sha, depends_on JSON, scope_read JSON, scope_write JSON, parallel_group, parallel_unit,
+parallel_units, attempt, and contract_fingerprint. Prepare creates each descriptor's unique scoped handoff
+and operation manifest in managed_path and returns their absolute handoff_path and operation_manifest.
+Before each ready descriptor's Task, call sortie_check_contract on that handoff_path and require status=ok.
+Do not recopy those returned paths as descriptor metadata. Put handoff_path exactly once under context_digest
+and operation_manifest exactly once as the manifest line after context_digest, matching INITIAL_HANDOFF_FIXTURE;
+never recreate, edit, or repeat either path.
+Join returns through Task; then call
 ${PARALLEL_STATUS_CAPABILITY} after each return and dispatch only newly ready descriptors. Never
 redispatch a running task after restart. Use status with reconcile=true only when host continuation
 identity cannot prove a running call; abandoned-worker is terminal. No automatic retry, serial fallback
@@ -419,7 +425,9 @@ SORTIE_PARALLEL_OUTCOME {"run_id":"<run_id>","dispatch_id":"<dispatch_id>","stat
 DEPENDENCY_PARALLEL_DISPATCH_FIXTURE
     opt_in: mode=parallel contract + sortie_prepare_parallel_dispatch; literal fields alone forbidden
     bounds: tasks=2..3; dispatch only returned ready descriptors; concurrency<=max_workers<=3
-    descriptor: exact run_id | dispatch_id | task_id | managed_path | branch | base_sha | depends_on | scope_read | scope_write | parallel_group | parallel_unit | parallel_units | attempt=1 | contract_fingerprint
+    descriptor: exact run_id | dispatch_id | task_id | managed_path as one project_root field | branch | base_sha | depends_on | scope_read | scope_write | parallel_group | parallel_unit | parallel_units | attempt=1 | contract_fingerprint
+    generated_control: returned handoff_path under context_digest once | returned operation_manifest as final manifest line once | never descriptor metadata
+    preflight: prepare creates scoped handoff + operation manifest in managed_path -> sortie_check_contract status=ok -> unique returned paths in INITIAL_HANDOFF_FIXTURE shape -> Task
     join: Task return -> sortie_parallel_dispatch_status -> newly ready descriptors only
     failure: suppress descendants; independent branches continue; no retry | post-dispatch serial fallback
     restart: running never redispatched; explicit reconcile without provable host call -> abandoned-worker stop
@@ -1213,10 +1221,10 @@ TERMINAL_STATUS_SEMANTICS_FIXTURE
 END_TERMINAL_STATUS_SEMANTICS_FIXTURE
 
 RUNTIME_ASSET_VERSION_SYNC_FIXTURE
-    runtime_version: 0.3.33-readable-terminal-report-v1
+    runtime_version: 0.3.34-parallel-host-contract-v1
     shared_marker: src/asset-version.ts
-    packaged_expectation: test/plugin-loader.test.ts uses 0.3.33-readable-terminal-report-v1
-    initialize_expectation: test/initialize.test.ts uses 0.3.33-readable-terminal-report-v1
+    packaged_expectation: test/plugin-loader.test.ts uses 0.3.34-parallel-host-contract-v1
+    initialize_expectation: test/initialize.test.ts uses 0.3.34-parallel-host-contract-v1
     rule: runtime asset versions, shared marker, packaged expectation, and initialize expectation change together
 END_RUNTIME_ASSET_VERSION_SYNC_FIXTURE
 
@@ -1291,7 +1299,7 @@ END_TERMINAL_EVIDENCE_FIXTURE
   },
   {
     name: "dog-worker",
-    version: "0.3.33-readable-terminal-report-v1",
+    version: "0.3.34-parallel-host-contract-v1",
     installPath: "agent/dog-worker.md",
     content: `---
 description: Dedicated worker for the canonical Sortie-dogs coordinator
@@ -1409,7 +1417,7 @@ the user.
   },
   {
     name: "dog-scout",
-    version: "0.3.33-readable-terminal-report-v1",
+    version: "0.3.34-parallel-host-contract-v1",
     installPath: "agent/dog-scout.md",
     content: `---
 description: Bounded evidence scout for dog-coordinator
@@ -1458,7 +1466,7 @@ prose; keep the keys, paths, commands, and identifiers verbatim.
   },
   {
     name: "dog-reviewer",
-    version: "0.3.33-readable-terminal-report-v1",
+    version: "0.3.34-parallel-host-contract-v1",
     installPath: "agent/dog-reviewer.md",
     content: `---
 description: Independent source reviewer for dog-coordinator
@@ -1487,7 +1495,7 @@ or transport.
   },
   {
     name: "dog-advisor",
-    version: "0.3.33-readable-terminal-report-v1",
+    version: "0.3.34-parallel-host-contract-v1",
     installPath: "agent/dog-advisor.md",
     content: `---
 description: Focused technical advisor for dog-coordinator
@@ -1511,7 +1519,7 @@ provider, vendor, model, variant, or transport.
   },
   {
     name: "sortie",
-    version: "0.3.33-readable-terminal-report-v1",
+    version: "0.3.34-parallel-host-contract-v1",
     installPath: "command/sortie.md",
     content: `---
 description: Start the canonical Sortie-dogs MkII workflow

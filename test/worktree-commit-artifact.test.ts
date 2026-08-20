@@ -154,6 +154,8 @@ test("recovers only the exact clean generated direct-child commit", async (t) =>
       const original = await produceWorktreeCommitArtifact({
         descriptor: value.descriptor, managed_path: value.path, validation: validation(),
       });
+      await writeFile(join(value.path, `handoff.${value.descriptor.task_id}.json`), "{}\n");
+      await writeFile(join(value.path, `${value.descriptor.task_id}.operation-manifest.json`), "{}\n");
       const message = await git(value.path, "log", "-1", "--format=%B");
       assert.match(message, /^sortie: task-recover-valid-0 \[validation:[0-9a-f]{24}\]\n\n$/u);
       assert.doesNotMatch(message, /process\.exit|node|-[eE]/u);

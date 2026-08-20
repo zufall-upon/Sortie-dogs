@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFile, realpath, stat } from "node:fs/promises";
+import { lstat, open, readFile, realpath, rm, stat } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import { RUNTIME_ASSET_VERSION } from "../asset-version.js";
@@ -8,6 +8,7 @@ import { ScopeLeaseError, ScopeLeaseRegistry, type ScopeLease } from "../core/sc
 import {
   produceWorktreeCommitArtifact,
   recoverWorktreeCommitArtifact,
+  resolveValidationExecutable,
   WorktreeCommitArtifactError,
 } from "../core/worktree-commit-artifact.js";
 import { normalizeWorktreeScope } from "../core/worktree-scope.js";
@@ -931,12 +932,12 @@ function parseStringArray(value: string | undefined): readonly string[] | undefi
 function parallelDescriptor(text: string): ParallelDispatchDescriptor | undefined {
   const unique = (key: string): string | undefined => {
     const values = taskValues(text, [key]);
-    return values.length === 1 ? values[0] : undefined;
+    return values.length > 0 && new Set(values).size === 1 ? values[0] : undefined;
   };
   const runID = unique("run_id");
   const dispatchID = unique("dispatch_id");
   const taskID = unique("task_id");
-  const managedPath = unique("managed_path");
+  const managedPath = unique("managed_path") ?? unique("project_root");
   const branch = unique("branch");
   const baseSHA = unique("base_sha");
   const dependsOn = parseStringArray(unique("depends_on"));
@@ -968,9 +969,11 @@ function parallelValidationRequest(args: Record<string, string>): {
 } | undefined {
   const keys = Object.keys(args).sort();
   const allowed = new Set(["dispatch_id", "run_id", "timeout_ms", "validation_args_json", "validation_executable"]);
+  const executable = args.validation_executable;
   if (!keys.every((key) => allowed.has(key)) ||
     !["dispatch_id", "run_id", "validation_executable"].every((key) => typeof args[key] === "string") ||
-    !isAbsolute(args.validation_executable!) || /[\u0000-\u001f\u007f]/u.test(args.validation_executable!)) return undefined;
+    /[\u0000-\u001f\u007f]/u.test(executable!) ||
+    (!isAbsolute(executable!) && (executable!.startsWith("-") || /[\\/]/u.test(executable!)))) return undefined;
   let validationArgs: readonly string[] = [];
   if (args.validation_args_json !== undefined) {
     if (typeof args.validation_args_json !== "string" || args.validation_args_json.length > INPUT_LIMITS.parallel) return undefined;
@@ -990,7 +993,7 @@ function parallelValidationRequest(args: Record<string, string>): {
     if (!Number.isInteger(timeout) || timeout < 1 || timeout > 600_000) return undefined;
   }
   const validation = {
-    executable: args.validation_executable!,
+    executable: executable!,
     args: validationArgs,
     ...(timeout === undefined ? {} : { timeout_ms: timeout }),
   };
@@ -1510,6 +1513,104 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     };
   }
 
+  function parallelControlPaths(descriptor: ParallelDispatchDescriptor): {
+    readonly handoff_path: string;
+    readonly operation_manifest: string;
+  } {
+    return {
+      handoff_path: join(descriptor.managed_path, `handoff.${descriptor.task_id}.json`),
+      operation_manifest: join(descriptor.managed_path, `${descriptor.task_id}.operation-manifest.json`),
+    };
+  }
+
+  async function createParallelControlFiles(
+    descriptor: ParallelDispatchDescriptor,
+    validationCommands: readonly string[],
+  ): Promise<void> {
+    const canonicalRoot = await realpath(descriptor.managed_path);
+    if (!samePath(canonicalRoot, descriptor.managed_path)) {
+      throw new ParallelDispatchError("lifecycle-failed", "Managed worktree identity changed before contract creation.");
+    }
+    const paths = parallelControlPaths(descriptor);
+    const manifestValue = {
+      version: "0.1.0",
+      task_id: descriptor.task_id,
+      read: [...descriptor.scope_read],
+      write: [...descriptor.scope_write],
+      validation: [...validationCommands],
+    };
+    const handoffValue = {
+      version: "0.1.0",
+      profile: "minimal",
+      id: descriptor.task_id,
+      created_at: new Date().toISOString(),
+      ext: { "sortie-dogs/write-gate": {
+        operation_manifest: basename(paths.operation_manifest),
+        project_root: descriptor.managed_path,
+      } },
+      task: {
+        title: `Parallel task ${descriptor.task_id}`,
+        objective: "Complete the prepared parallel descriptor within its declared scope.",
+      },
+      state: { done: [], next: ["Implement the prepared parallel descriptor."], blocked: [] },
+      risks: [],
+      verification: validationCommands.map((check) => ({
+        check, status: "not_run", exit_code: null, summary: "Delegated to the parallel artifact capability.",
+      })),
+    };
+    const manifest = validateOperationManifestSchema(manifestValue);
+    const handoff = validateHandoffSchema(handoffValue);
+    if (!manifest.ok || !handoff.ok ||
+      validateManifest(handoff.value, manifest.value, undefined, false, { requirePassedValidation: false })
+        .some(({ severity }) => severity === "error")) {
+      throw new ParallelDispatchError("invalid-contract", "Generated parallel worker contract is invalid.");
+    }
+    const created: string[] = [];
+    try {
+      for (const [path, value] of [[paths.operation_manifest, manifestValue], [paths.handoff_path, handoffValue]] as const) {
+        const content = JSON.stringify(value);
+        try {
+          const handle = await open(path, "wx", 0o600);
+          try {
+            await handle.writeFile(content, "utf8");
+            await handle.sync();
+          } finally {
+            await handle.close();
+          }
+          created.push(path);
+        } catch (error) {
+          if (!isRecord(error) || error.code !== "EEXIST") throw error;
+          const info = await lstat(path);
+          if (!info.isFile() || info.isSymbolicLink()) throw error;
+          const existing = await readFile(path, "utf8");
+          if (existing === content) continue;
+          if (path !== paths.handoff_path) throw error;
+          const existingValue = JSON.parse(existing) as unknown;
+          if (!isRecord(existingValue) || !validateHandoffSchema(existingValue).ok ||
+            JSON.stringify({ ...existingValue, created_at: handoffValue.created_at }) !== content) throw error;
+        }
+      }
+    } catch (error) {
+      await Promise.all(created.map((path) => rm(path, { force: true }).catch(() => undefined)));
+      throw error;
+    }
+  }
+
+  async function removeParallelControlFiles(descriptor: ParallelDispatchDescriptor): Promise<void> {
+    const paths = parallelControlPaths(descriptor);
+    await Promise.all([
+      rm(paths.handoff_path, { force: true }),
+      rm(paths.operation_manifest, { force: true }),
+    ]);
+  }
+
+  async function ensureParallelReadyControls(snapshot: ParallelDispatchSnapshot): Promise<void> {
+    if (snapshot.archived || snapshot.cancelled || snapshot.ready.length === 0) return;
+    await ensureLoaded();
+    const validationCommands = loaded?.manifest?.validation ?? [];
+    await Promise.all(snapshot.ready.map((descriptor) => createParallelControlFiles(descriptor, validationCommands)));
+  }
+
   function boundedParallelSnapshot(snapshot: ParallelDispatchSnapshot): object {
     return {
       run_id: snapshot.run_id,
@@ -1517,7 +1618,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       cancelled: snapshot.cancelled,
       archived: snapshot.archived,
       terminal_reason: snapshot.terminal_reason,
-      ready: snapshot.ready,
+      ready: snapshot.ready.map((descriptor) => ({ ...descriptor, ...parallelControlPaths(descriptor) })),
       tasks: snapshot.tasks.map(({ descriptor, worktree_id, phase, call_id, child_session_id, outcome, artifact }) => ({
         task_id: descriptor.task_id,
         worktree_id,
@@ -1588,7 +1689,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         task.descriptor.dispatch_id === binding.descriptor.dispatch_id && sameParallelDescriptor(task.descriptor, binding.descriptor));
       if (running === undefined) return deny("dispatch-inactive");
       if (running.artifact !== null) {
-        const executable = await realpath(request.validation.executable).catch(() => undefined);
+        const executable = await resolveValidationExecutable(request.validation.executable);
         if (executable === undefined) return deny("invalid-request");
         const requestedCommand = [executable, ...request.validation.args];
         if (JSON.stringify(running.artifact.validation.command) !== JSON.stringify(requestedCommand)) {
@@ -1596,6 +1697,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         }
         await (await getParallelCoordinator()).acceptArtifact(binding.ownerRoot, binding.completionCallID,
           sessionID, binding.descriptor, running.artifact);
+        await removeParallelControlFiles(binding.descriptor);
         parallelArtifacts.set(sessionID, { requestFingerprint: request.fingerprint, artifact: running.artifact });
         pruneParallelChildMap(parallelArtifacts);
         return JSON.stringify({ status: "created", replay: true, artifact: boundedParallelArtifact(running.artifact) });
@@ -1610,6 +1712,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       const artifact = recovered ?? await produceWorktreeCommitArtifact(produceRequest);
       await (await getParallelCoordinator()).acceptArtifact(binding.ownerRoot, binding.completionCallID,
         sessionID, binding.descriptor, artifact);
+      await removeParallelControlFiles(binding.descriptor);
       parallelArtifacts.set(sessionID, { requestFingerprint: request.fingerprint, artifact });
       pruneParallelChildMap(parallelArtifacts);
       return JSON.stringify({ status: "created", ...(recovered === undefined ? {} : { replay: true }),
@@ -1628,8 +1731,17 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       if (ownerRoot === undefined || !isAbsolute(contractPath) ||
         !await project.contains(contractPath)) return JSON.stringify({ status: "denied", reason: "project-boundary" });
       const contract = await readJson(resolve(contractPath), INPUT_LIMITS.parallel) as WorktreeParallelContract;
-      const result = await (await getParallelCoordinator()).prepare(contract, ownerRoot);
+      const coordinator = await getParallelCoordinator();
+      const result = await coordinator.prepare(contract, ownerRoot);
       if (result.status === "serial-fallback") return JSON.stringify(result);
+      try {
+        await ensureParallelReadyControls(result.snapshot);
+      } catch (error) {
+        await Promise.all(result.snapshot.ready.map((descriptor) =>
+          removeParallelControlFiles(descriptor).catch(() => undefined)));
+        await coordinator.cancel(ownerRoot, result.snapshot.run_id).catch(() => undefined);
+        throw error;
+      }
       const dispatched = result.snapshot.tasks.filter(({ phase }) =>
         phase === "running" || phase === "completed" || phase === "failed" || phase === "abandoned").length;
       const running = result.snapshot.tasks.filter(({ phase }) => phase === "running").length;
@@ -1651,6 +1763,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       const snapshot = reconcile === "true"
         ? await coordinator.reconcile(ownerRoot, coordinatorTaskCalls.get(ownerRoot) ?? new Set(), runID || undefined)
         : await coordinator.snapshot(ownerRoot, runID || undefined);
+      if (snapshot !== undefined) await ensureParallelReadyControls(snapshot);
       if (snapshot === undefined && !runID) {
         const archived = await coordinator.archives(ownerRoot);
         return JSON.stringify({ status: "ok", active: null, archived: archived.map(boundedParallelArchive) });
@@ -1679,7 +1792,13 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     try {
       const ownerRoot = await parallelToolOwner(sessionID);
       if (ownerRoot === undefined) return JSON.stringify({ status: "denied", reason: "coordinator-root-required" });
-      const snapshot = await (await getParallelCoordinator()).cancel(ownerRoot, runID || undefined);
+      const coordinator = await getParallelCoordinator();
+      const active = await coordinator.snapshot(ownerRoot, runID || undefined);
+      const snapshot = await coordinator.cancel(ownerRoot, runID || undefined);
+      if (active !== undefined && snapshot !== undefined) {
+        await Promise.all(active.tasks.filter(({ phase }) => phase === "pending" || phase === "reserved")
+          .map(({ descriptor }) => removeParallelControlFiles(descriptor).catch(() => undefined)));
+      }
       return snapshot === undefined
         ? JSON.stringify({ status: "absent" })
         : JSON.stringify({ status: "cancelled", ...boundedParallelSnapshot(snapshot) });
@@ -3321,6 +3440,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
             parallelChildBindings.delete(completedChildSessionID);
           }
           if (snapshot !== undefined) {
+            await ensureParallelReadyControls(snapshot);
+            if (snapshot.cancelled) {
+              await removeParallelControlFiles(parallel.descriptor).catch(() => undefined);
+            }
             const dispatched = snapshot.tasks.filter(({ phase }) =>
               phase === "running" || phase === "completed" || phase === "failed" || phase === "abandoned").length;
             const running = snapshot.tasks.filter(({ phase }) => phase === "running").length;
@@ -3380,13 +3503,14 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         const consultationFallbackAuthorized = role !== undefined &&
           consultationRetries.get(consultationRetryKey(toolInput.sessionID, role))?.phase === "pending";
         let parallelWorkerAuthorized = false;
+        let parallelWorkerAlreadyBound = false;
         let reservedParallelDescriptor: ParallelDispatchDescriptor | undefined;
         if (toolInput.tool === "task" && taskRole === "dog-worker" && isRecord(output.args)) {
           const prompt = typeof output.args.prompt === "string" ? output.args.prompt : "";
           const contractPrompt = taskContractText(prompt);
           reservedParallelDescriptor = parallelDescriptor(prompt);
           if (reservedParallelDescriptor !== undefined) {
-            const roots = taskValues(contractPrompt, ["project_root", "projectroot"]);
+            const roots = [...new Set(taskValues(contractPrompt, ["project_root", "projectroot"]))];
             if (roots.length !== 1 || !samePath(roots[0]!, reservedParallelDescriptor.managed_path)) {
               throw new HandoffDeniedError("contract-invalid", "<worker-dispatch>", {
                 defects: [contractDefect("contract", "/managed_path", "parallel_descriptor_project_mismatch")],
@@ -3397,7 +3521,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           const resume = modes.length === 1 && modes[0] === "same-task-resume";
           const handoffPaths = taskValues(contractPrompt, ["handoff_path", "handoffpath"]);
           const operationManifests = taskValues(contractPrompt, ["operation_manifest", "operationmanifest"]);
-          const projectRoots = taskValues(contractPrompt, ["project_root", "projectroot"]);
+          const projectRoots = [...new Set(taskValues(contractPrompt, ["project_root", "projectroot"]))];
           const sourceManifests = taskValues(contractPrompt, ["source_manifest", "sourcemanifest"]);
           const acceptanceValues = taskValues(contractPrompt, ["acceptance"]);
           const validationValues = taskValues(contractPrompt, ["validation"]);
@@ -3517,15 +3641,23 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           const coordinator = await getParallelCoordinator();
           const snapshot = await coordinator.snapshot(toolInput.sessionID, reservedParallelDescriptor.run_id);
           if (snapshot === undefined) throw new ParallelDispatchError("descriptor-mismatch", "Parallel run is absent.");
-          const dispatched = snapshot.tasks.filter(({ phase }) =>
-            phase === "running" || phase === "completed" || phase === "failed" || phase === "abandoned").length;
-          const running = snapshot.tasks.filter(({ phase }) => phase === "running").length;
-          fastLane.enableParallelDispatch(toolInput.sessionID, snapshot.max_workers, dispatched, running, snapshot.tasks.length);
+          parallelWorkerAlreadyBound = snapshot.tasks.some(({ phase, call_id, descriptor }) =>
+            phase === "running" && call_id === toolInput.callID &&
+            sameParallelDescriptor(descriptor, reservedParallelDescriptor!));
           await coordinator.bindDispatch(toolInput.sessionID, toolInput.callID, reservedParallelDescriptor);
+          const boundSnapshot = await coordinator.snapshot(toolInput.sessionID, reservedParallelDescriptor.run_id);
+          if (boundSnapshot === undefined) throw new ParallelDispatchError("descriptor-mismatch", "Parallel run is absent.");
+          const currentContribution = parallelWorkerAlreadyBound ? 0 : 1;
+          const dispatched = boundSnapshot.tasks.filter(({ phase }) =>
+            phase === "running" || phase === "completed" || phase === "failed" || phase === "abandoned").length;
+          const running = boundSnapshot.tasks.filter(({ phase }) => phase === "running").length;
+          fastLane.enableParallelDispatch(toolInput.sessionID, boundSnapshot.max_workers,
+            dispatched - currentContribution, running - currentContribution, boundSnapshot.tasks.length);
           parallelWorkerAuthorized = true;
         }
         const resumedWorkerSessionID = fastLane.beforeTool(toolInput.sessionID, toolInput.tool, output.args, {
           consultationFallbackAuthorized,
+          parallelWorkerAlreadyBound,
           parallelWorkerAuthorized,
         });
         if (resumedWorkerSessionID !== undefined) {
@@ -3728,7 +3860,13 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         if (eventSessionID !== undefined) {
           const coordinator = await getParallelCoordinator().catch(() => undefined);
           const owned = await coordinator?.snapshot(eventSessionID).catch(() => undefined);
-          if (owned !== undefined) await coordinator?.cancel(eventSessionID, owned.run_id).catch(() => undefined);
+          if (owned !== undefined) {
+            const cancelled = await coordinator?.cancel(eventSessionID, owned.run_id).catch(() => undefined);
+            if (cancelled !== undefined) {
+              await Promise.all(owned.tasks.filter(({ phase }) => phase === "pending" || phase === "reserved")
+                .map(({ descriptor }) => removeParallelControlFiles(descriptor).catch(() => undefined)));
+            }
+          }
         }
         evictSession(eventSessionID);
         for (const role of [REVIEWER_AGENT, ADVISOR_AGENT] as const) {

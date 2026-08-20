@@ -63,6 +63,7 @@ interface ReviewCandidateState {
 
 export interface FastLaneToolOptions {
   readonly consultationFallbackAuthorized?: boolean;
+  readonly parallelWorkerAlreadyBound?: boolean;
   readonly parallelWorkerAuthorized?: boolean;
 }
 
@@ -235,7 +236,7 @@ export class FastLaneController {
     state.parallelMode = true;
     state.workerLimit = totalTasks;
     state.workerDispatches = running;
-    state.totalWorkerDispatches = Math.max(state.totalWorkerDispatches, dispatched);
+    state.totalWorkerDispatches = dispatched;
   }
 
   continuationQueued(sessionID: string): void {
@@ -295,8 +296,18 @@ export class FastLaneController {
         throw new FastLaneDeniedError("WORKER_RESUME_INVALID");
       }
       if (state.parallelMode) {
-        if (options.parallelWorkerAuthorized !== true || state.workerDispatches >= state.parallelWorkerLimit ||
-          state.totalWorkerDispatches >= state.workerLimit) throw new FastLaneDeniedError("WORKER_LIMIT");
+        if (options.parallelWorkerAuthorized !== true) throw new FastLaneDeniedError("WORKER_LIMIT");
+        if (options.parallelWorkerAlreadyBound === true) {
+          if (state.workerDispatches < 1 || state.workerDispatches > state.parallelWorkerLimit ||
+            state.totalWorkerDispatches < 1 || state.totalWorkerDispatches > state.workerLimit) {
+            throw new FastLaneDeniedError("WORKER_LIMIT");
+          }
+          state.workerInFlight = true;
+          return;
+        }
+        if (state.workerDispatches >= state.parallelWorkerLimit || state.totalWorkerDispatches >= state.workerLimit) {
+          throw new FastLaneDeniedError("WORKER_LIMIT");
+        }
       } else if (state.backlogDrain &&
         (state.workerDispatches >= 1 || state.totalWorkerDispatches >= state.workerLimit)) {
         throw new FastLaneDeniedError("WORKER_LIMIT");

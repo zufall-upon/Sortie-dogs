@@ -45,6 +45,28 @@ test("only a typed parallel authorization raises the worker bound to three", () 
   );
 });
 
+test("a typed already-bound parallel call is not counted twice", () => {
+  const lane = new FastLaneController();
+  lane.beginTurn("parallel", false);
+  lane.enableParallelDispatch("parallel", 2, 2, 2, 2);
+  lane.beforeTool("parallel", "task", worker, {
+    parallelWorkerAuthorized: true,
+    parallelWorkerAlreadyBound: true,
+  });
+  lane.beforeTool("parallel", "task", worker, {
+    parallelWorkerAuthorized: true,
+    parallelWorkerAlreadyBound: true,
+  });
+  expectDenial(
+    () => lane.beforeTool("parallel", "task", worker, { parallelWorkerAuthorized: true }),
+    "WORKER_LIMIT",
+  );
+  expectDenial(
+    () => lane.beforeTool("parallel", "task", worker, { parallelWorkerAlreadyBound: true }),
+    "WORKER_LIMIT",
+  );
+});
+
 test("one exact handoff-uninspected result permits one same-task worker resume", () => {
   const lane = new FastLaneController();
   lane.beginTurn("root", false);

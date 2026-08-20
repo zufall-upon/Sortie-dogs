@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { lstat, realpath } from "node:fs/promises";
-import { isAbsolute, join, resolve, sep } from "node:path";
+import { delimiter, extname, isAbsolute, join, resolve, sep } from "node:path";
 import type {
   ParallelDispatchDescriptor,
   ContainedValidationRequest,
@@ -395,6 +395,23 @@ function validText(value: unknown, max = 256): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= max && !/[\u0000-\u001f\u007f]/u.test(value);
 }
 
+export async function resolveValidationExecutable(executable: string): Promise<string | undefined> {
+  if (isAbsolute(executable)) return realpath(executable).catch(() => undefined);
+  if (!validText(executable, MAX_COMMAND_TEXT) || executable.startsWith("-") || /[\\/]/u.test(executable)) return undefined;
+  const path = process.env.PATH ?? process.env.Path;
+  if (path === undefined) return undefined;
+  const extensions = process.platform === "win32" && extname(executable).length === 0
+    ? (process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").filter((value) => value.length > 0)
+    : [""];
+  for (const directory of path.split(delimiter)) {
+    for (const extension of extensions) {
+      const candidate = await realpath(resolve(directory || ".", `${executable}${extension}`)).catch(() => undefined);
+      if (candidate !== undefined && isAbsolute(candidate)) return candidate;
+    }
+  }
+  return undefined;
+}
+
 function pathIdentity(value: string): string {
   const normalized = resolve(value).split(sep).join("/");
   return process.platform === "win32" ? normalized.toLowerCase() : normalized;
@@ -567,6 +584,11 @@ async function runBounded(
   }
 }
 
+function boundedCommandKind(executable: string, args: readonly string[]): "git" | "validation" {
+  return /(?:^|[\\/])git(?:\.exe)?$/iu.test(executable) && args.length === 2 &&
+    args[0] === "diff" && args[1] === "--check" ? "git" : "validation";
+}
+
 /** Runs one bounded command without exposing output or performing Git mutations. */
 export async function runContainedValidation(request: ContainedValidationRequest): Promise<ContainedValidationResult> {
   const suppliedArgs = isRecord(request) && Array.isArray(request.args) ? request.args : [];
@@ -578,20 +600,23 @@ export async function runContainedValidation(request: ContainedValidationRequest
     Object.freeze({ ok: false as const, command, exit_code: exitCode,
       fingerprint: createHash("sha256").update(JSON.stringify([command, exitCode, error])).digest("hex"), error });
   if (!isRecord(request) || !exactKeys(request, ["cwd", "executable", "timeout_ms", ...(request.args === undefined ? [] : ["args"])]) ||
-    !validText(request.executable, MAX_COMMAND_TEXT) || !isAbsolute(request.executable) ||
+    !validText(request.executable, MAX_COMMAND_TEXT) ||
+    (!isAbsolute(request.executable) && (request.executable.startsWith("-") || /[\\/]/u.test(request.executable))) ||
     !validText(request.cwd, MAX_PATH) || !isAbsolute(request.cwd) ||
     !Number.isInteger(request.timeout_ms) || request.timeout_ms < 1 || request.timeout_ms > MAX_TIMEOUT ||
     !Array.isArray(suppliedArgs) || suppliedArgs.length > MAX_ARGUMENTS ||
     !suppliedArgs.every((arg) => validText(arg, MAX_COMMAND_TEXT))) return failed(fallbackCommand, null, "invalid-request");
   const [executable, cwd] = await Promise.all([
-    realpath(request.executable).catch(() => undefined), realpath(request.cwd).catch(() => undefined),
+    resolveValidationExecutable(request.executable),
+    realpath(request.cwd).catch(() => undefined),
   ]);
-  if (executable === undefined || cwd === undefined || !isAbsolute(executable) || !isAbsolute(cwd)) {
+  if (executable === undefined || cwd === undefined || !isAbsolute(cwd)) {
     return failed(fallbackCommand, null, "invalid-request");
   }
   const command = Object.freeze([executable, ...suppliedArgs]);
   try {
-    const result = await runBounded(executable, suppliedArgs, cwd, request.timeout_ms, "validation");
+    const result = await runBounded(executable, suppliedArgs, cwd, request.timeout_ms,
+      boundedCommandKind(executable, suppliedArgs));
     const fingerprint = createHash("sha256").update(JSON.stringify([command, result.code])).digest("hex");
     return result.code === 0
       ? Object.freeze({ ok: true as const, command, exit_code: 0 as const, fingerprint, error: null })
@@ -678,7 +703,7 @@ async function makeContext(request: { descriptor: ParallelDispatchDescriptor; ma
   return context;
 }
 
-function parseStatus(source: Buffer, staged: "forbid" | "require"): StatusEntry[] {
+function parseStatus(source: Buffer, staged: "forbid" | "require" | "either"): StatusEntry[] {
   let text: string;
   try { text = new TextDecoder("utf-8", { fatal: true }).decode(source); } catch {
     throw new WorktreeCommitArtifactError("invalid-state", "Git status path encoding is invalid.");
@@ -691,12 +716,15 @@ function parseStatus(source: Buffer, staged: "forbid" | "require"): StatusEntry[
     if (field.length < 4 || field[2] !== " ") throw new WorktreeCommitArtifactError("invalid-state", "Git status is ambiguous.");
     const x = field[0]!;
     const y = field[1]!;
-    const untracked = staged === "forbid" && x === "?" && y === "?";
+    const untracked = x === "?" && y === "?";
     if (!untracked && (x === "?" || y === "?" || x === "!" || y === "!" || "RCUT".includes(x) || "RCUT".includes(y))) {
       throw new WorktreeCommitArtifactError("invalid-state", "Untracked, renamed, copied, or unsupported changes are forbidden.");
     }
-    if ((!untracked && staged === "forbid" && (x !== " " || y !== "M" && y !== "D")) ||
-      (staged === "require" && ((x !== "A" && x !== "M" && x !== "D") || y !== " "))) {
+    const unstagedEdit = x === " " && (y === "M" || y === "D");
+    const stagedEdit = (x === "A" || x === "M" || x === "D") && y === " ";
+    if ((!untracked && staged === "forbid" && !unstagedEdit) ||
+      (!untracked && staged === "require" && !stagedEdit) ||
+      (!untracked && staged === "either" && !unstagedEdit && !stagedEdit)) {
       throw new WorktreeCommitArtifactError("invalid-state", "Index or worktree status is not an accepted implementation edit.");
     }
     const path = field.slice(3);
@@ -706,7 +734,7 @@ function parseStatus(source: Buffer, staged: "forbid" | "require"): StatusEntry[
     } catch {
       throw new WorktreeCommitArtifactError("invalid-state", "Changed path is not canonical.");
     }
-    entries.push({ code: untracked ? "A" : staged === "forbid" ? y as "M" | "D" : x as "A" | "M" | "D", path });
+    entries.push({ code: untracked ? "A" : stagedEdit ? x as "A" | "M" | "D" : y as "M" | "D", path });
     if (folded.length === 0) throw new WorktreeCommitArtifactError("invalid-state", "Changed path is invalid.");
   }
   entries.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
@@ -725,10 +753,35 @@ function assertScope(entries: readonly StatusEntry[], scope: readonly string[]):
   }
 }
 
-async function status(context: Context, staged: "forbid" | "require"): Promise<StatusEntry[]> {
-  return parseStatus(await context.git([
+async function status(context: Context, staged: "forbid" | "require" | "either"): Promise<StatusEntry[]> {
+  const entries = parseStatus(await context.git([
     "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none",
   ]), staged);
+  const controls = new Set([
+    `handoff.${context.descriptor.task_id}.json`,
+    `${context.descriptor.task_id}.operation-manifest.json`,
+  ]);
+  return entries.filter(({ code, path }) => code !== "A" || !controls.has(path));
+}
+
+async function stagedPaths(context: Context): Promise<ReadonlySet<string>> {
+  if ((await context.git(["ls-files", "-u", "-z"])).length !== 0) {
+    throw new WorktreeCommitArtifactError("invalid-state", "An unmerged index is forbidden.");
+  }
+  const fields = decodeGitOutput(await context.git([
+    "diff", "--cached", "--name-only", "--no-renames", "-z", "--",
+  ]), "Staged path encoding is invalid.").split("\0");
+  if (fields.at(-1) !== "") throw new WorktreeCommitArtifactError("invalid-state", "Staged paths are ambiguous.");
+  fields.pop();
+  for (const path of fields) {
+    if (normalizeWorktreeScopePath(path) !== path) {
+      throw new WorktreeCommitArtifactError("invalid-state", "A staged path is not canonical.");
+    }
+  }
+  if (new Set(fields.map((path) => path.toLowerCase())).size !== fields.length) {
+    throw new WorktreeCommitArtifactError("invalid-state", "Staged path identities are ambiguous.");
+  }
+  return new Set(fields);
 }
 
 async function assertNoSubmodules(context: Context, entries: readonly StatusEntry[]): Promise<void> {
@@ -927,9 +980,7 @@ async function validateCommit(
   artifact: WorktreeCommitArtifact,
 ): Promise<void> {
   await assertBaseState(context, artifact.commit_sha);
-  if ((await context.git([
-    "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none",
-  ])).length !== 0) {
+  if ((await status(context, "forbid")).length !== 0) {
     throw new WorktreeCommitArtifactError("verification-failed", "Committed checkout is not clean.");
   }
   const parentLine = (await context.git(["rev-list", "--parents", "-n", "1", artifact.commit_sha])).toString("utf8").trim().split(" ");
@@ -977,7 +1028,9 @@ export async function produceWorktreeCommitArtifact(request: WorktreeCommitProdu
   if (!isRecord(request) || !exactKeys(request, ["descriptor", "managed_path", "validation", ...(request.git_path === undefined ? [] : ["git_path"])]) ||
     !isRecord(request.validation) || !exactKeys(request.validation, ["executable", ...(request.validation.args === undefined ? [] : ["args"]),
       ...(request.validation.timeout_ms === undefined ? [] : ["timeout_ms"])]) ||
-    !validText(request.validation.executable, MAX_COMMAND_TEXT) || !isAbsolute(request.validation.executable) ||
+    !validText(request.validation.executable, MAX_COMMAND_TEXT) ||
+    (!isAbsolute(request.validation.executable) &&
+      (request.validation.executable.startsWith("-") || /[\\/]/u.test(request.validation.executable))) ||
     (request.validation.args !== undefined && (!Array.isArray(request.validation.args) || request.validation.args.length > MAX_ARGUMENTS ||
       !request.validation.args.every((arg) => validText(arg, MAX_COMMAND_TEXT)))) ||
     (request.validation.timeout_ms !== undefined && (!Number.isInteger(request.validation.timeout_ms) ||
@@ -985,27 +1038,40 @@ export async function produceWorktreeCommitArtifact(request: WorktreeCommitProdu
     throw new WorktreeCommitArtifactError("invalid-request", "Commit producer request is invalid.");
   }
   const context = await makeContext(request);
-  const executable = await realpath(request.validation.executable).catch(() => undefined);
+  const executable = await resolveValidationExecutable(request.validation.executable);
   if (executable === undefined || !isAbsolute(executable)) {
     throw new WorktreeCommitArtifactError("invalid-request", "Validation executable does not exist.");
   }
   const command = Object.freeze([executable, ...(request.validation.args ?? [])]);
   await assertBaseState(context, context.descriptor.base_sha);
-  const before = await status(context, "forbid");
+  const before = await status(context, "either");
   if (before.length === 0) throw new WorktreeCommitArtifactError("invalid-state", "No implementation changes exist.");
   assertScope(before, context.descriptor.scope_write);
   await assertNoSubmodules(context, before);
+  const staged = await stagedPaths(context);
+  const hostStaged = staged.size > 0;
+  if (hostStaged && (boundedCommandKind(executable, request.validation.args ?? []) !== "git" ||
+    staged.size !== before.length || !before.every(({ path }) => staged.has(path)))) {
+    throw new WorktreeCommitArtifactError("invalid-state", "Staged changes are not an exact host snapshot of the implementation.");
+  }
   const beforeFingerprint = await changeFingerprint(context, before, "worktree");
 
   const validation = await runBounded(executable, request.validation.args ?? [], context.managedPath,
-    request.validation.timeout_ms ?? GIT_TIMEOUT, "validation");
+    request.validation.timeout_ms ?? GIT_TIMEOUT, boundedCommandKind(executable, request.validation.args ?? []));
   if (validation.code !== 0) throw new WorktreeCommitArtifactError("validation-failed",
     validation.code === 240 ? "Validation containment setup failed."
       : validation.code === 241 ? "Validation left a descendant process."
-        : validation.code === 238 ? "Validation exceeded its resource bound."
+      : validation.code === 238 ? "Validation exceeded its resource bound."
           : "Validation exited unsuccessfully.");
+  if (hostStaged) {
+    const stagedValidation = await runBounded(executable, ["diff", "--cached", "--check"], context.managedPath,
+      request.validation.timeout_ms ?? GIT_TIMEOUT, "git");
+    if (stagedValidation.code !== 0) {
+      throw new WorktreeCommitArtifactError("validation-failed", "Staged implementation validation exited unsuccessfully.");
+    }
+  }
   await assertBaseState(context, context.descriptor.base_sha);
-  const after = await status(context, "forbid");
+  const after = await status(context, "either");
   assertScope(after, context.descriptor.scope_write);
   await assertNoSubmodules(context, after);
   if (JSON.stringify(after) !== JSON.stringify(before) || await changeFingerprint(context, after, "worktree") !== beforeFingerprint) {
@@ -1048,7 +1114,9 @@ export async function recoverWorktreeCommitArtifact(
   if (!isRecord(request) || !exactKeys(request, ["descriptor", "managed_path", "validation", ...(request.git_path === undefined ? [] : ["git_path"])]) ||
     !isRecord(request.validation) || !exactKeys(request.validation, ["executable", ...(request.validation.args === undefined ? [] : ["args"]),
       ...(request.validation.timeout_ms === undefined ? [] : ["timeout_ms"])]) ||
-    !validText(request.validation.executable, MAX_COMMAND_TEXT) || !isAbsolute(request.validation.executable) ||
+    !validText(request.validation.executable, MAX_COMMAND_TEXT) ||
+    (!isAbsolute(request.validation.executable) &&
+      (request.validation.executable.startsWith("-") || /[\\/]/u.test(request.validation.executable))) ||
     (request.validation.args !== undefined && (!Array.isArray(request.validation.args) || request.validation.args.length > MAX_ARGUMENTS ||
       !request.validation.args.every((arg) => validText(arg, MAX_COMMAND_TEXT)))) ||
     (request.validation.timeout_ms !== undefined && (!Number.isInteger(request.validation.timeout_ms) ||
@@ -1056,7 +1124,7 @@ export async function recoverWorktreeCommitArtifact(
     throw new WorktreeCommitArtifactError("invalid-request", "Commit recovery request is invalid.");
   }
   const context = await makeContext(request);
-  const executable = await realpath(request.validation.executable).catch(() => undefined);
+  const executable = await resolveValidationExecutable(request.validation.executable);
   if (executable === undefined || !isAbsolute(executable)) {
     throw new WorktreeCommitArtifactError("invalid-request", "Validation executable does not exist.");
   }
@@ -1066,9 +1134,7 @@ export async function recoverWorktreeCommitArtifact(
     throw new WorktreeCommitArtifactError("invalid-state", "Managed branch does not match the dispatch contract.");
   }
   if (state.head === context.descriptor.base_sha) return undefined;
-  if ((await context.git([
-    "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none",
-  ])).length !== 0) {
+  if ((await status(context, "forbid")).length !== 0) {
     throw new WorktreeCommitArtifactError("invalid-state", "Managed checkout is not clean.");
   }
   const parentLine = (await context.git(["rev-list", "--parents", "-n", "1", state.head])).toString("utf8").trim().split(" ");

@@ -19,6 +19,12 @@ function git(cwd: string, ...args: string[]): Promise<string> {
   }, (error, stdout, stderr) => error === null ? resolvePromise(stdout) : reject(new Error(stderr))));
 }
 
+function findExecutable(name: string): Promise<string> {
+  return new Promise((resolvePromise, reject) => execFile(process.platform === "win32" ? "where.exe" : "which", [name], {
+    shell: false, windowsHide: true, encoding: "utf8",
+  }, (error, stdout, stderr) => error === null ? resolvePromise(stdout.split(/\r?\n/u)[0]!) : reject(new Error(stderr))));
+}
+
 async function fixture(name: string) {
   const root = await mkdtemp(join(tmpdir(), `sortie-integration-${name}-`));
   const repository = join(root, "repository");
@@ -87,9 +93,12 @@ async function assertNoValidationWorktree(repository: string): Promise<void> {
 test("plumbing integrates deterministic topo order with atomic target update and clean checkout", async () => {
   const value = await fixture("success");
   try {
-    const a = await artifact(value.repository, value.base, "a", "a.txt", "a\n");
-    const b = await artifact(value.repository, value.base, "b", "b.txt", "b\n");
-    const c = await artifact(value.repository, value.base, "c", "c.txt", "c\n");
+    const command = process.platform === "win32"
+      ? [process.execPath]
+      : [await findExecutable("git"), "diff", "--check"];
+    const a = await artifact(value.repository, value.base, "a", "a.txt", "a\n", command);
+    const b = await artifact(value.repository, value.base, "b", "b.txt", "b\n", command);
+    const c = await artifact(value.repository, value.base, "c", "c.txt", "c\n", command);
     const queue = await WorktreeIntegrationQueue.open({ repositoryRoot: value.repository, targetBranch: "target" });
     const queued = await queue.enqueue("root", archive(value.base, [c, b, a], { b: ["a"] }));
     assert.deepEqual(queued.tasks.map(({ task_id }) => task_id), ["a", "c", "b"]);

@@ -122,8 +122,8 @@ test("three worktrees share one exact base, isolate edits, hash reserved IDs, an
       records: Array<{ targetDev: string; targetIno: string }>;
     };
     for (const record of inventory.records) {
-      assert.equal(BigInt(record.targetDev) > 0n && BigInt(record.targetDev) <= BigInt(Number.MAX_SAFE_INTEGER), true);
-      assert.equal(BigInt(record.targetIno) > 0n && BigInt(record.targetIno) <= BigInt(Number.MAX_SAFE_INTEGER), true);
+      assert.equal(BigInt(record.targetDev) > 0n && BigInt(record.targetDev) <= (1n << 64n) - 1n, true);
+      assert.equal(BigInt(record.targetIno) > 0n && BigInt(record.targetIno) <= (1n << 64n) - 1n, true);
     }
     assert.deepEqual(new Set(created.map(({ baseSha }) => baseSha)), new Set([pin.sha]));
     await Promise.all(created.map(async (entry, index) => {

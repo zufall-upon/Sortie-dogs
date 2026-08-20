@@ -22,7 +22,7 @@ const SHA = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u;
 const HASH = /^[0-9a-f]{64}$/u;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const DEVICE_ID = /^[1-9][0-9]*$/u;
-const MAX_SAFE_FILE_ID = BigInt(Number.MAX_SAFE_INTEGER);
+const MAX_FILE_ID = (1n << 64n) - 1n;
 const ACTIVE_PATH = /^wt-([0-9a-f]{16})-([0-9a-f]{32})$/u;
 const QUARANTINE_PATH = /^rm-([0-9a-f]{16})-([0-9a-f]{32})$/u;
 const PHASES = new Set(["creating", "setting-up", "ready", "removing", "orphaned"]);
@@ -141,11 +141,11 @@ function pathWithin(path: string, parent: string): boolean {
 }
 
 function safeStoredFileID(value: unknown): value is string {
-  return typeof value === "string" && DEVICE_ID.test(value) && BigInt(value) <= MAX_SAFE_FILE_ID;
+  return typeof value === "string" && DEVICE_ID.test(value) && BigInt(value) <= MAX_FILE_ID;
 }
 
 function fileID(path: string, value: bigint, kind: "device" | "inode"): string | undefined {
-  const native = value > 0n && value <= MAX_SAFE_FILE_ID ? value.toString() : undefined;
+  const native = value > 0n && value <= MAX_FILE_ID ? value.toString() : undefined;
   if (native !== undefined) return native;
   if (process.platform !== "win32" || (kind === "inode" && value === 0n)) return undefined;
   const volume = pathIdentity(parse(resolve(path)).root);

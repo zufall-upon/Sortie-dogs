@@ -2717,15 +2717,9 @@ test("typed parallel prepare is the only path to reserved dependency-aware worke
     assert.equal(prepared.ready.length, 2);
     const prompt = (descriptor: Record<string, unknown>) => [
       `task_id: ${descriptor.task_id}`,
-      "role: implementation",
-      `project_root: ${descriptor.managed_path}`,
-      "source_manifest: [base.txt]",
-      "operation_manifest: none",
-      "acceptance: bounded parallel control outcome",
-      "validation: no canonical validation",
       `run_id: ${descriptor.run_id}`,
       `dispatch_id: ${descriptor.dispatch_id}`,
-      `managed_path: ${descriptor.managed_path}`,
+      `project_root: ${descriptor.managed_path}`,
       `branch: ${descriptor.branch}`,
       `base_sha: ${descriptor.base_sha}`,
       `depends_on: ${JSON.stringify(descriptor.depends_on)}`,
@@ -2736,7 +2730,40 @@ test("typed parallel prepare is the only path to reserved dependency-aware worke
       `parallel_units: ${descriptor.parallel_units}`,
       `attempt: ${descriptor.attempt}`,
       `contract_fingerprint: ${descriptor.contract_fingerprint}`,
+      "context_digest:",
+      `  task_id: ${descriptor.task_id}`,
+      "  role: implementation",
+      `  project_root: ${descriptor.managed_path}`,
+      "  acceptance: bounded parallel control outcome",
+      "  validation: no canonical validation",
+      `  parallel_group: ${descriptor.parallel_group}`,
+      `  parallel_unit: ${descriptor.parallel_unit}`,
+      `  parallel_units: ${descriptor.parallel_units}`,
+      "source_manifest: [base.txt]",
+      "operation_manifest: none",
     ].join("\n");
+    const originalBindDispatch = ParallelDispatchCoordinator.prototype.bindDispatch;
+    let releaseFirstBind: (() => void) | undefined;
+    let bound = 0;
+    ParallelDispatchCoordinator.prototype.bindDispatch = async function (
+      ...args: Parameters<ParallelDispatchCoordinator["bindDispatch"]>
+    ) {
+      const result = await originalBindDispatch.apply(this, args);
+      bound += 1;
+      if (bound === 1) await new Promise<void>((resolve) => { releaseFirstBind = resolve; });
+      else releaseFirstBind?.();
+      return result;
+    };
+    try {
+      await Promise.all(prepared.ready.map(async (descriptor, index) => {
+        await before(
+          { tool: "task", sessionID: "root", callID: `parallel-${index}` },
+          { args: { subagent_type: "dog-worker", prompt: prompt(descriptor) } },
+        );
+      }));
+    } finally {
+      ParallelDispatchCoordinator.prototype.bindDispatch = originalBindDispatch;
+    }
     for (const [index, descriptor] of prepared.ready.entries()) {
       await before(
         { tool: "task", sessionID: "root", callID: `parallel-${index}` },
@@ -2780,7 +2807,7 @@ test("typed parallel prepare is the only path to reserved dependency-aware worke
 
 test("parallel worker artifact capability enforces exact lineage, terminal release, and bounded archive evidence", async () => {
   await withProject("parallel-artifact-capability", async (directory) => {
-    await writeFile(join(directory, ".gitignore"), "parallel-contract.json\noperation-manifest.json\nhandoff.json\n");
+    await writeFile(join(directory, ".gitignore"), "parallel-contract.json\n*.operation-manifest.json\nhandoff*.json\n");
     await writeFile(join(directory, "base.txt"), "base\n");
     await execFileAsync("git", ["init", "-q"], { cwd: directory });
     await execFileAsync("git", ["config", "user.name", "Sortie Test"], { cwd: directory });
@@ -2792,7 +2819,7 @@ test("parallel worker artifact capability enforces exact lineage, terminal relea
     await writeFile(contractPath, JSON.stringify({
       version: "0.1.0", mode: "parallel", max_workers: 2,
       tasks: ["a", "b"].map((taskID) => ({ task_id: taskID, worktree: `artifact-${taskID}`,
-        branch: `sortie/artifact-${taskID}`, base_sha: sha, depends_on: [],
+        branch: `sortie/artifact-${taskID}`, base_sha: sha, depends_on: taskID === "b" ? ["a"] : [],
         scope: { read: ["base.txt"], write: [`${taskID}.txt`] } })),
       artifacts: [], failure: null, baseline_metrics: null,
     }));
@@ -2804,22 +2831,20 @@ test("parallel worker artifact capability enforces exact lineage, terminal relea
     const prepared = JSON.parse(await hooks.tool!.sortie_prepare_parallel_dispatch!.execute(
       { contract_path: contractPath }, { sessionID: "root", agent: "dog-coordinator" },
     )) as { run_id: string; ready: Array<Record<string, unknown>> };
+    assert.equal(prepared.ready.length, 1);
     const descriptor = prepared.ready[0]!;
     const child = "artifact-child";
     const callID = "artifact-call";
-    const manifestPath = "operation-manifest.json";
     const managedPath = descriptor.managed_path as string;
-    await writeFile(join(managedPath, manifestPath), JSON.stringify({
-      ...operationManifest([`${descriptor.task_id}.txt`]), task_id: descriptor.task_id, validation: [],
-    }));
-    await writeFile(join(managedPath, "handoff.json"), JSON.stringify({
-      ...writeGateHandoff(managedPath, manifestPath), id: descriptor.task_id,
-    }));
+    const manifestPath = descriptor.operation_manifest as string;
+    const handoffPath = descriptor.handoff_path as string;
+    assert.equal((JSON.parse(await readFile(manifestPath, "utf8")) as { task_id: string }).task_id, descriptor.task_id);
+    assert.equal((JSON.parse(await readFile(handoffPath, "utf8")) as { id: string }).id, descriptor.task_id);
     const prompt = [
       `task_id: ${descriptor.task_id}`, "role: implementation", `project_root: ${managedPath}`,
-      `handoff_path: ${join(managedPath, "handoff.json")}`, `source_manifest: [${descriptor.task_id}.txt]`,
+      `handoff_path: ${handoffPath}`, `source_manifest: [${descriptor.task_id}.txt]`,
       `operation_manifest: ${manifestPath}`, "acceptance: create bounded artifact", "validation: typed capability",
-      ...Object.entries(descriptor).filter(([key]) => !["task_id", "managed_path"].includes(key))
+      ...Object.entries(descriptor).filter(([key]) => !["task_id", "managed_path", "handoff_path", "operation_manifest"].includes(key))
         .map(([key, value]) => `${key}: ${Array.isArray(value) ? JSON.stringify(value) : value}`),
       `managed_path: ${managedPath}`,
     ].join("\n");
@@ -2832,15 +2857,16 @@ test("parallel worker artifact capability enforces exact lineage, terminal relea
       { sessionID: child, agent: "dog-worker", parentID: "root" } as never,
       { message: { agent: "dog-worker", model: {} }, parts: [{ type: "text", text: prompt }] },
     );
-    await inspectHandoffWithRead(hooks, join(managedPath, "handoff.json"), child);
+    await inspectHandoffWithRead(hooks, handoffPath, child);
     assert.equal((await executeBindWriteGate(hooks, managedPath, child, manifestPath)).status, "bound");
     await writeFile(join(managedPath, `${descriptor.task_id}.txt`), "artifact\n");
+    await execFileAsync("git", ["add", "--", `${descriptor.task_id}.txt`], { cwd: managedPath });
     const capability = hooks.tool!.sortie_create_parallel_commit_artifact!;
     const args = {
       run_id: descriptor.run_id as string,
       dispatch_id: descriptor.dispatch_id as string,
-      validation_executable: process.execPath,
-      validation_args_json: JSON.stringify(["-e", "process.exit(0)"]),
+      validation_executable: "git",
+      validation_args_json: JSON.stringify(["diff", "--check"]),
     };
     const malformed = JSON.parse(await capability.execute(
       { ...args, validation_args_json: "{}" }, { sessionID: child, agent: "dog-worker" },
@@ -2879,7 +2905,7 @@ test("parallel worker artifact capability enforces exact lineage, terminal relea
     assert.equal(created.status, "created", JSON.stringify(created));
     assert.equal(created.replay, true);
     assert.equal((await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: managedPath })).stdout.trim(), postcommitHead);
-    assert.equal(JSON.stringify(created).match(/stdout|stderr|diff|log/gu), null);
+    assert.equal(JSON.stringify(created).match(/stdout|stderr|log/gu), null);
     const durable = JSON.parse(await hooks.tool!.sortie_parallel_dispatch_status!.execute(
       { run_id: prepared.run_id }, { sessionID: "root", agent: "dog-coordinator" },
     )) as { tasks: Array<{ phase: string; artifact: unknown }> };
@@ -2907,9 +2933,12 @@ test("parallel worker artifact capability enforces exact lineage, terminal relea
     );
     const status = JSON.parse(await hooks.tool!.sortie_parallel_dispatch_status!.execute(
       { run_id: prepared.run_id }, { sessionID: "root", agent: "dog-coordinator" },
-    )) as { tasks: Array<{ phase: string; artifact: unknown }> };
+    )) as { ready: Array<Record<string, unknown>>; tasks: Array<{ phase: string; artifact: unknown }> };
     assert.equal(status.tasks[0]!.phase, "completed");
     assert.ok(status.tasks[0]!.artifact);
+    assert.equal(status.ready.length, 1);
+    assert.equal((JSON.parse(await readFile(status.ready[0]!.handoff_path as string, "utf8")) as { id: string }).id, "b");
+    assert.equal((JSON.parse(await readFile(status.ready[0]!.operation_manifest as string, "utf8")) as { task_id: string }).task_id, "b");
   });
 });
 
@@ -2945,10 +2974,12 @@ test("parallel cancellation is coordinator-only, survives running join, and sess
       { contract_path: contractPath }, { sessionID: "root", agent: "dog-coordinator" },
     )) as { run_id: string; ready: Array<Record<string, unknown>> };
     const descriptor = prepared.ready[0]!;
+    const pendingDescriptor = prepared.ready[1]!;
     const prompt = [
       `task_id: ${descriptor.task_id}`, "role: implementation", `project_root: ${descriptor.managed_path}`,
       "source_manifest: [base.txt]", "operation_manifest: none", "acceptance: bounded cancel",
-      "validation: no canonical validation", ...Object.entries(descriptor).filter(([key]) => !["task_id", "managed_path"].includes(key))
+      "validation: no canonical validation", ...Object.entries(descriptor).filter(([key]) =>
+        !["task_id", "managed_path", "handoff_path", "operation_manifest"].includes(key))
         .map(([key, value]) => `${key}: ${Array.isArray(value) ? JSON.stringify(value) : value}`),
       `managed_path: ${descriptor.managed_path}`,
     ].join("\n");
@@ -2956,12 +2987,26 @@ test("parallel cancellation is coordinator-only, survives running join, and sess
       { tool: "task", sessionID: "root", callID: "running" },
       { args: { subagent_type: "dog-worker", prompt } },
     );
+    const originalCancel = ParallelDispatchCoordinator.prototype.cancel;
+    ParallelDispatchCoordinator.prototype.cancel = async function () { throw new Error("simulated cancellation persistence failure"); };
+    try {
+      const failedCancellation = JSON.parse(await hooks.tool!.sortie_cancel_parallel_dispatch!.execute(
+        { run_id: prepared.run_id }, { sessionID: "root", agent: "dog-coordinator" },
+      ));
+      assert.equal(failedCancellation.status, "denied");
+      await readFile(pendingDescriptor.handoff_path as string, "utf8");
+      await readFile(pendingDescriptor.operation_manifest as string, "utf8");
+    } finally {
+      ParallelDispatchCoordinator.prototype.cancel = originalCancel;
+    }
     const cancelled = JSON.parse(await hooks.tool!.sortie_cancel_parallel_dispatch!.execute(
       { run_id: prepared.run_id }, { sessionID: "root", agent: "dog-coordinator" },
     )) as { archived: boolean; ready: unknown[]; tasks: Array<{ phase: string }> };
     assert.equal(cancelled.archived, false);
     assert.equal(cancelled.ready.length, 0);
     assert.deepEqual(cancelled.tasks.map(({ phase }) => phase).sort(), ["running", "suppressed"]);
+    await assert.rejects(readFile(pendingDescriptor.handoff_path as string, "utf8"));
+    await assert.rejects(readFile(pendingDescriptor.operation_manifest as string, "utf8"));
     await hooks.event!({ event: { type: "session.idle", properties: { sessionID: "root" } } });
     const idle = JSON.parse(await hooks.tool!.sortie_parallel_dispatch_status!.execute(
       { run_id: prepared.run_id }, { sessionID: "root", agent: "dog-coordinator" },

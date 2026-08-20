@@ -121,7 +121,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       join(consumer, "node_modules", "sortie-dogs", "package.json"),
       "utf8",
     )) as { version?: string; scripts?: { prebuild?: string } };
-    assert.equal(installedPackage.version, "0.5.2");
+    assert.equal(installedPackage.version, "0.5.3");
     assert.equal(
       installedPackage.scripts?.prebuild,
       "node --input-type=module --eval \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true });\"",
@@ -372,7 +372,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     for (const asset of loaded.runtimeAssets) {
       assert.equal(asset.version, RUNTIME_ASSET_VERSION, `${asset.name} version must match the shared marker`);
     }
-    assert.equal(RUNTIME_ASSET_VERSION, "0.3.33-readable-terminal-report-v1");
+    assert.equal(RUNTIME_ASSET_VERSION, "0.3.34-parallel-host-contract-v1");
     const coordinatorFrontmatter = /^---\r?\n([\s\S]*?)\r?\n---/u.exec(coordinator.content)?.[1];
     assert.ok(coordinatorFrontmatter);
     assert.match(coordinatorFrontmatter, /^model: openai\/gpt-5\.6-luna$/m);
@@ -615,10 +615,15 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     );
     assert.ok(parallelContract, "coordinator needs the immutable parallel artifact contract");
     assert.match(parallelContract[1], /artifact_exception:\s*active bound parallel dog-worker -> sortie_create_parallel_commit_artifact exactly once -> durable artifact acceptance before return -> immediate gate release/);
+    assert.match(parallelContract[1], /generated_control:\s*returned handoff_path under context_digest once \| returned operation_manifest as final manifest line once \| never descriptor metadata/);
+    assert.match(parallelContract[1], /preflight:\s*prepare creates scoped handoff \+ operation manifest in managed_path -> sortie_check_contract status=ok -> unique returned paths in INITIAL_HANDOFF_FIXTURE shape -> Task/);
     assert.match(parallelContract[1], /artifact_restart:\s*durable running-task artifact -> exact replay; never create a second commit/);
     assert.match(parallelContract[1], /artifact_result:\s*targeted validation \| exact scoped A\/M\/D stage \| one managed-branch commit \| verified direct child\/object\/artifact \| bounded result/);
     assert.match(parallelContract[1], /artifact_failure:\s*retain edits\/worktree \| release gate \| failed \| blocked marker; raw output forbidden/);
     assert.match(parallelContract[1], /terminal_marker:\s*release complete and no tools\/subprocess in flight -> SORTIE_PARALLEL_OUTCOME strict bounded JSON/);
+    assert.match(parallelContract[1], /descriptor:\s*exact run_id \| dispatch_id \| task_id \| managed_path as one project_root field \| branch/);
+    assert.match(coordinator.content, /managed_path as the digest's single\s+project_root field/);
+    assert.match(coordinator.content, /Prepare creates each descriptor's unique scoped handoff\s+and operation manifest in managed_path and returns their absolute handoff_path and operation_manifest/);
     assert.match(worker.content, /After editing only scope_write, call sortie_create_parallel_commit_artifact exactly once while the lease\s+is held with run_id, dispatch_id, validation_executable, optional validation_args_json, and optional\s+timeout_ms/);
     assert.match(worker.content, /Immediately call sortie_release_write_gate after that capability, including producer failure/);
     assert.match(worker.content, /This exception applies only to the\s+parallel lane; the normal sequential-worker lane remains unchanged/);
@@ -1285,7 +1290,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(sortie.content, /never route a worker to the user/i);
 
     for (const asset of loaded.runtimeAssets) {
-      assert.equal(asset.version, "0.3.33-readable-terminal-report-v1");
+      assert.equal(asset.version, "0.3.34-parallel-host-contract-v1");
       const frontmatter = asset.content.match(/^---\r?\n([\s\S]+?)\r?\n---\r?\n/);
       assert.ok(frontmatter, `${asset.name} must have frontmatter`);
       const entries = Object.fromEntries(
