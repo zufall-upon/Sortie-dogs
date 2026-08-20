@@ -1102,7 +1102,7 @@ export function createContinuationHooks(
           identity.agent !== policy().agent
         ) return;
       }
-      if (pending || state?.ownsHostContinuation === true) output.enabled = false;
+      if (pending || (state?.ownsHostContinuation === true && input.overflow !== true)) output.enabled = false;
     },
 
     observeModel(sessionID, model, synthetic = false): void {

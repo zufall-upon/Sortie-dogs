@@ -1226,6 +1226,9 @@ test("host auto-continue is disabled only while a Sortie rollover is pending", a
   const stillOwned = { enabled: true };
   await hooks.compactionAutoContinue({ sessionID: "ses_root", overflow: false }, stillOwned);
   assert.equal(stillOwned.enabled, false, "synthetic prompt observation cannot reopen the race");
+  const nativeOverflow = { enabled: true };
+  await hooks.compactionAutoContinue({ sessionID: "ses_root", overflow: true }, nativeOverflow);
+  assert.equal(nativeOverflow.enabled, true, "stale Sortie ownership cannot suppress a later native overflow resume");
   await hooks.textComplete({ sessionID: "ses_root" }, { text: "resumed unit checkpoint" });
   const resumed = { enabled: true };
   await hooks.compactionAutoContinue({ sessionID: "ses_root", overflow: false }, resumed);
