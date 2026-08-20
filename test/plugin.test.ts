@@ -3026,20 +3026,32 @@ test("an established coordinator root keeps its role while preserving a selected
 
 test("a coordinator command cannot convert an existing non-coordinator root", async () => {
   await withProject("foreign-root-coordinator-command", async (directory) => {
+    const toasts: unknown[] = [];
     const hooks = await SortieDogsPlugin({ directory, client: { session: {
       get: async () => ({ data: { agent: "build" } }),
+    }, tui: {
+      showToast: async (request: unknown) => { toasts.push(request); },
     } } as never });
     const chat = hooks["chat.message"]!;
-    await assert.rejects(
-      () => chat(
-        { sessionID: "foreign-root", agent: "dog-coordinator" },
-        {
-          message: { agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
-          parts: [{ type: "text", text: "release routine" }],
-        },
-      ),
-      /SORTIE_FRESH_SESSION_REQUIRED: \/sortie requires a fresh root dog-coordinator session/u,
-    );
+    const foreignInput = { sessionID: "foreign-root", agent: "dog-coordinator" };
+    const foreignOutput = {
+      message: { agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+      parts: [{ type: "text", text: "release routine" }],
+    };
+    await chat(foreignInput, foreignOutput);
+    assert.equal(foreignInput.agent, "build");
+    assert.equal(foreignOutput.message.agent, "build");
+    assert.deepEqual(foreignOutput.parts, [{
+      type: "text",
+      text: "SORTIE_FRESH_SESSION_REQUIRED. Do not perform the requested task or use tools. " +
+        "Explain only that /sortie must start in a new session because this session belongs to build.",
+    }]);
+    assert.deepEqual(toasts, [{ body: {
+      title: "Sortie-dogs",
+      message: "/sortie requires a new session. This session remains build.",
+      variant: "warning",
+      duration: 8000,
+    } }]);
 
     const historyHooks = await SortieDogsPlugin({ directory, client: { session: {
       get: async () => ({ data: {} }),
@@ -3052,16 +3064,15 @@ test("a coordinator command cannot convert an existing non-coordinator root", as
       { sessionID: "foreign-history" },
       { system: [] },
     );
-    await assert.rejects(
-      () => historyHooks["chat.message"]!(
-        { sessionID: "foreign-history", agent: "dog-coordinator" },
-        {
-          message: { agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
-          parts: [{ type: "text", text: "release routine" }],
-        },
-      ),
-      /SORTIE_FRESH_SESSION_REQUIRED: \/sortie requires a fresh root dog-coordinator session/u,
-    );
+    const historyInput = { sessionID: "foreign-history", agent: "dog-coordinator" };
+    const historyOutput = {
+      message: { agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+      parts: [{ type: "text", text: "release routine" }],
+    };
+    await historyHooks["chat.message"]!(historyInput, historyOutput);
+    assert.equal(historyInput.agent, "build");
+    assert.equal(historyOutput.message.agent, "build");
+    assert.match(String((historyOutput.parts[0] as { text?: unknown }).text), /SORTIE_FRESH_SESSION_REQUIRED/u);
 
     const partialClientHooks = await SortieDogsPlugin({ directory, client: { session: {
       messages: async () => { throw new Error("unavailable"); },
@@ -3115,16 +3126,14 @@ test("a coordinator command cannot convert an existing non-coordinator root", as
         { info: { role: "user", agent: "build" }, parts: [{ type: "text", text: "foreign history" }] },
       ] }),
     } } as never });
-    await assert.rejects(
-      () => trustedIdentityHooks["chat.message"]!(
-        { sessionID: "trusted-identity", agent: "dog-coordinator" },
-        {
-          message: { agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
-          parts: [{ type: "text", text: "release routine" }],
-        },
-      ),
-      /SORTIE_FRESH_SESSION_REQUIRED/u,
-    );
+    const trustedIdentityInput = { sessionID: "trusted-identity", agent: "dog-coordinator" };
+    const trustedIdentityOutput = {
+      message: { agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+      parts: [{ type: "text", text: "release routine" }],
+    };
+    await trustedIdentityHooks["chat.message"]!(trustedIdentityInput, trustedIdentityOutput);
+    assert.equal(trustedIdentityInput.agent, "build");
+    assert.equal(trustedIdentityOutput.message.agent, "build");
 
     const childHooks = await SortieDogsPlugin({ directory, client: { session: {
       get: async () => ({ data: { agent: "dog-coordinator", parentID: "foreign-root" } }),
@@ -3303,7 +3312,7 @@ test("coordinator children and foreign text parts cannot become continuation roo
       } as never],
     }];
     const hooks = await SortieDogsPlugin({ directory, client: { session: {
-      get: async () => ({ data: { agent: "dog-coordinator" } }),
+      get: async () => ({ data: { agent: "dog-coordinator", parentID: "root" } }),
       messages: async () => ({ data: messages }),
       summarize: async () => { summarizeCalls += 1; return { data: true }; },
       promptAsync: async () => ({ data: true }),

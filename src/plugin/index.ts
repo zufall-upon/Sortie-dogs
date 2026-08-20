@@ -109,7 +109,13 @@ export interface OpenCodePluginInput {
   directory: string;
   worktree?: string;
   /** The host SDK client. Absent in hosts that construct the plugin without one. */
-  client?: SessionMessageReader & ContinuationClient & OpenCodeModelAvailabilityClient;
+  client?: SessionMessageReader & ContinuationClient & OpenCodeModelAvailabilityClient & {
+    tui?: {
+      showToast?: (request: {
+        body: { title: string; message: string; variant: "warning"; duration: number };
+      }) => Promise<unknown>;
+    };
+  };
   [key: string]: unknown;
 }
 
@@ -2648,7 +2654,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     }
   }
 
-  async function hostSessionHasForeignUserTurn(sessionID: string): Promise<boolean | undefined> {
+  async function hostSessionForeignUserAgent(sessionID: string): Promise<string | false | undefined> {
     const messages = input.client?.session?.messages;
     if (messages === undefined) return undefined;
     try {
@@ -2662,12 +2668,17 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         if ((message.info?.role ?? message.role) !== "user") continue;
         const agent = message.info?.agent ?? message.agent;
         if (typeof agent !== "string") return undefined;
-        if (agent !== COORDINATOR_AGENT) return true;
+        if (agent !== COORDINATOR_AGENT) return agent;
       }
       return false;
     } catch {
       return undefined;
     }
+  }
+
+  async function hostSessionHasForeignUserTurn(sessionID: string): Promise<boolean | undefined> {
+    const agent = await hostSessionForeignUserAgent(sessionID);
+    return typeof agent === "string" ? true : agent;
   }
 
   async function assistantMessageText(
@@ -3024,16 +3035,44 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           ? undefined
           : await hostSessionIdentity(chatInput.sessionID);
         const foreignRoot = identity?.agent !== undefined && identity.agent !== COORDINATOR_AGENT;
-        const foreignHistory = await hostSessionHasForeignUserTurn(chatInput.sessionID);
+        const foreignHistoryAgent = await hostSessionForeignUserAgent(chatInput.sessionID);
+        const foreignHistory = typeof foreignHistoryAgent === "string" ? true : foreignHistoryAgent;
         const unverifiableRoot =
           (input.client?.session?.get !== undefined && (
             identity === undefined ||
             (identity.agent === undefined && input.client?.session?.messages === undefined)
           )) ||
           (input.client?.session?.messages !== undefined && foreignHistory === undefined);
+        const currentAgent = !explicitChild && identity?.parentPresent === false
+          ? typeof foreignHistoryAgent === "string"
+            ? foreignHistoryAgent
+            : foreignRoot
+              ? identity.agent
+              : undefined
+          : undefined;
+        if (currentAgent !== undefined) {
+          const noticePart = output.parts.find((part) => isRecord(part) && part.type === "text");
+          if (!isRecord(noticePart)) {
+            throw new Error(
+              "SORTIE_FRESH_SESSION_REQUIRED: /sortie requires a fresh root dog-coordinator session; it cannot convert another agent or promote a child",
+            );
+          }
+          chatInput.agent = currentAgent;
+          output.message.agent = currentAgent;
+          noticePart.text = "SORTIE_FRESH_SESSION_REQUIRED. Do not perform the requested task or use tools. " +
+            `Explain only that /sortie must start in a new session because this session belongs to ${currentAgent}.`;
+          output.parts.splice(0, output.parts.length, noticePart);
+          await input.client?.tui?.showToast?.({ body: {
+            title: "Sortie-dogs",
+            message: `/sortie requires a new session. This session remains ${currentAgent}.`,
+            variant: "warning",
+            duration: 8000,
+          } }).catch(() => undefined);
+          return;
+        }
         if (
-          explicitChild || identity?.parentPresent === true || foreignRoot ||
-          foreignHistory === true || unverifiableRoot
+          explicitChild || identity?.parentPresent === true ||
+          foreignHistory || unverifiableRoot
         ) {
           throw new Error(
             "SORTIE_FRESH_SESSION_REQUIRED: /sortie requires a fresh root dog-coordinator session; it cannot convert another agent or promote a child",
