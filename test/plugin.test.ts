@@ -4322,6 +4322,18 @@ test("fresh coordinator bootstrap permits only exact missing configured control 
     await invoke("bash", {
       command: `& "M:\\@HyperV\\gh-cli\\bin\\gh.exe" api graphql -f 'query=query { viewer { login } }'`,
     }, "bootstrap-project-query-bash");
+    await invoke("powershell", {
+      command: `& "M:\\@HyperV\\gh-cli\\bin\\gh.exe" version`,
+    }, "bootstrap-gh-version");
+    await invoke("bash", {
+      command: `/opt/gh.exe --version`,
+    }, "bootstrap-gh-version-flag");
+    await assert.rejects(
+      invoke("powershell", {
+        command: `& "M:\\@HyperV\\gh-cli\\bin\\gh.exe" version unexpected`,
+      }, "bootstrap-gh-version-extra"),
+      (error: unknown) => error instanceof Error && /operation manifest unavailable/u.test(error.message),
+    );
     await invoke("bash", {
       command: `& "M:\\@HyperV\\gh-cli\\bin\\gh.exe" api graphql -f 'query=mutation { placeholder }'`,
     }, "bootstrap-project-mutation-bash");

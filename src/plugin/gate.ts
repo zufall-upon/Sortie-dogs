@@ -284,7 +284,8 @@ function isDirectFindHash(tokens: readonly string[]): boolean {
 
 function isRemoteOnlyGitHubCommand(tokens: readonly string[]): boolean {
   const command = tokens[1]?.toLowerCase();
-  return command === "project" || (command === "api" && tokens[2]?.toLowerCase() === "graphql") ||
+  return ((command === "version" || command === "--version") && tokens.length === 2) ||
+    command === "project" || (command === "api" && tokens[2]?.toLowerCase() === "graphql") ||
     (command === "auth" && tokens.length === 3 && tokens[2]?.toLowerCase() === "status");
 }
 
