@@ -1003,8 +1003,8 @@ test("generated assets require the user's language, per-line output, and emoji-m
   assert.match(readable[1], /^ {4}language: user's request language for all prose/m);
   assert.match(readable[1], /^ {4}verbatim: identifiers, paths, commands, document keys/m);
   assert.match(readable[1], /^ {4}separation: one blank line between plan, progress/m);
-  assert.match(readable[1], /^ {4}line_rule: one statement per line; run-on single-line output forbidden$/m);
-  assert.match(readable[1], /^ {4}emoji: exactly one leading emoji per user-facing line$/m);
+  assert.match(readable[1], /^ {4}line_rule: one statement per flat Markdown list item; run-on single-line output forbidden$/m);
+  assert.match(readable[1], /^ {4}emoji: exactly one emoji immediately after each list marker; Evidence heading begins with one emoji$/m);
   for (const emoji of ["🎯", "📊", "🐕", "🔍", "➡️", "⛔", "✅"]) {
     assert.ok(readable[1].includes(emoji), emoji);
   }
@@ -1093,37 +1093,38 @@ test("generated coordinator renders a conclusion-first view with readable Eviden
     /TERMINAL_OUTPUT_TEMPLATE\r?\n([\s\S]+?)\r?\nEND_TERMINAL_OUTPUT_TEMPLATE/,
   );
   assert.ok(output);
-  assert.equal(output[1].match(/\r?\n\r?\n/g)?.length, 1, "layers need exactly one blank separator");
+  assert.equal(output[1].match(/\r?\n\r?\n/g)?.length, 2, "Evidence heading needs one blank separator on each side");
   assert.match(
     output[1],
-    /^➡️ next_action: <single action or none>\r?\n\r?\n🔍 Evidence\r?$/mu,
-    "exactly one blank line leads from the conclusion block to the fixed Evidence heading",
+    /^- ➡️ next_action: <single action or none>\r?\n\r?\n🔍 Evidence\r?\n\r?\n- 🔍 status:/mu,
+    "exactly one blank line surrounds the fixed Evidence heading",
   );
   const layers = output[1].split(/\r?\n\r?\n/);
-  assert.equal(layers.length, 2);
-  const [standard, evidence] = layers;
-  assert.ok(evidence, "standard view and Evidence need one blank separator");
+  assert.equal(layers.length, 3);
+  const [standard, evidenceHeading, evidence] = layers;
+  assert.equal(evidenceHeading, "🔍 Evidence");
+  assert.ok(evidence, "Evidence heading and list need one blank separator");
   const standardLines = standard.split(/\r?\n/);
   assert.equal(standardLines.length, 3);
   assert.ok(standardLines.every((line) => line.length > 0), "standard view has no internal blank line");
-  assert.match(standardLines[0], /^✅ conclusion: status: .+; task_id: .+; .+$/u);
-  assert.match(standardLines[1], /^🔍 validation: <ordered PASS\/FAIL summary>$/u);
-  assert.match(standardLines[2], /^➡️ next_action: <single action or none>$/u);
+  assert.match(standardLines[0], /^- ✅ conclusion: status: .+; task_id: .+; .+$/u);
+  assert.match(standardLines[1], /^- 🔍 validation: <ordered PASS\/FAIL summary>$/u);
+  assert.match(standardLines[2], /^- ➡️ next_action: <single action or none>$/u);
   assert.deepEqual(standardLines, [
-    "✅ conclusion: status: <DONE | BLOCKED | NEED_DECISION>; task_id: <stable task id>; <short conclusion>",
-    "🔍 validation: <ordered PASS/FAIL summary>",
-    "➡️ next_action: <single action or none>",
-  ], "conclusion view is exactly three lines in conclusion, validation, next_action order");
+    "- ✅ conclusion: status: <DONE | BLOCKED | NEED_DECISION>; task_id: <stable task id>; <short conclusion>",
+    "- 🔍 validation: <ordered PASS/FAIL summary>",
+    "- ➡️ next_action: <single action or none>",
+  ], "conclusion view is exactly three flat list items in conclusion, validation, next_action order");
   assert.deepEqual(
-    standardLines.map((line) => /^\S+ ([a-z_]+):/u.exec(line)?.[1]),
+    standardLines.map((line) => /^- \S+ ([a-z_]+):/u.exec(line)?.[1]),
     ["conclusion", "validation", "next_action"],
     "standard protocol keys stay exact ASCII and ordered",
   );
   assert.ok(standardLines[0].includes("status: "), "status stays exact ASCII on the conclusion statement");
   assert.ok(standardLines[0].includes("; task_id: "), "task_id stays exact ASCII on the conclusion statement");
   assert.ok(
-    standardLines.every((line) => /^(?:✅|🐕|🔍|➡️) [\x00-\x7F]/u.test(line)),
-    "each standard line has exactly one leading emoji before an ASCII protocol key",
+    standardLines.every((line) => /^- (?:✅|🐕|🔍|➡️) [\x00-\x7F]/u.test(line)),
+    "each standard list item has exactly one emoji before an ASCII protocol key",
   );
   assert.ok(
     standardLines.every((line) => !/[.!?]\s+\S/u.test(line)),
@@ -1131,7 +1132,6 @@ test("generated coordinator renders a conclusion-first view with readable Eviden
   );
 
   const evidenceLines = evidence.split(/\r?\n/);
-  assert.equal(evidenceLines[0], "🔍 Evidence");
   assert.ok(evidenceLines.every((line) => line.length > 0), "Evidence has no internal blank line");
   const evidenceKeys = [
     "status",
@@ -1147,39 +1147,39 @@ test("generated coordinator renders a conclusion-first view with readable Eviden
     "new_findings",
     "next_action",
   ];
-  const evidenceFieldLines = evidenceLines.slice(1).filter((line) => /^(?:🔍|➡️) [a-z_]+:/u.test(line));
+  const evidenceFieldLines = evidenceLines.filter((line) => /^- (?:🔍|➡️) [a-z_]+:/u.test(line));
   assert.deepEqual(
-    evidenceFieldLines.map((line) => /^\S+ ([a-z_]+):/u.exec(line)?.[1]),
+    evidenceFieldLines.map((line) => /^- \S+ ([a-z_]+):/u.exec(line)?.[1]),
     evidenceKeys,
     "Evidence protocol keys stay exact ASCII and ordered",
   );
-  assert.match(evidence, /^🔍 manifest:$/mu, "Evidence retains the exact ASCII manifest key");
-  assert.match(evidence, /^🔍 manifest:\r?\n🔍   source_manifest:/mu, "manifest entries use continuation lines");
-  assert.match(evidence, /^🔍 decisions:/mu, "Evidence retains the exact ASCII decisions key");
-  assert.match(evidence, /^🔍 scout:\r?\n🔍   attempted:/mu, "scout fields use continuation lines");
-  assert.match(evidence, /^🔍 tracker:$/mu, "Evidence retains durable tracker batch state");
-  assert.match(evidence, /^🔍 tracker:\r?\n🔍   inventory_fingerprint:/mu, "tracker fields use continuation lines");
-  assert.match(evidence, /^🔍 raw_status: /mu, "Evidence retains the exact ASCII raw_status key");
-  assert.match(evidence, /^🔍 diff: /mu, "Evidence retains the exact ASCII diff key");
-  assert.match(evidence, /^🔍 stale_paths:$/mu, "Evidence retains the exact ASCII stale_paths key");
-  assert.match(evidence, /^🔍 stale_paths:\r?\n🔍   - /mu, "stale paths use continuation lines");
-  assert.match(evidence, /^🔍 new_findings:$/mu, "Evidence retains the exact ASCII new_findings key");
-  assert.match(evidence, /^🔍 new_findings:\r?\n🔍   - /mu, "new findings use continuation lines");
-  assert.match(evidence, /^➡️ next_action: /mu, "Evidence retains the exact ASCII next_action key");
+  assert.match(evidence, /^- 🔍 manifest:$/mu, "Evidence retains the exact ASCII manifest key");
+  assert.match(evidence, /^- 🔍 manifest:\r?\n- 🔍   source_manifest:/mu, "manifest entries use separate flat list items");
+  assert.match(evidence, /^- 🔍 decisions:/mu, "Evidence retains the exact ASCII decisions key");
+  assert.match(evidence, /^- 🔍 scout:\r?\n- 🔍   attempted:/mu, "scout fields use separate flat list items");
+  assert.match(evidence, /^- 🔍 tracker:$/mu, "Evidence retains durable tracker batch state");
+  assert.match(evidence, /^- 🔍 tracker:\r?\n- 🔍   inventory_fingerprint:/mu, "tracker fields use separate flat list items");
+  assert.match(evidence, /^- 🔍 raw_status: /mu, "Evidence retains the exact ASCII raw_status key");
+  assert.match(evidence, /^- 🔍 diff: /mu, "Evidence retains the exact ASCII diff key");
+  assert.match(evidence, /^- 🔍 stale_paths:$/mu, "Evidence retains the exact ASCII stale_paths key");
+  assert.match(evidence, /^- 🔍 stale_paths:\r?\n- 🔍   - /mu, "stale paths use separate flat list items");
+  assert.match(evidence, /^- 🔍 new_findings:$/mu, "Evidence retains the exact ASCII new_findings key");
+  assert.match(evidence, /^- 🔍 new_findings:\r?\n- 🔍   - /mu, "new findings use separate flat list items");
+  assert.match(evidence, /^- ➡️ next_action: /mu, "Evidence retains the exact ASCII next_action key");
   assert.ok(
-    evidenceLines.every((line) => /^(?:🔍|➡️) [\x00-\x7F]/u.test(line)),
-    "each Evidence line has exactly one leading emoji",
+    evidenceLines.every((line) => /^- (?:🔍|➡️) [\x00-\x7F]/u.test(line)),
+    "each Evidence list item has exactly one emoji",
   );
   assert.ok(
-    evidenceLines.slice(1).every((line) => /^(?:🔍|➡️) (?:[a-z_]+:|  )/u.test(line)),
-    "each Evidence line contains one canonical field statement or continuation",
+    evidenceLines.every((line) => /^- (?:🔍|➡️) (?:[a-z_]+:|  )/u.test(line)),
+    "each Evidence list item contains one canonical field statement or continuation",
   );
-  const validationLine = evidenceLines.find((line) => line.startsWith("🔍 validation:"));
-  assert.equal(validationLine, "🔍 validation:");
+  const validationLine = evidenceLines.find((line) => line.startsWith("- 🔍 validation:"));
+  assert.equal(validationLine, "- 🔍 validation:");
   const validationEntries = evidenceLines
-    .filter((line) => /^🔍\s+\[\d+\] command:/u.test(line))
+    .filter((line) => /^- 🔍\s+\[\d+\] command:/u.test(line))
     .map((line) => {
-      const match = /^🔍\s+\[(\d+)\] command: ([^;]+); exit: ([^;]+); fingerprint: (.+)$/u.exec(line);
+      const match = /^- 🔍\s+\[(\d+)\] command: ([^;]+); exit: ([^;]+); fingerprint: (.+)$/u.exec(line);
       assert.ok(match, `invalid validation continuation: ${line}`);
       return {
         index: Number(match[1]),
@@ -1200,7 +1200,7 @@ test("generated coordinator renders a conclusion-first view with readable Eviden
     /conclusion is the user's answer[\s\S]+detail layer, never a replacement for the conclusion/i,
   );
   assert.match(coordinator.content, /first non-empty\s+output: no plan, progress, assessment, Evidence heading, or preamble may precede it/i);
-  assert.match(coordinator.content, /Never put two\s+canonical fields or multiple validation entries on one physical line/i);
+  assert.match(coordinator.content, /Never put\s+two canonical fields or multiple validation entries in one list item/i);
 });
 
 test("shipped document fixtures satisfy the schemas the write gate enforces", () => {
@@ -4322,18 +4322,12 @@ test("fresh coordinator bootstrap permits only exact missing configured control 
     await invoke("bash", {
       command: `& "M:\\@HyperV\\gh-cli\\bin\\gh.exe" api graphql -f 'query=query { viewer { login } }'`,
     }, "bootstrap-project-query-bash");
-    await assert.rejects(
-      invoke("bash", {
-        command: `& "M:\\@HyperV\\gh-cli\\bin\\gh.exe" api graphql -f 'query=mutation { placeholder }'`,
-      }, "bootstrap-project-mutation-bash"),
-      (error: unknown) => error instanceof Error && /operation manifest unavailable/u.test(error.message),
-    );
-    await assert.rejects(
-      invoke("powershell", {
-        command: `& "M:\\@HyperV\\gh-cli\\bin\\gh.exe" api graphql -f 'query=mutation { placeholder }'`,
-      }, "bootstrap-project-mutation"),
-      (error: unknown) => error instanceof Error && /operation manifest unavailable/u.test(error.message),
-    );
+    await invoke("bash", {
+      command: `& "M:\\@HyperV\\gh-cli\\bin\\gh.exe" api graphql -f 'query=mutation { placeholder }'`,
+    }, "bootstrap-project-mutation-bash");
+    await invoke("powershell", {
+      command: `$env:GITHUB_TOKEN = $null; $env:GH_TOKEN = $null; & "M:\\@HyperV\\gh-cli\\bin\\gh.exe" api graphql --paginate --slurp -f 'query=mutation { placeholder }'`,
+    }, "bootstrap-project-mutation");
     await assert.rejects(
       invoke("powershell", {
         command: `& "M:\\@HyperV\\gh-cli\\bin\\gh.exe" api graphql --field query=@payload.graphql`,

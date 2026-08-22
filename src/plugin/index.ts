@@ -61,6 +61,7 @@ import {
   extractWritePaths,
   bootstrapWritePaths,
   isGitMutation,
+  isInlineRemoteMutation,
   isKnownReadOnlyTool,
   isRemoteMutation,
   normalizeCommand,
@@ -3473,11 +3474,16 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         toolInput.tool === "sortie_parallel_integration_status";
       const sessionGateCapability = toolInput.tool === "sortie_bind_write_gate" ||
         toolInput.tool === "sortie_release_write_gate" || toolInput.tool === PARALLEL_COMMIT_ARTIFACT_CAPABILITY;
-      const bootstrap = bootstrapRequired && !coordinatorCapability && !sessionGateCapability &&
+      const coordinatorDirectRemoteMutation = coordinatorRoot && bootstrapRequired &&
+        !coordinatorCapability && !sessionGateCapability && isInlineRemoteMutation(toolInput.tool, output.args) &&
+        await isExactCoordinatorRoot(toolInput);
+      const bootstrap = bootstrapRequired && !coordinatorDirectRemoteMutation &&
+        !coordinatorCapability && !sessionGateCapability &&
         !sessionAuthorizations.has(toolInput.sessionID) && (coordinatorRoot || coordinatorRoots.size > 0)
         ? await bootstrapControlState()
         : undefined;
-      if (coordinatorRoot && bootstrapRequired && !coordinatorCapability && !sessionGateCapability) {
+      if (coordinatorRoot && bootstrapRequired && !coordinatorDirectRemoteMutation &&
+        !coordinatorCapability && !sessionGateCapability) {
         if (bootstrap === undefined || bootstrap.missing.length > 0 || !bootstrap.usable) {
           if (bootstrap !== undefined && await permitsBootstrapWrite(toolInput, output, bootstrap)) return;
           if (isKnownReadOnlyTool(toolInput.tool, output.args, loaded?.readOnlyTools)) return;
