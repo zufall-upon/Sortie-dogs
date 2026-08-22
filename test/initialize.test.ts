@@ -60,11 +60,11 @@ test("fresh init installs every runtime asset and preserves project settings", a
     const result = await initializeProject(project);
 
     assert.equal(result.status, "installed");
-    assert.equal(result.version, "0.3.35-coordinator-direct-readable-output-v1");
+    assert.equal(result.version, "0.3.37-autonomous-review-progress-v1");
     for (const asset of runtimeAssets) {
       assert.equal(await readFile(join(project, ".opencode", asset.installPath), "utf8"), asset.content);
     }
-    assert.equal(await readFile(join(project, MARKER), "utf8"), "0.3.35-coordinator-direct-readable-output-v1\n");
+    assert.equal(await readFile(join(project, MARKER), "utf8"), "0.3.37-autonomous-review-progress-v1\n");
     assert.equal(await readFile(config, "utf8"), "{\"userSetting\":true}\n");
   } finally {
     await clean(project);
@@ -116,7 +116,7 @@ test("compatible update replaces owned drift, preserves user files, then becomes
     const marker = join(project, MARKER);
     const ownedAsset = join(project, ".opencode", runtimeAssets[0].installPath);
     const userFile = join(project, ".opencode", "sortie-dogs.json");
-    await writeFile(marker, (await readFile(marker, "utf8")).replace("0.3.35-coordinator-direct-readable-output-v1", "0.2.19-card20"));
+    await writeFile(marker, (await readFile(marker, "utf8")).replace("0.3.37-autonomous-review-progress-v1", "0.2.19-card20"));
     await writeFile(ownedAsset, "old RPT-owned content\n");
     await writeFile(userFile, "{\"userOwned\":true}\n");
 
@@ -151,7 +151,7 @@ test("rename migration removes a byte-matched owned legacy file", async () => {
     assert.equal(result.status, "installed");
     assert.deepEqual(result.preservedLegacyPaths, []);
     assert.equal(await lstat(legacyWorker).then(() => true, () => false), false);
-    assert.equal(await readFile(join(project, MARKER), "utf8"), "0.3.35-coordinator-direct-readable-output-v1\n");
+    assert.equal(await readFile(join(project, MARKER), "utf8"), "0.3.37-autonomous-review-progress-v1\n");
   } finally {
     await clean(project);
   }
@@ -180,7 +180,7 @@ test("a recognized current-version marker repairs a partial install and then bec
   try {
     const firstAsset = runtimeAssets[0];
     await mkdir(join(project, ".opencode", "agent"), { recursive: true });
-    await writeFile(join(project, MARKER), "0.3.35-coordinator-direct-readable-output-v1\n");
+    await writeFile(join(project, MARKER), "0.3.37-autonomous-review-progress-v1\n");
     await writeFile(join(project, ".opencode", firstAsset.installPath), firstAsset.content);
 
     const repaired = await initializeProject(project);
@@ -232,7 +232,7 @@ test("package 0.3.3 runtime card26 migrates to package 0.3.19 runtime card41", a
     await writeFile(ownedAsset, "card26 content\n");
     const updated = await initializeProject(project);
     assert.equal(updated.status, "installed");
-    assert.equal(await readFile(marker, "utf8"), "0.3.35-coordinator-direct-readable-output-v1\n");
+    assert.equal(await readFile(marker, "utf8"), "0.3.37-autonomous-review-progress-v1\n");
     assert.equal(await readFile(ownedAsset, "utf8"), runtimeAssets[0].content);
   } finally {
     await clean(project);
@@ -260,7 +260,7 @@ test("a future version in the recognized compatibility line is rejected", async 
   const project = await fixtureDirectory();
   try {
     await mkdir(join(project, ".opencode"));
-    await writeFile(join(project, MARKER), "0.3.36-card99\n");
+    await writeFile(join(project, MARKER), "0.3.38-card99\n");
 
     await assert.rejects(initializeProject(project), (error: unknown) => {
       assert.ok(error instanceof ProjectInitializationError);
@@ -379,12 +379,12 @@ test("CLI init supports an explicit project root, repeated init, and help", asyn
     });
     assert.deepEqual(await runCli(["init", project]), {
       exit: 0,
-      stdout: "Initialized Sortie-dogs 0.3.35-coordinator-direct-readable-output-v1.\n",
+      stdout: "Initialized Sortie-dogs 0.3.37-autonomous-review-progress-v1.\n",
       stderr: "",
     });
     assert.deepEqual(await runCli(["init", project]), {
       exit: 0,
-      stdout: "Sortie-dogs 0.3.35-coordinator-direct-readable-output-v1 is already initialized.\n",
+      stdout: "Sortie-dogs 0.3.37-autonomous-review-progress-v1 is already initialized.\n",
       stderr: "",
     });
   } finally {
@@ -511,13 +511,13 @@ test("CLI global init reports its target, legacy preservation, and invalid combi
     const env = { OPENCODE_CONFIG_DIR: globalRoot };
     assert.deepEqual(await runCli(["init", "--global"], env), {
       exit: 0,
-      stdout: `Initialized Sortie-dogs 0.3.35-coordinator-direct-readable-output-v1 globally at ${globalRoot}.\n` +
+      stdout: `Initialized Sortie-dogs 0.3.37-autonomous-review-progress-v1 globally at ${globalRoot}.\n` +
         "Preserved legacy runtime files: agent/coordinator-mk2a2.md.\n",
       stderr: "",
     });
     assert.deepEqual(await runCli(["init", "--global"], env), {
       exit: 0,
-      stdout: `Sortie-dogs 0.3.35-coordinator-direct-readable-output-v1 is already initialized globally at ${globalRoot}.\n` +
+      stdout: `Sortie-dogs 0.3.37-autonomous-review-progress-v1 is already initialized globally at ${globalRoot}.\n` +
         "Preserved legacy runtime files: agent/coordinator-mk2a2.md.\n",
       stderr: "",
     });

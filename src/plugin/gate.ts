@@ -691,12 +691,6 @@ export function isRemoteMutation(tool: string, args: unknown): boolean {
   return extractWritePaths(tool, args).remoteMutation === true;
 }
 
-/** Coordinator-owned remote mutations must keep their payload inline and auditable. */
-export function isInlineRemoteMutation(tool: string, args: unknown): boolean {
-  if (!isRemoteMutation(tool, args) || !isRecord(args) || typeof args.command !== "string") return false;
-  return !/(?:--input(?:\s|=)|query\s*=\s*@)/iu.test(args.command);
-}
-
 /**
  * Quoted segments keep their contents; every unquoted whitespace run collapses to one space so the
  * same command written with different spacing compares equal.

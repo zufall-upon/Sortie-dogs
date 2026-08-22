@@ -211,26 +211,40 @@ test("distinct review candidates have independent phases and retry budgets", () 
   expectDenial(() => lane.beforeTool("root", "task", candidateB), "CONSULTATION_RETRY_INVALID");
 });
 
-test("a final review after initial findings is the one verification review", () => {
+test("materially revised verification artifacts continue while exact duplicates are denied", () => {
   const lane = new FastLaneController();
   lane.beginTurn("root", false);
   const evidence = "canonical_validation_exit: 0\nrisk_tags: [public-logic]\ncandidate_id: corrected";
   lane.beforeTool("root", "task", {
     subagent_type: "dog-reviewer",
-    prompt: `review_phase: initial\n${evidence}`,
+    prompt: `review_phase: final\n${evidence}`,
+  });
+  expectDenial(() => lane.beforeTool("root", "task", {
+    subagent_type: "dog-reviewer",
+    prompt: `review_phase: initial\n${evidence}\nartifact_revision: alternate-initial`,
+  }), "REVIEW_PHASE_INVALID");
+  lane.beforeTool("root", "task", {
+    subagent_type: "dog-reviewer",
+    prompt: `review_phase: verification\n${evidence}\nartifact_revision: r1`,
   });
   lane.beforeTool("root", "task", {
     subagent_type: "dog-reviewer",
-    prompt: `review_phase: final\n${evidence}`,
+    prompt: `review_phase: verification\n${evidence}\nartifact_revision: r2`,
   });
   expectDenial(() => lane.beforeTool("root", "task", {
     subagent_type: "dog-reviewer",
-    prompt: `review_phase: final\n${evidence}`,
-  }), "REVIEW_LIMIT");
+    prompt: `review_phase: verification\n${evidence}\nartifact_revision: r2`,
+  }), "CONSULTATION_RETRY_INVALID");
+  for (let revision = 3; revision <= 35; revision += 1) {
+    lane.beforeTool("root", "task", {
+      subagent_type: "dog-reviewer",
+      prompt: `review_phase: verification\n${evidence}\nartifact_revision: r${revision}`,
+    });
+  }
   expectDenial(() => lane.beforeTool("root", "task", {
     subagent_type: "dog-reviewer",
-    prompt: `review_phase: final\n${evidence}\nfallback_retry: true`,
-  }, { consultationFallbackAuthorized: true }), "REVIEW_LIMIT");
+    prompt: `review_phase: verification\n${evidence}\nartifact_revision: r1`,
+  }), "CONSULTATION_RETRY_INVALID");
 });
 
 test("typed evidence fields reject duplicates, case changes, and unbracketed risks", () => {

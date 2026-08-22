@@ -55,10 +55,9 @@ interface FastLaneTurnState {
 }
 
 interface ReviewCandidateState {
-  initialDispatches: number;
-  initialPrompt?: string;
-  verificationDispatches: number;
-  verificationPrompt?: string;
+  initialPrompts: Set<string>;
+  verificationPrompts: Set<string>;
+  fallbackRetries: Set<string>;
 }
 
 export interface FastLaneToolOptions {
@@ -339,40 +338,34 @@ export class FastLaneController {
       const candidateKey = reviewCandidateBasis(prompt);
       let candidate = state.reviewCandidates.get(candidateKey);
       if (candidate === undefined) {
-        candidate = { initialDispatches: 0, verificationDispatches: 0 };
+        candidate = { initialPrompts: new Set(), verificationPrompts: new Set(), fallbackRetries: new Set() };
         state.reviewCandidates.set(candidateKey, candidate);
       }
       const phase = requestedPhase === "final"
-        ? candidate.initialDispatches === 0 ? "initial" : "verification"
+        ? candidate.initialPrompts.size === 0 ? "initial" : "verification"
         : requestedPhase;
-      if (requestedPhase === "final" && candidate.verificationDispatches > 0) {
-        throw new FastLaneDeniedError("REVIEW_LIMIT");
-      }
       const retry = lineValue(prompt, "fallback_retry");
-      const count = phase === "initial" ? candidate.initialDispatches : candidate.verificationDispatches;
-      const previousPrompt = phase === "initial" ? candidate.initialPrompt : candidate.verificationPrompt;
-      if (phase === "initial" && candidate.verificationDispatches > 0) {
+      const basis = fallbackBasis(prompt);
+      const prompts = phase === "initial" ? candidate.initialPrompts : candidate.verificationPrompts;
+      if (phase === "initial" && candidate.verificationPrompts.size > 0) {
         throw new FastLaneDeniedError("REVIEW_PHASE_INVALID");
       }
-      if (phase === "verification" && candidate.initialDispatches === 0) {
+      if (phase === "verification" && candidate.initialPrompts.size === 0) {
         throw new FastLaneDeniedError("REVIEW_PHASE_INVALID");
       }
-      if ((count === 0 && retry !== undefined) || (count === 1 && retry !== "true")) {
-        throw new FastLaneDeniedError("CONSULTATION_RETRY_INVALID");
-      }
-      if (count === 1 && options.consultationFallbackAuthorized !== true) {
-        throw new FastLaneDeniedError("CONSULTATION_RETRY_UNAUTHORIZED");
-      }
-      if (count === 1 && previousPrompt !== fallbackBasis(prompt)) {
-        throw new FastLaneDeniedError("CONSULTATION_RETRY_MISMATCH");
-      }
-      if (count >= 2) throw new FastLaneDeniedError("REVIEW_LIMIT");
-      if (phase === "initial") {
-        candidate.initialPrompt ??= fallbackBasis(prompt);
-        candidate.initialDispatches += 1;
+      if (retry !== undefined) {
+        if (retry !== "true" || !prompts.has(basis)) throw new FastLaneDeniedError("CONSULTATION_RETRY_INVALID");
+        if (candidate.fallbackRetries.has(`${phase}\0${basis}`)) throw new FastLaneDeniedError("REVIEW_LIMIT");
+        if (options.consultationFallbackAuthorized !== true) {
+          throw new FastLaneDeniedError("CONSULTATION_RETRY_UNAUTHORIZED");
+        }
+        candidate.fallbackRetries.add(`${phase}\0${basis}`);
       } else {
-        candidate.verificationPrompt ??= fallbackBasis(prompt);
-        candidate.verificationDispatches += 1;
+        if (prompts.has(basis)) throw new FastLaneDeniedError("CONSULTATION_RETRY_INVALID");
+        if (phase === "initial" && candidate.initialPrompts.size > 0) {
+          throw new FastLaneDeniedError("REVIEW_PHASE_INVALID");
+        }
+        prompts.add(basis);
       }
       return;
     }

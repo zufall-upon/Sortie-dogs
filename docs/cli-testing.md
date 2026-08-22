@@ -104,11 +104,10 @@ The packed OpenCode CLI run passes only when all applicable checks succeed:
 - A fresh `/sortie` session reaches `dog-coordinator`, performs the bounded scout
   and worker handoffs, records canonical validation, and reaches a terminal
   coordinator result.
-- Before the first worker dispatch, that root coordinator may create or repair only
-  root-level `operation-manifest.json`/`*.operation-manifest.json` and matching
-  `handoff*.json` control files. One exact native write or one paired `apply_patch`
-  is allowed. Shell redirection, source paths, child sessions, and malformed
-  contracts remain fail-closed; after accepted dispatch, normal inspection and binding apply.
+- The exact root coordinator is never write-gated, including before the first worker dispatch.
+  It owns direct inspection, tracker, Git, release, package, and control-file operations without
+  executable or subcommand allowlists. Child and worker sessions remain fail-closed until their
+  accepted handoff and operation manifest bind an exact write scope.
 - A declared write succeeds while an undeclared write is rejected before
   mutation. Independently, `sortie-dogs lint ... --changed-path
   undeclared.txt --strict` returns exit `1` and

@@ -61,7 +61,6 @@ import {
   extractWritePaths,
   bootstrapWritePaths,
   isGitMutation,
-  isInlineRemoteMutation,
   isKnownReadOnlyTool,
   isRemoteMutation,
   normalizeCommand,
@@ -3474,15 +3473,14 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         toolInput.tool === "sortie_parallel_integration_status";
       const sessionGateCapability = toolInput.tool === "sortie_bind_write_gate" ||
         toolInput.tool === "sortie_release_write_gate" || toolInput.tool === PARALLEL_COMMIT_ARTIFACT_CAPABILITY;
-      const coordinatorDirectRemoteMutation = coordinatorRoot && bootstrapRequired &&
-        !coordinatorCapability && !sessionGateCapability && isInlineRemoteMutation(toolInput.tool, output.args) &&
+      const exactCoordinatorDirectOperation = coordinatorRoot && !coordinatorCapability && !sessionGateCapability &&
         await isExactCoordinatorRoot(toolInput);
-      const bootstrap = bootstrapRequired && !coordinatorDirectRemoteMutation &&
+      const bootstrap = bootstrapRequired && !exactCoordinatorDirectOperation &&
         !coordinatorCapability && !sessionGateCapability &&
         !sessionAuthorizations.has(toolInput.sessionID) && (coordinatorRoot || coordinatorRoots.size > 0)
         ? await bootstrapControlState()
         : undefined;
-      if (coordinatorRoot && bootstrapRequired && !coordinatorDirectRemoteMutation &&
+      if (coordinatorRoot && bootstrapRequired && !exactCoordinatorDirectOperation &&
         !coordinatorCapability && !sessionGateCapability) {
         if (bootstrap === undefined || bootstrap.missing.length > 0 || !bootstrap.usable) {
           if (bootstrap !== undefined && await permitsBootstrapWrite(toolInput, output, bootstrap)) return;
@@ -3892,7 +3890,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         if (bootstrapRequired && bootstrap?.usable === true && bootstrap.missing.length > 0) {
           if (!bootstrapIdleWarnings.has(eventSessionID)) {
             bootstrapIdleWarnings.add(eventSessionID);
-            console.warn("[sortie-dogs] coordinator bootstrap paused: configured control files are missing");
+            console.warn("[sortie-dogs] coordinator controls are missing: worker dispatch remains unavailable");
           }
         }
       }

@@ -993,7 +993,7 @@ test("generated coordinator requires bounded progress, one Task evidence line, a
   ]) assert.ok(content.includes(required), required);
 });
 
-test("generated assets require the user's language, per-line output, and emoji-marked lines", () => {
+test("generated assets require the user's language and compact block-separated output", () => {
   const coordinator = runtimeAssets.find((asset) => asset.name === "dog-coordinator");
   assert.ok(coordinator);
   const readable = coordinator.content.match(
@@ -1003,8 +1003,8 @@ test("generated assets require the user's language, per-line output, and emoji-m
   assert.match(readable[1], /^ {4}language: user's request language for all prose/m);
   assert.match(readable[1], /^ {4}verbatim: identifiers, paths, commands, document keys/m);
   assert.match(readable[1], /^ {4}separation: one blank line between plan, progress/m);
-  assert.match(readable[1], /^ {4}line_rule: one statement per flat Markdown list item; run-on single-line output forbidden$/m);
-  assert.match(readable[1], /^ {4}emoji: exactly one emoji immediately after each list marker; Evidence heading begins with one emoji$/m);
+  assert.match(readable[1], /^ {4}line_rule: one statement per physical line; run-on single-line output forbidden$/m);
+  assert.match(readable[1], /^ {4}emoji: exactly one status emoji in a terminal report; no emoji inside Evidence$/m);
   for (const emoji of ["🎯", "📊", "🐕", "🔍", "➡️", "⛔", "✅"]) {
     assert.ok(readable[1].includes(emoji), emoji);
   }
@@ -1079,7 +1079,7 @@ test("generated assets require the user's language, per-line output, and emoji-m
   assert.match(worker.content, /denied optional check remains\s+DENIED evidence and never justifies another tool step/i);
 });
 
-test("generated coordinator renders a conclusion-first view with readable Evidence wrapping", () => {
+test("generated coordinator renders a compact conclusion and collapsible YAML Evidence", () => {
   const coordinator = runtimeAssets.find((asset) => asset.name === "dog-coordinator");
   assert.ok(coordinator);
   const semantics = coordinator.content.match(
@@ -1087,120 +1087,46 @@ test("generated coordinator renders a conclusion-first view with readable Eviden
   );
   assert.ok(semantics);
   assert.match(semantics[1], /DONE: requested evaluation completed, including evidence-based candidate rejection or non-adoption/);
+  assert.match(semantics[1], /status_icons: DONE=✅ \| BLOCKED=⛔ \| NEED_DECISION=❓/u);
   assert.match(semantics[1], /quality_gate_fail: validation evidence \+ autonomous non-adoption decision -> DONE; release remains unperformed/);
   assert.match(semantics[1], /process_defect: gate \| routing \| handoff \| local tool defect -> autonomous repair; never terminal BLOCKED/);
   const output = coordinator.content.match(
     /TERMINAL_OUTPUT_TEMPLATE\r?\n([\s\S]+?)\r?\nEND_TERMINAL_OUTPUT_TEMPLATE/,
   );
   assert.ok(output);
-  assert.equal(output[1].match(/\r?\n\r?\n/g)?.length, 2, "Evidence heading needs one blank separator on each side");
-  assert.match(
-    output[1],
-    /^- ➡️ next_action: <single action or none>\r?\n\r?\n🔍 Evidence\r?\n\r?\n- 🔍 status:/mu,
-    "exactly one blank line surrounds the fixed Evidence heading",
-  );
-  const layers = output[1].split(/\r?\n\r?\n/);
-  assert.equal(layers.length, 3);
-  const [standard, evidenceHeading, evidence] = layers;
-  assert.equal(evidenceHeading, "🔍 Evidence");
-  assert.ok(evidence, "Evidence heading and list need one blank separator");
-  const standardLines = standard.split(/\r?\n/);
-  assert.equal(standardLines.length, 3);
-  assert.ok(standardLines.every((line) => line.length > 0), "standard view has no internal blank line");
-  assert.match(standardLines[0], /^- ✅ conclusion: status: .+; task_id: .+; .+$/u);
-  assert.match(standardLines[1], /^- 🔍 validation: <ordered PASS\/FAIL summary>$/u);
-  assert.match(standardLines[2], /^- ➡️ next_action: <single action or none>$/u);
-  assert.deepEqual(standardLines, [
-    "- ✅ conclusion: status: <DONE | BLOCKED | NEED_DECISION>; task_id: <stable task id>; <short conclusion>",
-    "- 🔍 validation: <ordered PASS/FAIL summary>",
-    "- ➡️ next_action: <single action or none>",
-  ], "conclusion view is exactly three flat list items in conclusion, validation, next_action order");
-  assert.deepEqual(
-    standardLines.map((line) => /^- \S+ ([a-z_]+):/u.exec(line)?.[1]),
-    ["conclusion", "validation", "next_action"],
-    "standard protocol keys stay exact ASCII and ordered",
-  );
-  assert.ok(standardLines[0].includes("status: "), "status stays exact ASCII on the conclusion statement");
-  assert.ok(standardLines[0].includes("; task_id: "), "task_id stays exact ASCII on the conclusion statement");
-  assert.ok(
-    standardLines.every((line) => /^- (?:✅|🐕|🔍|➡️) [\x00-\x7F]/u.test(line)),
-    "each standard list item has exactly one emoji before an ASCII protocol key",
-  );
-  assert.ok(
-    standardLines.every((line) => !/[.!?]\s+\S/u.test(line)),
-    "each standard line contains one statement",
-  );
-
-  const evidenceLines = evidence.split(/\r?\n/);
-  assert.ok(evidenceLines.every((line) => line.length > 0), "Evidence has no internal blank line");
-  const evidenceKeys = [
-    "status",
-    "task_id",
-    "manifest",
-    "decisions",
-    "validation",
-    "scout",
-    "tracker",
-    "raw_status",
-    "diff",
-    "stale_paths",
-    "new_findings",
-    "next_action",
-  ];
-  const evidenceFieldLines = evidenceLines.filter((line) => /^- (?:🔍|➡️) [a-z_]+:/u.test(line));
-  assert.deepEqual(
-    evidenceFieldLines.map((line) => /^- \S+ ([a-z_]+):/u.exec(line)?.[1]),
-    evidenceKeys,
-    "Evidence protocol keys stay exact ASCII and ordered",
-  );
-  assert.match(evidence, /^- 🔍 manifest:$/mu, "Evidence retains the exact ASCII manifest key");
-  assert.match(evidence, /^- 🔍 manifest:\r?\n- 🔍   source_manifest:/mu, "manifest entries use separate flat list items");
-  assert.match(evidence, /^- 🔍 decisions:/mu, "Evidence retains the exact ASCII decisions key");
-  assert.match(evidence, /^- 🔍 scout:\r?\n- 🔍   attempted:/mu, "scout fields use separate flat list items");
-  assert.match(evidence, /^- 🔍 tracker:$/mu, "Evidence retains durable tracker batch state");
-  assert.match(evidence, /^- 🔍 tracker:\r?\n- 🔍   inventory_fingerprint:/mu, "tracker fields use separate flat list items");
-  assert.match(evidence, /^- 🔍 raw_status: /mu, "Evidence retains the exact ASCII raw_status key");
-  assert.match(evidence, /^- 🔍 diff: /mu, "Evidence retains the exact ASCII diff key");
-  assert.match(evidence, /^- 🔍 stale_paths:$/mu, "Evidence retains the exact ASCII stale_paths key");
-  assert.match(evidence, /^- 🔍 stale_paths:\r?\n- 🔍   - /mu, "stale paths use separate flat list items");
-  assert.match(evidence, /^- 🔍 new_findings:$/mu, "Evidence retains the exact ASCII new_findings key");
-  assert.match(evidence, /^- 🔍 new_findings:\r?\n- 🔍   - /mu, "new findings use separate flat list items");
-  assert.match(evidence, /^- ➡️ next_action: /mu, "Evidence retains the exact ASCII next_action key");
-  assert.ok(
-    evidenceLines.every((line) => /^- (?:🔍|➡️) [\x00-\x7F]/u.test(line)),
-    "each Evidence list item has exactly one emoji",
-  );
-  assert.ok(
-    evidenceLines.every((line) => /^- (?:🔍|➡️) (?:[a-z_]+:|  )/u.test(line)),
-    "each Evidence list item contains one canonical field statement or continuation",
-  );
-  const validationLine = evidenceLines.find((line) => line.startsWith("- 🔍 validation:"));
-  assert.equal(validationLine, "- 🔍 validation:");
-  const validationEntries = evidenceLines
-    .filter((line) => /^- 🔍\s+\[\d+\] command:/u.test(line))
-    .map((line) => {
-      const match = /^- 🔍\s+\[(\d+)\] command: ([^;]+); exit: ([^;]+); fingerprint: (.+)$/u.exec(line);
-      assert.ok(match, `invalid validation continuation: ${line}`);
-      return {
-        index: Number(match[1]),
-        keys: ["command", "exit", "fingerprint"],
-        command: match[2],
-        exit: Number(match[3]),
-        fingerprint: match[4],
-      };
-    });
+  const [summary, evidence] = output[1].split(/\r?\n\r?\n(?=<details>)/);
+  assert.ok(summary);
+  assert.ok(evidence);
+  assert.deepEqual(summary.split(/\r?\n\r?\n/), [
+    "<status emoji> **<DONE | BLOCKED | NEED_DECISION>** `<stable task id>` — <short conclusion>",
+    "**Validation:** <ordered PASS/FAIL summary>",
+    "**Next:** <single action or none>",
+  ], "visible conclusion is three compact paragraphs without list styling");
+  assert.equal(summary.match(/<status emoji>/gu)?.length, 1, "template has one status emoji slot");
+  assert.doesNotMatch(summary, /^-/mu, "visible conclusion has no Markdown list items");
+  assert.match(evidence, /^<details>\r?\n<summary>Evidence: <compact counts><\/summary>/u);
+  assert.match(evidence, /\r?\n```yaml\r?\n[\s\S]+\r?\n```\r?\n\r?\n<\/details>$/u);
+  assert.doesNotMatch(evidence, /[✅⛔❓🎯📊🐕🔍➡️]/u, "Evidence has no icons");
+  const yaml = /```yaml\r?\n([\s\S]+?)\r?\n```/u.exec(evidence)?.[1];
+  assert.ok(yaml);
+  assert.match(yaml, /^manifest:\r?\n {2}source:\r?\n {4}- <exact source path>\r?\n {2}operation:/mu);
+  assert.match(yaml, /^decisions:\r?\n {2}- /mu);
+  assert.match(yaml, /^validation:$/mu);
+  assert.doesNotMatch(yaml, /^(?:status|task_id|next_action|scout|tracker):/mu, "empty and duplicated fields are omitted");
+  const validationEntries = [...yaml.matchAll(
+    /^ {2}- command: (.+)\r?\n {4}exit: (.+)\r?\n {4}fingerprint: (.+)$/gmu,
+  )].map((match) => ({ command: match[1], exit: Number(match[2]), fingerprint: match[3] }));
   assert.deepEqual(validationEntries, [
-    { index: 1, keys: ["command", "exit", "fingerprint"], command: "npm test", exit: 1, fingerprint: "initial failure" },
-    { index: 2, keys: ["command", "exit", "fingerprint"], command: "npm test", exit: 0, fingerprint: "final pass" },
-  ], "every Evidence validation entry retains exact ASCII command, exit, and fingerprint keys and values");
-  assert.equal(validationEntries[0]?.exit, 1, "append-only validation history keeps initial exit=1 first");
-  assert.equal(validationEntries.at(-1)?.exit, 0, "append-only validation history keeps latest exit=0 last");
+    { command: "npm test", exit: 1, fingerprint: "initial failure" },
+    { command: "npm test", exit: 0, fingerprint: "final pass" },
+  ], "fenced YAML retains append-only command, exit, and fingerprint evidence");
   assert.match(
     coordinator.content,
     /conclusion is the user's answer[\s\S]+detail layer, never a replacement for the conclusion/i,
   );
   assert.match(coordinator.content, /first non-empty\s+output: no plan, progress, assessment, Evidence heading, or preamble may precede it/i);
-  assert.match(coordinator.content, /Never put\s+two canonical fields or multiple validation entries in one list item/i);
+  assert.match(coordinator.content, /Omit false, none,\s+empty arrays, empty objects, and fields already represented by the status line or Next paragraph/i);
+  assert.match(coordinator.content, /status, task_id, and next_action never repeat inside Evidence/i);
 });
 
 test("shipped document fixtures satisfy the schemas the write gate enforces", () => {
@@ -4277,7 +4203,7 @@ test("session policy is passive until an exact trigger and deactivates only on e
   });
 });
 
-test("fresh coordinator bootstrap permits only exact missing configured control files", async () => {
+test("fresh exact coordinator is ungated while child sessions remain fail-closed", async () => {
   await withProject("coordinator-bootstrap", async (directory) => {
     const identities: Record<string, Record<string, unknown>> = {
       root: { agent: "dog-coordinator" },
@@ -4328,46 +4254,41 @@ test("fresh coordinator bootstrap permits only exact missing configured control 
     await invoke("bash", {
       command: `/opt/gh.exe --version`,
     }, "bootstrap-gh-version-flag");
-    await assert.rejects(
-      invoke("powershell", {
-        command: `& "M:\\@HyperV\\gh-cli\\bin\\gh.exe" version unexpected`,
-      }, "bootstrap-gh-version-extra"),
-      (error: unknown) => error instanceof Error && /operation manifest unavailable/u.test(error.message),
-    );
+    await invoke("powershell", {
+      command: `$env:GITHUB_TOKEN=$null; $env:GH_TOKEN=$null; & "M:\\@HyperV\\gh-cli\\bin\\gh.exe" auth status`,
+    }, "bootstrap-gh-auth-status-with-token-clear");
+    await invoke("powershell", {
+      command: `& "M:\\@HyperV\\gh-cli\\bin\\gh.exe" version unexpected`,
+    }, "bootstrap-gh-version-extra");
+    await invoke("powershell", {
+      command: `& "M:\\@HyperV\\gh-cli\\bin\\gh.exe" future-command --future-flag`,
+    }, "bootstrap-gh-future-command");
+    await invoke("sortie_reflection", {
+      action: "list",
+      layer: "process",
+    }, "bootstrap-reflection");
     await invoke("bash", {
       command: `& "M:\\@HyperV\\gh-cli\\bin\\gh.exe" api graphql -f 'query=mutation { placeholder }'`,
     }, "bootstrap-project-mutation-bash");
     await invoke("powershell", {
       command: `$env:GITHUB_TOKEN = $null; $env:GH_TOKEN = $null; & "M:\\@HyperV\\gh-cli\\bin\\gh.exe" api graphql --paginate --slurp -f 'query=mutation { placeholder }'`,
     }, "bootstrap-project-mutation");
-    await assert.rejects(
-      invoke("powershell", {
-        command: `& "M:\\@HyperV\\gh-cli\\bin\\gh.exe" api graphql --field query=@payload.graphql`,
-      }, "bootstrap-project-query-file"),
-      (error: unknown) => error instanceof Error && /operation manifest unavailable/u.test(error.message),
-    );
-    await assert.rejects(
-      invoke("powershell", {
-        command: `& "M:\\@HyperV\\gh-cli\\bin\\gh.exe" api graphql -f=query=@payload.graphql`,
-      }, "bootstrap-project-query-file-equals"),
-      (error: unknown) => error instanceof Error && /operation manifest unavailable/u.test(error.message),
-    );
-    await assert.rejects(
-      invoke("powershell", {
-        command: `& "M:\\@HyperV\\gh-cli\\bin\\gh.exe" api graphql -fquery=@payload.graphql`,
-      }, "bootstrap-project-query-file-concatenated"),
-      (error: unknown) => error instanceof Error && /operation manifest unavailable/u.test(error.message),
-    );
+    await invoke("powershell", {
+      command: `& "M:\\@HyperV\\gh-cli\\bin\\gh.exe" api graphql --field query=@payload.graphql`,
+    }, "bootstrap-project-query-file");
+    await invoke("powershell", {
+      command: `& "M:\\@HyperV\\gh-cli\\bin\\gh.exe" api graphql -f=query=@payload.graphql`,
+    }, "bootstrap-project-query-file-equals");
+    await invoke("powershell", {
+      command: `& "M:\\@HyperV\\gh-cli\\bin\\gh.exe" api graphql -fquery=@payload.graphql`,
+    }, "bootstrap-project-query-file-concatenated");
     for (const [tool, args, callID] of [
       ["write", { file: "src/plugin/index.ts", content: "not-written" }, "deny-source"],
       ["write", { content: "not-written" }, "deny-unknown"],
       ["bash", { command: `echo bad > ${manifestPath}` }, "deny-shell"],
       ["apply_patch", { patchText: `*** Begin Patch\n*** Add File: operation-manifest.json\n+{}\n*** Add File: handoff.json\n+{}\n*** Add File: source.ts\n+bad\n*** End Patch` }, "deny-broad-patch"],
     ] as const) {
-      await assert.rejects(
-        invoke(tool, args, callID),
-        (error: unknown) => error instanceof Error && /operation manifest unavailable/u.test(error.message),
-      );
+      await invoke(tool, args, callID);
     }
 
     await hooks["tool.execute.after"]!(
@@ -4378,7 +4299,7 @@ test("fresh coordinator bootstrap permits only exact missing configured control 
   });
 });
 
-test("fresh coordinator bootstrap fails closed for malformed created control files and idles safely", async () => {
+test("fresh exact coordinator remains ungated after malformed control files and idle", async () => {
   await withProject("coordinator-bootstrap-malformed", async (directory) => {
     const hooks = await SortieDogsPlugin({
       directory,
@@ -4399,12 +4320,9 @@ test("fresh coordinator bootstrap fails closed for malformed created control fil
       { tool: "write", sessionID: "root", callID: "handoff-after-malformed", agent: "dog-coordinator" },
       { args: { file: join(directory, "handoff.json"), content: "{}" } },
     );
-    await assert.rejects(
-      hooks["tool.execute.before"]!(
-        { tool: "write", sessionID: "root", callID: "source-after-malformed", agent: "dog-coordinator" },
-        { args: { file: join(directory, "source.ts"), content: "bad" } },
-      ),
-      (error: unknown) => error instanceof Error && /operation manifest unavailable/u.test(error.message),
+    await hooks["tool.execute.before"]!(
+      { tool: "write", sessionID: "root", callID: "source-after-malformed", agent: "dog-coordinator" },
+      { args: { file: join(directory, "source.ts"), content: "bad" } },
     );
   });
 });
