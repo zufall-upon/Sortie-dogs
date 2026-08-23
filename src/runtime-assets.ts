@@ -22,7 +22,7 @@ export interface RuntimeAsset {
 export const runtimeAssets = [
   {
     name: "dog-coordinator",
-    version: "0.3.42-serial-capacity-fix-v1",
+    version: "0.3.43-authorized-remote-target-v1",
     installPath: "agent/dog-coordinator.md",
     content: `---
 description: Canonical MkII coordinator packaged by Sortie-dogs
@@ -702,12 +702,17 @@ PROJECT_V2_INVENTORY_QUERY_FIXTURE
     local_retry: shell quoting + variable binding + output decoding only; query text unchanged
     repeated_local_failure: user authorized stuck consultation -> dog-advisor material-uncertainty before terminal; third inventory invocation forbidden
 END_PROJECT_V2_INVENTORY_QUERY_FIXTURE
-Treat the active project root as immutable for the session. A candidate whose implementation root is
-outside it is not actionable in the current batch: hold or reassign the candidate and ask the user to
-open or switch to the owning project. Do not inspect, dispatch into, or mutate the external root from
-the active session. Never mark a cross-project implementation option as recommended; recommend the
-project-local option or hold when no project-local implementation exists. Even an explicit cross-project
-selection identifies the next owning-project task, not permission to continue it under the current root.
+Treat the active project root as immutable for source ownership and local commits. An unrelated external
+repository still requires hold, reassignment, or a session switch. A project-authorized remote execution
+target is different: when project instructions define a HyperV, VM, SSH, container, deployment, or Linux
+validation route for the same logical project, or the user explicitly selects such a known target, execute
+it from the current session. Do not require another OpenCode session inside the guest. Keep the worker's
+project_root on the active local project and bind its operation manifest there; declare the exact approved
+transport command, remote host, remote working or temp path, mutation scope, and validation command.
+Project-defined remote instructions and explicit target selection authorize the environment and bounded
+non-destructive work, but never waive credential, destructive-operation, publication, or promotion gates.
+If the target is not already defined by project evidence, ask once for the missing host or root instead of
+claiming cross-project capacity unavailable.
 For required graphify, try one direct query; unavailable or generated-script denial falls back to bounded
 read/grep, never skill-source inspection. For approved Windows gh, use two literal token clears then the
 direct client, never if, Test-Path, or a scriptblock.
@@ -728,11 +733,15 @@ COORDINATOR_DIRECT_OPERATION_FIXTURE
     candidate_body: full body evaluated at snapshot acquisition; queued acceptance digest is sufficient after compaction
     relevance_gate: current user scope + project evidence required; title | order | bulk status insufficient
     relevance_ambiguous: one question before mutation or dispatch
-    active_project_root: most specific task + tracker + project-instruction owner; immutable for the session
+    active_project_root: most specific task + tracker + project-instruction owner; immutable source ownership and local commit root
     workspace_ancestor: multiple projects below it -> forbidden as activeProjectRoot
-    external_implementation_root: hold | reassign | switch owning project; no inspect | dispatch | mutation
+    unrelated_external_root: hold | reassign | switch owning project; no inspect | dispatch | mutation
     cross_project_recommendation: forbidden; recommend project-local option or hold
-    explicit_external_selection: identifies next owning-project task; never continues under current root
+    authorized_remote_target: project instructions or explicit user selection + same logical project -> execute from current session
+    remote_worker_root: active local project; exact transport + host + remote path + scope + validation in local operation manifest
+    guest_opencode_session: never required for an authorized remote target
+    remote_unknown: ask once for missing host | root; never report cross-project capacity unavailable
+    remote_safety_boundary: environment authorization never waives credential | destructive | publication | promotion gates
     canonical_validation: exact accepted handoff or manifest command + project authorization -> coordinator-owned fallback
     worker_validation_denial: executable-not-allowlisted -> no redispatch | no blocker-resolution worker
     validation_fallback: coordinator direct exactly once; external approval required -> one question
@@ -1241,10 +1250,10 @@ TERMINAL_STATUS_SEMANTICS_FIXTURE
 END_TERMINAL_STATUS_SEMANTICS_FIXTURE
 
 RUNTIME_ASSET_VERSION_SYNC_FIXTURE
-    runtime_version: 0.3.42-serial-capacity-fix-v1
+    runtime_version: 0.3.43-authorized-remote-target-v1
     shared_marker: src/asset-version.ts
-    packaged_expectation: test/plugin-loader.test.ts uses 0.3.42-serial-capacity-fix-v1
-    initialize_expectation: test/initialize.test.ts uses 0.3.42-serial-capacity-fix-v1
+    packaged_expectation: test/plugin-loader.test.ts uses 0.3.43-authorized-remote-target-v1
+    initialize_expectation: test/initialize.test.ts uses 0.3.43-authorized-remote-target-v1
     rule: runtime asset versions, shared marker, packaged expectation, and initialize expectation change together
 END_RUNTIME_ASSET_VERSION_SYNC_FIXTURE
 
@@ -1313,7 +1322,7 @@ END_TERMINAL_EVIDENCE_FIXTURE
   },
   {
     name: "dog-worker",
-    version: "0.3.42-serial-capacity-fix-v1",
+    version: "0.3.43-authorized-remote-target-v1",
     installPath: "agent/dog-worker.md",
     content: `---
 description: Dedicated worker for the canonical Sortie-dogs coordinator
@@ -1431,7 +1440,7 @@ the user.
   },
   {
     name: "dog-scout",
-    version: "0.3.42-serial-capacity-fix-v1",
+    version: "0.3.43-authorized-remote-target-v1",
     installPath: "agent/dog-scout.md",
     content: `---
 description: Bounded evidence scout for dog-coordinator
@@ -1480,7 +1489,7 @@ prose; keep the keys, paths, commands, and identifiers verbatim.
   },
   {
     name: "dog-reviewer",
-    version: "0.3.42-serial-capacity-fix-v1",
+    version: "0.3.43-authorized-remote-target-v1",
     installPath: "agent/dog-reviewer.md",
     content: `---
 description: Independent source reviewer for dog-coordinator
@@ -1509,7 +1518,7 @@ or transport.
   },
   {
     name: "dog-advisor",
-    version: "0.3.42-serial-capacity-fix-v1",
+    version: "0.3.43-authorized-remote-target-v1",
     installPath: "agent/dog-advisor.md",
     content: `---
 description: Focused technical advisor for dog-coordinator
@@ -1533,7 +1542,7 @@ provider, vendor, model, variant, or transport.
   },
   {
     name: "sortie",
-    version: "0.3.42-serial-capacity-fix-v1",
+    version: "0.3.43-authorized-remote-target-v1",
     installPath: "command/sortie.md",
     content: `---
 description: Start the canonical Sortie-dogs MkII workflow
