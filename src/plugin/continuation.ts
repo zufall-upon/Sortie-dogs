@@ -357,8 +357,6 @@ interface SessionState {
   resumeIssuedEpoch?: number | undefined;
   /** Resume attempts made for the current epoch, bounded by the configured scheduler budget. */
   resumeAttempts: number;
-  /** This compaction belongs to Sortie until the resumed turn is observed. */
-  ownsHostContinuation: boolean;
   /** Rollover epoch whose compaction prompt hook has started. */
   compactingEpoch?: number | undefined;
   /** Prevents idle fallback from racing an explicit marker being resolved. */
@@ -472,7 +470,6 @@ export function createContinuationHooks(
       idleDeferred: false,
       rolloverEpoch: 0,
       resumeAttempts: 0,
-      ownsHostContinuation: false,
       textCompleting: false,
       directUsed: false,
       stepContinueCount: 0,
@@ -745,7 +742,6 @@ export function createContinuationHooks(
       if (continueReport === undefined) {
         state.pendingRollover = false;
         state.compactedRollover = false;
-        state.ownsHostContinuation = false;
         state.preserveCompactionScope = false;
         state.recoverySummaryValidated = false;
         if (state.resetAttemptsAfterCompaction) state.attempts = 0;
@@ -791,7 +787,6 @@ export function createContinuationHooks(
         state.promptPending = false;
         state.continueReport = undefined;
         state.latestReport = undefined;
-        state.ownsHostContinuation = false;
         state.preserveCompactionScope = false;
         state.recoverySummaryValidated = false;
         warnRollover(sessionID, "retries-exhausted");
@@ -813,7 +808,6 @@ export function createContinuationHooks(
     state.resumeIssuingEpoch = undefined;
     state.resumeIssuedEpoch = undefined;
     state.resumeAttempts = 0;
-    state.ownsHostContinuation = true;
     state.compactingEpoch = undefined;
     state.latestReport = report;
     state.continueReport = resume ? report : undefined;
@@ -961,7 +955,6 @@ export function createContinuationHooks(
             state.pendingRollover = false;
             state.promptPending = false;
             state.continueReport = undefined;
-            state.ownsHostContinuation = false;
             state.preserveCompactionScope = false;
             state.recoverySummaryValidated = false;
             return;
@@ -1000,7 +993,6 @@ export function createContinuationHooks(
           }
           // The resumed coordinator completed a turn, so no late event from its prior compaction can
           // compete with the next host-managed compaction.
-          state.ownsHostContinuation = false;
         }
         if (state.directUsed && output.text.includes(ROLLOVER_MARKER)) return;
         if (output.text.includes(ROLLOVER_MARKER)) {
@@ -1102,7 +1094,7 @@ export function createContinuationHooks(
           identity.agent !== policy().agent
         ) return;
       }
-      if (pending || (state?.ownsHostContinuation === true && input.overflow !== true)) output.enabled = false;
+      if (pending) output.enabled = false;
     },
 
     observeModel(sessionID, model, synthetic = false): void {
@@ -1119,7 +1111,6 @@ export function createContinuationHooks(
       if (!synthetic) {
         state.stepContinueCount = 0;
         state.stepContinueTotal = 0;
-        state.ownsHostContinuation = false;
         state.limitCompacted = false;
       }
     },

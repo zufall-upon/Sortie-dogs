@@ -22,13 +22,13 @@ export interface RuntimeAsset {
 export const runtimeAssets = [
   {
     name: "dog-coordinator",
-    version: "0.3.37-autonomous-review-progress-v1",
+    version: "0.3.38-terra-high-coordinator-v1",
     installPath: "agent/dog-coordinator.md",
     content: `---
 description: Canonical MkII coordinator packaged by Sortie-dogs
 mode: primary
-model: openai/gpt-5.6-luna
-variant: max
+model: openai/gpt-5.6-terra
+variant: high
 permission:
   question: allow
   task:
@@ -1220,10 +1220,10 @@ TERMINAL_STATUS_SEMANTICS_FIXTURE
 END_TERMINAL_STATUS_SEMANTICS_FIXTURE
 
 RUNTIME_ASSET_VERSION_SYNC_FIXTURE
-    runtime_version: 0.3.37-autonomous-review-progress-v1
+    runtime_version: 0.3.38-terra-high-coordinator-v1
     shared_marker: src/asset-version.ts
-    packaged_expectation: test/plugin-loader.test.ts uses 0.3.37-autonomous-review-progress-v1
-    initialize_expectation: test/initialize.test.ts uses 0.3.37-autonomous-review-progress-v1
+    packaged_expectation: test/plugin-loader.test.ts uses 0.3.38-terra-high-coordinator-v1
+    initialize_expectation: test/initialize.test.ts uses 0.3.38-terra-high-coordinator-v1
     rule: runtime asset versions, shared marker, packaged expectation, and initialize expectation change together
 END_RUNTIME_ASSET_VERSION_SYNC_FIXTURE
 
@@ -1292,7 +1292,7 @@ END_TERMINAL_EVIDENCE_FIXTURE
   },
   {
     name: "dog-worker",
-    version: "0.3.37-autonomous-review-progress-v1",
+    version: "0.3.38-terra-high-coordinator-v1",
     installPath: "agent/dog-worker.md",
     content: `---
 description: Dedicated worker for the canonical Sortie-dogs coordinator
@@ -1410,7 +1410,7 @@ the user.
   },
   {
     name: "dog-scout",
-    version: "0.3.37-autonomous-review-progress-v1",
+    version: "0.3.38-terra-high-coordinator-v1",
     installPath: "agent/dog-scout.md",
     content: `---
 description: Bounded evidence scout for dog-coordinator
@@ -1459,7 +1459,7 @@ prose; keep the keys, paths, commands, and identifiers verbatim.
   },
   {
     name: "dog-reviewer",
-    version: "0.3.37-autonomous-review-progress-v1",
+    version: "0.3.38-terra-high-coordinator-v1",
     installPath: "agent/dog-reviewer.md",
     content: `---
 description: Independent source reviewer for dog-coordinator
@@ -1488,7 +1488,7 @@ or transport.
   },
   {
     name: "dog-advisor",
-    version: "0.3.37-autonomous-review-progress-v1",
+    version: "0.3.38-terra-high-coordinator-v1",
     installPath: "agent/dog-advisor.md",
     content: `---
 description: Focused technical advisor for dog-coordinator
@@ -1512,7 +1512,7 @@ provider, vendor, model, variant, or transport.
   },
   {
     name: "sortie",
-    version: "0.3.37-autonomous-review-progress-v1",
+    version: "0.3.38-terra-high-coordinator-v1",
     installPath: "command/sortie.md",
     content: `---
 description: Start the canonical Sortie-dogs MkII workflow

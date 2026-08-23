@@ -1221,14 +1221,14 @@ test("host auto-continue is disabled only while a Sortie rollover is pending", a
   await hooks.sessionCompacting({ sessionID: "ses_root" }, {});
   const completed = { enabled: true };
   await hooks.compactionAutoContinue({ sessionID: "ses_root", overflow: false }, completed);
-  assert.equal(completed.enabled, false, "the owned compaction cannot race a duplicate host resume");
+  assert.equal(completed.enabled, true, "completed auto=false summarize releases host continuation ownership");
   hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-luna" }, true);
   const stillOwned = { enabled: true };
   await hooks.compactionAutoContinue({ sessionID: "ses_root", overflow: false }, stillOwned);
-  assert.equal(stillOwned.enabled, false, "synthetic prompt observation cannot reopen the race");
+  assert.equal(stillOwned.enabled, true, "synthetic prompt observation keeps later native compaction available");
   const nativeOverflow = { enabled: true };
-  await hooks.compactionAutoContinue({ sessionID: "ses_root", overflow: true }, nativeOverflow);
-  assert.equal(nativeOverflow.enabled, true, "stale Sortie ownership cannot suppress a later native overflow resume");
+  await hooks.compactionAutoContinue({ sessionID: "ses_root", overflow: false }, nativeOverflow);
+  assert.equal(nativeOverflow.enabled, true, "stale Sortie ownership cannot suppress a later native token compaction");
   await hooks.textComplete({ sessionID: "ses_root" }, { text: "resumed unit checkpoint" });
   const resumed = { enabled: true };
   await hooks.compactionAutoContinue({ sessionID: "ses_root", overflow: false }, resumed);

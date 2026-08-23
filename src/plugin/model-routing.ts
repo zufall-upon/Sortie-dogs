@@ -22,9 +22,9 @@ export type ModelRoutingConfig = Readonly<Record<string, RoleModelRoute>>;
 export const DEDICATED_WORKER_MODEL = "openai/gpt-5.6-luna";
 export const DEDICATED_WORKER_VARIANT = "max";
 
-/** The coordinator uses Luna at maximum effort to keep repeated root-context routing cheap and deliberate. */
-export const DEFAULT_COORDINATOR_MODEL = "openai/gpt-5.6-luna";
-export const DEFAULT_COORDINATOR_VARIANT = "max";
+/** The coordinator uses Terra High so routing and progress decisions do not bottleneck the workflow. */
+export const DEFAULT_COORDINATOR_MODEL = "openai/gpt-5.6-terra";
+export const DEFAULT_COORDINATOR_VARIANT = "high";
 
 /**
  * The stronger, far more expensive worker target a host may still select deliberately. It is no longer
@@ -87,7 +87,7 @@ const fixedModelRoleSet = new Set<string>(Object.keys(FIXED_MODEL_ROUTING));
 
 export const RECOMMENDED_LUNA_MODEL = "openai/gpt-5.6-luna";
 
-/** Coordinator state and routing use Luna Max; bounded evidence retrieval uses Luna High. */
+/** Coordinator state and routing use Terra High; bounded evidence retrieval uses Luna High. */
 export const DEFAULT_COORDINATOR_ROUTING: ModelRoutingConfig = Object.freeze({
   "dog-coordinator": Object.freeze({
     preferred: Object.freeze({

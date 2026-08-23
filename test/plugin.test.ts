@@ -321,8 +321,12 @@ test("recommended coordinator and Luna routes cover exact installed roles and re
   // The host declared another variant of the shipped worker model, so it joins that catalog entry.
   assert.deepEqual(defaults.modelCatalog.global, [
     {
+      model: DEFAULT_COORDINATOR_MODEL,
+      variants: [DEFAULT_COORDINATOR_VARIANT],
+    },
+    {
       model: DEDICATED_WORKER_MODEL,
-      variants: [DEFAULT_COORDINATOR_VARIANT, DEDICATED_WORKER_VARIANT, RECOMMENDED_SCOUT_VARIANT, "xhigh"]
+      variants: [DEDICATED_WORKER_VARIANT, RECOMMENDED_SCOUT_VARIANT, "xhigh"]
         .filter((variant, index, all) => all.indexOf(variant) === index),
     },
     { model: ESCALATION_WORKER_MODEL, variants: [ESCALATION_WORKER_VARIANT, CONSULTATION_FALLBACK_VARIANT] },
@@ -2027,7 +2031,7 @@ test("chat message hook applies explicit catalog routing and fails closed with o
     await chat({ sessionID: "routing", agent: "dog-coordinator" }, coordinator);
     assert.deepEqual(coordinator.message.model, {
       providerID: "openai",
-      modelID: "gpt-5.6-luna",
+      modelID: "gpt-5.6-terra",
       variant: DEFAULT_COORDINATOR_VARIANT,
     });
     for (const role of RECOMMENDED_CONSULTATION_ROLES) {
@@ -2361,7 +2365,7 @@ test("every packaged role follows default routing independently of write-gate ac
     const expected: Record<string, { providerID: string; modelID: string; variant?: string }> = {
       "dog-coordinator": {
         providerID: "openai",
-        modelID: "gpt-5.6-luna",
+        modelID: "gpt-5.6-terra",
         variant: DEFAULT_COORDINATOR_VARIANT,
       },
       "dog-scout": { providerID: "openai", modelID: "gpt-5.6-luna", variant: RECOMMENDED_SCOUT_VARIANT },
