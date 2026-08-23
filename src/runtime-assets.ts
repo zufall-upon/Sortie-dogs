@@ -22,7 +22,7 @@ export interface RuntimeAsset {
 export const runtimeAssets = [
   {
     name: "dog-coordinator",
-    version: "0.3.43-authorized-remote-target-v1",
+    version: "0.3.44-command-reauthorization-v1",
     installPath: "agent/dog-coordinator.md",
     content: `---
 description: Canonical MkII coordinator packaged by Sortie-dogs
@@ -103,8 +103,12 @@ concise evidence line before deterministic verification or terminal reporting. D
 assessment and next-action projection when the evidence line already determines the terminal result.
 Never test an
 unapproved script in the coordinator shell: delegate it to dog-worker under the fixed manifest.
-After any command deny, do not issue a diagnostic variant or retry; continue by delegation or report
-the existing denial. Issue independent read-only inspections in one step instead of one step per
+After a command deny, never repeat the unchanged denied invocation or invent a diagnostic variant.
+First classify whether the denial is a local routing or manifest-spelling defect. Repair that defect
+once and redispatch, or use the declared coordinator fallback. An explicit user correction, renewed
+authorization, or project-instruction exact executable path is changed state and must resume execution;
+never ask the user to convert input data when the approved local executable can perform the operation.
+Issue independent read-only inspections in one step instead of one step per
 file, because every extra step resends the whole session context.
 Normal sequential work has no artificial worker or Scout budget.
 
@@ -116,7 +120,8 @@ OPERATIONAL_VISIBILITY_FIXTURE
     task_line_format: one line; no duplicate assessment or next-action projection
     label_language: render these labels in the user's request language
     unapproved_script: coordinator shell forbidden; delegate to dog-worker
-    command_deny: diagnostic variant forbidden; retry forbidden
+    command_deny: unchanged invocation and diagnostic variant forbidden; one routing or manifest-spelling repair allowed
+    user_reauthorization: changed state -> resume approved executable; never demand manual data conversion
     read_batching: independent read-only inspections in one step
 END_OPERATIONAL_VISIBILITY_FIXTURE
 
@@ -743,8 +748,9 @@ COORDINATOR_DIRECT_OPERATION_FIXTURE
     remote_unknown: ask once for missing host | root; never report cross-project capacity unavailable
     remote_safety_boundary: environment authorization never waives credential | destructive | publication | promotion gates
     canonical_validation: exact accepted handoff or manifest command + project authorization -> coordinator-owned fallback
-    worker_validation_denial: executable-not-allowlisted -> no redispatch | no blocker-resolution worker
-    validation_fallback: coordinator direct exactly once; external approval required -> one question
+    worker_validation_denial: executable-not-allowlisted -> compare declared command with actual shell spelling; repair once | coordinator fallback
+    validation_fallback: coordinator direct exactly once; user reauthorization or project exact executable path resumes without another question
+    denied_command_equivalence: PowerShell call operator + quoted absolute executable equals declared bare absolute executable with identical arguments
     denial_classification: routing defect; not external blocker | not validation failure
     terminal_checkpoint: append session-only pendingTrackerUpdates; no external tracker call per unit
     batch_flush: one coordinator-owned direct tracker invocation when batch stops; apply every pending update
@@ -1250,10 +1256,10 @@ TERMINAL_STATUS_SEMANTICS_FIXTURE
 END_TERMINAL_STATUS_SEMANTICS_FIXTURE
 
 RUNTIME_ASSET_VERSION_SYNC_FIXTURE
-    runtime_version: 0.3.43-authorized-remote-target-v1
+    runtime_version: 0.3.44-command-reauthorization-v1
     shared_marker: src/asset-version.ts
-    packaged_expectation: test/plugin-loader.test.ts uses 0.3.43-authorized-remote-target-v1
-    initialize_expectation: test/initialize.test.ts uses 0.3.43-authorized-remote-target-v1
+    packaged_expectation: test/plugin-loader.test.ts uses 0.3.44-command-reauthorization-v1
+    initialize_expectation: test/initialize.test.ts uses 0.3.44-command-reauthorization-v1
     rule: runtime asset versions, shared marker, packaged expectation, and initialize expectation change together
 END_RUNTIME_ASSET_VERSION_SYNC_FIXTURE
 
@@ -1322,7 +1328,7 @@ END_TERMINAL_EVIDENCE_FIXTURE
   },
   {
     name: "dog-worker",
-    version: "0.3.43-authorized-remote-target-v1",
+    version: "0.3.44-command-reauthorization-v1",
     installPath: "agent/dog-worker.md",
     content: `---
 description: Dedicated worker for the canonical Sortie-dogs coordinator
@@ -1440,7 +1446,7 @@ the user.
   },
   {
     name: "dog-scout",
-    version: "0.3.43-authorized-remote-target-v1",
+    version: "0.3.44-command-reauthorization-v1",
     installPath: "agent/dog-scout.md",
     content: `---
 description: Bounded evidence scout for dog-coordinator
@@ -1489,7 +1495,7 @@ prose; keep the keys, paths, commands, and identifiers verbatim.
   },
   {
     name: "dog-reviewer",
-    version: "0.3.43-authorized-remote-target-v1",
+    version: "0.3.44-command-reauthorization-v1",
     installPath: "agent/dog-reviewer.md",
     content: `---
 description: Independent source reviewer for dog-coordinator
@@ -1518,7 +1524,7 @@ or transport.
   },
   {
     name: "dog-advisor",
-    version: "0.3.43-authorized-remote-target-v1",
+    version: "0.3.44-command-reauthorization-v1",
     installPath: "agent/dog-advisor.md",
     content: `---
 description: Focused technical advisor for dog-coordinator
@@ -1542,7 +1548,7 @@ provider, vendor, model, variant, or transport.
   },
   {
     name: "sortie",
-    version: "0.3.43-authorized-remote-target-v1",
+    version: "0.3.44-command-reauthorization-v1",
     installPath: "command/sortie.md",
     content: `---
 description: Start the canonical Sortie-dogs MkII workflow

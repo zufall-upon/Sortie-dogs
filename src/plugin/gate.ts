@@ -716,7 +716,10 @@ export function normalizeCommand(command: string): string {
       normalized += character;
     }
   }
-  return normalized;
+  const callOperator = /^& (["'])((?:[A-Za-z]:[\\/]|\\\\|\/)[^\s"']+)\1(?= |$)/u.exec(normalized);
+  return callOperator === null
+    ? normalized
+    : `${callOperator[2]}${normalized.slice(callOperator[0].length)}`;
 }
 
 /** Unbound sessions may invoke only tools whose complete input is known to be read-only. */

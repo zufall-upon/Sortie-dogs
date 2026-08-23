@@ -43,6 +43,7 @@ import {
   type SessionMessage,
 } from "../dist/plugin/task-result-repair.js";
 import { ReflectionStore } from "../dist/reflection/index.js";
+import { normalizeCommand } from "../dist/plugin/gate.js";
 import { configRoot } from "../dist/reflection/config.js";
 import {
   CONTINUATION_CAPABILITY,
@@ -993,7 +994,8 @@ test("generated coordinator requires bounded progress, one Task evidence line, a
     "根拠(<child>/<role>): <result evidence>",
     "no duplicate assessment or next-action projection",
     "Never test an unapproved script in the coordinator shell",
-    "After any command deny",
+    "After a command deny",
+    "explicit user correction, renewed authorization, or project-instruction exact executable path is changed state",
   ]) assert.ok(content.includes(required), required);
 });
 
@@ -1327,8 +1329,9 @@ test("runtime contract requires interactive continuation and deterministic recov
     "remote_unknown: ask once for missing host | root; never report cross-project capacity unavailable",
     "remote_safety_boundary: environment authorization never waives credential | destructive | publication | promotion gates",
     "canonical_validation: exact accepted handoff or manifest command + project authorization -> coordinator-owned fallback",
-    "worker_validation_denial: executable-not-allowlisted -> no redispatch | no blocker-resolution worker",
-    "validation_fallback: coordinator direct exactly once; external approval required -> one question",
+    "worker_validation_denial: executable-not-allowlisted -> compare declared command with actual shell spelling; repair once | coordinator fallback",
+    "validation_fallback: coordinator direct exactly once; user reauthorization or project exact executable path resumes without another question",
+    "denied_command_equivalence: PowerShell call operator + quoted absolute executable equals declared bare absolute executable with identical arguments",
     "denial_classification: routing defect; not external blocker | not validation failure",
     "terminal_checkpoint: append session-only pendingTrackerUpdates; no external tracker call per unit",
     "batch_flush: one coordinator-owned direct tracker invocation when batch stops; apply every pending update",
@@ -7120,6 +7123,30 @@ test("plugin shell gate allows explicit reads and denies unknown executables", a
       await expectActionableCommandDenial(() => invoke(command));
     }
   });
+});
+
+test("declared Windows executable commands accept equivalent PowerShell call-operator spelling", () => {
+  const declared = 'M:\\@HyperV\\WPy64-310111\\python-3.10.11.amd64\\python.exe -c "import openpyxl;print(openpyxl.__version__)"';
+  const invoked = '& \'M:\\@HyperV\\WPy64-310111\\python-3.10.11.amd64\\python.exe\' -c "import openpyxl;print(openpyxl.__version__)"';
+
+  assert.equal(normalizeCommand(invoked), normalizeCommand(declared));
+  assert.equal(
+    normalizeCommand("& 'C:/tools/python.exe' --version"),
+    normalizeCommand("C:/tools/python.exe --version"),
+  );
+  assert.equal(
+    normalizeCommand("& '\\\\server\\tools\\python.exe' --version"),
+    normalizeCommand("\\\\server\\tools\\python.exe --version"),
+  );
+  assert.equal(
+    normalizeCommand("& '/opt/tools/python' --version"),
+    normalizeCommand("/opt/tools/python --version"),
+  );
+  assert.notEqual(normalizeCommand("& 'relative-tool' --version"), normalizeCommand("relative-tool --version"));
+  assert.notEqual(
+    normalizeCommand("& 'C:\\tools\\python.exe -c safe'"),
+    normalizeCommand("C:\\tools\\python.exe -c safe"),
+  );
 });
 
 test("shell gate extracts bounded artifact download and archive paths", () => {
