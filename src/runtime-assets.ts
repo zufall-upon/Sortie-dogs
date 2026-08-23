@@ -22,7 +22,7 @@ export interface RuntimeAsset {
 export const runtimeAssets = [
   {
     name: "dog-coordinator",
-    version: "0.3.38-terra-high-coordinator-v1",
+    version: "0.3.42-serial-capacity-fix-v1",
     installPath: "agent/dog-coordinator.md",
     content: `---
 description: Canonical MkII coordinator packaged by Sortie-dogs
@@ -849,16 +849,27 @@ with no independent next candidate, no-work results, and turns waiting for a que
 without forced compaction. OpenCode owns token-limit automatic compaction; leave its auto-continue
 enabled so the same root session receives the host synthetic continuation turn after summarization.
 
-Backlog drain is an optional durable-queue optimization, never worker authorization; normal sequential
-work completes the accepted scope without it. For an explicit positive unit count that benefits from
-compaction, set backlogDrain.enabled=true and backlogDrain.maxUnits to that count, then call
-${BACKLOG_DRAIN_CAPABILITY} once before the drain with \`{ "max_units": "<exact bound>" }\`. Natural
-language durable-queue intent is sufficient. Vague or unbounded intent does not opt in and does not cap
-normal work.
+Backlog drain is an optional durable-queue optimization, never worker authorization. Infer continuity
+intent semantically from the user's full latest request, prior turns, and unresolved accepted scope;
+never gate it on literal keywords. Any wording that asks to keep selecting or completing subsequent
+independent units without per-unit user confirmation is sufficient opt-in with a default bound of three.
+"Sequentially", "continue", "順次", "続けて", and "残りを進めて" are non-exhaustive examples only.
+Do not opt in when ordering describes steps inside one bounded unit or when the user requests a pause,
+review, or decision between units. These nonqualifying conditions always override any named count; a
+count changes only the bound after continuity intent already qualifies. The user never needs to know a capability name.
+Before the first worker, set backlogDrain.enabled=true and backlogDrain.maxUnits to three, then call
+${BACKLOG_DRAIN_CAPABILITY} once with \`{ "max_units": "3" }\`. When the user explicitly names an
+integer of two or greater as the task, unit, or item count, use that exact count instead. Ignore other
+numbers such as versions, issue IDs, and limits. A request for exactly one bounded task keeps the normal lane.
 
 At drain start, acquire one complete leased snapshot with all pages in one client invocation and select
 at most backlogDrain.maxUnits. Persist attempted count across resumes. After each terminal handoff,
 update the queue locally and use the identity-preserving compaction resolver without tracker access.
+backlogDrain.maxUnits counts terminal queue units, not worker calls, recoverable denials, remediation,
+or corrected redispatches. Serial worker capacity has no plugin dispatch ceiling after the prior worker
+returns. Never report "worker capacity unavailable" for a serial WORKER_LIMIT denial: repair the
+handoff, resume the recoverable child when offered, or redispatch after the completed call. WORKER_LIMIT
+is a real capacity condition only for an already in-flight serial worker or an explicit parallel reservation.
 Stop on no progress, user decision, proven external blocker, or the declared bound; a blocked item does
 not stop independent work. On exhaustion, do not refresh inventory; flush pending tracker updates once.
 Wrapped shell inventory remains forbidden.
@@ -867,11 +878,21 @@ BACKLOG_DRAIN_FIXTURE
     default_config: backlogDrain.enabled=false; normal sequential work remains autonomous
     normal_multi_item: accepted related items -> sequential workers as evidence requires
     opt_in_purpose: durable queue accounting + compaction; never worker authorization
-    opt_in_required: backlogDrain.enabled=true; backlogDrain.maxUnits=<positive integer>
-    natural_language_opt_in: explicit ordered bounded units + durable no-stop queue intent -> enabled=true; maxUnits=exact named count
+    opt_in_required: coordinator invokes capability before first worker; user never names capability
+    intent_classifier: semantic full-request + prior-turn + unresolved-scope judgment; literal keyword matching forbidden
+    qualifying_intent: continue subsequent independent units without per-unit user confirmation -> enabled=true; maxUnits=3
+    examples: sequential | continue | 順次 | 続けて | 残りを進めて; non-exhaustive only
+    nonqualifying_intent: ordered steps inside one unit | pause between units | review between units | decision between units
+    precedence: nonqualifying intent always wins; explicit count only replaces bound after qualifying intent
+    trigger_action: call sortie_enable_backlog_drain { max_units: "3" } before first worker
+    explicit_count: task | unit | item count integer >=2 -> maxUnits=exact named count; unrelated numbers ignored
+    single_unit: exactly one bounded task -> normal lane; no backlog drain
     runtime_opt_in: ${BACKLOG_DRAIN_CAPABILITY} { max_units: "<exact positive bound>" } before durable drain; status=enabled required
     hard_ceiling: none beyond exact accepted user scope and positive declared drain bound
     execution: sequential; coordinator_authority=unchanged; per_unit_gates=unchanged
+    worker_capacity: no serial dispatch ceiling; maxUnits counts terminal queue units, not worker calls or remediation
+    worker_limit_semantics: only concurrent in-flight serial dispatch | explicit parallel reservation
+    serial_worker_limit_action: never terminal BLOCKED; wait for in-flight return | repair | same-child resume | corrected redispatch
     drain_counts: batchAttempted=terminal handoffs; batchCommitted=new commits; batchReconciled=accepted existing commits
     display: committed <batchCommitted>/<backlogDrain.maxUnits>; attempted <batchAttempted>/<backlogDrain.maxUnits>; reconciled <batchReconciled>
     inventory_acquisition: once at drain start in one client invocation; never after compaction
@@ -1220,10 +1241,10 @@ TERMINAL_STATUS_SEMANTICS_FIXTURE
 END_TERMINAL_STATUS_SEMANTICS_FIXTURE
 
 RUNTIME_ASSET_VERSION_SYNC_FIXTURE
-    runtime_version: 0.3.38-terra-high-coordinator-v1
+    runtime_version: 0.3.42-serial-capacity-fix-v1
     shared_marker: src/asset-version.ts
-    packaged_expectation: test/plugin-loader.test.ts uses 0.3.38-terra-high-coordinator-v1
-    initialize_expectation: test/initialize.test.ts uses 0.3.38-terra-high-coordinator-v1
+    packaged_expectation: test/plugin-loader.test.ts uses 0.3.42-serial-capacity-fix-v1
+    initialize_expectation: test/initialize.test.ts uses 0.3.42-serial-capacity-fix-v1
     rule: runtime asset versions, shared marker, packaged expectation, and initialize expectation change together
 END_RUNTIME_ASSET_VERSION_SYNC_FIXTURE
 
@@ -1292,7 +1313,7 @@ END_TERMINAL_EVIDENCE_FIXTURE
   },
   {
     name: "dog-worker",
-    version: "0.3.38-terra-high-coordinator-v1",
+    version: "0.3.42-serial-capacity-fix-v1",
     installPath: "agent/dog-worker.md",
     content: `---
 description: Dedicated worker for the canonical Sortie-dogs coordinator
@@ -1410,7 +1431,7 @@ the user.
   },
   {
     name: "dog-scout",
-    version: "0.3.38-terra-high-coordinator-v1",
+    version: "0.3.42-serial-capacity-fix-v1",
     installPath: "agent/dog-scout.md",
     content: `---
 description: Bounded evidence scout for dog-coordinator
@@ -1459,7 +1480,7 @@ prose; keep the keys, paths, commands, and identifiers verbatim.
   },
   {
     name: "dog-reviewer",
-    version: "0.3.38-terra-high-coordinator-v1",
+    version: "0.3.42-serial-capacity-fix-v1",
     installPath: "agent/dog-reviewer.md",
     content: `---
 description: Independent source reviewer for dog-coordinator
@@ -1488,7 +1509,7 @@ or transport.
   },
   {
     name: "dog-advisor",
-    version: "0.3.38-terra-high-coordinator-v1",
+    version: "0.3.42-serial-capacity-fix-v1",
     installPath: "agent/dog-advisor.md",
     content: `---
 description: Focused technical advisor for dog-coordinator
@@ -1512,7 +1533,7 @@ provider, vendor, model, variant, or transport.
   },
   {
     name: "sortie",
-    version: "0.3.38-terra-high-coordinator-v1",
+    version: "0.3.42-serial-capacity-fix-v1",
     installPath: "command/sortie.md",
     content: `---
 description: Start the canonical Sortie-dogs MkII workflow

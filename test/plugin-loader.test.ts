@@ -121,7 +121,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       join(consumer, "node_modules", "sortie-dogs", "package.json"),
       "utf8",
     )) as { version?: string; scripts?: { prebuild?: string } };
-    assert.equal(installedPackage.version, "0.5.8");
+    assert.equal(installedPackage.version, "0.5.9");
     assert.equal(
       installedPackage.scripts?.prebuild,
       "node --input-type=module --eval \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true });\"",
@@ -372,7 +372,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     for (const asset of loaded.runtimeAssets) {
       assert.equal(asset.version, RUNTIME_ASSET_VERSION, `${asset.name} version must match the shared marker`);
     }
-    assert.equal(RUNTIME_ASSET_VERSION, "0.3.38-terra-high-coordinator-v1");
+    assert.equal(RUNTIME_ASSET_VERSION, "0.3.42-serial-capacity-fix-v1");
     const coordinatorFrontmatter = /^---\r?\n([\s\S]*?)\r?\n---/u.exec(coordinator.content)?.[1];
     assert.ok(coordinatorFrontmatter);
     assert.match(coordinatorFrontmatter, /^model: openai\/gpt-5\.6-terra$/m);
@@ -677,7 +677,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       coordinator.content,
       /normal sequential terminal result with no independent next\s+candidate does not call a compaction tool or emit either continuation marker/i,
     );
-    assert.match(coordinator.content, /sortie_enable_backlog_drain once before the drain/);
+    assert.match(coordinator.content, /Before the first worker,[\s\S]+sortie_enable_backlog_drain once with/i);
     assert.match(coordinator.content, /optional durable-queue optimization, never worker authorization/i);
     // Every literal below must match a capability the packed plugin actually registers.
     assert.match(compactionIdentity[1], /continuation_agent:\s*dog-coordinator/);
@@ -706,14 +706,21 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(backlogDrain[1], /opt_in_purpose:\s*durable queue accounting \+ compaction; never worker authorization/);
     assert.match(
       backlogDrain[1],
-      /opt_in_required:\s*backlogDrain\.enabled=true; backlogDrain\.maxUnits=<positive integer>/,
+      /opt_in_required:\s*coordinator invokes capability before first worker; user never names capability/,
     );
-    assert.match(
-      backlogDrain[1],
-      /natural_language_opt_in:\s*explicit ordered bounded units \+ durable no-stop queue intent -> enabled=true; maxUnits=exact named count/,
-    );
+    assert.match(backlogDrain[1], /intent_classifier:\s*semantic full-request \+ prior-turn \+ unresolved-scope judgment; literal keyword matching forbidden/);
+    assert.match(backlogDrain[1], /qualifying_intent:\s*continue subsequent independent units without per-unit user confirmation -> enabled=true; maxUnits=3/);
+    assert.match(backlogDrain[1], /examples:\s*sequential \| continue \| 順次 \| 続けて \| 残りを進めて; non-exhaustive only/);
+    assert.match(backlogDrain[1], /nonqualifying_intent:\s*ordered steps inside one unit \| pause between units \| review between units \| decision between units/);
+    assert.match(backlogDrain[1], /precedence:\s*nonqualifying intent always wins; explicit count only replaces bound after qualifying intent/);
+    assert.match(backlogDrain[1], /trigger_action:\s*call sortie_enable_backlog_drain \{ max_units: "3" \} before first worker/);
+    assert.match(backlogDrain[1], /explicit_count:\s*task \| unit \| item count integer >=2 -> maxUnits=exact named count; unrelated numbers ignored/);
+    assert.match(backlogDrain[1], /single_unit:\s*exactly one bounded task -> normal lane; no backlog drain/);
     assert.match(backlogDrain[1], /hard_ceiling:\s*none beyond exact accepted user scope and positive declared drain bound/);
     assert.match(backlogDrain[1], /execution:\s*sequential; coordinator_authority=unchanged; per_unit_gates=unchanged/);
+    assert.match(backlogDrain[1], /worker_capacity:\s*no serial dispatch ceiling; maxUnits counts terminal queue units, not worker calls or remediation/);
+    assert.match(backlogDrain[1], /worker_limit_semantics:\s*only concurrent in-flight serial dispatch \| explicit parallel reservation/);
+    assert.match(backlogDrain[1], /serial_worker_limit_action:\s*never terminal BLOCKED; wait for in-flight return \| repair \| same-child resume \| corrected redispatch/);
     assert.match(
       backlogDrain[1],
       /drain_counts:\s*batchAttempted=terminal handoffs; batchCommitted=new commits; batchReconciled=accepted existing commits/,
@@ -1290,7 +1297,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(sortie.content, /never route a worker to the user/i);
 
     for (const asset of loaded.runtimeAssets) {
-      assert.equal(asset.version, "0.3.38-terra-high-coordinator-v1");
+      assert.equal(asset.version, "0.3.42-serial-capacity-fix-v1");
       const frontmatter = asset.content.match(/^---\r?\n([\s\S]+?)\r?\n---\r?\n/);
       assert.ok(frontmatter, `${asset.name} must have frontmatter`);
       const entries = Object.fromEntries(

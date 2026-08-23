@@ -349,7 +349,7 @@ test("a cold synthetic resume is fail-closed until a real turn", () => {
   lane.beforeTool("cold", "task", worker);
 });
 
-test("explicit backlog drain permits one worker per synthetic unit up to its bound", () => {
+test("explicit backlog drain does not treat serial worker attempts as queue-unit capacity", () => {
   const wider = new FastLaneController();
   wider.beginTurn("wider", false);
   wider.enableBacklogDrain("wider", 12);
@@ -374,6 +374,7 @@ test("explicit backlog drain permits one worker per synthetic unit up to its bou
     lane.beforeTool("drain", "task", advisor);
     lane.beforeTool("drain", "task", scout);
     lane.beforeTool("drain", "task", worker);
+    lane.workerCompleted("drain");
     lane.beforeTool("drain", "task", review);
     if (unit < 3) {
       lane.beforeTool("drain", "sortie_compact_and_continue", {});
@@ -385,11 +386,10 @@ test("explicit backlog drain permits one worker per synthetic unit up to its bou
       lane.beginTurn("drain", true);
     }
   }
-  expectDenial(
-    () => lane.beforeTool("drain", "sortie_compact_and_continue", {}),
-    "MANUAL_COMPACTION_FORBIDDEN",
-  );
+  lane.beforeTool("drain", "task", worker);
   expectDenial(() => lane.beforeTool("drain", "task", worker), "WORKER_LIMIT");
+  lane.workerCompleted("drain");
+  lane.beforeTool("drain", "sortie_compact_and_continue", {});
 });
 
 test("unknown and missing Task roles are denied", () => {

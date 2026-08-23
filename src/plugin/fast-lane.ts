@@ -180,8 +180,7 @@ export class FastLaneController {
 
   manualCompactionForbidden(sessionID: string): boolean {
     const state = this.sessions.get(sessionID);
-    return state !== undefined &&
-      (!state.backlogDrain || state.totalWorkerDispatches >= state.workerLimit);
+    return state !== undefined && !state.backlogDrain;
   }
 
   terminalInstructionRequired(sessionID: string): boolean {
@@ -198,8 +197,8 @@ export class FastLaneController {
 
   backlogContinuationAllowed(sessionID: string): boolean {
     const state = this.sessions.get(sessionID);
-    return state?.backlogDrain === true && state.workerDispatches === 1 &&
-      state.totalWorkerDispatches < state.workerLimit && !state.continuationPending;
+    return state?.backlogDrain === true && state.workerDispatches >= 1 &&
+      !state.continuationPending;
   }
 
   enableBacklogDrain(sessionID: string, maxUnits: number): void {
@@ -307,9 +306,6 @@ export class FastLaneController {
         if (state.workerDispatches >= state.parallelWorkerLimit || state.totalWorkerDispatches >= state.workerLimit) {
           throw new FastLaneDeniedError("WORKER_LIMIT");
         }
-      } else if (state.backlogDrain &&
-        (state.workerDispatches >= 1 || state.totalWorkerDispatches >= state.workerLimit)) {
-        throw new FastLaneDeniedError("WORKER_LIMIT");
       } else if (state.workerInFlight) {
         throw new FastLaneDeniedError("WORKER_LIMIT");
       }
