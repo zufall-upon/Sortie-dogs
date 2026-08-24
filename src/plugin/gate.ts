@@ -433,6 +433,10 @@ function commandIssue(segment: string, cause: string, hint: string): CommandIssu
   return { segment: segment.trim().slice(0, 240), cause, hint };
 }
 
+function isLiteralPowerShellPath(value: string): boolean {
+  return value.length > 0 && !/[\u0000-\u001f\u007f$*?\[\]@(){},;|&`<>]/u.test(value);
+}
+
 function robocopyOutput(tokens: readonly string[]): string | undefined {
   if (tokens.length !== 4) return undefined;
   const source = tokens[1];
@@ -561,6 +565,60 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
       }
     } else if (executable === "find" && isDirectFindHash(tokens)) {
       // Exact member lookup plus sha256sum is read-only; a following tee owns any output path.
+    } else if (executable === "copy-item") {
+      applies = true;
+      const destinations: string[] = [];
+      const sources: string[] = [];
+      const positional: string[] = [];
+      let unsupported = false;
+      let force = false;
+      for (let index = 1; index < tokens.length; index += 1) {
+        const token = tokens[index]!;
+        if (/^-(?:path|literalpath)$/iu.test(token)) {
+          const candidate = tokens[index + 1];
+          if (candidate !== undefined && !candidate.startsWith("-")) sources.push(candidate);
+          else unsupported = true;
+          index += 1;
+        } else if (/^-destination$/iu.test(token)) {
+          const candidate = tokens[index + 1];
+          if (candidate !== undefined && !candidate.startsWith("-")) destinations.push(candidate);
+          else unsupported = true;
+          index += 1;
+        } else if (/^-force$/iu.test(token)) {
+          if (force) unsupported = true;
+          force = true;
+        } else if (token.startsWith("-")) {
+          unsupported = true;
+        } else if (!token.startsWith("-")) {
+          positional.push(token);
+        }
+      }
+      const namedForm = sources.length === 1 && destinations.length === 1 && positional.length === 0;
+      const namedSourceForm = sources.length === 1 && destinations.length === 0 && positional.length === 1;
+      const namedDestinationForm = sources.length === 0 && destinations.length === 1 && positional.length === 1;
+      const positionalForm = sources.length === 0 && destinations.length === 0 && positional.length === 2;
+      const copySource = namedForm || namedSourceForm
+        ? sources[0]
+        : namedDestinationForm || positionalForm
+          ? positional[0]
+          : undefined;
+      const destination = namedForm || namedDestinationForm
+        ? destinations[0]
+        : namedSourceForm || positionalForm
+          ? positional.at(-1)
+          : undefined;
+      if (unsupported
+        || copySource === undefined
+        || destination === undefined
+        || !isLiteralPowerShellPath(copySource)
+        || !isLiteralPowerShellPath(destination)) {
+        ambiguous = true;
+        issue ??= commandIssue(
+          source,
+          "unsupported-copy-item-form",
+          "use one literal source, one literal destination, and optional -Force",
+        );
+      } else paths.push(destination);
     } else if (POWERSHELL_WRITE_COMMANDS.has(executable)) {
       applies = true;
       const named: string[] = [];

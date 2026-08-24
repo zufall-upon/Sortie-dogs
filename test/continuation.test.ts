@@ -747,7 +747,7 @@ test("the compaction prompt preserves batch state and names no legacy workflow",
   assert.equal(untracked.prompt, undefined, "an untracked session keeps the host compaction prompt");
 });
 
-test("session idle resumes non-terminal progress at most twice per context segment", async () => {
+test("session idle keeps resuming distinct non-terminal progress", async () => {
   const host = fakeHost({ agent: COORDINATOR });
   const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
   hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" });
@@ -768,7 +768,7 @@ test("session idle resumes non-terminal progress at most twice per context segme
     );
     await hooks.sessionIdle("ses_root");
   }
-  assert.equal(host.promptCalls.length, 2, "one context segment has a bounded recovery budget");
+  assert.equal(host.promptCalls.length, 3, "distinct progress reports continue in the same segment");
 
   hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" });
   await hooks.textComplete(
@@ -776,10 +776,10 @@ test("session idle resumes non-terminal progress at most twice per context segme
     { text: "➡️ next_action: resume after the new user turn" },
   );
   await hooks.sessionIdle("ses_root");
-  assert.equal(host.promptCalls.length, 3, "a real user turn resets the recovery budget");
+  assert.equal(host.promptCalls.length, 4, "a real user turn also continues normally");
 });
 
-test("a successful compaction resume refreshes the bounded step recovery segment", async () => {
+test("a successful compaction resume coexists with ongoing step recovery", async () => {
   const host = fakeHost({ agent: COORDINATOR });
   const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
   hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" });
@@ -792,7 +792,7 @@ test("a successful compaction resume refreshes the bounded step recovery segment
     await hooks.sessionIdle("ses_root");
     hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" }, true);
   }
-  assert.equal(host.promptCalls.length, 2, "the first context segment exhausts its two recoveries");
+  assert.equal(host.promptCalls.length, 3);
 
   await hooks.textComplete(
     { sessionID: "ses_root" },
@@ -803,8 +803,8 @@ test("a successful compaction resume refreshes the bounded step recovery segment
     "SORTIE_COMPACT_AND_CONTINUE_QUEUED",
   );
   await settle();
-  assert.equal(host.promptCalls.length, 3);
-  assert.ok(host.promptCalls[2]!.text.startsWith(AUTO_CONTINUE_PREFIX));
+  assert.equal(host.promptCalls.length, 4);
+  assert.ok(host.promptCalls[3]!.text.startsWith(AUTO_CONTINUE_PREFIX));
 
   hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" }, true);
   await hooks.textComplete(
@@ -812,8 +812,8 @@ test("a successful compaction resume refreshes the bounded step recovery segment
     { text: "📊 進行中: next task — 80%\n➡️ 次action: commit後のterminal reportを出す" },
   );
   await hooks.sessionIdle("ses_root");
-  assert.equal(host.promptCalls.length, 4, "the post-compaction segment receives a fresh bounded recovery");
-  assert.ok(host.promptCalls[3]!.text.startsWith(STEP_CONTINUE_PREFIX));
+  assert.equal(host.promptCalls.length, 5);
+  assert.ok(host.promptCalls[4]!.text.startsWith(STEP_CONTINUE_PREFIX));
 
   hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" }, true);
   await hooks.textComplete(
@@ -821,23 +821,23 @@ test("a successful compaction resume refreshes the bounded step recovery segment
     { text: "📊 進行中: next task — 85%\n➡️ 次action: terminal reportを準備する" },
   );
   await hooks.sessionIdle("ses_root");
-  assert.equal(host.promptCalls.length, 5, "the real user turn permits four step recoveries total");
+  assert.equal(host.promptCalls.length, 6);
 
   assert.equal(
     await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR }),
     "SORTIE_COMPACT_AND_CONTINUE_QUEUED",
   );
   await settle();
-  assert.equal(host.promptCalls.length, 6);
-  assert.ok(host.promptCalls[5]!.text.startsWith(AUTO_CONTINUE_PREFIX));
+  assert.equal(host.promptCalls.length, 7);
+  assert.ok(host.promptCalls[6]!.text.startsWith(AUTO_CONTINUE_PREFIX));
 
   hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" }, true);
   await hooks.textComplete(
     { sessionID: "ses_root" },
-    { text: "📊 進行中: final segment — 90%\n➡️ 次action: fifth recovery must stay blocked" },
+    { text: "📊 進行中: final segment — 90%\n➡️ 次action: continue without an artificial cap" },
   );
   await hooks.sessionIdle("ses_root");
-  assert.equal(host.promptCalls.length, 6, "another compaction cannot bypass the per-turn total");
+  assert.equal(host.promptCalls.length, 8);
 });
 
 test("text completion recovers when a one-shot host omits session idle", async () => {

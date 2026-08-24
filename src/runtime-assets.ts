@@ -22,7 +22,7 @@ export interface RuntimeAsset {
 export const runtimeAssets = [
   {
     name: "dog-coordinator",
-    version: "0.3.45-continuation-robocopy-v1",
+    version: "0.3.46-contract-directory-v1",
     installPath: "agent/dog-coordinator.md",
     content: `---
 description: Canonical MkII coordinator packaged by Sortie-dogs
@@ -1097,8 +1097,9 @@ the current candidate before any mutation:
 
 ext["sortie-dogs/write-gate"] = { operation_manifest: <candidate-root-relative-path>, project_root: <candidate-root-absolute-path> }
 
-Write it to the task-scoped sibling path handoff.<contract_id>.json and write its manifest to
-<contract_id>.operation-manifest.json. The scoped filename id must exactly equal the handoff id.
+Ensure the candidate directory .sortie-dogs/contracts/ exists, then write to the candidate-relative
+path .sortie-dogs/contracts/handoff.<contract_id>.json and write its manifest to
+.sortie-dogs/contracts/<contract_id>.operation-manifest.json. The scoped filename id must exactly equal the handoff id.
 Include the exact absolute handoff_path in the worker digest and bind it before mutation. Authorize it
 only for the current session and candidate. Never write a new mutating contract to the shared legacy
 handoff.json or operation-manifest.json; those fixed names remain read-compatible only. Keep both
@@ -1111,11 +1112,11 @@ for that child candidate, and never reuse an old candidate's manifest or authori
 WRITE_GATE_HANDOFF_FIXTURE
     timing: bind before mutation
     contract_id: exact handoff id; safe [A-Za-z0-9._-] token; unique among active coordinator roots
-    creation: handoff.<contract_id>.json + <contract_id>.operation-manifest.json exist before Task dispatch
+    creation: .sortie-dogs/contracts/handoff.<contract_id>.json + .sortie-dogs/contracts/<contract_id>.operation-manifest.json exist before Task dispatch
     handoff_path: exact absolute task-scoped candidate handoff path included in worker digest
     extension: ext["sortie-dogs/write-gate"] = { operation_manifest: <candidate-root-relative-path>, project_root: <candidate-root-absolute-path> }
     authorization: current session + current candidate only
-    legacy_fixed_paths: handoff.json + operation-manifest.json are read-compatible only; never emitted for new mutating work
+    legacy_fixed_paths: root handoff.json + operation-manifest.json remain read-compatible only; never emitted for new mutating work
     concurrent_roots: distinct contract_id + distinct files; one thread regeneration never revokes another
     nested_layout: parent workspace + child repo -> project_root is child candidate absolute path
     reuse: old candidate manifest or authorization rejected
@@ -1135,7 +1136,7 @@ HANDOFF_DOCUMENT_FIXTURE
       "profile": "full",
       "id": "task-example-r1",
       "created_at": "2026-01-01T00:00:00Z",
-      "ext": { "sortie-dogs/write-gate": { "operation_manifest": "task-example-r1.operation-manifest.json", "project_root": "<candidate-root-absolute-path>" } },
+      "ext": { "sortie-dogs/write-gate": { "operation_manifest": ".sortie-dogs/contracts/task-example-r1.operation-manifest.json", "project_root": "<candidate-root-absolute-path>" } },
       "task": { "title": "<short title>", "objective": "<objective>" },
       "scope": { "paths": ["src/declared.ts"] },
       "sources": [{ "path": "src/declared.ts", "rev": "r1" }],
@@ -1174,16 +1175,16 @@ document cannot fail the worker handshake for a contract reason. A contract deni
 document, the exact JSON pointer, and the failing rule, so repair that pointer and never resend an
 unchanged document. A defective result forbids Task dispatch. Repair and rerun preflight until status=ok;
 never dispatch a worker with that path and never ask the worker to repair coordinator-owned documents.
-With the default registration, create task-scoped handoffs as project-root siblings named
-handoff.<id>.json. A path under .opencode is unregistered unless project configuration explicitly
-registers that directory.
+With the default registration, ensure .sortie-dogs/contracts/ exists and create task-scoped handoffs
+there as handoff.<id>.json. Arbitrary hidden directories remain unregistered. Root legacy paths remain
+read-compatible and are never moved or deleted.
 
 CONTRACT_PREFLIGHT_FIXTURE
     tool: sortie_check_contract { handoff_path: <exact absolute handoff path> }
     required_result: status=ok
     defective_dispatch: forbidden; repair coordinator-owned document and rerun preflight before Task
-    handoff_path_rule: configured fixed path or scoped sibling handoff.<id>.json with filename id exactly equal to handoff id
-    default_path: <project root>/handoff.<id>.json; .opencode/handoff.<id>.json is unregistered unless explicitly configured
+    handoff_path_rule: configured fixed path or .sortie-dogs/contracts/handoff.<id>.json with filename id exactly equal to handoff id
+    default_path: <project root>/.sortie-dogs/contracts/handoff.<id>.json; arbitrary hidden paths are unregistered
     scoped_manifest_rule: <id>.operation-manifest.json is unique to the same active coordinator contract
     mismatch: arbitrary filename or filename/id mismatch -> defective before dispatch
     scope: every mutating dispatch, source work included; write-gate extension and operation_manifest required
@@ -1256,10 +1257,10 @@ TERMINAL_STATUS_SEMANTICS_FIXTURE
 END_TERMINAL_STATUS_SEMANTICS_FIXTURE
 
 RUNTIME_ASSET_VERSION_SYNC_FIXTURE
-    runtime_version: 0.3.45-continuation-robocopy-v1
+    runtime_version: 0.3.46-contract-directory-v1
     shared_marker: src/asset-version.ts
-    packaged_expectation: test/plugin-loader.test.ts uses 0.3.45-continuation-robocopy-v1
-    initialize_expectation: test/initialize.test.ts uses 0.3.45-continuation-robocopy-v1
+    packaged_expectation: test/plugin-loader.test.ts uses 0.3.46-contract-directory-v1
+    initialize_expectation: test/initialize.test.ts uses 0.3.46-contract-directory-v1
     rule: runtime asset versions, shared marker, packaged expectation, and initialize expectation change together
 END_RUNTIME_ASSET_VERSION_SYNC_FIXTURE
 
@@ -1328,7 +1329,7 @@ END_TERMINAL_EVIDENCE_FIXTURE
   },
   {
     name: "dog-worker",
-    version: "0.3.45-continuation-robocopy-v1",
+    version: "0.3.46-contract-directory-v1",
     installPath: "agent/dog-worker.md",
     content: `---
 description: Dedicated worker for the canonical Sortie-dogs coordinator
@@ -1446,7 +1447,7 @@ the user.
   },
   {
     name: "dog-scout",
-    version: "0.3.45-continuation-robocopy-v1",
+    version: "0.3.46-contract-directory-v1",
     installPath: "agent/dog-scout.md",
     content: `---
 description: Bounded evidence scout for dog-coordinator
@@ -1495,7 +1496,7 @@ prose; keep the keys, paths, commands, and identifiers verbatim.
   },
   {
     name: "dog-reviewer",
-    version: "0.3.45-continuation-robocopy-v1",
+    version: "0.3.46-contract-directory-v1",
     installPath: "agent/dog-reviewer.md",
     content: `---
 description: Independent source reviewer for dog-coordinator
@@ -1524,7 +1525,7 @@ or transport.
   },
   {
     name: "dog-advisor",
-    version: "0.3.45-continuation-robocopy-v1",
+    version: "0.3.46-contract-directory-v1",
     installPath: "agent/dog-advisor.md",
     content: `---
 description: Focused technical advisor for dog-coordinator
@@ -1548,7 +1549,7 @@ provider, vendor, model, variant, or transport.
   },
   {
     name: "sortie",
-    version: "0.3.45-continuation-robocopy-v1",
+    version: "0.3.46-contract-directory-v1",
     installPath: "command/sortie.md",
     content: `---
 description: Start the canonical Sortie-dogs MkII workflow

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -1182,10 +1182,10 @@ test("shipped document fixtures satisfy the schemas the write gate enforces", ()
   assert.match(preflight[1], /tool: sortie_check_contract \{ handoff_path: <exact absolute handoff path> \}/);
   assert.match(preflight[1], /required_result: status=ok/);
   assert.match(preflight[1], /defective_dispatch: forbidden/);
-  assert.match(preflight[1], /default_path: <project root>\/handoff\.<id>\.json/);
+  assert.match(preflight[1], /default_path: <project root>\/\.sortie-dogs\/contracts\/handoff\.<id>\.json/);
   assert.match(preflight[1], /timing: before Task dispatch and after every handoff regeneration/);
   assert.match(preflight[1], /authorization: read-only report; never inspection, bind, or mutation/);
-  assert.match(preflight[1], /configured fixed path or scoped sibling handoff\.<id>\.json with filename id exactly equal to handoff id/);
+  assert.match(preflight[1], /configured fixed path or \.sortie-dogs\/contracts\/handoff\.<id>\.json with filename id exactly equal to handoff id/);
   assert.match(preflight[1], /<id>\.operation-manifest\.json is unique to the same active coordinator contract/);
   assert.match(preflight[1], /arbitrary filename or filename\/id mismatch -> defective before dispatch/);
   assert.match(preflight[1], /equivalent_command: sortie-dogs lint <handoff_path> --manifest <operation_manifest_path> requires exit 0/);
@@ -1719,7 +1719,7 @@ test("reflection host identity failures and children leave storage absent", asyn
           { sessionID, agent: "dog-coordinator" },
           { message: { model: {} }, parts: [{ type: "text", text: "root" }] },
         );
-        if (["root-throw", "root-incomplete", "child"].includes(sessionID)) {
+        if (sessionID === "child") {
           await assert.rejects(invokeChat, /SORTIE_FRESH_SESSION_REQUIRED/u);
         }
         else await invokeChat();
@@ -2775,6 +2775,14 @@ test("parallel worker artifact capability enforces exact lineage, terminal relea
     const managedPath = descriptor.managed_path as string;
     const manifestPath = descriptor.operation_manifest as string;
     const handoffPath = descriptor.handoff_path as string;
+    assert.equal(
+      relative(managedPath, manifestPath).replaceAll("\\", "/"),
+      `.sortie-dogs/contracts/${descriptor.task_id}.operation-manifest.json`,
+    );
+    assert.equal(
+      relative(managedPath, handoffPath).replaceAll("\\", "/"),
+      `.sortie-dogs/contracts/handoff.${descriptor.task_id}.json`,
+    );
     assert.equal((JSON.parse(await readFile(manifestPath, "utf8")) as { task_id: string }).task_id, descriptor.task_id);
     assert.equal((JSON.parse(await readFile(handoffPath, "utf8")) as { id: string }).id, descriptor.task_id);
     const prompt = [
@@ -2874,6 +2882,8 @@ test("parallel worker artifact capability enforces exact lineage, terminal relea
     assert.equal(status.tasks[0]!.phase, "completed");
     assert.ok(status.tasks[0]!.artifact);
     assert.equal(status.ready.length, 1);
+    await assert.rejects(readFile(handoffPath, "utf8"));
+    await assert.rejects(readFile(manifestPath, "utf8"));
     assert.equal((JSON.parse(await readFile(status.ready[0]!.handoff_path as string, "utf8")) as { id: string }).id, "b");
     assert.equal((JSON.parse(await readFile(status.ready[0]!.operation_manifest as string, "utf8")) as { task_id: string }).task_id, "b");
   });
@@ -2974,8 +2984,8 @@ test("parallel cancellation is coordinator-only, survives running join, and sess
   });
 });
 
-test("an established coordinator root keeps its role while preserving a selected Sol model", async () => {
-  await withProject("sticky-coordinator-agent", async (directory) => {
+test("an explicit Build selection relinquishes an established coordinator while preserving its model", async () => {
+  await withProject("explicit-build-agent", async (directory) => {
     const hooks = await SortieDogsPlugin({ directory });
     const chat = hooks["chat.message"]!;
     await chat(
@@ -2987,32 +2997,29 @@ test("an established coordinator root keeps its role while preserving a selected
     );
     const driftInput = { sessionID: "root", agent: "build" };
     const driftOutput = {
-      message: { agent: "build", model: { providerID: "openai", modelID: "gpt-5.6-sol", variant: "xhigh" } },
+      message: { agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-sol", variant: "xhigh" } },
       parts: [{ type: "text", text: "continue with Sol" }],
     };
     await chat(driftInput, driftOutput);
 
-    assert.equal(driftInput.agent, "dog-coordinator");
-    assert.equal(driftOutput.message.agent, "dog-coordinator");
+    assert.equal(driftInput.agent, "build");
+    assert.equal(driftOutput.message.agent, "build");
     assert.deepEqual(driftOutput.message.model, {
       providerID: "openai",
       modelID: "gpt-5.6-sol",
       variant: "xhigh",
     });
     await hooks["tool.execute.before"]!(
-      { tool: "task", sessionID: "root", callID: "worker-after-model-handoff" },
-      { args: { subagent_type: "dog-worker", prompt: readOnlyWorkerPrompt(directory) } },
+      { tool: "task", sessionID: "root", callID: "generic-after-agent-switch" },
+      { args: { subagent_type: "agent-mk2a2-sol", prompt: "consult directly" } },
     );
   });
 });
 
-test("a coordinator command cannot convert an existing non-coordinator root", async () => {
+test("an explicit coordinator selection replaces a root agent but never promotes a child", async () => {
   await withProject("foreign-root-coordinator-command", async (directory) => {
-    const toasts: unknown[] = [];
     const hooks = await SortieDogsPlugin({ directory, client: { session: {
       get: async () => ({ data: { agent: "build" } }),
-    }, tui: {
-      showToast: async (request: unknown) => { toasts.push(request); },
     } } as never });
     const chat = hooks["chat.message"]!;
     const foreignInput = { sessionID: "foreign-root", agent: "dog-coordinator" };
@@ -3021,19 +3028,13 @@ test("a coordinator command cannot convert an existing non-coordinator root", as
       parts: [{ type: "text", text: "release routine" }],
     };
     await chat(foreignInput, foreignOutput);
-    assert.equal(foreignInput.agent, "build");
-    assert.equal(foreignOutput.message.agent, "build");
-    assert.deepEqual(foreignOutput.parts, [{
-      type: "text",
-      text: "SORTIE_FRESH_SESSION_REQUIRED. Do not perform the requested task or use tools. " +
-        "Explain only that /sortie must start in a new session because this session belongs to build.",
-    }]);
-    assert.deepEqual(toasts, [{ body: {
-      title: "Sortie-dogs",
-      message: "/sortie requires a new session. This session remains build.",
-      variant: "warning",
-      duration: 8000,
-    } }]);
+    assert.equal(foreignInput.agent, "dog-coordinator");
+    assert.equal(foreignOutput.message.agent, "dog-coordinator");
+    assert.deepEqual(foreignOutput.parts, [{ type: "text", text: "release routine" }]);
+    await hooks["tool.execute.before"]!(
+      { tool: "task", sessionID: "foreign-root", callID: "worker-after-build" },
+      { args: { subagent_type: "dog-worker", prompt: readOnlyWorkerPrompt(directory) } },
+    );
 
     const historyHooks = await SortieDogsPlugin({ directory, client: { session: {
       get: async () => ({ data: {} }),
@@ -3052,70 +3053,19 @@ test("a coordinator command cannot convert an existing non-coordinator root", as
       parts: [{ type: "text", text: "release routine" }],
     };
     await historyHooks["chat.message"]!(historyInput, historyOutput);
-    assert.equal(historyInput.agent, "build");
-    assert.equal(historyOutput.message.agent, "build");
-    assert.match(String((historyOutput.parts[0] as { text?: unknown }).text), /SORTIE_FRESH_SESSION_REQUIRED/u);
+    assert.equal(historyInput.agent, "dog-coordinator");
+    assert.equal(historyOutput.message.agent, "dog-coordinator");
 
     const partialClientHooks = await SortieDogsPlugin({ directory, client: { session: {
       messages: async () => { throw new Error("unavailable"); },
     } } as never });
-    await assert.rejects(
-      () => partialClientHooks["chat.message"]!(
-        { sessionID: "unverifiable-history", agent: "dog-coordinator" },
-        {
-          message: { agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
-          parts: [{ type: "text", text: "release routine" }],
-        },
-      ),
-      /SORTIE_FRESH_SESSION_REQUIRED/u,
-    );
-
-    const missingAgentHooks = await SortieDogsPlugin({ directory, client: { session: {
-      get: async () => ({ data: {} }),
-      messages: async () => ({ data: [
-        { info: { role: "user" }, parts: [{ type: "text", text: "unknown prior turn" }] },
-      ] }),
-    } } as never });
-    await assert.rejects(
-      () => missingAgentHooks["chat.message"]!(
-        { sessionID: "missing-history-agent", agent: "dog-coordinator" },
-        {
-          message: { agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
-          parts: [{ type: "text", text: "release routine" }],
-        },
-      ),
-      /SORTIE_FRESH_SESSION_REQUIRED/u,
-    );
-
-    const freshHistoryHooks = await SortieDogsPlugin({ directory, client: { session: {
-      get: async () => ({ data: {} }),
-      messages: async () => ({ data: [
-        { info: { role: "assistant", agent: "title" }, parts: [{ type: "text", text: "Release" }] },
-        { info: { role: "user", agent: "dog-coordinator" }, parts: [{ type: "text", text: "release routine" }] },
-      ] }),
-    } } as never });
-    await freshHistoryHooks["chat.message"]!(
-      { sessionID: "fresh-history", agent: "dog-coordinator" },
+    await partialClientHooks["chat.message"]!(
+      { sessionID: "unverifiable-history", agent: "dog-coordinator" },
       {
         message: { agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
         parts: [{ type: "text", text: "release routine" }],
       },
     );
-
-    const trustedIdentityHooks = await SortieDogsPlugin({ directory, client: { session: {
-      get: async () => ({ data: { agent: "dog-coordinator" } }),
-      messages: async () => ({ data: [
-        { info: { role: "user", agent: "build" }, parts: [{ type: "text", text: "foreign history" }] },
-      ] }),
-    } } as never });
-    const trustedIdentityInput = { sessionID: "trusted-identity", agent: "dog-coordinator" };
-    const trustedIdentityOutput = {
-      message: { agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
-      parts: [{ type: "text", text: "release routine" }],
-    };
-    await trustedIdentityHooks["chat.message"]!(trustedIdentityInput, trustedIdentityOutput);
-    assert.equal(trustedIdentityInput.agent, "build");
-    assert.equal(trustedIdentityOutput.message.agent, "build");
 
     const childHooks = await SortieDogsPlugin({ directory, client: { session: {
       get: async () => ({ data: { agent: "dog-coordinator", parentID: "foreign-root" } }),
@@ -3128,7 +3078,7 @@ test("a coordinator command cannot convert an existing non-coordinator root", as
           parts: [{ type: "text", text: "release routine" }],
         },
       ),
-      /SORTIE_FRESH_SESSION_REQUIRED: \/sortie requires a fresh root dog-coordinator session/u,
+      /SORTIE_FRESH_SESSION_REQUIRED: \/sortie cannot promote a child session/u,
     );
 
     const noClientHooks = await SortieDogsPlugin({ directory });
@@ -3140,7 +3090,7 @@ test("a coordinator command cannot convert an existing non-coordinator root", as
           parts: [{ type: "text", text: "release routine" }],
         },
       ),
-      /SORTIE_FRESH_SESSION_REQUIRED: \/sortie requires a fresh root dog-coordinator session/u,
+      /SORTIE_FRESH_SESSION_REQUIRED: \/sortie cannot promote a child session/u,
     );
 
     await noClientHooks.event!({ event: { type: "session.created", properties: {
@@ -3154,7 +3104,7 @@ test("a coordinator command cannot convert an existing non-coordinator root", as
           parts: [{ type: "text", text: "release routine" }],
         },
       ),
-      /SORTIE_FRESH_SESSION_REQUIRED: \/sortie requires a fresh root dog-coordinator session/u,
+      /SORTIE_FRESH_SESSION_REQUIRED: \/sortie cannot promote a child session/u,
     );
 
     const nullRootHooks = await SortieDogsPlugin({ directory, client: { session: {
@@ -3391,7 +3341,7 @@ test("an owned compaction text part resumes the same coordinator root", async ()
   });
 });
 
-test("worker dispatch rejects an unregistered handoff before consuming the fast lane", async () => {
+test("worker dispatch rejects an unregistered handoff and trusts its inspected manifest", async () => {
   await withProject("worker-dispatch-preflight", async (directory) => {
     await mkdir(join(directory, ".opencode"));
     await writeFile(join(directory, "operation-manifest.json"), JSON.stringify({
@@ -3444,62 +3394,52 @@ test("worker dispatch rejects an unregistered handoff before consuming the fast 
         return true;
       },
     );
-    await assert.rejects(
-      () => hooks["tool.execute.before"]!(
-        { tool: "task", sessionID: "root", callID: "validation-manifest-mismatch" },
-        {
-          args: {
-            subagent_type: "dog-worker",
-            prompt: [
-              "task_id: task-a",
-              "context_digest:",
-              `  project_root: ${directory}`,
-              `  handoff_path: ${registered}`,
-              "  acceptance: safe change",
-              "  role: implementation",
-              "  validation: { level: full, command: npm run different, diagnostics: [] }",
-              "source_manifest: [allowed.txt]",
-              "operation_manifest: operation-manifest.json",
-            ].join("\n"),
-          },
+    await hooks["tool.execute.before"]!(
+      { tool: "task", sessionID: "root", callID: "validation-manifest-mismatch" },
+      {
+        args: {
+          subagent_type: "dog-worker",
+          prompt: [
+            "task_id: task-a",
+            "context_digest:",
+            `  project_root: ${directory}`,
+            `  handoff_path: ${registered}`,
+            "  acceptance: safe change",
+            "  role: implementation",
+            "  validation: { level: full, command: npm run different, diagnostics: [] }",
+            "source_manifest: [allowed.txt]",
+            "operation_manifest: operation-manifest.json",
+          ].join("\n"),
         },
-      ),
-      (error: unknown) => {
-        assert.ok(error instanceof HandoffDeniedError);
-        assert.deepEqual(error.defects, [
-          "contract /validation/command dispatch_validation_manifest_mismatch",
-        ]);
-        return true;
       },
     );
-    await assert.rejects(
-      () => hooks["tool.execute.before"]!(
-        { tool: "task", sessionID: "root", callID: "validation-block-manifest-mismatch" },
-        {
-          args: {
-            subagent_type: "dog-worker",
-            prompt: [
-              "task_id: task-a",
-              "context_digest:",
-              `  project_root: ${directory}`,
-              `  handoff_path: ${registered}`,
-              "  acceptance: safe change",
-              "  role: implementation",
-              "  validation:",
-              "    command: npm run different",
-              "source_manifest: [allowed.txt]",
-              "operation_manifest: operation-manifest.json",
-            ].join("\n"),
-          },
+    await hooks["tool.execute.after"]!(
+      { tool: "task", sessionID: "root", callID: "validation-manifest-mismatch" },
+      {},
+    );
+    await hooks["tool.execute.before"]!(
+      { tool: "task", sessionID: "root", callID: "validation-block-manifest-mismatch" },
+      {
+        args: {
+          subagent_type: "dog-worker",
+          prompt: [
+            "task_id: task-a",
+            "context_digest:",
+            `  project_root: ${directory}`,
+            `  handoff_path: ${registered}`,
+            "  acceptance: safe change",
+            "  role: implementation",
+            "  validation:",
+            "    command: npm run different",
+            "source_manifest: [allowed.txt]",
+            "operation_manifest: operation-manifest.json",
+          ].join("\n"),
         },
-      ),
-      (error: unknown) => {
-        assert.ok(error instanceof HandoffDeniedError);
-        assert.deepEqual(error.defects, [
-          "contract /validation/command dispatch_validation_manifest_mismatch",
-        ]);
-        return true;
       },
+    );
+    await hooks["tool.execute.after"]!(
+      { tool: "task", sessionID: "root", callID: "validation-block-manifest-mismatch" },
+      {},
     );
     await assert.rejects(
       () => hooks["tool.execute.before"]!(
@@ -3696,7 +3636,7 @@ test("worker dispatch rejects an unregistered handoff before consuming the fast 
   });
 });
 
-test("an explicit real build turn cannot silently relinquish an in-memory coordinator route", async () => {
+test("an explicit real build turn clears an in-memory coordinator route", async () => {
   await withProject("coordinator-route-relinquished", async (directory) => {
     const hooks = await SortieDogsPlugin({ directory });
     const chat = hooks["chat.message"]!;
@@ -3712,20 +3652,31 @@ test("an explicit real build turn cannot silently relinquish an in-memory coordi
       { tool: "task", sessionID: "shared", callID: "sortie-worker" },
       { args: { subagent_type: "dog-worker", prompt: readOnlyWorkerPrompt(directory) } },
     );
-    await chat(
-      { sessionID: "shared", agent: "build" },
-      {
-        message: { agent: "build", model: { providerID: "host", modelID: "selected" } },
-        parts: [{ type: "text", text: "continue directly" }],
-      },
-    );
+    await hooks.event!({ event: { type: "session.created", properties: {
+      info: { id: "old-child", parentID: "shared", directory },
+    } } });
+    const buildInput = { sessionID: "shared", agent: "build" };
+    const buildOutput = {
+      message: { agent: "build", model: { providerID: "host", modelID: "selected" } },
+      parts: [{ type: "text", text: "continue directly" }],
+    };
+    await chat(buildInput, buildOutput);
+    assert.equal(buildInput.agent, "build");
+    assert.equal(buildOutput.message.agent, "build");
 
+    await before(
+      { tool: "task", sessionID: "shared", callID: "generic-sol" },
+      { args: { subagent_type: "agent-mk2a2-sol", prompt: "bounded implementation" } },
+    );
     await assert.rejects(
-      () => before(
-        { tool: "task", sessionID: "shared", callID: "generic-sol" },
-        { args: { subagent_type: "agent-mk2a2-sol", prompt: "bounded implementation" } },
+      () => chat(
+        { sessionID: "old-child", agent: "dog-coordinator" },
+        {
+          message: { agent: "dog-coordinator", model: { providerID: "host", modelID: "selected" } },
+          parts: [{ type: "text", text: "promote" }],
+        },
       ),
-      /SORTIE_FAST_LANE_DENIED: ROLE_FORBIDDEN/u,
+      /SORTIE_FRESH_SESSION_REQUIRED: \/sortie cannot promote a child session/u,
     );
   });
 });
@@ -4655,6 +4606,34 @@ test("a nested candidate binds from its own default handoff after one successful
   });
 });
 
+test("a nested candidate accepts the canonical contract directory", async () => {
+  await withProject("nested-canonical-contract", async (directory) => {
+    const candidateRoot = join(directory, "candidate");
+    const contractDirectory = join(candidateRoot, ".sortie-dogs", "contracts");
+    await mkdir(contractDirectory, { recursive: true });
+    const id = "nested-canonical";
+    const manifestRelative = `.sortie-dogs/contracts/${id}.operation-manifest.json`;
+    await writeFile(join(candidateRoot, manifestRelative), JSON.stringify({
+      ...operationManifest(["allowed.txt"]),
+      task_id: id,
+    }));
+    const handoff = writeGateHandoff(candidateRoot, manifestRelative);
+    handoff.id = id;
+    const handoffPath = join(contractDirectory, `handoff.${id}.json`);
+    await writeFile(handoffPath, JSON.stringify(handoff));
+
+    const hooks = await SortieDogsPlugin({ directory });
+    const check = hooks.tool?.sortie_check_contract as unknown as {
+      execute(args: { handoff_path: string }, context: { sessionID: string }): Promise<string>;
+    } | undefined;
+    assert.ok(check);
+    assert.deepEqual(
+      JSON.parse(await check.execute({ handoff_path: handoffPath }, { sessionID: "nested-root" })),
+      { status: "ok", defects: [] },
+    );
+  });
+});
+
 test("a denied handoff read reports the document, pointer, and rule that must be repaired", async () => {
   await withProject("handoff-denial-defects", async (directory) => {
     const hooks = await configuredHooks(directory);
@@ -4742,6 +4721,26 @@ test("the contract preflight reports gate defects without granting inspection", 
 
     await writeFile(handoffPath, JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
     assert.deepEqual(await report(handoffPath), { status: "ok", defects: [] });
+
+    const contractDirectory = join(directory, ".sortie-dogs", "contracts");
+    await mkdir(contractDirectory, { recursive: true });
+    const canonicalID = "canonical-task";
+    const canonicalManifest = `.sortie-dogs/contracts/${canonicalID}.operation-manifest.json`;
+    await writeFile(join(directory, canonicalManifest), JSON.stringify({
+      ...fixture.manifest,
+      task_id: canonicalID,
+    }));
+    const canonicalHandoff = writeGateHandoff(directory, canonicalManifest);
+    canonicalHandoff.id = canonicalID;
+    const canonicalHandoffPath = join(contractDirectory, `handoff.${canonicalID}.json`);
+    await writeFile(canonicalHandoffPath, JSON.stringify(canonicalHandoff));
+    assert.deepEqual(await report(canonicalHandoffPath), { status: "ok", defects: [] });
+
+    const hiddenDirectory = join(directory, ".sortie-dogs", "other");
+    await mkdir(hiddenDirectory);
+    const hiddenHandoffPath = join(hiddenDirectory, `handoff.${canonicalID}.json`);
+    await writeFile(hiddenHandoffPath, JSON.stringify(canonicalHandoff));
+    assert.deepEqual((await report(hiddenHandoffPath)).defects, ["handoff / handoff_path_not_registered"]);
 
     const artifactManifest = {
       ...fixture.manifest,
@@ -7105,6 +7104,35 @@ test("plugin shell gate allows explicit reads and denies unknown executables", a
       await expectActionableCommandDenial(() => invokePowerShell(command));
     }
     await invokePowerShell("Set-Content -LiteralPath allowed.txt -Value safe");
+    await invokePowerShell(
+      'Copy-Item -LiteralPath "read-only-source.bin" -Destination "allowed.txt" -Force',
+    );
+    await expectMessage(
+      () => invokePowerShell(
+        'Copy-Item -LiteralPath "read-only-source.bin" -Destination "blocked-copy.bin" -Force',
+      ),
+      'Write denied for "blocked-copy.bin": operation manifest write scope.',
+      "manifest-scope",
+    );
+    for (const command of [
+      'Copy-Item "read-only-source.bin" "blocked-copy.bin" -Include "allowed.txt"',
+      'Copy-Item -LiteralPath "read-only-source.bin" -Destination "$env:TEMP" -Force',
+      'Copy-Item -LiteralPath "read-only-source.bin" -Destination "*.bin" -Force',
+      'Copy-Item -Path "$dynamic" -Destination "allowed.txt"',
+      'Copy-Item -Path "*.bin" -Destination "allowed.txt"',
+      'Copy-Item -Path "[ab].bin" -Destination "allowed.txt"',
+      'Copy-Item -Path @("a","b") -Destination "allowed.txt"',
+      'Copy-Item -Path (Get-Location) -Destination "allowed.txt"',
+      'Copy-Item -LiteralPath -Recurse -Destination "allowed.txt"',
+      'Copy-Item -LiteralPath "read-only-source.bin" -Destination -Force',
+      'Copy-Item -LiteralPath "read-only-source.bin" -Destination "allowed.txt" -Force -Force',
+      'Copy-Item "source-a.bin" "source-b.bin" "allowed.txt"',
+    ]) {
+      await expectActionableCommandDenial(
+        () => invokePowerShell(command),
+        "unsupported-copy-item-form",
+      );
+    }
     const robocopyTarget = directory.replaceAll("/", "\\");
     await invokePowerShell(
       `& "C:\\Windows\\System32\\Robocopy.exe" "C:\\approved-source" "${robocopyTarget}" "allowed.txt"`,

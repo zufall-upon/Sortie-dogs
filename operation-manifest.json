@@ -2,6 +2,7 @@
   "version": "0.1.0",
   "task_id": "single-worker-fast-lane-v1",
   "read": [
+    ".gitignore",
     "AGENTS.md",
     "package.json",
     "package-lock.json",
@@ -10,6 +11,7 @@
     "docs/guide-ja.md",
     "docs/guide-zh-CN.md",
     "src/asset-version.ts",
+    "src/core/worktree-commit-artifact.ts",
     "src/core/consultation.ts",
     "src/plugin/continuation.ts",
     "src/plugin/fast-lane.ts",
@@ -24,6 +26,7 @@
     "test/plugin-loader.test.ts"
   ],
   "write": [
+    ".gitignore",
     "AGENTS.md",
     "operation-manifest.json",
     "package.json",
@@ -33,6 +36,7 @@
     "docs/guide-ja.md",
     "docs/guide-zh-CN.md",
     "src/asset-version.ts",
+    "src/core/worktree-commit-artifact.ts",
     "src/core/consultation.ts",
     "src/plugin/continuation.ts",
     "src/plugin/fast-lane.ts",

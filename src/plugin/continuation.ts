@@ -40,9 +40,6 @@ export const STEP_EXHAUSTED_PATTERN =
   /(?:最大step(?:s|数)?(?:に)?到達|step(?:s)?\s*(?:limit|budget)\s*(?:reached|exhausted)|maximum\s+steps?\s+reached)[\s\S]{0,2500}(?:残作業|未完了|未完|次action|next\s+action|remaining\s+work)/iu;
 
 const MAX_TRACKED_SESSIONS = 256;
-const MAX_STEP_CONTINUES_PER_SEGMENT = 2;
-const MAX_STEP_CONTINUES_PER_TURN = 4;
-
 const DEFAULT_TIMINGS = {
   /** Compaction is expensive; one rollover per minute per session is the canonical ceiling. */
   cooldownMilliseconds: 60_000,
@@ -365,9 +362,6 @@ interface SessionState {
   textCompleting: boolean;
   /** The direct capability already ran in this turn, so the marker must not run too. */
   directUsed: boolean;
-  /** Bounded recovery in the current compaction segment and across the whole real user turn. */
-  stepContinueCount: number;
-  stepContinueTotal: number;
   stepContinueIssuing: boolean;
   /** Referenced fallback because one-shot CLI can exit without emitting session.idle. */
   stepRecoveryTimer?: unknown;
@@ -474,8 +468,6 @@ export function createContinuationHooks(
       resumeAttempts: 0,
       textCompleting: false,
       directUsed: false,
-      stepContinueCount: 0,
-      stepContinueTotal: 0,
       stepContinueIssuing: false,
       touched: Date.now(),
     };
@@ -600,13 +592,9 @@ export function createContinuationHooks(
     const active = policy();
     if (
       resume === undefined || !active.enabled || active.agent !== agent || state.stepContinueIssuing ||
-      state.lastStepContinueReport === report ||
-      state.stepContinueCount >= MAX_STEP_CONTINUES_PER_SEGMENT ||
-      state.stepContinueTotal >= MAX_STEP_CONTINUES_PER_TURN
+      state.lastStepContinueReport === report
     ) return;
     state.stepContinueIssuing = true;
-    state.stepContinueCount += 1;
-    state.stepContinueTotal += 1;
     state.latestCoordinatorReport = undefined;
     try {
       const resumed = await resume.call(client!.session, {
@@ -624,8 +612,6 @@ export function createContinuationHooks(
       if (!promptCallSucceeded(resumed)) throw new Error("step continuation request rejected");
       state.lastStepContinueReport = report;
     } catch (error) {
-      state.stepContinueCount -= 1;
-      state.stepContinueTotal -= 1;
       state.latestCoordinatorReport = report;
       console.error("[sortie-continuation] step resume failed", sessionID, error);
     } finally {
@@ -658,9 +644,6 @@ export function createContinuationHooks(
       state.continueReport = undefined;
       state.preserveCompactionScope = false;
       state.recoverySummaryValidated = false;
-      // A successful rollover starts a new bounded context segment. Keep ordinary synthetic turns
-      // from resetting this guard, but allow two fresh progress recoveries after compaction.
-      state.stepContinueCount = 0;
       // The accepted prompt now belongs to the host loop, not this rollover request.
       state.active = false;
       return true;
@@ -1115,11 +1098,7 @@ export function createContinuationHooks(
       state.compactingEpoch = undefined;
       state.model = { providerID: model.providerID, modelID: model.modelID };
       state.turnRevision += 1;
-      if (!synthetic) {
-        state.stepContinueCount = 0;
-        state.stepContinueTotal = 0;
-        state.limitCompacted = false;
-      }
+      if (!synthetic) state.limitCompacted = false;
     },
 
     blocksTool(sessionID): boolean {

@@ -200,6 +200,10 @@ global file、project file、`SORTIE_DOGS_CONFIG`、plugin factory options。Ope
   空配列にすると bind 自体が成立しない。相対 entry は親 workspace 配下の nested repo でも
   candidate 相対として扱う。operational work では coordinator が dispatch 前に有効な handoff を
   作成して絶対 path を渡し、bind する child 自身が直前に built-in Read で読む。
+  新規 contract は candidate 相対の `.sortie-dogs/contracts/` に
+  `handoff.<id>.json` と `<id>.operation-manifest.json` として出力する。ここは `.gitignore`
+  で ignore 推奨。legacy の root/scoped path と custom 設定 path は移動・削除せず、読み取り・preflight・bind
+  互換を維持する。Sortie run が active でない場合だけ directory を削除する。
 - `readOnlyTools`: MCP tool など、file を変更しない host 固有 tool 名を追加する。
   未知の tool は bind 済み session では既定で拒否される。
 - `dedicatedWorkerModel`: 全 worker role が解決する単一 model。既定は `openai/gpt-5.6-luna` /
@@ -288,7 +292,7 @@ stage、commit、ユーザー対応を行わない。
 
 ## 更新と移行
 
-[Release v0.5.11](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.5.11)
+[Release v0.5.12](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.5.12)
 
 依存 asset を新しい release に更新後、対象 project root で再実行する。
 

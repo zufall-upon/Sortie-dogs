@@ -11,3 +11,4 @@ dist/
 marketing/
 node_modules/
 temp/
+/.sortie-dogs/contracts/

@@ -760,6 +760,8 @@ async function status(context: Context, staged: "forbid" | "require" | "either")
   const controls = new Set([
     `handoff.${context.descriptor.task_id}.json`,
     `${context.descriptor.task_id}.operation-manifest.json`,
+    `.sortie-dogs/contracts/handoff.${context.descriptor.task_id}.json`,
+    `.sortie-dogs/contracts/${context.descriptor.task_id}.operation-manifest.json`,
   ]);
   return entries.filter(({ code, path }) => code !== "A" || !controls.has(path));
 }

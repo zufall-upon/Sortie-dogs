@@ -192,6 +192,10 @@ factory options，请使用全局文件保存持久的全局设置。
   因此空数组会完全禁用绑定。相对条目在父 workspace 下的 nested repo 中也按 candidate 根目录解析。
   对 operational work，coordinator 必须在派发前创建有效 handoff 并传递其绝对路径；执行绑定的 child
   必须在 bind 前立即使用 built-in Read 读取该文件。
+  新 contract 会写入 candidate 相对的 `.sortie-dogs/contracts/`，文件名为
+  `handoff.<id>.json` 和 `<id>.operation-manifest.json`。建议在 `.gitignore` 中忽略该目录。
+  legacy 根目录/作用域路径和自定义配置路径不会自动移动或删除，继续兼容读取、preflight 与 bind。
+  只有没有正在运行的 Sortie run 时才可安全删除该目录。
 - `readOnlyTools`：追加不会修改文件的宿主专用工具名，例如 MCP 工具。
   对已绑定的会话，未知工具默认被拒绝。
 - `dedicatedWorkerModel`：所有 worker 角色解析到的唯一模型。默认为 `openai/gpt-5.6-luna`
@@ -275,7 +279,7 @@ canonical validation 后独立审查高风险候选项。二者都不负责实�
 
 ## 更新与迁移
 
-[Release v0.5.11](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.5.11)
+[Release v0.5.12](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.5.12)
 
 将依赖替换为新版 Release asset 后，在目标项目根目录再次运行：
 
