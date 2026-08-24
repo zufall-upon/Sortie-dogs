@@ -335,6 +335,8 @@ interface SessionState {
   latestReport?: string | undefined;
   /** Latest non-compaction coordinator text observed during the current user turn. */
   latestCoordinatorReport?: string | undefined;
+  /** Same completed assistant text can arrive through text-complete and a later persisted event. */
+  lastStepContinueReport?: string | undefined;
   /** A rollover is executing right now. */
   active: boolean;
   /** Summarize succeeded; a failed synthetic resume must not summarize the same state again. */
@@ -583,7 +585,9 @@ export function createContinuationHooks(
     if (terminalCheckpoint(text)) return false;
     if (/➡️\s*(?:次action|next_action)\s*:\s*\S/iu.test(text)) return true;
     const percent = latestProgressPercent(text);
-    return percent !== undefined && (percent < 100 || batchHasIndependentRemainder(text));
+    if (percent !== undefined) return percent < 100 || batchHasIndependentRemainder(text);
+    // Coordinators sometimes omit the optional percentage while retaining a localized progress label.
+    return /📊\s*(?:進行中|处理中|in[ -]?progress)(?:\s|[:：]|$)/iu.test(latestProgressLine(text) ?? "");
   }
 
   async function issueStepContinue(
@@ -596,6 +600,7 @@ export function createContinuationHooks(
     const active = policy();
     if (
       resume === undefined || !active.enabled || active.agent !== agent || state.stepContinueIssuing ||
+      state.lastStepContinueReport === report ||
       state.stepContinueCount >= MAX_STEP_CONTINUES_PER_SEGMENT ||
       state.stepContinueTotal >= MAX_STEP_CONTINUES_PER_TURN
     ) return;
@@ -617,6 +622,7 @@ export function createContinuationHooks(
         },
       });
       if (!promptCallSucceeded(resumed)) throw new Error("step continuation request rejected");
+      state.lastStepContinueReport = report;
     } catch (error) {
       state.stepContinueCount -= 1;
       state.stepContinueTotal -= 1;
@@ -1105,6 +1111,7 @@ export function createContinuationHooks(
       if (!synthetic && !state.pendingRollover && !state.active && !state.promptPending) state.attempts = 0;
       state.directUsed = false;
       state.latestCoordinatorReport = undefined;
+      if (!synthetic) state.lastStepContinueReport = undefined;
       state.compactingEpoch = undefined;
       state.model = { providerID: model.providerID, modelID: model.modelID };
       state.turnRevision += 1;

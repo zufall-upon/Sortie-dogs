@@ -953,6 +953,45 @@ test("session idle recovers in-progress output without a next action", async () 
   assert.match(host.promptCalls[0]!.text, /next_actionが欠落していれば/);
 });
 
+test("text completion recovers compact progress text without a percentage", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" });
+  await hooks.textComplete(
+    { sessionID: "ses_root" },
+    { text: "📊進行中: 原因確定。\n次: r14で修正し、検証を再実行。" },
+  );
+  await settle();
+  assert.equal(host.promptCalls.length, 1);
+  assert.ok(host.promptCalls[0]!.text.startsWith(STEP_CONTINUE_PREFIX));
+});
+
+test("text completion does not treat a charted terminal statistic as progress", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" });
+  await hooks.textComplete(
+    { sessionID: "ses_root" },
+    { text: "📊 Tests: 214 passed\nRelease validation complete." },
+  );
+  await settle();
+  assert.equal(host.promptCalls.length, 0);
+});
+
+test("duplicate completion delivery emits one step continuation prompt", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" });
+  const report = "📊進行中: 原因確定。\n次: r14で修正。";
+  await hooks.textComplete({ sessionID: "ses_root" }, { text: report });
+  await settle();
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" }, true);
+  await hooks.textComplete({ sessionID: "ses_root" }, { text: report });
+  await hooks.sessionIdle("ses_root");
+  await settle();
+  assert.equal(host.promptCalls.length, 1);
+});
+
 test("session idle compacts a terminal unit checkpoint below the batch target", async () => {
   const host = fakeHost({ agent: COORDINATOR });
   let markMainSummaryStarted!: () => void;

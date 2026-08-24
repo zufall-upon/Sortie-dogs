@@ -1819,10 +1819,13 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   }
 
   async function completeContinuationText(sessionID: string, text: string): Promise<void> {
+    const continuationText = fastLane.manualCompactionForbidden(sessionID)
+      ? text.replaceAll(ROLLOVER_MARKER, "").replaceAll(CONTINUATION_MARKER, "").trimEnd()
+      : text;
     await continuation.textComplete({
       sessionID,
       allowCheckpointContinuation: fastLane.backlogContinuationAllowed(sessionID),
-    }, { text });
+    }, { text: continuationText });
     if (fastLane.backlogContinuationAllowed(sessionID) && continuation.blocksTool(sessionID)) {
       fastLane.continuationQueued(sessionID);
     }
@@ -3132,7 +3135,6 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           .replaceAll(ROLLOVER_MARKER, "")
           .replaceAll(CONTINUATION_MARKER, "")
           .trimEnd();
-        return;
       }
       await completeContinuationText(textInput.sessionID, textOutput.text);
     },
@@ -3773,7 +3775,6 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       const eventPartTime = isRecord(eventPart?.time) ? eventPart.time : undefined;
       if (
         event.type === "message.part.updated" && isCoordinatorSession(eventSessionID) &&
-        !fastLane.manualCompactionForbidden(eventSessionID) &&
         eventPart?.type === "text" && typeof eventPart.text === "string" && eventPart.text.trim().length > 0 &&
         typeof eventPartTime?.end === "number" && typeof eventPart.id === "string" &&
         typeof eventPart.messageID === "string" &&
@@ -3818,7 +3819,6 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       }
       if (
         event.type === "message.updated" && isCoordinatorSession(eventSessionID) &&
-        !fastLane.manualCompactionForbidden(eventSessionID) &&
         info?.role === "assistant" && info.agent === COORDINATOR_AGENT && isRecord(info.time) &&
         typeof info.time.completed === "number" && typeof info.id === "string" &&
         !completedCoordinatorMessages.has(info.id)

@@ -3758,6 +3758,45 @@ test("a dispatched fast-lane worker suppresses legacy terminal compaction", asyn
   });
 });
 
+test("a normal lane strips compaction markers but still recovers non-terminal progress", async () => {
+  await withProject("normal-lane-progress-recovery", async (directory) => {
+    let prompts = 0;
+    const report = "📊進行中: 原因確定。\n次: r14で修正し、検証を再実行。";
+    const messages: SessionMessage[] = [{
+      info: { id: "progress-message", role: "assistant", agent: "dog-coordinator" } as never,
+      parts: [{ id: "progress-part", type: "text", text: report } as never],
+    }];
+    const hooks = await SortieDogsPlugin({ directory, client: { session: {
+      get: async () => ({ data: { agent: "dog-coordinator" } }),
+      messages: async () => ({ data: messages }),
+      promptAsync: async () => { prompts += 1; return { data: true }; },
+    } } as never });
+    await hooks["chat.message"]!(
+      { sessionID: "root", agent: "dog-coordinator" },
+      {
+        message: { agent: "dog-coordinator", model: { providerID: "host", modelID: "selected" } },
+        parts: [{ type: "text", text: "task" }],
+      },
+    );
+    const completed = {
+      text: `${report}\n${ROLLOVER_MARKER}\n${CONTINUATION_MARKER}`,
+    };
+    await hooks["experimental.text.complete"]!({ sessionID: "root" }, completed);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await hooks.event!({ event: { type: "message.part.updated", properties: { part: {
+      id: "progress-part",
+      messageID: "progress-message",
+      sessionID: "root",
+      type: "text",
+      text: report,
+      time: { end: Date.now() },
+    } } } });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.doesNotMatch(completed.text, /SORTIE_(?:COMPACT|CONTINUE)/u);
+    assert.equal(prompts, 1);
+  });
+});
+
 test("a review-only normal lane suppresses legacy terminal compaction", async () => {
   await withProject("review-only-terminal-marker", async (directory) => {
     const hooks = await SortieDogsPlugin({ directory });
@@ -7066,6 +7105,28 @@ test("plugin shell gate allows explicit reads and denies unknown executables", a
       await expectActionableCommandDenial(() => invokePowerShell(command));
     }
     await invokePowerShell("Set-Content -LiteralPath allowed.txt -Value safe");
+    const robocopyTarget = directory.replaceAll("/", "\\");
+    await invokePowerShell(
+      `& "C:\\Windows\\System32\\Robocopy.exe" "C:\\approved-source" "${robocopyTarget}" "allowed.txt"`,
+    );
+    await expectMessage(
+      () => invokePowerShell(
+        `& "C:\\Windows\\System32\\Robocopy.exe" "C:\\approved-source" "${robocopyTarget}" "blocked.txt"`,
+      ),
+      'Write denied for "blocked.txt": operation manifest write scope.',
+      "manifest-scope",
+    );
+    for (const command of [
+      `& "C:\\Windows\\System32\\Robocopy.exe" "C:\\approved-*" "${robocopyTarget}" "allowed.txt"`,
+      `& "C:\\Windows\\System32\\Robocopy.exe" "C:\\approved-source" "${robocopyTarget}\\*" "allowed.txt"`,
+      `& "C:\\Windows\\System32\\Robocopy.exe" "C:\\approved-source" "$env:TEMP" "allowed.txt"`,
+      `& "C:\\Windows\\System32\\Robocopy.exe" "C:\\approved-source" "${robocopyTarget}" "*.txt"`,
+    ]) {
+      await expectActionableCommandDenial(
+        () => invokePowerShell(command),
+        "unsupported-robocopy-form",
+      );
+    }
     await expectMessage(
       () => invokePowerShell("Get-Content allowed.txt > blocked.txt"),
       'Write denied for "blocked.txt": operation manifest write scope.',

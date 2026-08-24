@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { lstat, realpath } from "node:fs/promises";
-import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, relative, resolve, win32 } from "node:path";
 import { promisify } from "node:util";
 
 import { RelativePathError, normalizeManifestPath, normalizeRelativePath } from "../core/path.js";
@@ -433,6 +433,20 @@ function commandIssue(segment: string, cause: string, hint: string): CommandIssu
   return { segment: segment.trim().slice(0, 240), cause, hint };
 }
 
+function robocopyOutput(tokens: readonly string[]): string | undefined {
+  if (tokens.length !== 4) return undefined;
+  const source = tokens[1];
+  const destination = tokens[2];
+  const file = tokens[3];
+  const literal = (value: string) => value.length > 0 && !/[\u0000-\u001f\u007f$*?]/u.test(value);
+  if (
+    !literal(source) || !literal(destination) || !literal(file) ||
+    file === "." || file === ".." || /[\\/]/u.test(file) ||
+    source.startsWith("/") || destination.startsWith("/") || file.startsWith("/")
+  ) return undefined;
+  return win32.join(destination, file);
+}
+
 function shellPaths(command: string, powershell: boolean, depth = 0): Extraction {
   const paths: string[] = [];
   let applies = false;
@@ -520,6 +534,20 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
         issue ??= commandIssue(source, "unsupported-webrequest-form", "use one literal HTTPS -Uri and one explicit -OutFile path");
       } else paths.push(destination);
       if (destination !== undefined) requiredDirectories.push(dirname(destination));
+    } else if (/^robocopy(?:\.exe)?$/u.test(executable)) {
+      applies = true;
+      const destination = robocopyOutput(tokens);
+      if (destination === undefined) {
+        ambiguous = true;
+        issue ??= commandIssue(
+          source,
+          "unsupported-robocopy-form",
+          "use literal Robocopy.exe <source-dir> <destination-dir> <single-file>",
+        );
+      } else {
+        paths.push(destination);
+        requiredDirectories.push(dirname(destination));
+      }
     } else if (executable === "tar") {
       const mode = tarMode(tokens);
       if (mode === undefined) {
