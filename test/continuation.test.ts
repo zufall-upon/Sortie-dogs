@@ -168,6 +168,158 @@ test("the direct capability compacts the root coordinator and resumes the same s
   assert.doesNotMatch(host.promptCalls[0]!.text, /Tool-requested Sortie rollover/);
 });
 
+test("ordinary BLOCKED reports auto-resume while explicit true blockers remain terminal", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
+  await hooks.textComplete({ sessionID: "ses_root" }, {
+    text: "⛔ **BLOCKED** `task-r40` — local write scope defect\n**Next:** repair and redispatch without stopping",
+  });
+  await hooks.sessionIdle("ses_root");
+  assert.equal(host.promptCalls.length, 1);
+  assert.match(host.promptCalls[0]!.text, /autonomous|自律/iu);
+
+  const terminalHost = fakeHost({ agent: COORDINATOR });
+  const terminalHooks = createContinuationHooks(terminalHost.client, "/project", POLICY, FAST);
+  await terminalHooks.textComplete({ sessionID: "ses_root" }, {
+    text: "status: BLOCKED\nTRUE_BLOCKER: external: unavailable service",
+  });
+  await terminalHooks.sessionIdle("ses_root");
+  assert.equal(terminalHost.promptCalls.length, 0);
+});
+
+test("terminal classification uses the final status and rejects malformed blocker markers", async () => {
+  const completedHost = fakeHost({ agent: COORDINATOR });
+  const completedHooks = createContinuationHooks(completedHost.client, "/project", POLICY, FAST);
+  await completedHooks.textComplete({ sessionID: "ses_root" }, {
+    text: "⛔ **BLOCKED** `old` — prior report\n✅ **DONE** `task` — final report",
+  });
+  await completedHooks.sessionIdle("ses_root");
+  assert.equal(completedHost.promptCalls.length, 0);
+
+  const recoverHost = fakeHost({ agent: COORDINATOR });
+  const recoverHooks = createContinuationHooks(recoverHost.client, "/project", POLICY, FAST);
+  await recoverHooks.textComplete({ sessionID: "ses_root" }, {
+    text: [
+      "✅ **DONE** `old` — prior report",
+      "TRUE_BLOCKER: external: stale outage",
+      "⛔ **BLOCKED** `task` — local defect",
+      "TRUE_BLOCKER:",
+      "TRUE_BLOCKER: false",
+      "TRUE_BLOCKER: local process defect",
+      "> TRUE_BLOCKER: external: quoted old outage",
+      "```yaml",
+      "```not-a-close",
+      "TRUE_BLOCKER: external: fenced old outage",
+      "```",
+      "~~~yaml",
+      "TRUE_BLOCKER: external: tilde-fenced old outage",
+      "~~~",
+      "Explanation only: **DONE** is not the final status",
+    ].join("\n"),
+  });
+  await recoverHooks.sessionIdle("ses_root");
+  assert.equal(recoverHost.promptCalls.length, 1);
+});
+
+test("step continuation preserves user consultation and no-stop instructions", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
+  await hooks.textComplete({ sessionID: "ses_root" }, {
+    text: "status: BLOCKED\nNext: consult SOL if stuck, then continue sequentially without stopping",
+  });
+  await hooks.sessionIdle("ses_root");
+  assert.match(host.promptCalls[0]!.text, /SOL\/advisor consultation/i);
+  assert.match(host.promptCalls[0]!.text, /no-stop/i);
+  assert.match(host.promptCalls[0]!.text, /gate\/routing\/handoff\/scope\/retry\/time\/step/i);
+});
+
+test("step recovery continues through unstructured deferrals until a canonical terminal report", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" });
+  await hooks.textComplete({ sessionID: "ses_root" }, {
+    text: "status: BLOCKED\nLocal process defect; continue autonomously",
+  });
+  await hooks.sessionIdle("ses_root");
+  assert.equal(host.promptCalls.length, 1);
+
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" }, true);
+  const deferral = "Execution time limit; continue by creating the contract next turn.";
+  await hooks.textComplete({ sessionID: "ses_root" }, { text: deferral });
+  await hooks.sessionIdle("ses_root");
+  assert.equal(host.promptCalls.length, 2);
+
+  // Identical model text in a later synthetic turn is not a duplicate event from the prior turn.
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" }, true);
+  await hooks.textComplete({ sessionID: "ses_root" }, { text: deferral });
+  await hooks.sessionIdle("ses_root");
+  assert.equal(host.promptCalls.length, 3);
+
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" }, true);
+  await hooks.textComplete({ sessionID: "ses_root" }, {
+    text: "✅ **DONE** `task` — requested work completed",
+  });
+  await hooks.sessionIdle("ses_root");
+  assert.equal(host.promptCalls.length, 3);
+});
+
+test("a real user turn cancels stale step recovery state", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" });
+  await hooks.textComplete({ sessionID: "ses_root" }, { text: "status: BLOCKED\nLocal process defect" });
+  await hooks.sessionIdle("ses_root");
+  assert.equal(host.promptCalls.length, 1);
+
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" });
+  await hooks.textComplete({ sessionID: "ses_root" }, { text: "Answer to the new user request." });
+  await hooks.sessionIdle("ses_root");
+  assert.equal(host.promptCalls.length, 1);
+});
+
+test("step recovery rechecks a synthetic report that completes before promptAsync returns", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  let releaseFirstPrompt!: () => void;
+  let markFirstPromptStarted!: () => void;
+  const firstPromptStarted = new Promise<void>((resolve) => { markFirstPromptStarted = resolve; });
+  const firstPromptReleased = new Promise<void>((resolve) => { releaseFirstPrompt = resolve; });
+  let promptCount = 0;
+  const mutableSession = host.client.session as {
+    promptAsync: NonNullable<NonNullable<ContinuationClient["session"]>["promptAsync"]>;
+  };
+  mutableSession.promptAsync = async (request) => {
+    host.promptCalls.push({
+      id: request.path.id,
+      agent: request.body.agent,
+      text: request.body.parts[0]!.text,
+    });
+    promptCount += 1;
+    if (promptCount === 1) {
+      markFirstPromptStarted();
+      await firstPromptReleased;
+    }
+    return { data: true };
+  };
+
+  const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" });
+  await hooks.textComplete({ sessionID: "ses_root" }, { text: "status: BLOCKED\nLocal process defect" });
+  const firstIdle = hooks.sessionIdle("ses_root");
+  await firstPromptStarted;
+
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" }, true);
+  await hooks.textComplete({ sessionID: "ses_root" }, {
+    text: "Execution time limit; continue next turn.",
+  });
+  await hooks.sessionIdle("ses_root");
+  assert.equal(host.promptCalls.length, 1);
+
+  releaseFirstPrompt();
+  await firstIdle;
+  await settle();
+  assert.equal(host.promptCalls.length, 2);
+});
+
 test("the direct capability uses the current report in both compaction and resume prompts", async () => {
   const host = fakeHost({ agent: COORDINATOR });
   let hooks!: ReturnType<typeof createContinuationHooks>;
@@ -933,7 +1085,7 @@ test("session idle never resumes a terminal checkpoint", async () => {
   hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" });
   await hooks.textComplete(
     { sessionID: "ses_root" },
-    { text: "✅ status: BLOCKED; task_id: task\n➡️ next_action: user approval" },
+    { text: "⛔ **BLOCKED** `task` — approval required\nTRUE_BLOCKER: user-decision: approval required\n➡️ next_action: user approval" },
   );
   await hooks.sessionIdle("ses_root");
   assert.equal(host.promptCalls.length, 0);
@@ -985,7 +1137,7 @@ test("duplicate completion delivery emits one step continuation prompt", async (
   const report = "📊進行中: 原因確定。\n次: r14で修正。";
   await hooks.textComplete({ sessionID: "ses_root" }, { text: report });
   await settle();
-  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" }, true);
+  // A persisted completion event can redeliver the same text without starting another model turn.
   await hooks.textComplete({ sessionID: "ses_root" }, { text: report });
   await hooks.sessionIdle("ses_root");
   await settle();

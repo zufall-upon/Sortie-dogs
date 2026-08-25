@@ -248,6 +248,36 @@ test("external directory scope rejects symlink escape when the host permits syml
   }
 });
 
+test("missing ancestor plus child declaration scopes descendants without widening lone missing paths", async () => {
+  const root = await mkdtemp(join(tmpdir(), "sortie-project-"));
+  try {
+    const ancestor = "temp";
+    const child = "temp/candidate";
+    const gate = await createWriteGate(await createProjectPaths(root), {
+      ...makeManifest(),
+      write: [ancestor, child],
+    });
+    await gate.checkPath("temp/candidate/run.ps1");
+    await assert.rejects(gate.checkPath("temp/other/run.ps1"),
+      (error: unknown) => error instanceof WriteDeniedError && error.reason === "manifest-scope");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+
+  const loneRoot = await mkdtemp(join(tmpdir(), "sortie-project-"));
+  try {
+    const gate = await createWriteGate(await createProjectPaths(loneRoot), {
+      ...makeManifest(),
+      write: ["missing-target"],
+    });
+    await gate.checkPath("missing-target");
+    await assert.rejects(gate.checkPath("missing-target/child.txt"),
+      (error: unknown) => error instanceof WriteDeniedError && error.reason === "manifest-scope");
+  } finally {
+    await rm(loneRoot, { recursive: true, force: true });
+  }
+});
+
 test("sorts numeric JSON-pointer segments numerically beyond index 9", () => {
   const changedPaths = Array.from({ length: 11 }, (_, index) => `private/change-${index}`);
   assert.deepEqual(

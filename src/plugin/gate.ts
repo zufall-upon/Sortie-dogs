@@ -994,6 +994,11 @@ export async function createWriteGate(project: ProjectPaths, value: unknown): Pr
   } catch (error) {
     throw new WriteDeniedError("manifest-unavailable", "<unknown>", { cause: error });
   }
+  // A missing relative descendant is a directory scope when its parent is also declared.
+  // This authorizes files below the bounded child without widening the parent declaration.
+  const inferredDirectories = new Set([...writable].filter((candidate) =>
+    [...writable].some((other) => other !== candidate && candidate.startsWith(`${other}/`))
+  ));
   const writableDirectories: { path: string; realPath: string }[] = [];
   for (const path of writable) {
     try {
@@ -1002,7 +1007,8 @@ export async function createWriteGate(project: ProjectPaths, value: unknown): Pr
         writableDirectories.push({ path, realPath: await realpath(project.absolute(path)) });
       }
     } catch (error) {
-      if (declaredDirectories.has(path) && isRecord(error) && error.code === "ENOENT") {
+      if ((declaredDirectories.has(path) || inferredDirectories.has(path)) &&
+        isRecord(error) && error.code === "ENOENT") {
         writableDirectories.push({ path, realPath: await nearestExistingRealPath(project.absolute(path)) });
       }
       // Other missing, inaccessible, and concurrently changed paths remain exact-only scopes.

@@ -334,6 +334,8 @@ interface SessionState {
   latestCoordinatorReport?: string | undefined;
   /** Same completed assistant text can arrive through text-complete and a later persisted event. */
   lastStepContinueReport?: string | undefined;
+  /** Turn revision that issued lastStepContinueReport; identical text in a later turn is new work. */
+  lastStepContinueRevision?: number | undefined;
   /** A rollover is executing right now. */
   active: boolean;
   /** Summarize succeeded; a failed synthetic resume must not summarize the same state again. */
@@ -363,6 +365,8 @@ interface SessionState {
   /** The direct capability already ran in this turn, so the marker must not run too. */
   directUsed: boolean;
   stepContinueIssuing: boolean;
+  /** A synthetic step recovery remains active until a real user turn or canonical terminal report. */
+  stepRecoveryActive: boolean;
   /** Referenced fallback because one-shot CLI can exit without emitting session.idle. */
   stepRecoveryTimer?: unknown;
   lastRollover?: number | undefined;
@@ -469,6 +473,7 @@ export function createContinuationHooks(
       textCompleting: false,
       directUsed: false,
       stepContinueIssuing: false,
+      stepRecoveryActive: false,
       touched: Date.now(),
     };
     sessions.set(sessionID, created);
@@ -543,8 +548,57 @@ export function createContinuationHooks(
     if (!promptCallSucceeded(resumed)) throw new Error("resume request rejected");
   }
 
+  function topLevelProtocolLines(text: string): Array<{ index: number; line: string }> {
+    const lines: Array<{ index: number; line: string }> = [];
+    let fence: { character: string; length: number } | undefined;
+    for (const [index, line] of text.split(/\r?\n/u).entries()) {
+      if (fence === undefined) {
+        const opener = /^[ \t]*(`{3,}|~{3,})/u.exec(line)?.[1];
+        if (opener === undefined) {
+          if (!/^[ \t]*>/u.test(line)) lines.push({ index, line });
+          continue;
+        }
+        fence = { character: opener[0]!, length: opener.length };
+        continue;
+      }
+      const closer = /^[ \t]*(`{3,}|~{3,})[ \t]*$/u.exec(line)?.[1];
+      if (closer?.[0] === fence.character && closer.length >= fence.length) fence = undefined;
+    }
+    return lines;
+  }
+
+  function checkpointEntries(text: string): Array<{
+    index: number;
+    status: "DONE" | "BLOCKED" | "NEED_DECISION";
+  }> {
+    const entries: Array<{ index: number; status: "DONE" | "BLOCKED" | "NEED_DECISION" }> = [];
+    for (const { index, line } of topLevelProtocolLines(text)) {
+      const explicit = /^status:\s*(DONE|BLOCKED|NEED_DECISION)\b/iu.exec(line)?.[1]?.toUpperCase();
+      const status = explicit ??
+        (/^✅[ \t]+\*\*DONE\*\*/u.test(line) ? "DONE" :
+          /^⛔[ \t]+\*\*BLOCKED\*\*/u.test(line) ? "BLOCKED" :
+          /^❓[ \t]+\*\*NEED_DECISION\*\*/u.test(line) ? "NEED_DECISION" : undefined);
+      if (status === "DONE" || status === "BLOCKED" || status === "NEED_DECISION") {
+        entries.push({ index, status });
+      }
+    }
+    return entries;
+  }
+
+  function checkpointStatus(text: string): "DONE" | "BLOCKED" | "NEED_DECISION" | undefined {
+    return checkpointEntries(text).at(-1)?.status;
+  }
+
   function terminalCheckpoint(text: string): boolean {
-    return /\bstatus:\s*(?:DONE|BLOCKED|NEED_DECISION)\b/iu.test(text);
+    const status = checkpointStatus(text);
+    return status === "DONE" || status === "NEED_DECISION" || (status === "BLOCKED" && trueBlockerReport(text));
+  }
+
+  function trueBlockerReport(text: string): boolean {
+    const checkpoint = checkpointEntries(text).at(-1);
+    if (checkpoint?.status !== "BLOCKED") return false;
+    return topLevelProtocolLines(text).some(({ line, index }) => index > checkpoint.index &&
+      /^TRUE_BLOCKER\s*:\s*(?:external|user-decision)\s*:\s*\S.*$/u.test(line));
   }
 
   function latestProgressLine(text: string): string | undefined {
@@ -576,6 +630,7 @@ export function createContinuationHooks(
     if (text.startsWith(STEP_CONTINUE_PREFIX) || text.startsWith(AUTO_CONTINUE_PREFIX)) return false;
     if (terminalCheckpoint(text)) return false;
     if (/➡️\s*(?:次action|next_action)\s*:\s*\S/iu.test(text)) return true;
+    if (checkpointStatus(text) === "BLOCKED" && !trueBlockerReport(text)) return true;
     const percent = latestProgressPercent(text);
     if (percent !== undefined) return percent < 100 || batchHasIndependentRemainder(text);
     // Coordinators sometimes omit the optional percentage while retaining a localized progress label.
@@ -592,9 +647,11 @@ export function createContinuationHooks(
     const active = policy();
     if (
       resume === undefined || !active.enabled || active.agent !== agent || state.stepContinueIssuing ||
-      state.lastStepContinueReport === report
+      (state.lastStepContinueRevision === state.turnRevision && state.lastStepContinueReport === report)
     ) return;
+    const revision = state.turnRevision;
     state.stepContinueIssuing = true;
+    state.stepRecoveryActive = true;
     state.latestCoordinatorReport = undefined;
     try {
       const resumed = await resume.call(client!.session, {
@@ -605,17 +662,25 @@ export function createContinuationHooks(
           parts: [{
             type: "text",
             synthetic: true,
-            text: `${STEP_CONTINUE_PREFIX}\n直前出力は非terminal進捗。進捗報告を繰り返さず、明示next_actionが欠落していれば最新の未達user要求とbatch counterから次の必要toolを特定して同じturnで実行する。\n${report}`,
+            text: `${STEP_CONTINUE_PREFIX}\n直前出力は非terminal進捗またはlocal/process blocker。未達のuser order、sequential execution、no-stop制約、SOL/advisor consultation指示を保持し、interactionは真にuser-controlledな決定だけに限定する。local gate/routing/handoff/scope/retry/time/step defectはterminal reportにせず、自律修復・redispatchして継続する。進捗報告を繰り返さず、明示next_actionが欠落していれば最新の未達user要求とbatch counterから次の必要toolを特定して同じturnで実行する。\n${report}`,
           }],
         },
       });
       if (!promptCallSucceeded(resumed)) throw new Error("step continuation request rejected");
       state.lastStepContinueReport = report;
+      state.lastStepContinueRevision = revision;
     } catch (error) {
+      state.stepRecoveryActive = false;
       state.latestCoordinatorReport = report;
       console.error("[sortie-continuation] step resume failed", sessionID, error);
     } finally {
       state.stepContinueIssuing = false;
+      if (
+        sessions.get(sessionID) === state && state.stepRecoveryActive &&
+        state.latestCoordinatorReport !== undefined && !terminalCheckpoint(state.latestCoordinatorReport)
+      ) {
+        queueMicrotask(() => { void handleSessionIdle(sessionID); });
+      }
     }
   }
 
@@ -804,6 +869,7 @@ export function createContinuationHooks(
     state.recoverySummaryValidated = false;
     state.resetAttemptsAfterCompaction = resetAttemptsAfterCompaction;
     state.latestCoordinatorReport = undefined;
+    state.stepRecoveryActive = false;
     if (resume) state.attempts += 1;
     const epoch = state.rolloverEpoch;
     // session.idle can be lost when a one-shot CLI host exits. Keep this zero-delay timer referenced
@@ -967,6 +1033,11 @@ export function createContinuationHooks(
           !trimmed.startsWith(AUTO_CONTINUE_PREFIX)
         ) {
           state.latestCoordinatorReport = output.text.trim();
+          if (terminalCheckpoint(state.latestCoordinatorReport)) {
+            state.stepRecoveryActive = false;
+            clearTimer(state.stepRecoveryTimer);
+            state.stepRecoveryTimer = undefined;
+          }
           if (batchCheckpointNeedsContinuation(state.latestCoordinatorReport)) {
             if (input.allowCheckpointContinuation === false) {
               state.latestCoordinatorReport = undefined;
@@ -977,7 +1048,10 @@ export function createContinuationHooks(
                 : `${state.latestCoordinatorReport}\n➡️ 次action: 未達user要求の次の独立candidateへ進む`;
               await requestContinuation(input.sessionID, identity, report, true);
             }
-          } else if (nonTerminalProgress(state.latestCoordinatorReport)) {
+          } else if (
+            nonTerminalProgress(state.latestCoordinatorReport) ||
+            (state.stepRecoveryActive && !terminalCheckpoint(state.latestCoordinatorReport))
+          ) {
             scheduleStepRecovery(input.sessionID, state, state.latestCoordinatorReport);
           }
           // The resumed coordinator completed a turn, so no late event from its prior compaction can
@@ -1094,7 +1168,11 @@ export function createContinuationHooks(
       if (!synthetic && !state.pendingRollover && !state.active && !state.promptPending) state.attempts = 0;
       state.directUsed = false;
       state.latestCoordinatorReport = undefined;
-      if (!synthetic) state.lastStepContinueReport = undefined;
+      if (!synthetic) {
+        state.lastStepContinueReport = undefined;
+        state.lastStepContinueRevision = undefined;
+        state.stepRecoveryActive = false;
+      }
       state.compactingEpoch = undefined;
       state.model = { providerID: model.providerID, modelID: model.modelID };
       state.turnRevision += 1;
@@ -1128,7 +1206,8 @@ export function createContinuationHooks(
       if (
         state !== undefined && !state.stepContinueIssuing &&
         state.latestCoordinatorReport !== undefined &&
-        nonTerminalProgress(state.latestCoordinatorReport)
+        (nonTerminalProgress(state.latestCoordinatorReport) ||
+          (state.stepRecoveryActive && !terminalCheckpoint(state.latestCoordinatorReport)))
       ) {
         const report = state.latestCoordinatorReport;
         const revision = state.turnRevision;

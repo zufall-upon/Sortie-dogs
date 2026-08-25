@@ -1070,19 +1070,20 @@ test("generated assets require the user's language and compact block-separated o
 
   const worker = runtimeAssets.find((candidate) => candidate.name === "dog-worker");
   assert.ok(worker);
-  assert.match(worker.content, /Any command or tool denial is terminal evidence for that attempted operation/i);
+  assert.match(worker.content, /Any command or tool denial is process-defect evidence for that attempted operation/i);
   assert.match(
     worker.content,
     /not retry with another executable spelling, absolute path, shell wrapper, quoting style, narrowed\s+argument, direct probe, or diagnostic substitute/i,
   );
   assert.match(worker.content, /Own the bounded implementation loop inside one Task invocation/i);
   assert.match(worker.content, /Do not return an\s+intermediate progress checkpoint merely to ask dog-coordinator to resume the same work/i);
-  assert.match(worker.content, /Across the whole candidate,\s+including same-task resumes, permit at most two canonical validation executions and one execution of\s+the optional diagnostic/i);
-  assert.match(worker.content, /A third canonical attempt\s+or second diagnostic is forbidden/i);
-  assert.match(worker.content, /using the one diagnostic does not block a subsequent allowed canonical rerun/i);
-  assert.match(worker.content, /Coordinator resume or\s+fresh-worker redispatch never resets the counts/i);
+  assert.match(worker.content, /allow continued diagnose\/edit\/validate in the normal sequential worker lane/i);
+  assert.match(worker.content, /Every failed validation must produce a concrete source or harness change/i);
+  assert.match(worker.content, /unchanged command repetition is forbidden/i);
+  assert.match(worker.content, /Retain ordered validation history and\s+canonical\/diagnostic counts across resumes and redispatches/i);
+  assert.match(worker.content, /every terminal BLOCKED report must include its own line in the exact form TRUE_BLOCKER: external: <condition>/i);
   assert.match(worker.content, /Run only the exact canonical validation command\s+and its optional single diagnostic command predeclared in the applicable handoff and operation\s+manifest, or in the inline validation contract when operation_manifest=none/i);
-  assert.match(worker.content, /denied optional check remains\s+DENIED evidence and never justifies another tool step/i);
+  assert.match(worker.content, /denied optional\s+check remains DENIED evidence and never justifies unchanged repetition/i);
 });
 
 test("generated coordinator renders a compact conclusion and collapsible YAML Evidence", () => {
@@ -1242,7 +1243,7 @@ test("runtime contract requires interactive continuation and deterministic recov
   assert.match(handshake[1], /recoverable_bind_signal: escalation\.action=blocker-resolution-takeover/);
   assert.match(handshake[1], /nonrecoverable_bind_signal: escalation\.action=follow-remedy; resume_session=false/);
   assert.match(handshake[1], /redispatch_bind_signal: escalation\.action=redispatch-worker; resume_session=false; true_blocker=false/);
-  assert.match(handshake[1], /TRUE_BLOCKER absent -> blocker-resolution takeover on the same solSession/);
+  assert.match(handshake[1], /TRUE_BLOCKER: external: <condition> or TRUE_BLOCKER: user-decision: <condition> absent -> blocker-resolution takeover on the same solSession/);
   assert.match(worker.content, /do not terminate and do not ask the\s+user/i);
   assert.match(worker.content, /mutating dispatch[\s\S]+exact absolute handoff_path[\s\S]+built-in Read once on that handoff_path[\s\S]+same turn/i);
   assert.match(worker.content, /operation_manifest=none the dispatch is read-only:[\s\S]+require no\s+handoff_path[\s\S]+never inspect a handoff[\s\S]+never call sortie_bind_write_gate/i);

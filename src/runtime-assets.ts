@@ -22,7 +22,7 @@ export interface RuntimeAsset {
 export const runtimeAssets = [
   {
     name: "dog-coordinator",
-    version: "0.3.46-contract-directory-v1",
+    version: "0.3.47-autonomous-recovery-v1",
     installPath: "agent/dog-coordinator.md",
     content: `---
 description: Canonical MkII coordinator packaged by Sortie-dogs
@@ -1058,7 +1058,7 @@ RECOVERABLE_HANDSHAKE_FIXTURE
     recoverable_bind_signal: escalation.action=blocker-resolution-takeover; resume_session=true; true_blocker=false
     nonrecoverable_bind_signal: escalation.action=follow-remedy; resume_session=false; existing remedy takes priority
     redispatch_bind_signal: escalation.action=redispatch-worker; resume_session=false; true_blocker=false; never resume denied session or report true blocker; dispatch a fresh worker whose prompt carries inline role, project_root, source_manifest or operation_manifest, and acceptance or validation fields so activation precedes bind
-    normal_worker_blocked: TRUE_BLOCKER absent -> blocker-resolution takeover on the same solSession
+    normal_worker_blocked: TRUE_BLOCKER: external: <condition> or TRUE_BLOCKER: user-decision: <condition> absent -> blocker-resolution takeover on the same solSession
     sequence: operation manifest + valid registered handoff -> Task child activation -> built-in Read exact handoff_path -> bind in same turn
     attempt_limit: one recoverable retry only after state change; second unchanged denial -> retry-exhausted and checkpoint
     inspection_authority: successful built-in Read by binding child only; shell/coordinator/sibling/file.edited do not grant
@@ -1257,10 +1257,10 @@ TERMINAL_STATUS_SEMANTICS_FIXTURE
 END_TERMINAL_STATUS_SEMANTICS_FIXTURE
 
 RUNTIME_ASSET_VERSION_SYNC_FIXTURE
-    runtime_version: 0.3.46-contract-directory-v1
+    runtime_version: 0.3.47-autonomous-recovery-v1
     shared_marker: src/asset-version.ts
-    packaged_expectation: test/plugin-loader.test.ts uses 0.3.46-contract-directory-v1
-    initialize_expectation: test/initialize.test.ts uses 0.3.46-contract-directory-v1
+    packaged_expectation: test/plugin-loader.test.ts uses 0.3.47-autonomous-recovery-v1
+    initialize_expectation: test/initialize.test.ts uses 0.3.47-autonomous-recovery-v1
     rule: runtime asset versions, shared marker, packaged expectation, and initialize expectation change together
 END_RUNTIME_ASSET_VERSION_SYNC_FIXTURE
 
@@ -1329,7 +1329,7 @@ END_TERMINAL_EVIDENCE_FIXTURE
   },
   {
     name: "dog-worker",
-    version: "0.3.46-contract-directory-v1",
+    version: "0.3.47-autonomous-recovery-v1",
     installPath: "agent/dog-worker.md",
     content: `---
 description: Dedicated worker for the canonical Sortie-dogs coordinator
@@ -1348,8 +1348,8 @@ Own the bounded implementation loop inside one Task invocation. After an edit or
 validation, continue diagnosing, editing, and validating while the next action remains inside the
 same immutable manifests and no user decision or true external blocker is required. Do not return an
 intermediate progress checkpoint merely to ask dog-coordinator to resume the same work. Return only
-after canonical PASS, a manifest expansion is required, a declared retry limit is reached, a command
-is denied, or a true blocker or user decision is proven.
+after canonical PASS, a manifest expansion is required, a user decision or true external blocker is
+proven, or coordinator repair/takeover is required for a local process defect.
 
 Do not infer or second-guess the parent identity from prompt prose or session labels. For mutating
 work, the plugin's structured activation and bind result is the caller authority; only a structured
@@ -1377,13 +1377,16 @@ revokes authorization immediately; never treat session idle as a new authorizati
 Treat a denied bind as fail-closed for mutation;
 never use file.edited or session.idle as implicit authorization. Do not retry the same validation
 command after a failure without a concrete source or harness change. Across the whole candidate,
-including same-task resumes, permit at most two canonical validation executions and one execution of
-the optional diagnostic or evidence command. Run that optional command when fixed acceptance requires
-its output, including after canonical PASS, or after canonical failure when it selects a concrete fix.
-Retain both counts in ordered validation history. A third canonical attempt
-or second diagnostic is forbidden. After the second canonical execution without PASS, return a terminal retry-limit blocker;
-using the one diagnostic does not block a subsequent allowed canonical rerun. Coordinator resume or
-fresh-worker redispatch never resets the counts. Never stage outside exact manifest paths, use
+including same-task resumes, allow continued diagnose/edit/validate in the normal sequential worker lane.
+Every failed validation must produce a concrete source or harness change within the immutable manifests
+before rerunning; unchanged command repetition is forbidden. Retain ordered validation history and
+canonical/diagnostic counts across resumes and redispatches. Run the optional diagnostic or evidence command
+when fixed acceptance requires its output, including after canonical PASS. A local retry limit, command denial,
+gate/handoff/scope defect, or host time/step exhaustion is a process defect for coordinator repair or
+takeover, not TRUE_BLOCKER. Return structured process-defect evidence and never tell the user that work
+is terminal for those causes. Only an external dependency or user-controlled decision may be terminal,
+and every terminal BLOCKED report must include its own line in the exact form TRUE_BLOCKER: external: <condition>
+or TRUE_BLOCKER: user-decision: <condition>. Never stage outside exact manifest paths, use
 git add -A, amend, push, or perform coordinator-owned commit work.
 
 ## Parallel immutable commit artifact
@@ -1409,7 +1412,7 @@ and return it to dog-coordinator for ${PARALLEL_SUBMIT_REMEDIATION_CAPABILITY}. 
 clean worktrees, mutate main or the target, use shell Git, or independently prepare, validate, review,
 or accept integration. A missing field or a second remediation request is a terminal blocker.
 
-Any command or tool denial is terminal evidence for that attempted operation. Record it once and do
+Any command or tool denial is process-defect evidence for that attempted operation. Record it once and do
 not retry with another executable spelling, absolute path, shell wrapper, quoting style, narrowed
 argument, direct probe, or diagnostic substitute. Run only the exact canonical validation command
 and its optional single diagnostic command predeclared in the applicable handoff and operation
@@ -1417,8 +1420,8 @@ manifest, or in the inline validation contract when operation_manifest=none; do 
 add a syntax check, curl probe, Test-Path probe, single-browser variant, or other undeclared command.
 Use the optional command when fixed acceptance explicitly requires its evidence, or after canonical failure when its output is needed to choose a concrete fix,
 then continue in this invocation and rerun canonical validation after that fix. If the canonical command itself is
-denied, return its structured denial to dog-coordinator immediately. A denied optional check remains
-DENIED evidence and never justifies another tool step.
+denied, return its structured process defect to dog-coordinator for repair/redispatch. A denied optional
+check remains DENIED evidence and never justifies unchanged repetition.
 
 For a recoverable session-inactive result, do not terminate and do not ask the user. Classify it as a
 local handoff defect and return its structured reason, remedy, and redispatch-worker escalation
@@ -1442,12 +1445,13 @@ denial with resume_session=true authorizes blocker-resolution takeover on the sa
 a nonrecoverable denial, follow its existing remedy and never same-session resume. When a normal
 worker return is BLOCKED without TRUE_BLOCKER, dog-coordinator resumes the same solSession with
 role=blocker-resolution rather than terminating, replacing the session, or reporting a blocker to
-the user.
+the user. If the user ordered SOL/advisor consultation when stuck, perform that consultation before any
+blocker report. Local process defects require autonomous repair and redispatch, then continuation.
 `,
   },
   {
     name: "dog-scout",
-    version: "0.3.46-contract-directory-v1",
+    version: "0.3.47-autonomous-recovery-v1",
     installPath: "agent/dog-scout.md",
     content: `---
 description: Bounded evidence scout for dog-coordinator
@@ -1496,7 +1500,7 @@ prose; keep the keys, paths, commands, and identifiers verbatim.
   },
   {
     name: "dog-reviewer",
-    version: "0.3.46-contract-directory-v1",
+    version: "0.3.47-autonomous-recovery-v1",
     installPath: "agent/dog-reviewer.md",
     content: `---
 description: Independent source reviewer for dog-coordinator
@@ -1525,7 +1529,7 @@ or transport.
   },
   {
     name: "dog-advisor",
-    version: "0.3.46-contract-directory-v1",
+    version: "0.3.47-autonomous-recovery-v1",
     installPath: "agent/dog-advisor.md",
     content: `---
 description: Focused technical advisor for dog-coordinator
@@ -1549,7 +1553,7 @@ provider, vendor, model, variant, or transport.
   },
   {
     name: "sortie",
-    version: "0.3.46-contract-directory-v1",
+    version: "0.3.47-autonomous-recovery-v1",
     installPath: "command/sortie.md",
     content: `---
 description: Start the canonical Sortie-dogs MkII workflow
