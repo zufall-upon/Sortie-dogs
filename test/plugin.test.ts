@@ -1269,7 +1269,7 @@ test("runtime contract requires interactive continuation and deterministic recov
   assert.match(batch[1], /top_level_request: one accepted scope -> sequential workers as evidence requires/);
   assert.match(batch[1], /worker_return: deterministic evidence verification -> next unit \| terminal report/);
   assert.match(batch[1], /normal_path_forbidden: concurrent fanout \| unchanged redispatch \| critical-path tracker call/);
-  assert.match(batch[1], /native_compaction: host overflow only/);
+  assert.match(batch[1], /compaction: host overflow \| repeated nonterminal recovery \| guarded direct capability/);
 
   const compaction = coordinator.content.match(
     /COMPACTION_IDENTITY_FIXTURE\r?\n([\s\S]+?)\r?\nEND_COMPACTION_IDENTITY_FIXTURE/,
@@ -3743,7 +3743,7 @@ test("a normal lane strips compaction markers but still recovers non-terminal pr
       text: report,
       time: { end: Date.now() },
     } } } });
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await hooks.event!({ event: { type: "session.idle", properties: { sessionID: "root" } } });
     assert.doesNotMatch(completed.text, /SORTIE_(?:COMPACT|CONTINUE)/u);
     assert.equal(prompts, 1);
   });

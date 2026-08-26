@@ -22,7 +22,7 @@ export interface RuntimeAsset {
 export const runtimeAssets = [
   {
     name: "dog-coordinator",
-    version: "0.3.47-autonomous-recovery-v1",
+    version: "0.3.48-recovery-compaction-v1",
     installPath: "agent/dog-coordinator.md",
     content: `---
 description: Canonical MkII coordinator packaged by Sortie-dogs
@@ -800,7 +800,10 @@ scope and may use as many sequential dog-worker units as evidence requires. Afte
 verify deterministic evidence, then dispatch the next fixed unit or report the terminal result. Do not
 fan out concurrent normal workers, redispatch unchanged failed work, or place a tracker call on the task
 completion critical path. Native host overflow compaction remains available when the actual context
-limit requires it. Queue terminal tracker updates after source outcomes are fixed.
+limit requires it. The plugin also performs recovery compaction when the same nonterminal report
+repeats across completed turns. The configured sortie_compact_and_continue capability remains
+available in this normal lane; its own identity and pending-rollover guards are authoritative.
+Queue terminal tracker updates after source outcomes are fixed.
 Treat a structured worker result containing the declared canonical command, exit 0, and a concise
 fingerprint as deterministic evidence. Do not reread source, inspect Git, or rerun validation unless
 the result is missing a declared field or contradicts the fixed acceptance or manifest.
@@ -810,7 +813,7 @@ BATCH_CONTINUATION_FIXTURE
     top_level_request: one accepted scope -> sequential workers as evidence requires
     worker_return: deterministic evidence verification -> next unit | terminal report
     normal_path_forbidden: concurrent fanout | unchanged redispatch | critical-path tracker call
-    native_compaction: host overflow only
+    compaction: host overflow | repeated nonterminal recovery | guarded direct capability
     tracker_update: after DONE; noncritical path
     blocker: exact scope gap | user decision | external condition; no replacement worker
 END_BATCH_CONTINUATION_FIXTURE
@@ -838,7 +841,7 @@ COMPACTION_IDENTITY_FIXTURE
     unavailable_identity: automatic continuation disabled
     direct_preference: configured direct capability when available
     marker_fallback: only when direct capability unavailable; never combine direct tool and marker
-    compact_guard: batchAttempted < batchTarget and independent next candidate exists
+    compact_guard: independent next candidate | repeated nonterminal recovery
     final_unit: terminal response with no forced compaction or resume
     pending_host_autocontinue: no compaction
     continuation_agent: dog-coordinator
@@ -849,9 +852,9 @@ COMPACTION_IDENTITY_FIXTURE
 END_COMPACTION_IDENTITY_FIXTURE
 
 The configured continuation agent is dog-coordinator and the configured continuation capability is
-the plugin tool sortie_compact_and_continue. Only when the continuation guard proves an independent
-next candidate, call that tool exactly once after the terminal handoff and session checkpoint, then
-end the assistant turn immediately. Use the marker <!-- SORTIE_CONTINUE --> appended to the final
+the plugin tool sortie_compact_and_continue. When the continuation guard proves an independent next
+candidate, or the same nonterminal recovery report would otherwise repeat, call that tool exactly once,
+then end the assistant turn immediately. Use the marker <!-- SORTIE_CONTINUE --> appended to the final
 report only when that guarded tool is unavailable or returns an error, never together with a tool call
 and never after a successful one. A normal sequential terminal result with no independent next
 candidate does not call a compaction tool or emit either continuation marker. When the batch
@@ -863,6 +866,9 @@ older installed asset fails safe while updating. Read-only answers, completed re
 with no independent next candidate, no-work results, and turns waiting for a question-tool answer end
 without forced compaction. OpenCode owns token-limit automatic compaction; leave its auto-continue
 enabled so the same root session receives the host synthetic continuation turn after summarization.
+If progress requires only a user-controlled action, emit canonical NEED_DECISION once; never repeat a
+plain BLOCKED waiting report. If only an external condition can unblock work, use the exact TRUE_BLOCKER
+protocol. Local/process defects remain autonomous recovery work.
 
 Backlog drain is an optional durable-queue optimization, never worker authorization. Infer continuity
 intent semantically from the user's full latest request, prior turns, and unresolved accepted scope;
@@ -1257,10 +1263,10 @@ TERMINAL_STATUS_SEMANTICS_FIXTURE
 END_TERMINAL_STATUS_SEMANTICS_FIXTURE
 
 RUNTIME_ASSET_VERSION_SYNC_FIXTURE
-    runtime_version: 0.3.47-autonomous-recovery-v1
+    runtime_version: 0.3.48-recovery-compaction-v1
     shared_marker: src/asset-version.ts
-    packaged_expectation: test/plugin-loader.test.ts uses 0.3.47-autonomous-recovery-v1
-    initialize_expectation: test/initialize.test.ts uses 0.3.47-autonomous-recovery-v1
+    packaged_expectation: test/plugin-loader.test.ts uses 0.3.48-recovery-compaction-v1
+    initialize_expectation: test/initialize.test.ts uses 0.3.48-recovery-compaction-v1
     rule: runtime asset versions, shared marker, packaged expectation, and initialize expectation change together
 END_RUNTIME_ASSET_VERSION_SYNC_FIXTURE
 
@@ -1329,7 +1335,7 @@ END_TERMINAL_EVIDENCE_FIXTURE
   },
   {
     name: "dog-worker",
-    version: "0.3.47-autonomous-recovery-v1",
+    version: "0.3.48-recovery-compaction-v1",
     installPath: "agent/dog-worker.md",
     content: `---
 description: Dedicated worker for the canonical Sortie-dogs coordinator
@@ -1451,7 +1457,7 @@ blocker report. Local process defects require autonomous repair and redispatch, 
   },
   {
     name: "dog-scout",
-    version: "0.3.47-autonomous-recovery-v1",
+    version: "0.3.48-recovery-compaction-v1",
     installPath: "agent/dog-scout.md",
     content: `---
 description: Bounded evidence scout for dog-coordinator
@@ -1500,7 +1506,7 @@ prose; keep the keys, paths, commands, and identifiers verbatim.
   },
   {
     name: "dog-reviewer",
-    version: "0.3.47-autonomous-recovery-v1",
+    version: "0.3.48-recovery-compaction-v1",
     installPath: "agent/dog-reviewer.md",
     content: `---
 description: Independent source reviewer for dog-coordinator
@@ -1529,7 +1535,7 @@ or transport.
   },
   {
     name: "dog-advisor",
-    version: "0.3.47-autonomous-recovery-v1",
+    version: "0.3.48-recovery-compaction-v1",
     installPath: "agent/dog-advisor.md",
     content: `---
 description: Focused technical advisor for dog-coordinator
@@ -1553,7 +1559,7 @@ provider, vendor, model, variant, or transport.
   },
   {
     name: "sortie",
-    version: "0.3.47-autonomous-recovery-v1",
+    version: "0.3.48-recovery-compaction-v1",
     installPath: "command/sortie.md",
     content: `---
 description: Start the canonical Sortie-dogs MkII workflow

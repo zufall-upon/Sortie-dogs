@@ -278,15 +278,12 @@ test("typed evidence fields reject duplicates, case changes, and unbracketed ris
   }
 });
 
-test("advisor requires a strategy trigger and manual worker compaction is denied", () => {
+test("advisor requires a strategy trigger while plugin-owned compaction bypasses fast-lane", () => {
   const lane = new FastLaneController();
   lane.beginTurn("root", false);
   assert.equal(lane.manualCompactionForbidden("root"), true);
   assert.equal(lane.terminalInstructionRequired("root"), false);
-  expectDenial(
-    () => lane.beforeTool("root", "sortie_compact_and_continue", {}),
-    "MANUAL_COMPACTION_FORBIDDEN",
-  );
+  lane.beforeTool("root", "sortie_compact_and_continue", {});
   expectDenial(
     () => lane.beforeTool("root", "task", { subagent_type: "dog-advisor", prompt: "question" }),
     "ADVISOR_TRIGGER_REQUIRED",
@@ -323,10 +320,7 @@ test("advisor requires a strategy trigger and manual worker compaction is denied
     "ADVISOR_LIMIT",
   );
   lane.beforeTool("root", "task", worker);
-  expectDenial(
-    () => lane.beforeTool("root", "sortie_compact_and_continue", {}),
-    "MANUAL_COMPACTION_FORBIDDEN",
-  );
+  lane.beforeTool("root", "sortie_compact_and_continue", {});
   expectDenial(
     () => lane.beforeTool("root", "compact_and_continue", {}),
     "MANUAL_COMPACTION_FORBIDDEN",
@@ -341,10 +335,7 @@ test("a cold synthetic resume is fail-closed until a real turn", () => {
   const lane = new FastLaneController();
   lane.beginTurn("cold", true);
   expectDenial(() => lane.beforeTool("cold", "task", worker), "TURN_STATE_REQUIRED");
-  expectDenial(
-    () => lane.beforeTool("cold", "sortie_compact_and_continue", {}),
-    "MANUAL_COMPACTION_FORBIDDEN",
-  );
+  lane.beforeTool("cold", "sortie_compact_and_continue", {});
   lane.beginTurn("cold", false);
   lane.beforeTool("cold", "task", worker);
 });
@@ -359,10 +350,7 @@ test("explicit backlog drain does not treat serial worker attempts as queue-unit
   expectDenial(() => lane.enableBacklogDrain("drain", 0), "BACKLOG_DRAIN_INVALID");
   lane.enableBacklogDrain("drain", 4);
   expectDenial(() => lane.enableBacklogDrain("drain", 4), "BACKLOG_DRAIN_TOO_LATE");
-  expectDenial(
-    () => lane.beforeTool("drain", "sortie_compact_and_continue", {}),
-    "MANUAL_COMPACTION_FORBIDDEN",
-  );
+  lane.beforeTool("drain", "sortie_compact_and_continue", {});
   const advisor = { subagent_type: "dog-advisor", prompt: "strategy_trigger: architecture-choice" };
   const scout = { subagent_type: "dog-scout", prompt: "missing_evidence_code: manifest" };
   const review = {
@@ -379,10 +367,6 @@ test("explicit backlog drain does not treat serial worker attempts as queue-unit
     if (unit < 3) {
       lane.beforeTool("drain", "sortie_compact_and_continue", {});
       lane.continuationQueued("drain");
-      expectDenial(
-        () => lane.beforeTool("drain", "sortie_compact_and_continue", {}),
-        "MANUAL_COMPACTION_FORBIDDEN",
-      );
       lane.beginTurn("drain", true);
     }
   }

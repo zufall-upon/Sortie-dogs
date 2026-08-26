@@ -121,7 +121,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       join(consumer, "node_modules", "sortie-dogs", "package.json"),
       "utf8",
     )) as { version?: string; scripts?: { prebuild?: string } };
-    assert.equal(installedPackage.version, "0.5.13");
+    assert.equal(installedPackage.version, "0.5.14");
     assert.equal(
       installedPackage.scripts?.prebuild,
       "node --input-type=module --eval \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true });\"",
@@ -372,7 +372,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     for (const asset of loaded.runtimeAssets) {
       assert.equal(asset.version, RUNTIME_ASSET_VERSION, `${asset.name} version must match the shared marker`);
     }
-    assert.equal(RUNTIME_ASSET_VERSION, "0.3.47-autonomous-recovery-v1");
+    assert.equal(RUNTIME_ASSET_VERSION, "0.3.48-recovery-compaction-v1");
     const coordinatorFrontmatter = /^---\r?\n([\s\S]*?)\r?\n---/u.exec(coordinator.content)?.[1];
     assert.ok(coordinatorFrontmatter);
     assert.match(coordinatorFrontmatter, /^model: openai\/gpt-5\.6-terra$/m);
@@ -652,7 +652,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(batchContinuation[1], /top_level_request:\s*one accepted scope -> sequential workers as evidence requires/);
     assert.match(batchContinuation[1], /worker_return:\s*deterministic evidence verification -> next unit \| terminal report/);
     assert.match(batchContinuation[1], /normal_path_forbidden:\s*concurrent fanout \| unchanged redispatch \| critical-path tracker call/);
-    assert.match(batchContinuation[1], /native_compaction:\s*host overflow only/);
+    assert.match(batchContinuation[1], /compaction:\s*host overflow \| repeated nonterminal recovery \| guarded direct capability/);
     assert.match(batchContinuation[1], /tracker_update:\s*after DONE; noncritical path/);
     assert.match(
       coordinator.content,
@@ -672,7 +672,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(compactionIdentity[1], /child session -> root rejected/);
     assert.match(compactionIdentity[1], /automatic continuation disabled/);
     assert.match(compactionIdentity[1], /only when direct capability unavailable; never combine direct tool and marker/);
-    assert.match(coordinator.content, /Only when the continuation guard proves an independent\s+next candidate/i);
+    assert.match(coordinator.content, /When the continuation guard proves an independent next\s+candidate, or the same nonterminal recovery report would otherwise repeat/i);
     assert.match(
       coordinator.content,
       /normal sequential terminal result with no independent next\s+candidate does not call a compaction tool or emit either continuation marker/i,
@@ -1297,7 +1297,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(sortie.content, /never route a worker to the user/i);
 
     for (const asset of loaded.runtimeAssets) {
-      assert.equal(asset.version, "0.3.47-autonomous-recovery-v1");
+      assert.equal(asset.version, "0.3.48-recovery-compaction-v1");
       const frontmatter = asset.content.match(/^---\r?\n([\s\S]+?)\r?\n---\r?\n/);
       assert.ok(frontmatter, `${asset.name} must have frontmatter`);
       const entries = Object.fromEntries(

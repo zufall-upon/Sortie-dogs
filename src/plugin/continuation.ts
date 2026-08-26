@@ -48,6 +48,8 @@ const DEFAULT_TIMINGS = {
   /** A delayed retry backs up the immediate rollover kick and the normal session-idle path. */
   scheduleMilliseconds: 30_000,
   scheduleAttempts: 2,
+  /** Debounce completed text parts while retaining one-shot hosts that omit session.idle. */
+  stepRecoveryMilliseconds: 1_000,
 } as const;
 
 export type ContinuationTimings = typeof DEFAULT_TIMINGS;
@@ -200,6 +202,7 @@ export interface ContinuationHooks {
     output: { enabled: boolean },
   ): Promise<void>;
   observeModel(sessionID: string, model: { providerID: string; modelID: string }, synthetic?: boolean): void;
+  toolStarted(sessionID: string, tool: string): void;
   blocksTool(sessionID: string): boolean;
   sessionIdle(sessionID: string): Promise<void>;
   forgetSession(sessionID: string): void;
@@ -367,7 +370,13 @@ interface SessionState {
   stepContinueIssuing: boolean;
   /** A synthetic step recovery remains active until a real user turn or canonical terminal report. */
   stepRecoveryActive: boolean;
-  /** Referenced fallback because one-shot CLI can exit without emitting session.idle. */
+  /** Last completed recovery report observed at session idle. */
+  lastRecoveryFingerprint?: string | undefined;
+  /** Consecutive synthetic turns returning the same nonterminal report. */
+  recoveryRepeatCount: number;
+  /** Prevents duplicate idle events from counting one assistant turn twice. */
+  recoveryObservedRevision?: number | undefined;
+  /** Debounced fallback for one-shot hosts that omit session.idle. */
   stepRecoveryTimer?: unknown;
   lastRollover?: number | undefined;
   cooldownTimer?: unknown;
@@ -474,6 +483,7 @@ export function createContinuationHooks(
       directUsed: false,
       stepContinueIssuing: false,
       stepRecoveryActive: false,
+      recoveryRepeatCount: 0,
       touched: Date.now(),
     };
     sessions.set(sessionID, created);
@@ -637,6 +647,30 @@ export function createContinuationHooks(
     return /📊\s*(?:進行中|处理中|in[ -]?progress)(?:\s|[:：]|$)/iu.test(latestProgressLine(text) ?? "");
   }
 
+  function resetRecoveryStall(state: SessionState): void {
+    state.lastRecoveryFingerprint = undefined;
+    state.recoveryRepeatCount = 0;
+    state.recoveryObservedRevision = undefined;
+  }
+
+  function observeRecoveryReport(state: SessionState, report: string): number {
+    if (state.recoveryObservedRevision === state.turnRevision) return state.recoveryRepeatCount;
+    const checkpoint = checkpointEntries(report).at(-1);
+    const checkpointLine = checkpoint === undefined
+      ? undefined
+      : topLevelProtocolLines(report).find(({ index }) => index === checkpoint.index)?.line;
+    const task = /`([^`]+)`/u.exec(checkpointLine ?? "")?.[1];
+    const fingerprint = checkpoint?.status === "BLOCKED" && task !== undefined
+      ? `BLOCKED:${task}`
+      : report.replace(/\r\n?/gu, "\n").trim().replace(/[ \t]+/gu, " ");
+    state.recoveryRepeatCount = fingerprint === state.lastRecoveryFingerprint
+      ? state.recoveryRepeatCount + 1
+      : 1;
+    state.lastRecoveryFingerprint = fingerprint;
+    state.recoveryObservedRevision = state.turnRevision;
+    return state.recoveryRepeatCount;
+  }
+
   async function issueStepContinue(
     sessionID: string,
     state: SessionState,
@@ -662,7 +696,7 @@ export function createContinuationHooks(
           parts: [{
             type: "text",
             synthetic: true,
-            text: `${STEP_CONTINUE_PREFIX}\n直前出力は非terminal進捗またはlocal/process blocker。未達のuser order、sequential execution、no-stop制約、SOL/advisor consultation指示を保持し、interactionは真にuser-controlledな決定だけに限定する。local gate/routing/handoff/scope/retry/time/step defectはterminal reportにせず、自律修復・redispatchして継続する。進捗報告を繰り返さず、明示next_actionが欠落していれば最新の未達user要求とbatch counterから次の必要toolを特定して同じturnで実行する。\n${report}`,
+            text: `${STEP_CONTINUE_PREFIX}\n直前出力は非terminal進捗またはlocal/process blocker。未達のuser order、sequential execution、no-stop制約、SOL/advisor consultation指示を保持し、interactionは真にuser-controlledな決定だけに限定する。local gate/routing/handoff/scope/retry/time/step defectはterminal reportにせず、自律修復・redispatchして継続する。同じBLOCKED文を再掲禁止。明示next_actionが欠落していれば未達要求から特定し、次の必要toolを同じturnで実行するか、進行にuser操作だけが必要ならcanonical NEED_DECISION、外部条件だけが必要ならvalid TRUE_BLOCKERを一度だけ返す。\n${report}`,
           }],
         },
       });
@@ -854,6 +888,7 @@ export function createContinuationHooks(
     resume: boolean,
     resetAttemptsAfterCompaction = false,
     preserveCompactionScope = false,
+    countAttempt = true,
   ): void {
     const state = stateFor(sessionID);
     state.pendingRollover = true;
@@ -870,7 +905,8 @@ export function createContinuationHooks(
     state.resetAttemptsAfterCompaction = resetAttemptsAfterCompaction;
     state.latestCoordinatorReport = undefined;
     state.stepRecoveryActive = false;
-    if (resume) state.attempts += 1;
+    resetRecoveryStall(state);
+    if (resume && countAttempt) state.attempts += 1;
     const epoch = state.rolloverEpoch;
     // session.idle can be lost when a one-shot CLI host exits. Keep this zero-delay timer referenced
     // so the rollover reaches the host after the current plugin hook returns but before process exit.
@@ -935,7 +971,7 @@ export function createContinuationHooks(
         current.pendingRollover || current.active || current.promptPending
       ) return;
       void handleSessionIdle(sessionID);
-    }, 0);
+    }, timings.stepRecoveryMilliseconds);
   }
 
   const tool: ContinuationTool = {
@@ -955,13 +991,19 @@ export function createContinuationHooks(
           : reported;
       const state = stateFor(context.sessionID);
       const active = policy();
+      const recoveryReport = state.latestCoordinatorReport ?? state.lastStepContinueReport;
+      const activeRecovery = state.stepRecoveryActive && recoveryReport !== undefined &&
+        !terminalCheckpoint(recoveryReport);
+      const preserveRecoveryScope = activeRecovery &&
+        !terminalCheckpoint(recoveryReport) &&
+        (checkpointStatus(recoveryReport) === "BLOCKED" || !nonTerminalProgress(recoveryReport));
       const resolution = resolveContinuation({
         identity,
         configuredAgent: active.agent,
         configuredCapability: active.capability,
         requestedCapability: active.capability,
         enabled: active.enabled,
-        attempts: state.attempts,
+        attempts: activeRecovery ? 0 : state.attempts,
         maxAutoContinues: active.maxAutoContinues,
         // A tool call is the request itself, so an already pending rollover is the only conflict.
         pendingAutoContinue: state.pendingRollover,
@@ -980,8 +1022,11 @@ export function createContinuationHooks(
       state.directUsed = true;
       queueRollover(
         context.sessionID,
-        state.latestCoordinatorReport ?? TOOL_REQUESTED_REPORT,
+        recoveryReport ?? TOOL_REQUESTED_REPORT,
         resolution.continue,
+        false,
+        preserveRecoveryScope,
+        !activeRecovery,
       );
       return resolution.continue
         ? "SORTIE_COMPACT_AND_CONTINUE_QUEUED"
@@ -1037,6 +1082,7 @@ export function createContinuationHooks(
             state.stepRecoveryActive = false;
             clearTimer(state.stepRecoveryTimer);
             state.stepRecoveryTimer = undefined;
+            resetRecoveryStall(state);
           }
           if (batchCheckpointNeedsContinuation(state.latestCoordinatorReport)) {
             if (input.allowCheckpointContinuation === false) {
@@ -1172,11 +1218,22 @@ export function createContinuationHooks(
         state.lastStepContinueReport = undefined;
         state.lastStepContinueRevision = undefined;
         state.stepRecoveryActive = false;
+        resetRecoveryStall(state);
       }
       state.compactingEpoch = undefined;
       state.model = { providerID: model.providerID, modelID: model.modelID };
       state.turnRevision += 1;
       if (!synthetic) state.limitCompacted = false;
+    },
+
+    toolStarted(sessionID, tool): void {
+      const state = sessions.get(sessionID);
+      if (state === undefined) return;
+      clearTimer(state.stepRecoveryTimer);
+      state.stepRecoveryTimer = undefined;
+      if (tool !== CONTINUATION_CAPABILITY) {
+        state.latestCoordinatorReport = undefined;
+      }
     },
 
     blocksTool(sessionID): boolean {
@@ -1191,6 +1248,10 @@ export function createContinuationHooks(
 
   async function handleSessionIdle(sessionID: string): Promise<void> {
       const state = sessions.get(sessionID);
+      if (state !== undefined) {
+        clearTimer(state.stepRecoveryTimer);
+        state.stepRecoveryTimer = undefined;
+      }
       if (state?.textCompleting === true) {
         state.idleDeferred = true;
         return;
@@ -1224,7 +1285,16 @@ export function createContinuationHooks(
               : `${report}\n➡️ 次action: 未達user要求の次の独立candidateへ進む`;
             await requestContinuation(sessionID, identity, recoveredReport, true);
           } else {
-            await issueStepContinue(sessionID, state, report, active.agent);
+            const repeated = observeRecoveryReport(state, report) >= 2;
+            if (repeated && client?.session?.summarize !== undefined && summarizeBody(state) !== undefined) {
+              const recoveredReport = /➡️\s*(?:次action|next_action)\s*:\s*\S/iu.test(report)
+                ? report
+                : `${report}\n➡️ 次action: 同一BLOCKEDを再掲せず、実行またはcanonical decision分類へ進む`;
+              const preserveRecoveryScope = checkpointStatus(report) === "BLOCKED" || !nonTerminalProgress(report);
+              queueRollover(sessionID, recoveredReport, true, false, preserveRecoveryScope, false);
+            } else {
+              await issueStepContinue(sessionID, state, report, active.agent);
+            }
           }
         }
       }

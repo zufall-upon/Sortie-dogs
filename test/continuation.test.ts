@@ -38,6 +38,7 @@ const FAST: ContinuationTimings = {
   settleMilliseconds: 0,
   scheduleMilliseconds: 0,
   scheduleAttempts: 2,
+  stepRecoveryMilliseconds: 0,
 };
 
 interface SummarizeCall {
@@ -90,6 +91,14 @@ async function settle(): Promise<void> {
   for (let turn = 0; turn < 12; turn += 1) {
     await new Promise((resolve) => setTimeout(resolve, 0));
   }
+}
+
+function recoverySummary(next = "continue recovery"): string {
+  return `${ROLLOVER_TOKEN}\n\n## 未達のユーザー要求\n- finish accepted scope\n\n` +
+    "## task identity と制約\n- task /project\n\n## manifest\n- source_manifest: none\n\n" +
+    "## validation履歴\n- なし\n\n## batch counters\n- batchTarget: 1 / batchAttempted: 0 / batchCommitted: 0 / batchReconciled: 0\n\n" +
+    "## tracker batch state\n- inventoryFingerprint: なし / candidateQueue: なし\n- pendingTrackerUpdates: なし / flushState: flushed\n\n" +
+    `## 未解決blocker\n- repeated local recovery\n\n## 次action\n- ${next}`;
 }
 
 function resolution(overrides: Partial<Parameters<typeof resolveContinuation>[0]> = {}) {
@@ -249,18 +258,80 @@ test("step recovery continues through unstructured deferrals until a canonical t
   await hooks.sessionIdle("ses_root");
   assert.equal(host.promptCalls.length, 2);
 
-  // Identical model text in a later synthetic turn is not a duplicate event from the prior turn.
-  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" }, true);
-  await hooks.textComplete({ sessionID: "ses_root" }, { text: deferral });
-  await hooks.sessionIdle("ses_root");
-  assert.equal(host.promptCalls.length, 3);
-
   hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" }, true);
   await hooks.textComplete({ sessionID: "ses_root" }, {
     text: "✅ **DONE** `task` — requested work completed",
   });
   await hooks.sessionIdle("ses_root");
-  assert.equal(host.promptCalls.length, 3);
+  assert.equal(host.promptCalls.length, 2);
+});
+
+test("a repeated nonterminal recovery report compacts and resumes instead of looping", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  let hooks!: ReturnType<typeof createContinuationHooks>;
+  const mutableSession = host.client.session as {
+    summarize: NonNullable<NonNullable<ContinuationClient["session"]>["summarize"]>;
+  };
+  mutableSession.summarize = async (request) => {
+    host.summarizeCalls.push({ id: request.path.id, body: request.body });
+    const output: { context?: string[]; prompt?: string } = {};
+    await hooks.sessionCompacting({ sessionID: request.path.id }, output);
+    assert.match(output.prompt ?? "", /recovery report overrides only terminal outcomes/i);
+    await hooks.textComplete({ sessionID: request.path.id }, { text: recoverySummary() });
+    return { data: true };
+  };
+  hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
+  const report = "⛔ **BLOCKED** `task` — waiting without progress";
+
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" });
+  await hooks.textComplete({ sessionID: "ses_root" }, { text: report });
+  await hooks.sessionIdle("ses_root");
+  assert.equal(host.promptCalls.length, 1);
+
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" }, true);
+  hooks.toolStarted("ses_root", "bash");
+  await hooks.textComplete({ sessionID: "ses_root" }, {
+    text: "⛔ **BLOCKED** `task` — same wait with changing details 2/9.",
+  });
+  await hooks.sessionIdle("ses_root");
+  await settle();
+
+  assert.equal(host.summarizeCalls.length, 1);
+  assert.equal(host.promptCalls.length, 2);
+  assert.ok(host.promptCalls[1]!.text.startsWith(AUTO_CONTINUE_PREFIX));
+  assert.match(host.promptCalls[1]!.text, /同一BLOCKEDを再掲せず/);
+});
+
+test("repeated progress recovery uses the standard compaction summary", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  let hooks!: ReturnType<typeof createContinuationHooks>;
+  const mutableSession = host.client.session as {
+    summarize: NonNullable<NonNullable<ContinuationClient["session"]>["summarize"]>;
+  };
+  mutableSession.summarize = async (request) => {
+    host.summarizeCalls.push({ id: request.path.id, body: request.body });
+    const output: { context?: string[]; prompt?: string } = {};
+    await hooks.sessionCompacting({ sessionID: request.path.id }, output);
+    assert.doesNotMatch(output.prompt ?? "", /recovery report overrides only terminal outcomes/i);
+    await hooks.textComplete({ sessionID: request.path.id }, { text: `${ROLLOVER_TOKEN}\nsummary` });
+    return { data: true };
+  };
+  hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
+  const report = "📊 in progress: 50%\n➡️ next_action: continue implementation";
+
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" });
+  await hooks.textComplete({ sessionID: "ses_root" }, { text: report });
+  await hooks.sessionIdle("ses_root");
+
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" }, true);
+  hooks.toolStarted("ses_root", "bash");
+  await hooks.textComplete({ sessionID: "ses_root" }, { text: report });
+  await hooks.sessionIdle("ses_root");
+  await settle();
+
+  assert.equal(host.summarizeCalls.length, 1);
+  assert.equal(host.promptCalls.length, 2);
+  assert.ok(host.promptCalls[1]!.text.startsWith(AUTO_CONTINUE_PREFIX));
 });
 
 test("a real user turn cancels stale step recovery state", async () => {
@@ -1072,10 +1143,11 @@ test("forgotten session cannot resume after delayed identity lookup", async () =
     { sessionID: "ses_forgotten" },
     { text: "📊 進行中: forgotten — 45% | attempted 0/3 | continuation: none" },
   );
+  const idle = hooks.sessionIdle("ses_forgotten");
   await identityStarted;
   hooks.forgetSession("ses_forgotten");
   releaseIdentity();
-  await settle();
+  await idle;
   assert.equal(host.promptCalls.length, 0);
 });
 
@@ -1105,7 +1177,7 @@ test("session idle recovers in-progress output without a next action", async () 
   assert.match(host.promptCalls[0]!.text, /next_actionが欠落していれば/);
 });
 
-test("text completion recovers compact progress text without a percentage", async () => {
+test("session idle recovers compact progress text without a percentage", async () => {
   const host = fakeHost({ agent: COORDINATOR });
   const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
   hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" });
@@ -1113,9 +1185,44 @@ test("text completion recovers compact progress text without a percentage", asyn
     { sessionID: "ses_root" },
     { text: "📊進行中: 原因確定。\n次: r14で修正し、検証を再実行。" },
   );
-  await settle();
+  assert.equal(host.promptCalls.length, 0);
+  await hooks.sessionIdle("ses_root");
   assert.equal(host.promptCalls.length, 1);
   assert.ok(host.promptCalls[0]!.text.startsWith(STEP_CONTINUE_PREFIX));
+});
+
+test("a tool start cancels partial-text recovery for the active assistant turn", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  const hooks = createContinuationHooks(host.client, "/project", POLICY, {
+    ...FAST,
+    stepRecoveryMilliseconds: 25,
+  });
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" });
+  await hooks.textComplete({ sessionID: "ses_root" }, { text: "📊進行中: capture開始" });
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  hooks.toolStarted("ses_root", "bash");
+  await new Promise((resolve) => setTimeout(resolve, 35));
+  await hooks.sessionIdle("ses_root");
+  assert.equal(host.promptCalls.length, 0);
+});
+
+test("active recovery compaction ignores the ordinary batch continuation ceiling", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  const hooks = createContinuationHooks(host.client, "/project", { ...POLICY, maxAutoContinues: 1 }, FAST);
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" });
+  assert.equal(await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR }),
+    "SORTIE_COMPACT_AND_CONTINUE_QUEUED");
+  await settle();
+
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" }, true);
+  await hooks.textComplete({ sessionID: "ses_root" }, {
+    text: "⛔ **BLOCKED** `task` — local recovery remains",
+  });
+  await hooks.sessionIdle("ses_root");
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" }, true);
+
+  assert.equal(await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR }),
+    "SORTIE_COMPACT_AND_CONTINUE_QUEUED");
 });
 
 test("text completion does not treat a charted terminal statistic as progress", async () => {
@@ -1136,7 +1243,6 @@ test("duplicate completion delivery emits one step continuation prompt", async (
   hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" });
   const report = "📊進行中: 原因確定。\n次: r14で修正。";
   await hooks.textComplete({ sessionID: "ses_root" }, { text: report });
-  await settle();
   // A persisted completion event can redeliver the same text without starting another model turn.
   await hooks.textComplete({ sessionID: "ses_root" }, { text: report });
   await hooks.sessionIdle("ses_root");

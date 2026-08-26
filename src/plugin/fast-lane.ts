@@ -3,7 +3,9 @@ import { isSourceReviewRiskTag, STRATEGY_TRIGGERS } from "../core/consultation.j
 const MAX_SESSIONS = 256;
 const GAP_CODES = new Set(["manifest", "validation", "owner-risk"]);
 const STRATEGY_TRIGGER_SET = new Set<string>(STRATEGY_TRIGGERS);
-const MANUAL_COMPACTION_TOOLS = new Set(["compact_and_continue", "sortie_compact_and_continue"]);
+// The plugin-owned capability has root identity, pending-rollover, and continuation guards.
+// Fast-lane only blocks the untyped host compaction tool.
+const MANUAL_COMPACTION_TOOLS = new Set(["compact_and_continue"]);
 export const BACKLOG_DRAIN_CAPABILITY = "sortie_enable_backlog_drain";
 
 export type FastLaneDenialCode =

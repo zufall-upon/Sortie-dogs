@@ -3490,6 +3490,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     },
     "tool.execute.before": async (toolInput, output): Promise<void> => {
       const coordinatorRoot = isCoordinatorSession(toolInput.sessionID) || await recoverCoordinatorRoot(toolInput.sessionID);
+      if (coordinatorRoot) continuation.toolStarted(toolInput.sessionID, toolInput.tool);
       const coordinatorCapability = toolInput.tool === "task" ||
         toolInput.tool === CONTINUATION_CAPABILITY || toolInput.tool === BACKLOG_DRAIN_CAPABILITY ||
         toolInput.tool === "sortie_check_contract" ||
