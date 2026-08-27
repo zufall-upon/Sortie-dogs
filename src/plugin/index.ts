@@ -1242,6 +1242,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   const bindingOperations = new Set<string>();
   const activeSessions = new Map<string, ActiveSessionState>();
   const coordinatorRoots = new Map<string, CoordinatorRootLineage>();
+  const explicitCoordinatorModels = new Map<
+    string,
+    { providerID: string; modelID: string; variant?: string }
+  >();
   const bootstrapIdleWarnings = new Set<string>();
   const coordinatorTaskCalls = new Map<string, Set<string>>();
   const chatTransitions = new Map<string, Promise<void>>();
@@ -2570,10 +2574,17 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         rootID === sessionID && (activeSessions.get(childID)?.inFlightCalls.size ?? 0) > 0
       );
       if (hasInFlightChild) state.expiresAt = now + ACTIVE_SESSION_CACHE.ttlMilliseconds;
-      else coordinatorRoots.delete(sessionID);
+      else {
+        coordinatorRoots.delete(sessionID);
+        explicitCoordinatorModels.delete(sessionID);
+      }
     }
     const limit = ACTIVE_SESSION_CACHE.maximum - (reserveSlot ? 1 : 0);
-    while (coordinatorRoots.size > limit) coordinatorRoots.delete(coordinatorRoots.keys().next().value!);
+    while (coordinatorRoots.size > limit) {
+      const sessionID = coordinatorRoots.keys().next().value!;
+      coordinatorRoots.delete(sessionID);
+      explicitCoordinatorModels.delete(sessionID);
+    }
   }
 
   async function rememberCoordinatorRoot(sessionID: string): Promise<void> {
@@ -2724,6 +2735,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     }
     expiredSessions.delete(sessionID);
     coordinatorRoots.delete(sessionID);
+    explicitCoordinatorModels.delete(sessionID);
     bindingDenials.delete(sessionID);
     sessionTaskIDs.delete(sessionID);
     recoverableWorkerChildren.delete(sessionID);
@@ -3298,9 +3310,18 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       await ensureLoaded();
       const consultationFallbackRetry = await reserveConsultationFallbackRetry(chatInput, output);
       try {
-        const routed = await loaded?.modelRoutingHook?.(chatInput, output, {
-          skipPreferred: consultationFallbackRetry !== undefined,
-        });
+        if (coordinatorOrigin && chatInput.model !== undefined) {
+          explicitCoordinatorModels.set(chatInput.sessionID, { ...output.message.model });
+        }
+        const explicitCoordinatorModel = coordinatorOrigin
+          ? explicitCoordinatorModels.get(chatInput.sessionID)
+          : undefined;
+        if (explicitCoordinatorModel !== undefined) output.message.model = { ...explicitCoordinatorModel };
+        const routed = explicitCoordinatorModel
+          ? false
+          : await loaded?.modelRoutingHook?.(chatInput, output, {
+            skipPreferred: consultationFallbackRetry !== undefined,
+          });
         if (consultationFallbackRetry !== undefined && routed === true) {
           consultationRetries.set(consultationFallbackRetry.key, {
             phase: "consumed",

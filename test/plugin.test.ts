@@ -2400,7 +2400,7 @@ test("every packaged role follows default routing independently of write-gate ac
   });
 });
 
-test("a declared coordinator route still applies, because the host asked for it", async () => {
+test("an explicit root coordinator model wins over a declared coordinator route", async () => {
   await withProject("coordinator-route-declared", async (directory) => {
     await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
     await mkdir(join(directory, ".opencode"), { recursive: true });
@@ -2418,11 +2418,40 @@ test("a declared coordinator route still applies, because the host asked for it"
     const chat = hooks["chat.message"];
     assert.ok(chat);
     const declared = {
-      message: { agent: "dog-coordinator", model: { providerID: "anthropic", modelID: "claude-opus-5" } },
+      message: {
+        agent: "dog-coordinator",
+        model: { providerID: "openai", modelID: "gpt-5.6-sol", variant: "medium" },
+      },
       parts: [{ type: "text", text: "continue the batch" }],
     };
-    await chat({ sessionID: "declared-coordinator", agent: "dog-coordinator" }, declared);
+    await chat({
+      sessionID: "declared-coordinator",
+      agent: "dog-coordinator",
+      model: { providerID: "openai", modelID: "gpt-5.6-sol" },
+    }, declared);
     assert.deepEqual(declared.message.model, {
+      providerID: "openai",
+      modelID: "gpt-5.6-sol",
+      variant: "medium",
+    });
+
+    const synthetic = {
+      message: { agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+      parts: [{ type: "text", text: "continue", synthetic: true }],
+    };
+    await chat({ sessionID: "declared-coordinator", agent: "dog-coordinator" }, synthetic);
+    assert.deepEqual(synthetic.message.model, {
+      providerID: "openai",
+      modelID: "gpt-5.6-sol",
+      variant: "medium",
+    });
+
+    const defaulted = {
+      message: { agent: "dog-coordinator", model: { providerID: "host", modelID: "default" } },
+      parts: [{ type: "text", text: "start with the configured route" }],
+    };
+    await chat({ sessionID: "defaulted-coordinator", agent: "dog-coordinator" }, defaulted);
+    assert.deepEqual(defaulted.message.model, {
       providerID: "openai",
       modelID: "gpt-5.6-luna",
       variant: "max",
