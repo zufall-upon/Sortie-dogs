@@ -1237,6 +1237,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   }
 
   const inspected = new Map<string, InspectionCacheEntry>();
+  const inspectionOperations = new Map<string, Promise<void>>();
   const sessionAuthorizations = new Map<string, SessionAuthorization>();
   const bindingPins = new Map<string, BindingPin>();
   const bindingOperations = new Set<string>();
@@ -1717,9 +1718,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         if (JSON.stringify(running.artifact.validation.command) !== JSON.stringify(requestedCommand)) {
           return deny("artifact-replay");
         }
+        await removeParallelControlFiles(binding.descriptor);
         await (await getParallelCoordinator()).acceptArtifact(binding.ownerRoot, binding.completionCallID,
           sessionID, binding.descriptor, running.artifact);
-        await removeParallelControlFiles(binding.descriptor);
         parallelArtifacts.set(sessionID, { requestFingerprint: request.fingerprint, artifact: running.artifact });
         pruneParallelChildMap(parallelArtifacts);
         return JSON.stringify({ status: "created", replay: true, artifact: boundedParallelArtifact(running.artifact) });
@@ -1732,9 +1733,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       };
       const recovered = await recoverWorktreeCommitArtifact(produceRequest);
       const artifact = recovered ?? await produceWorktreeCommitArtifact(produceRequest);
+      await removeParallelControlFiles(binding.descriptor);
       await (await getParallelCoordinator()).acceptArtifact(binding.ownerRoot, binding.completionCallID,
         sessionID, binding.descriptor, artifact);
-      await removeParallelControlFiles(binding.descriptor);
       parallelArtifacts.set(sessionID, { requestFingerprint: request.fingerprint, artifact });
       pruneParallelChildMap(parallelArtifacts);
       return JSON.stringify({ status: "created", ...(recovered === undefined ? {} : { replay: true }),
@@ -2303,6 +2304,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         ) return deny("binding-replay");
       }
       const existingAuthorization = sessionAuthorizations.get(sessionID);
+      const pendingInspections = [...inspectionOperations.entries()]
+        .filter(([key]) => key.startsWith(`${sessionID}\u0000`))
+        .map(([, operation]) => operation);
+      if (pendingInspections.length > 0) await Promise.allSettled(pendingInspections);
       pruneInspections(now);
       const inspectedEntry = [...inspected.entries()].find(([key, entry]) =>
         key.startsWith(`${sessionID}\u0000`) &&
@@ -2756,7 +2761,15 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     if (activeSessionStatus(input.sessionID) !== "active" || !isRecord(input.args)) return;
     const path = input.args.filePath;
     if (typeof path !== "string" || path.length === 0) return;
-    await inspect(path, input.sessionID);
+    const absolutePath = resolve(path);
+    const key = `${input.sessionID}\u0000${absolutePath}`;
+    const operation = inspect(path, input.sessionID).then(() => undefined);
+    inspectionOperations.set(key, operation);
+    try {
+      await operation;
+    } finally {
+      if (inspectionOperations.get(key) === operation) inspectionOperations.delete(key);
+    }
   }
 
   async function invalidateEditedHandoff(path: string): Promise<void> {
@@ -2836,9 +2849,12 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     }
   }
 
-  async function hostSessionUserTurn(
+  async function hostSessionRecoveryHistory(
     sessionID: string,
-  ): Promise<{ readonly agent: string; readonly synthetic: boolean } | undefined> {
+  ): Promise<{
+    readonly hasForeignUserTurn: boolean;
+    readonly persistedTurn: { readonly agent: string; readonly synthetic: boolean } | undefined;
+  } | undefined> {
     const messages = input.client?.session?.messages;
     if (messages === undefined) return undefined;
     try {
@@ -2848,47 +2864,31 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       });
       const payload = isRecord(response) && "data" in response ? response.data : response;
       if (!Array.isArray(payload)) return undefined;
+      let persistedTurn: { readonly agent: string; readonly synthetic: boolean } | undefined;
+      let hasForeignUserTurn = false;
       for (let index = payload.length - 1; index >= 0; index -= 1) {
-        const message = payload[index] as SessionMessage;
-        if ((message.info?.role ?? message.role) !== "user") continue;
-        const agent = message.info?.agent ?? message.agent;
+        const message = payload[index];
+        if (!isRecord(message)) return undefined;
+        if (message.info !== undefined && !isRecord(message.info)) return undefined;
+        const info = isRecord(message.info) ? message.info : undefined;
+        const role = info?.role ?? message.role;
+        if (role !== "user" && role !== "assistant") return undefined;
+        if (role !== "user") continue;
+        const agent = info?.agent ?? message.agent;
         if (typeof agent !== "string") return undefined;
-        return {
-          agent,
-          synthetic: (message.parts ?? []).some((part) => part.synthetic === true),
-        };
+        if (agent !== COORDINATOR_AGENT) hasForeignUserTurn = true;
+        if (persistedTurn === undefined) {
+          if (message.parts !== undefined && !Array.isArray(message.parts)) return undefined;
+          persistedTurn = {
+            agent,
+            synthetic: Array.isArray(message.parts) && message.parts.some((part) => isRecord(part) && part.synthetic === true),
+          };
+        }
       }
-      return undefined;
+      return { hasForeignUserTurn, persistedTurn };
     } catch {
       return undefined;
     }
-  }
-
-  async function hostSessionForeignUserAgent(sessionID: string): Promise<string | false | undefined> {
-    const messages = input.client?.session?.messages;
-    if (messages === undefined) return undefined;
-    try {
-      const response = await messages.call(input.client!.session, {
-        path: { id: sessionID },
-        query: { directory: input.directory },
-      });
-      const payload = isRecord(response) && "data" in response ? response.data : response;
-      if (!Array.isArray(payload)) return undefined;
-      for (const message of payload as SessionMessage[]) {
-        if ((message.info?.role ?? message.role) !== "user") continue;
-        const agent = message.info?.agent ?? message.agent;
-        if (typeof agent !== "string") return undefined;
-        if (agent !== COORDINATOR_AGENT) return agent;
-      }
-      return false;
-    } catch {
-      return undefined;
-    }
-  }
-
-  async function hostSessionHasForeignUserTurn(sessionID: string): Promise<boolean | undefined> {
-    const agent = await hostSessionForeignUserAgent(sessionID);
-    return typeof agent === "string" ? true : agent;
   }
 
   async function assistantMessageText(
@@ -2950,9 +2950,11 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const identity = await hostSessionIdentity(sessionID);
     if (identity === undefined || identity.parentPresent) return false;
     if (identity.agent !== undefined && identity.agent !== COORDINATOR_AGENT) return false;
-    if (await hostSessionHasForeignUserTurn(sessionID) !== false) return false;
-    const persistedTurn = await hostSessionUserTurn(sessionID);
-    if (persistedTurn?.agent !== COORDINATOR_AGENT) return false;
+    const history = await hostSessionRecoveryHistory(sessionID);
+    if (history === undefined || history.hasForeignUserTurn) return false;
+    const persistedTurn = history.persistedTurn;
+    if (persistedTurn === undefined && identity.agent !== COORDINATOR_AGENT) return false;
+    if (persistedTurn !== undefined && persistedTurn.agent !== COORDINATOR_AGENT) return false;
     await rememberCoordinatorRoot(sessionID);
     releaseSessionEnforcement(sessionID);
     fastLane.beginTurn(sessionID, persistedTurn?.synthetic ?? false);
@@ -3411,6 +3413,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
      */
     "tool.execute.after": async (toolInput, output): Promise<void> => {
       const completedChildSessionID = toolInput.tool === "task" ? taskChildSessionID(output) : undefined;
+      const handoffInspection = inspectSuccessfulRead(toolInput);
       try {
         if (bootstrapRequired && toolInput.tool === "sortie_check_contract" && toolInput.sessionID !== undefined &&
           isCoordinatorSession(toolInput.sessionID) && successfulBootstrapContractCheck(output)) {
@@ -3434,7 +3437,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
             }
           }
         }
-        await inspectSuccessfulRead(toolInput);
+        await handoffInspection;
         let parallel = parallelCalls.get(toolInput.callID ?? "");
         if (parallel === undefined && toolInput.tool === "task" && toolInput.sessionID !== undefined &&
           toolInput.callID !== undefined &&

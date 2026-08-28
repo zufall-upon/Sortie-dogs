@@ -5229,6 +5229,49 @@ test("two coordinator threads bind isolated task-scoped handoffs in one project"
   });
 });
 
+test("a bind waits for its concurrent successful handoff inspection", async () => {
+  await withProject("concurrent-handoff-inspection", async (directory) => {
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+    const handoffPath = join(directory, "handoff.json");
+    await writeFile(handoffPath, JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
+    const hooks = await SortieDogsPlugin({ directory });
+    await hooks["chat.message"]!(
+      { sessionID: "concurrent-root", agent: "dog-coordinator" },
+      {
+        message: { agent: "dog-coordinator", model: { providerID: "host", modelID: "selected" } },
+        parts: [{ type: "text", text: "ordinary" }],
+      },
+    );
+    await hooks.event!({
+      event: {
+        type: "session.created",
+        properties: { info: { id: "concurrent-child", parentID: "concurrent-root", directory } },
+      },
+    });
+    await hooks["chat.message"]!(
+      { sessionID: "concurrent-child", agent: "dog-worker" },
+      {
+        message: { agent: "dog-worker", model: { providerID: "host", modelID: "selected" } },
+        parts: [{
+          type: "text",
+          text: `role=implementation\nproject_root=${directory}\noperation_manifest=operation-manifest.json\nacceptance=safe change`,
+        }],
+      },
+    );
+    const before = hooks["tool.execute.before"]!;
+    const after = hooks["tool.execute.after"]!;
+    const args = { filePath: handoffPath };
+    await before({ tool: "read", sessionID: "concurrent-child", callID: "concurrent-read" }, { args });
+    const inspection = after(
+      { tool: "read", sessionID: "concurrent-child", callID: "concurrent-read", args },
+      { output: "read" },
+    );
+    const binding = executeBindWriteGate(hooks, directory, "concurrent-child");
+    const [, result] = await Promise.all([inspection, binding]);
+    assert.equal(result.status, "bound");
+  });
+});
+
 test("a task-scoped handoff filename must equal the handoff id", async () => {
   await withProject("scoped-handoff-id-mismatch", async (directory) => {
     await writeFile(join(directory, "thread-a.operation-manifest.json"), JSON.stringify(fixture.manifest));
@@ -5298,6 +5341,55 @@ test("a late child re-proves expired coordinator lineage from host session ident
     } finally {
       Date.now = originalNow;
     }
+  });
+});
+
+test("cold CLI coordinator recovers before parallel dispatch gating", async () => {
+  await withProject("cold-cli-coordinator-recovery", async (directory) => {
+    let historyReads = 0;
+    const hooks = await SortieDogsPlugin({ directory, client: { session: {
+      get: async () => ({ data: { agent: "dog-coordinator" } }),
+      messages: async () => {
+        historyReads += 1;
+        if (historyReads > 1) throw new Error("history read repeated");
+        return { data: [] };
+      },
+    } } as never });
+    historyReads = 0;
+
+    await hooks["tool.execute.before"]!(
+      { tool: "sortie_prepare_parallel_dispatch", sessionID: "cold-root", callID: "cold-dispatch" },
+      { args: { contract_path: join(directory, "parallel-contract.json") } },
+    );
+    assert.equal(historyReads, 1);
+
+    const denied = async (client: unknown, sessionID: string) => {
+      await writeFile(join(directory, "operation-manifest.json"), "{}");
+      const deniedHooks = await SortieDogsPlugin({ directory, client: client as never });
+      await deniedHooks["chat.message"]!(
+        { sessionID, agent: "build" },
+        { message: { agent: "build", model: {} }, parts: [{ type: "text", text: "/sortie task" }] },
+      );
+      await assert.rejects(
+        () => deniedHooks["tool.execute.before"]!(
+          { tool: "sortie_prepare_parallel_dispatch", sessionID, callID: `denied-${sessionID}` },
+          { args: { contract_path: join(directory, "parallel-contract.json") } },
+        ),
+        /operation manifest unavailable/u,
+      );
+    };
+    await denied({ session: {
+      get: async () => ({ data: { agent: "dog-coordinator" } }),
+      messages: async () => { throw new Error("unavailable"); },
+    } }, "unreadable-history");
+    await denied({ session: {
+      get: async () => ({ data: undefined }),
+      messages: async () => ({ data: [] }),
+    } }, "undefined-identity");
+    await denied({ session: {
+      get: async () => ({ data: { agent: "dog-coordinator" } }),
+      messages: async () => ({ data: [{}] }),
+    } }, "malformed-history");
   });
 });
 

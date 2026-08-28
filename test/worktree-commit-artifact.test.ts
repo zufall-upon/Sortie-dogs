@@ -9,6 +9,7 @@ import test from "node:test";
 import {
   produceWorktreeCommitArtifact,
   recoverWorktreeCommitArtifact,
+  runContainedValidation,
   verifyWorktreeCommitArtifact,
   WorktreeCommitArtifactError,
 } from "../dist/core/worktree-commit-artifact.js";
@@ -261,6 +262,34 @@ test("validation-time drift of a scoped new file is rejected", async () => {
   } finally { await removeFixture(value); }
 });
 
+test("Linux systemd fallback preserves timeout evidence and a clean validation environment", async (t) => {
+  if (process.platform !== "linux") return t.skip("Linux-only fallback evidence");
+  const timeout = await runContainedValidation({
+    cwd: process.cwd(), executable: process.execPath, args: ["-e", "setTimeout(()=>{},5000)"], timeout_ms: 100,
+  });
+  assert.equal(timeout.ok, false);
+  assert.equal(timeout.exit_code, 238);
+
+  const value = await fixture("clean-environment");
+  process.env.SORTIE_VALIDATION_SECRET = "must-not-leak";
+  try {
+    await writeFile(join(value.path, "src", "value.txt"), "implemented\n");
+    const artifact = await produceWorktreeCommitArtifact({
+      descriptor: value.descriptor,
+      managed_path: value.path,
+      validation: {
+        executable: process.execPath,
+        args: ["-e", "process.exit(process.env.SORTIE_VALIDATION_SECRET === undefined ? 0 : 1)"],
+        timeout_ms: 5_000,
+      },
+    });
+    assert.equal(artifact.validation.exit_code, 0);
+  } finally {
+    delete process.env.SORTIE_VALIDATION_SECRET;
+    await removeFixture(value);
+  }
+});
+
 test("validation failures retain edits and never disclose output", async (t) => {
   await t.test("nonzero", async () => {
     const value = await fixture("nonzero");
@@ -296,6 +325,26 @@ test("validation failures retain edits and never disclose output", async (t) => 
       assert.equal((await git(value.path, "rev-parse", "HEAD")).trim(), value.base);
       const recorded = await readFile(pidFile, "utf8").catch(() => undefined);
       if (recorded !== undefined) await assertProcessGone(Number.parseInt(recorded, 10));
+    } finally { await removeFixture(value); }
+  });
+  await t.test("successful parent cannot leave a SIGTERM-ignoring descendant", async () => {
+    const value = await fixture("descendant");
+    try {
+      await writeFile(join(value.path, "src", "value.txt"), "implemented\n");
+      const pidFile = join(value.root, "descendant.pid");
+      const script = [
+        "const { spawn } = require('node:child_process');",
+        "const { readFileSync, writeFileSync } = require('node:fs');",
+        "const child = spawn(process.execPath, ['-e', \"process.on('SIGTERM',()=>{});setInterval(()=>{},1000)\"], { stdio: 'ignore', detached: true });",
+        "if (process.platform !== 'linux') writeFileSync(process.argv[1], String(child.pid));",
+        "else { const match = /^NSpid:\\s+([0-9]+)/mu.exec(readFileSync('/proc/' + child.pid + '/status', 'utf8')); if (match) writeFileSync(process.argv[1], match[1]); }",
+      ].join("");
+      await artifactError(produceWorktreeCommitArtifact({
+        descriptor: value.descriptor,
+        managed_path: value.path,
+        validation: { executable: process.execPath, args: ["-e", script, pidFile], timeout_ms: 5_000 },
+      }), "validation-failed");
+      await assertProcessGone(Number.parseInt(await readFile(pidFile, "utf8"), 10));
     } finally { await removeFixture(value); }
   });
 });

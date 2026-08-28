@@ -23,6 +23,7 @@ const MAX_OUTPUT = 1024 * 1024;
 const MAX_TIMEOUT = 10 * 60_000;
 const GIT_TIMEOUT = 30_000;
 const EXIT_GRACE = 500;
+let systemdUnitSequence = 0;
 const KILL_WAIT = 2_000;
 const WINDOWS_WRAPPER_GRACE = 15_000;
 const LINUX_WRAPPER_GRACE = 10_000;
@@ -493,9 +494,155 @@ async function terminateTree(child: ChildProcess, closed: Promise<unknown>): Pro
       return false;
     };
     if (!(await groupGone())) {
-      throw new WorktreeCommitArtifactError("validation-failed", "Process-tree termination could not be confirmed.");
+      try { process.kill(-child.pid, "SIGKILL"); } catch { /* Already closed. */ }
+      if (!(await groupGone())) {
+        throw new WorktreeCommitArtifactError("validation-failed", "Process-tree termination could not be confirmed.");
+      }
     }
   }
+}
+
+async function linuxSystemdRun(): Promise<string> {
+  for (const candidate of ["/usr/bin/systemd-run", "/bin/systemd-run"]) {
+    const canonical = await realpath(candidate).catch(() => undefined);
+    if (canonical === undefined || !canonical.startsWith("/usr/bin/") && !canonical.startsWith("/bin/")) continue;
+    const info = await lstat(canonical).catch(() => undefined);
+    if (info !== undefined && info.isFile() && !info.isSymbolicLink() && info.uid === 0 && (info.mode & 0o111) !== 0) return canonical;
+  }
+  throw new WorktreeCommitArtifactError("validation-failed", "Validation containment setup failed.");
+}
+
+async function linuxSystemctl(): Promise<string> {
+  for (const candidate of ["/usr/bin/systemctl", "/bin/systemctl"]) {
+    const canonical = await realpath(candidate).catch(() => undefined);
+    if (canonical === undefined || !canonical.startsWith("/usr/bin/") && !canonical.startsWith("/bin/")) continue;
+    const info = await lstat(canonical).catch(() => undefined);
+    if (info !== undefined && info.isFile() && !info.isSymbolicLink() && info.uid === 0 && (info.mode & 0o111) !== 0) return canonical;
+  }
+  throw new WorktreeCommitArtifactError("validation-failed", "Validation containment setup failed.");
+}
+
+async function linuxEnvironmentExecutable(): Promise<string> {
+  for (const candidate of ["/usr/bin/env", "/bin/env"]) {
+    const canonical = await realpath(candidate).catch(() => undefined);
+    if (canonical === undefined || !canonical.startsWith("/usr/bin/") && !canonical.startsWith("/bin/")) continue;
+    const info = await lstat(canonical).catch(() => undefined);
+    if (info !== undefined && info.isFile() && !info.isSymbolicLink() && info.uid === 0 && (info.mode & 0o111) !== 0) return canonical;
+  }
+  throw new WorktreeCommitArtifactError("validation-failed", "Validation containment setup failed.");
+}
+
+async function linuxShell(): Promise<string> {
+  for (const candidate of ["/bin/sh", "/usr/bin/sh"]) {
+    const canonical = await realpath(candidate).catch(() => undefined);
+    if (canonical === undefined || !canonical.startsWith("/usr/bin/") && !canonical.startsWith("/bin/")) continue;
+    const info = await lstat(canonical).catch(() => undefined);
+    if (info !== undefined && info.isFile() && !info.isSymbolicLink() && info.uid === 0 && (info.mode & 0o111) !== 0) return canonical;
+  }
+  throw new WorktreeCommitArtifactError("validation-failed", "Validation containment setup failed.");
+}
+
+async function stopSystemdUnit(unit: string, environment: NodeJS.ProcessEnv): Promise<void> {
+  const systemctl = await linuxSystemctl();
+  const invoke = async (args: readonly string[]): Promise<number | null> => {
+    const child = spawn(systemctl, args, { env: environment, shell: false, windowsHide: true, stdio: "ignore" });
+    const closed = new Promise<{ code: number | null }>((done, reject) => {
+      child.once("error", reject);
+      child.once("close", (code) => done({ code }));
+    });
+    if (!(await waitForClose(closed, KILL_WAIT + 1_500))) {
+      child.kill("SIGKILL");
+      if (!(await waitForClose(closed, KILL_WAIT))) {
+        throw new WorktreeCommitArtifactError("validation-failed", "Validation containment shutdown failed.");
+      }
+    }
+    return (await closed).code;
+  };
+  await invoke(["--user", "stop", unit]).catch(() => undefined);
+  const activeState = async (): Promise<boolean> => {
+    const code = await invoke(["--user", "is-active", "--quiet", unit]);
+    if (code === 0) return true;
+    if (code === 3 || code === 4) return false;
+    throw new WorktreeCommitArtifactError("validation-failed", "Validation containment shutdown failed.");
+  };
+  const deadline = Date.now() + KILL_WAIT;
+  while (Date.now() < deadline) {
+    if (await activeState()) {
+      await invoke(["--user", "stop", unit]).catch(() => undefined);
+    }
+    await new Promise((done) => setTimeout(done, 25));
+  }
+  if (await activeState()) {
+    throw new WorktreeCommitArtifactError("validation-failed", "Validation containment shutdown failed.");
+  }
+}
+
+async function runLinuxSystemd(
+  executable: string,
+  args: readonly string[],
+  cwd: string,
+  timeout: number,
+): Promise<CommandResult> {
+  const systemdRun = await linuxSystemdRun();
+  const [environmentExecutable, shell] = await Promise.all([linuxEnvironmentExecutable(), linuxShell()]);
+  const uid = process.getuid?.();
+  if (uid === undefined) throw new WorktreeCommitArtifactError("validation-failed", "Validation containment setup failed.");
+  const runtimeDirectory = `/run/user/${uid}`;
+  const environment = {
+    ...cleanEnvironment(),
+    XDG_RUNTIME_DIR: runtimeDirectory,
+    DBUS_SESSION_BUS_ADDRESS: `unix:path=${runtimeDirectory}/bus`,
+  };
+  systemdUnitSequence = (systemdUnitSequence + 1) % Number.MAX_SAFE_INTEGER;
+  const unit = `sortie-dogs-${process.pid}-${Date.now()}-${systemdUnitSequence}`;
+  const validationEnvironment = Object.entries(cleanEnvironment()).map(([key, value]) => `${key}=${value}`);
+  const child = spawn(systemdRun, [
+    "--user", "--wait", "--collect", "--quiet", `--unit=${unit}`,
+    "--property=KillMode=control-group", `--property=RuntimeMaxSec=${timeout}ms`,
+    "--property=TimeoutStopSec=1s", "--working-directory", cwd, "--",
+    environmentExecutable, "-i", ...validationEnvironment, shell, "-c",
+    '"$@"; code=$?; if [ "$code" -eq 0 ]; then exit 0; else exit 239; fi',
+    "sortie-validation", executable, ...args,
+  ], {
+    cwd, env: environment, shell: false, windowsHide: true, detached: true, stdio: ["ignore", "pipe", "pipe"],
+  });
+  const chunks: Buffer[] = [];
+  let outputBytes = 0;
+  let overflow = false;
+  const collect = (chunk: Buffer): void => {
+    outputBytes += chunk.byteLength;
+    if (outputBytes <= MAX_OUTPUT) chunks.push(chunk);
+    else overflow = true;
+  };
+  child.stdout!.on("data", collect);
+  child.stderr!.on("data", (chunk: Buffer) => {
+    outputBytes += chunk.byteLength;
+    if (outputBytes > MAX_OUTPUT) overflow = true;
+  });
+  const closed = new Promise<{ code: number | null }>((done, reject) => {
+    child.once("error", reject);
+    child.once("close", (code) => done({ code }));
+  });
+  let timer: NodeJS.Timeout | undefined;
+  const bounded = await Promise.race([
+    closed.then((result) => ({ kind: "closed" as const, result })),
+    new Promise<{ kind: "timeout" }>((done) => {
+      timer = setTimeout(() => done({ kind: "timeout" }), timeout + LINUX_WRAPPER_GRACE);
+    }),
+  ]).catch(async () => {
+    await terminateTree(child, closed).catch(() => undefined);
+    await stopSystemdUnit(unit, environment);
+    throw new WorktreeCommitArtifactError("validation-failed", "Validation executable failed.");
+  });
+  if (timer !== undefined) clearTimeout(timer);
+  if (bounded.kind === "timeout" || overflow) {
+    if (child.exitCode === null && child.signalCode === null) await terminateTree(child, closed);
+    await stopSystemdUnit(unit, environment);
+    throw new WorktreeCommitArtifactError("validation-failed", "Validation exceeded its resource bound.");
+  }
+  await stopSystemdUnit(unit, environment);
+  const code = bounded.result.code === 0 ? 0 : bounded.result.code === 1 ? 238 : 239;
+  return { code, stdout: Buffer.concat(chunks) };
 }
 
 async function runBounded(
@@ -573,6 +720,7 @@ async function runBounded(
     }
     const code = linuxWrapper && result.code !== 0 && ![238, 239, 240, 241].includes(result.code ?? -1)
       ? 240 : result.code ?? -1;
+    if (linuxWrapper && code === 240) return await runLinuxSystemd(executable, args, cwd, timeout);
     return { code, stdout: Buffer.concat(chunks) };
   } catch (error) {
     if (child.exitCode === null && child.signalCode === null) await terminateTree(child, closed).catch(() => undefined);
