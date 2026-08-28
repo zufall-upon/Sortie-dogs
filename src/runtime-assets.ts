@@ -22,7 +22,7 @@ export interface RuntimeAsset {
 export const runtimeAssets = [
   {
     name: "dog-coordinator",
-    version: "0.3.48-recovery-compaction-v1",
+    version: "0.3.49-run-metrics-v1",
     installPath: "agent/dog-coordinator.md",
     content: `---
 description: Canonical MkII coordinator packaged by Sortie-dogs
@@ -414,8 +414,8 @@ its outcome or abandoned-worker reconciliation. A bound active parallel dog-work
 immutable commit artifact only through ${PARALLEL_COMMIT_ARTIFACT_CAPABILITY}; all other Git mutation
 remains forbidden. That capability durably accepts the verified artifact before it returns, so restart
 can replay the exact running-task artifact without another commit. Terminal runs enter bounded durable archive; status and archive retain verified
-bounded artifacts with task, dispatch, worktree, branch, path, and base identities. Session idle never
-  outcomes are completed and their artifacts accepted, call ${PARALLEL_ENQUEUE_INTEGRATION_CAPABILITY}
+bounded artifacts with task, dispatch, worktree, branch, path, and base identities. Once outcomes are
+  completed and their artifacts accepted, call ${PARALLEL_ENQUEUE_INTEGRATION_CAPABILITY}
   with exact run_id and target_branch, then ${PARALLEL_INTEGRATE_QUEUE_CAPABILITY} once to prepare a
   synthetic candidate and run combined canonical validation; this does not update the target. Inspect
   ${PARALLEL_INTEGRATION_STATUS_CAPABILITY}. For remediation-required, dispatch exactly one dog-worker
@@ -1242,6 +1242,9 @@ output: no plan, progress, assessment, Evidence heading, or preamble may precede
 status line combining exactly one status emoji, bold status, task_id, and the short conclusion. Then
 render compact Validation and Next paragraphs with no bullets and no additional emoji. The
 conclusion is the user's answer; keep it short enough to scan without wrapping where possible.
+The plugin injects a measured **Run:** paragraph after a qualifying DONE status line. Do not emit,
+estimate, or fabricate Run metrics; the coordinator owns only the status, Validation, Next, and Evidence
+paragraphs shown below.
 The Evidence layer is a \`<details>\` block with a short count summary and exactly one fenced YAML
 block. It retains every ordered validation command, exit, and fingerprint and every non-empty
 canonical field; it is a detail layer, never a replacement for the conclusion. Omit false, none,
@@ -1263,10 +1266,10 @@ TERMINAL_STATUS_SEMANTICS_FIXTURE
 END_TERMINAL_STATUS_SEMANTICS_FIXTURE
 
 RUNTIME_ASSET_VERSION_SYNC_FIXTURE
-    runtime_version: 0.3.48-recovery-compaction-v1
+    runtime_version: 0.3.49-run-metrics-v1
     shared_marker: src/asset-version.ts
-    packaged_expectation: test/plugin-loader.test.ts uses 0.3.48-recovery-compaction-v1
-    initialize_expectation: test/initialize.test.ts uses 0.3.48-recovery-compaction-v1
+    packaged_expectation: test/plugin-loader.test.ts uses 0.3.49-run-metrics-v1
+    initialize_expectation: test/initialize.test.ts uses 0.3.49-run-metrics-v1
     rule: runtime asset versions, shared marker, packaged expectation, and initialize expectation change together
 END_RUNTIME_ASSET_VERSION_SYNC_FIXTURE
 
@@ -1335,7 +1338,7 @@ END_TERMINAL_EVIDENCE_FIXTURE
   },
   {
     name: "dog-worker",
-    version: "0.3.48-recovery-compaction-v1",
+    version: "0.3.49-run-metrics-v1",
     installPath: "agent/dog-worker.md",
     content: `---
 description: Dedicated worker for the canonical Sortie-dogs coordinator
@@ -1457,7 +1460,7 @@ blocker report. Local process defects require autonomous repair and redispatch, 
   },
   {
     name: "dog-scout",
-    version: "0.3.48-recovery-compaction-v1",
+    version: "0.3.49-run-metrics-v1",
     installPath: "agent/dog-scout.md",
     content: `---
 description: Bounded evidence scout for dog-coordinator
@@ -1506,7 +1509,7 @@ prose; keep the keys, paths, commands, and identifiers verbatim.
   },
   {
     name: "dog-reviewer",
-    version: "0.3.48-recovery-compaction-v1",
+    version: "0.3.49-run-metrics-v1",
     installPath: "agent/dog-reviewer.md",
     content: `---
 description: Independent source reviewer for dog-coordinator
@@ -1535,7 +1538,7 @@ or transport.
   },
   {
     name: "dog-advisor",
-    version: "0.3.48-recovery-compaction-v1",
+    version: "0.3.49-run-metrics-v1",
     installPath: "agent/dog-advisor.md",
     content: `---
 description: Focused technical advisor for dog-coordinator
@@ -1559,7 +1562,7 @@ provider, vendor, model, variant, or transport.
   },
   {
     name: "sortie",
-    version: "0.3.48-recovery-compaction-v1",
+    version: "0.3.49-run-metrics-v1",
     installPath: "command/sortie.md",
     content: `---
 description: Start the canonical Sortie-dogs MkII workflow

@@ -1097,6 +1097,8 @@ test("generated coordinator renders a compact conclusion and collapsible YAML Ev
   assert.match(semantics[1], /status_icons: DONE=✅ \| BLOCKED=⛔ \| NEED_DECISION=❓/u);
   assert.match(semantics[1], /quality_gate_fail: validation evidence \+ autonomous non-adoption decision -> DONE; release remains unperformed/);
   assert.match(semantics[1], /process_defect: gate \| routing \| handoff \| local tool defect -> autonomous repair; never terminal BLOCKED/);
+  assert.match(coordinator.content, /plugin injects a measured \*\*Run:\*\* paragraph/i);
+  assert.match(coordinator.content, /Do not emit,\s*estimate, or fabricate Run metrics/i);
   const output = coordinator.content.match(
     /TERMINAL_OUTPUT_TEMPLATE\r?\n([\s\S]+?)\r?\nEND_TERMINAL_OUTPUT_TEMPLATE/,
   );
@@ -1134,6 +1136,37 @@ test("generated coordinator renders a compact conclusion and collapsible YAML Ev
   assert.match(coordinator.content, /first non-empty\s+output: no plan, progress, assessment, Evidence heading, or preamble may precede it/i);
   assert.match(coordinator.content, /Omit false, none,\s+empty arrays, empty objects, and fields already represented by the status line or Next paragraph/i);
   assert.match(coordinator.content, /status, task_id, and next_action never repeat inside Evidence/i);
+});
+
+test("coordinator DONE output receives host-reported root and child run metrics", async () => {
+  await withProject("done-run-metrics", async (directory) => {
+    const created = Date.now() - 65_000;
+    const hooks = await SortieDogsPlugin({ directory, client: { session: {
+      get: async () => ({ data: { agent: "dog-coordinator", time: { created } } }),
+      children: async ({ path }) => ({ data: path.id === "root" ? [{ id: "child" }] : [] }),
+      messages: async ({ path }) => ({ data: path.id === "root" ? [{ info: {
+        id: "root-step", role: "assistant", cost: 0.1,
+        tokens: { input: 100, output: 10, reasoning: 5, cache: { read: 50, write: 5 } },
+      } }] : [{ info: {
+        id: "child-step", role: "assistant", cost: 0.2,
+        tokens: { input: 30, output: 5, reasoning: 0, cache: { read: 10, write: 0 } },
+      } }] }),
+    } } as never });
+    await hooks["chat.message"]!(
+      { sessionID: "root", agent: "dog-coordinator" },
+      {
+        message: { agent: "dog-coordinator", model: { providerID: "host", modelID: "selected" } },
+        parts: [{ type: "text", text: "task" }],
+      },
+    );
+    const completed = {
+      text: "✅ **DONE** `metrics` — complete\n\n**Validation:** PASS\n\n**Next:** none\n\n<details>evidence</details>",
+    };
+    await hooks["experimental.text.complete"]!({ sessionID: "root" }, completed);
+    assert.match(completed.text, /^✅ \*\*DONE\*\*[^\n]+\n\n\*\*Run:\*\* pre-terminal host snapshot · 1m /u);
+    assert.match(completed.text, /pre-terminal host snapshot[\s\S]*215 tokens · \$0\.3000 · 2 completed assistant model steps · 2 sessions · 27\.9% cache ratio/u);
+    assert.match(completed.text, /\n\n\*\*Validation:\*\* PASS/u);
+  });
 });
 
 test("shipped document fixtures satisfy the schemas the write gate enforces", () => {

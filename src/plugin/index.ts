@@ -88,6 +88,8 @@ import {
   type SessionMessageReader,
 } from "./task-result-repair.js";
 import { configRoot, nearestPackageVersion, reflectionEnabled, ReflectionError, ReflectionStore } from "../reflection/index.js";
+import { collectRunMetrics, insertRunMetrics, isDoneTerminalText } from "./run-metrics.js";
+import type { RunMetricsClient } from "./run-metrics.js";
 
 const INPUT_LIMITS = { config: 64 * 1024, manifest: 512 * 1024, handoff: 2 * 1024 * 1024, parallel: 512 * 1024 } as const;
 const INSPECTION_CACHE = { maximum: 256, ttlMilliseconds: 30 * 60 * 1000 } as const;
@@ -113,7 +115,7 @@ export interface OpenCodePluginInput {
   directory: string;
   worktree?: string;
   /** The host SDK client. Absent in hosts that construct the plugin without one. */
-  client?: SessionMessageReader & ContinuationClient & OpenCodeModelAvailabilityClient & {
+  client?: SessionMessageReader & RunMetricsClient & ContinuationClient & OpenCodeModelAvailabilityClient & {
     tui?: {
       showToast?: (request: {
         body: { title: string; message: string; variant: "warning"; duration: number };
@@ -3225,6 +3227,11 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           .replaceAll(ROLLOVER_MARKER, "")
           .replaceAll(CONTINUATION_MARKER, "")
           .trimEnd();
+      }
+      if ((isCoordinatorSession(textInput.sessionID) || await recoverCoordinatorRoot(textInput.sessionID)) &&
+        isDoneTerminalText(textOutput.text)) {
+        const metrics = await collectRunMetrics(input.client, textInput.sessionID, input.directory).catch(() => undefined);
+        if (metrics !== undefined) textOutput.text = insertRunMetrics(textOutput.text, metrics);
       }
       await completeContinuationText(textInput.sessionID, textOutput.text, false);
     },
