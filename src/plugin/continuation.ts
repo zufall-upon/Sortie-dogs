@@ -189,7 +189,11 @@ export interface ContinuationTool {
 export interface ContinuationHooks {
   readonly tool: ContinuationTool;
   textComplete(
-    input: { sessionID: string; allowCheckpointContinuation?: boolean },
+    input: {
+      sessionID: string;
+      allowCheckpointContinuation?: boolean;
+      allowStepRecoveryFallback?: boolean;
+    },
     output: { text: string },
   ): Promise<void>;
   sessionCompacting(
@@ -1098,7 +1102,9 @@ export function createContinuationHooks(
             nonTerminalProgress(state.latestCoordinatorReport) ||
             (state.stepRecoveryActive && !terminalCheckpoint(state.latestCoordinatorReport))
           ) {
-            scheduleStepRecovery(input.sessionID, state, state.latestCoordinatorReport);
+            if (input.allowStepRecoveryFallback !== false) {
+              scheduleStepRecovery(input.sessionID, state, state.latestCoordinatorReport);
+            }
           }
           // The resumed coordinator completed a turn, so no late event from its prior compaction can
           // compete with the next host-managed compaction.

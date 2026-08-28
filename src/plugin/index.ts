@@ -1888,13 +1888,18 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     }
   }
 
-  async function completeContinuationText(sessionID: string, text: string): Promise<void> {
+  async function completeContinuationText(
+    sessionID: string,
+    text: string,
+    allowStepRecoveryFallback = true,
+  ): Promise<void> {
     const continuationText = fastLane.manualCompactionForbidden(sessionID)
       ? text.replaceAll(ROLLOVER_MARKER, "").replaceAll(CONTINUATION_MARKER, "").trimEnd()
       : text;
     await continuation.textComplete({
       sessionID,
       allowCheckpointContinuation: fastLane.backlogContinuationAllowed(sessionID),
+      allowStepRecoveryFallback,
     }, { text: continuationText });
     if (fastLane.backlogContinuationAllowed(sessionID) && continuation.blocksTool(sessionID)) {
       fastLane.continuationQueued(sessionID);
@@ -3219,7 +3224,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           .replaceAll(CONTINUATION_MARKER, "")
           .trimEnd();
       }
-      await completeContinuationText(textInput.sessionID, textOutput.text);
+      await completeContinuationText(textInput.sessionID, textOutput.text, false);
     },
     "experimental.session.compacting": async (compactInput, compactOutput): Promise<void> => {
       await continuation.sessionCompacting(compactInput, compactOutput);
@@ -3828,14 +3833,13 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           eventPart.id,
         );
         if (text !== undefined && text === eventPart.text.trim()) {
-          completedCoordinatorMessages.add(eventPart.messageID);
           while (completedCoordinatorParts.size > ACTIVE_SESSION_CACHE.maximum) {
             completedCoordinatorParts.delete(completedCoordinatorParts.values().next().value!);
           }
           while (completedCoordinatorMessages.size > ACTIVE_SESSION_CACHE.maximum) {
             completedCoordinatorMessages.delete(completedCoordinatorMessages.values().next().value!);
           }
-          await completeContinuationText(eventSessionID, text);
+          await completeContinuationText(eventSessionID, text, false);
           return;
         }
         completedCoordinatorParts.delete(eventPart.id);

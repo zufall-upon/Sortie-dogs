@@ -3262,6 +3262,53 @@ test("a completed coordinator text part triggers continuation before step finish
   });
 });
 
+test("an interim coordinator progress part does not recover until the message completes", async () => {
+  await withProject("text-part-event-recovery", async (directory) => {
+    let prompts = 0;
+    const messages: SessionMessage[] = [{
+      info: { id: "message-1", role: "assistant", agent: "dog-coordinator" } as never,
+      parts: [{
+        id: "part-1",
+        type: "text",
+        text: "📊 進行中: tool準備中",
+      } as never],
+    }];
+    const hooks = await SortieDogsPlugin({ directory, client: { session: {
+      get: async () => ({ data: { agent: "dog-coordinator" } }),
+      messages: async () => ({ data: messages }),
+      promptAsync: async () => { prompts += 1; return { data: true }; },
+    } } as never });
+    await hooks["chat.message"]!(
+      { sessionID: "root", agent: "dog-coordinator" },
+      {
+        message: { agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+        parts: [{ type: "text", text: "start" }],
+      },
+    );
+    await hooks.event!({ event: { type: "message.part.updated", properties: { part: {
+      id: "part-1",
+      messageID: "message-1",
+      sessionID: "root",
+      type: "text",
+      text: "📊 進行中: tool準備中",
+      time: { end: Date.now() },
+    } } } });
+
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    assert.equal(prompts, 0);
+
+    await hooks.event!({ event: { type: "message.updated", properties: { info: {
+      id: "message-1",
+      sessionID: "root",
+      role: "assistant",
+      agent: "dog-coordinator",
+      time: { completed: Date.now() },
+    } } } });
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    assert.equal(prompts, 1);
+  });
+});
+
 test("coordinator children and foreign text parts cannot become continuation roots", async () => {
   await withProject("continuation-event-identity", async (directory) => {
     let summarizeCalls = 0;

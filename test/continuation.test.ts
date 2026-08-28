@@ -1087,6 +1087,26 @@ test("text completion recovers when a one-shot host omits session idle", async (
   assert.equal(eventHost.promptCalls.length, 1, "real idle and fallback share one recovery state");
 });
 
+test("partial text waits for message completion or idle before step recovery", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  const hooks = createContinuationHooks(host.client, "/project", POLICY, {
+    ...FAST,
+    stepRecoveryMilliseconds: 10,
+  });
+  hooks.observeModel("ses_partial", { providerID: "openai", modelID: "gpt-5.6-terra" });
+  await hooks.textComplete(
+    { sessionID: "ses_partial", allowStepRecoveryFallback: false },
+    { text: "📊 進行中: tool準備中" },
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(host.promptCalls.length, 0);
+
+  await hooks.sessionIdle("ses_partial");
+  assert.equal(host.promptCalls.length, 1);
+  assert.ok(host.promptCalls[0]!.text.startsWith(STEP_CONTINUE_PREFIX));
+});
+
 test("text completion compacts and resumes a checkpoint before a one-shot host can exit", async () => {
   const host = fakeHost({ agent: COORDINATOR });
   let hooks!: ReturnType<typeof createContinuationHooks>;
