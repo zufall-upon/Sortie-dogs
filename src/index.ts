@@ -115,3 +115,20 @@ export type {
   ValidationResult,
 } from "./core/consultation.js";
 export type * from "./core/types.js";
+export {
+  inspectRetainedStateCapsule,
+  MAX_RETAINED_STATE_BYTES,
+  MAX_RETAINED_STATE_ITEMS,
+  MAX_RETAINED_STATE_WARNINGS,
+  RETAINED_STATE_AUTHORITY,
+  RETAINED_STATE_EXTENSION,
+  RETAINED_STATE_SCHEMA_VERSION,
+} from "./core/retained-state.js";
+export type {
+  AdmissionReceipt,
+  NextEvidenceDecision,
+  RetainedStateCapsule,
+  RetainedStateInspection,
+  RetainedStateWarning,
+  RetainedValidationAttempt,
+} from "./core/retained-state.js";

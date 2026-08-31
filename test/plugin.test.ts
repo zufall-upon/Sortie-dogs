@@ -1148,10 +1148,10 @@ test("coordinator DONE output receives host-reported root and child run metrics"
       get: async () => ({ data: { agent: "dog-coordinator", time: { created } } }),
       children: async ({ path }) => ({ data: path.id === "root" ? [{ id: "child" }] : [] }),
       messages: async ({ path }) => ({ data: path.id === "root" ? [{ info: {
-        id: "root-step", role: "assistant", cost: 0.1,
+        id: "root-step", role: "assistant", agent: "dog-coordinator", cost: 0.1,
         tokens: { input: 100, output: 10, reasoning: 5, cache: { read: 50, write: 5 } },
       } }] : [{ info: {
-        id: "child-step", role: "assistant", cost: 0.2,
+        id: "child-step", role: "assistant", agent: "dog-worker", cost: 0.2,
         tokens: { input: 30, output: 5, reasoning: 0, cache: { read: 10, write: 0 } },
       } }] }),
     } } as never });
@@ -1171,6 +1171,8 @@ test("coordinator DONE output receives host-reported root and child run metrics"
       { args: { filePath: join(directory, "operation-manifest.json") } },
     );
     await hooks.event!({ event: { type: "session.idle", properties: { sessionID: "root" } } });
+    const compacted = { context: ["old context"], prompt: "old prompt" };
+    await hooks["experimental.session.compacting"]!({ sessionID: "root" }, compacted);
     const completed = {
       text: "✅ **DONE** `metrics` — complete\n\n**Validation:** PASS\n\n**Next:** none\n\n<details>evidence</details>",
     };
@@ -1194,7 +1196,29 @@ test("coordinator DONE output receives host-reported root and child run metrics"
     assert.equal(body.level, "info");
     assert.equal(body.message, "run-metrics.snapshot");
     assert.equal(body.extra.available, true);
+    assert.equal(body.extra.outcome, "DONE");
     assert.equal(body.extra.sessionID, "root");
+    assert.equal(body.extra.runtimeAssetVersion, "0.3.51-state-observability-v1");
+    assert.equal(body.extra.inputTokens, 130);
+    assert.equal(body.extra.outputTokens, 15);
+    assert.equal(body.extra.reasoningTokens, 5);
+    assert.equal(body.extra.cacheReadTokens, 60);
+    assert.equal(body.extra.cacheWriteTokens, 5);
+    assert.deepEqual(body.extra.roles, {
+      "dog-coordinator": {
+        tokens: 170, inputTokens: 100, outputTokens: 10, reasoningTokens: 5,
+        cacheReadTokens: 50, cacheWriteTokens: 5, cost: 0.1, steps: 1, cacheRatio: 50 / 170,
+      },
+      "dog-worker": {
+        tokens: 45, inputTokens: 30, outputTokens: 5, reasoningTokens: 0,
+        cacheReadTokens: 10, cacheWriteTokens: 0, cost: 0.2, steps: 1, cacheRatio: 10 / 45,
+      },
+    });
+    assert.equal(body.extra.compactionPolicyCount, 1);
+    assert.equal(body.extra.compactionContextInputBytes, Buffer.byteLength("old context"));
+    assert.ok((body.extra.compactionContextOutputBytes as number) > Buffer.byteLength("old context"));
+    assert.equal(body.extra.compactionPromptInputBytes, Buffer.byteLength("old prompt"));
+    assert.ok((body.extra.compactionPromptOutputBytes as number) > Buffer.byteLength("old prompt"));
     assert.equal(body.extra.hostSessionIdentityCount, 1);
     assert.equal(body.extra.bootstrapControlStateCount, 2);
     assert.equal(body.extra.collectRunMetricsCount, 1);
@@ -1352,6 +1376,7 @@ test("runtime contract requires interactive continuation and deterministic recov
   assert.match(question[1], /context_line_1:/);
   assert.match(question[1], /context_line_5:/);
   assert.match(question[1], /invoke question tool; plain-text final forbidden/);
+  assert.match(question[1], /unavailable_fallback: canonical NEED_DECISION once/);
   assert.match(question[1], /automatically resume the same candidate flow/);
   /*
    * Scoping the tool to blocked external state left every design or scope choice as a prose question,

@@ -258,14 +258,14 @@ test("ordinary BLOCKED reports auto-resume while explicit true blockers remain t
   assert.equal(terminalHost.promptCalls.length, 0);
 });
 
-test("terminal classification uses the final status and rejects malformed blocker markers", async () => {
+test("terminal classification uses only the first conclusion status and rejects malformed blocker markers", async () => {
   const completedHost = fakeHost({ agent: COORDINATOR });
   const completedHooks = createContinuationHooks(completedHost.client, "/project", POLICY, FAST);
   await completedHooks.textComplete({ sessionID: "ses_root" }, {
     text: "⛔ **BLOCKED** `old` — prior report\n✅ **DONE** `task` — final report",
   });
   await completedHooks.sessionIdle("ses_root");
-  assert.equal(completedHost.promptCalls.length, 0);
+  assert.equal(completedHost.promptCalls.length, 1);
 
   const recoverHost = fakeHost({ agent: COORDINATOR });
   const recoverHooks = createContinuationHooks(recoverHost.client, "/project", POLICY, FAST);
@@ -289,7 +289,15 @@ test("terminal classification uses the final status and rejects malformed blocke
     ].join("\n"),
   });
   await recoverHooks.sessionIdle("ses_root");
-  assert.equal(recoverHost.promptCalls.length, 1);
+  assert.equal(recoverHost.promptCalls.length, 0);
+
+  const progressHost = fakeHost({ agent: COORDINATOR });
+  const progressHooks = createContinuationHooks(progressHost.client, "/project", POLICY, FAST);
+  await progressHooks.textComplete({ sessionID: "ses_root" }, {
+    text: "📊 進行中: validation\nstatus: DONE — example only",
+  });
+  await progressHooks.sessionIdle("ses_root");
+  assert.equal(progressHost.promptCalls.length, 1);
 });
 
 test("step continuation preserves user consultation and no-stop instructions", async () => {
@@ -1278,6 +1286,22 @@ test("session idle never resumes a terminal checkpoint", async () => {
   );
   await hooks.sessionIdle("ses_root");
   assert.equal(host.promptCalls.length, 0);
+
+  const decisionHost = fakeHost({ agent: COORDINATOR });
+  const decisionHooks = createContinuationHooks(decisionHost.client, "/project", POLICY, FAST);
+  await decisionHooks.textComplete({ sessionID: "ses_decision" }, {
+    text: "❓ **NEED_DECISION** `task` — runtime confirmation required\n\n**Next:** provide the RPT",
+  });
+  await decisionHooks.sessionIdle("ses_decision");
+  assert.equal(decisionHost.promptCalls.length, 0);
+
+  const aliasHost = fakeHost({ agent: COORDINATOR });
+  const aliasHooks = createContinuationHooks(aliasHost.client, "/project", POLICY, FAST);
+  await aliasHooks.textComplete({ sessionID: "ses_alias" }, {
+    text: "✅ conclusion: status: DONE; task_id: task-06; verification complete",
+  });
+  await aliasHooks.sessionIdle("ses_alias");
+  assert.equal(aliasHost.promptCalls.length, 0);
 });
 
 test("session idle recovers in-progress output without a next action", async () => {

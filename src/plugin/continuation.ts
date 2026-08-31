@@ -651,7 +651,12 @@ export function createContinuationHooks(
     const entries: Array<{ index: number; status: "DONE" | "BLOCKED" | "NEED_DECISION" }> = [];
     for (const { index, line } of topLevelProtocolLines(text)) {
       const explicit = /^status:\s*(DONE|BLOCKED|NEED_DECISION)\b/iu.exec(line)?.[1]?.toUpperCase();
-      const status = explicit ??
+      const aliasMatch = /^([✅⛔❓])[ \t]+conclusion:\s*status:\s*(DONE|BLOCKED|NEED_DECISION)\b/iu.exec(line);
+      const aliasStatus = aliasMatch?.[2]?.toUpperCase();
+      const alias = aliasStatus === "DONE" && aliasMatch?.[1] === "✅" ? "DONE" :
+        aliasStatus === "BLOCKED" && aliasMatch?.[1] === "⛔" ? "BLOCKED" :
+        aliasStatus === "NEED_DECISION" && aliasMatch?.[1] === "❓" ? "NEED_DECISION" : undefined;
+      const status = explicit ?? alias ??
         (/^✅[ \t]+\*\*DONE\*\*/u.test(line) ? "DONE" :
           /^⛔[ \t]+\*\*BLOCKED\*\*/u.test(line) ? "BLOCKED" :
           /^❓[ \t]+\*\*NEED_DECISION\*\*/u.test(line) ? "NEED_DECISION" : undefined);
@@ -662,8 +667,15 @@ export function createContinuationHooks(
     return entries;
   }
 
+  function firstCheckpoint(text: string): { index: number; status: "DONE" | "BLOCKED" | "NEED_DECISION" } | undefined {
+    const firstLine = topLevelProtocolLines(text).find(({ line }) => line.trim().length > 0);
+    return firstLine === undefined
+      ? undefined
+      : checkpointEntries(text).find(({ index }) => index === firstLine.index);
+  }
+
   function checkpointStatus(text: string): "DONE" | "BLOCKED" | "NEED_DECISION" | undefined {
-    return checkpointEntries(text).at(-1)?.status;
+    return firstCheckpoint(text)?.status;
   }
 
   function terminalCheckpoint(text: string): boolean {
@@ -672,7 +684,7 @@ export function createContinuationHooks(
   }
 
   function trueBlockerReport(text: string): boolean {
-    const checkpoint = checkpointEntries(text).at(-1);
+    const checkpoint = firstCheckpoint(text);
     if (checkpoint?.status !== "BLOCKED") return false;
     return topLevelProtocolLines(text).some(({ line, index }) => index > checkpoint.index &&
       /^TRUE_BLOCKER\s*:\s*(?:external|user-decision)\s*:\s*\S.*$/u.test(line));
@@ -722,7 +734,7 @@ export function createContinuationHooks(
 
   function observeRecoveryReport(state: SessionState, report: string): number {
     if (state.recoveryObservedRevision === state.turnRevision) return state.recoveryRepeatCount;
-    const checkpoint = checkpointEntries(report).at(-1);
+    const checkpoint = firstCheckpoint(report);
     const checkpointLine = checkpoint === undefined
       ? undefined
       : topLevelProtocolLines(report).find(({ index }) => index === checkpoint.index)?.line;

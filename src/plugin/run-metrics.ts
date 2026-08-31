@@ -9,11 +9,31 @@ export interface RunMetricsClient {
 export interface RunMetrics {
   readonly durationMilliseconds: number | undefined;
   readonly tokens: number | undefined;
+  readonly inputTokens: number | undefined;
+  readonly outputTokens: number | undefined;
+  readonly reasoningTokens: number | undefined;
+  readonly cacheReadTokens: number | undefined;
+  readonly cacheWriteTokens: number | undefined;
   readonly cost: number | undefined;
   readonly steps: number | undefined;
   readonly sessions: number | undefined;
   readonly cacheRatio: number | undefined;
+  readonly roles: Readonly<Record<string, RunRoleMetrics>> | undefined;
 }
+
+export interface RunRoleMetrics {
+  readonly tokens: number;
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly reasoningTokens: number;
+  readonly cacheReadTokens: number;
+  readonly cacheWriteTokens: number;
+  readonly cost: number | undefined;
+  readonly steps: number;
+  readonly cacheRatio: number | undefined;
+}
+
+export type RunTerminalOutcome = "DONE" | "BLOCKED" | "NEED_DECISION";
 
 const MAX_SESSIONS = 128;
 
@@ -30,7 +50,28 @@ function number(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
-function messageTokens(message: Record<string, unknown>): [number, number] | undefined {
+interface MessageTokens {
+  readonly total: number;
+  readonly input: number;
+  readonly output: number;
+  readonly reasoning: number;
+  readonly cacheRead: number;
+  readonly cacheWrite: number;
+}
+
+interface MutableRoleMetrics {
+  tokens: number;
+  inputTokens: number;
+  outputTokens: number;
+  reasoningTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  cost: number;
+  costAvailable: boolean;
+  steps: number;
+}
+
+function messageTokens(message: Record<string, unknown>): MessageTokens | undefined {
   const info = record(message.info) ?? message;
   const tokens = record(info.tokens) ?? record(message.tokens);
   if (tokens === undefined) return undefined;
@@ -41,7 +82,20 @@ function messageTokens(message: Record<string, unknown>): [number, number] | und
   const cacheRead = number(cache?.read) ?? number(tokens.cacheRead) ?? number(tokens.cache_read);
   const cacheWrite = number(cache?.write) ?? number(tokens.cacheWrite) ?? number(tokens.cache_write);
   if (input === undefined || output === undefined || reasoning === undefined || cacheRead === undefined || cacheWrite === undefined) return undefined;
-  return [input + output + reasoning + cacheRead + cacheWrite, cacheRead];
+  return {
+    total: input + output + reasoning + cacheRead + cacheWrite,
+    input,
+    output,
+    reasoning,
+    cacheRead,
+    cacheWrite,
+  };
+}
+
+function messageAgent(message: Record<string, unknown>): string {
+  const info = record(message.info) ?? message;
+  const agent = info.agent ?? message.agent;
+  return typeof agent === "string" && agent.trim().length > 0 ? agent.slice(0, 128) : "unknown";
 }
 
 function assistantMessages(value: unknown): Record<string, unknown>[] | undefined {
@@ -52,6 +106,14 @@ function assistantMessages(value: unknown): Record<string, unknown>[] | undefine
     const info = item === undefined ? undefined : record(item.info);
     return item !== undefined && (info?.role ?? item.role) === "assistant";
   });
+}
+
+function conclusionStatusAlias(line: string): RunTerminalOutcome | undefined {
+  const match = /^([✅⛔❓])[ \t]+conclusion:\s*status:\s*(DONE|BLOCKED|NEED_DECISION)\b/iu.exec(line);
+  const outcome = match?.[2]?.toUpperCase();
+  if (outcome !== "DONE" && outcome !== "BLOCKED" && outcome !== "NEED_DECISION") return undefined;
+  const expectedIcon = outcome === "DONE" ? "✅" : outcome === "BLOCKED" ? "⛔" : "❓";
+  return match?.[1] === expectedIcon ? outcome : undefined;
 }
 
 export async function collectRunMetrics(
@@ -82,12 +144,17 @@ export async function collectRunMetrics(
   if (ids.length >= MAX_SESSIONS) hierarchyComplete = false;
   const uniqueMessages = new Set<string>();
   let totalTokens = 0;
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let reasoningTokens = 0;
   let cacheRead = 0;
+  let cacheWrite = 0;
   let tokensAvailable = true;
   let messagesComplete = true;
   let steps = 0;
   let cost = 0;
   let costAvailable = true;
+  const roleMetrics = new Map<string, MutableRoleMetrics>();
   for (const id of ids) {
     try {
       const messages = assistantMessages(await session.messages.call(session, { path: { id }, query: { directory } }));
@@ -101,10 +168,43 @@ export async function collectRunMetrics(
         if (uniqueMessages.has(messageID)) continue;
         uniqueMessages.add(messageID);
         steps += 1;
+        const agent = messageAgent(message);
+        const role = roleMetrics.get(agent) ?? {
+          tokens: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+          reasoningTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          cost: 0,
+          costAvailable: true,
+          steps: 0,
+        };
+        role.steps += 1;
+        roleMetrics.set(agent, role);
         const tokens = messageTokens(message);
-        if (tokens !== undefined) { totalTokens += tokens[0]; cacheRead += tokens[1]; } else tokensAvailable = false;
+        if (tokens !== undefined) {
+          totalTokens += tokens.total;
+          inputTokens += tokens.input;
+          outputTokens += tokens.output;
+          reasoningTokens += tokens.reasoning;
+          cacheRead += tokens.cacheRead;
+          cacheWrite += tokens.cacheWrite;
+          role.tokens += tokens.total;
+          role.inputTokens += tokens.input;
+          role.outputTokens += tokens.output;
+          role.reasoningTokens += tokens.reasoning;
+          role.cacheReadTokens += tokens.cacheRead;
+          role.cacheWriteTokens += tokens.cacheWrite;
+        } else tokensAvailable = false;
         const reportedCost = number(info.cost) ?? number(message.cost);
-        if (reportedCost === undefined) costAvailable = false; else cost += reportedCost;
+        if (reportedCost === undefined) {
+          costAvailable = false;
+          role.costAvailable = false;
+        } else {
+          cost += reportedCost;
+          role.cost += reportedCost;
+        }
       }
     } catch { return undefined; }
   }
@@ -119,10 +219,28 @@ export async function collectRunMetrics(
   return {
     durationMilliseconds: created === undefined ? undefined : Math.max(0, now - created),
     tokens: hierarchyComplete && messagesComplete && tokensAvailable ? totalTokens : undefined,
+    inputTokens: hierarchyComplete && messagesComplete && tokensAvailable ? inputTokens : undefined,
+    outputTokens: hierarchyComplete && messagesComplete && tokensAvailable ? outputTokens : undefined,
+    reasoningTokens: hierarchyComplete && messagesComplete && tokensAvailable ? reasoningTokens : undefined,
+    cacheReadTokens: hierarchyComplete && messagesComplete && tokensAvailable ? cacheRead : undefined,
+    cacheWriteTokens: hierarchyComplete && messagesComplete && tokensAvailable ? cacheWrite : undefined,
     cost: hierarchyComplete && messagesComplete && costAvailable ? cost : undefined,
     steps: hierarchyComplete && messagesComplete ? steps : undefined,
     sessions: hierarchyComplete ? ids.length : undefined,
     cacheRatio: hierarchyComplete && messagesComplete && tokensAvailable && totalTokens > 0 ? cacheRead / totalTokens : undefined,
+    roles: hierarchyComplete && messagesComplete && tokensAvailable
+      ? Object.fromEntries([...roleMetrics].map(([agent, role]) => [agent, {
+        tokens: role.tokens,
+        inputTokens: role.inputTokens,
+        outputTokens: role.outputTokens,
+        reasoningTokens: role.reasoningTokens,
+        cacheReadTokens: role.cacheReadTokens,
+        cacheWriteTokens: role.cacheWriteTokens,
+        cost: role.costAvailable ? role.cost : undefined,
+        steps: role.steps,
+        cacheRatio: role.tokens > 0 ? role.cacheReadTokens / role.tokens : undefined,
+      }]))
+      : undefined,
   };
 }
 
@@ -143,17 +261,66 @@ export function formatRunMetrics(metrics: RunMetrics): string {
   return `**Run:** pre-terminal host snapshot · ${elapsed} · ${tokens} · ${cost} · ${steps} · ${sessions} · ${cache}`;
 }
 
+function topLevelLines(text: string): Array<{ index: number; line: string }> {
+  const lines: Array<{ index: number; line: string }> = [];
+  let fence: { character: string; length: number } | undefined;
+  for (const [index, line] of text.split(/\r?\n/u).entries()) {
+    if (fence === undefined) {
+      const opener = /^[ \t]*(`{3,}|~{3,})/u.exec(line)?.[1];
+      if (opener === undefined) {
+        if (!/^[ \t]*>/u.test(line)) lines.push({ index, line });
+        continue;
+      }
+      fence = { character: opener[0]!, length: opener.length };
+      continue;
+    }
+    const closer = /^[ \t]*(`{3,}|~{3,})[ \t]*$/u.exec(line)?.[1];
+    if (closer?.[0] === fence.character && closer.length >= fence.length) fence = undefined;
+  }
+  return lines;
+}
+
+function terminalCheckpoint(text: string): { index: number; outcome: RunTerminalOutcome } | undefined {
+  const lines = topLevelLines(text);
+  const first = lines.find(({ line }) => line.trim().length > 0);
+  if (first === undefined) return undefined;
+  const checkpoint = (() => {
+    const { index, line } = first;
+    const normalized = /^status:\s*(DONE|BLOCKED|NEED_DECISION)\b/iu.exec(line)?.[1]?.toUpperCase();
+    const explicit: RunTerminalOutcome | undefined = normalized === "DONE" || normalized === "BLOCKED" || normalized === "NEED_DECISION"
+      ? normalized
+      : undefined;
+    const outcome = explicit ?? conclusionStatusAlias(line) ??
+      (/^✅[ \t]+\*\*DONE\*\*/u.test(line) ? "DONE" :
+        /^⛔[ \t]+\*\*BLOCKED\*\*/u.test(line) ? "BLOCKED" :
+        /^❓[ \t]+\*\*NEED_DECISION\*\*/u.test(line) ? "NEED_DECISION" : undefined);
+    return outcome === "DONE" || outcome === "BLOCKED" || outcome === "NEED_DECISION"
+      ? { index, outcome }
+      : undefined;
+  })();
+  return checkpoint;
+}
+
 export function isDoneTerminalText(text: string): boolean {
-  const first = text.split(/\r?\n/u).find((line) => line.trim().length > 0) ?? "";
-  return /^✅\s+\*\*DONE\*\*(?:\s|$)/u.test(first) || /^status:\s*DONE(?:\s|$)/u.test(first);
+  return terminalCheckpoint(text)?.outcome === "DONE";
+}
+
+export function terminalRunOutcome(text: string): RunTerminalOutcome | undefined {
+  const checkpoint = terminalCheckpoint(text);
+  if (checkpoint === undefined) return undefined;
+  if (checkpoint.outcome !== "BLOCKED") return checkpoint.outcome;
+  return topLevelLines(text).some(({ index, line }) => index > checkpoint.index &&
+    /^TRUE_BLOCKER\s*:\s*(?:external|user-decision)\s*:\s*\S.*$/u.test(line))
+    ? "BLOCKED"
+    : undefined;
 }
 
 export function insertRunMetrics(text: string, metrics: RunMetrics): string {
-  if (/\*\*Run:\*\*/u.test(text) || !isDoneTerminalText(text)) return text;
+  const checkpoint = terminalCheckpoint(text);
+  if (checkpoint?.outcome !== "DONE") return text;
+  if (topLevelLines(text).some(({ index, line }) => index > checkpoint.index && /^\*\*Run:\*\*/u.test(line))) return text;
   const newline = text.includes("\r\n") ? "\r\n" : "\n";
-  const statusStart = text.search(/^(?:✅\s+\*\*DONE\*\*|status:\s*DONE).*$/mu);
-  if (statusStart < 0) return text;
-  const statusEnd = text.indexOf(newline, statusStart);
-  if (statusEnd < 0) return `${text}${newline}${newline}${formatRunMetrics(metrics)}`;
-  return `${text.slice(0, statusEnd + newline.length)}${newline}${formatRunMetrics(metrics)}${newline}${text.slice(statusEnd + newline.length)}`;
+  const lines = text.split(/\r?\n/u);
+  lines.splice(checkpoint.index + 1, 0, "", formatRunMetrics(metrics));
+  return lines.join(newline);
 }

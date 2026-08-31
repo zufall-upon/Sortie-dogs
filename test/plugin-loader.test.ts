@@ -121,7 +121,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       join(consumer, "node_modules", "sortie-dogs", "package.json"),
       "utf8",
     )) as { version?: string; scripts?: { prebuild?: string } };
-    assert.equal(installedPackage.version, "0.6.1");
+    assert.equal(installedPackage.version, "0.7.0");
     assert.equal(
       installedPackage.scripts?.prebuild,
       "node --input-type=module --eval \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true });\"",
@@ -171,10 +171,30 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       "UnavailableConsultationResult",
       "ValidationResult",
     ] as const;
+    const retainedValueNames = [
+      "inspectRetainedStateCapsule",
+      "MAX_RETAINED_STATE_BYTES",
+      "MAX_RETAINED_STATE_ITEMS",
+      "MAX_RETAINED_STATE_WARNINGS",
+      "RETAINED_STATE_AUTHORITY",
+      "RETAINED_STATE_EXTENSION",
+      "RETAINED_STATE_SCHEMA_VERSION",
+    ] as const;
+    const retainedTypeNames = [
+      "AdmissionReceipt",
+      "NextEvidenceDecision",
+      "RetainedStateCapsule",
+      "RetainedStateInspection",
+      "RetainedStateWarning",
+      "RetainedValidationAttempt",
+    ] as const;
     assert.doesNotMatch(rootDeclaration, /export \* from "\.\/core\/consultation\.js";/);
     assert.match(rootDeclaration, /export \{[^}]+\} from "\.\/core\/consultation\.js";/s);
     assert.match(rootDeclaration, /export type \{[^}]+\} from "\.\/core\/consultation\.js";/s);
     for (const publicName of [...consultationValueNames, ...consultationTypeNames]) {
+      assert.match(rootDeclaration, new RegExp(`\\b${publicName}\\b`));
+    }
+    for (const publicName of [...retainedValueNames, ...retainedTypeNames]) {
       assert.match(rootDeclaration, new RegExp(`\\b${publicName}\\b`));
     }
 
@@ -232,12 +252,23 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
           runtimeAssets,
           consultationCapabilities: root.CONSULTATION_CAPABILITIES,
           consultationRolePolicy: root.CONSULTATION_ROLE_POLICY,
-          consultationValidatorTypes: [
+           consultationValidatorTypes: [
             typeof root.isSourceReviewRiskTag,
             typeof root.requiresSourceReview,
             typeof root.evaluateSourceReviewRequirement,
-            typeof root.shouldConsultStrategy,
-          ],
+             typeof root.shouldConsultStrategy,
+           ],
+           retainedValueTypes: ${JSON.stringify(retainedValueNames)}.map((name) => typeof root[name]),
+           retainedInspection: root.inspectRetainedStateCapsule({ ext: {
+             [root.RETAINED_STATE_EXTENSION]: {
+               schema_version: '0.1', authority: 'shadow', task_id: 'packed-task',
+               acceptance_fingerprint: 'packed-acceptance', source_manifest: 'none', operation_manifest: 'none',
+               validation_history: [], blockers: [], next_action: 'none',
+             },
+           } }),
+           malformedRetainedInspection: root.inspectRetainedStateCapsule({ ext: {
+             [root.RETAINED_STATE_EXTENSION]: { schema_version: 'invalid' },
+           } }),
           consultationIdentity: Object.fromEntries(
             consultationValueNames.map((name) => [name, root[name] === consultation[name]]),
           ),
@@ -280,6 +311,9 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       consultationIdentity: Readonly<Record<string, boolean>>;
       consultationRolePolicy: Readonly<Record<string, string>>;
       consultationValidatorTypes: readonly string[];
+      retainedValueTypes: readonly string[];
+      retainedInspection: { capsule?: { task_id?: string }; warnings: readonly unknown[] };
+      malformedRetainedInspection: { capsule?: unknown; warnings: readonly unknown[] };
       reviewAvailability: { readonly ok: boolean; readonly code?: string };
       nonPassReviewGate: { readonly ok: boolean; readonly permitStage?: boolean; readonly verdict?: string };
       runtimeAssets: Array<{
@@ -334,6 +368,11 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       sourceReview: "dog-reviewer",
     });
     assert.deepEqual(loaded.consultationValidatorTypes, ["function", "function", "function", "function"]);
+    assert.deepEqual(loaded.retainedValueTypes, ["function", "number", "number", "number", "string", "string", "string"]);
+    assert.equal(loaded.retainedInspection.capsule?.task_id, "packed-task");
+    assert.deepEqual(loaded.retainedInspection.warnings, []);
+    assert.equal(loaded.malformedRetainedInspection.capsule, undefined);
+    assert.equal(loaded.malformedRetainedInspection.warnings.length, 1);
     assert.deepEqual(
       loaded.consultationIdentity,
       Object.fromEntries(consultationValueNames.map((name) => [name, true])),
@@ -372,7 +411,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     for (const asset of loaded.runtimeAssets) {
       assert.equal(asset.version, RUNTIME_ASSET_VERSION, `${asset.name} version must match the shared marker`);
     }
-    assert.equal(RUNTIME_ASSET_VERSION, "0.3.50-observability-reflection-v1");
+    assert.equal(RUNTIME_ASSET_VERSION, "0.3.51-state-observability-v1");
     const coordinatorFrontmatter = /^---\r?\n([\s\S]*?)\r?\n---/u.exec(coordinator.content)?.[1];
     assert.ok(coordinatorFrontmatter);
     assert.match(coordinatorFrontmatter, /^model: openai\/gpt-5\.6-terra$/m);
@@ -382,6 +421,10 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.equal(worker.content.includes(DEDICATED_WORKER_VARIANT), false);
 
     assert.match(scout.content, /^---\r?\n[\s\S]*\nsteps:\s*8\r?\n/);
+    assert.match(coordinator.content, /RETAINED_STATE_SHADOW_FIXTURE/);
+    assert.match(coordinator.content, /optional ext\["sortie-dogs\/retained-state"\] sibling of sortie-dogs\/write-gate/);
+    assert.match(coordinator.content, /warnings are advisory and never block/);
+    assert.match(coordinator.content, /never read for routing, continuation, write-gate, completion, or review/);
     const deniedScoutTools = [
       "bash",
       "webfetch",
@@ -440,10 +483,15 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     );
     assert.match(advisor.content, /Reject every SourceReview request[\s\S]+SourceReview is\s+dog-reviewer-only work/i);
     assert.doesNotMatch(advisor.content, /Accept[^.]*SourceReview/i);
+    assert.match(advisor.content, /complete bounded Strategy artifact; use only that artifact and invoke no tools/i);
     assert.ok(advisor.content.length >= 350, "dog-advisor needs a substantive consultation role");
     for (const consultationAsset of [reviewer, advisor]) {
       const frontmatter = consultationAsset.content.match(/^---\r?\n([\s\S]+?)\r?\n---/)?.[1];
       assert.ok(frontmatter, `${consultationAsset.name} needs frontmatter`);
+      assert.match(frontmatter, /permission:\r?\n(?:  [a-z]+: deny\r?\n){11}tools:/);
+      assert.match(frontmatter, /tools:\r?\n(?:  [a-z]+: false\r?\n){10}  [a-z]+: false$/);
+      assert.match(frontmatter, /^  read: deny$/m);
+      assert.match(frontmatter, /^  read: false$/m);
       assert.doesNotMatch(frontmatter, /^(?:model|variant):/m);
       assert.doesNotMatch(
         consultationAsset.content,
@@ -507,6 +555,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       /RESUMED_HANDOFF_FIXTURE\r?\n([\s\S]+?)\r?\nEND_RESUMED_HANDOFF_FIXTURE/,
     );
     assert.ok(resumedHandoff, "coordinator needs a same-task resume fixture");
+    assert.match(resumedHandoff[1], /authorization:\s*runtime resume_session=true for exact child; completed Task without signal -> fresh worker \+ full handoff/);
     assert.match(resumedHandoff[1], /mode:\s*same-task-resume/);
     assert.doesNotMatch(resumedHandoff[1], /preserve:/);
     assert.match(resumedHandoff[1], /resume_delta:/);
@@ -1297,7 +1346,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(sortie.content, /never route a worker to the user/i);
 
     for (const asset of loaded.runtimeAssets) {
-      assert.equal(asset.version, "0.3.50-observability-reflection-v1");
+      assert.equal(asset.version, "0.3.51-state-observability-v1");
       const frontmatter = asset.content.match(/^---\r?\n([\s\S]+?)\r?\n---\r?\n/);
       assert.ok(frontmatter, `${asset.name} must have frontmatter`);
       const entries = Object.fromEntries(

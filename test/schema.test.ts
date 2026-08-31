@@ -10,6 +10,7 @@ import {
   validateOperationManifestSchema,
 } from "../src/core/validate-schema.ts";
 import { lintHandoff } from "../src/core/validate-semantics.ts";
+import { RETAINED_STATE_EXTENSION } from "../src/core/retained-state.ts";
 
 async function readJson(url) {
   return JSON.parse(await readFile(url, "utf8"));
@@ -99,6 +100,17 @@ test("schema engine returns structural diagnostics separately from semantic lint
   }];
   assert.equal(validateHandoffSchema(semanticallyInvalid).ok, true);
   assert.equal(lintHandoff(semanticallyInvalid).length, 1);
+});
+
+test("opaque handoff extension accepts valid and malformed retained-state sidecars", () => {
+  for (const sidecar of [
+    { schema_version: "0.1", authority: "shadow", task_id: "t", malformed_optional: true },
+    { schema_version: "wrong", arbitrary: ["data"] },
+  ]) {
+    const candidate = clone(minimal);
+    candidate.ext = { [RETAINED_STATE_EXTENSION]: sidecar };
+    assertValid(candidate);
+  }
 });
 
 test("schema engine validates operation manifests and preserves rejected values", () => {

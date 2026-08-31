@@ -88,7 +88,7 @@ import {
   type SessionMessageReader,
 } from "./task-result-repair.js";
 import { configRoot, nearestPackageVersion, REFLECTION_POLICY, reflectionEnabled, ReflectionError, ReflectionStore } from "../reflection/index.js";
-import { collectRunMetrics, insertRunMetrics, isDoneTerminalText } from "./run-metrics.js";
+import { collectRunMetrics, insertRunMetrics, terminalRunOutcome } from "./run-metrics.js";
 import type { RunMetricsClient } from "./run-metrics.js";
 
 const INPUT_LIMITS = { config: 64 * 1024, manifest: 512 * 1024, handoff: 2 * 1024 * 1024, parallel: 512 * 1024 } as const;
@@ -1134,6 +1134,13 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   interface SessionOperationMeasurements {
     touched: number;
     operations: Record<SessionOperation, OperationMeasurement>;
+    compactionPolicy: {
+      count: number;
+      contextInputBytes: number;
+      contextOutputBytes: number;
+      promptInputBytes: number;
+      promptOutputBytes: number;
+    };
   }
   const sessionOperationMetrics = new Map<string, SessionOperationMeasurements>();
 
@@ -1187,6 +1194,13 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         bootstrapControlState: { count: 0, elapsedMilliseconds: 0 },
         collectRunMetrics: { count: 0, elapsedMilliseconds: 0 },
       },
+      compactionPolicy: {
+        count: 0,
+        contextInputBytes: 0,
+        contextOutputBytes: 0,
+        promptInputBytes: 0,
+        promptOutputBytes: 0,
+      },
     };
     sessionOperationMetrics.set(sessionID, created);
     return created;
@@ -1208,7 +1222,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   }
 
   function operationMetricsSnapshot(sessionID: string): Record<string, number> {
-    const operations = sessionOperationMetrics.get(sessionID)?.operations;
+    const measurements = sessionOperationMetrics.get(sessionID);
+    const operations = measurements?.operations;
+    const compaction = measurements?.compactionPolicy;
     return {
       hostSessionIdentityCount: operations?.hostSessionIdentity.count ?? 0,
       hostSessionIdentityElapsedMilliseconds: Math.round(operations?.hostSessionIdentity.elapsedMilliseconds ?? 0),
@@ -1216,7 +1232,20 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       bootstrapControlStateElapsedMilliseconds: Math.round(operations?.bootstrapControlState.elapsedMilliseconds ?? 0),
       collectRunMetricsCount: operations?.collectRunMetrics.count ?? 0,
       collectRunMetricsElapsedMilliseconds: Math.round(operations?.collectRunMetrics.elapsedMilliseconds ?? 0),
+      compactionPolicyCount: compaction?.count ?? 0,
+      compactionContextInputBytes: compaction?.contextInputBytes ?? 0,
+      compactionContextOutputBytes: compaction?.contextOutputBytes ?? 0,
+      compactionPromptInputBytes: compaction?.promptInputBytes ?? 0,
+      compactionPromptOutputBytes: compaction?.promptOutputBytes ?? 0,
     };
+  }
+
+  function utf8Bytes(value: string | undefined): number {
+    return value === undefined ? 0 : Buffer.byteLength(value, "utf8");
+  }
+
+  function contextBytes(value: readonly string[] | undefined): number {
+    return value?.reduce((total, entry) => total + utf8Bytes(entry), 0) ?? 0;
   }
 
   // Project config read is required discovery for its opt-in; no reflection storage/version read
@@ -3341,23 +3370,43 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           .replaceAll(CONTINUATION_MARKER, "")
           .trimEnd();
       }
+      const runOutcome = terminalRunOutcome(textOutput.text);
       if ((isCoordinatorSession(textInput.sessionID) || await recoverCoordinatorRoot(textInput.sessionID)) &&
-        isDoneTerminalText(textOutput.text)) {
+        runOutcome !== undefined) {
         const metrics = await measureSessionOperation(
           textInput.sessionID,
           "collectRunMetrics",
           () => collectRunMetrics(input.client, textInput.sessionID, input.directory).catch(() => undefined),
         );
-        if (metrics !== undefined) textOutput.text = insertRunMetrics(textOutput.text, metrics);
+        if (metrics !== undefined && runOutcome === "DONE") textOutput.text = insertRunMetrics(textOutput.text, metrics);
         appLogInfo("run-metrics.snapshot", textInput.sessionID, {
           available: metrics !== undefined,
+          outcome: runOutcome,
+          runtimeAssetVersion: RUNTIME_ASSET_VERSION,
+          ...(metrics ?? {}),
           ...operationMetricsSnapshot(textInput.sessionID),
         });
       }
       await completeContinuationText(textInput.sessionID, textOutput.text, false);
     },
     "experimental.session.compacting": async (compactInput, compactOutput): Promise<void> => {
+      const before = {
+        context: contextBytes(compactOutput.context),
+        prompt: utf8Bytes(compactOutput.prompt),
+      };
       await continuation.sessionCompacting(compactInput, compactOutput);
+      const after = {
+        context: contextBytes(compactOutput.context),
+        prompt: utf8Bytes(compactOutput.prompt),
+      };
+      if (before.context !== after.context || before.prompt !== after.prompt) {
+        const measurement = operationMetricsFor(compactInput.sessionID).compactionPolicy;
+        measurement.count += 1;
+        measurement.contextInputBytes += before.context;
+        measurement.contextOutputBytes += after.context;
+        measurement.promptInputBytes += before.prompt;
+        measurement.promptOutputBytes += after.prompt;
+      }
     },
     "experimental.compaction.autocontinue": async (autoInput, autoOutput): Promise<void> => {
       await continuation.compactionAutoContinue(autoInput, autoOutput);

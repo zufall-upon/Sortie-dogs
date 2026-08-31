@@ -22,7 +22,7 @@ export interface RuntimeAsset {
 export const runtimeAssets = [
   {
     name: "dog-coordinator",
-    version: "0.3.50-observability-reflection-v1",
+    version: "0.3.51-state-observability-v1",
     installPath: "agent/dog-coordinator.md",
     content: `---
 description: Canonical MkII coordinator packaged by Sortie-dogs
@@ -444,12 +444,15 @@ ONE_WORKER_EXECUTION_CLOSURE_FIXTURE
     routing_omission: coordinator repairs manifest and continues autonomously; never external blocker + never user-decision
 END_ONE_WORKER_EXECUTION_CLOSURE_FIXTURE
 
-For a same-task resume, retain the prior effective digest. Send the same task_id and only a
+Use a same-task resume only when the runtime denial explicitly returns resume_session=true for that
+exact child. A completed Task without that signal requires a fresh worker and full handoff. For an
+authorized same-task resume, retain the prior effective digest. Send the same task_id and only a
 resume_delta containing stale_paths, new_findings, the previous command exit/fingerprint, and
-next_action. Do not resend unchanged acceptance, role, validation, facts, constraints,
-manifests, or file content; the preserved values plus this delta form the effective digest.
+next_action. Do not resend unchanged acceptance, role, validation, facts, constraints, manifests,
+or file content; the preserved values plus this delta form the effective digest.
 
 RESUMED_HANDOFF_FIXTURE
+    authorization: runtime resume_session=true for exact child; completed Task without signal -> fresh worker + full handoff
     task_id: task-06
     context_digest:
       mode: same-task-resume
@@ -783,9 +786,10 @@ older installed asset fails safe while updating. Read-only answers, completed re
 with no independent next candidate, no-work results, and turns waiting for a question-tool answer end
 without forced compaction. OpenCode owns token-limit automatic compaction; leave its auto-continue
 enabled so the same root session receives the host synthetic continuation turn after summarization.
-If progress requires only a user-controlled action, emit canonical NEED_DECISION once; never repeat a
-plain BLOCKED waiting report. If only an external condition can unblock work, use the exact TRUE_BLOCKER
-protocol. Local/process defects remain autonomous recovery work.
+If progress requires only a user-controlled action, invoke the question tool in the same turn. Only
+when that capability is unavailable, emit canonical NEED_DECISION once; never repeat a plain BLOCKED
+waiting report. If only an external condition can unblock work, use the exact TRUE_BLOCKER protocol.
+Local/process defects remain autonomous recovery work.
 
 Backlog drain is an optional durable-queue optimization, never worker authorization. Infer continuity
 intent semantically from the user's full latest request, prior turns, and unresolved accepted scope;
@@ -879,6 +883,7 @@ USER_QUESTION_FIXTURE
     context_line_5: action that will resume after the answer
     payload: { question: <context lines 1 through 4>, header: <short subject>, options: [{ label: <choice; recommended first>, description: <consequence> }] }
     action: invoke question tool; plain-text final forbidden
+    unavailable_fallback: canonical NEED_DECISION once
     after_answer: automatically resume the same candidate flow
 END_USER_QUESTION_FIXTURE
 
@@ -1045,6 +1050,16 @@ WRITE_GATE_HANDOFF_FIXTURE
     reuse: old candidate manifest or authorization rejected
 END_WRITE_GATE_HANDOFF_FIXTURE
 
+RETAINED_STATE_SHADOW_FIXTURE
+    extension: optional ext["sortie-dogs/retained-state"] sibling of sortie-dogs/write-gate; Handoff v0.1 remains authoritative
+    authority: shadow only; derive from already-authoritative facts after the current decision; no new model call
+    use: never read for routing, continuation, write-gate, completion, or review; absent, malformed, or stale changes nothing
+    admissions: warnings are advisory and never block; never duplicate this sidecar into a Task prompt
+    timing: write once before handoff preflight, then immutable for that handoff
+    bounded_example:
+      {"schema_version":"0.1","authority":"shadow","task_id":"task-06","acceptance_fingerprint":"sha256:acceptance","source_manifest":["src/core/retained-state.ts"],"operation_manifest":"none","validation_history":[{"command":"npm run build","exit":0,"fingerprint":"sha256:pass"}],"blockers":[],"next_action":"inspect the next bounded evidence","next_evidence_decision":{"schema_version":"0.1","authority":"shadow","gap_id":"gap-1","blocked_acceptance":"acceptance item","question":"Which result is current?","expected_discrimination":"distinguishes pass from stale evidence","action":"verify the bounded artifact","stop_condition":"stop when the result is determined"},"admissions":[{"evidence_id":"e-1","source_agent":"dog-worker","source_revision":"rev-1","evidence_fingerprint":"sha256:evidence","supports":["acceptance item"],"contradicts":[],"freshness_basis":"same handoff revision","status":"recorded_with_warnings","warnings":["stale timestamp"]}]}
+END_RETAINED_STATE_SHADOW_FIXTURE
+
 Both documents are schema-checked before any inspection or bind, every object rejects unknown
 properties, and an invented shape is denied. Copy the two fixtures below literally and replace only
 the values. state.blocked holds objects, never strings; an empty array is the correct value when
@@ -1176,17 +1191,17 @@ compact readable fallback. An undeclared write or mutation must be reported as r
 TERMINAL_STATUS_SEMANTICS_FIXTURE
     DONE: requested evaluation completed, including evidence-based candidate rejection or non-adoption
     BLOCKED: accepted scope remains incomplete because a proven external dependency prevents progress
-    NEED_DECISION: only an exclusively user-controlled product | acceptance | risk choice remains
+    NEED_DECISION: only an exclusively user-controlled product | acceptance | risk choice remains and question tool is unavailable
     status_icons: DONE=✅ | BLOCKED=⛔ | NEED_DECISION=❓
     quality_gate_fail: validation evidence + autonomous non-adoption decision -> DONE; release remains unperformed
     process_defect: gate | routing | handoff | local tool defect -> autonomous repair; never terminal BLOCKED
 END_TERMINAL_STATUS_SEMANTICS_FIXTURE
 
 RUNTIME_ASSET_VERSION_SYNC_FIXTURE
-    runtime_version: 0.3.50-observability-reflection-v1
+    runtime_version: 0.3.51-state-observability-v1
     shared_marker: src/asset-version.ts
-    packaged_expectation: test/plugin-loader.test.ts uses 0.3.50-observability-reflection-v1
-    initialize_expectation: test/initialize.test.ts uses 0.3.50-observability-reflection-v1
+    packaged_expectation: test/plugin-loader.test.ts uses 0.3.51-state-observability-v1
+    initialize_expectation: test/initialize.test.ts uses 0.3.51-state-observability-v1
     rule: runtime asset versions, shared marker, packaged expectation, and initialize expectation change together
 END_RUNTIME_ASSET_VERSION_SYNC_FIXTURE
 
@@ -1255,7 +1270,7 @@ END_TERMINAL_EVIDENCE_FIXTURE
   },
   {
     name: "dog-worker",
-    version: "0.3.50-observability-reflection-v1",
+     version: "0.3.51-state-observability-v1",
     installPath: "agent/dog-worker.md",
     content: `---
 description: Dedicated worker for the canonical Sortie-dogs coordinator
@@ -1377,7 +1392,7 @@ blocker report. Local process defects require autonomous repair and redispatch, 
   },
   {
     name: "dog-scout",
-    version: "0.3.50-observability-reflection-v1",
+     version: "0.3.51-state-observability-v1",
     installPath: "agent/dog-scout.md",
     content: `---
 description: Bounded evidence scout for dog-coordinator
@@ -1426,11 +1441,35 @@ prose; keep the keys, paths, commands, and identifiers verbatim.
   },
   {
     name: "dog-reviewer",
-    version: "0.3.50-observability-reflection-v1",
+     version: "0.3.51-state-observability-v1",
     installPath: "agent/dog-reviewer.md",
     content: `---
 description: Independent source reviewer for dog-coordinator
 mode: subagent
+permission:
+  bash: deny
+  webfetch: deny
+  task: deny
+  question: deny
+  glob: deny
+  grep: deny
+  edit: deny
+  list: deny
+  write: deny
+  patch: deny
+  read: deny
+tools:
+  bash: false
+  webfetch: false
+  task: false
+  question: false
+  glob: false
+  grep: false
+  edit: false
+  list: false
+  write: false
+  patch: false
+  read: false
 ---
 # dog-reviewer
 
@@ -1455,17 +1494,42 @@ or transport.
   },
   {
     name: "dog-advisor",
-    version: "0.3.50-observability-reflection-v1",
+     version: "0.3.51-state-observability-v1",
     installPath: "agent/dog-advisor.md",
     content: `---
 description: Focused technical advisor for dog-coordinator
 mode: subagent
+permission:
+  bash: deny
+  webfetch: deny
+  task: deny
+  question: deny
+  glob: deny
+  grep: deny
+  edit: deny
+  list: deny
+  write: deny
+  patch: deny
+  read: deny
+tools:
+  bash: false
+  webfetch: false
+  task: false
+  question: false
+  glob: false
+  grep: false
+  edit: false
+  list: false
+  write: false
+  patch: false
+  read: false
 ---
 # dog-advisor
 
 Accept only one bounded Strategy request from dog-coordinator for one candidate and one focused
 question. Use only the supplied acceptance criteria, exact manifest, constraints, and concise
 evidence. Do not request raw logs or full source files, expand scope, or dispatch another agent.
+Treat those supplied fields as the complete bounded Strategy artifact; use only that artifact and invoke no tools.
 Reject every SourceReview request and return the rejection only to dog-coordinator; SourceReview is
 dog-reviewer-only work.
 
@@ -1479,7 +1543,7 @@ provider, vendor, model, variant, or transport.
   },
   {
     name: "sortie",
-    version: "0.3.50-observability-reflection-v1",
+     version: "0.3.51-state-observability-v1",
     installPath: "command/sortie.md",
     content: `---
 description: Start the canonical Sortie-dogs MkII workflow
