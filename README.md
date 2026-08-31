@@ -2,8 +2,8 @@
 
 **Give OpenCode a task; get a bounded, validated implementation loop instead of an open-ended agent run.**
 
-> **Project status: Experimental / unsupported.** No stability, compatibility,
-> or support guarantees are provided. Mk2A2 remains the canonical internal workflow.
+> **Project status: Beta.** Stable in regular use. As a pre-1.0 release,
+> configuration and runtime assets may still change between releases.
 
 [![npm](https://img.shields.io/npm/v/sortie-dogs)](https://www.npmjs.com/package/sortie-dogs)
 [![license](https://img.shields.io/npm/l/sortie-dogs)](LICENSE)
