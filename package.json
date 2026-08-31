@@ -1,12 +1,16 @@
 {
   "name": "sortie-dogs",
   "version": "0.6.1",
-  "description": "Bounded, validated orchestration loop plugin for OpenCode",
+  "description": "Bounded agent harness and validated orchestration loop plugin for OpenCode",
   "keywords": [
     "opencode",
     "opencode-plugin",
     "ai-orchestration",
-    "multi-agent"
+    "multi-agent",
+    "agent-harness",
+    "harness-engineering",
+    "coding-agent",
+    "agentic-coding"
   ],
   "license": "MIT",
   "repository": {

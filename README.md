@@ -2,6 +2,10 @@
 
 **Give OpenCode a task; get a bounded, validated implementation loop instead of an open-ended agent run.**
 
+Sortie-dogs is an execution harness for OpenCode, applying harness-engineering
+principles through mechanical write boundaries, validation, review, and bounded
+orchestration.
+
 > **Project status: Beta.** Stable in regular use. As a pre-1.0 release,
 > configuration and runtime assets may still change between releases.
 
