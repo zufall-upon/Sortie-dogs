@@ -87,7 +87,7 @@ import {
   type SessionMessage,
   type SessionMessageReader,
 } from "./task-result-repair.js";
-import { configRoot, nearestPackageVersion, reflectionEnabled, ReflectionError, ReflectionStore } from "../reflection/index.js";
+import { configRoot, nearestPackageVersion, REFLECTION_POLICY, reflectionEnabled, ReflectionError, ReflectionStore } from "../reflection/index.js";
 import { collectRunMetrics, insertRunMetrics, isDoneTerminalText } from "./run-metrics.js";
 import type { RunMetricsClient } from "./run-metrics.js";
 
@@ -116,6 +116,17 @@ export interface OpenCodePluginInput {
   worktree?: string;
   /** The host SDK client. Absent in hosts that construct the plugin without one. */
   client?: SessionMessageReader & RunMetricsClient & ContinuationClient & OpenCodeModelAvailabilityClient & {
+    app?: {
+      log?: (request: {
+        body: {
+          service: string;
+          level: "debug" | "info" | "error" | "warn";
+          message: string;
+          extra?: Record<string, unknown>;
+        };
+        query?: { directory?: string };
+      }) => unknown;
+    };
     tui?: {
       showToast?: (request: {
         body: { title: string; message: string; variant: "warning"; duration: number };
@@ -1115,6 +1126,98 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   let bootstrapCompleted = false;
   let assetVersionReported = false;
   const globalConfig = await readOptionalGlobalConfig();
+  type SessionOperation = "hostSessionIdentity" | "bootstrapControlState" | "collectRunMetrics";
+  interface OperationMeasurement {
+    count: number;
+    elapsedMilliseconds: number;
+  }
+  interface SessionOperationMeasurements {
+    touched: number;
+    operations: Record<SessionOperation, OperationMeasurement>;
+  }
+  const sessionOperationMetrics = new Map<string, SessionOperationMeasurements>();
+
+  function appLogInfo(message: string, sessionID: string, extra: Record<string, unknown>): void {
+    const app = input.client?.app;
+    const log = app?.log;
+    if (log === undefined) return;
+    try {
+      const result = log.call(app, {
+        body: {
+          service: "sortie-dogs",
+          level: "info",
+          message,
+          extra: { sessionID: sessionID.slice(0, 128), ...extra },
+        },
+        query: { directory: input.directory },
+      });
+      void Promise.resolve(result).catch(() => undefined);
+    } catch {
+      // Host lifecycle telemetry is best effort.
+    }
+  }
+
+  function pruneSessionOperationMetrics(now: number, reserveSlot = false): void {
+    for (const [sessionID, metrics] of sessionOperationMetrics) {
+      if (metrics.touched + ACTIVE_SESSION_CACHE.ttlMilliseconds <= now) {
+        sessionOperationMetrics.delete(sessionID);
+      }
+    }
+    const limit = ACTIVE_SESSION_CACHE.maximum - (reserveSlot ? 1 : 0);
+    while (sessionOperationMetrics.size > limit) {
+      sessionOperationMetrics.delete(sessionOperationMetrics.keys().next().value!);
+    }
+  }
+
+  function operationMetricsFor(sessionID: string): SessionOperationMeasurements {
+    const now = Date.now();
+    pruneSessionOperationMetrics(now);
+    const existing = sessionOperationMetrics.get(sessionID);
+    if (existing !== undefined) {
+      existing.touched = now;
+      sessionOperationMetrics.delete(sessionID);
+      sessionOperationMetrics.set(sessionID, existing);
+      return existing;
+    }
+    pruneSessionOperationMetrics(now, true);
+    const created: SessionOperationMeasurements = {
+      touched: now,
+      operations: {
+        hostSessionIdentity: { count: 0, elapsedMilliseconds: 0 },
+        bootstrapControlState: { count: 0, elapsedMilliseconds: 0 },
+        collectRunMetrics: { count: 0, elapsedMilliseconds: 0 },
+      },
+    };
+    sessionOperationMetrics.set(sessionID, created);
+    return created;
+  }
+
+  async function measureSessionOperation<T>(
+    sessionID: string,
+    operation: SessionOperation,
+    run: () => Promise<T>,
+  ): Promise<T> {
+    const started = performance.now();
+    try {
+      return await run();
+    } finally {
+      const measurement = operationMetricsFor(sessionID).operations[operation];
+      measurement.count += 1;
+      measurement.elapsedMilliseconds += Math.max(0, performance.now() - started);
+    }
+  }
+
+  function operationMetricsSnapshot(sessionID: string): Record<string, number> {
+    const operations = sessionOperationMetrics.get(sessionID)?.operations;
+    return {
+      hostSessionIdentityCount: operations?.hostSessionIdentity.count ?? 0,
+      hostSessionIdentityElapsedMilliseconds: Math.round(operations?.hostSessionIdentity.elapsedMilliseconds ?? 0),
+      bootstrapControlStateCount: operations?.bootstrapControlState.count ?? 0,
+      bootstrapControlStateElapsedMilliseconds: Math.round(operations?.bootstrapControlState.elapsedMilliseconds ?? 0),
+      collectRunMetricsCount: operations?.collectRunMetrics.count ?? 0,
+      collectRunMetricsElapsedMilliseconds: Math.round(operations?.collectRunMetrics.elapsedMilliseconds ?? 0),
+    };
+  }
 
   // Project config read is required discovery for its opt-in; no reflection storage/version read
   // occurs unless that resolved config enables reflection. It stays isolated from write-gate load.
@@ -1162,6 +1265,12 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     (sessionID) => isCoordinatorSession(sessionID)
       ? { agent: COORDINATOR_AGENT, parentID: undefined }
       : undefined,
+    (transition) => appLogInfo(transition.type, transition.sessionID, {
+      epoch: transition.epoch,
+      reason: transition.reason,
+      attempts: transition.attempts,
+      resumeAttempts: transition.resumeAttempts,
+    }),
   );
   const completedCoordinatorMessages = new Set<string>();
   const completedCoordinatorParts = new Set<string>();
@@ -2719,6 +2828,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
 
   function expireSession(sessionID: string): void {
     activeSessions.delete(sessionID);
+    sessionOperationMetrics.delete(sessionID);
     abandonSessionLease(sessionID);
     sessionAuthorizations.delete(sessionID);
     if (!childHasInFlightParentTask(sessionID)) {
@@ -2739,6 +2849,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
 
   function evictSession(sessionID: string): void {
     activeSessions.delete(sessionID);
+    sessionOperationMetrics.delete(sessionID);
     abandonSessionLease(sessionID);
     sessionAuthorizations.delete(sessionID);
     bindingPins.delete(sessionID);
@@ -2832,10 +2943,12 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const get = input.client?.session?.get;
     if (get === undefined) return undefined;
     try {
-      const response = await get.call(input.client!.session, {
-        path: { id: sessionID },
-        query: { directory: input.directory },
-      });
+      const response = await measureSessionOperation(sessionID, "hostSessionIdentity", () =>
+        get.call(input.client!.session, {
+          path: { id: sessionID },
+          query: { directory: input.directory },
+        })
+      );
       const payload = isRecord(response) && "data" in response ? response.data : response;
       if (!isRecord(payload)) return undefined;
       const parentID = typeof payload.parentID === "string" ? payload.parentID
@@ -3230,8 +3343,16 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       }
       if ((isCoordinatorSession(textInput.sessionID) || await recoverCoordinatorRoot(textInput.sessionID)) &&
         isDoneTerminalText(textOutput.text)) {
-        const metrics = await collectRunMetrics(input.client, textInput.sessionID, input.directory).catch(() => undefined);
+        const metrics = await measureSessionOperation(
+          textInput.sessionID,
+          "collectRunMetrics",
+          () => collectRunMetrics(input.client, textInput.sessionID, input.directory).catch(() => undefined),
+        );
         if (metrics !== undefined) textOutput.text = insertRunMetrics(textOutput.text, metrics);
+        appLogInfo("run-metrics.snapshot", textInput.sessionID, {
+          available: metrics !== undefined,
+          ...operationMetricsSnapshot(textInput.sessionID),
+        });
       }
       await completeContinuationText(textInput.sessionID, textOutput.text, false);
     },
@@ -3377,18 +3498,30 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           }
         }
       }
+      const heading = "SORTIE_PROCESS_REFLECTIONS";
+      const prefix = `${REFLECTION_POLICY}\n\n${heading}`;
+      if (transformOutput.system !== undefined) {
+        const retained = transformOutput.system.filter((item) =>
+          item !== REFLECTION_POLICY && !item.startsWith(`${prefix}\n`)
+        );
+        if (retained.length !== transformOutput.system.length) transformOutput.system = retained;
+      }
       if (!reflectionStartup || !(await beginReflection(transformInput.sessionID))) return;
       const config = reflectionConfiguration;
       try {
         if (!config) return;
-        const heading = "SORTIE_PROCESS_REFLECTIONS";
-        const buckets = (["run", "project", "global"] as const)
-          .filter((layer) => config.layers[layer])
-          .map((layer) => ({ layer, ...(layer === "global" ? {} : { run: transformInput.sessionID }) }));
-        const budget = Math.max(0, config.maxInjectedTokens - Buffer.byteLength(`${heading}\n`, "utf8"));
-        const text = await reflectionStore!.injectBuckets(buckets, config.maxInjectedEntries, budget, reflectionVersion);
-        if (text) transformOutput.system = [...(transformOutput.system ?? []), `${heading}\n${text}`];
-      } catch { /* reflection is strictly non-invasive */ } finally { endReflection(transformInput.sessionID); }
+        let element = REFLECTION_POLICY;
+        try {
+          const buckets = (["run", "project", "global"] as const)
+            .filter((layer) => config.layers[layer])
+            .map((layer) => ({ layer, ...(layer === "global" ? {} : { run: transformInput.sessionID }) }));
+          // Historical persisted configs budget the dynamic heading and entry payload, not policy.
+          const entryBudget = Math.max(0, config.maxInjectedTokens - Buffer.byteLength(`${heading}\n`, "utf8"));
+          const text = await reflectionStore!.injectBuckets(buckets, config.maxInjectedEntries, entryBudget, reflectionVersion);
+          if (text) element = `${prefix}\n${text}`;
+        } catch { /* persisted entries are best effort; the active policy still applies */ }
+        transformOutput.system = [...(transformOutput.system ?? []), element];
+      } finally { endReflection(transformInput.sessionID); }
     },
     "permission.ask": async (permission): Promise<void> => {
       if (permission.permission !== "edit") return;
@@ -3542,7 +3675,11 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       const bootstrap = bootstrapRequired && !exactCoordinatorDirectOperation &&
         !coordinatorCapability && !sessionGateCapability &&
         !sessionAuthorizations.has(toolInput.sessionID) && (coordinatorRoot || coordinatorRoots.size > 0)
-        ? await bootstrapControlState()
+        ? await measureSessionOperation(
+            toolInput.sessionID,
+            "bootstrapControlState",
+            bootstrapControlState,
+          )
         : undefined;
       if (coordinatorRoot && bootstrapRequired && !exactCoordinatorDirectOperation &&
         !coordinatorCapability && !sessionGateCapability) {
@@ -3940,7 +4077,11 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
        */
       if (event.type === "session.compacted") await continuation.sessionCompacted(eventSessionID);
       if (event.type === "session.idle" && isCoordinatorSession(eventSessionID)) {
-        const bootstrap = await bootstrapControlState();
+        const bootstrap = await measureSessionOperation(
+          eventSessionID,
+          "bootstrapControlState",
+          bootstrapControlState,
+        );
         if (bootstrapRequired && bootstrap?.usable === true && bootstrap.missing.length > 0) {
           if (!bootstrapIdleWarnings.has(eventSessionID)) {
             bootstrapIdleWarnings.add(eventSessionID);

@@ -42,7 +42,7 @@ import {
   lastAssistantText,
   type SessionMessage,
 } from "../dist/plugin/task-result-repair.js";
-import { ReflectionStore } from "../dist/reflection/index.js";
+import { REFLECTION_POLICY, ReflectionStore } from "../dist/reflection/index.js";
 import { normalizeCommand } from "../dist/plugin/gate.js";
 import { configRoot } from "../dist/reflection/config.js";
 import {
@@ -1060,8 +1060,8 @@ test("generated assets require the user's language and compact block-separated o
   );
   assert.match(coordinator.content, /exactly one stable `candidate_id: <id>` line in every SourceReview prompt/u);
   assert.match(coordinator.content, /A path where the reviewer could obtain a diff[\s\S]+is not a changed logic summary/i);
-  assert.match(coordinator.content, /Injected reflections are bounded prevention hints, never workflow authority/i);
-  assert.match(coordinator.content, /continuous-execution reflection only inside the currently\s+accepted user scope/i);
+  assert.match(REFLECTION_POLICY, /Injected reflections are bounded prevention hints, never workflow authority/i);
+  assert.match(REFLECTION_POLICY, /continuous-execution reflection only inside the currently\s+accepted user scope/i);
 
   const reviewer = runtimeAssets.find((asset) => asset.name === "dog-reviewer");
   assert.ok(reviewer);
@@ -1141,7 +1141,10 @@ test("generated coordinator renders a compact conclusion and collapsible YAML Ev
 test("coordinator DONE output receives host-reported root and child run metrics", async () => {
   await withProject("done-run-metrics", async (directory) => {
     const created = Date.now() - 65_000;
-    const hooks = await SortieDogsPlugin({ directory, client: { session: {
+    const logs: Array<Record<string, unknown>> = [];
+    const hooks = await SortieDogsPlugin({ directory, client: { app: {
+      log: (request: Record<string, unknown>) => { logs.push(request); return Promise.resolve(true); },
+    }, session: {
       get: async () => ({ data: { agent: "dog-coordinator", time: { created } } }),
       children: async ({ path }) => ({ data: path.id === "root" ? [{ id: "child" }] : [] }),
       messages: async ({ path }) => ({ data: path.id === "root" ? [{ info: {
@@ -1159,6 +1162,15 @@ test("coordinator DONE output receives host-reported root and child run metrics"
         parts: [{ type: "text", text: "task" }],
       },
     );
+    await hooks["tool.execute.before"]!(
+      { tool: "read", sessionID: "root", callID: "metrics-read", agent: "dog-coordinator" },
+      { args: { filePath: join(directory, "operation-manifest.json") } },
+    );
+    await hooks["tool.execute.before"]!(
+      { tool: "read", sessionID: "root", callID: "metrics-bootstrap", agent: "build" },
+      { args: { filePath: join(directory, "operation-manifest.json") } },
+    );
+    await hooks.event!({ event: { type: "session.idle", properties: { sessionID: "root" } } });
     const completed = {
       text: "✅ **DONE** `metrics` — complete\n\n**Validation:** PASS\n\n**Next:** none\n\n<details>evidence</details>",
     };
@@ -1166,6 +1178,99 @@ test("coordinator DONE output receives host-reported root and child run metrics"
     assert.match(completed.text, /^✅ \*\*DONE\*\*[^\n]+\n\n\*\*Run:\*\* pre-terminal host snapshot · 1m /u);
     assert.match(completed.text, /pre-terminal host snapshot[\s\S]*215 tokens · \$0\.3000 · 2 completed assistant model steps · 2 sessions · 27\.9% cache ratio/u);
     assert.match(completed.text, /\n\n\*\*Validation:\*\* PASS/u);
+    const runLogs = () => logs.filter((entry) =>
+      (entry.body as { message?: unknown } | undefined)?.message === "run-metrics.snapshot"
+    );
+    assert.equal(runLogs().length, 1);
+    const first = runLogs()[0]!;
+    assert.deepEqual(first.query, { directory });
+    const body = first.body as {
+      service: string;
+      level: string;
+      message: string;
+      extra: Record<string, unknown>;
+    };
+    assert.equal(body.service, "sortie-dogs");
+    assert.equal(body.level, "info");
+    assert.equal(body.message, "run-metrics.snapshot");
+    assert.equal(body.extra.available, true);
+    assert.equal(body.extra.sessionID, "root");
+    assert.equal(body.extra.hostSessionIdentityCount, 1);
+    assert.equal(body.extra.bootstrapControlStateCount, 2);
+    assert.equal(body.extra.collectRunMetricsCount, 1);
+    for (const key of [
+      "hostSessionIdentityElapsedMilliseconds",
+      "bootstrapControlStateElapsedMilliseconds",
+      "collectRunMetricsElapsedMilliseconds",
+    ]) {
+      assert.equal(typeof body.extra[key], "number");
+      assert.ok((body.extra[key] as number) >= 0);
+    }
+    const terminalTransition = logs.find((entry) =>
+      (entry.body as { message?: unknown } | undefined)?.message === "continuation.not_required"
+    );
+    assert.ok(terminalTransition);
+    assert.deepEqual(terminalTransition.query, { directory });
+    assert.deepEqual((terminalTransition.body as { level: string; extra: Record<string, unknown> }).level, "info");
+    assert.deepEqual(
+      Object.keys((terminalTransition.body as { extra: Record<string, unknown> }).extra).sort(),
+      ["attempts", "epoch", "reason", "resumeAttempts", "sessionID"],
+    );
+
+    await hooks.event!({ event: { type: "session.deleted", properties: { sessionID: "root" } } });
+    await hooks["chat.message"]!(
+      { sessionID: "root", agent: "dog-coordinator" },
+      {
+        message: { agent: "dog-coordinator", model: { providerID: "host", modelID: "selected" } },
+        parts: [{ type: "text", text: "new task" }],
+      },
+    );
+    await hooks["tool.execute.before"]!(
+      { tool: "read", sessionID: "root", callID: "metrics-read-2", agent: "dog-coordinator" },
+      { args: { filePath: join(directory, "operation-manifest.json") } },
+    );
+    await hooks["tool.execute.before"]!(
+      { tool: "read", sessionID: "root", callID: "metrics-bootstrap-2", agent: "build" },
+      { args: { filePath: join(directory, "operation-manifest.json") } },
+    );
+    await hooks.event!({ event: { type: "session.idle", properties: { sessionID: "root" } } });
+    const second = { text: "✅ **DONE** `metrics-2` — complete" };
+    await hooks["experimental.text.complete"]!({ sessionID: "root" }, second);
+    assert.equal(runLogs().length, 2);
+    const reset = (runLogs()[1]!.body as { extra: Record<string, unknown> }).extra;
+    assert.equal(reset.hostSessionIdentityCount, 1);
+    assert.equal(reset.bootstrapControlStateCount, 2);
+    assert.equal(reset.collectRunMetricsCount, 1);
+  });
+});
+
+test("terminal run metrics log an unavailable snapshot when host metrics cannot be collected", async () => {
+  await withProject("unavailable-run-metrics", async (directory) => {
+    const logs: Array<Record<string, unknown>> = [];
+    const hooks = await SortieDogsPlugin({ directory, client: {
+      app: { log: (request: Record<string, unknown>) => { logs.push(request); return Promise.resolve(true); } },
+      session: { get: async () => ({ data: { agent: "dog-coordinator" } }) },
+    } as never });
+    await hooks["chat.message"]!(
+      { sessionID: "root", agent: "dog-coordinator" },
+      {
+        message: { agent: "dog-coordinator", model: { providerID: "host", modelID: "selected" } },
+        parts: [{ type: "text", text: "task" }],
+      },
+    );
+    const completed = { text: "✅ **DONE** `metrics-unavailable` — complete" };
+    await hooks["experimental.text.complete"]!({ sessionID: "root" }, completed);
+
+    const snapshots = logs.filter((entry) =>
+      (entry.body as { message?: unknown } | undefined)?.message === "run-metrics.snapshot"
+    );
+    assert.equal(snapshots.length, 1);
+    const body = snapshots[0]!.body as { level: string; extra: Record<string, unknown> };
+    assert.equal(body.level, "info");
+    assert.equal(body.extra.available, false);
+    assert.equal(body.extra.collectRunMetricsCount, 1);
+    assert.equal(typeof body.extra.collectRunMetricsElapsedMilliseconds, "number");
+    assert.doesNotMatch(completed.text, /\*\*Run:\*\*/u);
   });
 });
 
@@ -1421,7 +1526,8 @@ test("runtime contract requires interactive continuation and deterministic recov
     new RegExp(`configured continuation capability is\\s+the plugin tool ${CONTINUATION_CAPABILITY}`, "i"),
   );
 
-  const reflection = coordinator.content.match(
+  assert.doesNotMatch(coordinator.content, /REFLECTION_POLICY_FIXTURE/u);
+  const reflection = REFLECTION_POLICY.match(
     /REFLECTION_POLICY_FIXTURE\r?\n([\s\S]+?)\r?\nEND_REFLECTION_POLICY_FIXTURE/,
   );
   assert.ok(reflection);
@@ -1430,7 +1536,11 @@ test("runtime contract requires interactive continuation and deterministic recov
     reflection[1],
     /allowed_evidence: user-correction \| repeated-process-failure \| review-artifact-defect \| retry-policy-violation/,
   );
-  assert.match(reflection[1], /global_layer: forbidden/);
+  assert.match(
+    REFLECTION_POLICY,
+    /Global-layer writes are forbidden by default and allowed only when the user or config explicitly enables\s+reflection\.layers\.global\./,
+  );
+  assert.match(reflection[1], /global_layer: forbidden by default; allowed only when user or config explicitly enables reflection\.layers\.global/);
   assert.match(reflection[1], /attribution: before\/after state or exact command evidence required/);
   assert.match(reflection[1], /tracker_privacy: no item\/node\/draft ID \| URL \| title \| body \| field value \| status \| inventory payload/);
   assert.match(reflection[1], /user_correction_layer: project immediately/);
@@ -1439,7 +1549,7 @@ test("runtime contract requires interactive continuation and deterministic recov
   assert.match(reflection[1], /call_limit: one record per triggering event; three record calls per run/);
   assert.match(reflection[1], /injected_project_recurrence: record project once to increment hits/);
   assert.match(reflection[1], /non_triggers: code bug \| ordinary validation failure/);
-  assert.match(reflection[1], /call: sortie_reflection \{ action: record/);
+  assert.match(reflection[1], /call: sortie_reflection \{ action: record, layer: <run\|project\|global>/);
   assert.match(reflection[1], /field_budget: concise ASCII English; scope \+ trigger \+ cause \+ prevention \+ evidenceRef <=400 characters total/);
   assert.match(reflection[1], /scope_format: lowercase kebab-case \[a-z0-9-\]\+; underscores forbidden/);
   assert.match(reflection[1], /list: never before record; once before replace \| forget \| promote only when target id is absent/);
@@ -1541,6 +1651,84 @@ async function configuredHooks(directory: string) {
   await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
   return await SortieDogsPlugin({ directory });
 }
+
+test("reflection policy injection is disabled by default, complete when empty or seeded, and exactly once", async () => {
+  await withProject("reflection-policy-injection", async (directory) => {
+    const oldXdg = process.env.XDG_CONFIG_HOME;
+    const oldConfig = process.env.SORTIE_DOGS_CONFIG;
+    const oldReflection = process.env.SORTIE_REFLECTION;
+    const xdg = await mkdtemp(join(testEnvironment, "reflection-policy-xdg-"));
+    const client = { session: { get: async () => ({ data: { agent: "dog-coordinator" } }) } } as never;
+    try {
+      process.env.XDG_CONFIG_HOME = xdg;
+      delete process.env.SORTIE_DOGS_CONFIG;
+      delete process.env.SORTIE_REFLECTION;
+
+      const disabled = await SortieDogsPlugin({ directory, client });
+      await disabled["chat.message"]!(
+        { sessionID: "reflection-disabled", agent: "dog-coordinator" },
+        { message: { model: {} }, parts: [{ type: "text", text: "root" }] },
+      );
+      const disabledSystem = { system: ["base"] };
+      await disabled["experimental.chat.system.transform"]!({ sessionID: "reflection-disabled" }, disabledSystem);
+      assert.deepEqual(disabledSystem.system, ["base"]);
+
+      const enabled = await SortieDogsPlugin(
+        { directory, client },
+        { reflection: { enabled: true, maxInjectedEntries: 2, maxInjectedTokens: 500 } },
+      );
+      const rootSession = "reflection-policy-root";
+      await enabled["chat.message"]!(
+        { sessionID: rootSession, agent: "dog-coordinator" },
+        { message: { model: {} }, parts: [{ type: "text", text: "root" }] },
+      );
+      const empty = { system: ["base"] };
+      await enabled["experimental.chat.system.transform"]!({ sessionID: rootSession }, empty);
+      assert.deepEqual(empty.system, ["base", REFLECTION_POLICY]);
+      await enabled["experimental.chat.system.transform"]!({ sessionID: rootSession }, empty);
+      assert.equal(empty.system.filter((element) => element.includes(REFLECTION_POLICY)).length, 1);
+
+      const execute = enabled.tool!.sortie_reflection.execute;
+      const first = JSON.parse(await execute({ action: "record", layer: "run", scope: "first", trigger: "t", cause: "c", prevention: "First.", evidence: "user-correction", evidenceRef: "r" }, { sessionID: rootSession, agent: "dog-coordinator" }));
+      const second = JSON.parse(await execute({ action: "record", layer: "run", scope: "second", trigger: "t", cause: "c", prevention: "Second.", evidence: "user-correction", evidenceRef: "r" }, { sessionID: rootSession, agent: "dog-coordinator" }));
+      await execute({ action: "replace", layer: "run", id: first.id, scope: "first", trigger: "t2", cause: "c2", prevention: "First updated." }, { sessionID: rootSession, agent: "dog-coordinator" });
+      const seeded = { system: [] as string[] };
+      await enabled["experimental.chat.system.transform"]!({ sessionID: rootSession }, seeded);
+      assert.deepEqual(seeded.system, [
+        `${REFLECTION_POLICY}\n\nSORTIE_PROCESS_REFLECTIONS\n- [${first.id}] first (hits=2): First updated.\n- [${second.id}] second (hits=1): Second.`,
+      ]);
+      const seededElement = seeded.system[0]!;
+      process.env.SORTIE_REFLECTION = "0";
+      await enabled["experimental.chat.system.transform"]!({ sessionID: rootSession }, seeded);
+      assert.deepEqual(seeded.system, []);
+      delete process.env.SORTIE_REFLECTION;
+
+      seeded.system = [seededElement];
+      await enabled["experimental.chat.system.transform"]!({ sessionID: "reflection-rejected" }, seeded);
+      assert.deepEqual(seeded.system, []);
+
+      const injectBuckets = ReflectionStore.prototype.injectBuckets;
+      seeded.system = [seededElement];
+      try {
+        ReflectionStore.prototype.injectBuckets = async () => { throw new Error("injected storage failure"); };
+        await enabled["experimental.chat.system.transform"]!({ sessionID: rootSession }, seeded);
+        assert.deepEqual(seeded.system, [REFLECTION_POLICY]);
+        assert.equal(seeded.system[0]!.includes(first.id), false);
+        assert.equal(seeded.system[0]!.includes(second.id), false);
+      } finally {
+        ReflectionStore.prototype.injectBuckets = injectBuckets;
+      }
+      await enabled["experimental.session.compacting"]!({ sessionID: rootSession }, { context: [], prompt: "" });
+      await enabled["experimental.chat.system.transform"]!({ sessionID: rootSession }, seeded);
+      assert.deepEqual(seeded.system, [seededElement]);
+    } finally {
+      if (oldXdg === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = oldXdg;
+      if (oldConfig === undefined) delete process.env.SORTIE_DOGS_CONFIG; else process.env.SORTIE_DOGS_CONFIG = oldConfig;
+      if (oldReflection === undefined) delete process.env.SORTIE_REFLECTION; else process.env.SORTIE_REFLECTION = oldReflection;
+      await rm(xdg, { recursive: true, force: true });
+    }
+  });
+});
 
 test("global Sortie config enables reflection without plugin tuple options", async () => {
   await withProject("reflection-global-config", async (directory) => {
@@ -1660,13 +1848,13 @@ test("reflection integration is opt-in, layered, guarded, kill-switchable, and d
       await hooks["chat.message"]!({ sessionID: rootSession, agent: "dog-coordinator" }, { message: { model: {} }, parts: [{ type: "text", text: "root" }] });
       const empty = { system: ["base"] };
       await hooks["experimental.chat.system.transform"]!({ sessionID: rootSession }, empty);
-      assert.deepEqual(empty.system, ["base"]);
+      assert.deepEqual(empty.system, ["base", REFLECTION_POLICY]);
       assert.deepEqual(logs, [{ level: "warn", service: "sortie-dogs", message: "reflection_corrupt_json" }]);
       const execute = hooks.tool!.sortie_reflection.execute;
       const recorded = JSON.parse(await execute({ action: "record", layer: "run", scope: "integration", trigger: "trigger", cause: "cause", prevention: "Prevent this.", evidence: "user-correction", evidenceRef: "ref" }, { sessionID: rootSession, agent: "dog-coordinator" }));
       const injected = { system: [] as string[] };
       await hooks["experimental.chat.system.transform"]!({ sessionID: rootSession }, injected);
-      assert.match(injected.system[0] ?? "", new RegExp(`^SORTIE_PROCESS_REFLECTIONS\\n- \\[${recorded.id}\\] integration \\(hits=1\\): Prevent this\\.$`, "u"));
+      assert.equal(injected.system[0], `${REFLECTION_POLICY}\n\nSORTIE_PROCESS_REFLECTIONS\n- [${recorded.id}] integration (hits=1): Prevent this.`);
       const listed = JSON.parse(await execute({ action: "list", layer: "run" }, { sessionID: rootSession, agent: "dog-coordinator" }));
       assert.equal(listed.entries[0].id, recorded.id);
       const replaced = JSON.parse(await execute({ action: "replace", layer: "run", id: recorded.id, scope: "integration", trigger: "new trigger", cause: "new cause", prevention: "Use the improved prevention." }, { sessionID: rootSession, agent: "dog-coordinator" }));
@@ -1679,7 +1867,7 @@ test("reflection integration is opt-in, layered, guarded, kill-switchable, and d
       await hooks["experimental.session.compacting"]!({ sessionID: rootSession }, compacted);
       const afterCompaction = { system: [] as string[] };
       await hooks["experimental.chat.system.transform"]!({ sessionID: rootSession }, afterCompaction);
-      assert.match(afterCompaction.system[0] ?? "", new RegExp(`^SORTIE_PROCESS_REFLECTIONS\\n- \\[${recorded.id}\\] integration \\(hits=2\\): Use the improved prevention\\.$`, "u"));
+      assert.equal(afterCompaction.system[0], `${REFLECTION_POLICY}\n\nSORTIE_PROCESS_REFLECTIONS\n- [${recorded.id}] integration (hits=2): Use the improved prevention.`);
       assert.equal(await execute({ action: "promote", layer: "run", id: recorded.id, promotedRef: "fix", }, { sessionID: rootSession, agent: "dog-coordinator" }), "promoted");
       assert.equal(await execute({ action: "clear", layer: "run" }, { sessionID: rootSession, agent: "dog-coordinator" }), "cleared");
       await execute({ action: "record", layer: "run", scope: "survive", trigger: "trigger", cause: "cause", prevention: "Keep this.", evidence: "user-correction", evidenceRef: "ref" }, { sessionID: rootSession, agent: "dog-coordinator" });
@@ -1688,7 +1876,7 @@ test("reflection integration is opt-in, layered, guarded, kill-switchable, and d
       assert.equal(JSON.parse(await execute({ action: "list", layer: "project" }, { sessionID: rootSession, agent: "dog-coordinator" })).entries[0].id, projectEntry.id);
       const layered = { system: [] as string[] };
       await hooks["experimental.chat.system.transform"]!({ sessionID: rootSession }, layered);
-      assert.equal(layered.system[0]?.split("\n").length, 3);
+      assert.equal(layered.system[0]?.slice(REFLECTION_POLICY.length).trim().split("\n").length, 3);
       const child = await execute({ action: "clear", layer: "run" }, { sessionID: "child", agent: "dog-coordinator" });
       assert.equal(child, "reflection_not_permitted");
       assert.equal(await execute({ action: "clear", layer: "run" }, { sessionID: rootSession, agent: "other-agent" }), "reflection_not_permitted");
@@ -1708,9 +1896,9 @@ test("reflection integration is opt-in, layered, guarded, kill-switchable, and d
       const tinyRoot = "reflection-tiny-root";
       await tinyHooks["chat.message"]!({ sessionID: tinyRoot, agent: "dog-coordinator" }, { message: { model: {} }, parts: [{ type: "text", text: "root" }] });
       await tinyHooks.tool!.sortie_reflection.execute({ action: "record", layer: "run", scope: "tiny", trigger: "t", cause: "c", prevention: "p", evidence: "user-correction", evidenceRef: "r" }, { sessionID: tinyRoot, agent: "dog-coordinator" });
-      const headingDoesNotFit = { system: [] as string[] };
-      await tinyHooks["experimental.chat.system.transform"]!({ sessionID: tinyRoot }, headingDoesNotFit);
-      assert.deepEqual(headingDoesNotFit.system, []);
+      const entryBudgetSuppressesEntries = { system: [] as string[] };
+      await tinyHooks["experimental.chat.system.transform"]!({ sessionID: tinyRoot }, entryBudgetSuppressesEntries);
+      assert.deepEqual(entryBudgetSuppressesEntries.system, [REFLECTION_POLICY], "maxInjectedTokens=1 suppresses entries while preserving the enabled reflection policy");
       process.env.SORTIE_REFLECTION = "0";
       const killed = await SortieDogsPlugin({ directory }, { reflection: { enabled: true } });
       assert.equal(killed.tool?.sortie_reflection, undefined);

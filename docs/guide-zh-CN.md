@@ -177,7 +177,8 @@ handoff 与 operation manifest 在检查和绑定之前都会做 schema 校验�
   "dedicatedWorkerModel": { "model": "provider/model", "variant": "deep" },
   "reflection": {
     "enabled": false,
-    "layers": { "run": true, "project": true, "global": false }
+    "layers": { "run": true, "project": true, "global": false },
+    "maxInjectedTokens": 500
   }
 }
 ```
@@ -203,7 +204,9 @@ factory options，请使用全局文件保存持久的全局设置。
   无法按角色分别路由。
 - `reflection`：仅供已激活的 root `dog-coordinator` 使用的 process prevention，默认关闭。
   opt-in 后 run / project 层默认开启；跨项目共享的 global storage 层只有显式开启才生效。
-  child 与其他 agent 会被拒绝，`SORTIE_REFLECTION=0` 可立即停止该功能。仅在已解决的 blocker / review
+  child 与其他 agent 会被拒绝，`SORTIE_REFLECTION=0` 可立即停止该功能。governing `REFLECTION_POLICY`
+  仅在 reflection 启用时注入。`maxInjectedTokens` 只限制动态 `SORTIE_PROCESS_REFLECTIONS` 标题和
+  持久化条目行，不包括该 policy。仅在已解决的 blocker / review
   defect 之后及 terminal unit 时评估，每个 run 最多记录3条；普通代码缺陷与外部故障不会写入。
 - 普通 OpenCode auto-compaction 保留 host 的 auto-continue。只有 Sortie 已显式排队自己的
   rollover 时，才会抑制 host auto-continue，避免双重继续。
@@ -279,7 +282,7 @@ canonical validation 后独立审查高风险候选项。二者都不负责实�
 
 ## 更新与迁移
 
-[Release v0.6.0](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.6.0)
+[Release v0.6.1](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.6.1)
 
 将依赖替换为新版 Release asset 后，在目标项目根目录再次运行：
 

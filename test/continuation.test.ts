@@ -154,7 +154,15 @@ test("continuation resolver grants only a configured root coordinator", () => {
 
 test("the direct capability compacts the root coordinator and resumes the same session", async () => {
   const host = fakeHost({ agent: COORDINATOR });
-  const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
+  const transitions: string[] = [];
+  const hooks = createContinuationHooks(
+    host.client,
+    "/project",
+    POLICY,
+    FAST,
+    undefined,
+    (transition) => transitions.push(transition.type),
+  );
 
   await hooks.textComplete(
     { sessionID: "ses_root" },
@@ -175,6 +183,60 @@ test("the direct capability compacts the root coordinator and resumes the same s
   assert.ok(host.promptCalls[0]!.text.startsWith(AUTO_CONTINUE_PREFIX));
   assert.match(host.promptCalls[0]!.text, /batchAttempted=2 batchCommitted=1 batchReconciled=1; next=card-3/);
   assert.doesNotMatch(host.promptCalls[0]!.text, /Tool-requested Sortie rollover/);
+  assert.deepEqual(transitions, [
+    "continuation.queued",
+    "continuation.compacted",
+    "continuation.resumed",
+  ]);
+});
+
+test("plain terminal transitions are observed once and observer failures are isolated", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  const transitions: string[] = [];
+  const hooks = createContinuationHooks(
+    host.client,
+    "/project",
+    POLICY,
+    FAST,
+    undefined,
+    (transition) => {
+      transitions.push(transition.type);
+      throw new Error("observer failure");
+    },
+  );
+
+  const terminal = { text: "✅ **DONE** `task` — complete" };
+  await hooks.textComplete({ sessionID: "ses_root" }, terminal);
+  await hooks.textComplete({ sessionID: "ses_root" }, terminal);
+  await hooks.textComplete({ sessionID: "ses_root" }, { text: "ordinary nonterminal text" });
+
+  assert.deepEqual(transitions, ["continuation.not_required"]);
+  assert.equal(host.summarizeCalls.length, 0);
+  assert.equal(host.promptCalls.length, 0);
+});
+
+test("a native compacted event after queue does not claim an unstarted Sortie rollover", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  const transitions: string[] = [];
+  const hooks = createContinuationHooks(
+    host.client,
+    "/project",
+    POLICY,
+    FAST,
+    undefined,
+    (transition) => transitions.push(transition.type),
+  );
+
+  await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR });
+  await hooks.sessionCompacted("ses_root");
+  assert.deepEqual(transitions, ["continuation.queued"]);
+
+  await settle();
+  assert.deepEqual(transitions, [
+    "continuation.queued",
+    "continuation.compacted",
+    "continuation.resumed",
+  ]);
 });
 
 test("ordinary BLOCKED reports auto-resume while explicit true blockers remain terminal", async () => {
@@ -472,13 +534,22 @@ test("the direct capability starts before its delayed idle-event fallback", asyn
 
 test("the compacted event issues the resume before the summarize request returns", async () => {
   const host = fakeHost({ agent: COORDINATOR });
+  const transitions: string[] = [];
   let hooks!: ReturnType<typeof createContinuationHooks>;
   host.client.session!.summarize = async (request) => {
     host.summarizeCalls.push({ id: request.path.id, body: request.body });
     await hooks.sessionCompacted(request.path.id);
+    assert.deepEqual(transitions, [
+      "continuation.queued",
+      "continuation.compacted",
+      "continuation.resumed",
+    ], "host lifecycle telemetry must complete before summarize resolves");
     return { data: true };
   };
-  hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
+  hooks = createContinuationHooks(host.client, "/project", POLICY, FAST, undefined, (transition) => {
+    transitions.push(transition.type);
+    throw new Error("observer failure");
+  });
 
   await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR });
   await settle();
@@ -486,20 +557,46 @@ test("the compacted event issues the resume before the summarize request returns
   assert.equal(host.promptCalls.length, 1, "post-summary fallback must not duplicate the event resume");
   assert.ok(host.promptCalls[0]!.text.startsWith(AUTO_CONTINUE_PREFIX));
   assert.equal(hooks.blocksTool("ses_root"), false);
+  assert.deepEqual(transitions, [
+    "continuation.queued",
+    "continuation.compacted",
+    "continuation.resumed",
+  ]);
 });
 
 test("the compaction summary issues the resume before a one-shot host can exit", async () => {
   const host = fakeHost({ agent: COORDINATOR });
+  const transitions: string[] = [];
+  let summaryObserved!: () => void;
+  const observed = new Promise<void>((resolve) => { summaryObserved = resolve; });
+  let releaseSummary!: () => void;
+  const release = new Promise<void>((resolve) => { releaseSummary = resolve; });
   let hooks!: ReturnType<typeof createContinuationHooks>;
   host.client.session!.summarize = async (request) => {
     host.summarizeCalls.push({ id: request.path.id, body: request.body });
     await hooks.sessionCompacting({ sessionID: request.path.id }, {});
     await hooks.textComplete({ sessionID: request.path.id }, { text: "## 目的\nsummary without rollover token" });
+    summaryObserved();
+    await release;
     return { data: true };
   };
-  hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
+  hooks = createContinuationHooks(
+    host.client,
+    "/project",
+    POLICY,
+    FAST,
+    undefined,
+    (transition) => transitions.push(transition.type),
+  );
 
   await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR });
+  await observed;
+  assert.deepEqual(transitions, [
+    "continuation.queued",
+    "continuation.compacted",
+    "continuation.resumed",
+  ], "owned summary telemetry must not wait for summarize resolution");
+  releaseSummary();
   await settle();
   assert.equal(host.summarizeCalls.length, 1);
   assert.equal(host.promptCalls.length, 1, "post-summary fallback must not duplicate the early resume");

@@ -23,6 +23,7 @@ export interface ReflectionConfiguration {
   readonly enabled: boolean;
   readonly layers: { readonly run: boolean; readonly project: boolean; readonly global: boolean };
   readonly maxInjectedEntries: number;
+  /** Token budget for the dynamic SORTIE_PROCESS_REFLECTIONS heading and persisted entry lines; excludes the governing REFLECTION_POLICY. */
   readonly maxInjectedTokens: number;
 }
 export type ReflectionPolicyInput = Partial<Omit<ReflectionConfiguration, "layers">> & { layers?: Partial<ReflectionConfiguration["layers"]> };

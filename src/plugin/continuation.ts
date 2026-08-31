@@ -212,6 +212,30 @@ export interface ContinuationHooks {
   forgetSession(sessionID: string): void;
 }
 
+export type ContinuationTransitionType =
+  | "continuation.queued"
+  | "continuation.compacted"
+  | "continuation.resumed"
+  | "continuation.not_required";
+
+export type ContinuationTransitionReason =
+  | "continuation-requested"
+  | "compaction-only"
+  | "summarize-accepted"
+  | "prompt-accepted"
+  | "terminal-checkpoint";
+
+export interface ContinuationTransition {
+  readonly type: ContinuationTransitionType;
+  readonly sessionID: string;
+  readonly epoch: number;
+  readonly reason: ContinuationTransitionReason;
+  readonly attempts: number;
+  readonly resumeAttempts: number;
+}
+
+export type ContinuationTransitionObserver = (transition: ContinuationTransition) => void;
+
 const ROLLOVER_PROMPT = [
   `Your very first output line must be exactly: ${ROLLOVER_TOKEN}`,
   "Write nothing before that line: no greeting, no explanation, no restatement of this instruction.",
@@ -363,6 +387,9 @@ interface SessionState {
   resumeIssuingEpoch?: number | undefined;
   /** Epoch whose resume was accepted before the summarize request returned. */
   resumeIssuedEpoch?: number | undefined;
+  /** Epochs already reported to the optional lifecycle observer. */
+  compactedTransitionEpoch?: number | undefined;
+  resumedTransitionEpoch?: number | undefined;
   /** Resume attempts made for the current epoch, bounded by the configured scheduler budget. */
   resumeAttempts: number;
   /** Rollover epoch whose compaction prompt hook has started. */
@@ -380,6 +407,8 @@ interface SessionState {
   recoveryRepeatCount: number;
   /** Prevents duplicate idle events from counting one assistant turn twice. */
   recoveryObservedRevision?: number | undefined;
+  /** Turn revision whose plain terminal checkpoint was already reported. */
+  notRequiredRevision?: number | undefined;
   /** Debounced fallback for one-shot hosts that omit session.idle. */
   stepRecoveryTimer?: unknown;
   lastRollover?: number | undefined;
@@ -427,9 +456,43 @@ export function createContinuationHooks(
   policySource: ContinuationPolicySource,
   timings: ContinuationTimings = DEFAULT_TIMINGS,
   localIdentity?: LocalIdentitySource,
+  transitionObserver?: ContinuationTransitionObserver,
 ): ContinuationHooks {
   const sessions = new Map<string, SessionState>();
   const warned = new Set<string>();
+
+  function observeTransition(
+    type: ContinuationTransitionType,
+    sessionID: string,
+    state: SessionState,
+    reason: ContinuationTransitionReason,
+  ): void {
+    try {
+      transitionObserver?.({
+        type,
+        sessionID,
+        epoch: state.rolloverEpoch,
+        reason,
+        attempts: state.attempts,
+        resumeAttempts: state.resumeAttempts,
+      });
+    } catch {
+      // Lifecycle telemetry is best effort and must never affect continuation.
+    }
+  }
+
+  function observeResumed(sessionID: string, state: SessionState, epoch: number): void {
+    if (state.compactedTransitionEpoch !== epoch || state.resumedTransitionEpoch === epoch) return;
+    state.resumedTransitionEpoch = epoch;
+    observeTransition("continuation.resumed", sessionID, state, "prompt-accepted");
+  }
+
+  function observeCompacted(sessionID: string, state: SessionState, epoch: number): void {
+    if (state.compactedTransitionEpoch === epoch) return;
+    state.compactedTransitionEpoch = epoch;
+    observeTransition("continuation.compacted", sessionID, state, "summarize-accepted");
+    if (state.resumeIssuedEpoch === epoch) observeResumed(sessionID, state, epoch);
+  }
 
   /**
    * A rollover that cannot start is otherwise indistinguishable from a coordinator that never asked
@@ -749,6 +812,7 @@ export function createContinuationHooks(
       state.recoverySummaryValidated = false;
       // The accepted prompt now belongs to the host loop, not this rollover request.
       state.active = false;
+      observeResumed(sessionID, state, epoch);
       return true;
     } catch (error) {
       console.error("[sortie-continuation] resume arbiter failed", sessionID, error);
@@ -822,6 +886,7 @@ export function createContinuationHooks(
         state.promptPending = false;
         state.compactedRollover = true;
         state.lastRollover = Date.now();
+        observeCompacted(sessionID, state, operationEpoch);
       }
       if (
         state.resumeIssuingEpoch === operationEpoch ||
@@ -912,6 +977,12 @@ export function createContinuationHooks(
     resetRecoveryStall(state);
     if (resume && countAttempt) state.attempts += 1;
     const epoch = state.rolloverEpoch;
+    observeTransition(
+      "continuation.queued",
+      sessionID,
+      state,
+      resume ? "continuation-requested" : "compaction-only",
+    );
     // session.idle can be lost when a one-shot CLI host exits. Keep this zero-delay timer referenced
     // so the rollover reaches the host after the current plugin hook returns but before process exit.
     setTimeout(async () => {
@@ -1071,8 +1142,11 @@ export function createContinuationHooks(
          * One-shot CLI hosts can exit as soon as the compaction assistant finishes, before the
          * compacted event or summarize response. Its text-complete hook is the last awaited boundary
          * where the summary message already exists and a resume prompt can still join the same loop.
-         */
+        */
         if (ownedCompactionSummary || trimmed.startsWith(ROLLOVER_TOKEN)) {
+          if (ownedCompactionSummary) {
+            observeCompacted(input.sessionID, state, state.rolloverEpoch);
+          }
           await arbitrateResume(input.sessionID, state);
           if (state.resumeIssuedEpoch === state.rolloverEpoch) return;
         }
@@ -1087,6 +1161,19 @@ export function createContinuationHooks(
             clearTimer(state.stepRecoveryTimer);
             state.stepRecoveryTimer = undefined;
             resetRecoveryStall(state);
+            if (
+              state.notRequiredRevision !== state.turnRevision &&
+              !output.text.includes(ROLLOVER_MARKER) &&
+              !output.text.includes(CONTINUATION_MARKER)
+            ) {
+              state.notRequiredRevision = state.turnRevision;
+              observeTransition(
+                "continuation.not_required",
+                input.sessionID,
+                state,
+                "terminal-checkpoint",
+              );
+            }
           }
           if (batchCheckpointNeedsContinuation(state.latestCoordinatorReport)) {
             if (input.allowCheckpointContinuation === false) {
@@ -1189,7 +1276,13 @@ export function createContinuationHooks(
 
     async sessionCompacted(sessionID): Promise<void> {
       const state = sessions.get(sessionID);
-      if (state !== undefined) await arbitrateResume(sessionID, state);
+      if (
+        state?.pendingRollover === true &&
+        (state.active || state.promptPending || state.compactingEpoch === state.rolloverEpoch)
+      ) {
+        observeCompacted(sessionID, state, state.rolloverEpoch);
+        await arbitrateResume(sessionID, state);
+      }
     },
 
     async compactionAutoContinue(input, output): Promise<void> {

@@ -185,7 +185,8 @@ tool を使う。inspection も bind も行わずに同じ defect を報告す�
   "dedicatedWorkerModel": { "model": "provider/model", "variant": "deep" },
   "reflection": {
     "enabled": false,
-    "layers": { "run": true, "project": true, "global": false }
+    "layers": { "run": true, "project": true, "global": false },
+    "maxInjectedTokens": 500
   }
 }
 ```
@@ -212,6 +213,8 @@ global file、project file、`SORTIE_DOGS_CONFIG`、plugin factory options。Ope
 - `reflection`: activated root `dog-coordinator` だけが使える process prevention。既定無効。
   opt-in 後の run / project layer は既定有効、project 間で共有する global storage layer は明示的に
   有効化しない限り無効。child / 他 agent は拒否され、`SORTIE_REFLECTION=0` で即時停止する。
+  governing `REFLECTION_POLICY` は reflection 有効時だけ注入する。`maxInjectedTokens` は動的な
+  `SORTIE_PROCESS_REFLECTIONS` heading と永続化 entry 行の budget で、policy は対象外。
   解決済みblocker / review defect後とterminal unit時だけ評価し、1 run最大3件。通常のcode bugや
   外部障害は記録しない。
 - 通常の OpenCode auto-compaction は host の auto-continue を維持する。Sortie が明示的に queue
@@ -292,7 +295,7 @@ stage、commit、ユーザー対応を行わない。
 
 ## 更新と移行
 
-[Release v0.6.0](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.6.0)
+[Release v0.6.1](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.6.1)
 
 依存 asset を新しい release に更新後、対象 project root で再実行する。
 
