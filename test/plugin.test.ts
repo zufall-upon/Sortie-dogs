@@ -7,6 +7,11 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import { runtimeAssets } from "../dist/runtime-assets.js";
+import { RUNTIME_ASSET_VERSION } from "../dist/asset-version.js";
+import {
+  ACCEPTANCE_CONTINUITY_EXTENSION,
+  acceptanceContinuityFingerprint,
+} from "../dist/core/acceptance-continuity.js";
 import {
   HandoffDeniedError,
   ModelRoutingDeniedError,
@@ -1198,7 +1203,7 @@ test("coordinator DONE output receives host-reported root and child run metrics"
     assert.equal(body.extra.available, true);
     assert.equal(body.extra.outcome, "DONE");
     assert.equal(body.extra.sessionID, "root");
-    assert.equal(body.extra.runtimeAssetVersion, "0.3.51-state-observability-v1");
+    assert.equal(body.extra.runtimeAssetVersion, "0.3.52-acceptance-continuity-v1");
     assert.equal(body.extra.inputTokens, 130);
     assert.equal(body.extra.outputTokens, 15);
     assert.equal(body.extra.reasoningTokens, 5);
@@ -1474,13 +1479,13 @@ test("runtime contract requires interactive continuation and deterministic recov
     "executable_absent: question tool; no worker discovery or recursive search",
     "project_inventory: exactly one complete snapshot per top-level user request in one direct client invocation; no Task",
     "pagination: all pages inside that invocation until pageInfo.hasNextPage=false; no model turn per page",
-    "candidate_queue: snapshot selects at most configured batch bound; evaluate full body once then retain identity | status | ordering | implementation root | acceptance fingerprint | acceptance hashes | bounded acceptance digest; raw body discarded",
-    "fingerprint_algorithm: Unicode NFC + CRLF/CR to LF + no trim; lowercase hex SHA-256 full body and each ordered criterion",
-    "inventory_fingerprint_algorithm: fixed key order identity,status,ordering,implementationRoot,acceptanceFingerprint,acceptanceHashes + sort ordering then identity + NFC/LF + compact canonical JSON + lowercase hex SHA-256",
-    "digest_role: acceptanceDigest <=300 chars; routing only; strip secrets | personal data | URLs | item metadata | raw excerpts; redaction failure -> requires_user_decision",
+    "candidate_queue: snapshot selects at most configured batch bound; evaluate full body once then retain identity | status | ordering | implementation root | exact handoff path | opaque acceptance fingerprint only; raw body discarded",
+    "fingerprint_algorithm: Unicode NFC + CRLF/CR to LF + no trim; lowercase hex SHA-256 full body",
+    "inventory_fingerprint_algorithm: fixed key order identity,status,ordering,implementationRoot,handoffPath,acceptanceFingerprint + sort ordering then identity + NFC/LF + compact canonical JSON + lowercase hex SHA-256",
+    "checkpoint_authority: summary never authors acceptance; preserve exact fingerprint + handoff path; reread exact immutable handoff after compaction",
     "inventory_reuse: compaction | worker return | local tracker mutation never invalidate; apply successful mutations locally then recompute canonical inventoryFingerprint before compaction or selection",
     "inventory_retry: external failure -> forbidden; local construction | JSON decode defect -> one corrected approved-client invocation; unchanged payload forbidden; total invocations <=2",
-    "candidate_body: full body evaluated at snapshot acquisition; queued acceptance digest is sufficient after compaction",
+    "candidate_body: full body evaluated at snapshot acquisition; exact immutable handoff + opaque fingerprint are sufficient after compaction",
     "relevance_gate: current user scope + project evidence required; title | order | bulk status insufficient",
     "relevance_ambiguous: one question before mutation or dispatch",
     "active_project_root: most specific task + tracker + project-instruction owner; immutable source ownership and local commit root",
@@ -1500,7 +1505,7 @@ test("runtime contract requires interactive continuation and deterministic recov
     "terminal_checkpoint: append session-only pendingTrackerUpdates; no external tracker call per unit",
     "batch_flush: one coordinator-owned direct tracker invocation when batch stops; apply every pending update",
     "durable_session_state: terminal Evidence + compaction summary preserve inventoryFingerprint | candidateQueue | pendingTrackerUpdates | trackerFlushState",
-    "restart_reconcile: stale tracker -> require git + source + matching acceptanceFingerprint and acceptanceHashes + durable handoff; accepted commit becomes batchReconciled, never reimplemented",
+    "restart_reconcile: stale tracker -> require git + source + matching opaque acceptanceFingerprint + durable handoff; accepted commit becomes batchReconciled, never reimplemented",
     "flush_failure: source outcomes authoritative + reconciliation pending; no same-request retry",
     "github_auth: approved gh only + child-process GITHUB_TOKEN/GH_TOKEN clear when guide requires stored auth; credential extraction forbidden",
     "github_failure: auth | rate-limit | transport | API GraphQL error -> whole-batch blocker; no retry | REST fallback | query rewrite | diagnostic API",
@@ -1592,7 +1597,7 @@ test("runtime contract requires interactive continuation and deterministic recov
   for (const contract of [
     "drain_counts: batchAttempted=terminal handoffs; batchCommitted=new commits; batchReconciled=accepted existing commits",
     "inventory_acquisition: once at drain start in one client invocation; never after compaction",
-    "candidate_queue: at most backlogDrain.maxUnits; deterministic acceptance fingerprint + hashes + bounded digest + required selection fields; raw body discarded",
+    "candidate_queue: at most backlogDrain.maxUnits; exact handoff path + deterministic opaque acceptance fingerprint + required selection fields; raw body discarded",
     "continuation: terminal handoff -> session checkpoint -> local queue update -> compact resume; no tracker access",
     "tracker_flush: once when drain stops; all pending updates in one direct invocation",
     "queue_exhausted: stop without inventory refresh; next top-level request may reacquire",
@@ -2039,6 +2044,17 @@ async function activate(
     { sessionID },
     { message: { model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: "/sortie task" }] },
   );
+}
+
+function acceptanceContinuity(taskID: string, criteria: string[], parent = "none"): Record<string, unknown> {
+  return {
+    schema_version: "0.1",
+    authority: "dispatch",
+    task_id: taskID,
+    criteria,
+    fingerprint: acceptanceContinuityFingerprint(criteria),
+    parent_fingerprint: parent,
+  };
 }
 
 function readOnlyWorkerPrompt(directory: string): string {
@@ -2867,10 +2883,28 @@ test("typed parallel prepare is the only path to reserved dependency-aware worke
   await withProject("typed-parallel-dispatch", async (directory) => {
     await writeFile(join(directory, ".gitignore"), "parallel-contract.json\n");
     await writeFile(join(directory, "base.txt"), "base\n");
+    await mkdir(join(directory, ".opencode"));
+    await writeFile(join(directory, ".opencode", "sortie-dogs.version"), `${RUNTIME_ASSET_VERSION}\n`);
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify({
+      ...fixture.manifest,
+      validation: ["npm test"],
+    }));
+    const parentCriteria = ["Preserve the sequential parent criterion."];
+    const parentFingerprint = acceptanceContinuityFingerprint(parentCriteria);
+    const parentHandoff = writeGateHandoff(directory, "operation-manifest.json") as { ext: Record<string, unknown> };
+    await writeFile(join(directory, "handoff.sequential-parent.json"), JSON.stringify({
+      ...parentHandoff,
+      id: "sequential-parent",
+      ext: {
+        ...parentHandoff.ext,
+        [ACCEPTANCE_CONTINUITY_EXTENSION]: acceptanceContinuity("sequential-parent", parentCriteria),
+      },
+    }));
     await execFileAsync("git", ["init", "-q"], { cwd: directory });
     await execFileAsync("git", ["config", "user.name", "Sortie Test"], { cwd: directory });
     await execFileAsync("git", ["config", "user.email", "sortie@example.invalid"], { cwd: directory });
-    await execFileAsync("git", ["add", ".gitignore", "base.txt"], { cwd: directory });
+    await execFileAsync("git", ["add", ".gitignore", "base.txt", ".opencode/sortie-dogs.version",
+      "operation-manifest.json", "handoff.sequential-parent.json"], { cwd: directory });
     await execFileAsync("git", ["commit", "-q", "-m", "base"], { cwd: directory });
     const { stdout } = await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: directory });
     const sha = stdout.trim();
@@ -2909,6 +2943,31 @@ test("typed parallel prepare is the only path to reserved dependency-aware worke
     );
     const before = hooks["tool.execute.before"]!;
     await before(
+      { tool: "task", sessionID: "root", callID: "sequential-parent" },
+      { args: { subagent_type: "dog-worker", prompt: [
+        "task_id: sequential-parent",
+        "role: implementation",
+        `project_root: ${directory}`,
+        `handoff_path: ${join(directory, "handoff.sequential-parent.json")}`,
+        "source_manifest: [base.txt]",
+        "operation_manifest: operation-manifest.json",
+        "acceptance:",
+        ...parentCriteria.map((criterion) => `  - ${criterion}`),
+        "validation: npm test",
+      ].join("\n") } },
+    );
+    await hooks["tool.execute.after"]!(
+      { tool: "task", sessionID: "root", callID: "sequential-parent" },
+      { output: "<task_result>done</task_result>", metadata: {} },
+    );
+    await hooks["chat.message"]!(
+      { sessionID: "root", agent: "dog-coordinator" },
+      {
+        message: { agent: "dog-coordinator", model: { providerID: "host", modelID: "selected" } },
+        parts: [{ type: "text", text: "parallel turn" }],
+      },
+    );
+    await before(
       { tool: "task", sessionID: "literal-root", callID: "literal-one" },
       { args: { subagent_type: "dog-worker", prompt: readOnlyWorkerPrompt(directory) +
         "\nparallel_group: literal\nparallel_unit: a\nparallel_units: 2" } },
@@ -2926,35 +2985,53 @@ test("typed parallel prepare is the only path to reserved dependency-aware worke
       { contract_path: contractPath },
       { sessionID: "root", agent: "dog-coordinator" },
     )) as { status: string; run_id: string; ready: Array<Record<string, unknown>> };
-    assert.equal(prepared.status, "prepared");
+    assert.equal(prepared.status, "prepared", JSON.stringify(prepared));
     assert.equal(prepared.ready.length, 2);
+    const generatedCriteria = [...parentCriteria, "Complete the prepared parallel descriptor within its declared scope."];
+    for (const descriptor of prepared.ready) {
+      assert.deepEqual(descriptor.acceptance, generatedCriteria);
+      assert.equal(descriptor.acceptance_parent_fingerprint, parentFingerprint);
+      const generatedHandoff = JSON.parse(await readFile(descriptor.handoff_path as string, "utf8")) as {
+        ext: Record<string, { criteria?: string[]; parent_fingerprint?: string }>;
+      };
+      assert.deepEqual(generatedHandoff.ext[ACCEPTANCE_CONTINUITY_EXTENSION]?.criteria, generatedCriteria);
+      assert.equal(generatedHandoff.ext[ACCEPTANCE_CONTINUITY_EXTENSION]?.parent_fingerprint, parentFingerprint);
+    }
+    assert.equal(prepared.ready[0]!.acceptance_fingerprint, prepared.ready[1]!.acceptance_fingerprint,
+      "ready siblings share one parent acceptance rather than chaining through each other");
     const prompt = (descriptor: Record<string, unknown>) => [
-      `task_id: ${descriptor.task_id}`,
-      `run_id: ${descriptor.run_id}`,
-      `dispatch_id: ${descriptor.dispatch_id}`,
-      `project_root: ${descriptor.managed_path}`,
-      `branch: ${descriptor.branch}`,
-      `base_sha: ${descriptor.base_sha}`,
-      `depends_on: ${JSON.stringify(descriptor.depends_on)}`,
-      `scope_read: ${JSON.stringify(descriptor.scope_read)}`,
-      `scope_write: ${JSON.stringify(descriptor.scope_write)}`,
-      `parallel_group: ${descriptor.parallel_group}`,
-      `parallel_unit: ${descriptor.parallel_unit}`,
-      `parallel_units: ${descriptor.parallel_units}`,
-      `attempt: ${descriptor.attempt}`,
-      `contract_fingerprint: ${descriptor.contract_fingerprint}`,
       "context_digest:",
       `  task_id: ${descriptor.task_id}`,
+      `  run_id: ${descriptor.run_id}`,
+      `  dispatch_id: ${descriptor.dispatch_id}`,
       "  role: implementation",
       `  project_root: ${descriptor.managed_path}`,
-      "  acceptance: bounded parallel control outcome",
+      `  branch: ${descriptor.branch}`,
+      `  base_sha: ${descriptor.base_sha}`,
+      `  depends_on: ${JSON.stringify(descriptor.depends_on)}`,
+      `  scope_read: ${JSON.stringify(descriptor.scope_read)}`,
+      `  scope_write: ${JSON.stringify(descriptor.scope_write)}`,
+      `  handoff_path: ${descriptor.handoff_path}`,
+      "  acceptance:",
+      ...(descriptor.acceptance as string[]).map((criterion) => `    - ${criterion}`),
       "  validation: no canonical validation",
       `  parallel_group: ${descriptor.parallel_group}`,
       `  parallel_unit: ${descriptor.parallel_unit}`,
       `  parallel_units: ${descriptor.parallel_units}`,
-      "source_manifest: [base.txt]",
-      "operation_manifest: none",
+      `  attempt: ${descriptor.attempt}`,
+      `  contract_fingerprint: ${descriptor.contract_fingerprint}`,
+      "  source_manifest: [base.txt]",
+      `operation_manifest: ${descriptor.operation_manifest}`,
     ].join("\n");
+    const client = { session: {
+      get: async () => ({ data: { agent: "dog-coordinator" } }),
+      messages: async () => ({ data: [{ info: { role: "user", agent: "dog-coordinator" }, parts: [{ type: "text", text: "resume" }] }] }),
+    } } as never;
+    const restarted = await SortieDogsPlugin({ directory, client });
+    const system = { system: [] as string[] };
+    await restarted["experimental.chat.system.transform"]!({ sessionID: "root" }, system);
+    assert.match(system.system.join("\n"), /SORTIE_PARALLEL_DISPATCH_STATE/u);
+    const restartedBefore = restarted["tool.execute.before"]!;
     const originalBindDispatch = ParallelDispatchCoordinator.prototype.bindDispatch;
     let releaseFirstBind: (() => void) | undefined;
     let bound = 0;
@@ -2969,7 +3046,7 @@ test("typed parallel prepare is the only path to reserved dependency-aware worke
     };
     try {
       await Promise.all(prepared.ready.map(async (descriptor, index) => {
-        await before(
+        await restartedBefore(
           { tool: "task", sessionID: "root", callID: `parallel-${index}` },
           { args: { subagent_type: "dog-worker", prompt: prompt(descriptor) } },
         );
@@ -2978,20 +3055,20 @@ test("typed parallel prepare is the only path to reserved dependency-aware worke
       ParallelDispatchCoordinator.prototype.bindDispatch = originalBindDispatch;
     }
     for (const [index, descriptor] of prepared.ready.entries()) {
-      await before(
+      await restartedBefore(
         { tool: "task", sessionID: "root", callID: `parallel-${index}` },
         { args: { subagent_type: "dog-worker", prompt: prompt(descriptor) } },
       );
     }
     await assert.rejects(
-      () => before(
+      () => restartedBefore(
         { tool: "task", sessionID: "root", callID: "parallel-replay" },
         { args: { subagent_type: "dog-worker", prompt: prompt(prepared.ready[0]!) } },
       ),
       (error: unknown) => error instanceof ParallelDispatchError && error.code === "descriptor-replay",
     );
     for (const [index, descriptor] of prepared.ready.entries()) {
-      await hooks["tool.execute.after"]!(
+      await restarted["tool.execute.after"]!(
         { tool: "task", sessionID: "root", callID: `parallel-${index}` },
         { output: `<task_result>\nSORTIE_PARALLEL_OUTCOME ${JSON.stringify({
           run_id: descriptor.run_id,
@@ -3000,20 +3077,12 @@ test("typed parallel prepare is the only path to reserved dependency-aware worke
         })}\n</task_result>`, metadata: { sessionId: `child-${index}` } },
       );
     }
-    const status = JSON.parse(await hooks.tool!.sortie_parallel_dispatch_status!.execute(
+    const status = JSON.parse(await restarted.tool!.sortie_parallel_dispatch_status!.execute(
       { run_id: prepared.run_id, reconcile: "false" },
       { sessionID: "root", agent: "dog-coordinator" },
     )) as { tasks: Array<{ phase: string }> };
     assert.deepEqual(status.tasks.map(({ phase }) => phase), ["failed", "failed"]);
 
-    const client = { session: {
-      get: async () => ({ data: { agent: "dog-coordinator" } }),
-      messages: async () => ({ data: [{ info: { role: "user", agent: "dog-coordinator" }, parts: [{ type: "text", text: "resume" }] }] }),
-    } } as never;
-    const restarted = await SortieDogsPlugin({ directory, client });
-    const system = { system: [] as string[] };
-    await restarted["experimental.chat.system.transform"]!({ sessionID: "root" }, system);
-    assert.match(system.system.join("\n"), /SORTIE_PARALLEL_DISPATCH_STATE/u);
     assert.doesNotMatch(system.system.join("\n"), /SORTIE_PARALLEL_OUTCOME/u);
   });
 });
@@ -3065,7 +3134,10 @@ test("parallel worker artifact capability enforces exact lineage, terminal relea
       `task_id: ${descriptor.task_id}`, "role: implementation", `project_root: ${managedPath}`,
       `handoff_path: ${handoffPath}`, `source_manifest: [${descriptor.task_id}.txt]`,
       `operation_manifest: ${manifestPath}`, "acceptance: create bounded artifact", "validation: typed capability",
-      ...Object.entries(descriptor).filter(([key]) => !["task_id", "managed_path", "handoff_path", "operation_manifest"].includes(key))
+      ...Object.entries(descriptor).filter(([key]) => ![
+        "task_id", "managed_path", "handoff_path", "operation_manifest",
+        "acceptance", "acceptance_fingerprint", "acceptance_parent_fingerprint",
+      ].includes(key))
         .map(([key, value]) => `${key}: ${Array.isArray(value) ? JSON.stringify(value) : value}`),
       `managed_path: ${managedPath}`,
     ].join("\n");
@@ -3202,7 +3274,10 @@ test("parallel cancellation is coordinator-only, survives running join, and sess
       `task_id: ${descriptor.task_id}`, "role: implementation", `project_root: ${descriptor.managed_path}`,
       "source_manifest: [base.txt]", "operation_manifest: none", "acceptance: bounded cancel",
       "validation: no canonical validation", ...Object.entries(descriptor).filter(([key]) =>
-        !["task_id", "managed_path", "handoff_path", "operation_manifest"].includes(key))
+        ![
+          "task_id", "managed_path", "handoff_path", "operation_manifest",
+          "acceptance", "acceptance_fingerprint", "acceptance_parent_fingerprint",
+        ].includes(key))
         .map(([key, value]) => `${key}: ${Array.isArray(value) ? JSON.stringify(value) : value}`),
       `managed_path: ${descriptor.managed_path}`,
     ].join("\n");
@@ -3956,6 +4031,282 @@ test("worker dispatch rejects an unregistered handoff and trusts its inspected m
         error.defects.includes("contract / dispatch_inline_handoff_incomplete"),
     );
     await dispatch(registered, "good-worker");
+  });
+});
+
+test("current runtime assets require exact acceptance continuity on mutating dispatch", async () => {
+  await withProject("acceptance-continuity-dispatch", async (directory) => {
+    await mkdir(join(directory, ".opencode"));
+    await writeFile(join(directory, ".opencode", "sortie-dogs.version"), `${RUNTIME_ASSET_VERSION}\n`);
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify({
+      ...fixture.manifest,
+      validation: ["npm test"],
+    }));
+    const handoffPath = join(directory, "handoff.task-a.json");
+    const base = writeGateHandoff(directory, "operation-manifest.json") as { ext: Record<string, unknown> };
+    await writeFile(handoffPath, JSON.stringify({ ...base, id: "task-a" }));
+    const hooks = await SortieDogsPlugin({ directory });
+    await hooks["chat.message"]!(
+      { sessionID: "root", agent: "dog-coordinator" },
+      { message: { agent: "dog-coordinator", model: {} }, parts: [{ type: "text", text: "task" }] },
+    );
+    const dispatch = (acceptance: string, callID: string, taskID = "task-a") => hooks["tool.execute.before"]!(
+      { tool: "task", sessionID: "root", callID },
+      { args: { subagent_type: "dog-worker", prompt: [
+        `task_id: ${taskID}`,
+        "role: implementation",
+        `project_root: ${directory}`,
+        `handoff_path: ${handoffPath}`,
+        "source_manifest: [allowed.txt]",
+        "operation_manifest: operation-manifest.json",
+        "acceptance:",
+        `  - ${acceptance}`,
+        "validation: npm test",
+      ].join("\n") } },
+    );
+    await assert.rejects(() => dispatch("preserve exact quality", "missing-continuity"),
+      (error: unknown) => error instanceof HandoffDeniedError &&
+        error.defects.includes("handoff /ext/sortie-dogs~1acceptance-continuity acceptance_continuity_absent"));
+
+    const criteria = ["preserve exact quality"];
+    await writeFile(handoffPath, JSON.stringify({
+      ...base,
+      id: "task-a",
+      ext: { ...base.ext, [ACCEPTANCE_CONTINUITY_EXTENSION]: acceptanceContinuity("task-other", criteria) },
+    }));
+    await assert.rejects(() => dispatch(criteria[0]!, "handoff-ledger-id-mismatch", "task-other"),
+      (error: unknown) => error instanceof HandoffDeniedError &&
+        error.defects.includes("contract /acceptance acceptance_continuity_mismatch"));
+    await writeFile(handoffPath, JSON.stringify({
+      ...base,
+      id: "task-a",
+      ext: { ...base.ext, [ACCEPTANCE_CONTINUITY_EXTENSION]: acceptanceContinuity("task-a", criteria,
+        acceptanceContinuityFingerprint(["unrelated criterion"])) },
+    }));
+    await assert.rejects(() => dispatch(criteria[0]!, "initial-parent"),
+      (error: unknown) => error instanceof HandoffDeniedError &&
+        error.defects.includes("handoff /ext/sortie-dogs~1acceptance-continuity acceptance_parent_continuity_mismatch"));
+    await writeFile(handoffPath, JSON.stringify({
+      ...base,
+      id: "task-a",
+      ext: { ...base.ext, [ACCEPTANCE_CONTINUITY_EXTENSION]: acceptanceContinuity("task-a", criteria) },
+    }));
+    await assert.rejects(() => dispatch("broad quality", "drifted-continuity"),
+      (error: unknown) => error instanceof HandoffDeniedError &&
+        error.defects.includes("contract /acceptance acceptance_continuity_mismatch"));
+    await dispatch(criteria[0]!, "valid-continuity");
+  });
+});
+
+test("follow-up mutating dispatch cannot drop parent acceptance criteria", async () => {
+  await withProject("acceptance-parent-continuity", async (directory) => {
+    await mkdir(join(directory, ".opencode"));
+    await writeFile(join(directory, ".opencode", "sortie-dogs.version"), `${RUNTIME_ASSET_VERSION}\n`);
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify({
+      ...fixture.manifest,
+      validation: ["npm test"],
+    }));
+    const firstCriteria = ["keep the reference", "preserve visual density"];
+    const firstFingerprint = acceptanceContinuityFingerprint(firstCriteria);
+    const firstPath = join(directory, "handoff.task-a.json");
+    const secondPath = join(directory, "handoff.task-b.json");
+    const thirdPath = join(directory, "handoff.task-c.json");
+    const base = writeGateHandoff(directory, "operation-manifest.json") as { ext: Record<string, unknown> };
+    await writeFile(firstPath, JSON.stringify({
+      ...base, id: "task-a",
+      ext: { ...base.ext, [ACCEPTANCE_CONTINUITY_EXTENSION]: acceptanceContinuity("task-a", firstCriteria) },
+    }));
+    const hooks = await SortieDogsPlugin({ directory });
+    await hooks["chat.message"]!(
+      { sessionID: "root", agent: "dog-coordinator" },
+      { message: { agent: "dog-coordinator", model: {} }, parts: [{ type: "text", text: "task" }] },
+    );
+    const dispatch = async (taskID: string, handoffPath: string, criteria: string[], callID: string) => {
+      await hooks["tool.execute.before"]!(
+        { tool: "task", sessionID: "root", callID },
+        { args: { subagent_type: "dog-worker", prompt: [
+          `task_id: ${taskID}`,
+          "role: implementation",
+          `project_root: ${directory}`,
+          `handoff_path: ${handoffPath}`,
+          "source_manifest: [allowed.txt]",
+          "operation_manifest: operation-manifest.json",
+          "acceptance:",
+          ...criteria.map((criterion) => `  - ${criterion}`),
+          "validation: npm test",
+        ].join("\n") } },
+      );
+    };
+    await dispatch("task-a", firstPath, firstCriteria, "first-continuity");
+    await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "first-continuity" }, {});
+    await writeFile(firstPath, JSON.stringify({
+      ...base, id: "task-a",
+      ext: { ...base.ext, [ACCEPTANCE_CONTINUITY_EXTENSION]: acceptanceContinuity(
+        "task-a", firstCriteria, acceptanceContinuityFingerprint(["wrong parent"]),
+      ) },
+    }));
+    await assert.rejects(() => dispatch("task-a", firstPath, firstCriteria, "unchanged-parent-drift"),
+      (error: unknown) => error instanceof HandoffDeniedError &&
+        error.defects.includes("handoff /ext/sortie-dogs~1acceptance-continuity acceptance_parent_continuity_mismatch"));
+    const dispatchFollowUp = async (criteria: string[], callID: string, accepted = false) => {
+      await writeFile(secondPath, JSON.stringify({
+        ...base, id: "task-b",
+        ext: { ...base.ext, [ACCEPTANCE_CONTINUITY_EXTENSION]: acceptanceContinuity("task-b", criteria, firstFingerprint) },
+      }));
+      if (accepted) {
+        await dispatch("task-b", secondPath, criteria, callID);
+      } else {
+        await assert.rejects(() => dispatch("task-b", secondPath, criteria, callID),
+          (error: unknown) => error instanceof HandoffDeniedError &&
+            error.defects.includes("handoff /ext/sortie-dogs~1acceptance-continuity acceptance_parent_continuity_mismatch"));
+      }
+    };
+    await dispatchFollowUp([firstCriteria[1]!, firstCriteria[0]!], "reordered-parent");
+    await dispatchFollowUp(firstCriteria, "changed-task-without-strict-append");
+    await dispatchFollowUp(["add grass clusters", ...firstCriteria], "inserted-before-parent");
+    await dispatchFollowUp([firstCriteria[0]!, "add grass clusters", firstCriteria[1]!], "inserted-between-parent");
+    await hooks["tool.execute.before"]!(
+      { tool: "task", sessionID: "root", callID: "lane-blocker" },
+      { args: { subagent_type: "dog-worker", prompt: readOnlyWorkerPrompt(directory) } },
+    );
+    const rejectedCriteria = [...firstCriteria, "rejected staged criterion"];
+    await writeFile(secondPath, JSON.stringify({
+      ...base, id: "task-b",
+      ext: { ...base.ext, [ACCEPTANCE_CONTINUITY_EXTENSION]: acceptanceContinuity(
+        "task-b", rejectedCriteria, firstFingerprint,
+      ) },
+    }));
+    await assert.rejects(() => dispatch("task-b", secondPath, rejectedCriteria, "rejected-before-dispatch"),
+      /SORTIE_FAST_LANE_DENIED: WORKER_LIMIT/u);
+    await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "lane-blocker" }, {});
+    const correctedCriteria = [...firstCriteria, "corrected criterion"];
+    await writeFile(thirdPath, JSON.stringify({
+      ...base, id: "task-c",
+      ext: { ...base.ext, [ACCEPTANCE_CONTINUITY_EXTENSION]: acceptanceContinuity(
+        "task-c", correctedCriteria, firstFingerprint,
+      ) },
+    }));
+    await dispatch("task-c", thirdPath, correctedCriteria, "corrected-after-rejection");
+  });
+});
+
+test("global stale marker blocks dispatch when no project marker exists", async () => {
+  await withProject("global-asset-version-skew", async (directory) => {
+    const globalRoot = process.env.OPENCODE_CONFIG_DIR!;
+    await rm(globalRoot, { recursive: true, force: true });
+    await mkdir(globalRoot, { recursive: true });
+    await writeFile(join(globalRoot, "sortie-dogs.version"), "0.3.33-readable-terminal-report-v1\n");
+    try {
+      const hooks = await SortieDogsPlugin({ directory });
+      await hooks["chat.message"]!(
+        { sessionID: "root", agent: "dog-coordinator" },
+        { message: { agent: "dog-coordinator", model: {} }, parts: [{ type: "text", text: "task" }] },
+      );
+      await assert.rejects(() => hooks["tool.execute.before"]!(
+        { tool: "task", sessionID: "root", callID: "global-skewed-worker" },
+        { args: { subagent_type: "dog-worker", prompt: readOnlyWorkerPrompt(directory) } },
+      ), /SORTIE_FRESH_SESSION_REQUIRED: installed agent assets/u);
+    } finally {
+      await rm(globalRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+test("current global marker enables acceptance continuity enforcement", async () => {
+  await withProject("global-current-continuity", async (directory) => {
+    const globalRoot = process.env.OPENCODE_CONFIG_DIR!;
+    await rm(globalRoot, { recursive: true, force: true });
+    await mkdir(globalRoot, { recursive: true });
+    await writeFile(join(globalRoot, "sortie-dogs.version"), `${RUNTIME_ASSET_VERSION}\n`);
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify({
+      ...fixture.manifest,
+      validation: ["npm test"],
+    }));
+    const handoffPath = join(directory, "handoff.task-global.json");
+    await writeFile(handoffPath, JSON.stringify({
+      ...writeGateHandoff(directory, "operation-manifest.json"),
+      id: "task-global",
+    }));
+    try {
+      const hooks = await SortieDogsPlugin({ directory });
+      await hooks["chat.message"]!(
+        { sessionID: "root", agent: "dog-coordinator" },
+        { message: { agent: "dog-coordinator", model: {} }, parts: [{ type: "text", text: "task" }] },
+      );
+      await assert.rejects(() => hooks["tool.execute.before"]!(
+        { tool: "task", sessionID: "root", callID: "global-current-worker" },
+        { args: { subagent_type: "dog-worker", prompt: [
+          "task_id: task-global",
+          "role: implementation",
+          `project_root: ${directory}`,
+          `handoff_path: ${handoffPath}`,
+          "source_manifest: [allowed.txt]",
+          "operation_manifest: operation-manifest.json",
+          "acceptance: preserve exact quality",
+          "validation: npm test",
+        ].join("\n") } },
+      ), (error: unknown) => error instanceof HandoffDeniedError &&
+        error.defects.includes("handoff /ext/sortie-dogs~1acceptance-continuity acceptance_continuity_absent"));
+    } finally {
+      await rm(globalRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+test("present corrupt project markers override a current global marker and fail closed", async () => {
+  await withProject("project-marker-corruption", async (directory) => {
+    const globalRoot = process.env.OPENCODE_CONFIG_DIR!;
+    await rm(globalRoot, { recursive: true, force: true });
+    await mkdir(globalRoot, { recursive: true });
+    await writeFile(join(globalRoot, "sortie-dogs.version"), `${RUNTIME_ASSET_VERSION}\n`);
+    await mkdir(join(directory, ".opencode"));
+    const marker = join(directory, ".opencode", "sortie-dogs.version");
+    await writeFile(marker, "");
+    try {
+      const hooks = await SortieDogsPlugin({ directory });
+      const rejectSession = async (sessionID: string) => {
+        await hooks["chat.message"]!(
+          { sessionID, agent: "dog-coordinator" },
+          { message: { agent: "dog-coordinator", model: {} }, parts: [{ type: "text", text: "task" }] },
+        );
+        await assert.rejects(() => hooks["tool.execute.before"]!(
+          { tool: "task", sessionID, callID: `worker-${sessionID}` },
+          { args: { subagent_type: "dog-worker", prompt: readOnlyWorkerPrompt(directory) } },
+        ), /SORTIE_FRESH_SESSION_REQUIRED: installed agent assets/u);
+      };
+      await rejectSession("empty-marker-root");
+      await rm(marker);
+      await mkdir(marker);
+      await rejectSession("directory-marker-root");
+    } finally {
+      await rm(globalRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+test("asset version skew stays blocked until a fresh plugin session", async () => {
+  await withProject("asset-version-skew-block", async (directory) => {
+    await mkdir(join(directory, ".opencode"));
+    const marker = join(directory, ".opencode", "sortie-dogs.version");
+    await writeFile(marker, "0.3.33-readable-terminal-report-v1\n");
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+    const hooks = await SortieDogsPlugin({ directory });
+    await hooks["chat.message"]!(
+      { sessionID: "root", agent: "dog-coordinator" },
+      { message: { agent: "dog-coordinator", model: {} }, parts: [{ type: "text", text: "task" }] },
+    );
+    const dispatch = (sessionID = "root", prompt = "role: implementation") => hooks["tool.execute.before"]!(
+      { tool: "task", sessionID, callID: `skewed-worker-${sessionID}` },
+      { args: { subagent_type: "dog-worker", prompt } },
+    );
+    await assert.rejects(dispatch, /SORTIE_FRESH_SESSION_REQUIRED: installed agent assets/u);
+    await writeFile(marker, `${RUNTIME_ASSET_VERSION}\n`);
+    await assert.rejects(dispatch, /SORTIE_FRESH_SESSION_REQUIRED: installed agent assets/u);
+    await hooks["chat.message"]!(
+      { sessionID: "fresh-root", agent: "dog-coordinator" },
+      { message: { agent: "dog-coordinator", model: {} }, parts: [{ type: "text", text: "task" }] },
+    );
+    await dispatch("fresh-root", readOnlyWorkerPrompt(directory));
   });
 });
 

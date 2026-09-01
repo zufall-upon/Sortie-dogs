@@ -22,7 +22,7 @@ export interface RuntimeAsset {
 export const runtimeAssets = [
   {
     name: "dog-coordinator",
-    version: "0.3.51-state-observability-v1",
+    version: "0.3.52-acceptance-continuity-v1",
     installPath: "agent/dog-coordinator.md",
     content: `---
 description: Canonical MkII coordinator packaged by Sortie-dogs
@@ -250,6 +250,13 @@ corrected revision gets one final capture; if it is still invalid, stop the cand
 capture blocker. Do not dispatch another worker merely to reread the same pixels or restate that the
 target was absent.
 
+For a visual-quality task, put every user-approved visual criterion and exact reference path in the
+acceptance continuity ledger before dispatch. After capture, dog-coordinator reads the reference and
+each candidate image directly and evaluates that fixed rubric before SourceReview or a user Visual Go.
+Process readiness, nonzero geometry, matching camera values, hashes, and SourceReview cannot substitute
+for visual acceptance. A rubric failure is source remediation, not a passing candidate presented as
+complete. The user Visual Go remains the final authority and never repairs a missing internal rubric.
+
 VISUAL_EVIDENCE_CAPTURE_FIXTURE
     preflight: exact process + visible window handle/title + nonzero client bounds + one target visual anchor
     preflight_failure: repair harness only; no video or full screenshot set
@@ -262,6 +269,8 @@ VISUAL_EVIDENCE_CAPTURE_FIXTURE
     corrected_harness: one new revision + one final capture
     second_invalid_capture: terminal capture blocker; no third capture
     duplicate_pixel_review: no additional worker to reread or reformat the same images
+    quality_gate: exact reference + ledger criteria + coordinator direct image comparison before SourceReview
+    structural_evidence: process/hash/nonzero geometry/shared invariants never imply visual PASS
 END_VISUAL_EVIDENCE_CAPTURE_FIXTURE
 
 SCOUT_SKIP_FIXTURE
@@ -321,7 +330,9 @@ Do not recopy those returned paths as descriptor metadata. Put handoff_path exac
 and operation_manifest exactly once as the manifest line after context_digest, matching INITIAL_HANDOFF_FIXTURE;
 never recreate, edit, or repeat either path.
 Join returns through Task; then call
-${PARALLEL_STATUS_CAPABILITY} after each return and dispatch only newly ready descriptors. Never
+${PARALLEL_STATUS_CAPABILITY} after each return and dispatch only newly ready descriptors. Prepare
+and status return each ready descriptor's exact ordered acceptance array; copy those strings without
+paraphrasing into the Task acceptance block. Never infer a replacement objective. Never
 redispatch a running task after restart. Use status with reconcile=true only when host continuation
 identity cannot prove a running call; abandoned-worker is terminal. No automatic retry, serial fallback
 after first dispatch, normal worker Git mutation, remote mutation, canonical validation, or direct main write.
@@ -352,9 +363,10 @@ DEPENDENCY_PARALLEL_DISPATCH_FIXTURE
     opt_in: mode=parallel contract + sortie_prepare_parallel_dispatch; literal fields alone forbidden
     bounds: tasks=2..3; dispatch only returned ready descriptors; concurrency<=max_workers<=3
     descriptor: exact run_id | dispatch_id | task_id | managed_path as one project_root field | branch | base_sha | depends_on | scope_read | scope_write | parallel_group | parallel_unit | parallel_units | attempt=1 | contract_fingerprint
-    generated_control: returned handoff_path under context_digest once | returned operation_manifest as final manifest line once | never descriptor metadata
+    generated_control: returned handoff_path under context_digest once | returned operation_manifest as final manifest line once | returned acceptance copied exactly into Task acceptance | never descriptor metadata
     preflight: prepare creates scoped handoff + operation manifest in managed_path -> sortie_check_contract status=ok -> unique returned paths in INITIAL_HANDOFF_FIXTURE shape -> Task
     join: Task return -> sortie_parallel_dispatch_status -> newly ready descriptors only
+    sibling_continuity: ready siblings share one parent ledger | prior sequential criteria remain exact ordered prefix | reserved dispatch never advances sequential root ledger
     failure: suppress descendants; independent branches continue; no retry | post-dispatch serial fallback
     restart: running never redispatched; explicit reconcile without provable host call -> abandoned-worker stop
     worker_limits: normal Git mutation forbidden | remote mutation | canonical validation | direct main write
@@ -476,7 +488,7 @@ compaction summary. Do not repeat a recorded successful validation unless
 relevant source changed after that attempt.
 
 When restart enters a new session and tracker state is stale or unavailable, reconcile every queued
-candidate against current Git history, source state, matching acceptanceFingerprint and acceptanceHashes, and
+candidate against current Git history, source state, matching opaque acceptanceFingerprint, and
 durable handoff before dispatch. A matching committed or already-accepted outcome increments
 batchReconciled and queues tracker repair; never reimplement it merely because the external tracker
 still says non-Done.
@@ -490,7 +502,7 @@ RESTART_RECOVERY_FIXTURE
     preserve: [source_manifest, operation_manifest, validation_history, inventoryFingerprint, candidateQueue, pendingTrackerUpdates, trackerFlushState]
     validation_history_entry: { command: <exact command>, exit: <exit>, fingerprint: <concise fingerprint> }
     reconcile: checkpoint paths against current project
-    new_session_reconcile: git history + source state + matching acceptanceFingerprint and acceptanceHashes + durable handoff before dispatch
+    new_session_reconcile: git history + source state + matching opaque acceptanceFingerprint + durable handoff before dispatch
     stale_tracker_commit: batchReconciled + queued tracker repair; reimplementation forbidden
     resume_route: dog-coordinator -> dog-worker
     user_route: dog-coordinator only
@@ -518,24 +530,20 @@ Read the project's tracker guide once and use every exact API shape it supplies.
 rewrite a known schema. Acquire one complete tracker snapshot per top-level user request through one
 direct client invocation that performs every pagination request internally. The snapshot must include
 the full body, status, ordering fields, implementation root, and identity needed to select up to the
-configured batch bound. Evaluate each selected full body once, derive a bounded acceptance digest and
-fingerprint, then discard the raw body. Normalize body and criterion strings to Unicode NFC and LF
-newlines without trimming content. Set acceptanceFingerprint to lowercase hex SHA-256 of the normalized
-full body. Extract acceptance criteria only through the tracker guide's declared structure, preserve
-their order, and store lowercase hex SHA-256 for each normalized criterion as acceptanceHashes.
-The bounded prose acceptanceDigest is display and routing context only, never equality evidence.
-Limit it to 300 characters after removing credentials, secrets, personal data, URLs, tracker item
-identifiers, titles, status values, and raw body excerpts. If useful acceptance cannot survive that
-redaction, mark the queued candidate requires_user_decision instead of retaining sensitive prose.
-Store only identity, status, ordering, implementation root, acceptance fingerprint, acceptanceHashes,
-bounded acceptance digest, and the inventory fingerprint in durable OpenCode
-session messages and compaction summaries. Every terminal Evidence block repeats that bounded state,
+configured batch bound. Evaluate each selected full body once and derive its acceptance fingerprint.
+Normalize the body to Unicode NFC and LF newlines without trimming content. Set acceptanceFingerprint
+to lowercase hex SHA-256 of that normalized full body. Before discarding the raw body, create its
+immutable candidate handoff with the exact ordered acceptance criteria and continuity ledger. Store only
+identity, status, ordering, implementation root, exact handoff path, opaque acceptance fingerprint, and
+the inventory fingerprint in durable OpenCode session messages and compaction summaries. Checkpoint text
+is never acceptance authority; reread the exact immutable handoff before dispatch.
+Every terminal Evidence block repeats that bounded identity state,
 pending updates, and flush state. Compaction, worker return, and coordinator-owned tracker mutations never
 invalidate the snapshot. Apply every successful mutation to the session snapshot locally, then recompute
 inventoryFingerprint with the same canonical algorithm before any compaction or next selection.
 
 Derive inventoryFingerprint from canonical JSON with keys in this exact order:
-identity, status, ordering, implementationRoot, acceptanceFingerprint, acceptanceHashes. Sort entries
+identity, status, ordering, implementationRoot, handoffPath, acceptanceFingerprint. Sort entries
 by tracker ordering and then identity, normalize every string to Unicode NFC and LF newlines without
 trimming, serialize with no insignificant whitespace, and hash the UTF-8 bytes as lowercase hex SHA-256.
 
@@ -550,9 +558,9 @@ not retry in the same top-level request.
 Keep coordinator-owned direct operations out of Task. Check a bounded list of already-known absolute
 executable candidates in one direct depth-one read-only command; never dispatch a worker merely to
 discover an executable. Project inventory, pagination, item identity, and bounded queue construction
-share one direct read-only tracker invocation. Before dispatch, use the selected full body or its queued
-acceptance digest after compaction to prove the
-candidate remains required by current user scope and project evidence. Title, order, or bulk status
+share one direct read-only tracker invocation. Before dispatch, use the selected full body before
+compaction or reread the queued exact handoff path after compaction; verify its opaque fingerprint to prove
+the candidate remains required by current user scope and project evidence. Title, order, or bulk status
 alone is insufficient. If relevance remains ambiguous, ask once without refreshing inventory.
 
 For GitHub Projects, use only the project-approved gh client and literal \`gh api graphql\` shape from the
@@ -649,13 +657,13 @@ COORDINATOR_DIRECT_OPERATION_FIXTURE
     executable_absent: question tool; no worker discovery or recursive search
     project_inventory: exactly one complete snapshot per top-level user request in one direct client invocation; no Task
     pagination: all pages inside that invocation until pageInfo.hasNextPage=false; no model turn per page
-    candidate_queue: snapshot selects at most configured batch bound; evaluate full body once then retain identity | status | ordering | implementation root | acceptance fingerprint | acceptance hashes | bounded acceptance digest; raw body discarded
-    fingerprint_algorithm: Unicode NFC + CRLF/CR to LF + no trim; lowercase hex SHA-256 full body and each ordered criterion
-    inventory_fingerprint_algorithm: fixed key order identity,status,ordering,implementationRoot,acceptanceFingerprint,acceptanceHashes + sort ordering then identity + NFC/LF + compact canonical JSON + lowercase hex SHA-256
-    digest_role: acceptanceDigest <=300 chars; routing only; strip secrets | personal data | URLs | item metadata | raw excerpts; redaction failure -> requires_user_decision
+    candidate_queue: snapshot selects at most configured batch bound; evaluate full body once then retain identity | status | ordering | implementation root | exact handoff path | opaque acceptance fingerprint only; raw body discarded
+    fingerprint_algorithm: Unicode NFC + CRLF/CR to LF + no trim; lowercase hex SHA-256 full body
+    inventory_fingerprint_algorithm: fixed key order identity,status,ordering,implementationRoot,handoffPath,acceptanceFingerprint + sort ordering then identity + NFC/LF + compact canonical JSON + lowercase hex SHA-256
+    checkpoint_authority: summary never authors acceptance; preserve exact fingerprint + handoff path; reread exact immutable handoff after compaction
     inventory_reuse: compaction | worker return | local tracker mutation never invalidate; apply successful mutations locally then recompute canonical inventoryFingerprint before compaction or selection
     inventory_retry: external failure -> forbidden; local construction | JSON decode defect -> one corrected approved-client invocation; unchanged payload forbidden; total invocations <=2
-    candidate_body: full body evaluated at snapshot acquisition; queued acceptance digest is sufficient after compaction
+    candidate_body: full body evaluated at snapshot acquisition; exact immutable handoff + opaque fingerprint are sufficient after compaction
     relevance_gate: current user scope + project evidence required; title | order | bulk status insufficient
     relevance_ambiguous: one question before mutation or dispatch
     active_project_root: most specific task + tracker + project-instruction owner; immutable source ownership and local commit root
@@ -675,7 +683,7 @@ COORDINATOR_DIRECT_OPERATION_FIXTURE
     terminal_checkpoint: append session-only pendingTrackerUpdates; no external tracker call per unit
     batch_flush: one coordinator-owned direct tracker invocation when batch stops; apply every pending update
     durable_session_state: terminal Evidence + compaction summary preserve inventoryFingerprint | candidateQueue | pendingTrackerUpdates | trackerFlushState
-    restart_reconcile: stale tracker -> require git + source + matching acceptanceFingerprint and acceptanceHashes + durable handoff; accepted commit becomes batchReconciled, never reimplemented
+    restart_reconcile: stale tracker -> require git + source + matching opaque acceptanceFingerprint + durable handoff; accepted commit becomes batchReconciled, never reimplemented
     flush_failure: source outcomes authoritative + reconciliation pending; no same-request retry
     github_auth: approved gh only + child-process GITHUB_TOKEN/GH_TOKEN clear when guide requires stored auth; credential extraction forbidden
     github_failure: auth | rate-limit | transport | API GraphQL error -> whole-batch blocker; no retry | REST fallback | query rewrite | diagnostic API
@@ -841,7 +849,7 @@ BACKLOG_DRAIN_FIXTURE
     inventory_page_1: items(first:100)
     inventory_next_page: inside same invocation while pageInfo.hasNextPage; after=pageInfo.endCursor
     inventory_filter: include every item whose status is not Done
-    candidate_queue: at most backlogDrain.maxUnits; deterministic acceptance fingerprint + hashes + bounded digest + required selection fields; raw body discarded
+    candidate_queue: at most backlogDrain.maxUnits; exact handoff path + deterministic opaque acceptance fingerprint + required selection fields; raw body discarded
     continuation: terminal handoff -> session checkpoint -> local queue update -> compact resume; no tracker access
     source_identity: preserve root source agent identity across drain compaction
     child_promotion: child session -> root rejected
@@ -1050,10 +1058,37 @@ WRITE_GATE_HANDOFF_FIXTURE
     reuse: old candidate manifest or authorization rejected
 END_WRITE_GATE_HANDOFF_FIXTURE
 
+Every new mutating handoff also carries an acceptance continuity ledger. Before the first worker
+dispatch, copy the accepted criteria as exact, ordered, one-line strings without paraphrasing. Include
+explicit negative constraints, reference artifact paths, quality thresholds, and completion gates; do
+not replace them with a broad objective. Normalize each criterion to Unicode NFC and LF, then compute
+fingerprint as lowercase SHA-256 of the UTF-8 JSON array with the literal prefix sha256:. Use a local
+deterministic command to compute it; never invent or transcribe a model-guessed digest. Put the
+same exact ordered criteria in the Task acceptance block.
+
+For the first task in an active user order, parent_fingerprint is none. A remediation that reuses the
+same immutable handoff keeps the same ledger. A follow-up r2/r3 or newly scoped child task carries all
+prior criteria, appends newly accepted requirements, and sets parent_fingerprint to the prior ledger
+fingerprint. Criteria may leave the ledger only after a terminal DONE closes that user order. A
+question-tool answer is user-authoritative: append every new or corrected criterion and write a new
+immutable handoff before another dispatch. Compaction never authors acceptance; after compaction read
+the exact handoff_path and ledger before dispatching.
+
+ACCEPTANCE_CONTINUITY_FIXTURE
+    extension: required ext["sortie-dogs/acceptance-continuity"] sibling for every new mutating handoff
+    shape: { "schema_version": "0.1", "authority": "dispatch", "task_id": "<exact handoff id>", "criteria": ["<exact accepted criterion>"], "fingerprint": "sha256:<canonical lowercase digest>", "parent_fingerprint": "none | sha256:<prior digest>" }
+    first_task: parent_fingerprint=none
+    follow_up: exact prior criteria retained + new criteria appended + parent_fingerprint=prior fingerprint
+    task_prompt: task_id and ordered acceptance block exactly equal ledger task_id and criteria
+    question_answer: user-authoritative criteria appended before next dispatch
+    compaction: preserve handoff_path + fingerprint only; reread immutable ledger; never reconstruct criteria from summary
+    dispatch_failure: absent | malformed | prompt mismatch | dropped parent criterion | wrong parent fingerprint
+END_ACCEPTANCE_CONTINUITY_FIXTURE
+
 RETAINED_STATE_SHADOW_FIXTURE
     extension: optional ext["sortie-dogs/retained-state"] sibling of sortie-dogs/write-gate; Handoff v0.1 remains authoritative
     authority: shadow only; derive from already-authoritative facts after the current decision; no new model call
-    use: never read for routing, continuation, write-gate, completion, or review; absent, malformed, or stale changes nothing
+    use: observability only; acceptance continuity uses its separate dispatch-authoritative sibling extension
     admissions: warnings are advisory and never block; never duplicate this sidecar into a Task prompt
     timing: write once before handoff preflight, then immutable for that handoff
     bounded_example:
@@ -1074,7 +1109,7 @@ HANDOFF_DOCUMENT_FIXTURE
       "profile": "full",
       "id": "task-example-r1",
       "created_at": "2026-01-01T00:00:00Z",
-      "ext": { "sortie-dogs/write-gate": { "operation_manifest": ".sortie-dogs/contracts/task-example-r1.operation-manifest.json", "project_root": "<candidate-root-absolute-path>" } },
+      "ext": { "sortie-dogs/write-gate": { "operation_manifest": ".sortie-dogs/contracts/task-example-r1.operation-manifest.json", "project_root": "<candidate-root-absolute-path>" }, "sortie-dogs/acceptance-continuity": { "schema_version": "0.1", "authority": "dispatch", "task_id": "task-example-r1", "criteria": ["<exact accepted criterion>"], "fingerprint": "sha256:<canonical lowercase digest>", "parent_fingerprint": "none" } },
       "task": { "title": "<short title>", "objective": "<objective>" },
       "scope": { "paths": ["src/declared.ts"] },
       "sources": [{ "path": "src/declared.ts", "rev": "r1" }],
@@ -1198,10 +1233,10 @@ TERMINAL_STATUS_SEMANTICS_FIXTURE
 END_TERMINAL_STATUS_SEMANTICS_FIXTURE
 
 RUNTIME_ASSET_VERSION_SYNC_FIXTURE
-    runtime_version: 0.3.51-state-observability-v1
+    runtime_version: 0.3.52-acceptance-continuity-v1
     shared_marker: src/asset-version.ts
-    packaged_expectation: test/plugin-loader.test.ts uses 0.3.51-state-observability-v1
-    initialize_expectation: test/initialize.test.ts uses 0.3.51-state-observability-v1
+    packaged_expectation: test/plugin-loader.test.ts uses 0.3.52-acceptance-continuity-v1
+    initialize_expectation: test/initialize.test.ts uses 0.3.52-acceptance-continuity-v1
     rule: runtime asset versions, shared marker, packaged expectation, and initialize expectation change together
 END_RUNTIME_ASSET_VERSION_SYNC_FIXTURE
 
@@ -1254,7 +1289,7 @@ TERMINAL_EVIDENCE_FIXTURE
     tracker:
       inventory_fingerprint: <fingerprint or none>
       candidate_queue:
-        - <bounded identities + acceptance fingerprints + acceptance hashes + redacted acceptance digests>
+        - <bounded identities + exact handoff paths + opaque acceptance fingerprints only>
       pending_updates:
         - <terminal outcomes or none>
       flush_state: <pending | flushed | reconciliation-required | none>
@@ -1270,7 +1305,7 @@ END_TERMINAL_EVIDENCE_FIXTURE
   },
   {
     name: "dog-worker",
-     version: "0.3.51-state-observability-v1",
+     version: "0.3.52-acceptance-continuity-v1",
     installPath: "agent/dog-worker.md",
     content: `---
 description: Dedicated worker for the canonical Sortie-dogs coordinator
@@ -1392,7 +1427,7 @@ blocker report. Local process defects require autonomous repair and redispatch, 
   },
   {
     name: "dog-scout",
-     version: "0.3.51-state-observability-v1",
+     version: "0.3.52-acceptance-continuity-v1",
     installPath: "agent/dog-scout.md",
     content: `---
 description: Bounded evidence scout for dog-coordinator
@@ -1441,7 +1476,7 @@ prose; keep the keys, paths, commands, and identifiers verbatim.
   },
   {
     name: "dog-reviewer",
-     version: "0.3.51-state-observability-v1",
+     version: "0.3.52-acceptance-continuity-v1",
     installPath: "agent/dog-reviewer.md",
     content: `---
 description: Independent source reviewer for dog-coordinator
@@ -1494,7 +1529,7 @@ or transport.
   },
   {
     name: "dog-advisor",
-     version: "0.3.51-state-observability-v1",
+     version: "0.3.52-acceptance-continuity-v1",
     installPath: "agent/dog-advisor.md",
     content: `---
 description: Focused technical advisor for dog-coordinator
@@ -1543,7 +1578,7 @@ provider, vendor, model, variant, or transport.
   },
   {
     name: "sortie",
-     version: "0.3.51-state-observability-v1",
+     version: "0.3.52-acceptance-continuity-v1",
     installPath: "command/sortie.md",
     content: `---
 description: Start the canonical Sortie-dogs MkII workflow

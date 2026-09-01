@@ -116,6 +116,20 @@ export type {
 } from "./core/consultation.js";
 export type * from "./core/types.js";
 export {
+  ACCEPTANCE_CONTINUITY_AUTHORITY,
+  ACCEPTANCE_CONTINUITY_EXTENSION,
+  ACCEPTANCE_CONTINUITY_SCHEMA_VERSION,
+  acceptanceContinuityFingerprint,
+  inspectAcceptanceContinuity,
+  MAX_ACCEPTANCE_CONTINUITY_BYTES,
+  MAX_ACCEPTANCE_CRITERIA,
+  normalizeAcceptanceCriteria,
+} from "./core/acceptance-continuity.js";
+export type {
+  AcceptanceContinuityInspection,
+  AcceptanceContinuityLedger,
+} from "./core/acceptance-continuity.js";
+export {
   inspectRetainedStateCapsule,
   MAX_RETAINED_STATE_BYTES,
   MAX_RETAINED_STATE_ITEMS,

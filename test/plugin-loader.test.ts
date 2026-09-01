@@ -121,7 +121,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       join(consumer, "node_modules", "sortie-dogs", "package.json"),
       "utf8",
     )) as { version?: string; scripts?: { prebuild?: string } };
-    assert.equal(installedPackage.version, "0.7.0");
+    assert.equal(installedPackage.version, "0.7.1");
     assert.equal(
       installedPackage.scripts?.prebuild,
       "node --input-type=module --eval \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true });\"",
@@ -188,6 +188,20 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       "RetainedStateWarning",
       "RetainedValidationAttempt",
     ] as const;
+    const acceptanceContinuityValueNames = [
+      "ACCEPTANCE_CONTINUITY_AUTHORITY",
+      "ACCEPTANCE_CONTINUITY_EXTENSION",
+      "ACCEPTANCE_CONTINUITY_SCHEMA_VERSION",
+      "acceptanceContinuityFingerprint",
+      "inspectAcceptanceContinuity",
+      "MAX_ACCEPTANCE_CONTINUITY_BYTES",
+      "MAX_ACCEPTANCE_CRITERIA",
+      "normalizeAcceptanceCriteria",
+    ] as const;
+    const acceptanceContinuityTypeNames = [
+      "AcceptanceContinuityInspection",
+      "AcceptanceContinuityLedger",
+    ] as const;
     assert.doesNotMatch(rootDeclaration, /export \* from "\.\/core\/consultation\.js";/);
     assert.match(rootDeclaration, /export \{[^}]+\} from "\.\/core\/consultation\.js";/s);
     assert.match(rootDeclaration, /export type \{[^}]+\} from "\.\/core\/consultation\.js";/s);
@@ -195,6 +209,9 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       assert.match(rootDeclaration, new RegExp(`\\b${publicName}\\b`));
     }
     for (const publicName of [...retainedValueNames, ...retainedTypeNames]) {
+      assert.match(rootDeclaration, new RegExp(`\\b${publicName}\\b`));
+    }
+    for (const publicName of [...acceptanceContinuityValueNames, ...acceptanceContinuityTypeNames]) {
       assert.match(rootDeclaration, new RegExp(`\\b${publicName}\\b`));
     }
 
@@ -411,7 +428,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     for (const asset of loaded.runtimeAssets) {
       assert.equal(asset.version, RUNTIME_ASSET_VERSION, `${asset.name} version must match the shared marker`);
     }
-    assert.equal(RUNTIME_ASSET_VERSION, "0.3.51-state-observability-v1");
+    assert.equal(RUNTIME_ASSET_VERSION, "0.3.52-acceptance-continuity-v1");
     const coordinatorFrontmatter = /^---\r?\n([\s\S]*?)\r?\n---/u.exec(coordinator.content)?.[1];
     assert.ok(coordinatorFrontmatter);
     assert.match(coordinatorFrontmatter, /^model: openai\/gpt-5\.6-terra$/m);
@@ -424,7 +441,10 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(coordinator.content, /RETAINED_STATE_SHADOW_FIXTURE/);
     assert.match(coordinator.content, /optional ext\["sortie-dogs\/retained-state"\] sibling of sortie-dogs\/write-gate/);
     assert.match(coordinator.content, /warnings are advisory and never block/);
-    assert.match(coordinator.content, /never read for routing, continuation, write-gate, completion, or review/);
+    assert.match(coordinator.content, /acceptance continuity uses its separate dispatch-authoritative sibling extension/);
+    assert.match(coordinator.content, /ACCEPTANCE_CONTINUITY_FIXTURE/);
+    assert.match(coordinator.content, /question-tool answer is user-authoritative/);
+    assert.match(coordinator.content, /Compaction never authors acceptance/);
     const deniedScoutTools = [
       "bash",
       "webfetch",
@@ -580,7 +600,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       /validation_history_entry:\s*\{ command: <exact command>, exit: <exit>, fingerprint: <concise fingerprint> \}/,
     );
     assert.match(restartRecovery[1], /resume_route:\s*dog-coordinator -> dog-worker/);
-    assert.match(restartRecovery[1], /new_session_reconcile:\s*git history \+ source state \+ matching acceptanceFingerprint and acceptanceHashes \+ durable handoff before dispatch/);
+    assert.match(restartRecovery[1], /new_session_reconcile:\s*git history \+ source state \+ matching opaque acceptanceFingerprint \+ durable handoff before dispatch/);
     assert.match(restartRecovery[1], /stale_tracker_commit:\s*batchReconciled \+ queued tracker repair; reimplementation forbidden/);
     assert.match(restartRecovery[1], /user_route:\s*dog-coordinator only/);
     assert.match(coordinator.content, /dispatch implementation only to dog-worker/i);
@@ -664,7 +684,8 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     );
     assert.ok(parallelContract, "coordinator needs the immutable parallel artifact contract");
     assert.match(parallelContract[1], /artifact_exception:\s*active bound parallel dog-worker -> sortie_create_parallel_commit_artifact exactly once -> durable artifact acceptance before return -> immediate gate release/);
-    assert.match(parallelContract[1], /generated_control:\s*returned handoff_path under context_digest once \| returned operation_manifest as final manifest line once \| never descriptor metadata/);
+    assert.match(parallelContract[1], /generated_control:\s*returned handoff_path under context_digest once \| returned operation_manifest as final manifest line once \| returned acceptance copied exactly into Task acceptance \| never descriptor metadata/);
+    assert.match(parallelContract[1], /sibling_continuity:\s*ready siblings share one parent ledger \| prior sequential criteria remain exact ordered prefix \| reserved dispatch never advances sequential root ledger/);
     assert.match(parallelContract[1], /preflight:\s*prepare creates scoped handoff \+ operation manifest in managed_path -> sortie_check_contract status=ok -> unique returned paths in INITIAL_HANDOFF_FIXTURE shape -> Task/);
     assert.match(parallelContract[1], /artifact_restart:\s*durable running-task artifact -> exact replay; never create a second commit/);
     assert.match(parallelContract[1], /artifact_result:\s*targeted validation \| exact scoped A\/M\/D stage \| one managed-branch commit \| verified direct child\/object\/artifact \| bounded result/);
@@ -785,7 +806,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       /inventory_next_page:\s*inside same invocation while pageInfo\.hasNextPage; after=pageInfo\.endCursor/,
     );
     assert.match(backlogDrain[1], /inventory_filter:\s*include every item whose status is not Done/);
-    assert.match(backlogDrain[1], /candidate_queue:\s*at most backlogDrain\.maxUnits; deterministic acceptance fingerprint \+ hashes \+ bounded digest \+ required selection fields; raw body discarded/);
+    assert.match(backlogDrain[1], /candidate_queue:\s*at most backlogDrain\.maxUnits; exact handoff path \+ deterministic opaque acceptance fingerprint \+ required selection fields; raw body discarded/);
     assert.match(
       backlogDrain[1],
       /continuation:\s*terminal handoff -> session checkpoint -> local queue update -> compact resume; no tracker access/,
@@ -1346,7 +1367,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(sortie.content, /never route a worker to the user/i);
 
     for (const asset of loaded.runtimeAssets) {
-      assert.equal(asset.version, "0.3.51-state-observability-v1");
+      assert.equal(asset.version, "0.3.52-acceptance-continuity-v1");
       const frontmatter = asset.content.match(/^---\r?\n([\s\S]+?)\r?\n---\r?\n/);
       assert.ok(frontmatter, `${asset.name} must have frontmatter`);
       const entries = Object.fromEntries(

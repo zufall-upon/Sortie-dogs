@@ -3,6 +3,16 @@ import { lstat, mkdir, open, readFile, realpath, rm, stat } from "node:fs/promis
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import { RUNTIME_ASSET_VERSION } from "../asset-version.js";
+import {
+  ACCEPTANCE_CONTINUITY_AUTHORITY,
+  ACCEPTANCE_CONTINUITY_EXTENSION,
+  ACCEPTANCE_CONTINUITY_SCHEMA_VERSION,
+  acceptanceContinuityFingerprint,
+  inspectAcceptanceContinuity,
+  normalizeAcceptanceCriteria,
+  type AcceptanceContinuityLedger,
+} from "../core/acceptance-continuity.js";
+import { resolveGlobalConfigRoot } from "../core/initialize.js";
 import { normalizeRelativePath, RelativePathError } from "../core/path.js";
 import { ScopeLeaseError, ScopeLeaseRegistry, type ScopeLease } from "../core/scope-lease-registry.js";
 import {
@@ -109,6 +119,7 @@ const GIT_POINTER_LIMIT = 4096;
 const PARALLEL_OUTCOME_MARKER = "SORTIE_PARALLEL_OUTCOME";
 const CANONICAL_CONTRACT_DIRECTORY = ".sortie-dogs/contracts";
 const CANONICAL_CONTRACT_HANDOFF = `${CANONICAL_CONTRACT_DIRECTORY}/handoff.json`;
+const GENERATED_PARALLEL_ACCEPTANCE = "Complete the prepared parallel descriptor within its declared scope.";
 export const PARALLEL_COMMIT_ARTIFACT_CAPABILITY = "sortie_create_parallel_commit_artifact";
 
 export interface OpenCodePluginInput {
@@ -629,9 +640,12 @@ interface HandoffPathRegistration {
 
 interface InspectedContractIdentity {
   readonly explicitWriteGate: boolean;
+  readonly handoffID: string;
   readonly manifestPath: string;
   readonly projectRoot: string;
   readonly validationCommands: ReadonlySet<string>;
+  readonly acceptanceContinuity: AcceptanceContinuityLedger | undefined;
+  readonly acceptanceContinuityError: "absent" | "malformed" | "oversize" | undefined;
 }
 
 /** Accept a task-scoped sibling of a registered handoff without opening arbitrary directories. */
@@ -812,7 +826,7 @@ function taskHeaderCount(text: string, keys: readonly string[]): number {
 
 function taskInlineValues(text: string, keys: readonly string[]): readonly string[] {
   const aliases = keys.map((key) => key.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")).join("|");
-  return [...text.matchAll(new RegExp(`^\\s*(?:${aliases})\\s*:\\s*(\\S.*?)\\s*$`, "gimu"))]
+  return [...text.matchAll(new RegExp(`^[\\t ]*(?:${aliases})[\\t ]*:[\\t ]*(\\S.*?)[\\t ]*$`, "gimu"))]
     .map((match) => match[1]!);
 }
 
@@ -834,6 +848,39 @@ function taskBlockHasContent(text: string, keys: readonly string[]): boolean {
     return true;
   }
   return false;
+}
+
+function taskAcceptanceCriteria(text: string): readonly string[] | undefined {
+  const inline = taskInlineValues(text, ["acceptance"]);
+  if (inline.length === 1) {
+    const array = parseStringArray(inline[0]);
+    return normalizeAcceptanceCriteria(array ?? [unquoteValue(inline[0]!)]);
+  }
+  if (inline.length > 1) return undefined;
+  const lines = text.split(/\r?\n/u);
+  const headers = lines.flatMap((line, index) => {
+    const match = /^(\s*)acceptance\s*:\s*$/iu.exec(line);
+    return match === null ? [] : [{ index, indent: match[1]!.replaceAll("\t", "  ").length }];
+  });
+  if (headers.length !== 1) return undefined;
+  const values: string[] = [];
+  for (let index = headers[0]!.index + 1; index < lines.length; index += 1) {
+    const line = lines[index]!;
+    if (line.trim().length === 0) continue;
+    const indent = /^\s*/u.exec(line)![0].replaceAll("\t", "  ").length;
+    if (indent <= headers[0]!.indent) break;
+    const item = /^\s*-\s+(.+?)\s*$/u.exec(line)?.[1];
+    if (item === undefined) return undefined;
+    let value: string;
+    try {
+      value = item.startsWith("\"") ? JSON.parse(item) as string : unquoteValue(item);
+    } catch {
+      return undefined;
+    }
+    if (typeof value !== "string" || value.length === 0) return undefined;
+    values.push(value);
+  }
+  return values.length === 0 ? undefined : normalizeAcceptanceCriteria(values);
 }
 
 function taskContractText(text: string): string {
@@ -1124,7 +1171,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   let manifestAbsent = false;
   let bootstrapRequired = false;
   let bootstrapCompleted = false;
-  let assetVersionReported = false;
+  type AssetVersionStatus = "unmarked" | "current" | "mismatch";
+  const assetVersionPins = new Map<string, AssetVersionStatus>();
+  const rootAcceptanceContinuity = new Map<string, AcceptanceContinuityLedger>();
+  const parallelAcceptanceContinuity = new Map<string, AcceptanceContinuityLedger>();
   const globalConfig = await readOptionalGlobalConfig();
   type SessionOperation = "hostSessionIdentity" | "bootstrapControlState" | "collectRunMetrics";
   interface OperationMeasurement {
@@ -1310,7 +1360,6 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     loading = (async () => {
       try {
         project ??= await createProjectPaths(resolveProjectRoot(input));
-        await reportAssetVersionSkew(project);
         const projectConfig = await readOptionalProjectConfig(project);
         const environmentConfig = readEnvironmentConfig();
         const parsed = resolvePluginConfigurationSourcesWithGlobal(
@@ -1351,19 +1400,53 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
 
   /**
    * Installed agents and this plugin implement two halves of one contract. A project that installed
-   * a different asset version is reported once so the mismatch is visible before it shows up as an
-   * unexplained handshake failure. Reporting never blocks: reinstalling is the operator's decision.
+   * a different asset version is sticky for this plugin instance. Reinstalling files cannot update an
+   * already-running coordinator prompt, so worker dispatch remains blocked until a fresh session loads.
    */
-  async function reportAssetVersionSkew(paths: ProjectPaths): Promise<void> {
-    if (assetVersionReported) return;
-    assetVersionReported = true;
-    const marker = await readFile(paths.absolute(PROJECT_VERSION_MARKER), "utf8").catch(() => undefined);
-    const installed = marker?.trim();
-    if (installed === undefined || installed.length === 0 || installed === RUNTIME_ASSET_VERSION) return;
-    console.warn(
-      `Sortie-dogs: this project installed agent assets ${installed} but the loaded plugin ships ` +
-      `${RUNTIME_ASSET_VERSION}. Run "sortie-dogs init ." to reinstall the matching agents.`,
-    );
+  async function readAssetVersionMarker(path: string): Promise<
+    { readonly kind: "absent" } | { readonly kind: "corrupt" } | { readonly kind: "present"; readonly value: string }
+  > {
+    try {
+      const value = (await readFile(path, "utf8")).trim();
+      return value.length === 0 ? { kind: "corrupt" } : { kind: "present", value };
+    } catch (error) {
+      return isRecord(error) && error.code === "ENOENT" ? { kind: "absent" } : { kind: "corrupt" };
+    }
+  }
+
+  async function currentAssetVersionStatus(paths: ProjectPaths): Promise<AssetVersionStatus> {
+    const local = await readAssetVersionMarker(paths.absolute(PROJECT_VERSION_MARKER));
+    if (local.kind === "corrupt") return "mismatch";
+    if (local.kind === "present") return local.value === RUNTIME_ASSET_VERSION ? "current" : "mismatch";
+    let globalRoot: string;
+    try {
+      globalRoot = await resolveGlobalConfigRoot();
+    } catch {
+      return "mismatch";
+    }
+    const global = await readAssetVersionMarker(join(globalRoot, "sortie-dogs.version"));
+    if (global.kind === "absent") return "unmarked";
+    return global.kind === "present" && global.value === RUNTIME_ASSET_VERSION ? "current" : "mismatch";
+  }
+
+  async function pinAssetVersion(sessionID: string): Promise<AssetVersionStatus> {
+    const pinned = assetVersionPins.get(sessionID);
+    if (pinned !== undefined) return pinned;
+    project ??= await createProjectPaths(resolveProjectRoot(input));
+    const status = await currentAssetVersionStatus(project);
+    assetVersionPins.set(sessionID, status);
+    while (assetVersionPins.size > ACTIVE_SESSION_CACHE.maximum) {
+      const candidate = assetVersionPins.keys().next().value!;
+      if (coordinatorRoots.has(candidate)) break;
+      assetVersionPins.delete(candidate);
+    }
+    if (status === "mismatch") {
+      console.warn(
+        `Sortie-dogs: installed agent assets do not match ${RUNTIME_ASSET_VERSION}. ` +
+        "Repair the marker, then start a fresh coordinator session.",
+      );
+    }
+    return status;
   }
 
   /**
@@ -1651,6 +1734,25 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     };
   }
 
+  function parallelAcceptanceKey(descriptor: ParallelDispatchDescriptor): string {
+    return `${descriptor.run_id}\u0000${descriptor.dispatch_id}`;
+  }
+
+  function generatedParallelAcceptance(
+    descriptor: ParallelDispatchDescriptor,
+    parent: AcceptanceContinuityLedger | undefined,
+  ): AcceptanceContinuityLedger {
+    const criteria = [...(parent?.criteria ?? []), GENERATED_PARALLEL_ACCEPTANCE];
+    return {
+      schema_version: ACCEPTANCE_CONTINUITY_SCHEMA_VERSION,
+      authority: ACCEPTANCE_CONTINUITY_AUTHORITY,
+      task_id: descriptor.task_id,
+      criteria,
+      fingerprint: acceptanceContinuityFingerprint(criteria),
+      parent_fingerprint: parent?.fingerprint ?? "none",
+    };
+  }
+
   async function ensureParallelContractDirectory(canonicalRoot: string): Promise<string> {
     let parent = canonicalRoot;
     for (const segment of [".sortie-dogs", "contracts"]) {
@@ -1676,6 +1778,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   async function createParallelControlFiles(
     descriptor: ParallelDispatchDescriptor,
     validationCommands: readonly string[],
+    parentAcceptance?: AcceptanceContinuityLedger,
   ): Promise<void> {
     const canonicalRoot = await realpath(descriptor.managed_path);
     if (!samePath(canonicalRoot, descriptor.managed_path)) {
@@ -1686,6 +1789,32 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const expectedContractDirectory = resolve(canonicalRoot, CANONICAL_CONTRACT_DIRECTORY);
     if (!samePath(contractDirectory, expectedContractDirectory)) {
       throw new ParallelDispatchError("lifecycle-failed", "Parallel contract directory escapes the managed worktree.");
+    }
+    const expectedAcceptance = generatedParallelAcceptance(descriptor, parentAcceptance);
+    let acceptance = parallelAcceptanceContinuity.get(parallelAcceptanceKey(descriptor));
+    if (acceptance === undefined) {
+      const existing = await readFile(paths.handoff_path, "utf8").catch(() => undefined);
+      if (existing !== undefined) {
+        try {
+          const parsed = JSON.parse(existing) as unknown;
+          const validated = validateHandoffSchema(parsed);
+          const inspectedAcceptance = validated.ok ? inspectAcceptanceContinuity(validated.value).ledger : undefined;
+          if (inspectedAcceptance?.task_id === descriptor.task_id &&
+            inspectedAcceptance.criteria.at(-1) === GENERATED_PARALLEL_ACCEPTANCE &&
+            (parentAcceptance === undefined ||
+              (inspectedAcceptance.fingerprint === expectedAcceptance.fingerprint &&
+                inspectedAcceptance.parent_fingerprint === expectedAcceptance.parent_fingerprint))) {
+            acceptance = inspectedAcceptance;
+          }
+        } catch {
+          // Exact generated-content comparison below rejects malformed or unrelated existing controls.
+        }
+      }
+    }
+    acceptance ??= expectedAcceptance;
+    parallelAcceptanceContinuity.set(parallelAcceptanceKey(descriptor), acceptance);
+    while (parallelAcceptanceContinuity.size > ACTIVE_SESSION_CACHE.maximum * 3) {
+      parallelAcceptanceContinuity.delete(parallelAcceptanceContinuity.keys().next().value!);
     }
     const manifestValue = {
       version: "0.1.0",
@@ -1699,10 +1828,13 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       profile: "minimal",
       id: descriptor.task_id,
       created_at: new Date().toISOString(),
-      ext: { "sortie-dogs/write-gate": {
-        operation_manifest: relative(descriptor.managed_path, paths.operation_manifest).replaceAll("\\", "/"),
-        project_root: descriptor.managed_path,
-      } },
+      ext: {
+        "sortie-dogs/write-gate": {
+          operation_manifest: relative(descriptor.managed_path, paths.operation_manifest).replaceAll("\\", "/"),
+          project_root: descriptor.managed_path,
+        },
+        [ACCEPTANCE_CONTINUITY_EXTENSION]: acceptance,
+      },
       task: {
         title: `Parallel task ${descriptor.task_id}`,
         objective: "Complete the prepared parallel descriptor within its declared scope.",
@@ -1759,11 +1891,16 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     ]);
   }
 
-  async function ensureParallelReadyControls(snapshot: ParallelDispatchSnapshot): Promise<void> {
-    if (snapshot.archived || snapshot.cancelled || snapshot.ready.length === 0) return;
+  async function ensureParallelReadyControls(
+    snapshot: ParallelDispatchSnapshot,
+    parentAcceptance?: AcceptanceContinuityLedger,
+  ): Promise<void> {
+    if (snapshot.archived || snapshot.cancelled) return;
     await ensureLoaded();
     const validationCommands = loaded?.manifest?.validation ?? [];
-    await Promise.all(snapshot.ready.map((descriptor) => createParallelControlFiles(descriptor, validationCommands)));
+    await Promise.all(snapshot.tasks
+      .filter(({ phase }) => phase === "pending" || phase === "reserved")
+      .map(({ descriptor }) => createParallelControlFiles(descriptor, validationCommands, parentAcceptance)));
   }
 
   async function restoreActiveParallelControls(snapshot: ParallelDispatchSnapshot): Promise<void> {
@@ -1781,7 +1918,16 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       cancelled: snapshot.cancelled,
       archived: snapshot.archived,
       terminal_reason: snapshot.terminal_reason,
-      ready: snapshot.ready.map((descriptor) => ({ ...descriptor, ...parallelControlPaths(descriptor) })),
+      ready: snapshot.ready.map((descriptor) => {
+        const acceptance = parallelAcceptanceContinuity.get(parallelAcceptanceKey(descriptor));
+        return {
+          ...descriptor,
+          ...parallelControlPaths(descriptor),
+          acceptance: acceptance?.criteria ?? [],
+          acceptance_fingerprint: acceptance?.fingerprint,
+          acceptance_parent_fingerprint: acceptance?.parent_fingerprint,
+        };
+      }),
       tasks: snapshot.tasks.map(({ descriptor, worktree_id, phase, call_id, child_session_id, outcome, artifact }) => ({
         task_id: descriptor.task_id,
         worktree_id,
@@ -1898,9 +2044,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       const result = await coordinator.prepare(contract, ownerRoot);
       if (result.status === "serial-fallback") return JSON.stringify(result);
       try {
-        await ensureParallelReadyControls(result.snapshot);
+        await ensureParallelReadyControls(result.snapshot, rootAcceptanceContinuity.get(ownerRoot));
       } catch (error) {
-        await Promise.all(result.snapshot.ready.map((descriptor) =>
+        await Promise.all(result.snapshot.tasks.map(({ descriptor }) =>
           removeParallelControlFiles(descriptor).catch(() => undefined)));
         await coordinator.cancel(ownerRoot, result.snapshot.run_id).catch(() => undefined);
         throw error;
@@ -2300,11 +2446,15 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         resolve(inspectedProjectRoot, directory)));
     }
 
+    const continuity = inspectAcceptanceContinuity(validation.value);
     const identity = {
       explicitWriteGate: extension !== undefined,
+      handoffID: validation.value.id,
       manifestPath,
       projectRoot: inspectedProjectRoot,
       validationCommands: new Set(manifest.validation.map(normalizeCommand)),
+      acceptanceContinuity: continuity.ledger,
+      acceptanceContinuityError: continuity.error,
     };
     if (sessionID === undefined) return identity;
     const now = Date.now();
@@ -2727,6 +2877,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       else {
         coordinatorRoots.delete(sessionID);
         explicitCoordinatorModels.delete(sessionID);
+        assetVersionPins.delete(sessionID);
       }
     }
     const limit = ACTIVE_SESSION_CACHE.maximum - (reserveSlot ? 1 : 0);
@@ -2734,6 +2885,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       const sessionID = coordinatorRoots.keys().next().value!;
       coordinatorRoots.delete(sessionID);
       explicitCoordinatorModels.delete(sessionID);
+      assetVersionPins.delete(sessionID);
     }
   }
 
@@ -2879,6 +3031,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   function evictSession(sessionID: string): void {
     activeSessions.delete(sessionID);
     sessionOperationMetrics.delete(sessionID);
+    rootAcceptanceContinuity.delete(sessionID);
     abandonSessionLease(sessionID);
     sessionAuthorizations.delete(sessionID);
     bindingPins.delete(sessionID);
@@ -2887,6 +3040,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     }
     expiredSessions.delete(sessionID);
     coordinatorRoots.delete(sessionID);
+    assetVersionPins.delete(sessionID);
     explicitCoordinatorModels.delete(sessionID);
     bindingDenials.delete(sessionID);
     sessionTaskIDs.delete(sessionID);
@@ -3035,6 +3189,30 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     }
   }
 
+  function acceptanceParentPrefix(
+    ledger: AcceptanceContinuityLedger,
+  ): readonly string[] | undefined {
+    if (ledger.parent_fingerprint === "none") return undefined;
+    for (let length = 1; length < ledger.criteria.length; length += 1) {
+      const prefix = ledger.criteria.slice(0, length);
+      if (acceptanceContinuityFingerprint(prefix) === ledger.parent_fingerprint) return prefix;
+    }
+    return undefined;
+  }
+
+  async function recoverAcceptanceParent(
+    sessionID: string,
+    ledger: AcceptanceContinuityLedger,
+    descriptor: ParallelDispatchDescriptor | undefined,
+  ): Promise<boolean> {
+    if (descriptor === undefined || acceptanceParentPrefix(ledger) === undefined ||
+      ledger.parent_fingerprint === "none") return false;
+    const snapshot = await (await getParallelCoordinator()).snapshot(sessionID, descriptor.run_id);
+    return snapshot?.tasks.some(({ phase, descriptor: durable }) =>
+      (phase === "pending" || phase === "reserved" || phase === "running") &&
+      sameParallelDescriptor(durable, descriptor)) === true;
+  }
+
   async function assistantMessageText(
     sessionID: string,
     messageID: string,
@@ -3100,6 +3278,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     if (persistedTurn === undefined && identity.agent !== COORDINATOR_AGENT) return false;
     if (persistedTurn !== undefined && persistedTurn.agent !== COORDINATOR_AGENT) return false;
     await rememberCoordinatorRoot(sessionID);
+    await pinAssetVersion(sessionID);
     releaseSessionEnforcement(sessionID);
     fastLane.beginTurn(sessionID, persistedTurn?.synthetic ?? false);
     return true;
@@ -3386,6 +3565,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           ...(metrics ?? {}),
           ...operationMetricsSnapshot(textInput.sessionID),
         });
+        if (runOutcome === "DONE") rootAcceptanceContinuity.delete(textInput.sessionID);
       }
       await completeContinuationText(textInput.sessionID, textOutput.text, false);
     },
@@ -3443,6 +3623,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         fastLane.beginTurn(chatInput.sessionID, synthetic);
         releaseSessionEnforcement(chatInput.sessionID);
         await rememberCoordinatorRoot(chatInput.sessionID);
+        await pinAssetVersion(chatInput.sessionID);
       } else {
         if (!synthetic && isCoordinatorSession(chatInput.sessionID)) {
           fastLane.forget(chatInput.sessionID);
@@ -3759,7 +3940,16 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         let parallelWorkerAuthorized = false;
         let parallelWorkerAlreadyBound = false;
         let reservedParallelDescriptor: ParallelDispatchDescriptor | undefined;
+        let validatedRootAcceptance: AcceptanceContinuityLedger | undefined;
         if (toolInput.tool === "task" && taskRole === "dog-worker" && isRecord(output.args)) {
+          await ensureLoaded();
+          const assetVersionStatus = await pinAssetVersion(toolInput.sessionID);
+          if (assetVersionStatus === "mismatch") {
+            throw new Error(
+              "SORTIE_FRESH_SESSION_REQUIRED: installed agent assets and the loaded plugin use different contracts; " +
+              "run sortie-dogs init . and start a fresh coordinator session",
+            );
+          }
           const prompt = typeof output.args.prompt === "string" ? output.args.prompt : "";
           const contractPrompt = taskContractText(prompt);
           reservedParallelDescriptor = parallelDescriptor(prompt);
@@ -3882,6 +4072,51 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
                 defects: [contractDefect("contract", "/", "dispatch_identity_mismatch")],
               });
             }
+            if (assetVersionStatus === "current") {
+              const ledger = identity.acceptanceContinuity;
+              if (ledger === undefined) {
+                throw new HandoffDeniedError("contract-invalid", handoffPaths[0]!, {
+                  defects: [contractDefect("handoff", "/ext/sortie-dogs~1acceptance-continuity",
+                    `acceptance_continuity_${identity.acceptanceContinuityError ?? "missing"}`)],
+                });
+              }
+              const criteria = taskAcceptanceCriteria(contractPrompt);
+              if (taskIDs.length !== 1 || taskIDs[0] !== identity.handoffID ||
+                ledger.task_id !== identity.handoffID || criteria === undefined ||
+                criteria.length !== ledger.criteria.length ||
+                criteria.some((criterion, index) => criterion !== ledger.criteria[index])) {
+                throw new HandoffDeniedError("contract-invalid", handoffPaths[0]!, {
+                  defects: [contractDefect("contract", "/acceptance", "acceptance_continuity_mismatch")],
+                });
+              }
+              const previous = rootAcceptanceContinuity.get(toolInput.sessionID);
+              if (previous === undefined) {
+                if (ledger.parent_fingerprint !== "none" &&
+                  !await recoverAcceptanceParent(toolInput.sessionID, ledger, reservedParallelDescriptor)) {
+                  throw new HandoffDeniedError("contract-invalid", handoffPaths[0]!, {
+                    defects: [contractDefect("handoff", "/ext/sortie-dogs~1acceptance-continuity",
+                      "acceptance_parent_continuity_mismatch")],
+                  });
+                }
+              } else if (previous.task_id === ledger.task_id && previous.fingerprint === ledger.fingerprint) {
+                if (ledger.parent_fingerprint !== previous.parent_fingerprint) {
+                  throw new HandoffDeniedError("contract-invalid", handoffPaths[0]!, {
+                    defects: [contractDefect("handoff", "/ext/sortie-dogs~1acceptance-continuity",
+                      "acceptance_parent_continuity_mismatch")],
+                  });
+                }
+              } else {
+                if (ledger.parent_fingerprint !== previous.fingerprint ||
+                  ledger.criteria.length <= previous.criteria.length ||
+                  previous.criteria.some((criterion, index) => criterion !== ledger.criteria[index])) {
+                  throw new HandoffDeniedError("contract-invalid", handoffPaths[0]!, {
+                    defects: [contractDefect("handoff", "/ext/sortie-dogs~1acceptance-continuity",
+                      "acceptance_parent_continuity_mismatch")],
+                  });
+                }
+              }
+              validatedRootAcceptance = ledger;
+            }
           }
         }
         if (reservedParallelDescriptor !== undefined) {
@@ -3907,6 +4142,13 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           parallelWorkerAlreadyBound,
           parallelWorkerAuthorized,
         });
+        if (validatedRootAcceptance !== undefined && reservedParallelDescriptor === undefined) {
+          rootAcceptanceContinuity.delete(toolInput.sessionID);
+          rootAcceptanceContinuity.set(toolInput.sessionID, validatedRootAcceptance);
+          while (rootAcceptanceContinuity.size > ACTIVE_SESSION_CACHE.maximum) {
+            rootAcceptanceContinuity.delete(rootAcceptanceContinuity.keys().next().value!);
+          }
+        }
         if (resumedWorkerSessionID !== undefined) {
           const recoverableParallel = parallelRecoverableChildren.get(resumedWorkerSessionID);
           if (recoverableParallel !== undefined) {

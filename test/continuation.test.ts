@@ -1055,9 +1055,8 @@ test("the compaction prompt preserves batch state and names no legacy workflow",
     "status",
     "ordering",
     "implementation root",
+    "exact handoff path",
     "acceptance fingerprint",
-    "acceptance hashes",
-    "acceptance digest",
     "pending tracker updates",
     "tracker flush state",
     "source_manifest",
@@ -1066,6 +1065,9 @@ test("the compaction prompt preserves batch state and names no legacy workflow",
   ]) {
     assert.ok(prompt.includes(preserved), `the rollover prompt must preserve ${preserved}`);
   }
+  assert.match(prompt, /Never author, shorten, infer, or treat summary text as acceptance authority/u);
+  assert.doesNotMatch(prompt, /確定済みの受け入れ基準/u);
+  assert.doesNotMatch(prompt, /acceptance hashes|acceptance digest|redacted acceptance digest/u);
   assert.doesNotMatch(prompt, /MK2A2|MKII|MK4|MK5|MK6/);
 
   const untracked: { prompt?: string } = {};
@@ -1438,7 +1440,7 @@ test("session idle compacts a terminal unit checkpoint below the batch target", 
 - batchTarget: 10 / batchAttempted: 1 / batchCommitted: 1 / batchReconciled: 0
 
 ## tracker batch state
-- inventoryFingerprint: inv-1 / candidateQueue: Release 04 | status ready | ordering 4 | implementation root /project | acceptance fingerprint fp-4 | acceptance hashes h-4 | redacted acceptance digest ship release
+- inventoryFingerprint: inv-1 / candidateQueue: Release 04 | status ready | ordering 4 | implementation root /project | handoff path /project/handoff.release-04.json | acceptance fingerprint fp-4
 - pendingTrackerUpdates: Release 03 done / flushState: pending
 
 ## 未解決blocker
