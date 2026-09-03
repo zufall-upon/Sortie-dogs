@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
-import { RUNTIME_ASSET_VERSION } from "../dist/asset-version.js";
+import { RUNTIME_ASSET_VERSION } from "../src/asset-version.ts";
 import {
   DEDICATED_WORKER_MODEL,
   DEDICATED_WORKER_VARIANT,
@@ -82,15 +82,14 @@ function gate(input: {
 }
 
 test("packed package exposes plugin and versioned runtime assets", async () => {
-  const npmCli = process.env.npm_execpath;
-  assert.ok(npmCli, "npm_execpath is required for the package smoke test");
+  const npmCli = process.env.npm_execpath ?? join(dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
 
   await mkdir(testEnvironment, { recursive: true });
   const fixture = await mkdtemp(join(testEnvironment, "package-export-"));
   try {
     const { stdout: packOutput } = await execFileAsync(
       process.execPath,
-      [npmCli, "pack", "--ignore-scripts", "--json", "--pack-destination", fixture],
+      [npmCli, "pack", "--json", "--pack-destination", fixture],
       { cwd: projectRoot },
     );
     const packed = JSON.parse(packOutput) as Array<{ filename: string; files?: Array<{ path: string }> }>;
@@ -441,7 +440,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     for (const asset of loaded.runtimeAssets) {
       assert.equal(asset.version, RUNTIME_ASSET_VERSION, `${asset.name} version must match the shared marker`);
     }
-    assert.equal(RUNTIME_ASSET_VERSION, "0.3.63-luna-artifact-join-v1");
+    assert.equal(RUNTIME_ASSET_VERSION, "0.3.64-luna-validation-command-v1");
     const coordinatorFrontmatter = /^---\r?\n([\s\S]*?)\r?\n---/u.exec(coordinator.content)?.[1];
     assert.ok(coordinatorFrontmatter);
     assert.match(coordinatorFrontmatter, /^model: openai\/gpt-5\.6-terra$/m);
@@ -721,7 +720,10 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(parallelContract[1], /descriptor:\s*exact run_id \| dispatch_id \| task_id \| managed_path as one project_root field \| branch/);
     assert.match(coordinator.content, /managed_path as the digest's single\s+project_root field/);
     assert.match(coordinator.content, /Prepare creates each descriptor's unique scoped handoff\s+and operation manifest in managed_path and returns their absolute handoff_path and operation_manifest/);
-    assert.match(worker.content, /After editing only scope_write, call sortie_create_parallel_commit_artifact exactly once while the lease\s+is held with run_id, dispatch_id, validation_executable, optional validation_args_json, and optional\s+timeout_ms/);
+    for (const parallelWorker of [worker, lunaWorker]) {
+      assert.match(parallelWorker.content, /map descriptor validation\.command\[0\] to validation_executable and\s+JSON\.stringify\(validation\.command\.slice\(1\)\) to validation_args_json/);
+      assert.match(parallelWorker.content, /Never join the command array into one executable\s+string/);
+    }
     assert.match(worker.content, /Immediately call sortie_release_write_gate after that capability, including producer failure/);
     assert.match(worker.content, /This exception applies only to the\s+parallel lane; the normal sequential-worker lane remains unchanged/);
     assert.match(coordinator.content, /only consultation capabilities are Strategy and SourceReview/);
@@ -1394,7 +1396,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(sortie.content, /never route a worker to the user/i);
 
     for (const asset of loaded.runtimeAssets) {
-      assert.equal(asset.version, "0.3.63-luna-artifact-join-v1");
+      assert.equal(asset.version, "0.3.64-luna-validation-command-v1");
       const frontmatter = asset.content.match(/^---\r?\n([\s\S]+?)\r?\n---\r?\n/);
       assert.ok(frontmatter, `${asset.name} must have frontmatter`);
       const entries = Object.fromEntries(

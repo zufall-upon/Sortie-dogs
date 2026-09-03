@@ -96,9 +96,11 @@ Only ${contract.artifactAuthority} may use the exception below.
 In every parallel-lane mutating tool call, spell each destination as an absolute path rooted under the
 descriptor managed_path. scope_write remains repository-relative authority identity only and is never a
 host tool path. A relative destination may resolve in the primary checkout and is denied fail-closed.
-After editing only scope_write, call ${PARALLEL_COMMIT_ARTIFACT_CAPABILITY} exactly once while the lease
-is held with run_id, dispatch_id, validation_executable, optional validation_args_json, and optional
-timeout_ms. It performs targeted validation, stages only exact scoped A/M/D paths, creates one
+After editing only scope_write, map descriptor validation.command[0] to validation_executable and
+JSON.stringify(validation.command.slice(1)) to validation_args_json. Then call
+${PARALLEL_COMMIT_ARTIFACT_CAPABILITY} exactly once while the lease is held with run_id, dispatch_id,
+those mapped validation fields, and optional timeout_ms. Never join the command array into one executable
+string. It performs targeted validation, stages only exact scoped A/M/D paths, creates one
 managed-branch commit, verifies its direct child, object, and artifact, and returns only the bounded
 verified artifact. Do not use shell Git, remote mutation, direct main, or canonical validation.
 Immediately call sortie_release_write_gate after that capability, including producer failure. Failed
@@ -198,7 +200,7 @@ remediation or Sol demotion; only dog-coordinator decides that route.`,
 export const runtimeAssets = [
   {
     name: "dog-coordinator",
-    version: "0.3.63-luna-artifact-join-v1",
+    version: "0.3.64-luna-validation-command-v1",
     installPath: "agent/dog-coordinator.md",
     content: `---
 description: Canonical MkII coordinator packaged by Sortie-dogs
@@ -1510,10 +1512,10 @@ TERMINAL_STATUS_SEMANTICS_FIXTURE
 END_TERMINAL_STATUS_SEMANTICS_FIXTURE
 
 RUNTIME_ASSET_VERSION_SYNC_FIXTURE
-    runtime_version: 0.3.63-luna-artifact-join-v1
+    runtime_version: 0.3.64-luna-validation-command-v1
     shared_marker: src/asset-version.ts
-    packaged_expectation: test/plugin-loader.test.ts uses 0.3.63-luna-artifact-join-v1
-    initialize_expectation: test/initialize.test.ts uses 0.3.63-luna-artifact-join-v1
+    packaged_expectation: test/plugin-loader.test.ts uses 0.3.64-luna-validation-command-v1
+    initialize_expectation: test/initialize.test.ts uses 0.3.64-luna-validation-command-v1
     rule: runtime asset versions, shared marker, packaged expectation, and initialize expectation change together
 END_RUNTIME_ASSET_VERSION_SYNC_FIXTURE
 
@@ -1582,19 +1584,19 @@ END_TERMINAL_EVIDENCE_FIXTURE
   },
   {
     name: "dog-worker",
-    version: "0.3.63-luna-artifact-join-v1",
+    version: "0.3.64-luna-validation-command-v1",
     installPath: "agent/dog-worker.md",
     content: workerAssetContent(SERIAL_WORKER_CONTRACT),
   },
   {
     name: "dog-luna-worker",
-    version: "0.3.63-luna-artifact-join-v1",
+    version: "0.3.64-luna-validation-command-v1",
     installPath: "agent/dog-luna-worker.md",
     content: workerAssetContent(LUNA_WORKER_CONTRACT),
   },
   {
     name: "dog-scout",
-    version: "0.3.63-luna-artifact-join-v1",
+    version: "0.3.64-luna-validation-command-v1",
     installPath: "agent/dog-scout.md",
     content: `---
 description: Bounded evidence scout for dog-coordinator
@@ -1643,7 +1645,7 @@ prose; keep the keys, paths, commands, and identifiers verbatim.
   },
   {
     name: "dog-reviewer",
-    version: "0.3.63-luna-artifact-join-v1",
+    version: "0.3.64-luna-validation-command-v1",
     installPath: "agent/dog-reviewer.md",
     content: `---
 description: Independent source reviewer for dog-coordinator
@@ -1696,7 +1698,7 @@ or transport.
   },
   {
     name: "dog-advisor",
-    version: "0.3.63-luna-artifact-join-v1",
+    version: "0.3.64-luna-validation-command-v1",
     installPath: "agent/dog-advisor.md",
     content: `---
 description: Focused technical advisor for dog-coordinator
@@ -1745,7 +1747,7 @@ provider, vendor, model, variant, or transport.
   },
   {
     name: "sortie",
-    version: "0.3.63-luna-artifact-join-v1",
+    version: "0.3.64-luna-validation-command-v1",
     installPath: "command/sortie.md",
     content: `---
 description: Start the canonical Sortie-dogs MkII workflow

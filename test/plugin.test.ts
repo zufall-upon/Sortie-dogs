@@ -1301,7 +1301,7 @@ test("coordinator DONE output receives host-reported root and child run metrics"
     assert.equal(body.extra.available, true);
     assert.equal(body.extra.outcome, "DONE");
     assert.equal(body.extra.sessionID, "root");
-    assert.equal(body.extra.runtimeAssetVersion, "0.3.63-luna-artifact-join-v1");
+    assert.equal(body.extra.runtimeAssetVersion, "0.3.64-luna-validation-command-v1");
     assert.equal(body.extra.inputTokens, 130);
     assert.equal(body.extra.outputTokens, 15);
     assert.equal(body.extra.reasoningTokens, 5);
