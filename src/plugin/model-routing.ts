@@ -12,27 +12,22 @@ export interface RoleModelRoute {
 
 export type ModelRoutingConfig = Readonly<Record<string, RoleModelRoute>>;
 
-/**
- * The published DeepSWE cost curve settles the worker target: the cheap model at top reasoning effort
- * solves more than the expensive model at mid effort while costing a fraction of it, so paying for the
- * expensive model by default bought a lower solve rate. Worker effort therefore sits at the top of the
- * cheap model's range, and review effort stays above it on a stronger model, which is what the
- * mandatory source review is for.
- */
-export const DEDICATED_WORKER_MODEL = "openai/gpt-5.6-luna";
-export const DEDICATED_WORKER_VARIANT = "max";
+/** The stable serial implementation route stays on Sol when Luna fan-out is unsafe or unavailable. */
+export const DEDICATED_WORKER_MODEL = "openai/gpt-5.6-sol";
+export const DEDICATED_WORKER_VARIANT = "medium";
+
+/** Luna executes only units admitted to the fabric; it is not the serial worker's fallback target. */
+export const LUNA_FABRIC_WORKER_MODEL = "openai/gpt-5.6-luna";
+export const LUNA_FABRIC_WORKER_VARIANT = "max";
+export const LUNA_FABRIC_WORKER_ROLE = "dog-luna-worker";
 
 /** The coordinator uses Terra High so routing and progress decisions do not bottleneck the workflow. */
 export const DEFAULT_COORDINATOR_MODEL = "openai/gpt-5.6-terra";
 export const DEFAULT_COORDINATOR_VARIANT = "high";
 
-/**
- * The stronger, far more expensive worker target a host may still select deliberately. It is no longer
- * a default route: it stays declared so an explicit dedicatedWorkerModel resolves against the catalog
- * without extra host configuration.
- */
-export const ESCALATION_WORKER_MODEL = "openai/gpt-5.6-sol";
-export const ESCALATION_WORKER_VARIANT = "medium";
+/** Compatibility names retained for the pre-v0.8 explicit Sol target. */
+export const ESCALATION_WORKER_MODEL = DEDICATED_WORKER_MODEL;
+export const ESCALATION_WORKER_VARIANT = DEDICATED_WORKER_VARIANT;
 
 export const DEDICATED_WORKER_ROLES = [
   "implementation",
@@ -55,15 +50,15 @@ export const DEFAULT_DEDICATED_WORKER_TARGET: ModelTarget = Object.freeze({
   variant: DEDICATED_WORKER_VARIANT,
 });
 
-/** The declared escalation target for a host that chooses to pay for the stronger worker model. */
+/** Compatibility target retained for existing consumers of the explicit Sol declaration. */
 export const ESCALATION_WORKER_TARGET: ModelTarget = Object.freeze({
   model: ESCALATION_WORKER_MODEL,
   variant: ESCALATION_WORKER_VARIANT,
 });
 
 /**
- * Fixed worker routes for one dedicated target. Which target is dedicated is a host decision, but
- * every worker role resolves to that single target and never to a fallback.
+ * Fixed serial worker routes for one dedicated target. Which target is dedicated is a host decision,
+ * but every serial worker role resolves to that single target and never to a fallback.
  */
 export function dedicatedWorkerRouting(
   target: ModelTarget = DEFAULT_DEDICATED_WORKER_TARGET,
@@ -81,11 +76,31 @@ export function dedicatedWorkerRouting(
 
 export const DEDICATED_WORKER_ROUTING: ModelRoutingConfig = dedicatedWorkerRouting();
 
-export const FIXED_MODEL_ROUTING: ModelRoutingConfig = DEDICATED_WORKER_ROUTING;
+export const LUNA_FABRIC_WORKER_TARGET: ModelTarget = Object.freeze({
+  model: LUNA_FABRIC_WORKER_MODEL,
+  variant: LUNA_FABRIC_WORKER_VARIANT,
+});
+
+export const LUNA_FABRIC_WORKER_ROUTING: ModelRoutingConfig = Object.freeze({
+  [LUNA_FABRIC_WORKER_ROLE]: Object.freeze({
+    preferred: LUNA_FABRIC_WORKER_TARGET,
+  }),
+});
+
+export function fixedWorkerRouting(
+  dedicatedTarget: ModelTarget = DEFAULT_DEDICATED_WORKER_TARGET,
+): ModelRoutingConfig {
+  return Object.freeze({
+    ...dedicatedWorkerRouting(dedicatedTarget),
+    ...LUNA_FABRIC_WORKER_ROUTING,
+  });
+}
+
+export const FIXED_MODEL_ROUTING: ModelRoutingConfig = fixedWorkerRouting();
 
 const fixedModelRoleSet = new Set<string>(Object.keys(FIXED_MODEL_ROUTING));
 
-export const RECOMMENDED_LUNA_MODEL = "openai/gpt-5.6-luna";
+export const RECOMMENDED_LUNA_MODEL = LUNA_FABRIC_WORKER_MODEL;
 
 /** Coordinator state and routing use Terra High; bounded evidence retrieval uses Luna High. */
 export const DEFAULT_COORDINATOR_ROUTING: ModelRoutingConfig = Object.freeze({
@@ -119,7 +134,7 @@ export const RECOMMENDED_LUNA_ROUTING: ModelRoutingConfig = Object.freeze(Object
 /**
  * Consultation must not inherit the caller's model. The preferred consultation model is the
  * strongest reasoning model a host declares; it stays out of the built-in catalog so an undeclared
- * host falls back to the dedicated target instead of an unavailable route.
+ * host falls back to the shipped high-effort Sol target instead of an unavailable route.
  */
 export const RECOMMENDED_CONSULTATION_MODEL = "anthropic/claude-opus-5";
 export const RECOMMENDED_CONSULTATION_ROLES = Object.freeze(
@@ -131,8 +146,8 @@ export const CONSULTATION_FALLBACK_VARIANT = "xhigh";
 
 /**
  * The shipped consultation fallback. Review has to be able to reject work the worker just produced, so
- * it stays on the stronger model even though the worker no longer defaults to it; a fallback equal to
- * the worker target would review that work with exactly the capability that produced it.
+ * it stays at higher reasoning effort than the stable Sol worker. Matching the worker variant would
+ * review that work with exactly the capability that produced it.
  */
 export const DEFAULT_CONSULTATION_FALLBACK_TARGET: ModelTarget = Object.freeze({
   model: ESCALATION_WORKER_MODEL,
@@ -210,13 +225,16 @@ export const BUILT_IN_MODEL_CATALOG: ModelCatalog = Object.freeze({
     Object.freeze({
       model: DEDICATED_WORKER_MODEL,
       variants: Object.freeze(
-        [DEDICATED_WORKER_VARIANT, RECOMMENDED_SCOUT_VARIANT]
+        [DEDICATED_WORKER_VARIANT, CONSULTATION_FALLBACK_VARIANT]
           .filter((variant, index, all) => all.indexOf(variant) === index),
       ),
     }),
     Object.freeze({
-      model: ESCALATION_WORKER_MODEL,
-      variants: Object.freeze([ESCALATION_WORKER_VARIANT, CONSULTATION_FALLBACK_VARIANT]),
+      model: LUNA_FABRIC_WORKER_MODEL,
+      variants: Object.freeze(
+        [LUNA_FABRIC_WORKER_VARIANT, RECOMMENDED_SCOUT_VARIANT]
+          .filter((variant, index, all) => all.indexOf(variant) === index),
+      ),
     }),
   ]),
 });
@@ -228,7 +246,7 @@ export interface ResolveModelRouteInput {
   /** Global routing is consulted only after the local route candidates fail. */
   readonly global?: ModelRoutingConfig;
   readonly catalog: ModelCatalog;
-  /** The single target every dedicated worker role resolves to. Defaults to the shipped target. */
+  /** The serial target every dedicated worker role resolves to. The Luna fabric route ignores it. */
   readonly dedicated?: ModelTarget;
   /** Consultation retry only: ignore each configured preferred target and begin at its fallback. */
   readonly skipPreferred?: boolean;
@@ -346,8 +364,11 @@ function findAvailable(
 /** Resolve a role deterministically without provider calls or implicit model guesses. */
 export function resolveModelRoute(input: ResolveModelRouteInput): ModelRouteResolution {
   const attempts: ModelResolutionAttempt[] = [];
-  const routes = isFixedModelRole(input.role)
-    ? [["fixed", [input.dedicated ?? DEFAULT_DEDICATED_WORKER_TARGET]] as const]
+  const fixedTarget = isDedicatedWorkerRole(input.role)
+    ? input.dedicated ?? DEFAULT_DEDICATED_WORKER_TARGET
+    : FIXED_MODEL_ROUTING[input.role]?.preferred;
+  const routes = fixedTarget !== undefined
+    ? [["fixed", [fixedTarget]] as const]
     : [
       ["local", ownRoute(input.local, input.role)] as const,
       ["global", ownRoute(input.global, input.role)] as const,

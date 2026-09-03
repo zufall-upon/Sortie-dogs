@@ -7,7 +7,12 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import { RUNTIME_ASSET_VERSION } from "../dist/asset-version.js";
-import { DEDICATED_WORKER_MODEL, DEDICATED_WORKER_VARIANT } from "../dist/plugin/model-routing.js";
+import {
+  DEDICATED_WORKER_MODEL,
+  DEDICATED_WORKER_VARIANT,
+  LUNA_FABRIC_WORKER_MODEL,
+  LUNA_FABRIC_WORKER_VARIANT,
+} from "../dist/plugin/model-routing.js";
 
 /*
  * The environment layer is a real configuration source, so a host that declares one would silently
@@ -121,7 +126,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       join(consumer, "node_modules", "sortie-dogs", "package.json"),
       "utf8",
     )) as { version?: string; scripts?: { prebuild?: string } };
-    assert.equal(installedPackage.version, "0.7.1");
+    assert.equal(installedPackage.version, "0.8.0");
     assert.equal(
       installedPackage.scripts?.prebuild,
       "node --input-type=module --eval \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true });\"",
@@ -358,7 +363,10 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
      * names it. Text-only parity is exactly what let the batch loop ship inert.
      */
     assert.deepEqual(loaded.packedTools, [
+      "sortie_accept_luna_fabric_candidate",
       "sortie_accept_parallel_integration",
+      "sortie_admit_luna_fabric",
+      "sortie_advance_luna_fabric_wave",
       "sortie_bind_write_gate",
       "sortie_cancel_parallel_dispatch",
       "sortie_check_contract",
@@ -369,9 +377,11 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
         "sortie_integrate_parallel_queue",
         "sortie_parallel_dispatch_status",
         "sortie_parallel_integration_status",
+      "sortie_prepare_luna_fabric",
       "sortie_prepare_parallel_dispatch",
       "sortie_release_write_gate",
       "sortie_submit_integration_remediation",
+      "sortie_validate_luna_fabric_candidate",
     ]);
     assert.deepEqual(loaded.packedHookKeys, [
       "experimental.chat.system.transform",
@@ -394,12 +404,13 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       loaded.consultationIdentity,
       Object.fromEntries(consultationValueNames.map((name) => [name, true])),
     );
-    assert.equal(loaded.runtimeAssets.length, 6);
+    assert.equal(loaded.runtimeAssets.length, 7);
     assert.deepEqual(
       loaded.runtimeAssets.map(({ name, installPath }) => ({ name, installPath })),
       [
         { name: "dog-coordinator", installPath: "agent/dog-coordinator.md" },
         { name: "dog-worker", installPath: "agent/dog-worker.md" },
+        { name: "dog-luna-worker", installPath: "agent/dog-luna-worker.md" },
         { name: "dog-scout", installPath: "agent/dog-scout.md" },
         { name: "dog-reviewer", installPath: "agent/dog-reviewer.md" },
         { name: "dog-advisor", installPath: "agent/dog-advisor.md" },
@@ -409,16 +420,18 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
 
     const coordinator = loaded.runtimeAssets.find(({ name }) => name === "dog-coordinator");
     const worker = loaded.runtimeAssets.find(({ name }) => name === "dog-worker");
+    const lunaWorker = loaded.runtimeAssets.find(({ name }) => name === "dog-luna-worker");
     const scout = loaded.runtimeAssets.find(({ name }) => name === "dog-scout")!;
     const reviewer = loaded.runtimeAssets.find(({ name }) => name === "dog-reviewer")!;
     const advisor = loaded.runtimeAssets.find(({ name }) => name === "dog-advisor")!;
     const sortie = loaded.runtimeAssets.find(({ name }) => name === "sortie");
     assert.ok(coordinator);
     assert.ok(worker);
+    assert.ok(lunaWorker);
     assert.ok(sortie);
     assert.match(
       coordinator.content,
-      /^permission:\r?\n  question: allow\r?\n  task:\r?\n    "\*": deny\r?\n    dog-worker: allow\r?\n    dog-scout: allow\r?\n    dog-reviewer: allow\r?\n    dog-advisor: allow\r?\ntools:\r?\n  question: true\r?\n  task: true$/mu,
+      /^permission:\r?\n  question: allow\r?\n  task:\r?\n    "\*": deny\r?\n    dog-worker: allow\r?\n    dog-luna-worker: allow\r?\n    dog-scout: allow\r?\n    dog-reviewer: allow\r?\n    dog-advisor: allow\r?\ntools:\r?\n  question: true\r?\n  task: true$/mu,
     );
     for (const denied of ["build", "implementer", "fixer", "reviewer", "explore", "general", "coordinator"]) {
       assert.doesNotMatch(coordinator.content, new RegExp(`^    ${denied}: allow$`, "m"));
@@ -428,7 +441,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     for (const asset of loaded.runtimeAssets) {
       assert.equal(asset.version, RUNTIME_ASSET_VERSION, `${asset.name} version must match the shared marker`);
     }
-    assert.equal(RUNTIME_ASSET_VERSION, "0.3.52-acceptance-continuity-v1");
+    assert.equal(RUNTIME_ASSET_VERSION, "0.3.63-luna-artifact-join-v1");
     const coordinatorFrontmatter = /^---\r?\n([\s\S]*?)\r?\n---/u.exec(coordinator.content)?.[1];
     assert.ok(coordinatorFrontmatter);
     assert.match(coordinatorFrontmatter, /^model: openai\/gpt-5\.6-terra$/m);
@@ -436,6 +449,19 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.equal(/^---\r?\n[\s\S]*?\r?\n---/u.exec(worker.content)?.[0].includes("model:"), false);
     assert.equal(worker.content.includes(DEDICATED_WORKER_MODEL), false);
     assert.equal(worker.content.includes(DEDICATED_WORKER_VARIANT), false);
+    assert.equal(/^---\r?\n[\s\S]*?\r?\n---/u.exec(lunaWorker.content)?.[0].includes("model:"), false);
+    assert.equal(lunaWorker.content.includes(LUNA_FABRIC_WORKER_MODEL), false);
+    assert.equal(lunaWorker.content.includes(LUNA_FABRIC_WORKER_VARIANT), false);
+    assert.match(lunaWorker.content, /exactly one bounded implementation unit/i);
+    assert.match(lunaWorker.content, /validated admitted\s+Luna fabric descriptor/i);
+    assert.match(lunaWorker.content, /descriptor selects this route but never replaces write-gate\s+authorization/i);
+    assert.match(lunaWorker.content, /never decompose work, widen a manifest, accept a second unit/i);
+    assert.match(coordinator.content, /^    dog-luna-worker: allow$/mu);
+    assert.match(coordinator.content, /LUNA_FABRIC_DISPATCH_FIXTURE/);
+    assert.match(coordinator.content, /sortie_prepare_luna_fabric/);
+    assert.match(coordinator.content, /\.opencode\/sortie-dogs-luna-fabric\.json/);
+    assert.match(coordinator.content, /must already be ignored by Git/);
+    assert.match(coordinator.content, /Every scope entry must already be a lowercase/);
 
     assert.match(scout.content, /^---\r?\n[\s\S]*\nsteps:\s*8\r?\n/);
     assert.match(coordinator.content, /RETAINED_STATE_SHADOW_FIXTURE/);
@@ -683,7 +709,8 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       /DEPENDENCY_PARALLEL_DISPATCH_FIXTURE\r?\n([\s\S]+?)\r?\nEND_DEPENDENCY_PARALLEL_DISPATCH_FIXTURE/,
     );
     assert.ok(parallelContract, "coordinator needs the immutable parallel artifact contract");
-    assert.match(parallelContract[1], /artifact_exception:\s*active bound parallel dog-worker -> sortie_create_parallel_commit_artifact exactly once -> durable artifact acceptance before return -> immediate gate release/);
+    assert.match(parallelContract[1], /artifact_exception:\s*active bound parallel worker of the run route -> sortie_create_parallel_commit_artifact exactly once -> durable artifact acceptance before return -> immediate gate release/);
+    assert.match(parallelContract[1], /route_roles:\s*sol-serial run -> dog-worker \| luna-fabric run -> dog-luna-worker; role never inferred from session/);
     assert.match(parallelContract[1], /generated_control:\s*returned handoff_path under context_digest once \| returned operation_manifest as final manifest line once \| returned acceptance copied exactly into Task acceptance \| never descriptor metadata/);
     assert.match(parallelContract[1], /sibling_continuity:\s*ready siblings share one parent ledger \| prior sequential criteria remain exact ordered prefix \| reserved dispatch never advances sequential root ledger/);
     assert.match(parallelContract[1], /preflight:\s*prepare creates scoped handoff \+ operation manifest in managed_path -> sortie_check_contract status=ok -> unique returned paths in INITIAL_HANDOFF_FIXTURE shape -> Task/);
@@ -1367,7 +1394,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(sortie.content, /never route a worker to the user/i);
 
     for (const asset of loaded.runtimeAssets) {
-      assert.equal(asset.version, "0.3.52-acceptance-continuity-v1");
+      assert.equal(asset.version, "0.3.63-luna-artifact-join-v1");
       const frontmatter = asset.content.match(/^---\r?\n([\s\S]+?)\r?\n---\r?\n/);
       assert.ok(frontmatter, `${asset.name} must have frontmatter`);
       const entries = Object.fromEntries(
@@ -1379,7 +1406,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       );
       assert.ok(entries.description, `${asset.name} needs a description`);
       if (asset.name === "dog-coordinator") assert.equal(entries.mode, "primary");
-      if (["dog-worker", "dog-scout", "dog-reviewer", "dog-advisor"].includes(asset.name)) {
+      if (["dog-worker", "dog-luna-worker", "dog-scout", "dog-reviewer", "dog-advisor"].includes(asset.name)) {
         assert.equal(entries.mode, "subagent");
       }
       if (asset.name === "sortie") assert.equal(entries.agent, "dog-coordinator");

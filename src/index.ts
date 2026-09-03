@@ -1,5 +1,30 @@
 export { lintHandoff } from "./core/validate-semantics.js";
 export { validateWorktreeParallelContract } from "./core/validate-worktree-parallel.js";
+export {
+  LUNA_FABRIC_CONTRACT_VERSION,
+  admitLunaFabric,
+} from "./core/luna-fabric-contract.js";
+export type {
+  LunaFabricAdmission,
+  LunaFabricContract,
+  LunaFabricDiagnostic,
+  LunaFabricExternalEffect,
+  LunaFabricProvenance,
+  LunaFabricSharedPath,
+  LunaFabricSolReason,
+  LunaFabricUnit,
+  LunaFabricValidation,
+} from "./core/luna-fabric-contract.js";
+export {
+  LUNA_FABRIC_MAX_ACTIVE,
+  LunaFabricScheduler,
+  createLunaFabricScheduler,
+} from "./core/luna-fabric-scheduler.js";
+export type {
+  LunaFabricAdvance,
+  LunaFabricSchedulerState,
+  LunaFabricWave,
+} from "./core/luna-fabric-scheduler.js";
 export { validateWorktreeParallelSchema } from "./core/validate-schema.js";
 export {
   ScopeLeaseError,
@@ -32,8 +57,10 @@ export {
 } from "./core/worktree-integration-queue.js";
 export * from "./core/worktree-commit-artifact.js";
 export type {
+  FabricDispatchSolReason,
   ParallelDispatchCoordinatorOptions,
   ParallelDispatchErrorCode,
+  ParallelDispatchFabricPrepareResult,
   ParallelDispatchPrepareResult,
   ParallelDispatchClaim,
 } from "./core/worktree-parallel-dispatch.js";
@@ -61,12 +88,16 @@ export { SortieDogsPlugin } from "./plugin/index.js";
  * plugin runtime symbol is public here instead.
  */
 export {
+  FreshSessionRequiredError,
   HandoffDeniedError,
   InvalidModelTargetError,
   ModelRoutingDeniedError,
   isExplicitTaskHandoff,
 } from "./plugin/index.js";
 export type {
+  FreshSessionAction,
+  FreshSessionReason,
+  FreshSessionResult,
   HandoffDenialReason,
   OpenCodeEvent,
   OpenCodeHooks,

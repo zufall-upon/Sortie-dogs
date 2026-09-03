@@ -199,9 +199,12 @@ factory options，请使用全局文件保存持久的全局设置。
   只有没有正在运行的 Sortie run 时才可安全删除该目录。
 - `readOnlyTools`：追加不会修改文件的宿主专用工具名，例如 MCP 工具。
   对已绑定的会话，未知工具默认被拒绝。
-- `dedicatedWorkerModel`：所有 worker 角色解析到的唯一模型。默认为 `openai/gpt-5.6-luna`
-  与变体 `max`；当该模型不可用、或你想要不同的 worker effort 时，请声明自己的模型。worker 角色始终解析到这一个目标，
-  无法按角色分别路由。
+- `dedicatedWorkerModel`：`implementation`、`remediation`、`blocker-resolution`、
+  `sol-worker-mk2a2` 与 `dog-worker` 使用的串行 implementation target。默认为
+  `openai/gpt-5.6-sol` 的 `medium` variant。已分发的 `dog-luna-worker` fabric route 固定使用
+  `openai/gpt-5.6-luna` 的 `max` variant。若串行 target 指向同一个 Luna 模型，配置将因两个 route identity
+  合并而被拒绝。coordinator 只对已 prepared 的 `luna-fabric` run 的 ready descriptor 派发该角色；
+  `sol-serial` run 仍然使用 `dog-worker`。
 - `reflection`：仅供已激活的 root `dog-coordinator` 使用的 process prevention，默认关闭。
   opt-in 后 run / project 层默认开启；跨项目共享的 global storage 层只有显式开启才生效。
   child 与其他 agent 会被拒绝，`SORTIE_REFLECTION=0` 可立即停止该功能。governing `REFLECTION_POLICY`
@@ -232,17 +235,26 @@ workflow 的瓶颈，默认配置优先平衡能力与成本。若宿主确认 T
 routing hook 会先使用已配置的免费层 fallback；若没有，则保留会话模型。`dog-scout` 默认使用
 `openai/gpt-5.6-luna` 的 `high` variant。项目级 routing 可以覆盖这两个角色。
 
-`implementation`、`remediation`、`blocker-resolution` 和 `dog-worker` 始终使用专用 worker
-target，即 `openai/gpt-5.6-luna` 的 `max` variant。若要预先使用更强的 worker 模型，请将
-`dedicatedWorkerModel` 声明为 `openai/gpt-5.6-sol`。`modelRouting` 不能替换这些路由，只有 `dedicatedWorkerModel` 能移动它们。其他显式配置的路由
-会依次尝试 preferred target 和有序 fallback。没有 built-in default 或显式路由的角色会保留 OpenCode
-已选择的模型。
+`implementation`、`remediation`、`blocker-resolution`、`sol-worker-mk2a2` 和 `dog-worker` 固定使用
+stable serial target `openai/gpt-5.6-sol` 的 `medium` variant。宿主无法提供该模型时，只能通过
+`dedicatedWorkerModel` 移动串行 target。已分发的 `dog-luna-worker` 是仅在 fabric admission 后使用的独立
+route，固定为 `openai/gpt-5.6-luna` 的 `max` variant。coordinator 必须先用 `sortie_admit_luna_fabric`
+接纳 v0.8 DAG 合约，再用 `sortie_prepare_luna_fabric` 准备，然后才能为该 `luna-fabric` run 派发最多
+五个当前 ready wave 中彼此不同的 unit。完整 DAG 最多包含 64 个 unit。所有 active artifact 验证完成后，
+`sortie_advance_luna_fabric_wave` 会把 artifact 集成到 runtime-owned hidden candidate，清理旧 worktree，并从该
+exact snapshot 创建下一 wave 的 fresh worktree。最终 wave 后，`sortie_validate_luna_fabric_candidate` 只运行一次
+canonical validation；review 后只有 `sortie_accept_luna_fabric_candidate` 能对 target 执行一次 CAS。已声明的
+shared-path ownership 会把重叠 unit 串行安排到不同 wave；未归属的 overlap 或任何
+admission 缺陷都会让整个任务退回单个 `dog-worker`。fabric 不会在多个 lane 中复制同一个 unit。
+`modelRouting` 不能替换任一固定 route；串行 target
+指向同一 Luna 模型的配置也会被拒绝。0.7.0 的 `dog-worker` 使用 Luna Max；v0.8 保留这段历史记录，同时
+分离 stable Sol 与 fabric Luna。其他显式 route 依次尝试 preferred target 和有序 fallback。没有 built-in
+default 或显式 route 的角色保留 OpenCode 已选择的模型。
 
 `dog-reviewer` 和 `dog-advisor` 不得继承调用方的模型：如果 review / strategy 运行在生成候选的同一个
 模型上，就失去了独立性。当 catalog 声明了 `anthropic/claude-opus-5` 时，这两个角色默认使用它；否则回退到
-比 worker target 高一档的 `openai/gpt-5.6-sol` `xhigh`。重新声明了 `dedicatedWorkerModel` 的 host，
-会把该 target 作为第一顺位 fallback，因为这类 host 可能根本无法提供内置模型。这里不强制任何厂商：
-两个角色都可配置，声明你实际可用的模型即可。
+effort 高于 serial worker 的 `openai/gpt-5.6-sol` `xhigh`。移动 `dedicatedWorkerModel` 不会改变 consultation
+policy。这里不强制任何厂商：两个角色都可配置，声明你实际可用的模型即可。
 
 ```json
 {
@@ -282,7 +294,7 @@ canonical validation 后独立审查高风险候选项。二者都不负责实�
 
 ## 更新与迁移
 
-[Release v0.7.1](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.7.1)
+[Release v0.8.0](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.8.0)
 
 将依赖替换为新版 Release asset 后，在目标项目根目录再次运行：
 

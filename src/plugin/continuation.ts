@@ -30,6 +30,8 @@ const TOOL_REQUESTED_REPORT =
 /** First line the rollover summary must emit, mirroring the batch target of three attempts. */
 export const ROLLOVER_TOKEN = "SORTIE_ROLLOVER_COMPACTED";
 export const DEFAULT_MAX_AUTO_CONTINUES = 10;
+/** One centrally configured default for stalled implementation Task recovery. */
+export const DEFAULT_TASK_WATCHDOG_MILLISECONDS = 5 * 60 * 1000;
 
 /**
  * A coordinator that exhausted its step budget reports remaining work instead of continuing. That
@@ -62,6 +64,7 @@ export type ContinuationRejection =
   | "continuation-disabled"
   | "limit-reached"
   | "pending-autocontinue"
+  | "fresh-session-required"
   | "summarize-model-unavailable";
 
 export interface ContinuationIdentity {
@@ -126,6 +129,18 @@ export function resolveContinuation(input: ContinuationResolutionInput): Continu
 /** The subset of the OpenCode SDK client continuation depends on. */
 export interface ContinuationClient {
   readonly session?: {
+    readonly abort?: (request: {
+      path: { id: string };
+      query?: { directory?: string };
+    }) => Promise<unknown>;
+    readonly create?: (request: {
+      query?: { directory?: string };
+      body?: Record<string, never>;
+    }) => Promise<unknown>;
+    readonly delete?: (request: {
+      path: { id: string };
+      query?: { directory?: string };
+    }) => Promise<unknown>;
     readonly get?: (request: { path: { id: string } }) => Promise<unknown>;
     readonly summarize?: (request: {
       path: { id: string };
@@ -137,7 +152,7 @@ export interface ContinuationClient {
       query?: { directory?: string };
       body: {
         agent: string;
-        parts: ReadonlyArray<{ type: "text"; synthetic: true; text: string }>;
+        parts: ReadonlyArray<{ type: "text"; synthetic?: boolean; text: string }>;
       };
     }) => Promise<unknown>;
   };
@@ -209,6 +224,11 @@ export interface ContinuationHooks {
   toolStarted(sessionID: string, tool: string): void;
   blocksTool(sessionID: string): boolean;
   sessionIdle(sessionID: string): Promise<void>;
+  stopAutomaticRecovery(sessionID: string): Promise<void>;
+  recoverStalledTask(
+    sessionID: string,
+    callIDs: readonly string[],
+  ): Promise<"recovered" | "identity-rejected" | "capability-unavailable" | "request-rejected">;
   forgetSession(sessionID: string): void;
 }
 
@@ -462,6 +482,7 @@ export function createContinuationHooks(
 ): ContinuationHooks {
   const sessions = new Map<string, SessionState>();
   const warned = new Set<string>();
+  const stoppedSessions = new Set<string>();
 
   function observeTransition(
     type: ContinuationTransitionType,
@@ -758,6 +779,7 @@ export function createContinuationHooks(
     report: string,
     agent: string,
   ): Promise<void> {
+    if (stoppedSessions.has(sessionID)) return;
     const resume = client?.session?.promptAsync;
     const active = policy();
     if (
@@ -804,6 +826,7 @@ export function createContinuationHooks(
    * promptAsync directly. The epoch lock makes concurrent compacted/text/idle signals idempotent.
    */
   async function arbitrateResume(sessionID: string, state: SessionState): Promise<boolean> {
+    if (stoppedSessions.has(sessionID)) return false;
     if (!state.pendingRollover || !state.active || state.continueReport === undefined) return false;
     if (state.preserveCompactionScope && !state.recoverySummaryValidated) return false;
     const epoch = state.rolloverEpoch;
@@ -840,6 +863,7 @@ export function createContinuationHooks(
   }
 
   async function runRollover(sessionID: string): Promise<boolean> {
+    if (stoppedSessions.has(sessionID)) return false;
     const state = sessions.get(sessionID);
     if (state === undefined || !state.pendingRollover || state.active) return false;
     const summarize = client?.session?.summarize;
@@ -945,6 +969,7 @@ export function createContinuationHooks(
 
   function scheduleRollover(sessionID: string, attempt = 0, epoch = sessions.get(sessionID)?.rolloverEpoch): void {
     unrefTimer(setTimeout(async () => {
+      if (stoppedSessions.has(sessionID)) return;
       if (epoch === undefined || sessions.get(sessionID)?.rolloverEpoch !== epoch) return;
       const completed = await runRollover(sessionID);
       const state = sessions.get(sessionID);
@@ -973,6 +998,7 @@ export function createContinuationHooks(
     preserveCompactionScope = false,
     countAttempt = true,
   ): void {
+    if (stoppedSessions.has(sessionID)) return;
     const state = stateFor(sessionID);
     state.pendingRollover = true;
     state.compactedRollover = false;
@@ -1046,6 +1072,83 @@ export function createContinuationHooks(
       clearTimer(state.stepRecoveryTimer);
     }
     sessions.delete(sessionID);
+    stoppedSessions.delete(sessionID);
+  }
+
+  async function stopAutomaticRecovery(sessionID: string): Promise<void> {
+    const state = sessions.get(sessionID);
+    if (state !== undefined) {
+      clearTimer(state.cooldownTimer);
+      clearTimer(state.stepRecoveryTimer);
+      state.cooldownTimer = undefined;
+      state.stepRecoveryTimer = undefined;
+      state.pendingRollover = false;
+      state.active = false;
+      state.promptPending = false;
+      state.continueReport = undefined;
+      state.latestCoordinatorReport = undefined;
+      state.stepRecoveryActive = false;
+      state.idleDeferred = false;
+      state.rolloverEpoch += 1;
+    }
+    stoppedSessions.delete(sessionID);
+    stoppedSessions.add(sessionID);
+    while (stoppedSessions.size > MAX_TRACKED_SESSIONS) {
+      stoppedSessions.delete(stoppedSessions.values().next().value!);
+    }
+    const abort = client?.session?.abort;
+    if (abort !== undefined) {
+      await abort.call(client!.session, {
+        path: { id: sessionID },
+        query: { directory },
+      }).catch(() => undefined);
+    }
+  }
+
+  async function recoverStalledTask(
+    sessionID: string,
+    callIDs: readonly string[],
+  ): Promise<"recovered" | "identity-rejected" | "capability-unavailable" | "request-rejected"> {
+    const active = policy();
+    const resolution = resolveContinuation({
+      identity: await readIdentity(sessionID),
+      configuredAgent: active.agent,
+      configuredCapability: active.capability,
+      requestedCapability: active.capability,
+      enabled: active.enabled,
+      attempts: 0,
+      maxAutoContinues: active.maxAutoContinues,
+      pendingAutoContinue: false,
+    });
+    if (!resolution.continue) return "identity-rejected";
+    const abort = client?.session?.abort;
+    const resume = client?.session?.promptAsync;
+    if (abort === undefined || resume === undefined) return "capability-unavailable";
+    try {
+      await abort.call(client!.session, {
+        path: { id: sessionID },
+        query: { directory },
+      });
+      const evidence = JSON.stringify({
+        type: "coordinator-task-watchdog",
+        call_ids: [...new Set(callIDs)].slice(0, 8),
+      });
+      const response = await resume.call(client!.session, {
+        path: { id: sessionID },
+        query: { directory },
+        body: {
+          agent: active.agent,
+          parts: [{
+            type: "text",
+            synthetic: true,
+            text: `${STEP_CONTINUE_PREFIX}\n${evidence}\n停止したworker Taskを再実行せず、既存handoff、validation履歴、batch counterを保持して同一rootの次actionから継続する。`,
+          }],
+        },
+      });
+      return promptCallSucceeded(response) ? "recovered" : "request-rejected";
+    } catch {
+      return "request-rejected";
+    }
   }
 
   function scheduleStepRecovery(sessionID: string, state: SessionState, report: string): void {
@@ -1068,6 +1171,9 @@ export function createContinuationHooks(
     description:
       "Compact the coordinator session and continue the bounded batch on the next independent unit.",
     async execute(_args, context): Promise<string> {
+      if (stoppedSessions.has(context.sessionID)) {
+        return "SORTIE_CONTINUATION_REJECTED: fresh-session-required";
+      }
       /*
        * A host that answers the session lookup without an agent field still knows the caller, so
        * the tool context supplies the identity while any reported parent link stays authoritative.
@@ -1127,6 +1233,7 @@ export function createContinuationHooks(
     tool,
 
     async textComplete(input, output): Promise<void> {
+      if (stoppedSessions.has(input.sessionID)) return;
       const state = stateFor(input.sessionID);
       state.textCompleting = true;
       try {
@@ -1255,6 +1362,7 @@ export function createContinuationHooks(
     },
 
     async sessionCompacting(input, output): Promise<void> {
+      if (stoppedSessions.has(input.sessionID)) return;
       const state = sessions.get(input.sessionID);
       if (state?.pendingRollover === true && (state.active || state.promptPending)) {
         state.compactingEpoch = state.rolloverEpoch;
@@ -1289,6 +1397,7 @@ export function createContinuationHooks(
     },
 
     async sessionCompacted(sessionID): Promise<void> {
+      if (stoppedSessions.has(sessionID)) return;
       const state = sessions.get(sessionID);
       if (
         state?.pendingRollover === true &&
@@ -1300,6 +1409,10 @@ export function createContinuationHooks(
     },
 
     async compactionAutoContinue(input, output): Promise<void> {
+      if (stoppedSessions.has(input.sessionID)) {
+        output.enabled = false;
+        return;
+      }
       const state = sessions.get(input.sessionID);
       const pending = state?.pendingRollover === true || state?.active === true ||
         state?.promptPending === true;
@@ -1320,6 +1433,7 @@ export function createContinuationHooks(
     },
 
     observeModel(sessionID, model, synthetic = false): void {
+      if (stoppedSessions.has(sessionID)) return;
       if (!nonEmpty(model.providerID) || !nonEmpty(model.modelID)) return;
       const state = stateFor(sessionID);
       clearTimer(state.stepRecoveryTimer);
@@ -1356,10 +1470,15 @@ export function createContinuationHooks(
 
     sessionIdle: handleSessionIdle,
 
+    stopAutomaticRecovery,
+
+    recoverStalledTask,
+
     forgetSession,
   };
 
   async function handleSessionIdle(sessionID: string): Promise<void> {
+      if (stoppedSessions.has(sessionID)) return;
       const state = sessions.get(sessionID);
       if (state !== undefined) {
         clearTimer(state.stepRecoveryTimer);

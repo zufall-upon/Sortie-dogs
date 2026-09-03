@@ -207,9 +207,12 @@ global file、project file、`SORTIE_DOGS_CONFIG`、plugin factory options。Ope
   互換を維持する。Sortie run が active でない場合だけ directory を削除する。
 - `readOnlyTools`: MCP tool など、file を変更しない host 固有 tool 名を追加する。
   未知の tool は bind 済み session では既定で拒否される。
-- `dedicatedWorkerModel`: 全 worker role が解決する単一 model。既定は `openai/gpt-5.6-luna` /
-  variant `max`。この model を使えない環境、または別の worker effort を使いたい場合は自分の
-  model を宣言する。worker role は常にこの単一 target に解決され、role ごとの routing はできない。
+- `dedicatedWorkerModel`: `implementation`、`remediation`、`blocker-resolution`、
+  `sol-worker-mk2a2`、`dog-worker` が使う serial implementation target。既定は
+  `openai/gpt-5.6-sol` / variant `medium`。配布済み `dog-luna-worker` fabric route は
+  `openai/gpt-5.6-luna` / variant `max` に固定される。serial target に同じ Luna model を指定すると
+  route identity が収束するため、設定全体を無効として拒否する。coordinatorは prepared `luna-fabric` run の
+  ready descriptor にだけこの role を dispatch し、`sol-serial` run では `dog-worker` を使う。
 - `reflection`: activated root `dog-coordinator` だけが使える process prevention。既定無効。
   opt-in 後の run / project layer は既定有効、project 間で共有する global storage layer は明示的に
   有効化しない限り無効。child / 他 agent は拒否され、`SORTIE_REFLECTION=0` で即時停止する。
@@ -242,19 +245,27 @@ workflowのbottleneckにしないため、能力とcostの均衡を優先する�
 証明した場合は設定済みfree-tier fallbackを使い、それもなければsession modelを維持する。`dog-scout` のデフォルトは
 `openai/gpt-5.6-luna` の `high` variant。Project-local routing でどちらも上書きできる。
 
-`implementation`、`remediation`、`blocker-resolution`、`dog-worker` は専用 worker target
-`openai/gpt-5.6-luna` の `max` variant に固定される。強い worker model を先に使う場合は
-`dedicatedWorkerModel` に `openai/gpt-5.6-sol` を宣言する。
-`modelRouting` では置換できず、移動できるのは `dedicatedWorkerModel` のみ。その他の明示
-route は Preferred target から順序付き fallback へ決定的に解決する。Built-in default も明示 route
-もない role は、OpenCode で選択済みの model を維持する。
+`implementation`、`remediation`、`blocker-resolution`、`sol-worker-mk2a2`、`dog-worker` は
+stable serial target `openai/gpt-5.6-sol` の `medium` variant に固定される。host が提供できない場合だけ
+`dedicatedWorkerModel` でserial targetを移動できる。配布済み `dog-luna-worker` はfabric admission後だけ使う
+別routeで、`openai/gpt-5.6-luna` の `max` variantに固定される。coordinatorは v0.8 DAG contract を
+`sortie_admit_luna_fabric` で admit し、`sortie_prepare_luna_fabric` で prepare した後にのみ、その
+`luna-fabric` run のcurrent ready waveにある別々のunitを最大5つdispatchできる。DAG全体は最大64 unit。
+active artifactがすべて検証された後、`sortie_advance_luna_fabric_wave` がruntime-owned hidden candidateへ統合し、
+旧worktreeをcleanupして、そのexact snapshotから次waveのfresh worktreeを作る。最終wave後は
+`sortie_validate_luna_fabric_candidate` がcanonical validationを1回実行し、review後の
+`sortie_accept_luna_fabric_candidate` だけがtargetを1回CASする。宣言済みshared-path ownershipは重複unitをwave間で直列化する。
+未所有overlapまたはadmission defectはjob全体を1つの `dog-worker` へ戻す。同じunitの複製実行は禁止。
+`modelRouting` はどちらも置換できず、
+serial targetに同じLuna modelを指定した設定も拒否する。0.7.0の`dog-worker`はLuna Maxだったが、v0.8は
+その履歴を残した上でstable Solとfabric Lunaを分離する。その他の明示routeはPreferred targetから順序付き
+fallbackへ決定的に解決する。Built-in defaultも明示routeもないroleはOpenCodeで選択済みmodelを維持する。
 
 `dog-reviewer` と `dog-advisor` は呼び出し元の model を継承してはならない。候補を生成した model
 で review / strategy を実行すると独立性が失われるため。両 role は catalog に
-`anthropic/claude-opus-5` が宣言されていればそれを、なければ worker target より 1 段上の
-`openai/gpt-5.6-sol` `xhigh` を使う。`dedicatedWorkerModel` を再宣言した host では、その target が
-最初の fallback になる。shipped model 自体を提供できない host があるため。特定 vendor は必須では
-なく、両 role とも設定可能なので、実際に利用できる model を宣言すればよい。
+`anthropic/claude-opus-5` が宣言されていればそれを、なければserial workerより高effortの
+`openai/gpt-5.6-sol` `xhigh` を使う。`dedicatedWorkerModel` の移動はconsultation policyを変更しない。
+特定vendorは必須ではなく、両roleとも設定可能なので、実際に利用できるmodelを宣言すればよい。
 
 ```json
 {
@@ -295,7 +306,7 @@ stage、commit、ユーザー対応を行わない。
 
 ## 更新と移行
 
-[Release v0.7.1](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.7.1)
+[Release v0.8.0](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.8.0)
 
 依存 asset を新しい release に更新後、対象 project root で再実行する。
 

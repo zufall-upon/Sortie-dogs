@@ -25,6 +25,7 @@ export type WriteDenialReason =
   | "path-required"
   | "project-boundary"
   | "manifest-scope"
+  | "parallel-relative-path"
   | "parallel-git-mutation"
   | "parallel-remote-mutation"
   | "parallel-validation"
@@ -42,6 +43,7 @@ export class WriteDeniedError extends Error {
       "path-required": "write path must be explicit.",
       "project-boundary": "project-root-relative path required.",
       "manifest-scope": "operation manifest write scope.",
+      "parallel-relative-path": "parallel implementation write paths must be absolute and rooted in managed_path.",
       "parallel-git-mutation": "parallel implementation workers cannot mutate shared Git state.",
       "parallel-remote-mutation": "parallel implementation workers cannot mutate shared remote state.",
       "parallel-validation": "parallel implementation validation must run after the worker join.",

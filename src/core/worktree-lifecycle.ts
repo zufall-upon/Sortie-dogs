@@ -7,7 +7,7 @@ import type { WorktreeParallelTask } from "./types.js";
 import { normalizeWorktreeScope } from "./worktree-scope.js";
 
 const INVENTORY_VERSION = 3;
-const MAX_WORKTREES = 3;
+const MAX_WORKTREES = 5;
 const MAX_INVENTORY_RECORDS = MAX_WORKTREES;
 const MAX_INVENTORY_BYTES = 1024 * 1024;
 const MAX_TEXT = 256;
@@ -48,6 +48,13 @@ export interface WorktreeSetupHook {
 
 export interface WorktreeCreateRequest {
   readonly pin: WorktreeBasePin;
+  readonly tasks: readonly WorktreeParallelTask[];
+  readonly setupHooks?: readonly WorktreeSetupHook[];
+}
+
+export interface WorktreeCreateAtBaseRequest {
+  readonly authority: WorktreeBasePin;
+  readonly baseSha: string;
   readonly tasks: readonly WorktreeParallelTask[];
   readonly setupHooks?: readonly WorktreeSetupHook[];
 }
@@ -320,8 +327,33 @@ export class WorktreeLifecycle {
       (request.setupHooks !== undefined && !Array.isArray(request.setupHooks))) {
       throw new WorktreeLifecycleError("invalid-request", "Create request is invalid.");
     }
-    if (pathIdentity(request.pin.repositoryRoot as string) !== pathIdentity(this.repositoryRoot) ||
-      typeof request.pin.sha !== "string" || !SHA.test(request.pin.sha)) {
+    return this.createManyAtBaseInternal(request, request.pin, request.pin.sha, 2);
+  }
+
+  async createManyAtBase(request: WorktreeCreateAtBaseRequest): Promise<readonly ManagedWorktree[]> {
+    if (!isRecord(request) || !hasExactKeys(request, request.setupHooks === undefined
+      ? ["authority", "baseSha", "tasks"]
+      : ["authority", "baseSha", "setupHooks", "tasks"]) || !isRecord(request.authority) ||
+      !hasExactKeys(request.authority, ["repositoryRoot", "sha"]) || !Array.isArray(request.tasks) ||
+      request.tasks.length < 1 || request.tasks.length > MAX_WORKTREES ||
+      (request.setupHooks !== undefined && !Array.isArray(request.setupHooks))) {
+      throw new WorktreeLifecycleError("invalid-request", "Create request is invalid.");
+    }
+    if (typeof request.baseSha !== "string" || !SHA.test(request.baseSha)) {
+      throw new WorktreeLifecycleError("invalid-request", "Candidate base is invalid.");
+    }
+    return this.createManyAtBaseInternal(request, request.authority, request.baseSha, 1);
+  }
+
+  private async createManyAtBaseInternal(
+    request: { readonly tasks: readonly WorktreeParallelTask[]; readonly setupHooks?: readonly WorktreeSetupHook[] },
+    authority: WorktreeBasePin,
+    baseSha: string,
+    minimumTasks: number,
+  ): Promise<readonly ManagedWorktree[]> {
+    if (request.tasks.length < minimumTasks || request.tasks.length > MAX_WORKTREES ||
+      pathIdentity(authority.repositoryRoot as string) !== pathIdentity(this.repositoryRoot) ||
+      typeof authority.sha !== "string" || !SHA.test(authority.sha)) {
       throw new WorktreeLifecycleError("invalid-request", "Base pin is invalid.");
     }
     if ((request.setupHooks?.length ?? 0) > MAX_SETUP_HOOKS) {
@@ -333,7 +365,7 @@ export class WorktreeLifecycle {
     const seenTask = new Set<string>();
     const records: InventoryRecord[] = [];
     for (const task of request.tasks) {
-      this.validateTask(task, request.pin.sha);
+      this.validateTask(task, baseSha);
       const id = identity(task.worktree);
       const branchID = task.branch.toLowerCase();
       const taskID = task.task_id.toLowerCase();
@@ -346,8 +378,8 @@ export class WorktreeLifecycle {
         throw new WorktreeLifecycleError("invalid-request", "Worktree path identity collides.");
       }
       const lockReason = `sortie-dogs:${id.slice(0, 16)}:${ownershipNonce}`;
-      records.push({ identity: id, path, pathNonce: ownershipNonce, branch: task.branch, baseSha: request.pin.sha,
-        expectedSha: request.pin.sha, lockReason, ownershipNonce, branchOwned: false,
+      records.push({ identity: id, path, pathNonce: ownershipNonce, branch: task.branch, baseSha,
+        expectedSha: baseSha, lockReason, ownershipNonce, branchOwned: false,
         targetDev: null, targetIno: null, phase: "creating" });
       seenIdentity.add(id);
       seenBranch.add(branchID);
@@ -361,7 +393,7 @@ export class WorktreeLifecycle {
     try {
       await this.withInventoryTransaction(async () => {
         if (this.inventory.records.length + records.length > MAX_WORKTREES) {
-          throw new WorktreeLifecycleError("invalid-request", "Managed worktree inventory cannot exceed three records.");
+          throw new WorktreeLifecycleError("invalid-request", "Managed worktree inventory cannot exceed five records.");
         }
         if (records.some((record) => this.inventory.records.some((entry) =>
           entry.identity === record.identity || entry.branch.toLowerCase() === record.branch.toLowerCase()))) {
@@ -370,11 +402,7 @@ export class WorktreeLifecycle {
         if ((await Promise.all(records.map((record) => this.branchExists(record.branch)))).some(Boolean)) {
           throw new WorktreeLifecycleError("invalid-request", "A requested branch already exists.");
         }
-        const current = (await this.git(["rev-parse", "--verify", "HEAD^{commit}"])).trim();
-        if (current !== request.pin.sha) {
-          throw new WorktreeLifecycleError("stale-base", "Primary HEAD no longer matches the base pin.");
-        }
-        await this.assertClean(this.repositoryRoot, "dirty-tree");
+        await this.assertAuthorityAndBase(authority.sha, baseSha);
         this.inventory.records.push(...records);
         await this.saveInventory();
         for (const record of records) {
@@ -393,7 +421,7 @@ export class WorktreeLifecycle {
       try {
         for (const hook of hooks) {
           await this.runSetupHook(hook.executable, hook.args, record.path, hook.timeoutMs);
-          await this.assertCreationIdentity(request.pin.sha, [record]);
+          await this.assertCreationIdentity(authority.sha, [record]);
         }
       } finally {
         this.inFlight.delete(record.identity);
@@ -401,7 +429,7 @@ export class WorktreeLifecycle {
     }));
     try {
       if (setup.some((result) => result.status === "rejected")) throw new Error("setup");
-      await this.assertCreationIdentity(request.pin.sha, records);
+      await this.assertCreationIdentity(authority.sha, records);
       return await this.withInventoryTransaction(async () => {
         const currentRecords = records.map((record) => this.requireOwnedRecord(record, "setting-up"));
         for (const record of currentRecords) record.phase = "ready";
@@ -747,6 +775,22 @@ export class WorktreeLifecycle {
       "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none",
     ], path);
     return status.length === 0;
+  }
+
+  private async assertAuthorityAndBase(authoritySha: string, baseSha: string): Promise<void> {
+    const current = (await this.git(["rev-parse", "--verify", "HEAD^{commit}"])).trim();
+    if (current !== authoritySha) {
+      throw new WorktreeLifecycleError("stale-base", "Primary HEAD no longer matches the authority pin.");
+    }
+    await this.assertClean(this.repositoryRoot, "dirty-tree");
+    let resolved: string;
+    try {
+      resolved = (await this.git(["rev-parse", "--verify", `${baseSha}^{commit}`])).trim();
+      if (resolved !== baseSha) throw new Error("base identity");
+      await this.git(["merge-base", "--is-ancestor", authoritySha, baseSha]);
+    } catch {
+      throw new WorktreeLifecycleError("stale-base", "Candidate base is not an exact descendant commit of the authority pin.");
+    }
   }
 
   private async listWorktrees(): Promise<GitWorktree[]> {

@@ -154,7 +154,7 @@ test("DAG identity, cycle, path, mode, artifact, and metrics boundaries fail clo
     if (path.includes("\n")) assert.equal(validateWorktreeParallelSchema(malformed).ok, false);
   }
 
-  for (const maxWorkers of [4, 2.5, Number.NaN]) {
+  for (const maxWorkers of [6, 2.5, Number.NaN]) {
     const invalidWorkers = contract({ read: [], write: ["src/a.ts"] }, { read: [], write: ["src/b.ts"] });
     invalidWorkers.max_workers = maxWorkers;
     assert.deepEqual(validateWorktreeParallelContract(invalidWorkers).diagnostics.map(({ code }) => code), [

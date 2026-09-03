@@ -13,6 +13,7 @@ import {
   type AcceptanceContinuityLedger,
 } from "../core/acceptance-continuity.js";
 import { resolveGlobalConfigRoot } from "../core/initialize.js";
+import { admitLunaFabric } from "../core/luna-fabric-contract.js";
 import { normalizeRelativePath, RelativePathError } from "../core/path.js";
 import { ScopeLeaseError, ScopeLeaseRegistry, type ScopeLease } from "../core/scope-lease-registry.js";
 import {
@@ -117,6 +118,16 @@ const SORTIE_TRIGGER = /^\/sortie(?:\s|$)/;
 const TASK_ROLES = new Set(["implementation", "remediation", "blocker-resolution"]);
 const GIT_POINTER_LIMIT = 4096;
 const PARALLEL_OUTCOME_MARKER = "SORTIE_PARALLEL_OUTCOME";
+const LUNA_FABRIC_ADMISSION_CAPABILITY = "sortie_admit_luna_fabric";
+const LUNA_FABRIC_CONTRACT_RELATIVE_PATH = ".opencode/sortie-dogs-luna-fabric.json";
+const LUNA_FABRIC_PREPARE_CAPABILITY = "sortie_prepare_luna_fabric";
+const LUNA_FABRIC_ADVANCE_CAPABILITY = "sortie_advance_luna_fabric_wave";
+const LUNA_FABRIC_VALIDATE_CAPABILITY = "sortie_validate_luna_fabric_candidate";
+const LUNA_FABRIC_ACCEPT_CAPABILITY = "sortie_accept_luna_fabric_candidate";
+const SERIAL_WORKER_AGENT = "dog-worker";
+const LUNA_FABRIC_WORKER_AGENT = "dog-luna-worker";
+/** Both implementation roles share one dispatch contract; the durable run route selects which one. */
+const IMPLEMENTATION_AGENTS = new Set([SERIAL_WORKER_AGENT, LUNA_FABRIC_WORKER_AGENT]);
 const CANONICAL_CONTRACT_DIRECTORY = ".sortie-dogs/contracts";
 const CANONICAL_CONTRACT_HANDOFF = `${CANONICAL_CONTRACT_DIRECTORY}/handoff.json`;
 const GENERATED_PARALLEL_ACCEPTANCE = "Complete the prepared parallel descriptor within its declared scope.";
@@ -197,6 +208,32 @@ export type HandoffDenialReason =
   | "input-unavailable"
   | "schema-invalid"
   | "contract-invalid";
+
+export type FreshSessionReason = "child-lineage" | "asset-contract-skew";
+export type FreshSessionAction = "open-fresh-root" | "install-assets-then-open-fresh-root";
+export type FreshSessionResult =
+  | Readonly<{
+      status: "redispatched";
+      reason: FreshSessionReason;
+      source_session_id: string;
+      target_session_id: string;
+      retry_same_session: false;
+    }>
+  | Readonly<{
+      status: "user-action-required";
+      reason: FreshSessionReason;
+      action: FreshSessionAction;
+      retry_same_session: false;
+    }>;
+
+export class FreshSessionRequiredError extends Error {
+  readonly code = "SORTIE_FRESH_SESSION_REQUIRED";
+
+  constructor(readonly result: FreshSessionResult, options?: ErrorOptions) {
+    super(`SORTIE_FRESH_SESSION_REQUIRED: ${JSON.stringify(result)}`, options);
+    this.name = "FreshSessionRequiredError";
+  }
+}
 
 /**
  * A denial the author cannot diagnose is a denial the author repeats, so every contract rejection
@@ -621,6 +658,22 @@ function textPart(part: unknown): string | undefined {
   return isRecord(part) && typeof part.text === "string" ? part.text : undefined;
 }
 
+interface FreshSessionPromptPart {
+  readonly type: "text";
+  readonly text: string;
+}
+
+function freshSessionPrompt(parts: readonly unknown[]): readonly FreshSessionPromptPart[] | undefined {
+  const prompt: FreshSessionPromptPart[] = [];
+  for (const part of parts) {
+    if (!isRecord(part) || part.type !== "text" || part.synthetic === true || typeof part.text !== "string") {
+      return undefined;
+    }
+    prompt.push({ type: "text", text: part.text });
+  }
+  return prompt.length > 0 && prompt.some(({ text }) => text.trim().length > 0) ? prompt : undefined;
+}
+
 /**
  * One handoff entry per line. The coordinator asset emits inline digests as `key: value`, often
  * indented or list-prefixed, while host wrappers emit flat `key=value`. Both forms describe the
@@ -807,7 +860,7 @@ export function isExplicitTaskHandoff(text: string): boolean {
 
 function explicitTaskText(output: Parameters<OpenCodeChatMessageHook>[1]): string | undefined {
   return output.parts.map(textPart).find((text) =>
-    text !== undefined && (isExplicitTaskHandoff(text) || isBlockTaskHandoff(text)));
+    text !== undefined && (isExplicitTaskHandoff(text) || isBlockTaskHandoff(text) || parallelDescriptor(text) !== undefined));
 }
 
 function taskProjectRoot(text: string): string | undefined {
@@ -948,7 +1001,7 @@ function parallelTaskMode(text: string): ActiveSessionState["parallel"] {
   if (group?.toLowerCase() === "none" && unit !== undefined && count === 1) return "none";
   return group !== undefined && group.toLowerCase() !== "none" &&
     unit !== undefined && unit.toLowerCase() !== "none" &&
-    Number.isInteger(count) && count >= 2 && count <= 3 ? "valid" : "invalid";
+    Number.isInteger(count) && count >= 2 && count <= 5 ? "valid" : "invalid";
 }
 
 function parseStringArray(value: string | undefined): readonly string[] | undefined {
@@ -989,7 +1042,7 @@ function parallelDescriptor(text: string): ParallelDispatchDescriptor | undefine
   return {
     run_id: runID!, dispatch_id: dispatchID!, task_id: taskID!, managed_path: managedPath!, branch: branch!,
     base_sha: baseSHA!, depends_on: dependsOn, scope_read: scopeRead, scope_write: scopeWrite,
-    parallel_group: group!, parallel_unit: unit!, parallel_units: units, attempt: attempt as 1,
+    parallel_group: group!, parallel_unit: unit!, parallel_units: units, attempt: attempt as 1 | 2,
     contract_fingerprint: contractFingerprint!,
   };
 }
@@ -1173,6 +1226,11 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   let bootstrapCompleted = false;
   type AssetVersionStatus = "unmarked" | "current" | "mismatch";
   const assetVersionPins = new Map<string, AssetVersionStatus>();
+  const coordinatorPrompts = new Map<string, readonly FreshSessionPromptPart[]>();
+  const freshSessionRedispatches = new Map<string, {
+    readonly operation: Promise<FreshSessionResult>;
+    settled: boolean;
+  }>();
   const rootAcceptanceContinuity = new Map<string, AcceptanceContinuityLedger>();
   const parallelAcceptanceContinuity = new Map<string, AcceptanceContinuityLedger>();
   const globalConfig = await readOptionalGlobalConfig();
@@ -1354,6 +1412,119 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   const completedCoordinatorMessages = new Set<string>();
   const completedCoordinatorParts = new Set<string>();
 
+  function freshSessionFallback(
+    reason: FreshSessionReason,
+    action: FreshSessionAction,
+  ): FreshSessionResult {
+    return { status: "user-action-required", reason, action, retry_same_session: false };
+  }
+
+  function promptAccepted(response: unknown): boolean {
+    if (response === undefined || response === true) return true;
+    if (!isRecord(response) || response.error !== undefined) return false;
+    if (isRecord(response.response)) {
+      if (response.response.ok === false) return false;
+      if (typeof response.response.status === "number" && response.response.status >= 400) return false;
+    }
+    return true;
+  }
+
+  async function deleteFreshSession(sessionID: string): Promise<void> {
+    const remove = input.client?.session?.delete;
+    if (remove === undefined) return;
+    await remove.call(input.client!.session, {
+      path: { id: sessionID },
+      query: { directory: input.worktree ?? input.directory },
+    }).catch(() => undefined);
+  }
+
+  async function redispatchFreshCoordinator(
+    sourceSessionID: string,
+    reason: FreshSessionReason,
+    prompt: readonly FreshSessionPromptPart[] | undefined,
+    fallbackAction: FreshSessionAction,
+  ): Promise<FreshSessionResult> {
+    const create = input.client?.session?.create;
+    const send = input.client?.session?.promptAsync;
+    if (prompt === undefined || create === undefined || send === undefined) {
+      return freshSessionFallback(reason, fallbackAction);
+    }
+    const key = `${sourceSessionID}\u0000${reason}`;
+    const existing = freshSessionRedispatches.get(key);
+    if (existing !== undefined) return await existing.operation;
+    const operation = (async (): Promise<FreshSessionResult> => {
+      let targetSessionID: string | undefined;
+      try {
+        const created = await create.call(input.client!.session, {
+          query: { directory: input.worktree ?? input.directory },
+          body: {},
+        });
+        const payload = isRecord(created) && "data" in created ? created.data : created;
+        if (!isRecord(payload) || typeof payload.id !== "string" || payload.id.length === 0) {
+          return freshSessionFallback(reason, fallbackAction);
+        }
+        targetSessionID = payload.id;
+        const parentID = typeof payload.parentID === "string" ? payload.parentID
+          : typeof payload.parentId === "string" ? payload.parentId
+            : undefined;
+        if (parentID !== undefined) {
+          await deleteFreshSession(targetSessionID);
+          return freshSessionFallback(reason, fallbackAction);
+        }
+        if (reason === "asset-contract-skew") {
+          project ??= await createProjectPaths(resolveProjectRoot(input));
+          if (await currentAssetVersionStatus(project) !== "current") {
+            await deleteFreshSession(targetSessionID);
+            return freshSessionFallback(reason, "install-assets-then-open-fresh-root");
+          }
+        }
+        const sent = await send.call(input.client!.session, {
+          path: { id: targetSessionID },
+          query: { directory: input.worktree ?? input.directory },
+          body: { agent: COORDINATOR_AGENT, parts: prompt },
+        });
+        if (!promptAccepted(sent)) throw new Error("fresh coordinator prompt rejected");
+        appLogInfo("fresh-session.redispatched", sourceSessionID, {
+          reason,
+          targetSessionID: targetSessionID.slice(0, 128),
+        });
+        return {
+          status: "redispatched",
+          reason,
+          source_session_id: sourceSessionID,
+          target_session_id: targetSessionID,
+          retry_same_session: false,
+        };
+      } catch {
+        if (targetSessionID !== undefined) await deleteFreshSession(targetSessionID);
+        return freshSessionFallback(reason, fallbackAction);
+      }
+    })();
+    const entry = { operation, settled: false };
+    freshSessionRedispatches.set(key, entry);
+    void operation.then((result) => {
+      entry.settled = true;
+      if (
+        result.status === "user-action-required" &&
+        result.action === "install-assets-then-open-fresh-root" &&
+        freshSessionRedispatches.get(key) === entry
+      ) {
+        freshSessionRedispatches.delete(key);
+      }
+      while (freshSessionRedispatches.size > ACTIVE_SESSION_CACHE.maximum) {
+        const completed = [...freshSessionRedispatches].find(([, candidate]) => candidate.settled);
+        if (completed === undefined) break;
+        freshSessionRedispatches.delete(completed[0]);
+      }
+    });
+    while (freshSessionRedispatches.size > ACTIVE_SESSION_CACHE.maximum) {
+      const completed = [...freshSessionRedispatches].find(([, candidate]) => candidate.settled);
+      if (completed === undefined) break;
+      freshSessionRedispatches.delete(completed[0]);
+    }
+    return await operation;
+  }
+
   async function ensureLoaded(): Promise<void> {
     if (loaded?.gate !== undefined) return;
     if (loading !== undefined) return loading;
@@ -1472,6 +1643,13 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   >();
   const bootstrapIdleWarnings = new Set<string>();
   const coordinatorTaskCalls = new Map<string, Set<string>>();
+  interface CoordinatorTaskWatchdogState {
+    generation: number;
+    lastActivity: number;
+    recovering: boolean;
+    timer?: ReturnType<typeof setTimeout>;
+  }
+  const coordinatorTaskWatchdogs = new Map<string, CoordinatorTaskWatchdogState>();
   const chatTransitions = new Map<string, Promise<void>>();
   const reflectionOwnedRoots = new Set<string>();
   const reflectionClosingRoots = new Set<string>();
@@ -1741,8 +1919,16 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   function generatedParallelAcceptance(
     descriptor: ParallelDispatchDescriptor,
     parent: AcceptanceContinuityLedger | undefined,
+    unitAcceptance: readonly string[] = [],
   ): AcceptanceContinuityLedger {
-    const criteria = [...(parent?.criteria ?? []), GENERATED_PARALLEL_ACCEPTANCE];
+    const parentCriteria = parent?.criteria ?? [];
+    const criteria = [
+      ...parentCriteria,
+      ...unitAcceptance.filter((criterion) => !parentCriteria.includes(criterion)),
+      ...(!parentCriteria.includes(GENERATED_PARALLEL_ACCEPTANCE) && !unitAcceptance.includes(GENERATED_PARALLEL_ACCEPTANCE)
+        ? [GENERATED_PARALLEL_ACCEPTANCE]
+        : []),
+    ];
     return {
       schema_version: ACCEPTANCE_CONTINUITY_SCHEMA_VERSION,
       authority: ACCEPTANCE_CONTINUITY_AUTHORITY,
@@ -1779,6 +1965,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     descriptor: ParallelDispatchDescriptor,
     validationCommands: readonly string[],
     parentAcceptance?: AcceptanceContinuityLedger,
+    unitAcceptance?: readonly string[],
   ): Promise<void> {
     const canonicalRoot = await realpath(descriptor.managed_path);
     if (!samePath(canonicalRoot, descriptor.managed_path)) {
@@ -1790,7 +1977,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     if (!samePath(contractDirectory, expectedContractDirectory)) {
       throw new ParallelDispatchError("lifecycle-failed", "Parallel contract directory escapes the managed worktree.");
     }
-    const expectedAcceptance = generatedParallelAcceptance(descriptor, parentAcceptance);
+    const expectedAcceptance = generatedParallelAcceptance(descriptor, parentAcceptance, unitAcceptance);
     let acceptance = parallelAcceptanceContinuity.get(parallelAcceptanceKey(descriptor));
     if (acceptance === undefined) {
       const existing = await readFile(paths.handoff_path, "utf8").catch(() => undefined);
@@ -1801,9 +1988,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           const inspectedAcceptance = validated.ok ? inspectAcceptanceContinuity(validated.value).ledger : undefined;
           if (inspectedAcceptance?.task_id === descriptor.task_id &&
             inspectedAcceptance.criteria.at(-1) === GENERATED_PARALLEL_ACCEPTANCE &&
-            (parentAcceptance === undefined ||
-              (inspectedAcceptance.fingerprint === expectedAcceptance.fingerprint &&
-                inspectedAcceptance.parent_fingerprint === expectedAcceptance.parent_fingerprint))) {
+            inspectedAcceptance.fingerprint === expectedAcceptance.fingerprint &&
+            inspectedAcceptance.parent_fingerprint === expectedAcceptance.parent_fingerprint) {
             acceptance = inspectedAcceptance;
           }
         } catch {
@@ -1900,7 +2086,12 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const validationCommands = loaded?.manifest?.validation ?? [];
     await Promise.all(snapshot.tasks
       .filter(({ phase }) => phase === "pending" || phase === "reserved")
-      .map(({ descriptor }) => createParallelControlFiles(descriptor, validationCommands, parentAcceptance)));
+       .map(({ descriptor }) => createParallelControlFiles(
+         descriptor,
+         validationCommands,
+         parentAcceptance,
+         snapshot.fabric?.unit_acceptance[descriptor.task_id],
+       )));
   }
 
   async function restoreActiveParallelControls(snapshot: ParallelDispatchSnapshot): Promise<void> {
@@ -1908,12 +2099,18 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const validationCommands = loaded?.manifest?.validation ?? [];
     await Promise.all(snapshot.tasks
       .filter(({ phase }) => phase === "pending" || phase === "reserved" || phase === "running")
-      .map(({ descriptor }) => createParallelControlFiles(descriptor, validationCommands)));
+       .map(({ descriptor }) => createParallelControlFiles(
+         descriptor,
+         validationCommands,
+         undefined,
+         snapshot.fabric?.unit_acceptance[descriptor.task_id],
+       )));
   }
 
   function boundedParallelSnapshot(snapshot: ParallelDispatchSnapshot): object {
     return {
       run_id: snapshot.run_id,
+      route: snapshot.route,
       max_workers: snapshot.max_workers,
       cancelled: snapshot.cancelled,
       archived: snapshot.archived,
@@ -1941,12 +2138,44 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         outcome,
         artifact: boundedParallelArtifact(artifact),
       })),
+      ...(snapshot.fabric === undefined ? {} : { fabric: snapshot.fabric }),
     };
+  }
+
+  function parallelWaveCounts(snapshot: ParallelDispatchSnapshot): {
+    dispatched: number; running: number; total: number;
+  } {
+    const active = snapshot.fabric === undefined ? undefined : new Set(snapshot.fabric.active_unit_ids);
+    const tasks = active === undefined
+      ? snapshot.tasks
+      : snapshot.tasks.filter(({ descriptor }) => active.has(descriptor.task_id));
+    return {
+      dispatched: tasks.filter(({ phase }) =>
+        phase === "running" || phase === "completed" || phase === "failed" || phase === "abandoned").length,
+      running: tasks.filter(({ phase }) => phase === "running").length,
+      total: tasks.length,
+    };
+  }
+
+  async function demoteReadyFabricFailure(
+    coordinator: ParallelDispatchCoordinator,
+    ownerRoot: string,
+    snapshot: ParallelDispatchSnapshot,
+  ): Promise<ParallelDispatchSnapshot> {
+    const active = new Set(snapshot.fabric?.active_unit_ids ?? []);
+    const failed = snapshot.route === "luna-fabric" &&
+      !snapshot.tasks.some(({ phase, descriptor }) => active.has(descriptor.task_id) && phase === "running")
+      ? snapshot.tasks.find(({ phase, descriptor }) => active.has(descriptor.task_id) &&
+        phase === "failed" && descriptor.attempt === 1)
+      : undefined;
+    return failed === undefined ? snapshot
+      : coordinator.demoteFailedFabricUnit(ownerRoot, snapshot.run_id, failed.descriptor.task_id);
   }
 
   function boundedParallelArchive(archive: ParallelDispatchArchive): object {
     return {
       run_id: archive.run_id,
+      route: archive.route,
       contract_fingerprint: archive.contract_fingerprint,
       cancelled: archive.cancelled,
       terminal_reason: archive.terminal_reason,
@@ -1955,6 +2184,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         task_id, worktree_id, managed_path, branch, base_sha, dispatch_id, phase, call_id, child_session_id, outcome,
         artifact: boundedParallelArtifact(artifact),
       })),
+      ...(archive.fabric === undefined ? {} : { fabric: archive.fabric }),
     };
   }
 
@@ -1968,7 +2198,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   ): Promise<string> {
     const deny = (reason: string): string => JSON.stringify({ status: "denied", reason });
     const sessionID = context.sessionID;
-    if (context.agent !== undefined && context.agent !== "dog-worker") return deny("worker-required");
+    if (context.agent !== undefined && !IMPLEMENTATION_AGENTS.has(context.agent)) return deny("worker-required");
     const request = parallelValidationRequest(args);
     if (request === undefined) return deny("invalid-request");
     const active = activeSessions.get(sessionID);
@@ -2051,10 +2281,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         await coordinator.cancel(ownerRoot, result.snapshot.run_id).catch(() => undefined);
         throw error;
       }
-      const dispatched = result.snapshot.tasks.filter(({ phase }) =>
-        phase === "running" || phase === "completed" || phase === "failed" || phase === "abandoned").length;
-      const running = result.snapshot.tasks.filter(({ phase }) => phase === "running").length;
-      fastLane.enableParallelDispatch(ownerRoot, result.snapshot.max_workers, dispatched, running, result.snapshot.tasks.length);
+      const counts = parallelWaveCounts(result.snapshot);
+      fastLane.enableParallelDispatch(ownerRoot, result.snapshot.max_workers, counts.dispatched, counts.running, counts.total);
       return JSON.stringify({ status: "prepared", ...boundedParallelSnapshot(result.snapshot) });
     } catch (error) {
       const reason = error instanceof ParallelDispatchError ? error.code
@@ -2064,14 +2292,169 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     }
   }
 
+  async function prepareLunaFabricDispatch(sessionID: string, contractPath: string): Promise<string> {
+    try {
+      const ownerRoot = await parallelToolOwner(sessionID);
+      project ??= await createProjectPaths(resolveProjectRoot(input));
+      if (ownerRoot === undefined || !isAbsolute(contractPath) ||
+        !await project.contains(contractPath)) return JSON.stringify({ status: "denied", reason: "project-boundary" });
+      if (await project.toRelativePath(contractPath) !== LUNA_FABRIC_CONTRACT_RELATIVE_PATH) {
+        return JSON.stringify({
+          status: "denied",
+          reason: "contract-control-path-required",
+          required_contract_path: LUNA_FABRIC_CONTRACT_RELATIVE_PATH,
+        });
+      }
+      const coordinator = await getParallelCoordinator();
+      const result = await coordinator.prepareFabric(
+        await readJson(resolve(contractPath), INPUT_LIMITS.parallel),
+        ownerRoot,
+      );
+      if (result.status === "sol-serial") return JSON.stringify(result);
+      try {
+        await ensureParallelReadyControls(result.snapshot, rootAcceptanceContinuity.get(ownerRoot));
+      } catch (error) {
+        await Promise.all(result.snapshot.tasks.map(({ descriptor }) =>
+          removeParallelControlFiles(descriptor).catch(() => undefined)));
+        await coordinator.cancel(ownerRoot, result.snapshot.run_id).catch(() => undefined);
+        throw error;
+      }
+      const counts = parallelWaveCounts(result.snapshot);
+      fastLane.enableParallelDispatch(ownerRoot, result.snapshot.max_workers, counts.dispatched, counts.running, counts.total);
+      return JSON.stringify({
+        status: "prepared",
+        fabric_fingerprint: result.fabric_fingerprint,
+        width: result.width,
+        depth: result.depth,
+        ...boundedParallelSnapshot(result.snapshot),
+      });
+    } catch (error) {
+      const reason = error instanceof ParallelDispatchError ? error.code
+        : error instanceof PluginInputError ? `input-${error.reason}`
+          : "parallel-unavailable";
+      return JSON.stringify({ status: "denied", reason });
+    }
+  }
+
+  async function advanceLunaFabricWave(sessionID: string, runID: string): Promise<string> {
+    try {
+      const ownerRoot = await parallelToolOwner(sessionID);
+      if (ownerRoot === undefined) return JSON.stringify({ status: "denied", reason: "coordinator-root-required" });
+      const snapshot = await (await getParallelCoordinator()).integrateFabricWave(ownerRoot, runID);
+      await ensureParallelReadyControls(snapshot, rootAcceptanceContinuity.get(ownerRoot));
+      const counts = parallelWaveCounts(snapshot);
+      if (!snapshot.archived && counts.total > 0) {
+        fastLane.advanceParallelWave(ownerRoot, snapshot.max_workers, counts.dispatched, counts.running, counts.total);
+      }
+      return JSON.stringify({ status: snapshot.archived ? "completed" : "advanced", ...boundedParallelSnapshot(snapshot) });
+    } catch (error) {
+      return JSON.stringify({
+        status: "denied",
+        reason: error instanceof ParallelDispatchError ? error.code : "fabric-advance-unavailable",
+      });
+    }
+  }
+
+  async function validateLunaFabricCandidate(
+    sessionID: string,
+    runID: string,
+    validationExecutable: string,
+    validationArgsJson: string,
+    timeoutText: string,
+  ): Promise<string> {
+    try {
+      const ownerRoot = await parallelToolOwner(sessionID);
+      const executable = await resolveValidationExecutable(validationExecutable);
+      const args = parseStringArray(validationArgsJson);
+      const timeout = Number(timeoutText);
+      if (ownerRoot === undefined || executable === undefined || args === undefined ||
+        !Number.isSafeInteger(timeout)) return JSON.stringify({ status: "denied", reason: "invalid-contract" });
+      const snapshot = await (await getParallelCoordinator()).validateFabricCandidate(
+        ownerRoot, runID, executable, args, timeout,
+      );
+      return JSON.stringify({
+        status: snapshot.fabric?.validation.status === "pass" ? "validated" : "failed",
+        ...boundedParallelSnapshot(snapshot),
+      });
+    } catch (error) {
+      return JSON.stringify({
+        status: "denied",
+        reason: error instanceof ParallelDispatchError ? error.code : "fabric-validation-unavailable",
+      });
+    }
+  }
+
+  async function acceptLunaFabricCandidate(
+    sessionID: string,
+    runID: string,
+    candidateHead: string,
+    review: string,
+    reviewFingerprint: string,
+  ): Promise<string> {
+    try {
+      const ownerRoot = await parallelToolOwner(sessionID);
+      if (ownerRoot === undefined || (review !== "pass" && review !== "skip" && review !== "fail")) {
+        return JSON.stringify({ status: "denied", reason: "invalid-contract" });
+      }
+      const snapshot = await (await getParallelCoordinator()).acceptFabricCandidate(
+        ownerRoot, runID, candidateHead, review, reviewFingerprint,
+      );
+      return JSON.stringify({
+        status: snapshot.terminal_reason === "completed" ? "accepted" : "rejected",
+        ...boundedParallelSnapshot(snapshot),
+      });
+    } catch (error) {
+      return JSON.stringify({
+        status: "denied",
+        reason: error instanceof ParallelDispatchError ? error.code : "fabric-accept-unavailable",
+      });
+    }
+  }
+
+  async function admitLunaFabricContract(sessionID: string, contractPath: string): Promise<string> {
+    try {
+      const ownerRoot = await parallelToolOwner(sessionID);
+      project ??= await createProjectPaths(resolveProjectRoot(input));
+      if (ownerRoot === undefined || !isAbsolute(contractPath) || !await project.contains(contractPath)) {
+        return JSON.stringify({ status: "denied", reason: "project-boundary" });
+      }
+      if (await project.toRelativePath(contractPath) !== LUNA_FABRIC_CONTRACT_RELATIVE_PATH) {
+        return JSON.stringify({
+          status: "denied",
+          reason: "contract-control-path-required",
+          required_contract_path: LUNA_FABRIC_CONTRACT_RELATIVE_PATH,
+        });
+      }
+      const admission = admitLunaFabric(await readJson(resolve(contractPath), INPUT_LIMITS.parallel));
+      return admission.route === "luna-fabric"
+        ? JSON.stringify({
+            status: "admitted",
+            route: admission.route,
+            contract_fingerprint: admission.contract_fingerprint,
+            width: admission.width,
+            depth: admission.depth,
+            unit_count: admission.contract.units.length,
+          })
+        : JSON.stringify({ status: "serial-route", ...admission });
+    } catch (error) {
+      return JSON.stringify({
+        status: "denied",
+        reason: error instanceof PluginInputError ? `input-${error.reason}` : "fabric-admission-unavailable",
+      });
+    }
+  }
+
   async function parallelDispatchStatus(sessionID: string, runID: string, reconcile: string): Promise<string> {
     try {
       const ownerRoot = await parallelToolOwner(sessionID);
       if (ownerRoot === undefined) return JSON.stringify({ status: "denied", reason: "coordinator-root-required" });
       const coordinator = await getParallelCoordinator();
-      const snapshot = reconcile === "true"
+      let snapshot = reconcile === "true"
         ? await coordinator.reconcile(ownerRoot, coordinatorTaskCalls.get(ownerRoot) ?? new Set(), runID || undefined)
         : await coordinator.snapshot(ownerRoot, runID || undefined);
+      if (snapshot !== undefined && !snapshot.archived) {
+        snapshot = await demoteReadyFabricFailure(coordinator, ownerRoot, snapshot);
+      }
       if (snapshot !== undefined) await ensureParallelReadyControls(snapshot);
       if (snapshot === undefined && !runID) {
         const archived = await coordinator.archives(ownerRoot);
@@ -2197,13 +2580,19 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const calls = coordinatorTaskCalls.get(sessionID) ?? new Set<string>();
     calls.add(callID);
     coordinatorTaskCalls.set(sessionID, calls);
+    armCoordinatorTaskWatchdog(sessionID, Date.now());
   }
 
   function finishCoordinatorTask(sessionID: string | undefined, callID: string | undefined): boolean {
     if (sessionID === undefined || callID === undefined) return false;
     const calls = coordinatorTaskCalls.get(sessionID);
     if (calls === undefined || !calls.delete(callID)) return false;
-    if (calls.size === 0) coordinatorTaskCalls.delete(sessionID);
+    if (calls.size === 0) {
+      coordinatorTaskCalls.delete(sessionID);
+      clearCoordinatorTaskWatchdog(sessionID);
+    } else {
+      armCoordinatorTaskWatchdog(sessionID, Date.now());
+    }
     return true;
   }
 
@@ -2212,7 +2601,108 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     return parentID !== undefined && (coordinatorTaskCalls.get(parentID)?.size ?? 0) > 0;
   }
 
+  function watchdogTimeoutMilliseconds(): number {
+    return loaded?.continuation.taskWatchdogMilliseconds ??
+      DEFAULT_PLUGIN_OPTIONS.continuation.taskWatchdogMilliseconds;
+  }
+
+  function clearCoordinatorTaskWatchdog(sessionID: string): void {
+    const state = coordinatorTaskWatchdogs.get(sessionID);
+    if (state?.timer !== undefined) clearTimeout(state.timer);
+    coordinatorTaskWatchdogs.delete(sessionID);
+  }
+
+  function armCoordinatorTaskWatchdog(sessionID: string, activity: number): void {
+    if (!coordinatorTaskCalls.has(sessionID)) return;
+    const state = coordinatorTaskWatchdogs.get(sessionID) ?? {
+      generation: 0,
+      lastActivity: activity,
+      recovering: false,
+    };
+    if (state.timer !== undefined) clearTimeout(state.timer);
+    state.generation += 1;
+    state.lastActivity = activity;
+    state.recovering = false;
+    const generation = state.generation;
+    state.timer = setTimeout(() => {
+      void sweepCoordinatorTaskWatchdog(sessionID, generation);
+    }, watchdogTimeoutMilliseconds());
+    state.timer.unref?.();
+    coordinatorTaskWatchdogs.set(sessionID, state);
+  }
+
+  function touchCoordinatorTaskWatchdog(sessionID: string): void {
+    const root = coordinatorRootForSession(sessionID);
+    if (root !== undefined && coordinatorTaskWatchdogs.has(root)) {
+      armCoordinatorTaskWatchdog(root, Date.now());
+    }
+  }
+
+  function sessionOwnedByRoot(sessionID: string, rootID: string): boolean {
+    return sessionID === rootID || sessionRoots.get(sessionID) === rootID || sessionParents.get(sessionID) === rootID;
+  }
+
+  async function watchdogProtectedReasons(rootID: string): Promise<string[]> {
+    const reasons = new Set<string>();
+    if ([...parallelCalls.values()].some((call) => call.ownerRoot === rootID)) reasons.add("parallel-running");
+    if ([...sessionAuthorizations].some(([sessionID]) => sessionOwnedByRoot(sessionID, rootID))) {
+      reasons.add("bound-write-gate");
+    }
+    if ([...bindingOperations].some((sessionID) => sessionOwnedByRoot(sessionID, rootID)) ||
+      [...parallelArtifactOperations].some((sessionID) => sessionOwnedByRoot(sessionID, rootID))) {
+      reasons.add("durable-update-in-flight");
+    }
+    if (parallelCoordinator !== undefined) {
+      const snapshot = await parallelCoordinator.snapshot(rootID).catch(() => undefined);
+      if (snapshot !== undefined && !snapshot.archived) reasons.add("durable-state-present");
+    }
+    return [...reasons].sort();
+  }
+
+  async function sweepCoordinatorTaskWatchdog(sessionID: string, generation: number): Promise<void> {
+    const state = coordinatorTaskWatchdogs.get(sessionID);
+    const calls = coordinatorTaskCalls.get(sessionID);
+    if (state === undefined || calls === undefined || state.generation !== generation || state.recovering) return;
+    const elapsed = Date.now() - state.lastActivity;
+    if (elapsed < watchdogTimeoutMilliseconds()) {
+      armCoordinatorTaskWatchdog(sessionID, state.lastActivity);
+      return;
+    }
+    state.recovering = true;
+    const reasons = await watchdogProtectedReasons(sessionID);
+    if (coordinatorTaskWatchdogs.get(sessionID) !== state || state.generation !== generation) return;
+    if (reasons.length > 0) {
+      state.recovering = false;
+      appLogInfo("batch-watchdog.deferred", sessionID, {
+        type: "coordinator-task-watchdog-deferred",
+        reasons,
+        callCount: calls.size,
+      });
+      armCoordinatorTaskWatchdog(sessionID, Date.now());
+      return;
+    }
+    const callIDs = [...calls];
+    const result = await continuation.recoverStalledTask(sessionID, callIDs);
+    if (coordinatorTaskWatchdogs.get(sessionID) !== state || state.generation !== generation) return;
+    if (result === "recovered") {
+      appLogInfo("batch-watchdog.recovered", sessionID, {
+        type: "coordinator-task-watchdog-recovered",
+        callCount: callIDs.length,
+      });
+      abortCoordinatorTasks(sessionID);
+      return;
+    }
+    state.recovering = false;
+    appLogInfo("batch-watchdog.deferred", sessionID, {
+      type: "coordinator-task-watchdog-deferred",
+      reasons: [result],
+      callCount: calls.size,
+    });
+    armCoordinatorTaskWatchdog(sessionID, Date.now());
+  }
+
   function abortCoordinatorTasks(sessionID: string, preserveRecoverable = false): void {
+    clearCoordinatorTaskWatchdog(sessionID);
     if (coordinatorTaskCalls.delete(sessionID)) fastLane.workerCompleted(sessionID);
     for (const [childID, parentID] of [...sessionParents]) {
       if (parentID === sessionID && (!preserveRecoverable || !recoverableWorkerChildren.has(childID))) {
@@ -2447,6 +2937,12 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     }
 
     const continuity = inspectAcceptanceContinuity(validation.value);
+    if (continuity.error !== undefined && continuity.error !== "absent") {
+      throw new HandoffDeniedError("contract-invalid", path, {
+        defects: [contractDefect("handoff", "/ext/sortie-dogs~1acceptance-continuity",
+          `acceptance_continuity_${continuity.error}`)],
+      });
+    }
     const identity = {
       explicitWriteGate: extension !== undefined,
       handoffID: validation.value.id,
@@ -2512,7 +3008,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       },
       "parallel-contract-invalid": {
         recoverable: false,
-        remedy: "Redispatch a fresh worker with parallel_group, parallel_unit, and parallel_units=2..3 all present, or omit all three fields for serial work.",
+        remedy: "Redispatch a fresh worker with parallel_group, parallel_unit, and parallel_units=2..5 all present, or omit all three fields for serial work.",
       },
       "durable-scope-unavailable": {
         recoverable: false,
@@ -2878,6 +3374,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         coordinatorRoots.delete(sessionID);
         explicitCoordinatorModels.delete(sessionID);
         assetVersionPins.delete(sessionID);
+        coordinatorPrompts.delete(sessionID);
       }
     }
     const limit = ACTIVE_SESSION_CACHE.maximum - (reserveSlot ? 1 : 0);
@@ -2886,6 +3383,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       coordinatorRoots.delete(sessionID);
       explicitCoordinatorModels.delete(sessionID);
       assetVersionPins.delete(sessionID);
+      coordinatorPrompts.delete(sessionID);
     }
   }
 
@@ -3041,6 +3539,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     expiredSessions.delete(sessionID);
     coordinatorRoots.delete(sessionID);
     assetVersionPins.delete(sessionID);
+    coordinatorPrompts.delete(sessionID);
     explicitCoordinatorModels.delete(sessionID);
     bindingDenials.delete(sessionID);
     sessionTaskIDs.delete(sessionID);
@@ -3205,8 +3704,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     ledger: AcceptanceContinuityLedger,
     descriptor: ParallelDispatchDescriptor | undefined,
   ): Promise<boolean> {
-    if (descriptor === undefined || acceptanceParentPrefix(ledger) === undefined ||
-      ledger.parent_fingerprint === "none") return false;
+    if (acceptanceParentPrefix(ledger) === undefined || ledger.parent_fingerprint === "none") return false;
+    if (descriptor === undefined) return true;
     const snapshot = await (await getParallelCoordinator()).snapshot(sessionID, descriptor.run_id);
     return snapshot?.tasks.some(({ phase, descriptor: durable }) =>
       (phase === "pending" || phase === "reserved" || phase === "running") &&
@@ -3460,6 +3959,59 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           return JSON.stringify({ status: "enabled", max_units: maxUnits });
         },
       }),
+      [LUNA_FABRIC_ADMISSION_CAPABILITY]: defineTool({
+        description: "Validate one coordinator-generated Luna DAG from the exact ignored project control path .opencode/sortie-dogs-luna-fabric.json and return a typed automatic Luna or Sol route.",
+        args: { contract_path: defineTool.schema.string() },
+        async execute(args, context): Promise<string> {
+          return admitLunaFabricContract(context.sessionID, args.contract_path);
+        },
+      }),
+      [LUNA_FABRIC_PREPARE_CAPABILITY]: defineTool({
+        description: "Prepare one admitted Luna fabric contract from the exact ignored project control path .opencode/sortie-dogs-luna-fabric.json as up to five disjoint durable Luna units.",
+        args: { contract_path: defineTool.schema.string() },
+        async execute(args, context): Promise<string> {
+          return prepareLunaFabricDispatch(context.sessionID, args.contract_path);
+        },
+      }),
+      [LUNA_FABRIC_ADVANCE_CAPABILITY]: defineTool({
+        description: "Integrate one completed Luna fabric wave into the runtime-owned hidden candidate.",
+        args: { run_id: defineTool.schema.string() },
+        async execute(args, context): Promise<string> {
+          return advanceLunaFabricWave(context.sessionID, args.run_id);
+        },
+      }),
+      [LUNA_FABRIC_VALIDATE_CAPABILITY]: defineTool({
+        description: "Run canonical validation once on the complete hidden Luna fabric candidate.",
+        args: {
+          run_id: defineTool.schema.string(),
+          validation_executable: defineTool.schema.string(),
+          validation_args_json: optionalString(),
+          timeout_ms: optionalString(),
+        },
+        async execute(args, context): Promise<string> {
+          return validateLunaFabricCandidate(
+            context.sessionID,
+            args.run_id,
+            args.validation_executable,
+            args.validation_args_json ?? "[]",
+            args.timeout_ms ?? "600000",
+          );
+        },
+      }),
+      [LUNA_FABRIC_ACCEPT_CAPABILITY]: defineTool({
+        description: "Record final review and promote one validated Luna fabric candidate through one target CAS.",
+        args: {
+          run_id: defineTool.schema.string(),
+          candidate_head: defineTool.schema.string(),
+          review: defineTool.schema.string(),
+          review_fingerprint: defineTool.schema.string(),
+        },
+        async execute(args, context): Promise<string> {
+          return acceptLunaFabricCandidate(
+            context.sessionID, args.run_id, args.candidate_head, args.review, args.review_fingerprint,
+          );
+        },
+      }),
       sortie_prepare_parallel_dispatch: defineTool({
         description: "Prepare one validated two-to-three-task dependency-aware parallel dispatch run.",
         args: { contract_path: defineTool.schema.string() },
@@ -3596,6 +4148,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       const parentID = chatParentID(chatInput);
       const synthetic = output.parts.some((part) => isRecord(part) && part.synthetic === true);
       if (parentID !== undefined) rememberParent(chatInput.sessionID, parentID);
+      touchCoordinatorTaskWatchdog(chatInput.sessionID);
       const coordinatorRoot = isCoordinatorSession(chatInput.sessionID);
       const selectedAgent = chatInput.agent ?? output.message.agent;
       if (chatInput.agent !== undefined && output.message.agent !== chatInput.agent) {
@@ -3608,9 +4161,13 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           ? undefined
           : await hostSessionIdentity(chatInput.sessionID);
         if (explicitChild || identity?.parentPresent === true) {
-          throw new Error(
-            "SORTIE_FRESH_SESSION_REQUIRED: /sortie cannot promote a child session to a root dog-coordinator",
-          );
+          await continuation.stopAutomaticRecovery(chatInput.sessionID);
+          throw new FreshSessionRequiredError(await redispatchFreshCoordinator(
+            chatInput.sessionID,
+            "child-lineage",
+            freshSessionPrompt(output.parts),
+            "open-fresh-root",
+          ));
         }
         fastLane.forget(chatInput.sessionID);
         abortCoordinatorTasks(chatInput.sessionID);
@@ -3620,6 +4177,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       }
       const coordinatorOrigin = parentID === undefined && requestedCoordinator;
       if (coordinatorOrigin) {
+        const prompt = synthetic ? undefined : freshSessionPrompt(output.parts);
+        if (prompt !== undefined) coordinatorPrompts.set(chatInput.sessionID, prompt);
         fastLane.beginTurn(chatInput.sessionID, synthetic);
         releaseSessionEnforcement(chatInput.sessionID);
         await rememberCoordinatorRoot(chatInput.sessionID);
@@ -3631,6 +4190,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           continuation.forgetSession(chatInput.sessionID);
           await retireParallelWorkflow(chatInput.sessionID);
           evictSession(chatInput.sessionID);
+        } else if (!synthetic && selectedAgent !== COORDINATOR_AGENT) {
+          continuation.forgetSession(chatInput.sessionID);
         }
         const taskText = explicitTaskText(output);
         if (taskText !== undefined) {
@@ -3644,24 +4205,27 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           await recoverCoordinatorLineage(chatInput.sessionID);
           inheritedRoot = await inheritedTaskRoot(chatInput.sessionID, taskText);
         }
-        if (inheritedRoot !== undefined) {
-          sessionRoots.set(chatInput.sessionID, inheritedRoot);
-          activateSession(chatInput.sessionID, parallelTaskMode(taskText!));
-          const descriptor = parallelDescriptor(taskText!);
-          const recordedAgent = chatInput.agent ?? output.message.agent;
-          const matchingCall = descriptor === undefined ? undefined : [...parallelCalls.values()].find((call) =>
-            call.ownerRoot === inheritedRoot && sameParallelDescriptor(call.descriptor, descriptor));
-          if (descriptor !== undefined && recordedAgent === "dog-worker" && matchingCall !== undefined &&
-            samePath(taskProjectRoot(taskText!) ?? "", descriptor.managed_path) && sessionParents.get(chatInput.sessionID) === inheritedRoot) {
-            parallelChildBindings.set(chatInput.sessionID, {
+          if (inheritedRoot !== undefined) {
+            sessionRoots.set(chatInput.sessionID, inheritedRoot);
+            const descriptor = parallelDescriptor(taskText!);
+            const recordedAgent = chatInput.agent ?? output.message.agent;
+            const matchingCall = descriptor === undefined ? undefined : [...parallelCalls.values()].find((call) =>
+              call.ownerRoot === inheritedRoot && sameParallelDescriptor(call.descriptor, descriptor));
+            if (descriptor !== undefined && recordedAgent !== undefined && IMPLEMENTATION_AGENTS.has(recordedAgent) &&
+              matchingCall !== undefined &&
+              samePath(taskProjectRoot(taskText!) ?? "", descriptor.managed_path) && sessionParents.get(chatInput.sessionID) === inheritedRoot) {
+              activateSession(chatInput.sessionID, parallelTaskMode(taskText!));
+              parallelChildBindings.set(chatInput.sessionID, {
               ownerRoot: inheritedRoot,
               descriptor,
               completionCallID: matchingCall.completionCallID,
             });
             pruneParallelChildMap(parallelChildBindings);
-          } else {
-            parallelChildBindings.delete(chatInput.sessionID);
-          }
+            } else {
+              parallelChildBindings.delete(chatInput.sessionID);
+              activateSession(chatInput.sessionID,
+                descriptor === undefined ? parallelTaskMode(taskText!) : "invalid");
+            }
         } else if (activatesSession(chatInput, output)) {
           activateSession(chatInput.sessionID, taskText === undefined ? "none" : parallelTaskMode(taskText));
         }
@@ -3780,8 +4344,13 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     /*
      * Upstream builds a task result from the child's last text part, so a trailing empty text part
      * erases an answer the worker already produced and the coordinator re-dispatches the same work.
-     */
+    */
     "tool.execute.after": async (toolInput, output): Promise<void> => {
+      if (toolInput.sessionID !== undefined) touchCoordinatorTaskWatchdog(toolInput.sessionID);
+      // The host after hook itself proves the Task is no longer stalled. Disarm before result repair or
+      // durable parallel bookkeeping, either of which may outlive a deliberately short watchdog policy.
+      const coordinatorTaskFinished = toolInput.tool === "task" &&
+        finishCoordinatorTask(toolInput.sessionID, toolInput.callID);
       const completedChildSessionID = toolInput.tool === "task" ? taskChildSessionID(output) : undefined;
       const handoffInspection = inspectSuccessfulRead(toolInput);
       try {
@@ -3833,28 +4402,28 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           const terminal = parallelOutcome(output.output);
           let effectiveOutcome = terminal.outcome;
           let terminalRecorded = false;
-          if (effectiveOutcome === "completed") {
-            const binding = completedChildSessionID === undefined ? undefined : parallelChildBindings.get(completedChildSessionID);
-            const childActive = completedChildSessionID === undefined ? undefined : activeSessions.get(completedChildSessionID);
-            const authorization = completedChildSessionID === undefined ? undefined : sessionAuthorizations.get(completedChildSessionID);
-            const artifactSnapshot = await parallelCoordinator.snapshot(parallel.ownerRoot, parallel.descriptor.run_id);
-            const durableArtifact = artifactSnapshot?.tasks.find(({ descriptor }) =>
-              descriptor.dispatch_id === parallel!.descriptor.dispatch_id)?.artifact ?? null;
-            const terminalGate = completedChildSessionID !== undefined && binding !== undefined && durableArtifact !== null &&
-              binding.ownerRoot === parallel.ownerRoot && sameParallelDescriptor(binding.descriptor, parallel.descriptor) &&
-              childActive?.released === true && childActive.inFlightCalls.size === 0 && authorization?.suspended === true &&
-              authorization.lease === undefined && !recoverableWorkerChildren.has(completedChildSessionID);
-            if (!terminalGate) {
-              effectiveOutcome = "failed";
-            }
-          }
-          const snapshot = await parallelCoordinator.completeCall(
+          const binding = completedChildSessionID === undefined ? undefined : parallelChildBindings.get(completedChildSessionID);
+          const childActive = completedChildSessionID === undefined ? undefined : activeSessions.get(completedChildSessionID);
+          const authorization = completedChildSessionID === undefined ? undefined : sessionAuthorizations.get(completedChildSessionID);
+          const artifactSnapshot = await parallelCoordinator.snapshot(parallel.ownerRoot, parallel.descriptor.run_id);
+          const durableArtifact = artifactSnapshot?.tasks.find(({ descriptor }) =>
+            descriptor.dispatch_id === parallel!.descriptor.dispatch_id)?.artifact ?? null;
+          const terminalGate = completedChildSessionID !== undefined && binding !== undefined && durableArtifact !== null &&
+            binding.ownerRoot === parallel.ownerRoot && sameParallelDescriptor(binding.descriptor, parallel.descriptor) &&
+            childActive?.released === true && childActive.inFlightCalls.size === 0 && authorization?.suspended === true &&
+            authorization.lease === undefined && !recoverableWorkerChildren.has(completedChildSessionID);
+          if (terminalGate) effectiveOutcome = "completed";
+          else if (effectiveOutcome === "completed") effectiveOutcome = "failed";
+          const effectiveClaim = terminalGate
+            ? { run_id: parallel.descriptor.run_id, dispatch_id: parallel.descriptor.dispatch_id }
+            : terminal.claimed;
+          let snapshot = await parallelCoordinator.completeCall(
             parallel.ownerRoot, parallel.completionCallID, completedChildSessionID,
-            effectiveOutcome, terminal.claimed,
+            effectiveOutcome, effectiveClaim,
           ).then((value) => { terminalRecorded = true; return value; }).catch(async () => {
             if (effectiveOutcome !== "failed") {
               return parallelCoordinator!.completeCall(parallel!.ownerRoot, parallel!.completionCallID,
-                completedChildSessionID, "failed", terminal.claimed).then((value) => {
+                completedChildSessionID, "failed", effectiveClaim).then((value) => {
                 terminalRecorded = true;
                 return value;
               }).catch(() => undefined);
@@ -3866,20 +4435,23 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
             parallelChildBindings.delete(completedChildSessionID);
           }
           if (snapshot !== undefined) {
+            snapshot = await demoteReadyFabricFailure(parallelCoordinator, parallel.ownerRoot, snapshot)
+              .catch(() => snapshot!);
             await ensureParallelReadyControls(snapshot);
             if (snapshot.cancelled) {
               await removeParallelControlFiles(parallel.descriptor).catch(() => undefined);
             }
-            const dispatched = snapshot.tasks.filter(({ phase }) =>
-              phase === "running" || phase === "completed" || phase === "failed" || phase === "abandoned").length;
-            const running = snapshot.tasks.filter(({ phase }) => phase === "running").length;
-            fastLane.enableParallelDispatch(parallel.ownerRoot, snapshot.max_workers, dispatched, running, snapshot.tasks.length);
+            const counts = parallelWaveCounts(snapshot);
+            if (counts.total > 0) {
+              fastLane.enableParallelDispatch(parallel.ownerRoot, snapshot.max_workers,
+                counts.dispatched, counts.running, counts.total);
+            }
           }
         }
       } finally {
         parallelCalls.delete(toolInput.callID ?? "");
         activeSessions.get(toolInput.sessionID ?? "")?.inFlightCalls.delete(toolInput.callID ?? "");
-        if (toolInput.tool === "task" && finishCoordinatorTask(toolInput.sessionID, toolInput.callID)) {
+        if (coordinatorTaskFinished) {
           fastLane.workerCompleted(toolInput.sessionID!);
         }
         if (completedChildSessionID !== undefined && !recoverableWorkerChildren.has(completedChildSessionID)) {
@@ -3889,10 +4461,14 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     },
     "tool.execute.before": async (toolInput, output): Promise<void> => {
       const coordinatorRoot = isCoordinatorSession(toolInput.sessionID) || await recoverCoordinatorRoot(toolInput.sessionID);
+      touchCoordinatorTaskWatchdog(toolInput.sessionID);
       if (coordinatorRoot) continuation.toolStarted(toolInput.sessionID, toolInput.tool);
       const coordinatorCapability = toolInput.tool === "task" ||
         toolInput.tool === CONTINUATION_CAPABILITY || toolInput.tool === BACKLOG_DRAIN_CAPABILITY ||
         toolInput.tool === "sortie_check_contract" ||
+        toolInput.tool === LUNA_FABRIC_ADMISSION_CAPABILITY || toolInput.tool === LUNA_FABRIC_PREPARE_CAPABILITY ||
+        toolInput.tool === LUNA_FABRIC_ADVANCE_CAPABILITY || toolInput.tool === LUNA_FABRIC_VALIDATE_CAPABILITY ||
+        toolInput.tool === LUNA_FABRIC_ACCEPT_CAPABILITY ||
         toolInput.tool === "sortie_prepare_parallel_dispatch" || toolInput.tool === "sortie_parallel_dispatch_status" ||
         toolInput.tool === "sortie_cancel_parallel_dispatch" ||
         toolInput.tool === "sortie_enqueue_parallel_integration" || toolInput.tool === "sortie_integrate_parallel_queue" ||
@@ -3941,14 +4517,22 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         let parallelWorkerAlreadyBound = false;
         let reservedParallelDescriptor: ParallelDispatchDescriptor | undefined;
         let validatedRootAcceptance: AcceptanceContinuityLedger | undefined;
-        if (toolInput.tool === "task" && taskRole === "dog-worker" && isRecord(output.args)) {
+        if (toolInput.tool === "task" && taskRole !== undefined && IMPLEMENTATION_AGENTS.has(taskRole) &&
+          isRecord(output.args)) {
           await ensureLoaded();
           const assetVersionStatus = await pinAssetVersion(toolInput.sessionID);
           if (assetVersionStatus === "mismatch") {
-            throw new Error(
-              "SORTIE_FRESH_SESSION_REQUIRED: installed agent assets and the loaded plugin use different contracts; " +
-              "run sortie-dogs init . and start a fresh coordinator session",
-            );
+            await continuation.stopAutomaticRecovery(toolInput.sessionID);
+            const liveStatus = project === undefined ? "mismatch" : await currentAssetVersionStatus(project);
+            const result = liveStatus === "current"
+              ? await redispatchFreshCoordinator(
+                  toolInput.sessionID,
+                  "asset-contract-skew",
+                  coordinatorPrompts.get(toolInput.sessionID),
+                  "open-fresh-root",
+                )
+              : freshSessionFallback("asset-contract-skew", "install-assets-then-open-fresh-root");
+            throw new FreshSessionRequiredError(result);
           }
           const prompt = typeof output.args.prompt === "string" ? output.args.prompt : "";
           const contractPrompt = taskContractText(prompt);
@@ -3961,6 +4545,20 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
               });
             }
           }
+          if (reservedParallelDescriptor !== undefined) {
+            const paths = parallelControlPaths(reservedParallelDescriptor);
+            const identity = await inspect(paths.handoff_path, undefined, { report: true });
+            const ledger = identity?.acceptanceContinuity;
+            if (identity === undefined || !identity.explicitWriteGate ||
+              !samePath(identity.projectRoot, reservedParallelDescriptor.managed_path) ||
+              !samePath(identity.manifestPath, paths.operation_manifest) || ledger === undefined ||
+              ledger.task_id !== reservedParallelDescriptor.task_id) {
+              throw new HandoffDeniedError("contract-invalid", paths.handoff_path, {
+                defects: [contractDefect("handoff", "/", "parallel_generated_control_mismatch")],
+              });
+            }
+            validatedRootAcceptance = ledger;
+          } else {
           const modes = taskValues(contractPrompt, ["mode"]);
           const resume = modes.length === 1 && modes[0] === "same-task-resume";
           const handoffPaths = taskValues(contractPrompt, ["handoff_path", "handoffpath"]);
@@ -4118,11 +4716,24 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
               validatedRootAcceptance = ledger;
             }
           }
+          }
+        }
+        if (toolInput.tool === "task" && taskRole === LUNA_FABRIC_WORKER_AGENT && reservedParallelDescriptor === undefined) {
+          throw new HandoffDeniedError("contract-invalid", "<worker-dispatch>", {
+            defects: [contractDefect("contract", "/role", "luna_worker_requires_admitted_descriptor")],
+          });
         }
         if (reservedParallelDescriptor !== undefined) {
           const coordinator = await getParallelCoordinator();
           const snapshot = await coordinator.snapshot(toolInput.sessionID, reservedParallelDescriptor.run_id);
           if (snapshot === undefined) throw new ParallelDispatchError("descriptor-mismatch", "Parallel run is absent.");
+           const routedAgent = snapshot.route === "luna-fabric" && reservedParallelDescriptor.attempt === 1
+             ? LUNA_FABRIC_WORKER_AGENT : SERIAL_WORKER_AGENT;
+          if (taskRole !== routedAgent) {
+            throw new HandoffDeniedError("contract-invalid", "<worker-dispatch>", {
+              defects: [contractDefect("contract", "/role", "parallel_route_role_mismatch")],
+            });
+          }
           parallelWorkerAlreadyBound = snapshot.tasks.some(({ phase, call_id, descriptor }) =>
             phase === "running" && call_id === toolInput.callID &&
             sameParallelDescriptor(descriptor, reservedParallelDescriptor!));
@@ -4130,11 +4741,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           const boundSnapshot = await coordinator.snapshot(toolInput.sessionID, reservedParallelDescriptor.run_id);
           if (boundSnapshot === undefined) throw new ParallelDispatchError("descriptor-mismatch", "Parallel run is absent.");
           const currentContribution = parallelWorkerAlreadyBound ? 0 : 1;
-          const dispatched = boundSnapshot.tasks.filter(({ phase }) =>
-            phase === "running" || phase === "completed" || phase === "failed" || phase === "abandoned").length;
-          const running = boundSnapshot.tasks.filter(({ phase }) => phase === "running").length;
+          const counts = parallelWaveCounts(boundSnapshot);
           fastLane.enableParallelDispatch(toolInput.sessionID, boundSnapshot.max_workers,
-            dispatched - currentContribution, running - currentContribution, boundSnapshot.tasks.length);
+            counts.dispatched - currentContribution, counts.running - currentContribution, counts.total);
           parallelWorkerAuthorized = true;
         }
         const resumedWorkerSessionID = fastLane.beforeTool(toolInput.sessionID, toolInput.tool, output.args, {
@@ -4157,7 +4766,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           }
           recoverableWorkerChildren.delete(resumedWorkerSessionID);
         }
-        if (toolInput.tool === "task" && taskRole === "dog-worker") {
+        if (toolInput.tool === "task" && taskRole !== undefined && IMPLEMENTATION_AGENTS.has(taskRole)) {
           bootstrapRequired = false;
           bootstrapCompleted = true;
           bootstrapIdleWarnings.delete(toolInput.sessionID);
@@ -4224,6 +4833,11 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           activeState?.parallel === "valid" && command !== undefined &&
           authorization?.validationCommands.has(command) === true
         ) throw new WriteDeniedError("parallel-validation", "<parallel-unit>");
+        if (activeState?.parallel === "valid") {
+          const extracted = extractWritePaths(toolInput.tool, output.args);
+          const relativeWrite = extracted.paths.find((path) => !isAbsolute(path));
+          if (relativeWrite !== undefined) throw new WriteDeniedError("parallel-relative-path", relativeWrite);
+        }
         await gate.check(toolInput, output);
       } catch (error) {
         activeState?.inFlightCalls.delete(toolInput.callID);
@@ -4256,6 +4870,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       }
       if (eventSessionID === undefined) return;
       const eventPartTime = isRecord(eventPart?.time) ? eventPart.time : undefined;
+      if (event.type === "message.part.updated" && eventPart?.type === "tool" &&
+        typeof eventPart.callID === "string" && isRecord(eventPart.state) && eventPart.state.status === "error") {
+        activeSessions.get(eventSessionID)?.inFlightCalls.delete(eventPart.callID);
+      }
       if (
         event.type === "message.part.updated" && isCoordinatorSession(eventSessionID) &&
         eventPart?.type === "text" && typeof eventPart.text === "string" && eventPart.text.trim().length > 0 &&
@@ -4325,8 +4943,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         if (eventParentID !== undefined) {
           rememberParent(eventSessionID, eventParentID);
         }
+        touchCoordinatorTaskWatchdog(eventSessionID);
         return;
       }
+      touchCoordinatorTaskWatchdog(eventSessionID);
       if (event.type === "session.deleted") {
         fastLane.forget(eventSessionID);
         abortCoordinatorTasks(eventSessionID);

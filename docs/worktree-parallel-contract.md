@@ -7,7 +7,7 @@ typed worker-only commit artifact production. Card 06 owns cleanup and serial in
 
 - `version`: `0.1.0`.
 - `mode`: `parallel` or `single-worker`.
-- `max_workers`: `1` for single-worker; `2..3` for parallel.
+- `max_workers`: `1` for single-worker; `2..5` for parallel.
 - `tasks`: bounded DAG nodes with stable task, worktree, branch, base SHA, dependencies, and scope.
 - `artifacts`: immutable worker commit evidence tied to the task, exact base SHA, and branch.
 - `failure`: one typed failure or `null`.
@@ -22,6 +22,15 @@ traversal, and empty paths fail closed.
 Dependencies must name another task in the same contract. Self-dependencies, unknown dependencies,
 and cycles are invalid. A dependency does not waive scope isolation: dependent tasks with overlapping
 write-related scopes remain invalid and must run through a serial contract instead.
+
+The automatic v0.8 Luna fabric is a separate overlay. It may persist up to 64 admitted DAG units but
+materializes descriptors and managed worktrees only for one scheduler-selected wave of at most five
+units. Declared shared-path owners may overlap across the run, never inside one active wave. A wave does
+not refill after one unit finishes. Once every active artifact is verified, the runtime applies them in
+stable order to its hidden candidate ref; the lifecycle removes the completed wave and creates fresh
+worktrees from that exact snapshot while the clean target authority remains unchanged. The coordinator
+cannot supply or mutate the candidate SHA. After the final wave, one contained canonical validation and
+review precede one target compare-and-swap; failure leaves the target unchanged.
 
 ## Scope Matrix
 
@@ -71,8 +80,8 @@ models, worker bound, validation conditions, and measurement window.
 ## Follow-on Ownership
 
 - Card 02: durable cross-process scope leases.
-- Card 03: completed. `WorktreeLifecycle` pins a clean primary checkout, creates two or three locked
-  linked worktrees from the exact pin, caps all managed inventory phases at three records globally,
+- Card 03: completed. `WorktreeLifecycle` pins a clean primary checkout, creates two to five locked
+  linked worktrees from the exact pin, caps all managed inventory phases at five records globally,
   persists restart-safe inventory under a durable cross-process authority in the Git common directory,
   and only removes an unchanged, exactly owned worktree and branch through non-force Git operations.
   Its worktree root is fixed at `sortie-dogs/managed-worktrees-v1` beneath that common directory;

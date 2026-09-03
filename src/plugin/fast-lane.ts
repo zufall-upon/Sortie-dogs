@@ -6,6 +6,8 @@ const STRATEGY_TRIGGER_SET = new Set<string>(STRATEGY_TRIGGERS);
 // The plugin-owned capability has root identity, pending-rollover, and continuation guards.
 // Fast-lane only blocks the untyped host compaction tool.
 const MANUAL_COMPACTION_TOOLS = new Set(["compact_and_continue"]);
+// Serial Sol and admitted Luna fabric units consume the same bounded implementation budget.
+const IMPLEMENTATION_ROLES = new Set(["dog-worker", "dog-luna-worker"]);
 export const BACKLOG_DRAIN_CAPABILITY = "sortie_enable_backlog_drain";
 
 export type FastLaneDenialCode =
@@ -225,8 +227,8 @@ export class FastLaneController {
   ): void {
     const state = this.sessions.get(sessionID);
     if (state === undefined) throw new FastLaneDeniedError("TURN_STATE_REQUIRED");
-    if (state.backlogDrain || !Number.isInteger(maxWorkers) || maxWorkers < 2 || maxWorkers > 3 ||
-      !Number.isInteger(totalTasks) || totalTasks < maxWorkers || totalTasks > 3 ||
+    if (state.backlogDrain || !Number.isInteger(maxWorkers) || maxWorkers < 1 || maxWorkers > 5 ||
+      !Number.isInteger(totalTasks) || totalTasks < maxWorkers || totalTasks > 5 ||
       !Number.isInteger(dispatched) || dispatched < 0 || dispatched > totalTasks ||
       !Number.isInteger(running) || running < 0 || running > maxWorkers ||
       (state.totalWorkerDispatches > 0 && state.workerLimit !== totalTasks)) {
@@ -237,6 +239,22 @@ export class FastLaneController {
     state.workerLimit = totalTasks;
     state.workerDispatches = running;
     state.totalWorkerDispatches = dispatched;
+  }
+
+  advanceParallelWave(
+    sessionID: string,
+    maxWorkers: number,
+    dispatched: number,
+    running: number,
+    totalTasks: number,
+  ): void {
+    const state = this.sessions.get(sessionID);
+    if (state === undefined || !state.parallelMode || state.workerDispatches !== 0) {
+      throw new FastLaneDeniedError("WORKER_LIMIT");
+    }
+    state.totalWorkerDispatches = 0;
+    state.workerLimit = totalTasks;
+    this.enableParallelDispatch(sessionID, maxWorkers, dispatched, running, totalTasks);
   }
 
   continuationQueued(sessionID: string): void {
@@ -279,7 +297,7 @@ export class FastLaneController {
 
     const role = taskArgument(args, "subagent_type");
     const prompt = taskArgument(args, "prompt") ?? "";
-    if (role === "dog-worker") {
+    if (role !== undefined && IMPLEMENTATION_ROLES.has(role)) {
       const taskID = lineValue(prompt, "task_id");
       if (state.workerDispatches >= 1 && state.workerResumeTaskID !== undefined &&
         state.workerResumeSessionID !== undefined &&

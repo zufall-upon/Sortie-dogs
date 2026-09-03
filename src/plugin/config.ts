@@ -2,8 +2,9 @@ import {
   BUILT_IN_MODEL_CATALOG,
   DEFAULT_DEDICATED_WORKER_TARGET,
   DEFAULT_FREE_TIER_FALLBACK_MODELS,
+  LUNA_FABRIC_WORKER_MODEL,
   RECOMMENDED_ROLE_ROUTING,
-  dedicatedWorkerRouting,
+  fixedWorkerRouting,
   isFixedModelRole,
   recommendedRoleRouting,
   parseModelRoutingConfig,
@@ -17,6 +18,7 @@ import { CONSULTATION_ROLE_POLICY } from "../core/consultation.js";
 import {
   CONTINUATION_CAPABILITY,
   DEFAULT_MAX_AUTO_CONTINUES,
+  DEFAULT_TASK_WATCHDOG_MILLISECONDS,
 } from "./continuation.js";
 
 export interface ReflectionConfiguration {
@@ -37,8 +39,8 @@ export interface SortieDogsPluginOptions {
    */
   readOnlyTools?: readonly string[];
   /**
-   * The single model every dedicated worker role resolves to. Worker routing stays fixed to one
-   * target; a host that cannot serve the shipped target declares its own here.
+   * The serial model every dedicated worker role resolves to. The Luna fabric route remains separate;
+   * a host that cannot serve the shipped serial target declares its own here.
    */
   dedicatedWorkerModel?: ModelTarget;
   modelRouting?: ModelRoutingConfig;
@@ -62,12 +64,16 @@ export interface ContinuationConfiguration {
   readonly agent: string;
   readonly capability: string;
   readonly maxAutoContinues: number;
+  /** Root coordinator inactivity allowed while an implementation Task is outstanding. */
+  readonly taskWatchdogMilliseconds: number;
   /** Absent reuses the latest coordinator model observed for this session. */
   readonly summarizeModel?: ModelTarget;
 }
 
 /** A continuation ceiling beyond this stops being a bounded batch. */
 const MAX_AUTO_CONTINUE_LIMIT = 10;
+const MIN_TASK_WATCHDOG_MILLISECONDS = 10;
+const MAX_TASK_WATCHDOG_MILLISECONDS = 30 * 60 * 1000;
 const CONTINUATION_AGENT = "dog-coordinator";
 
 export interface ConsultationPolicyInput {
@@ -150,6 +156,7 @@ export const DEFAULT_PLUGIN_OPTIONS: Readonly<
     agent: CONTINUATION_AGENT,
     capability: CONTINUATION_CAPABILITY,
     maxAutoContinues: DEFAULT_MAX_AUTO_CONTINUES,
+    taskWatchdogMilliseconds: DEFAULT_TASK_WATCHDOG_MILLISECONDS,
   }),
   reflection: Object.freeze({ enabled: false, layers: Object.freeze({ run: true, project: true, global: false }), maxInjectedEntries: 3, maxInjectedTokens: 500 }),
 };
@@ -238,7 +245,7 @@ function parseConsultationPolicy(value: unknown): ConsultationPolicyInput | unde
 
 function parseContinuationPolicy(value: unknown): ContinuationPolicyInput | undefined {
   if (!isRecord(value) || Object.keys(value).some(
-    (key) => !["enabled", "agent", "capability", "maxAutoContinues", "summarizeModel"].includes(key),
+    (key) => !["enabled", "agent", "capability", "maxAutoContinues", "taskWatchdogMilliseconds", "summarizeModel"].includes(key),
   )) {
     return undefined;
   }
@@ -250,6 +257,12 @@ function parseContinuationPolicy(value: unknown): ContinuationPolicyInput | unde
     value.maxAutoContinues !== undefined &&
     (!positiveInteger(value.maxAutoContinues) || value.maxAutoContinues > MAX_AUTO_CONTINUE_LIMIT)
   ) return undefined;
+  if (
+    value.taskWatchdogMilliseconds !== undefined &&
+    (!positiveInteger(value.taskWatchdogMilliseconds) ||
+      value.taskWatchdogMilliseconds < MIN_TASK_WATCHDOG_MILLISECONDS ||
+      value.taskWatchdogMilliseconds > MAX_TASK_WATCHDOG_MILLISECONDS)
+  ) return undefined;
   const summarizeModel = value.summarizeModel === undefined
     ? undefined
     : parseModelTarget(value.summarizeModel);
@@ -259,6 +272,9 @@ function parseContinuationPolicy(value: unknown): ContinuationPolicyInput | unde
     ...(value.agent === undefined ? {} : { agent: value.agent }),
     ...(value.capability === undefined ? {} : { capability: value.capability }),
     ...(value.maxAutoContinues === undefined ? {} : { maxAutoContinues: value.maxAutoContinues }),
+    ...(value.taskWatchdogMilliseconds === undefined
+      ? {}
+      : { taskWatchdogMilliseconds: value.taskWatchdogMilliseconds }),
     ...(summarizeModel === undefined ? {} : { summarizeModel }),
   });
 }
@@ -458,14 +474,15 @@ export function resolvePluginConfiguration(...values: readonly unknown[]): Plugi
     }
     if (layer.reflection !== undefined) reflection = Object.freeze({ ...reflection, ...layer.reflection, layers: Object.freeze({ ...reflection.layers, ...(layer.reflection.layers ?? {}) }) });
   }
+  if (dedicatedWorkerModel.model === LUNA_FABRIC_WORKER_MODEL) return { kind: "invalid" };
   modelRouting = {
     ...Object.fromEntries(Object.entries(modelRouting).filter(([role]) => !isFixedModelRole(role))),
-    // A recommended route the host never restated must track the host's dedicated target.
+    // Restore shipped recommendations only for roles no configuration layer explicitly restated.
     ...Object.fromEntries(Object.entries(recommendedRoleRouting(dedicatedWorkerModel))
       .filter(([role]) => !configuredRoles.has(role))),
-    ...dedicatedWorkerRouting(dedicatedWorkerModel),
+    ...fixedWorkerRouting(dedicatedWorkerModel),
   };
-  // The dedicated target is authoritative for worker roles, so it is always a known catalog entry.
+  // The serial target is authoritative for dedicated roles, so it is always a known catalog entry.
   modelCatalog = {
     ...modelCatalog,
     global: mergeCatalogModels(modelCatalog.global ?? [], [
@@ -526,7 +543,7 @@ export function resolvePluginConfigurationSourcesWithGlobal(
     ...(environmentLayer.modelRouting ?? {}),
     ...(hostLayer.modelRouting ?? {}),
   }).filter(([role]) => !isFixedModelRole(role)));
-  const fixedRouting = dedicatedWorkerRouting(configured.dedicatedWorkerModel);
+  const fixedRouting = fixedWorkerRouting(configured.dedicatedWorkerModel);
   const modelRouting = {
     ...Object.fromEntries(Object.entries(configured.modelRouting)
       .filter(([role]) => !isFixedModelRole(role))),
@@ -535,7 +552,7 @@ export function resolvePluginConfigurationSourcesWithGlobal(
   return {
     ...configured,
     modelRouting,
-    // Dedicated worker policy is authoritative over every configurable layer.
+    // Fixed serial and fabric worker policy is authoritative over every configurable layer.
     localModelRouting: { ...(projectLayer.modelRouting ?? {}), ...fixedRouting },
     globalModelRouting,
   };

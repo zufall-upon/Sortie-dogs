@@ -83,7 +83,7 @@ export function validateWorktreeParallelContract(
   });
 
   if (
-    !Number.isInteger(contract.max_workers) || contract.max_workers < 1 || contract.max_workers > 3 ||
+    !Number.isInteger(contract.max_workers) || contract.max_workers < 1 || contract.max_workers > 5 ||
     (contract.mode === "single-worker" && contract.max_workers !== 1) ||
     (contract.mode === "parallel" && (contract.max_workers < 2 || contract.tasks.length < 2))
   ) diagnostics.push(issue("WTP004_MODE_WORKER_MISMATCH", "/max_workers", MESSAGES.mode));

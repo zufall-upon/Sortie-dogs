@@ -30,7 +30,7 @@ test("acceptance continuity canonicalizes NFC and LF without paraphrasing", () =
   assert.equal(inspected.ledger?.fingerprint, acceptanceContinuityFingerprint(normalized));
 });
 
-test("acceptance continuity rejects drift, unknown fields, duplicates, and oversize input", () => {
+test("acceptance continuity rejects drift, unknown fields, and oversize input", () => {
   const drifted = handoff();
   drifted.ext[ACCEPTANCE_CONTINUITY_EXTENSION].criteria[1] = "Broad visual quality";
   assert.equal(inspectAcceptanceContinuity(drifted).error, "malformed");
@@ -39,8 +39,13 @@ test("acceptance continuity rejects drift, unknown fields, duplicates, and overs
   unknown.ext[ACCEPTANCE_CONTINUITY_EXTENSION].unexpected = true;
   assert.equal(inspectAcceptanceContinuity(unknown).error, "malformed");
 
-  assert.equal(inspectAcceptanceContinuity(handoff(["same", "same"])).error, "malformed");
   const huge = { ext: { [ACCEPTANCE_CONTINUITY_EXTENSION]: "x".repeat(MAX_ACCEPTANCE_CONTINUITY_BYTES) } };
   assert.equal(inspectAcceptanceContinuity(huge).error, "oversize");
   assert.equal(inspectAcceptanceContinuity({}).error, "absent");
+});
+
+test("acceptance continuity permits redundant criteria without weakening their ordered fingerprint", () => {
+  const inspected = inspectAcceptanceContinuity(handoff(["preserve the boundary", "preserve the boundary"]));
+  assert.equal(inspected.error, undefined);
+  assert.deepEqual(inspected.ledger?.criteria, ["preserve the boundary", "preserve the boundary"]);
 });

@@ -28,6 +28,7 @@ const HASH = /^[0-9a-f]{64}$/u;
 const REF = /^refs\/heads\/[A-Za-z0-9][A-Za-z0-9._\/-]{0,254}$/u;
 const MAX_COMMAND_PARTS = 129;
 const MAX_COMMAND_TEXT = 1000;
+const MAX_TASKS = 5;
 const VALIDATION_TIMEOUT = 10 * 60_000;
 const LEASE_TTL = VALIDATION_TIMEOUT + 2 * 60_000;
 const LEASE_SCOPE = Object.freeze({ read: [] as string[], write: ["sortie-dogs/integration-queue-v2"] });
@@ -135,7 +136,7 @@ function parseBlocker(value: unknown): IntegrationQueueBlocker | null {
   if (!record(value) || !keys(value, ["attempts_remaining", "candidate_base", "causal_task_ids", "code", "conflict_paths", "task_id"]) ||
     !codes.includes(value.code as string) || !text(value.task_id, 128) || typeof value.candidate_base !== "string" || !SHA.test(value.candidate_base) ||
     !Array.isArray(value.conflict_paths) || value.conflict_paths.length > 256 || !value.conflict_paths.every((path) => text(path, 1024)) ||
-    !Array.isArray(value.causal_task_ids) || value.causal_task_ids.length > 3 || !value.causal_task_ids.every((id) => text(id, 128)) ||
+    !Array.isArray(value.causal_task_ids) || value.causal_task_ids.length > MAX_TASKS || !value.causal_task_ids.every((id) => text(id, 128)) ||
     ![0, 1].includes(value.attempts_remaining as number)) throw new Error("blocker");
   return value as unknown as IntegrationQueueBlocker;
 }
@@ -172,7 +173,7 @@ function parseTask(value: unknown): StoredTask {
     typeof value.source_commit !== "string" || !SHA.test(value.source_commit) ||
     typeof value.original_source_commit !== "string" || !SHA.test(value.original_source_commit) ||
     !(value.synthetic_commit === null || (typeof value.synthetic_commit === "string" && SHA.test(value.synthetic_commit))) ||
-    !Array.isArray(value.depends_on) || value.depends_on.length > 3 || !value.depends_on.every((item) => text(item, 128)) ||
+    !Array.isArray(value.depends_on) || value.depends_on.length > MAX_TASKS || !value.depends_on.every((item) => text(item, 128)) ||
     !Array.isArray(value.changed_paths) || value.changed_paths.length > 256 ||
     !value.changed_paths.every((item) => text(item, 1024))) throw new Error("task");
   return { ...value, validation_command: parseCommand(value.validation_command) } as unknown as StoredTask;
@@ -190,9 +191,9 @@ function parseQueue(value: unknown): Queue {
     typeof queue.candidate_ref !== "string" || !/^refs\/sortie-dogs\/integration-candidates\/[0-9a-f]{16}$/u.test(queue.candidate_ref) ||
     !(queue.candidate_head === null || (typeof queue.candidate_head === "string" && SHA.test(queue.candidate_head))) ||
     !(queue.failure_code === null || text(queue.failure_code, 64)) || !Array.isArray(queue.tasks) ||
-    queue.tasks.length === 0 || queue.tasks.length > 3 || !Array.isArray(queue.cleanup_pending) ||
+    queue.tasks.length === 0 || queue.tasks.length > MAX_TASKS || !Array.isArray(queue.cleanup_pending) ||
     !queue.cleanup_pending.every((item) => text(item, 256)) || !Array.isArray(queue.warnings) ||
-    queue.warnings.length > 3 || !queue.warnings.every((item) => text(item, 512)) || ![0, 1].includes(queue.remediation_attempts_used as number)) throw new Error("queue");
+    queue.warnings.length > MAX_TASKS || !queue.warnings.every((item) => text(item, 512)) || ![0, 1].includes(queue.remediation_attempts_used as number)) throw new Error("queue");
   const tasks = queue.tasks.map(parseTask);
   if (new Set(tasks.map(({ task_id }) => task_id)).size !== tasks.length ||
     new Set(tasks.map(({ source_commit }) => source_commit)).size !== tasks.length) throw new Error("identities");
@@ -213,7 +214,7 @@ function parseState(value: unknown): State {
 function validateArchive(archive: ParallelDispatchArchive): void {
   if (!record(archive) || !text(archive.owner_root, 256) || !text(archive.run_id, 128) ||
     typeof archive.contract_fingerprint !== "string" || !HASH.test(archive.contract_fingerprint) || archive.cancelled ||
-    archive.terminal_reason !== "completed" || !Array.isArray(archive.tasks) || archive.tasks.length === 0 || archive.tasks.length > 3) {
+    archive.terminal_reason !== "completed" || !Array.isArray(archive.tasks) || archive.tasks.length === 0 || archive.tasks.length > MAX_TASKS) {
     throw new IntegrationQueueError("invalid-archive", "Only a bounded completed parallel archive can be enqueued.");
   }
   const ids = new Set<string>();

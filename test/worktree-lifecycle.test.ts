@@ -103,17 +103,17 @@ test("pinCleanBase rejects tracked and untracked dirt while ignored files are al
   }
 });
 
-test("three worktrees share one exact base, isolate edits, hash reserved IDs, and clean ignored dependencies", async () => {
+test("five worktrees share one exact base, isolate edits, hash reserved IDs, and clean ignored dependencies", async () => {
   const value = await fixture("parallel");
   try {
     const pin = await value.lifecycle.pinCleanBase();
-    const ids = ["CON", "aux", "safe-worker"];
+    const ids = ["CON", "aux", "safe-worker", "lane-four", "lane-five"];
     const expectedPrefixes = ids.map((id) => value.lifecycle.pathPrefixFor(id));
     assert.deepEqual(expectedPrefixes, ids.map((id) => value.lifecycle.pathPrefixFor(id)));
     for (const path of expectedPrefixes) assert.match(basename(path), /^wt-[0-9a-f]{16}-$/u);
 
     const created = await value.lifecycle.createMany({ pin, tasks: tasks(pin, ids) });
-    assert.equal(created.length, 3);
+    assert.equal(created.length, 5);
     for (const [index, entry] of created.entries()) {
       assert.equal(entry.path.startsWith(expectedPrefixes[index]!), true);
       assert.match(basename(entry.path), /^wt-[0-9a-f]{16}-[0-9a-f]{32}$/u);
@@ -131,7 +131,7 @@ test("three worktrees share one exact base, isolate edits, hash reserved IDs, an
     }));
     assert.equal(await readFile(join(value.repository, "shared.txt"), "utf8"), "base\n");
     assert.deepEqual(await Promise.all(created.map((entry) => readFile(join(entry.path, "shared.txt"), "utf8"))),
-      ["worker-0\n", "worker-1\n", "worker-2\n"]);
+      ["worker-0\n", "worker-1\n", "worker-2\n", "worker-3\n", "worker-4\n"]);
     await Promise.all(created.map(async (entry) => {
       await writeFile(join(entry.path, "shared.txt"), "base\n");
       await mkdir(join(entry.path, "node_modules"));
@@ -139,6 +139,53 @@ test("three worktrees share one exact base, isolate edits, hash reserved IDs, an
     }));
     for (const id of ids) await value.lifecycle.cleanup(id);
     for (const path of created.map(({ path }) => path)) assert.equal(await stat(path).catch(() => undefined), undefined);
+  } finally {
+    await cleanupFixture(value);
+  }
+});
+
+test("candidate base worktree leaves the authority checkout unchanged and supports one-unit acceptance", async () => {
+  const value = await fixture("candidate-base");
+  try {
+    const authority = await value.lifecycle.pinCleanBase();
+    const targetBranch = (await git(value.repository, "symbolic-ref", "--short", "HEAD")).trim();
+    const targetBefore = (await git(value.repository, "rev-parse", `refs/heads/${targetBranch}`)).trim();
+    const tree = (await git(value.repository, "rev-parse", "HEAD^{tree}")).trim();
+    const baseSha = (await git(value.repository, "commit-tree", tree, "-p", authority.sha, "-m", "candidate")).trim();
+    const requested = tasks({ repositoryRoot: authority.repositoryRoot, sha: baseSha }, ["candidate"]);
+    const [created] = await value.lifecycle.createManyAtBase({ authority, baseSha, tasks: requested });
+    assert.equal(created?.baseSha, baseSha);
+    assert.equal((await git(value.repository, "rev-parse", "HEAD")).trim(), authority.sha);
+    assert.equal((await git(value.repository, "rev-parse", `refs/heads/${targetBranch}`)).trim(), targetBefore);
+    await writeFile(join(created!.path, "candidate.txt"), "candidate\n");
+    await git(created!.path, "add", "candidate.txt");
+    await git(created!.path, "commit", "-q", "-m", "accepted");
+    const commitSha = (await git(created!.path, "rev-parse", "HEAD")).trim();
+    await value.lifecycle.acceptCommit("candidate", created!.path, baseSha, commitSha, created!.branch);
+    const restarted = await WorktreeLifecycle.open({ repositoryRoot: value.repository });
+    assert.deepEqual((await restarted.reconcile()).map(({ phase }) => phase), ["ready"]);
+    await restarted.cleanup("candidate");
+    await assert.rejects(git(value.repository, "rev-parse", "--verify", `refs/heads/${created!.branch}`));
+    assert.equal(await stat(created!.path).catch(() => undefined), undefined);
+  } finally {
+    await cleanupFixture(value);
+  }
+});
+
+test("candidate base rejects unrelated commits and a moved or dirty authority", async () => {
+  const value = await fixture("candidate-rejections");
+  try {
+    const authority = await value.lifecycle.pinCleanBase();
+    const tree = (await git(value.repository, "rev-parse", "HEAD^{tree}")).trim();
+    const unrelated = (await git(value.repository, "commit-tree", tree, "-m", "unrelated")).trim();
+    await errorCode(value.lifecycle.createManyAtBase({ authority, baseSha: unrelated, tasks: tasks({ repositoryRoot: authority.repositoryRoot, sha: unrelated }, ["unrelated"]) }), "stale-base");
+    await writeFile(join(value.repository, "moved.txt"), "moved\n");
+    await git(value.repository, "add", "moved.txt");
+    await git(value.repository, "commit", "-q", "-m", "moved");
+    await errorCode(value.lifecycle.createManyAtBase({ authority, baseSha: authority.sha, tasks: tasks(authority, ["moved"]) }), "stale-base");
+    const movedAuthority = await value.lifecycle.pinCleanBase();
+    await writeFile(join(value.repository, "dirty.txt"), "dirty\n");
+    await errorCode(value.lifecycle.createManyAtBase({ authority: movedAuthority, baseSha: movedAuthority.sha, tasks: tasks(movedAuthority, ["dirty"]) }), "dirty-tree");
   } finally {
     await cleanupFixture(value);
   }
@@ -221,22 +268,23 @@ test("setup-visible mutation fails closed and retains orphaned worktrees", async
   }
 });
 
-test("sequential and concurrent lifecycle instances enforce the global three-record bound", async () => {
+test("sequential and concurrent lifecycle instances enforce the global five-record bound", async () => {
   const value = await fixture("global-bound");
   try {
     const pin = await value.lifecycle.pinCleanBase();
     const second = await WorktreeLifecycle.open({ repositoryRoot: value.repository });
     const attempts = await Promise.allSettled([
-      value.lifecycle.createMany({ pin, tasks: tasks(pin, ["race-a", "race-b"]) }),
-      second.createMany({ pin, tasks: tasks(pin, ["race-c", "race-d"]) }),
+      value.lifecycle.createMany({ pin, tasks: tasks(pin, ["race-a", "race-b", "race-c"]) }),
+      second.createMany({ pin, tasks: tasks(pin, ["race-d", "race-e", "race-f"]) }),
     ]);
     assert.equal(attempts.filter(({ status }) => status === "fulfilled").length, 1);
     const rejected = attempts.find(({ status }) => status === "rejected") as PromiseRejectedResult;
     assert.equal(rejected.reason instanceof WorktreeLifecycleError && rejected.reason.code === "invalid-request", true);
     const records = await value.lifecycle.reconcile();
-    assert.equal(records.length, 2);
+    assert.equal(records.length, 3);
+    await value.lifecycle.createMany({ pin, tasks: tasks(pin, ["fill-a", "fill-b"]) });
     await errorCode(value.lifecycle.createMany({ pin, tasks: tasks(pin, ["overflow-a", "overflow-b"]) }), "invalid-request");
-    assert.equal((await value.lifecycle.reconcile()).length, 2);
+    assert.equal((await value.lifecycle.reconcile()).length, 5);
   } finally {
     await cleanupFixture(value);
   }

@@ -812,7 +812,8 @@ function validateDescriptor(value: unknown): asserts value is ParallelDispatchDe
     !validText(value.branch) || !validText(value.managed_path, MAX_PATH) || !isAbsolute(value.managed_path) ||
     typeof value.run_id !== "string" || !UUID.test(value.run_id) || typeof value.dispatch_id !== "string" ||
     !UUID.test(value.dispatch_id) || typeof value.base_sha !== "string" || !SHA.test(value.base_sha) ||
-    typeof value.contract_fingerprint !== "string" || !HASH.test(value.contract_fingerprint) || value.attempt !== 1 ||
+    typeof value.contract_fingerprint !== "string" || !HASH.test(value.contract_fingerprint) ||
+    (value.attempt !== 1 && value.attempt !== 2) ||
     value.parallel_group !== value.run_id || value.parallel_unit !== value.task_id ||
     !Number.isInteger(value.parallel_units) || (value.parallel_units as number) < 2 || (value.parallel_units as number) > 64 ||
     !Array.isArray(value.depends_on) || value.depends_on.length > 64 || !value.depends_on.every((item) => validText(item)) ||
@@ -1231,7 +1232,11 @@ export async function produceWorktreeCommitArtifact(request: WorktreeCommitProdu
   await context.git(["add", "--", ...before.map(({ path }) => path)]);
   await assertValidatedIndex(context, before, beforeFingerprint);
   await assertValidatedIndex(context, before, beforeFingerprint);
-  await context.git(["commit", "--no-verify", "--no-gpg-sign", "-m", producerCommitMessage(context.descriptor, command)]);
+  await context.git([
+    "-c", "user.name=Sortie Fabric",
+    "-c", "user.email=sortie@example.invalid",
+    "commit", "--no-verify", "--no-gpg-sign", "-m", producerCommitMessage(context.descriptor, command),
+  ]);
   const commit = (await context.git(["rev-parse", "--verify", "HEAD^{commit}"])).toString("utf8").trim();
   if (!SHA.test(commit) || commit === context.descriptor.base_sha) {
     throw new WorktreeCommitArtifactError("verification-failed", "Git did not create one new commit.");

@@ -117,6 +117,8 @@ async function assertProcessGone(pid: number): Promise<void> {
 test("produces frozen evidence, reverifies it, accepts lifecycle commit, and cleans up", async () => {
   const value = await fixture("valid");
   try {
+    await git(value.repository, "config", "--unset", "user.name");
+    await git(value.repository, "config", "--unset", "user.email");
     await writeFile(join(value.path, "src", "value.txt"), "implemented\n");
     const artifact = await produceWorktreeCommitArtifact({
       descriptor: value.descriptor, managed_path: value.path, validation: validation(),
@@ -131,6 +133,8 @@ test("produces frozen evidence, reverifies it, accepts lifecycle commit, and cle
     assert.match(artifact.change_fingerprint, /^[0-9a-f]{64}$/u);
     assert.match(artifact.validation.validation_fingerprint, /^[0-9a-f]{64}$/u);
     assert.equal("stdout" in artifact.validation || "stderr" in artifact.validation, false);
+    assert.equal((await git(value.path, "log", "-1", "--format=%an <%ae>")).trim(),
+      "Sortie Fabric <sortie@example.invalid>");
     const verified = await verifyWorktreeCommitArtifact({
       descriptor: value.descriptor, managed_path: value.path, artifact,
     });

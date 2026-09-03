@@ -189,6 +189,9 @@ export type ParallelDispatchTaskPhase =
 
 export type ParallelDispatchOutcome = "completed" | "failed" | "blocked" | "cancelled";
 
+/** Durable worker route identity. A run never changes its route after preparation. */
+export type ParallelDispatchRoute = "sol-serial" | "luna-fabric";
+
 export interface ParallelDispatchDescriptor {
   readonly run_id: string;
   readonly dispatch_id: string;
@@ -202,7 +205,7 @@ export interface ParallelDispatchDescriptor {
   readonly parallel_group: string;
   readonly parallel_unit: string;
   readonly parallel_units: number;
-  readonly attempt: 1;
+  readonly attempt: 1 | 2;
   readonly contract_fingerprint: string;
 }
 
@@ -216,17 +219,50 @@ export interface ParallelDispatchTaskSnapshot {
   readonly artifact: WorktreeCommitArtifact | null;
 }
 
+export interface ParallelDispatchFabricSnapshot {
+  readonly total_units: number;
+  readonly wave: number;
+  readonly base_sha: string;
+  readonly pending_unit_ids: readonly string[];
+  readonly completed_unit_ids: readonly string[];
+  readonly active_unit_ids: readonly string[];
+  readonly unit_acceptance: Readonly<Record<string, readonly string[]>>;
+  readonly lanes: Readonly<Record<string, number>>;
+  readonly transition: "cleanup" | "creating" | null;
+  readonly candidate_ref: string;
+  readonly candidate_head: string;
+  readonly wave_heads: readonly string[];
+  readonly validation: {
+    readonly command: readonly string[];
+    readonly status: "pending" | "running" | "pass" | "fail";
+    readonly fingerprint: string | null;
+  };
+  readonly review: {
+    readonly status: "pending" | "pass" | "skip" | "fail";
+    readonly fingerprint: string | null;
+  };
+  readonly promoted: boolean;
+  readonly demotions: readonly {
+    readonly unit_id: string;
+    readonly luna_dispatch_id: string;
+    readonly luna_worktree_id: string;
+    readonly sol_dispatch_id: string;
+  }[];
+}
+
 export interface ParallelDispatchSnapshot {
   readonly run_id: string;
   readonly owner_root: string;
   readonly project_root: string;
   readonly contract_fingerprint: string;
+  readonly route: ParallelDispatchRoute;
   readonly max_workers: number;
   readonly cancelled: boolean;
   readonly archived: boolean;
   readonly terminal_reason: "completed" | "cancelled" | "failed" | null;
   readonly tasks: readonly ParallelDispatchTaskSnapshot[];
   readonly ready: readonly ParallelDispatchDescriptor[];
+  readonly fabric?: ParallelDispatchFabricSnapshot;
 }
 
 export interface ParallelDispatchArchiveTask {
@@ -248,9 +284,11 @@ export interface ParallelDispatchArchive {
   readonly run_id: string;
   readonly owner_root: string;
   readonly contract_fingerprint: string;
+  readonly route: ParallelDispatchRoute;
   readonly cancelled: boolean;
   readonly terminal_reason: "completed" | "cancelled" | "failed";
   readonly tasks: readonly ParallelDispatchArchiveTask[];
+  readonly fabric?: ParallelDispatchFabricSnapshot;
 }
 
 export type IntegrationQueuePhase =

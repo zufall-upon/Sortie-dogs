@@ -56,13 +56,13 @@ export function inspectAcceptanceContinuity(handoff: unknown): AcceptanceContinu
     raw.task_id.length === 0 || raw.task_id.length > MAX_TASK_ID || !Array.isArray(raw.criteria) ||
     raw.criteria.length === 0 || raw.criteria.length > MAX_ACCEPTANCE_CRITERIA ||
     !raw.criteria.every((criterion) => typeof criterion === "string" && criterion.length > 0 && criterion.length <= MAX_CRITERION) ||
-    new Set(raw.criteria).size !== raw.criteria.length || typeof raw.fingerprint !== "string" ||
+    typeof raw.fingerprint !== "string" ||
     !FINGERPRINT.test(raw.fingerprint) || !(raw.parent_fingerprint === "none" ||
       (typeof raw.parent_fingerprint === "string" && FINGERPRINT.test(raw.parent_fingerprint)))) {
     return { ledger: undefined, error: "malformed" };
   }
   const criteria = normalizeAcceptanceCriteria(raw.criteria as string[]);
-  if (new Set(criteria).size !== criteria.length || acceptanceContinuityFingerprint(criteria) !== raw.fingerprint) {
+  if (acceptanceContinuityFingerprint(criteria) !== raw.fingerprint) {
     return { ledger: undefined, error: "malformed" };
   }
   return {

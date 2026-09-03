@@ -13,6 +13,7 @@ import {
   acceptanceContinuityFingerprint,
 } from "../dist/core/acceptance-continuity.js";
 import {
+  FreshSessionRequiredError,
   HandoffDeniedError,
   ModelRoutingDeniedError,
   SortieDogsPlugin,
@@ -36,6 +37,9 @@ import {
   DEFAULT_FREE_TIER_FALLBACK_MODELS,
   ESCALATION_WORKER_MODEL,
   ESCALATION_WORKER_VARIANT,
+  LUNA_FABRIC_WORKER_MODEL,
+  LUNA_FABRIC_WORKER_ROLE,
+  LUNA_FABRIC_WORKER_VARIANT,
   RECOMMENDED_SCOUT_VARIANT,
   RECOMMENDED_CONSULTATION_MODEL,
   RECOMMENDED_CONSULTATION_ROLES,
@@ -53,7 +57,9 @@ import { configRoot } from "../dist/reflection/config.js";
 import {
   CONTINUATION_CAPABILITY,
   CONTINUATION_MARKER,
+  DEFAULT_TASK_WATCHDOG_MILLISECONDS,
   ROLLOVER_MARKER,
+  STEP_CONTINUE_PREFIX,
 } from "../dist/plugin/continuation.js";
 import { createProjectPaths, createWriteGate, extractWritePaths } from "../dist/plugin/gate.js";
 import { validateManifest } from "../dist/core/validate-manifest.js";
@@ -83,6 +89,17 @@ import {
  * silently change every packaged default this suite asserts. Tests observe the package, not the machine.
  */
 delete process.env.SORTIE_DOGS_CONFIG;
+
+function isFreshSessionError(
+  error: unknown,
+  reason: "child-lineage" | "asset-contract-skew",
+  status: "redispatched" | "user-action-required" = "user-action-required",
+  action?: "open-fresh-root" | "install-assets-then-open-fresh-root",
+): boolean {
+  return error instanceof FreshSessionRequiredError && error.result.reason === reason &&
+    error.result.status === status && error.result.retry_same_session === false &&
+    (action === undefined || (error.result.status === "user-action-required" && error.result.action === action));
+}
 
 interface PluginCase {
   name: string;
@@ -141,6 +158,9 @@ test("model routing configuration is strict and merges roles by layer", () => {
         preferred: { model: DEDICATED_WORKER_MODEL, variant: DEDICATED_WORKER_VARIANT },
       });
     }
+    assert.deepEqual(parsed.modelRouting[LUNA_FABRIC_WORKER_ROLE], {
+      preferred: { model: LUNA_FABRIC_WORKER_MODEL, variant: LUNA_FABRIC_WORKER_VARIANT },
+    });
   }
   assert.equal(parseModelRoutingConfig({ reviewer: { preferred: { model: "x", extra: true } } }), undefined);
   assert.deepEqual(
@@ -199,7 +219,7 @@ test("model routing configuration is strict and merges roles by layer", () => {
   }
 });
 
-test("a host may declare which single model every dedicated worker role resolves to", () => {
+test("a host may relocate serial workers without changing the fixed Luna fabric route", () => {
   const target = { model: "vendor-host/worker", variant: "deep" };
   const configured = resolvePluginConfigurationSources(
     { dedicatedWorkerModel: target },
@@ -225,14 +245,51 @@ test("a host may declare which single model every dedicated worker role resolves
       variant: target.variant,
     }, `${role} resolves against the declared target`);
   }
-  // Declaring a role route directly still cannot displace the dedicated worker policy.
+  assert.deepEqual(configured.modelRouting[LUNA_FABRIC_WORKER_ROLE], {
+    preferred: { model: LUNA_FABRIC_WORKER_MODEL, variant: LUNA_FABRIC_WORKER_VARIANT },
+  });
+  assert.deepEqual(resolveModelRoute({
+    role: LUNA_FABRIC_WORKER_ROLE,
+    local: configured.localModelRouting,
+    global: configured.globalModelRouting,
+    catalog: configured.modelCatalog,
+    dedicated: configured.dedicatedWorkerModel,
+  }), {
+    ok: true,
+    role: LUNA_FABRIC_WORKER_ROLE,
+    source: "fixed",
+    catalog: "global",
+    model: LUNA_FABRIC_WORKER_MODEL,
+    variant: LUNA_FABRIC_WORKER_VARIANT,
+  });
+  // Declaring either role directly still cannot displace fixed serial/fabric policy.
   const attempted = resolvePluginConfiguration({
     dedicatedWorkerModel: target,
-    modelRouting: { "dog-worker": { model: "attempted/override" } },
+    modelRouting: {
+      "dog-worker": { model: "attempted/override" },
+      [LUNA_FABRIC_WORKER_ROLE]: { model: "attempted/fabric-override" },
+    },
   });
   assert.equal(attempted.kind, "configured");
   if (attempted.kind === "configured") {
     assert.deepEqual(attempted.modelRouting["dog-worker"], { preferred: target });
+    assert.deepEqual(attempted.modelRouting[LUNA_FABRIC_WORKER_ROLE], {
+      preferred: { model: LUNA_FABRIC_WORKER_MODEL, variant: LUNA_FABRIC_WORKER_VARIANT },
+    });
+  }
+  assert.deepEqual(resolvePluginConfiguration({
+    dedicatedWorkerModel: { model: LUNA_FABRIC_WORKER_MODEL },
+  }), { kind: "invalid" });
+  assert.deepEqual(resolvePluginConfiguration({
+    dedicatedWorkerModel: { model: LUNA_FABRIC_WORKER_MODEL, variant: "high" },
+  }), { kind: "invalid" });
+  const laterSerialOverride = resolvePluginConfiguration(
+    { dedicatedWorkerModel: { model: LUNA_FABRIC_WORKER_MODEL } },
+    { dedicatedWorkerModel: target },
+  );
+  assert.equal(laterSerialOverride.kind, "configured");
+  if (laterSerialOverride.kind === "configured") {
+    assert.deepEqual(laterSerialOverride.dedicatedWorkerModel, target);
   }
   assert.deepEqual(resolvePluginConfiguration({ dedicatedWorkerModel: { model: "" } }), { kind: "invalid" });
   assert.deepEqual(
@@ -324,7 +381,7 @@ test("recommended coordinator and Luna routes cover exact installed roles and re
   });
   assert.equal(defaults.kind, "configured");
   if (defaults.kind !== "configured") return;
-  // The host declared another variant of the shipped worker model, so it joins that catalog entry.
+  // The host declared another Luna variant, so it joins the shared scout/fabric catalog entry.
   assert.deepEqual(defaults.modelCatalog.global, [
     {
       model: DEFAULT_COORDINATOR_MODEL,
@@ -332,10 +389,14 @@ test("recommended coordinator and Luna routes cover exact installed roles and re
     },
     {
       model: DEDICATED_WORKER_MODEL,
-      variants: [DEDICATED_WORKER_VARIANT, RECOMMENDED_SCOUT_VARIANT, "xhigh"]
+      variants: [DEDICATED_WORKER_VARIANT, CONSULTATION_FALLBACK_VARIANT]
         .filter((variant, index, all) => all.indexOf(variant) === index),
     },
-    { model: ESCALATION_WORKER_MODEL, variants: [ESCALATION_WORKER_VARIANT, CONSULTATION_FALLBACK_VARIANT] },
+    {
+      model: LUNA_FABRIC_WORKER_MODEL,
+      variants: [LUNA_FABRIC_WORKER_VARIANT, RECOMMENDED_SCOUT_VARIANT, "xhigh"]
+        .filter((variant, index, all) => all.indexOf(variant) === index),
+    },
     { model: "provider/custom" },
   ]);
   assert.deepEqual(defaults.modelRouting["dog-coordinator"], {
@@ -366,13 +427,13 @@ test("recommended coordinator and Luna routes cover exact installed roles and re
       catalog: defaults.modelCatalog,
     }),
   })), Object.entries(lunaRoleVariants).map(([role, variant]) => ({
-    configured: { preferred: { model: DEDICATED_WORKER_MODEL, variant } },
+    configured: { preferred: { model: LUNA_FABRIC_WORKER_MODEL, variant } },
     resolved: {
       ok: true,
       role,
       source: "global",
       catalog: "global",
-      model: DEDICATED_WORKER_MODEL,
+      model: LUNA_FABRIC_WORKER_MODEL,
       variant,
     },
   })));
@@ -426,10 +487,11 @@ test("consultation never inherits the caller model and stays host-configurable",
   if (relocated.kind !== "configured") return;
 
   /*
-   * Review has to be able to reject what the worker produced, so the fallback stays on the stronger
-   * model rather than matching the cheap worker target the cost curve selected.
+   * Review has to be able to reject what the worker produced, so the fallback stays at a higher effort
+   * than the stable serial worker even though both routes use Sol.
    */
-  assert.notEqual(ESCALATION_WORKER_MODEL, DEDICATED_WORKER_MODEL);
+  assert.equal(ESCALATION_WORKER_VARIANT, DEDICATED_WORKER_VARIANT);
+  assert.notEqual(CONSULTATION_FALLBACK_VARIANT, DEDICATED_WORKER_VARIANT);
 
   for (const role of RECOMMENDED_CONSULTATION_ROLES) {
     assert.deepEqual(resolveFor(defaults, role), {
@@ -605,6 +667,21 @@ test("MkII worker routes stay fixed while consultation roles remain host configu
       }],
     });
   }
+  assert.deepEqual(resolveModelRoute({
+    role: LUNA_FABRIC_WORKER_ROLE,
+    local: missingSol.localModelRouting,
+    global: missingSol.globalModelRouting,
+    catalog: missingSol.modelCatalog,
+  }), {
+    ok: false,
+    role: LUNA_FABRIC_WORKER_ROLE,
+    reason: "unresolved-role",
+    attempts: [{
+      source: "fixed",
+      target: { model: LUNA_FABRIC_WORKER_MODEL, variant: LUNA_FABRIC_WORKER_VARIANT },
+      reason: "model-unavailable",
+    }],
+  });
 });
 
 test("consultation policy parses strictly and deep-merges defaults through host precedence", () => {
@@ -979,7 +1056,9 @@ test("consultation adapter is provider-neutral and model names do not affect cor
 
 test("generated dog-worker runtime asset leaves its model to dedicated routing", () => {
   const dogWorker = runtimeAssets.find((asset) => asset.name === "dog-worker");
+  const lunaWorker = runtimeAssets.find((asset) => asset.name === LUNA_FABRIC_WORKER_ROLE);
   assert.ok(dogWorker);
+  assert.ok(lunaWorker);
   assert.ok(dogWorker.content.startsWith(`---
 description: Dedicated worker for the canonical Sortie-dogs coordinator
 mode: subagent
@@ -988,6 +1067,18 @@ mode: subagent
   // Pinning an unavailable model in the asset would stop the agent from loading at all, so the
   // dedicated target stays a routing decision that a host can redeclare.
   assert.equal(dogWorker.content.includes(DEDICATED_WORKER_MODEL), false);
+  assert.ok(lunaWorker.content.startsWith(`---
+description: Isolated Luna fabric worker for one admitted Sortie-dogs unit
+mode: subagent
+---
+`));
+  assert.equal(lunaWorker.content.includes(LUNA_FABRIC_WORKER_MODEL), false);
+  for (const asset of [dogWorker, lunaWorker]) {
+    assert.match(asset.content, /## Shared worker contract/u);
+    assert.match(asset.content, /same immutable manifests/u);
+    assert.match(asset.content, /sortie_bind_write_gate/u);
+    assert.match(asset.content, /Every failed validation must produce a concrete source or harness change/u);
+  }
 });
 
 test("generated coordinator requires bounded progress, one Task evidence line, and deny-safe delegation", () => {
@@ -1042,7 +1133,7 @@ test("generated assets require the user's language and compact block-separated o
   assert.match(visibility[1], /^ {4}task_line: 🔍 根拠/m);
   assert.match(visibility[1], /^ {4}task_line_format: one line; no duplicate assessment or next-action projection/m);
 
-  for (const name of ["dog-worker", "dog-scout", "dog-reviewer", "dog-advisor"]) {
+  for (const name of ["dog-worker", "dog-luna-worker", "dog-scout", "dog-reviewer", "dog-advisor"]) {
     const asset = runtimeAssets.find((candidate) => candidate.name === name);
     assert.ok(asset, name);
     assert.match(asset.content, /in the language the\s+(?:supplied|dispatch uses)/i, name);
@@ -1078,6 +1169,10 @@ test("generated assets require the user's language and compact block-separated o
   assert.match(worker.content, /Any command or tool denial is process-defect evidence for that attempted operation/i);
   assert.match(
     worker.content,
+    /every parallel-lane mutating tool call[\s\S]+absolute path rooted under the\s+descriptor managed_path[\s\S]+scope_write remains repository-relative authority identity only/i,
+  );
+  assert.match(
+    worker.content,
     /not retry with another executable spelling, absolute path, shell wrapper, quoting style, narrowed\s+argument, direct probe, or diagnostic substitute/i,
   );
   assert.match(worker.content, /Own the bounded implementation loop inside one Task invocation/i);
@@ -1104,6 +1199,9 @@ test("generated coordinator renders a compact conclusion and collapsible YAML Ev
   assert.match(semantics[1], /process_defect: gate \| routing \| handoff \| local tool defect -> autonomous repair; never terminal BLOCKED/);
   assert.match(coordinator.content, /plugin injects a measured \*\*Run:\*\* paragraph/i);
   assert.match(coordinator.content, /Do not emit,\s*estimate, or fabricate Run metrics/i);
+  assert.match(coordinator.content, /LUNA_FABRIC_CONTRACT_SHAPE_FIXTURE/);
+  assert.match(coordinator.content, /"version": "0\.8\.0"/);
+  assert.match(coordinator.content, /"validation": \{ "level": "targeted", "command":/);
   const output = coordinator.content.match(
     /TERMINAL_OUTPUT_TEMPLATE\r?\n([\s\S]+?)\r?\nEND_TERMINAL_OUTPUT_TEMPLATE/,
   );
@@ -1203,7 +1301,7 @@ test("coordinator DONE output receives host-reported root and child run metrics"
     assert.equal(body.extra.available, true);
     assert.equal(body.extra.outcome, "DONE");
     assert.equal(body.extra.sessionID, "root");
-    assert.equal(body.extra.runtimeAssetVersion, "0.3.52-acceptance-continuity-v1");
+    assert.equal(body.extra.runtimeAssetVersion, "0.3.63-luna-artifact-join-v1");
     assert.equal(body.extra.inputTokens, 130);
     assert.equal(body.extra.outputTokens, 15);
     assert.equal(body.extra.reasoningTokens, 5);
@@ -1373,7 +1471,7 @@ test("runtime contract requires interactive continuation and deterministic recov
   assert.ok(question);
   assert.match(
     coordinator.content,
-    /^permission:\r?\n  question: allow\r?\n  task:\r?\n    "\*": deny\r?\n    dog-worker: allow\r?\n    dog-scout: allow\r?\n    dog-reviewer: allow\r?\n    dog-advisor: allow\r?\ntools:\r?\n  question: true\r?\n  task: true$/mu,
+    /^permission:\r?\n  question: allow\r?\n  task:\r?\n    "\*": deny\r?\n    dog-worker: allow\r?\n    dog-luna-worker: allow\r?\n    dog-scout: allow\r?\n    dog-reviewer: allow\r?\n    dog-advisor: allow\r?\ntools:\r?\n  question: true\r?\n  task: true$/mu,
   );
   for (const denied of ["build", "implementer", "fixer", "reviewer", "explore", "general", "coordinator"]) {
     assert.doesNotMatch(coordinator.content, new RegExp(`^    ${denied}: allow$`, "m"));
@@ -1618,6 +1716,7 @@ test("continuation configuration ships a working default and rejects an unsafe o
       agent: "dog-coordinator",
       capability: CONTINUATION_CAPABILITY,
       maxAutoContinues: 10,
+      taskWatchdogMilliseconds: DEFAULT_TASK_WATCHDOG_MILLISECONDS,
     });
   }
 
@@ -1642,6 +1741,8 @@ test("continuation configuration ships a working default and rejects an unsafe o
     { continuation: { maxAutoContinues: 0 } },
     { continuation: { maxAutoContinues: 11 } },
     { continuation: { maxAutoContinues: 2.5 } },
+    { continuation: { taskWatchdogMilliseconds: 9 } },
+    { continuation: { taskWatchdogMilliseconds: 30 * 60 * 1000 + 1 } },
     { continuation: { enabled: "yes" } },
     { continuation: { summarizeModel: { model: "" } } },
     { continuation: { unknown: true } },
@@ -1673,7 +1774,7 @@ async function withProject(
     await mkdir(join(directory, ".git"));
     await run(directory);
   } finally {
-    await rm(directory, { recursive: true, force: true });
+    await rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 }
 
@@ -1814,7 +1915,10 @@ test("invalid global Sortie config fails reflection closed without removing core
       const hooks = await SortieDogsPlugin({ directory });
       assert.equal(hooks.tool?.sortie_reflection, undefined);
       assert.deepEqual(Object.keys(hooks.tool ?? {}).sort(), [
+        "sortie_accept_luna_fabric_candidate",
         "sortie_accept_parallel_integration",
+        "sortie_admit_luna_fabric",
+        "sortie_advance_luna_fabric_wave",
         "sortie_bind_write_gate",
         "sortie_cancel_parallel_dispatch",
         "sortie_check_contract",
@@ -1825,9 +1929,11 @@ test("invalid global Sortie config fails reflection closed without removing core
         "sortie_integrate_parallel_queue",
         "sortie_parallel_dispatch_status",
         "sortie_parallel_integration_status",
+        "sortie_prepare_luna_fabric",
         "sortie_prepare_parallel_dispatch",
         "sortie_release_write_gate",
         "sortie_submit_integration_remediation",
+        "sortie_validate_luna_fabric_candidate",
       ]);
       assert.equal(warnings.length, 1);
       await activate(hooks, "invalid-json-global");
@@ -2639,7 +2745,7 @@ test("every packaged role follows default routing independently of write-gate ac
         variant: DEFAULT_COORDINATOR_VARIANT,
       },
       "dog-scout": { providerID: "openai", modelID: "gpt-5.6-luna", variant: RECOMMENDED_SCOUT_VARIANT },
-      "dog-worker": { providerID: "openai", modelID: "gpt-5.6-luna", variant: DEDICATED_WORKER_VARIANT },
+      "dog-worker": { providerID: "openai", modelID: "gpt-5.6-sol", variant: DEDICATED_WORKER_VARIANT },
       "dog-reviewer": { providerID: "openai", modelID: "gpt-5.6-sol", variant: CONSULTATION_FALLBACK_VARIANT },
       "dog-advisor": { providerID: "openai", modelID: "gpt-5.6-sol", variant: CONSULTATION_FALLBACK_VARIANT },
     };
@@ -2879,6 +2985,241 @@ test("coordinator task hooks permit autonomous sequential workers across synthet
   });
 });
 
+test("coordinator-only Luna admission returns bounded route evidence without dispatch authority", async () => {
+  await withProject("luna-fabric-admission", async (directory) => {
+    await mkdir(join(directory, ".opencode"));
+    const contractPath = join(directory, ".opencode", "sortie-dogs-luna-fabric.json");
+    const unit = (id: string, order: number) => ({
+      unit_id: id,
+      acceptance_items: [`accept-${id}`],
+      scope_read: ["src/shared.ts"],
+      scope_write: [`src/${id}.ts`],
+      depends_on: [],
+      validation: { level: "targeted", command: ["node", "--test", `test/${id}.test.ts`] },
+      shared_path_keys: [],
+      exclusive_resources: [],
+      scheduler_order: order,
+    });
+    await writeFile(contractPath, JSON.stringify({
+      version: "0.8.0",
+      provenance: {
+        source: "dog-coordinator",
+        acceptance_fingerprint: "a".repeat(64),
+        target_branch: "main",
+        target_sha: "b".repeat(40),
+      },
+      acceptance_items: ["accept-unit-a", "accept-unit-b"],
+      effects: [],
+      shared_paths: [],
+      units: [unit("unit-a", 0), unit("unit-b", 1)],
+    }));
+    const hooks = await SortieDogsPlugin({ directory });
+    await hooks["chat.message"]!(
+      { sessionID: "root", agent: "dog-coordinator" },
+      { message: { agent: "dog-coordinator", model: {} }, parts: [{ type: "text", text: "route" }] },
+    );
+    const misplaced = JSON.parse(await hooks.tool!.sortie_admit_luna_fabric!.execute(
+      { contract_path: join(directory, "luna-fabric.json") },
+      { sessionID: "root", agent: "dog-coordinator" },
+    ));
+    assert.deepEqual(misplaced, {
+      status: "denied",
+      reason: "contract-control-path-required",
+      required_contract_path: ".opencode/sortie-dogs-luna-fabric.json",
+    });
+    const admitted = JSON.parse(await hooks.tool!.sortie_admit_luna_fabric!.execute(
+      { contract_path: contractPath },
+      { sessionID: "root", agent: "dog-coordinator" },
+    ));
+    assert.deepEqual(Object.keys(admitted).sort(), [
+      "contract_fingerprint", "depth", "route", "status", "unit_count", "width",
+    ]);
+    assert.equal(admitted.status, "admitted");
+    assert.equal(admitted.route, "luna-fabric");
+    assert.equal(admitted.width, 2);
+    assert.equal(admitted.unit_count, 2);
+
+    await writeFile(contractPath, JSON.stringify({ bad: true }));
+    const serial = JSON.parse(await hooks.tool!.sortie_admit_luna_fabric!.execute(
+      { contract_path: contractPath },
+      { sessionID: "root", agent: "dog-coordinator" },
+    ));
+    assert.equal(serial.status, "serial-route");
+    assert.equal(serial.reason, "malformed-contract");
+
+    const child = JSON.parse(await hooks.tool!.sortie_admit_luna_fabric!.execute(
+      { contract_path: contractPath },
+      { sessionID: "child", agent: "dog-worker" },
+    ));
+    assert.equal(child.status, "denied");
+  });
+});
+
+test("fabric prepare returns a luna-fabric run whose descriptors bind only dog-luna-worker", async () => {
+  await withProject("luna-fabric-prepare", async (directory) => {
+    await writeFile(join(directory, ".gitignore"), ".opencode/sortie-dogs-luna-fabric.json\n");
+    await writeFile(join(directory, "base.txt"), "base\n");
+    await mkdir(join(directory, ".opencode"));
+    await writeFile(join(directory, ".opencode", "sortie-dogs.version"), `${RUNTIME_ASSET_VERSION}\n`);
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify({
+      ...fixture.manifest,
+      validation: ["npm test"],
+    }));
+    await execFileAsync("git", ["init", "-q", "-b", "main"], { cwd: directory });
+    await execFileAsync("git", ["config", "user.name", "Sortie Test"], { cwd: directory });
+    await execFileAsync("git", ["config", "user.email", "sortie@example.invalid"], { cwd: directory });
+    await execFileAsync("git", ["add", ".gitignore", "base.txt", ".opencode/sortie-dogs.version",
+      "operation-manifest.json"], { cwd: directory });
+    await execFileAsync("git", ["commit", "-q", "-m", "base"], { cwd: directory });
+    const { stdout } = await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: directory });
+    const sha = stdout.trim();
+    const contractPath = join(directory, ".opencode", "sortie-dogs-luna-fabric.json");
+    await writeFile(contractPath, JSON.stringify({
+      version: "0.8.0",
+      provenance: {
+        source: "dog-coordinator",
+        acceptance_fingerprint: "c".repeat(64),
+        target_branch: "main",
+        target_sha: sha,
+      },
+      acceptance_items: ["own-a", "own-b"],
+      effects: [],
+      shared_paths: [],
+      units: ["a", "b"].map((id, order) => ({
+        unit_id: id,
+        acceptance_items: [`own-${id}`],
+        scope_read: ["base.txt"],
+        scope_write: [`${id}.txt`],
+        depends_on: [],
+        validation: { level: "targeted", command: ["node", "--test", `test/${id}.test.ts`] },
+        shared_path_keys: [],
+        exclusive_resources: [],
+        scheduler_order: order,
+      })),
+    }));
+
+    const hooks = await SortieDogsPlugin({ directory });
+    await hooks["chat.message"]!(
+      { sessionID: "root", agent: "dog-coordinator" },
+      {
+        message: { agent: "dog-coordinator", model: { providerID: "host", modelID: "selected" } },
+        parts: [{ type: "text", text: "fabric" }],
+      },
+    );
+    const prepared = JSON.parse(await hooks.tool!.sortie_prepare_luna_fabric!.execute(
+      { contract_path: contractPath },
+      { sessionID: "root", agent: "dog-coordinator" },
+    )) as { status: string; run_id: string; route: string; width: number; depth: number; fabric_fingerprint: string;
+      ready: Array<Record<string, unknown>> };
+    assert.equal(prepared.status, "prepared", JSON.stringify(prepared));
+    assert.equal(prepared.route, "luna-fabric");
+    assert.equal(prepared.width, 2);
+    assert.equal(prepared.depth, 1);
+    assert.match(prepared.fabric_fingerprint, /^[0-9a-f]{64}$/u);
+    assert.equal(prepared.ready.length, 2);
+    assert.deepEqual(prepared.ready.map((descriptor) => descriptor.acceptance), [
+      ["own-a", "Complete the prepared parallel descriptor within its declared scope."],
+      ["own-b", "Complete the prepared parallel descriptor within its declared scope."],
+    ]);
+    const earlyAdvance = JSON.parse(await hooks.tool!.sortie_advance_luna_fabric_wave!.execute(
+      { run_id: prepared.run_id },
+      { sessionID: "root", agent: "dog-coordinator" },
+    ));
+    assert.deepEqual(earlyAdvance, { status: "denied", reason: "wave-not-ready" });
+
+    const prompt = (descriptor: Record<string, unknown>) => [
+      "context_digest:",
+      `  task_id: ${descriptor.task_id}`,
+      `  run_id: ${descriptor.run_id}`,
+      `  dispatch_id: ${descriptor.dispatch_id}`,
+      "  role: implementation",
+      `  project_root: ${descriptor.managed_path}`,
+      `  branch: ${descriptor.branch}`,
+      `  base_sha: ${descriptor.base_sha}`,
+      `  depends_on: ${JSON.stringify(descriptor.depends_on)}`,
+      `  scope_read: ${JSON.stringify(descriptor.scope_read)}`,
+      `  scope_write: ${JSON.stringify(descriptor.scope_write)}`,
+      `  handoff_path: ${descriptor.handoff_path}`,
+      "  acceptance:",
+      ...(descriptor.acceptance as string[]).map((criterion) => `    - ${criterion}`),
+      "  validation: no canonical validation",
+      `  parallel_group: ${descriptor.parallel_group}`,
+      `  parallel_unit: ${descriptor.parallel_unit}`,
+      `  parallel_units: ${descriptor.parallel_units}`,
+      `  attempt: ${descriptor.attempt}`,
+      `  contract_fingerprint: ${descriptor.contract_fingerprint}`,
+      "  source_manifest: [base.txt]",
+      `operation_manifest: ${descriptor.operation_manifest}`,
+    ].join("\n");
+    const before = hooks["tool.execute.before"]!;
+    await assert.rejects(
+      () => before(
+        { tool: "task", sessionID: "root", callID: "serial-role" },
+        { args: { subagent_type: "dog-worker", prompt: prompt(prepared.ready[0]!) } },
+      ),
+      /parallel_route_role_mismatch/u,
+    );
+    await assert.rejects(
+      () => before(
+        { tool: "task", sessionID: "root", callID: "luna-without-descriptor" },
+        { args: { subagent_type: "dog-luna-worker", prompt: readOnlyWorkerPrompt(directory) } },
+      ),
+      /luna_worker_requires_admitted_descriptor/u,
+    );
+    const descriptorOnlyPrompt = prompt(prepared.ready[0]!).replace("  role: implementation\n", "");
+    await before(
+      { tool: "task", sessionID: "root", callID: "luna-a" },
+      { args: { subagent_type: "dog-luna-worker", prompt: descriptorOnlyPrompt } },
+    );
+    await before(
+      { tool: "task", sessionID: "root", callID: "luna-b" },
+      { args: { subagent_type: "dog-luna-worker", prompt: prompt(prepared.ready[1]!) } },
+    );
+    await hooks.event!({ event: { type: "session.created",
+      properties: { info: { id: "luna-child-a", parentID: "root" } } } });
+    await hooks["chat.message"]!(
+      { sessionID: "luna-child-a", agent: "dog-luna-worker", parentID: "root" } as never,
+      { message: { agent: "dog-luna-worker", model: {} }, parts: [{ type: "text", text: descriptorOnlyPrompt }] },
+    );
+    await inspectHandoffWithRead(hooks, prepared.ready[0]!.handoff_path as string, "luna-child-a");
+    assert.equal((await executeBindWriteGate(
+      hooks,
+      prepared.ready[0]!.managed_path as string,
+      "luna-child-a",
+      prepared.ready[0]!.operation_manifest as string,
+    )).status, "bound");
+    const mismatchedChild = "luna-child-mismatch";
+    const mismatchedPrompt = descriptorOnlyPrompt.replace(
+      `  project_root: ${prepared.ready[0]!.managed_path}`,
+      `  project_root: ${directory}`,
+    );
+    await hooks.event!({ event: { type: "session.created",
+      properties: { info: { id: mismatchedChild, parentID: "root" } } } });
+    await hooks["chat.message"]!(
+      { sessionID: mismatchedChild, agent: "dog-luna-worker", parentID: "root" } as never,
+      { message: { agent: "dog-luna-worker", model: {} }, parts: [{ type: "text", text: mismatchedPrompt }] },
+    );
+    assert.deepEqual(await executeBindWriteGate(
+      hooks,
+      prepared.ready[0]!.managed_path as string,
+      mismatchedChild,
+      prepared.ready[0]!.operation_manifest as string,
+    ), {
+      status: "denied",
+      reason: "parallel-contract-invalid",
+      recoverable: false,
+      remedy: "Redispatch a fresh worker with parallel_group, parallel_unit, and parallel_units=2..5 all present, or omit all three fields for serial work.",
+      escalation: { action: "follow-remedy", resume_session: false, true_blocker: false },
+    });
+    const status = JSON.parse(await hooks.tool!.sortie_parallel_dispatch_status!.execute(
+      { run_id: prepared.ready[0]!.run_id as string, reconcile: "false" },
+      { sessionID: "root", agent: "dog-coordinator" },
+    )) as { route: string; tasks: Array<{ phase: string }> };
+    assert.equal(status.route, "luna-fabric");
+    assert.deepEqual(status.tasks.map(({ phase }) => phase), ["running", "running"]);
+  });
+});
+
 test("typed parallel prepare is the only path to reserved dependency-aware worker dispatch", async () => {
   await withProject("typed-parallel-dispatch", async (directory) => {
     await writeFile(join(directory, ".gitignore"), "parallel-contract.json\n");
@@ -2900,7 +3241,7 @@ test("typed parallel prepare is the only path to reserved dependency-aware worke
         [ACCEPTANCE_CONTINUITY_EXTENSION]: acceptanceContinuity("sequential-parent", parentCriteria),
       },
     }));
-    await execFileAsync("git", ["init", "-q"], { cwd: directory });
+    await execFileAsync("git", ["init", "-q", "-b", "main"], { cwd: directory });
     await execFileAsync("git", ["config", "user.name", "Sortie Test"], { cwd: directory });
     await execFileAsync("git", ["config", "user.email", "sortie@example.invalid"], { cwd: directory });
     await execFileAsync("git", ["add", ".gitignore", "base.txt", ".opencode/sortie-dogs.version",
@@ -3091,7 +3432,7 @@ test("parallel worker artifact capability enforces exact lineage, terminal relea
   await withProject("parallel-artifact-capability", async (directory) => {
     await writeFile(join(directory, ".gitignore"), "parallel-contract.json\n*.operation-manifest.json\nhandoff*.json\n");
     await writeFile(join(directory, "base.txt"), "base\n");
-    await execFileAsync("git", ["init", "-q"], { cwd: directory });
+    await execFileAsync("git", ["init", "-q", "-b", "main"], { cwd: directory });
     await execFileAsync("git", ["config", "user.name", "Sortie Test"], { cwd: directory });
     await execFileAsync("git", ["config", "user.email", "sortie@example.invalid"], { cwd: directory });
     await execFileAsync("git", ["add", ".gitignore", "base.txt"], { cwd: directory });
@@ -3152,6 +3493,14 @@ test("parallel worker artifact capability enforces exact lineage, terminal relea
     );
     await inspectHandoffWithRead(hooks, handoffPath, child);
     assert.equal((await executeBindWriteGate(hooks, managedPath, child, manifestPath)).status, "bound");
+    await expectMessage(
+      () => hooks["tool.execute.before"]!(
+        { tool: "apply_patch", sessionID: child, callID: "relative-parallel-write" },
+        { args: { patchText: `*** Begin Patch\n*** Add File: ${descriptor.task_id}.txt\n+leak\n*** End Patch` } },
+      ),
+      `Write denied for "${descriptor.task_id}.txt": parallel implementation write paths must be absolute and rooted in managed_path.`,
+      "parallel-relative-path",
+    );
     await writeFile(join(managedPath, `${descriptor.task_id}.txt`), "artifact\n");
     await execFileAsync("git", ["add", "--", `${descriptor.task_id}.txt`], { cwd: managedPath });
     const capability = hooks.tool!.sortie_create_parallel_commit_artifact!;
@@ -3221,8 +3570,7 @@ test("parallel worker artifact capability enforces exact lineage, terminal relea
     assert.deepEqual(await executeReleaseWriteGate(hooks, child), { status: "released" });
     await hooks["tool.execute.after"]!(
       { tool: "task", sessionID: "root", callID },
-      { output: `SORTIE_PARALLEL_OUTCOME ${JSON.stringify({ run_id: descriptor.run_id,
-        dispatch_id: descriptor.dispatch_id, status: "completed" })}`, metadata: { sessionId: child } },
+      { output: "SORTIE_PARALLEL_OUTCOME: completed", metadata: { sessionId: child } },
     );
     const status = JSON.parse(await hooks.tool!.sortie_parallel_dispatch_status!.execute(
       { run_id: prepared.run_id }, { sessionID: "root", agent: "dog-coordinator" },
@@ -3429,8 +3777,21 @@ test("an explicit coordinator selection replaces a root agent but never promotes
           parts: [{ type: "text", text: "release routine" }],
         },
       ),
-      /SORTIE_FRESH_SESSION_REQUIRED: \/sortie cannot promote a child session/u,
+      (error: unknown) => isFreshSessionError(error, "child-lineage", "user-action-required", "open-fresh-root"),
     );
+    await childHooks["chat.message"]!(
+      { sessionID: "foreign-child", parentID: "foreign-root", agent: "build" } as never,
+      {
+        message: { agent: "build", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+        parts: [{ type: "text", text: "leave Sortie routing" }],
+      },
+    );
+    const childAutoContinue = { enabled: true };
+    await childHooks["experimental.compaction.autocontinue"]!(
+      { sessionID: "foreign-child" },
+      childAutoContinue,
+    );
+    assert.equal(childAutoContinue.enabled, true, "an explicit agent change releases the stopped Sortie lifecycle");
 
     const noClientHooks = await SortieDogsPlugin({ directory });
     await assert.rejects(
@@ -3441,7 +3802,7 @@ test("an explicit coordinator selection replaces a root agent but never promotes
           parts: [{ type: "text", text: "release routine" }],
         },
       ),
-      /SORTIE_FRESH_SESSION_REQUIRED: \/sortie cannot promote a child session/u,
+      (error: unknown) => isFreshSessionError(error, "child-lineage", "user-action-required", "open-fresh-root"),
     );
 
     await noClientHooks.event!({ event: { type: "session.created", properties: {
@@ -3455,7 +3816,7 @@ test("an explicit coordinator selection replaces a root agent but never promotes
           parts: [{ type: "text", text: "release routine" }],
         },
       ),
-      /SORTIE_FRESH_SESSION_REQUIRED: \/sortie cannot promote a child session/u,
+      (error: unknown) => isFreshSessionError(error, "child-lineage", "user-action-required", "open-fresh-root"),
     );
 
     const nullRootHooks = await SortieDogsPlugin({ directory, client: { session: {
@@ -3477,6 +3838,112 @@ test("an explicit coordinator selection replaces a root agent but never promotes
         "*** End Patch",
       ].join("\n") } },
     );
+  });
+});
+
+test("a child coordinator request redispatches once to a fresh top-level session", async () => {
+  await withProject("child-fresh-root-redispatch", async (directory) => {
+    let creates = 0;
+    let prompts = 0;
+    let deletes = 0;
+    let promptRequest: Record<string, unknown> | undefined;
+    const hooks = await SortieDogsPlugin({ directory, client: { session: {
+      get: async ({ path }: { path: { id: string } }) => ({ data: path.id === "child"
+        ? { id: "child", agent: "dog-coordinator", parentID: "parent" }
+        : { id: path.id, agent: "dog-coordinator" } }),
+      create: async () => { creates += 1; return { data: { id: "fresh-root" } }; },
+      promptAsync: async (request: Record<string, unknown>) => {
+        prompts += 1;
+        promptRequest = request;
+        return { data: true };
+      },
+      delete: async () => { deletes += 1; return { data: true }; },
+    } } as never });
+    const invoke = () => hooks["chat.message"]!(
+      { sessionID: "child", parentID: "parent", agent: "dog-coordinator" } as never,
+      {
+        message: { agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+        parts: [{ type: "text", text: "continue the benchmark" }],
+      },
+    );
+    const redispatched = (error: unknown) => {
+      assert.ok(isFreshSessionError(error, "child-lineage", "redispatched"));
+      assert.ok(error instanceof FreshSessionRequiredError && error.result.status === "redispatched");
+      assert.equal(error.result.source_session_id, "child");
+      assert.equal(error.result.target_session_id, "fresh-root");
+      return true;
+    };
+    await assert.rejects(invoke, redispatched);
+    await assert.rejects(invoke, redispatched);
+
+    assert.equal(creates, 1);
+    assert.equal(prompts, 1);
+    assert.equal(deletes, 0);
+    assert.deepEqual(promptRequest, {
+      path: { id: "fresh-root" },
+      query: { directory },
+      body: {
+        agent: "dog-coordinator",
+        parts: [{ type: "text", text: "continue the benchmark" }],
+      },
+    });
+  });
+});
+
+test("a host-created child is discarded instead of being treated as a fresh root", async () => {
+  await withProject("child-fresh-root-rejected", async (directory) => {
+    let prompts = 0;
+    let deletes = 0;
+    const hooks = await SortieDogsPlugin({ directory, client: { session: {
+      get: async () => ({ data: { id: "child", agent: "dog-coordinator", parentID: "parent" } }),
+      create: async () => ({ data: { id: "not-a-root", parentID: "parent" } }),
+      promptAsync: async () => { prompts += 1; return { data: true }; },
+      delete: async () => { deletes += 1; return { data: true }; },
+    } } as never });
+    await assert.rejects(
+      () => hooks["chat.message"]!(
+        { sessionID: "child", parentID: "parent", agent: "dog-coordinator" } as never,
+        {
+          message: { agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+          parts: [{ type: "text", text: "continue" }],
+        },
+      ),
+      (error: unknown) => isFreshSessionError(error, "child-lineage", "user-action-required", "open-fresh-root"),
+    );
+    assert.equal(prompts, 0);
+    assert.equal(deletes, 1);
+  });
+});
+
+test("a rejected fresh-root prompt deletes the empty session and does not retry", async () => {
+  await withProject("child-fresh-root-prompt-rejected", async (directory) => {
+    let creates = 0;
+    let prompts = 0;
+    let deletes = 0;
+    const hooks = await SortieDogsPlugin({ directory, client: { session: {
+      get: async () => ({ data: { id: "child", agent: "dog-coordinator", parentID: "parent" } }),
+      create: async () => { creates += 1; return { data: { id: "empty-root" } }; },
+      promptAsync: async () => { prompts += 1; return { error: { name: "rejected" } }; },
+      delete: async () => { deletes += 1; return { data: true }; },
+    } } as never });
+    const invoke = () => hooks["chat.message"]!(
+      { sessionID: "child", parentID: "parent", agent: "dog-coordinator" } as never,
+      {
+        message: { agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+        parts: [{ type: "text", text: "continue" }],
+      },
+    );
+    await assert.rejects(
+      invoke,
+      (error: unknown) => isFreshSessionError(error, "child-lineage", "user-action-required", "open-fresh-root"),
+    );
+    await assert.rejects(
+      invoke,
+      (error: unknown) => isFreshSessionError(error, "child-lineage", "user-action-required", "open-fresh-root"),
+    );
+    assert.equal(creates, 1);
+    assert.equal(prompts, 1);
+    assert.equal(deletes, 1);
   });
 });
 
@@ -4190,6 +4657,47 @@ test("follow-up mutating dispatch cannot drop parent acceptance criteria", async
   });
 });
 
+test("a fresh coordinator recovers serial acceptance continuity from its strict prefix", async () => {
+  await withProject("acceptance-parent-serial-recovery", async (directory) => {
+    await mkdir(join(directory, ".opencode"));
+    await writeFile(join(directory, ".opencode", "sortie-dogs.version"), `${RUNTIME_ASSET_VERSION}\n`);
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify({
+      ...fixture.manifest,
+      validation: ["npm test"],
+    }));
+    const parentCriteria = ["keep the pinned snapshot", "preserve the non-claim boundary"];
+    const criteria = [...parentCriteria, "record the measured snapshot state"];
+    const handoffPath = join(directory, "handoff.resumed-task.json");
+    const base = writeGateHandoff(directory, "operation-manifest.json") as { ext: Record<string, unknown> };
+    await writeFile(handoffPath, JSON.stringify({
+      ...base,
+      id: "resumed-task",
+      ext: { ...base.ext, [ACCEPTANCE_CONTINUITY_EXTENSION]: acceptanceContinuity(
+        "resumed-task", criteria, acceptanceContinuityFingerprint(parentCriteria),
+      ) },
+    }));
+    const hooks = await SortieDogsPlugin({ directory });
+    await hooks["chat.message"]!(
+      { sessionID: "fresh-root", agent: "dog-coordinator" },
+      { message: { agent: "dog-coordinator", model: {} }, parts: [{ type: "text", text: "resume" }] },
+    );
+    await hooks["tool.execute.before"]!(
+      { tool: "task", sessionID: "fresh-root", callID: "serial-recovery" },
+      { args: { subagent_type: "dog-worker", prompt: [
+        "task_id: resumed-task",
+        "role: implementation",
+        `project_root: ${directory}`,
+        `handoff_path: ${handoffPath}`,
+        "source_manifest: [allowed.txt]",
+        "operation_manifest: operation-manifest.json",
+        "acceptance:",
+        ...criteria.map((criterion) => `  - ${criterion}`),
+        "validation: npm test",
+      ].join("\n") } },
+    );
+  });
+});
+
 test("global stale marker blocks dispatch when no project marker exists", async () => {
   await withProject("global-asset-version-skew", async (directory) => {
     const globalRoot = process.env.OPENCODE_CONFIG_DIR!;
@@ -4205,7 +4713,9 @@ test("global stale marker blocks dispatch when no project marker exists", async 
       await assert.rejects(() => hooks["tool.execute.before"]!(
         { tool: "task", sessionID: "root", callID: "global-skewed-worker" },
         { args: { subagent_type: "dog-worker", prompt: readOnlyWorkerPrompt(directory) } },
-      ), /SORTIE_FRESH_SESSION_REQUIRED: installed agent assets/u);
+      ), (error: unknown) => isFreshSessionError(
+        error, "asset-contract-skew", "user-action-required", "install-assets-then-open-fresh-root",
+      ));
     } finally {
       await rm(globalRoot, { recursive: true, force: true });
     }
@@ -4272,7 +4782,9 @@ test("present corrupt project markers override a current global marker and fail 
         await assert.rejects(() => hooks["tool.execute.before"]!(
           { tool: "task", sessionID, callID: `worker-${sessionID}` },
           { args: { subagent_type: "dog-worker", prompt: readOnlyWorkerPrompt(directory) } },
-        ), /SORTIE_FRESH_SESSION_REQUIRED: installed agent assets/u);
+        ), (error: unknown) => isFreshSessionError(
+          error, "asset-contract-skew", "user-action-required", "install-assets-then-open-fresh-root",
+        ));
       };
       await rejectSession("empty-marker-root");
       await rm(marker);
@@ -4299,14 +4811,136 @@ test("asset version skew stays blocked until a fresh plugin session", async () =
       { tool: "task", sessionID, callID: `skewed-worker-${sessionID}` },
       { args: { subagent_type: "dog-worker", prompt } },
     );
-    await assert.rejects(dispatch, /SORTIE_FRESH_SESSION_REQUIRED: installed agent assets/u);
+    await assert.rejects(dispatch, (error: unknown) => isFreshSessionError(
+      error, "asset-contract-skew", "user-action-required", "install-assets-then-open-fresh-root",
+    ));
     await writeFile(marker, `${RUNTIME_ASSET_VERSION}\n`);
-    await assert.rejects(dispatch, /SORTIE_FRESH_SESSION_REQUIRED: installed agent assets/u);
+    await assert.rejects(dispatch, (error: unknown) => isFreshSessionError(
+      error, "asset-contract-skew", "user-action-required", "open-fresh-root",
+    ));
     await hooks["chat.message"]!(
       { sessionID: "fresh-root", agent: "dog-coordinator" },
       { message: { agent: "dog-coordinator", model: {} }, parts: [{ type: "text", text: "task" }] },
     );
     await dispatch("fresh-root", readOnlyWorkerPrompt(directory));
+  });
+});
+
+test("a repaired asset skew redispatches the retained request to one fresh root", async () => {
+  await withProject("asset-version-skew-redispatch", async (directory) => {
+    await mkdir(join(directory, ".opencode"));
+    const marker = join(directory, ".opencode", "sortie-dogs.version");
+    await writeFile(marker, "0.3.33-readable-terminal-report-v1\n");
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+    let creates = 0;
+    let prompts = 0;
+    let promptRequest: Record<string, unknown> | undefined;
+    const hooks = await SortieDogsPlugin({ directory, client: { session: {
+      get: async ({ path }: { path: { id: string } }) => ({ data: { id: path.id, agent: "dog-coordinator" } }),
+      create: async () => { creates += 1; return { data: { id: "repaired-root" } }; },
+      promptAsync: async (request: Record<string, unknown>) => {
+        prompts += 1;
+        promptRequest = request;
+        return { data: true };
+      },
+    } } as never });
+    await hooks["chat.message"]!(
+      { sessionID: "stale-root", agent: "dog-coordinator" },
+      {
+        message: { agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+        parts: [{ type: "text", text: "continue benchmark from durable handoff" }],
+      },
+    );
+    const dispatch = (callID: string) => hooks["tool.execute.before"]!(
+      { tool: "task", sessionID: "stale-root", callID },
+      { args: { subagent_type: "dog-worker", prompt: readOnlyWorkerPrompt(directory) } },
+    );
+    await assert.rejects(
+      () => dispatch("before-repair"),
+      (error: unknown) => isFreshSessionError(
+        error, "asset-contract-skew", "user-action-required", "install-assets-then-open-fresh-root",
+      ),
+    );
+    assert.equal(creates, 0);
+
+    await writeFile(marker, `${RUNTIME_ASSET_VERSION}\n`);
+    const redispatched = (error: unknown) => {
+      assert.ok(isFreshSessionError(error, "asset-contract-skew", "redispatched"));
+      assert.ok(error instanceof FreshSessionRequiredError && error.result.status === "redispatched");
+      assert.equal(error.result.target_session_id, "repaired-root");
+      return true;
+    };
+    await assert.rejects(() => dispatch("after-repair"), redispatched);
+    await assert.rejects(() => dispatch("duplicate-after-repair"), redispatched);
+
+    assert.equal(creates, 1);
+    assert.equal(prompts, 1);
+    assert.deepEqual(promptRequest, {
+      path: { id: "repaired-root" },
+      query: { directory },
+      body: {
+        agent: "dog-coordinator",
+        parts: [{ type: "text", text: "continue benchmark from durable handoff" }],
+      },
+    });
+  });
+});
+
+test("asset skew returning during root creation deletes the unprompted session", async () => {
+  await withProject("asset-version-skew-create-race", async (directory) => {
+    await mkdir(join(directory, ".opencode"));
+    const marker = join(directory, ".opencode", "sortie-dogs.version");
+    await writeFile(marker, "0.3.33-readable-terminal-report-v1\n");
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+    let creates = 0;
+    let prompts = 0;
+    let deletes = 0;
+    const hooks = await SortieDogsPlugin({ directory, client: { session: {
+      get: async ({ path }: { path: { id: string } }) => ({ data: { id: path.id, agent: "dog-coordinator" } }),
+      create: async () => {
+        creates += 1;
+        if (creates === 1) await writeFile(marker, "0.3.33-readable-terminal-report-v1\n");
+        return { data: { id: `raced-root-${creates}` } };
+      },
+      promptAsync: async () => { prompts += 1; return { data: true }; },
+      delete: async () => { deletes += 1; return { data: true }; },
+    } } as never });
+    await hooks["chat.message"]!(
+      { sessionID: "stale-root", agent: "dog-coordinator" },
+      {
+        message: { agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+        parts: [{ type: "text", text: "continue benchmark" }],
+      },
+    );
+    await writeFile(marker, `${RUNTIME_ASSET_VERSION}\n`);
+    await assert.rejects(
+      () => hooks["tool.execute.before"]!(
+        { tool: "task", sessionID: "stale-root", callID: "marker-race" },
+        { args: { subagent_type: "dog-worker", prompt: readOnlyWorkerPrompt(directory) } },
+      ),
+      (error: unknown) => isFreshSessionError(
+        error, "asset-contract-skew", "user-action-required", "install-assets-then-open-fresh-root",
+      ),
+    );
+    assert.equal(prompts, 0);
+    assert.equal(deletes, 1);
+
+    await writeFile(marker, `${RUNTIME_ASSET_VERSION}\n`);
+    await assert.rejects(
+      () => hooks["tool.execute.before"]!(
+        { tool: "task", sessionID: "stale-root", callID: "after-marker-race-repair" },
+        { args: { subagent_type: "dog-worker", prompt: readOnlyWorkerPrompt(directory) } },
+      ),
+      (error: unknown) => {
+        assert.ok(isFreshSessionError(error, "asset-contract-skew", "redispatched"));
+        assert.ok(error instanceof FreshSessionRequiredError && error.result.status === "redispatched");
+        assert.equal(error.result.target_session_id, "raced-root-2");
+        return true;
+      },
+    );
+    assert.equal(creates, 2);
+    assert.equal(prompts, 1);
+    assert.equal(deletes, 1);
   });
 });
 
@@ -4350,7 +4984,7 @@ test("an explicit real build turn clears an in-memory coordinator route", async 
           parts: [{ type: "text", text: "promote" }],
         },
       ),
-      /SORTIE_FRESH_SESSION_REQUIRED: \/sortie cannot promote a child session/u,
+      (error: unknown) => isFreshSessionError(error, "child-lineage", "user-action-required", "open-fresh-root"),
     );
   });
 });
@@ -5392,6 +6026,21 @@ test("the contract preflight reports gate defects without granting inspection", 
     await writeFile(unregistered, JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
     assert.equal((await report(unregistered)).status, "defective");
     assert.deepEqual((await report(unregistered)).defects, ["handoff / handoff_path_not_registered"]);
+
+    const malformedCriteria = ["preserve the boundary"];
+    const malformedContinuity = writeGateHandoff(directory, "operation-manifest.json") as {
+      ext: Record<string, unknown>;
+    };
+    const malformedLedger = acceptanceContinuity("task-a", malformedCriteria) as { fingerprint: string };
+    malformedLedger.fingerprint = `sha256:${"0".repeat(64)}`;
+    malformedContinuity.ext[ACCEPTANCE_CONTINUITY_EXTENSION] = malformedLedger;
+    await writeFile(handoffPath, JSON.stringify(malformedContinuity));
+    assert.deepEqual(await report(handoffPath), {
+      status: "defective",
+      reason: "contract-invalid",
+      defects: ["handoff /ext/sortie-dogs~1acceptance-continuity acceptance_continuity_malformed"],
+      remedy: "Repair each reported pointer in the named document, then check it again.",
+    });
 
     await writeFile(handoffPath, JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
     assert.deepEqual(await report(handoffPath), { status: "ok", defects: [] });
@@ -6637,6 +7286,14 @@ test("parallel worker bindings allow disjoint scopes and reject equal or ancesto
     assert.equal((await executeBindWriteGate(hooks, directory, "unit-b", "unit-b.operation-manifest.json")).status, "bound");
     assert.equal((await executeBindWriteGate(hooks, directory, "unit-segment", "unit-segment.operation-manifest.json")).status, "bound");
     assert.equal((await executeBindWriteGate(hooks, directory, "unit-serial", "unit-serial.operation-manifest.json")).status, "bound");
+    await before(
+      { tool: "read", sessionID: "unit-b", callID: "failed-read" },
+      { args: { filePath: join(directory, "missing.ts") } },
+    );
+    await event({ event: { type: "message.part.updated", properties: { part: {
+      type: "tool", sessionID: "unit-b", callID: "failed-read", state: { status: "error" },
+    } } } });
+    assert.deepEqual(await executeReleaseWriteGate(hooks, "unit-b"), { status: "released" });
     await expectMessage(
       () => before(
         { tool: "bash", sessionID: "unit-segment", callID: "parallel-validation" },
@@ -6691,7 +7348,8 @@ test("parallel worker bindings allow disjoint scopes and reject equal or ancesto
     assert.equal(invalidParallel.reason, "parallel-contract-invalid");
     assert.equal(invalidParallel.recoverable, false);
 
-    const inFlightInput = { tool: "write", sessionID: "unit-a", callID: "in-flight-write", args: { file: "src/a.ts", content: "not-written" } };
+    const inFlightInput = { tool: "write", sessionID: "unit-a", callID: "in-flight-write",
+      args: { file: join(directory, "src", "a.ts"), content: "not-written" } };
     await before(inFlightInput, { args: inFlightInput.args });
     const originalNow = Date.now;
     let now = Date.now();
@@ -6905,7 +7563,7 @@ test("transient durable release failure denies release and retains authority for
     assert.equal(rebound.idempotent, true);
     await hooks["tool.execute.before"]!(
       { tool: "write", sessionID, callID: "retained-authority" },
-      { args: { file: "release-contention.ts", content: "not-written" } },
+      { args: { file: join(directory, "release-contention.ts"), content: "not-written" } },
     );
     await hooks["tool.execute.after"]!(
       { tool: "write", sessionID, callID: "retained-authority" },
@@ -7164,6 +7822,202 @@ test("parent idle evicts authorization left by an interrupted Task call", async 
       'Write denied for "<unknown>": operation manifest unavailable.',
       "manifest-unavailable",
     );
+  });
+});
+
+test("root task watchdog aborts and resumes the same coordinator once when after and idle are absent", async () => {
+  await withProject("task-watchdog-recovery", async (directory) => {
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+    await writeFile(join(directory, "handoff.json"), JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
+    const aborts: string[] = [];
+    const prompts: Array<{ id: string; text: string }> = [];
+    const hooks = await SortieDogsPlugin({
+      directory,
+      client: {
+        session: {
+          abort: async ({ path }) => { aborts.push(path.id); return true; },
+          promptAsync: async ({ path, body }) => {
+            prompts.push({ id: path.id, text: body.parts[0]!.text });
+            return true;
+          },
+        },
+      },
+    }, { continuation: { taskWatchdogMilliseconds: 20 } });
+    await beginTrackedTaskChild(hooks, directory, "watchdog-root", "watchdog-child", "watchdog-call");
+
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.deepEqual(aborts, ["watchdog-root"]);
+    assert.equal(prompts.length, 1);
+    assert.equal(prompts[0]!.id, "watchdog-root");
+    assert.ok(prompts[0]!.text.startsWith(STEP_CONTINUE_PREFIX));
+    assert.match(prompts[0]!.text, /coordinator-task-watchdog/);
+
+    await hooks["tool.execute.after"]!(
+      { tool: "task", sessionID: "watchdog-root", callID: "watchdog-call" },
+      { output: "<task><task_result>late</task_result></task>", metadata: { sessionId: "watchdog-child" } },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(aborts.length, 1);
+    assert.equal(prompts.length, 1);
+  });
+});
+
+test("root task watchdog recovery is passive outside the coordinator abort and synthetic resume APIs", async () => {
+  await withProject("task-watchdog-passive-recovery", async (directory) => {
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+    await writeFile(join(directory, "handoff.json"), JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
+    await writeFile(join(directory, "tracked.txt"), "unchanged\n");
+    const hostMutationCalls: string[] = [];
+    const hooks = await SortieDogsPlugin({
+      directory,
+      client: {
+        app: { log: async () => undefined },
+        session: {
+          abort: async ({ path }) => { hostMutationCalls.push(`session.abort:${path.id}`); return true; },
+          promptAsync: async ({ path }) => { hostMutationCalls.push(`session.promptAsync:${path.id}`); return true; },
+          create: async () => { hostMutationCalls.push("session.create"); return true; },
+          delete: async () => { hostMutationCalls.push("session.delete"); return true; },
+          summarize: async () => { hostMutationCalls.push("session.summarize"); return true; },
+        },
+      } as never,
+    }, { continuation: { taskWatchdogMilliseconds: 20 } });
+    await beginTrackedTaskChild(hooks, directory, "passive-root", "passive-child", "passive-call");
+
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.deepEqual(hostMutationCalls, ["session.abort:passive-root", "session.promptAsync:passive-root"]);
+    assert.equal(await readFile(join(directory, "tracked.txt"), "utf8"), "unchanged\n");
+    await hooks.event!({ event: { type: "session.idle", properties: { sessionID: "passive-root" } } });
+    await new Promise((resolve) => setTimeout(resolve, 80));
+  });
+});
+
+test("normal Task completion and manual session cancellation disarm root watchdog recovery", async () => {
+  await withProject("task-watchdog-disarm", async (directory) => {
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+    await writeFile(join(directory, "handoff.json"), JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
+    const aborts: string[] = [];
+    const prompts: string[] = [];
+    const hooks = await SortieDogsPlugin({ directory, client: { session: {
+      abort: async ({ path }) => { aborts.push(path.id); return true; },
+      promptAsync: async ({ path }) => { prompts.push(path.id); return true; },
+    } } as never }, { continuation: { taskWatchdogMilliseconds: 20 } });
+
+    await beginTrackedTaskChild(hooks, directory, "normal-root", "normal-child", "normal-call");
+    await hooks["tool.execute.after"]!(
+      { tool: "task", sessionID: "normal-root", callID: "normal-call" },
+      { output: "<task><task_result>done</task_result></task>", metadata: { sessionId: "normal-child" } },
+    );
+    await beginTrackedTaskChild(hooks, directory, "cancel-root", "cancel-child", "cancel-call");
+    await hooks.event!({ event: { type: "session.deleted", properties: { sessionID: "cancel-root" } } });
+
+    await new Promise((resolve) => setTimeout(resolve, 55));
+    assert.deepEqual(aborts, []);
+    assert.deepEqual(prompts, []);
+  });
+});
+
+test("root task watchdog defers and rearms for a running parallel task with unarchived durable state", async () => {
+  await withProject("task-watchdog-parallel-defer", async (directory) => {
+    await writeFile(join(directory, ".gitignore"), "parallel-contract.json\n");
+    await writeFile(join(directory, "base.txt"), "base\n");
+    await execFileAsync("git", ["init", "-q"], { cwd: directory });
+    await execFileAsync("git", ["config", "user.name", "Sortie Test"], { cwd: directory });
+    await execFileAsync("git", ["config", "user.email", "sortie@example.invalid"], { cwd: directory });
+    await execFileAsync("git", ["add", ".gitignore", "base.txt"], { cwd: directory });
+    await execFileAsync("git", ["commit", "-q", "-m", "base"], { cwd: directory });
+    const baseSHA = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: directory })).stdout.trim();
+    const contractPath = join(directory, "parallel-contract.json");
+    await writeFile(contractPath, JSON.stringify({
+      version: "0.1.0", mode: "parallel", max_workers: 2,
+      tasks: ["a", "b"].map((taskID) => ({ task_id: `parallel-watchdog-${taskID}`,
+        worktree: `parallel-watchdog-${taskID}`, branch: `sortie/parallel-watchdog-${taskID}`,
+        base_sha: baseSHA, depends_on: [], scope: { read: ["base.txt"], write: [`result-${taskID}.txt`] } })),
+      artifacts: [], failure: null, baseline_metrics: null,
+    }));
+    const aborts: string[] = [];
+    const logs: Array<{ message: string; extra?: Record<string, unknown> }> = [];
+    const hooks = await SortieDogsPlugin({ directory, client: {
+      app: { log: ({ body }) => { logs.push({ message: body.message, extra: body.extra }); } },
+      session: {
+        abort: async ({ path }) => { aborts.push(path.id); return true; },
+        promptAsync: async () => true,
+      },
+    } as never }, { continuation: { taskWatchdogMilliseconds: 20 } });
+    await hooks["chat.message"]!(
+      { sessionID: "parallel-root", agent: "dog-coordinator" },
+      { message: { agent: "dog-coordinator", model: {} }, parts: [{ type: "text", text: "parallel watchdog" }] },
+    );
+    const prepared = JSON.parse(await hooks.tool!.sortie_prepare_parallel_dispatch!.execute(
+      { contract_path: contractPath }, { sessionID: "parallel-root", agent: "dog-coordinator" },
+    )) as { run_id: string; ready: Array<Record<string, unknown>> };
+    const descriptor = prepared.ready[0]!;
+    const prompt = [
+      `task_id: ${descriptor.task_id}`, "role: implementation", `project_root: ${descriptor.managed_path}`,
+      `handoff_path: ${descriptor.handoff_path}`, "source_manifest: [base.txt]",
+      `operation_manifest: ${descriptor.operation_manifest}`, "acceptance: bounded parallel watchdog",
+      "validation: no canonical validation", ...Object.entries(descriptor).filter(([key]) => ![
+        "task_id", "managed_path", "handoff_path", "operation_manifest",
+        "acceptance", "acceptance_fingerprint", "acceptance_parent_fingerprint",
+      ].includes(key)).map(([key, value]) => `${key}: ${Array.isArray(value) ? JSON.stringify(value) : value}`),
+      `managed_path: ${descriptor.managed_path}`,
+    ].join("\n");
+    await hooks["tool.execute.before"]!(
+      { tool: "task", sessionID: "parallel-root", callID: "parallel-call" },
+      { args: { subagent_type: "dog-worker", prompt } },
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    assert.deepEqual(aborts, []);
+    const deferred = logs.find(({ message, extra }) => message === "batch-watchdog.deferred" &&
+      Array.isArray(extra?.reasons) && extra.reasons.includes("parallel-running"));
+    assert.ok(deferred);
+    assert.deepEqual(deferred.extra?.reasons, ["durable-state-present", "parallel-running"]);
+    assert.ok(logs.filter(({ message }) => message === "batch-watchdog.deferred").length >= 2);
+    assert.deepEqual(aborts, []);
+
+    await hooks["tool.execute.after"]!(
+      { tool: "task", sessionID: "parallel-root", callID: "parallel-call" },
+      { output: `SORTIE_PARALLEL_OUTCOME ${JSON.stringify({ run_id: prepared.run_id,
+        dispatch_id: descriptor.dispatch_id, status: "failed" })}`, metadata: {} },
+    );
+    await hooks.tool!.sortie_cancel_parallel_dispatch!.execute(
+      { run_id: prepared.run_id }, { sessionID: "parallel-root", agent: "dog-coordinator" },
+    );
+    await hooks.event!({ event: { type: "session.deleted", properties: { sessionID: "parallel-root" } } });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  });
+});
+
+test("root task watchdog records deferred evidence and rearms while a child write gate is bound", async () => {
+  await withProject("task-watchdog-bound-defer", async (directory) => {
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+    const handoffPath = join(directory, "handoff.json");
+    await writeFile(handoffPath, JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
+    const aborts: string[] = [];
+    const logs: Array<{ message: string; extra?: Record<string, unknown> }> = [];
+    const hooks = await SortieDogsPlugin({
+      directory,
+      client: {
+        app: { log: ({ body }) => { logs.push({ message: body.message, extra: body.extra }); } },
+        session: {
+          abort: async ({ path }) => { aborts.push(path.id); return true; },
+          promptAsync: async () => true,
+        },
+      },
+    }, { continuation: { taskWatchdogMilliseconds: 20 } });
+    await beginTrackedTaskChild(hooks, directory, "defer-root", "defer-child", "defer-call");
+    await inspectHandoffWithRead(hooks, handoffPath, "defer-child");
+    assert.equal((await executeBindWriteGate(hooks, directory, "defer-child")).status, "bound");
+
+    await new Promise((resolve) => setTimeout(resolve, 55));
+    assert.deepEqual(aborts, []);
+    const deferred = logs.find(({ message }) => message === "batch-watchdog.deferred");
+    assert.ok(deferred);
+    assert.deepEqual(deferred.extra?.reasons, ["bound-write-gate"]);
+
+    await hooks.event!({ event: { type: "session.idle", properties: { sessionID: "defer-root" } } });
+    await new Promise((resolve) => setTimeout(resolve, 35));
+    assert.deepEqual(aborts, []);
   });
 });
 

@@ -31,12 +31,14 @@ test("normal turns permit autonomous sequential workers across synthetic continu
   lane.beforeTool("root", "task", worker);
 });
 
-test("only a typed parallel authorization raises the worker bound to three", () => {
+test("only a typed parallel authorization raises the worker bound to five", () => {
   const lane = new FastLaneController();
   lane.beginTurn("parallel", false);
-  lane.enableParallelDispatch("parallel", 3, 0, 0, 3);
+  lane.enableParallelDispatch("parallel", 5, 0, 0, 5);
   lane.beforeTool("parallel", "task", worker, { parallelWorkerAuthorized: true });
   expectDenial(() => lane.beforeTool("parallel", "task", worker), "WORKER_LIMIT");
+  lane.beforeTool("parallel", "task", worker, { parallelWorkerAuthorized: true });
+  lane.beforeTool("parallel", "task", worker, { parallelWorkerAuthorized: true });
   lane.beforeTool("parallel", "task", worker, { parallelWorkerAuthorized: true });
   lane.beforeTool("parallel", "task", worker, { parallelWorkerAuthorized: true });
   expectDenial(

@@ -11,6 +11,7 @@ Sortie-dogs-owned paths:
 ```text
 .opencode/agent/dog-coordinator.md
 .opencode/agent/dog-worker.md
+.opencode/agent/dog-luna-worker.md
 .opencode/agent/dog-scout.md
 .opencode/agent/dog-reviewer.md
 .opencode/agent/dog-advisor.md

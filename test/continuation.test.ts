@@ -1109,6 +1109,74 @@ test("session idle keeps resuming distinct non-terminal progress", async () => {
   assert.equal(host.promptCalls.length, 4, "a real user turn also continues normally");
 });
 
+test("fresh-session recovery permanently stops same-session automatic continuation", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
+  hooks.observeModel("ses_stale", { providerID: "openai", modelID: "gpt-5.6-terra" });
+  await hooks.stopAutomaticRecovery("ses_stale");
+
+  await hooks.textComplete(
+    { sessionID: "ses_stale" },
+    { text: "📊 進行中: retry stale task\n➡️ 次action: retry" },
+  );
+  await hooks.sessionIdle("ses_stale");
+  await settle();
+  assert.equal(host.promptCalls.length, 0);
+  assert.equal(
+    await hooks.tool.execute({}, { sessionID: "ses_stale", agent: COORDINATOR }),
+    "SORTIE_CONTINUATION_REJECTED: fresh-session-required",
+  );
+  const autoContinue = { enabled: true };
+  await hooks.compactionAutoContinue({ sessionID: "ses_stale" }, autoContinue);
+  assert.equal(autoContinue.enabled, false);
+
+  hooks.forgetSession("ses_stale");
+  hooks.observeModel("ses_stale", { providerID: "openai", modelID: "gpt-5.6-terra" });
+  await hooks.textComplete(
+    { sessionID: "ses_stale" },
+    { text: "📊 進行中: fresh lifecycle\n➡️ 次action: continue" },
+  );
+  await hooks.sessionIdle("ses_stale");
+  assert.equal(host.promptCalls.length, 1, "explicit lifecycle release removes the stop latch");
+});
+
+test("fresh-session recovery aborts an in-flight same-session continuation", async () => {
+  let prompts = 0;
+  let aborts = 0;
+  let promptStarted!: () => void;
+  let releasePrompt!: () => void;
+  const started = new Promise<void>((resolve) => { promptStarted = resolve; });
+  const released = new Promise<void>((resolve) => { releasePrompt = resolve; });
+  const client: ContinuationClient = { session: {
+    get: async () => ({ data: { agent: COORDINATOR } }),
+    promptAsync: async () => {
+      prompts += 1;
+      promptStarted();
+      await released;
+      return { data: true };
+    },
+    abort: async () => { aborts += 1; return { data: true }; },
+  } };
+  const hooks = createContinuationHooks(client, "/project", POLICY, {
+    ...FAST,
+    stepRecoveryMilliseconds: 60_000,
+  });
+  hooks.observeModel("ses_racing", { providerID: "openai", modelID: "gpt-5.6-terra" });
+  await hooks.textComplete(
+    { sessionID: "ses_racing" },
+    { text: "📊 進行中: racing retry\n➡️ 次action: continue" },
+  );
+  const idle = hooks.sessionIdle("ses_racing");
+  await started;
+  await hooks.stopAutomaticRecovery("ses_racing");
+  releasePrompt();
+  await idle;
+  await hooks.sessionIdle("ses_racing");
+
+  assert.equal(prompts, 1);
+  assert.equal(aborts, 1);
+});
+
 test("a successful compaction resume coexists with ongoing step recovery", async () => {
   const host = fakeHost({ agent: COORDINATOR });
   const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);

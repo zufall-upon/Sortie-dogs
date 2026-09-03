@@ -110,7 +110,7 @@ await runConformance("OpenCode continuation/session seams compose with the confo
       { sessionID: "ses_child", parentID: "ses_root", agent: "dog-coordinator" },
       { message: { agent: "dog-coordinator", model: { providerID: "fake", modelID: "compact" } }, parts: [{ type: "text", text: "child" }] },
     ),
-    /SORTIE_FRESH_SESSION_REQUIRED: \/sortie cannot promote a child session/u,
+    /SORTIE_FRESH_SESSION_REQUIRED: .*"reason":"child-lineage"/u,
   );
   const base = replaySubject();
   return {
