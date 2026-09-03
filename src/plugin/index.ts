@@ -501,6 +501,11 @@ interface OpenCodeToolFactory {
   schema: { string(): unknown; optional?(value: unknown): unknown };
 }
 
+const defineTool: OpenCodeToolFactory = Object.assign(
+  (definition: OpenCodeToolDefinition) => definition,
+  { schema: { string: () => ({ type: "string" }) } },
+);
+
 interface PinnedJson {
   value: unknown;
   hash: string;
@@ -1190,22 +1195,6 @@ function abandonDetachedLease(lease: ScopeLease | undefined): void {
 
 /** Named OpenCode plugin export. Importing the package has no side effects; invoking it installs active gates. */
 export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
-  const pluginModuleName = "@opencode-ai/plugin";
-  const pluginModule = await import(pluginModuleName).catch(() => undefined) as
-    | { tool?: OpenCodeToolFactory }
-    | undefined;
-  const toolCandidate = pluginModule?.tool as unknown;
-  const toolSchema = typeof toolCandidate === "function"
-    ? (toolCandidate as unknown as { schema?: unknown }).schema
-    : undefined;
-  const validToolCandidate = typeof toolCandidate === "function" &&
-    isRecord(toolSchema) && typeof toolSchema.string === "function";
-  const defineTool: OpenCodeToolFactory = validToolCandidate
-    ? toolCandidate as OpenCodeToolFactory
-    : Object.assign(
-    (definition: OpenCodeToolDefinition) => definition,
-    { schema: { string: () => ({ type: "string" }) } },
-  );
   const optionalString = () => {
     const stringSchema = defineTool.schema.string();
     if (isRecord(stringSchema) && typeof stringSchema.optional === "function") {
