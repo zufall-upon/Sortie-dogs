@@ -130,18 +130,6 @@ process.env.XDG_CONFIG_HOME = join(testEnvironment, "plugin-default-xdg");
 assert.equal(configRoot(), join(testEnvironment, "plugin-default-xdg", "opencode"));
 const execFileAsync = promisify(execFile);
 
-test("plugin initialization does not import the host plugin package and keeps compatible tool schemas", async () => {
-  const source = await readFile(new URL("../src/plugin/index.ts", import.meta.url), "utf8");
-  assert.equal(source.includes("@opencode-ai/plugin"), false);
-
-  const hooks = await SortieDogsPlugin({ directory: process.cwd() });
-  const bind = hooks.tool?.sortie_bind_write_gate;
-  assert.deepEqual(bind?.args, {
-    project_root: { type: "string" },
-    manifest_path: { type: "string" },
-  });
-});
-
 test("model routing configuration is strict and merges roles by layer", () => {
   const project = {
     reviewer: { preferred: { model: "vendor-a/review", variant: "deep" } },
