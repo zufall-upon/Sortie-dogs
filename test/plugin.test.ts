@@ -3605,7 +3605,7 @@ test("parallel worker artifact capability enforces exact lineage, terminal relea
   });
 });
 
-test("parallel cancellation is coordinator-only, survives running join, and session deletion cancels pending work", async () => {
+test("parallel cancellation is coordinator-only, survives running join, and session deletion preserves durable work", async () => {
   await withProject("parallel-cancel", async (directory) => {
     await writeFile(join(directory, ".gitignore"), "parallel-contract.json\n");
     await writeFile(join(directory, "base.txt"), "base\n");
@@ -3699,7 +3699,10 @@ test("parallel cancellation is coordinator-only, survives running join, and sess
     )) as { run_id: string };
     await hooks.event!({ event: { type: "session.deleted", properties: { sessionID: "root" } } });
     const reopened = await ParallelDispatchCoordinator.open({ repositoryRoot: directory });
-    assert.equal((await reopened.snapshot("root", next.run_id))!.terminal_reason, "cancelled");
+    const retained = (await reopened.snapshot("root", next.run_id))!;
+    assert.equal(retained.archived, false);
+    assert.equal(retained.cancelled, false);
+    assert.equal((await reopened.cancel("root", next.run_id))!.terminal_reason, "cancelled");
   });
 });
 

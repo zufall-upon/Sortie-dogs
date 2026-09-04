@@ -80,6 +80,8 @@ test("recreates the representative benchmark from tracked source", { timeout: 30
       first.package.sha256);
     assert.equal(first.package.sha256, createHash("sha256").update(await readFile(packagePath)).digest("hex"));
     assert.equal(new Set(first.expected_writes).size, 5);
+    assert.match(await readFile(join(first.project_root, "AGENTS.md"), "utf8"),
+      /representative-medium-sol-serial/u);
     assert.deepEqual(first.result_contract, {
       exact_keys: [
         "accepted_candidate_sha", "accepted_cas_violations", "cleanup", "expected_outputs", "fixture_id",
@@ -87,6 +89,7 @@ test("recreates the representative benchmark from tracked source", { timeout: 30
         "sol_demotion_count", "target_integrity", "target_sha_after", "target_sha_before",
         "validation_candidate_sha",
       ],
+      required_values: { target_integrity: true, accepted_cas_violations: 0, scope_corruption: false },
       cleanup: { status: "complete", remaining_paths: [] },
       expected_outputs: first.expected_writes.map((path) => ({ path, exists: true })),
     });

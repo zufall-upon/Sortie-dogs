@@ -5078,17 +5078,6 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           if (deleted) { reflectionOwnedRoots.delete(eventSessionID); reflectionClosingRoots.delete(eventSessionID); }
           else reflectionWarning("reflection_cleanup_failed");
         }
-        if (eventSessionID !== undefined) {
-          const coordinator = await getParallelCoordinator().catch(() => undefined);
-          const owned = await coordinator?.snapshot(eventSessionID).catch(() => undefined);
-          if (owned !== undefined) {
-            const cancelled = await coordinator?.cancel(eventSessionID, owned.run_id).catch(() => undefined);
-            if (cancelled !== undefined) {
-              await Promise.all(owned.tasks.filter(({ phase }) => phase === "pending" || phase === "reserved")
-                .map(({ descriptor }) => removeParallelControlFiles(descriptor).catch(() => undefined)));
-            }
-          }
-        }
         evictSession(eventSessionID);
         knownChildSessions.delete(eventSessionID);
         for (const role of [REVIEWER_AGENT, ADVISOR_AGENT] as const) {

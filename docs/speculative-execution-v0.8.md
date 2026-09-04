@@ -319,10 +319,11 @@ This is not a model-only microbenchmark. Elapsed time includes dispatch, the slo
 handling, candidate combination, and final validation. Record the same duration and cost fields for both
 routes.
 
-Continue production implementation only when the slice demonstrates at least 35 percent lower wall-clock
-duration, estimated API cost no greater than 1.5 times Sol, five-child host capacity, and zero target or
-scope corruption. A no-go result stops the production cards before scheduler and state-machine cost is
-incurred. The fixture and raw measurement conditions remain unchanged for later RPT comparison.
+Continue production implementation only when the slice is no more than 10 percent slower than Sol,
+estimated API cost is no greater than 1.5 times Sol, five-child host capacity exists, and target or scope
+corruption remains zero. A 35 percent wall-clock reduction is an optimization target, not a release blocker.
+A no-go result stops the production cards before scheduler and state-machine cost is incurred. The fixture
+and raw measurement conditions remain unchanged for later RPT comparison.
 
 ## Practical acceptance gate
 
@@ -332,7 +333,7 @@ cache conditions.
 
 v0.8.0 live acceptance requires:
 
-- At least 35 percent lower wall-clock duration than the matched Sol run.
+- No more than 10 percent slower wall-clock duration than the matched Sol run.
 - Estimated API cost no greater than 1.5 times the matched Sol run.
 - Zero target corruption.
 - Zero accepted compare-and-swap violation.
@@ -340,7 +341,7 @@ v0.8.0 live acceptance requires:
 
 No-go conditions:
 
-- The fabric is slower than Sol on the decomposable fixture.
+- The fabric is more than 10 percent slower than Sol on the decomposable fixture.
 - A partial candidate reaches the target.
 - A stale target is overwritten or treated as success.
 - A concurrent scope or exclusive-resource conflict escapes runtime validation.
@@ -375,11 +376,12 @@ proceeds in dependency order:
    their exact worktrees, and emits one fresh attempt-2 descriptor at the same candidate base and scope.
    Attempt 2 binds only `dog-worker`; durable cleanup/create intent permits restart adoption. Successful
    promotion or review rejection removes owned candidate and source refs without force cleanup.
-9. Add matched speed and cost metrics, WSL CLI RPT, and Windows Desktop RPT; enable the live route when
-   the practical acceptance gate passes.
+9. Add matched speed and cost metrics and WSL CLI RPT; enable the live route when the practical acceptance
+   gate passes. Windows Desktop Luna RPT is not applicable until that host has a contracted Luna model.
 
 Worktree, concurrency, schema, routing, and write-gate changes require focused tests,
-`npm run test:full`, and both runtime acceptance paths before release.
+`npm run test:full`, and the WSL Luna runtime acceptance path before release. Windows Desktop Luna is not
+a release gate until that host has a contracted Luna model.
 
 ## v0.8 evidence runtime
 

@@ -122,8 +122,14 @@ function validateConfig(config) {
   invariant(Array.isArray(config.expected_writes) && config.expected_writes.length === 5 &&
     new Set(config.expected_writes).size === 5, "Expected writes must be five disjoint paths.");
   invariant(isRecord(config.result_contract) &&
-    exactKeys(config.result_contract, ["cleanup", "exact_keys", "expected_outputs"]) &&
+    exactKeys(config.result_contract, ["cleanup", "exact_keys", "expected_outputs", "required_values"]) &&
     JSON.stringify(config.result_contract.exact_keys) === JSON.stringify(RESULT_KEYS) &&
+    isRecord(config.result_contract.required_values) &&
+    exactKeys(config.result_contract.required_values,
+      ["accepted_cas_violations", "scope_corruption", "target_integrity"]) &&
+    config.result_contract.required_values.accepted_cas_violations === 0 &&
+    config.result_contract.required_values.scope_corruption === false &&
+    config.result_contract.required_values.target_integrity === true &&
     isRecord(config.result_contract.cleanup) && config.result_contract.cleanup.status === "complete" &&
     Array.isArray(config.result_contract.cleanup.remaining_paths) &&
     config.result_contract.cleanup.remaining_paths.length === 0 &&
@@ -226,6 +232,7 @@ export async function prepareRepresentativeRuntime({ runtimeRoot, packagePath })
     expected_writes: units.map(({ output }) => output),
     result_contract: {
       exact_keys: RESULT_KEYS,
+      required_values: { target_integrity: true, accepted_cas_violations: 0, scope_corruption: false },
       cleanup: { status: "complete", remaining_paths: [] },
       expected_outputs: units.map(({ output: path }) => ({ path, exists: true })),
     },
@@ -249,9 +256,11 @@ export function validateRepresentativeResult(configValue, result) {
   invariant(SHA.test(result.accepted_candidate_sha) &&
     result.validation_candidate_sha === result.accepted_candidate_sha, "Candidate validation identity is invalid.");
   invariant(result.target_sha_before === config.target_sha && result.target_sha_after === result.accepted_candidate_sha &&
-    result.target_integrity === true, "Target integrity failed.");
-  invariant(result.accepted_cas_violations === 0, "Accepted CAS violation detected.");
-  invariant(result.scope_corruption === false, "Scope corruption detected.");
+    result.target_integrity === config.result_contract.required_values.target_integrity, "Target integrity failed.");
+  invariant(result.accepted_cas_violations === config.result_contract.required_values.accepted_cas_violations,
+    "Accepted CAS violation detected.");
+  invariant(result.scope_corruption === config.result_contract.required_values.scope_corruption,
+    "Scope corruption detected.");
   invariant(Number.isInteger(result.sol_demotion_count) && result.sol_demotion_count >= 0 &&
     result.sol_demotion_count <= config.units.length &&
     (result.route === "luna-fabric" || result.sol_demotion_count === 0), "Sol demotion evidence is invalid.");
