@@ -72,6 +72,8 @@ handoff_path, never inspect a handoff, never call sortie_bind_write_gate, and ru
 read-only validation and optional evidence command. If read-only work requests a mutation, return the missing authorization instead.
 Prefer the project-relative manifest path; an exact absolute path is accepted only when it resolves
 inside that same candidate root and is normalized to the same relative identity.
+After a successful bind, never Read, reconstruct, or retype operation_manifest; the bind result pins it.
+Treat every runtime-injected control path as opaque and reuse it only for the required handoff Read and bind.
 The write authorization remains bound across model/tool turns inside the same Task invocation.
 The parent task completion hook releases it when the child returns. A changed handoff or manifest
 revokes authorization immediately; never treat session idle as a new authorization.
@@ -200,7 +202,7 @@ remediation or Sol demotion; only dog-coordinator decides that route.`,
 export const runtimeAssets = [
   {
     name: "dog-coordinator",
-    version: "0.3.64-luna-validation-command-v1",
+    version: "0.3.69-luna-combined-validation-replay-v1",
     installPath: "agent/dog-coordinator.md",
     content: `---
 description: Canonical MkII coordinator packaged by Sortie-dogs
@@ -227,8 +229,9 @@ MkII workflow. Follow project instructions and preserve the canonical MkII order
 
 1. Confirm the project target. Before any edit, state a plan of no more than three lines.
 2. Fix the acceptance criteria, editable manifest, worker role, and validation command.
-3. Delegate one fixed implementation unit at a time to dog-worker with all required context inline,
-   and continue with later units in the accepted scope when evidence requires them.
+3. For an accepted scope with at least two safe independently implementable units, autonomously
+   choose the Luna fabric route. A user request for serial/no-parallel execution overrides that
+   default. Otherwise, use the sequential dog-worker route for one unit at a time with all required context inline.
 4. Evaluate returned validation evidence, apply the canonical review policy, then complete
    coordinator-owned commit, release, publication, and reporting work.
 
@@ -474,25 +477,28 @@ SCOUT_FANOUT_FIXTURE
     next_route: resolved -> next dog-worker | new gap -> bounded Scout | user decision | blocker
 END_SCOUT_FANOUT_FIXTURE
 
-## Runtime-enforced sequential worker lane
+## Runtime-enforced implementation routing
 
-Each accepted user scope may require multiple implementation units. Dispatch one dog-worker at a time
-for the current fixed manifest. That worker owns inspect, edit, targeted checks, canonical validation,
+Each accepted user scope may require multiple implementation units. Independently assess whether the
+fixed manifest contains at least two safe independently implementable units. If so, default to the
+Luna fabric route without user opt-in; an explicit user serial/no-parallel request wins. That route
+owns inspect, edit, targeted checks, canonical validation,
 and bounded in-session remediation for that unit. After its result, verify deterministic evidence and
 autonomously dispatch the next unit when the accepted scope, a user answer, or newly discovered evidence
 requires it. A scope gap returns to dog-coordinator to refine the manifest from project or user evidence;
 ask the user only for an exclusively user-controlled decision. The runtime imposes no normal-lane
-per-turn worker count. Concurrent fan-out still requires the explicit parallel contract.
+per-turn worker count. Explicit parallel contracts remain a separate runtime lane.
 
 PARALLEL_IMPLEMENTATION_FIXTURE
-    default: sequential dog-workers as evidence requires
-    route: dog-coordinator -> dog-worker -> deterministic evidence verification -> next unit | DONE
+    default: Luna fabric when accepted scope has >=2 safe independently implementable units
+    serial_override: explicit user serial/no-parallel request -> dog-worker
+    route: dog-coordinator -> Luna admission/prepare -> dog-luna-worker wave -> deterministic evidence verification | DONE
     ownership: one worker owns each fixed manifest unit
     next_worker: allowed after verified return for accepted scope | user answer | changed evidence
     hard_budget: none on normal sequential dispatch
     denial_no_progress: same contract defect after one corrected handoff -> no third Task; diagnose coordinator | gate mismatch
     scope_gap: coordinator refines manifest; question only for user-controlled decision
-    parallel_fanout: forbidden on normal lane
+    parallel_fanout: automatic only through the Luna fabric contract; explicit parallel contract remains separate
 END_PARALLEL_IMPLEMENTATION_FIXTURE
 
 Automatic Luna routing uses a separate coordinator-generated v0.8 DAG contract. Before any fabric
@@ -574,7 +580,8 @@ LUNA_FABRIC_DISPATCH_FIXTURE
     prepared_evidence: route=luna-fabric | fabric_fingerprint | width<=5 | depth | ready descriptors
     bounds: units=2..64; active wave=1..5; every active wave keeps disjoint write-related scope
     barrier: no mid-wave refill | all active artifacts complete before candidate advancement
-    advance: ${LUNA_FABRIC_ADVANCE_CAPABILITY} with run_id; runtime builds and atomically advances the hidden candidate
+    advance: ${LUNA_FABRIC_ADVANCE_CAPABILITY} with run_id; on the final wave also pass the absolute canonical
+      validation executable, JSON argument array, and bounded timeout so integration and validation stay in one invocation
     fresh_wave: prior worktrees cleaned | next descriptors use fresh paths at candidate_base | target unchanged
     shared_path: declared ownership serializes overlapping units across waves with stable lane affinity
     role_binding: luna-fabric run -> dog-luna-worker only | sol-serial run -> dog-worker only | no descriptor -> no Luna Task
@@ -584,9 +591,10 @@ LUNA_FABRIC_DISPATCH_FIXTURE
     shared_reuse: descriptor fields | handoff and manifest control files | join | status | cancel | artifact
 END_LUNA_FABRIC_DISPATCH_FIXTURE
 
-After the final wave, call ${LUNA_FABRIC_VALIDATE_CAPABILITY} exactly once with run_id, the absolute
-canonical validation executable, its JSON argument array, and bounded timeout. The capability validates
-only a fresh detached worktree at the runtime-owned candidate ref. On PASS, apply the normal risk policy
+After the final wave, call ${LUNA_FABRIC_ADVANCE_CAPABILITY} with run_id, the absolute canonical
+validation executable, its JSON argument array, and bounded timeout. The capability integrates and validates
+only a fresh detached worktree at the runtime-owned candidate ref. Use ${LUNA_FABRIC_VALIDATE_CAPABILITY} for
+recovery of any complete pending candidate when combined advancement cannot be resumed. On PASS, apply the normal risk policy
 to the combined candidate, then call ${LUNA_FABRIC_ACCEPT_CAPABILITY} with exact run_id, candidate_head,
 review=pass or skip, and the review evidence fingerprint. review=fail rejects without target mutation.
 Promotion requires the target branch to remain at the admitted authority SHA and not be checked out,
@@ -597,15 +605,15 @@ Parallel dispatch is a separate explicit runtime lane. Enter it only when the us
 Worktree Parallel Contract with mode=parallel. Call ${PARALLEL_PREPARE_CAPABILITY} exactly once with
 the absolute contract_path. Literal parallel fields never opt in. If prepare returns serial-fallback,
 dispatch no parallel worker and use the normal lane. If prepare returns descriptors, dispatch only its
-ready descriptors, at most max_workers and never more than five total tasks. Copy every descriptor
-field exactly into the Task prompt: run_id, dispatch_id, task_id, managed_path as the digest's single
-project_root field, branch, base_sha, depends_on JSON, scope_read JSON, scope_write JSON, parallel_group, parallel_unit,
-parallel_units, attempt, and contract_fingerprint. Prepare creates each descriptor's unique scoped handoff
-and operation manifest in managed_path and returns their absolute handoff_path and operation_manifest.
+ready descriptors, at most max_workers and never more than five total tasks. Put only the returned
+run_id and task_id into the Task prompt as the machine lookup identity; never transcribe dispatch_id,
+managed_path, branch, base_sha, depends_on, scopes, parallel fields, attempt, or contract_fingerprint.
+The runtime resolves the exact reserved descriptor and injects those machine-owned fields before child
+creation. Prepare creates each descriptor's unique scoped handoff and operation manifest in managed_path.
 Before each ready descriptor's Task, call sortie_check_contract on that handoff_path and require status=ok.
-Do not recopy those returned paths as descriptor metadata. Put handoff_path exactly once under context_digest
-and operation_manifest exactly once as the manifest line after context_digest, matching INITIAL_HANDOFF_FIXTURE;
-never recreate, edit, or repeat either path.
+Do not transcribe handoff_path, operation_manifest, or project_root into the Task prompt; the runtime injects
+their exact values from the reserved descriptor. Include source_manifest, acceptance, validation, and all
+other semantic context matching INITIAL_HANDOFF_FIXTURE; never recreate or edit generated control files.
 Join returns through Task; then call
 ${PARALLEL_STATUS_CAPABILITY} after each return and dispatch only newly ready descriptors. Prepare
 and status return each ready descriptor's exact ordered acceptance array; copy those strings without
@@ -717,7 +725,7 @@ INITIAL_HANDOFF_FIXTURE
       resume_delta: none
       parallel_group: <shared group id or none>
       parallel_unit: <distinct unit id or none>
-      parallel_units: <2..5 for parallel implementation; 1 otherwise>
+      parallel_units: <1..5 for runtime-issued parallel implementation; 1 with parallel_group=none otherwise>
     source_manifest: [<declared source path>]
     operation_manifest: <exact absolute operation manifest>
 END_INITIAL_HANDOFF_FIXTURE
@@ -1512,10 +1520,10 @@ TERMINAL_STATUS_SEMANTICS_FIXTURE
 END_TERMINAL_STATUS_SEMANTICS_FIXTURE
 
 RUNTIME_ASSET_VERSION_SYNC_FIXTURE
-    runtime_version: 0.3.64-luna-validation-command-v1
+    runtime_version: 0.3.69-luna-combined-validation-replay-v1
     shared_marker: src/asset-version.ts
-    packaged_expectation: test/plugin-loader.test.ts uses 0.3.64-luna-validation-command-v1
-    initialize_expectation: test/initialize.test.ts uses 0.3.64-luna-validation-command-v1
+    packaged_expectation: test/plugin-loader.test.ts uses 0.3.69-luna-combined-validation-replay-v1
+    initialize_expectation: test/initialize.test.ts uses 0.3.69-luna-combined-validation-replay-v1
     rule: runtime asset versions, shared marker, packaged expectation, and initialize expectation change together
 END_RUNTIME_ASSET_VERSION_SYNC_FIXTURE
 
@@ -1584,19 +1592,19 @@ END_TERMINAL_EVIDENCE_FIXTURE
   },
   {
     name: "dog-worker",
-    version: "0.3.64-luna-validation-command-v1",
+    version: "0.3.69-luna-combined-validation-replay-v1",
     installPath: "agent/dog-worker.md",
     content: workerAssetContent(SERIAL_WORKER_CONTRACT),
   },
   {
     name: "dog-luna-worker",
-    version: "0.3.64-luna-validation-command-v1",
+    version: "0.3.69-luna-combined-validation-replay-v1",
     installPath: "agent/dog-luna-worker.md",
     content: workerAssetContent(LUNA_WORKER_CONTRACT),
   },
   {
     name: "dog-scout",
-    version: "0.3.64-luna-validation-command-v1",
+    version: "0.3.69-luna-combined-validation-replay-v1",
     installPath: "agent/dog-scout.md",
     content: `---
 description: Bounded evidence scout for dog-coordinator
@@ -1645,7 +1653,7 @@ prose; keep the keys, paths, commands, and identifiers verbatim.
   },
   {
     name: "dog-reviewer",
-    version: "0.3.64-luna-validation-command-v1",
+    version: "0.3.69-luna-combined-validation-replay-v1",
     installPath: "agent/dog-reviewer.md",
     content: `---
 description: Independent source reviewer for dog-coordinator
@@ -1698,7 +1706,7 @@ or transport.
   },
   {
     name: "dog-advisor",
-    version: "0.3.64-luna-validation-command-v1",
+    version: "0.3.69-luna-combined-validation-replay-v1",
     installPath: "agent/dog-advisor.md",
     content: `---
 description: Focused technical advisor for dog-coordinator
@@ -1747,7 +1755,7 @@ provider, vendor, model, variant, or transport.
   },
   {
     name: "sortie",
-    version: "0.3.64-luna-validation-command-v1",
+    version: "0.3.69-luna-combined-validation-replay-v1",
     installPath: "command/sortie.md",
     content: `---
 description: Start the canonical Sortie-dogs MkII workflow

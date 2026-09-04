@@ -1301,7 +1301,7 @@ test("coordinator DONE output receives host-reported root and child run metrics"
     assert.equal(body.extra.available, true);
     assert.equal(body.extra.outcome, "DONE");
     assert.equal(body.extra.sessionID, "root");
-    assert.equal(body.extra.runtimeAssetVersion, "0.3.64-luna-validation-command-v1");
+    assert.equal(body.extra.runtimeAssetVersion, "0.3.69-luna-combined-validation-replay-v1");
     assert.equal(body.extra.inputTokens, 130);
     assert.equal(body.extra.outputTokens, 15);
     assert.equal(body.extra.reasoningTokens, 5);
@@ -2867,6 +2867,14 @@ test("an empty task result is repaired from the child session instead of re-disp
       '<task id="ses_child" state="completed">\n<task_result>\nstatus: READY\ntask_id: PVTI-1\n</task_result>\n</task>',
     );
 
+    const wrapperOnlyIdentity = {
+      output: '<task id="ses_wrapper_child" state="completed">\n<task_result>\n\n</task_result>\n</task>',
+      metadata: {},
+    };
+    await after({ tool: "task", sessionID: "ses_parent" }, wrapperOnlyIdentity);
+    assert.deepEqual(requested.at(-1), { path: { id: "ses_wrapper_child" } });
+    assert.match(wrapperOnlyIdentity.output, /status: READY/u);
+
     // A result the host already filled in must survive byte-identical.
     const intact = {
       output: '<task id="ses_child" state="completed">\n<task_result>\nPONG\n</task_result>\n</task>',
@@ -3166,11 +3174,38 @@ test("fabric prepare returns a luna-fabric run whose descriptors bind only dog-l
       ),
       /luna_worker_requires_admitted_descriptor/u,
     );
-    const descriptorOnlyPrompt = prompt(prepared.ready[0]!).replace("  role: implementation\n", "");
+    const descriptorOnlyPrompt = [
+      "context_digest:",
+      `  task_id: ${prepared.ready[0]!.task_id}`,
+      `  run_id: ${prepared.ready[0]!.run_id}`,
+      "  branch: transcribed-branch",
+      "  branch: duplicate-branch",
+      "  role: implementation",
+      "  source_manifest: [base.txt]",
+      "  acceptance:",
+      ...(prepared.ready[0]!.acceptance as string[]).map((criterion) => `    - ${criterion}`),
+      "  validation: no canonical validation",
+    ].join("\n");
+    await assert.rejects(
+      () => before(
+        { tool: "task", sessionID: "root", callID: "luna-ambiguous-lookup" },
+        { args: { subagent_type: "dog-luna-worker",
+          prompt: `${descriptorOnlyPrompt}\nrun_id: ${prepared.run_id}-conflict` } },
+      ),
+      /dispatch_inline_handoff_incomplete/u,
+    );
+    const lunaArgs = { subagent_type: "dog-luna-worker", prompt: descriptorOnlyPrompt };
     await before(
       { tool: "task", sessionID: "root", callID: "luna-a" },
-      { args: { subagent_type: "dog-luna-worker", prompt: descriptorOnlyPrompt } },
+      { args: lunaArgs },
     );
+    assert.ok(lunaArgs.prompt.includes(`managed_path: ${prepared.ready[0]!.managed_path}`));
+    assert.ok(lunaArgs.prompt.includes(`contract_fingerprint: ${prepared.ready[0]!.contract_fingerprint}`));
+    assert.ok(lunaArgs.prompt.includes(`handoff_path: ${prepared.ready[0]!.handoff_path}`));
+    assert.equal(lunaArgs.prompt.match(/^[\t ]*task_id:/gmu)?.length, 1, lunaArgs.prompt);
+    assert.equal(lunaArgs.prompt.match(/^[\t ]*run_id:/gmu)?.length, 1, lunaArgs.prompt);
+    assert.equal(lunaArgs.prompt.match(/^[\t ]*branch:/gmu)?.length, 1, lunaArgs.prompt);
+    assert.doesNotMatch(lunaArgs.prompt, /transcribed-|duplicate-/u);
     await before(
       { tool: "task", sessionID: "root", callID: "luna-b" },
       { args: { subagent_type: "dog-luna-worker", prompt: prompt(prepared.ready[1]!) } },
@@ -3179,19 +3214,19 @@ test("fabric prepare returns a luna-fabric run whose descriptors bind only dog-l
       properties: { info: { id: "luna-child-a", parentID: "root" } } } });
     await hooks["chat.message"]!(
       { sessionID: "luna-child-a", agent: "dog-luna-worker", parentID: "root" } as never,
-      { message: { agent: "dog-luna-worker", model: {} }, parts: [{ type: "text", text: descriptorOnlyPrompt }] },
+      { message: { agent: "dog-luna-worker", model: {} }, parts: [{ type: "text", text: lunaArgs.prompt }] },
     );
     await inspectHandoffWithRead(hooks, prepared.ready[0]!.handoff_path as string, "luna-child-a");
     assert.equal((await executeBindWriteGate(
       hooks,
-      prepared.ready[0]!.managed_path as string,
+      directory,
       "luna-child-a",
-      prepared.ready[0]!.operation_manifest as string,
+      join(directory, "mistyped.operation-manifest.json"),
     )).status, "bound");
     const mismatchedChild = "luna-child-mismatch";
-    const mismatchedPrompt = descriptorOnlyPrompt.replace(
-      `  project_root: ${prepared.ready[0]!.managed_path}`,
-      `  project_root: ${directory}`,
+    const mismatchedPrompt = lunaArgs.prompt.replace(
+      `project_root: ${prepared.ready[0]!.managed_path}`,
+      `project_root: ${directory}`,
     );
     await hooks.event!({ event: { type: "session.created",
       properties: { info: { id: mismatchedChild, parentID: "root" } } } });
@@ -3199,6 +3234,7 @@ test("fabric prepare returns a luna-fabric run whose descriptors bind only dog-l
       { sessionID: mismatchedChild, agent: "dog-luna-worker", parentID: "root" } as never,
       { message: { agent: "dog-luna-worker", model: {} }, parts: [{ type: "text", text: mismatchedPrompt }] },
     );
+    await inspectHandoffWithRead(hooks, prepared.ready[0]!.handoff_path as string, mismatchedChild);
     assert.deepEqual(await executeBindWriteGate(
       hooks,
       prepared.ready[0]!.managed_path as string,
@@ -3208,7 +3244,7 @@ test("fabric prepare returns a luna-fabric run whose descriptors bind only dog-l
       status: "denied",
       reason: "parallel-contract-invalid",
       recoverable: false,
-      remedy: "Redispatch a fresh worker with parallel_group, parallel_unit, and parallel_units=2..5 all present, or omit all three fields for serial work.",
+      remedy: "Redispatch a fresh worker with parallel_group, parallel_unit, and parallel_units=1..5 all present, or omit all three fields for serial work.",
       escalation: { action: "follow-remedy", resume_session: false, true_blocker: false },
     });
     const status = JSON.parse(await hooks.tool!.sortie_parallel_dispatch_status!.execute(
@@ -3340,29 +3376,13 @@ test("typed parallel prepare is the only path to reserved dependency-aware worke
     }
     assert.equal(prepared.ready[0]!.acceptance_fingerprint, prepared.ready[1]!.acceptance_fingerprint,
       "ready siblings share one parent acceptance rather than chaining through each other");
-    const prompt = (descriptor: Record<string, unknown>) => [
-      "context_digest:",
-      `  task_id: ${descriptor.task_id}`,
-      `  run_id: ${descriptor.run_id}`,
-      `  dispatch_id: ${descriptor.dispatch_id}`,
-      "  role: implementation",
-      `  project_root: ${descriptor.managed_path}`,
-      `  branch: ${descriptor.branch}`,
-      `  base_sha: ${descriptor.base_sha}`,
-      `  depends_on: ${JSON.stringify(descriptor.depends_on)}`,
-      `  scope_read: ${JSON.stringify(descriptor.scope_read)}`,
-      `  scope_write: ${JSON.stringify(descriptor.scope_write)}`,
-      `  handoff_path: ${descriptor.handoff_path}`,
-      "  acceptance:",
-      ...(descriptor.acceptance as string[]).map((criterion) => `    - ${criterion}`),
-      "  validation: no canonical validation",
-      `  parallel_group: ${descriptor.parallel_group}`,
-      `  parallel_unit: ${descriptor.parallel_unit}`,
-      `  parallel_units: ${descriptor.parallel_units}`,
-      `  attempt: ${descriptor.attempt}`,
-      `  contract_fingerprint: ${descriptor.contract_fingerprint}`,
-      "  source_manifest: [base.txt]",
-      `operation_manifest: ${descriptor.operation_manifest}`,
+    const lookupPrompt = (descriptor: Record<string, unknown>) => [
+      `run_id: ${descriptor.run_id}`,
+      `task_id: ${descriptor.task_id}`,
+      "source_manifest: [base.txt]",
+      "acceptance:",
+      ...(descriptor.acceptance as string[]).map((criterion) => `  - ${criterion}`),
+      "validation: no canonical validation",
     ].join("\n");
     const client = { session: {
       get: async () => ({ data: { agent: "dog-coordinator" } }),
@@ -3389,7 +3409,7 @@ test("typed parallel prepare is the only path to reserved dependency-aware worke
       await Promise.all(prepared.ready.map(async (descriptor, index) => {
         await restartedBefore(
           { tool: "task", sessionID: "root", callID: `parallel-${index}` },
-          { args: { subagent_type: "dog-worker", prompt: prompt(descriptor) } },
+          { args: { subagent_type: "dog-worker", prompt: lookupPrompt(descriptor) } },
         );
       }));
     } finally {
@@ -3398,13 +3418,13 @@ test("typed parallel prepare is the only path to reserved dependency-aware worke
     for (const [index, descriptor] of prepared.ready.entries()) {
       await restartedBefore(
         { tool: "task", sessionID: "root", callID: `parallel-${index}` },
-        { args: { subagent_type: "dog-worker", prompt: prompt(descriptor) } },
+        { args: { subagent_type: "dog-worker", prompt: lookupPrompt(descriptor) } },
       );
     }
     await assert.rejects(
       () => restartedBefore(
         { tool: "task", sessionID: "root", callID: "parallel-replay" },
-        { args: { subagent_type: "dog-worker", prompt: prompt(prepared.ready[0]!) } },
+        { args: { subagent_type: "dog-worker", prompt: lookupPrompt(prepared.ready[0]!) } },
       ),
       (error: unknown) => error instanceof ParallelDispatchError && error.code === "descriptor-replay",
     );
@@ -3570,7 +3590,7 @@ test("parallel worker artifact capability enforces exact lineage, terminal relea
     assert.deepEqual(await executeReleaseWriteGate(hooks, child), { status: "released" });
     await hooks["tool.execute.after"]!(
       { tool: "task", sessionID: "root", callID },
-      { output: "SORTIE_PARALLEL_OUTCOME: completed", metadata: { sessionId: child } },
+      { output: `<task id="${child}" state="completed">\n<task_result>\nSORTIE_PARALLEL_OUTCOME: completed\n</task_result>\n</task>`, metadata: {} },
     );
     const status = JSON.parse(await hooks.tool!.sortie_parallel_dispatch_status!.execute(
       { run_id: prepared.run_id }, { sessionID: "root", agent: "dog-coordinator" },

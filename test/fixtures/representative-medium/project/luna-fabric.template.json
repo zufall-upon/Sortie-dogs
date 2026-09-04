@@ -1,0 +1,75 @@
+{
+  "version": "0.8.0",
+  "provenance": {
+    "source": "dog-coordinator",
+    "acceptance_fingerprint": "0000000000000000000000000000000000000000000000000000000000000000",
+    "target_branch": "benchmark-medium",
+    "target_sha": "0000000000000000000000000000000000000000"
+  },
+  "acceptance_items": [
+    "unit-1 implements positive integer argument validation",
+    "unit-2 implements a bounded retry schedule",
+    "unit-3 implements stable weighted batching",
+    "unit-4 implements ordered event reduction",
+    "unit-5 implements contained output path resolution"
+  ],
+  "effects": [],
+  "shared_paths": [],
+  "units": [
+    {
+      "unit_id": "unit-1",
+      "acceptance_items": ["unit-1 implements positive integer argument validation"],
+      "scope_read": ["input/unit-1.md", "test/unit-1.test.mjs"],
+      "scope_write": ["output/unit-1.mjs"],
+      "depends_on": [],
+      "validation": {"level": "targeted", "command": ["node", "--test", "test/unit-1.test.mjs"]},
+      "shared_path_keys": [],
+      "exclusive_resources": [],
+      "scheduler_order": 0
+    },
+    {
+      "unit_id": "unit-2",
+      "acceptance_items": ["unit-2 implements a bounded retry schedule"],
+      "scope_read": ["input/unit-2.md", "test/unit-2.test.mjs"],
+      "scope_write": ["output/unit-2.mjs"],
+      "depends_on": [],
+      "validation": {"level": "targeted", "command": ["node", "--test", "test/unit-2.test.mjs"]},
+      "shared_path_keys": [],
+      "exclusive_resources": [],
+      "scheduler_order": 1
+    },
+    {
+      "unit_id": "unit-3",
+      "acceptance_items": ["unit-3 implements stable weighted batching"],
+      "scope_read": ["input/unit-3.md", "test/unit-3.test.mjs"],
+      "scope_write": ["output/unit-3.mjs"],
+      "depends_on": [],
+      "validation": {"level": "targeted", "command": ["node", "--test", "test/unit-3.test.mjs"]},
+      "shared_path_keys": [],
+      "exclusive_resources": [],
+      "scheduler_order": 2
+    },
+    {
+      "unit_id": "unit-4",
+      "acceptance_items": ["unit-4 implements ordered event reduction"],
+      "scope_read": ["input/unit-4.md", "test/unit-4.test.mjs"],
+      "scope_write": ["output/unit-4.mjs"],
+      "depends_on": [],
+      "validation": {"level": "targeted", "command": ["node", "--test", "test/unit-4.test.mjs"]},
+      "shared_path_keys": [],
+      "exclusive_resources": [],
+      "scheduler_order": 3
+    },
+    {
+      "unit_id": "unit-5",
+      "acceptance_items": ["unit-5 implements contained output path resolution"],
+      "scope_read": ["input/unit-5.md", "test/unit-5.test.mjs"],
+      "scope_write": ["output/unit-5.mjs"],
+      "depends_on": [],
+      "validation": {"level": "targeted", "command": ["node", "--test", "test/unit-5.test.mjs"]},
+      "shared_path_keys": [],
+      "exclusive_resources": [],
+      "scheduler_order": 4
+    }
+  ]
+}

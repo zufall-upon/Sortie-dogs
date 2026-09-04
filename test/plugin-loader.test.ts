@@ -440,7 +440,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     for (const asset of loaded.runtimeAssets) {
       assert.equal(asset.version, RUNTIME_ASSET_VERSION, `${asset.name} version must match the shared marker`);
     }
-    assert.equal(RUNTIME_ASSET_VERSION, "0.3.64-luna-validation-command-v1");
+    assert.equal(RUNTIME_ASSET_VERSION, "0.3.69-luna-combined-validation-replay-v1");
     const coordinatorFrontmatter = /^---\r?\n([\s\S]*?)\r?\n---/u.exec(coordinator.content)?.[1];
     assert.ok(coordinatorFrontmatter);
     assert.match(coordinatorFrontmatter, /^model: openai\/gpt-5\.6-terra$/m);
@@ -693,16 +693,17 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     const parallelImplementation = coordinator.content.match(
       /PARALLEL_IMPLEMENTATION_FIXTURE\r?\n([\s\S]+?)\r?\nEND_PARALLEL_IMPLEMENTATION_FIXTURE/,
     );
-    assert.ok(parallelImplementation, "coordinator needs the runtime sequential-worker lane");
+    assert.ok(parallelImplementation, "coordinator needs the runtime implementation-routing lane");
     for (const contract of [
-      "default: sequential dog-workers as evidence requires",
-      "route: dog-coordinator -> dog-worker -> deterministic evidence verification -> next unit | DONE",
+      "default: Luna fabric when accepted scope has >=2 safe independently implementable units",
+      "serial_override: explicit user serial/no-parallel request -> dog-worker",
+      "route: dog-coordinator -> Luna admission/prepare -> dog-luna-worker wave -> deterministic evidence verification | DONE",
       "ownership: one worker owns each fixed manifest unit",
       "next_worker: allowed after verified return for accepted scope | user answer | changed evidence",
       "hard_budget: none on normal sequential dispatch",
       "denial_no_progress: same contract defect after one corrected handoff -> no third Task; diagnose coordinator | gate mismatch",
       "scope_gap: coordinator refines manifest; question only for user-controlled decision",
-      "parallel_fanout: forbidden on normal lane",
+      "parallel_fanout: automatic only through the Luna fabric contract; explicit parallel contract remains separate",
     ]) assert.ok(parallelImplementation[1].includes(contract), contract);
     const parallelContract = coordinator.content.match(
       /DEPENDENCY_PARALLEL_DISPATCH_FIXTURE\r?\n([\s\S]+?)\r?\nEND_DEPENDENCY_PARALLEL_DISPATCH_FIXTURE/,
@@ -718,8 +719,8 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(parallelContract[1], /artifact_failure:\s*retain edits\/worktree \| release gate \| failed \| blocked marker; raw output forbidden/);
     assert.match(parallelContract[1], /terminal_marker:\s*release complete and no tools\/subprocess in flight -> SORTIE_PARALLEL_OUTCOME strict bounded JSON/);
     assert.match(parallelContract[1], /descriptor:\s*exact run_id \| dispatch_id \| task_id \| managed_path as one project_root field \| branch/);
-    assert.match(coordinator.content, /managed_path as the digest's single\s+project_root field/);
-    assert.match(coordinator.content, /Prepare creates each descriptor's unique scoped handoff\s+and operation manifest in managed_path and returns their absolute handoff_path and operation_manifest/);
+    assert.match(coordinator.content, /Put only the returned\s+run_id and task_id into the Task prompt/);
+    assert.match(coordinator.content, /Prepare creates each descriptor's unique scoped handoff and operation manifest in managed_path/);
     for (const parallelWorker of [worker, lunaWorker]) {
       assert.match(parallelWorker.content, /map descriptor validation\.command\[0\] to validation_executable and\s+JSON\.stringify\(validation\.command\.slice\(1\)\) to validation_args_json/);
       assert.match(parallelWorker.content, /Never join the command array into one executable\s+string/);
@@ -1396,7 +1397,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(sortie.content, /never route a worker to the user/i);
 
     for (const asset of loaded.runtimeAssets) {
-      assert.equal(asset.version, "0.3.64-luna-validation-command-v1");
+      assert.equal(asset.version, "0.3.69-luna-combined-validation-replay-v1");
       const frontmatter = asset.content.match(/^---\r?\n([\s\S]+?)\r?\n---\r?\n/);
       assert.ok(frontmatter, `${asset.name} must have frontmatter`);
       const entries = Object.fromEntries(

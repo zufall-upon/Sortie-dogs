@@ -49,6 +49,8 @@ const ROUTES = new Set<ParallelDispatchRoute>(["sol-serial", "luna-fabric"]);
 const TERMINAL_REASONS = new Set(["completed", "cancelled", "failed"]);
 const STATE_SCOPE = Object.freeze({ read: [] as string[], write: ["sortie-dogs/parallel-dispatch-state"] });
 const PREPARE_SCOPE = Object.freeze({ read: [] as string[], write: ["sortie-dogs/parallel-dispatch-prepare"] });
+const FABRIC_OPERATION_SCOPE = Object.freeze({ read: [] as string[], write: ["sortie-dogs/luna-fabric-operation"] });
+const activeFabricValidations = new Set<string>();
 
 export type ParallelDispatchErrorCode =
   | "invalid-contract"
@@ -858,6 +860,28 @@ export class ParallelDispatchCoordinator {
     return this.advanceFabricWave(ownerRoot, runID, candidate);
   }
 
+  async integrateFabricWaveAndValidate(
+    ownerRoot: string,
+    runID: string,
+    executable: string,
+    args: readonly string[] = [],
+    timeoutMs = 10 * 60_000,
+  ): Promise<ParallelDispatchSnapshot> {
+    if (!validText(ownerRoot, 256) || !UUID.test(runID) || !isAbsolute(executable) ||
+      !Array.isArray(args) || args.length > 128 || !args.every((arg) => validText(arg, MAX_COMMAND_TEXT)) ||
+      !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30 * 60_000) {
+      throw new ParallelDispatchError("invalid-contract", "Final fabric validation request is invalid.");
+    }
+    const existing = await this.snapshot(ownerRoot, runID);
+    const fabric = existing?.fabric;
+    const complete = fabric !== undefined && fabric.active_unit_ids.length === 0 &&
+      fabric.pending_unit_ids.length === 0 && fabric.transition === null;
+    if (complete) return this.validateFabricCandidate(ownerRoot, runID, executable, args, timeoutMs);
+    const snapshot = await this.integrateFabricWave(ownerRoot, runID);
+    if ((snapshot.fabric?.active_unit_ids.length ?? 0) !== 0) return snapshot;
+    return this.validateFabricCandidate(ownerRoot, runID, executable, args, timeoutMs);
+  }
+
   async demoteFailedFabricUnit(ownerRoot: string, runID: string, unitID: string): Promise<ParallelDispatchSnapshot> {
     if (!validText(ownerRoot, 256) || !UUID.test(runID) || !validText(unitID, 128)) {
       throw new ParallelDispatchError("descriptor-mismatch", "Fabric demotion identity is invalid.");
@@ -998,68 +1022,151 @@ export class ParallelDispatchCoordinator {
       !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30 * 60_000) {
       throw new ParallelDispatchError("invalid-contract", "Final fabric validation request is invalid.");
     }
-    await this.recoverWithAuthority();
-    const evidence = await this.transaction((state) => {
-      const run = this.requireRun(state, ownerRoot, runID);
-      if (run.fabric === null || run.fabric.transition !== null || run.fabric.demotion_transition !== null ||
-        run.fabric.scheduler.active !== null ||
-        run.fabric.scheduler.pending.length !== 0 || run.fabric.promoted) {
-        throw new ParallelDispatchError("wave-not-ready", "Fabric candidate is not ready for final validation.");
-      }
-      if (run.fabric.validation.status === "running") {
-        throw new ParallelDispatchError("outcome-conflict", "Final fabric validation is already running.");
-      }
-      if (run.fabric.validation.status !== "pending") return { result: { fabric: run.fabric, replay: true }, changed: false };
-      run.fabric.validation = { command: [executable, ...args], status: "running", fingerprint: null };
-      return { result: { fabric: run.fabric, replay: false }, changed: true };
-    });
-    if (evidence.replay) {
-      const snapshot = await this.snapshot(ownerRoot, runID);
-      if (snapshot === undefined) throw new ParallelDispatchError("outcome-conflict", "Validated fabric candidate disappeared.");
-      return snapshot;
+    const requestedCommand = [executable, ...args];
+    const claimKey = `${this.stateRoot}\u0000${runID}`;
+    if (activeFabricValidations.has(claimKey)) {
+      throw new ParallelDispatchError("outcome-conflict", "Final fabric validation is already running.");
     }
-    await this.assertFabricAuthority(evidence.fabric);
-    if (await this.readRef(evidence.fabric.candidate_ref) !== evidence.fabric.candidate_head) {
-      throw new ParallelDispatchError("candidate-invalid", "Hidden candidate ref changed before validation.");
-    }
-    const path = join(this.stateRoot, `fabric-validation-${randomUUID()}`);
-    let added = false;
-    let result;
+    activeFabricValidations.add(claimKey);
     try {
-      await this.gitBuffer(["worktree", "add", "--detach", path, evidence.fabric.candidate_head]);
-      added = true;
-      const beforeHead = (await this.gitBuffer(["rev-parse", "--verify", "HEAD^{commit}"], undefined, path)).toString("utf8").trim();
-      const beforeStatus = await this.gitBuffer(["status", "--porcelain=v1", "--untracked-files=normal"], undefined, path);
-      if (beforeHead !== evidence.fabric.candidate_head || beforeStatus.length !== 0) throw new Error("validation-worktree");
-      result = await runContainedValidation({ executable, args, cwd: path, timeout_ms: timeoutMs });
-      const afterHead = (await this.gitBuffer(["rev-parse", "--verify", "HEAD^{commit}"], undefined, path)).toString("utf8").trim();
-      const afterStatus = await this.gitBuffer(["status", "--porcelain=v1", "--untracked-files=normal"], undefined, path);
-      if (afterHead !== evidence.fabric.candidate_head || afterStatus.length !== 0) {
-        result = { ...result, ok: false as const, error: "execution-failed" as const };
-      }
-    } catch {
-      throw new ParallelDispatchError("candidate-invalid", "Final fabric validation worktree failed closed.");
+      return await this.withFabricOperationAuthority(async (lease) => {
+        let claimed = false;
+        let authorityLost = false;
+        const assertAuthority = async (): Promise<void> => {
+          try { await lease.assertHeld(); }
+          catch {
+            authorityLost = true;
+            throw new ParallelDispatchError("state-locked", "Fabric validation authority was lost.");
+          }
+        };
+        try {
+          await this.recoverWithAuthority();
+          const evidence = await this.transaction<
+            | { kind: "archived"; snapshot: ParallelDispatchSnapshot }
+            | { kind: "active"; fabric: StoredFabric; replay: boolean }
+          >((state) => {
+            const archived = this.findRunArchive(state, ownerRoot, runID);
+            if (archived !== undefined) {
+              const fabric = archived.run.fabric;
+              if (fabric === null || !["pass", "fail"].includes(fabric.validation.status) ||
+                JSON.stringify(fabric.validation.command) !== JSON.stringify(requestedCommand)) {
+                throw new ParallelDispatchError("outcome-conflict", "Archived fabric validation does not match.");
+              }
+              return { result: { kind: "archived", snapshot: this.publicSnapshot(
+                archived.run, true, archived.terminal_reason,
+              ) }, changed: false };
+            }
+            const run = this.requireRun(state, ownerRoot, runID);
+            if (run.fabric === null || run.fabric.transition !== null || run.fabric.demotion_transition !== null ||
+              run.fabric.scheduler.active !== null ||
+              run.fabric.scheduler.pending.length !== 0 || run.fabric.promoted) {
+              throw new ParallelDispatchError("wave-not-ready", "Fabric candidate is not ready for final validation.");
+            }
+            if (run.fabric.validation.status !== "pending") {
+              if (JSON.stringify(run.fabric.validation.command) !== JSON.stringify(requestedCommand)) {
+                throw new ParallelDispatchError("outcome-conflict", "Fabric validation command does not match the replay request.");
+              }
+              return { result: { kind: "active", fabric: run.fabric,
+                replay: run.fabric.validation.status !== "running" }, changed: false };
+            }
+            run.fabric.validation = { command: requestedCommand, status: "running", fingerprint: null };
+            return { result: { kind: "active", fabric: run.fabric, replay: false }, changed: true };
+          });
+          if (evidence.kind === "archived") return evidence.snapshot;
+          if (evidence.replay) {
+            if (evidence.fabric.validation.status === "fail") {
+              return await this.finalizeFailedFabricValidation(ownerRoot, runID, evidence.fabric, lease);
+            }
+            const snapshot = await this.snapshot(ownerRoot, runID);
+            if (snapshot === undefined) throw new ParallelDispatchError("outcome-conflict", "Validated fabric candidate disappeared.");
+            return snapshot;
+          }
+          claimed = true;
+          await assertAuthority();
+          await this.assertFabricAuthority(evidence.fabric);
+          if (await this.readRef(evidence.fabric.candidate_ref) !== evidence.fabric.candidate_head) {
+            throw new ParallelDispatchError("candidate-invalid", "Hidden candidate ref changed before validation.");
+          }
+          const path = join(this.stateRoot, `fabric-validation-${randomUUID()}`);
+          let added = false;
+          let result;
+          try {
+            await this.gitBuffer(["worktree", "add", "--detach", path, evidence.fabric.candidate_head]);
+            added = true;
+            const beforeHead = (await this.gitBuffer(["rev-parse", "--verify", "HEAD^{commit}"], undefined, path)).toString("utf8").trim();
+            const beforeStatus = await this.gitBuffer(["status", "--porcelain=v1", "--untracked-files=normal"], undefined, path);
+            if (beforeHead !== evidence.fabric.candidate_head || beforeStatus.length !== 0) throw new Error("validation-worktree");
+            result = await runContainedValidation({ executable, args, cwd: path, timeout_ms: timeoutMs });
+            const afterHead = (await this.gitBuffer(["rev-parse", "--verify", "HEAD^{commit}"], undefined, path)).toString("utf8").trim();
+            const afterStatus = await this.gitBuffer(["status", "--porcelain=v1", "--untracked-files=normal"], undefined, path);
+            if (afterHead !== evidence.fabric.candidate_head || afterStatus.length !== 0) {
+              result = { ...result, ok: false as const, error: "execution-failed" as const };
+            }
+          } catch {
+            throw new ParallelDispatchError("candidate-invalid", "Final fabric validation worktree failed closed.");
+          } finally {
+            if (added) {
+              await this.gitBuffer(["worktree", "remove", "--force", path]).catch(() => undefined);
+            }
+          }
+          if (result === undefined) throw new ParallelDispatchError("candidate-invalid", "Final fabric validation produced no result.");
+          await assertAuthority();
+          const snapshot = await this.transaction((state) => {
+            const run = this.requireRun(state, ownerRoot, runID);
+            if (run.fabric === null || run.fabric.candidate_head !== evidence.fabric.candidate_head ||
+              run.fabric.validation.status !== "running" ||
+              JSON.stringify(run.fabric.validation.command) !== JSON.stringify(result.command)) {
+              throw new ParallelDispatchError("outcome-conflict", "Fabric candidate changed during final validation.");
+            }
+            run.fabric.validation = {
+              command: [...result.command],
+              status: result.ok ? "pass" : "fail",
+              fingerprint: result.fingerprint,
+            };
+            return { result: this.publicSnapshot(run), changed: true };
+          });
+          claimed = false;
+          return result.ok ? snapshot
+            : await this.finalizeFailedFabricValidation(ownerRoot, runID, evidence.fabric, lease);
+        } catch (error) {
+          if (claimed && !authorityLost) {
+            await this.transaction((state) => {
+              const run = state.run;
+              if (run?.kind === "run" && run.run_id === runID && run.owner_root === ownerRoot && run.fabric !== null &&
+                run.fabric.validation.status === "running" &&
+                JSON.stringify(run.fabric.validation.command) === JSON.stringify(requestedCommand)) {
+                run.fabric.validation = { command: [], status: "pending", fingerprint: null };
+                return { result: undefined, changed: true };
+              }
+              return { result: undefined, changed: false };
+            }).catch(() => undefined);
+          }
+          throw error;
+        }
+      });
     } finally {
-      if (added) {
-        const clean = await this.gitBuffer(["status", "--porcelain=v1", "--untracked-files=normal"], undefined, path)
-          .then((output) => output.length === 0, () => false);
-        if (clean) await this.gitBuffer(["worktree", "remove", path]).catch(() => undefined);
-      }
+      activeFabricValidations.delete(claimKey);
     }
-    if (result === undefined) throw new ParallelDispatchError("candidate-invalid", "Final fabric validation produced no result.");
+  }
+
+  private async finalizeFailedFabricValidation(
+    ownerRoot: string,
+    runID: string,
+    fabric: StoredFabric,
+    lease: ScopeLease,
+  ): Promise<ParallelDispatchSnapshot> {
+    await lease.assertHeld().catch(() => { throw new ParallelDispatchError("state-locked", "Fabric validation authority was lost."); });
+    if (await this.readRef(fabric.candidate_ref) === fabric.candidate_head) {
+      await this.git(["update-ref", "-d", fabric.candidate_ref, fabric.candidate_head]);
+    }
+    await this.deleteFabricSourceRefs(fabric);
     return this.transaction((state) => {
       const run = this.requireRun(state, ownerRoot, runID);
-      if (run.fabric === null || run.fabric.candidate_head !== evidence.fabric.candidate_head ||
-        run.fabric.validation.status !== "running" ||
-        JSON.stringify(run.fabric.validation.command) !== JSON.stringify(result.command)) {
-        throw new ParallelDispatchError("outcome-conflict", "Fabric candidate changed during final validation.");
+      if (run.fabric === null || run.fabric.candidate_head !== fabric.candidate_head ||
+        run.fabric.validation.status !== "fail" || run.fabric.validation.fingerprint === null) {
+        throw new ParallelDispatchError("outcome-conflict", "Failed fabric validation changed during cleanup.");
       }
-      run.fabric.validation = {
-        command: [...result.command],
-        status: result.ok ? "pass" : "fail",
-        fingerprint: result.fingerprint,
-      };
-      return { result: this.publicSnapshot(run), changed: true };
+      return { result: this.archiveIfTerminal(state, run), changed: true };
     });
   }
 
@@ -1074,72 +1181,100 @@ export class ParallelDispatchCoordinator {
       !["pass", "skip", "fail"].includes(review) || !HASH.test(reviewFingerprint)) {
       throw new ParallelDispatchError("invalid-contract", "Final fabric review decision is invalid.");
     }
-    await this.recoverWithAuthority();
-    const evidence = await this.transaction<
-      { kind: "archived"; snapshot: ParallelDispatchSnapshot } | { kind: "active"; fabric: StoredFabric }
-    >((state) => {
-      const archived = this.findRunArchive(state, ownerRoot, runID);
-      if (archived !== undefined) {
-        const fabric = archived.run.fabric;
-        if (fabric === null || fabric.candidate_head !== candidateHead ||
-          fabric.review.status !== review || fabric.review.fingerprint !== reviewFingerprint ||
-          (review !== "fail" && !fabric.promoted)) {
-          throw new ParallelDispatchError("outcome-conflict", "Archived fabric review does not match.");
+    return this.withFabricOperationAuthority(async (lease) => {
+      await this.recoverWithAuthority();
+      const evidence = await this.transaction<
+        { kind: "archived"; snapshot: ParallelDispatchSnapshot } | { kind: "active"; fabric: StoredFabric }
+      >((state) => {
+        const archived = this.findRunArchive(state, ownerRoot, runID);
+        if (archived !== undefined) {
+          const fabric = archived.run.fabric;
+          if (fabric === null || fabric.candidate_head !== candidateHead ||
+            fabric.review.status !== review || fabric.review.fingerprint !== reviewFingerprint ||
+            (review !== "fail" && !fabric.promoted)) {
+            throw new ParallelDispatchError("outcome-conflict", "Archived fabric review does not match.");
+          }
+          return { result: { kind: "archived", snapshot: this.publicSnapshot(archived.run, true, archived.terminal_reason) }, changed: false };
         }
-        return { result: { kind: "archived", snapshot: this.publicSnapshot(archived.run, true, archived.terminal_reason) }, changed: false };
-      }
-      const run = this.requireRun(state, ownerRoot, runID);
-      if (run.fabric === null || run.fabric.candidate_head !== candidateHead ||
-        run.fabric.validation.status !== "pass" || run.fabric.validation.fingerprint === null ||
-        run.fabric.transition !== null || run.fabric.demotion_transition !== null ||
-        run.fabric.scheduler.active !== null || run.fabric.scheduler.pending.length !== 0) {
-        throw new ParallelDispatchError("candidate-invalid", "Validated final fabric candidate is absent.");
-      }
-      return { result: { kind: "active", fabric: run.fabric }, changed: false };
-    });
-    if (evidence.kind === "archived") return evidence.snapshot;
-    const fabric = evidence.fabric;
-    if (review === "fail") {
-      if (await this.readRef(fabric.candidate_ref) === candidateHead) {
-        await this.git(["update-ref", "-d", fabric.candidate_ref, candidateHead]);
-      }
-      await this.deleteFabricSourceRefs(fabric);
-      return this.transaction((state) => {
         const run = this.requireRun(state, ownerRoot, runID);
-        if (run.fabric === null || run.fabric.candidate_head !== candidateHead) {
-          throw new ParallelDispatchError("outcome-conflict", "Fabric candidate changed during review.");
+        if (run.fabric === null || run.fabric.candidate_head !== candidateHead ||
+          run.fabric.validation.status !== "pass" || run.fabric.validation.fingerprint === null ||
+          run.fabric.transition !== null || run.fabric.demotion_transition !== null ||
+          run.fabric.scheduler.active !== null || run.fabric.scheduler.pending.length !== 0) {
+          throw new ParallelDispatchError("candidate-invalid", "Validated final fabric candidate is absent.");
         }
-        run.fabric.review = { status: "fail", fingerprint: reviewFingerprint };
-        return { result: this.archiveIfTerminal(state, run), changed: true };
+        if (run.fabric.review.status === "pending") {
+          run.fabric.review = { status: review, fingerprint: reviewFingerprint };
+          return { result: { kind: "active", fabric: run.fabric }, changed: true };
+        }
+        if (run.fabric.review.status !== review || run.fabric.review.fingerprint !== reviewFingerprint ||
+          run.fabric.promoted) {
+          throw new ParallelDispatchError("outcome-conflict", "A different fabric review decision is already claimed.");
+        }
+        return { result: { kind: "active", fabric: run.fabric }, changed: false };
       });
-    }
-    const targetRef = `refs/heads/${fabric.target_branch}`;
-    const target = await this.readRef(targetRef);
-    const primary = await this.lifecycle.pinCleanBase().catch(() => undefined);
-    if (primary?.sha !== fabric.authority_sha || (target !== fabric.authority_sha && target !== candidateHead) ||
-      await this.targetCheckedOut(targetRef)) {
-      throw new ParallelDispatchError("candidate-invalid", "Final target is stale, dirty, or checked out.");
-    }
-    if (target === fabric.authority_sha) {
-      try { await this.git(["update-ref", targetRef, candidateHead, fabric.authority_sha]); }
-      catch {
-        if (await this.readRef(targetRef) !== candidateHead) {
-          throw new ParallelDispatchError("candidate-invalid", "Final target CAS was lost.");
+      if (evidence.kind === "archived") return evidence.snapshot;
+      const fabric = evidence.fabric;
+      if (review === "fail") {
+        await lease.assertHeld().catch(() => { throw new ParallelDispatchError("state-locked", "Fabric review authority was lost."); });
+        if (await this.readRef(fabric.candidate_ref) === candidateHead) {
+          await this.git(["update-ref", "-d", fabric.candidate_ref, candidateHead]);
         }
+        await this.deleteFabricSourceRefs(fabric);
+        return this.transaction((state) => {
+          const run = this.requireRun(state, ownerRoot, runID);
+          if (run.fabric === null || run.fabric.candidate_head !== candidateHead ||
+            run.fabric.review.status !== review || run.fabric.review.fingerprint !== reviewFingerprint) {
+            throw new ParallelDispatchError("outcome-conflict", "Fabric candidate changed during review.");
+          }
+          return { result: this.archiveIfTerminal(state, run), changed: true };
+        });
       }
-    }
-    if (await this.readRef(fabric.candidate_ref) === candidateHead) {
-      await this.git(["update-ref", "-d", fabric.candidate_ref, candidateHead]);
-    }
-    await this.deleteFabricSourceRefs(fabric);
-    return this.transaction((state) => {
-      const run = this.requireRun(state, ownerRoot, runID);
-      if (run.fabric === null || run.fabric.candidate_head !== candidateHead) {
-        throw new ParallelDispatchError("outcome-conflict", "Fabric candidate changed during promotion.");
+      const targetRef = `refs/heads/${fabric.target_branch}`;
+      try {
+        const target = await this.readRef(targetRef);
+        const primary = await this.lifecycle.pinCleanBase().catch(() => undefined);
+        if (primary?.sha !== fabric.authority_sha || (target !== fabric.authority_sha && target !== candidateHead) ||
+          await this.targetCheckedOut(targetRef)) {
+          throw new ParallelDispatchError("candidate-invalid", "Final target is stale, dirty, or checked out.");
+        }
+        await lease.assertHeld().catch(() => { throw new ParallelDispatchError("state-locked", "Fabric promotion authority was lost."); });
+        if (target === fabric.authority_sha) {
+          try { await this.git(["update-ref", targetRef, candidateHead, fabric.authority_sha]); }
+          catch {
+            if (await this.readRef(targetRef) !== candidateHead) {
+              throw new ParallelDispatchError("candidate-invalid", "Final target CAS was lost.");
+            }
+          }
+        }
+        if (await this.readRef(fabric.candidate_ref) === candidateHead) {
+          await this.git(["update-ref", "-d", fabric.candidate_ref, candidateHead]);
+        }
+        await this.deleteFabricSourceRefs(fabric);
+        return this.transaction((state) => {
+          const run = this.requireRun(state, ownerRoot, runID);
+          if (run.fabric === null || run.fabric.candidate_head !== candidateHead ||
+            run.fabric.review.status !== review || run.fabric.review.fingerprint !== reviewFingerprint || run.cancelled) {
+            throw new ParallelDispatchError("outcome-conflict", "Fabric candidate changed during promotion.");
+          }
+          run.fabric.promoted = true;
+          return { result: this.archiveIfTerminal(state, run), changed: true };
+        });
+      } catch (error) {
+        if (await this.readRef(targetRef).catch(() => undefined) !== candidateHead) {
+          await this.transaction((state) => {
+            const run = state.run;
+            if (run?.owner_root !== ownerRoot || run.run_id !== runID || run.fabric === null ||
+              run.fabric.candidate_head !== candidateHead || run.fabric.promoted ||
+              run.fabric.review.status !== review || run.fabric.review.fingerprint !== reviewFingerprint) {
+              return { result: undefined, changed: false };
+            }
+            run.fabric.review = { status: "pending", fingerprint: null };
+            return { result: undefined, changed: true };
+          }).catch(() => undefined);
+        }
+        throw error;
       }
-      run.fabric.review = { status: review, fingerprint: reviewFingerprint };
-      run.fabric.promoted = true;
-      return { result: this.archiveIfTerminal(state, run), changed: true };
     });
   }
 
@@ -1148,17 +1283,21 @@ export class ParallelDispatchCoordinator {
       throw new ParallelDispatchError("descriptor-mismatch", "Parallel dispatch descriptor is invalid.");
     }
     await this.recoverWithAuthority();
-    const fabric = await this.transaction((state) => {
-      const run = state.run?.kind === "run" && state.run.owner_root === ownerRoot &&
-        state.run.run_id === descriptor.run_id ? state.run : undefined;
-      return { result: run?.fabric ?? null, changed: false };
-    });
+    const state = await this.load();
+    const run = state.run?.kind === "run" && state.run.owner_root === ownerRoot &&
+      state.run.run_id === descriptor.run_id ? state.run : undefined;
+    const fabric = run?.fabric ?? null;
+    const fabricFingerprint = fabric === null ? null : fingerprint(fabric);
     if (fabric !== null) await this.assertFabricAuthority(fabric);
     return this.transaction((state) => {
       if (state.run === null && this.findRunArchive(state, ownerRoot, descriptor.run_id) !== undefined) {
         throw new ParallelDispatchError("descriptor-replay", "Parallel dispatch run is already archived.");
       }
       const run = this.requireRun(state, ownerRoot, descriptor.run_id);
+      if ((run.fabric === null ? null : fingerprint(run.fabric)) !== fabricFingerprint ||
+        (run.fabric !== null && (run.fabric.transition !== null || run.fabric.demotion_transition !== null))) {
+        throw new ParallelDispatchError("outcome-conflict", "Fabric recovery state changed during dispatch binding.");
+      }
       const task = run.tasks.find((entry) => entry.descriptor.dispatch_id === descriptor.dispatch_id);
       if (task === undefined || fingerprint(task.descriptor) !== fingerprint(descriptor)) {
         throw new ParallelDispatchError("descriptor-mismatch", "Parallel dispatch descriptor does not match durable state.");
@@ -1352,22 +1491,27 @@ export class ParallelDispatchCoordinator {
     if (!validText(ownerRoot, 256) || (runID !== undefined && (!validText(runID, 64) || !UUID.test(runID)))) {
       throw new ParallelDispatchError("descriptor-mismatch", "Parallel run identity is invalid.");
     }
-    await this.recoverWithAuthority();
-    return this.transaction((state) => {
-      if (state.run === null) {
-        const archived = runID === undefined ? undefined : this.findRunArchive(state, ownerRoot, runID);
-        return { result: archived === undefined ? undefined : this.publicSnapshot(archived.run, true, archived.terminal_reason), changed: false };
-      }
-      const run = this.requireRun(state, ownerRoot, runID);
-      if (run.cancelled) return { result: this.publicSnapshot(run), changed: false };
-      run.cancelled = true;
-      for (const task of run.tasks) {
-        if (task.phase === "pending" || task.phase === "reserved") {
-          task.phase = "suppressed";
-          task.outcome = "cancelled";
+    return this.withFabricOperationAuthority(async () => {
+      await this.recoverWithAuthority();
+      return this.transaction((state) => {
+        if (state.run === null) {
+          const archived = runID === undefined ? undefined : this.findRunArchive(state, ownerRoot, runID);
+          return { result: archived === undefined ? undefined : this.publicSnapshot(archived.run, true, archived.terminal_reason), changed: false };
         }
-      }
-      return { result: this.archiveIfTerminal(state, run), changed: true };
+        const run = this.requireRun(state, ownerRoot, runID);
+        if (run.cancelled) return { result: this.publicSnapshot(run), changed: false };
+        if (run.fabric !== null && run.fabric.review.status !== "pending" && !run.fabric.promoted) {
+          throw new ParallelDispatchError("outcome-conflict", "A fabric review decision is already claimed.");
+        }
+        run.cancelled = true;
+        for (const task of run.tasks) {
+          if (task.phase === "pending" || task.phase === "reserved") {
+            task.phase = "suppressed";
+            task.outcome = "cancelled";
+          }
+        }
+        return { result: this.archiveIfTerminal(state, run), changed: true };
+      });
     });
   }
 
@@ -1448,6 +1592,9 @@ export class ParallelDispatchCoordinator {
   }
 
   private async recoverWithAuthority(): Promise<void> {
+    const state = await this.load();
+    if (state.run?.kind !== "preparing" && (state.run?.kind !== "run" || state.run.fabric === null ||
+      (state.run.fabric.demotion_transition === null && state.run.fabric.transition === null))) return;
     await this.withPrepareAuthority(async () => {
       await this.recoverPreparation(undefined, true);
       await this.recoverFabricDemotion();
@@ -2114,14 +2261,14 @@ export class ParallelDispatchCoordinator {
     }
   }
 
-  private async acquire(scope = STATE_SCOPE): Promise<ScopeLease> {
+  private async acquire(scope = STATE_SCOPE, ttlMs = 10 * 60_000): Promise<ScopeLease> {
     const deadline = Date.now() + LOCK_TIMEOUT_MS;
     while (true) {
       try {
         return await this.registry.acquire({
           ownerId: `parallel-dispatch:${process.pid}:${randomUUID()}`,
           scope,
-          ttlMs: 10 * 60_000,
+          ttlMs,
         });
       } catch (error) {
         if (!(error instanceof ScopeLeaseError) ||
@@ -2193,6 +2340,16 @@ export class ParallelDispatchCoordinator {
     let failure: unknown;
     let result: T | undefined;
     try { result = await operation(); } catch (error) { failure = error; }
+    await lease.release().catch(() => lease.close());
+    if (failure !== undefined) throw failure;
+    return result as T;
+  }
+
+  private async withFabricOperationAuthority<T>(operation: (lease: ScopeLease) => Promise<T>): Promise<T> {
+    const lease = await this.acquire(FABRIC_OPERATION_SCOPE, 30_000);
+    let failure: unknown;
+    let result: T | undefined;
+    try { result = await operation(lease); } catch (error) { failure = error; }
     await lease.release().catch(() => lease.close());
     if (failure !== undefined) throw failure;
     return result as T;

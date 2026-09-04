@@ -12,6 +12,8 @@ const { runtimeAssets } = assets;
 const OPEN_CODE_DIRECTORY = ".opencode";
 const VERSION_MARKER = `${OPEN_CODE_DIRECTORY}/sortie-dogs.version`;
 const GLOBAL_VERSION_MARKER = "sortie-dogs.version";
+const LUNA_FABRIC_CONTROL_IGNORE = `${OPEN_CODE_DIRECTORY}/.gitignore`;
+const LUNA_FABRIC_CONTROL_FILE = "sortie-dogs-luna-fabric.json";
 
 interface LegacyRuntimeAsset {
   readonly relativePath: string;
@@ -315,6 +317,48 @@ async function overwriteFileSafely(
   }
 }
 
+async function appendFileSafely(root: string, relativePath: string, content: string): Promise<void> {
+  await assertSafeExistingPath(root, relativePath, true);
+  let handle;
+  try {
+    handle = await open(resolve(root, relativePath), constants.O_WRONLY | constants.O_APPEND | constants.O_NOFOLLOW);
+    if (!(await handle.stat()).isFile()) {
+      throw new ProjectInitializationError("conflict", "An initialization file path is not a regular file.");
+    }
+    await handle.writeFile(content, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ELOOP") {
+      throw new ProjectInitializationError("unsafe-path", "Initialization paths must not contain symbolic links.", {
+        cause: error,
+      });
+    }
+    throw error;
+  } finally {
+    await handle?.close();
+  }
+}
+
+async function ensureProjectLunaControlIgnore(
+  root: string,
+  createdFiles: string[] = [],
+  modifiedFiles: Array<{ relativePath: string; content: Buffer }> = [],
+  createdDirectories: string[] = [],
+): Promise<void> {
+  const relativePath = LUNA_FABRIC_CONTROL_IGNORE;
+  const present = await assertSafeExistingPath(root, relativePath, true);
+  if (!present) {
+    await ensureDirectory(root, OPEN_CODE_DIRECTORY, createdDirectories);
+    await createFile(resolve(root, relativePath), `${LUNA_FABRIC_CONTROL_FILE}\n`, createdFiles);
+    return;
+  }
+  const current = await readFile(resolve(root, relativePath));
+  const text = current.toString("utf8");
+  if (new RegExp(`(?:^|\\r?\\n)${LUNA_FABRIC_CONTROL_FILE.replace(".", "\\.")}(?:\\r?\\n|$)`, "u").test(text)) return;
+  modifiedFiles.push({ relativePath, content: current });
+  const separator = text.endsWith("\n") ? "" : "\n";
+  await appendFileSafely(root, relativePath, `${separator}${LUNA_FABRIC_CONTROL_FILE}\n`);
+}
+
 interface InitializationLayout {
   readonly assetPrefix: string;
   readonly markerPath: string;
@@ -382,6 +426,7 @@ async function initializeRoot(
     existing[index]?.equals(Buffer.from(entry.content)) ?? false;
   const assetsMatch = assetEntries.every(matches);
   if (markerText !== undefined && parseMarker(markerText.toString("utf8")) === version && assetsMatch) {
+    if (!layout.preserveAllLegacy) await ensureProjectLunaControlIgnore(root);
     return {
       status: "unchanged",
       version,
@@ -421,6 +466,9 @@ async function initializeRoot(
   const removedFiles: Array<{ relativePath: string; content: Buffer }> = [];
   const createdDirectories: string[] = [];
   try {
+    if (!layout.preserveAllLegacy) {
+      await ensureProjectLunaControlIgnore(root, createdFiles, modifiedFiles, createdDirectories);
+    }
     for (let index = 0; index < entries.length; index += 1) {
       const entry = entries[index];
       if (matches(entry, index)) continue;

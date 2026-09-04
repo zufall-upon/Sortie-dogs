@@ -199,6 +199,63 @@ test("parallel state authority retries transient lease mutex contention", async 
   }
 });
 
+test("five concurrent fabric binds skip recovery authority for a stable active run", async () => {
+  const value = await fixture("stable-bind-contention");
+  const originalAcquire = ScopeLeaseRegistry.prototype.acquire;
+  try {
+    const coordinator = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const units = ["a", "b", "c", "d", "e"].map((id, index) => fabricUnit(id, index));
+    const prepared = await coordinator.prepareFabric(fabricContract(value.sha, units), "root");
+    assert.equal(prepared.status, "prepared");
+    if (prepared.status !== "prepared") return;
+    const acquiredScopes: string[][] = [];
+    ScopeLeaseRegistry.prototype.acquire = async function (
+      ...args: Parameters<ScopeLeaseRegistry["acquire"]>
+    ) {
+      acquiredScopes.push([...args[0].scope.write]);
+      return await originalAcquire.apply(this, args);
+    };
+    const coordinators = await Promise.all(prepared.snapshot.ready.map(async () =>
+      await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository })));
+    await Promise.all(prepared.snapshot.ready.map(async (descriptor, index) =>
+      await coordinators[index]!.bindDispatch("root", `call-${index}`, descriptor)));
+    assert.equal(acquiredScopes.filter((scope) => scope.includes("sortie-dogs/parallel-dispatch-prepare")).length, 0);
+    assert.ok(acquiredScopes.filter((scope) => scope.includes("sortie-dogs/parallel-dispatch-state")).length >= 5);
+    assert.ok((await coordinator.snapshot("root", prepared.snapshot.run_id))!.tasks.every(({ phase }) => phase === "running"));
+  } finally {
+    ScopeLeaseRegistry.prototype.acquire = originalAcquire;
+    await rm(value.root, { recursive: true, force: true });
+  }
+});
+
+test("fabric bind fails closed when recovery state changes after its authority read", async () => {
+  const value = await fixture("bind-recovery-race");
+  try {
+    const coordinator = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const units = [fabricUnit("a", 0), fabricUnit("b", 1)];
+    const prepared = await coordinator.prepareFabric(fabricContract(value.sha, units), "root");
+    assert.equal(prepared.status, "prepared");
+    if (prepared.status !== "prepared") return;
+    type MutableState = {
+      run: null | { kind: string; fabric: null | { transition: unknown } };
+    };
+    const internal = coordinator as unknown as { load(): Promise<MutableState> };
+    const originalLoad = internal.load.bind(coordinator);
+    let loads = 0;
+    internal.load = async () => {
+      const state = await originalLoad();
+      loads += 1;
+      if (loads === 3 && state.run?.kind === "run" && state.run.fabric !== null) state.run.fabric.transition = {};
+      return state;
+    };
+    await errorCode(coordinator.bindDispatch("root", "call-a", prepared.snapshot.ready[0]!), "outcome-conflict");
+    internal.load = originalLoad;
+    assert.equal((await coordinator.snapshot("root", prepared.snapshot.run_id))!.tasks[0]!.phase, "reserved");
+  } finally {
+    await rm(value.root, { recursive: true, force: true });
+  }
+});
+
 test("an admitted fabric contract prepares one durable luna-fabric run", async () => {
   const value = await fixture("fabric-prepare");
   try {
@@ -288,6 +345,21 @@ test("a six-unit fabric advances only at the barrier into a fresh exact-base wor
     const recovered = await restarted.snapshot("root", prepared.snapshot.run_id);
     assert.deepEqual(recovered?.ready, advanced.ready);
     assert.equal((await run(value.repository, "worktree", "list", "--porcelain")).match(/^worktree /gmu)?.length, 2);
+    const singleton = recovered!.ready[0]!;
+    await restarted.bindDispatch("root", "call-f", singleton);
+    await acceptAndComplete(restarted, singleton, "call-f", "child-f");
+    const validated = await restarted.integrateFabricWaveAndValidate(
+      "root", prepared.snapshot.run_id, process.execPath, ["-e", "process.exit(0)"],
+    );
+    assert.equal(validated.fabric!.validation.status, "pass");
+    assert.equal((await run(value.repository, "show", `${validated.fabric!.candidate_head}:f.txt`)).trim(), "f");
+    await run(value.repository, "checkout", "--detach", value.sha);
+    const accepted = await restarted.acceptFabricCandidate(
+      "root", prepared.snapshot.run_id, validated.fabric!.candidate_head, "skip", "f".repeat(64),
+    );
+    assert.equal(accepted.archived, true);
+    assert.equal(accepted.terminal_reason, "completed");
+    assert.equal((await run(value.repository, "rev-parse", "refs/heads/main")).trim(), validated.fabric!.candidate_head);
   } finally {
     await rm(value.root, { recursive: true, force: true });
   }
@@ -336,9 +408,9 @@ test("fabric claims validation once and resumes acceptance after a completed tar
     const validated = successful.value;
     assert.equal(validated.fabric!.validation.status, "pass");
     assert.match(validated.fabric!.validation.fingerprint!, /^[0-9a-f]{64}$/u);
-    assert.equal((await coordinator.validateFabricCandidate(
+    await errorCode(coordinator.validateFabricCandidate(
       "root", prepared.snapshot.run_id, process.execPath, ["-e", "process.exit(9)"],
-    )).fabric!.validation.status, "pass");
+    ), "outcome-conflict");
 
     await run(value.repository, "checkout", "--detach", value.sha);
     // A process may stop after the target CAS but before durable promotion state is written.
@@ -355,6 +427,322 @@ test("fabric claims validation once and resumes acceptance after a completed tar
       await coordinator.acceptFabricCandidate("root", prepared.snapshot.run_id, candidate, "skip", "d".repeat(64)),
       accepted,
     );
+  } finally {
+    await rm(value.root, { recursive: true, force: true });
+  }
+});
+
+test("failed fabric target promotion releases its review claim for cancellation", async () => {
+  const value = await fixture("fabric-promotion-conflict");
+  try {
+    const coordinator = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const prepared = await coordinator.prepareFabric(
+      fabricContract(value.sha, [fabricUnit("a", 0), fabricUnit("b", 1)]), "root",
+    );
+    assert.equal(prepared.status, "prepared");
+    if (prepared.status !== "prepared") return;
+    for (const [index, descriptor] of prepared.snapshot.ready.entries()) {
+      await coordinator.bindDispatch("root", `call-${index}`, descriptor);
+      await acceptAndComplete(coordinator, descriptor, `call-${index}`, `child-${index}`);
+    }
+    const validated = await coordinator.integrateFabricWaveAndValidate(
+      "root", prepared.snapshot.run_id, process.execPath, ["-e", "process.exit(0)"],
+    );
+    const candidate = validated.fabric!.candidate_head;
+
+    await run(value.repository, "checkout", "--detach", value.sha);
+    await writeFile(join(value.repository, "base.txt"), "moved\n");
+    await run(value.repository, "add", "base.txt");
+    await run(value.repository, "commit", "-q", "-m", "move target");
+    const moved = (await run(value.repository, "rev-parse", "HEAD")).trim();
+    await run(value.repository, "checkout", "--detach", value.sha);
+    await run(value.repository, "update-ref", "refs/heads/main", moved, value.sha);
+
+    await errorCode(coordinator.acceptFabricCandidate(
+      "root", prepared.snapshot.run_id, candidate, "pass", "d".repeat(64),
+    ), "candidate-invalid");
+    assert.equal((await coordinator.snapshot("root", prepared.snapshot.run_id))!.fabric!.review.status, "pending");
+    const cancelled = await coordinator.cancel("root", prepared.snapshot.run_id);
+    assert.equal(cancelled?.archived, true);
+    assert.equal(cancelled?.terminal_reason, "cancelled");
+  } finally {
+    await rm(value.root, { recursive: true, force: true });
+  }
+});
+
+test("fabric operation authority heartbeats throughout validation", async () => {
+  const value = await fixture("fabric-validation-heartbeat");
+  const originalAcquire = ScopeLeaseRegistry.prototype.acquire;
+  try {
+    const coordinator = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const prepared = await coordinator.prepareFabric(
+      fabricContract(value.sha, [fabricUnit("a", 0), fabricUnit("b", 1)]), "root",
+    );
+    assert.equal(prepared.status, "prepared");
+    if (prepared.status !== "prepared") return;
+    for (const [index, descriptor] of prepared.snapshot.ready.entries()) {
+      await coordinator.bindDispatch("root", `call-${index}`, descriptor);
+      await acceptAndComplete(coordinator, descriptor, `call-${index}`, `child-${index}`);
+    }
+    await coordinator.integrateFabricWave("root", prepared.snapshot.run_id);
+    ScopeLeaseRegistry.prototype.acquire = async function (
+      ...args: Parameters<ScopeLeaseRegistry["acquire"]>
+    ) {
+      return await originalAcquire.call(this, { ...args[0], ttlMs: 90 });
+    };
+    const started = join(value.root, "validation-started.txt");
+    const validation = coordinator.validateFabricCandidate(
+      "root", prepared.snapshot.run_id, process.execPath,
+      ["-e", "require('node:fs').writeFileSync(process.argv[1], 'x');setTimeout(()=>{},350)", started],
+    );
+    while (await stat(started).catch(() => undefined) === undefined) {
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+    }
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 180));
+    const registry = (coordinator as unknown as { registry: ScopeLeaseRegistry }).registry;
+    await assert.rejects(
+      registry.acquire({ scope: { read: [], write: ["sortie-dogs/luna-fabric-operation"] }, ttlMs: 90 }),
+      (error: unknown) => error instanceof ScopeLeaseError && error.code === "scope-conflict",
+    );
+    assert.equal((await validation).fabric!.validation.status, "pass");
+  } finally {
+    ScopeLeaseRegistry.prototype.acquire = originalAcquire;
+    await rm(value.root, { recursive: true, force: true });
+  }
+});
+
+test("failed fabric validation archives cleanly and releases the active slot", async () => {
+  const value = await fixture("fabric-validation-fail");
+  try {
+    const coordinator = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const candidateContract = fabricContract(value.sha, [fabricUnit("a", 0), fabricUnit("b", 1)]);
+    const prepared = await coordinator.prepareFabric(candidateContract, "root");
+    assert.equal(prepared.status, "prepared");
+    if (prepared.status !== "prepared") return;
+    for (const [index, descriptor] of prepared.snapshot.ready.entries()) {
+      await coordinator.bindDispatch("root", `call-${index}`, descriptor);
+      await acceptAndComplete(coordinator, descriptor, `call-${index}`, `child-${index}`);
+    }
+    const integrated = await coordinator.integrateFabricWave("root", prepared.snapshot.run_id);
+    const failed = await coordinator.validateFabricCandidate(
+      "root", prepared.snapshot.run_id, process.execPath,
+      ["-e", "require('node:fs').writeFileSync('validation-dirty.txt','dirty');process.exit(7)"],
+    );
+    assert.equal(failed.archived, true);
+    assert.equal(failed.terminal_reason, "failed");
+    assert.equal(failed.fabric!.validation.status, "fail");
+    await assert.rejects(run(value.repository, "rev-parse", "--verify", integrated.fabric!.candidate_ref));
+    assert.equal((await run(value.repository, "for-each-ref", "--format=%(refname)",
+      "refs/sortie-dogs/luna-fabric-sources/")).trim(), "");
+    assert.equal((await run(value.repository, "worktree", "list", "--porcelain")).match(/^worktree /gmu)?.length, 1);
+    assert.equal((await run(value.repository, "rev-parse", "refs/heads/main")).trim(), value.sha);
+    const next = await coordinator.prepareFabric(candidateContract, "root-next");
+    assert.equal(next.status, "prepared");
+    if (next.status === "prepared") await coordinator.cancel("root-next", next.snapshot.run_id);
+  } finally {
+    await rm(value.root, { recursive: true, force: true });
+  }
+});
+
+test("failed fabric review archives cleanly without moving the target", async () => {
+  const value = await fixture("fabric-review-fail");
+  try {
+    const coordinator = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const prepared = await coordinator.prepareFabric(
+      fabricContract(value.sha, [fabricUnit("a", 0), fabricUnit("b", 1)]), "root",
+    );
+    assert.equal(prepared.status, "prepared");
+    if (prepared.status !== "prepared") return;
+    for (const [index, descriptor] of prepared.snapshot.ready.entries()) {
+      await coordinator.bindDispatch("root", `call-${index}`, descriptor);
+      await acceptAndComplete(coordinator, descriptor, `call-${index}`, `child-${index}`);
+    }
+    const validated = await coordinator.integrateFabricWaveAndValidate(
+      "root", prepared.snapshot.run_id, process.execPath, ["-e", "process.exit(0)"],
+    );
+    const rejected = await coordinator.acceptFabricCandidate(
+      "root", prepared.snapshot.run_id, validated.fabric!.candidate_head, "fail", "a".repeat(64),
+    );
+    assert.equal(rejected.archived, true);
+    assert.equal(rejected.terminal_reason, "failed");
+    assert.equal(rejected.fabric!.review.status, "fail");
+    assert.equal((await run(value.repository, "rev-parse", "refs/heads/main")).trim(), value.sha);
+    await assert.rejects(run(value.repository, "rev-parse", "--verify", validated.fabric!.candidate_ref));
+    assert.equal((await run(value.repository, "for-each-ref", "--format=%(refname)",
+      "refs/sortie-dogs/luna-fabric-sources/")).trim(), "");
+  } finally {
+    await rm(value.root, { recursive: true, force: true });
+  }
+});
+
+test("integrateFabricWaveAndValidate integrates the final wave and validates without changing target", async () => {
+  const value = await fixture("fabric-combined-final");
+  try {
+    const coordinator = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const prepared = await coordinator.prepareFabric(
+      fabricContract(value.sha, [fabricUnit("a", 0), fabricUnit("b", 1)]), "root",
+    );
+    assert.equal(prepared.status, "prepared");
+    if (prepared.status !== "prepared") return;
+    for (const [index, descriptor] of prepared.snapshot.ready.entries()) {
+      await coordinator.bindDispatch("root", `call-${index}`, descriptor);
+      await acceptAndComplete(coordinator, descriptor, `call-${index}`, `child-${index}`);
+    }
+    const combined = await coordinator.integrateFabricWaveAndValidate(
+      "root", prepared.snapshot.run_id, process.execPath, ["-e", "process.exit(0)"],
+    );
+    assert.equal(combined.fabric!.active_unit_ids.length, 0);
+    assert.equal(combined.fabric!.validation.status, "pass");
+    assert.notEqual(combined.fabric!.candidate_head, value.sha);
+    assert.equal((await run(value.repository, "rev-parse", "refs/heads/main")).trim(), value.sha);
+  } finally {
+    await rm(value.root, { recursive: true, force: true });
+  }
+});
+
+test("integrateFabricWaveAndValidate advances non-final waves without running supplied validation", async () => {
+  const value = await fixture("fabric-combined-nonfinal");
+  try {
+    const coordinator = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const units = ["a", "b", "c", "d", "e"].map((id, index) => fabricUnit(id, index));
+    units.push(fabricUnit("f", 5, { depends_on: ["a"] }));
+    const prepared = await coordinator.prepareFabric(fabricContract(value.sha, units), "root");
+    assert.equal(prepared.status, "prepared");
+    if (prepared.status !== "prepared") return;
+    for (const [index, descriptor] of prepared.snapshot.ready.entries()) {
+      await coordinator.bindDispatch("root", `call-${index}`, descriptor);
+      await acceptAndComplete(coordinator, descriptor, `call-${index}`, `child-${index}`);
+    }
+    const counter = join(value.root, "must-not-run.txt");
+    const advanced = await coordinator.integrateFabricWaveAndValidate(
+      "root", prepared.snapshot.run_id, process.execPath,
+      ["-e", "require('node:fs').writeFileSync(process.argv[1], 'ran')", counter],
+    );
+    assert.deepEqual(advanced.ready.map(({ task_id }) => task_id), ["f"]);
+    assert.equal(advanced.fabric!.validation.status, "pending");
+    await assert.rejects(stat(counter));
+  } finally {
+    await rm(value.root, { recursive: true, force: true });
+  }
+});
+
+test("integrateFabricWaveAndValidate rejects a relative executable before wave mutation", async () => {
+  const value = await fixture("fabric-combined-invalid");
+  try {
+    const coordinator = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const prepared = await coordinator.prepareFabric(
+      fabricContract(value.sha, [fabricUnit("a", 0), fabricUnit("b", 1)]), "root",
+    );
+    assert.equal(prepared.status, "prepared");
+    if (prepared.status !== "prepared") return;
+    for (const [index, descriptor] of prepared.snapshot.ready.entries()) {
+      await coordinator.bindDispatch("root", `call-${index}`, descriptor);
+      await acceptAndComplete(coordinator, descriptor, `call-${index}`, `child-${index}`);
+    }
+    const before = await coordinator.snapshot("root", prepared.snapshot.run_id);
+    await errorCode(
+      coordinator.integrateFabricWaveAndValidate("root", prepared.snapshot.run_id, "node"),
+      "invalid-contract",
+    );
+    assert.deepEqual(await coordinator.snapshot("root", prepared.snapshot.run_id), before);
+    const integrated = await coordinator.integrateFabricWave("root", prepared.snapshot.run_id);
+    assert.equal(integrated.fabric!.validation.status, "pending");
+  } finally {
+    await rm(value.root, { recursive: true, force: true });
+  }
+});
+
+test("integrateFabricWaveAndValidate retries validation after final integration response loss", async () => {
+  const value = await fixture("fabric-combined-retry-integration");
+  try {
+    const coordinator = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const prepared = await coordinator.prepareFabric(
+      fabricContract(value.sha, [fabricUnit("a", 0), fabricUnit("b", 1)]), "root",
+    );
+    assert.equal(prepared.status, "prepared");
+    if (prepared.status !== "prepared") return;
+    for (const [index, descriptor] of prepared.snapshot.ready.entries()) {
+      await coordinator.bindDispatch("root", `call-${index}`, descriptor);
+      await acceptAndComplete(coordinator, descriptor, `call-${index}`, `child-${index}`);
+    }
+    const integrated = await coordinator.integrateFabricWave("root", prepared.snapshot.run_id);
+    const retried = await coordinator.integrateFabricWaveAndValidate(
+      "root", prepared.snapshot.run_id, process.execPath, ["-e", "process.exit(0)"],
+    );
+    assert.equal(retried.fabric!.candidate_head, integrated.fabric!.candidate_head);
+    assert.equal(retried.fabric!.validation.status, "pass");
+  } finally {
+    await rm(value.root, { recursive: true, force: true });
+  }
+});
+
+test("integrateFabricWaveAndValidate reclaims an interrupted durable validation", async () => {
+  const value = await fixture("fabric-combined-retry-running");
+  try {
+    const coordinator = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const prepared = await coordinator.prepareFabric(
+      fabricContract(value.sha, [fabricUnit("a", 0), fabricUnit("b", 1)]), "root",
+    );
+    assert.equal(prepared.status, "prepared");
+    if (prepared.status !== "prepared") return;
+    for (const [index, descriptor] of prepared.snapshot.ready.entries()) {
+      await coordinator.bindDispatch("root", `call-${index}`, descriptor);
+      await acceptAndComplete(coordinator, descriptor, `call-${index}`, `child-${index}`);
+    }
+    await coordinator.integrateFabricWave("root", prepared.snapshot.run_id);
+    const counter = join(value.root, "reclaimed-validation.txt");
+    const args = ["-e", "require('node:fs').appendFileSync(process.argv[1], 'x')", counter];
+    const statePath = join(value.repository, ".git", "sortie-dogs", "parallel-dispatch-v5", "state.json");
+    const state = JSON.parse(await readFile(statePath, "utf8")) as {
+      revision: number;
+      run: { fabric: { validation: { command: string[]; status: string; fingerprint: string | null } } };
+    };
+    state.revision += 1;
+    state.run.fabric.validation = { command: [process.execPath, ...args], status: "running", fingerprint: null };
+    await writeFile(statePath, JSON.stringify(state));
+
+    const restarted = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const validated = await restarted.integrateFabricWaveAndValidate(
+      "root", prepared.snapshot.run_id, process.execPath, args,
+    );
+    assert.equal(validated.fabric!.validation.status, "pass");
+    assert.equal(await readFile(counter, "utf8"), "x");
+  } finally {
+    await rm(value.root, { recursive: true, force: true });
+  }
+});
+
+test("integrateFabricWaveAndValidate retries passed validation without executing twice", async () => {
+  const value = await fixture("fabric-combined-retry-validation");
+  try {
+    const coordinator = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const prepared = await coordinator.prepareFabric(
+      fabricContract(value.sha, [fabricUnit("a", 0), fabricUnit("b", 1)]), "root",
+    );
+    assert.equal(prepared.status, "prepared");
+    if (prepared.status !== "prepared") return;
+    for (const [index, descriptor] of prepared.snapshot.ready.entries()) {
+      await coordinator.bindDispatch("root", `call-${index}`, descriptor);
+      await acceptAndComplete(coordinator, descriptor, `call-${index}`, `child-${index}`);
+    }
+    const counter = join(value.root, "validation-count.txt");
+    const args = ["-e", "require('node:fs').appendFileSync(process.argv[1], 'x')", counter];
+    const first = await coordinator.integrateFabricWaveAndValidate(
+      "root", prepared.snapshot.run_id, process.execPath, args,
+    );
+    const second = await coordinator.integrateFabricWaveAndValidate(
+      "root", prepared.snapshot.run_id, process.execPath, args,
+    );
+    assert.equal(first.fabric!.validation.status, "pass");
+    assert.equal(second.fabric!.validation.status, "pass");
+    assert.equal(await readFile(counter, "utf8"), "x");
+    await errorCode(
+      coordinator.integrateFabricWaveAndValidate(
+        "root", prepared.snapshot.run_id, process.execPath, ["-e", "process.exit(0)"],
+      ),
+      "outcome-conflict",
+    );
+    assert.equal(await readFile(counter, "utf8"), "x");
   } finally {
     await rm(value.root, { recursive: true, force: true });
   }

@@ -1,0 +1,23 @@
+{
+  "schema_version": "0.1.0",
+  "fixture_id": "representative-medium-v1",
+  "target_branch": "benchmark-medium",
+  "timeouts_ms": {
+    "route": 300000,
+    "host_margin": 60000,
+    "host_task_cap": 360000
+  },
+  "routes": {
+    "sol-serial": {
+      "role": "dog-worker",
+      "implementation_child_count": 1,
+      "operation_manifest": "project/serial.operation-manifest.json"
+    },
+    "luna-fabric": {
+      "role": "dog-luna-worker",
+      "implementation_child_count": 5,
+      "width": 5,
+      "contract": "luna-fabric.json"
+    }
+  }
+}

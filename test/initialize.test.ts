@@ -60,11 +60,12 @@ test("fresh init installs every runtime asset and preserves project settings", a
     const result = await initializeProject(project);
 
     assert.equal(result.status, "installed");
-    assert.equal(result.version, "0.3.64-luna-validation-command-v1");
+    assert.equal(result.version, "0.3.69-luna-combined-validation-replay-v1");
     for (const asset of runtimeAssets) {
       assert.equal(await readFile(join(project, ".opencode", asset.installPath), "utf8"), asset.content);
     }
-    assert.equal(await readFile(join(project, MARKER), "utf8"), "0.3.64-luna-validation-command-v1\n");
+    assert.equal(await readFile(join(project, MARKER), "utf8"), "0.3.69-luna-combined-validation-replay-v1\n");
+    assert.equal(await readFile(join(project, ".opencode", ".gitignore"), "utf8"), "sortie-dogs-luna-fabric.json\n");
     assert.equal(await readFile(config, "utf8"), "{\"userSetting\":true}\n");
   } finally {
     await clean(project);
@@ -116,7 +117,7 @@ test("compatible update replaces owned drift, preserves user files, then becomes
     const marker = join(project, MARKER);
     const ownedAsset = join(project, ".opencode", runtimeAssets[0].installPath);
     const userFile = join(project, ".opencode", "sortie-dogs.json");
-    await writeFile(marker, (await readFile(marker, "utf8")).replace("0.3.64-luna-validation-command-v1", "0.2.19-card20"));
+    await writeFile(marker, (await readFile(marker, "utf8")).replace("0.3.69-luna-combined-validation-replay-v1", "0.2.19-card20"));
     await writeFile(ownedAsset, "old RPT-owned content\n");
     await writeFile(userFile, "{\"userOwned\":true}\n");
 
@@ -151,7 +152,7 @@ test("rename migration removes a byte-matched owned legacy file", async () => {
     assert.equal(result.status, "installed");
     assert.deepEqual(result.preservedLegacyPaths, []);
     assert.equal(await lstat(legacyWorker).then(() => true, () => false), false);
-    assert.equal(await readFile(join(project, MARKER), "utf8"), "0.3.64-luna-validation-command-v1\n");
+    assert.equal(await readFile(join(project, MARKER), "utf8"), "0.3.69-luna-combined-validation-replay-v1\n");
   } finally {
     await clean(project);
   }
@@ -180,7 +181,7 @@ test("a recognized current-version marker repairs a partial install and then bec
   try {
     const firstAsset = runtimeAssets[0];
     await mkdir(join(project, ".opencode", "agent"), { recursive: true });
-    await writeFile(join(project, MARKER), "0.3.64-luna-validation-command-v1\n");
+    await writeFile(join(project, MARKER), "0.3.69-luna-combined-validation-replay-v1\n");
     await writeFile(join(project, ".opencode", firstAsset.installPath), firstAsset.content);
 
     const repaired = await initializeProject(project);
@@ -232,8 +233,24 @@ test("package 0.3.3 runtime card26 migrates to package 0.3.19 runtime card41", a
     await writeFile(ownedAsset, "card26 content\n");
     const updated = await initializeProject(project);
     assert.equal(updated.status, "installed");
-    assert.equal(await readFile(marker, "utf8"), "0.3.64-luna-validation-command-v1\n");
+    assert.equal(await readFile(marker, "utf8"), "0.3.69-luna-combined-validation-replay-v1\n");
     assert.equal(await readFile(ownedAsset, "utf8"), runtimeAssets[0].content);
+  } finally {
+    await clean(project);
+  }
+});
+
+test("project init appends the Luna control ignore without replacing user rules", async () => {
+  const project = await fixtureDirectory();
+  try {
+    const ignore = join(project, ".opencode", ".gitignore");
+    await mkdir(join(project, ".opencode"));
+    await writeFile(ignore, "user-rule");
+
+    await initializeProject(project);
+    await initializeProject(project);
+
+    assert.equal(await readFile(ignore, "utf8"), "user-rule\nsortie-dogs-luna-fabric.json\n");
   } finally {
     await clean(project);
   }
@@ -260,7 +277,7 @@ test("a future version in the recognized compatibility line is rejected", async 
   const project = await fixtureDirectory();
   try {
     await mkdir(join(project, ".opencode"));
-    await writeFile(join(project, MARKER), "0.3.65-card99\n");
+    await writeFile(join(project, MARKER), "0.3.70-card99\n");
 
     await assert.rejects(initializeProject(project), (error: unknown) => {
       assert.ok(error instanceof ProjectInitializationError);
@@ -379,12 +396,12 @@ test("CLI init supports an explicit project root, repeated init, and help", asyn
     });
     assert.deepEqual(await runCli(["init", project]), {
       exit: 0,
-      stdout: "Initialized Sortie-dogs 0.3.64-luna-validation-command-v1.\n",
+      stdout: "Initialized Sortie-dogs 0.3.69-luna-combined-validation-replay-v1.\n",
       stderr: "",
     });
     assert.deepEqual(await runCli(["init", project]), {
       exit: 0,
-      stdout: "Sortie-dogs 0.3.64-luna-validation-command-v1 is already initialized.\n",
+      stdout: "Sortie-dogs 0.3.69-luna-combined-validation-replay-v1 is already initialized.\n",
       stderr: "",
     });
   } finally {
@@ -511,13 +528,13 @@ test("CLI global init reports its target, legacy preservation, and invalid combi
     const env = { OPENCODE_CONFIG_DIR: globalRoot };
     assert.deepEqual(await runCli(["init", "--global"], env), {
       exit: 0,
-      stdout: `Initialized Sortie-dogs 0.3.64-luna-validation-command-v1 globally at ${globalRoot}.\n` +
+      stdout: `Initialized Sortie-dogs 0.3.69-luna-combined-validation-replay-v1 globally at ${globalRoot}.\n` +
         "Preserved legacy runtime files: agent/coordinator-mk2a2.md.\n",
       stderr: "",
     });
     assert.deepEqual(await runCli(["init", "--global"], env), {
       exit: 0,
-      stdout: `Sortie-dogs 0.3.64-luna-validation-command-v1 is already initialized globally at ${globalRoot}.\n` +
+      stdout: `Sortie-dogs 0.3.69-luna-combined-validation-replay-v1 is already initialized globally at ${globalRoot}.\n` +
         "Preserved legacy runtime files: agent/coordinator-mk2a2.md.\n",
       stderr: "",
     });
@@ -556,5 +573,35 @@ test("failed global init unwinds every config-root directory it created", async 
   } finally {
     mutableAssets.pop();
     await clean(fixture);
+  }
+});
+
+test("failed project init rolls back the Luna control ignore with runtime assets", async () => {
+  const project = await fixtureDirectory();
+  const mutableAssets = runtimeAssets as unknown as Array<{
+    installPath: string;
+    content: string;
+    version: string;
+  }>;
+  mutableAssets.push(
+    { installPath: "forced", content: "file\n", version: runtimeAssets[0].version },
+    { installPath: "forced/child", content: "child\n", version: runtimeAssets[0].version },
+  );
+  try {
+    const ignore = join(project, ".opencode", ".gitignore");
+    await mkdir(join(project, ".opencode"));
+    await writeFile(ignore, "user-rule\n");
+
+    await assert.rejects(initializeProject(project), (error: unknown) => {
+      assert.ok(error instanceof ProjectInitializationError);
+      assert.equal(error.code, "conflict");
+      return true;
+    });
+    assert.equal(await readFile(ignore, "utf8"), "user-rule\n");
+    assert.equal(await lstat(join(project, MARKER)).then(() => true, () => false), false);
+    assert.equal(await lstat(join(project, ".opencode", "forced")).then(() => true, () => false), false);
+  } finally {
+    mutableAssets.splice(-2);
+    await clean(project);
   }
 });

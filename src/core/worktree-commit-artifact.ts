@@ -815,7 +815,7 @@ function validateDescriptor(value: unknown): asserts value is ParallelDispatchDe
     typeof value.contract_fingerprint !== "string" || !HASH.test(value.contract_fingerprint) ||
     (value.attempt !== 1 && value.attempt !== 2) ||
     value.parallel_group !== value.run_id || value.parallel_unit !== value.task_id ||
-    !Number.isInteger(value.parallel_units) || (value.parallel_units as number) < 2 || (value.parallel_units as number) > 64 ||
+    !Number.isInteger(value.parallel_units) || (value.parallel_units as number) < 1 || (value.parallel_units as number) > 5 ||
     !Array.isArray(value.depends_on) || value.depends_on.length > 64 || !value.depends_on.every((item) => validText(item)) ||
     !Array.isArray(value.scope_read) || value.scope_read.length > 256 || !value.scope_read.every((path) => validText(path, MAX_PATH)) ||
     !Array.isArray(value.scope_write) || value.scope_write.length === 0 || value.scope_write.length > 256 ||

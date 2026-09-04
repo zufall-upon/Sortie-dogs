@@ -12,6 +12,7 @@
 export const TASK_TOOL = "task";
 
 const TASK_RESULT_PATTERN = /(<task_result>)([\s\S]*?)(<\/task_result>)/u;
+const TASK_WRAPPER_PATTERN = /^\s*<task\s+id="([A-Za-z0-9_-]{1,256})"(?:\s+state="[A-Za-z0-9_-]{1,32}")?\s*>/u;
 
 export interface TaskToolExecuteInput {
   readonly tool: string;
@@ -84,9 +85,13 @@ export function lastAssistantText(messages: readonly SessionMessage[]): string |
 
 export function taskChildSessionID(output: TaskToolExecuteOutput): string | undefined {
   const metadata = output.metadata;
-  if (metadata === null || typeof metadata !== "object") return undefined;
-  const id = (metadata as { sessionId?: unknown }).sessionId;
-  return typeof id === "string" && id.length > 0 ? id : undefined;
+  if (metadata !== null && typeof metadata === "object") {
+    const value = metadata as { sessionId?: unknown; sessionID?: unknown };
+    const id = value.sessionId ?? value.sessionID;
+    if (typeof id === "string" && id.length > 0) return id;
+  }
+  if (typeof output.output !== "string") return undefined;
+  return TASK_WRAPPER_PATTERN.exec(output.output)?.[1];
 }
 
 function emptyResultMatch(output: TaskToolExecuteOutput): RegExpMatchArray | undefined {

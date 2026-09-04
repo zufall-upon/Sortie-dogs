@@ -227,9 +227,9 @@ global file for durable global settings.
   requests are not repeated.
 - **Writes stay inside the assignment.** Exact source or operation manifests
   gate edits and handoffs.
-- **Autonomous sequential implementation.** A normal request may use as many sequential
-  workers as its accepted scope requires. Concurrent fan-out still needs the explicit
-  parallel contract.
+- **Autonomous implementation routing.** An accepted scope with at least two safe independent
+  units defaults to Luna fabric without opt-in. An explicit serial/no-parallel request wins;
+  other work uses sequential workers. The separate parallel contract remains explicit.
 - **Runtime overlap protection.** Active equal or ancestor write scopes are rejected
   before mutation, and full validation waits until every parallel unit joins.
 - **Evidence before completion.** Canonical validation, risk-based review, and

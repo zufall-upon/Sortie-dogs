@@ -1,0 +1,22 @@
+{
+  "version": "0.1.0",
+  "task_id": "representative-medium-sol-serial",
+  "read": [
+    "AGENTS.md",
+    "package.json",
+    "input",
+    "test",
+    "validate.mjs"
+  ],
+  "write": [
+    "output",
+    "output/unit-1.mjs",
+    "output/unit-2.mjs",
+    "output/unit-3.mjs",
+    "output/unit-4.mjs",
+    "output/unit-5.mjs"
+  ],
+  "validation": [
+    "node validate.mjs"
+  ]
+}
