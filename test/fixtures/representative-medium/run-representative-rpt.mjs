@@ -116,7 +116,7 @@ function validateConfig(config) {
     "Runtime paths are absent.");
   invariant(SHA.test(config.target_sha), "Target SHA must be exact.");
   invariant(isRecord(config.package) && typeof config.package.path === "string" &&
-    config.package.version === "0.8.1" && SHA256.test(config.package.sha256), "Package provenance is invalid.");
+    config.package.version === "0.8.2" && SHA256.test(config.package.sha256), "Package provenance is invalid.");
   invariant(SHA256.test(config.fixture_source_sha256), "Fixture source identity is invalid.");
   invariant(Array.isArray(config.units) && config.units.length === 5, "Exactly five units are required.");
   invariant(Array.isArray(config.expected_writes) && config.expected_writes.length === 5 &&
@@ -150,7 +150,7 @@ export async function prepareRepresentativeRuntime({ runtimeRoot, packagePath })
   const packageFile = resolve(packagePath);
   invariant((await stat(packageFile)).isFile(), "Package provenance path must identify a file.");
   const repositoryPackage = await json(join(REPOSITORY_ROOT, "package.json"));
-  invariant(repositoryPackage.version === "0.8.1", "Representative fixture requires package version 0.8.1.");
+  invariant(repositoryPackage.version === "0.8.2", "Representative fixture requires package version 0.8.2.");
   const template = await json(join(SOURCE_ROOT, "representative-config.template.json"));
   validateTemplate(template);
   const contractTemplate = await json(join(PROJECT_SOURCE, "luna-fabric.template.json"));

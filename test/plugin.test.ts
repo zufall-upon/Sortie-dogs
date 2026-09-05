@@ -3864,8 +3864,10 @@ test("an explicit coordinator selection replaces a root agent but never promotes
   });
 });
 
-test("a child coordinator request redispatches once to a fresh top-level session", async () => {
+test("a child coordinator request with stale assets redispatches once to a fresh top-level session", async () => {
   await withProject("child-fresh-root-redispatch", async (directory) => {
+    await mkdir(join(directory, ".opencode"));
+    await writeFile(join(directory, ".opencode", "sortie-dogs.version"), "0.3.33-readable-terminal-report-v1\n");
     let creates = 0;
     let prompts = 0;
     let deletes = 0;
@@ -4721,14 +4723,19 @@ test("a fresh coordinator recovers serial acceptance continuity from its strict 
   });
 });
 
-test("global stale marker blocks dispatch without aborting the coordinator turn", async () => {
+test("global stale marker warns once and allows worker dispatch", async () => {
   await withProject("global-asset-version-skew", async (directory) => {
     const globalRoot = process.env.OPENCODE_CONFIG_DIR!;
     await rm(globalRoot, { recursive: true, force: true });
     await mkdir(globalRoot, { recursive: true });
-    await writeFile(join(globalRoot, "sortie-dogs.version"), "0.3.33-readable-terminal-report-v1\n");
+    const marker = join(globalRoot, "sortie-dogs.version");
+    const staleMarker = "0.3.33-readable-terminal-report-v1\n";
+    await writeFile(marker, staleMarker);
+    const warnings: unknown[][] = [];
+    const originalWarn = console.warn;
     let aborts = 0;
     try {
+      console.warn = (...arguments_: unknown[]) => { warnings.push(arguments_); };
       const hooks = await SortieDogsPlugin({ directory, client: { session: {
         abort: async () => { aborts += 1; return { data: true }; },
       } } as never });
@@ -4736,14 +4743,55 @@ test("global stale marker blocks dispatch without aborting the coordinator turn"
         { sessionID: "root", agent: "dog-coordinator" },
         { message: { agent: "dog-coordinator", model: {} }, parts: [{ type: "text", text: "task" }] },
       );
-      await assert.rejects(() => hooks["tool.execute.before"]!(
+      await hooks["tool.execute.before"]!(
         { tool: "task", sessionID: "root", callID: "global-skewed-worker" },
         { args: { subagent_type: "dog-worker", prompt: readOnlyWorkerPrompt(directory) } },
-      ), (error: unknown) => isFreshSessionError(
-        error, "asset-contract-skew", "user-action-required", "restart-host-after-install",
-      ));
+      );
+      await hooks["tool.execute.after"]!(
+        { tool: "task", sessionID: "root", callID: "global-skewed-worker" },
+        {},
+      );
+      await hooks["tool.execute.before"]!(
+        { tool: "task", sessionID: "root", callID: "global-skewed-worker-again" },
+        { args: { subagent_type: "dog-worker", prompt: readOnlyWorkerPrompt(directory) } },
+      );
       assert.equal(aborts, 0);
+      assert.equal(warnings.length, 1);
+      assert.deepEqual(await readFile(marker), Buffer.from(staleMarker));
+      assert.match(String(warnings[0]![0]), /Worker dispatch will continue/u);
+      assert.match(String(warnings[0]![0]), /sortie-dogs init \./u);
+      assert.doesNotMatch(String(warnings[0]![0]), /restart|blocked/iu);
     } finally {
+      console.warn = originalWarn;
+      await rm(globalRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+test("current project marker takes precedence over a stale global marker", async () => {
+  await withProject("project-current-global-stale", async (directory) => {
+    const globalRoot = process.env.OPENCODE_CONFIG_DIR!;
+    await rm(globalRoot, { recursive: true, force: true });
+    await mkdir(globalRoot, { recursive: true });
+    await writeFile(join(globalRoot, "sortie-dogs.version"), "0.3.33-readable-terminal-report-v1\n");
+    await mkdir(join(directory, ".opencode"));
+    await writeFile(join(directory, ".opencode", "sortie-dogs.version"), `${RUNTIME_ASSET_VERSION}\n`);
+    const warnings: unknown[][] = [];
+    const originalWarn = console.warn;
+    try {
+      console.warn = (...arguments_: unknown[]) => { warnings.push(arguments_); };
+      const hooks = await SortieDogsPlugin({ directory });
+      await hooks["chat.message"]!(
+        { sessionID: "local-current-root", agent: "dog-coordinator" },
+        { message: { agent: "dog-coordinator", model: {} }, parts: [{ type: "text", text: "task" }] },
+      );
+      await hooks["tool.execute.before"]!(
+        { tool: "task", sessionID: "local-current-root", callID: "local-current-worker" },
+        { args: { subagent_type: "dog-worker", prompt: readOnlyWorkerPrompt(directory) } },
+      );
+      assert.equal(warnings.length, 0);
+    } finally {
+      console.warn = originalWarn;
       await rm(globalRoot, { recursive: true, force: true });
     }
   });
@@ -4790,7 +4838,7 @@ test("current global marker enables acceptance continuity enforcement", async ()
   });
 });
 
-test("present corrupt project markers override a current global marker and fail closed", async () => {
+test("present corrupt project markers override a current global marker but remain diagnostic", async () => {
   await withProject("project-marker-corruption", async (directory) => {
     const globalRoot = process.env.OPENCODE_CONFIG_DIR!;
     await rm(globalRoot, { recursive: true, force: true });
@@ -4799,178 +4847,74 @@ test("present corrupt project markers override a current global marker and fail 
     await mkdir(join(directory, ".opencode"));
     const marker = join(directory, ".opencode", "sortie-dogs.version");
     await writeFile(marker, "");
+    const warnings: unknown[][] = [];
+    const originalWarn = console.warn;
     try {
+      console.warn = (...arguments_: unknown[]) => { warnings.push(arguments_); };
       const hooks = await SortieDogsPlugin({ directory });
-      const rejectSession = async (sessionID: string) => {
+      const dispatch = async (sessionID: string, worker = "dog-worker") => {
         await hooks["chat.message"]!(
           { sessionID, agent: "dog-coordinator" },
           { message: { agent: "dog-coordinator", model: {} }, parts: [{ type: "text", text: "task" }] },
         );
-        await assert.rejects(() => hooks["tool.execute.before"]!(
+        const operation = () => hooks["tool.execute.before"]!(
           { tool: "task", sessionID, callID: `worker-${sessionID}` },
-          { args: { subagent_type: "dog-worker", prompt: readOnlyWorkerPrompt(directory) } },
-        ), (error: unknown) => isFreshSessionError(
-          error, "asset-contract-skew", "user-action-required", "restart-host-after-install",
-        ));
+          { args: { subagent_type: worker, prompt: readOnlyWorkerPrompt(directory) } },
+        );
+        if (worker === "dog-luna-worker") await assert.rejects(operation, /luna_worker_requires_admitted_descriptor/u);
+        else await operation();
       };
-      await rejectSession("empty-marker-root");
+      await dispatch("empty-marker-root");
       await rm(marker);
       await mkdir(marker);
-      await rejectSession("directory-marker-root");
+      await dispatch("directory-marker-root", "dog-luna-worker");
+      assert.equal(warnings.length, 2);
     } finally {
+      console.warn = originalWarn;
       await rm(globalRoot, { recursive: true, force: true });
     }
   });
 });
 
-test("asset version skew stays blocked until a fresh plugin session", async () => {
-  await withProject("asset-version-skew-block", async (directory) => {
+test("stale project marker overrides a current global marker without fresh-session side effects", async () => {
+  await withProject("asset-version-skew-diagnostic", async (directory) => {
+    const globalRoot = process.env.OPENCODE_CONFIG_DIR!;
+    await rm(globalRoot, { recursive: true, force: true });
+    await mkdir(globalRoot, { recursive: true });
+    await writeFile(join(globalRoot, "sortie-dogs.version"), `${RUNTIME_ASSET_VERSION}\n`);
     await mkdir(join(directory, ".opencode"));
     const marker = join(directory, ".opencode", "sortie-dogs.version");
     await writeFile(marker, "0.3.33-readable-terminal-report-v1\n");
-    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
-    const hooks = await SortieDogsPlugin({ directory });
-    await hooks["chat.message"]!(
-      { sessionID: "root", agent: "dog-coordinator" },
-      { message: { agent: "dog-coordinator", model: {} }, parts: [{ type: "text", text: "task" }] },
-    );
-    const dispatch = (sessionID = "root", prompt = "role: implementation") => hooks["tool.execute.before"]!(
-      { tool: "task", sessionID, callID: `skewed-worker-${sessionID}` },
-      { args: { subagent_type: "dog-worker", prompt } },
-    );
-    await assert.rejects(dispatch, (error: unknown) => isFreshSessionError(
-      error, "asset-contract-skew", "user-action-required", "restart-host-after-install",
-    ));
-    await writeFile(marker, `${RUNTIME_ASSET_VERSION}\n`);
-    await assert.rejects(dispatch, (error: unknown) => isFreshSessionError(
-      error, "asset-contract-skew", "user-action-required", "open-fresh-root",
-    ));
-    await hooks["chat.message"]!(
-      { sessionID: "fresh-root", agent: "dog-coordinator" },
-      { message: { agent: "dog-coordinator", model: {} }, parts: [{ type: "text", text: "task" }] },
-    );
-    await dispatch("fresh-root", readOnlyWorkerPrompt(directory));
-  });
-});
-
-test("a repaired asset skew redispatches the retained request to one fresh root", async () => {
-  await withProject("asset-version-skew-redispatch", async (directory) => {
-    await mkdir(join(directory, ".opencode"));
-    const marker = join(directory, ".opencode", "sortie-dogs.version");
-    await writeFile(marker, "0.3.33-readable-terminal-report-v1\n");
-    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
     let creates = 0;
     let prompts = 0;
     let aborts = 0;
-    let promptRequest: Record<string, unknown> | undefined;
-    const hooks = await SortieDogsPlugin({ directory, client: { session: {
-      get: async ({ path }: { path: { id: string } }) => ({ data: { id: path.id, agent: "dog-coordinator" } }),
-      create: async () => { creates += 1; return { data: { id: "repaired-root" } }; },
-      abort: async () => { aborts += 1; return { data: true }; },
-      promptAsync: async (request: Record<string, unknown>) => {
-        prompts += 1;
-        promptRequest = request;
-        return { data: true };
-      },
-    } } as never });
-    await hooks["chat.message"]!(
-      { sessionID: "stale-root", agent: "dog-coordinator" },
-      {
-        message: { agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
-        parts: [{ type: "text", text: "continue benchmark from durable handoff" }],
-      },
-    );
-    const dispatch = (callID: string) => hooks["tool.execute.before"]!(
-      { tool: "task", sessionID: "stale-root", callID },
-      { args: { subagent_type: "dog-worker", prompt: readOnlyWorkerPrompt(directory) } },
-    );
-    await assert.rejects(
-      () => dispatch("before-repair"),
-      (error: unknown) => isFreshSessionError(
-        error, "asset-contract-skew", "user-action-required", "restart-host-after-install",
-      ),
-    );
-    assert.equal(creates, 0);
-
-    await writeFile(marker, `${RUNTIME_ASSET_VERSION}\n`);
-    const redispatched = (error: unknown) => {
-      assert.ok(isFreshSessionError(error, "asset-contract-skew", "redispatched"));
-      assert.ok(error instanceof FreshSessionRequiredError && error.result.status === "redispatched");
-      assert.equal(error.result.target_session_id, "repaired-root");
-      return true;
-    };
-    await assert.rejects(() => dispatch("after-repair"), redispatched);
-    await assert.rejects(() => dispatch("duplicate-after-repair"), redispatched);
-
-    assert.equal(creates, 1);
-    assert.equal(prompts, 1);
-    assert.equal(aborts, 0);
-    assert.deepEqual(promptRequest, {
-      path: { id: "repaired-root" },
-      query: { directory },
-      body: {
-        agent: "dog-coordinator",
-        parts: [{ type: "text", text: "continue benchmark from durable handoff" }],
-      },
-    });
-  });
-});
-
-test("asset skew returning during root creation deletes the unprompted session", async () => {
-  await withProject("asset-version-skew-create-race", async (directory) => {
-    await mkdir(join(directory, ".opencode"));
-    const marker = join(directory, ".opencode", "sortie-dogs.version");
-    await writeFile(marker, "0.3.33-readable-terminal-report-v1\n");
-    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
-    let creates = 0;
-    let prompts = 0;
     let deletes = 0;
+    const warnings: unknown[][] = [];
+    const originalWarn = console.warn;
     const hooks = await SortieDogsPlugin({ directory, client: { session: {
-      get: async ({ path }: { path: { id: string } }) => ({ data: { id: path.id, agent: "dog-coordinator" } }),
-      create: async () => {
-        creates += 1;
-        if (creates === 1) await writeFile(marker, "0.3.33-readable-terminal-report-v1\n");
-        return { data: { id: `raced-root-${creates}` } };
-      },
+      create: async () => { creates += 1; return { data: { id: "unexpected-root" } }; },
+      abort: async () => { aborts += 1; return { data: true }; },
       promptAsync: async () => { prompts += 1; return { data: true }; },
       delete: async () => { deletes += 1; return { data: true }; },
     } } as never });
-    await hooks["chat.message"]!(
-      { sessionID: "stale-root", agent: "dog-coordinator" },
-      {
-        message: { agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
-        parts: [{ type: "text", text: "continue benchmark" }],
-      },
-    );
-    await writeFile(marker, `${RUNTIME_ASSET_VERSION}\n`);
-    await assert.rejects(
-      () => hooks["tool.execute.before"]!(
-        { tool: "task", sessionID: "stale-root", callID: "marker-race" },
-        { args: { subagent_type: "dog-worker", prompt: readOnlyWorkerPrompt(directory) } },
-      ),
-      (error: unknown) => isFreshSessionError(
-        error, "asset-contract-skew", "user-action-required", "restart-host-after-install",
-      ),
-    );
-    assert.equal(prompts, 0);
-    assert.equal(deletes, 1);
-
-    await writeFile(marker, `${RUNTIME_ASSET_VERSION}\n`);
-    await assert.rejects(
-      () => hooks["tool.execute.before"]!(
-        { tool: "task", sessionID: "stale-root", callID: "after-marker-race-repair" },
-        { args: { subagent_type: "dog-worker", prompt: readOnlyWorkerPrompt(directory) } },
-      ),
-      (error: unknown) => {
-        assert.ok(isFreshSessionError(error, "asset-contract-skew", "redispatched"));
-        assert.ok(error instanceof FreshSessionRequiredError && error.result.status === "redispatched");
-        assert.equal(error.result.target_session_id, "raced-root-2");
-        return true;
-      },
-    );
-    assert.equal(creates, 2);
-    assert.equal(prompts, 1);
-    assert.equal(deletes, 1);
+    try {
+      console.warn = (...arguments_: unknown[]) => { warnings.push(arguments_); };
+      for (const sessionID of ["fresh-root-a", "fresh-root-b"]) {
+        await hooks["chat.message"]!(
+          { sessionID, agent: "dog-coordinator" },
+          { message: { agent: "dog-coordinator", model: {} }, parts: [{ type: "text", text: "task" }] },
+        );
+        await hooks["tool.execute.before"]!(
+          { tool: "task", sessionID, callID: `skewed-worker-${sessionID}` },
+          { args: { subagent_type: "dog-worker", prompt: readOnlyWorkerPrompt(directory) } },
+        );
+      }
+      assert.equal(warnings.length, 2);
+      assert.deepEqual({ creates, prompts, deletes, aborts }, { creates: 0, prompts: 0, deletes: 0, aborts: 0 });
+    } finally {
+      console.warn = originalWarn;
+      await rm(globalRoot, { recursive: true, force: true });
+    }
   });
 });
 

@@ -1530,13 +1530,6 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           await deleteFreshSession(targetSessionID);
           return freshSessionFallback(reason, fallbackAction);
         }
-        if (reason === "asset-contract-skew") {
-          project ??= await createProjectPaths(resolveProjectRoot(input));
-          if (await currentAssetVersionStatus(project) !== "current") {
-            await deleteFreshSession(targetSessionID);
-            return freshSessionFallback(reason, "restart-host-after-install");
-          }
-        }
         const sent = await send.call(input.client!.session, {
           path: { id: targetSessionID },
           query: { directory: input.worktree ?? input.directory },
@@ -1628,11 +1621,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     return loading;
   }
 
-  /**
-   * Installed agents and this plugin implement two halves of one contract. A project that installed
-   * a different asset version is sticky for this plugin instance. Reinstalling files cannot update an
-   * already-loaded plugin, so worker dispatch remains blocked until the host restarts.
-   */
+  /** Agent asset markers are local-first diagnostics; runtime enforcement belongs to this loaded plugin. */
   async function readAssetVersionMarker(path: string): Promise<
     { readonly kind: "absent" } | { readonly kind: "corrupt" } | { readonly kind: "present"; readonly value: string }
   > {
@@ -1673,7 +1662,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     if (status === "mismatch") {
       console.warn(
         `Sortie-dogs: installed agent assets do not match ${RUNTIME_ASSET_VERSION}. ` +
-        "Repair the installed assets, then restart the OpenCode host.",
+        "Worker dispatch will continue; run `sortie-dogs init .` to refresh project assets.",
       );
     }
     return status;
@@ -4621,19 +4610,6 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           isRecord(output.args)) {
           await ensureLoaded();
           const assetVersionStatus = await pinAssetVersion(toolInput.sessionID);
-          if (assetVersionStatus === "mismatch") {
-            await continuation.stopAutomaticRecovery(toolInput.sessionID, false);
-            const liveStatus = project === undefined ? "mismatch" : await currentAssetVersionStatus(project);
-            const result = liveStatus === "current"
-              ? await redispatchFreshCoordinator(
-                  toolInput.sessionID,
-                  "asset-contract-skew",
-                  coordinatorPrompts.get(toolInput.sessionID),
-                  "open-fresh-root",
-                )
-              : freshSessionFallback("asset-contract-skew", "restart-host-after-install");
-            throw new FreshSessionRequiredError(result);
-          }
           let prompt = typeof output.args.prompt === "string" ? output.args.prompt : "";
           const lookup = parallelDescriptorLookup(prompt);
           if (lookup !== undefined) {
