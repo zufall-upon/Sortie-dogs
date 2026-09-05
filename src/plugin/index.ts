@@ -210,7 +210,10 @@ export type HandoffDenialReason =
   | "contract-invalid";
 
 export type FreshSessionReason = "child-lineage" | "asset-contract-skew";
-export type FreshSessionAction = "open-fresh-root" | "install-assets-then-open-fresh-root";
+export type FreshSessionAction =
+  | "open-fresh-root"
+  | "install-assets-then-open-fresh-root"
+  | "restart-host-after-install";
 export type FreshSessionResult =
   | Readonly<{
       status: "redispatched";
@@ -1531,7 +1534,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           project ??= await createProjectPaths(resolveProjectRoot(input));
           if (await currentAssetVersionStatus(project) !== "current") {
             await deleteFreshSession(targetSessionID);
-            return freshSessionFallback(reason, "install-assets-then-open-fresh-root");
+            return freshSessionFallback(reason, "restart-host-after-install");
           }
         }
         const sent = await send.call(input.client!.session, {
@@ -1562,7 +1565,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       entry.settled = true;
       if (
         result.status === "user-action-required" &&
-        result.action === "install-assets-then-open-fresh-root" &&
+        (result.action === "install-assets-then-open-fresh-root" || result.action === "restart-host-after-install") &&
         freshSessionRedispatches.get(key) === entry
       ) {
         freshSessionRedispatches.delete(key);
@@ -1628,7 +1631,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   /**
    * Installed agents and this plugin implement two halves of one contract. A project that installed
    * a different asset version is sticky for this plugin instance. Reinstalling files cannot update an
-   * already-running coordinator prompt, so worker dispatch remains blocked until a fresh session loads.
+   * already-loaded plugin, so worker dispatch remains blocked until the host restarts.
    */
   async function readAssetVersionMarker(path: string): Promise<
     { readonly kind: "absent" } | { readonly kind: "corrupt" } | { readonly kind: "present"; readonly value: string }
@@ -1670,7 +1673,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     if (status === "mismatch") {
       console.warn(
         `Sortie-dogs: installed agent assets do not match ${RUNTIME_ASSET_VERSION}. ` +
-        "Repair the marker, then start a fresh coordinator session.",
+        "Repair the installed assets, then restart the OpenCode host.",
       );
     }
     return status;
@@ -4619,7 +4622,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           await ensureLoaded();
           const assetVersionStatus = await pinAssetVersion(toolInput.sessionID);
           if (assetVersionStatus === "mismatch") {
-            await continuation.stopAutomaticRecovery(toolInput.sessionID);
+            await continuation.stopAutomaticRecovery(toolInput.sessionID, false);
             const liveStatus = project === undefined ? "mismatch" : await currentAssetVersionStatus(project);
             const result = liveStatus === "current"
               ? await redispatchFreshCoordinator(
@@ -4628,7 +4631,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
                   coordinatorPrompts.get(toolInput.sessionID),
                   "open-fresh-root",
                 )
-              : freshSessionFallback("asset-contract-skew", "install-assets-then-open-fresh-root");
+              : freshSessionFallback("asset-contract-skew", "restart-host-after-install");
             throw new FreshSessionRequiredError(result);
           }
           let prompt = typeof output.args.prompt === "string" ? output.args.prompt : "";

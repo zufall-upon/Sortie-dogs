@@ -94,7 +94,7 @@ function isFreshSessionError(
   error: unknown,
   reason: "child-lineage" | "asset-contract-skew",
   status: "redispatched" | "user-action-required" = "user-action-required",
-  action?: "open-fresh-root" | "install-assets-then-open-fresh-root",
+  action?: "open-fresh-root" | "install-assets-then-open-fresh-root" | "restart-host-after-install",
 ): boolean {
   return error instanceof FreshSessionRequiredError && error.result.reason === reason &&
     error.result.status === status && error.result.retry_same_session === false &&
@@ -4721,14 +4721,17 @@ test("a fresh coordinator recovers serial acceptance continuity from its strict 
   });
 });
 
-test("global stale marker blocks dispatch when no project marker exists", async () => {
+test("global stale marker blocks dispatch without aborting the coordinator turn", async () => {
   await withProject("global-asset-version-skew", async (directory) => {
     const globalRoot = process.env.OPENCODE_CONFIG_DIR!;
     await rm(globalRoot, { recursive: true, force: true });
     await mkdir(globalRoot, { recursive: true });
     await writeFile(join(globalRoot, "sortie-dogs.version"), "0.3.33-readable-terminal-report-v1\n");
+    let aborts = 0;
     try {
-      const hooks = await SortieDogsPlugin({ directory });
+      const hooks = await SortieDogsPlugin({ directory, client: { session: {
+        abort: async () => { aborts += 1; return { data: true }; },
+      } } as never });
       await hooks["chat.message"]!(
         { sessionID: "root", agent: "dog-coordinator" },
         { message: { agent: "dog-coordinator", model: {} }, parts: [{ type: "text", text: "task" }] },
@@ -4737,8 +4740,9 @@ test("global stale marker blocks dispatch when no project marker exists", async 
         { tool: "task", sessionID: "root", callID: "global-skewed-worker" },
         { args: { subagent_type: "dog-worker", prompt: readOnlyWorkerPrompt(directory) } },
       ), (error: unknown) => isFreshSessionError(
-        error, "asset-contract-skew", "user-action-required", "install-assets-then-open-fresh-root",
+        error, "asset-contract-skew", "user-action-required", "restart-host-after-install",
       ));
+      assert.equal(aborts, 0);
     } finally {
       await rm(globalRoot, { recursive: true, force: true });
     }
@@ -4806,7 +4810,7 @@ test("present corrupt project markers override a current global marker and fail 
           { tool: "task", sessionID, callID: `worker-${sessionID}` },
           { args: { subagent_type: "dog-worker", prompt: readOnlyWorkerPrompt(directory) } },
         ), (error: unknown) => isFreshSessionError(
-          error, "asset-contract-skew", "user-action-required", "install-assets-then-open-fresh-root",
+          error, "asset-contract-skew", "user-action-required", "restart-host-after-install",
         ));
       };
       await rejectSession("empty-marker-root");
@@ -4835,7 +4839,7 @@ test("asset version skew stays blocked until a fresh plugin session", async () =
       { args: { subagent_type: "dog-worker", prompt } },
     );
     await assert.rejects(dispatch, (error: unknown) => isFreshSessionError(
-      error, "asset-contract-skew", "user-action-required", "install-assets-then-open-fresh-root",
+      error, "asset-contract-skew", "user-action-required", "restart-host-after-install",
     ));
     await writeFile(marker, `${RUNTIME_ASSET_VERSION}\n`);
     await assert.rejects(dispatch, (error: unknown) => isFreshSessionError(
@@ -4857,10 +4861,12 @@ test("a repaired asset skew redispatches the retained request to one fresh root"
     await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
     let creates = 0;
     let prompts = 0;
+    let aborts = 0;
     let promptRequest: Record<string, unknown> | undefined;
     const hooks = await SortieDogsPlugin({ directory, client: { session: {
       get: async ({ path }: { path: { id: string } }) => ({ data: { id: path.id, agent: "dog-coordinator" } }),
       create: async () => { creates += 1; return { data: { id: "repaired-root" } }; },
+      abort: async () => { aborts += 1; return { data: true }; },
       promptAsync: async (request: Record<string, unknown>) => {
         prompts += 1;
         promptRequest = request;
@@ -4881,7 +4887,7 @@ test("a repaired asset skew redispatches the retained request to one fresh root"
     await assert.rejects(
       () => dispatch("before-repair"),
       (error: unknown) => isFreshSessionError(
-        error, "asset-contract-skew", "user-action-required", "install-assets-then-open-fresh-root",
+        error, "asset-contract-skew", "user-action-required", "restart-host-after-install",
       ),
     );
     assert.equal(creates, 0);
@@ -4898,6 +4904,7 @@ test("a repaired asset skew redispatches the retained request to one fresh root"
 
     assert.equal(creates, 1);
     assert.equal(prompts, 1);
+    assert.equal(aborts, 0);
     assert.deepEqual(promptRequest, {
       path: { id: "repaired-root" },
       query: { directory },
@@ -4942,7 +4949,7 @@ test("asset skew returning during root creation deletes the unprompted session",
         { args: { subagent_type: "dog-worker", prompt: readOnlyWorkerPrompt(directory) } },
       ),
       (error: unknown) => isFreshSessionError(
-        error, "asset-contract-skew", "user-action-required", "install-assets-then-open-fresh-root",
+        error, "asset-contract-skew", "user-action-required", "restart-host-after-install",
       ),
     );
     assert.equal(prompts, 0);

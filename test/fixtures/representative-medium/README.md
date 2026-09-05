@@ -18,7 +18,7 @@ validation command.
 Prepare a runtime copy without running either route:
 
 ```text
-node test/fixtures/representative-medium/run-representative-rpt.mjs --prepare --runtime-root _testenv/representative-medium --package _testenv/sortie-dogs-0.8.0.tgz
+node test/fixtures/representative-medium/run-representative-rpt.mjs --prepare --runtime-root _testenv/representative-medium --package _testenv/sortie-dogs-0.8.1.tgz
 ```
 
 The command creates a deterministic nested Git baseline, `representative-config.json`, and an exact

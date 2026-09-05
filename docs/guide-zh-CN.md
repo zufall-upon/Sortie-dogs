@@ -294,13 +294,16 @@ canonical validation 后独立审查高风险候选项。二者都不负责实�
 
 ## 更新与迁移
 
-[Release v0.8.0](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.8.0)
+[Release v0.8.1](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.8.1)
 
 将依赖替换为新版 Release asset 后，在目标项目根目录再次运行：
 
 ```sh
 npx sortie-dogs init .
 ```
+
+初始化完成后，请在恢复 coordinator 或新建 session 前完全重启 OpenCode host。plugin module 按
+process 加载，因此仅新建 session 无法载入更新。
 
 `init` 可重复安全执行。它会更新 Sortie-dogs 自有文件、迁移能够识别的旧 runtime file，并将
 版本记录到 `.opencode/sortie-dogs.version`。遇到冲突或无法识别的文件时，初始化不会改动它们，

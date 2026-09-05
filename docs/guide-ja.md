@@ -306,13 +306,16 @@ stage、commit、ユーザー対応を行わない。
 
 ## 更新と移行
 
-[Release v0.8.0](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.8.0)
+[Release v0.8.1](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.8.1)
 
 依存 asset を新しい release に更新後、対象 project root で再実行する。
 
 ```sh
 npx sortie-dogs init .
 ```
+
+初期化後、coordinator の再開または新規 session 作成前に OpenCode host を完全に再起動する。
+plugin module は process 単位で読み込まれるため、新規 session だけでは更新されない。
 
 `init` は冪等。Sortie-dogs 所有 file を更新し、認識済み旧 runtime file を移行して、version を
 `.opencode/sortie-dogs.version` に記録する。競合または未認識 file は変更せず安全に停止する。

@@ -24,7 +24,7 @@ Requirements: Node.js 22.6 or newer, npm, and OpenCode.
 
 Guides: [日本語](docs/guide-ja.md) · [简体中文](docs/guide-zh-CN.md) · [CLI testing](docs/cli-testing.md)
 
-Release: [v0.8.0](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.8.0)
+Release: [v0.8.1](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.8.1)
 
 ## Quick start
 
@@ -407,6 +407,9 @@ After replacing the dependency with a newer release asset, run:
 ```sh
 npx sortie-dogs init .
 ```
+
+After initialization, fully restart the OpenCode host before resuming a coordinator or opening a
+fresh session. Plugin modules are process-scoped, so a new session alone cannot load the update.
 
 `init` is idempotent. It updates files owned by Sortie-dogs, migrates recognized
 older runtime files, and records the installed version in

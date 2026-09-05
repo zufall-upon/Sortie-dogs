@@ -224,7 +224,7 @@ export interface ContinuationHooks {
   toolStarted(sessionID: string, tool: string): void;
   blocksTool(sessionID: string): boolean;
   sessionIdle(sessionID: string): Promise<void>;
-  stopAutomaticRecovery(sessionID: string): Promise<void>;
+  stopAutomaticRecovery(sessionID: string, abortSession?: boolean): Promise<void>;
   recoverStalledTask(
     sessionID: string,
     callIDs: readonly string[],
@@ -1075,7 +1075,7 @@ export function createContinuationHooks(
     stoppedSessions.delete(sessionID);
   }
 
-  async function stopAutomaticRecovery(sessionID: string): Promise<void> {
+  async function stopAutomaticRecovery(sessionID: string, abortSession = true): Promise<void> {
     const state = sessions.get(sessionID);
     if (state !== undefined) {
       clearTimer(state.cooldownTimer);
@@ -1096,7 +1096,7 @@ export function createContinuationHooks(
     while (stoppedSessions.size > MAX_TRACKED_SESSIONS) {
       stoppedSessions.delete(stoppedSessions.values().next().value!);
     }
-    const abort = client?.session?.abort;
+    const abort = abortSession ? client?.session?.abort : undefined;
     if (abort !== undefined) {
       await abort.call(client!.session, {
         path: { id: sessionID },
