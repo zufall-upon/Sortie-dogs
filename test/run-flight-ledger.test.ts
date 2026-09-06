@@ -5,7 +5,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { EvidenceCapsuleStore, type EvidenceCapsule } from "../src/core/evidence-capsule.ts";
-import { RunFlightLedger, RunFlightLedgerError, reconstructRunFlightLedger, type FlightObservation, type RunFlightEvent } from "../src/core/run-flight-ledger.ts";
+import { RunFlightLedger, RunFlightLedgerError, reconstructRunFlightLedger, type FlightObservation, type RunFlightEvent, type FlightResourceBudget, type RecoveryKind } from "../src/core/run-flight-ledger.ts";
 import { compileAcceptanceCoverage, type AcceptanceCompileProposal } from "../src/core/acceptance-compiler.ts";
 
 const digest = (character: string): string => `sha256:${character.repeat(64)}`;
@@ -62,6 +62,7 @@ test("appends, reopens, and reconstructs two real waves with hash-referenced cap
   assert.equal(state.observations[1].estimated_cost.usd, null);
   const finalRead = await (await RunFlightLedger.open(file, access)).read();
   assert.equal(finalRead.state.terminal_disposition, "succeeded");
+  assert.deepEqual(finalRead.state, state);
   const completedLedger = await readFile(file, "utf8");
   await assert.rejects(
     reopened.append(event({ kind: "route.selected", at, route_id: "r3", candidate_id: "c2", role: "review", model: "m3", variant: null, reason: "planning" })),
@@ -149,4 +150,108 @@ test("persists rejected and accepted compile identities across reopen and keeps 
   await reopened.append(event({ kind: "run.planned", at, run_id: "run-plan", initial_candidate_id: "c0", budget_limits: { recovery_actions: 1, probe_iterations: 1, model_attempts: 1 } }));
   assert.deepEqual((await reopened.read()).state.plan_decisions, acceptedState.plan_decisions);
   assert.equal(before.includes("observable"), false);
+});
+
+async function resourceFixture(name: string, limits: FlightResourceBudget = { time_ms: 100, cost_usd: 1 }) {
+  const value = await fixture(name);
+  await value.ledger.append({ kind: "run.planned", at, run_id: name, initial_candidate_id: "c0",
+    budget_limits: { recovery_actions: 100, probe_iterations: 100, model_attempts: 100 }, resource_budget_limits: limits });
+  await value.ledger.append({ kind: "route.selected", at, route_id: "route", candidate_id: "c0",
+    role: "implementation", model: "initial", variant: null, reason: "implementation" });
+  await value.ledger.append({ kind: "wave.opened", at, wave_id: "wave", wave_index: 1, candidate_id: "c0" });
+  for (const unit_id of ["u1", "u2"]) await value.ledger.append({ kind: "unit.opened", at, unit_id,
+    wave_id: "wave", candidate_id: "c0", references: { capsule_ids: [], artifact_ids: [] } });
+  return value;
+}
+
+function resourceStart(unit: string, id: string, predecessor: string | null, request?: FlightResourceBudget,
+  kind: "implementation" | RecoveryKind = "implementation"): RunFlightEvent {
+  return { kind: "attempt.started", at, attempt_id: id, predecessor_attempt_id: predecessor, unit_id: unit,
+    candidate_id: "c0", route_id: "route", role: kind === "model_rescue" ? "rescue" : "implementation",
+    selected_model: `model-${id}`, selected_variant: null, child_id: `child-${id}`, call_id: `call-${id}`,
+    budget_charge: { kind, recovery_actions: kind === "implementation" ? 0 : 1,
+      probe_iterations: kind === "adaptive_probe" ? 1 : 0,
+      model_attempts: kind === "adaptive_probe" || kind === "read_only_diagnosis" ? 0 : 1 },
+    ...(request === undefined ? {} : { resource_budget_request: request }) };
+}
+
+function resourceFinish(id: string, time: number | null, cost: number | null): RunFlightEvent {
+  return { kind: "attempt.finished", at, attempt_id: id, observed_model: `observed-${id}`, observed_variant: null,
+    failure: { category: "implementation", code: "bounded-failure" }, disposition: "continue",
+    observation: { ...unknownObservation("recovery"), duration_ms: time,
+      estimated_cost: { usd: cost, provenance: cost === null ? "unknown" : "calculated" } },
+    references: { capsule_ids: [], artifact_ids: [] } };
+}
+
+test("resource reservations survive reopen and serialize competing instances without overspending", async () => {
+  const { ledger, file, access } = await resourceFixture("resource-concurrency");
+  const other = await RunFlightLedger.open(file, access);
+  const outcomes = await Promise.allSettled([
+    ledger.append(resourceStart("u1", "a1", null, { time_ms: 75, cost_usd: 0.75 })),
+    other.append(resourceStart("u2", "a2", null, { time_ms: 75, cost_usd: 0.75 })),
+  ]);
+  assert.equal(outcomes.filter(({ status }) => status === "fulfilled").length, 1);
+  const rejected = outcomes.find(({ status }) => status === "rejected") as PromiseRejectedResult;
+  assert.ok(rejected.reason instanceof RunFlightLedgerError);
+  assert.equal(rejected.reason.code, "budget");
+  const reopened = await (await RunFlightLedger.open(file, access)).read();
+  assert.deepEqual(reopened.state.resource_budget_reserved, { time_ms: 75, cost_usd: 0.75 });
+  assert.deepEqual(reopened.state.resource_budget_consumed, { time_ms: 0, cost_usd: 0 });
+  assert.equal(reopened.records.filter(({ event: entry }) => entry.kind === "attempt.started").length, 1);
+});
+
+test("all recovery kinds and model changes share consumed time and cost across restart", async () => {
+  const { ledger, file, access } = await resourceFixture("resource-lineage");
+  const kinds = ["implementation", "normal_remediation", "adaptive_probe", "read_only_diagnosis", "model_rescue"] as const;
+  for (const [index, kind] of kinds.entries()) {
+    const reopened = await RunFlightLedger.open(file, access);
+    await reopened.append(resourceStart("u1", `a${index}`, index === 0 ? null : `a${index - 1}`,
+      { time_ms: 20, cost_usd: 0.125 }, kind));
+    await reopened.append(resourceFinish(`a${index}`, 20, 0.125));
+  }
+  const before = await readFile(file, "utf8");
+  const state = (await ledger.read()).state;
+  assert.deepEqual(state.resource_budget_consumed, { time_ms: 100, cost_usd: 0.625 });
+  assert.deepEqual(state.resource_budget_reserved, { time_ms: 0, cost_usd: 0 });
+  await assert.rejects(ledger.append(resourceStart("u1", "excess", "a4", { time_ms: 1, cost_usd: 0 }, "model_rescue")),
+    (error: unknown) => error instanceof RunFlightLedgerError && error.code === "budget");
+  assert.equal(await readFile(file, "utf8"), before);
+  assert.deepEqual((await (await RunFlightLedger.open(file, access)).read()).state, state);
+});
+
+test("unknown usage and actual overruns are recorded, never zero-filled or discarded", async () => {
+  for (const [name, time, cost] of [["unknown-time", null, 0.125], ["unknown-cost", 10, null],
+    ["time-overrun", 101, 0.125], ["cost-overrun", 10, 1.125]] as const) {
+    const { ledger, file, access } = await resourceFixture(name);
+    await ledger.append(resourceStart("u1", "a1", null, { time_ms: 10, cost_usd: 0.125 }));
+    await ledger.append(resourceFinish("a1", time, cost));
+    const reopened = await RunFlightLedger.open(file, access);
+    assert.deepEqual((await reopened.read()).state.resource_budget_consumed, { time_ms: time, cost_usd: cost });
+    const before = await readFile(file, "utf8");
+    await assert.rejects(reopened.append(resourceStart("u1", "a2", "a1", { time_ms: 1, cost_usd: 0.125 })),
+      (error: unknown) => error instanceof RunFlightLedgerError && error.code === "budget");
+    assert.equal(await readFile(file, "utf8"), before);
+    assert.equal((await reopened.read()).records.filter(({ event: entry }) => entry.kind === "attempt.finished").length, 1);
+  }
+});
+
+test("resource budgets reject missing reservations, cost exhaustion, invalid values, and sum overflow", async () => {
+  const { ledger, file } = await resourceFixture("resource-invalid", { time_ms: Number.MAX_SAFE_INTEGER, cost_usd: Number.MAX_VALUE });
+  const before = await readFile(file, "utf8");
+  await assert.rejects(ledger.append(resourceStart("u1", "missing", null)),
+    (error: unknown) => error instanceof RunFlightLedgerError && error.code === "budget");
+  for (const request of [{ time_ms: -1, cost_usd: 0 }, { time_ms: 0.5, cost_usd: 0 },
+    { time_ms: 0, cost_usd: Infinity }, { time_ms: 0, cost_usd: -1 }]) {
+    await assert.rejects(ledger.append(resourceStart("u1", "invalid", null, request)),
+      (error: unknown) => error instanceof RunFlightLedgerError && error.code === "invalid");
+  }
+  assert.equal(await readFile(file, "utf8"), before);
+  await ledger.append(resourceStart("u1", "large", null, { time_ms: Number.MAX_SAFE_INTEGER, cost_usd: Number.MAX_VALUE }));
+  for (const request of [{ time_ms: 1, cost_usd: 0 }, { time_ms: 0, cost_usd: Number.MAX_VALUE }]) {
+    await assert.rejects(ledger.append(resourceStart("u2", "overflow", null, request)),
+      (error: unknown) => error instanceof RunFlightLedgerError && error.code === "budget");
+  }
+  const costFixture = await resourceFixture("resource-cost-limit");
+  await assert.rejects(costFixture.ledger.append(resourceStart("u1", "cost", null, { time_ms: 1, cost_usd: 1.125 })),
+    (error: unknown) => error instanceof RunFlightLedgerError && error.code === "budget");
 });

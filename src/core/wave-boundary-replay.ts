@@ -40,6 +40,9 @@ export interface WaveBoundaryIdentity {
 export interface WaveBoundaryRecoveryBudget {
   readonly budget_consumed: FlightBudgetLimits;
   readonly budget_limits: FlightBudgetLimits;
+  readonly resource_budget_limits: RunFlightState["resource_budget_limits"];
+  readonly resource_budget_consumed: RunFlightState["resource_budget_consumed"];
+  readonly resource_budget_reserved: RunFlightState["resource_budget_reserved"];
   readonly validated_event_count: number;
   readonly validated_tail_hash: string;
 }
@@ -122,6 +125,9 @@ export function selectWaveBoundaryReplay(records: unknown, options?: unknown): W
     recovery_budget: {
       budget_consumed: { ...validated.state.budget_consumed },
       budget_limits: { ...validated.state.budget_limits },
+      resource_budget_limits: validated.state.resource_budget_limits === null ? null : { ...validated.state.resource_budget_limits },
+      resource_budget_consumed: { ...validated.state.resource_budget_consumed },
+      resource_budget_reserved: { ...validated.state.resource_budget_reserved },
       validated_event_count: validated.records.length,
       validated_tail_hash: validated.records[validated.records.length - 1].event_hash,
     },

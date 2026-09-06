@@ -28,6 +28,16 @@ export interface FlightBudgetCharge extends FlightBudgetLimits {
   readonly kind: "implementation" | RecoveryKind;
 }
 
+export interface FlightResourceBudget {
+  readonly time_ms: number;
+  readonly cost_usd: number;
+}
+
+export interface FlightResourceUsage {
+  readonly time_ms: number | null;
+  readonly cost_usd: number | null;
+}
+
 export interface FlightReferenceSet {
   readonly capsule_ids: readonly string[];
   readonly artifact_ids: readonly string[];
@@ -51,12 +61,12 @@ export interface FlightObservation {
 interface EventBase { readonly at: string; }
 
 export type RunFlightEvent =
-  | (EventBase & { readonly kind: "run.planned"; readonly run_id: string; readonly initial_candidate_id: string; readonly budget_limits: FlightBudgetLimits })
+  | (EventBase & { readonly kind: "run.planned"; readonly run_id: string; readonly initial_candidate_id: string; readonly budget_limits: FlightBudgetLimits; readonly resource_budget_limits?: FlightResourceBudget })
   | (EventBase & { readonly kind: "plan.compiled"; readonly plan_id: string; readonly proposal_id: string; readonly decision: "accepted" | "rejected"; readonly gap_codes: readonly AcceptanceCompileGapCode[] })
   | (EventBase & { readonly kind: "route.selected"; readonly route_id: string; readonly candidate_id: string; readonly role: FlightRole; readonly model: string; readonly variant: string | null; readonly reason: "planning" | "implementation" | RecoveryKind })
   | (EventBase & { readonly kind: "wave.opened"; readonly wave_id: string; readonly wave_index: number; readonly candidate_id: string })
   | (EventBase & { readonly kind: "unit.opened"; readonly unit_id: string; readonly wave_id: string; readonly candidate_id: string; readonly references: FlightReferenceSet })
-  | (EventBase & { readonly kind: "attempt.started"; readonly attempt_id: string; readonly predecessor_attempt_id: string | null; readonly unit_id: string; readonly candidate_id: string; readonly route_id: string; readonly role: FlightRole; readonly selected_model: string; readonly selected_variant: string | null; readonly child_id: string | null; readonly call_id: string; readonly budget_charge: FlightBudgetCharge })
+  | (EventBase & { readonly kind: "attempt.started"; readonly attempt_id: string; readonly predecessor_attempt_id: string | null; readonly unit_id: string; readonly candidate_id: string; readonly route_id: string; readonly role: FlightRole; readonly selected_model: string; readonly selected_variant: string | null; readonly child_id: string | null; readonly call_id: string; readonly budget_charge: FlightBudgetCharge; readonly resource_budget_request?: FlightResourceBudget })
   | (EventBase & { readonly kind: "attempt.finished"; readonly attempt_id: string; readonly observed_model: string | null; readonly observed_variant: string | null; readonly failure: { readonly category: FailureCategory; readonly code: string } | null; readonly disposition: TerminalDisposition; readonly observation: FlightObservation; readonly references: FlightReferenceSet })
   | (EventBase & { readonly kind: "recovery.recorded"; readonly recovery_id: string; readonly failed_attempt_id: string; readonly kind_detail: RecoveryKind; readonly candidate_id: string })
   | (EventBase & { readonly kind: "validation.recorded"; readonly validation_id: string; readonly unit_id: string; readonly command_fingerprint: string; readonly result: "passed" | "failed"; readonly artifact_id: string | null })
@@ -92,6 +102,9 @@ export interface RunFlightState {
   readonly completed_wave_count: number;
   readonly budget_limits: FlightBudgetLimits | null;
   readonly budget_consumed: FlightBudgetLimits;
+  readonly resource_budget_limits: FlightResourceBudget | null;
+  readonly resource_budget_consumed: FlightResourceUsage;
+  readonly resource_budget_reserved: FlightResourceUsage;
   readonly child_counts: Readonly<Record<FlightRole, number>>;
   readonly validation_reruns: number;
   readonly observations: readonly FlightObservation[];
@@ -147,6 +160,22 @@ function validCharge(value: unknown): value is FlightBudgetCharge {
     (value.kind === "implementation" || Number(value.recovery_actions) > 0);
 }
 
+function validResourceBudget(value: unknown): value is FlightResourceBudget {
+  return isObject(value) && only(value, ["time_ms", "cost_usd"]) && integer(value.time_ms) &&
+    typeof value.cost_usd === "number" && Number.isFinite(value.cost_usd) && value.cost_usd >= 0;
+}
+
+function addResources(left: FlightResourceUsage, right: FlightResourceUsage): FlightResourceUsage {
+  const time = left.time_ms === null || right.time_ms === null ? null : left.time_ms + right.time_ms;
+  const cost = left.cost_usd === null || right.cost_usd === null ? null : left.cost_usd + right.cost_usd;
+  return { time_ms: time !== null && Number.isSafeInteger(time) ? time : null,
+    cost_usd: cost !== null && Number.isFinite(cost) ? cost : null };
+}
+
+function reservedResources(state: MutableState): FlightResourceUsage {
+  return [...state.resource_reservations.values()].reduce<FlightResourceUsage>(addResources, { time_ms: 0, cost_usd: 0 });
+}
+
 function validReferences(value: unknown): value is FlightReferenceSet {
   return isObject(value) && only(value, ["capsule_ids", "artifact_ids"]) && Array.isArray(value.capsule_ids) && Array.isArray(value.artifact_ids) &&
     value.capsule_ids.length <= 64 && value.artifact_ids.length <= 64 && value.capsule_ids.every(hash) && value.artifact_ids.every(hash) &&
@@ -172,12 +201,12 @@ function validEvent(value: unknown): value is RunFlightEvent {
   if (!isObject(value) || !text(value.kind) || !text(value.at) || Number.isNaN(Date.parse(value.at))) return false;
   const base = ["kind", "at"];
   switch (value.kind) {
-    case "run.planned": return only(value, [...base, "run_id", "initial_candidate_id", "budget_limits"]) && text(value.run_id) && text(value.initial_candidate_id) && validBudget(value.budget_limits);
+    case "run.planned": return only(value, [...base, "run_id", "initial_candidate_id", "budget_limits", "resource_budget_limits"]) && text(value.run_id) && text(value.initial_candidate_id) && validBudget(value.budget_limits) && (!Object.hasOwn(value, "resource_budget_limits") || validResourceBudget(value.resource_budget_limits));
     case "plan.compiled": return only(value, [...base, "plan_id", "proposal_id", "decision", "gap_codes"]) && hash(value.plan_id) && hash(value.proposal_id) && enumValue(value.decision, ["accepted", "rejected"]) && Array.isArray(value.gap_codes) && value.gap_codes.length <= 128 && value.gap_codes.every((code) => enumValue(code, GAP_CODES)) && new Set(value.gap_codes).size === value.gap_codes.length && ((value.decision === "accepted" && value.gap_codes.length === 0) || (value.decision === "rejected" && value.gap_codes.length > 0));
     case "route.selected": return only(value, [...base, "route_id", "candidate_id", "role", "model", "variant", "reason"]) && text(value.route_id) && text(value.candidate_id) && enumValue(value.role, ["implementation", "review", "advice", "rescue"]) && text(value.model) && nullableText(value.variant) && enumValue(value.reason, ["planning", "implementation", "normal_remediation", "adaptive_probe", "read_only_diagnosis", "model_rescue"]);
     case "wave.opened": return only(value, [...base, "wave_id", "wave_index", "candidate_id"]) && text(value.wave_id) && Number.isInteger(value.wave_index) && Number(value.wave_index) >= 1 && text(value.candidate_id);
     case "unit.opened": return only(value, [...base, "unit_id", "wave_id", "candidate_id", "references"]) && text(value.unit_id) && text(value.wave_id) && text(value.candidate_id) && validReferences(value.references);
-    case "attempt.started": return only(value, [...base, "attempt_id", "predecessor_attempt_id", "unit_id", "candidate_id", "route_id", "role", "selected_model", "selected_variant", "child_id", "call_id", "budget_charge"]) && text(value.attempt_id) && nullableText(value.predecessor_attempt_id) && text(value.unit_id) && text(value.candidate_id) && text(value.route_id) && enumValue(value.role, ["implementation", "review", "advice", "rescue"]) && text(value.selected_model) && nullableText(value.selected_variant) && nullableText(value.child_id) && text(value.call_id) && validCharge(value.budget_charge);
+    case "attempt.started": return only(value, [...base, "attempt_id", "predecessor_attempt_id", "unit_id", "candidate_id", "route_id", "role", "selected_model", "selected_variant", "child_id", "call_id", "budget_charge", "resource_budget_request"]) && text(value.attempt_id) && nullableText(value.predecessor_attempt_id) && text(value.unit_id) && text(value.candidate_id) && text(value.route_id) && enumValue(value.role, ["implementation", "review", "advice", "rescue"]) && text(value.selected_model) && nullableText(value.selected_variant) && nullableText(value.child_id) && text(value.call_id) && validCharge(value.budget_charge) && (!Object.hasOwn(value, "resource_budget_request") || validResourceBudget(value.resource_budget_request));
     case "attempt.finished": {
       if (!only(value, [...base, "attempt_id", "observed_model", "observed_variant", "failure", "disposition", "observation", "references"]) || !text(value.attempt_id) || !nullableText(value.observed_model) || !nullableText(value.observed_variant) || !enumValue(value.disposition, ["continue", "succeeded", "failed", "cancelled"]) || !validObservation(value.observation) || !validReferences(value.references)) return false;
       const failure = value.failure;
@@ -203,6 +232,9 @@ interface MutableState {
   pending_candidate: { from: string; to: string; wave: string; artifact: string } | null; candidate_completed: boolean; cleanup_completed: boolean;
   ids: Set<string>; validation_fingerprints: Set<string>; attempts: Map<string, string>; units: Map<string, MutableUnitState>;
   plan_decisions: { plan_id: string; proposal_id: string; decision: "accepted" | "rejected"; gap_codes: AcceptanceCompileGapCode[] }[]; plan_ids: Set<string>; accepted_plan: string | null;
+  resource_budget_limits: FlightResourceBudget | null;
+  resource_budget_consumed: FlightResourceUsage;
+  resource_reservations: Map<string, FlightResourceUsage>;
 }
 
 interface MutableUnitState {
@@ -221,7 +253,8 @@ function initialState(): MutableState {
     last_attempt_id: null, completed_wave_count: 0, budget_limits: null, budget_consumed: { recovery_actions: 0, probe_iterations: 0, model_attempts: 0 },
     child_counts: { implementation: 0, review: 0, advice: 0, rescue: 0 }, validation_reruns: 0, observations: [], terminal_disposition: null,
     current_route_id: null, pending_candidate: null, candidate_completed: false, cleanup_completed: false,
-    ids: new Set(), validation_fingerprints: new Set(), attempts: new Map(), units: new Map(), plan_decisions: [], plan_ids: new Set(), accepted_plan: null };
+    ids: new Set(), validation_fingerprints: new Set(), attempts: new Map(), units: new Map(), plan_decisions: [], plan_ids: new Set(), accepted_plan: null,
+    resource_budget_limits: null, resource_budget_consumed: { time_ms: 0, cost_usd: 0 }, resource_reservations: new Map() };
 }
 
 function claim(state: MutableState, id: string): void {
@@ -238,7 +271,8 @@ function applyEvent(state: MutableState, event: RunFlightEvent): void {
   switch (event.kind) {
     case "run.planned":
       requireTransition(state.run_id === null, "run.planned must be the first and only planning event."); claim(state, event.run_id); claim(state, event.initial_candidate_id);
-      state.run_id = event.run_id; state.current_candidate_id = event.initial_candidate_id; state.budget_limits = event.budget_limits; break;
+      state.run_id = event.run_id; state.current_candidate_id = event.initial_candidate_id; state.budget_limits = event.budget_limits;
+      state.resource_budget_limits = event.resource_budget_limits ?? null; break;
     case "plan.compiled":
       requireTransition(state.active_wave_id === null && state.current_route_id === null && !state.plan_ids.has(event.plan_id) && state.accepted_plan === null, "Plan decision must be unique and precede routing.");
       state.plan_ids.add(event.plan_id); if (event.decision === "accepted") state.accepted_plan = event.plan_id;
@@ -266,7 +300,16 @@ function applyEvent(state: MutableState, event: RunFlightEvent): void {
       requireTransition(event.route_id === state.active_wave_route_id, "Attempt route does not match the active wave route."); claim(state, event.attempt_id);
       const next = { recovery_actions: state.budget_consumed.recovery_actions + event.budget_charge.recovery_actions, probe_iterations: state.budget_consumed.probe_iterations + event.budget_charge.probe_iterations, model_attempts: state.budget_consumed.model_attempts + event.budget_charge.model_attempts };
       const limits = state.budget_limits!;
-      if (next.recovery_actions > limits.recovery_actions || next.probe_iterations > limits.probe_iterations || next.model_attempts > limits.model_attempts) throw new RunFlightLedgerError("budget", "Cumulative recovery budget exceeded.");
+      if (!Object.values(next).every(integer) || next.recovery_actions > limits.recovery_actions || next.probe_iterations > limits.probe_iterations || next.model_attempts > limits.model_attempts) throw new RunFlightLedgerError("budget", "Cumulative recovery budget exceeded.");
+      const request = event.resource_budget_request ?? { time_ms: null, cost_usd: null };
+      if (state.resource_budget_limits !== null) {
+        const total = addResources(addResources(state.resource_budget_consumed, reservedResources(state)), request);
+        if (total.time_ms === null || total.cost_usd === null || total.time_ms > state.resource_budget_limits.time_ms ||
+          total.cost_usd > state.resource_budget_limits.cost_usd) {
+          throw new RunFlightLedgerError("budget", "Cumulative time or cost budget is unknown or exhausted.");
+        }
+      }
+      state.resource_reservations.set(event.attempt_id, request);
       state.budget_consumed = next;
       unit.budget_consumed = { recovery_actions: unit.budget_consumed.recovery_actions + event.budget_charge.recovery_actions, probe_iterations: unit.budget_consumed.probe_iterations + event.budget_charge.probe_iterations, model_attempts: unit.budget_consumed.model_attempts + event.budget_charge.model_attempts };
       unit.active_attempt_id = event.attempt_id; unit.last_attempt_id = event.attempt_id; unit.last_disposition = null;
@@ -278,6 +321,11 @@ function applyEvent(state: MutableState, event: RunFlightEvent): void {
       const unitId = state.attempts.get(event.attempt_id);
       const unit = unitId === undefined ? undefined : state.units.get(unitId);
       requireTransition(unit !== undefined && unit.active_attempt_id === event.attempt_id, "Attempt finish does not match the active attempt.");
+      // Preserve actual overruns and missing measurements; only a subsequent attempt is denied.
+      state.resource_reservations.delete(event.attempt_id);
+      state.resource_budget_consumed = addResources(state.resource_budget_consumed, {
+        time_ms: event.observation.duration_ms, cost_usd: event.observation.estimated_cost.usd,
+      });
       unit.active_attempt_id = null; unit.last_failed_attempt_id = event.failure === null ? null : event.attempt_id; unit.last_disposition = event.disposition; state.observations.push(event.observation); break;
     }
     case "recovery.recorded": {
@@ -317,7 +365,9 @@ function publicState(state: MutableState): RunFlightState {
     active_attempt_id: soleUnit?.[1].active_attempt_id ?? null, last_attempt_id: openUnits.length > 1 ? null : soleUnit?.[1].last_attempt_id ?? state.last_attempt_id, completed_wave_count: state.completed_wave_count,
     budget_limits: state.budget_limits, budget_consumed: { ...state.budget_consumed }, child_counts: { ...state.child_counts },
     validation_reruns: state.validation_reruns, observations: state.observations.map((entry) => structuredClone(entry)), terminal_disposition: state.terminal_disposition,
-    plan_decisions: state.plan_decisions.map((entry) => ({ ...entry, gap_codes: [...entry.gap_codes] })) };
+    plan_decisions: state.plan_decisions.map((entry) => ({ ...entry, gap_codes: [...entry.gap_codes] })),
+    resource_budget_limits: state.resource_budget_limits === null ? null : { ...state.resource_budget_limits },
+    resource_budget_consumed: { ...state.resource_budget_consumed }, resource_budget_reserved: reservedResources(state) };
 }
 
 export function reconstructRunFlightLedger(records: readonly RunFlightEventRecord[]): RunFlightState {

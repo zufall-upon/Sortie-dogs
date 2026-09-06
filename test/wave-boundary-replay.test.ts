@@ -62,6 +62,7 @@ async function appendWave(
     unit_id: `unit-${suffix}`, candidate_id: candidate, route_id: `route-${suffix}`,
     role: recoveryCharge ? "rescue" : "implementation", selected_model: `model-${suffix}`,
     selected_variant: null, child_id: null, call_id: `call-${suffix}`,
+    resource_budget_request: { time_ms: 50, cost_usd: 0.5 },
     budget_charge: {
       kind: recoveryCharge ? "model_rescue" : "implementation",
       recovery_actions: recoveryCharge ? 1 : 0,
@@ -71,7 +72,10 @@ async function appendWave(
   }));
   await ledger.append(event({
     kind: "attempt.finished", at, attempt_id: `attempt-${suffix}`, observed_model: `model-${suffix}`,
-    observed_variant: null, failure: null, disposition: "succeeded", observation: observation("unit"),
+    observed_variant: null, failure: null, disposition: "succeeded", observation: {
+      ...observation("unit"), duration_ms: index * 10,
+      estimated_cost: { usd: index / 8, provenance: "calculated" },
+    },
     references: { capsule_ids: [], artifact_ids: [] },
   }));
   await ledger.append(event({ kind: "unit.completed", at, unit_id: `unit-${suffix}`, disposition: "succeeded" }));
@@ -90,6 +94,7 @@ async function completedTwoWaveLedger(name: string): Promise<readonly RunFlightE
   await ledger.append(event({
     kind: "run.planned", at, run_id: `run-${name}`, initial_candidate_id: "candidate-0",
     budget_limits: { recovery_actions: 3, probe_iterations: 2, model_attempts: 2 },
+    resource_budget_limits: { time_ms: 100, cost_usd: 1 },
   }));
   await appendWave(ledger, "1", 1, "candidate-0", "candidate-1");
   await appendWave(ledger, "2", 2, "candidate-1", "candidate-2", true);
@@ -128,6 +133,9 @@ test("reconstructs the latest real-ledger wave boundary without changing its inp
   assert.deepEqual(selected.recovery_budget, {
     budget_consumed: { recovery_actions: 1, probe_iterations: 0, model_attempts: 1 },
     budget_limits: { recovery_actions: 3, probe_iterations: 2, model_attempts: 2 },
+    resource_budget_limits: { time_ms: 100, cost_usd: 1 },
+    resource_budget_consumed: { time_ms: 30, cost_usd: 0.375 },
+    resource_budget_reserved: { time_ms: 0, cost_usd: 0 },
     validated_event_count: records.length,
     validated_tail_hash: records.at(-1)?.event_hash,
   });
@@ -152,6 +160,9 @@ test("selects an explicit historical boundary while retaining full-ledger recove
   assert.equal(selected.state.completed_wave_count, 1);
   assert.deepEqual(selected.state.budget_consumed, { recovery_actions: 0, probe_iterations: 0, model_attempts: 0 });
   assert.deepEqual(selected.recovery_budget.budget_consumed, { recovery_actions: 1, probe_iterations: 0, model_attempts: 1 });
+  assert.deepEqual(selected.state.resource_budget_consumed, { time_ms: 10, cost_usd: 0.125 });
+  assert.deepEqual(selected.recovery_budget.resource_budget_consumed, { time_ms: 30, cost_usd: 0.375 });
+  assert.deepEqual(selected.recovery_budget.resource_budget_limits, { time_ms: 100, cost_usd: 1 });
   assert.equal(selected.recovery_budget.validated_event_count, records.length);
   assert.equal(selected.recovery_budget.validated_tail_hash, records.at(-1)?.event_hash);
 });
