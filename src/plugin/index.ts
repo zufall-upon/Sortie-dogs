@@ -100,6 +100,8 @@ import {
 } from "./task-result-repair.js";
 import { configRoot, nearestPackageVersion, REFLECTION_POLICY, reflectionEnabled, ReflectionError, ReflectionStore } from "../reflection/index.js";
 import { syncProjectReflectionBlock } from "../reflection/managed-sync.js";
+import { CancellableChildLifecycle, DEFAULT_CHILD_DEADLINE_MS } from "../core/child-lifecycle-runtime.js";
+import type { ChildTerminalEvidence, ChildTerminalObservation } from "../core/child-terminal-reconciliation.js";
 import { collectRunMetrics, insertRunMetrics, terminalRunOutcome } from "./run-metrics.js";
 import type { RunMetricsClient } from "./run-metrics.js";
 
@@ -1705,6 +1707,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   const reflectionClosingRoots = new Set<string>();
   const reflectionInFlight = new Map<string, number>();
   const reflectionWaiters = new Map<string, Array<() => void>>();
+  const childLifecycles = new Map<string, CancellableChildLifecycle>();
+  const observedChildTerminals = new Map<string, boolean>();
+  const childObservedLeases = new Map<string, ScopeLease>();
+  const settledChildLifecycles = new Map<string, true>();
   const bindingDenials = new Map<
     string,
     Map<string, Map<string, string>>
@@ -2185,6 +2191,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         phase,
         call_id,
         child_session_id,
+        deadline_ms: child_session_id === null ? null : childLifecycles.get(child_session_id)?.descriptor.deadline_ms ?? null,
         outcome,
         artifact: boundedParallelArtifact(artifact),
       })),
@@ -2215,11 +2222,13 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const active = new Set(snapshot.fabric?.active_unit_ids ?? []);
     const failed = snapshot.route === "luna-fabric" &&
       !snapshot.tasks.some(({ phase, descriptor }) => active.has(descriptor.task_id) && phase === "running")
-      ? snapshot.tasks.find(({ phase, descriptor }) => active.has(descriptor.task_id) &&
-        phase === "failed" && descriptor.attempt === 1)
+      ? snapshot.tasks.find(({ phase, descriptor, outcome }) => !snapshot.cancelled && active.has(descriptor.task_id) &&
+        phase === "failed" && outcome !== "cancelled" && descriptor.attempt === 1)
       : undefined;
-    return failed === undefined ? snapshot
-      : coordinator.demoteFailedFabricUnit(ownerRoot, snapshot.run_id, failed.descriptor.task_id);
+    if (failed === undefined) return snapshot;
+    const child = failed.child_session_id === null ? undefined : childLifecycles.get(failed.child_session_id);
+    if (child !== undefined && (await child.check()).status !== "terminal") return snapshot;
+    return coordinator.demoteFailedFabricUnit(ownerRoot, snapshot.run_id, failed.descriptor.task_id);
   }
 
   function boundedParallelArchive(archive: ParallelDispatchArchive): object {
@@ -2310,6 +2319,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       return deny(error instanceof WorktreeCommitArtifactError ? `artifact-${error.code}` : "artifact-production-failed");
     } finally {
       parallelArtifactOperations.delete(sessionID);
+      void childLifecycles.get(sessionID)?.check();
     }
   }
 
@@ -2411,6 +2421,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       if (!hasValidation) {
         const snapshot = await (await getParallelCoordinator()).integrateFabricWave(ownerRoot, runID);
         await ensureParallelReadyControls(snapshot, rootAcceptanceContinuity.get(ownerRoot));
+        for (const child of childLifecycles.values()) if (child.descriptor.identity.run_id === runID) await child.check();
         const counts = parallelWaveCounts(snapshot);
         if (!snapshot.archived && counts.total > 0) {
           fastLane.advanceParallelWave(ownerRoot, snapshot.max_workers, counts.dispatched, counts.running, counts.total);
@@ -2426,6 +2437,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       const snapshot = await (await getParallelCoordinator()).integrateFabricWaveAndValidate(
         ownerRoot, runID, executable, args, timeout,
       );
+      for (const child of childLifecycles.values()) if (child.descriptor.identity.run_id === runID) await child.check();
       await ensureParallelReadyControls(snapshot, rootAcceptanceContinuity.get(ownerRoot));
       const counts = parallelWaveCounts(snapshot);
       if (!snapshot.archived && counts.total > 0) {
@@ -2540,6 +2552,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       let snapshot = reconcile === "true"
         ? await coordinator.reconcile(ownerRoot, coordinatorTaskCalls.get(ownerRoot) ?? new Set(), runID || undefined)
         : await coordinator.snapshot(ownerRoot, runID || undefined);
+      if (snapshot !== undefined) await restoreChildLifecycles(ownerRoot, snapshot);
       if (snapshot !== undefined && !snapshot.archived) {
         snapshot = await demoteReadyFabricFailure(coordinator, ownerRoot, snapshot);
       }
@@ -2575,19 +2588,40 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       const coordinator = await getParallelCoordinator();
       const active = await coordinator.snapshot(ownerRoot, runID || undefined);
       if (active !== undefined) {
+        await restoreChildLifecycles(ownerRoot, active);
         await Promise.all(active.tasks.filter(({ phase }) => phase === "pending" || phase === "reserved")
           .map(({ descriptor }) => removeParallelControlFiles(descriptor)));
       }
       let snapshot: ParallelDispatchSnapshot | undefined;
+      let reconciliationPending = false;
       try {
         snapshot = await coordinator.cancel(ownerRoot, runID || undefined);
       } catch (error) {
         if (active !== undefined) await ensureParallelReadyControls(active);
         throw error;
       }
+      if (snapshot !== undefined) {
+        await coordinator.cleanupSuppressed(ownerRoot, snapshot.run_id);
+        for (const task of snapshot.tasks) {
+          if (task.child_session_id !== null) {
+            const child = childLifecycles.get(task.child_session_id);
+            if (child !== undefined) {
+              const result = await child.check(true);
+              if (result.status !== "terminal") reconciliationPending = true;
+            }
+            else if (task.call_id === null) reconciliationPending = true;
+            else {
+              const ledger = await coordinator.childLedger(ownerRoot, task.descriptor, task.call_id, task.child_session_id);
+              reconciliationPending ||= !(await ledger.read()).state.children.some((entry) =>
+                entry.identity.attempt_id === task.descriptor.dispatch_id && entry.terminal !== null);
+            }
+          }
+        }
+        snapshot = await coordinator.snapshot(ownerRoot, snapshot.run_id);
+      }
       return snapshot === undefined
         ? JSON.stringify({ status: "absent" })
-        : JSON.stringify({ status: "cancelled", ...boundedParallelSnapshot(snapshot) });
+        : JSON.stringify({ status: reconciliationPending || snapshot.tasks.some(({ phase }) => phase === "running") ? "cancelling" : "cancelled", ...boundedParallelSnapshot(snapshot) });
     } catch (error) {
       return JSON.stringify({
         status: "denied",
@@ -2635,6 +2669,104 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       await current;
     } finally {
       if (chatTransitions.get(sessionID) === current) chatTransitions.delete(sessionID);
+    }
+  }
+
+  async function registerChildLifecycle(childID: string, binding: {
+    ownerRoot: string; descriptor: ParallelDispatchDescriptor; completionCallID: string;
+  }, agent: string): Promise<void> {
+    if (childLifecycles.has(childID)) return;
+    const coordinator = await getParallelCoordinator();
+    const { descriptor, ownerRoot, completionCallID } = binding;
+    const snapshot = await coordinator.snapshot(ownerRoot, descriptor.run_id);
+    if (snapshot === undefined) throw new Error("child-run-unavailable");
+    const route = snapshot.route === "luna-fabric" && descriptor.attempt === 1 ? LUNA_FABRIC_WORKER_AGENT : SERIAL_WORKER_AGENT;
+    if (agent !== route) throw new Error("child-route-mismatch");
+    const predecessor = snapshot.fabric?.demotions.find((entry) => entry.sol_dispatch_id === descriptor.dispatch_id)?.luna_dispatch_id ?? null;
+    const ledger = await coordinator.childLedger(ownerRoot, descriptor, completionCallID, childID);
+    const identity = { run_id: descriptor.run_id, unit_id: descriptor.task_id, attempt_id: descriptor.dispatch_id,
+      predecessor_attempt_id: predecessor, candidate_id: descriptor.base_sha, route_id: route,
+      child_id: childID, call_id: completionCallID };
+    const previous = (await ledger.read()).state.children.find((entry) => entry.identity.attempt_id === identity.attempt_id);
+    const timeout = process.env.SORTIE_CHILD_DEADLINE_MS === undefined ? DEFAULT_CHILD_DEADLINE_MS : Number(process.env.SORTIE_CHILD_DEADLINE_MS);
+    if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 2 ** 31 - 1) throw new Error("invalid-child-deadline");
+    let stopped = false;
+    let heldLease: ScopeLease | undefined;
+    const scopeRoot = await durableScopeRoot(project!.root);
+    if (scopeRoot === undefined) throw new Error("child-lease-registry-unavailable");
+    const registry = new ScopeLeaseRegistry(scopeRoot);
+    const scope = { read: [...descriptor.scope_read], write: [...descriptor.scope_write] };
+    const observe = async (): Promise<{ observation: ChildTerminalObservation; evidence: ChildTerminalEvidence }> => {
+      const snapshot = await coordinator.snapshot(ownerRoot, descriptor.run_id);
+      const task = snapshot?.tasks.find((entry) => sameParallelDescriptor(entry.descriptor, descriptor));
+      if (task === undefined || task.call_id !== completionCallID || task.child_session_id !== childID) throw new Error("child-identity-drift");
+      const active = activeSessions.get(childID);
+      const authorization = sessionAuthorizations.get(childID);
+      heldLease ??= authorization?.lease ?? childObservedLeases.get(childID);
+      const terminal = observedChildTerminals.has(childID) && (!recoverableWorkerChildren.has(childID) || stopped);
+      const quiescent = active === undefined ? observedChildTerminals.get(childID) === true : active.inFlightCalls.size === 0;
+      const gateReleased = authorization === undefined || (authorization.suspended && active?.released === true);
+      const noLease = !(await registry.hasConflictingLease(scope)) && (heldLease === undefined || await heldLease.isReleased());
+      const satisfied = (value: boolean) => value ? "satisfied" as const : "unsatisfied" as const;
+      return { observation: { identity, disposition: task.artifact !== null ? "succeeded" : stopped || task.outcome === "cancelled" ? "cancelled" :
+        task.outcome === "completed" ? "succeeded" : "failed" },
+        evidence: { terminal: satisfied(terminal), tools_quiescent: satisfied(quiescent),
+          artifact_window_closed: satisfied(!parallelArtifactOperations.has(childID)),
+          gate_released: satisfied(gateReleased), writer_released: satisfied(gateReleased && noLease), lease_released: satisfied(noLease),
+          worktree_released: satisfied(await coordinator.childWorktreeReleased(descriptor)) } };
+    };
+    const lifecycle = await CancellableChildLifecycle.open({ identity,
+      deadline_ms: previous?.deadline_ms ?? Date.now() + timeout }, ledger, {
+      observe,
+      stop: async () => {
+        heldLease ??= sessionAuthorizations.get(childID)?.lease;
+        const session = (input.client as unknown as { session?: Record<string, unknown> })?.session;
+        if (typeof session?.abort !== "function") throw new Error("child-abort-unavailable");
+        const result = await session.abort.call(session, { path: { id: childID }, query: { directory: input.directory } });
+        if (result === false || (isRecord(result) && result.data === false)) throw new Error("child-abort-unconfirmed");
+        stopped = true;
+      },
+      release: async () => {
+        const observed = await observe();
+        if (observed.evidence.terminal !== "satisfied" || observed.evidence.tools_quiescent !== "satisfied" ||
+          observed.evidence.artifact_window_closed !== "satisfied") throw new Error("child-still-active");
+        const authorization = sessionAuthorizations.get(childID);
+        if (authorization !== undefined) authorization.suspended = true;
+        heldLease ??= authorization?.lease;
+        if (heldLease !== undefined && !(await heldLease.isReleased())) await heldLease.release();
+        if (authorization !== undefined) authorization.lease = undefined;
+        const active = activeSessions.get(childID);
+        if (active !== undefined) active.released = true;
+        await removeParallelControlFiles(descriptor);
+        await coordinator.releaseChildWorktree(ownerRoot, descriptor, completionCallID, childID, (await observe()).evidence);
+      },
+      terminal: async (state) => {
+        const snapshot = await coordinator.completeCall(ownerRoot, completionCallID, childID,
+          state.terminal!.disposition === "succeeded" ? "completed" : state.terminal!.disposition === "failed" ? "failed" : "cancelled",
+          { run_id: descriptor.run_id, dispatch_id: descriptor.dispatch_id });
+        if (snapshot !== undefined) {
+          await Promise.all(snapshot.tasks.filter(({ phase }) => phase === "suppressed")
+            .map((task) => removeParallelControlFiles(task.descriptor)));
+          await coordinator.cleanupSuppressed(ownerRoot, descriptor.run_id);
+          await ensureParallelReadyControls(snapshot);
+        }
+        childLifecycles.delete(childID);
+        childObservedLeases.delete(childID);
+        settledChildLifecycles.set(descriptor.dispatch_id, true);
+        pruneParallelChildMap(settledChildLifecycles);
+      },
+    });
+    childLifecycles.set(childID, lifecycle);
+    lifecycle.arm();
+    if (previous?.terminal != null) void lifecycle.check();
+  }
+
+  async function restoreChildLifecycles(ownerRoot: string, snapshot: ParallelDispatchSnapshot): Promise<void> {
+    for (const task of snapshot.tasks) {
+      if (task.child_session_id === null || task.call_id === null || childLifecycles.has(task.child_session_id) ||
+        settledChildLifecycles.has(task.descriptor.dispatch_id)) continue;
+      const agent = snapshot.route === "luna-fabric" && task.descriptor.attempt === 1 ? LUNA_FABRIC_WORKER_AGENT : SERIAL_WORKER_AGENT;
+      await registerChildLifecycle(task.child_session_id, { ownerRoot, descriptor: task.descriptor, completionCallID: task.call_id }, agent);
     }
   }
 
@@ -3967,7 +4099,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       });
       const coordinator = parallelCoordinator ?? (gitEntry === undefined ? undefined : await getParallelCoordinator());
       const snapshot = await coordinator?.snapshot(sessionID);
-      const activeBatch = (snapshot !== undefined && !snapshot.archived) ||
+      const activeBatch = childLifecycles.size > 0 || (snapshot !== undefined && !snapshot.archived) ||
         (coordinatorTaskCalls.get(sessionID)?.size ?? 0) > 0 ||
         [...parallelCalls.values()].some((call) => call.ownerRoot === sessionID) ||
         [...bindingOperations].some(owns) || [...sessionAuthorizations.keys()].some(owns) ||
@@ -4152,7 +4284,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         },
       }),
       sortie_cancel_parallel_dispatch: defineTool({
-        description: "Cancel one owned parallel dispatch without forcing running workers or cleaning worktrees.",
+        description: "Request owned child cancellation, preserve artifact windows, and confirm resource cleanup before reporting cancelled.",
         args: { run_id: optionalString() },
         async execute(args, context): Promise<string> {
           return cancelParallelDispatch(context.sessionID, args.run_id ?? "");
@@ -4272,6 +4404,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       await continuation.compactionAutoContinue(autoInput, autoOutput);
     },
     "chat.message": async (chatInput, output): Promise<void> => {
+      if (childLifecycles.get(chatInput.sessionID)?.stopping) throw new Error("child-cancellation-in-progress");
+      observedChildTerminals.delete(chatInput.sessionID);
       await serializeChatTransition(chatInput.sessionID, async () => {
       const parentID = chatParentID(chatInput);
       const synthetic = output.parts.some((part) => isRecord(part) && part.synthetic === true);
@@ -4348,6 +4482,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
                 descriptor,
                 completionCallID: matchingCall.completionCallID,
               });
+              await registerChildLifecycle(chatInput.sessionID, parallelChildBindings.get(chatInput.sessionID)!, recordedAgent);
               pruneParallelChildMap(parallelChildBindings);
             } else {
               parallelChildBindings.delete(chatInput.sessionID);
@@ -4480,6 +4615,14 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       const coordinatorTaskFinished = toolInput.tool === "task" &&
         finishCoordinatorTask(toolInput.sessionID, toolInput.callID);
       const completedChildSessionID = toolInput.tool === "task" ? taskChildSessionID(output) : undefined;
+      if (completedChildSessionID !== undefined && childLifecycles.has(completedChildSessionID)) {
+        const active = activeSessions.get(completedChildSessionID);
+        observedChildTerminals.set(completedChildSessionID,
+          active === undefined ? observedChildTerminals.get(completedChildSessionID) === true : active.inFlightCalls.size === 0);
+        const lease = sessionAuthorizations.get(completedChildSessionID)?.lease;
+        if (lease !== undefined) childObservedLeases.set(completedChildSessionID, lease);
+        pruneParallelChildMap(observedChildTerminals);
+      }
       const handoffInspection = inspectSuccessfulRead(toolInput);
       try {
         if (bootstrapRequired && toolInput.tool === "sortie_check_contract" && toolInput.sessionID !== undefined &&
@@ -4525,6 +4668,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         if (toolInput.tool === "task" && parallel !== undefined && completedChildSessionID !== undefined &&
           recoverableWorkerChildren.has(completedChildSessionID)) {
           parallelRecoverableChildren.set(completedChildSessionID, parallel);
+        } else if (toolInput.tool === "task" && completedChildSessionID !== undefined && childLifecycles.get(completedChildSessionID)?.stopping) {
+          // The cancellation lifecycle owns terminal publication after resource reconciliation.
         } else if (toolInput.tool === "task" && parallel !== undefined && parallelCoordinator !== undefined &&
           toolInput.callID !== undefined) {
           const terminal = parallelOutcome(output.output);
@@ -4584,10 +4729,15 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         }
         if (completedChildSessionID !== undefined && !recoverableWorkerChildren.has(completedChildSessionID)) {
           evictSession(completedChildSessionID);
+          void childLifecycles.get(completedChildSessionID)?.check();
         }
       }
     },
     "tool.execute.before": async (toolInput, output): Promise<void> => {
+      if (childLifecycles.get(toolInput.sessionID)?.stopping && toolInput.tool !== "sortie_release_write_gate") {
+        throw new Error("child-cancellation-in-progress");
+      }
+      observedChildTerminals.delete(toolInput.sessionID);
       const coordinatorRoot = isCoordinatorSession(toolInput.sessionID) || await recoverCoordinatorRoot(toolInput.sessionID);
       touchCoordinatorTaskWatchdog(toolInput.sessionID);
       if (coordinatorRoot) continuation.toolStarted(toolInput.sessionID, toolInput.tool);
@@ -5129,9 +5279,17 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       if (event.type === "session.idle" && isCoordinatorSession(eventSessionID)) {
         abortCoordinatorTasks(eventSessionID, true);
       }
+      if (event.type === "session.idle" && childLifecycles.has(eventSessionID) && !parallelArtifactOperations.has(eventSessionID)) {
+        observedChildTerminals.set(eventSessionID, true);
+      }
       if (!isActiveSession(eventSessionID)) return;
       if (event.type !== "session.idle") touchActiveSession(eventSessionID);
       if (event.type === "session.idle" && eventSessionID !== undefined) {
+        if (childLifecycles.has(eventSessionID)) {
+          observedChildTerminals.set(eventSessionID, true);
+          const lease = sessionAuthorizations.get(eventSessionID)?.lease;
+          if (lease !== undefined) childObservedLeases.set(eventSessionID, lease);
+        }
         activeSessions.get(eventSessionID)?.inFlightCalls.clear();
         if (recoverableWorkerChildren.has(eventSessionID)) {
           touchActiveSession(eventSessionID);

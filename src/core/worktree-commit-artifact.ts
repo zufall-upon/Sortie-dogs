@@ -459,7 +459,7 @@ async function linuxUnshare(): Promise<string> {
   throw new WorktreeCommitArtifactError("validation-failed", "Validation containment setup failed.");
 }
 
-async function terminateTree(child: ChildProcess, closed: Promise<unknown>): Promise<void> {
+export async function terminateTree(child: ChildProcess, closed: Promise<unknown>): Promise<void> {
   if (child.pid === undefined) return;
   if (process.platform === "win32") {
     const taskkill = join(process.env.SystemRoot ?? process.env.SYSTEMROOT ?? "C:\\Windows", "System32", "taskkill.exe");

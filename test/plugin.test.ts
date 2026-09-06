@@ -3712,7 +3712,8 @@ test("parallel cancellation is coordinator-only, survives running join, and sess
     assert.ok(archived.tasks.every(({ managed_path }) => managed_path.length > 0));
 
     const lifecycle = await WorktreeLifecycle.open({ repositoryRoot: directory });
-    for (const id of ["cancel-a", "cancel-b"]) await lifecycle.cleanup(id);
+    assert.equal(await lifecycle.hasManagedWorktree("cancel-b"), false);
+    await lifecycle.cleanup("cancel-a");
     await writeFile(contractPath, (await readFile(contractPath, "utf8")).replaceAll("cancel-", "deleted-")
       .replaceAll("sortie/cancel-", "sortie/deleted-"));
     const next = JSON.parse(await hooks.tool!.sortie_prepare_parallel_dispatch!.execute(

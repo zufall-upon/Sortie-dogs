@@ -4,8 +4,8 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { EvidenceCapsuleStore, type EvidenceCapsule } from "../src/core/evidence-capsule.ts";
-import { RunFlightLedger, RunFlightLedgerError, reconstructRunFlightLedger, type FlightObservation, type RunFlightEvent, type FlightResourceBudget, type RecoveryKind } from "../src/core/run-flight-ledger.ts";
+import { EvidenceCapsuleStore, type EvidenceCapsule } from "../dist/core/evidence-capsule.js";
+import { RunFlightLedger, RunFlightLedgerError, reconstructRunFlightLedger, type FlightObservation, type RunFlightEvent, type FlightResourceBudget, type RecoveryKind } from "../dist/core/run-flight-ledger.js";
 import { compileAcceptanceCoverage, type AcceptanceCompileProposal } from "../src/core/acceptance-compiler.ts";
 
 const digest = (character: string): string => `sha256:${character.repeat(64)}`;

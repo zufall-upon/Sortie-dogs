@@ -28,7 +28,9 @@ import { validateWorktreeParallelContract } from "./validate-worktree-parallel.j
 import { WorktreeLifecycle, WorktreeLifecycleError, type ManagedWorktree } from "./worktree-lifecycle.js";
 import { runContainedValidation } from "./worktree-commit-artifact.js";
 import { inspectExecutionPlan, type ExecutionPlan } from "./execution-plan.js";
-import { createRunFlightPlanPrefix, reconstructRunFlightLedger, type RunFlightEventRecord } from "./run-flight-ledger.js";
+import { createRunFlightPlanPrefix, reconstructRunFlightLedger, RunFlightLedger, type RunFlightEventRecord } from "./run-flight-ledger.js";
+import { EvidenceCapsuleStore } from "./evidence-capsule.js";
+import type { ChildTerminalEvidence } from "./child-terminal-reconciliation.js";
 
 const VERSION = 5;
 const MAX_STATE_BYTES = 1024 * 1024;
@@ -950,7 +952,7 @@ export class ParallelDispatchCoordinator {
       if (task?.descriptor.attempt === 2) return { result: this.publicSnapshot(run), changed: false };
       if (run.fabric.demotion_transition !== null) return { result: undefined, changed: false };
       const active = new Set(run.fabric.scheduler.active?.unit_ids ?? []);
-      if (!active.has(unitID) || task === undefined || task.phase !== "failed" || task.descriptor.attempt !== 1 ||
+      if (!active.has(unitID) || task === undefined || task.phase !== "failed" || task.outcome === "cancelled" || task.descriptor.attempt !== 1 ||
         run.tasks.some((entry) => active.has(entry.descriptor.task_id) &&
           (entry.phase === "pending" || entry.phase === "reserved" || entry.phase === "running"))) {
         throw new ParallelDispatchError("wave-not-ready", "Fabric unit is not ready for Sol demotion.");
@@ -1572,6 +1574,87 @@ export class ParallelDispatchCoordinator {
       this.reserveReady(run);
       return { result: this.archiveIfTerminal(state, run), changed: true };
     });
+  }
+
+  async childLedger(ownerRoot: string, descriptor: ParallelDispatchDescriptor, callID: string, childID: string): Promise<RunFlightLedger> {
+    if (!validText(childID, 256)) throw new ParallelDispatchError("descriptor-mismatch", "Child identity is invalid.");
+    await this.transaction((state) => {
+      const run = state.run?.kind === "run" && state.run.run_id === descriptor.run_id
+        ? this.requireRun(state, ownerRoot, descriptor.run_id)
+        : this.findRunArchive(state, ownerRoot, descriptor.run_id)?.run;
+      if (run === undefined) throw new ParallelDispatchError("descriptor-mismatch", "Child run is unavailable.");
+      const task = run.tasks.find((entry) => entry.descriptor.dispatch_id === descriptor.dispatch_id);
+      if (task === undefined || fingerprint(task.descriptor) !== fingerprint(descriptor) || task.call_id !== callID ||
+        (task.child_session_id === null && task.phase !== "running") ||
+        (task.child_session_id !== null && task.child_session_id !== childID)) {
+        throw new ParallelDispatchError("descriptor-mismatch", "Child lifecycle does not match its durable dispatch.");
+      }
+      const changed = task.child_session_id === null;
+      task.child_session_id = childID;
+      return { result: undefined, changed };
+    });
+    return RunFlightLedger.open(join(this.stateRoot, "children", `${descriptor.dispatch_id}.json`), {
+      store: new EvidenceCapsuleStore(join(this.stateRoot, "capsules")), declared_capsule_ids: [],
+      authorized_source_paths: descriptor.scope_read,
+    });
+  }
+
+  async releaseChildWorktree(ownerRoot: string, descriptor: ParallelDispatchDescriptor, callID: string,
+    childID: string, evidence: ChildTerminalEvidence): Promise<void> {
+    if (["terminal", "tools_quiescent", "artifact_window_closed", "writer_released", "gate_released", "lease_released"]
+      .some((key) => evidence[key as keyof ChildTerminalEvidence] !== "satisfied")) {
+      throw new ParallelDispatchError("outcome-conflict", "Child release lacks quiescence evidence.");
+    }
+    const release = await this.transaction((state) => {
+      const run = state.run?.kind === "run" && state.run.run_id === descriptor.run_id
+        ? this.requireRun(state, ownerRoot, descriptor.run_id)
+        : this.findRunArchive(state, ownerRoot, descriptor.run_id)?.run;
+      if (run === undefined) throw new ParallelDispatchError("descriptor-mismatch", "Child run is unavailable.");
+      const task = run.tasks.find((entry) => entry.descriptor.dispatch_id === descriptor.dispatch_id);
+      if (task === undefined || fingerprint(task.descriptor) !== fingerprint(descriptor) ||
+        task.call_id !== callID || task.child_session_id !== childID) {
+        throw new ParallelDispatchError("descriptor-mismatch", "Child release identity changed.");
+      }
+      let ref: string | undefined;
+      if (task.artifact !== null) {
+        ref = run.fabric === null
+          ? `refs/sortie-dogs/child-artifacts/${fingerprint(run.run_id).slice(0, 16)}/${fingerprint(descriptor.dispatch_id).slice(0, 16)}`
+          : `refs/sortie-dogs/luna-fabric-sources/${fingerprint(run.run_id).slice(0, 16)}/${fingerprint(descriptor.task_id).slice(0, 16)}`;
+        if (run.fabric !== null && !run.fabric.source_refs.some((entry) => entry.ref === ref)) {
+          run.fabric.source_refs.push({ unit_id: descriptor.task_id, ref, commit: task.artifact.commit_sha });
+          return { result: { worktree: task.worktree_id, ref, commit: task.artifact.commit_sha }, changed: true };
+        }
+      }
+      return { result: { worktree: task.worktree_id, ref, commit: task.artifact?.commit_sha }, changed: false };
+    });
+    if (release.ref !== undefined && release.commit !== undefined) {
+      const existing = await this.readRef(release.ref);
+      if (existing === undefined) await this.git(["update-ref", release.ref, release.commit, ""]);
+      else if (existing !== release.commit) throw new ParallelDispatchError("outcome-conflict", "Accepted child artifact ref changed.");
+    }
+    if (await this.lifecycle.hasManagedWorktree(release.worktree)) await this.lifecycle.cleanup(release.worktree);
+  }
+
+  async cleanupSuppressed(ownerRoot: string, runID: string): Promise<void> {
+    const snapshot = await this.snapshot(ownerRoot, runID);
+    if (snapshot === undefined) throw new ParallelDispatchError("descriptor-mismatch", "Cancelled run is unavailable.");
+    for (const task of snapshot.tasks) {
+      if (task.phase === "suppressed" && task.call_id === null && task.child_session_id === null && task.artifact === null &&
+        await this.lifecycle.hasManagedWorktree(task.worktree_id)) await this.lifecycle.cleanup(task.worktree_id);
+    }
+  }
+
+  async childWorktreeReleased(descriptor: ParallelDispatchDescriptor): Promise<boolean> {
+    const snapshot = await this.transaction((state) => {
+      const run = state.run?.kind === "run" && state.run.run_id === descriptor.run_id ? state.run :
+        state.archived.find((entry): entry is StoredRunArchive => entry.kind === "run" && entry.run.run_id === descriptor.run_id)?.run;
+      const task = run?.tasks.find((entry) => entry.descriptor.dispatch_id === descriptor.dispatch_id);
+      if (task === undefined || fingerprint(task.descriptor) !== fingerprint(descriptor)) {
+        throw new ParallelDispatchError("descriptor-mismatch", "Child worktree identity changed.");
+      }
+      return { result: task.worktree_id, changed: false };
+    });
+    return !(await this.lifecycle.hasManagedWorktree(snapshot));
   }
 
   async cancel(ownerRoot: string, runID?: string): Promise<ParallelDispatchSnapshot | undefined> {

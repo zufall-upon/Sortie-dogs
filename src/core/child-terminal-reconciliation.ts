@@ -76,7 +76,7 @@ const IDENTITY_FIELDS = [
 
 const CONTEXT_IDENTITY_FIELDS = ["run_id", "unit_id", "candidate_id", "route_id", "child_id", "call_id"] as const;
 
-const EVIDENCE_FIELDS: readonly ChildTerminalEvidenceName[] = [
+export const CHILD_TERMINAL_EVIDENCE_FIELDS: readonly ChildTerminalEvidenceName[] = Object.freeze([
   "terminal",
   "tools_quiescent",
   "artifact_window_closed",
@@ -84,7 +84,7 @@ const EVIDENCE_FIELDS: readonly ChildTerminalEvidenceName[] = [
   "gate_released",
   "lease_released",
   "worktree_released",
-];
+]);
 
 const DISPOSITIONS: readonly ChildTerminalDisposition[] = ["continue", "succeeded", "failed", "cancelled"];
 const EVIDENCE_STATES: readonly ChildTerminalEvidenceState[] = ["satisfied", "unsatisfied", "unknown"];
@@ -108,6 +108,15 @@ function identityProblem(value: unknown): "identity_missing" | "identity_invalid
     } else if (typeof item !== "string" || item.length === 0) return "identity_invalid";
   }
   return null;
+}
+
+export function isChildTerminalIdentity(value: unknown): value is ChildTerminalIdentity {
+  return identityProblem(value) === null && isRecord(value) &&
+    Object.keys(value).every((key) => (IDENTITY_FIELDS as readonly string[]).includes(key));
+}
+
+export function sameChildTerminalIdentity(left: ChildTerminalIdentity, right: ChildTerminalIdentity): boolean {
+  return IDENTITY_FIELDS.every((field) => left[field] === right[field]);
 }
 
 function terminalFingerprint(
@@ -161,7 +170,7 @@ export function reconcileChildTerminal(input: unknown): ChildTerminalReconciliat
 
   if (!isRecord(input.evidence)) return rejected("invalid_evidence");
   const evidenceRecord = input.evidence;
-  if (EVIDENCE_FIELDS.some((field) => !EVIDENCE_STATES.includes(evidenceRecord[field] as ChildTerminalEvidenceState))) {
+  if (CHILD_TERMINAL_EVIDENCE_FIELDS.some((field) => !EVIDENCE_STATES.includes(evidenceRecord[field] as ChildTerminalEvidenceState))) {
     return rejected("invalid_evidence");
   }
   const evidence = evidenceRecord as unknown as ChildTerminalEvidence;
@@ -173,8 +182,8 @@ export function reconcileChildTerminal(input: unknown): ChildTerminalReconciliat
   }
   if (typeof settled === "string" && settled !== fingerprint) return rejected("settled_conflict", fingerprint);
 
-  const unknown = EVIDENCE_FIELDS.filter((field) => evidence[field] === "unknown");
-  const blocking = EVIDENCE_FIELDS.filter((field) => evidence[field] === "unsatisfied");
+  const unknown = CHILD_TERMINAL_EVIDENCE_FIELDS.filter((field) => evidence[field] === "unknown");
+  const blocking = CHILD_TERMINAL_EVIDENCE_FIELDS.filter((field) => evidence[field] === "unsatisfied");
   if (unknown.length > 0 || blocking.length > 0) {
     const reason = unknown.length > 0 && blocking.length > 0
       ? "evidence_unsatisfied_and_unknown"

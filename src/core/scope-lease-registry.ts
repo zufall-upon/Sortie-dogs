@@ -113,6 +113,7 @@ export interface ScopeLease {
   readonly scope: WorktreeScope;
   heartbeat(): Promise<void>;
   assertHeld(): Promise<void>;
+  isReleased(): Promise<boolean>;
   release(): Promise<void>;
   abandon(): Promise<void>;
   close(): void;
@@ -145,6 +146,12 @@ export class ScopeLeaseRegistry {
 
   static open(stateRoot: string, options?: ScopeLeaseRegistryOptions): ScopeLeaseRegistry {
     return new ScopeLeaseRegistry(stateRoot, options);
+  }
+
+  async hasConflictingLease(scope: WorktreeScope): Promise<boolean> {
+    const normalized = this.validateRequest(scope);
+    return this.withLock(async () => (await this.load()).leases.some((lease) =>
+      lease.expiresAt > Date.now() && worktreeScopesConflict(normalized, { read: lease.read, write: lease.write })));
   }
 
   async acquire(request: ScopeLeaseAcquireRequest): Promise<ScopeLease> {
@@ -259,6 +266,11 @@ export class ScopeLeaseRegistry {
       scope: Object.freeze({ read: [...scope.read], write: [...scope.write] }),
       heartbeat: () => serialized("heartbeat"),
       assertHeld: () => serialized("assert"),
+      isReleased: () => this.withLock(async () => {
+        const state = await this.load();
+        return !state.leases.some((lease) => lease.id === id && lease.ownerHash === ownerHash &&
+          lease.tokenHash === credentialHash && lease.expiresAt > Date.now());
+      }),
       release: () => serialized("release"),
       abandon: () => serialized("abandon"),
       close: stop,

@@ -4,6 +4,8 @@ import path from "node:path";
 
 import type { EvidenceCapsuleStore } from "./evidence-capsule.js";
 import type { AcceptanceCompileGapCode, AcceptanceCompileResult } from "./acceptance-compiler.js";
+import { CHILD_TERMINAL_EVIDENCE_FIELDS, isChildTerminalIdentity, reconcileChildTerminal, sameChildTerminalIdentity,
+  type ChildTerminalIdentity, type ChildTerminalEvidence, type ChildTerminalDisposition } from "./child-terminal-reconciliation.js";
 
 export const RUN_FLIGHT_LEDGER_SCHEMA_VERSION = "0.1" as const;
 export const MAX_RUN_FLIGHT_EVENTS = 2048;
@@ -60,7 +62,17 @@ export interface FlightObservation {
 
 interface EventBase { readonly at: string; }
 
+export interface ChildFlightState {
+  readonly identity: ChildTerminalIdentity;
+  readonly deadline_ms: number;
+  readonly stop_trigger: "deadline_expired" | "explicit_cancellation" | null;
+  readonly terminal: { readonly disposition: ChildTerminalDisposition; readonly fingerprint: string } | null;
+}
+
 export type RunFlightEvent =
+  | (EventBase & { readonly kind: "child.registered"; readonly identity: ChildTerminalIdentity; readonly deadline_ms: number })
+  | (EventBase & { readonly kind: "child.stop-requested"; readonly identity: ChildTerminalIdentity; readonly trigger: "deadline_expired" | "explicit_cancellation" })
+  | (EventBase & { readonly kind: "child.terminal"; readonly identity: ChildTerminalIdentity; readonly disposition: ChildTerminalDisposition; readonly evidence: ChildTerminalEvidence })
   | (EventBase & { readonly kind: "run.planned"; readonly run_id: string; readonly initial_candidate_id: string; readonly budget_limits: FlightBudgetLimits; readonly resource_budget_limits?: FlightResourceBudget })
   | (EventBase & { readonly kind: "plan.compiled"; readonly plan_id: string; readonly proposal_id: string; readonly decision: "accepted" | "rejected"; readonly gap_codes: readonly AcceptanceCompileGapCode[] })
   | (EventBase & { readonly kind: "route.selected"; readonly route_id: string; readonly candidate_id: string; readonly role: FlightRole; readonly model: string; readonly variant: string | null; readonly reason: "planning" | "implementation" | RecoveryKind })
@@ -93,6 +105,7 @@ export interface RunFlightEventRecord {
 }
 
 export interface RunFlightState {
+  readonly children: readonly ChildFlightState[];
   readonly run_id: string | null;
   readonly current_candidate_id: string | null;
   readonly active_wave_id: string | null;
@@ -201,6 +214,12 @@ function validEvent(value: unknown): value is RunFlightEvent {
   if (!isObject(value) || !text(value.kind) || !text(value.at) || Number.isNaN(Date.parse(value.at))) return false;
   const base = ["kind", "at"];
   switch (value.kind) {
+    case "child.registered": return only(value, [...base, "identity", "deadline_ms"]) && isChildTerminalIdentity(value.identity) && integer(value.deadline_ms);
+    case "child.stop-requested": return only(value, [...base, "identity", "trigger"]) && isChildTerminalIdentity(value.identity) && enumValue(value.trigger, ["deadline_expired", "explicit_cancellation"]);
+    case "child.terminal": return only(value, [...base, "identity", "disposition", "evidence"]) &&
+      isObject(value.evidence) && only(value.evidence, CHILD_TERMINAL_EVIDENCE_FIELDS) &&
+      isChildTerminalIdentity(value.identity) && reconcileChildTerminal({ current: value.identity,
+        observation: { identity: value.identity, disposition: value.disposition }, evidence: value.evidence }).status === "ready";
     case "run.planned": return only(value, [...base, "run_id", "initial_candidate_id", "budget_limits", "resource_budget_limits"]) && text(value.run_id) && text(value.initial_candidate_id) && validBudget(value.budget_limits) && (!Object.hasOwn(value, "resource_budget_limits") || validResourceBudget(value.resource_budget_limits));
     case "plan.compiled": return only(value, [...base, "plan_id", "proposal_id", "decision", "gap_codes"]) && hash(value.plan_id) && hash(value.proposal_id) && enumValue(value.decision, ["accepted", "rejected"]) && Array.isArray(value.gap_codes) && value.gap_codes.length <= 128 && value.gap_codes.every((code) => enumValue(code, GAP_CODES)) && new Set(value.gap_codes).size === value.gap_codes.length && ((value.decision === "accepted" && value.gap_codes.length === 0) || (value.decision === "rejected" && value.gap_codes.length > 0));
     case "route.selected": return only(value, [...base, "route_id", "candidate_id", "role", "model", "variant", "reason"]) && text(value.route_id) && text(value.candidate_id) && enumValue(value.role, ["implementation", "review", "advice", "rescue"]) && text(value.model) && nullableText(value.variant) && enumValue(value.reason, ["planning", "implementation", "normal_remediation", "adaptive_probe", "read_only_diagnosis", "model_rescue"]);
@@ -225,6 +244,7 @@ function validEvent(value: unknown): value is RunFlightEvent {
 }
 
 interface MutableState {
+  children: Map<string, ChildFlightState>;
   run_id: string | null; current_candidate_id: string | null; active_wave_id: string | null; active_wave_route_id: string | null;
   last_attempt_id: string | null; completed_wave_count: number; budget_limits: FlightBudgetLimits | null;
   budget_consumed: FlightBudgetLimits; child_counts: Record<FlightRole, number>; validation_reruns: number; observations: FlightObservation[];
@@ -254,7 +274,7 @@ function initialState(): MutableState {
     child_counts: { implementation: 0, review: 0, advice: 0, rescue: 0 }, validation_reruns: 0, observations: [], terminal_disposition: null,
     current_route_id: null, pending_candidate: null, candidate_completed: false, cleanup_completed: false,
     ids: new Set(), validation_fingerprints: new Set(), attempts: new Map(), units: new Map(), plan_decisions: [], plan_ids: new Set(), accepted_plan: null,
-    resource_budget_limits: null, resource_budget_consumed: { time_ms: 0, cost_usd: 0 }, resource_reservations: new Map() };
+    resource_budget_limits: null, resource_budget_consumed: { time_ms: 0, cost_usd: 0 }, resource_reservations: new Map(), children: new Map() };
 }
 
 function claim(state: MutableState, id: string): void {
@@ -269,8 +289,33 @@ function requireTransition(condition: unknown, message: string): asserts conditi
 function applyEvent(state: MutableState, event: RunFlightEvent): void {
   requireTransition(state.terminal_disposition === null, "No event may follow run completion.");
   switch (event.kind) {
+    case "child.registered": {
+      requireTransition((state.run_id === null || state.run_id === event.identity.run_id) &&
+        [...state.children.values()].every((child) => child.identity.run_id === event.identity.run_id) &&
+        !state.children.has(event.identity.attempt_id), "Child attempt is already registered or belongs to another run.");
+      state.children.set(event.identity.attempt_id, { identity: { ...event.identity }, deadline_ms: event.deadline_ms,
+        stop_trigger: null, terminal: null });
+      break;
+    }
+    case "child.stop-requested":
+    case "child.terminal": {
+      const child = state.children.get(event.identity.attempt_id);
+      requireTransition(child !== undefined && child.terminal === null && sameChildTerminalIdentity(child.identity, event.identity),
+        "Child lifecycle identity or terminal state changed.");
+      if (event.kind === "child.stop-requested") {
+        requireTransition(child.stop_trigger === null, "Child stop was already requested.");
+        state.children.set(event.identity.attempt_id, { ...child, stop_trigger: event.trigger });
+      } else {
+        const terminal = reconcileChildTerminal({ current: child.identity,
+          observation: { identity: event.identity, disposition: event.disposition }, evidence: event.evidence });
+        requireTransition(terminal.status === "ready" && terminal.fingerprint !== null, "Child resources are not reconciled.");
+        state.children.set(event.identity.attempt_id, { ...child,
+          terminal: { disposition: event.disposition, fingerprint: terminal.fingerprint } });
+      }
+      break;
+    }
     case "run.planned":
-      requireTransition(state.run_id === null, "run.planned must be the first and only planning event."); claim(state, event.run_id); claim(state, event.initial_candidate_id);
+      requireTransition(state.run_id === null && [...state.children.values()].every((child) => child.identity.run_id === event.run_id), "run.planned must be the first and only planning event."); claim(state, event.run_id); claim(state, event.initial_candidate_id);
       state.run_id = event.run_id; state.current_candidate_id = event.initial_candidate_id; state.budget_limits = event.budget_limits;
       state.resource_budget_limits = event.resource_budget_limits ?? null; break;
     case "plan.compiled":
@@ -354,7 +399,8 @@ function applyEvent(state: MutableState, event: RunFlightEvent): void {
     case "cleanup.completed":
       requireTransition(state.candidate_completed && !state.cleanup_completed && event.run_id === state.run_id, "Cleanup must follow candidate completion."); state.cleanup_completed = true; state.observations.push(event.observation); break;
     case "run.completed":
-      requireTransition(state.cleanup_completed && event.run_id === state.run_id, "Run completion must follow cleanup."); state.terminal_disposition = event.disposition; break;
+      requireTransition(state.cleanup_completed && event.run_id === state.run_id &&
+        [...state.children.values()].every((child) => child.terminal !== null), "Run completion must follow child reconciliation and cleanup."); state.terminal_disposition = event.disposition; break;
   }
 }
 
@@ -367,7 +413,8 @@ function publicState(state: MutableState): RunFlightState {
     validation_reruns: state.validation_reruns, observations: state.observations.map((entry) => structuredClone(entry)), terminal_disposition: state.terminal_disposition,
     plan_decisions: state.plan_decisions.map((entry) => ({ ...entry, gap_codes: [...entry.gap_codes] })),
     resource_budget_limits: state.resource_budget_limits === null ? null : { ...state.resource_budget_limits },
-    resource_budget_consumed: { ...state.resource_budget_consumed }, resource_budget_reserved: reservedResources(state) };
+    resource_budget_consumed: { ...state.resource_budget_consumed }, resource_budget_reserved: reservedResources(state),
+    children: structuredClone([...state.children.values()]) };
 }
 
 export function reconstructRunFlightLedger(records: readonly RunFlightEventRecord[]): RunFlightState {
@@ -472,6 +519,16 @@ export class RunFlightLedger {
     if (!handle) throw new RunFlightLedgerError("conflict", "Ledger lock remained busy.");
     try {
       const records = await this.#readRecords();
+      if ("identity" in event && event.kind.startsWith("child.")) {
+        const previous = records.find(({ event: stored }) => stored.kind === event.kind && "identity" in stored &&
+          stored.identity.attempt_id === event.identity.attempt_id);
+        if (previous !== undefined) {
+          if (recordHash(1, null, { ...event, at: previous.event.at }) !== recordHash(1, null, previous.event)) {
+            throw new RunFlightLedgerError("transition", "A different child lifecycle event is already recorded.");
+          }
+          return reconstructRunFlightLedger(records);
+        }
+      }
       await this.#verifyCapsuleIds(capsuleIds(event));
       const sequence = records.length + 1;
       const previousHash = records.at(-1)?.event_hash ?? null;

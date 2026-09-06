@@ -169,6 +169,89 @@ export {
   RETAINED_STATE_EXTENSION,
   RETAINED_STATE_SCHEMA_VERSION,
 } from "./core/retained-state.js";
+export {
+  canonicalizeEvidenceCapsule,
+  DEFAULT_MAX_EVIDENCE_CAPSULES,
+  EVIDENCE_CAPSULE_SCHEMA_VERSION,
+  EvidenceCapsuleError,
+  EvidenceCapsuleStore,
+  evaluateEvidenceCapsuleFreshness,
+  evidenceCapsuleHash,
+  MAX_EVIDENCE_CAPSULE_BYTES,
+  MAX_EVIDENCE_CAPSULE_ITEMS,
+} from "./core/evidence-capsule.js";
+export {
+  createExecutionPlan,
+  EXECUTION_PLAN_VERSION,
+  ExecutionPlanError,
+  executionPlanManifestFingerprint,
+  inspectExecutionPlan,
+} from "./core/execution-plan.js";
+export type {
+  ExecutionPlan,
+  ExecutionPlanErrorCode,
+} from "./core/execution-plan.js";
+export {
+  ACCEPTANCE_COMPILER_VERSION,
+  compileAcceptanceCoverage,
+  MAX_ACCEPTANCE_COMPILE_GAPS,
+  MAX_ACCEPTANCE_COMPILE_ITEMS,
+} from "./core/acceptance-compiler.js";
+export type {
+  AcceptanceCompileCoverage,
+  AcceptanceCompileGap,
+  AcceptanceCompileGapCode,
+  AcceptanceCompileItem,
+  AcceptanceCompileProposal,
+  AcceptanceCompileResult,
+  AcceptanceCompileValidation,
+  AcceptanceCoverageMapEntry,
+} from "./core/acceptance-compiler.js";
+export {
+  MAX_RUN_FLIGHT_EVENTS,
+  MAX_RUN_FLIGHT_LEDGER_BYTES,
+  reconstructRunFlightLedger,
+  RUN_FLIGHT_LEDGER_SCHEMA_VERSION,
+  RunFlightLedger,
+  RunFlightLedgerError,
+} from "./core/run-flight-ledger.js";
+export { CancellableChildLifecycle, DEFAULT_CHILD_DEADLINE_MS } from "./core/child-lifecycle-runtime.js";
+export type { ChildLifecycleDescriptor, ChildLifecycleRuntime, ChildLifecycleResult } from "./core/child-lifecycle-runtime.js";
+export { reconcileChildTerminal } from "./core/child-terminal-reconciliation.js";
+export type { ChildTerminalIdentity, ChildTerminalObservation, ChildTerminalEvidence,
+  ChildTerminalDisposition } from "./core/child-terminal-reconciliation.js";
+export type {
+  ChildFlightState,
+  FailureCategory,
+  FlightBudgetCharge,
+  FlightBudgetLimits,
+  FlightResourceBudget,
+  FlightResourceUsage,
+  FlightObservation,
+  FlightReferenceSet,
+  FlightRole,
+  FlightStage,
+  RecoveryKind,
+  RunFlightEvent,
+  RunFlightEventRecord,
+  RunFlightEvidenceAccess,
+  RunFlightLedgerErrorCode,
+  RunFlightState,
+  TerminalDisposition,
+} from "./core/run-flight-ledger.js";
+export type {
+  EvidenceAcceptanceLink,
+  EvidenceCapsule,
+  EvidenceCapsuleErrorCode,
+  EvidenceCapsuleFreshness,
+  EvidenceCapsuleLookupRequest,
+  EvidenceCapsuleLookupResult,
+  EvidenceCapsuleProvenance,
+  EvidenceCapsulePutResult,
+  EvidenceRisk,
+  EvidenceSourceReference,
+  EvidenceValidationReference,
+} from "./core/evidence-capsule.js";
 export type {
   AdmissionReceipt,
   NextEvidenceDecision,
