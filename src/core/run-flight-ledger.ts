@@ -1,0 +1,449 @@
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import path from "node:path";
+
+import type { EvidenceCapsuleStore } from "./evidence-capsule.js";
+import type { AcceptanceCompileGapCode, AcceptanceCompileResult } from "./acceptance-compiler.js";
+
+export const RUN_FLIGHT_LEDGER_SCHEMA_VERSION = "0.1" as const;
+export const MAX_RUN_FLIGHT_EVENTS = 2048;
+export const MAX_RUN_FLIGHT_LEDGER_BYTES = 1024 * 1024;
+
+const HASH_PATTERN = /^sha256:[a-f0-9]{64}$/u;
+const MAX_TEXT = 256;
+
+export type FlightRole = "implementation" | "review" | "advice" | "rescue";
+export type RecoveryKind = "normal_remediation" | "adaptive_probe" | "read_only_diagnosis" | "model_rescue";
+export type FailureCategory = "infrastructure" | "authorization" | "contract" | "cancellation" | "implementation";
+export type TerminalDisposition = "continue" | "succeeded" | "failed" | "cancelled";
+export type FlightStage = "planning" | "route" | "unit" | "wave" | "candidate" | "cleanup" | "recovery";
+
+export interface FlightBudgetLimits {
+  readonly recovery_actions: number;
+  readonly probe_iterations: number;
+  readonly model_attempts: number;
+}
+
+export interface FlightBudgetCharge extends FlightBudgetLimits {
+  readonly kind: "implementation" | RecoveryKind;
+}
+
+export interface FlightReferenceSet {
+  readonly capsule_ids: readonly string[];
+  readonly artifact_ids: readonly string[];
+}
+
+export interface FlightObservation {
+  readonly stage: FlightStage;
+  readonly duration_ms: number | null;
+  readonly usage: {
+    readonly input_tokens: number | null;
+    readonly cache_read_tokens: number | null;
+    readonly output_tokens: number | null;
+    readonly provenance: "measured" | "provider_estimate" | "unknown";
+  };
+  readonly estimated_cost: {
+    readonly usd: number | null;
+    readonly provenance: "provider_estimate" | "calculated" | "unknown";
+  };
+}
+
+interface EventBase { readonly at: string; }
+
+export type RunFlightEvent =
+  | (EventBase & { readonly kind: "run.planned"; readonly run_id: string; readonly initial_candidate_id: string; readonly budget_limits: FlightBudgetLimits })
+  | (EventBase & { readonly kind: "plan.compiled"; readonly plan_id: string; readonly proposal_id: string; readonly decision: "accepted" | "rejected"; readonly gap_codes: readonly AcceptanceCompileGapCode[] })
+  | (EventBase & { readonly kind: "route.selected"; readonly route_id: string; readonly candidate_id: string; readonly role: FlightRole; readonly model: string; readonly variant: string | null; readonly reason: "planning" | "implementation" | RecoveryKind })
+  | (EventBase & { readonly kind: "wave.opened"; readonly wave_id: string; readonly wave_index: number; readonly candidate_id: string })
+  | (EventBase & { readonly kind: "unit.opened"; readonly unit_id: string; readonly wave_id: string; readonly candidate_id: string; readonly references: FlightReferenceSet })
+  | (EventBase & { readonly kind: "attempt.started"; readonly attempt_id: string; readonly predecessor_attempt_id: string | null; readonly unit_id: string; readonly candidate_id: string; readonly route_id: string; readonly role: FlightRole; readonly selected_model: string; readonly selected_variant: string | null; readonly child_id: string | null; readonly call_id: string; readonly budget_charge: FlightBudgetCharge })
+  | (EventBase & { readonly kind: "attempt.finished"; readonly attempt_id: string; readonly observed_model: string | null; readonly observed_variant: string | null; readonly failure: { readonly category: FailureCategory; readonly code: string } | null; readonly disposition: TerminalDisposition; readonly observation: FlightObservation; readonly references: FlightReferenceSet })
+  | (EventBase & { readonly kind: "recovery.recorded"; readonly recovery_id: string; readonly failed_attempt_id: string; readonly kind_detail: RecoveryKind; readonly candidate_id: string })
+  | (EventBase & { readonly kind: "validation.recorded"; readonly validation_id: string; readonly unit_id: string; readonly command_fingerprint: string; readonly result: "passed" | "failed"; readonly artifact_id: string | null })
+  | (EventBase & { readonly kind: "unit.completed"; readonly unit_id: string; readonly disposition: "succeeded" | "failed" })
+  | (EventBase & { readonly kind: "wave.completed"; readonly wave_id: string; readonly produced_candidate_id: string; readonly artifact_id: string })
+  | (EventBase & { readonly kind: "candidate.advanced"; readonly from_candidate_id: string; readonly candidate_id: string; readonly wave_id: string; readonly artifact_id: string })
+  | (EventBase & { readonly kind: "candidate.completed"; readonly candidate_id: string; readonly references: FlightReferenceSet })
+  | (EventBase & { readonly kind: "cleanup.completed"; readonly run_id: string; readonly observation: FlightObservation })
+  | (EventBase & { readonly kind: "run.completed"; readonly run_id: string; readonly disposition: "succeeded" | "failed" | "cancelled" });
+
+export type RunPlannedFlightEvent = Extract<RunFlightEvent, { readonly kind: "run.planned" }>;
+export type PlanCompiledFlightEvent = Extract<RunFlightEvent, { readonly kind: "plan.compiled" }>;
+
+export interface RunFlightLedgerInitialPrefixInput {
+  readonly run_planned: RunPlannedFlightEvent;
+  readonly plan_compiled: PlanCompiledFlightEvent;
+}
+
+export interface RunFlightEventRecord {
+  readonly sequence: number;
+  readonly previous_hash: string | null;
+  readonly event_hash: string;
+  readonly event: RunFlightEvent;
+}
+
+export interface RunFlightState {
+  readonly run_id: string | null;
+  readonly current_candidate_id: string | null;
+  readonly active_wave_id: string | null;
+  readonly active_unit_id: string | null;
+  readonly active_attempt_id: string | null;
+  readonly last_attempt_id: string | null;
+  readonly completed_wave_count: number;
+  readonly budget_limits: FlightBudgetLimits | null;
+  readonly budget_consumed: FlightBudgetLimits;
+  readonly child_counts: Readonly<Record<FlightRole, number>>;
+  readonly validation_reruns: number;
+  readonly observations: readonly FlightObservation[];
+  readonly terminal_disposition: "succeeded" | "failed" | "cancelled" | null;
+  readonly plan_decisions: readonly { readonly plan_id: string; readonly proposal_id: string; readonly decision: "accepted" | "rejected"; readonly gap_codes: readonly AcceptanceCompileGapCode[] }[];
+}
+
+export type RunFlightLedgerErrorCode = "invalid" | "capacity" | "sequence" | "transition" | "budget" | "conflict";
+
+export class RunFlightLedgerError extends Error {
+  readonly code: RunFlightLedgerErrorCode;
+  constructor(code: RunFlightLedgerErrorCode, message: string) {
+    super(message);
+    this.name = "RunFlightLedgerError";
+    this.code = code;
+  }
+}
+
+export interface RunFlightEvidenceAccess {
+  readonly store: EvidenceCapsuleStore;
+  readonly declared_capsule_ids: readonly string[];
+  readonly authorized_source_paths: readonly string[];
+}
+
+const isObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+const text = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= MAX_TEXT;
+const integer = (value: unknown): value is number => Number.isSafeInteger(value) && Number(value) >= 0;
+const nullableText = (value: unknown): value is string | null => value === null || text(value);
+const only = (value: Record<string, unknown>, keys: readonly string[]): boolean => Object.keys(value).every((key) => keys.includes(key));
+const enumValue = (value: unknown, values: readonly string[]): value is string => typeof value === "string" && values.includes(value);
+const hash = (value: unknown): value is string => typeof value === "string" && HASH_PATTERN.test(value);
+const GAP_CODES: readonly AcceptanceCompileGapCode[] = ["malformed_proposal", "duplicate_acceptance_id", "duplicate_unit_id", "duplicate_validation_id", "duplicate_coverage", "unknown_acceptance_id", "unknown_unit_id", "unknown_validation_id", "validation_unit_mismatch", "undeclared_capsule", "validation_evidence_missing", "uncovered_acceptance"];
+
+function canonical(value: unknown): string {
+  const sort = (item: unknown): unknown => Array.isArray(item) ? item.map(sort) : isObject(item)
+    ? Object.fromEntries(Object.keys(item).sort().map((key) => [key, sort(item[key])])) : item;
+  return JSON.stringify(sort(value));
+}
+
+function recordHash(sequence: number, previousHash: string | null, event: RunFlightEvent): string {
+  return `sha256:${createHash("sha256").update(canonical({ sequence, previous_hash: previousHash, event })).digest("hex")}`;
+}
+
+function validBudget(value: unknown): value is FlightBudgetLimits {
+  return isObject(value) && only(value, ["recovery_actions", "probe_iterations", "model_attempts"]) &&
+    integer(value.recovery_actions) && integer(value.probe_iterations) && integer(value.model_attempts);
+}
+
+function validCharge(value: unknown): value is FlightBudgetCharge {
+  return isObject(value) && only(value, ["kind", "recovery_actions", "probe_iterations", "model_attempts"]) &&
+    enumValue(value.kind, ["implementation", "normal_remediation", "adaptive_probe", "read_only_diagnosis", "model_rescue"]) &&
+    integer(value.recovery_actions) && integer(value.probe_iterations) && integer(value.model_attempts) &&
+    (value.kind === "implementation" || Number(value.recovery_actions) > 0);
+}
+
+function validReferences(value: unknown): value is FlightReferenceSet {
+  return isObject(value) && only(value, ["capsule_ids", "artifact_ids"]) && Array.isArray(value.capsule_ids) && Array.isArray(value.artifact_ids) &&
+    value.capsule_ids.length <= 64 && value.artifact_ids.length <= 64 && value.capsule_ids.every(hash) && value.artifact_ids.every(hash) &&
+    new Set(value.capsule_ids).size === value.capsule_ids.length && new Set(value.artifact_ids).size === value.artifact_ids.length;
+}
+
+function validObservation(value: unknown): value is FlightObservation {
+  if (!isObject(value) || !only(value, ["stage", "duration_ms", "usage", "estimated_cost"]) ||
+    !enumValue(value.stage, ["planning", "route", "unit", "wave", "candidate", "cleanup", "recovery"]) ||
+    !(value.duration_ms === null || integer(value.duration_ms)) || !isObject(value.usage) || !isObject(value.estimated_cost)) return false;
+  const usage = value.usage;
+  const cost = value.estimated_cost;
+  return only(usage, ["input_tokens", "cache_read_tokens", "output_tokens", "provenance"]) &&
+    [usage.input_tokens, usage.cache_read_tokens, usage.output_tokens].every((entry) => entry === null || integer(entry)) &&
+    enumValue(usage.provenance, ["measured", "provider_estimate", "unknown"]) &&
+    only(cost, ["usd", "provenance"]) && (cost.usd === null || (typeof cost.usd === "number" && Number.isFinite(cost.usd) && cost.usd >= 0)) &&
+    enumValue(cost.provenance, ["provider_estimate", "calculated", "unknown"]) &&
+    (usage.provenance !== "unknown" || [usage.input_tokens, usage.cache_read_tokens, usage.output_tokens].every((entry) => entry === null)) &&
+    (cost.provenance !== "unknown" || cost.usd === null);
+}
+
+function validEvent(value: unknown): value is RunFlightEvent {
+  if (!isObject(value) || !text(value.kind) || !text(value.at) || Number.isNaN(Date.parse(value.at))) return false;
+  const base = ["kind", "at"];
+  switch (value.kind) {
+    case "run.planned": return only(value, [...base, "run_id", "initial_candidate_id", "budget_limits"]) && text(value.run_id) && text(value.initial_candidate_id) && validBudget(value.budget_limits);
+    case "plan.compiled": return only(value, [...base, "plan_id", "proposal_id", "decision", "gap_codes"]) && hash(value.plan_id) && hash(value.proposal_id) && enumValue(value.decision, ["accepted", "rejected"]) && Array.isArray(value.gap_codes) && value.gap_codes.length <= 128 && value.gap_codes.every((code) => enumValue(code, GAP_CODES)) && new Set(value.gap_codes).size === value.gap_codes.length && ((value.decision === "accepted" && value.gap_codes.length === 0) || (value.decision === "rejected" && value.gap_codes.length > 0));
+    case "route.selected": return only(value, [...base, "route_id", "candidate_id", "role", "model", "variant", "reason"]) && text(value.route_id) && text(value.candidate_id) && enumValue(value.role, ["implementation", "review", "advice", "rescue"]) && text(value.model) && nullableText(value.variant) && enumValue(value.reason, ["planning", "implementation", "normal_remediation", "adaptive_probe", "read_only_diagnosis", "model_rescue"]);
+    case "wave.opened": return only(value, [...base, "wave_id", "wave_index", "candidate_id"]) && text(value.wave_id) && Number.isInteger(value.wave_index) && Number(value.wave_index) >= 1 && text(value.candidate_id);
+    case "unit.opened": return only(value, [...base, "unit_id", "wave_id", "candidate_id", "references"]) && text(value.unit_id) && text(value.wave_id) && text(value.candidate_id) && validReferences(value.references);
+    case "attempt.started": return only(value, [...base, "attempt_id", "predecessor_attempt_id", "unit_id", "candidate_id", "route_id", "role", "selected_model", "selected_variant", "child_id", "call_id", "budget_charge"]) && text(value.attempt_id) && nullableText(value.predecessor_attempt_id) && text(value.unit_id) && text(value.candidate_id) && text(value.route_id) && enumValue(value.role, ["implementation", "review", "advice", "rescue"]) && text(value.selected_model) && nullableText(value.selected_variant) && nullableText(value.child_id) && text(value.call_id) && validCharge(value.budget_charge);
+    case "attempt.finished": {
+      if (!only(value, [...base, "attempt_id", "observed_model", "observed_variant", "failure", "disposition", "observation", "references"]) || !text(value.attempt_id) || !nullableText(value.observed_model) || !nullableText(value.observed_variant) || !enumValue(value.disposition, ["continue", "succeeded", "failed", "cancelled"]) || !validObservation(value.observation) || !validReferences(value.references)) return false;
+      const failure = value.failure;
+      return (failure === null && value.disposition === "succeeded") || (isObject(failure) && only(failure, ["category", "code"]) && enumValue(failure.category, ["infrastructure", "authorization", "contract", "cancellation", "implementation"]) && text(failure.code) && value.disposition !== "succeeded");
+    }
+    case "recovery.recorded": return only(value, [...base, "recovery_id", "failed_attempt_id", "kind_detail", "candidate_id"]) && text(value.recovery_id) && text(value.failed_attempt_id) && enumValue(value.kind_detail, ["normal_remediation", "adaptive_probe", "read_only_diagnosis", "model_rescue"]) && text(value.candidate_id);
+    case "validation.recorded": return only(value, [...base, "validation_id", "unit_id", "command_fingerprint", "result", "artifact_id"]) && text(value.validation_id) && text(value.unit_id) && hash(value.command_fingerprint) && enumValue(value.result, ["passed", "failed"]) && (value.artifact_id === null || hash(value.artifact_id));
+    case "unit.completed": return only(value, [...base, "unit_id", "disposition"]) && text(value.unit_id) && enumValue(value.disposition, ["succeeded", "failed"]);
+    case "wave.completed": return only(value, [...base, "wave_id", "produced_candidate_id", "artifact_id"]) && text(value.wave_id) && text(value.produced_candidate_id) && hash(value.artifact_id);
+    case "candidate.advanced": return only(value, [...base, "from_candidate_id", "candidate_id", "wave_id", "artifact_id"]) && text(value.from_candidate_id) && text(value.candidate_id) && text(value.wave_id) && hash(value.artifact_id);
+    case "candidate.completed": return only(value, [...base, "candidate_id", "references"]) && text(value.candidate_id) && validReferences(value.references);
+    case "cleanup.completed": return only(value, [...base, "run_id", "observation"]) && text(value.run_id) && validObservation(value.observation) && value.observation.stage === "cleanup";
+    case "run.completed": return only(value, [...base, "run_id", "disposition"]) && text(value.run_id) && enumValue(value.disposition, ["succeeded", "failed", "cancelled"]);
+    default: return false;
+  }
+}
+
+interface MutableState {
+  run_id: string | null; current_candidate_id: string | null; active_wave_id: string | null; active_wave_route_id: string | null;
+  last_attempt_id: string | null; completed_wave_count: number; budget_limits: FlightBudgetLimits | null;
+  budget_consumed: FlightBudgetLimits; child_counts: Record<FlightRole, number>; validation_reruns: number; observations: FlightObservation[];
+  terminal_disposition: "succeeded" | "failed" | "cancelled" | null; current_route_id: string | null;
+  pending_candidate: { from: string; to: string; wave: string; artifact: string } | null; candidate_completed: boolean; cleanup_completed: boolean;
+  ids: Set<string>; validation_fingerprints: Set<string>; attempts: Map<string, string>; units: Map<string, MutableUnitState>;
+  plan_decisions: { plan_id: string; proposal_id: string; decision: "accepted" | "rejected"; gap_codes: AcceptanceCompileGapCode[] }[]; plan_ids: Set<string>; accepted_plan: string | null;
+}
+
+interface MutableUnitState {
+  wave_id: string;
+  active_attempt_id: string | null;
+  last_attempt_id: string | null;
+  initial_predecessor_id: string | null;
+  last_failed_attempt_id: string | null;
+  last_disposition: TerminalDisposition | null;
+  completed_disposition: "succeeded" | "failed" | null;
+  budget_consumed: FlightBudgetLimits;
+}
+
+function initialState(): MutableState {
+  return { run_id: null, current_candidate_id: null, active_wave_id: null, active_wave_route_id: null,
+    last_attempt_id: null, completed_wave_count: 0, budget_limits: null, budget_consumed: { recovery_actions: 0, probe_iterations: 0, model_attempts: 0 },
+    child_counts: { implementation: 0, review: 0, advice: 0, rescue: 0 }, validation_reruns: 0, observations: [], terminal_disposition: null,
+    current_route_id: null, pending_candidate: null, candidate_completed: false, cleanup_completed: false,
+    ids: new Set(), validation_fingerprints: new Set(), attempts: new Map(), units: new Map(), plan_decisions: [], plan_ids: new Set(), accepted_plan: null };
+}
+
+function claim(state: MutableState, id: string): void {
+  if (state.ids.has(id)) throw new RunFlightLedgerError("transition", `Duplicate durable identity: ${id}`);
+  state.ids.add(id);
+}
+
+function requireTransition(condition: unknown, message: string): asserts condition {
+  if (!condition) throw new RunFlightLedgerError("transition", message);
+}
+
+function applyEvent(state: MutableState, event: RunFlightEvent): void {
+  requireTransition(state.terminal_disposition === null, "No event may follow run completion.");
+  switch (event.kind) {
+    case "run.planned":
+      requireTransition(state.run_id === null, "run.planned must be the first and only planning event."); claim(state, event.run_id); claim(state, event.initial_candidate_id);
+      state.run_id = event.run_id; state.current_candidate_id = event.initial_candidate_id; state.budget_limits = event.budget_limits; break;
+    case "plan.compiled":
+      requireTransition(state.run_id !== null && state.active_wave_id === null && state.current_route_id === null && !state.plan_ids.has(event.plan_id) && state.accepted_plan === null, "Plan decision must be unique and precede routing.");
+      state.plan_ids.add(event.plan_id); if (event.decision === "accepted") state.accepted_plan = event.plan_id;
+      state.plan_decisions.push({ plan_id: event.plan_id, proposal_id: event.proposal_id, decision: event.decision, gap_codes: [...event.gap_codes] }); break;
+    case "route.selected":
+      requireTransition(state.run_id !== null && state.active_wave_id === null && !state.candidate_completed && event.candidate_id === state.current_candidate_id, "Route must target the current candidate between waves."); claim(state, event.route_id); state.current_route_id = event.route_id; break;
+    case "wave.opened":
+      requireTransition(state.current_route_id !== null && state.active_wave_id === null && state.pending_candidate === null && event.candidate_id === state.current_candidate_id && event.wave_index === state.completed_wave_count + 1, "Wave order or candidate is invalid."); claim(state, event.wave_id); state.active_wave_id = event.wave_id; state.active_wave_route_id = state.current_route_id; state.current_route_id = null; break;
+    case "unit.opened": {
+      requireTransition(state.active_wave_id === event.wave_id && event.candidate_id === state.current_candidate_id, "Unit must open in the active wave and candidate."); claim(state, event.unit_id);
+      const openUnits = [...state.units.values()].filter((unit) => unit.completed_disposition === null);
+      if (openUnits.length > 0) for (const unit of openUnits) if (unit.last_attempt_id === null) unit.initial_predecessor_id = null;
+      state.units.set(event.unit_id, {
+        wave_id: event.wave_id, active_attempt_id: null, last_attempt_id: null,
+        initial_predecessor_id: openUnits.length === 0 ? state.last_attempt_id : null,
+        last_failed_attempt_id: null, last_disposition: null, completed_disposition: null,
+        budget_consumed: { recovery_actions: 0, probe_iterations: 0, model_attempts: 0 },
+      });
+      break;
+    }
+    case "attempt.started": {
+      const unit = state.units.get(event.unit_id);
+      const expectedPredecessor = unit?.last_attempt_id ?? unit?.initial_predecessor_id ?? null;
+      requireTransition(unit !== undefined && unit.completed_disposition === null && unit.active_attempt_id === null && event.candidate_id === state.current_candidate_id && event.predecessor_attempt_id === expectedPredecessor, "Attempt predecessor, unit, or candidate is invalid.");
+      requireTransition(event.route_id === state.active_wave_route_id, "Attempt route does not match the active wave route."); claim(state, event.attempt_id);
+      const next = { recovery_actions: state.budget_consumed.recovery_actions + event.budget_charge.recovery_actions, probe_iterations: state.budget_consumed.probe_iterations + event.budget_charge.probe_iterations, model_attempts: state.budget_consumed.model_attempts + event.budget_charge.model_attempts };
+      const limits = state.budget_limits!;
+      if (next.recovery_actions > limits.recovery_actions || next.probe_iterations > limits.probe_iterations || next.model_attempts > limits.model_attempts) throw new RunFlightLedgerError("budget", "Cumulative recovery budget exceeded.");
+      state.budget_consumed = next;
+      unit.budget_consumed = { recovery_actions: unit.budget_consumed.recovery_actions + event.budget_charge.recovery_actions, probe_iterations: unit.budget_consumed.probe_iterations + event.budget_charge.probe_iterations, model_attempts: unit.budget_consumed.model_attempts + event.budget_charge.model_attempts };
+      unit.active_attempt_id = event.attempt_id; unit.last_attempt_id = event.attempt_id; unit.last_disposition = null;
+      state.last_attempt_id = event.attempt_id; state.attempts.set(event.attempt_id, event.unit_id);
+      if (event.child_id !== null) state.child_counts[event.role] += 1;
+      break;
+    }
+    case "attempt.finished": {
+      const unitId = state.attempts.get(event.attempt_id);
+      const unit = unitId === undefined ? undefined : state.units.get(unitId);
+      requireTransition(unit !== undefined && unit.active_attempt_id === event.attempt_id, "Attempt finish does not match the active attempt.");
+      unit.active_attempt_id = null; unit.last_failed_attempt_id = event.failure === null ? null : event.attempt_id; unit.last_disposition = event.disposition; state.observations.push(event.observation); break;
+    }
+    case "recovery.recorded": {
+      const unitId = state.attempts.get(event.failed_attempt_id);
+      const unit = unitId === undefined ? undefined : state.units.get(unitId);
+      requireTransition(unit !== undefined && unit.last_failed_attempt_id === event.failed_attempt_id && unit.last_disposition === "continue" && event.candidate_id === state.current_candidate_id && unit.active_attempt_id === null, "Recovery must reference the latest continuable failed attempt and current candidate."); claim(state, event.recovery_id); break;
+    }
+    case "validation.recorded": {
+      const unit = state.units.get(event.unit_id);
+      requireTransition(unit !== undefined && unit.completed_disposition === null && unit.active_attempt_id === null, "Validation must belong to an open idle unit."); claim(state, event.validation_id);
+      if (state.validation_fingerprints.has(event.command_fingerprint)) state.validation_reruns += 1; else state.validation_fingerprints.add(event.command_fingerprint); break;
+    }
+    case "unit.completed": {
+      const unit = state.units.get(event.unit_id);
+      const matchingDisposition = event.disposition === "succeeded" ? unit?.last_disposition === "succeeded" : unit?.last_disposition === "failed" || unit?.last_disposition === "cancelled";
+      requireTransition(unit !== undefined && unit.completed_disposition === null && unit.active_attempt_id === null && unit.last_attempt_id !== null && matchingDisposition, "Unit completion does not match its terminal attempt."); unit.completed_disposition = event.disposition; break;
+    }
+    case "wave.completed":
+      requireTransition(state.active_wave_id === event.wave_id && state.units.size > 0 && [...state.units.values()].every((unit) => unit.wave_id === event.wave_id && unit.completed_disposition !== null) && event.produced_candidate_id !== state.current_candidate_id, "Wave completion is missing units or has a conflicting candidate.");
+      state.pending_candidate = { from: state.current_candidate_id!, to: event.produced_candidate_id, wave: event.wave_id, artifact: event.artifact_id }; state.active_wave_id = null; state.active_wave_route_id = null; state.completed_wave_count += 1; break;
+    case "candidate.advanced":
+      requireTransition(state.pending_candidate !== null && event.from_candidate_id === state.pending_candidate.from && event.candidate_id === state.pending_candidate.to && event.wave_id === state.pending_candidate.wave && event.artifact_id === state.pending_candidate.artifact, "Candidate transition conflicts with the completed wave.");
+      claim(state, event.candidate_id); state.current_candidate_id = event.candidate_id; state.pending_candidate = null; state.last_attempt_id = null; state.units.clear(); state.attempts.clear(); break;
+    case "candidate.completed":
+      requireTransition(state.active_wave_id === null && state.pending_candidate === null && event.candidate_id === state.current_candidate_id && state.completed_wave_count > 0, "Only the current integrated candidate may complete."); state.candidate_completed = true; break;
+    case "cleanup.completed":
+      requireTransition(state.candidate_completed && !state.cleanup_completed && event.run_id === state.run_id, "Cleanup must follow candidate completion."); state.cleanup_completed = true; state.observations.push(event.observation); break;
+    case "run.completed":
+      requireTransition(state.cleanup_completed && event.run_id === state.run_id, "Run completion must follow cleanup."); state.terminal_disposition = event.disposition; break;
+  }
+}
+
+function publicState(state: MutableState): RunFlightState {
+  const openUnits = [...state.units.entries()].filter(([, unit]) => unit.completed_disposition === null);
+  const soleUnit = openUnits.length === 1 ? openUnits[0] : undefined;
+  return { run_id: state.run_id, current_candidate_id: state.current_candidate_id, active_wave_id: state.active_wave_id, active_unit_id: soleUnit?.[0] ?? null,
+    active_attempt_id: soleUnit?.[1].active_attempt_id ?? null, last_attempt_id: openUnits.length > 1 ? null : soleUnit?.[1].last_attempt_id ?? state.last_attempt_id, completed_wave_count: state.completed_wave_count,
+    budget_limits: state.budget_limits, budget_consumed: { ...state.budget_consumed }, child_counts: { ...state.child_counts },
+    validation_reruns: state.validation_reruns, observations: state.observations.map((entry) => structuredClone(entry)), terminal_disposition: state.terminal_disposition,
+    plan_decisions: state.plan_decisions.map((entry) => ({ ...entry, gap_codes: [...entry.gap_codes] })) };
+}
+
+export function reconstructRunFlightLedger(records: readonly RunFlightEventRecord[]): RunFlightState {
+  if (records.length > MAX_RUN_FLIGHT_EVENTS) throw new RunFlightLedgerError("capacity", "Ledger event capacity exceeded.");
+  const state = initialState();
+  let previous: string | null = null;
+  records.forEach((record, index) => {
+    if (!isObject(record) || !only(record, ["sequence", "previous_hash", "event_hash", "event"]) || record.sequence !== index + 1 || record.previous_hash !== previous || !hash(record.event_hash) || !validEvent(record.event)) throw new RunFlightLedgerError("sequence", "Ledger sequence is missing, reordered, or malformed.");
+    const expected = recordHash(record.sequence, record.previous_hash, record.event);
+    if (record.event_hash !== expected) throw new RunFlightLedgerError("conflict", "Ledger event content conflicts with its immutable hash chain.");
+    applyEvent(state, record.event); previous = record.event_hash;
+  });
+  return publicState(state);
+}
+
+export function createRunFlightLedgerInitialPrefix(input: unknown): readonly RunFlightEventRecord[] {
+  if (!isObject(input) || !only(input, ["run_planned", "plan_compiled"]) ||
+    !validEvent(input.run_planned) || input.run_planned.kind !== "run.planned" ||
+    !validEvent(input.plan_compiled) || input.plan_compiled.kind !== "plan.compiled") {
+    throw new RunFlightLedgerError("invalid", "Initial ledger prefix does not match the closed planning schema.");
+  }
+  const events: readonly [RunPlannedFlightEvent, PlanCompiledFlightEvent] = [
+    structuredClone(input.run_planned),
+    structuredClone(input.plan_compiled),
+  ];
+  if (events.length > MAX_RUN_FLIGHT_EVENTS) throw new RunFlightLedgerError("capacity", "Ledger event capacity exceeded.");
+  let previousHash: string | null = null;
+  const records = events.map((event, index): RunFlightEventRecord => {
+    const sequence = index + 1;
+    const record: RunFlightEventRecord = {
+      sequence,
+      previous_hash: previousHash,
+      event_hash: recordHash(sequence, previousHash, event),
+      event,
+    };
+    previousHash = record.event_hash;
+    return record;
+  });
+  reconstructRunFlightLedger(records);
+  const body = canonical({ schema_version: RUN_FLIGHT_LEDGER_SCHEMA_VERSION, events: records });
+  if (Buffer.byteLength(body) > MAX_RUN_FLIGHT_LEDGER_BYTES) throw new RunFlightLedgerError("capacity", "Ledger byte capacity exceeded.");
+  return records;
+}
+
+function capsuleIds(event: RunFlightEvent): readonly string[] {
+  return "references" in event ? event.references.capsule_ids : [];
+}
+
+export class RunFlightLedger {
+  readonly #filePath: string;
+  readonly #evidence: RunFlightEvidenceAccess;
+  #tail: Promise<void> = Promise.resolve();
+
+  private constructor(filePath: string, evidence: RunFlightEvidenceAccess) { this.#filePath = filePath; this.#evidence = evidence; }
+
+  static async open(filePath: string, evidence: RunFlightEvidenceAccess): Promise<RunFlightLedger> {
+    const ledger = new RunFlightLedger(filePath, evidence);
+    await ledger.read();
+    return ledger;
+  }
+
+  async read(): Promise<{ readonly records: readonly RunFlightEventRecord[]; readonly state: RunFlightState }> {
+    const records = await this.#readRecords();
+    await this.#verifyCapsules(records);
+    return { records: structuredClone(records), state: reconstructRunFlightLedger(records) };
+  }
+
+  async append(event: RunFlightEvent): Promise<RunFlightState> {
+    if (!validEvent(event)) throw new RunFlightLedgerError("invalid", "Event does not match the closed ledger schema.");
+    let resolve!: () => void;
+    const previous = this.#tail;
+    this.#tail = new Promise<void>((done) => { resolve = done; });
+    await previous;
+    try { return await this.#appendLocked(structuredClone(event)); } finally { resolve(); }
+  }
+
+  async appendCompileResult(result: AcceptanceCompileResult, at: string): Promise<RunFlightState> {
+    return this.append({ kind: "plan.compiled", at, plan_id: result.plan_id, proposal_id: result.proposal_id, decision: result.status, gap_codes: result.status === "accepted" ? [] : [...new Set(result.gaps.map((entry) => entry.code))] });
+  }
+
+  async #appendLocked(event: RunFlightEvent): Promise<RunFlightState> {
+    await mkdir(path.dirname(this.#filePath), { recursive: true });
+    const lockPath = `${this.#filePath}.lock`;
+    let handle;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      try { handle = await open(lockPath, "wx"); break; }
+      catch (error) {
+        if (!isObject(error) || error.code !== "EEXIST") throw error;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    }
+    if (!handle) throw new RunFlightLedgerError("conflict", "Ledger lock remained busy.");
+    try {
+      const records = await this.#readRecords();
+      await this.#verifyCapsuleIds(capsuleIds(event));
+      const sequence = records.length + 1;
+      const previousHash = records.at(-1)?.event_hash ?? null;
+      const record: RunFlightEventRecord = { sequence, previous_hash: previousHash, event_hash: recordHash(sequence, previousHash, event), event };
+      const next = [...records, record];
+      const state = reconstructRunFlightLedger(next);
+      const body = canonical({ schema_version: RUN_FLIGHT_LEDGER_SCHEMA_VERSION, events: next });
+      if (Buffer.byteLength(body) > MAX_RUN_FLIGHT_LEDGER_BYTES) throw new RunFlightLedgerError("capacity", "Ledger byte capacity exceeded.");
+      const temporary = `${this.#filePath}.${process.pid}.${randomUUID()}.tmp`;
+      await writeFile(temporary, body, { encoding: "utf8", flag: "wx" });
+      try { await rename(temporary, this.#filePath); } catch (error) { await unlink(temporary).catch(() => undefined); throw error; }
+      return state;
+    } finally { await handle.close(); await unlink(lockPath).catch(() => undefined); }
+  }
+
+  async #readRecords(): Promise<RunFlightEventRecord[]> {
+    let raw: string;
+    try { raw = await readFile(this.#filePath, "utf8"); }
+    catch (error) { if (isObject(error) && error.code === "ENOENT") return []; throw error; }
+    if (Buffer.byteLength(raw) > MAX_RUN_FLIGHT_LEDGER_BYTES) throw new RunFlightLedgerError("capacity", "Ledger byte capacity exceeded.");
+    let document: unknown;
+    try { document = JSON.parse(raw); } catch { throw new RunFlightLedgerError("invalid", "Ledger is not valid JSON."); }
+    if (!isObject(document) || !only(document, ["schema_version", "events"]) || document.schema_version !== RUN_FLIGHT_LEDGER_SCHEMA_VERSION || !Array.isArray(document.events)) throw new RunFlightLedgerError("invalid", "Ledger document does not match the closed schema.");
+    reconstructRunFlightLedger(document.events as RunFlightEventRecord[]);
+    return document.events as RunFlightEventRecord[];
+  }
+
+  async #verifyCapsules(records: readonly RunFlightEventRecord[]): Promise<void> {
+    for (const record of records) await this.#verifyCapsuleIds(capsuleIds(record.event));
+  }
+
+  async #verifyCapsuleIds(ids: readonly string[]): Promise<void> {
+    for (const capsuleId of ids) await this.#evidence.store.lookup({ capsule_id: capsuleId, declared_capsule_ids: this.#evidence.declared_capsule_ids, authorized_source_paths: this.#evidence.authorized_source_paths });
+  }
+}
