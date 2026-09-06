@@ -376,9 +376,11 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
         "sortie_integrate_parallel_queue",
         "sortie_parallel_dispatch_status",
         "sortie_parallel_integration_status",
+      "sortie_prepare_failure_swarm",
       "sortie_prepare_luna_fabric",
       "sortie_prepare_parallel_dispatch",
       "sortie_release_write_gate",
+      "sortie_select_failure_diagnosis",
       "sortie_submit_integration_remediation",
       "sortie_validate_luna_fabric_candidate",
     ]);
@@ -440,7 +442,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     for (const asset of loaded.runtimeAssets) {
       assert.equal(asset.version, RUNTIME_ASSET_VERSION, `${asset.name} version must match the shared marker`);
     }
-    assert.equal(RUNTIME_ASSET_VERSION, "0.3.69-luna-combined-validation-replay-v1");
+    assert.equal(RUNTIME_ASSET_VERSION, "0.3.70-readonly-failure-swarm-v1");
     const coordinatorFrontmatter = /^---\r?\n([\s\S]*?)\r?\n---/u.exec(coordinator.content)?.[1];
     assert.ok(coordinatorFrontmatter);
     assert.match(coordinatorFrontmatter, /^model: openai\/gpt-5\.6-terra$/m);
@@ -1397,7 +1399,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(sortie.content, /never route a worker to the user/i);
 
     for (const asset of loaded.runtimeAssets) {
-      assert.equal(asset.version, "0.3.69-luna-combined-validation-replay-v1");
+      assert.equal(asset.version, "0.3.70-readonly-failure-swarm-v1");
       const frontmatter = asset.content.match(/^---\r?\n([\s\S]+?)\r?\n---\r?\n/);
       assert.ok(frontmatter, `${asset.name} must have frontmatter`);
       const entries = Object.fromEntries(
@@ -1415,9 +1417,17 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       if (asset.name === "sortie") assert.equal(entries.agent, "dog-coordinator");
       assert.doesNotMatch(
         asset.content,
-        /project\s+helper|capsule|controller|\bFSM\b|routing\s+ledger|dedicated\s+harness|alternate\s+orchestrator/i,
+        /project\s+helper|controller|\bFSM\b|routing\s+ledger|dedicated\s+harness|alternate\s+orchestrator/i,
         `${asset.name} must not reference forbidden artifacts`,
       );
+      if (asset.name === "dog-coordinator") {
+        assert.match(asset.content, /sortie_prepare_failure_swarm/);
+        assert.match(asset.content, /sortie_select_failure_diagnosis/);
+      }
+      if (asset.name === "dog-luna-worker") {
+        assert.match(asset.content, /failure_swarm_descriptor/);
+        assert.match(asset.content, /Only exact source_manifest Read calls/);
+      }
     }
     assert.equal(new Set(loaded.runtimeAssets.map(({ version }) => version)).size, 1);
     assert.doesNotMatch(

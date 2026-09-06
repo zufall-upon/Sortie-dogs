@@ -65,6 +65,7 @@ interface ReviewCandidateState {
 }
 
 export interface FastLaneToolOptions {
+  readonly readonlyDiagnosisAuthorized?: boolean;
   readonly consultationFallbackAuthorized?: boolean;
   readonly parallelWorkerAlreadyBound?: boolean;
   readonly parallelWorkerAuthorized?: boolean;
@@ -297,6 +298,7 @@ export class FastLaneController {
 
     const role = taskArgument(args, "subagent_type");
     const prompt = taskArgument(args, "prompt") ?? "";
+    if (role === "dog-luna-worker" && options.readonlyDiagnosisAuthorized === true) return;
     if (role !== undefined && IMPLEMENTATION_ROLES.has(role)) {
       const taskID = lineValue(prompt, "task_id");
       if (state.workerDispatches >= 1 && state.workerResumeTaskID !== undefined &&

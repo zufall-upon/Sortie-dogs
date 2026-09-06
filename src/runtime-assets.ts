@@ -1,4 +1,5 @@
 import type { RuntimeAssetVersion } from "./asset-version.js";
+const ASSET_VERSION: RuntimeAssetVersion = "0.3.70-readonly-failure-swarm-v1";
 
 // Kept local so source-mode CLI execution does not load the plugin graph.
 const BACKLOG_DRAIN_CAPABILITY = "sortie_enable_backlog_drain";
@@ -179,6 +180,15 @@ const LUNA_WORKER_CONTRACT: WorkerRoleContract = {
   description: "Isolated Luna fabric worker for one admitted Sortie-dogs unit",
   introduction: `You are the isolated Luna fabric implementation worker for dog-coordinator.
 
+A runtime-approved failure_swarm_descriptor is a separate read-only diagnosis contract. In that
+mode operation_manifest=none: do not bind a write gate, create an artifact, run shell commands, or
+call another agent. Only exact source_manifest Read calls are available. Return plain JSON with
+causal_class, verdict (supported/excluded/unknown), and validation_fingerprints from input_capsule.
+Do not return votes, confidence scores, raw logs, free-form metadata, or a remediation selection.
+The coordinator owns capsule publication and the single repair authorization.
+This diagnosis-only JSON format replaces the implementation artifact/report format below.
+
+Outside diagnosis mode:
 Accept exactly one bounded implementation unit only when the dispatch contains a validated admitted
 Luna fabric descriptor. Require its stable run, wave, lane, unit, base, exact manifests, dependency,
 resource, and validation identities. The descriptor selects this route but never replaces write-gate
@@ -202,7 +212,7 @@ remediation or Sol demotion; only dog-coordinator decides that route.`,
 export const runtimeAssets = [
   {
     name: "dog-coordinator",
-    version: "0.3.69-luna-combined-validation-replay-v1",
+    version: ASSET_VERSION,
     installPath: "agent/dog-coordinator.md",
     content: `---
 description: Canonical MkII coordinator packaged by Sortie-dogs
@@ -236,7 +246,7 @@ MkII workflow. Follow project instructions and preserve the canonical MkII order
    coordinator-owned commit, release, publication, and reporting work.
 
 Keep control of the user conversation. Workers return only to you. Task dispatch is restricted to
-dog-worker, dog-scout, dog-reviewer, and dog-advisor. Every other target, including generic build,
+dog-worker, admitted dog-luna-worker, dog-scout, dog-reviewer, and dog-advisor. Every other target, including generic build,
 implementer, fixer, reviewer, explore, general, and alternate coordinators, is denied fail-closed.
 
 ## User language and readable output
@@ -590,6 +600,27 @@ LUNA_FABRIC_DISPATCH_FIXTURE
     demotion_restart: completed sibling artifacts pinned | cleanup/create intent durable | exact worktree adopted once
     shared_reuse: descriptor fields | handoff and manifest control files | join | status | cancel | artifact
 END_LUNA_FABRIC_DISPATCH_FIXTURE
+
+## Selective read-only Failure Swarm
+
+Only unresolved causal uncertainty after a recorded normal-remediation attempt and another failed
+canonical validation qualifies. Known failures may go directly to an eligible bounded rescue.
+Do not invent missing flight-ledger events, budget values, or model usage. The swarm is optional,
+never a mandatory diagnosis/probe/repair/rescue chain, and model confidence is not an input.
+
+Write the bounded coordinator request at .opencode/sortie-dogs-failure-swarm.json with run_id,
+unit_id, attempt_id, cause, source_capsule_id, causal_classes, max_lanes, per_lane_budget_charge,
+timeout_ms, and the existing ledger_path under .sortie-dogs/. Optional per_lane_resource_budget
+uses the run's shared time/cost limits. Use the existing compiled plan and Luna DAG files.
+Call sortie_prepare_failure_swarm. Dispatch only its returned ready descriptors with
+dog-luna-worker and one failure_swarm_descriptor JSON line. The plugin binds source scope,
+read-only authority, distinct causes, cumulative budget, and the shared cancellable lifecycle.
+No diagnosis child may write or select a remedy. After findings finish, the coordinator (Terra by
+default, or the user's explicitly selected coordinator) calls sortie_select_failure_diagnosis
+with swarm_id and one selection_json containing diagnosis_id, capsule_id, recovery_kind,
+proposal, and budget_request. Preserve its immutable scope/acceptance/validation contract and
+contract_id. Record the ensuing normal attempt with remediation_contract_id; only that attempt
+can consume the selected repair. Normal writer, validation, review, and CAS gates still apply.
 
 After the final wave, call ${LUNA_FABRIC_ADVANCE_CAPABILITY} with run_id, the absolute canonical
 validation executable, its JSON argument array, and bounded timeout. The capability integrates and validates
@@ -1520,10 +1551,10 @@ TERMINAL_STATUS_SEMANTICS_FIXTURE
 END_TERMINAL_STATUS_SEMANTICS_FIXTURE
 
 RUNTIME_ASSET_VERSION_SYNC_FIXTURE
-    runtime_version: 0.3.69-luna-combined-validation-replay-v1
+    runtime_version: ${ASSET_VERSION}
     shared_marker: src/asset-version.ts
-    packaged_expectation: test/plugin-loader.test.ts uses 0.3.69-luna-combined-validation-replay-v1
-    initialize_expectation: test/initialize.test.ts uses 0.3.69-luna-combined-validation-replay-v1
+    packaged_expectation: test/plugin-loader.test.ts uses ${ASSET_VERSION}
+    initialize_expectation: test/initialize.test.ts uses ${ASSET_VERSION}
     rule: runtime asset versions, shared marker, packaged expectation, and initialize expectation change together
 END_RUNTIME_ASSET_VERSION_SYNC_FIXTURE
 
@@ -1592,19 +1623,19 @@ END_TERMINAL_EVIDENCE_FIXTURE
   },
   {
     name: "dog-worker",
-    version: "0.3.69-luna-combined-validation-replay-v1",
+    version: ASSET_VERSION,
     installPath: "agent/dog-worker.md",
     content: workerAssetContent(SERIAL_WORKER_CONTRACT),
   },
   {
     name: "dog-luna-worker",
-    version: "0.3.69-luna-combined-validation-replay-v1",
+    version: ASSET_VERSION,
     installPath: "agent/dog-luna-worker.md",
     content: workerAssetContent(LUNA_WORKER_CONTRACT),
   },
   {
     name: "dog-scout",
-    version: "0.3.69-luna-combined-validation-replay-v1",
+    version: ASSET_VERSION,
     installPath: "agent/dog-scout.md",
     content: `---
 description: Bounded evidence scout for dog-coordinator
@@ -1653,7 +1684,7 @@ prose; keep the keys, paths, commands, and identifiers verbatim.
   },
   {
     name: "dog-reviewer",
-    version: "0.3.69-luna-combined-validation-replay-v1",
+    version: ASSET_VERSION,
     installPath: "agent/dog-reviewer.md",
     content: `---
 description: Independent source reviewer for dog-coordinator
@@ -1706,7 +1737,7 @@ or transport.
   },
   {
     name: "dog-advisor",
-    version: "0.3.69-luna-combined-validation-replay-v1",
+    version: ASSET_VERSION,
     installPath: "agent/dog-advisor.md",
     content: `---
 description: Focused technical advisor for dog-coordinator
@@ -1755,7 +1786,7 @@ provider, vendor, model, variant, or transport.
   },
   {
     name: "sortie",
-    version: "0.3.69-luna-combined-validation-replay-v1",
+    version: ASSET_VERSION,
     installPath: "command/sortie.md",
     content: `---
 description: Start the canonical Sortie-dogs MkII workflow

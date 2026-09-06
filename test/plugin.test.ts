@@ -1303,7 +1303,7 @@ test("coordinator DONE output receives host-reported root and child run metrics"
     assert.equal(body.extra.available, true);
     assert.equal(body.extra.outcome, "DONE");
     assert.equal(body.extra.sessionID, "root");
-    assert.equal(body.extra.runtimeAssetVersion, "0.3.69-luna-combined-validation-replay-v1");
+    assert.equal(body.extra.runtimeAssetVersion, "0.3.70-readonly-failure-swarm-v1");
     assert.equal(body.extra.inputTokens, 130);
     assert.equal(body.extra.outputTokens, 15);
     assert.equal(body.extra.reasoningTokens, 5);
@@ -1931,9 +1931,11 @@ test("invalid global Sortie config fails reflection closed without removing core
         "sortie_integrate_parallel_queue",
         "sortie_parallel_dispatch_status",
         "sortie_parallel_integration_status",
+        "sortie_prepare_failure_swarm",
         "sortie_prepare_luna_fabric",
         "sortie_prepare_parallel_dispatch",
         "sortie_release_write_gate",
+        "sortie_select_failure_diagnosis",
         "sortie_submit_integration_remediation",
         "sortie_validate_luna_fabric_candidate",
       ]);

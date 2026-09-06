@@ -216,12 +216,16 @@ export {
   RunFlightLedgerError,
 } from "./core/run-flight-ledger.js";
 export { CancellableChildLifecycle, DEFAULT_CHILD_DEADLINE_MS } from "./core/child-lifecycle-runtime.js";
+export { FailureSwarmRuntime } from "./core/failure-swarm-runtime.js";
+export type { FailureSwarmRequest, ReadOnlyDiagnosisDescriptor, DiagnosisFinding } from "./core/failure-swarm-runtime.js";
 export type { ChildLifecycleDescriptor, ChildLifecycleRuntime, ChildLifecycleResult } from "./core/child-lifecycle-runtime.js";
 export { reconcileChildTerminal } from "./core/child-terminal-reconciliation.js";
 export type { ChildTerminalIdentity, ChildTerminalObservation, ChildTerminalEvidence,
   ChildTerminalDisposition } from "./core/child-terminal-reconciliation.js";
 export type {
   ChildFlightState,
+  DiagnosisFlightState,
+  DiagnosisSelection,
   FailureCategory,
   FlightBudgetCharge,
   FlightBudgetLimits,

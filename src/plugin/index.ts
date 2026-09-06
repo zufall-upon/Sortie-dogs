@@ -101,6 +101,10 @@ import {
 import { configRoot, nearestPackageVersion, REFLECTION_POLICY, reflectionEnabled, ReflectionError, ReflectionStore } from "../reflection/index.js";
 import { syncProjectReflectionBlock } from "../reflection/managed-sync.js";
 import { CancellableChildLifecycle, DEFAULT_CHILD_DEADLINE_MS } from "../core/child-lifecycle-runtime.js";
+import { FailureSwarmRuntime, type FailureSwarmRequest, type ReadOnlyDiagnosisDescriptor } from "../core/failure-swarm-runtime.js";
+import { EvidenceCapsuleStore } from "../core/evidence-capsule.js";
+import { RunFlightLedger, diagnosisContractHash, type DiagnosisSelection, type FlightObservation } from "../core/run-flight-ledger.js";
+import { LUNA_FABRIC_MAX_ACTIVE } from "../core/luna-fabric-scheduler.js";
 import type { ChildTerminalEvidence, ChildTerminalObservation } from "../core/child-terminal-reconciliation.js";
 import { collectRunMetrics, insertRunMetrics, terminalRunOutcome } from "./run-metrics.js";
 import type { RunMetricsClient } from "./run-metrics.js";
@@ -130,6 +134,9 @@ const LUNA_FABRIC_VALIDATE_CAPABILITY = "sortie_validate_luna_fabric_candidate";
 const LUNA_FABRIC_ACCEPT_CAPABILITY = "sortie_accept_luna_fabric_candidate";
 const SERIAL_WORKER_AGENT = "dog-worker";
 const LUNA_FABRIC_WORKER_AGENT = "dog-luna-worker";
+const FAILURE_SWARM_REQUEST = ".opencode/sortie-dogs-failure-swarm.json";
+const FAILURE_SWARM_PREPARE = "sortie_prepare_failure_swarm";
+const FAILURE_SWARM_SELECT = "sortie_select_failure_diagnosis";
 /** Both implementation roles share one dispatch contract; the durable run route selects which one. */
 const IMPLEMENTATION_AGENTS = new Set([SERIAL_WORKER_AGENT, LUNA_FABRIC_WORKER_AGENT]);
 const CANONICAL_CONTRACT_DIRECTORY = ".sortie-dogs/contracts";
@@ -1711,6 +1718,12 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   const observedChildTerminals = new Map<string, boolean>();
   const childObservedLeases = new Map<string, ScopeLease>();
   const settledChildLifecycles = new Map<string, true>();
+  type DiagnosisContext = { ownerRoot: string; sourceRoot: string; runtime: FailureSwarmRuntime; request: FailureSwarmRequest };
+  type DiagnosisCall = { context: DiagnosisContext; descriptor: ReadOnlyDiagnosisDescriptor; callID: string;
+    started: number; childID?: string; tools: Set<string>; completed: boolean; accepting: boolean; cancelled: boolean; finding: unknown; observation?: FlightObservation };
+  const diagnosisContexts = new Map<string, DiagnosisContext>();
+  const diagnosisCalls = new Map<string, DiagnosisCall>();
+  const diagnosisChildren = new Map<string, DiagnosisCall>();
   const bindingDenials = new Map<
     string,
     Map<string, Map<string, string>>
@@ -1829,6 +1842,181 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     project ??= await createProjectPaths(resolveProjectRoot(input));
     parallelCoordinator ??= await ParallelDispatchCoordinator.open({ repositoryRoot: project.root });
     return parallelCoordinator;
+  }
+
+  function diagnosisDenied(error: unknown): string {
+    const reason = isRecord(error) && typeof error.code === "string" ? error.code :
+      error instanceof Error && error.message.startsWith("diagnosis-") ? error.message : "failure-swarm-unavailable";
+    return JSON.stringify({ status: "denied", reason });
+  }
+
+  async function loadDiagnosisContext(ownerRoot: string): Promise<DiagnosisContext> {
+    project ??= await createProjectPaths(resolveProjectRoot(input));
+    const raw = await readJson(join(project.root, FAILURE_SWARM_REQUEST), INPUT_LIMITS.parallel);
+    if (!isRecord(raw) || Object.keys(raw).some((key) => !["run_id", "unit_id", "attempt_id", "cause", "source_capsule_id",
+      "causal_classes", "max_lanes", "per_lane_budget_charge", "per_lane_resource_budget", "timeout_ms", "ledger_path", "capsule_directory", "source_root"].includes(key)) ||
+      typeof raw.ledger_path !== "string") throw new Error("diagnosis-request-invalid");
+    const ledgerRelative = normalizeRelativePath(raw.ledger_path);
+    const capsuleRelative = normalizeRelativePath(typeof raw.capsule_directory === "string" ? raw.capsule_directory : ".sortie-dogs/evidence-capsules");
+    if (!ledgerRelative.startsWith(".sortie-dogs/") || !ledgerRelative.endsWith(".json") || !capsuleRelative.startsWith(".sortie-dogs/")) {
+      throw new Error("diagnosis-control-scope-invalid");
+    }
+    const ledgerPath = join(project.root, ledgerRelative);
+    const capsulePath = join(project.root, capsuleRelative);
+    if (!(await project.contains(ledgerPath)) || !(await project.contains(capsulePath))) throw new Error("diagnosis-control-scope-invalid");
+    const sourceRoot = typeof raw.source_root === "string" ? resolve(project.root, raw.source_root) : project.root;
+    if (!samePath(sourceRoot, project.root)) {
+      const snapshot = await (await getParallelCoordinator()).snapshot(ownerRoot, String(raw.run_id));
+      if (!snapshot?.tasks.some((task) => task.descriptor.task_id === raw.unit_id && samePath(task.descriptor.managed_path, sourceRoot))) {
+        throw new Error("diagnosis-source-root-unowned");
+      }
+    }
+    const plan = await readJson(join(project.root, EXECUTION_PLAN_RELATIVE_PATH), INPUT_LIMITS.parallel);
+    const fabric = await readJson(join(project.root, LUNA_FABRIC_CONTRACT_RELATIVE_PATH), INPUT_LIMITS.parallel);
+    const admission = admitLunaFabric(fabric);
+    if (admission.route !== "luna-fabric" || !isRecord(plan) || !Array.isArray(plan.capsule_ids)) throw new Error("diagnosis-plan-invalid");
+    const store = new EvidenceCapsuleStore(capsulePath);
+    const ledger = await RunFlightLedger.open(ledgerPath, { store,
+      declared_capsule_ids: [...plan.capsule_ids, raw.source_capsule_id] as string[],
+      authorized_source_paths: [...new Set(admission.contract.units.flatMap((unit) => [...unit.scope_read, ...unit.scope_write]))] });
+    const runtime = new FailureSwarmRuntime(ledger, store, plan, fabric, async (paths) => {
+      const source = await createProjectPaths(sourceRoot);
+      return Promise.all(paths.map(async (relativePath) => {
+        const absolute = resolve(sourceRoot, relativePath);
+        if (await source.toRelativePath(absolute) !== normalizeRelativePath(relativePath)) throw new Error("diagnosis-source-scope-invalid");
+        const info = await stat(absolute);
+        if (!info.isFile() || info.size > 8 * 1024 * 1024) throw new Error("diagnosis-source-oversize");
+        return { path: relativePath, blob_hash: `sha256:${createHash("sha256").update(await readFile(absolute)).digest("hex")}` };
+      }));
+    }, ownerRoot);
+    const { ledger_path: _ledger, capsule_directory: _capsules, source_root: _source, ...request } = raw;
+    return { ownerRoot, sourceRoot, runtime, request: request as unknown as FailureSwarmRequest };
+  }
+
+  async function diagnosisContext(ownerRoot: string, swarmID: string): Promise<DiagnosisContext> {
+    const cached = diagnosisContexts.get(swarmID);
+    if (cached !== undefined) {
+      if (cached.ownerRoot !== ownerRoot) throw new Error("diagnosis-owner-mismatch");
+      await cached.runtime.get(swarmID);
+      return cached;
+    }
+    const context = await loadDiagnosisContext(ownerRoot);
+    const swarm = await context.runtime.get(swarmID);
+    if (swarm.unit_id !== context.request.unit_id || swarm.failed_attempt_id !== context.request.attempt_id ||
+      swarm.source_capsule_id !== context.request.source_capsule_id) throw new Error("diagnosis-request-drift");
+    diagnosisContexts.set(swarmID, context);
+    pruneParallelChildMap(diagnosisContexts);
+    return context;
+  }
+
+  async function prepareFailureSwarm(sessionID: string): Promise<string> {
+    try {
+      const ownerRoot = await parallelToolOwner(sessionID);
+      if (ownerRoot === undefined) return JSON.stringify({ status: "denied", reason: "coordinator-root-required" });
+      if (input.client?.session?.messages === undefined || input.client?.session?.get === undefined) throw new Error("diagnosis-host-unavailable");
+      const context = await loadDiagnosisContext(ownerRoot);
+      const occupied = [...parallelCalls.values()].filter((call) => call.ownerRoot === ownerRoot).length +
+        [...diagnosisCalls.values()].filter((call) => call.context.ownerRoot === ownerRoot).length;
+      const lanes = Array.from({ length: LUNA_FABRIC_MAX_ACTIVE }, (_, index) => ({ lane_id: `luna-${index + 1}`,
+        access: "read_only" as const, available: index < LUNA_FABRIC_MAX_ACTIVE - occupied }));
+      const result = await context.runtime.prepare(context.request, lanes);
+      if (result.status !== "prepared") return JSON.stringify(result);
+      diagnosisContexts.set(result.swarm.swarm_id, context);
+      pruneParallelChildMap(diagnosisContexts);
+      return JSON.stringify({ status: "prepared", swarm_id: result.swarm.swarm_id, replay: result.replay,
+        findings: result.swarm.lanes.map((lane) => ({ ...lane, ...(result.swarm.findings[lane.lane_id] ?? { capsule_id: null, verdict: "pending" }) })),
+        selection: result.swarm.selection, executed_attempt_id: result.swarm.executed_attempt_id,
+        ready: result.swarm.lanes.filter((lane) => !Object.hasOwn(result.swarm.dispatched, lane.lane_id))
+          .map((lane) => context.runtime.descriptor(result.swarm, lane.lane_id)) });
+    } catch (error) { return diagnosisDenied(error); }
+  }
+
+  async function selectFailureDiagnosis(sessionID: string, swarmID: string, selectionJson: string): Promise<string> {
+    try {
+      const ownerRoot = await parallelToolOwner(sessionID);
+      if (ownerRoot === undefined) return JSON.stringify({ status: "denied", reason: "coordinator-root-required" });
+      if (Buffer.byteLength(selectionJson) > 8192) throw new Error("diagnosis-selection-oversize");
+      const context = await diagnosisContext(ownerRoot, swarmID);
+      const result = await context.runtime.select(swarmID, JSON.parse(selectionJson) as Omit<DiagnosisSelection, "contract_id">);
+      return JSON.stringify({ status: "selected", ...result, writer_admission: "normal-gates-required" });
+    } catch (error) { return diagnosisDenied(error); }
+  }
+
+  function diagnosisMarker(prompt: string): ReadOnlyDiagnosisDescriptor | undefined {
+    const matches = [...prompt.matchAll(/^failure_swarm_descriptor:\s*(\{[^\n]+\})\s*$/gmu)];
+    if (matches.length === 0) return undefined;
+    if (matches.length !== 1) throw new Error("diagnosis-descriptor-invalid");
+    return JSON.parse(matches[0]![1]!) as ReadOnlyDiagnosisDescriptor;
+  }
+
+  async function claimDiagnosisTask(ownerRoot: string, callID: string, args: Record<string, unknown>, commit = false): Promise<boolean> {
+    if (typeof args.prompt !== "string") return false;
+    const supplied = diagnosisMarker(args.prompt);
+    if (supplied === undefined) return false;
+    if (await parallelToolOwner(ownerRoot) !== ownerRoot) throw new Error("diagnosis-owner-mismatch");
+    if (args.subagent_type !== LUNA_FABRIC_WORKER_AGENT || args.task_id !== undefined) throw new Error("diagnosis-worker-invalid");
+    const context = await diagnosisContext(ownerRoot, supplied.swarm_id);
+    const swarm = await context.runtime.get(supplied.swarm_id);
+    const expected = context.runtime.descriptor(swarm, supplied.lane_id);
+    if (diagnosisContractHash(expected) !== diagnosisContractHash(supplied)) throw new Error("diagnosis-descriptor-drift");
+    if (commit && !diagnosisCalls.has(callID)) {
+      const occupied = [...parallelCalls.values()].filter((call) => call.ownerRoot === ownerRoot).length +
+        [...diagnosisCalls.values()].filter((call) => call.context.ownerRoot === ownerRoot).length;
+      if (occupied >= LUNA_FABRIC_MAX_ACTIVE) throw new Error("diagnosis-no-free-lane");
+    }
+    const descriptor = commit ? await context.runtime.claim(supplied.swarm_id, supplied.lane_id, callID) : expected;
+    const capsule = await context.runtime.store.lookup({ capsule_id: swarm.source_capsule_id,
+      declared_capsule_ids: [swarm.source_capsule_id], authorized_source_paths: swarm.source_paths });
+    args.prompt = [`task_id: diagnosis-${descriptor.diagnosis_id.slice(7)}`, "role: implementation", `project_root: ${context.sourceRoot}`,
+      `source_manifest: ${JSON.stringify(descriptor.source_manifest)}`, "operation_manifest: none",
+      `acceptance: Diagnose only ${descriptor.causal_class}; no writes, votes, recursive tasks, or self-confidence scores.`,
+      "validation: read-only", `failure_swarm_descriptor: ${JSON.stringify(descriptor)}`,
+      `input_capsule: ${JSON.stringify(capsule.capsule)}`,
+      "Return plain JSON only: causal_class, verdict (supported/excluded/unknown), validation_fingerprints from input_capsule. Only exact source-manifest Read calls are permitted."].join("\n");
+    if (commit && !diagnosisCalls.has(callID)) diagnosisCalls.set(callID, { context, descriptor, callID, started: Date.now(),
+      tools: new Set(), completed: false, accepting: false, cancelled: false, finding: null });
+    return true;
+  }
+
+  async function bindDiagnosisChild(childID: string, ownerRoot: string, prompt: string): Promise<void> {
+    const descriptor = diagnosisMarker(prompt);
+    if (descriptor === undefined) return;
+    const call = [...diagnosisCalls.values()].find((entry) => entry.context.ownerRoot === ownerRoot &&
+      diagnosisContractHash(entry.descriptor) === diagnosisContractHash(descriptor));
+    if (call === undefined || (call.childID !== undefined && call.childID !== childID) || sessionAuthorizations.has(childID)) throw new Error("diagnosis-child-unowned");
+    if (diagnosisChildren.has(childID)) {
+      if (diagnosisChildren.get(childID) !== call) throw new Error("diagnosis-child-reused");
+      return;
+    }
+    call.childID = childID;
+    diagnosisChildren.set(childID, call);
+    const identity = { run_id: descriptor.run_id, unit_id: descriptor.unit_id, attempt_id: descriptor.diagnosis_id,
+      predecessor_attempt_id: descriptor.failed_attempt_id, candidate_id: descriptor.candidate_id,
+      route_id: "read_only_diagnosis", child_id: childID, call_id: call.callID };
+    const lifecycle = await call.context.runtime.bindChild(descriptor, call.callID, childID, {
+      observe: async () => ({ observation: { identity, disposition: call.finding !== null ? "succeeded" : call.cancelled ? "cancelled" : "failed" },
+        evidence: { terminal: call.completed ? "satisfied" : "unsatisfied", tools_quiescent: call.tools.size === 0 ? "satisfied" : "unsatisfied",
+          artifact_window_closed: call.accepting ? "unsatisfied" : "satisfied", writer_released: "satisfied",
+          gate_released: sessionAuthorizations.has(childID) ? "unsatisfied" : "satisfied", lease_released: "satisfied", worktree_released: "satisfied" } }),
+      stop: async () => {
+        const session = (input.client as unknown as { session?: Record<string, unknown> })?.session;
+        if (typeof session?.abort !== "function") throw new Error("diagnosis-abort-unavailable");
+        const result = await session.abort.call(session, { path: { id: childID }, query: { directory: input.directory } });
+        if (result === false || (isRecord(result) && result.data === false)) throw new Error("diagnosis-abort-unconfirmed");
+        call.cancelled = true;
+      },
+      release: async () => { if (!call.completed || call.tools.size !== 0 || sessionAuthorizations.has(childID)) throw new Error("diagnosis-release-unconfirmed"); },
+      terminal: async () => {
+        const observation = call.observation ?? { stage: "recovery", duration_ms: Math.max(0, Date.now() - call.started),
+          usage: { input_tokens: null, cache_read_tokens: null, output_tokens: null, provenance: "unknown" },
+          estimated_cost: { usd: null, provenance: "unknown" } } satisfies FlightObservation;
+        try { await call.context.runtime.finish(descriptor.swarm_id, descriptor.lane_id, call.finding, observation); }
+        catch { await call.context.runtime.finish(descriptor.swarm_id, descriptor.lane_id, null, observation); }
+        childLifecycles.delete(childID);
+      },
+    });
+    childLifecycles.set(childID, lifecycle);
+    lifecycle.arm();
   }
 
   async function getIntegrationQueue(targetBranch: string): Promise<WorktreeIntegrationQueue> {
@@ -2864,6 +3052,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
 
   async function watchdogProtectedReasons(rootID: string): Promise<string[]> {
     const reasons = new Set<string>();
+    if ([...diagnosisCalls.values()].some((call) => call.context.ownerRoot === rootID)) reasons.add("diagnosis-running");
     if ([...parallelCalls.values()].some((call) => call.ownerRoot === rootID)) reasons.add("parallel-running");
     if ([...sessionAuthorizations].some(([sessionID]) => sessionOwnedByRoot(sessionID, rootID))) {
       reasons.add("bound-write-gate");
@@ -4115,6 +4304,16 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
 
   const hooks: OpenCodeHooks = {
     tool: {
+      [FAILURE_SWARM_PREPARE]: defineTool({
+        description: "Prepare bounded read-only diagnosis lanes from the coordinator's failure-swarm request and authoritative flight ledger.",
+        args: {},
+        execute: async (_args, context) => prepareFailureSwarm(context.sessionID),
+      }),
+      [FAILURE_SWARM_SELECT]: defineTool({
+        description: "Record exactly one supported diagnosis and its immutable remediation contract; normal writer and budget gates remain required.",
+        args: { swarm_id: defineTool.schema.string(), selection_json: defineTool.schema.string() },
+        execute: async (args, context) => selectFailureDiagnosis(context.sessionID, args.swarm_id, args.selection_json),
+      }),
       sortie_bind_write_gate: defineTool({
         description: "Bind this active session to one project-relative operation manifest without changing files.",
         args: {
@@ -4123,6 +4322,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         },
         async execute(args, context): Promise<string> {
           const parallel = parallelChildBindings.get(context.sessionID);
+          if (diagnosisChildren.has(context.sessionID)) return JSON.stringify({ status: "denied", reason: "diagnosis-read-only" });
           const paths = parallel === undefined ? undefined : parallelControlPaths(parallel.descriptor);
           const result = await bindWriteGate(
             context.sessionID,
@@ -4404,6 +4604,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       await continuation.compactionAutoContinue(autoInput, autoOutput);
     },
     "chat.message": async (chatInput, output): Promise<void> => {
+      const oldDiagnosis = diagnosisChildren.get(chatInput.sessionID);
+      if (oldDiagnosis?.completed && chatInput.agent !== undefined && chatInput.agent !== LUNA_FABRIC_WORKER_AGENT) diagnosisChildren.delete(chatInput.sessionID);
       if (childLifecycles.get(chatInput.sessionID)?.stopping) throw new Error("child-cancellation-in-progress");
       observedChildTerminals.delete(chatInput.sessionID);
       await serializeChatTransition(chatInput.sessionID, async () => {
@@ -4493,6 +4695,12 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           activateSession(chatInput.sessionID, taskText === undefined ? "none" : parallelTaskMode(taskText));
         }
         touchActiveSession(chatInput.sessionID);
+      }
+      const diagnosisText = output.parts.map(textPart).find((text) => text !== undefined && diagnosisMarker(text) !== undefined);
+      const diagnosisParent = sessionParents.get(chatInput.sessionID);
+      if (diagnosisText !== undefined && diagnosisParent !== undefined) {
+        if ((chatInput.agent ?? output.message.agent) !== LUNA_FABRIC_WORKER_AGENT) throw new Error("diagnosis-worker-invalid");
+        await bindDiagnosisChild(chatInput.sessionID, diagnosisParent, diagnosisText);
       }
       /*
        * Role routing is a dispatch policy, not a write-gate concern. Consultation and evidence roles
@@ -4609,12 +4817,16 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
      * erases an answer the worker already produced and the coordinator re-dispatches the same work.
     */
     "tool.execute.after": async (toolInput, output): Promise<void> => {
+      diagnosisChildren.get(toolInput.sessionID ?? "")?.tools.delete(toolInput.callID ?? "");
+      const diagnosisCandidate = toolInput.tool === "task" ? diagnosisCalls.get(toolInput.callID ?? "") : undefined;
+      const diagnosis = diagnosisCandidate?.context.ownerRoot === toolInput.sessionID ? diagnosisCandidate : undefined;
+      if (diagnosis !== undefined) diagnosis.accepting = true;
       if (toolInput.sessionID !== undefined) touchCoordinatorTaskWatchdog(toolInput.sessionID);
       // The host after hook itself proves the Task is no longer stalled. Disarm before result repair or
       // durable parallel bookkeeping, either of which may outlive a deliberately short watchdog policy.
       const coordinatorTaskFinished = toolInput.tool === "task" &&
         finishCoordinatorTask(toolInput.sessionID, toolInput.callID);
-      const completedChildSessionID = toolInput.tool === "task" ? taskChildSessionID(output) : undefined;
+      const completedChildSessionID = toolInput.tool === "task" ? diagnosis?.childID ?? taskChildSessionID(output) : undefined;
       if (completedChildSessionID !== undefined && childLifecycles.has(completedChildSessionID)) {
         const active = activeSessions.get(completedChildSessionID);
         observedChildTerminals.set(completedChildSessionID,
@@ -4665,7 +4877,20 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
             };
           }
         }
-        if (toolInput.tool === "task" && parallel !== undefined && completedChildSessionID !== undefined &&
+        if (diagnosis !== undefined && completedChildSessionID !== undefined) {
+          const messages = await input.client?.session?.messages?.({ path: { id: completedChildSessionID } }).catch(() => undefined);
+          const data = isRecord(messages) && "data" in messages ? messages.data : messages;
+          const text = Array.isArray(data) ? lastAssistantText(data as SessionMessage[]) : typeof output.output === "string" ? output.output : undefined;
+          try { diagnosis.finding = text === undefined || Buffer.byteLength(text) > 8192 ? null : JSON.parse(text); }
+          catch { diagnosis.finding = null; }
+          const metrics = await collectRunMetrics(input.client, completedChildSessionID, input.directory).catch(() => undefined);
+          const measured = metrics?.inputTokens !== undefined && metrics.cacheReadTokens !== undefined && metrics.outputTokens !== undefined;
+          diagnosis.observation = { stage: "recovery", duration_ms: Math.max(0, Date.now() - diagnosis.started),
+            usage: { input_tokens: measured ? metrics!.inputTokens! : null, cache_read_tokens: measured ? metrics!.cacheReadTokens! : null,
+              output_tokens: measured ? metrics!.outputTokens! : null, provenance: measured ? "measured" : "unknown" },
+            estimated_cost: { usd: metrics?.cost ?? null, provenance: metrics?.cost === undefined ? "unknown" : "provider_estimate" } };
+          diagnosis.completed = true;
+        } else if (toolInput.tool === "task" && parallel !== undefined && completedChildSessionID !== undefined &&
           recoverableWorkerChildren.has(completedChildSessionID)) {
           parallelRecoverableChildren.set(completedChildSessionID, parallel);
         } else if (toolInput.tool === "task" && completedChildSessionID !== undefined && childLifecycles.get(completedChildSessionID)?.stopping) {
@@ -4722,9 +4947,14 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           }
         }
       } finally {
+        if (diagnosis !== undefined) {
+          diagnosis.completed = true;
+          diagnosis.accepting = false;
+          diagnosisCalls.delete(toolInput.callID ?? "");
+        }
         parallelCalls.delete(toolInput.callID ?? "");
         activeSessions.get(toolInput.sessionID ?? "")?.inFlightCalls.delete(toolInput.callID ?? "");
-        if (coordinatorTaskFinished) {
+        if (coordinatorTaskFinished && diagnosis === undefined) {
           fastLane.workerCompleted(toolInput.sessionID!);
         }
         if (completedChildSessionID !== undefined && !recoverableWorkerChildren.has(completedChildSessionID)) {
@@ -4738,10 +4968,41 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         throw new Error("child-cancellation-in-progress");
       }
       observedChildTerminals.delete(toolInput.sessionID);
+      let diagnosis = diagnosisChildren.get(toolInput.sessionID);
+      if (diagnosis === undefined && diagnosisCalls.size > 0 && !isCoordinatorSession(toolInput.sessionID)) {
+        const host = await hostSessionIdentity(toolInput.sessionID);
+        if (host?.parentID !== undefined && [...diagnosisCalls.values()].some((entry) => entry.context.ownerRoot === host.parentID)) {
+          const response = await input.client?.session?.messages?.({ path: { id: toolInput.sessionID } });
+          const messages = isRecord(response) && "data" in response ? response.data : response;
+          const first = Array.isArray(messages) ? messages.find((message) => isRecord(message) &&
+            ((isRecord(message.info) && message.info.role === "user") || message.role === "user")) : undefined;
+          const prompt = isRecord(first) && Array.isArray(first.parts) ? first.parts.map(textPart).filter((text) => text !== undefined).join("\n") : undefined;
+          if (prompt !== undefined && diagnosisMarker(prompt) !== undefined) {
+            if (host.agent !== LUNA_FABRIC_WORKER_AGENT) throw new Error("diagnosis-worker-invalid");
+            await bindDiagnosisChild(toolInput.sessionID, host.parentID, prompt);
+            diagnosis = diagnosisChildren.get(toolInput.sessionID);
+          } else if (host.agent === LUNA_FABRIC_WORKER_AGENT && !parallelChildBindings.has(toolInput.sessionID)) throw new Error("diagnosis-child-unbound");
+        }
+      }
+      if (diagnosis !== undefined) {
+        if (diagnosis.completed || toolInput.tool.toLowerCase() !== "read" || !isRecord(output.args) || typeof output.args.filePath !== "string") {
+          throw new Error("diagnosis-read-only");
+        }
+        const source = await createProjectPaths(diagnosis.context.sourceRoot);
+        const absolute = resolve(diagnosis.context.sourceRoot, output.args.filePath);
+        const relative = await source.toRelativePath(absolute);
+        if (!diagnosis.descriptor.source_manifest.includes(relative)) throw new Error("diagnosis-source-scope-invalid");
+        output.args.filePath = absolute;
+        diagnosis.tools.add(toolInput.callID);
+        return;
+      }
       const coordinatorRoot = isCoordinatorSession(toolInput.sessionID) || await recoverCoordinatorRoot(toolInput.sessionID);
+      const readonlyDiagnosis = coordinatorRoot && toolInput.tool === "task" && isRecord(output.args)
+        ? await claimDiagnosisTask(toolInput.sessionID, toolInput.callID, output.args) : false;
       touchCoordinatorTaskWatchdog(toolInput.sessionID);
       if (coordinatorRoot) continuation.toolStarted(toolInput.sessionID, toolInput.tool);
       const coordinatorCapability = toolInput.tool === "task" ||
+        toolInput.tool === FAILURE_SWARM_PREPARE || toolInput.tool === FAILURE_SWARM_SELECT ||
         toolInput.tool === CONTINUATION_CAPABILITY || toolInput.tool === BACKLOG_DRAIN_CAPABILITY ||
         toolInput.tool === "sortie_check_contract" ||
         toolInput.tool === LUNA_FABRIC_ADMISSION_CAPABILITY || toolInput.tool === LUNA_FABRIC_PREPARE_CAPABILITY ||
@@ -5003,7 +5264,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           }
           }
         }
-        if (toolInput.tool === "task" && taskRole === LUNA_FABRIC_WORKER_AGENT && reservedParallelDescriptor === undefined) {
+        if (toolInput.tool === "task" && taskRole === LUNA_FABRIC_WORKER_AGENT && reservedParallelDescriptor === undefined && !readonlyDiagnosis) {
           throw new HandoffDeniedError("contract-invalid", "<worker-dispatch>", {
             defects: [contractDefect("contract", "/role", "luna_worker_requires_admitted_descriptor")],
           });
@@ -5033,6 +5294,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           parallelWorkerAuthorized = true;
         }
         const resumedWorkerSessionID = fastLane.beforeTool(toolInput.sessionID, toolInput.tool, output.args, {
+          readonlyDiagnosisAuthorized: readonlyDiagnosis,
           consultationFallbackAuthorized,
           parallelWorkerAlreadyBound,
           parallelWorkerAuthorized,
@@ -5053,6 +5315,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           recoverableWorkerChildren.delete(resumedWorkerSessionID);
         }
         if (toolInput.tool === "task" && taskRole !== undefined && IMPLEMENTATION_AGENTS.has(taskRole)) {
+          if (readonlyDiagnosis && isRecord(output.args)) await claimDiagnosisTask(toolInput.sessionID, toolInput.callID, output.args, true);
           bootstrapRequired = false;
           bootstrapCompleted = true;
           bootstrapIdleWarnings.delete(toolInput.sessionID);
@@ -5159,6 +5422,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       if (event.type === "message.part.updated" && eventPart?.type === "tool" &&
         typeof eventPart.callID === "string" && isRecord(eventPart.state) && eventPart.state.status === "error") {
         activeSessions.get(eventSessionID)?.inFlightCalls.delete(eventPart.callID);
+        diagnosisChildren.get(eventSessionID)?.tools.delete(eventPart.callID);
       }
       if (
         event.type === "message.part.updated" && isCoordinatorSession(eventSessionID) &&
@@ -5278,6 +5542,11 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       if (event.type === "session.idle") await continuation.sessionIdle(eventSessionID);
       if (event.type === "session.idle" && isCoordinatorSession(eventSessionID)) {
         abortCoordinatorTasks(eventSessionID, true);
+      }
+      const diagnostic = diagnosisChildren.get(eventSessionID);
+      if (event.type === "session.idle" && diagnostic !== undefined && !diagnostic.accepting) {
+        if (childLifecycles.get(eventSessionID)?.stopping) diagnostic.completed = true;
+        diagnostic.tools.clear();
       }
       if (event.type === "session.idle" && childLifecycles.has(eventSessionID) && !parallelArtifactOperations.has(eventSessionID)) {
         observedChildTerminals.set(eventSessionID, true);

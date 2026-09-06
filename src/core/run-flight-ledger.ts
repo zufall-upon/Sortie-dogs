@@ -4,6 +4,8 @@ import path from "node:path";
 
 import type { EvidenceCapsuleStore } from "./evidence-capsule.js";
 import type { AcceptanceCompileGapCode, AcceptanceCompileResult } from "./acceptance-compiler.js";
+import { LUNA_FABRIC_MAX_ACTIVE } from "./luna-fabric-scheduler.js";
+import { normalizeRelativePath } from "./path.js";
 import { CHILD_TERMINAL_EVIDENCE_FIELDS, isChildTerminalIdentity, reconcileChildTerminal, sameChildTerminalIdentity,
   type ChildTerminalIdentity, type ChildTerminalEvidence, type ChildTerminalDisposition } from "./child-terminal-reconciliation.js";
 
@@ -69,7 +71,51 @@ export interface ChildFlightState {
   readonly terminal: { readonly disposition: ChildTerminalDisposition; readonly fingerprint: string } | null;
 }
 
+export interface DiagnosisLane {
+  readonly lane_id: string;
+  readonly diagnosis_id: string;
+  readonly causal_class: string;
+}
+export interface DiagnosisSelection {
+  readonly diagnosis_id: string;
+  readonly capsule_id: string;
+  readonly contract_id: string;
+  readonly recovery_kind: Exclude<RecoveryKind, "read_only_diagnosis">;
+  readonly proposal: string;
+  readonly budget_request: FlightBudgetCharge;
+}
+export interface DiagnosisFlightState {
+  readonly owner_root: string;
+  readonly run_id: string;
+  readonly swarm_id: string;
+  readonly request_fingerprint: string;
+  readonly unit_id: string;
+  readonly failed_attempt_id: string;
+  readonly candidate_id: string;
+  readonly plan_id: string;
+  readonly plan_binding_id: string;
+  readonly source_capsule_id: string;
+  readonly source_paths: readonly string[];
+  readonly deadline_ms: number;
+  readonly lanes: readonly DiagnosisLane[];
+  readonly budget_charge: FlightBudgetCharge;
+  readonly per_lane_resource_budget?: FlightResourceBudget;
+  readonly dispatched: Readonly<Record<string, string>>;
+  readonly findings: Readonly<Record<string, { capsule_id: string | null; verdict: "supported" | "excluded" | "unknown" }>>;
+  readonly selection: DiagnosisSelection | null;
+  readonly executed_attempt_id: string | null;
+}
+
 export type RunFlightEvent =
+  | (EventBase & { readonly kind: "diagnosis.opened"; readonly swarm_id: string; readonly request_fingerprint: string; readonly owner_root: string;
+      readonly unit_id: string; readonly failed_attempt_id: string; readonly candidate_id: string;
+      readonly plan_id: string; readonly plan_binding_id: string; readonly source_capsule_id: string;
+      readonly source_paths: readonly string[]; readonly deadline_ms: number; readonly lanes: readonly DiagnosisLane[];
+      readonly budget_charge: FlightBudgetCharge; readonly per_lane_resource_budget?: FlightResourceBudget })
+  | (EventBase & { readonly kind: "diagnosis.dispatched"; readonly swarm_id: string; readonly lane_id: string; readonly call_id: string })
+  | (EventBase & { readonly kind: "diagnosis.finished"; readonly swarm_id: string; readonly lane_id: string;
+      readonly capsule_id: string | null; readonly verdict: "supported" | "excluded" | "unknown"; readonly observation: FlightObservation })
+  | (EventBase & { readonly kind: "diagnosis.selected"; readonly swarm_id: string; readonly selection: DiagnosisSelection })
   | (EventBase & { readonly kind: "child.registered"; readonly identity: ChildTerminalIdentity; readonly deadline_ms: number })
   | (EventBase & { readonly kind: "child.stop-requested"; readonly identity: ChildTerminalIdentity; readonly trigger: "deadline_expired" | "explicit_cancellation" })
   | (EventBase & { readonly kind: "child.terminal"; readonly identity: ChildTerminalIdentity; readonly disposition: ChildTerminalDisposition; readonly evidence: ChildTerminalEvidence })
@@ -78,7 +124,7 @@ export type RunFlightEvent =
   | (EventBase & { readonly kind: "route.selected"; readonly route_id: string; readonly candidate_id: string; readonly role: FlightRole; readonly model: string; readonly variant: string | null; readonly reason: "planning" | "implementation" | RecoveryKind })
   | (EventBase & { readonly kind: "wave.opened"; readonly wave_id: string; readonly wave_index: number; readonly candidate_id: string })
   | (EventBase & { readonly kind: "unit.opened"; readonly unit_id: string; readonly wave_id: string; readonly candidate_id: string; readonly references: FlightReferenceSet })
-  | (EventBase & { readonly kind: "attempt.started"; readonly attempt_id: string; readonly predecessor_attempt_id: string | null; readonly unit_id: string; readonly candidate_id: string; readonly route_id: string; readonly role: FlightRole; readonly selected_model: string; readonly selected_variant: string | null; readonly child_id: string | null; readonly call_id: string; readonly budget_charge: FlightBudgetCharge; readonly resource_budget_request?: FlightResourceBudget })
+  | (EventBase & { readonly kind: "attempt.started"; readonly attempt_id: string; readonly predecessor_attempt_id: string | null; readonly unit_id: string; readonly candidate_id: string; readonly route_id: string; readonly role: FlightRole; readonly selected_model: string; readonly selected_variant: string | null; readonly child_id: string | null; readonly call_id: string; readonly budget_charge: FlightBudgetCharge; readonly resource_budget_request?: FlightResourceBudget; readonly remediation_contract_id?: string })
   | (EventBase & { readonly kind: "attempt.finished"; readonly attempt_id: string; readonly observed_model: string | null; readonly observed_variant: string | null; readonly failure: { readonly category: FailureCategory; readonly code: string } | null; readonly disposition: TerminalDisposition; readonly observation: FlightObservation; readonly references: FlightReferenceSet })
   | (EventBase & { readonly kind: "recovery.recorded"; readonly recovery_id: string; readonly failed_attempt_id: string; readonly kind_detail: RecoveryKind; readonly candidate_id: string })
   | (EventBase & { readonly kind: "validation.recorded"; readonly validation_id: string; readonly unit_id: string; readonly command_fingerprint: string; readonly result: "passed" | "failed"; readonly artifact_id: string | null })
@@ -105,6 +151,7 @@ export interface RunFlightEventRecord {
 }
 
 export interface RunFlightState {
+  readonly diagnoses: readonly DiagnosisFlightState[];
   readonly children: readonly ChildFlightState[];
   readonly run_id: string | null;
   readonly current_candidate_id: string | null;
@@ -161,6 +208,24 @@ function recordHash(sequence: number, previousHash: string | null, event: RunFli
   return `sha256:${createHash("sha256").update(canonical({ sequence, previous_hash: previousHash, event })).digest("hex")}`;
 }
 
+export function diagnosisContractHash(value: unknown): string {
+  return `sha256:${createHash("sha256").update(canonical(value)).digest("hex")}`;
+}
+
+function validDiagnosisPaths(value: unknown): value is string[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 64 || new Set(value).size !== value.length) return false;
+  try { return value.every((entry) => typeof entry === "string" && entry.length <= 512 && normalizeRelativePath(entry) === entry); }
+  catch { return false; }
+}
+
+function validDiagnosisSelection(value: unknown): value is DiagnosisSelection {
+  return isObject(value) && only(value, ["diagnosis_id", "capsule_id", "contract_id", "recovery_kind", "proposal", "budget_request"]) &&
+    text(value.diagnosis_id) && hash(value.capsule_id) && hash(value.contract_id) &&
+    typeof value.proposal === "string" && value.proposal.length > 0 && value.proposal.length <= 1000 && !/[\u0000-\u001f\u007f]/u.test(value.proposal) &&
+    validCharge(value.budget_request) && value.budget_request.kind === value.recovery_kind &&
+    enumValue(value.recovery_kind, ["normal_remediation", "adaptive_probe", "model_rescue"]);
+}
+
 function validBudget(value: unknown): value is FlightBudgetLimits {
   return isObject(value) && only(value, ["recovery_actions", "probe_iterations", "model_attempts"]) &&
     integer(value.recovery_actions) && integer(value.probe_iterations) && integer(value.model_attempts);
@@ -214,6 +279,22 @@ function validEvent(value: unknown): value is RunFlightEvent {
   if (!isObject(value) || !text(value.kind) || !text(value.at) || Number.isNaN(Date.parse(value.at))) return false;
   const base = ["kind", "at"];
   switch (value.kind) {
+    case "diagnosis.opened": return only(value, [...base, "swarm_id", "request_fingerprint", "owner_root", "unit_id", "failed_attempt_id", "candidate_id",
+      "plan_id", "plan_binding_id", "source_capsule_id", "source_paths", "deadline_ms", "lanes", "budget_charge", "per_lane_resource_budget"]) &&
+      hash(value.swarm_id) && hash(value.request_fingerprint) && text(value.owner_root) && text(value.unit_id) && text(value.failed_attempt_id) && text(value.candidate_id) &&
+      hash(value.plan_id) && hash(value.plan_binding_id) && hash(value.source_capsule_id) && validDiagnosisPaths(value.source_paths) && integer(value.deadline_ms) &&
+      Array.isArray(value.lanes) && value.lanes.length > 0 && value.lanes.length <= LUNA_FABRIC_MAX_ACTIVE &&
+      value.lanes.every((lane) => isObject(lane) && only(lane, ["lane_id", "diagnosis_id", "causal_class"]) && text(lane.lane_id) && hash(lane.diagnosis_id) &&
+        typeof lane.causal_class === "string" && /^[a-z][a-z0-9-]{0,63}$/u.test(lane.causal_class)) &&
+      validCharge(value.budget_charge) && value.budget_charge.kind === "read_only_diagnosis" &&
+      value.budget_charge.recovery_actions >= value.lanes.length && value.budget_charge.model_attempts >= value.lanes.length &&
+      (!Object.hasOwn(value, "per_lane_resource_budget") || validResourceBudget(value.per_lane_resource_budget));
+    case "diagnosis.dispatched": return only(value, [...base, "swarm_id", "lane_id", "call_id"]) && hash(value.swarm_id) && text(value.lane_id) && text(value.call_id);
+    case "diagnosis.finished": return only(value, [...base, "swarm_id", "lane_id", "capsule_id", "verdict", "observation"]) &&
+      hash(value.swarm_id) && text(value.lane_id) && (value.capsule_id === null || hash(value.capsule_id)) &&
+      enumValue(value.verdict, ["supported", "excluded", "unknown"]) && (value.capsule_id !== null || value.verdict === "unknown") &&
+      validObservation(value.observation) && value.observation.stage === "recovery";
+    case "diagnosis.selected": return only(value, [...base, "swarm_id", "selection"]) && hash(value.swarm_id) && validDiagnosisSelection(value.selection);
     case "child.registered": return only(value, [...base, "identity", "deadline_ms"]) && isChildTerminalIdentity(value.identity) && integer(value.deadline_ms);
     case "child.stop-requested": return only(value, [...base, "identity", "trigger"]) && isChildTerminalIdentity(value.identity) && enumValue(value.trigger, ["deadline_expired", "explicit_cancellation"]);
     case "child.terminal": return only(value, [...base, "identity", "disposition", "evidence"]) &&
@@ -225,7 +306,7 @@ function validEvent(value: unknown): value is RunFlightEvent {
     case "route.selected": return only(value, [...base, "route_id", "candidate_id", "role", "model", "variant", "reason"]) && text(value.route_id) && text(value.candidate_id) && enumValue(value.role, ["implementation", "review", "advice", "rescue"]) && text(value.model) && nullableText(value.variant) && enumValue(value.reason, ["planning", "implementation", "normal_remediation", "adaptive_probe", "read_only_diagnosis", "model_rescue"]);
     case "wave.opened": return only(value, [...base, "wave_id", "wave_index", "candidate_id"]) && text(value.wave_id) && Number.isInteger(value.wave_index) && Number(value.wave_index) >= 1 && text(value.candidate_id);
     case "unit.opened": return only(value, [...base, "unit_id", "wave_id", "candidate_id", "references"]) && text(value.unit_id) && text(value.wave_id) && text(value.candidate_id) && validReferences(value.references);
-    case "attempt.started": return only(value, [...base, "attempt_id", "predecessor_attempt_id", "unit_id", "candidate_id", "route_id", "role", "selected_model", "selected_variant", "child_id", "call_id", "budget_charge", "resource_budget_request"]) && text(value.attempt_id) && nullableText(value.predecessor_attempt_id) && text(value.unit_id) && text(value.candidate_id) && text(value.route_id) && enumValue(value.role, ["implementation", "review", "advice", "rescue"]) && text(value.selected_model) && nullableText(value.selected_variant) && nullableText(value.child_id) && text(value.call_id) && validCharge(value.budget_charge) && (!Object.hasOwn(value, "resource_budget_request") || validResourceBudget(value.resource_budget_request));
+    case "attempt.started": return only(value, [...base, "attempt_id", "predecessor_attempt_id", "unit_id", "candidate_id", "route_id", "role", "selected_model", "selected_variant", "child_id", "call_id", "budget_charge", "resource_budget_request", "remediation_contract_id"]) && text(value.attempt_id) && nullableText(value.predecessor_attempt_id) && text(value.unit_id) && text(value.candidate_id) && text(value.route_id) && enumValue(value.role, ["implementation", "review", "advice", "rescue"]) && text(value.selected_model) && nullableText(value.selected_variant) && nullableText(value.child_id) && text(value.call_id) && validCharge(value.budget_charge) && (!Object.hasOwn(value, "resource_budget_request") || validResourceBudget(value.resource_budget_request)) && (!Object.hasOwn(value, "remediation_contract_id") || hash(value.remediation_contract_id));
     case "attempt.finished": {
       if (!only(value, [...base, "attempt_id", "observed_model", "observed_variant", "failure", "disposition", "observation", "references"]) || !text(value.attempt_id) || !nullableText(value.observed_model) || !nullableText(value.observed_variant) || !enumValue(value.disposition, ["continue", "succeeded", "failed", "cancelled"]) || !validObservation(value.observation) || !validReferences(value.references)) return false;
       const failure = value.failure;
@@ -244,6 +325,7 @@ function validEvent(value: unknown): value is RunFlightEvent {
 }
 
 interface MutableState {
+  diagnoses: Map<string, DiagnosisFlightState>;
   children: Map<string, ChildFlightState>;
   run_id: string | null; current_candidate_id: string | null; active_wave_id: string | null; active_wave_route_id: string | null;
   last_attempt_id: string | null; completed_wave_count: number; budget_limits: FlightBudgetLimits | null;
@@ -258,6 +340,8 @@ interface MutableState {
 }
 
 interface MutableUnitState {
+  last_recovery_kind: "implementation" | RecoveryKind | null;
+  last_validation: "passed" | "failed" | null;
   wave_id: string;
   active_attempt_id: string | null;
   last_attempt_id: string | null;
@@ -274,7 +358,7 @@ function initialState(): MutableState {
     child_counts: { implementation: 0, review: 0, advice: 0, rescue: 0 }, validation_reruns: 0, observations: [], terminal_disposition: null,
     current_route_id: null, pending_candidate: null, candidate_completed: false, cleanup_completed: false,
     ids: new Set(), validation_fingerprints: new Set(), attempts: new Map(), units: new Map(), plan_decisions: [], plan_ids: new Set(), accepted_plan: null,
-    resource_budget_limits: null, resource_budget_consumed: { time_ms: 0, cost_usd: 0 }, resource_reservations: new Map(), children: new Map() };
+    resource_budget_limits: null, resource_budget_consumed: { time_ms: 0, cost_usd: 0 }, resource_reservations: new Map(), children: new Map(), diagnoses: new Map() };
 }
 
 function claim(state: MutableState, id: string): void {
@@ -286,15 +370,94 @@ function requireTransition(condition: unknown, message: string): asserts conditi
   if (!condition) throw new RunFlightLedgerError("transition", message);
 }
 
+function chargeRecoveryBudget(state: MutableState, charge: FlightBudgetCharge): void {
+  requireTransition(state.budget_limits !== null, "Recovery budget is not configured.");
+  const next = { recovery_actions: state.budget_consumed.recovery_actions + charge.recovery_actions,
+    probe_iterations: state.budget_consumed.probe_iterations + charge.probe_iterations,
+    model_attempts: state.budget_consumed.model_attempts + charge.model_attempts };
+  if (!Object.values(next).every(integer) || (Object.keys(next) as (keyof FlightBudgetLimits)[]).some((key) => next[key] > state.budget_limits![key])) {
+    throw new RunFlightLedgerError("budget", "Cumulative recovery budget exceeded.");
+  }
+  state.budget_consumed = next;
+}
+
+function reserveResourceBudget(state: MutableState, key: string, request?: FlightResourceBudget): void {
+  const reservation = request ?? { time_ms: null, cost_usd: null };
+  if (state.resource_budget_limits !== null) {
+    const total = addResources(addResources(state.resource_budget_consumed, reservedResources(state)), reservation);
+    if (total.time_ms === null || total.cost_usd === null || total.time_ms > state.resource_budget_limits.time_ms ||
+      total.cost_usd > state.resource_budget_limits.cost_usd) throw new RunFlightLedgerError("budget", "Cumulative time or cost budget is unknown or exhausted.");
+  }
+  state.resource_reservations.set(key, reservation);
+}
+
 function applyEvent(state: MutableState, event: RunFlightEvent): void {
   requireTransition(state.terminal_disposition === null, "No event may follow run completion.");
   switch (event.kind) {
+    case "diagnosis.opened": {
+      const unit = state.units.get(event.unit_id);
+      requireTransition(unit !== undefined && unit.active_attempt_id === null && unit.completed_disposition === null &&
+        unit.last_failed_attempt_id === event.failed_attempt_id && unit.last_recovery_kind === "normal_remediation" &&
+        unit.last_validation === "failed" && event.candidate_id === state.current_candidate_id && state.accepted_plan === event.plan_id,
+        "Diagnosis requires the current failed canonical validation after normal remediation.");
+      requireTransition(![...state.diagnoses.values()].some((entry) => entry.failed_attempt_id === event.failed_attempt_id), "Attempt already diagnosed.");
+      const reservedLanes = [...state.diagnoses.values()].reduce((count, entry) => count +
+        entry.lanes.filter((lane) => !Object.hasOwn(entry.findings, lane.lane_id)).length, 0);
+      requireTransition(reservedLanes + event.lanes.length <= LUNA_FABRIC_MAX_ACTIVE, "Diagnosis lane capacity exceeded.");
+      for (const key of ["lane_id", "diagnosis_id", "causal_class"] as const) {
+        requireTransition(new Set(event.lanes.map((lane) => lane[key])).size === event.lanes.length, "Diagnosis lanes must be distinct.");
+      }
+      claim(state, event.swarm_id);
+      chargeRecoveryBudget(state, event.budget_charge);
+      for (const lane of event.lanes) {
+        claim(state, lane.diagnosis_id);
+        reserveResourceBudget(state, `diagnosis:${lane.diagnosis_id}`, event.per_lane_resource_budget);
+      }
+      const { kind: _kind, at: _at, ...opened } = event;
+      state.diagnoses.set(event.swarm_id, { ...opened, run_id: state.run_id!, dispatched: {}, findings: {}, selection: null, executed_attempt_id: null });
+      break;
+    }
+    case "diagnosis.dispatched": {
+      const swarm = state.diagnoses.get(event.swarm_id);
+      requireTransition(swarm !== undefined && swarm.selection === null && swarm.lanes.some((lane) => lane.lane_id === event.lane_id) &&
+        !Object.hasOwn(swarm.dispatched, event.lane_id) && !Object.values(swarm.dispatched).includes(event.call_id), "Diagnosis dispatch is invalid or duplicated.");
+      state.diagnoses.set(event.swarm_id, { ...swarm, dispatched: { ...swarm.dispatched, [event.lane_id]: event.call_id } });
+      break;
+    }
+    case "diagnosis.finished": {
+      const swarm = state.diagnoses.get(event.swarm_id);
+      const lane = swarm?.lanes.find((entry) => entry.lane_id === event.lane_id);
+      requireTransition(swarm !== undefined && lane !== undefined && Object.hasOwn(swarm.dispatched, event.lane_id) &&
+        !Object.hasOwn(swarm.findings, event.lane_id) && state.children.get(lane.diagnosis_id)?.terminal != null,
+        "Diagnosis must finish once after child reconciliation.");
+      state.resource_reservations.delete(`diagnosis:${lane.diagnosis_id}`);
+      state.resource_budget_consumed = addResources(state.resource_budget_consumed, { time_ms: event.observation.duration_ms, cost_usd: event.observation.estimated_cost.usd });
+      state.observations.push(event.observation);
+      state.diagnoses.set(event.swarm_id, { ...swarm, findings: { ...swarm.findings, [event.lane_id]: { capsule_id: event.capsule_id, verdict: event.verdict } } });
+      break;
+    }
+    case "diagnosis.selected": {
+      const swarm = state.diagnoses.get(event.swarm_id);
+      const lane = swarm?.lanes.find((entry) => entry.diagnosis_id === event.selection.diagnosis_id);
+      const unit = swarm === undefined ? undefined : state.units.get(swarm.unit_id);
+      requireTransition(swarm !== undefined && lane !== undefined && swarm.selection === null &&
+        swarm.lanes.every((entry) => Object.hasOwn(swarm.findings, entry.lane_id)) &&
+        swarm.findings[lane.lane_id]?.capsule_id === event.selection.capsule_id && swarm.findings[lane.lane_id]?.verdict === "supported" &&
+        unit?.active_attempt_id === null && unit.last_failed_attempt_id === swarm.failed_attempt_id && swarm.candidate_id === state.current_candidate_id,
+        "Only one supported diagnosis can authorize the current repair.");
+      state.diagnoses.set(event.swarm_id, { ...swarm, selection: { ...event.selection } });
+      break;
+    }
     case "child.registered": {
       requireTransition((state.run_id === null || state.run_id === event.identity.run_id) &&
         [...state.children.values()].every((child) => child.identity.run_id === event.identity.run_id) &&
         !state.children.has(event.identity.attempt_id), "Child attempt is already registered or belongs to another run.");
+      if ([...state.diagnoses.values()].some((entry) => entry.lanes.some((lane) => lane.diagnosis_id === event.identity.attempt_id))) {
+        requireTransition(![...state.children.values()].some((entry) => entry.identity.child_id === event.identity.child_id), "Diagnosis requires a fresh child session.");
+      }
       state.children.set(event.identity.attempt_id, { identity: { ...event.identity }, deadline_ms: event.deadline_ms,
         stop_trigger: null, terminal: null });
+      if ([...state.diagnoses.values()].some((entry) => entry.lanes.some((lane) => lane.diagnosis_id === event.identity.attempt_id))) state.child_counts.advice += 1;
       break;
     }
     case "child.stop-requested":
@@ -331,6 +494,7 @@ function applyEvent(state: MutableState, event: RunFlightEvent): void {
       const openUnits = [...state.units.values()].filter((unit) => unit.completed_disposition === null);
       if (openUnits.length > 0) for (const unit of openUnits) if (unit.last_attempt_id === null) unit.initial_predecessor_id = null;
       state.units.set(event.unit_id, {
+        last_recovery_kind: null, last_validation: null,
         wave_id: event.wave_id, active_attempt_id: null, last_attempt_id: null,
         initial_predecessor_id: openUnits.length === 0 ? state.last_attempt_id : null,
         last_failed_attempt_id: null, last_disposition: null, completed_disposition: null,
@@ -343,19 +507,22 @@ function applyEvent(state: MutableState, event: RunFlightEvent): void {
       const expectedPredecessor = unit?.last_attempt_id ?? unit?.initial_predecessor_id ?? null;
       requireTransition(unit !== undefined && unit.completed_disposition === null && unit.active_attempt_id === null && event.candidate_id === state.current_candidate_id && event.predecessor_attempt_id === expectedPredecessor, "Attempt predecessor, unit, or candidate is invalid.");
       requireTransition(event.route_id === state.active_wave_route_id, "Attempt route does not match the active wave route."); claim(state, event.attempt_id);
-      const next = { recovery_actions: state.budget_consumed.recovery_actions + event.budget_charge.recovery_actions, probe_iterations: state.budget_consumed.probe_iterations + event.budget_charge.probe_iterations, model_attempts: state.budget_consumed.model_attempts + event.budget_charge.model_attempts };
-      const limits = state.budget_limits!;
-      if (!Object.values(next).every(integer) || next.recovery_actions > limits.recovery_actions || next.probe_iterations > limits.probe_iterations || next.model_attempts > limits.model_attempts) throw new RunFlightLedgerError("budget", "Cumulative recovery budget exceeded.");
-      const request = event.resource_budget_request ?? { time_ms: null, cost_usd: null };
-      if (state.resource_budget_limits !== null) {
-        const total = addResources(addResources(state.resource_budget_consumed, reservedResources(state)), request);
-        if (total.time_ms === null || total.cost_usd === null || total.time_ms > state.resource_budget_limits.time_ms ||
-          total.cost_usd > state.resource_budget_limits.cost_usd) {
-          throw new RunFlightLedgerError("budget", "Cumulative time or cost budget is unknown or exhausted.");
+      const selected = [...state.diagnoses.values()].find((entry) => entry.unit_id === event.unit_id && entry.failed_attempt_id === expectedPredecessor);
+      if (selected !== undefined) {
+        const directRescue = selected.selection === null && event.remediation_contract_id === undefined && event.budget_charge.kind === "model_rescue" &&
+          selected.lanes.every((lane) => Object.hasOwn(selected.findings, lane.lane_id) && selected.findings[lane.lane_id]!.verdict !== "supported");
+        if (!directRescue) {
+          requireTransition(selected.selection !== null && selected.executed_attempt_id === null &&
+            event.remediation_contract_id === selected.selection.contract_id &&
+            canonical(event.budget_charge) === canonical(selected.selection.budget_request), "Repair is not the single authorized diagnosis selection.");
+          state.diagnoses.set(selected.swarm_id, { ...selected, executed_attempt_id: event.attempt_id });
         }
+      } else if (event.remediation_contract_id !== undefined) {
+        throw new RunFlightLedgerError("transition", "Remediation contract does not belong to this predecessor.");
       }
-      state.resource_reservations.set(event.attempt_id, request);
-      state.budget_consumed = next;
+      chargeRecoveryBudget(state, event.budget_charge);
+      reserveResourceBudget(state, event.attempt_id, event.resource_budget_request);
+      unit.last_recovery_kind = event.budget_charge.kind; unit.last_validation = null;
       unit.budget_consumed = { recovery_actions: unit.budget_consumed.recovery_actions + event.budget_charge.recovery_actions, probe_iterations: unit.budget_consumed.probe_iterations + event.budget_charge.probe_iterations, model_attempts: unit.budget_consumed.model_attempts + event.budget_charge.model_attempts };
       unit.active_attempt_id = event.attempt_id; unit.last_attempt_id = event.attempt_id; unit.last_disposition = null;
       state.last_attempt_id = event.attempt_id; state.attempts.set(event.attempt_id, event.unit_id);
@@ -381,6 +548,7 @@ function applyEvent(state: MutableState, event: RunFlightEvent): void {
     case "validation.recorded": {
       const unit = state.units.get(event.unit_id);
       requireTransition(unit !== undefined && unit.completed_disposition === null && unit.active_attempt_id === null, "Validation must belong to an open idle unit."); claim(state, event.validation_id);
+      unit.last_validation = event.result;
       if (state.validation_fingerprints.has(event.command_fingerprint)) state.validation_reruns += 1; else state.validation_fingerprints.add(event.command_fingerprint); break;
     }
     case "unit.completed": {
@@ -414,7 +582,7 @@ function publicState(state: MutableState): RunFlightState {
     plan_decisions: state.plan_decisions.map((entry) => ({ ...entry, gap_codes: [...entry.gap_codes] })),
     resource_budget_limits: state.resource_budget_limits === null ? null : { ...state.resource_budget_limits },
     resource_budget_consumed: { ...state.resource_budget_consumed }, resource_budget_reserved: reservedResources(state),
-    children: structuredClone([...state.children.values()]) };
+    children: structuredClone([...state.children.values()]), diagnoses: structuredClone([...state.diagnoses.values()]) };
 }
 
 export function reconstructRunFlightLedger(records: readonly RunFlightEventRecord[]): RunFlightState {
@@ -470,6 +638,7 @@ export function createRunFlightLedgerInitialPrefix(input: unknown): readonly Run
 }
 
 function capsuleIds(event: RunFlightEvent): readonly string[] {
+  if (event.kind === "diagnosis.opened") return [event.source_capsule_id];
   return "references" in event ? event.references.capsule_ids : [];
 }
 
@@ -519,6 +688,14 @@ export class RunFlightLedger {
     if (!handle) throw new RunFlightLedgerError("conflict", "Ledger lock remained busy.");
     try {
       const records = await this.#readRecords();
+      if (event.kind.startsWith("diagnosis.") && "swarm_id" in event) {
+        const prior = records.find(({ event: stored }) => stored.kind === event.kind && "swarm_id" in stored && stored.swarm_id === event.swarm_id &&
+          (!("lane_id" in event) || ("lane_id" in stored && stored.lane_id === event.lane_id)));
+        if (prior !== undefined) {
+          if (recordHash(1, null, { ...event, at: prior.event.at }) !== recordHash(1, null, prior.event)) throw new RunFlightLedgerError("transition", "Diagnosis record conflicts with its accepted identity.");
+          return reconstructRunFlightLedger(records);
+        }
+      }
       if ("identity" in event && event.kind.startsWith("child.")) {
         const previous = records.find(({ event: stored }) => stored.kind === event.kind && "identity" in stored &&
           stored.identity.attempt_id === event.identity.attempt_id);
@@ -529,7 +706,7 @@ export class RunFlightLedger {
           return reconstructRunFlightLedger(records);
         }
       }
-      await this.#verifyCapsuleIds(capsuleIds(event));
+      await this.#verifyEventCapsules(event);
       const sequence = records.length + 1;
       const previousHash = records.at(-1)?.event_hash ?? null;
       const record: RunFlightEventRecord = { sequence, previous_hash: previousHash, event_hash: recordHash(sequence, previousHash, event), event };
@@ -557,7 +734,15 @@ export class RunFlightLedger {
   }
 
   async #verifyCapsules(records: readonly RunFlightEventRecord[]): Promise<void> {
-    for (const record of records) await this.#verifyCapsuleIds(capsuleIds(record.event));
+    for (const record of records) await this.#verifyEventCapsules(record.event);
+  }
+
+  async #verifyEventCapsules(event: RunFlightEvent): Promise<void> {
+    if (event.kind === "diagnosis.finished" && event.capsule_id !== null) {
+      // The coordinator's accepted finding event declares this newly created, scope-checked capsule.
+      await this.#evidence.store.lookup({ capsule_id: event.capsule_id, declared_capsule_ids: [event.capsule_id],
+        authorized_source_paths: this.#evidence.authorized_source_paths });
+    } else await this.#verifyCapsuleIds(capsuleIds(event));
   }
 
   async #verifyCapsuleIds(ids: readonly string[]): Promise<void> {
