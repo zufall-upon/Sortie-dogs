@@ -99,6 +99,7 @@ import {
   type SessionMessageReader,
 } from "./task-result-repair.js";
 import { configRoot, nearestPackageVersion, REFLECTION_POLICY, reflectionEnabled, ReflectionError, ReflectionStore } from "../reflection/index.js";
+import { syncProjectReflectionBlock } from "../reflection/managed-sync.js";
 import { collectRunMetrics, insertRunMetrics, terminalRunOutcome } from "./run-metrics.js";
 import type { RunMetricsClient } from "./run-metrics.js";
 
@@ -3955,6 +3956,31 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     try { (log.log as (value: unknown) => unknown)({ level: "warn", service: "sortie-dogs", message: code }); } catch { /* host logging is best effort */ }
   }
 
+  async function syncTerminalProjectReflections(sessionID: string): Promise<void> {
+    try {
+      if (!reflectionConfiguration?.layers.project || (reflectionInFlight.get(sessionID) ?? 0) > 0 ||
+        !(await reflectionPermitted(sessionID))) return;
+      const owns = (id: string) => id === sessionID || sessionRoots.get(id) === sessionID || sessionParents.get(id) === sessionID;
+      const gitEntry = await lstat(join(project!.root, ".git")).catch((error: unknown) => {
+        if (isRecord(error) && error.code === "ENOENT") return undefined;
+        throw error;
+      });
+      const coordinator = parallelCoordinator ?? (gitEntry === undefined ? undefined : await getParallelCoordinator());
+      const snapshot = await coordinator?.snapshot(sessionID);
+      const activeBatch = (snapshot !== undefined && !snapshot.archived) ||
+        (coordinatorTaskCalls.get(sessionID)?.size ?? 0) > 0 ||
+        [...parallelCalls.values()].some((call) => call.ownerRoot === sessionID) ||
+        [...bindingOperations].some(owns) || [...sessionAuthorizations.keys()].some(owns) ||
+        [...activeSessions].some(([id, state]) => owns(id) && state.inFlightCalls.size > 0) ||
+        continuation.blocksTool(sessionID);
+      if (activeBatch) return;
+      const entries = (await reflectionStore!.list("project", sessionID, reflectionVersion!)).entries;
+      const result = await syncProjectReflectionBlock({ projectRoot: project!.root, entries, activeBatch: false,
+        syncEnabled: process.env.SORTIE_REFLECTION_SYNC !== "0" });
+      if (result.kind === "proposal") reflectionWarning(`reflection_sync_${result.reason}`);
+    } catch { reflectionWarning("reflection_sync_failed"); }
+  }
+
   const hooks: OpenCodeHooks = {
     tool: {
       sortie_bind_write_gate: defineTool({
@@ -4219,6 +4245,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         if (runOutcome === "DONE") rootAcceptanceContinuity.delete(textInput.sessionID);
       }
       await completeContinuationText(textInput.sessionID, textOutput.text, false);
+      if (runOutcome === "DONE" && isCoordinatorSession(textInput.sessionID)) {
+        await syncTerminalProjectReflections(textInput.sessionID);
+      }
     },
     "experimental.session.compacting": async (compactInput, compactOutput): Promise<void> => {
       const before = {
