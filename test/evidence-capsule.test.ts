@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
@@ -10,6 +11,7 @@ import {
   evaluateEvidenceCapsuleFreshness,
   evidenceCapsuleHash,
   type EvidenceCapsule,
+  MAX_EVIDENCE_CAPSULE_BYTES,
 } from "../src/core/evidence-capsule.ts";
 
 const hash = (character: string): string => `sha256:${character.repeat(64)}`;
@@ -146,4 +148,83 @@ test("closed schema rejects unknown fields instead of retaining arbitrary metada
     if (error instanceof Error && "code" in error && error.code === "ENOENT") return [];
     throw error;
   }), []);
+});
+
+test("live lookup rejects stale, missing, and ambiguous source evidence while historical lookup survives", async () => {
+  const store = new EvidenceCapsuleStore(path.join(root, "live-lookup"));
+  const saved = await store.put(capsule(), ["src/a.ts"]);
+  const request = { capsule_id: saved.capsule_id, declared_capsule_ids: [saved.capsule_id], authorized_source_paths: ["src/a.ts"] };
+  const current = { path: "src/a.ts", blob_hash: hash("a") };
+  const fresh = await store.lookupFresh(request, [current, { path: "src/other.ts", blob_hash: hash("e") }]);
+  assert.equal(fresh.capsule_id, saved.capsule_id);
+  for (const sources of [[], [{ ...current, blob_hash: hash("e") }]]) {
+    await assert.rejects(store.lookupFresh(request, sources),
+      (error: unknown) => error instanceof EvidenceCapsuleError && error.code === "stale");
+  }
+  await assert.rejects(store.lookupFresh(request, [current, { ...current, path: "src\\a.ts", blob_hash: hash("e") }]),
+    (error: unknown) => error instanceof EvidenceCapsuleError && error.code === "invalid");
+  assert.deepEqual((await store.lookup(request)).capsule, capsule());
+  await assert.rejects(store.lookupFresh({ ...request, declared_capsule_ids: [] }, [current]),
+    (error: unknown) => error instanceof EvidenceCapsuleError && error.code === "undeclared");
+  await assert.rejects(store.lookupFresh({ ...request, authorized_source_paths: [] }, [current]),
+    (error: unknown) => error instanceof EvidenceCapsuleError && error.code === "source_scope");
+});
+
+test("independent store instances enforce one shared capacity without evicting accepted evidence", async () => {
+  const directory = path.join(root, "shared-capacity");
+  const results = await Promise.allSettled(["left", "right"].map((revision) =>
+    new EvidenceCapsuleStore(directory, { maxCapsules: 1 }).put({ ...capsule(), extractor_version: revision }, ["src/a.ts"])));
+  assert.equal(results.filter(({ status }) => status === "fulfilled").length, 1);
+  const rejected = results.find(({ status }) => status === "rejected") as PromiseRejectedResult;
+  assert.ok(rejected.reason instanceof EvidenceCapsuleError);
+  assert.equal(rejected.reason.code, "capacity");
+  const files = await readdir(directory);
+  assert.equal(files.length, 1);
+  assert.match(files[0], /^sha256-[a-f0-9]{64}\.json$/u);
+  const accepted = results.find(({ status }) => status === "fulfilled") as PromiseFulfilledResult<Awaited<ReturnType<EvidenceCapsuleStore["put"]>>>;
+  assert.equal((await new EvidenceCapsuleStore(directory).lookup({ capsule_id: accepted.value.capsule_id,
+    declared_capsule_ids: [accepted.value.capsule_id], authorized_source_paths: ["src/a.ts"] })).capsule_id, accepted.value.capsule_id);
+});
+
+test("oversized on-disk evidence is rejected before parsing and publication failures release their lock", async () => {
+  const directory = path.join(root, "oversize-disk");
+  const store = new EvidenceCapsuleStore(directory);
+  const saved = await store.put(capsule(), ["src/a.ts"]);
+  await writeFile(path.join(directory, `${saved.capsule_id.replace(":", "-")}.json`), "x".repeat(MAX_EVIDENCE_CAPSULE_BYTES + 1));
+  const request = { capsule_id: saved.capsule_id, declared_capsule_ids: [saved.capsule_id], authorized_source_paths: ["src/a.ts"] };
+  await assert.rejects(store.lookup(request), (error: unknown) => error instanceof EvidenceCapsuleError && error.code === "oversize");
+  await assert.rejects(store.put(capsule(), ["src/a.ts"]), (error: unknown) => error instanceof EvidenceCapsuleError && error.code === "oversize");
+  assert.equal((await readdir(directory)).includes(".publish.lock"), false);
+  await store.put({ ...capsule(), extractor_version: "another" }, ["src/a.ts"]);
+});
+
+test("five-lane payload deduplication is measured separately from source reads and model usage", async (t) => {
+  const sourcePath = path.join(root, "measured-source.ts");
+  await writeFile(sourcePath, "export function run() { return 1; }\n");
+  let reads = 0;
+  let extractions = 0;
+  const extract = async (): Promise<EvidenceCapsule> => {
+    reads += 1;
+    const source = await readFile(sourcePath);
+    extractions += 1;
+    return { ...capsule(), sources: [{ path: "src/a.ts", blob_hash: `sha256:${createHash("sha256").update(source).digest("hex")}`, symbol: "run" }] };
+  };
+  const baseline = await Promise.all(Array.from({ length: 5 }, extract));
+  const unshared = { source_reads: reads, extractions };
+  reads = 0;
+  extractions = 0;
+  const directory = path.join(root, "measured-five-lanes");
+  const shared = await Promise.all(Array.from({ length: 5 }, async () =>
+    new EvidenceCapsuleStore(directory).put(await extract(), ["src/a.ts"])));
+  assert.equal(new Set(shared.map(({ capsule_id }) => capsule_id)).size, 1);
+  assert.ok(shared.every(({ capsule_id }) => capsule_id === evidenceCapsuleHash(baseline[0])));
+  const withCapsules = { source_reads: reads, extractions,
+    payload_creates: shared.filter(({ status }) => status === "created").length,
+    payload_reuses: shared.filter(({ status }) => status === "reused").length };
+  assert.deepEqual(unshared, { source_reads: 5, extractions: 5 });
+  assert.deepEqual(withCapsules, { source_reads: 5, extractions: 5, payload_creates: 1, payload_reuses: 4 });
+  assert.equal((await readdir(directory)).length, 1);
+  // This fixture does not call a model. Payload reuse must not be presented as billed-token savings.
+  t.diagnostic(JSON.stringify({ unshared, with_capsules: withCapsules,
+    model_usage: { input_tokens: null, cache_read_tokens: null, output_tokens: null }, token_savings_verified: false }));
 });

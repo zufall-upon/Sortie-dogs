@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 export const EVIDENCE_CAPSULE_SCHEMA_VERSION = "0.1" as const;
@@ -55,6 +55,8 @@ export type EvidenceCapsuleErrorCode =
   | "capacity"
   | "undeclared"
   | "source_scope"
+  | "stale"
+  | "busy"
   | "missing"
   | "corrupt";
 
@@ -190,6 +192,7 @@ export function evaluateEvidenceCapsuleFreshness(
     let normalized: string;
     try { normalized = normalizeSourcePath(source.path); } catch { throw new EvidenceCapsuleError("invalid", "Freshness input contains an invalid source path."); }
     if (!HASH_PATTERN.test(source.blob_hash)) throw new EvidenceCapsuleError("invalid", "Freshness input contains an invalid blob hash.");
+    if (current.has(normalized)) throw new EvidenceCapsuleError("invalid", "Freshness input contains duplicate source paths.");
     current.set(normalized, source.blob_hash);
   }
   const changed = capsule.sources.filter((source) => current.get(source.path) !== source.blob_hash).map((source) => source.path);
@@ -204,7 +207,7 @@ export class EvidenceCapsuleStore {
 
   constructor(directory: string, options: { readonly maxCapsules?: number } = {}) {
     const maxCapsules = options.maxCapsules ?? DEFAULT_MAX_EVIDENCE_CAPSULES;
-    if (!Number.isInteger(maxCapsules) || maxCapsules < 1) throw new EvidenceCapsuleError("capacity", "Capsule capacity must be a positive integer.");
+    if (!Number.isSafeInteger(maxCapsules) || maxCapsules < 1) throw new EvidenceCapsuleError("capacity", "Capsule capacity must be a positive safe integer.");
     this.#directory = directory;
     this.#maxCapsules = maxCapsules;
   }
@@ -234,6 +237,16 @@ export class EvidenceCapsuleStore {
     return { capsule_id: request.capsule_id, capsule, reuse: { payload: true, source_content: false } };
   }
 
+  /** Live reuse requires fresh source evidence; historical ledger lookup remains content-addressed. */
+  async lookupFresh(request: EvidenceCapsuleLookupRequest,
+    currentSources: readonly Pick<EvidenceSourceReference, "path" | "blob_hash">[]): Promise<EvidenceCapsuleLookupResult> {
+    const result = await this.lookup(request);
+    if (evaluateEvidenceCapsuleFreshness(result.capsule, currentSources, request.authorized_source_paths).status !== "fresh") {
+      throw new EvidenceCapsuleError("stale", "Relevant source evidence changed or is missing.");
+    }
+    return result;
+  }
+
   #serializedWrite(operation: () => Promise<EvidenceCapsulePutResult>): Promise<EvidenceCapsulePutResult> {
     const result = this.#writeTail.then(operation, operation);
     this.#writeTail = result.then(() => undefined, () => undefined);
@@ -242,6 +255,25 @@ export class EvidenceCapsuleStore {
 
   async #publish(capsuleId: string, canonical: string): Promise<EvidenceCapsulePutResult> {
     await mkdir(this.#directory, { recursive: true });
+    const lockPath = path.join(this.#directory, ".publish.lock");
+    let lock;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      try { lock = await open(lockPath, "wx"); break; }
+      catch (error) {
+        if (!isObject(error) || error.code !== "EEXIST") throw error;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    }
+    if (lock === undefined) throw new EvidenceCapsuleError("busy", "Evidence capsule publication remains locked.");
+    try {
+      return await this.#publishLocked(capsuleId, canonical);
+    } finally {
+      await lock.close();
+      await unlink(lockPath);
+    }
+  }
+
+  async #publishLocked(capsuleId: string, canonical: string): Promise<EvidenceCapsulePutResult> {
     const target = this.#capsulePath(capsuleId);
     try {
       const existing = await this.#readCanonical(capsuleId);
@@ -270,7 +302,13 @@ export class EvidenceCapsuleStore {
   async #readCanonical(capsuleId: string): Promise<string> {
     if (!HASH_PATTERN.test(capsuleId)) throw new EvidenceCapsuleError("invalid", "Evidence capsule identity is invalid.");
     let raw: string;
-    try { raw = await readFile(this.#capsulePath(capsuleId), "utf8"); }
+    try {
+      const capsulePath = this.#capsulePath(capsuleId);
+      if ((await stat(capsulePath)).size > MAX_EVIDENCE_CAPSULE_BYTES) {
+        throw new EvidenceCapsuleError("oversize", "Stored evidence capsule exceeds its byte bound.");
+      }
+      raw = await readFile(capsulePath, "utf8");
+    }
     catch (error) {
       if (isObject(error) && error.code === "ENOENT") throw new EvidenceCapsuleError("missing", "Evidence capsule was not found.");
       throw error;
