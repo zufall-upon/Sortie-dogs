@@ -248,15 +248,26 @@ test("fabric preparation durably pins one coordinator execution plan and rejects
     ]);
     const capsule = `sha256:${"c".repeat(64)}`;
     const acceptance = `sha256:${"b".repeat(64)}`;
-    const proposal = compileAcceptanceCoverage({
+    const compileInput = {
       version: "0.1",
       provenance: { producer: "dog-coordinator", acceptance_fingerprint: acceptance, capsule_inputs_exclude_secrets: true },
       unit_ids: ["a", "b"], declared_capsule_ids: [capsule],
       acceptance_items: ["a", "b"].map((id) => ({ acceptance_id: `own-${id}`, observable_criterion: `observe ${id}` })),
       validations: ["a", "b"].map((id) => ({ validation_id: `v-${id}`, unit_id: id, command_fingerprint: `sha256:${"d".repeat(64)}`, references: { capsule_ids: [capsule], artifact_ids: [] } })),
       coverage: ["a", "b"].map((id) => ({ acceptance_id: `own-${id}`, unit_id: id, validation_ids: [`v-${id}`] })),
+    };
+    const manifestFingerprint = executionPlanManifestFingerprint({ write: ["a.txt", "b.txt"] });
+    const rejected = compileAcceptanceCoverage({ ...compileInput, coverage: [] });
+    assert.equal(rejected.status, "rejected");
+    if (rejected.status !== "rejected") return;
+    assert.ok(rejected.gaps.some(({ code }) => code === "uncovered_acceptance"));
+    assert.throws(() => createExecutionPlan(rejected, candidate, manifestFingerprint), {
+      code: "compile-rejected",
     });
-    const plan = createExecutionPlan(proposal, candidate, executionPlanManifestFingerprint({ write: ["a.txt", "b.txt"] }));
+    assert.equal(await coordinator.snapshot("root"), undefined);
+    assert.equal((await run(value.repository, "worktree", "list", "--porcelain")).match(/^worktree /gmu)?.length, 1);
+    const proposal = compileAcceptanceCoverage(compileInput);
+    const plan = createExecutionPlan(proposal, candidate, manifestFingerprint);
     const prepared = await coordinator.prepareFabric(candidate, "root", plan);
     assert.equal(prepared.status, "prepared");
     if (prepared.status !== "prepared") return;
