@@ -240,7 +240,7 @@ function applyEvent(state: MutableState, event: RunFlightEvent): void {
       requireTransition(state.run_id === null, "run.planned must be the first and only planning event."); claim(state, event.run_id); claim(state, event.initial_candidate_id);
       state.run_id = event.run_id; state.current_candidate_id = event.initial_candidate_id; state.budget_limits = event.budget_limits; break;
     case "plan.compiled":
-      requireTransition(state.run_id !== null && state.active_wave_id === null && state.current_route_id === null && !state.plan_ids.has(event.plan_id) && state.accepted_plan === null, "Plan decision must be unique and precede routing.");
+      requireTransition(state.active_wave_id === null && state.current_route_id === null && !state.plan_ids.has(event.plan_id) && state.accepted_plan === null, "Plan decision must be unique and precede routing.");
       state.plan_ids.add(event.plan_id); if (event.decision === "accepted") state.accepted_plan = event.plan_id;
       state.plan_decisions.push({ plan_id: event.plan_id, proposal_id: event.proposal_id, decision: event.decision, gap_codes: [...event.gap_codes] }); break;
     case "route.selected":
@@ -331,6 +331,16 @@ export function reconstructRunFlightLedger(records: readonly RunFlightEventRecor
     applyEvent(state, record.event); previous = record.event_hash;
   });
   return publicState(state);
+}
+
+/** Compilation can precede run allocation; no execution budget is invented for planning evidence. */
+export function createRunFlightPlanPrefix(event: PlanCompiledFlightEvent): readonly RunFlightEventRecord[] {
+  if (!validEvent(event) || event.kind !== "plan.compiled") {
+    throw new RunFlightLedgerError("invalid", "Planning evidence must be a compile decision.");
+  }
+  const record = { sequence: 1, previous_hash: null, event_hash: recordHash(1, null, event), event: structuredClone(event) };
+  reconstructRunFlightLedger([record]);
+  return [record];
 }
 
 export function createRunFlightLedgerInitialPrefix(input: unknown): readonly RunFlightEventRecord[] {

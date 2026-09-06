@@ -126,7 +126,6 @@ test("rejects undeclared capsules, out-of-scope capsule sources, unknown fields,
 
 test("persists rejected and accepted compile identities across reopen and keeps state unchanged after duplicate rejection", async () => {
   const { ledger, file, access } = await fixture("compile-decisions");
-  await ledger.append(event({ kind: "run.planned", at, run_id: "run-plan", initial_candidate_id: "c0", budget_limits: { recovery_actions: 1, probe_iterations: 1, model_attempts: 1 } }));
   const base: AcceptanceCompileProposal = {
     version: "0.1", provenance: { producer: "dog-coordinator", acceptance_fingerprint: digest("a"), capsule_inputs_exclude_secrets: true },
     unit_ids: ["u1"], declared_capsule_ids: [], acceptance_items: [{ acceptance_id: "item1", observable_criterion: "observable" }],
@@ -145,6 +144,9 @@ test("persists rejected and accepted compile identities across reopen and keeps 
   await assert.rejects(ledger.appendCompileResult(accepted, at), (error: unknown) => error instanceof RunFlightLedgerError && error.code === "transition");
   assert.equal(await readFile(file, "utf8"), before);
   const reopened = await RunFlightLedger.open(file, access);
+  assert.deepEqual((await reopened.read()).state.plan_decisions, acceptedState.plan_decisions);
+  assert.equal(acceptedState.budget_limits, null);
+  await reopened.append(event({ kind: "run.planned", at, run_id: "run-plan", initial_candidate_id: "c0", budget_limits: { recovery_actions: 1, probe_iterations: 1, model_attempts: 1 } }));
   assert.deepEqual((await reopened.read()).state.plan_decisions, acceptedState.plan_decisions);
   assert.equal(before.includes("observable"), false);
 });

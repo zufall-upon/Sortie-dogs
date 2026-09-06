@@ -120,6 +120,7 @@ const GIT_POINTER_LIMIT = 4096;
 const PARALLEL_OUTCOME_MARKER = "SORTIE_PARALLEL_OUTCOME";
 const LUNA_FABRIC_ADMISSION_CAPABILITY = "sortie_admit_luna_fabric";
 const LUNA_FABRIC_CONTRACT_RELATIVE_PATH = ".opencode/sortie-dogs-luna-fabric.json";
+const EXECUTION_PLAN_RELATIVE_PATH = ".opencode/sortie-dogs-execution-plan.json";
 const LUNA_FABRIC_PREPARE_CAPABILITY = "sortie_prepare_luna_fabric";
 const LUNA_FABRIC_ADVANCE_CAPABILITY = "sortie_advance_luna_fabric_wave";
 const LUNA_FABRIC_VALIDATE_CAPABILITY = "sortie_validate_luna_fabric_candidate";
@@ -2340,7 +2341,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     }
   }
 
-  async function prepareLunaFabricDispatch(sessionID: string, contractPath: string): Promise<string> {
+  async function prepareLunaFabricDispatch(sessionID: string, contractPath: string, executionPlanPath?: string): Promise<string> {
     try {
       const ownerRoot = await parallelToolOwner(sessionID);
       project ??= await createProjectPaths(resolveProjectRoot(input));
@@ -2353,10 +2354,19 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           required_contract_path: LUNA_FABRIC_CONTRACT_RELATIVE_PATH,
         });
       }
+      if (executionPlanPath !== undefined && (!isAbsolute(executionPlanPath) || !await project.contains(executionPlanPath) ||
+        await project.toRelativePath(executionPlanPath) !== EXECUTION_PLAN_RELATIVE_PATH)) {
+        return JSON.stringify({
+          status: "denied",
+          reason: "execution-plan-control-path-required",
+          required_execution_plan_path: EXECUTION_PLAN_RELATIVE_PATH,
+        });
+      }
       const coordinator = await getParallelCoordinator();
       const result = await coordinator.prepareFabric(
         await readJson(resolve(contractPath), INPUT_LIMITS.parallel),
         ownerRoot,
+        executionPlanPath === undefined ? undefined : await readJson(resolve(executionPlanPath), INPUT_LIMITS.parallel),
       );
       if (result.status === "sol-serial") return JSON.stringify(result);
       try {
@@ -2372,6 +2382,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       return JSON.stringify({
         status: "prepared",
         fabric_fingerprint: result.fabric_fingerprint,
+        plan_id: result.plan_id,
+        plan_binding_id: result.plan_binding_id,
         width: result.width,
         depth: result.depth,
         ...boundedParallelSnapshot(result.snapshot),
@@ -4049,9 +4061,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       }),
       [LUNA_FABRIC_PREPARE_CAPABILITY]: defineTool({
         description: "Prepare one admitted Luna fabric contract from the exact ignored project control path .opencode/sortie-dogs-luna-fabric.json as up to five disjoint durable Luna units.",
-        args: { contract_path: defineTool.schema.string() },
+        args: { contract_path: defineTool.schema.string(), execution_plan_path: optionalString() },
         async execute(args, context): Promise<string> {
-          return prepareLunaFabricDispatch(context.sessionID, args.contract_path);
+          return prepareLunaFabricDispatch(context.sessionID, args.contract_path, args.execution_plan_path);
         },
       }),
       [LUNA_FABRIC_ADVANCE_CAPABILITY]: defineTool({

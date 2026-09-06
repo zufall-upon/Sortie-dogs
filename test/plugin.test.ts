@@ -21,6 +21,8 @@ import {
 } from "../dist/plugin/index.js";
 import { ParallelDispatchError } from "../dist/core/worktree-parallel-dispatch.js";
 import { ParallelDispatchCoordinator } from "../dist/core/worktree-parallel-dispatch.js";
+import { compileAcceptanceCoverage } from "../dist/core/acceptance-compiler.js";
+import { createExecutionPlan, executionPlanManifestFingerprint } from "../dist/core/execution-plan.js";
 import { WorktreeLifecycle } from "../dist/core/worktree-lifecycle.js";
 import {
   resolvePluginConfiguration,
@@ -3065,7 +3067,11 @@ test("coordinator-only Luna admission returns bounded route evidence without dis
 
 test("fabric prepare returns a luna-fabric run whose descriptors bind only dog-luna-worker", async () => {
   await withProject("luna-fabric-prepare", async (directory) => {
-    await writeFile(join(directory, ".gitignore"), ".opencode/sortie-dogs-luna-fabric.json\n");
+    await writeFile(join(directory, ".gitignore"), [
+      ".opencode/sortie-dogs-luna-fabric.json",
+      ".opencode/sortie-dogs-execution-plan.json",
+      "",
+    ].join("\n"));
     await writeFile(join(directory, "base.txt"), "base\n");
     await mkdir(join(directory, ".opencode"));
     await writeFile(join(directory, ".opencode", "sortie-dogs.version"), `${RUNTIME_ASSET_VERSION}\n`);
@@ -3082,7 +3088,7 @@ test("fabric prepare returns a luna-fabric run whose descriptors bind only dog-l
     const { stdout } = await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: directory });
     const sha = stdout.trim();
     const contractPath = join(directory, ".opencode", "sortie-dogs-luna-fabric.json");
-    await writeFile(contractPath, JSON.stringify({
+    const fabricValue = {
       version: "0.8.0",
       provenance: {
         source: "dog-coordinator",
@@ -3104,7 +3110,20 @@ test("fabric prepare returns a luna-fabric run whose descriptors bind only dog-l
         exclusive_resources: [],
         scheduler_order: order,
       })),
-    }));
+    };
+    await writeFile(contractPath, JSON.stringify(fabricValue));
+    const capsule = `sha256:${"e".repeat(64)}`;
+    const compileResult = compileAcceptanceCoverage({
+      version: "0.1",
+      provenance: { producer: "dog-coordinator", acceptance_fingerprint: `sha256:${"c".repeat(64)}`, capsule_inputs_exclude_secrets: true },
+      unit_ids: ["a", "b"], declared_capsule_ids: [capsule],
+      acceptance_items: ["a", "b"].map((id) => ({ acceptance_id: `own-${id}`, observable_criterion: `observe ${id}` })),
+      validations: ["a", "b"].map((id) => ({ validation_id: `v-${id}`, unit_id: id, command_fingerprint: `sha256:${"d".repeat(64)}`, references: { capsule_ids: [capsule], artifact_ids: [] } })),
+      coverage: ["a", "b"].map((id) => ({ acceptance_id: `own-${id}`, unit_id: id, validation_ids: [`v-${id}`] })),
+    });
+    const executionPlan = createExecutionPlan(compileResult, fabricValue, executionPlanManifestFingerprint(fixture.manifest));
+    const executionPlanPath = join(directory, ".opencode", "sortie-dogs-execution-plan.json");
+    await writeFile(executionPlanPath, JSON.stringify(executionPlan));
 
     const hooks = await SortieDogsPlugin({ directory });
     await hooks["chat.message"]!(
@@ -3115,15 +3134,17 @@ test("fabric prepare returns a luna-fabric run whose descriptors bind only dog-l
       },
     );
     const prepared = JSON.parse(await hooks.tool!.sortie_prepare_luna_fabric!.execute(
-      { contract_path: contractPath },
+      { contract_path: contractPath, execution_plan_path: executionPlanPath },
       { sessionID: "root", agent: "dog-coordinator" },
     )) as { status: string; run_id: string; route: string; width: number; depth: number; fabric_fingerprint: string;
-      ready: Array<Record<string, unknown>> };
+      plan_id: string; plan_binding_id: string; ready: Array<Record<string, unknown>> };
     assert.equal(prepared.status, "prepared", JSON.stringify(prepared));
     assert.equal(prepared.route, "luna-fabric");
     assert.equal(prepared.width, 2);
     assert.equal(prepared.depth, 1);
     assert.match(prepared.fabric_fingerprint, /^[0-9a-f]{64}$/u);
+    assert.equal(prepared.plan_id, executionPlan.plan_id);
+    assert.equal(prepared.plan_binding_id, executionPlan.binding_id);
     assert.equal(prepared.ready.length, 2);
     assert.deepEqual(prepared.ready.map((descriptor) => descriptor.acceptance), [
       ["own-a", "Complete the prepared parallel descriptor within its declared scope."],

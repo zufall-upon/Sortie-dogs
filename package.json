@@ -59,6 +59,10 @@
     "prepack": "npm run build",
     "pretest": "npm run build",
     "test": "node --experimental-strip-types --import ./test/setup.ts --test \"test/plugin.test.ts\" \"test/continuation.test.ts\" \"test/fast-lane.test.ts\"",
+    "pretest:dispatch": "npm run build",
+    "test:dispatch": "node --experimental-strip-types --import ./test/setup.ts --test --test-timeout=100000 --test-reporter=spec \"test/execution-plan.test.ts\" \"test/worktree-parallel-dispatch.test.ts\" \"test/acceptance-compiler.test.ts\" \"test/run-flight-ledger.test.ts\" \"test/evidence-capsule.test.ts\"",
+    "pretest:integration": "npm run build",
+    "test:integration": "node --experimental-strip-types --import ./test/setup.ts --test --test-timeout=1200000 --test-reporter=spec \"test/integration/worktree-parallel-dispatch.test.ts\"",
     "pretest:full": "npm run build",
     "test:full": "node --experimental-strip-types --import ./test/setup.ts --test \"test/**/*.test.ts\""
   },

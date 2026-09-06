@@ -27,6 +27,8 @@ import { validateWorktreeParallelSchema } from "./validate-schema.js";
 import { validateWorktreeParallelContract } from "./validate-worktree-parallel.js";
 import { WorktreeLifecycle, WorktreeLifecycleError, type ManagedWorktree } from "./worktree-lifecycle.js";
 import { runContainedValidation } from "./worktree-commit-artifact.js";
+import { inspectExecutionPlan, type ExecutionPlan } from "./execution-plan.js";
+import { createRunFlightPlanPrefix, reconstructRunFlightLedger, type RunFlightEventRecord } from "./run-flight-ledger.js";
 
 const VERSION = 5;
 const MAX_STATE_BYTES = 1024 * 1024;
@@ -94,6 +96,8 @@ export type ParallelDispatchFabricPrepareResult =
       readonly status: "prepared";
       readonly snapshot: ParallelDispatchSnapshot;
       readonly fabric_fingerprint: string;
+      readonly plan_id: string | null;
+      readonly plan_binding_id: string | null;
       readonly width: number;
       readonly depth: number;
     }
@@ -121,6 +125,8 @@ type StoredRun = {
   cancelled: boolean;
   tasks: StoredTask[];
   fabric: StoredFabric | null;
+  execution_plan: ExecutionPlan | null;
+  plan_ledger: readonly RunFlightEventRecord[] | null;
 };
 
 type PreparingTask = {
@@ -146,6 +152,8 @@ type StoredPreparation = {
   create_attempted: boolean;
   tasks: PreparingTask[];
   fabric: StoredFabric | null;
+  execution_plan: ExecutionPlan | null;
+  plan_ledger: readonly RunFlightEventRecord[] | null;
 };
 
 type StoredFabricTransition = {
@@ -204,6 +212,15 @@ type StoredPreparationArchive = {
 
 type StoredArchive = StoredRunArchive | StoredPreparationArchive;
 type State = { version: 5; revision: number; run: StoredRun | StoredPreparation | null; archived: StoredArchive[] };
+
+type PendingFabricOutcome = {
+  owner_root: string;
+  call_id: string;
+  child_session_id: string | null;
+  descriptor: ParallelDispatchDescriptor;
+  artifact: WorktreeCommitArtifact | null;
+  outcome: ParallelDispatchOutcome | null;
+};
 
 export interface ParallelDispatchClaim {
   readonly run_id: string;
@@ -512,11 +529,26 @@ function parseFabric(raw: unknown, contractFingerprint: string): StoredFabric | 
   };
 }
 
+function parsePlanLedger(value: unknown, plan: ExecutionPlan | null): readonly RunFlightEventRecord[] | null {
+  if (plan === null && (value === undefined || value === null)) return null;
+  if (plan === null || !Array.isArray(value) || value.length !== 1) throw new Error("plan-ledger");
+  const state = reconstructRunFlightLedger(value);
+  const decision = state.plan_decisions[0];
+  if (state.run_id !== null || decision?.decision !== "accepted" || decision.plan_id !== plan.plan_id ||
+    decision.proposal_id !== plan.proposal_id) throw new Error("plan-ledger-identity");
+  return value;
+}
+
 function parseRun(raw: unknown): StoredRun {
   if (!isRecord(raw) || !exactKeys(raw, [
     "cancelled", "contract_fingerprint", "fabric", "kind", "max_workers", "owner_root", "project_root", "route", "run_id", "tasks",
+    ...(Object.hasOwn(raw, "execution_plan") ? ["execution_plan"] : []),
+    ...(Object.hasOwn(raw, "plan_ledger") ? ["plan_ledger"] : []),
   ]) || raw.kind !== "run" || !validHeader(raw) || typeof raw.cancelled !== "boolean") throw new Error("run");
   const fabric = parseFabric(raw.fabric, raw.contract_fingerprint as string);
+  const executionPlan = raw.execution_plan === undefined || raw.execution_plan === null
+    ? null
+    : fabric === null ? (() => { throw new Error("run-plan"); })() : inspectExecutionPlan(raw.execution_plan, fabric.contract);
   if ((raw.route === "luna-fabric") !== (fabric !== null) ||
     (fabric === null && ((raw.tasks as unknown[]).length > MAX_TASKS || (raw.tasks as unknown[]).length < 2 ||
       (raw.max_workers as number) < 2))) throw new Error("run-route");
@@ -572,14 +604,20 @@ function parseRun(raw: unknown): StoredRun {
       throw new Error("fabric-run-state");
     }
   }
-  return { ...(raw as unknown as StoredRun), tasks, fabric };
+  return { ...(raw as unknown as StoredRun), tasks, fabric, execution_plan: executionPlan,
+    plan_ledger: parsePlanLedger(raw.plan_ledger, executionPlan) };
 }
 
 function parsePreparation(raw: unknown): StoredPreparation {
   if (!isRecord(raw) || !exactKeys(raw, [
     "contract_fingerprint", "create_attempted", "fabric", "kind", "max_workers", "owner_root", "project_root", "route", "run_id", "tasks",
+    ...(Object.hasOwn(raw, "execution_plan") ? ["execution_plan"] : []),
+    ...(Object.hasOwn(raw, "plan_ledger") ? ["plan_ledger"] : []),
   ]) || raw.kind !== "preparing" || !validHeader(raw) || typeof raw.create_attempted !== "boolean") throw new Error("preparation");
   const fabric = parseFabric(raw.fabric, raw.contract_fingerprint as string);
+  const executionPlan = raw.execution_plan === undefined || raw.execution_plan === null
+    ? null
+    : fabric === null ? (() => { throw new Error("preparation-plan"); })() : inspectExecutionPlan(raw.execution_plan, fabric.contract);
   if ((raw.route === "luna-fabric") !== (fabric !== null) || (raw.tasks as unknown[]).length > MAX_TASKS ||
     (fabric === null && ((raw.tasks as unknown[]).length < 2 || (raw.max_workers as number) < 2))) {
     throw new Error("preparation-route");
@@ -608,7 +646,8 @@ function parsePreparation(raw: unknown): StoredPreparation {
     tasks.push(value as unknown as PreparingTask);
   }
   if (tasks.some((task) => task.depends_on.some((dependency) => !ids.has(dependency)))) throw new Error("preparing-dependency");
-  return { ...(raw as unknown as StoredPreparation), tasks, fabric };
+  return { ...(raw as unknown as StoredPreparation), tasks, fabric, execution_plan: executionPlan,
+    plan_ledger: parsePlanLedger(raw.plan_ledger, executionPlan) };
 }
 
 function parseArchive(raw: unknown): StoredArchive {
@@ -646,6 +685,7 @@ export class ParallelDispatchCoordinator {
   private readonly statePath: string;
   private readonly registry: ScopeLeaseRegistry;
   private queue = Promise.resolve();
+  private readonly pendingFabricOutcomes = new Map<string, Map<string, PendingFabricOutcome>>();
 
   private constructor(
     private readonly repositoryRoot: string,
@@ -707,10 +747,15 @@ export class ParallelDispatchCoordinator {
    * Prepare one admitted Luna fabric contract. Admission is pure, so runtime capacity and the
    * concurrent-worktree disjointness this release can honor are enforced here and route to Sol.
    */
-  async prepareFabric(value: unknown, ownerRoot: string): Promise<ParallelDispatchFabricPrepareResult> {
+  async prepareFabric(value: unknown, ownerRoot: string, executionPlanValue?: unknown): Promise<ParallelDispatchFabricPrepareResult> {
     if (!validText(ownerRoot, 256)) throw new ParallelDispatchError("invalid-contract", "Coordinator root identity is invalid.");
     const admission = admitLunaFabric(value);
     if (admission.route !== "luna-fabric") return { status: "sol-serial", reason: admission.reason };
+    let executionPlan: ExecutionPlan | null = null;
+    if (executionPlanValue !== undefined) {
+      try { executionPlan = inspectExecutionPlan(executionPlanValue, admission.contract); }
+      catch { throw new ParallelDispatchError("invalid-contract", "Execution plan binding does not match the admitted fabric contract."); }
+    }
     const scheduler = createLunaFabricScheduler(admission.contract, admission.contract.provenance.target_sha);
     if (scheduler.nextWave() === null) return { status: "sol-serial", reason: "contract-unmappable" };
     const schedulerState = scheduler.snapshot();
@@ -735,8 +780,10 @@ export class ParallelDispatchCoordinator {
     return {
       status: "prepared",
       snapshot: await this.prepareRun(contract, "luna-fabric", ownerRoot, fabric, admission.contract_fingerprint,
-        schedulerState.active!.unit_ids.length),
+        schedulerState.active!.unit_ids.length, executionPlan),
       fabric_fingerprint: admission.contract_fingerprint,
+      plan_id: executionPlan?.plan_id ?? null,
+      plan_binding_id: executionPlan?.binding_id ?? null,
       width: Math.min(MAX_TASKS, admission.width),
       depth: admission.depth,
     };
@@ -749,6 +796,7 @@ export class ParallelDispatchCoordinator {
     fabric: StoredFabric | null = null,
     fingerprintOverride?: string,
     maxWorkersOverride?: number,
+    executionPlan: ExecutionPlan | null = null,
   ): Promise<ParallelDispatchSnapshot> {
     const contractFingerprint = fingerprintOverride ?? fingerprint(contract);
     return this.withPrepareAuthority(async () => {
@@ -763,7 +811,8 @@ export class ParallelDispatchCoordinator {
       const existing = await this.transaction((state) => {
         if (state.run === null) return { result: undefined, changed: false };
         if (state.run.kind !== "run" || state.run.owner_root !== ownerRoot || state.run.route !== route ||
-          state.run.contract_fingerprint !== contractFingerprint) {
+          state.run.contract_fingerprint !== contractFingerprint ||
+          state.run.execution_plan?.binding_id !== executionPlan?.binding_id) {
           throw new ParallelDispatchError("active-run", "Another durable parallel run already owns this repository.");
         }
         return { result: this.publicSnapshot(state.run), changed: false };
@@ -809,6 +858,11 @@ export class ParallelDispatchCoordinator {
             ...fabric,
             candidate_ref: `refs/sortie-dogs/luna-fabric-candidates/${fingerprint(runID).slice(0, 16)}`,
           },
+          execution_plan: executionPlan,
+          plan_ledger: executionPlan === null ? null : createRunFlightPlanPrefix({
+            kind: "plan.compiled", at: new Date().toISOString(), plan_id: executionPlan.plan_id,
+            proposal_id: executionPlan.proposal_id, decision: "accepted", gap_codes: [],
+          }),
         };
         state.run = value;
         return { result: value, changed: true };
@@ -1325,13 +1379,15 @@ export class ParallelDispatchCoordinator {
       throw new ParallelDispatchError("artifact-invalid", "Commit artifact claim is invalid.");
     }
     await this.recoverWithAuthority();
-    const authorized = await this.transaction((state) => {
+    const authorizationState = await this.load();
+    const authorized = (() => {
+      const state = authorizationState;
       const archived = state.run === null ? this.findRunArchive(state, ownerRoot, descriptor.run_id) : undefined;
       if (archived !== undefined) {
         const task = archived.run.tasks.find((entry) => entry.descriptor.dispatch_id === descriptor.dispatch_id);
         if (task !== undefined && task.call_id === callID && task.child_session_id === childSessionID &&
           task.artifact_accepted && task.artifact !== null && fingerprint(task.artifact) === fingerprint(artifact)) {
-          return { result: undefined, changed: false };
+          return undefined;
         }
         throw new ParallelDispatchError("outcome-conflict", "Archived dispatch artifact does not match.");
       }
@@ -1344,7 +1400,7 @@ export class ParallelDispatchCoordinator {
         if (task.artifact_accepted && (task.phase === "running" || task.phase === "completed") && task.call_id === callID &&
           task.child_session_id === childSessionID &&
           fingerprint(task.artifact) === fingerprint(artifact)) {
-          return { result: undefined, changed: false };
+          return undefined;
         }
         if (task.phase !== "running" || task.call_id !== callID || task.child_session_id !== childSessionID ||
           fingerprint(task.artifact) !== fingerprint(artifact)) {
@@ -1355,8 +1411,8 @@ export class ParallelDispatchCoordinator {
         (task.child_session_id !== null && task.child_session_id !== childSessionID)) {
         throw new ParallelDispatchError("descriptor-replay", "Artifact is not authorized for the active dispatch.");
       }
-      return { result: { worktreeID: task.worktree_id, descriptor: cloneDescriptor(task.descriptor), fabric: run.fabric }, changed: false };
-    });
+      return { worktreeID: task.worktree_id, descriptor: cloneDescriptor(task.descriptor), fabric: run.fabric };
+    })();
     if (authorized === undefined) {
       const snapshot = await this.snapshot(ownerRoot, descriptor.run_id);
       if (snapshot === undefined) throw new ParallelDispatchError("outcome-conflict", "Artifact outcome disappeared.");
@@ -1374,6 +1430,35 @@ export class ParallelDispatchCoordinator {
       });
     } catch {
       throw new ParallelDispatchError("artifact-invalid", "Commit artifact verification failed.");
+    }
+    if (authorized.fabric !== null) {
+      try {
+        await this.lifecycle.acceptCommit(
+          authorized.worktreeID,
+          authorized.descriptor.managed_path,
+          authorized.descriptor.base_sha,
+          artifact.commit_sha,
+          authorized.descriptor.branch,
+        );
+      } catch {
+        throw new ParallelDispatchError("lifecycle-failed", "Verified commit could not be accepted by worktree lifecycle.");
+      }
+      return this.transaction((state) => {
+        const run = this.requireRun(state, ownerRoot, descriptor.run_id);
+        const task = run.tasks.find((entry) => entry.descriptor.dispatch_id === descriptor.dispatch_id);
+        if (run.fabric === null || task === undefined || fingerprint(task.descriptor) !== fingerprint(descriptor) ||
+          task.phase !== "running" || task.call_id !== callID ||
+          (task.child_session_id !== null && task.child_session_id !== childSessionID)) {
+          throw new ParallelDispatchError("outcome-conflict", "Dispatch changed while its artifact was being accepted.");
+        }
+        if (task.artifact !== null && fingerprint(task.artifact) !== fingerprint(artifact)) {
+          throw new ParallelDispatchError("outcome-conflict", "A competing artifact was already recorded.");
+        }
+        task.child_session_id = childSessionID;
+        task.artifact = cloneArtifact(artifact);
+        task.artifact_accepted = true;
+        return { result: this.publicSnapshot(run), changed: true };
+      });
     }
     const preAccepted = await this.transaction((state) => {
       if (state.run === null || state.run.kind !== "run" || state.run.owner_root !== ownerRoot ||
@@ -1446,6 +1531,8 @@ export class ParallelDispatchCoordinator {
       throw new ParallelDispatchError("outcome-conflict", "Parallel outcome is invalid.");
     }
     await this.recoverWithAuthority();
+    const fabricResult = await this.completeFabricCall(ownerRoot, callID, childSessionID, outcome, claimed);
+    if (fabricResult.handled) return fabricResult.snapshot;
     return this.transaction((state) => {
       if (state.run === null || state.run.kind !== "run" || state.run.owner_root !== ownerRoot) {
         const archived = state.archived.find((entry): entry is StoredRunArchive => entry.kind === "run" &&
@@ -1560,6 +1647,15 @@ export class ParallelDispatchCoordinator {
       }
       const run = state.run;
       let changed = false;
+      const pending = run.fabric === null ? undefined : this.pendingFabricOutcomes.get(run.run_id);
+      if (pending !== undefined) {
+        for (const task of run.tasks) {
+          const candidate = pending.get(task.descriptor.dispatch_id);
+          if (task.phase !== "running" || candidate?.outcome === null || candidate?.outcome === undefined) continue;
+          this.applyFabricOutcome(run, task, candidate);
+          changed = true;
+        }
+      }
       for (const task of run.tasks) {
         if (task.phase === "running" && task.call_id !== null && !activeCallIDs.has(task.call_id)) {
           task.phase = "abandoned";
@@ -1576,8 +1672,110 @@ export class ParallelDispatchCoordinator {
         }
       }
       if (changed) this.reserveReady(run);
-      return { result: changed ? this.archiveIfTerminal(state, run) : this.publicSnapshot(run), changed };
+      const result = changed ? this.archiveIfTerminal(state, run) : this.publicSnapshot(run);
+      if (changed && pending !== undefined) this.pendingFabricOutcomes.delete(run.run_id);
+      return { result, changed };
     });
+  }
+
+  private fabricOutcome(runID: string, task: StoredTask): PendingFabricOutcome {
+    let wave = this.pendingFabricOutcomes.get(runID);
+    if (wave === undefined) {
+      wave = new Map();
+      this.pendingFabricOutcomes.set(runID, wave);
+    }
+    let pending = wave.get(task.descriptor.dispatch_id);
+    if (pending === undefined) {
+      pending = {
+        owner_root: "",
+        call_id: task.call_id!,
+        child_session_id: task.child_session_id,
+        descriptor: cloneDescriptor(task.descriptor),
+        artifact: task.artifact === null ? null : cloneArtifact(task.artifact),
+        outcome: null,
+      };
+      wave.set(task.descriptor.dispatch_id, pending);
+    }
+    return pending;
+  }
+
+  private applyFabricOutcome(run: StoredRun, task: StoredTask, pending: PendingFabricOutcome): void {
+    if (pending.artifact !== null) {
+      task.artifact = cloneArtifact(pending.artifact);
+      task.artifact_accepted = true;
+    }
+    if (pending.child_session_id !== null) task.child_session_id = pending.child_session_id;
+    task.outcome = pending.outcome;
+    task.phase = pending.outcome === "completed" ? "completed" : "failed";
+    if (task.phase === "failed") this.suppressDescendants(run, task.descriptor.task_id);
+  }
+
+  private async completeFabricCall(
+    ownerRoot: string,
+    callID: string,
+    childSessionID: string | undefined,
+    outcome: ParallelDispatchOutcome,
+    claimed: ParallelDispatchClaim | undefined,
+  ): Promise<{ handled: boolean; snapshot: ParallelDispatchSnapshot | undefined }> {
+    const source = await this.load();
+    const run = source.run?.kind === "run" && source.run.owner_root === ownerRoot ? source.run : undefined;
+    const task = run?.tasks.find((entry) => entry.call_id === callID);
+    if (run?.fabric === null || run === undefined || task === undefined || task.phase !== "running") {
+      return { handled: false, snapshot: undefined };
+    }
+    const pending = this.fabricOutcome(run.run_id, task);
+    if ((pending.owner_root !== "" && pending.owner_root !== ownerRoot) || pending.call_id !== callID ||
+      (pending.child_session_id !== null && childSessionID !== undefined && pending.child_session_id !== childSessionID)) {
+      throw new ParallelDispatchError("outcome-conflict", "A different terminal outcome was already recorded.");
+    }
+    pending.owner_root = ownerRoot;
+    if (childSessionID !== undefined) pending.child_session_id = childSessionID;
+    let effective = outcome;
+    if (effective === "completed" && (claimed === undefined || claimed.run_id !== run.run_id ||
+      claimed.dispatch_id !== task.descriptor.dispatch_id || childSessionID === undefined ||
+      pending.child_session_id !== childSessionID || pending.artifact === null)) effective = "failed";
+    if (pending.outcome !== null && pending.outcome !== effective) {
+      throw new ParallelDispatchError("outcome-conflict", "A different terminal outcome was already recorded.");
+    }
+    pending.outcome = effective;
+    const active = run.fabric.scheduler.active?.unit_ids ?? [];
+    const wave = this.pendingFabricOutcomes.get(run.run_id)!;
+    const ready = active.every((id) => {
+      const activeTask = run.tasks.find((entry) => entry.descriptor.task_id === id);
+      return activeTask !== undefined && (activeTask.phase !== "running" ||
+        wave.get(activeTask.descriptor.dispatch_id)?.outcome !== null &&
+        wave.get(activeTask.descriptor.dispatch_id)?.outcome !== undefined);
+    });
+    if (!ready) return { handled: true, snapshot: this.publicSnapshot(run) };
+    const result = await this.transaction<{ handled: boolean; snapshot: ParallelDispatchSnapshot | undefined }>((state) => {
+      const durableRun = this.requireRun(state, ownerRoot, run.run_id);
+      if (durableRun.fabric === null) throw new ParallelDispatchError("outcome-conflict", "Fabric outcome changed before its wave barrier.");
+      let changed = false;
+      for (const id of active) {
+        const activeTask = durableRun.tasks.find((entry) => entry.descriptor.task_id === id)!;
+        const candidate = wave.get(activeTask.descriptor.dispatch_id);
+        if (activeTask.phase === "running") {
+          if (candidate?.outcome === null || candidate?.outcome === undefined || activeTask.call_id !== candidate.call_id ||
+            fingerprint(activeTask.descriptor) !== fingerprint(candidate.descriptor)) {
+            throw new ParallelDispatchError("outcome-conflict", "Fabric outcome changed before its wave barrier.");
+          }
+          this.applyFabricOutcome(durableRun, activeTask, candidate);
+          changed = true;
+        } else if (candidate !== undefined && (activeTask.outcome !== candidate.outcome ||
+          activeTask.call_id !== candidate.call_id || fingerprint(activeTask.descriptor) !== fingerprint(candidate.descriptor) ||
+          activeTask.child_session_id !== candidate.child_session_id ||
+          (candidate.artifact !== null && (activeTask.artifact === null ||
+            fingerprint(activeTask.artifact) !== fingerprint(candidate.artifact))))) {
+          throw new ParallelDispatchError("outcome-conflict", "Fabric outcome changed before its wave barrier.");
+        }
+      }
+      if (!changed) return { result: { handled: true, snapshot: this.publicSnapshot(durableRun) }, changed: false };
+      this.reserveReady(durableRun);
+      const snapshot = this.archiveIfTerminal(state, durableRun);
+      return { result: { handled: true, snapshot }, changed: true };
+    });
+    this.pendingFabricOutcomes.delete(run.run_id);
+    return result;
   }
 
   private contractTasks(preparation: StoredPreparation): WorktreeParallelTask[] {
@@ -2000,6 +2198,8 @@ export class ParallelDispatchCoordinator {
       max_workers: preparation.max_workers,
       cancelled: false,
       fabric: preparation.fabric,
+      execution_plan: preparation.execution_plan,
+      plan_ledger: preparation.plan_ledger,
       tasks: preparation.tasks.map((task, index) => ({
         worktree_id: task.worktree_id,
         descriptor: cloneDescriptor({
