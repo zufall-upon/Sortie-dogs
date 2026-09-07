@@ -14,6 +14,9 @@ import {
 } from "../core/acceptance-continuity.js";
 import { resolveGlobalConfigRoot } from "../core/initialize.js";
 import { admitLunaFabric } from "../core/luna-fabric-contract.js";
+import { summarizeExperienceEvidence } from "../core/experience-evidence-summary.js";
+import { selectExperienceRoute } from "../core/experience-route-policy.js";
+import { resolveExperienceRouting } from "../core/experience-routing-runtime.js";
 import { normalizeRelativePath, RelativePathError } from "../core/path.js";
 import { ScopeLeaseError, ScopeLeaseRegistry, type ScopeLease } from "../core/scope-lease-registry.js";
 import {
@@ -105,6 +108,13 @@ import { FailureSwarmRuntime, type FailureSwarmRequest, type ReadOnlyDiagnosisDe
 import { EvidenceCapsuleStore } from "../core/evidence-capsule.js";
 import { RunFlightLedger, diagnosisContractHash, type DiagnosisSelection, type FlightObservation } from "../core/run-flight-ledger.js";
 import { LUNA_FABRIC_MAX_ACTIVE } from "../core/luna-fabric-scheduler.js";
+import { terminalRescueModel } from "./terminal-rescue-binding.js";
+import type { ModelTarget } from "./model-routing.js";
+import { TerminalRescueRuntime, type TerminalRescueRequest } from "../core/terminal-rescue-runtime.js";
+import { OpenCodeTerminalRescueHost, type TerminalRescueSessionClient } from "./terminal-rescue-host.js";
+import { AdaptiveRemediationRuntime, AdaptiveRunFlightLineage, type AdaptiveRemediationRequest } from "../core/adaptive-remediation-runtime.js";
+import { DEFAULT_ADAPTIVE_REMEDIATION_MODEL, GitAdaptiveRemediationHost, OpenCodeAdaptiveRemediationProvider,
+  type AdaptiveRemediationSessionClient } from "./adaptive-remediation-host.js";
 import type { ChildTerminalEvidence, ChildTerminalObservation } from "../core/child-terminal-reconciliation.js";
 import { collectRunMetrics, insertRunMetrics, terminalRunOutcome } from "./run-metrics.js";
 import type { RunMetricsClient } from "./run-metrics.js";
@@ -126,6 +136,7 @@ const TASK_ROLES = new Set(["implementation", "remediation", "blocker-resolution
 const GIT_POINTER_LIMIT = 4096;
 const PARALLEL_OUTCOME_MARKER = "SORTIE_PARALLEL_OUTCOME";
 const LUNA_FABRIC_ADMISSION_CAPABILITY = "sortie_admit_luna_fabric";
+const EXPERIENCE_ROUTE_PROPOSAL_CAPABILITY = "sortie_propose_experience_route";
 const LUNA_FABRIC_CONTRACT_RELATIVE_PATH = ".opencode/sortie-dogs-luna-fabric.json";
 const EXECUTION_PLAN_RELATIVE_PATH = ".opencode/sortie-dogs-execution-plan.json";
 const LUNA_FABRIC_PREPARE_CAPABILITY = "sortie_prepare_luna_fabric";
@@ -147,6 +158,8 @@ export const PARALLEL_COMMIT_ARTIFACT_CAPABILITY = "sortie_create_parallel_commi
 export interface OpenCodePluginInput {
   directory: string;
   worktree?: string;
+  /** Optional host-injected lifecycle observation window; production callers use the core default. */
+  childLifecycleCheckWaitMs?: number;
   /** The host SDK client. Absent in hosts that construct the plugin without one. */
   client?: SessionMessageReader & RunMetricsClient & ContinuationClient & OpenCodeModelAvailabilityClient & {
     app?: {
@@ -525,6 +538,44 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+function proposeExperienceRoute(requestJson: string): string {
+  let request: unknown;
+  try {
+    if (typeof requestJson !== "string" || Buffer.byteLength(requestJson, "utf8") > INPUT_LIMITS.parallel) {
+      throw new Error("invalid-request");
+    }
+    request = JSON.parse(requestJson);
+  } catch {
+    return JSON.stringify({
+      ...selectExperienceRoute(undefined),
+      summary_status: "rejected",
+      summary_reason: "invalid-input",
+    });
+  }
+  if (!isRecord(request) || Object.keys(request).sort().join(",") !==
+      "caller_heuristic_route,observations,policy,shape") {
+    return JSON.stringify({
+      ...selectExperienceRoute(undefined),
+      summary_status: "rejected",
+      summary_reason: "invalid-input",
+    });
+  }
+
+  const summary = summarizeExperienceEvidence({ observations: request.observations });
+  const selection = selectExperienceRoute({
+    shape: request.shape,
+    caller_heuristic_route: request.caller_heuristic_route,
+    policy: request.policy,
+    evidence: summary.status === "summarized" ? summary.evidence : [],
+  });
+  return JSON.stringify({
+    ...selection,
+    ...(summary.status === "rejected" ? { status: "rejected", reason: summary.reason } : {}),
+    summary_status: summary.status,
+    summary_reason: summary.reason,
+  });
+}
+
 async function readJson(path: string, limit: number): Promise<unknown> {
   let metadata;
   try {
@@ -706,6 +757,7 @@ interface HandoffPathRegistration {
 }
 
 interface InspectedContractIdentity {
+  readonly terminalRescueTarget?: ModelTarget;
   readonly explicitWriteGate: boolean;
   readonly handoffID: string;
   readonly manifestPath: string;
@@ -1260,6 +1312,10 @@ function abandonDetachedLease(lease: ScopeLease | undefined): void {
 
 /** Named OpenCode plugin export. Importing the package has no side effects; invoking it installs active gates. */
 export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
+  if (input.childLifecycleCheckWaitMs !== undefined &&
+    (!Number.isSafeInteger(input.childLifecycleCheckWaitMs) || input.childLifecycleCheckWaitMs < 1)) {
+    throw new Error("invalid-child-lifecycle-check-wait");
+  }
   const pluginModuleName = "@opencode-ai/plugin";
   const pluginModule = await import(pluginModuleName).catch(() => undefined) as
     | { tool?: OpenCodeToolFactory }
@@ -1715,6 +1771,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   const reflectionInFlight = new Map<string, number>();
   const reflectionWaiters = new Map<string, Array<() => void>>();
   const childLifecycles = new Map<string, CancellableChildLifecycle>();
+  const terminalRescueHandoffs = new Map<string, string>();
   const observedChildTerminals = new Map<string, boolean>();
   const childObservedLeases = new Map<string, ScopeLease>();
   const settledChildLifecycles = new Map<string, true>();
@@ -1754,7 +1811,15 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   }>();
   const parallelChildBindings = new Map<string, ParallelChildBinding>();
   const parallelArtifacts = new Map<string, PendingParallelArtifact>();
-  const parallelArtifactOperations = new Set<string>();
+  type ParallelArtifactOperation = {
+    phase: "validation" | "protected";
+    readonly controller: AbortController;
+    readonly settled: Promise<void>;
+    readonly settle: () => void;
+  };
+  const parallelArtifactOperations = new Map<string, ParallelArtifactOperation>();
+  /** Missing entry means legacy behavior; explicit false disables only policy-selected live takeover. */
+  const fabricExperienceEscalation = new Map<string, boolean>();
 
   interface BootstrapControlState {
     readonly controls: readonly string[];
@@ -1840,7 +1905,11 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
 
   async function getParallelCoordinator(): Promise<ParallelDispatchCoordinator> {
     project ??= await createProjectPaths(resolveProjectRoot(input));
-    parallelCoordinator ??= await ParallelDispatchCoordinator.open({ repositoryRoot: project.root });
+    if (parallelCoordinator === undefined) {
+      const gitPath = await resolveValidationExecutable("git");
+      if (gitPath === undefined) throw new Error("git-executable-unavailable");
+      parallelCoordinator = await ParallelDispatchCoordinator.open({ repositoryRoot: project.root, gitPath });
+    }
     return parallelCoordinator;
   }
 
@@ -1929,6 +1998,138 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         ready: result.swarm.lanes.filter((lane) => !Object.hasOwn(result.swarm.dispatched, lane.lane_id))
           .map((lane) => context.runtime.descriptor(result.swarm, lane.lane_id)) });
     } catch (error) { return diagnosisDenied(error); }
+  }
+
+  async function executeTerminalRescue(sessionID: string): Promise<string> {
+    try {
+      const ownerRoot = await parallelToolOwner(sessionID);
+      if (ownerRoot === undefined) return JSON.stringify({ status: "denied", reason: "coordinator-root-required" });
+      project ??= await createProjectPaths(resolveProjectRoot(input));
+      const raw = await readJson(join(project.root, ".opencode/sortie-dogs-terminal-rescue.json"), INPUT_LIMITS.parallel);
+      if (!isRecord(raw) || Object.keys(raw).some((key) => !["request", "ledger_path", "scope_read", "capsule_ids", "validation"].includes(key)) ||
+        !isRecord(raw.request) || typeof raw.ledger_path !== "string" || !Array.isArray(raw.scope_read) ||
+        !raw.scope_read.every((path) => typeof path === "string") || !Array.isArray(raw.capsule_ids) ||
+        !raw.capsule_ids.every((id) => typeof id === "string") || !isRecord(raw.validation) || typeof raw.validation.executable !== "string" ||
+        (raw.validation.args !== undefined && (!Array.isArray(raw.validation.args) || !raw.validation.args.every((arg) => typeof arg === "string")))) {
+        throw new Error("rescue-request-invalid");
+      }
+      const request = raw.request as unknown as TerminalRescueRequest;
+      const ledgerRelative = normalizeRelativePath(raw.ledger_path);
+      if (!ledgerRelative.startsWith(".sortie-dogs/") || !ledgerRelative.endsWith(".json") ||
+        !await project.contains(join(project.root, ledgerRelative))) throw new Error("rescue-ledger-scope-invalid");
+      const scopeRead = raw.scope_read.map((path) => normalizeRelativePath(path as string));
+      const ledger = await RunFlightLedger.open(join(project.root, ledgerRelative), {
+        store: new EvidenceCapsuleStore(join(project.root, ".sortie-dogs/evidence-capsules")),
+        declared_capsule_ids: raw.capsule_ids as string[], authorized_source_paths: scopeRead });
+      const state = (await ledger.read()).state;
+      if (state.run_id === null) throw new Error("rescue-run-unavailable");
+      const client = input.client as unknown as TerminalRescueSessionClient;
+      if (typeof client?.session?.create !== "function" || typeof client.session.prompt !== "function" || typeof client.session.abort !== "function") {
+        return JSON.stringify({ status: "non_rescue", reason: "host_unavailable" });
+      }
+      const scopeRoot = await durableScopeRoot(project.root);
+      if (scopeRoot === undefined) throw new Error("rescue-lease-registry-unavailable");
+      const registry = new ScopeLeaseRegistry(scopeRoot);
+      const host = new OpenCodeTerminalRescueHost({ projectRoot: project.root, ownerSessionID: ownerRoot,
+        runID: state.run_id, ledgerPath: ledgerRelative, scopeRead, client,
+        validation: { executable: raw.validation.executable, args: raw.validation.args as string[] | undefined,
+          timeout_ms: request.budget_request.resources.time_ms },
+        createdChild: (childID, callID) => {
+          rememberParent(childID, ownerRoot); sessionRoots.set(childID, ownerRoot); beginCoordinatorTask(ownerRoot, callID);
+        },
+        finishedChild: (callID) => { finishCoordinatorTask(ownerRoot, callID); },
+        releaseWriter: async (childID) => {
+          if ((activeSessions.get(childID)?.inFlightCalls.size ?? 0) !== 0) throw new Error("rescue-tools-active");
+          const authorization = sessionAuthorizations.get(childID);
+          if (authorization !== undefined) { authorization.suspended = true; await authorization.lease?.release(); authorization.lease = undefined; }
+          const active = activeSessions.get(childID);
+          if (active !== undefined) active.released = true;
+        },
+        writerReleased: async (childID) => {
+          const authorization = sessionAuthorizations.get(childID);
+          return (activeSessions.get(childID)?.inFlightCalls.size ?? 0) === 0 &&
+            (authorization === undefined || authorization.suspended) &&
+            !await registry.hasConflictingLease({ read: [], write: [...request.accepted_base.scope] });
+        } });
+      const result = await new TerminalRescueRuntime(ledger, host).execute(request);
+      let receipt: unknown;
+      if ("attempt" in result && /^[0-9a-f-]{36}$/u.test(result.attempt.attempt_id)) {
+        receipt = await readJson(join(project.root, ".sortie-dogs/rescue-artifacts", `${result.attempt.attempt_id}.json`), INPUT_LIMITS.parallel).catch(() => undefined);
+      }
+      return JSON.stringify({ ...result, ...(receipt === undefined ? {} : { receipt }), promotion: "normal-final-gates-required" });
+    } catch (error) {
+      const reason = error instanceof Error && error.message.startsWith("rescue-") ? error.message :
+        isRecord(error) && typeof error.code === "string" ? error.code : "rescue-unavailable";
+      return JSON.stringify({ status: "denied", reason });
+    }
+  }
+
+  async function executeAdaptiveRemediation(sessionID: string): Promise<string> {
+    try {
+      const ownerRoot = await parallelToolOwner(sessionID);
+      if (ownerRoot === undefined) return JSON.stringify({ status: "denied", reason: "coordinator-root-required" });
+      project ??= await createProjectPaths(resolveProjectRoot(input));
+      const raw = await readJson(join(project.root, ".opencode/sortie-dogs-adaptive-remediation.json"), INPUT_LIMITS.parallel);
+      if (!isRecord(raw) || Object.keys(raw).some((key) => !["request", "ledger_path", "capsule_ids", "lineage"].includes(key)) ||
+        !isRecord(raw.request) || !isRecord(raw.lineage) || typeof raw.ledger_path !== "string" || !Array.isArray(raw.capsule_ids) ||
+        !raw.capsule_ids.every((id) => typeof id === "string")) throw new Error("adaptive-request-invalid");
+      const request = raw.request as unknown as AdaptiveRemediationRequest;
+      if (typeof request.task_id !== "string" || request.task_id.length === 0 || typeof request.target_ref !== "string" ||
+        !request.target_ref.startsWith("refs/heads/") || !isRecord(request.allowed_paths) || !Array.isArray(request.allowed_paths.read) ||
+        !Array.isArray(request.allowed_paths.write) || request.allowed_paths.write.length === 0 ||
+        ![...request.allowed_paths.read, ...request.allowed_paths.write].every((path) => typeof path === "string") ||
+        !Array.isArray(request.acceptance) || request.acceptance.length === 0 || !request.acceptance.every((item) => typeof item === "string") ||
+        typeof raw.lineage.unit_id !== "string" || typeof raw.lineage.route_id !== "string" || typeof raw.lineage.candidate_id !== "string" ||
+        (raw.lineage.predecessor_attempt_id !== null && typeof raw.lineage.predecessor_attempt_id !== "string")) {
+        throw new Error("adaptive-request-invalid");
+      }
+      const ledgerRelative = normalizeRelativePath(raw.ledger_path);
+      if (!ledgerRelative.startsWith(".sortie-dogs/") || !ledgerRelative.endsWith(".json") ||
+        !await project.contains(join(project.root, ledgerRelative))) throw new Error("adaptive-ledger-scope-invalid");
+      const scopeRead = request.allowed_paths.read.map((path) => normalizeRelativePath(path));
+      const scopeWrite = request.allowed_paths.write.map((path) => normalizeRelativePath(path));
+      const ledger = await RunFlightLedger.open(join(project.root, ledgerRelative), {
+        store: new EvidenceCapsuleStore(join(project.root, ".sortie-dogs/evidence-capsules")),
+        declared_capsule_ids: raw.capsule_ids as string[], authorized_source_paths: [...scopeRead, ...scopeWrite] });
+      const state = (await ledger.read()).state;
+      if (state.run_id === null) throw new Error("adaptive-run-unavailable");
+      const client = input.client as unknown as AdaptiveRemediationSessionClient;
+      if (typeof client?.session?.create !== "function" || typeof client.session.prompt !== "function" || typeof client.session.abort !== "function") {
+        throw new Error("adaptive-host-unavailable");
+      }
+      const scopeRoot = await durableScopeRoot(project.root);
+      if (scopeRoot === undefined) throw new Error("adaptive-lease-registry-unavailable");
+      const registry = new ScopeLeaseRegistry(scopeRoot);
+      const provider = new OpenCodeAdaptiveRemediationProvider({ projectRoot: project.root, ownerSessionID: ownerRoot,
+        runID: state.run_id, taskID: request.task_id, scopeRead, scopeWrite, acceptance: request.acceptance,
+        improvementSignal: request.improvement_signal, client,
+        createdChild: (childID, callID) => {
+          rememberParent(childID, ownerRoot); sessionRoots.set(childID, ownerRoot); beginCoordinatorTask(ownerRoot, callID);
+        }, finishedChild: (callID) => { finishCoordinatorTask(ownerRoot, callID); },
+        releaseWriter: async (childID) => {
+          if ((activeSessions.get(childID)?.inFlightCalls.size ?? 0) !== 0) throw new Error("adaptive-tools-active");
+          const authorization = sessionAuthorizations.get(childID);
+          if (authorization !== undefined) { authorization.suspended = true; await authorization.lease?.release(); authorization.lease = undefined; }
+          const active = activeSessions.get(childID);
+          if (active !== undefined) active.released = true;
+        }, writerReleased: async (childID) => {
+          const authorization = sessionAuthorizations.get(childID);
+          return (activeSessions.get(childID)?.inFlightCalls.size ?? 0) === 0 &&
+            (authorization === undefined || authorization.suspended) && !await registry.hasConflictingLease({ read: [], write: [...scopeWrite] });
+        } });
+      const lineage = new AdaptiveRunFlightLineage({ ledger, unit_id: raw.lineage.unit_id,
+        route_id: raw.lineage.route_id, candidate_id: raw.lineage.candidate_id,
+        predecessor_attempt_id: raw.lineage.predecessor_attempt_id, selected_model: DEFAULT_ADAPTIVE_REMEDIATION_MODEL,
+        selected_variant: null, model_attempt_per_patch: true });
+      const host = new GitAdaptiveRemediationHost({ repositoryRoot: project.root, runID: state.run_id, taskID: request.task_id,
+        targetRef: request.target_ref, allowedPaths: request.allowed_paths, patchProducer: provider, reviewProvider: provider,
+        reserveProbe: () => lineage.reserveProbe(), finishProbe: (value) => lineage.finishProbe(value), failProbe: (value) => lineage.failProbe(value) });
+      return JSON.stringify(await new AdaptiveRemediationRuntime(host).execute(request));
+    } catch (error) {
+      const reason = error instanceof Error && error.message.startsWith("adaptive-") ? error.message :
+        isRecord(error) && typeof error.code === "string" ? error.code : "adaptive-unavailable";
+      return JSON.stringify({ status: "denied", reason });
+    }
   }
 
   async function selectFailureDiagnosis(sessionID: string, swarmID: string, selectionJson: string): Promise<string> {
@@ -2468,6 +2669,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         : deny("artifact-replay");
     }
     if (parallelArtifactOperations.has(sessionID)) return deny("artifact-replay");
+    let operation: ParallelArtifactOperation | undefined;
     try {
       await authorization.lease.assertHeld();
       const snapshot = await (await getParallelCoordinator()).snapshot(binding.ownerRoot, binding.descriptor.run_id);
@@ -2488,14 +2690,27 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         pruneParallelChildMap(parallelArtifacts);
         return JSON.stringify({ status: "created", replay: true, artifact: boundedParallelArtifact(running.artifact) });
       }
-      parallelArtifactOperations.add(sessionID);
+      let settleOperation!: () => void;
+      const activeOperation: ParallelArtifactOperation = {
+        phase: "protected",
+        controller: new AbortController(),
+        settled: new Promise<void>((resolve) => { settleOperation = resolve; }),
+        settle: () => settleOperation(),
+      };
+      operation = activeOperation;
+      parallelArtifactOperations.set(sessionID, activeOperation);
       const produceRequest = {
         descriptor: binding.descriptor,
         managed_path: binding.descriptor.managed_path,
         validation: request.validation,
       };
       const recovered = await recoverWorktreeCommitArtifact(produceRequest);
-      const artifact = recovered ?? await produceWorktreeCommitArtifact(produceRequest);
+      activeOperation.phase = "validation";
+      const artifact = recovered ?? await produceWorktreeCommitArtifact(produceRequest, {
+        signal: activeOperation.controller.signal,
+        enterProtectedPhase: () => { activeOperation.phase = "protected"; },
+      });
+      activeOperation.phase = "protected";
       await removeParallelControlFiles(binding.descriptor);
       await (await getParallelCoordinator()).acceptArtifact(binding.ownerRoot, binding.completionCallID,
         sessionID, binding.descriptor, artifact);
@@ -2507,6 +2722,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       return deny(error instanceof WorktreeCommitArtifactError ? `artifact-${error.code}` : "artifact-production-failed");
     } finally {
       parallelArtifactOperations.delete(sessionID);
+      operation?.settle();
       void childLifecycles.get(sessionID)?.check();
     }
   }
@@ -2561,13 +2777,29 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           required_execution_plan_path: EXECUTION_PLAN_RELATIVE_PATH,
         });
       }
+      const contract = await readJson(resolve(contractPath), INPUT_LIMITS.parallel);
+      const structuralAdmission = admitLunaFabric(contract);
+      const experience = await resolveExperienceRouting(project.root, structuralAdmission);
+      if (structuralAdmission.route !== "luna-fabric") {
+        return JSON.stringify({ status: "sol-serial", reason: structuralAdmission.reason, experience: experience.trace });
+      }
+      if (experience.route === "sol-serial") {
+        return JSON.stringify({ status: "sol-serial", reason: "experience-route-selected",
+          contract_fingerprint: structuralAdmission.contract_fingerprint, experience: experience.trace });
+      }
       const coordinator = await getParallelCoordinator();
       const result = await coordinator.prepareFabric(
-        await readJson(resolve(contractPath), INPUT_LIMITS.parallel),
+        contract,
         ownerRoot,
         executionPlanPath === undefined ? undefined : await readJson(resolve(executionPlanPath), INPUT_LIMITS.parallel),
       );
-      if (result.status === "sol-serial") return JSON.stringify(result);
+      if (result.status === "sol-serial") return JSON.stringify({ ...result, experience: experience.trace });
+      if (experience.escalation_enabled !== null) {
+        fabricExperienceEscalation.set(result.snapshot.run_id, experience.escalation_enabled);
+        while (fabricExperienceEscalation.size > ACTIVE_SESSION_CACHE.maximum) {
+          fabricExperienceEscalation.delete(fabricExperienceEscalation.keys().next().value!);
+        }
+      }
       try {
         await ensureParallelReadyControls(result.snapshot, rootAcceptanceContinuity.get(ownerRoot));
       } catch (error) {
@@ -2585,6 +2817,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         plan_binding_id: result.plan_binding_id,
         width: result.width,
         depth: result.depth,
+        experience: experience.trace,
         ...boundedParallelSnapshot(result.snapshot),
       });
     } catch (error) {
@@ -2714,16 +2947,22 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         });
       }
       const admission = admitLunaFabric(await readJson(resolve(contractPath), INPUT_LIMITS.parallel));
+      const experience = await resolveExperienceRouting(project.root, admission);
+      if (admission.route === "luna-fabric" && experience.route === "sol-serial") {
+        return JSON.stringify({ status: "serial-route", route: "sol-serial", reason: "experience-route-selected",
+          contract_fingerprint: admission.contract_fingerprint, experience: experience.trace });
+      }
       return admission.route === "luna-fabric"
         ? JSON.stringify({
             status: "admitted",
-            route: admission.route,
+            route: experience.route,
             contract_fingerprint: admission.contract_fingerprint,
             width: admission.width,
             depth: admission.depth,
             unit_count: admission.contract.units.length,
+            experience: experience.trace,
           })
-        : JSON.stringify({ status: "serial-route", ...admission });
+        : JSON.stringify({ status: "serial-route", ...admission, experience: experience.trace });
     } catch (error) {
       return JSON.stringify({
         status: "denied",
@@ -2873,12 +3112,13 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const predecessor = snapshot.fabric?.demotions.find((entry) => entry.sol_dispatch_id === descriptor.dispatch_id)?.luna_dispatch_id ?? null;
     const ledger = await coordinator.childLedger(ownerRoot, descriptor, completionCallID, childID);
     const identity = { run_id: descriptor.run_id, unit_id: descriptor.task_id, attempt_id: descriptor.dispatch_id,
-      predecessor_attempt_id: predecessor, candidate_id: descriptor.base_sha, route_id: route,
+      predecessor_attempt_id: predecessor, candidate_id: descriptor.base_sha, route_id: descriptor.parallel_group,
       child_id: childID, call_id: completionCallID };
     const previous = (await ledger.read()).state.children.find((entry) => entry.identity.attempt_id === identity.attempt_id);
     const timeout = process.env.SORTIE_CHILD_DEADLINE_MS === undefined ? DEFAULT_CHILD_DEADLINE_MS : Number(process.env.SORTIE_CHILD_DEADLINE_MS);
     if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 2 ** 31 - 1) throw new Error("invalid-child-deadline");
     let stopped = false;
+    let liveTakeover = false;
     let heldLease: ScopeLease | undefined;
     const scopeRoot = await durableScopeRoot(project!.root);
     if (scopeRoot === undefined) throw new Error("child-lease-registry-unavailable");
@@ -2899,15 +3139,48 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       return { observation: { identity, disposition: task.artifact !== null ? "succeeded" : stopped || task.outcome === "cancelled" ? "cancelled" :
         task.outcome === "completed" ? "succeeded" : "failed" },
         evidence: { terminal: satisfied(terminal), tools_quiescent: satisfied(quiescent),
-          artifact_window_closed: satisfied(!parallelArtifactOperations.has(childID)),
+          artifact_window_closed: satisfied(parallelArtifactOperations.get(childID)?.phase !== "protected"),
           gate_released: satisfied(gateReleased), writer_released: satisfied(gateReleased && noLease), lease_released: satisfied(noLease),
           worktree_released: satisfied(await coordinator.childWorktreeReleased(descriptor)) } };
     };
-    const lifecycle = await CancellableChildLifecycle.open({ identity,
+    let lifecycle!: CancellableChildLifecycle;
+    lifecycle = await CancellableChildLifecycle.open({ identity,
       deadline_ms: previous?.deadline_ms ?? Date.now() + timeout }, ledger, {
       observe,
+      takeover: async () => {
+        if (fabricExperienceEscalation.get(descriptor.run_id) === false) return undefined;
+        const fresh = await coordinator.snapshot(ownerRoot, descriptor.run_id);
+        if (fresh?.route !== "luna-fabric" || fresh.fabric === undefined || fresh.archived || fresh.cancelled ||
+          descriptor.attempt !== 1) return undefined;
+        const source = fresh.tasks.find((entry) => sameParallelDescriptor(entry.descriptor, descriptor));
+        if (source?.phase !== "running" || source.call_id !== completionCallID || source.child_session_id !== childID) return undefined;
+        const observation = await coordinator.criticalPathInput(ownerRoot, descriptor.run_id, identity);
+        liveTakeover = true;
+        try {
+          const result = await coordinator.takeoverCriticalFabricUnit(ownerRoot, descriptor.run_id, observation, identity, lifecycle);
+          if (result.status === "not-proposed") return undefined;
+          if (result.status === "waiting") return { status: "waiting", reason: result.reason };
+          await ensureParallelReadyControls(result.snapshot);
+          childLifecycles.delete(childID);
+          childObservedLeases.delete(childID);
+          settledChildLifecycles.set(descriptor.dispatch_id, true);
+          pruneParallelChildMap(settledChildLifecycles);
+          const terminal = (await ledger.read()).state.children.find((entry) => entry.identity.attempt_id === identity.attempt_id);
+          return terminal?.terminal === null || terminal === undefined
+            ? { status: "waiting", reason: "terminal-unconfirmed" }
+            : { status: "terminal", state: terminal };
+        } finally {
+          liveTakeover = false;
+        }
+      },
       stop: async () => {
         heldLease ??= sessionAuthorizations.get(childID)?.lease;
+        const artifactOperation = parallelArtifactOperations.get(childID);
+        if (artifactOperation !== undefined) {
+          if (artifactOperation.phase === "validation") artifactOperation.controller.abort();
+          await artifactOperation.settled;
+          if (parallelArtifacts.has(childID)) return;
+        }
         const session = (input.client as unknown as { session?: Record<string, unknown> })?.session;
         if (typeof session?.abort !== "function") throw new Error("child-abort-unavailable");
         const result = await session.abort.call(session, { path: { id: childID }, query: { directory: input.directory } });
@@ -2926,9 +3199,12 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         const active = activeSessions.get(childID);
         if (active !== undefined) active.released = true;
         await removeParallelControlFiles(descriptor);
-        await coordinator.releaseChildWorktree(ownerRoot, descriptor, completionCallID, childID, (await observe()).evidence);
+        const finalObservation = await observe();
+        await coordinator.releaseChildWorktree(ownerRoot, descriptor, completionCallID, childID,
+          finalObservation.evidence, finalObservation.observation.disposition !== "succeeded");
       },
       terminal: async (state) => {
+        if (liveTakeover) return;
         const snapshot = await coordinator.completeCall(ownerRoot, completionCallID, childID,
           state.terminal!.disposition === "succeeded" ? "completed" : state.terminal!.disposition === "failed" ? "failed" : "cancelled",
           { run_id: descriptor.run_id, dispatch_id: descriptor.dispatch_id });
@@ -2943,7 +3219,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         settledChildLifecycles.set(descriptor.dispatch_id, true);
         pruneParallelChildMap(settledChildLifecycles);
       },
-    });
+    }, input.childLifecycleCheckWaitMs === undefined ? undefined : { checkWaitMs: input.childLifecycleCheckWaitMs });
     childLifecycles.set(childID, lifecycle);
     lifecycle.arm();
     if (previous?.terminal != null) void lifecycle.check();
@@ -3050,15 +3326,21 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     return sessionID === rootID || sessionRoots.get(sessionID) === rootID || sessionParents.get(sessionID) === rootID;
   }
 
+  function childHasInFlightTool(rootID: string): boolean {
+    return [...activeSessions].some(([sessionID, state]) =>
+      sessionID !== rootID && sessionOwnedByRoot(sessionID, rootID) && state.inFlightCalls.size > 0 &&
+      !parallelArtifactOperations.has(sessionID));
+  }
+
   async function watchdogProtectedReasons(rootID: string): Promise<string[]> {
     const reasons = new Set<string>();
     if ([...diagnosisCalls.values()].some((call) => call.context.ownerRoot === rootID)) reasons.add("diagnosis-running");
     if ([...parallelCalls.values()].some((call) => call.ownerRoot === rootID)) reasons.add("parallel-running");
-    if ([...sessionAuthorizations].some(([sessionID]) => sessionOwnedByRoot(sessionID, rootID))) {
+    const bindingInFlight = [...bindingOperations].some((sessionID) => sessionOwnedByRoot(sessionID, rootID));
+    if (bindingInFlight || [...sessionAuthorizations].some(([sessionID]) => sessionOwnedByRoot(sessionID, rootID))) {
       reasons.add("bound-write-gate");
     }
-    if ([...bindingOperations].some((sessionID) => sessionOwnedByRoot(sessionID, rootID)) ||
-      [...parallelArtifactOperations].some((sessionID) => sessionOwnedByRoot(sessionID, rootID))) {
+    if ([...parallelArtifactOperations.keys()].some((sessionID) => sessionOwnedByRoot(sessionID, rootID))) {
       reasons.add("durable-update-in-flight");
     }
     if (parallelCoordinator !== undefined) {
@@ -3078,6 +3360,11 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       return;
     }
     state.recovering = true;
+    if (childHasInFlightTool(sessionID)) {
+      state.recovering = false;
+      armCoordinatorTaskWatchdog(sessionID, Date.now());
+      return;
+    }
     const reasons = await watchdogProtectedReasons(sessionID);
     if (coordinatorTaskWatchdogs.get(sessionID) !== state || state.generation !== generation) return;
     if (reasons.length > 0) {
@@ -3184,7 +3471,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   async function inspect(
     path: string,
     sessionID: string | undefined,
-    options: { readonly report?: boolean } = {},
+    options: { readonly report?: boolean; readonly rescueSessionID?: string } = {},
   ): Promise<InspectedContractIdentity | undefined> {
     const unregistered = (code: string): void => {
       if (!options.report) return;
@@ -3353,6 +3640,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       });
     }
     const identity = {
+      ...(options.rescueSessionID !== undefined && validation.value.ext?.["sortie-dogs/terminal-rescue"] !== undefined
+        ? { terminalRescueTarget: await terminalRescueModel({ owner_root: project.root, session_id: options.rescueSessionID,
+          binding: validation.value.ext["sortie-dogs/terminal-rescue"], scope_write: manifest.write,
+          acceptance: continuity.ledger?.criteria ?? [], validation: manifest.validation }) } : {}),
       explicitWriteGate: extension !== undefined,
       handoffID: validation.value.id,
       manifestPath,
@@ -4304,6 +4595,16 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
 
   const hooks: OpenCodeHooks = {
     tool: {
+      sortie_execute_adaptive_remediation: defineTool({
+        description: "Auto-select and execute one bounded adaptive remediation from .opencode/sortie-dogs-adaptive-remediation.json using hidden Git candidates, the shared flight ledger, one canonical validation, independent review, CAS, and post-merge verification.",
+        args: {},
+        execute: async (_args, context) => executeAdaptiveRemediation(context.sessionID),
+      }),
+      sortie_execute_terminal_rescue: defineTool({
+        description: "After failed normal Sol remediation, execute one bounded Astra rescue from .opencode/sortie-dogs-terminal-rescue.json and its authoritative flight ledger. Returns a hidden candidate artifact; final review and CAS remain required.",
+        args: {},
+        execute: async (_args, context) => executeTerminalRescue(context.sessionID),
+      }),
       [FAILURE_SWARM_PREPARE]: defineTool({
         description: "Prepare bounded read-only diagnosis lanes from the coordinator's failure-swarm request and authoritative flight ledger.",
         args: {},
@@ -4422,6 +4723,17 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         args: { contract_path: defineTool.schema.string(), execution_plan_path: optionalString() },
         async execute(args, context): Promise<string> {
           return prepareLunaFabricDispatch(context.sessionID, args.contract_path, args.execution_plan_path);
+        },
+      }),
+      [EXPERIENCE_ROUTE_PROPOSAL_CAPABILITY]: defineTool({
+        description: "Propose a typed experience route from bounded caller evidence without changing admission, routing, escalation, or dispatch state.",
+        args: { request_json: defineTool.schema.string() },
+        async execute(args, context): Promise<string> {
+          if (context.agent !== COORDINATOR_AGENT ||
+            !(isCoordinatorSession(context.sessionID) || await recoverCoordinatorRoot(context.sessionID))) {
+            return JSON.stringify({ status: "denied", reason: "coordinator-only" });
+          }
+          return proposeExperienceRoute(args.request_json);
         },
       }),
       [LUNA_FABRIC_ADVANCE_CAPABILITY]: defineTool({
@@ -4708,6 +5020,23 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
        * them silently inheriting the caller's model instead of its own configured route.
        */
       await ensureLoaded();
+      let terminalRescueTarget: ModelTarget | undefined;
+      if (selectedAgent === SERIAL_WORKER_AGENT) {
+        const text = explicitTaskText(output);
+        const rescueRequested = text !== undefined && handoffValue(handoffEntries(text), ["terminal_rescue_attempt"]) !== undefined;
+        if (text !== undefined && !rescueRequested) terminalRescueHandoffs.delete(chatInput.sessionID);
+        const suppliedPath = !rescueRequested ? undefined : handoffValue(handoffEntries(text!), ["handoff_path"]);
+        const path = suppliedPath === undefined ? terminalRescueHandoffs.get(chatInput.sessionID) : unquoteValue(suppliedPath);
+        if (path !== undefined) {
+          const identity = await inspect(path, undefined, { report: true, rescueSessionID: chatInput.sessionID });
+          terminalRescueTarget = identity?.terminalRescueTarget;
+          if (rescueRequested && terminalRescueTarget === undefined) throw new Error("rescue-binding-unavailable");
+          if (terminalRescueTarget !== undefined) {
+            terminalRescueHandoffs.set(chatInput.sessionID, path);
+            pruneParallelChildMap(terminalRescueHandoffs);
+          }
+        }
+      } else terminalRescueHandoffs.delete(chatInput.sessionID);
       const consultationFallbackRetry = await reserveConsultationFallbackRetry(chatInput, output);
       try {
         if (coordinatorOrigin && chatInput.model !== undefined) {
@@ -4721,6 +5050,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           ? false
           : await loaded?.modelRoutingHook?.(chatInput, output, {
             skipPreferred: consultationFallbackRetry !== undefined,
+            terminalRescueTarget,
           });
         if (consultationFallbackRetry !== undefined && routed === true) {
           consultationRetries.set(consultationFallbackRetry.key, {
@@ -5005,7 +5335,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         toolInput.tool === FAILURE_SWARM_PREPARE || toolInput.tool === FAILURE_SWARM_SELECT ||
         toolInput.tool === CONTINUATION_CAPABILITY || toolInput.tool === BACKLOG_DRAIN_CAPABILITY ||
         toolInput.tool === "sortie_check_contract" ||
-        toolInput.tool === LUNA_FABRIC_ADMISSION_CAPABILITY || toolInput.tool === LUNA_FABRIC_PREPARE_CAPABILITY ||
+        toolInput.tool === LUNA_FABRIC_ADMISSION_CAPABILITY || toolInput.tool === EXPERIENCE_ROUTE_PROPOSAL_CAPABILITY ||
+        toolInput.tool === LUNA_FABRIC_PREPARE_CAPABILITY ||
         toolInput.tool === LUNA_FABRIC_ADVANCE_CAPABILITY || toolInput.tool === LUNA_FABRIC_VALIDATE_CAPABILITY ||
         toolInput.tool === LUNA_FABRIC_ACCEPT_CAPABILITY ||
         toolInput.tool === "sortie_prepare_parallel_dispatch" || toolInput.tool === "sortie_parallel_dispatch_status" ||

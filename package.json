@@ -1,6 +1,6 @@
 {
   "name": "sortie-dogs",
-  "version": "0.8.2",
+  "version": "0.8.3",
   "description": "Bounded agent harness and validated orchestration loop plugin for OpenCode",
   "keywords": [
     "opencode",
@@ -64,7 +64,7 @@
     "pretest:integration": "npm run build",
     "test:integration": "node --experimental-strip-types --import ./test/setup.ts --test --test-timeout=1200000 --test-reporter=spec \"test/integration/worktree-parallel-dispatch.test.ts\"",
     "pretest:full": "npm run build",
-    "test:full": "node --experimental-strip-types --import ./test/setup.ts --test \"test/**/*.test.ts\""
+    "test:full": "node --experimental-strip-types test/helpers/full-test-runner.ts"
   },
   "dependencies": {
     "ajv": "^8.17.1",

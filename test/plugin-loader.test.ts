@@ -125,7 +125,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       join(consumer, "node_modules", "sortie-dogs", "package.json"),
       "utf8",
     )) as { version?: string; scripts?: { prebuild?: string } };
-    assert.equal(installedPackage.version, "0.8.2");
+    assert.equal(installedPackage.version, "0.8.3");
     assert.equal(
       installedPackage.scripts?.prebuild,
       "node --input-type=module --eval \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true });\"",
@@ -373,12 +373,15 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
         "sortie_create_parallel_commit_artifact",
         "sortie_enable_backlog_drain",
         "sortie_enqueue_parallel_integration",
+        "sortie_execute_adaptive_remediation",
+        "sortie_execute_terminal_rescue",
         "sortie_integrate_parallel_queue",
         "sortie_parallel_dispatch_status",
         "sortie_parallel_integration_status",
       "sortie_prepare_failure_swarm",
       "sortie_prepare_luna_fabric",
       "sortie_prepare_parallel_dispatch",
+      "sortie_propose_experience_route",
       "sortie_release_write_gate",
       "sortie_select_failure_diagnosis",
       "sortie_submit_integration_remediation",

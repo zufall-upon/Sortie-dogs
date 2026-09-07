@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
+  criticalPathTakeoverTrigger,
   proposeCriticalPathTakeover,
   type CriticalPathInput,
   type CriticalPathUnitObservation,
@@ -221,5 +222,16 @@ describe("critical-path takeover proposal", () => {
     // This pure decision API neither stops execution nor performs takeover, writer exclusion,
     // validation, review, or CAS. It returns names of obligations for runtime enforcement only.
     if (result.status === "proposed") assert.equal(Object.isFrozen(result.runtime_obligations), true);
+  });
+
+  it("maps policy reasons to typed live triggers without using terminal rescue", () => {
+    const deadline = proposeCriticalPathTakeover(input([activeLuna("deadline")]));
+    assert.equal(deadline.status, "proposed");
+    if (deadline.status === "proposed") assert.equal(criticalPathTakeoverTrigger(deadline), "live_deadline_exceeded");
+    const repeated = proposeCriticalPathTakeover(input([
+      activeLuna("repeated", { deadline: "within_deadline", failures: "repeated" }),
+    ]));
+    assert.equal(repeated.status, "proposed");
+    if (repeated.status === "proposed") assert.equal(criticalPathTakeoverTrigger(repeated), "live_repeated_failure");
   });
 });

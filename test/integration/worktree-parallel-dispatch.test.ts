@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { availableParallelism } from "node:os";
 import { join } from "node:path";
-import nodeTest, { describe, type TestContext } from "node:test";
+import nodeTest, { after, describe, type TestContext } from "node:test";
 
 import {
   ParallelDispatchCoordinator,
@@ -14,6 +14,8 @@ import { ScopeLeaseError, ScopeLeaseRegistry } from "../../dist/core/scope-lease
 import { compileAcceptanceCoverage } from "../../dist/core/acceptance-compiler.js";
 import { createExecutionPlan, executionPlanManifestFingerprint } from "../../dist/core/execution-plan.js";
 import { reconstructRunFlightLedger, type RunFlightEventRecord } from "../../dist/core/run-flight-ledger.js";
+import { CancellableChildLifecycle } from "../../dist/core/child-lifecycle-runtime.js";
+import type { ChildTerminalEvidence } from "../../dist/core/child-terminal-reconciliation.js";
 import type { ParallelDispatchDescriptor } from "../../src/core/types.ts";
 import {
   acceptAndComplete,
@@ -25,12 +27,14 @@ import {
   fabricUnit,
   fixture,
   gitDiffCheck,
+  openParallelCoordinator,
   run,
 } from "../helpers/worktree-dispatch-fixture.ts";
 
 export type RegisteredTest = {
   name: string;
   options?: { timeout?: number };
+  phase?: "s01";
   run: (context: TestContext) => void | Promise<void>;
 };
 
@@ -66,10 +70,22 @@ function test(
   registerCase(isolatedCases, name, optionsOrRun, run);
 }
 
+function s01Test(name: string, run: RegisteredTest["run"]): void;
+function s01Test(name: string, options: RegisteredTest["options"], run: RegisteredTest["run"]): void;
+function s01Test(
+  name: string,
+  optionsOrRun: RegisteredTest["options"] | RegisteredTest["run"],
+  run?: RegisteredTest["run"],
+): void {
+  const before = isolatedCases.length;
+  registerCase(isolatedCases, name, optionsOrRun, run);
+  isolatedCases[before]!.phase = "s01";
+}
+
 test("fork/join reserves only DAG-ready tasks and supports three bounded workers", async () => {
   const value = await fixture("join");
   try {
-    const coordinator = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const coordinator = await openParallelCoordinator(value.repository);
     const prepared = await coordinator.prepare(contract(value.sha), "root");
     assert.equal(prepared.status, "prepared");
     if (prepared.status !== "prepared") return;
@@ -95,7 +111,7 @@ test("fork/join reserves only DAG-ready tasks and supports three bounded workers
 test("five independent units reserve five durable descriptors from one exact base", async () => {
   const value = await fixture("five-lanes");
   try {
-    const coordinator = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const coordinator = await openParallelCoordinator(value.repository);
     const prepared = await coordinator.prepare(contract(value.sha, [[], [], [], [], []]), "root");
     assert.equal(prepared.status, "prepared");
     if (prepared.status !== "prepared") return;
@@ -124,7 +140,7 @@ test("parallel state authority retries transient lease mutex contention", async 
   let registry: ScopeLeaseRegistry | undefined;
   let originalAcquire: ScopeLeaseRegistry["acquire"] | undefined;
   try {
-    const coordinator = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const coordinator = await openParallelCoordinator(value.repository);
     const prepared = await coordinator.prepare(contract(value.sha, [[], ["a"]]), "root");
     assert.equal(prepared.status, "prepared");
     let contended = true;
@@ -149,14 +165,14 @@ test("five concurrent fabric binds skip recovery authority for a stable active r
   const value = await fixture("stable-bind-contention");
   const patched: Array<{ registry: ScopeLeaseRegistry; acquire: ScopeLeaseRegistry["acquire"] }> = [];
   try {
-    const coordinator = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const coordinator = await openParallelCoordinator(value.repository);
     const units = ["a", "b", "c", "d", "e"].map((id, index) => fabricUnit(id, index));
     const prepared = await coordinator.prepareFabric(fabricContract(value.sha, units), "root");
     assert.equal(prepared.status, "prepared");
     if (prepared.status !== "prepared") return;
     const acquiredScopes: string[][] = [];
     const coordinators = await Promise.all(prepared.snapshot.ready.map(async () =>
-      await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository })));
+      await openParallelCoordinator(value.repository)));
     for (const candidate of coordinators) {
       const registry = (candidate as unknown as { registry: ScopeLeaseRegistry }).registry;
       const acquire = registry.acquire.bind(registry);
@@ -180,7 +196,7 @@ test("five concurrent fabric binds skip recovery authority for a stable active r
 test("fabric bind fails closed when recovery state changes after its authority read", async () => {
   const value = await fixture("bind-recovery-race");
   try {
-    const coordinator = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const coordinator = await openParallelCoordinator(value.repository);
     const units = [fabricUnit("a", 0), fabricUnit("b", 1)];
     const prepared = await coordinator.prepareFabric(fabricContract(value.sha, units), "root");
     assert.equal(prepared.status, "prepared");
@@ -208,7 +224,7 @@ test("fabric bind fails closed when recovery state changes after its authority r
 test("an admitted fabric contract prepares one durable luna-fabric run", async () => {
   const value = await fixture("fabric-prepare");
   try {
-    const coordinator = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const coordinator = await openParallelCoordinator(value.repository);
     const units = ["a", "b"].map((id, index) => fabricUnit(id, index));
     const prepared = await coordinator.prepareFabric(fabricContract(value.sha, units), "root");
     assert.equal(prepared.status, "prepared");
@@ -241,7 +257,7 @@ test("an admitted fabric contract prepares one durable luna-fabric run", async (
 test("fabric preparation durably pins one coordinator execution plan and rejects resume drift", { timeout: 60_000 }, async () => {
   const value = await fixture("fabric-plan-binding");
   try {
-    const coordinator = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const coordinator = await openParallelCoordinator(value.repository);
     const candidate = fabricContract(value.sha, [
       fabricUnit("a", 0, { acceptance_items: ["own-a"] }),
       fabricUnit("b", 1, { acceptance_items: ["own-b"] }),
@@ -282,7 +298,7 @@ test("fabric preparation durably pins one coordinator execution plan and rejects
       plan_id: prepared.plan_id, proposal_id: plan.proposal_id, decision: "accepted", gap_codes: [],
     }]);
     assert.equal(reconstructRunFlightLedger(state.run.plan_ledger).budget_limits, null);
-    const restarted = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const restarted = await openParallelCoordinator(value.repository);
     const resumed = await restarted.prepareFabric(candidate, "root", plan);
     assert.equal(resumed.status, "prepared");
     assert.deepEqual(JSON.parse(await readFile(statePath, "utf8")).run.plan_ledger, state.run.plan_ledger);
@@ -311,7 +327,7 @@ test("fabric preparation durably pins one coordinator execution plan and rejects
 test("admission and unowned concurrent overlap route the fabric to Sol without a worktree", async () => {
   const value = await fixture("fabric-sol");
   try {
-    const coordinator = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const coordinator = await openParallelCoordinator(value.repository);
     const overlapping = [
       fabricUnit("a", 0, { scope_write: ["a.txt"] }),
       fabricUnit("b", 1, { scope_write: ["a.txt"] }),
@@ -330,13 +346,29 @@ test("admission and unowned concurrent overlap route the fabric to Sol without a
   }
 });
 
-test("a six-unit fabric advances only at the barrier into a fresh exact-base worktree", async (t) => {
+s01Test("a six-unit fabric advances only at the barrier into a fresh exact-base worktree", async (t) => {
   const value = await fixture("fabric-waves");
   try {
-    const coordinator = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
-    const units = ["a", "b", "c", "d", "e"].map((id, index) => fabricUnit(id, index));
-    units.push(fabricUnit("f", 5, { depends_on: ["a"] }));
-    const prepared = await coordinator.prepareFabric(fabricContract(value.sha, units), "root");
+    const coordinator = await openParallelCoordinator(value.repository);
+    const units = ["a", "b", "c", "d", "e"].map((id, index) =>
+      fabricUnit(id, index, { acceptance_items: [`own-${id}`] }));
+    units.push(fabricUnit("f", 5, { depends_on: ["a"], acceptance_items: ["own-f"] }));
+    const candidateContract = fabricContract(value.sha, units);
+    const capsule = `sha256:${"c".repeat(64)}`;
+    const proposal = compileAcceptanceCoverage({
+      version: "0.1",
+      provenance: { producer: "dog-coordinator", acceptance_fingerprint: `sha256:${"b".repeat(64)}`, capsule_inputs_exclude_secrets: true },
+      unit_ids: units.map((unit) => unit.unit_id as string),
+      declared_capsule_ids: [capsule],
+      acceptance_items: units.map((unit) => ({ acceptance_id: (unit.acceptance_items as string[])[0]!, observable_criterion: `observe ${unit.unit_id as string}` })),
+      validations: units.map((unit) => ({ validation_id: `v-${unit.unit_id as string}`, unit_id: unit.unit_id as string,
+        command_fingerprint: `sha256:${"d".repeat(64)}`, references: { capsule_ids: [capsule], artifact_ids: [] } })),
+      coverage: units.map((unit) => ({ acceptance_id: (unit.acceptance_items as string[])[0]!, unit_id: unit.unit_id as string,
+        validation_ids: [`v-${unit.unit_id as string}`] })),
+    });
+    const plan = createExecutionPlan(proposal, candidateContract,
+      executionPlanManifestFingerprint({ write: units.flatMap((unit) => unit.scope_write as string[]) }));
+    const prepared = await coordinator.prepareFabric(candidateContract, "root", plan);
     assert.equal(prepared.status, "prepared");
     if (prepared.status !== "prepared") return;
     assert.equal(prepared.snapshot.fabric?.total_units, 6);
@@ -356,7 +388,7 @@ test("a six-unit fabric advances only at the barrier into a fresh exact-base wor
     const acceptedArtifactSnapshot = await coordinator.acceptArtifact("root", "call-0", "child-0", first, firstArtifact);
     assert.deepEqual(acceptedArtifactSnapshot.tasks
       .find(({ descriptor }) => descriptor.dispatch_id === first.dispatch_id)!.artifact, firstArtifact);
-    const firstRestart = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const firstRestart = await openParallelCoordinator(value.repository);
     const replayed = await firstRestart.acceptArtifact("root", "call-0", "child-0", first, firstArtifact);
     assert.deepEqual(replayed.tasks.find(({ descriptor }) => descriptor.dispatch_id === first.dispatch_id)!.artifact, firstArtifact);
     await errorCode(firstRestart.acceptArtifact("root", "call-0", "other-child", first, firstArtifact), "outcome-conflict");
@@ -387,11 +419,38 @@ test("a six-unit fabric advances only at the barrier into a fresh exact-base wor
       snapshot!.tasks.some(({ descriptor: task }) => task.task_id === "f") === false));
     for (const path of firstPaths) assert.notEqual(await stat(path).catch(() => undefined), undefined);
     const counter = join(value.root, "must-not-run.txt");
+    const candidateBuilder = firstRestart as unknown as {
+      buildFabricCandidate(runID: string, base: string, tasks: readonly unknown[]): Promise<string>;
+    };
+    const originalBuildFabricCandidate = candidateBuilder.buildFabricCandidate.bind(firstRestart);
+    let buildFabricCandidateCalls = 0;
+    candidateBuilder.buildFabricCandidate = async (...args) => {
+      buildFabricCandidateCalls += 1;
+      return await originalBuildFabricCandidate(...args);
+    };
     const advanced = await firstRestart.integrateFabricWaveAndValidate(
       "root", prepared.snapshot.run_id, process.execPath,
       ["-e", "require('node:fs').writeFileSync(process.argv[1], 'ran')", counter],
     );
+    assert.equal(buildFabricCandidateCalls, 1);
+    candidateBuilder.buildFabricCandidate = originalBuildFabricCandidate;
     const candidate = advanced.fabric!.candidate_head;
+    const firstBoundaryState = JSON.parse(await readFile(statePath, "utf8")) as { run: { plan_ledger: RunFlightEventRecord[] } };
+    const firstBoundary = reconstructRunFlightLedger(firstBoundaryState.run.plan_ledger);
+    assert.equal(firstBoundary.accepted_fabric_waves.length, 1);
+    assert.equal(firstBoundary.accepted_fabric_waves[0]!.candidate_id, candidate);
+    assert.deepEqual(firstBoundary.accepted_fabric_waves[0]!.artifacts.map(({ unit_id }) => unit_id), ["a", "b", "c", "d", "e"]);
+    const firstReplay = await firstRestart.inspectFabricWaveBoundaryReplay("root", prepared.snapshot.run_id);
+    assert.equal(firstReplay?.reason, "latest_accepted_boundary");
+    assert.equal(firstReplay?.route, "luna-fabric");
+    assert.deepEqual(firstReplay?.plan, plan);
+    assert.deepEqual(firstReplay?.plan_decisions.map(({ plan_id, decision }) => ({ plan_id, decision })), [
+      { plan_id: plan.plan_id, decision: "accepted" },
+    ]);
+    assert.deepEqual(firstReplay?.scheduler, firstBoundary.accepted_fabric_waves[0]!.scheduler_after);
+    assert.deepEqual(firstReplay?.artifacts, firstBoundary.accepted_fabric_waves[0]!.artifacts);
+    assert.deepEqual(firstReplay?.candidate_snapshot, firstBoundary.accepted_fabric_waves[0]!.candidate_snapshot);
+    assert.equal(firstReplay?.recovery_budget.budget_limits, null);
     let nonFinalVerified = false;
     await t.test("integrateFabricWaveAndValidate advances non-final waves without running supplied validation", async () => {
       assert.equal(advanced.archived, false);
@@ -413,8 +472,32 @@ test("a six-unit fabric advances only at the barrier into a fresh exact-base wor
     assert.equal((await readFile(join(value.repository, ".git", "refs", "heads", "main"), "utf8")).trim(), value.sha);
 
     let restarted!: ParallelDispatchCoordinator;
+    await t.test("automatic boundary recovery is read-only and rejects a corrupt ledger before resuming", async () => {
+      const savedState = await readFile(statePath, "utf8");
+      const worktrees = await run(value.repository, "worktree", "list", "--porcelain");
+      const recovery = await openParallelCoordinator(value.repository);
+      const recovered = await recovery.snapshot("root", prepared.snapshot.run_id);
+      assert.deepEqual(recovered, advanced);
+      assert.deepEqual(await recovery.inspectFabricWaveBoundaryReplay("root", prepared.snapshot.run_id), firstReplay);
+      assert.equal(await readFile(statePath, "utf8"), savedState);
+      assert.equal(await run(value.repository, "worktree", "list", "--porcelain"), worktrees);
+      assert.equal((await run(value.repository, "rev-parse", "refs/heads/main")).trim(), value.sha);
+
+      const corrupted = JSON.parse(savedState);
+      corrupted.run.plan_ledger.reverse();
+      const corruptedState = JSON.stringify(corrupted);
+      try {
+        await writeFile(statePath, corruptedState);
+        await errorCode(recovery.snapshot("root", prepared.snapshot.run_id), "corrupt-state");
+        assert.equal(await readFile(statePath, "utf8"), corruptedState);
+        assert.equal(await run(value.repository, "worktree", "list", "--porcelain"), worktrees);
+        assert.equal((await run(value.repository, "rev-parse", "refs/heads/main")).trim(), value.sha);
+      } finally {
+        await writeFile(statePath, savedState);
+      }
+    });
     await t.test("restart replays the next wave and integrates its verified artifact once", async () => {
-      restarted = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+      restarted = await openParallelCoordinator(value.repository);
       const singleton = advanced.ready[0]!;
       await restarted.bindDispatch("root", "call-f", singleton);
       await acceptAndComplete(restarted, singleton, "call-f", "child-f");
@@ -425,6 +508,22 @@ test("a six-unit fabric advances only at the barrier into a fresh exact-base wor
       ["-e", "if(require('node:fs').readFileSync('f.txt','utf8').trim()!=='f')process.exitCode=1"],
     );
     let finalVerified = false;
+    const reopenedBoundaryState = JSON.parse(await readFile(statePath, "utf8")) as { run: { plan_ledger: RunFlightEventRecord[] } };
+    const reopenedBoundaries = reconstructRunFlightLedger(reopenedBoundaryState.run.plan_ledger).accepted_fabric_waves;
+    assert.equal(reopenedBoundaries.length, 2);
+    assert.equal(reopenedBoundaries[1]!.from_candidate_id, candidate);
+    assert.equal(reopenedBoundaries[1]!.candidate_id, validated.fabric!.candidate_head);
+    assert.deepEqual(reopenedBoundaries[1]!.artifacts.map(({ unit_id }) => unit_id), ["f"]);
+    const automaticReplay = await restarted.inspectFabricWaveBoundaryReplay("root", prepared.snapshot.run_id);
+    const diagnosticReplay = await restarted.inspectFabricWaveBoundaryReplay(
+      "root", prepared.snapshot.run_id, firstReplay!.boundary_event_hash,
+    );
+    assert.equal(automaticReplay?.reason, "latest_accepted_boundary");
+    assert.equal(automaticReplay?.candidate_snapshot.candidate_head, validated.fabric!.candidate_head);
+    assert.equal(diagnosticReplay?.reason, "diagnostic_override");
+    assert.equal(diagnosticReplay?.candidate_snapshot.candidate_head, candidate);
+    assert.equal((await readFile(join(value.repository, ".git", "refs", "heads", "main"), "utf8")).trim(), value.sha);
+    assert.equal(validated.ready.length, 0);
     await t.test("integrateFabricWaveAndValidate integrates the final wave and validates without changing target", () => {
       assert.equal(validated.fabric!.active_unit_ids.length, 0);
       assert.equal(validated.fabric!.validation.status, "pass");
@@ -451,7 +550,7 @@ test("a six-unit fabric advances only at the barrier into a fresh exact-base wor
 test("fabric claims validation once and resumes acceptance after a completed target CAS", async (t) => {
   const value = await fixture("fabric-promote");
   try {
-    const coordinator = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const coordinator = await openParallelCoordinator(value.repository);
     const units = [fabricUnit("a", 0), fabricUnit("b", 1)];
     const prepared = await coordinator.prepareFabric(fabricContract(value.sha, units), "root");
     assert.equal(prepared.status, "prepared");
@@ -533,7 +632,7 @@ test("fabric claims validation once and resumes acceptance after a completed tar
 test("failed fabric target promotion releases its review claim for cancellation", async () => {
   const value = await fixture("fabric-promotion-conflict");
   try {
-    const coordinator = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const coordinator = await openParallelCoordinator(value.repository);
     const prepared = await coordinator.prepareFabric(
       fabricContract(value.sha, [fabricUnit("a", 0), fabricUnit("b", 1)]), "root",
     );
@@ -573,7 +672,7 @@ test("fabric operation authority heartbeats throughout validation", async () => 
   let registry: ScopeLeaseRegistry | undefined;
   let originalAcquire: ScopeLeaseRegistry["acquire"] | undefined;
   try {
-    const coordinator = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const coordinator = await openParallelCoordinator(value.repository);
     const prepared = await coordinator.prepareFabric(
       fabricContract(value.sha, [fabricUnit("a", 0), fabricUnit("b", 1)]), "root",
     );
@@ -587,18 +686,18 @@ test("fabric operation authority heartbeats throughout validation", async () => 
     registry = (coordinator as unknown as { registry: ScopeLeaseRegistry }).registry;
     originalAcquire = registry.acquire.bind(registry);
     registry.acquire = async (...args: Parameters<ScopeLeaseRegistry["acquire"]>) =>
-      await originalAcquire!({ ...args[0], ttlMs: 500 });
+      await originalAcquire!({ ...args[0], ttlMs: 2_000 });
     const started = join(value.root, "validation-started.txt");
     const validation = coordinator.validateFabricCandidate(
       "root", prepared.snapshot.run_id, process.execPath,
-      ["-e", "require('node:fs').writeFileSync(process.argv[1], 'x');setTimeout(()=>{},1200)", started],
+      ["-e", "require('node:fs').writeFileSync(process.argv[1], 'x');setTimeout(()=>{},5000)", started],
     );
     while (await stat(started).catch(() => undefined) === undefined) {
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
     }
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 700));
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 3000));
     await assert.rejects(
-      registry.acquire({ scope: { read: [], write: ["sortie-dogs/luna-fabric-operation"] }, ttlMs: 500 }),
+      registry.acquire({ scope: { read: [], write: ["sortie-dogs/luna-fabric-operation"] }, ttlMs: 2_000 }),
       (error: unknown) => error instanceof ScopeLeaseError && error.code === "scope-conflict",
     );
     assert.equal((await validation).fabric!.validation.status, "pass");
@@ -611,7 +710,7 @@ test("fabric operation authority heartbeats throughout validation", async () => 
 test("failed fabric validation archives cleanly and releases the active slot", async () => {
   const value = await fixture("fabric-validation-fail");
   try {
-    const coordinator = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const coordinator = await openParallelCoordinator(value.repository);
     const candidateContract = fabricContract(value.sha, [fabricUnit("a", 0), fabricUnit("b", 1)]);
     const prepared = await coordinator.prepareFabric(candidateContract, "root");
     assert.equal(prepared.status, "prepared");
@@ -644,7 +743,7 @@ test("failed fabric validation archives cleanly and releases the active slot", a
 test("failed fabric review archives cleanly without moving the target", async () => {
   const value = await fixture("fabric-review-fail");
   try {
-    const coordinator = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const coordinator = await openParallelCoordinator(value.repository);
     const prepared = await coordinator.prepareFabric(
       fabricContract(value.sha, [fabricUnit("a", 0), fabricUnit("b", 1)]), "root",
     );
@@ -675,7 +774,7 @@ test("failed fabric review archives cleanly without moving the target", async ()
 test("integrateFabricWaveAndValidate rejects a relative executable before wave mutation", async () => {
   const value = await fixture("fabric-combined-invalid");
   try {
-    const coordinator = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const coordinator = await openParallelCoordinator(value.repository);
     const prepared = await coordinator.prepareFabric(
       fabricContract(value.sha, [fabricUnit("a", 0), fabricUnit("b", 1)]), "root",
     );
@@ -701,7 +800,7 @@ test("integrateFabricWaveAndValidate rejects a relative executable before wave m
 test("integrateFabricWaveAndValidate retries validation after final integration response loss", async () => {
   const value = await fixture("fabric-combined-retry-integration");
   try {
-    const coordinator = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const coordinator = await openParallelCoordinator(value.repository);
     const prepared = await coordinator.prepareFabric(
       fabricContract(value.sha, [fabricUnit("a", 0), fabricUnit("b", 1)]), "root",
     );
@@ -725,7 +824,7 @@ test("integrateFabricWaveAndValidate retries validation after final integration 
 test("a failed Luna unit demotes once to a fresh Sol worktree and joins the same hidden candidate", async () => {
   const value = await fixture("fabric-demotion");
   try {
-    const coordinator = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const coordinator = await openParallelCoordinator(value.repository);
     const prepared = await coordinator.prepareFabric(
       fabricContract(value.sha, [fabricUnit("a", 0), fabricUnit("b", 1)]), "root",
     );
@@ -747,7 +846,7 @@ test("a failed Luna unit demotes once to a fresh Sol worktree and joins the same
     assert.equal(await stat(failed!.managed_path).catch(() => undefined), undefined);
     assert.equal(await stat(sibling!.managed_path).catch(() => undefined), undefined);
 
-    const restarted = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const restarted = await openParallelCoordinator(value.repository);
     const replay = await restarted.demoteFailedFabricUnit("root", prepared.snapshot.run_id, "a");
     assert.deepEqual(replay.ready, demoted.ready);
     await restarted.bindDispatch("root", "sol-a", replay.ready[0]!);
@@ -772,7 +871,7 @@ test("restart adopts a Sol demotion worktree created after durable intent", asyn
   let injected = true;
   let restoreLifecycle = (): void => {};
   try {
-    const coordinator = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const coordinator = await openParallelCoordinator(value.repository);
     const prepared = await coordinator.prepareFabric(
       fabricContract(value.sha, [fabricUnit("a", 0), fabricUnit("b", 1)]), "root",
     );
@@ -794,7 +893,7 @@ test("restart adopts a Sol demotion worktree created after durable intent", asyn
     await errorCode(coordinator.demoteFailedFabricUnit("root", prepared.snapshot.run_id, "a"), "lifecycle-failed");
     restoreLifecycle();
 
-    const restarted = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const restarted = await openParallelCoordinator(value.repository);
     const recovered = await restarted.snapshot("root", prepared.snapshot.run_id);
     assert.deepEqual(recovered!.ready.map(({ task_id, attempt }) => ({ task_id, attempt })), [{ task_id: "a", attempt: 2 }]);
     assert.equal(recovered!.fabric!.demotions.length, 1);
@@ -804,10 +903,166 @@ test("restart adopts a Sol demotion worktree created after durable intent", asyn
   }
 });
 
+test("live critical takeover stops only its source and durably resumes one attempt-2 descriptor", async () => {
+  const value = await fixture("fabric-live-takeover");
+  try {
+    const coordinator = await openParallelCoordinator(value.repository);
+    const prepared = await coordinator.prepareFabric(
+      fabricContract(value.sha, [fabricUnit("a", 0), fabricUnit("b", 1)]), "root",
+    );
+    assert.equal(prepared.status, "prepared");
+    if (prepared.status !== "prepared") return;
+    const [source, sibling] = prepared.snapshot.ready;
+    await coordinator.bindDispatch("root", "call-a", source!);
+    await coordinator.bindDispatch("root", "call-b", sibling!);
+    const acceptedSibling = await acceptAndComplete(coordinator, sibling!, "call-b", "child-b");
+    const siblingPath = sibling!.managed_path;
+    const sourceIdentity = {
+      run_id: source!.run_id, unit_id: source!.task_id, attempt_id: source!.dispatch_id,
+      predecessor_attempt_id: null, candidate_id: source!.base_sha, route_id: source!.parallel_group,
+      child_id: "child-a", call_id: "call-a",
+    };
+    const ledger = await coordinator.childLedger("root", source!, "call-a", "child-a");
+    let stopped = false;
+    const evidence = (): ChildTerminalEvidence => ({
+      terminal: stopped ? "satisfied" : "unsatisfied",
+      tools_quiescent: stopped ? "satisfied" : "unsatisfied",
+      artifact_window_closed: "satisfied", gate_released: "satisfied", lease_released: "satisfied",
+      writer_released: "satisfied", worktree_released: "satisfied",
+    });
+    const lifecycle = await CancellableChildLifecycle.open({ identity: sourceIdentity, deadline_ms: Date.now() + 60_000 }, ledger, {
+      observe: async () => ({ observation: { identity: sourceIdentity, disposition: "cancelled" }, evidence: evidence() }),
+      stop: async () => { stopped = true; },
+      release: async () => { await coordinator.releaseChildWorktree("root", source!, "call-a", "child-a", evidence()); },
+      terminal: async () => { await coordinator.completeCall("root", "call-a", "child-a", "cancelled"); },
+    });
+    const observation = { active_takeover_count: 0, units: [
+      { unit_id: "a", depends_on: [], state: "active", executor: "luna", deadline: "deadline_exceeded", failures: "not_repeated" },
+      { unit_id: "b", depends_on: [], state: "completed", executor: "luna", deadline: "within_deadline", failures: "not_repeated" },
+    ] } as const;
+    let taken = await coordinator.takeoverCriticalFabricUnit("root", source!.run_id, observation, sourceIdentity, lifecycle);
+    const finishBy = Date.now() + 60_000;
+    while (taken.status === "waiting" && Date.now() < finishBy) {
+      taken = await coordinator.takeoverCriticalFabricUnit("root", source!.run_id, observation, sourceIdentity, lifecycle);
+    }
+    assert.equal(taken.status, "taken-over");
+    assert.equal(taken.trigger, "live_deadline_exceeded");
+    assert.deepEqual(taken.snapshot.ready.map(({ task_id, attempt, base_sha }) => ({ task_id, attempt, base_sha })), [
+      { task_id: "a", attempt: 2, base_sha: prepared.snapshot.fabric!.candidate_head },
+    ]);
+    assert.equal(await stat(source!.managed_path).catch(() => undefined), undefined);
+    assert.equal(await stat(siblingPath).catch(() => undefined), undefined);
+    const retainedSibling = taken.snapshot.tasks.find(({ descriptor }) => descriptor.task_id === "b")!;
+    assert.equal(retainedSibling.phase, "completed");
+    assert.equal(retainedSibling.outcome, "completed");
+    assert.deepEqual(retainedSibling.artifact, acceptedSibling.artifact);
+    assert.equal((await run(value.repository, "rev-parse", `${acceptedSibling.artifact.commit_sha}^{commit}`)).trim(),
+      acceptedSibling.artifact.commit_sha);
+    assert.equal((await run(value.repository, "rev-parse", "refs/heads/main")).trim(), value.sha);
+    const reopened = await openParallelCoordinator(value.repository);
+    const replay = await reopened.takeoverCriticalFabricUnit("root", source!.run_id, observation, sourceIdentity, lifecycle);
+    assert.equal(replay.status, "taken-over");
+    if (replay.status === "taken-over") assert.deepEqual(replay.snapshot.ready, taken.snapshot.ready);
+    await reopened.cancel("root", source!.run_id);
+  } finally {
+    await rm(value.root, { recursive: true, force: true });
+  }
+});
+
+test("deadline takeover resumes from the last accepted candidate and completes one reviewed CAS", async () => {
+  const value = await fixture("fabric-live-takeover-after-wave");
+  try {
+    const coordinator = await openParallelCoordinator(value.repository);
+    const units = [
+      fabricUnit("seed", 0),
+      fabricUnit("critical", 1, { depends_on: ["seed"] }),
+      fabricUnit("sibling", 2, { depends_on: ["seed"] }),
+      fabricUnit("final", 3, { depends_on: ["critical", "sibling"] }),
+    ];
+    const prepared = await coordinator.prepareFabric(fabricContract(value.sha, units), "root");
+    assert.equal(prepared.status, "prepared");
+    if (prepared.status !== "prepared") return;
+    const seed = prepared.snapshot.ready[0]!;
+    await coordinator.bindDispatch("root", "call-seed", seed);
+    await acceptAndComplete(coordinator, seed, "call-seed", "child-seed");
+    const firstWave = await coordinator.integrateFabricWave("root", prepared.snapshot.run_id);
+    const acceptedBase = firstWave.fabric!.candidate_head;
+    assert.notEqual(acceptedBase, value.sha);
+
+    const source = firstWave.ready.find(({ task_id }) => task_id === "critical")!;
+    const sibling = firstWave.ready.find(({ task_id }) => task_id === "sibling")!;
+    assert.equal(source.base_sha, acceptedBase);
+    await coordinator.bindDispatch("root", "call-critical", source);
+    await coordinator.bindDispatch("root", "call-sibling", sibling);
+    const acceptedSibling = await acceptAndComplete(coordinator, sibling, "call-sibling", "child-sibling");
+    const sourceIdentity = { run_id: source.run_id, unit_id: source.task_id, attempt_id: source.dispatch_id,
+      predecessor_attempt_id: null, candidate_id: source.base_sha, route_id: source.parallel_group,
+      child_id: "child-critical", call_id: "call-critical" };
+    const ledger = await coordinator.childLedger("root", source, "call-critical", "child-critical");
+    let stopped = false;
+    const evidence = (): ChildTerminalEvidence => ({ terminal: stopped ? "satisfied" : "unsatisfied",
+      tools_quiescent: stopped ? "satisfied" : "unsatisfied", artifact_window_closed: "satisfied",
+      gate_released: "satisfied", lease_released: "satisfied", writer_released: "satisfied", worktree_released: "satisfied" });
+    const lifecycle = await CancellableChildLifecycle.open({ identity: sourceIdentity, deadline_ms: Date.now() - 1 }, ledger, {
+      observe: async () => ({ observation: { identity: sourceIdentity, disposition: "cancelled" }, evidence: evidence() }),
+      stop: async () => { stopped = true; },
+      release: async () => { await coordinator.releaseChildWorktree("root", source, "call-critical", "child-critical", evidence()); },
+      // Live takeover owns the durable failed transition after lifecycle terminal confirmation.
+      terminal: async () => {},
+    });
+    const observation = await coordinator.criticalPathInput("root", source.run_id, sourceIdentity);
+    let takeover = await coordinator.takeoverCriticalFabricUnit("root", source.run_id, observation, sourceIdentity, lifecycle);
+    const finishBy = Date.now() + 60_000;
+    while (takeover.status === "waiting" && Date.now() < finishBy) {
+      takeover = await coordinator.takeoverCriticalFabricUnit("root", source.run_id, observation, sourceIdentity, lifecycle);
+    }
+    assert.equal(takeover.status, "taken-over");
+    if (takeover.status !== "taken-over") return;
+    assert.equal(takeover.trigger, "live_deadline_exceeded");
+    const sol = takeover.snapshot.ready.find(({ task_id }) => task_id === "critical")!;
+    assert.equal(sol.attempt, 2);
+    assert.equal(sol.base_sha, acceptedBase);
+    assert.deepEqual(sol.scope_read, source.scope_read);
+    assert.deepEqual(sol.scope_write, source.scope_write);
+    assert.deepEqual(takeover.snapshot.tasks.find(({ descriptor }) => descriptor.task_id === "sibling")!.artifact,
+      acceptedSibling.artifact);
+    const replay = await coordinator.takeoverCriticalFabricUnit("root", source.run_id, observation, sourceIdentity, lifecycle);
+    assert.equal(replay.status, "taken-over");
+    assert.equal(takeover.snapshot.fabric!.demotions.length, 1);
+
+    await coordinator.bindDispatch("root", "call-sol", sol);
+    await acceptAndComplete(coordinator, sol, "call-sol", "child-sol");
+    const secondWave = await coordinator.integrateFabricWave("root", source.run_id);
+    const final = secondWave.ready.find(({ task_id }) => task_id === "final")!;
+    await coordinator.bindDispatch("root", "call-final", final);
+    await acceptAndComplete(coordinator, final, "call-final", "child-final");
+    const validated = await coordinator.integrateFabricWaveAndValidate(
+      "root", source.run_id, process.execPath, ["-e", "process.exit(0)"],
+    );
+    assert.equal(validated.fabric!.validation.status, "pass");
+    assert.equal((await run(value.repository, "rev-parse", "refs/heads/main")).trim(), value.sha);
+    await run(value.repository, "checkout", "--detach", value.sha);
+    const accepted = await coordinator.acceptFabricCandidate(
+      "root", source.run_id, validated.fabric!.candidate_head, "pass", "a".repeat(64),
+    );
+    assert.equal(accepted.terminal_reason, "completed");
+    assert.equal(accepted.fabric!.promoted, true);
+    assert.deepEqual(await coordinator.acceptFabricCandidate(
+      "root", source.run_id, validated.fabric!.candidate_head, "pass", "a".repeat(64),
+    ), accepted);
+    await assert.rejects(coordinator.acceptFabricCandidate(
+      "root", source.run_id, validated.fabric!.candidate_head, "pass", "b".repeat(64),
+    ), { code: "outcome-conflict" });
+    assert.equal((await run(value.repository, "worktree", "list", "--porcelain")).match(/^worktree /gmu)?.length, 1);
+  } finally {
+    await rm(value.root, { recursive: true, force: true });
+  }
+});
+
 test("failure suppresses descendants while independent work continues and cancellation is bounded", async () => {
   const value = await fixture("failure");
   try {
-    const coordinator = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const coordinator = await openParallelCoordinator(value.repository);
     const prepared = await coordinator.prepare(contract(value.sha), "root");
     assert.equal(prepared.status, "prepared");
     if (prepared.status !== "prepared") return;
@@ -829,7 +1084,7 @@ test("failure suppresses descendants while independent work continues and cancel
 test("descriptor replay, wrong descriptor, duplicate and late outcomes fail closed", async () => {
   const value = await fixture("replay");
   try {
-    const coordinator = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const coordinator = await openParallelCoordinator(value.repository);
     const prepared = await coordinator.prepare(contract(value.sha, [[], []]), "root");
     assert.equal(prepared.status, "prepared");
     if (prepared.status !== "prepared") return;
@@ -857,14 +1112,14 @@ test("descriptor replay, wrong descriptor, duplicate and late outcomes fail clos
 test("restart preserves running work and explicit reconcile abandons rather than redispatches", async () => {
   const value = await fixture("restart");
   try {
-    const first = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const first = await openParallelCoordinator(value.repository);
     const prepared = await first.prepare(contract(value.sha, [[], []]), "root");
     assert.equal(prepared.status, "prepared");
     if (prepared.status !== "prepared") return;
     const descriptor = prepared.snapshot.ready[0]!;
     await first.bindDispatch("root", "host-call", descriptor);
 
-    const restarted = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const restarted = await openParallelCoordinator(value.repository);
     const before = await restarted.snapshot("root", prepared.snapshot.run_id);
     assert.equal(before!.tasks.find(({ descriptor: task }) => task.dispatch_id === descriptor.dispatch_id)!.phase, "running");
     assert.equal(before!.ready.some(({ dispatch_id }) => dispatch_id === descriptor.dispatch_id), false);
@@ -881,7 +1136,7 @@ test("restart preserves running work and explicit reconcile abandons rather than
 test("preflight fallback creates no worktree while schema, dirty, stale and corrupt state stop", async () => {
   const value = await fixture("preflight");
   try {
-    const coordinator = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const coordinator = await openParallelCoordinator(value.repository);
     const overlap = contract(value.sha, [[], []]);
     overlap.tasks[1]!.scope.write = [...overlap.tasks[0]!.scope.write];
     assert.deepEqual(await coordinator.prepare(overlap, "root"), {
@@ -910,8 +1165,8 @@ test("separate coordinator instances serialize prepare and retain one immutable 
   const value = await fixture("compete");
   try {
     const [left, right] = await Promise.all([
-      ParallelDispatchCoordinator.open({ repositoryRoot: value.repository }),
-      ParallelDispatchCoordinator.open({ repositoryRoot: value.repository }),
+      openParallelCoordinator(value.repository),
+      openParallelCoordinator(value.repository),
     ]);
     const candidate = contract(value.sha, [[], []]);
     const results = await Promise.all([
@@ -942,7 +1197,7 @@ test("restart adopts exact worktrees created after durable intent and never crea
   let restoreLifecycle = (): void => {};
   try {
     const candidate = contract(value.sha, [[], []]);
-    const first = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const first = await openParallelCoordinator(value.repository);
     const lifecycle = lifecycleOf(first);
     const original = lifecycle.createMany;
     lifecycle.createMany = async (...args): Promise<Awaited<ReturnType<typeof original>>> => {
@@ -958,7 +1213,7 @@ test("restart adopts exact worktrees created after durable intent and never crea
     const before = await run(value.repository, "worktree", "list", "--porcelain");
     assert.equal(before.match(/^worktree /gmu)?.length, 3);
 
-    const restarted = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const restarted = await openParallelCoordinator(value.repository);
     const prepared = await restarted.prepare(candidate, "root");
     assert.equal(prepared.status, "prepared");
     if (prepared.status !== "prepared") return;
@@ -973,7 +1228,7 @@ test("restart adopts exact worktrees created after durable intent and never crea
 test("terminal and cancelled runs archive ownership and release the active slot", async () => {
   const value = await fixture("archive");
   try {
-    const coordinator = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const coordinator = await openParallelCoordinator(value.repository);
     const first = await coordinator.prepare(contract(value.sha, [[], [], []]), "root");
     assert.equal(first.status, "prepared");
     if (first.status !== "prepared") return;
@@ -1018,7 +1273,7 @@ test("terminal and cancelled runs archive ownership and release the active slot"
 test("cancellation preserves running join and archives only after its outcome", async () => {
   const value = await fixture("cancel-running");
   try {
-    const coordinator = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const coordinator = await openParallelCoordinator(value.repository);
     const prepared = await coordinator.prepare(contract(value.sha, [[], []]), "root");
     assert.equal(prepared.status, "prepared");
     if (prepared.status !== "prepared") return;
@@ -1047,7 +1302,7 @@ test("cancellation preserves running join and archives only after its outcome", 
 test("verified artifacts survive restart and archive as bounded deeply frozen evidence", async () => {
   const value = await fixture("artifact-archive");
   try {
-    const coordinator = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const coordinator = await openParallelCoordinator(value.repository);
     const prepared = await coordinator.prepare(contract(value.sha, [[], []]), "root");
     assert.equal(prepared.status, "prepared");
     if (prepared.status !== "prepared") return;
@@ -1070,7 +1325,7 @@ test("verified artifacts survive restart and archive as bounded deeply frozen ev
       "base_sha", "branch", "change_fingerprint", "changed_paths", "commit_sha", "task_id", "validation",
     ]);
 
-    const restarted = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const restarted = await openParallelCoordinator(value.repository);
     const reopened = await restarted.snapshot("root", prepared.snapshot.run_id);
     assert.deepEqual(reopened!.tasks.find(({ descriptor }) => descriptor.dispatch_id === first!.dispatch_id)!.artifact, artifact);
     await restarted.acceptArtifact("root", "call-a", "child-a", first!, artifact);
@@ -1111,7 +1366,7 @@ test("artifact acceptance survives both lifecycle crash windows and completion c
     restoreLifecycles.push(() => { lifecycle.acceptCommit = original; });
   };
   try {
-    const coordinator = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const coordinator = await openParallelCoordinator(value.repository);
     injectLifecycle(coordinator);
     const prepared = await coordinator.prepare(contract(value.sha, [[], [], []]), "root");
     assert.equal(prepared.status, "prepared");
@@ -1132,7 +1387,7 @@ test("artifact acceptance survives both lifecycle crash windows and completion c
     assert.equal(provisional.run.tasks[0]!.artifact_accepted, false);
 
     await coordinator.acceptArtifact("root", "call-a", "child-a", first!, firstArtifact);
-    const restarted = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const restarted = await openParallelCoordinator(value.repository);
     injectLifecycle(restarted);
     await restarted.completeCall("root", "call-a", "child-a", "completed", {
       run_id: first!.run_id, dispatch_id: first!.dispatch_id,
@@ -1145,7 +1400,7 @@ test("artifact acceptance survives both lifecycle crash windows and completion c
       validation: gitDiffCheck,
     });
     await errorCode(restarted.acceptArtifact("root", "call-b", "child-b", second!, secondArtifact), "lifecycle-failed");
-    const secondRestart = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const secondRestart = await openParallelCoordinator(value.repository);
     injectLifecycle(secondRestart);
     await secondRestart.acceptArtifact("root", "call-b", "child-b", second!, secondArtifact);
     await secondRestart.completeCall("root", "call-b", "child-b", "completed", {
@@ -1168,7 +1423,7 @@ test("artifact acceptance survives both lifecycle crash windows and completion c
     assert.deepEqual(failed.artifact, thirdArtifact);
     assert.equal(terminal!.archived, true);
 
-    const reopened = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const reopened = await openParallelCoordinator(value.repository);
     const archive = await reopened.snapshot("root", prepared.snapshot.run_id);
     assert.equal(archive!.terminal_reason, "failed");
     assert.deepEqual(archive!.tasks.find(({ descriptor }) => descriptor.dispatch_id === third!.dispatch_id)!.artifact, thirdArtifact);
@@ -1181,7 +1436,7 @@ test("artifact acceptance survives both lifecycle crash windows and completion c
 test("durable artifact parser rejects semantic corruption without consulting the checkout", async () => {
   const value = await fixture("artifact-corrupt");
   try {
-    const coordinator = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const coordinator = await openParallelCoordinator(value.repository);
     const candidate = contract(value.sha, [[], []]);
     candidate.tasks[0]!.scope.write = ["upper"];
     const prepared = await coordinator.prepare(candidate, "root");
@@ -1199,7 +1454,7 @@ test("durable artifact parser rejects semantic corruption without consulting the
     assert.deepEqual(artifact.changed_paths, ["upper/A.txt"]);
     const statePath = join(value.repository, ".git", "sortie-dogs", "parallel-dispatch-v5", "state.json");
     const pristine = JSON.parse(await readFile(statePath, "utf8")) as Record<string, any>;
-    assert.deepEqual((await (await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository }))
+    assert.deepEqual((await (await openParallelCoordinator(value.repository))
       .snapshot("root", prepared.snapshot.run_id))!.tasks[0]!.artifact, artifact);
     const corruptions: Array<(state: Record<string, any>) => void> = [
       (state) => { state.run.tasks[0].artifact.validation.command[0] = "node"; },
@@ -1214,7 +1469,7 @@ test("durable artifact parser rejects semantic corruption without consulting the
       const state = structuredClone(pristine);
       corrupt(state);
       await writeFile(statePath, JSON.stringify(state));
-      const reopened = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+      const reopened = await openParallelCoordinator(value.repository);
       await errorCode(reopened.snapshot("root", prepared.snapshot.run_id), "corrupt-state");
     }
   } finally {
@@ -1225,7 +1480,7 @@ test("durable artifact parser rejects semantic corruption without consulting the
 test("completion without artifact fails and tampering is rejected before lifecycle acceptance", async () => {
   const value = await fixture("artifact-failclosed");
   try {
-    const coordinator = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const coordinator = await openParallelCoordinator(value.repository);
     const prepared = await coordinator.prepare(contract(value.sha, [[], []]), "root");
     assert.equal(prepared.status, "prepared");
     if (prepared.status !== "prepared") return;
@@ -1263,7 +1518,7 @@ test("completion without artifact fails and tampering is rejected before lifecyc
 test("reconciliation retains accepted artifact evidence on abandonment without releasing descendants", async () => {
   const value = await fixture("artifact-abandon");
   try {
-    const coordinator = await ParallelDispatchCoordinator.open({ repositoryRoot: value.repository });
+    const coordinator = await openParallelCoordinator(value.repository);
     const prepared = await coordinator.prepare(contract(value.sha, [[], ["a"]]), "root");
     assert.equal(prepared.status, "prepared");
     if (prepared.status !== "prepared") return;
@@ -1287,9 +1542,14 @@ test("reconciliation retains accepted artifact evidence on abandonment without r
   }
 });
 
-export function worktreeDispatchCases(layer: "normal" | "integration"): readonly RegisteredTest[] {
-  return isolatedCases.filter((candidate) =>
-    normalCases.has(candidate.name) === (layer === "normal"));
+export function worktreeDispatchCases(layer: "normal" | "integration" | "s01" | "remaining"): readonly RegisteredTest[] {
+  return isolatedCases.filter((candidate) => {
+    const normal = normalCases.has(candidate.name);
+    if (layer === "normal") return normal;
+    if (layer === "s01") return !normal && candidate.phase === "s01";
+    if (layer === "remaining") return !normal && candidate.phase !== "s01";
+    return !normal;
+  });
 }
 
 function registerNormalWorktreeDispatchCases(): void {
@@ -1301,19 +1561,69 @@ function registerNormalWorktreeDispatchCases(): void {
 }
 
 function registerIntegrationWorktreeDispatchCases(): void {
-  const changedScenarioNames = new Set([
-    "a six-unit fabric advances only at the barrier into a fresh exact-base worktree",
-  ]);
-  const integrationCases = worktreeDispatchCases("integration");
-  describe("six-unit and interrupted durable integration scenarios", { concurrency: 2 }, () => {
-    for (const candidate of integrationCases.filter(({ name }) => changedScenarioNames.has(name))) {
-      nodeTest(candidate.name, candidate.options ?? {}, candidate.run);
-    }
-  });
-  describe("remaining worktree dispatch integration scenarios", { concurrency: 4 }, () => {
-    for (const candidate of integrationCases.filter(({ name }) => !changedScenarioNames.has(name))) {
-      nodeTest(candidate.name, candidate.options ?? {}, candidate.run);
-    }
+  const selectedPhase = process.env.SORTIE_WORKTREE_DISPATCH_PHASE;
+  const s01Cases = worktreeDispatchCases("s01");
+  const remainingCases = worktreeDispatchCases("remaining");
+  const activity = {
+    s01: 0,
+    remaining: 0,
+    overlap: 0,
+    s01Started: 0,
+    s01Finished: 0,
+    remainingStarted: 0,
+    remainingFinished: 0,
+  };
+  const trackedRun = (group: "s01" | "remaining", candidate: RegisteredTest): RegisteredTest["run"] =>
+    async (context) => {
+      const other = group === "s01" ? "remaining" : "s01";
+      if (group === "remaining") assert.equal(activity.s01, 0);
+      if (activity[`${group}Started`] === 0) activity[`${group}Started`] = performance.now();
+      activity[group] += 1;
+      if (activity[other] > 0) activity.overlap += 1;
+      try {
+        await candidate.run(context);
+      } finally {
+        activity[group] -= 1;
+        activity[`${group}Finished`] = performance.now();
+        assert.equal(activity.overlap, 0);
+      }
+    };
+  const reportActivity = () => {
+    assert.equal(activity.s01, 0);
+    assert.equal(activity.remaining, 0);
+    assert.equal(activity.overlap, 0);
+    console.log("SORTIE_INTEGRATION_GROUPS", JSON.stringify({
+      s01_duration_ms: activity.s01Started === 0 ? 0 : Math.round(activity.s01Finished - activity.s01Started),
+      remaining_duration_ms: activity.remainingStarted === 0 ? 0 : Math.round(activity.remainingFinished - activity.remainingStarted),
+      overlap: activity.overlap,
+    }));
+  };
+  if (selectedPhase === "s01") {
+    describe("six-unit and interrupted durable integration scenarios", { concurrency: 2 }, () => {
+      for (const candidate of s01Cases) {
+        nodeTest(candidate.name, candidate.options ?? {}, trackedRun("s01", candidate));
+      }
+      after(reportActivity);
+    });
+    return;
+  }
+  if (selectedPhase === "remaining") {
+    describe("remaining worktree dispatch integration scenarios", { concurrency: Math.min(4, availableParallelism()) }, () => {
+      for (const candidate of remainingCases) {
+        nodeTest(candidate.name, candidate.options ?? {}, trackedRun("remaining", candidate));
+      }
+      after(reportActivity);
+    });
+    return;
+  }
+  describe("worktree dispatch integration barrier", { concurrency: false }, () => {
+    describe("six-unit and interrupted durable integration scenarios", { concurrency: 2 }, () => {
+      for (const candidate of s01Cases) nodeTest(candidate.name, candidate.options ?? {}, trackedRun("s01", candidate));
+    });
+    describe("remaining worktree dispatch integration scenarios", { concurrency: Math.min(4, availableParallelism()) }, () => {
+      for (const candidate of remainingCases) nodeTest(candidate.name, candidate.options ?? {}, trackedRun("remaining", candidate));
+    });
+    after(reportActivity);
   });
 }
 

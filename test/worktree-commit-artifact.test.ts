@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { ChildProcess, execFile } from "node:child_process";
 import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -266,6 +266,105 @@ test("validation-time drift of a scoped new file is rejected", async () => {
   } finally { await removeFixture(value); }
 });
 
+test("fingerprint base query is shared locally while validation and verify stay fresh", async () => {
+  const value = await fixture("fingerprint-base-query");
+  const originalSpawn = ChildProcess.prototype.spawn;
+  let treeQueries = 0;
+  let baseQueries = 0;
+  ChildProcess.prototype.spawn = function observedSpawn(options): boolean {
+    const args = Array.isArray(options.args) ? options.args : [];
+    const commandIndex = args.indexOf("ls-tree");
+    if (commandIndex >= 0) {
+      treeQueries += 1;
+      if (args[commandIndex + 3] === value.base) baseQueries += 1;
+    }
+    return originalSpawn.call(this, options);
+  };
+  try {
+    await writeFile(join(value.path, "src", "value.txt"), "implemented\n");
+    const artifact = await produceWorktreeCommitArtifact({
+      descriptor: value.descriptor, managed_path: value.path, validation: validation(),
+    });
+    assert.equal(treeQueries, 6);
+    assert.equal(baseQueries, 5);
+    const fingerprint = artifact.change_fingerprint;
+    const verified = await verifyWorktreeCommitArtifact({
+      descriptor: value.descriptor, managed_path: value.path, artifact,
+    });
+    assert.equal(verified.change_fingerprint, fingerprint);
+    assert.equal(treeQueries, 8);
+    assert.equal(baseQueries, 6);
+  } finally {
+    ChildProcess.prototype.spawn = originalSpawn;
+    await removeFixture(value);
+  }
+});
+
+test("branch and head identity uses one exact Git process", async () => {
+  const value = await fixture("branch-head-process");
+  const originalSpawn = ChildProcess.prototype.spawn;
+  let combinedQueries = 0;
+  let symbolicQueries = 0;
+  ChildProcess.prototype.spawn = function observedSpawn(options): boolean {
+    const args = Array.isArray(options.args) ? options.args : [];
+    const commandIndex = args.indexOf("rev-parse");
+    if (commandIndex >= 0 && args.slice(commandIndex, commandIndex + 4).join("\0") ===
+      "rev-parse\0HEAD^{commit}\0--symbolic-full-name\0HEAD") combinedQueries += 1;
+    if (args.includes("symbolic-ref")) symbolicQueries += 1;
+    return originalSpawn.call(this, options);
+  };
+  try {
+    assert.equal(await recoverWorktreeCommitArtifact({
+      descriptor: value.descriptor, managed_path: value.path, validation: validation(),
+    }), undefined);
+    assert.equal(combinedQueries, 1);
+    assert.equal(symbolicQueries, 0);
+  } finally {
+    ChildProcess.prototype.spawn = originalSpawn;
+    await removeFixture(value);
+  }
+});
+
+test("branch and head identity rejects detached and malformed Git output", async (t) => {
+  await t.test("detached", async () => {
+    const value = await fixture("branch-head-detached");
+    try {
+      await git(value.path, "checkout", "--detach", "-q");
+      await artifactError(recoverWorktreeCommitArtifact({
+        descriptor: value.descriptor, managed_path: value.path, validation: validation(),
+      }), "invalid-state");
+    } finally { await removeFixture(value); }
+  });
+
+  const malformed = [
+    { name: "missing", command: ["rev-parse", "HEAD"] },
+    { name: "extra", command: ["rev-parse", "HEAD", "HEAD", "HEAD"] },
+    { name: "invalid", command: ["rev-parse", "HEAD", "HEAD"] },
+    { name: "empty", command: ["for-each-ref", "--format=", "--count=1"] },
+  ] as const;
+  for (const item of malformed) await t.test(item.name, async () => {
+    const value = await fixture(`branch-head-${item.name}`);
+    const originalSpawn = ChildProcess.prototype.spawn;
+    ChildProcess.prototype.spawn = function malformedSpawn(options): boolean {
+      const args = Array.isArray(options.args) ? options.args : [];
+      const commandIndex = args.indexOf("rev-parse");
+      if (commandIndex >= 0 && args.slice(commandIndex, commandIndex + 4).join("\0") ===
+        "rev-parse\0HEAD^{commit}\0--symbolic-full-name\0HEAD") {
+        args.splice(commandIndex, 4, ...item.command);
+      }
+      return originalSpawn.call(this, options);
+    };
+    try {
+      await artifactError(recoverWorktreeCommitArtifact({
+        descriptor: value.descriptor, managed_path: value.path, validation: validation(),
+      }), "invalid-state");
+    } finally {
+      ChildProcess.prototype.spawn = originalSpawn;
+      await removeFixture(value);
+    }
+  });
+});
+
 test("Linux systemd fallback preserves timeout evidence and a clean validation environment", async (t) => {
   if (process.platform !== "linux") return t.skip("Linux-only fallback evidence");
   const timeout = await runContainedValidation({
@@ -351,6 +450,40 @@ test("validation failures retain edits and never disclose output", async (t) => 
       await assertProcessGone(Number.parseInt(await readFile(pidFile, "utf8"), 10));
     } finally { await removeFixture(value); }
   });
+});
+
+test("host cancellation stops contained validation before the protected commit phase", async () => {
+  const value = await fixture("host-cancel");
+  const controller = new AbortController();
+  let protectedEntries = 0;
+  try {
+    await writeFile(join(value.path, "src", "value.txt"), "implemented\n");
+    const production = produceWorktreeCommitArtifact({
+      descriptor: value.descriptor,
+      managed_path: value.path,
+      validation: { executable: process.execPath, args: ["-e", "setInterval(()=>{},1000)"], timeout_ms: 60_000 },
+    }, { signal: controller.signal, enterProtectedPhase: () => { protectedEntries += 1; } });
+    setTimeout(() => controller.abort(), 100).unref();
+    await artifactError(production, "validation-failed");
+    assert.equal(protectedEntries, 0);
+    assert.equal((await git(value.path, "rev-parse", "HEAD")).trim(), value.base);
+    assert.match(await git(value.path, "status", "--porcelain"), /src\/value\.txt/u);
+  } finally { await removeFixture(value); }
+});
+
+test("cancellation after the protected boundary cannot rewrite a successful artifact", async () => {
+  const value = await fixture("protected-success");
+  const controller = new AbortController();
+  let protectedEntries = 0;
+  try {
+    await writeFile(join(value.path, "src", "value.txt"), "implemented\n");
+    const artifact = await produceWorktreeCommitArtifact({
+      descriptor: value.descriptor, managed_path: value.path, validation: validation(),
+    }, { signal: controller.signal, enterProtectedPhase: () => { protectedEntries += 1; controller.abort(); } });
+    assert.equal(protectedEntries, 1);
+    assert.notEqual(artifact.commit_sha, value.base);
+    assert.equal(artifact.validation.exit_code, 0);
+  } finally { await removeFixture(value); }
 });
 
 test("validation evidence accepts exactly 129 bounded command items and rejects oversized text", async (t) => {

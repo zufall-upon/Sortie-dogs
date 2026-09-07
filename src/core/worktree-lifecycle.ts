@@ -4,7 +4,7 @@ import { chmod, lstat, mkdir, open, readFile, realpath, rename, rm, stat } from 
 import { dirname, isAbsolute, join, parse, resolve, sep } from "node:path";
 import { ScopeLeaseError, ScopeLeaseRegistry, type ScopeLease } from "./scope-lease-registry.js";
 import type { WorktreeParallelTask } from "./types.js";
-import { normalizeWorktreeScope } from "./worktree-scope.js";
+import { normalizeWorktreeScope, normalizeWorktreeScopePath } from "./worktree-scope.js";
 
 const INVENTORY_VERSION = 3;
 const MAX_WORKTREES = 5;
@@ -17,6 +17,9 @@ const GIT_TIMEOUT_MS = 30_000;
 const GIT_MAX_BUFFER = 1024 * 1024;
 const PROCESS_EXIT_GRACE_MS = 500;
 const PROCESS_KILL_WAIT_MS = 2_000;
+const MAX_DIRECT_PARENT_ATTESTATIONS = 32;
+const GIT_LOCK_RETRY_ATTEMPTS = 20;
+const GIT_LOCK_RETRY_DELAY_MS = 50;
 const INVENTORY_SCOPE = Object.freeze({ read: [] as string[], write: ["sortie-dogs/worktree-inventory"] });
 const SHA = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u;
 const HASH = /^[0-9a-f]{64}$/u;
@@ -88,6 +91,15 @@ export class WorktreeLifecycleError extends Error {
   }
 }
 
+class GitCommandError extends WorktreeLifecycleError {
+  readonly transientLock: boolean;
+
+  constructor(stderr: string) {
+    super("git-failed", "Git command failed.");
+    this.transientLock = /(?:cannot|could not|unable to) (?:create |hold )?(?:'.*\.lock'|lock)|\.lock['"]?\s+already exists/iu.test(stderr);
+  }
+}
+
 type InventoryRecord = {
   identity: string;
   path: string;
@@ -104,6 +116,11 @@ type InventoryRecord = {
 };
 
 type Inventory = { version: 3; records: InventoryRecord[] };
+
+type PreparedWorktree = {
+  readonly targetDev: string;
+  readonly targetIno: string;
+};
 
 type RootIdentity = {
   readonly dev: string;
@@ -212,6 +229,7 @@ export class WorktreeLifecycle {
   private writeQueue = Promise.resolve();
   private transactionQueue = Promise.resolve();
   private transactionLease: ScopeLease | undefined;
+  private readonly directParentAttestations = new Map<string, true>();
 
   private constructor(
     private readonly repositoryRoot: string,
@@ -257,8 +275,12 @@ export class WorktreeLifecycle {
         bootstrap(["rev-parse", "--git-common-dir"]),
         bootstrap(["rev-parse", "--git-dir"]),
       ]);
-      if ((await bootstrap(["rev-parse", "--is-inside-work-tree"])).trim() !== "true" ||
-        (await bootstrap(["rev-parse", "--is-bare-repository"])).trim() !== "false") throw new Error("not checkout");
+      const checkoutKind = (await bootstrap([
+        "rev-parse", "--is-inside-work-tree", "--is-bare-repository",
+      ])).trim().split(/\r?\n/u);
+      if (checkoutKind.length !== 2 || checkoutKind[0] !== "true" || checkoutKind[1] !== "false") {
+        throw new Error("not checkout");
+      }
     } catch {
       throw new WorktreeLifecycleError("invalid-repository", "Repository root is not a primary Git checkout.");
     }
@@ -405,9 +427,17 @@ export class WorktreeLifecycle {
         await this.assertAuthorityAndBase(authority.sha, baseSha);
         this.inventory.records.push(...records);
         await this.saveInventory();
-        for (const record of records) {
-          await this.createAndLock(record);
+        const prepared = await Promise.allSettled(records.map((record) => this.createAndLock(record)));
+        for (const [index, result] of prepared.entries()) {
+          if (result.status === "rejected") continue;
+          const current = this.requireOwnedRecord(records[index]!, "creating");
+          current.targetDev = result.value.targetDev;
+          current.targetIno = result.value.targetIno;
+          current.branchOwned = true;
+          current.phase = "setting-up";
+          await this.saveInventory();
         }
+        if (prepared.some((result) => result.status === "rejected")) throw new Error("prepare");
       });
     } catch (error) {
       if (error instanceof WorktreeLifecycleError &&
@@ -467,30 +497,25 @@ export class WorktreeLifecycle {
         await this.assertRootIdentity();
         if (await lstat(quarantinePath).catch(() => undefined) !== undefined ||
           await this.exactEntry(record) === undefined || !(await this.isClean(record.path))) throw new Error("identity");
+        await this.git(["worktree", "unlock", originalPath]);
+        await this.assertRootIdentity();
+        if (await this.exactEntry(record, undefined, false) === undefined || !(await this.isClean(record.path))) {
+          if (await this.targetMatches(record)) {
+            await this.git(["worktree", "lock", "--reason", record.lockReason, originalPath]).catch(() => undefined);
+          }
+          throw new Error("identity");
+        }
         try {
           await this.git(["worktree", "move", originalPath, quarantinePath]);
         } catch {
-          if (await this.exactEntry(record) === undefined || !(await this.isClean(record.path))) throw new Error("identity");
-          await this.git(["worktree", "unlock", originalPath]);
-          await this.assertRootIdentity();
-          if (await this.exactEntry(record, undefined, false) === undefined || !(await this.isClean(record.path))) {
-            if (await this.targetMatches(record)) {
-              await this.git(["worktree", "lock", "--reason", record.lockReason, originalPath]).catch(() => undefined);
-            }
-            throw new Error("identity");
+          if (await this.exactEntry(record, undefined, false) !== undefined && await this.targetMatches(record)) {
+            await this.git(["worktree", "lock", "--reason", record.lockReason, originalPath]).catch(() => undefined);
           }
-          try {
-            await this.git(["worktree", "move", originalPath, quarantinePath]);
-          } catch {
-            if (await this.exactEntry(record, undefined, false) !== undefined && await this.targetMatches(record)) {
-              await this.git(["worktree", "lock", "--reason", record.lockReason, originalPath]).catch(() => undefined);
-            }
-            throw new Error("move");
-          }
-          record.path = quarantinePath;
-          record.pathNonce = quarantineNonce;
-          await this.git(["worktree", "lock", "--reason", record.lockReason, quarantinePath]);
+          throw new Error("move");
         }
+        record.path = quarantinePath;
+        record.pathNonce = quarantineNonce;
+        await this.git(["worktree", "lock", "--reason", record.lockReason, quarantinePath]);
         record.path = quarantinePath;
         record.pathNonce = quarantineNonce;
         if (await this.exactEntry(record) === undefined ||
@@ -516,6 +541,55 @@ export class WorktreeLifecycle {
       }
       this.inventory.records = this.inventory.records.filter((entryRecord) => entryRecord !== record);
       await this.saveInventory();
+    });
+  }
+
+  /** Discards only quiescent dirt inside one owned cancelled dispatch scope. */
+  async discardOwnedChanges(worktreeId: string, managedPath: string, baseSha: string, branch: string,
+    scopeWrite: readonly string[]): Promise<void> {
+    if (!validText(worktreeId) || !validText(managedPath, MAX_PATH) || !isAbsolute(managedPath) ||
+      !SHA.test(baseSha) || !validText(branch) || !Array.isArray(scopeWrite) || scopeWrite.length === 0) {
+      throw new WorktreeLifecycleError("invalid-request", "Cancelled cleanup request is invalid.");
+    }
+    let scope: readonly string[];
+    try { scope = normalizeWorktreeScope({ read: [], write: scopeWrite }).write; } catch {
+      throw new WorktreeLifecycleError("invalid-request", "Cancelled cleanup scope is invalid.");
+    }
+    const id = identity(worktreeId);
+    if (this.inFlight.has(id)) throw new WorktreeLifecycleError("unsafe-cleanup", "Worktree operation is still in flight.");
+    await this.assertRootIdentity();
+    await this.withInventoryTransaction(async () => {
+      const record = this.inventory.records.find((entry) => entry.identity === id);
+      if (record === undefined || record.phase !== "ready" || !record.branchOwned || record.branch !== branch ||
+        record.baseSha !== baseSha || record.expectedSha !== baseSha ||
+        pathIdentity(record.path) !== pathIdentity(managedPath) || await this.exactEntry(record) === undefined) {
+        throw new WorktreeLifecycleError("unsafe-cleanup", "Cancelled cleanup ownership or Git identity changed.");
+      }
+      const source = await this.git(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none"], record.path);
+      const fields = source.split("\0");
+      if (fields.at(-1) !== "") throw new WorktreeLifecycleError("unsafe-cleanup", "Cancelled cleanup status is ambiguous.");
+      fields.pop();
+      const paths: string[] = [];
+      for (const field of fields) {
+        if (field.length < 4 || field[2] !== " " || "RCU".includes(field[0]!) || "RCU".includes(field[1]!)) {
+          throw new WorktreeLifecycleError("unsafe-cleanup", "Cancelled cleanup status is unsupported.");
+        }
+        const path = field.slice(3);
+        let normalized: string;
+        try { normalized = normalizeWorktreeScopePath(path); } catch {
+          throw new WorktreeLifecycleError("unsafe-cleanup", "Cancelled cleanup path is invalid.");
+        }
+        if (!scope.some((allowed) => allowed === normalized || normalized.startsWith(`${allowed}/`))) {
+          throw new WorktreeLifecycleError("unsafe-cleanup", "Cancelled cleanup found a change outside owned scope.");
+        }
+        paths.push(path);
+      }
+      if (paths.length === 0) return;
+      await this.git(["reset", "--hard", baseSha], record.path);
+      await this.git(["clean", "-fd", "--", ...paths], record.path);
+      if (await this.exactEntry(record) === undefined || !(await this.isClean(record.path))) {
+        throw new WorktreeLifecycleError("unsafe-cleanup", "Cancelled cleanup did not reach the owned base state.");
+      }
     });
   }
 
@@ -551,8 +625,7 @@ export class WorktreeLifecycle {
       if (await this.exactEntry(record, undefined, true, commitSha) === undefined || !(await this.isClean(record.path))) {
         throw new WorktreeLifecycleError("unsafe-cleanup", "Accepted checkout path, branch, HEAD, or cleanliness is invalid.");
       }
-      const parents = (await this.git(["rev-list", "--parents", "-n", "1", commitSha], record.path)).trim().split(" ");
-      if (parents.length !== 2 || parents[0] !== commitSha || parents[1] !== baseSha) {
+      if (!(await this.attestDirectParent(commitSha, baseSha, record.path))) {
         throw new WorktreeLifecycleError("unsafe-cleanup", "Accepted commit is not a direct single-parent child of the expected base.");
       }
       if (record.expectedSha === commitSha) return;
@@ -595,7 +668,8 @@ export class WorktreeLifecycle {
           retained.push(record);
           continue;
         }
-        if (entry === undefined || await this.exactEntry(record, entry) === undefined || !(await this.isClean(record.path))) {
+        if (entry === undefined || await this.exactEntry(record, entry, true, record.expectedSha) === undefined ||
+          !(await this.isClean(record.path))) {
           record.phase = "orphaned";
           changed = true;
         }
@@ -759,9 +833,10 @@ export class WorktreeLifecycle {
         maxBuffer: GIT_MAX_BUFFER,
         windowsHide: true,
         encoding: "utf8",
-      }, (error, stdout) => {
+      }, (error, stdout, stderr) => {
         if (error === null) resolvePromise(stdout);
-        else reject(new WorktreeLifecycleError(code, code === "git-failed" ? "Git command failed." : "Setup executable failed."));
+        else reject(code === "git-failed" ? new GitCommandError(stderr) :
+          new WorktreeLifecycleError(code, "Setup executable failed."));
       });
     });
   }
@@ -783,6 +858,7 @@ export class WorktreeLifecycle {
       throw new WorktreeLifecycleError("stale-base", "Primary HEAD no longer matches the authority pin.");
     }
     await this.assertClean(this.repositoryRoot, "dirty-tree");
+    if (baseSha === authoritySha) return;
     let resolved: string;
     try {
       resolved = (await this.git(["rev-parse", "--verify", `${baseSha}^{commit}`])).trim();
@@ -799,20 +875,32 @@ export class WorktreeLifecycle {
 
   private async refSha(branch: string): Promise<string | undefined> {
     try {
-      const value = (await this.git(["rev-parse", "--verify", `refs/heads/${branch}^{commit}`])).trim();
-      return SHA.test(value) ? value : undefined;
+      const sha = (await this.git(["rev-parse", "--verify", `refs/heads/${branch}^{commit}`])).trim();
+      return SHA.test(sha) ? sha : undefined;
     } catch {
       return undefined;
     }
   }
 
   private async branchExists(branch: string): Promise<boolean> {
-    try {
-      await this.git(["show-ref", "--verify", "--quiet", `refs/heads/${branch}`]);
+    return await this.refSha(branch) !== undefined;
+  }
+
+  private async attestDirectParent(expectedSha: string, baseSha: string, cwd = this.repositoryRoot): Promise<boolean> {
+    const key = `${this.commonGitDir}\0${expectedSha}\0${baseSha}`;
+    if (this.directParentAttestations.has(key)) {
+      this.directParentAttestations.delete(key);
+      this.directParentAttestations.set(key, true);
       return true;
-    } catch {
-      return false;
     }
+    const parents = (await this.git(["rev-list", "--parents", "-n", "1", expectedSha], cwd)).trim().split(" ");
+    if (parents.length !== 2 || parents[0] !== expectedSha || parents[1] !== baseSha) return false;
+    this.directParentAttestations.set(key, true);
+    if (this.directParentAttestations.size > MAX_DIRECT_PARENT_ATTESTATIONS) {
+      const oldest = this.directParentAttestations.keys().next().value as string | undefined;
+      if (oldest !== undefined) this.directParentAttestations.delete(oldest);
+    }
+    return true;
   }
 
   private async exactEntry(
@@ -825,7 +913,7 @@ export class WorktreeLifecycle {
       pathIdentity(candidate.path) === pathIdentity(record.path));
     if (entry === undefined || entry.bare || entry.detached || entry.prunable || entry.head !== expectedSha ||
       entry.branch !== `refs/heads/${record.branch}` || (requireLock && entry.locked !== record.lockReason) ||
-      (await this.refSha(record.branch)) !== expectedSha) return undefined;
+      await this.refSha(record.branch) !== expectedSha) return undefined;
     const actualPath = await realpath(record.path).catch(() => undefined);
     const listedPath = await realpath(entry.path).catch(() => undefined);
     if (actualPath === undefined || pathIdentity(actualPath) !== pathIdentity(record.path) ||
@@ -834,27 +922,35 @@ export class WorktreeLifecycle {
     return entry;
   }
 
-  private async createAndLock(record: InventoryRecord): Promise<void> {
+  private async createAndLock(record: InventoryRecord): Promise<PreparedWorktree> {
     await this.assertRootIdentity();
     if (!this.isDirectManagedRecord(record) || await lstat(record.path).catch(() => undefined) !== undefined ||
       await this.branchExists(record.branch)) throw new Error("identity");
-    await this.git(["worktree", "add", "-b", record.branch, record.path, record.baseSha]);
+    await this.addWorktree(record);
     await this.assertRootIdentity();
     const info = await this.targetInfo(record.path);
     if (info === undefined) throw new Error("identity");
-    record.targetDev = info.dev;
-    record.targetIno = info.ino;
+    const prepared = { ...record, targetDev: info.dev, targetIno: info.ino, branchOwned: true };
     const entry = (await this.listWorktrees()).find((candidate) => pathIdentity(candidate.path) === pathIdentity(record.path));
     if (entry === undefined || entry.bare || entry.detached || entry.prunable || entry.head !== record.expectedSha ||
       entry.branch !== `refs/heads/${record.branch}` || await this.refSha(record.branch) !== record.expectedSha) {
       throw new Error("identity");
     }
-    record.branchOwned = true;
-    await this.saveInventory();
     await this.git(["worktree", "lock", "--reason", record.lockReason, record.path]);
-    if (await this.exactEntry(record) === undefined) throw new Error("identity");
-    record.phase = "setting-up";
-    await this.saveInventory();
+    if (await this.exactEntry(prepared) === undefined) throw new Error("identity");
+    return { targetDev: info.dev, targetIno: info.ino };
+  }
+
+  private async addWorktree(record: InventoryRecord): Promise<void> {
+    for (let attempt = 1; attempt <= GIT_LOCK_RETRY_ATTEMPTS; attempt += 1) {
+      try {
+        await this.git(["worktree", "add", "-b", record.branch, record.path, record.baseSha]);
+        return;
+      } catch (error) {
+        if (!(error instanceof GitCommandError) || !error.transientLock || attempt === GIT_LOCK_RETRY_ATTEMPTS) throw error;
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, GIT_LOCK_RETRY_DELAY_MS));
+      }
+    }
   }
 
   private requireOwnedRecord(record: InventoryRecord, phase: WorktreeLifecyclePhase): InventoryRecord {
@@ -1027,8 +1123,7 @@ export class WorktreeLifecycle {
           ((typed.phase === "setting-up" || typed.phase === "ready" || typed.phase === "removing") &&
             typed.targetDev === null)) throw new Error();
         if (typed.expectedSha !== typed.baseSha) {
-          const parents = (await this.git(["rev-list", "--parents", "-n", "1", typed.expectedSha])).trim().split(" ");
-          if (parents.length !== 2 || parents[0] !== typed.expectedSha || parents[1] !== typed.baseSha) throw new Error();
+          if (!(await this.attestDirectParent(typed.expectedSha, typed.baseSha))) throw new Error();
         }
         identities.add(value.identity);
         branches.add(value.branch.toLowerCase());

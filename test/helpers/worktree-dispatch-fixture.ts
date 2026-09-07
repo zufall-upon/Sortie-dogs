@@ -23,11 +23,15 @@ export const gitDiffCheck = { executable: gitExecutable, args: ["diff", "--check
 
 export function run(cwd: string, ...args: string[]): Promise<string> {
   return new Promise((resolvePromise, reject) => {
-    execFile("git", args, { cwd, shell: false, windowsHide: true, timeout: 30_000, encoding: "utf8" }, (error, stdout, stderr) => {
+    execFile(gitExecutable, args, { cwd, shell: false, windowsHide: true, timeout: 30_000, encoding: "utf8" }, (error, stdout, stderr) => {
       if (error === null) resolvePromise(stdout);
       else reject(new Error(`git failed: ${stderr}`));
     });
   });
+}
+
+export function openParallelCoordinator(repositoryRoot: string): Promise<ParallelDispatchCoordinator> {
+  return ParallelDispatchCoordinator.open({ repositoryRoot, gitPath: gitExecutable });
 }
 
 export function commit(cwd: string, ...args: string[]): Promise<string> {
@@ -133,7 +137,7 @@ export async function acceptAndComplete(
   };
 }
 
-const maxParallelArtifactProducers = 5;
+const maxParallelArtifactProducers = 4;
 
 export async function acceptAndCompleteMany(
   coordinator: ParallelDispatchCoordinator,

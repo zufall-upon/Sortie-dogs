@@ -28,9 +28,20 @@ import { validateWorktreeParallelContract } from "./validate-worktree-parallel.j
 import { WorktreeLifecycle, WorktreeLifecycleError, type ManagedWorktree } from "./worktree-lifecycle.js";
 import { runContainedValidation } from "./worktree-commit-artifact.js";
 import { inspectExecutionPlan, type ExecutionPlan } from "./execution-plan.js";
-import { createRunFlightPlanPrefix, reconstructRunFlightLedger, RunFlightLedger, type RunFlightEventRecord } from "./run-flight-ledger.js";
+import { appendRunFlightLedgerEvents, createRunFlightPlanPrefix, reconstructRunFlightLedger, RunFlightLedger, type RunFlightEventRecord } from "./run-flight-ledger.js";
 import { EvidenceCapsuleStore } from "./evidence-capsule.js";
 import type { ChildTerminalEvidence } from "./child-terminal-reconciliation.js";
+import { isChildTerminalIdentity, sameChildTerminalIdentity, type ChildTerminalIdentity } from "./child-terminal-reconciliation.js";
+import { CancellableChildLifecycle } from "./child-lifecycle-runtime.js";
+import { criticalPathTakeoverTrigger, proposeCriticalPathTakeover, type CriticalPathInput,
+  type CriticalPathResult, type CriticalPathTakeoverTrigger } from "./critical-path.js";
+import {
+  selectWaveBoundaryReplay,
+  WaveBoundaryReplayError,
+  type FabricWaveBoundaryIdentity,
+  type WaveBoundaryRecoveryBudget,
+  type WaveBoundaryReplayReason,
+} from "./wave-boundary-replay.js";
 
 const VERSION = 5;
 const MAX_STATE_BYTES = 1024 * 1024;
@@ -172,14 +183,19 @@ type StoredFabricDemotion = {
   luna_dispatch_id: string;
   luna_worktree_id: string;
   sol_dispatch_id: string;
+  trigger: FabricDemotionTrigger;
 };
 
+type FabricDemotionTrigger = "terminal_quality_rescue" | CriticalPathTakeoverTrigger;
+
 type StoredFabricDemotionTransition = {
-  phase: "cleanup" | "creating";
+  phase: "stopping" | "cleanup" | "creating";
   unit_id: string;
   failed_worktree_id: string;
   cleanup_worktree_ids: string[];
   task: PreparingTask;
+  trigger: FabricDemotionTrigger;
+  source_identity: ChildTerminalIdentity | null;
 };
 
 type StoredFabric = {
@@ -224,6 +240,14 @@ type PendingFabricOutcome = {
   outcome: ParallelDispatchOutcome | null;
 };
 
+type BuiltFabricCandidate = {
+  readonly run_id: string;
+  readonly candidate_base: string;
+  readonly candidate_head: string;
+  readonly fabric_identity: string;
+  readonly artifact_identity: string;
+};
+
 export interface ParallelDispatchClaim {
   readonly run_id: string;
   readonly dispatch_id: string;
@@ -232,6 +256,31 @@ export interface ParallelDispatchClaim {
 export interface ParallelDispatchCoordinatorOptions {
   readonly repositoryRoot: string;
   readonly gitPath?: string;
+}
+
+export type LiveFabricTakeoverResult =
+  | { readonly status: "not-proposed"; readonly decision: CriticalPathResult }
+  | { readonly status: "waiting"; readonly trigger: CriticalPathTakeoverTrigger; readonly reason: string;
+      readonly snapshot: ParallelDispatchSnapshot }
+  | { readonly status: "taken-over"; readonly trigger: CriticalPathTakeoverTrigger;
+      readonly snapshot: ParallelDispatchSnapshot };
+
+/** Read-only reconstruction of one accepted fabric boundary. It is never a dispatch instruction. */
+export interface FabricWaveBoundaryReplayRecord {
+  readonly reason: WaveBoundaryReplayReason;
+  readonly boundary_event_hash: string;
+  readonly route: "luna-fabric";
+  readonly plan: ExecutionPlan;
+  readonly plan_decisions: readonly {
+    readonly plan_id: string;
+    readonly proposal_id: string;
+    readonly decision: "accepted" | "rejected";
+    readonly gap_codes: readonly string[];
+  }[];
+  readonly scheduler: LunaFabricSchedulerState;
+  readonly artifacts: FabricWaveBoundaryIdentity["artifacts"];
+  readonly candidate_snapshot: FabricWaveBoundaryIdentity["candidate_snapshot"];
+  readonly recovery_budget: WaveBoundaryRecoveryBudget;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -435,9 +484,10 @@ function parseFabric(raw: unknown, contractFingerprint: string): StoredFabric | 
     !validStringList(raw.wave_heads, MAX_FABRIC_UNITS) || !raw.wave_heads.every((head) => SHA.test(head)) ||
     new Set(raw.wave_heads).size !== raw.wave_heads.length || typeof raw.promoted !== "boolean" ||
     !Array.isArray(raw.demotions) || raw.demotions.length > MAX_FABRIC_UNITS ||
-    !raw.demotions.every((entry) => isRecord(entry) && exactKeys(entry, ["luna_dispatch_id", "luna_worktree_id", "sol_dispatch_id", "unit_id"]) &&
+    !raw.demotions.every((entry) => isRecord(entry) && exactKeys(entry, ["luna_dispatch_id", "luna_worktree_id", "sol_dispatch_id", "trigger", "unit_id"]) &&
       validText(entry.unit_id, 128) && typeof entry.luna_dispatch_id === "string" && UUID.test(entry.luna_dispatch_id) &&
-      validText(entry.luna_worktree_id, 256) && typeof entry.sol_dispatch_id === "string" && UUID.test(entry.sol_dispatch_id)) ||
+      validText(entry.luna_worktree_id, 256) && typeof entry.sol_dispatch_id === "string" && UUID.test(entry.sol_dispatch_id) &&
+      ["terminal_quality_rescue", "live_deadline_exceeded", "live_repeated_failure"].includes(entry.trigger as string)) ||
     !Array.isArray(raw.source_refs) || raw.source_refs.length > MAX_FABRIC_UNITS ||
     !raw.source_refs.every((entry) => isRecord(entry) && exactKeys(entry, ["commit", "ref", "unit_id"]) &&
       validText(entry.unit_id, 128) && typeof entry.commit === "string" && SHA.test(entry.commit) &&
@@ -489,15 +539,21 @@ function parseFabric(raw: unknown, contractFingerprint: string): StoredFabric | 
   let demotionTransition: StoredFabricDemotionTransition | null = null;
   if (raw.demotion_transition !== null) {
     if (!isRecord(raw.demotion_transition) || !exactKeys(raw.demotion_transition, [
-      "cleanup_worktree_ids", "failed_worktree_id", "phase", "task", "unit_id",
-    ]) || (raw.demotion_transition.phase !== "cleanup" && raw.demotion_transition.phase !== "creating") ||
+      "cleanup_worktree_ids", "failed_worktree_id", "phase", "source_identity", "task", "trigger", "unit_id",
+    ]) || !["stopping", "cleanup", "creating"].includes(raw.demotion_transition.phase as string) ||
       !validText(raw.demotion_transition.unit_id, 128) || !validText(raw.demotion_transition.failed_worktree_id, 256) ||
-      !validStringList(raw.demotion_transition.cleanup_worktree_ids, MAX_TASKS)) throw new Error("fabric-demotion-transition");
+      !validStringList(raw.demotion_transition.cleanup_worktree_ids, MAX_TASKS) ||
+      !["terminal_quality_rescue", "live_deadline_exceeded", "live_repeated_failure"].includes(raw.demotion_transition.trigger as string) ||
+      !(raw.demotion_transition.source_identity === null || isChildTerminalIdentity(raw.demotion_transition.source_identity))) {
+      throw new Error("fabric-demotion-transition");
+    }
     const tasks = parseTransitionTasks([raw.demotion_transition.task]);
     if (tasks.length !== 1 || tasks[0]!.task_id !== raw.demotion_transition.unit_id) throw new Error("fabric-demotion-task");
-    demotionTransition = { phase: raw.demotion_transition.phase, unit_id: raw.demotion_transition.unit_id,
+    demotionTransition = { phase: raw.demotion_transition.phase as StoredFabricDemotionTransition["phase"], unit_id: raw.demotion_transition.unit_id,
       failed_worktree_id: raw.demotion_transition.failed_worktree_id,
-      cleanup_worktree_ids: [...raw.demotion_transition.cleanup_worktree_ids], task: tasks[0]! };
+      cleanup_worktree_ids: [...raw.demotion_transition.cleanup_worktree_ids], task: tasks[0]!,
+      trigger: raw.demotion_transition.trigger as FabricDemotionTrigger,
+      source_identity: raw.demotion_transition.source_identity as ChildTerminalIdentity | null };
   }
   const expectedHead = transition?.candidate_base ?? scheduler.base_sha;
   if (raw.candidate_head !== expectedHead ||
@@ -531,13 +587,19 @@ function parseFabric(raw: unknown, contractFingerprint: string): StoredFabric | 
   };
 }
 
-function parsePlanLedger(value: unknown, plan: ExecutionPlan | null): readonly RunFlightEventRecord[] | null {
+function parsePlanLedger(value: unknown, plan: ExecutionPlan | null, fabric: StoredFabric | null): readonly RunFlightEventRecord[] | null {
   if (plan === null && (value === undefined || value === null)) return null;
-  if (plan === null || !Array.isArray(value) || value.length !== 1) throw new Error("plan-ledger");
+  if (plan === null || !Array.isArray(value) || value.length < 1) throw new Error("plan-ledger");
   const state = reconstructRunFlightLedger(value);
   const decision = state.plan_decisions[0];
-  if (state.run_id !== null || decision?.decision !== "accepted" || decision.plan_id !== plan.plan_id ||
-    decision.proposal_id !== plan.proposal_id) throw new Error("plan-ledger-identity");
+  const legacy = value.length === 1;
+  const latest = state.accepted_fabric_waves.at(-1);
+  if (state.run_id !== null || state.plan_decisions.length !== 1 || decision?.decision !== "accepted" ||
+    decision.plan_id !== plan.plan_id || decision.proposal_id !== plan.proposal_id ||
+    (!legacy && (fabric === null || latest === undefined || latest.plan_binding_id !== plan.binding_id ||
+      latest.candidate_id !== fabric.candidate_head || latest.wave_index !== fabric.wave_heads.length ||
+      fingerprint(latest.scheduler_after) !== fingerprint(fabric.transition?.scheduler ?? fabric.scheduler) ||
+      fingerprint(latest.candidate_snapshot.wave_heads) !== fingerprint(fabric.wave_heads)))) throw new Error("plan-ledger-identity");
   return value;
 }
 
@@ -607,7 +669,7 @@ function parseRun(raw: unknown): StoredRun {
     }
   }
   return { ...(raw as unknown as StoredRun), tasks, fabric, execution_plan: executionPlan,
-    plan_ledger: parsePlanLedger(raw.plan_ledger, executionPlan) };
+    plan_ledger: parsePlanLedger(raw.plan_ledger, executionPlan, fabric) };
 }
 
 function parsePreparation(raw: unknown): StoredPreparation {
@@ -649,7 +711,7 @@ function parsePreparation(raw: unknown): StoredPreparation {
   }
   if (tasks.some((task) => task.depends_on.some((dependency) => !ids.has(dependency)))) throw new Error("preparing-dependency");
   return { ...(raw as unknown as StoredPreparation), tasks, fabric, execution_plan: executionPlan,
-    plan_ledger: parsePlanLedger(raw.plan_ledger, executionPlan) };
+    plan_ledger: parsePlanLedger(raw.plan_ledger, executionPlan, fabric) };
 }
 
 function parseArchive(raw: unknown): StoredArchive {
@@ -688,6 +750,7 @@ export class ParallelDispatchCoordinator {
   private readonly registry: ScopeLeaseRegistry;
   private queue = Promise.resolve();
   private readonly pendingFabricOutcomes = new Map<string, Map<string, PendingFabricOutcome>>();
+  private readonly automaticFabricReplays = new Map<string, FabricWaveBoundaryReplayRecord>();
 
   private constructor(
     private readonly repositoryRoot: string,
@@ -901,6 +964,9 @@ export class ParallelDispatchCoordinator {
     });
     await this.assertFabricAuthority(evidence.fabric);
     const candidate = await this.buildFabricCandidate(runID, evidence.fabric.candidate_head, evidence.tasks);
+    const builtCandidate = this.builtFabricCandidate(
+      runID, evidence.contract_fingerprint, evidence.fabric, evidence.tasks, candidate,
+    );
     const currentRef = await this.readRef(evidence.fabric.candidate_ref);
     if (currentRef === evidence.fabric.candidate_head) {
       try {
@@ -913,7 +979,7 @@ export class ParallelDispatchCoordinator {
     } else if (currentRef !== candidate) {
       throw new ParallelDispatchError("wave-integration-failed", "Hidden candidate ref does not match the deterministic wave result.");
     }
-    return this.advanceFabricWave(ownerRoot, runID, candidate);
+    return this.advanceFabricWave(ownerRoot, runID, candidate, builtCandidate);
   }
 
   async integrateFabricWaveAndValidate(
@@ -938,6 +1004,160 @@ export class ParallelDispatchCoordinator {
     return this.validateFabricCandidate(ownerRoot, runID, executable, args, timeoutMs);
   }
 
+  /** Stop one observed critical Luna attempt, then reuse the durable Sol demotion recovery. */
+  async criticalPathInput(ownerRoot: string, runID: string, sourceIdentity: ChildTerminalIdentity): Promise<CriticalPathInput> {
+    if (!validText(ownerRoot, 256) || !UUID.test(runID) || !isChildTerminalIdentity(sourceIdentity)) {
+      throw new ParallelDispatchError("descriptor-mismatch", "Critical path observation identity is invalid.");
+    }
+    await this.recoverWithAuthority();
+    return this.transaction((state) => {
+      const run = this.requireRun(state, ownerRoot, runID);
+      if (run.fabric === null || run.cancelled) {
+        throw new ParallelDispatchError("descriptor-mismatch", "Critical path observation requires an active fabric run.");
+      }
+      const source = run.tasks.find((entry) => entry.descriptor.dispatch_id === sourceIdentity.attempt_id);
+      if (source === undefined || source.descriptor.task_id !== sourceIdentity.unit_id || source.phase !== "running" ||
+        source.descriptor.attempt !== 1 || source.call_id !== sourceIdentity.call_id ||
+        source.child_session_id !== sourceIdentity.child_id || source.descriptor.base_sha !== sourceIdentity.candidate_id ||
+        source.descriptor.parallel_group !== sourceIdentity.route_id) {
+        throw new ParallelDispatchError("outcome-conflict", "Critical path source observation conflicts with durable state.");
+      }
+      const pendingWave = this.pendingFabricOutcomes.get(run.run_id);
+      const unitState = (task: StoredTask | undefined): "pending" | "active" | "completed" | "cancelled" => {
+        if (task === undefined || task.phase === "pending" || task.phase === "reserved") return "pending";
+        if (task.phase === "completed") return "completed";
+        if (task.phase !== "running") return "cancelled";
+        const pending = pendingWave?.get(task.descriptor.dispatch_id);
+        return pending?.outcome === "completed" && pending.artifact !== null ? "completed" :
+          pending?.outcome !== null && pending?.outcome !== undefined ? "cancelled" : "active";
+      };
+      return { result: {
+        active_takeover_count: run.fabric.demotion_transition === null ? 0 : 1,
+        units: run.fabric.contract.units.map((unit) => {
+          const task = run.tasks.find((entry) => entry.descriptor.task_id === unit.unit_id);
+          return {
+            unit_id: unit.unit_id,
+            depends_on: unit.depends_on,
+            state: unitState(task),
+            executor: task?.descriptor.attempt === 2 ? "other" as const : "luna" as const,
+            deadline: task?.descriptor.dispatch_id === sourceIdentity.attempt_id ? "deadline_exceeded" as const : "unknown" as const,
+            failures: "unknown" as const,
+          };
+        }),
+      }, changed: false };
+    });
+  }
+
+  /** Stop one observed critical Luna attempt, then reuse the durable Sol demotion recovery. */
+  async takeoverCriticalFabricUnit(
+    ownerRoot: string,
+    runID: string,
+    observation: CriticalPathInput,
+    sourceIdentity: ChildTerminalIdentity,
+    lifecycle: CancellableChildLifecycle,
+  ): Promise<LiveFabricTakeoverResult> {
+    if (!validText(ownerRoot, 256) || !UUID.test(runID) || !isChildTerminalIdentity(sourceIdentity) ||
+      !(lifecycle instanceof CancellableChildLifecycle) ||
+      !sameChildTerminalIdentity(sourceIdentity, lifecycle.descriptor.identity)) {
+      throw new ParallelDispatchError("descriptor-mismatch", "Live fabric takeover identity is invalid.");
+    }
+    await this.recoverWithAuthority();
+    const intent = await this.transaction<
+      | { kind: "intent"; trigger: CriticalPathTakeoverTrigger; settled_dispatch_ids: readonly string[] }
+      | { kind: "completed"; trigger: CriticalPathTakeoverTrigger; snapshot: ParallelDispatchSnapshot }
+      | { kind: "none"; decision: CriticalPathResult }
+    >((state) => {
+      const run = this.requireRun(state, ownerRoot, runID);
+      if (run.fabric === null || run.cancelled || run.fabric.transition !== null) {
+        throw new ParallelDispatchError("descriptor-mismatch", "Run is not ready for live fabric takeover.");
+      }
+      const current = run.fabric.demotion_transition;
+      if (current !== null) {
+        if (current.phase !== "stopping" || current.unit_id !== sourceIdentity.unit_id ||
+          current.source_identity === null || !sameChildTerminalIdentity(current.source_identity, sourceIdentity) ||
+          current.trigger === "terminal_quality_rescue") {
+          throw new ParallelDispatchError("outcome-conflict", "Another durable fabric takeover is active.");
+        }
+        return { result: { kind: "intent" as const, trigger: current.trigger as CriticalPathTakeoverTrigger,
+          settled_dispatch_ids: [] }, changed: false };
+      }
+      const completedTakeover = run.fabric.demotions.find((entry) =>
+        entry.luna_dispatch_id === sourceIdentity.attempt_id && entry.unit_id === sourceIdentity.unit_id &&
+        entry.trigger !== "terminal_quality_rescue");
+      if (completedTakeover !== undefined) {
+        return { result: { kind: "completed" as const, trigger: completedTakeover.trigger as CriticalPathTakeoverTrigger,
+          snapshot: this.publicSnapshot(run) }, changed: false };
+      }
+      const decision = proposeCriticalPathTakeover(observation);
+      if (decision.status !== "proposed") return { result: { kind: "none" as const, decision }, changed: false };
+      const task = run.tasks.find((entry) => entry.descriptor.task_id === decision.unit_id);
+      const unit = run.fabric.contract.units.find((entry) => entry.unit_id === decision.unit_id);
+      const observed = observation.units.find((entry) => entry.unit_id === decision.unit_id);
+      const contractIDs = new Set(run.fabric.contract.units.map((entry) => entry.unit_id));
+      if (observation.units.length !== contractIDs.size || observation.active_takeover_count !== 0 ||
+        observation.units.some((entry) => !contractIDs.has(entry.unit_id)) || task === undefined || unit === undefined ||
+        observed === undefined || observed.state !== "active" || task.phase !== "running" || task.descriptor.attempt !== 1 ||
+        task.artifact !== null || task.call_id !== sourceIdentity.call_id ||
+        (task.child_session_id !== null && task.child_session_id !== sourceIdentity.child_id) ||
+        sourceIdentity.run_id !== run.run_id || sourceIdentity.unit_id !== task.descriptor.task_id ||
+        sourceIdentity.attempt_id !== task.descriptor.dispatch_id || sourceIdentity.predecessor_attempt_id !== null ||
+        sourceIdentity.candidate_id !== run.fabric.candidate_head || sourceIdentity.candidate_id !== task.descriptor.base_sha ||
+        sourceIdentity.route_id !== task.descriptor.parallel_group ||
+        run.fabric.demotions.some((entry) => entry.unit_id === decision.unit_id)) {
+        throw new ParallelDispatchError("outcome-conflict", "Live fabric takeover observation conflicts with durable state.");
+      }
+      for (const contractUnit of run.fabric.contract.units) {
+        const entry = observation.units.find((candidate) => candidate.unit_id === contractUnit.unit_id)!;
+        if (entry.depends_on.length !== contractUnit.depends_on.length ||
+          entry.depends_on.some((dependency, index) => dependency !== contractUnit.depends_on[index])) {
+          throw new ParallelDispatchError("outcome-conflict", "Live fabric takeover graph conflicts with the accepted contract.");
+        }
+      }
+      const trigger = criticalPathTakeoverTrigger(decision);
+      // The normal wave barrier intentionally keeps sibling terminal outcomes in memory until every
+      // lane settles. A deadline takeover is that barrier's exceptional completion path: preserve
+      // already accepted siblings durably before replacing only the straggler.
+      const pendingWave = this.pendingFabricOutcomes.get(run.run_id);
+      const settled = run.tasks.filter((entry) => entry.descriptor.dispatch_id !== sourceIdentity.attempt_id &&
+        entry.phase === "running" && pendingWave?.get(entry.descriptor.dispatch_id)?.outcome === "completed" &&
+        pendingWave.get(entry.descriptor.dispatch_id)!.artifact !== null);
+      for (const entry of settled) this.applyFabricOutcome(run, entry, pendingWave!.get(entry.descriptor.dispatch_id)!);
+      this.planFabricDemotion(run, decision.unit_id, trigger, sourceIdentity, settled.map((entry) => entry.worktree_id));
+      return { result: { kind: "intent" as const, trigger,
+        settled_dispatch_ids: settled.map((entry) => entry.descriptor.dispatch_id) }, changed: true };
+    });
+    if (intent.kind === "none") return { status: "not-proposed", decision: intent.decision };
+    if (intent.kind === "completed") return { status: "taken-over", trigger: intent.trigger, snapshot: intent.snapshot };
+    const pendingWave = this.pendingFabricOutcomes.get(runID);
+    for (const dispatchID of intent.settled_dispatch_ids) pendingWave?.delete(dispatchID);
+    if (pendingWave?.size === 0) this.pendingFabricOutcomes.delete(runID);
+    const stopped = await lifecycle.stopForTakeover(sourceIdentity);
+    if (stopped.status !== "terminal") {
+      const snapshot = await this.snapshot(ownerRoot, runID);
+      if (snapshot === undefined) throw new ParallelDispatchError("outcome-conflict", "Live fabric takeover disappeared.");
+      return { status: "waiting", trigger: intent.trigger, reason: stopped.reason, snapshot };
+    }
+    await this.transaction((state) => {
+      const run = this.requireRun(state, ownerRoot, runID);
+      const transition = run.fabric?.demotion_transition;
+      const task = run.tasks.find((entry) => entry.descriptor.dispatch_id === sourceIdentity.attempt_id);
+      if (run.fabric === null || transition === null || transition === undefined || transition.phase !== "stopping" ||
+        transition.source_identity === null || !sameChildTerminalIdentity(transition.source_identity, sourceIdentity) ||
+        task === undefined || task.descriptor.attempt !== 1) {
+        throw new ParallelDispatchError("outcome-conflict", "Live fabric takeover changed after source termination.");
+      }
+      task.phase = "failed";
+      task.child_session_id = sourceIdentity.child_id;
+      task.outcome = stopped.state.terminal?.disposition === "failed" ? "failed" : "cancelled";
+      transition.phase = "cleanup";
+      return { result: undefined, changed: true };
+    });
+    await this.withPrepareAuthority(async () => { await this.recoverFabricDemotion(runID); });
+    const snapshot = await this.snapshot(ownerRoot, runID);
+    if (snapshot === undefined) throw new ParallelDispatchError("outcome-conflict", "Live fabric takeover disappeared.");
+    return { status: "taken-over", trigger: intent.trigger, snapshot };
+  }
+
   async demoteFailedFabricUnit(ownerRoot: string, runID: string, unitID: string): Promise<ParallelDispatchSnapshot> {
     if (!validText(ownerRoot, 256) || !UUID.test(runID) || !validText(unitID, 128)) {
       throw new ParallelDispatchError("descriptor-mismatch", "Fabric demotion identity is invalid.");
@@ -957,28 +1177,10 @@ export class ParallelDispatchCoordinator {
           (entry.phase === "pending" || entry.phase === "reserved" || entry.phase === "running"))) {
         throw new ParallelDispatchError("wave-not-ready", "Fabric unit is not ready for Sol demotion.");
       }
-      const unit = run.fabric.contract.units.find((entry) => entry.unit_id === unitID)!;
-      const fingerprintPrefix = run.contract_fingerprint.slice(0, 16);
-      const worktreeID = `fabric-${fingerprintPrefix}-w${run.fabric.scheduler.wave}-sol-${unitID}`;
-      const planned: PreparingTask = {
-        dispatch_id: randomUUID(), task_id: unitID, worktree_id: worktreeID,
-        lifecycle_identity: lifecycleIdentity(worktreeID),
-        branch: `sortie-dogs/luna-fabric/${fingerprintPrefix}/w${run.fabric.scheduler.wave}-sol-${unitID}`,
-        base_sha: run.fabric.scheduler.base_sha, depends_on: [...unit.depends_on],
-        scope_read: [...unit.scope_read], scope_write: [...unit.scope_write],
-      };
       const completed = run.tasks.filter((entry) => active.has(entry.descriptor.task_id) && entry.phase === "completed" &&
         entry.artifact !== null && entry.artifact_accepted);
-      for (const entry of completed) {
-        const ref = `refs/sortie-dogs/luna-fabric-sources/${fingerprint(runID).slice(0, 16)}/${fingerprint(entry.descriptor.task_id).slice(0, 16)}`;
-        if (!run.fabric.source_refs.some((source) => source.ref === ref)) {
-          run.fabric.source_refs.push({ unit_id: entry.descriptor.task_id, ref, commit: entry.artifact!.commit_sha });
-        }
-      }
-      run.fabric.demotion_transition = {
-        phase: "cleanup", unit_id: unitID, failed_worktree_id: task.worktree_id,
-        cleanup_worktree_ids: completed.map((entry) => entry.worktree_id), task: planned,
-      };
+      this.planFabricDemotion(run, unitID, "terminal_quality_rescue", null,
+        completed.map((entry) => entry.worktree_id));
       return { result: undefined, changed: true };
     });
     if (existing !== undefined) return existing;
@@ -988,10 +1190,49 @@ export class ParallelDispatchCoordinator {
     return snapshot;
   }
 
+  private planFabricDemotion(
+    run: StoredRun,
+    unitID: string,
+    trigger: FabricDemotionTrigger,
+    sourceIdentity: ChildTerminalIdentity | null,
+    cleanupWorktreeIDs: string[],
+  ): void {
+    if (run.fabric === null) throw new ParallelDispatchError("descriptor-mismatch", "Fabric demotion requires a fabric run.");
+    const task = run.tasks.find((entry) => entry.descriptor.task_id === unitID)!;
+    const unit = run.fabric.contract.units.find((entry) => entry.unit_id === unitID)!;
+    const fingerprintPrefix = run.contract_fingerprint.slice(0, 16);
+    const worktreeID = `fabric-${fingerprintPrefix}-w${run.fabric.scheduler.wave}-sol-${unitID}`;
+    const planned: PreparingTask = {
+      dispatch_id: randomUUID(), task_id: unitID, worktree_id: worktreeID,
+      lifecycle_identity: lifecycleIdentity(worktreeID),
+      branch: `sortie-dogs/luna-fabric/${fingerprintPrefix}/w${run.fabric.scheduler.wave}-sol-${unitID}`,
+      base_sha: run.fabric.scheduler.base_sha, depends_on: [...unit.depends_on],
+      scope_read: [...unit.scope_read], scope_write: [...unit.scope_write],
+    };
+    const active = new Set(run.fabric.scheduler.active?.unit_ids ?? []);
+    for (const entry of run.tasks.filter((candidate) => active.has(candidate.descriptor.task_id) &&
+      candidate.phase === "completed" && candidate.artifact !== null && candidate.artifact_accepted)) {
+      const ref = `refs/sortie-dogs/luna-fabric-sources/${fingerprint(run.run_id).slice(0, 16)}/${fingerprint(entry.descriptor.task_id).slice(0, 16)}`;
+      if (!run.fabric.source_refs.some((source) => source.ref === ref)) {
+        run.fabric.source_refs.push({ unit_id: entry.descriptor.task_id, ref, commit: entry.artifact!.commit_sha });
+      }
+    }
+    run.fabric.demotion_transition = {
+      phase: trigger === "terminal_quality_rescue" ? "cleanup" : "stopping",
+      unit_id: unitID,
+      failed_worktree_id: task.worktree_id,
+      cleanup_worktree_ids: [...cleanupWorktreeIDs],
+      task: planned,
+      trigger,
+      source_identity: sourceIdentity === null ? null : structuredClone(sourceIdentity),
+    };
+  }
+
   private async advanceFabricWave(
     ownerRoot: string,
     runID: string,
     candidateBase: string,
+    builtCandidate?: BuiltFabricCandidate,
   ): Promise<ParallelDispatchSnapshot> {
     if (!validText(ownerRoot, 256) || !UUID.test(runID) || !SHA.test(candidateBase)) {
       throw new ParallelDispatchError("candidate-invalid", "Fabric wave advancement is invalid.");
@@ -1016,12 +1257,15 @@ export class ParallelDispatchCoordinator {
       }
       return { result: {
         fabric: run.fabric,
+        contract_fingerprint: run.contract_fingerprint,
         tasks: tasks.map((task) => ({ ...task!, descriptor: cloneDescriptor(task!.descriptor),
           artifact: cloneArtifact(task!.artifact!) })),
       }, changed: false };
     });
     if (evidence !== undefined) {
-      await this.assertFabricCandidate(evidence.fabric, runID, candidateBase, evidence.tasks);
+      await this.assertFabricCandidate(
+        evidence.fabric, runID, evidence.contract_fingerprint, candidateBase, evidence.tasks, builtCandidate,
+      );
       await this.transaction((state) => {
         const run = this.requireRun(state, ownerRoot, runID);
         if (run.fabric === null || run.fabric.transition !== null ||
@@ -1057,10 +1301,36 @@ export class ParallelDispatchCoordinator {
         };
         run.fabric.candidate_head = candidateBase;
         if (run.fabric.wave_heads.at(-1) !== candidateBase) run.fabric.wave_heads.push(candidateBase);
+        if (run.execution_plan !== null && run.plan_ledger !== null) {
+          run.plan_ledger = appendRunFlightLedgerEvents(run.plan_ledger, [{
+            kind: "fabric.wave.accepted",
+            at: new Date().toISOString(),
+            plan_id: run.execution_plan.plan_id,
+            plan_binding_id: run.execution_plan.binding_id,
+            wave_index: evidence.fabric.scheduler.active!.number,
+            from_candidate_id: evidence.fabric.candidate_head,
+            candidate_id: candidateBase,
+            artifacts: evidence.tasks.map((task) => ({
+              unit_id: task.descriptor.task_id,
+              commit_sha: task.artifact!.commit_sha,
+              change_fingerprint: task.artifact!.change_fingerprint,
+              validation_fingerprint: task.artifact!.validation.validation_fingerprint,
+            })),
+            scheduler_before: evidence.fabric.scheduler,
+            scheduler_after: next,
+            candidate_snapshot: {
+              authority_sha: run.fabric.authority_sha,
+              target_branch: run.fabric.target_branch,
+              candidate_ref: run.fabric.candidate_ref,
+              candidate_head: candidateBase,
+              wave_heads: [...run.fabric.wave_heads],
+            },
+          }]);
+        }
         return { result: undefined, changed: true };
       });
     }
-    await this.withPrepareAuthority(async () => { await this.recoverFabricTransition(runID); });
+    await this.withPrepareAuthority(async () => { await this.recoverFabricTransition(runID, builtCandidate); });
     const snapshot = await this.snapshot(ownerRoot, runID);
     if (snapshot === undefined) throw new ParallelDispatchError("outcome-conflict", "Fabric wave advancement disappeared.");
     return snapshot;
@@ -1600,7 +1870,7 @@ export class ParallelDispatchCoordinator {
   }
 
   async releaseChildWorktree(ownerRoot: string, descriptor: ParallelDispatchDescriptor, callID: string,
-    childID: string, evidence: ChildTerminalEvidence): Promise<void> {
+    childID: string, evidence: ChildTerminalEvidence, discardOwnedChanges = false): Promise<void> {
     if (["terminal", "tools_quiescent", "artifact_window_closed", "writer_released", "gate_released", "lease_released"]
       .some((key) => evidence[key as keyof ChildTerminalEvidence] !== "satisfied")) {
       throw new ParallelDispatchError("outcome-conflict", "Child release lacks quiescence evidence.");
@@ -1622,17 +1892,27 @@ export class ParallelDispatchCoordinator {
           : `refs/sortie-dogs/luna-fabric-sources/${fingerprint(run.run_id).slice(0, 16)}/${fingerprint(descriptor.task_id).slice(0, 16)}`;
         if (run.fabric !== null && !run.fabric.source_refs.some((entry) => entry.ref === ref)) {
           run.fabric.source_refs.push({ unit_id: descriptor.task_id, ref, commit: task.artifact.commit_sha });
-          return { result: { worktree: task.worktree_id, ref, commit: task.artifact.commit_sha }, changed: true };
+          return { result: { worktree: task.worktree_id, ref, commit: task.artifact.commit_sha,
+            managedPath: task.descriptor.managed_path, baseSha: task.descriptor.base_sha,
+            branch: task.descriptor.branch, scopeWrite: task.descriptor.scope_write }, changed: true };
         }
       }
-      return { result: { worktree: task.worktree_id, ref, commit: task.artifact?.commit_sha }, changed: false };
+      return { result: { worktree: task.worktree_id, ref, commit: task.artifact?.commit_sha,
+        managedPath: task.descriptor.managed_path, baseSha: task.descriptor.base_sha,
+        branch: task.descriptor.branch, scopeWrite: task.descriptor.scope_write }, changed: false };
     });
     if (release.ref !== undefined && release.commit !== undefined) {
       const existing = await this.readRef(release.ref);
       if (existing === undefined) await this.git(["update-ref", release.ref, release.commit, ""]);
       else if (existing !== release.commit) throw new ParallelDispatchError("outcome-conflict", "Accepted child artifact ref changed.");
     }
-    if (await this.lifecycle.hasManagedWorktree(release.worktree)) await this.lifecycle.cleanup(release.worktree);
+    if (await this.lifecycle.hasManagedWorktree(release.worktree)) {
+      if (discardOwnedChanges && release.commit === undefined) {
+        await this.lifecycle.discardOwnedChanges(release.worktree, release.managedPath, release.baseSha,
+          release.branch, release.scopeWrite);
+      }
+      await this.lifecycle.cleanup(release.worktree);
+    }
   }
 
   async cleanupSuppressed(ownerRoot: string, runID: string): Promise<void> {
@@ -1693,6 +1973,29 @@ export class ParallelDispatchCoordinator {
       const archived = runID === undefined ? undefined : this.findRunArchive(state, ownerRoot, runID);
       return { result: archived === undefined ? undefined : this.publicSnapshot(archived.run, true, archived.terminal_reason), changed: false };
     });
+  }
+
+  /**
+   * Observe the same read-only descriptor used by automatic recovery, or select a historical
+   * accepted boundary for diagnosis. A diagnostic override never replaces the automatic record.
+   */
+  async inspectFabricWaveBoundaryReplay(
+    ownerRoot: string,
+    runID: string,
+    boundaryEventHash?: string,
+  ): Promise<FabricWaveBoundaryReplayRecord | undefined> {
+    if (!validText(ownerRoot, 256) || !UUID.test(runID) ||
+      (boundaryEventHash !== undefined && !/^sha256:[a-f0-9]{64}$/u.test(boundaryEventHash))) {
+      throw new ParallelDispatchError("invalid-contract", "Fabric replay inspection identity is invalid.");
+    }
+    const state = await this.load();
+    const run = state.run?.kind === "run" && state.run.run_id === runID
+      ? state.run
+      : this.findRunArchive(state, ownerRoot, runID)?.run;
+    if (run === undefined || run.owner_root !== ownerRoot) return undefined;
+    const replay = this.reconstructFabricBoundary(run, boundaryEventHash);
+    if (boundaryEventHash === undefined && replay !== undefined) this.automaticFabricReplays.set(runID, replay);
+    return replay;
   }
 
   async archives(ownerRoot: string): Promise<readonly ParallelDispatchArchive[]> {
@@ -1874,12 +2177,63 @@ export class ParallelDispatchCoordinator {
 
   private async recoverWithAuthority(): Promise<void> {
     const state = await this.load();
+    if (state.run?.kind === "run") {
+      const replay = this.reconstructFabricBoundary(state.run);
+      if (replay !== undefined) this.automaticFabricReplays.set(state.run.run_id, replay);
+    }
     if (state.run?.kind !== "preparing" && (state.run?.kind !== "run" || state.run.fabric === null ||
       (state.run.fabric.demotion_transition === null && state.run.fabric.transition === null))) return;
     await this.withPrepareAuthority(async () => {
       await this.recoverPreparation(undefined, true);
       await this.recoverFabricDemotion();
       await this.recoverFabricTransition();
+    });
+  }
+
+  private reconstructFabricBoundary(
+    run: StoredRun,
+    boundaryEventHash?: string,
+  ): FabricWaveBoundaryReplayRecord | undefined {
+    if (run.fabric === null || run.execution_plan === null || run.plan_ledger === null) return undefined;
+    let selected;
+    try {
+      selected = selectWaveBoundaryReplay(run.plan_ledger,
+        boundaryEventHash === undefined ? undefined : { boundary_event_hash: boundaryEventHash });
+    } catch (error) {
+      if (error instanceof WaveBoundaryReplayError && error.code === "boundary_missing" && boundaryEventHash === undefined) {
+        return undefined;
+      }
+      if (error instanceof WaveBoundaryReplayError && ["invalid_override", "unknown_override"].includes(error.code)) {
+        throw new ParallelDispatchError("invalid-contract", error.message);
+      }
+      throw new ParallelDispatchError("corrupt-state", "Accepted fabric replay ledger is invalid.");
+    }
+    const boundary = selected.boundary;
+    if (!("event_kind" in boundary) || boundary.event_kind !== "fabric.wave.accepted" ||
+      boundary.plan_id !== run.execution_plan.plan_id || boundary.plan_binding_id !== run.execution_plan.binding_id) {
+      throw new ParallelDispatchError("corrupt-state", "Accepted fabric replay boundary conflicts with its execution plan.");
+    }
+    if (boundaryEventHash === undefined) {
+      const scheduler = run.fabric.transition?.scheduler ?? run.fabric.scheduler;
+      if (fingerprint(boundary.scheduler_after) !== fingerprint(scheduler) ||
+        boundary.candidate_snapshot.authority_sha !== run.fabric.authority_sha ||
+        boundary.candidate_snapshot.target_branch !== run.fabric.target_branch ||
+        boundary.candidate_snapshot.candidate_ref !== run.fabric.candidate_ref ||
+        boundary.candidate_snapshot.candidate_head !== run.fabric.candidate_head ||
+        fingerprint(boundary.candidate_snapshot.wave_heads) !== fingerprint(run.fabric.wave_heads)) {
+        throw new ParallelDispatchError("corrupt-state", "Latest accepted fabric replay boundary conflicts with durable candidate state.");
+      }
+    }
+    return structuredClone({
+      reason: selected.reason,
+      boundary_event_hash: boundary.event_hash,
+      route: "luna-fabric" as const,
+      plan: run.execution_plan,
+      plan_decisions: selected.state.plan_decisions,
+      scheduler: boundary.scheduler_after,
+      artifacts: boundary.artifacts,
+      candidate_snapshot: boundary.candidate_snapshot,
+      recovery_budget: selected.recovery_budget,
     });
   }
 
@@ -1896,6 +2250,7 @@ export class ParallelDispatchCoordinator {
         transition: run.fabric.demotion_transition }, changed: false };
     });
     if (recovery === undefined) return;
+    if (recovery.transition.phase === "stopping") return;
     await this.assertFabricAuthority(recovery.fabric);
     for (const source of recovery.fabric.source_refs) {
       const current = await this.readRef(source.ref);
@@ -1954,7 +2309,7 @@ export class ParallelDispatchCoordinator {
       failed.phase = "pending"; failed.call_id = null; failed.child_session_id = null;
       failed.outcome = null; failed.artifact = null; failed.artifact_accepted = false;
       run.fabric.demotions.push({ unit_id: task.task_id, luna_dispatch_id: lunaDispatchID,
-        luna_worktree_id: lunaWorktreeID, sol_dispatch_id: task.dispatch_id });
+        luna_worktree_id: lunaWorktreeID, sol_dispatch_id: task.dispatch_id, trigger: transition.trigger });
       run.fabric.demotion_transition = null;
       this.reserveReady(run);
       return { result: undefined, changed: true };
@@ -1964,19 +2319,57 @@ export class ParallelDispatchCoordinator {
   private async assertFabricCandidate(
     fabric: StoredFabric,
     runID: string,
+    contractFingerprint: string,
     candidateBase: string,
     tasks: readonly StoredTask[],
+    builtCandidate?: BuiltFabricCandidate,
   ): Promise<void> {
     try {
       await this.assertFabricAuthority(fabric);
       const candidate = (await this.git(["rev-parse", "--verify", `${candidateBase}^{commit}`])).trim();
-      const expected = await this.buildFabricCandidate(runID, fabric.scheduler.base_sha, tasks);
+      let expected: string;
+      if (builtCandidate === undefined) {
+        expected = await this.buildFabricCandidate(runID, fabric.scheduler.base_sha, tasks);
+      } else {
+        const current = this.builtFabricCandidate(
+          runID, contractFingerprint, fabric, tasks, candidateBase,
+        );
+        if (fingerprint(current) !== fingerprint(builtCandidate)) throw new Error("built-candidate-identity");
+        expected = builtCandidate.candidate_head;
+      }
       if (candidate !== candidateBase || candidateBase !== expected || candidateBase === fabric.scheduler.base_sha ||
         await this.readRef(fabric.candidate_ref) !== candidateBase) throw new Error("identity");
       await this.git(["merge-base", "--is-ancestor", fabric.authority_sha, candidateBase]);
     } catch {
       throw new ParallelDispatchError("candidate-invalid", "Candidate does not contain the completed wave or target authority changed.");
     }
+  }
+
+  private builtFabricCandidate(
+    runID: string,
+    contractFingerprint: string,
+    fabric: StoredFabric,
+    tasks: readonly StoredTask[],
+    candidateHead: string,
+  ): BuiltFabricCandidate {
+    return {
+      run_id: runID,
+      candidate_base: fabric.scheduler.base_sha,
+      candidate_head: candidateHead,
+      fabric_identity: fingerprint({
+        authority_sha: fabric.authority_sha,
+        target_branch: fabric.target_branch,
+        candidate_ref: fabric.candidate_ref,
+        contract_fingerprint: contractFingerprint,
+        scheduler: fabric.scheduler,
+      }),
+      artifact_identity: fingerprint(tasks.map((task) => ({
+        task_id: task.descriptor.task_id,
+        base_sha: task.descriptor.base_sha,
+        scope_write: task.descriptor.scope_write,
+        artifact: task.artifact,
+      }))),
+    };
   }
 
   private async buildFabricCandidate(
@@ -2071,7 +2464,10 @@ export class ParallelDispatchCoordinator {
     }
   }
 
-  private async recoverFabricTransition(expectedRunID?: string): Promise<void> {
+  private async recoverFabricTransition(
+    expectedRunID?: string,
+    builtCandidate?: BuiltFabricCandidate,
+  ): Promise<void> {
     const recovery = await this.transaction((state) => {
       const run = state.run;
       if (run?.kind !== "run") {
@@ -2101,8 +2497,10 @@ export class ParallelDispatchCoordinator {
     await this.assertFabricCandidate(
       recovery.fabric,
       recovery.run_id,
+      recovery.contract_fingerprint,
       recovery.transition.candidate_base,
       recovery.tasks,
+      builtCandidate,
     );
 
     for (const worktreeID of recovery.transition.cleanup_worktree_ids) {
@@ -2499,7 +2897,8 @@ export class ParallelDispatchCoordinator {
         Object.freeze([...unit.acceptance_items]),
       ]))),
       lanes: Object.freeze({ ...(active?.lanes ?? {}) }),
-      transition: fabric.transition?.phase ?? fabric.demotion_transition?.phase ?? null,
+      transition: fabric.transition?.phase ?? (fabric.demotion_transition?.phase === "stopping"
+        ? "cleanup" : fabric.demotion_transition?.phase) ?? null,
       candidate_ref: fabric.candidate_ref,
       candidate_head: fabric.candidate_head,
       wave_heads: Object.freeze([...fabric.wave_heads]),
@@ -2507,7 +2906,12 @@ export class ParallelDispatchCoordinator {
         status: fabric.validation.status, fingerprint: fabric.validation.fingerprint }),
       review: Object.freeze({ ...fabric.review }),
       promoted: fabric.promoted,
-      demotions: Object.freeze(fabric.demotions.map((entry) => Object.freeze({ ...entry }))),
+      demotions: Object.freeze(fabric.demotions.map((entry) => Object.freeze({
+        unit_id: entry.unit_id,
+        luna_dispatch_id: entry.luna_dispatch_id,
+        luna_worktree_id: entry.luna_worktree_id,
+        sol_dispatch_id: entry.sol_dispatch_id,
+      }))),
     });
   }
 

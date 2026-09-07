@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 
 import { EvidenceCapsuleStore } from "../dist/core/evidence-capsule.js";
 import {
+  appendRunFlightLedgerEvents,
+  createRunFlightPlanPrefix,
   RunFlightLedger,
   type FlightObservation,
   type RunFlightEvent,
@@ -23,6 +25,36 @@ const observation = (stage: FlightObservation["stage"]): FlightObservation => ({
   estimated_cost: { usd: null, provenance: "unknown" },
 });
 const event = <T extends RunFlightEvent>(value: T): T => value;
+
+function fabricRecords(): readonly RunFlightEventRecord[] {
+  const planId = digest("a");
+  const bindingId = digest("b");
+  const c0 = "0".repeat(40);
+  const c1 = "1".repeat(40);
+  const c2 = "2".repeat(40);
+  const scheduler0 = { wave: 1, base_sha: c0, pending: ["a", "b"], completed: [],
+    active: { number: 1, base_sha: c0, unit_ids: ["a"], lanes: { a: 0 } }, lane_affinity: {} };
+  const scheduler1 = { wave: 2, base_sha: c1, pending: ["b"], completed: ["a"],
+    active: { number: 2, base_sha: c1, unit_ids: ["b"], lanes: { b: 0 } }, lane_affinity: {} };
+  const scheduler2 = { wave: 2, base_sha: c2, pending: [], completed: ["a", "b"], active: null, lane_affinity: {} };
+  const artifact = (unit_id: string, commit_sha: string) => ({ unit_id, commit_sha,
+    change_fingerprint: "d".repeat(64), validation_fingerprint: "e".repeat(64) });
+  return appendRunFlightLedgerEvents(createRunFlightPlanPrefix({
+    kind: "plan.compiled", at, plan_id: planId, proposal_id: digest("c"), decision: "accepted", gap_codes: [],
+  }), [{
+    kind: "fabric.wave.accepted", at, plan_id: planId, plan_binding_id: bindingId, wave_index: 1,
+    from_candidate_id: c0, candidate_id: c1, artifacts: [artifact("a", "a".repeat(40))],
+    scheduler_before: scheduler0, scheduler_after: scheduler1,
+    candidate_snapshot: { authority_sha: c0, target_branch: "main", candidate_ref: "refs/candidate/run",
+      candidate_head: c1, wave_heads: [c1] },
+  }, {
+    kind: "fabric.wave.accepted", at, plan_id: planId, plan_binding_id: bindingId, wave_index: 2,
+    from_candidate_id: c1, candidate_id: c2, artifacts: [artifact("b", "b".repeat(40))],
+    scheduler_before: scheduler1, scheduler_after: scheduler2,
+    candidate_snapshot: { authority_sha: c0, target_branch: "main", candidate_ref: "refs/candidate/run",
+      candidate_head: c2, wave_heads: [c1, c2] },
+  }]);
+}
 
 test.before(async () => {
   await rm(root, { recursive: true, force: true });
@@ -165,6 +197,29 @@ test("selects an explicit historical boundary while retaining full-ledger recove
   assert.deepEqual(selected.recovery_budget.resource_budget_limits, { time_ms: 100, cost_usd: 1 });
   assert.equal(selected.recovery_budget.validated_event_count, records.length);
   assert.equal(selected.recovery_budget.validated_tail_hash, records.at(-1)?.event_hash);
+});
+
+test("selects typed accepted fabric boundaries without inventing unavailable budgets", () => {
+  const records = fabricRecords();
+  const boundaries = records.filter(({ event: entry }) => entry.kind === "fabric.wave.accepted");
+  const automatic = selectWaveBoundaryReplay(records);
+  assert.equal(automatic.reason, "latest_accepted_boundary");
+  assert.equal("event_kind" in automatic.boundary && automatic.boundary.event_kind, "fabric.wave.accepted");
+  if (!("event_kind" in automatic.boundary)) return;
+  assert.equal(automatic.boundary.plan_id, digest("a"));
+  assert.equal(automatic.boundary.plan_binding_id, digest("b"));
+  assert.equal(automatic.boundary.wave_index, 2);
+  assert.deepEqual(automatic.boundary.artifacts.map(({ unit_id }) => unit_id), ["b"]);
+  assert.equal(automatic.boundary.candidate_snapshot.candidate_head, "2".repeat(40));
+  assert.equal(automatic.state.current_candidate_id, "2".repeat(40));
+  assert.equal(automatic.recovery_budget.budget_limits, null);
+  assert.deepEqual(automatic.recovery_budget.resource_budget_consumed, { time_ms: 0, cost_usd: 0 });
+
+  const diagnostic = selectWaveBoundaryReplay(records, { boundary_event_hash: boundaries[0]!.event_hash });
+  assert.equal(diagnostic.reason, "diagnostic_override");
+  assert.equal(diagnostic.boundary.event_hash, boundaries[0]!.event_hash);
+  assert.equal(diagnostic.state.current_candidate_id, "1".repeat(40));
+  assert.equal(diagnostic.recovery_budget.validated_tail_hash, records.at(-1)!.event_hash);
 });
 
 test("rejects absent boundaries, invalid overrides, and unknown canonical overrides", async () => {

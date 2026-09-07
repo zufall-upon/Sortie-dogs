@@ -8,6 +8,7 @@ import type {
   ContainedValidationResult,
   WorktreeCommitArtifact,
   WorktreeCommitProduceRequest,
+  WorktreeCommitProductionControl,
   WorktreeCommitValidationEvidence,
   WorktreeCommitVerifyRequest,
 } from "./types.js";
@@ -582,7 +583,9 @@ async function runLinuxSystemd(
   args: readonly string[],
   cwd: string,
   timeout: number,
+  signal?: AbortSignal,
 ): Promise<CommandResult> {
+  if (signal?.aborted) throw new WorktreeCommitArtifactError("validation-failed", "Validation was cancelled.");
   const systemdRun = await linuxSystemdRun();
   const [environmentExecutable, shell] = await Promise.all([linuxEnvironmentExecutable(), linuxShell()]);
   const uid = process.getuid?.();
@@ -624,20 +627,29 @@ async function runLinuxSystemd(
     child.once("close", (code) => done({ code }));
   });
   let timer: NodeJS.Timeout | undefined;
+  let abortListener: (() => void) | undefined;
+  const cancelled = new Promise<{ kind: "cancelled" }>((done) => {
+    abortListener = () => done({ kind: "cancelled" });
+    signal?.addEventListener("abort", abortListener, { once: true });
+  });
   const bounded = await Promise.race([
     closed.then((result) => ({ kind: "closed" as const, result })),
     new Promise<{ kind: "timeout" }>((done) => {
       timer = setTimeout(() => done({ kind: "timeout" }), timeout + LINUX_WRAPPER_GRACE);
-    }),
+    }), cancelled,
   ]).catch(async () => {
     await terminateTree(child, closed).catch(() => undefined);
     await stopSystemdUnit(unit, environment);
     throw new WorktreeCommitArtifactError("validation-failed", "Validation executable failed.");
   });
+  if (abortListener !== undefined) signal?.removeEventListener("abort", abortListener);
   if (timer !== undefined) clearTimeout(timer);
-  if (bounded.kind === "timeout" || overflow) {
+  if (bounded.kind === "cancelled" || bounded.kind === "timeout" || overflow) {
     if (child.exitCode === null && child.signalCode === null) await terminateTree(child, closed);
     await stopSystemdUnit(unit, environment);
+    if (bounded.kind === "cancelled") {
+      throw new WorktreeCommitArtifactError("validation-failed", "Validation was cancelled.");
+    }
     throw new WorktreeCommitArtifactError("validation-failed", "Validation exceeded its resource bound.");
   }
   await stopSystemdUnit(unit, environment);
@@ -651,7 +663,11 @@ async function runBounded(
   cwd: string,
   timeout: number,
   kind: "git" | "validation",
+  signal?: AbortSignal,
 ): Promise<CommandResult> {
+  if (kind === "validation" && signal?.aborted) {
+    throw new WorktreeCommitArtifactError("validation-failed", "Validation was cancelled.");
+  }
   const windowsWrapper = kind === "validation" && process.platform === "win32";
   const linuxWrapper = kind === "validation" && process.platform === "linux";
   if (kind === "validation" && !windowsWrapper && !linuxWrapper) {
@@ -687,6 +703,9 @@ async function runBounded(
   let outputBytes = 0;
   let overflow = false;
   let timedOut = false;
+  let aborted = signal?.aborted ?? false;
+  const abortListener = (): void => { aborted = true; };
+  if (kind === "validation") signal?.addEventListener("abort", abortListener, { once: true });
   const collect = (chunk: Buffer): void => {
     outputBytes += chunk.byteLength;
     if (outputBytes <= MAX_OUTPUT) chunks.push(chunk);
@@ -707,20 +726,21 @@ async function runBounded(
   const timer = setTimeout(() => { timedOut = true; }, outerTimeout);
   timer.unref();
   try {
-    while (!settled && !timedOut && !overflow) {
+    while (!settled && !timedOut && !overflow && !aborted) {
       await Promise.race([closed, new Promise((done) => setTimeout(done, 10))]);
     }
-    if (timedOut || overflow) {
+    if (timedOut || overflow || aborted) {
       await terminateTree(child, closed);
     }
     const result = await closed;
+    if (aborted) throw new WorktreeCommitArtifactError("validation-failed", "Validation was cancelled.");
     if (timedOut || overflow) {
       throw new WorktreeCommitArtifactError(kind === "git" ? "git-failed" : "validation-failed",
         `${kind === "git" ? "Git" : "Validation"} exceeded its resource bound.`);
     }
     const code = linuxWrapper && result.code !== 0 && ![238, 239, 240, 241].includes(result.code ?? -1)
       ? 240 : result.code ?? -1;
-    if (linuxWrapper && code === 240) return await runLinuxSystemd(executable, args, cwd, timeout);
+    if (linuxWrapper && code === 240) return await runLinuxSystemd(executable, args, cwd, timeout, signal);
     return { code, stdout: Buffer.concat(chunks) };
   } catch (error) {
     if (child.exitCode === null && child.signalCode === null) await terminateTree(child, closed).catch(() => undefined);
@@ -728,6 +748,7 @@ async function runBounded(
     throw new WorktreeCommitArtifactError(kind === "git" ? "git-failed" : "validation-failed",
       `${kind === "git" ? "Git" : "Validation"} executable failed.`);
   } finally {
+    signal?.removeEventListener("abort", abortListener);
     clearTimeout(timer);
   }
 }
@@ -738,7 +759,7 @@ function boundedCommandKind(executable: string, args: readonly string[]): "git" 
 }
 
 /** Runs one bounded command without exposing output or performing Git mutations. */
-export async function runContainedValidation(request: ContainedValidationRequest): Promise<ContainedValidationResult> {
+export async function runContainedValidation(request: ContainedValidationRequest, signal?: AbortSignal): Promise<ContainedValidationResult> {
   const suppliedArgs = isRecord(request) && Array.isArray(request.args) ? request.args : [];
   const fallbackCommand = Object.freeze([
     isRecord(request) && typeof request.executable === "string" ? request.executable : "invalid",
@@ -764,7 +785,7 @@ export async function runContainedValidation(request: ContainedValidationRequest
   const command = Object.freeze([executable, ...suppliedArgs]);
   try {
     const result = await runBounded(executable, suppliedArgs, cwd, request.timeout_ms,
-      boundedCommandKind(executable, suppliedArgs));
+      boundedCommandKind(executable, suppliedArgs), signal);
     const fingerprint = createHash("sha256").update(JSON.stringify([command, result.code])).digest("hex");
     return result.code === 0
       ? Object.freeze({ ok: true as const, command, exit_code: 0 as const, fingerprint, error: null })
@@ -799,11 +820,17 @@ class Context {
   }
 
   async branchAndHead(): Promise<{ branch: string; head: string }> {
-    const [branch, head] = await Promise.all([
-      this.git(["symbolic-ref", "--quiet", "--short", "HEAD"]),
-      this.git(["rev-parse", "--verify", "HEAD^{commit}"]),
-    ]);
-    return { branch: branch.toString("utf8").trim(), head: head.toString("utf8").trim() };
+    const output = decodeGitOutput(
+      await this.git(["rev-parse", "HEAD^{commit}", "--symbolic-full-name", "HEAD"]),
+      "Managed branch or HEAD encoding is invalid.",
+    );
+    const lines = output.split("\n");
+    if (lines.at(-1) === "") lines.pop();
+    if (lines.length !== 2 || !SHA.test(lines[0]!) || !lines[1]!.startsWith("refs/heads/") ||
+      lines[1]!.length === "refs/heads/".length) {
+      throw new WorktreeCommitArtifactError("invalid-state", "Managed branch or HEAD output is invalid.");
+    }
+    return { branch: lines[1]!.slice("refs/heads/".length), head: lines[0]! };
   }
 }
 
@@ -982,6 +1009,7 @@ async function targetObjects(
   entries: readonly StatusEntry[],
   source: "worktree" | "index" | "commit",
   commit?: string,
+  worktreeBase?: Promise<Map<string, GitObjectEntry>>,
 ): Promise<Map<string, GitObjectEntry>> {
   const present = entries.filter(({ code }) => code !== "D");
   if (source === "index") {
@@ -997,7 +1025,7 @@ async function targetObjects(
   if (fileMode !== "true" && fileMode !== "false") {
     throw new WorktreeCommitArtifactError("invalid-state", "Git file mode configuration is invalid.");
   }
-  const base = await treeObjects(context, context.descriptor.base_sha, entries.map(({ path }) => path));
+  const base = await (worktreeBase ?? treeObjects(context, context.descriptor.base_sha, entries.map(({ path }) => path)));
   const objects = new Map<string, GitObjectEntry>();
   for (const entry of present) {
     const info = await lstat(join(context.managedPath, entry.path)).catch(() => undefined);
@@ -1024,9 +1052,10 @@ async function changeFingerprint(
   commit?: string,
 ): Promise<string> {
   const paths = entries.map(({ path }) => path);
+  const basePromise = treeObjects(context, context.descriptor.base_sha, paths);
   const [base, target] = await Promise.all([
-    treeObjects(context, context.descriptor.base_sha, paths),
-    targetObjects(context, entries, source, commit),
+    basePromise,
+    targetObjects(context, entries, source, commit, source === "worktree" ? basePromise : undefined),
   ]);
   const hash = createHash("sha256").update("sortie-change-v2\0");
   for (const entry of entries) {
@@ -1175,7 +1204,10 @@ function validateArtifactShape(value: unknown, descriptor: ParallelDispatchDescr
   }
 }
 
-export async function produceWorktreeCommitArtifact(request: WorktreeCommitProduceRequest): Promise<WorktreeCommitArtifact> {
+export async function produceWorktreeCommitArtifact(
+  request: WorktreeCommitProduceRequest,
+  control?: WorktreeCommitProductionControl,
+): Promise<WorktreeCommitArtifact> {
   if (!isRecord(request) || !exactKeys(request, ["descriptor", "managed_path", "validation", ...(request.git_path === undefined ? [] : ["git_path"])]) ||
     !isRecord(request.validation) || !exactKeys(request.validation, ["executable", ...(request.validation.args === undefined ? [] : ["args"]),
       ...(request.validation.timeout_ms === undefined ? [] : ["timeout_ms"])]) ||
@@ -1188,6 +1220,10 @@ export async function produceWorktreeCommitArtifact(request: WorktreeCommitProdu
       request.validation.timeout_ms < 1 || request.validation.timeout_ms > MAX_TIMEOUT))) {
     throw new WorktreeCommitArtifactError("invalid-request", "Commit producer request is invalid.");
   }
+  if (control !== undefined && (!(control.signal instanceof AbortSignal) || typeof control.enterProtectedPhase !== "function")) {
+    throw new WorktreeCommitArtifactError("invalid-request", "Commit producer control is invalid.");
+  }
+  if (control?.signal.aborted) throw new WorktreeCommitArtifactError("validation-failed", "Validation was cancelled.");
   const context = await makeContext(request);
   const executable = await resolveValidationExecutable(request.validation.executable);
   if (executable === undefined || !isAbsolute(executable)) {
@@ -1208,7 +1244,7 @@ export async function produceWorktreeCommitArtifact(request: WorktreeCommitProdu
   const beforeFingerprint = await changeFingerprint(context, before, "worktree");
 
   const validation = await runBounded(executable, request.validation.args ?? [], context.managedPath,
-    request.validation.timeout_ms ?? GIT_TIMEOUT, boundedCommandKind(executable, request.validation.args ?? []));
+    request.validation.timeout_ms ?? GIT_TIMEOUT, boundedCommandKind(executable, request.validation.args ?? []), control?.signal);
   if (validation.code !== 0) throw new WorktreeCommitArtifactError("validation-failed",
     validation.code === 240 ? "Validation containment setup failed."
       : validation.code === 241 ? "Validation left a descendant process."
@@ -1229,6 +1265,8 @@ export async function produceWorktreeCommitArtifact(request: WorktreeCommitProdu
     throw new WorktreeCommitArtifactError("validation-failed", "Validation changed implementation content or status.");
   }
 
+  if (control?.signal.aborted) throw new WorktreeCommitArtifactError("validation-failed", "Validation was cancelled.");
+  control?.enterProtectedPhase();
   await context.git(["add", "--", ...before.map(({ path }) => path)]);
   await assertValidatedIndex(context, before, beforeFingerprint);
   await assertValidatedIndex(context, before, beforeFingerprint);

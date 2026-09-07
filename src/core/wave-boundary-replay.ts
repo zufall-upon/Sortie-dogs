@@ -37,9 +37,24 @@ export interface WaveBoundaryIdentity {
   readonly artifact_id: string;
 }
 
+export interface FabricWaveBoundaryIdentity {
+  readonly event_kind: "fabric.wave.accepted";
+  readonly sequence: number;
+  readonly event_hash: string;
+  readonly plan_id: string;
+  readonly plan_binding_id: string;
+  readonly wave_index: number;
+  readonly from_candidate_id: string;
+  readonly candidate_id: string;
+  readonly artifacts: RunFlightState["accepted_fabric_waves"][number]["artifacts"];
+  readonly scheduler_before: RunFlightState["accepted_fabric_waves"][number]["scheduler_before"];
+  readonly scheduler_after: RunFlightState["accepted_fabric_waves"][number]["scheduler_after"];
+  readonly candidate_snapshot: RunFlightState["accepted_fabric_waves"][number]["candidate_snapshot"];
+}
+
 export interface WaveBoundaryRecoveryBudget {
   readonly budget_consumed: FlightBudgetLimits;
-  readonly budget_limits: FlightBudgetLimits;
+  readonly budget_limits: FlightBudgetLimits | null;
   readonly resource_budget_limits: RunFlightState["resource_budget_limits"];
   readonly resource_budget_consumed: RunFlightState["resource_budget_consumed"];
   readonly resource_budget_reserved: RunFlightState["resource_budget_reserved"];
@@ -49,7 +64,7 @@ export interface WaveBoundaryRecoveryBudget {
 
 export interface WaveBoundaryReplaySelection {
   readonly reason: WaveBoundaryReplayReason;
-  readonly boundary: WaveBoundaryIdentity;
+  readonly boundary: WaveBoundaryIdentity | FabricWaveBoundaryIdentity;
   readonly prefix: readonly RunFlightEventRecord[];
   readonly state: RunFlightState;
   readonly recovery_budget: WaveBoundaryRecoveryBudget;
@@ -90,9 +105,14 @@ export function selectWaveBoundaryReplay(records: unknown, options?: unknown): W
   // Validate the complete ledger before selecting a prefix. An invalid tail must never be hidden by replay.
   const validated = validateEntireLedger(records);
   const validatedOptions = validateOptions(options);
-  const boundaries = validated.records.filter((record) => record.event.kind === "candidate.advanced");
+  const fabricBoundaries = validated.records.filter((record) => record.event.kind === "fabric.wave.accepted");
+  // Fabric planning ledgers and legacy execution ledgers are separate valid formats. Prefer the
+  // accepted fabric boundary when present while preserving candidate.advanced selection verbatim.
+  const boundaries = fabricBoundaries.length > 0
+    ? fabricBoundaries
+    : validated.records.filter((record) => record.event.kind === "candidate.advanced");
   if (boundaries.length === 0) {
-    throw new WaveBoundaryReplayError("boundary_missing", "Ledger has no accepted candidate advancement boundary.");
+    throw new WaveBoundaryReplayError("boundary_missing", "Ledger has no accepted wave boundary.");
   }
 
   const override = validatedOptions.boundary_event_hash;
@@ -100,31 +120,52 @@ export function selectWaveBoundaryReplay(records: unknown, options?: unknown): W
     ? boundaries[boundaries.length - 1]
     : boundaries.find((record) => record.event_hash === override);
   if (selected === undefined) {
-    throw new WaveBoundaryReplayError("unknown_override", "Boundary override does not identify a candidate advancement event.");
+    throw new WaveBoundaryReplayError("unknown_override", "Boundary override does not identify an accepted wave event.");
   }
 
   const prefix = structuredClone(validated.records.slice(0, selected.sequence));
   const state = reconstructRunFlightLedger(prefix);
   const event = selected.event;
-  if (event.kind !== "candidate.advanced" || validated.state.budget_limits === null) {
+  if (event.kind !== "candidate.advanced" && event.kind !== "fabric.wave.accepted") {
     throw new WaveBoundaryReplayError("invalid_ledger", "Validated boundary state is internally inconsistent.");
   }
 
+  if (event.kind === "candidate.advanced" && validated.state.budget_limits === null) {
+    throw new WaveBoundaryReplayError("invalid_ledger", "Validated execution boundary has no recovery budget.");
+  }
+
+  const boundary: WaveBoundaryIdentity | FabricWaveBoundaryIdentity = event.kind === "candidate.advanced"
+    ? {
+        sequence: selected.sequence,
+        event_hash: selected.event_hash,
+        from_candidate_id: event.from_candidate_id,
+        candidate_id: event.candidate_id,
+        wave_id: event.wave_id,
+        artifact_id: event.artifact_id,
+      }
+    : {
+        event_kind: "fabric.wave.accepted",
+        sequence: selected.sequence,
+        event_hash: selected.event_hash,
+        plan_id: event.plan_id,
+        plan_binding_id: event.plan_binding_id,
+        wave_index: event.wave_index,
+        from_candidate_id: event.from_candidate_id,
+        candidate_id: event.candidate_id,
+        artifacts: structuredClone(event.artifacts),
+        scheduler_before: structuredClone(event.scheduler_before),
+        scheduler_after: structuredClone(event.scheduler_after),
+        candidate_snapshot: structuredClone(event.candidate_snapshot),
+      };
+
   return {
     reason: override === undefined ? "latest_accepted_boundary" : "diagnostic_override",
-    boundary: {
-      sequence: selected.sequence,
-      event_hash: selected.event_hash,
-      from_candidate_id: event.from_candidate_id,
-      candidate_id: event.candidate_id,
-      wave_id: event.wave_id,
-      artifact_id: event.artifact_id,
-    },
+    boundary,
     prefix,
     state,
     recovery_budget: {
       budget_consumed: { ...validated.state.budget_consumed },
-      budget_limits: { ...validated.state.budget_limits },
+      budget_limits: validated.state.budget_limits === null ? null : { ...validated.state.budget_limits },
       resource_budget_limits: validated.state.resource_budget_limits === null ? null : { ...validated.state.resource_budget_limits },
       resource_budget_consumed: { ...validated.state.resource_budget_consumed },
       resource_budget_reserved: { ...validated.state.resource_budget_reserved },

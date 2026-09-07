@@ -25,7 +25,7 @@ export interface OpenCodeChatMessageOutput {
 export type OpenCodeChatMessageHook = (
   input: OpenCodeChatMessageInput,
   output: OpenCodeChatMessageOutput,
-  options?: { readonly skipPreferred?: boolean },
+  options?: { readonly skipPreferred?: boolean; readonly terminalRescueTarget?: ModelTarget },
 ) => Promise<boolean | void>;
 
 export interface ModelRoutingHookConfiguration {
@@ -144,7 +144,7 @@ function enabledHostModels(response: unknown): ReadonlySet<string> | undefined {
   return models;
 }
 
-async function readHostModels(
+export async function readHostModels(
   client: OpenCodeModelAvailabilityClient | undefined,
 ): Promise<ReadonlySet<string> | undefined> {
   if (client?.v2?.model?.list !== undefined) {
@@ -198,6 +198,15 @@ export function createModelRoutingHook(
         ? output.message.agent
         : undefined;
     if (role === undefined) return false;
+    if (options?.terminalRescueTarget !== undefined) {
+      const target = options.terminalRescueTarget;
+      const model = openCodeModel(target.model);
+      if (role !== "dog-worker" || model === undefined) throw new InvalidModelTargetError();
+      const available = await readHostModels(client);
+      if (!available?.has(target.model)) throw new ModelRoutingDeniedError(role, []);
+      output.message.model = { ...model, ...(target.variant === undefined ? {} : { variant: target.variant }) };
+      return true;
+    }
     const hasRoute = Object.prototype.hasOwnProperty.call(config.local ?? {}, role) ||
       Object.prototype.hasOwnProperty.call(config.global ?? {}, role);
     if (!hasRoute) return false;

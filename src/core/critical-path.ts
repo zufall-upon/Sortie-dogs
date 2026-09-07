@@ -35,6 +35,8 @@ export type CriticalPathRuntimeObligation =
   | "final-review"
   | "candidate-cas";
 
+export type CriticalPathTakeoverTrigger = "live_deadline_exceeded" | "live_repeated_failure";
+
 export type CriticalPathResult =
   | { readonly status: "rejected"; readonly code: CriticalPathRejectionCode; readonly unit_id: string | null }
   | { readonly status: "none"; readonly reason: "active-takeover" | "no-conservative-blocker" }
@@ -192,4 +194,11 @@ export function proposeCriticalPathTakeover(input: unknown): CriticalPathResult 
     structural_basis: "sole-unfinished-direct-dependency-with-completion-reachability",
     runtime_obligations: RUNTIME_OBLIGATIONS,
   };
+}
+
+/** Preserve the policy reason as a runtime trigger without conflating terminal quality rescue. */
+export function criticalPathTakeoverTrigger(
+  proposal: Extract<CriticalPathResult, { readonly status: "proposed" }>,
+): CriticalPathTakeoverTrigger {
+  return proposal.reason === "deadline_exceeded" ? "live_deadline_exceeded" : "live_repeated_failure";
 }

@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
+import { availableParallelism } from "node:os";
 import { join, relative } from "node:path";
-import test from "node:test";
+import test, { describe } from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
@@ -85,6 +86,7 @@ import {
   type ReviewArtifact,
   type ReviewVerdict,
 } from "../dist/core/consultation.js";
+import { writeExperienceRoutingFixture } from "./fixtures/experience-router/run-experience-router-rpt.mjs";
 
 /*
  * Environment and global-file layers are real configuration sources, so machine settings would
@@ -128,9 +130,15 @@ const fixture = JSON.parse(
 ) as PluginFixture;
 const cases = new Map(fixture.cases.map((candidate) => [candidate.name, candidate]));
 const testEnvironment = fileURLToPath(new URL("../_testenv/", import.meta.url));
+const testEnvironmentReady = mkdir(testEnvironment, { recursive: true });
 process.env.XDG_CONFIG_HOME = join(testEnvironment, "plugin-default-xdg");
 assert.equal(configRoot(), join(testEnvironment, "plugin-default-xdg", "opencode"));
 const execFileAsync = promisify(execFile);
+const isolatedPluginCases: Array<{ name: string; run: () => void | Promise<void> }> = [];
+
+function isolated(name: string, run: () => void | Promise<void>): void {
+  isolatedPluginCases.push({ name, run });
+}
 
 test("model routing configuration is strict and merges roles by layer", () => {
   const project = {
@@ -1770,7 +1778,7 @@ async function withProject(
   name: string,
   run: (directory: string) => Promise<void>,
 ): Promise<void> {
-  await mkdir(testEnvironment, { recursive: true });
+  await testEnvironmentReady;
   const directory = await mkdtemp(join(testEnvironment, `plugin-${name}-`));
   try {
     await mkdir(join(directory, ".git"));
@@ -1928,12 +1936,15 @@ test("invalid global Sortie config fails reflection closed without removing core
         "sortie_create_parallel_commit_artifact",
         "sortie_enable_backlog_drain",
         "sortie_enqueue_parallel_integration",
+        "sortie_execute_adaptive_remediation",
+        "sortie_execute_terminal_rescue",
         "sortie_integrate_parallel_queue",
         "sortie_parallel_dispatch_status",
         "sortie_parallel_integration_status",
         "sortie_prepare_failure_swarm",
         "sortie_prepare_luna_fabric",
         "sortie_prepare_parallel_dispatch",
+        "sortie_propose_experience_route",
         "sortie_release_write_gate",
         "sortie_select_failure_diagnosis",
         "sortie_submit_integration_remediation",
@@ -1954,6 +1965,13 @@ test("invalid global Sortie config fails reflection closed without removing core
       if (oldXdg === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = oldXdg;
       await rm(xdg, { recursive: true, force: true });
     }
+  });
+});
+
+test("plugin exposes the adaptive remediation execution entrypoint", async () => {
+  await withProject("adaptive-remediation-entrypoint", async (directory) => {
+    const hooks = await SortieDogsPlugin({ directory });
+    assert.ok(hooks.tool?.sortie_execute_adaptive_remediation);
   });
 });
 
@@ -3012,7 +3030,7 @@ test("coordinator-only Luna admission returns bounded route evidence without dis
       exclusive_resources: [],
       scheduler_order: order,
     });
-    await writeFile(contractPath, JSON.stringify({
+    const fabricValue = {
       version: "0.8.0",
       provenance: {
         source: "dog-coordinator",
@@ -3024,7 +3042,8 @@ test("coordinator-only Luna admission returns bounded route evidence without dis
       effects: [],
       shared_paths: [],
       units: [unit("unit-a", 0), unit("unit-b", 1)],
-    }));
+    };
+    await writeFile(contractPath, JSON.stringify(fabricValue));
     const hooks = await SortieDogsPlugin({ directory });
     await hooks["chat.message"]!(
       { sessionID: "root", agent: "dog-coordinator" },
@@ -3044,12 +3063,13 @@ test("coordinator-only Luna admission returns bounded route evidence without dis
       { sessionID: "root", agent: "dog-coordinator" },
     ));
     assert.deepEqual(Object.keys(admitted).sort(), [
-      "contract_fingerprint", "depth", "route", "status", "unit_count", "width",
+      "contract_fingerprint", "depth", "experience", "route", "status", "unit_count", "width",
     ]);
     assert.equal(admitted.status, "admitted");
     assert.equal(admitted.route, "luna-fabric");
     assert.equal(admitted.width, 2);
     assert.equal(admitted.unit_count, 2);
+    assert.equal(admitted.experience.fallback_reason, "experience-index-absent");
 
     await writeFile(contractPath, JSON.stringify({ bad: true }));
     const serial = JSON.parse(await hooks.tool!.sortie_admit_luna_fabric!.execute(
@@ -3067,7 +3087,133 @@ test("coordinator-only Luna admission returns bounded route evidence without dis
   });
 });
 
-test("fabric prepare returns a luna-fabric run whose descriptors bind only dog-luna-worker", async () => {
+test("experience route proposal reuses summarized evidence without changing admission or execution authority", async () => {
+  await withProject("experience-route-proposal", async (directory) => {
+    const hooks = await SortieDogsPlugin({ directory });
+    await hooks["chat.message"]!(
+      { sessionID: "root", agent: "dog-coordinator" },
+      { message: { agent: "dog-coordinator", model: {} }, parts: [{ type: "text", text: "route" }] },
+    );
+    const capability = hooks.tool!.sortie_propose_experience_route!;
+    assert.deepEqual(Object.keys(capability.args), ["request_json"]);
+    assert.deepEqual(Object.keys(hooks.tool!.sortie_admit_luna_fabric!.args), ["contract_path"]);
+
+    const identity = {
+      package: "sortie-dogs@0.8.5-corpus",
+      fixture: "experience-router-fixed-corpus",
+      validation: "synthetic-complete-run",
+      cache: "fixed",
+      price_basis: "synthetic-unit-price",
+      denominator: "complete-run",
+    };
+    const policy = {
+      version: "v0.8.5-fixed-corpus",
+      evidence_window: "fixed-window",
+      minimum_samples: 3,
+      duration_threshold: 0.8,
+      cost_threshold: 0.8,
+      rows: [{
+        shape: "eligible-shape",
+        baseline_route: "sol-serial",
+        policy_route: "luna-fabric-with-escalation",
+      }],
+    };
+    const observations = [
+      ...[90, 100, 110].map((duration_ms, index) => ({
+        run_id: `baseline-${index}`, completed: true, shape: "eligible-shape", route: "sol-serial",
+        evidence_window: "fixed-window", identity, duration_ms, estimated_cost_amount: [9, 10, 11][index],
+      })),
+      ...[70, 80, 90].map((duration_ms, index) => ({
+        run_id: `candidate-${index}`, completed: true, shape: "eligible-shape",
+        route: "luna-fabric-with-escalation", evidence_window: "fixed-window", identity,
+        duration_ms, estimated_cost_amount: [7, 8, 9][index],
+      })),
+    ];
+    const request = (overrides: Record<string, unknown> = {}) => JSON.stringify({
+      shape: "eligible-shape",
+      caller_heuristic_route: "sol-serial",
+      policy,
+      observations,
+      ...overrides,
+    });
+    const execute = (request_json: string, sessionID = "root", agent = "dog-coordinator") =>
+      capability.execute({ request_json }, { sessionID, agent }).then(JSON.parse);
+
+    const proposed = await execute(request());
+    assert.equal(proposed.status, "proposed");
+    assert.equal(proposed.route, "luna-fabric-with-escalation");
+    assert.equal(proposed.reason, "matched-evidence-within-thresholds");
+    assert.equal(proposed.policy_version, policy.version);
+    assert.equal(proposed.shape, "eligible-shape");
+    assert.equal(proposed.evidence_window, "fixed-window");
+    assert.deepEqual(proposed.authority, {
+      policy: "caller-declared", evidence: "caller-matched", execution: "not-performed",
+    });
+    assert.equal(proposed.summary_status, "summarized");
+    assert.equal(proposed.summary_reason, "complete-caller-observations");
+
+    const sparse = await execute(request({ observations: observations.filter((_, index) => index !== 2 && index !== 5) }));
+    assert.equal(sparse.status, "fallback");
+    assert.equal(sparse.route, "sol-serial");
+    assert.equal(sparse.reason, "sparse-evidence");
+
+    const unseen = await execute(request({ shape: "unknown-shape" }));
+    assert.equal(unseen.status, "fallback");
+    assert.equal(unseen.route, "sol-serial");
+    assert.equal(unseen.reason, "shape-unseen");
+
+    const inconclusive = await execute(request({ observations: [] }));
+    assert.equal(inconclusive.status, "fallback");
+    assert.equal(inconclusive.route, "sol-serial");
+    assert.equal(inconclusive.reason, "unproven-evidence");
+    assert.equal(inconclusive.summary_status, "inconclusive");
+    assert.equal(inconclusive.summary_reason, "empty-observations");
+
+    const rejected = await execute("{bad");
+    assert.equal(rejected.status, "rejected");
+    assert.equal(rejected.reason, "invalid-input");
+    assert.equal(rejected.authority.execution, "not-performed");
+    assert.deepEqual(await execute(request(), "child", "dog-worker"), {
+      status: "denied", reason: "coordinator-only",
+    });
+  });
+});
+
+test("experience routing changes real admission and direct prepare cannot bypass a selected Sol route", async () => {
+  await withProject("experience-route-execution", async (directory) => {
+    const fixture = await writeExperienceRoutingFixture(directory);
+    await mkdir(join(directory, ".opencode"));
+    const contractPath = join(directory, ".opencode", "sortie-dogs-luna-fabric.json");
+    await writeFile(contractPath, JSON.stringify(fixture.contract));
+    const hooks = await SortieDogsPlugin({ directory });
+    await hooks["chat.message"]!(
+      { sessionID: "root", agent: "dog-coordinator" },
+      { message: { agent: "dog-coordinator", model: {} }, parts: [{ type: "text", text: "route" }] },
+    );
+
+    const admitted = JSON.parse(await hooks.tool!.sortie_admit_luna_fabric!.execute(
+      { contract_path: contractPath },
+      { sessionID: "root", agent: "dog-coordinator" },
+    ));
+    assert.equal(admitted.status, "serial-route");
+    assert.equal(admitted.route, "sol-serial");
+    assert.equal(admitted.reason, "experience-route-selected");
+    assert.equal(admitted.experience.chosen_route, "sol-serial");
+    assert.equal(admitted.experience.fallback_reason, null);
+    assert.equal(admitted.experience.evidence_refs.length, 6);
+
+    const prepared = JSON.parse(await hooks.tool!.sortie_prepare_luna_fabric!.execute(
+      { contract_path: contractPath },
+      { sessionID: "root", agent: "dog-coordinator" },
+    ));
+    assert.equal(prepared.status, "sol-serial");
+    assert.equal(prepared.reason, "experience-route-selected");
+    assert.equal(prepared.contract_fingerprint, admitted.contract_fingerprint);
+    assert.equal(prepared.experience.decision_fingerprint, admitted.experience.decision_fingerprint);
+  });
+});
+
+isolated("fabric prepare returns a luna-fabric run whose descriptors bind only dog-luna-worker", async () => {
   await withProject("luna-fabric-prepare", async (directory) => {
     await writeFile(join(directory, ".gitignore"), [
       ".opencode/sortie-dogs-luna-fabric.json",
@@ -3996,7 +4142,7 @@ test("a rejected fresh-root prompt deletes the empty session and does not retry"
   });
 });
 
-test("a completed coordinator message triggers checkpoint continuation when text-complete is absent", async () => {
+isolated("a completed coordinator message triggers checkpoint continuation when text-complete is absent", async () => {
   await withProject("message-event-continuation", async (directory) => {
     let summarizeCalls = 0;
     let historyReads = 0;
@@ -4043,7 +4189,7 @@ test("a completed coordinator message triggers checkpoint continuation when text
   });
 });
 
-test("a completed coordinator text part triggers continuation before step finish", async () => {
+isolated("a completed coordinator text part triggers continuation before step finish", async () => {
   await withProject("text-part-event-continuation", async (directory) => {
     let summarizeCalls = 0;
     const messages: SessionMessage[] = [{
@@ -4099,7 +4245,7 @@ test("a completed coordinator text part triggers continuation before step finish
   });
 });
 
-test("an interim coordinator progress part does not recover until the message completes", async () => {
+isolated("an interim coordinator progress part does not recover until the message completes", async () => {
   await withProject("text-part-event-recovery", async (directory) => {
     let prompts = 0;
     const messages: SessionMessage[] = [{
@@ -4146,7 +4292,7 @@ test("an interim coordinator progress part does not recover until the message co
   });
 });
 
-test("coordinator children and foreign text parts cannot become continuation roots", async () => {
+isolated("coordinator children and foreign text parts cannot become continuation roots", async () => {
   await withProject("continuation-event-identity", async (directory) => {
     let summarizeCalls = 0;
     const messages: SessionMessage[] = [{
@@ -4188,7 +4334,7 @@ test("coordinator children and foreign text parts cannot become continuation roo
   });
 });
 
-test("an owned compaction text part resumes the same coordinator root", async () => {
+isolated("an owned compaction text part resumes the same coordinator root", async () => {
   await withProject("compaction-part-event-continuation", async (directory) => {
     let prompts = 0;
     let releaseSummary!: () => void;
@@ -7860,7 +8006,7 @@ test("root task watchdog aborts and resumes the same coordinator once when after
   });
 });
 
-test("root task watchdog recovery is passive outside the coordinator abort and synthetic resume APIs", async () => {
+isolated("root task watchdog recovery is passive outside the coordinator abort and synthetic resume APIs", async () => {
   await withProject("task-watchdog-passive-recovery", async (directory) => {
     await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
     await writeFile(join(directory, "handoff.json"), JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
@@ -7889,7 +8035,7 @@ test("root task watchdog recovery is passive outside the coordinator abort and s
   });
 });
 
-test("normal Task completion and manual session cancellation disarm root watchdog recovery", async () => {
+isolated("normal Task completion and manual session cancellation disarm root watchdog recovery", async () => {
   await withProject("task-watchdog-disarm", async (directory) => {
     await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
     await writeFile(join(directory, "handoff.json"), JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
@@ -7914,7 +8060,7 @@ test("normal Task completion and manual session cancellation disarm root watchdo
   });
 });
 
-test("root task watchdog defers and rearms for a running parallel task with unarchived durable state", async () => {
+isolated("root task watchdog defers and rearms for a running parallel task with unarchived durable state", async () => {
   await withProject("task-watchdog-parallel-defer", async (directory) => {
     await writeFile(join(directory, ".gitignore"), "parallel-contract.json\n");
     await writeFile(join(directory, "base.txt"), "base\n");
@@ -8012,6 +8158,8 @@ test("root task watchdog records deferred evidence and rearms while a child writ
     const deferred = logs.find(({ message }) => message === "batch-watchdog.deferred");
     assert.ok(deferred);
     assert.deepEqual(deferred.extra?.reasons, ["bound-write-gate"]);
+    assert.equal(logs.some(({ extra }) =>
+      Array.isArray(extra?.reasons) && extra.reasons.includes("durable-update-in-flight")), false);
 
     await hooks.event!({ event: { type: "session.idle", properties: { sessionID: "defer-root" } } });
     await new Promise((resolve) => setTimeout(resolve, 35));
@@ -8510,7 +8658,7 @@ test("git add requires exact explicit paths and rejects broad or undeclared path
   });
 });
 
-test("git commit requires the cached path set to equal the manifest", async () => {
+isolated("git commit requires the cached path set to equal the manifest", async () => {
   await withProject("git-commit-gate", async (directory) => {
     await execFileAsync("git", ["init", directory]);
     await writeFile(join(directory, "allowed.txt"), "allowed");
@@ -8555,7 +8703,7 @@ test("git commit requires the cached path set to equal the manifest", async () =
   });
 });
 
-test("git commit normalizes cached paths relative to a candidate subdirectory", async () => {
+isolated("git commit normalizes cached paths relative to a candidate subdirectory", async () => {
   await withProject("git-commit-candidate-subdirectory", async (directory) => {
     const candidateRoot = join(directory, "subrepo");
     await mkdir(candidateRoot);
@@ -8584,7 +8732,7 @@ test("git commit normalizes cached paths relative to a candidate subdirectory", 
   });
 });
 
-test("git commit accepts cached descendants of declared directory scopes", async () => {
+isolated("git commit accepts cached descendants of declared directory scopes", async () => {
   await withProject("git-commit-directory-scope", async (directory) => {
     const generated = join(directory, "generated");
     await mkdir(generated);
@@ -9051,4 +9199,8 @@ test("plugin fixture accepts warning-only handoff state and dedupes per session"
       "manifest-unavailable",
     );
   });
+});
+
+describe("isolated plugin fixtures", { concurrency: Math.min(4, availableParallelism()) }, () => {
+  for (const candidate of isolatedPluginCases) test(candidate.name, candidate.run);
 });

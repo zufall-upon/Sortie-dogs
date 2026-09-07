@@ -8,6 +8,7 @@ import { LUNA_FABRIC_MAX_ACTIVE } from "./luna-fabric-scheduler.js";
 import { normalizeRelativePath } from "./path.js";
 import { CHILD_TERMINAL_EVIDENCE_FIELDS, isChildTerminalIdentity, reconcileChildTerminal, sameChildTerminalIdentity,
   type ChildTerminalIdentity, type ChildTerminalEvidence, type ChildTerminalDisposition } from "./child-terminal-reconciliation.js";
+import type { TerminalRescueAcceptedBase } from "./terminal-rescue-policy.js";
 
 export const RUN_FLIGHT_LEDGER_SCHEMA_VERSION = "0.1" as const;
 export const MAX_RUN_FLIGHT_EVENTS = 2048;
@@ -60,6 +61,31 @@ export interface FlightObservation {
     readonly usd: number | null;
     readonly provenance: "provider_estimate" | "calculated" | "unknown";
   };
+}
+
+export interface FabricWaveArtifactEvidence {
+  readonly unit_id: string;
+  readonly commit_sha: string;
+  readonly change_fingerprint: string;
+  readonly validation_fingerprint: string;
+}
+
+export interface FabricWaveSchedulerEvidence {
+  readonly wave: number;
+  readonly base_sha: string;
+  readonly pending: readonly string[];
+  readonly completed: readonly string[];
+  readonly active: { readonly number: number; readonly base_sha: string; readonly unit_ids: readonly string[];
+    readonly lanes: Readonly<Record<string, number>> } | null;
+  readonly lane_affinity: Readonly<Record<string, number>>;
+}
+
+export interface FabricCandidateSnapshotEvidence {
+  readonly authority_sha: string;
+  readonly target_branch: string;
+  readonly candidate_ref: string;
+  readonly candidate_head: string;
+  readonly wave_heads: readonly string[];
 }
 
 interface EventBase { readonly at: string; }
@@ -121,10 +147,14 @@ export type RunFlightEvent =
   | (EventBase & { readonly kind: "child.terminal"; readonly identity: ChildTerminalIdentity; readonly disposition: ChildTerminalDisposition; readonly evidence: ChildTerminalEvidence })
   | (EventBase & { readonly kind: "run.planned"; readonly run_id: string; readonly initial_candidate_id: string; readonly budget_limits: FlightBudgetLimits; readonly resource_budget_limits?: FlightResourceBudget })
   | (EventBase & { readonly kind: "plan.compiled"; readonly plan_id: string; readonly proposal_id: string; readonly decision: "accepted" | "rejected"; readonly gap_codes: readonly AcceptanceCompileGapCode[] })
+  | (EventBase & { readonly kind: "fabric.wave.accepted"; readonly plan_id: string; readonly plan_binding_id: string;
+      readonly wave_index: number; readonly from_candidate_id: string; readonly candidate_id: string;
+      readonly artifacts: readonly FabricWaveArtifactEvidence[]; readonly scheduler_before: FabricWaveSchedulerEvidence;
+      readonly scheduler_after: FabricWaveSchedulerEvidence; readonly candidate_snapshot: FabricCandidateSnapshotEvidence })
   | (EventBase & { readonly kind: "route.selected"; readonly route_id: string; readonly candidate_id: string; readonly role: FlightRole; readonly model: string; readonly variant: string | null; readonly reason: "planning" | "implementation" | RecoveryKind })
   | (EventBase & { readonly kind: "wave.opened"; readonly wave_id: string; readonly wave_index: number; readonly candidate_id: string })
   | (EventBase & { readonly kind: "unit.opened"; readonly unit_id: string; readonly wave_id: string; readonly candidate_id: string; readonly references: FlightReferenceSet })
-  | (EventBase & { readonly kind: "attempt.started"; readonly attempt_id: string; readonly predecessor_attempt_id: string | null; readonly unit_id: string; readonly candidate_id: string; readonly route_id: string; readonly role: FlightRole; readonly selected_model: string; readonly selected_variant: string | null; readonly child_id: string | null; readonly call_id: string; readonly budget_charge: FlightBudgetCharge; readonly resource_budget_request?: FlightResourceBudget; readonly remediation_contract_id?: string })
+  | (EventBase & { readonly kind: "attempt.started"; readonly attempt_id: string; readonly predecessor_attempt_id: string | null; readonly unit_id: string; readonly candidate_id: string; readonly route_id: string; readonly role: FlightRole; readonly selected_model: string; readonly selected_variant: string | null; readonly child_id: string | null; readonly call_id: string; readonly budget_charge: FlightBudgetCharge; readonly resource_budget_request?: FlightResourceBudget; readonly remediation_contract_id?: string; readonly terminal_rescue_contract?: TerminalRescueAcceptedBase })
   | (EventBase & { readonly kind: "attempt.finished"; readonly attempt_id: string; readonly observed_model: string | null; readonly observed_variant: string | null; readonly failure: { readonly category: FailureCategory; readonly code: string } | null; readonly disposition: TerminalDisposition; readonly observation: FlightObservation; readonly references: FlightReferenceSet })
   | (EventBase & { readonly kind: "recovery.recorded"; readonly recovery_id: string; readonly failed_attempt_id: string; readonly kind_detail: RecoveryKind; readonly candidate_id: string })
   | (EventBase & { readonly kind: "validation.recorded"; readonly validation_id: string; readonly unit_id: string; readonly command_fingerprint: string; readonly result: "passed" | "failed"; readonly artifact_id: string | null })
@@ -170,6 +200,7 @@ export interface RunFlightState {
   readonly observations: readonly FlightObservation[];
   readonly terminal_disposition: "succeeded" | "failed" | "cancelled" | null;
   readonly plan_decisions: readonly { readonly plan_id: string; readonly proposal_id: string; readonly decision: "accepted" | "rejected"; readonly gap_codes: readonly AcceptanceCompileGapCode[] }[];
+  readonly accepted_fabric_waves: readonly Extract<RunFlightEvent, { readonly kind: "fabric.wave.accepted" }>[];
 }
 
 export type RunFlightLedgerErrorCode = "invalid" | "capacity" | "sequence" | "transition" | "budget" | "conflict";
@@ -197,11 +228,19 @@ const only = (value: Record<string, unknown>, keys: readonly string[]): boolean 
 const enumValue = (value: unknown, values: readonly string[]): value is string => typeof value === "string" && values.includes(value);
 const hash = (value: unknown): value is string => typeof value === "string" && HASH_PATTERN.test(value);
 const GAP_CODES: readonly AcceptanceCompileGapCode[] = ["malformed_proposal", "duplicate_acceptance_id", "duplicate_unit_id", "duplicate_validation_id", "duplicate_coverage", "unknown_acceptance_id", "unknown_unit_id", "unknown_validation_id", "validation_unit_mismatch", "undeclared_capsule", "validation_evidence_missing", "uncovered_acceptance"];
+const SHA_PATTERN = /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u;
+const PLAIN_HASH_PATTERN = /^[a-f0-9]{64}$/u;
 
 function canonical(value: unknown): string {
   const sort = (item: unknown): unknown => Array.isArray(item) ? item.map(sort) : isObject(item)
     ? Object.fromEntries(Object.keys(item).sort().map((key) => [key, sort(item[key])])) : item;
   return JSON.stringify(sort(value));
+}
+
+function validRescueContract(value: unknown): boolean {
+  return isObject(value) && only(value, ["candidate_id", "contract_id", "scope", "acceptance", "validation"]) &&
+    text(value.candidate_id) && text(value.contract_id) && [value.scope, value.acceptance, value.validation]
+      .every((items) => Array.isArray(items) && items.length > 0 && items.every(text));
 }
 
 function recordHash(sequence: number, previousHash: string | null, event: RunFlightEvent): string {
@@ -275,6 +314,56 @@ function validObservation(value: unknown): value is FlightObservation {
     (cost.provenance !== "unknown" || cost.usd === null);
 }
 
+function validFabricScheduler(value: unknown): value is FabricWaveSchedulerEvidence {
+  if (!isObject(value) || !only(value, ["wave", "base_sha", "pending", "completed", "active", "lane_affinity"]) ||
+    !integer(value.wave) || typeof value.base_sha !== "string" || !SHA_PATTERN.test(value.base_sha) ||
+    !Array.isArray(value.pending) || !Array.isArray(value.completed)) return false;
+  const pending = value.pending;
+  const completed = value.completed;
+  if (!pending.every(text) || !completed.every(text) ||
+    new Set(pending).size !== pending.length || new Set(completed).size !== completed.length ||
+    pending.some((id) => completed.includes(id)) || !isObject(value.lane_affinity) ||
+    Object.keys(value.lane_affinity).some((key) => !text(key)) ||
+    Object.values(value.lane_affinity).some((lane) => !integer(lane) || Number(lane) >= LUNA_FABRIC_MAX_ACTIVE)) return false;
+  if (value.active === null) return true;
+  return isObject(value.active) && only(value.active, ["number", "base_sha", "unit_ids", "lanes"]) &&
+    integer(value.active.number) && value.active.number === value.wave && typeof value.active.base_sha === "string" &&
+    SHA_PATTERN.test(value.active.base_sha) && value.active.base_sha === value.base_sha && Array.isArray(value.active.unit_ids) &&
+    value.active.unit_ids.length > 0 && value.active.unit_ids.length <= LUNA_FABRIC_MAX_ACTIVE && value.active.unit_ids.every(text) &&
+    new Set(value.active.unit_ids).size === value.active.unit_ids.length && value.active.unit_ids.every((id) => pending.includes(id)) &&
+    isObject(value.active.lanes) && only(value.active.lanes, value.active.unit_ids) &&
+    Object.values(value.active.lanes).every((lane) => integer(lane) && Number(lane) < LUNA_FABRIC_MAX_ACTIVE) &&
+    new Set(Object.values(value.active.lanes)).size === value.active.unit_ids.length;
+}
+
+function validFabricWaveEvent(value: Record<string, unknown>, base: readonly string[]): boolean {
+  if (!only(value, [...base, "plan_id", "plan_binding_id", "wave_index", "from_candidate_id", "candidate_id", "artifacts",
+    "scheduler_before", "scheduler_after", "candidate_snapshot"]) || !hash(value.plan_id) || !hash(value.plan_binding_id) ||
+    !integer(value.wave_index) || Number(value.wave_index) < 1 || typeof value.from_candidate_id !== "string" ||
+    !SHA_PATTERN.test(value.from_candidate_id) || typeof value.candidate_id !== "string" || !SHA_PATTERN.test(value.candidate_id) ||
+    value.from_candidate_id === value.candidate_id || !validFabricScheduler(value.scheduler_before) ||
+    !validFabricScheduler(value.scheduler_after) || !Array.isArray(value.artifacts) || value.artifacts.length === 0 ||
+    value.artifacts.length > LUNA_FABRIC_MAX_ACTIVE) return false;
+  const artifacts = value.artifacts;
+  if (!artifacts.every((artifact) => isObject(artifact) && only(artifact, ["unit_id", "commit_sha", "change_fingerprint", "validation_fingerprint"]) &&
+    text(artifact.unit_id) && typeof artifact.commit_sha === "string" && SHA_PATTERN.test(artifact.commit_sha) &&
+    typeof artifact.change_fingerprint === "string" && PLAIN_HASH_PATTERN.test(artifact.change_fingerprint) &&
+    typeof artifact.validation_fingerprint === "string" && PLAIN_HASH_PATTERN.test(artifact.validation_fingerprint)) ||
+    new Set(artifacts.map((artifact) => (artifact as FabricWaveArtifactEvidence).unit_id)).size !== artifacts.length) return false;
+  const before = value.scheduler_before;
+  const after = value.scheduler_after;
+  if (before.active === null || before.active.number !== value.wave_index || before.base_sha !== value.from_candidate_id ||
+    after.base_sha !== value.candidate_id || artifacts.map((artifact) => (artifact as FabricWaveArtifactEvidence).unit_id).join("\0") !== before.active.unit_ids.join("\0") ||
+    before.active.unit_ids.some((id) => !after.completed.includes(id)) || before.active.unit_ids.some((id) => after.pending.includes(id))) return false;
+  const snapshot = value.candidate_snapshot;
+  return isObject(snapshot) && only(snapshot, ["authority_sha", "target_branch", "candidate_ref", "candidate_head", "wave_heads"]) &&
+    typeof snapshot.authority_sha === "string" && SHA_PATTERN.test(snapshot.authority_sha) && text(snapshot.target_branch) &&
+    text(snapshot.candidate_ref) && typeof snapshot.candidate_head === "string" && snapshot.candidate_head === value.candidate_id &&
+    Array.isArray(snapshot.wave_heads) && snapshot.wave_heads.length === value.wave_index && snapshot.wave_heads.every((head) =>
+      typeof head === "string" && SHA_PATTERN.test(head)) && new Set(snapshot.wave_heads).size === snapshot.wave_heads.length &&
+    snapshot.wave_heads.at(-1) === value.candidate_id;
+}
+
 function validEvent(value: unknown): value is RunFlightEvent {
   if (!isObject(value) || !text(value.kind) || !text(value.at) || Number.isNaN(Date.parse(value.at))) return false;
   const base = ["kind", "at"];
@@ -303,10 +392,11 @@ function validEvent(value: unknown): value is RunFlightEvent {
         observation: { identity: value.identity, disposition: value.disposition }, evidence: value.evidence }).status === "ready";
     case "run.planned": return only(value, [...base, "run_id", "initial_candidate_id", "budget_limits", "resource_budget_limits"]) && text(value.run_id) && text(value.initial_candidate_id) && validBudget(value.budget_limits) && (!Object.hasOwn(value, "resource_budget_limits") || validResourceBudget(value.resource_budget_limits));
     case "plan.compiled": return only(value, [...base, "plan_id", "proposal_id", "decision", "gap_codes"]) && hash(value.plan_id) && hash(value.proposal_id) && enumValue(value.decision, ["accepted", "rejected"]) && Array.isArray(value.gap_codes) && value.gap_codes.length <= 128 && value.gap_codes.every((code) => enumValue(code, GAP_CODES)) && new Set(value.gap_codes).size === value.gap_codes.length && ((value.decision === "accepted" && value.gap_codes.length === 0) || (value.decision === "rejected" && value.gap_codes.length > 0));
+    case "fabric.wave.accepted": return validFabricWaveEvent(value, base);
     case "route.selected": return only(value, [...base, "route_id", "candidate_id", "role", "model", "variant", "reason"]) && text(value.route_id) && text(value.candidate_id) && enumValue(value.role, ["implementation", "review", "advice", "rescue"]) && text(value.model) && nullableText(value.variant) && enumValue(value.reason, ["planning", "implementation", "normal_remediation", "adaptive_probe", "read_only_diagnosis", "model_rescue"]);
     case "wave.opened": return only(value, [...base, "wave_id", "wave_index", "candidate_id"]) && text(value.wave_id) && Number.isInteger(value.wave_index) && Number(value.wave_index) >= 1 && text(value.candidate_id);
     case "unit.opened": return only(value, [...base, "unit_id", "wave_id", "candidate_id", "references"]) && text(value.unit_id) && text(value.wave_id) && text(value.candidate_id) && validReferences(value.references);
-    case "attempt.started": return only(value, [...base, "attempt_id", "predecessor_attempt_id", "unit_id", "candidate_id", "route_id", "role", "selected_model", "selected_variant", "child_id", "call_id", "budget_charge", "resource_budget_request", "remediation_contract_id"]) && text(value.attempt_id) && nullableText(value.predecessor_attempt_id) && text(value.unit_id) && text(value.candidate_id) && text(value.route_id) && enumValue(value.role, ["implementation", "review", "advice", "rescue"]) && text(value.selected_model) && nullableText(value.selected_variant) && nullableText(value.child_id) && text(value.call_id) && validCharge(value.budget_charge) && (!Object.hasOwn(value, "resource_budget_request") || validResourceBudget(value.resource_budget_request)) && (!Object.hasOwn(value, "remediation_contract_id") || hash(value.remediation_contract_id));
+    case "attempt.started": return only(value, [...base, "attempt_id", "predecessor_attempt_id", "unit_id", "candidate_id", "route_id", "role", "selected_model", "selected_variant", "child_id", "call_id", "budget_charge", "resource_budget_request", "remediation_contract_id", "terminal_rescue_contract"]) && text(value.attempt_id) && nullableText(value.predecessor_attempt_id) && text(value.unit_id) && text(value.candidate_id) && text(value.route_id) && enumValue(value.role, ["implementation", "review", "advice", "rescue"]) && text(value.selected_model) && nullableText(value.selected_variant) && nullableText(value.child_id) && text(value.call_id) && validCharge(value.budget_charge) && (!Object.hasOwn(value, "resource_budget_request") || validResourceBudget(value.resource_budget_request)) && (!Object.hasOwn(value, "remediation_contract_id") || hash(value.remediation_contract_id)) && (!Object.hasOwn(value, "terminal_rescue_contract") || validRescueContract(value.terminal_rescue_contract));
     case "attempt.finished": {
       if (!only(value, [...base, "attempt_id", "observed_model", "observed_variant", "failure", "disposition", "observation", "references"]) || !text(value.attempt_id) || !nullableText(value.observed_model) || !nullableText(value.observed_variant) || !enumValue(value.disposition, ["continue", "succeeded", "failed", "cancelled"]) || !validObservation(value.observation) || !validReferences(value.references)) return false;
       const failure = value.failure;
@@ -334,12 +424,16 @@ interface MutableState {
   pending_candidate: { from: string; to: string; wave: string; artifact: string } | null; candidate_completed: boolean; cleanup_completed: boolean;
   ids: Set<string>; validation_fingerprints: Set<string>; attempts: Map<string, string>; units: Map<string, MutableUnitState>;
   plan_decisions: { plan_id: string; proposal_id: string; decision: "accepted" | "rejected"; gap_codes: AcceptanceCompileGapCode[] }[]; plan_ids: Set<string>; accepted_plan: string | null;
+  accepted_fabric_waves: Extract<RunFlightEvent, { readonly kind: "fabric.wave.accepted" }>[];
   resource_budget_limits: FlightResourceBudget | null;
   resource_budget_consumed: FlightResourceUsage;
   resource_reservations: Map<string, FlightResourceUsage>;
 }
 
 interface MutableUnitState {
+  last_started: Extract<RunFlightEvent, { kind: "attempt.started" }> | null;
+  last_failure: FailureCategory | null;
+  rescue_used: boolean;
   last_recovery_kind: "implementation" | RecoveryKind | null;
   last_validation: "passed" | "failed" | null;
   wave_id: string;
@@ -357,7 +451,7 @@ function initialState(): MutableState {
     last_attempt_id: null, completed_wave_count: 0, budget_limits: null, budget_consumed: { recovery_actions: 0, probe_iterations: 0, model_attempts: 0 },
     child_counts: { implementation: 0, review: 0, advice: 0, rescue: 0 }, validation_reruns: 0, observations: [], terminal_disposition: null,
     current_route_id: null, pending_candidate: null, candidate_completed: false, cleanup_completed: false,
-    ids: new Set(), validation_fingerprints: new Set(), attempts: new Map(), units: new Map(), plan_decisions: [], plan_ids: new Set(), accepted_plan: null,
+    ids: new Set(), validation_fingerprints: new Set(), attempts: new Map(), units: new Map(), plan_decisions: [], plan_ids: new Set(), accepted_plan: null, accepted_fabric_waves: [],
     resource_budget_limits: null, resource_budget_consumed: { time_ms: 0, cost_usd: 0 }, resource_reservations: new Map(), children: new Map(), diagnoses: new Map() };
 }
 
@@ -455,6 +549,14 @@ function applyEvent(state: MutableState, event: RunFlightEvent): void {
       if ([...state.diagnoses.values()].some((entry) => entry.lanes.some((lane) => lane.diagnosis_id === event.identity.attempt_id))) {
         requireTransition(![...state.children.values()].some((entry) => entry.identity.child_id === event.identity.child_id), "Diagnosis requires a fresh child session.");
       }
+      const attempt = state.units.get(event.identity.unit_id)?.last_started;
+      if (attempt?.terminal_rescue_contract !== undefined && attempt.attempt_id === event.identity.attempt_id) {
+        requireTransition(attempt.call_id === event.identity.call_id && attempt.candidate_id === event.identity.candidate_id &&
+          attempt.route_id === event.identity.route_id && attempt.predecessor_attempt_id === event.identity.predecessor_attempt_id &&
+          ![...state.children.values()].some((child) => child.identity.child_id === event.identity.child_id),
+        "Terminal rescue child must match its reserved attempt and use a fresh session.");
+        if (attempt.child_id === null) state.child_counts.rescue += 1;
+      }
       state.children.set(event.identity.attempt_id, { identity: { ...event.identity }, deadline_ms: event.deadline_ms,
         stop_trigger: null, terminal: null });
       if ([...state.diagnoses.values()].some((entry) => entry.lanes.some((lane) => lane.diagnosis_id === event.identity.attempt_id))) state.child_counts.advice += 1;
@@ -485,6 +587,23 @@ function applyEvent(state: MutableState, event: RunFlightEvent): void {
       requireTransition(state.active_wave_id === null && state.current_route_id === null && !state.plan_ids.has(event.plan_id) && state.accepted_plan === null, "Plan decision must be unique and precede routing.");
       state.plan_ids.add(event.plan_id); if (event.decision === "accepted") state.accepted_plan = event.plan_id;
       state.plan_decisions.push({ plan_id: event.plan_id, proposal_id: event.proposal_id, decision: event.decision, gap_codes: [...event.gap_codes] }); break;
+    case "fabric.wave.accepted": {
+      const previous = state.accepted_fabric_waves.at(-1);
+      requireTransition(state.run_id === null && state.accepted_plan === event.plan_id &&
+        event.wave_index === state.accepted_fabric_waves.length + 1 &&
+        (previous === undefined ? event.candidate_snapshot.authority_sha === event.from_candidate_id :
+          (previous.plan_binding_id === event.plan_binding_id &&
+          previous.candidate_id === event.from_candidate_id && canonical(previous.scheduler_after) === canonical(event.scheduler_before) &&
+          previous.candidate_snapshot.authority_sha === event.candidate_snapshot.authority_sha &&
+          previous.candidate_snapshot.target_branch === event.candidate_snapshot.target_branch &&
+          previous.candidate_snapshot.candidate_ref === event.candidate_snapshot.candidate_ref &&
+          canonical([...previous.candidate_snapshot.wave_heads, event.candidate_id]) === canonical(event.candidate_snapshot.wave_heads))),
+        "Accepted fabric wave is missing, reordered, or conflicts with its plan and candidate lineage.");
+      state.accepted_fabric_waves.push(structuredClone(event));
+      state.current_candidate_id = event.candidate_id;
+      state.completed_wave_count += 1;
+      break;
+    }
     case "route.selected":
       requireTransition(state.run_id !== null && state.active_wave_id === null && !state.candidate_completed && event.candidate_id === state.current_candidate_id, "Route must target the current candidate between waves."); claim(state, event.route_id); state.current_route_id = event.route_id; break;
     case "wave.opened":
@@ -494,7 +613,7 @@ function applyEvent(state: MutableState, event: RunFlightEvent): void {
       const openUnits = [...state.units.values()].filter((unit) => unit.completed_disposition === null);
       if (openUnits.length > 0) for (const unit of openUnits) if (unit.last_attempt_id === null) unit.initial_predecessor_id = null;
       state.units.set(event.unit_id, {
-        last_recovery_kind: null, last_validation: null,
+        last_recovery_kind: null, last_validation: null, last_started: null, last_failure: null, rescue_used: false,
         wave_id: event.wave_id, active_attempt_id: null, last_attempt_id: null,
         initial_predecessor_id: openUnits.length === 0 ? state.last_attempt_id : null,
         last_failed_attempt_id: null, last_disposition: null, completed_disposition: null,
@@ -507,6 +626,23 @@ function applyEvent(state: MutableState, event: RunFlightEvent): void {
       const expectedPredecessor = unit?.last_attempt_id ?? unit?.initial_predecessor_id ?? null;
       requireTransition(unit !== undefined && unit.completed_disposition === null && unit.active_attempt_id === null && event.candidate_id === state.current_candidate_id && event.predecessor_attempt_id === expectedPredecessor, "Attempt predecessor, unit, or candidate is invalid.");
       requireTransition(event.route_id === state.active_wave_route_id, "Attempt route does not match the active wave route."); claim(state, event.attempt_id);
+      if (event.terminal_rescue_contract !== undefined) {
+        const prior = unit.last_started;
+        const child = prior === null ? undefined : state.children.get(prior.attempt_id);
+        requireTransition(prior?.role === "implementation" && unit.last_recovery_kind === "normal_remediation" &&
+          unit.last_disposition === "failed" && unit.last_failure === "implementation" && unit.last_validation === "failed" &&
+          !unit.rescue_used && child?.terminal?.disposition === "failed" &&
+          child.identity.run_id === state.run_id && child.identity.unit_id === event.unit_id &&
+          child.identity.candidate_id === event.candidate_id && child.identity.route_id === event.route_id &&
+          child.identity.call_id === prior.call_id && (prior.child_id === null || child.identity.child_id === prior.child_id),
+        "Terminal rescue requires the reconciled failed normal remediation and canonical validation.");
+        requireTransition(![...state.units.values()].some((other) => other.active_attempt_id !== null && other.last_started?.role === "rescue"),
+          "Only one terminal rescue may be active in a run.");
+        requireTransition(event.role === "rescue" && event.budget_charge.kind === "model_rescue" &&
+          event.budget_charge.model_attempts > 0 && event.resource_budget_request !== undefined &&
+          state.resource_budget_limits !== null && event.terminal_rescue_contract.candidate_id === event.candidate_id,
+        "Terminal rescue must preserve its accepted candidate and reserve a measured resource budget.");
+      }
       const selected = [...state.diagnoses.values()].find((entry) => entry.unit_id === event.unit_id && entry.failed_attempt_id === expectedPredecessor);
       if (selected !== undefined) {
         const directRescue = selected.selection === null && event.remediation_contract_id === undefined && event.budget_charge.kind === "model_rescue" &&
@@ -523,6 +659,8 @@ function applyEvent(state: MutableState, event: RunFlightEvent): void {
       chargeRecoveryBudget(state, event.budget_charge);
       reserveResourceBudget(state, event.attempt_id, event.resource_budget_request);
       unit.last_recovery_kind = event.budget_charge.kind; unit.last_validation = null;
+      unit.last_started = event;
+      unit.rescue_used ||= event.budget_charge.kind === "model_rescue";
       unit.budget_consumed = { recovery_actions: unit.budget_consumed.recovery_actions + event.budget_charge.recovery_actions, probe_iterations: unit.budget_consumed.probe_iterations + event.budget_charge.probe_iterations, model_attempts: unit.budget_consumed.model_attempts + event.budget_charge.model_attempts };
       unit.active_attempt_id = event.attempt_id; unit.last_attempt_id = event.attempt_id; unit.last_disposition = null;
       state.last_attempt_id = event.attempt_id; state.attempts.set(event.attempt_id, event.unit_id);
@@ -533,12 +671,18 @@ function applyEvent(state: MutableState, event: RunFlightEvent): void {
       const unitId = state.attempts.get(event.attempt_id);
       const unit = unitId === undefined ? undefined : state.units.get(unitId);
       requireTransition(unit !== undefined && unit.active_attempt_id === event.attempt_id, "Attempt finish does not match the active attempt.");
+      if (unit.last_started?.terminal_rescue_contract !== undefined) {
+        requireTransition(state.children.get(event.attempt_id)?.terminal?.disposition === event.disposition,
+          "Terminal rescue cannot finish before its child and writer are reconciled.");
+      }
       // Preserve actual overruns and missing measurements; only a subsequent attempt is denied.
       state.resource_reservations.delete(event.attempt_id);
       state.resource_budget_consumed = addResources(state.resource_budget_consumed, {
         time_ms: event.observation.duration_ms, cost_usd: event.observation.estimated_cost.usd,
       });
-      unit.active_attempt_id = null; unit.last_failed_attempt_id = event.failure === null ? null : event.attempt_id; unit.last_disposition = event.disposition; state.observations.push(event.observation); break;
+      unit.active_attempt_id = null; unit.last_failed_attempt_id = event.failure === null ? null : event.attempt_id; unit.last_disposition = event.disposition;
+      unit.last_failure = event.failure?.category ?? null;
+      state.observations.push(event.observation); break;
     }
     case "recovery.recorded": {
       const unitId = state.attempts.get(event.failed_attempt_id);
@@ -582,7 +726,8 @@ function publicState(state: MutableState): RunFlightState {
     plan_decisions: state.plan_decisions.map((entry) => ({ ...entry, gap_codes: [...entry.gap_codes] })),
     resource_budget_limits: state.resource_budget_limits === null ? null : { ...state.resource_budget_limits },
     resource_budget_consumed: { ...state.resource_budget_consumed }, resource_budget_reserved: reservedResources(state),
-    children: structuredClone([...state.children.values()]), diagnoses: structuredClone([...state.diagnoses.values()]) };
+    children: structuredClone([...state.children.values()]), diagnoses: structuredClone([...state.diagnoses.values()]),
+    accepted_fabric_waves: structuredClone(state.accepted_fabric_waves) };
 }
 
 export function reconstructRunFlightLedger(records: readonly RunFlightEventRecord[]): RunFlightState {
@@ -606,6 +751,28 @@ export function createRunFlightPlanPrefix(event: PlanCompiledFlightEvent): reado
   const record = { sequence: 1, previous_hash: null, event_hash: recordHash(1, null, event), event: structuredClone(event) };
   reconstructRunFlightLedger([record]);
   return [record];
+}
+
+export function appendRunFlightLedgerEvents(
+  records: readonly RunFlightEventRecord[],
+  events: readonly RunFlightEvent[],
+): readonly RunFlightEventRecord[] {
+  reconstructRunFlightLedger(records);
+  let previousHash = records.at(-1)?.event_hash ?? null;
+  const appended = events.map((event, index): RunFlightEventRecord => {
+    if (!validEvent(event)) throw new RunFlightLedgerError("invalid", "Event does not match the closed ledger schema.");
+    const sequence = records.length + index + 1;
+    const record = { sequence, previous_hash: previousHash, event_hash: recordHash(sequence, previousHash, event),
+      event: structuredClone(event) };
+    previousHash = record.event_hash;
+    return record;
+  });
+  const next = [...structuredClone(records), ...appended];
+  reconstructRunFlightLedger(next);
+  if (next.length > MAX_RUN_FLIGHT_EVENTS || Buffer.byteLength(canonical({ schema_version: RUN_FLIGHT_LEDGER_SCHEMA_VERSION, events: next })) > MAX_RUN_FLIGHT_LEDGER_BYTES) {
+    throw new RunFlightLedgerError("capacity", "Ledger capacity exceeded.");
+  }
+  return next;
 }
 
 export function createRunFlightLedgerInitialPrefix(input: unknown): readonly RunFlightEventRecord[] {

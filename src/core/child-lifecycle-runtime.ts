@@ -4,12 +4,15 @@ import { isChildTerminalIdentity, reconcileChildTerminal, sameChildTerminalIdent
   type ChildTerminalIdentity, type ChildTerminalObservation, type ChildTerminalEvidence } from "./child-terminal-reconciliation.js";
 
 export const DEFAULT_CHILD_DEADLINE_MS = 10 * 60_000;
+export const DEFAULT_CHILD_CHECK_WAIT_MS = 5000;
 export interface ChildLifecycleDescriptor {
   readonly identity: ChildTerminalIdentity;
   readonly deadline_ms: number;
 }
 export interface ChildLifecycleRuntime {
   observe(): Promise<{ observation: ChildTerminalObservation; evidence: ChildTerminalEvidence }>;
+  /** Optional host policy entry. A terminal result means the same lifecycle completed a live takeover. */
+  takeover?(): Promise<ChildLifecycleResult | undefined>;
   /** Resolves only after the host's normal process-tree stop request has completed. */
   stop(): Promise<void>;
   release(): Promise<void>;
@@ -18,6 +21,9 @@ export interface ChildLifecycleRuntime {
 export type ChildLifecycleResult =
   | { status: "terminal"; state: ChildFlightState }
   | { status: "waiting"; reason: string };
+export interface ChildLifecycleOptions {
+  readonly checkWaitMs?: number;
+}
 
 /** One lifecycle for implementation, diagnosis, and escalation; the host retains process ownership. */
 export class CancellableChildLifecycle {
@@ -26,22 +32,25 @@ export class CancellableChildLifecycle {
   #stopping = false;
   #disposed = false;
   #explicit = false;
+  #evaluatingTakeover = false;
 
   private constructor(readonly descriptor: ChildLifecycleDescriptor, readonly ledger: RunFlightLedger,
-    readonly runtime: ChildLifecycleRuntime) {}
+    readonly runtime: ChildLifecycleRuntime, readonly checkWaitMs: number) {}
 
   static async open(descriptor: ChildLifecycleDescriptor, ledger: RunFlightLedger,
-    runtime: ChildLifecycleRuntime): Promise<CancellableChildLifecycle> {
+    runtime: ChildLifecycleRuntime, options: ChildLifecycleOptions = {}): Promise<CancellableChildLifecycle> {
     if (!isChildTerminalIdentity(descriptor.identity) || !Number.isSafeInteger(descriptor.deadline_ms) || descriptor.deadline_ms < 0) {
       throw new Error("invalid-child-descriptor");
     }
+    const checkWaitMs = options.checkWaitMs ?? DEFAULT_CHILD_CHECK_WAIT_MS;
+    if (!Number.isSafeInteger(checkWaitMs) || checkWaitMs < 1) throw new Error("invalid-child-lifecycle-options");
     const prior = (await ledger.read()).state.children.find((entry) => entry.identity.attempt_id === descriptor.identity.attempt_id);
     if (prior !== undefined && (!sameChildTerminalIdentity(prior.identity, descriptor.identity) || prior.deadline_ms !== descriptor.deadline_ms)) {
       throw new Error("child-descriptor-drift");
     }
     await ledger.append({ kind: "child.registered", at: new Date().toISOString(), ...descriptor });
     const lifecycle = new CancellableChildLifecycle(Object.freeze({ ...descriptor,
-      identity: Object.freeze({ ...descriptor.identity }) }), ledger, runtime);
+      identity: Object.freeze({ ...descriptor.identity }) }), ledger, runtime, checkWaitMs);
     lifecycle.#stopping = prior?.stop_trigger != null;
     return lifecycle;
   }
@@ -75,17 +84,39 @@ export class CancellableChildLifecycle {
     const operation = this.#operation;
     // A slow host must not block the coordinator or cause overlapping stop/release operations.
     return new Promise((resolve) => {
-      const timer = setTimeout(() => resolve({ status: "waiting", reason: "runtime-pending" }), 5000);
+      const timer = setTimeout(() => resolve({ status: "waiting", reason: "runtime-pending" }), this.checkWaitMs);
       void operation.then((result) => { clearTimeout(timer); resolve(result); });
     });
   }
 
-  async #check(): Promise<ChildLifecycleResult> {
+  /** Live takeover uses the same bounded stop/release path, but must name the currently registered attempt. */
+  stopForTakeover(identity: ChildTerminalIdentity): Promise<ChildLifecycleResult> {
+    if (!isChildTerminalIdentity(identity) || !sameChildTerminalIdentity(identity, this.descriptor.identity)) {
+      return Promise.resolve({ status: "waiting", reason: "identity-drift" });
+    }
+    if (this.#evaluatingTakeover) return this.#check(false);
+    this.#explicit = true;
+    return this.check(true);
+  }
+
+  async #check(allowTakeover = true): Promise<ChildLifecycleResult> {
     const identity = this.descriptor.identity;
     const state = (await this.ledger.read()).state.children.find((entry) => entry.identity.attempt_id === identity.attempt_id)!;
+    if (allowTakeover && !this.#explicit && Date.now() >= state.deadline_ms && this.runtime.takeover !== undefined) {
+      this.#evaluatingTakeover = true;
+      try {
+        const takeover = await this.runtime.takeover();
+        if (takeover !== undefined) {
+          if (takeover.status === "terminal") this.dispose();
+          return takeover;
+        }
+      } finally {
+        this.#evaluatingTakeover = false;
+      }
+    }
     if (state.terminal !== null) {
       await this.runtime.terminal(state);
-      this.dispose();
+      if (!this.#evaluatingTakeover) this.dispose();
       return { status: "terminal", state };
     }
     let observed = await this.runtime.observe();
@@ -128,7 +159,7 @@ export class CancellableChildLifecycle {
       disposition: observed.observation.disposition, evidence: observed.evidence });
     const terminal = (await this.ledger.read()).state.children.find((entry) => entry.identity.attempt_id === identity.attempt_id)!;
     await this.runtime.terminal(terminal);
-    this.dispose();
+    if (!this.#evaluatingTakeover) this.dispose();
     return { status: "terminal", state: terminal };
   }
 }

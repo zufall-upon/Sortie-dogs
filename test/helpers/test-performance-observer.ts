@@ -4,6 +4,7 @@ import { basename, join } from "node:path";
 import { performance } from "node:perf_hooks";
 
 type Metric = { count: number; bytes: number; ms: number; samples_ms?: number[] };
+type GitCommandMetric = { count: number; child_ms: number };
 type Summary = {
   schema: 1;
   pid: number;
@@ -14,9 +15,21 @@ type Summary = {
   state_writes: Metric;
   temp_writes: Metric;
   observer_writes: number;
-  methods: Record<string, Metric>;
+  methods: Record<string, Metric | GitCommandMetric>;
+  git_commands: Record<string, GitCommandMetric>;
   fixture_roots: string[];
 };
+
+const gitCommands = new Set([
+  "add", "branch", "cat-file", "check-ignore", "check-ref-format", "checkout", "clean", "commit",
+  "config", "diff", "for-each-ref", "hash-object", "init", "ls-files", "merge", "merge-base",
+  "merge-tree", "mktree", "read-tree", "rev-list", "rev-parse", "show", "show-ref", "status",
+  "symbolic-ref", "update-index", "update-ref", "verify-commit", "worktree", "write-tree",
+]);
+const gitGlobalOptionsWithValue = new Set([
+  "-c", "-C", "--config-env", "--exec-path", "--git-dir", "--namespace", "--super-prefix", "--work-tree",
+]);
+const maxGitCommandsPerPhase = 64;
 
 const outputDirectory = process.env.SORTIE_PERF_OUTPUT_DIR;
 const started = performance.now();
@@ -32,11 +45,42 @@ const summary: Summary = {
   temp_writes: metric(),
   observer_writes: 0,
   methods: {},
+  git_commands: {},
   fixture_roots: [],
 };
 
 function metric(): Metric {
   return { count: 0, bytes: 0, ms: 0 };
+}
+
+function classifyGitCommand(args: unknown): string {
+  if (!Array.isArray(args)) return "other";
+  let index = 0;
+  const first = args[0];
+  if (typeof first === "string" && ["git", "git.exe"].includes(basename(first).toLowerCase())) index += 1;
+  while (index < args.length) {
+    const value = args[index];
+    if (typeof value !== "string") return "other";
+    if (gitGlobalOptionsWithValue.has(value)) {
+      index += 2;
+      continue;
+    }
+    if (value.startsWith("-")) {
+      index += 1;
+      continue;
+    }
+    return gitCommands.has(value) ? value : "other";
+  }
+  return "other";
+}
+
+function gitCommandMetric(command: string): GitCommandMetric {
+  const existing = summary.git_commands[command];
+  if (existing !== undefined) return existing;
+  const boundedCommand = Object.keys(summary.git_commands).length < maxGitCommandsPerPhase ? command : "other";
+  const entry = summary.git_commands[boundedCommand] ??= { count: 0, child_ms: 0 };
+  summary.methods[`git:${boundedCommand}`] = entry;
+  return entry;
 }
 
 function classifyTestPhase(argv: readonly string[]): string {
@@ -164,9 +208,22 @@ function install(): void {
   patchDescriptorWrites();
 
   const originalSpawn = childProcess.ChildProcess.prototype.spawn;
-  childProcess.ChildProcess.prototype.spawn = function (options: { file?: string }) {
-    if (basename(options.file ?? "").toLowerCase().replace(/\.exe$/u, "") === "git") summary.git_processes += 1;
-    return originalSpawn.call(this, options);
+  childProcess.ChildProcess.prototype.spawn = function (options: { file?: string; args?: unknown }) {
+    if (basename(options.file ?? "").toLowerCase().replace(/\.exe$/u, "") !== "git") {
+      return originalSpawn.call(this, options);
+    }
+    summary.git_processes += 1;
+    const entry = gitCommandMetric(classifyGitCommand(options.args));
+    const childStarted = performance.now();
+    entry.count += 1;
+    try {
+      const spawned = originalSpawn.call(this, options);
+      this.once("close", () => { entry.child_ms += Math.round(performance.now() - childStarted); });
+      return spawned;
+    } catch (error) {
+      entry.child_ms += Math.round(performance.now() - childStarted);
+      throw error;
+    }
   };
 
   const checkpoint = setInterval(() => persist(), 3_000);
@@ -182,7 +239,10 @@ function persist(): void {
 }
 
 export async function observeMethod<T>(name: string, operation: () => Promise<T> | T): Promise<T> {
-  const entry = summary.methods[name] ??= { ...metric(), samples_ms: [] };
+  const existing = summary.methods[name];
+  const entry = existing !== undefined && "ms" in existing
+    ? existing
+    : summary.methods[name] = { ...metric(), samples_ms: [] };
   const methodStarted = performance.now();
   entry.count += 1;
   try {

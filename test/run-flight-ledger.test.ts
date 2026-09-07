@@ -5,7 +5,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { EvidenceCapsuleStore, type EvidenceCapsule } from "../dist/core/evidence-capsule.js";
-import { RunFlightLedger, RunFlightLedgerError, reconstructRunFlightLedger, type FlightObservation, type RunFlightEvent, type FlightResourceBudget, type RecoveryKind } from "../dist/core/run-flight-ledger.js";
+import { appendRunFlightLedgerEvents, createRunFlightPlanPrefix, RunFlightLedger, RunFlightLedgerError, reconstructRunFlightLedger, type FlightObservation, type RunFlightEvent, type FlightResourceBudget, type RecoveryKind } from "../dist/core/run-flight-ledger.js";
 import { compileAcceptanceCoverage, type AcceptanceCompileProposal } from "../src/core/acceptance-compiler.ts";
 
 const digest = (character: string): string => `sha256:${character.repeat(64)}`;
@@ -110,6 +110,50 @@ test("rejects missing, reordered, duplicate, and conflicting transitions", async
   await writeFile(file, JSON.stringify(raw), "utf8");
   assert.throws(() => reconstructRunFlightLedger(raw.events as never[]), (error: unknown) => error instanceof RunFlightLedgerError && error.code === "sequence");
   void capsuleId;
+});
+
+test("accepted fabric wave evidence preserves a legacy plan prefix and fails closed on broken two-wave lineage", () => {
+  const planId = digest("a");
+  const bindingId = digest("b");
+  const c0 = "0".repeat(40);
+  const c1 = "1".repeat(40);
+  const c2 = "2".repeat(40);
+  const prefix = createRunFlightPlanPrefix({ kind: "plan.compiled", at, plan_id: planId,
+    proposal_id: digest("c"), decision: "accepted", gap_codes: [] });
+  assert.equal(reconstructRunFlightLedger(prefix).accepted_fabric_waves.length, 0);
+  const scheduler0 = { wave: 1, base_sha: c0, pending: ["a", "b"], completed: [],
+    active: { number: 1, base_sha: c0, unit_ids: ["a"], lanes: { a: 0 } }, lane_affinity: {} };
+  const scheduler1 = { wave: 2, base_sha: c1, pending: ["b"], completed: ["a"],
+    active: { number: 2, base_sha: c1, unit_ids: ["b"], lanes: { b: 0 } }, lane_affinity: {} };
+  const scheduler2 = { wave: 2, base_sha: c2, pending: [], completed: ["a", "b"], active: null, lane_affinity: {} };
+  const artifact = (unit_id: string, commit_sha: string) => ({ unit_id, commit_sha,
+    change_fingerprint: "d".repeat(64), validation_fingerprint: "e".repeat(64) });
+  const records = appendRunFlightLedgerEvents(prefix, [{
+    kind: "fabric.wave.accepted", at, plan_id: planId, plan_binding_id: bindingId, wave_index: 1,
+    from_candidate_id: c0, candidate_id: c1, artifacts: [artifact("a", "a".repeat(40))],
+    scheduler_before: scheduler0, scheduler_after: scheduler1,
+    candidate_snapshot: { authority_sha: c0, target_branch: "main", candidate_ref: "refs/candidate/run",
+      candidate_head: c1, wave_heads: [c1] },
+  }, {
+    kind: "fabric.wave.accepted", at, plan_id: planId, plan_binding_id: bindingId, wave_index: 2,
+    from_candidate_id: c1, candidate_id: c2, artifacts: [artifact("b", "b".repeat(40))],
+    scheduler_before: scheduler1, scheduler_after: scheduler2,
+    candidate_snapshot: { authority_sha: c0, target_branch: "main", candidate_ref: "refs/candidate/run",
+      candidate_head: c2, wave_heads: [c1, c2] },
+  }]);
+  const state = reconstructRunFlightLedger(records);
+  assert.equal(state.current_candidate_id, c2);
+  assert.equal(state.completed_wave_count, 2);
+  assert.deepEqual(state.accepted_fabric_waves.map(({ candidate_id, artifacts }) =>
+    ({ candidate_id, units: artifacts.map(({ unit_id }) => unit_id) })), [
+    { candidate_id: c1, units: ["a"] }, { candidate_id: c2, units: ["b"] },
+  ]);
+  for (const mutate of [
+    (value: typeof records) => value.slice(1),
+    (value: typeof records) => [...value, value.at(-1)!],
+    (value: typeof records) => [value[0]!, value[2]!, value[1]!],
+    (value: typeof records) => { const changed = structuredClone(value); (changed[2]!.event as { candidate_id: string }).candidate_id = "3".repeat(40); return changed; },
+  ]) assert.throws(() => reconstructRunFlightLedger(mutate(records)), RunFlightLedgerError);
 });
 
 test("rejects undeclared capsules, out-of-scope capsule sources, unknown fields, and non-hash artifacts", async () => {

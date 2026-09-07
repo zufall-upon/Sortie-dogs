@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 import { lstat, mkdtemp, mkdir, readFile, readdir, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import test from "node:test";
+import nodeTest, { type TestContext } from "node:test";
 
 import {
   WorktreeLifecycle,
@@ -11,6 +11,17 @@ import {
   type WorktreeBasePin,
 } from "../dist/core/worktree-lifecycle.js";
 import type { WorktreeParallelTask } from "../src/core/types.ts";
+
+type RegisteredTest = {
+  name: string;
+  body: (context: TestContext) => unknown;
+};
+
+const registeredTests: RegisteredTest[] = [];
+
+function test(name: string, body: (context: TestContext) => unknown): void {
+  registeredTests.push({ name, body });
+}
 
 function run(executable: string, args: readonly string[], cwd: string): Promise<string> {
   return new Promise((resolvePromise, reject) => {
@@ -107,12 +118,59 @@ test("five worktrees share one exact base, isolate edits, hash reserved IDs, and
   const value = await fixture("parallel");
   try {
     const pin = await value.lifecycle.pinCleanBase();
+    type PrivateLifecycle = {
+      inventory: { records: Array<{ branch: string; phase: string }> };
+      createAndLock(record: unknown): Promise<unknown>;
+      saveInventory(): Promise<void>;
+    };
+    const lifecycle = value.lifecycle as unknown as PrivateLifecycle;
+    const originalCreateAndLock = lifecycle.createAndLock.bind(value.lifecycle);
+    const originalSave = lifecycle.saveInventory.bind(value.lifecycle);
+    let addEntrants = 0;
+    let activePrepares = 0;
+    let maximumActivePrepares = 0;
+    let activeSaves = 0;
+    let maximumActiveSaves = 0;
+    const savedPhases: string[][] = [];
+    lifecycle.saveInventory = async () => {
+      activeSaves += 1;
+      maximumActiveSaves = Math.max(maximumActiveSaves, activeSaves);
+      try {
+        await originalSave();
+        savedPhases.push(lifecycle.inventory.records.map(({ phase }) => phase));
+      } finally {
+        activeSaves -= 1;
+      }
+    };
+    lifecycle.createAndLock = async (record) => {
+      addEntrants += 1;
+      activePrepares += 1;
+      maximumActivePrepares = Math.max(maximumActivePrepares, activePrepares);
+      try {
+        return await originalCreateAndLock(record);
+      } finally {
+        activePrepares -= 1;
+      }
+    };
+
     const ids = ["CON", "aux", "safe-worker", "lane-four", "lane-five"];
     const expectedPrefixes = ids.map((id) => value.lifecycle.pathPrefixFor(id));
     assert.deepEqual(expectedPrefixes, ids.map((id) => value.lifecycle.pathPrefixFor(id)));
     for (const path of expectedPrefixes) assert.match(basename(path), /^wt-[0-9a-f]{16}-$/u);
 
     const created = await value.lifecycle.createMany({ pin, tasks: tasks(pin, ids) });
+    assert.equal(addEntrants, 5);
+    assert.equal(maximumActivePrepares, 5);
+    assert.equal(maximumActiveSaves, 1);
+    assert.deepEqual(savedPhases.slice(0, 6), [
+      ["creating", "creating", "creating", "creating", "creating"],
+      ["setting-up", "creating", "creating", "creating", "creating"],
+      ["setting-up", "setting-up", "creating", "creating", "creating"],
+      ["setting-up", "setting-up", "setting-up", "creating", "creating"],
+      ["setting-up", "setting-up", "setting-up", "setting-up", "creating"],
+      ["setting-up", "setting-up", "setting-up", "setting-up", "setting-up"],
+    ]);
+    assert.deepEqual(savedPhases.at(-1), Array(5).fill("ready"));
     assert.equal(created.length, 5);
     for (const [index, entry] of created.entries()) {
       assert.equal(entry.path.startsWith(expectedPrefixes[index]!), true);
@@ -162,11 +220,103 @@ test("candidate base worktree leaves the authority checkout unchanged and suppor
     await git(created!.path, "commit", "-q", "-m", "accepted");
     const commitSha = (await git(created!.path, "rev-parse", "HEAD")).trim();
     await value.lifecycle.acceptCommit("candidate", created!.path, baseSha, commitSha, created!.branch);
-    const restarted = await WorktreeLifecycle.open({ repositoryRoot: value.repository });
+    const prototype = WorktreeLifecycle.prototype as unknown as {
+      git(args: readonly string[], cwd?: string): Promise<string>;
+    };
+    const originalGit = prototype.git;
+    let restartParentChecks = 0;
+    prototype.git = async function (args, cwd) {
+      if (args.join(" ") === `rev-list --parents -n 1 ${commitSha}`) restartParentChecks += 1;
+      return originalGit.call(this, args, cwd);
+    };
+    let restarted: WorktreeLifecycle;
+    try {
+      restarted = await WorktreeLifecycle.open({ repositoryRoot: value.repository });
+    } finally {
+      prototype.git = originalGit;
+    }
+    assert.equal(restartParentChecks, 1, "a new lifecycle open revalidates persisted parentage");
     assert.deepEqual((await restarted.reconcile()).map(({ phase }) => phase), ["ready"]);
     await restarted.cleanup("candidate");
     await assert.rejects(git(value.repository, "rev-parse", "--verify", `refs/heads/${created!.branch}`));
     assert.equal(await stat(created!.path).catch(() => undefined), undefined);
+  } finally {
+    await cleanupFixture(value);
+  }
+});
+
+test("direct-parent attestations are positive-only, instance-scoped, fully bound, and capped", async () => {
+  const value = await fixture("parent-attestations");
+  try {
+    type PrivateLifecycle = {
+      git(args: readonly string[], cwd?: string): Promise<string>;
+      attestDirectParent(expectedSha: string, baseSha: string, cwd?: string): Promise<boolean>;
+    };
+    const lifecycle = value.lifecycle as unknown as PrivateLifecycle;
+    const originalGit = lifecycle.git.bind(value.lifecycle);
+    const expected = "a".repeat(40);
+    const base = "b".repeat(40);
+    const otherBase = "c".repeat(40);
+    let calls = 0;
+    let fail = false;
+    lifecycle.git = async (args, cwd) => {
+      if (args[0] !== "rev-list") return originalGit(args, cwd);
+      calls += 1;
+      if (fail) throw new WorktreeLifecycleError("git-failed", "injected");
+      const requested = args[4]!;
+      const parent = requested === expected ? (calls === 2 ? otherBase : base) : requested.replace(/^./u, "f");
+      return `${requested} ${parent}\n`;
+    };
+
+    assert.equal(await lifecycle.attestDirectParent(expected, base), true);
+    assert.equal(await lifecycle.attestDirectParent(expected, base), true);
+    assert.equal(calls, 1, "same instance and exact pair reuses a positive attestation");
+    assert.equal(await lifecycle.attestDirectParent(expected, otherBase), true);
+    assert.equal(calls, 2, "a different base is a cache miss");
+
+    const failedExpected = "d".repeat(40);
+    fail = true;
+    await assert.rejects(lifecycle.attestDirectParent(failedExpected, base));
+    fail = false;
+    assert.equal(await lifecycle.attestDirectParent(failedExpected, base), false);
+    assert.equal(await lifecycle.attestDirectParent(failedExpected, base), false);
+    assert.equal(calls, 5, "Git failures and non-parent results are not cached");
+
+    for (let index = 0; index < 32; index += 1) {
+      const sha = index.toString(16).padStart(40, "0");
+      lifecycle.git = async (args) => {
+        calls += 1;
+        return `${args[4]} ${base}\n`;
+      };
+      assert.equal(await lifecycle.attestDirectParent(sha, base), true);
+    }
+    lifecycle.git = async (args) => {
+      calls += 1;
+      return `${args[4]} ${base}\n`;
+    };
+    const beforeEvictedLookup = calls;
+    assert.equal(await lifecycle.attestDirectParent(expected, base), true);
+    assert.equal(calls, beforeEvictedLookup + 1, "the least-recent positive entry is evicted above 32");
+
+    const prototype = WorktreeLifecycle.prototype as unknown as PrivateLifecycle;
+    const prototypeGit = prototype.git;
+    let reopenedCalls = 0;
+    prototype.git = async function (args, cwd) {
+      if (args[0] === "rev-list") reopenedCalls += 1;
+      return prototypeGit.call(this, args, cwd);
+    };
+    try {
+      const reopened = await WorktreeLifecycle.open({ repositoryRoot: value.repository });
+      const reopenedPrivate = reopened as unknown as PrivateLifecycle;
+      reopenedPrivate.git = async (args) => {
+        reopenedCalls += 1;
+        return `${args[4]} ${base}\n`;
+      };
+      assert.equal(await reopenedPrivate.attestDirectParent(expected, base), true);
+      assert.equal(reopenedCalls, 1, "a new lifecycle instance revalidates the same pair");
+    } finally {
+      prototype.git = prototypeGit;
+    }
   } finally {
     await cleanupFixture(value);
   }
@@ -191,7 +341,48 @@ test("candidate base rejects unrelated commits and a moved or dirty authority", 
   }
 });
 
-test("cleanup refuses tracked and untracked changes and later removes only restored worktrees", async () => {
+test("authority validation keeps fresh HEAD and status checks without revalidating an identical base", async () => {
+  const value = await fixture("authority-validation");
+  try {
+    const authority = await value.lifecycle.pinCleanBase();
+    const privateLifecycle = value.lifecycle as unknown as {
+      git(args: readonly string[], cwd?: string): Promise<string>;
+    };
+    const originalGit = privateLifecycle.git.bind(value.lifecycle);
+    const calls: string[][] = [];
+    privateLifecycle.git = async (args, cwd) => {
+      calls.push([...args]);
+      return originalGit(args, cwd);
+    };
+
+    await value.lifecycle.createManyAtBase({
+      authority,
+      baseSha: authority.sha,
+      tasks: tasks(authority, ["same-base"]),
+    });
+
+    assert.equal(calls.some((args) => args.join(" ") === "rev-parse --verify HEAD^{commit}"), true);
+    assert.equal(calls.some((args) => args[0] === "status" && args[1] === "--porcelain=v1"), true);
+    assert.equal(calls.some((args) => args.join(" ") === `rev-parse --verify ${authority.sha}^{commit}`), false);
+    assert.equal(calls.some((args) => args[0] === "merge-base" && args[1] === "--is-ancestor"), false);
+    await value.lifecycle.cleanup("same-base");
+  } finally {
+    await cleanupFixture(value);
+  }
+});
+
+test("bootstrap validates the combined checkout and bare repository booleans", async () => {
+  const root = await mkdtemp(join(tmpdir(), "sortie-worktree-bootstrap-"));
+  const repository = join(root, "bare.git");
+  try {
+    await git(root, "init", "--bare", "-q", repository);
+    await errorCode(WorktreeLifecycle.open({ repositoryRoot: repository }), "invalid-repository");
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  }
+});
+
+test("cleanup moves restored worktrees once and retains changes introduced after unlock", async () => {
   const value = await fixture("dirty-cleanup");
   try {
     const pin = await value.lifecycle.pinCleanBase();
@@ -204,8 +395,63 @@ test("cleanup refuses tracked and untracked changes and later removes only resto
     assert.equal((await stat(created[1]!.path)).isDirectory(), true);
     await writeFile(join(created[0]!.path, "shared.txt"), "base\n");
     await rm(join(created[1]!.path, "new.txt"));
-    await value.lifecycle.cleanup("tracked");
+    const privateLifecycle = value.lifecycle as unknown as {
+      git(args: readonly string[], cwd?: string): Promise<string>;
+    };
+    const originalGit = privateLifecycle.git.bind(value.lifecycle);
+    const operations: string[] = [];
+    privateLifecycle.git = async (args, cwd) => {
+      if (args[0] === "worktree" && (args[1] === "unlock" || args[1] === "move")) operations.push(args[1]);
+      return originalGit(args, cwd);
+    };
     await value.lifecycle.cleanup("untracked");
+    assert.deepEqual(operations, ["unlock", "move", "unlock"]);
+
+    let changedAfterUnlock = false;
+    let moveCalls = 0;
+    privateLifecycle.git = async (args, cwd) => {
+      const result = await originalGit(args, cwd);
+      if (args[0] === "worktree" && args[1] === "move") moveCalls += 1;
+      if (!changedAfterUnlock && args[0] === "worktree" && args[1] === "unlock" && args[2] === created[0]!.path) {
+        changedAfterUnlock = true;
+        await writeFile(join(created[0]!.path, "shared.txt"), "changed after unlock\n");
+      }
+      return result;
+    };
+    await errorCode(value.lifecycle.cleanup("tracked"), "unsafe-cleanup");
+    assert.equal(changedAfterUnlock, true);
+    assert.equal(moveCalls, 0);
+    assert.equal((await stat(created[0]!.path)).isDirectory(), true);
+    assert.equal(await readFile(join(created[0]!.path, "shared.txt"), "utf8"), "changed after unlock\n");
+    const inventory = JSON.parse(await readFile(inventoryPath(value), "utf8")) as {
+      records: Array<{ branch: string; phase: string }>;
+    };
+    assert.equal(inventory.records.find(({ branch }) => branch === created[0]!.branch)?.phase, "orphaned");
+  } finally {
+    await cleanupFixture(value);
+  }
+});
+
+test("cancelled cleanup discards only quiescent dirt inside the owned scope", async () => {
+  const value = await fixture("cancelled-dirty");
+  try {
+    const pin = await value.lifecycle.pinCleanBase();
+    const created = await value.lifecycle.createMany({ pin, tasks: tasks(pin, ["owned", "foreign"]) });
+    await writeFile(join(created[0]!.path, "shared.txt"), "owned tracked dirt\n");
+    await writeFile(join(created[0]!.path, "file-0.txt"), "owned addition\n");
+    await value.lifecycle.discardOwnedChanges("owned", created[0]!.path, pin.sha, created[0]!.branch,
+      ["shared.txt", "file-0.txt"]);
+    assert.equal(await readFile(join(created[0]!.path, "shared.txt"), "utf8"), "base\n");
+    assert.equal(await stat(join(created[0]!.path, "file-0.txt")).catch(() => undefined), undefined);
+
+    await writeFile(join(created[1]!.path, "shared.txt"), "foreign dirt\n");
+    await errorCode(value.lifecycle.discardOwnedChanges("foreign", created[1]!.path, pin.sha,
+      created[1]!.branch, ["file-1.txt"]), "unsafe-cleanup");
+    assert.equal(await readFile(join(created[1]!.path, "shared.txt"), "utf8"), "foreign dirt\n");
+    await writeFile(join(created[1]!.path, "shared.txt"), "base\n");
+    await value.lifecycle.cleanup("owned");
+    await value.lifecycle.cleanup("foreign");
+    assert.equal(await readFile(join(value.repository, "shared.txt"), "utf8"), "base\n");
   } finally {
     await cleanupFixture(value);
   }
@@ -593,4 +839,64 @@ test("base and branch requests fail closed and implementation contains no destru
   } finally {
     await cleanupFixture(value);
   }
+});
+
+const exclusiveTestNames = new Set([
+  "candidate base worktree leaves the authority checkout unchanged and supports one-unit acceptance",
+  "direct-parent attestations are positive-only, instance-scoped, fully bound, and capped",
+]);
+
+nodeTest("worktree lifecycle registered tests", { concurrency: 4 }, async (context) => {
+  assert.equal(registeredTests.length, 27);
+  assert.equal(new Set(registeredTests.map(({ name }) => name)).size, 27);
+  const initialFixtureRoots = new Set(
+    (await readdir(tmpdir())).filter((name) => name.startsWith("sortie-worktree-")),
+  );
+
+  const safeTests = registeredTests.filter(({ name }) => !exclusiveTestNames.has(name));
+  const exclusiveTests = registeredTests.filter(({ name }) => exclusiveTestNames.has(name));
+  assert.equal(safeTests.length, 25);
+  assert.equal(exclusiveTests.length, 2);
+
+  let activeSafe = 0;
+  let maximumActiveSafe = 0;
+  let exclusiveActive = false;
+  let exclusiveOverlap = false;
+
+  await Promise.all(safeTests.map(({ name, body }) => context.test(name, async (testContext) => {
+    activeSafe += 1;
+    maximumActiveSafe = Math.max(maximumActiveSafe, activeSafe);
+    exclusiveOverlap ||= exclusiveActive;
+    assert.equal(activeSafe <= 4, true);
+    assert.equal(exclusiveActive, false);
+    try {
+      await body(testContext);
+    } finally {
+      activeSafe -= 1;
+    }
+  })));
+
+  for (const { name, body } of exclusiveTests) {
+    await context.test(name, async (testContext) => {
+      exclusiveOverlap ||= activeSafe !== 0 || exclusiveActive;
+      assert.equal(activeSafe, 0);
+      assert.equal(exclusiveActive, false);
+      exclusiveActive = true;
+      try {
+        await body(testContext);
+      } finally {
+        exclusiveActive = false;
+      }
+    });
+  }
+
+  const fixtureResiduals = (await readdir(tmpdir()))
+    .filter((name) => name.startsWith("sortie-worktree-") && !initialFixtureRoots.has(name));
+  assert.equal(activeSafe, 0);
+  assert.equal(maximumActiveSafe <= 4, true);
+  assert.equal(exclusiveOverlap, false);
+  assert.deepEqual(fixtureResiduals, []);
+  context.diagnostic(
+    `leafTests=26 maximumActiveSafe=${maximumActiveSafe} exclusiveOverlap=${exclusiveOverlap} fixtureResiduals=${fixtureResiduals.length}`,
+  );
 });

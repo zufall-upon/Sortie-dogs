@@ -123,6 +123,12 @@ export interface WorktreeCommitProduceRequest {
   readonly git_path?: string;
 }
 
+/** Host-only cancellation state; never serialized into a worker request or artifact. */
+export interface WorktreeCommitProductionControl {
+  readonly signal: AbortSignal;
+  readonly enterProtectedPhase: () => void;
+}
+
 export interface WorktreeCommitVerifyRequest {
   readonly descriptor: ParallelDispatchDescriptor;
   readonly managed_path: string;
@@ -155,7 +161,167 @@ export interface WorktreeParallelContract {
   baseline_metrics: WorktreeParallelMetrics | null;
 }
 
-export type SchemaKind = "handoff" | "operation-manifest" | "worktree-parallel";
+export type AdaptiveRemediationVersion = "0.1.0";
+export type AdaptiveRemediationMode = "adaptive-remediation" | "standard";
+export type AdaptiveRemediationPlatform = "windows" | "wsl";
+export type AdaptiveRemediationSelectionReason =
+  | "eligible-auto"
+  | "unsupported-platform"
+  | "scope-ineligible"
+  | "validation-ineligible"
+  | "unsafe-target";
+export type AdaptiveRemediationFailureCode =
+  | "PROBE_FAILED"
+  | "NO_IMPROVEMENT"
+  | "ITERATION_BUDGET_EXHAUSTED"
+  | "SCOPE_EXPANSION_REQUIRED"
+  | "CLEANUP_FAILED"
+  | "FULL_VALIDATION_FAILED"
+  | "REVIEW_REMEDIATION_REQUIRED"
+  | "CAS_DRIFT"
+  | "POST_MERGE_VERIFICATION_FAILED";
+export type AdaptiveRemediationState =
+  | "ADMITTED" | "PROBING" | "PROMISING" | "REFINING" | "CONVERGED"
+  | "FULL_VALIDATED" | "REVIEWED" | "MERGED" | "VERIFIED"
+  | "ABANDONED" | "SOL_DEMOTED" | "REJECTED" | "REINTEGRATE_REQUIRED";
+
+export interface AdaptiveRemediationScope {
+  readonly read: readonly string[];
+  readonly write: readonly string[];
+}
+
+export interface AdaptiveRemediationSelection {
+  readonly mode: AdaptiveRemediationMode;
+  readonly reason: AdaptiveRemediationSelectionReason;
+  readonly activation_reason: string;
+  readonly platform: AdaptiveRemediationPlatform;
+}
+
+export interface AdaptiveRemediationLimits {
+  readonly iteration_budget: 1 | 2 | 3;
+  readonly max_changed_paths: number;
+  readonly cleanup_timeout_ms: number;
+}
+
+export interface AdaptiveRemediationCommand {
+  readonly executable: string;
+  readonly args?: readonly string[];
+  readonly timeout_ms: number;
+}
+
+export interface AdaptiveRemediationProbeCommand extends AdaptiveRemediationCommand {
+  /** Project-relative JSON file written by the validator: { signal_id, value }. */
+  readonly observation_path: string;
+}
+
+export interface AdaptiveRemediationSignal {
+  readonly signal_id: string;
+  readonly improvement_direction: "increase" | "decrease";
+  readonly absolute_improvement_threshold: number;
+  readonly goal: { readonly operator: "at-least" | "at-most"; readonly value: number };
+}
+
+export interface AdaptiveRemediationValidationEvidence {
+  readonly command: readonly string[];
+  readonly status: "pending" | "pass" | "fail";
+  readonly exit_code: number | null;
+  readonly fingerprint: string | null;
+}
+
+export interface AdaptiveRemediationIteration {
+  readonly iteration: 1 | 2 | 3;
+  readonly parent_candidate: string;
+  readonly candidate_head: string;
+  readonly hypothesis: string;
+  readonly patch_fingerprint: string;
+  readonly changed_paths: readonly string[];
+  readonly measured_probe: {
+    readonly signal_id: string;
+    readonly baseline_value: number | null;
+    readonly current_value: number | null;
+    readonly outcome: "improved" | "unchanged" | "worse" | "inconclusive";
+    readonly artifact_fingerprint: string;
+  };
+  readonly cleanup: {
+    readonly status: "pending" | "pass" | "fail";
+    readonly remaining_paths: readonly string[];
+  };
+}
+
+export interface AdaptiveRemediationReview {
+  readonly status: "pending" | "pass" | "fail" | "remediation-required";
+  readonly fingerprint: string | null;
+  readonly remediation_attempts: 0 | 1;
+}
+
+export interface AdaptiveRemediationPromotion {
+  readonly status: "pending" | "promoted" | "cas-drift";
+  readonly expected_target_head: string;
+  readonly observed_target_head: string | null;
+  readonly candidate_head: string | null;
+}
+
+export interface AdaptiveRemediationFailure {
+  readonly code: AdaptiveRemediationFailureCode;
+  readonly fallback: "standard" | "stop";
+  readonly detail: string;
+}
+
+export interface AdaptiveRemediationMetrics {
+  readonly mode: AdaptiveRemediationMode;
+  readonly reason: AdaptiveRemediationSelectionReason;
+  readonly activation_reason: string;
+  readonly iteration_count: number;
+  readonly probe_count: number;
+  readonly full_validation_count: 0 | 1;
+  readonly post_merge_validation_count: 0 | 1;
+  readonly discarded_patch_count: number;
+  readonly time_to_first_signal_ms: number | null;
+  readonly duration_ms: number;
+  readonly total_tokens: number | null;
+  readonly estimated_cost_usd: number | null;
+  readonly sol_demotions: number;
+  readonly cas_conflicts: number;
+  readonly post_merge_failures: number;
+}
+
+export interface AdaptiveRemediationContract {
+  readonly version: AdaptiveRemediationVersion;
+  readonly task_id: string;
+  readonly selection: AdaptiveRemediationSelection;
+  readonly state: AdaptiveRemediationState;
+  readonly target: {
+    readonly ref: string;
+    readonly base_head: string;
+    readonly base_tree: string;
+  };
+  readonly allowed_paths: AdaptiveRemediationScope;
+  readonly limits: AdaptiveRemediationLimits;
+  readonly probe_validation: AdaptiveRemediationProbeCommand;
+  readonly canonical_validation: AdaptiveRemediationCommand;
+  readonly improvement_signals: readonly [AdaptiveRemediationSignal];
+  readonly risk_class: "low" | "medium" | "high";
+  readonly post_merge_validation: AdaptiveRemediationCommand;
+  readonly baseline_probe: {
+    readonly signal_id: string;
+    readonly value: number | null;
+    readonly artifact_fingerprint: string;
+  } | null;
+  readonly iterations: readonly AdaptiveRemediationIteration[];
+  readonly converged: boolean;
+  readonly full_validation: AdaptiveRemediationValidationEvidence;
+  readonly review: AdaptiveRemediationReview;
+  readonly promotion: AdaptiveRemediationPromotion;
+  readonly post_merge: AdaptiveRemediationValidationEvidence;
+  readonly failure: AdaptiveRemediationFailure | null;
+  readonly metrics: AdaptiveRemediationMetrics;
+}
+
+export type SchemaKind =
+  | "handoff"
+  | "operation-manifest"
+  | "worktree-parallel"
+  | "adaptive-remediation";
 
 export type WorktreeParallelContractIssueCode =
   | "WTP001_DUPLICATE_IDENTITY"
