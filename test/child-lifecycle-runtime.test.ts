@@ -158,6 +158,48 @@ test("a slow host returns bounded pending evidence without overlapping stop oper
   } finally { unblock(); lifecycle.dispose(); }
 });
 
+test("child lifecycle arms its registered deadline without readiness gating", async () => {
+  const steps: ProfileEntry[] = [];
+  const { ledger } = await profileStep(steps, "standalone", () => standalone());
+  const deadline_ms = Date.now() + 250;
+  let stopped = false;
+  let stopCount = 0;
+  let terminalCount = 0;
+  let terminalResolve!: () => void;
+  const terminalObserved = new Promise<void>((resolve) => { terminalResolve = resolve; });
+  const lifecycle = await profileStep(steps, "lifecycle_open", () => CancellableChildLifecycle.open({ identity, deadline_ms }, ledger, {
+    observe: async () => ({ observation: { identity, disposition: "cancelled" }, evidence: {
+      ...allReleased(), terminal: stopped ? "satisfied" : "unsatisfied",
+    } }),
+    stop: async () => { stopCount += 1; stopped = true; },
+    release: async () => {},
+    terminal: async () => { terminalCount += 1; terminalResolve(); },
+  }));
+  let watchdog: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const registered = (await ledger.read()).state.children[0];
+    assert.equal(registered.deadline_ms, deadline_ms);
+    assert.ok(Date.now() < deadline_ms, "registered deadline must still be in the future before arm");
+    lifecycle.arm();
+    assert.equal(stopCount, 0);
+    await profileStep(steps, "deadline_terminal", () => Promise.race([
+      terminalObserved,
+      new Promise<never>((_resolve, reject) => { watchdog = setTimeout(() => reject(new Error("armed deadline did not reach terminal")), 5000); }),
+    ]));
+    assert.ok(Date.now() >= deadline_ms);
+    assert.equal(stopCount, 1);
+    assert.equal(terminalCount, 1);
+    const final = await ledger.read();
+    assert.equal(final.state.children[0].stop_trigger, "deadline_expired");
+    assert.equal(final.state.children[0].terminal?.disposition, "cancelled");
+  } finally {
+    if (watchdog !== undefined) clearTimeout(watchdog);
+    lifecycle.dispose();
+    console.log(JSON.stringify({ marker: "child-lifecycle-profile", case: "registered-deadline-arm", steps,
+      stop_count: stopCount, terminal_count: terminalCount }));
+  }
+});
+
 test("identity changes between observation and stop are rejected before effects", async () => {
   const { ledger } = await standalone();
   let reads = 0;
@@ -267,7 +309,7 @@ test("cancelling one child preserves accepted sibling artifacts and both accepte
   console.log(JSON.stringify({ marker: "child-lifecycle-profile", case: "accepted-sibling", steps, callbacks, poll_iterations }));
 });
 
-test("plugin deadline takes over one critical child and preserves an unrelated lane", async () => {
+test("plugin deadline takes over one critical child and preserves an unrelated lane", async (t) => {
   const steps: ProfileEntry[] = [];
   const callbacks = { abort: callbackProfile(), tree_stop: callbackProfile() };
   let poll_iterations = 0;
@@ -294,6 +336,13 @@ test("plugin deadline takes over one critical child and preserves an unrelated l
   let aborts = 0;
   let abortAt = 0;
   let releaseFailure: unknown;
+  let capturedLifecycle: CancellableChildLifecycle | undefined;
+  let capturedIdentity: ChildTerminalIdentity | undefined;
+  let targetArmCaptures = 0;
+  let armRestored = false;
+  let armResumed = false;
+  let artifactResult: Promise<string> | undefined;
+  let artifactSettled: { output?: string; error?: unknown } | undefined;
   const originalReleaseChildWorktree = ParallelDispatchCoordinator.prototype.releaseChildWorktree;
   ParallelDispatchCoordinator.prototype.releaseChildWorktree = async function (...releaseArgs) {
     try { return await originalReleaseChildWorktree.apply(this, releaseArgs); }
@@ -322,6 +371,19 @@ test("plugin deadline takes over one critical child and preserves an unrelated l
     const args = { subagent_type: "dog-luna-worker", prompt: ["context_digest:", `  task_id: ${descriptor.task_id}`,
       `  run_id: ${descriptor.run_id}`, "  role: implementation", "  source_manifest: [base.txt]",
       "  acceptance:", ...descriptor.acceptance.map((text: string) => `    - ${text}`), "  validation: no canonical validation"].join("\n") };
+    const originalArm = CancellableChildLifecycle.prototype.arm;
+    const armMock = t.mock.method(CancellableChildLifecycle.prototype, "arm", function (this: CancellableChildLifecycle) {
+      const current = (this as unknown as { descriptor: { identity: ChildTerminalIdentity } }).descriptor.identity;
+      const targeted = current.child_id === "child" && current.call_id === "call" && current.run_id === descriptor.run_id &&
+        current.unit_id === descriptor.task_id && current.attempt_id === descriptor.dispatch_id;
+      if (targeted && targetArmCaptures === 0) {
+        targetArmCaptures += 1;
+        capturedLifecycle = this;
+        capturedIdentity = current;
+        return;
+      }
+      originalArm.call(this);
+    });
     await profileStep(steps, "task_activation_bind", async () => {
       await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "call" }, { args });
       await hooks.event!({ event: { type: "session.created", properties: { info: { id: "child", parentID: "root" } } } });
@@ -345,16 +407,30 @@ test("plugin deadline takes over one critical child and preserves an unrelated l
       timeout_ms: "60000" };
     await hooks["tool.execute.before"]!({ tool: "sortie_create_parallel_commit_artifact", sessionID: "child", callID: "artifact" },
       { args: artifactArgs });
-    const artifactResult = hooks.tool!.sortie_create_parallel_commit_artifact!.execute(artifactArgs,
+    artifactResult = hooks.tool!.sortie_create_parallel_commit_artifact!.execute(artifactArgs,
       { sessionID: "child", agent: "dog-luna-worker" });
+    void artifactResult.then((output) => { artifactSettled = { output }; }, (error: unknown) => { artifactSettled = { error }; });
     const validationStartDeadline = Date.now() + 45_000;
     while (await stat(validationStarted).catch(() => undefined) === undefined && Date.now() < validationStartDeadline) {
+      if (artifactSettled !== undefined) {
+        const reason = artifactSettled.error instanceof Error ? `${artifactSettled.error.name}: ${artifactSettled.error.message}` :
+          artifactSettled.error === undefined ? artifactSettled.output : String(artifactSettled.error);
+        throw new Error(`contained validation settled before start marker: ${reason}`);
+      }
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     assert.notEqual(await stat(validationStarted).catch(() => undefined), undefined, "contained validation did not start");
     const before = await coordinator.snapshot("root", prepared.run_id);
     const boundDescriptor = before!.tasks.find((task) => task.descriptor.dispatch_id === descriptor.dispatch_id)!.descriptor;
     const ledger = await coordinator.childLedger("root", boundDescriptor, "call", "child");
+    assert.equal(targetArmCaptures, 1);
+    assert.deepEqual(capturedIdentity, { run_id: descriptor.run_id, unit_id: descriptor.task_id,
+      attempt_id: descriptor.dispatch_id, predecessor_attempt_id: null, candidate_id: descriptor.base_sha,
+      route_id: descriptor.parallel_group, child_id: "child", call_id: "call" });
+    armMock.mock.restore();
+    armRestored = true;
+    capturedLifecycle!.arm();
+    armResumed = true;
     const after = await profileStep(steps, "poll", async () => {
       const pollStarted = performance.now();
       const expires = Date.now() + 120000;
@@ -420,6 +496,15 @@ test("plugin deadline takes over one critical child and preserves an unrelated l
       assert.equal((await run(value.repository, "worktree", "list", "--porcelain")).match(/^worktree /gmu)?.length, 1);
     });
   } finally {
+    if (!armRestored) {
+      t.mock.restoreAll();
+      armRestored = true;
+    }
+    if (capturedLifecycle !== undefined && !armResumed) {
+      capturedLifecycle.arm();
+      armResumed = true;
+    }
+    await artifactResult?.catch(() => undefined);
     ParallelDispatchCoordinator.prototype.releaseChildWorktree = originalReleaseChildWorktree;
     if (oldTimeout === undefined) delete process.env.SORTIE_CHILD_DEADLINE_MS; else process.env.SORTIE_CHILD_DEADLINE_MS = oldTimeout;
     await profileStep(steps, "process_stop", () => tree.stop());

@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto";
-import { lstat, mkdir, open, readFile, realpath, rm, stat } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { lstat, mkdir, open, readFile, readdir, realpath, rm, stat } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import { RUNTIME_ASSET_VERSION } from "../asset-version.js";
@@ -17,7 +17,7 @@ import { admitLunaFabric } from "../core/luna-fabric-contract.js";
 import { summarizeExperienceEvidence } from "../core/experience-evidence-summary.js";
 import { selectExperienceRoute } from "../core/experience-route-policy.js";
 import { resolveExperienceRouting } from "../core/experience-routing-runtime.js";
-import { normalizeRelativePath, RelativePathError } from "../core/path.js";
+import { normalizeManifestPath, normalizeRelativePath, RelativePathError } from "../core/path.js";
 import { ScopeLeaseError, ScopeLeaseRegistry, type ScopeLease } from "../core/scope-lease-registry.js";
 import {
   produceWorktreeCommitArtifact,
@@ -26,6 +26,7 @@ import {
   WorktreeCommitArtifactError,
 } from "../core/worktree-commit-artifact.js";
 import { normalizeWorktreeScope } from "../core/worktree-scope.js";
+import type { ValidationBudgetRequest, ValidationOutcome } from "../core/validation-budget.js";
 import {
   ParallelDispatchCoordinator,
   ParallelDispatchError,
@@ -107,6 +108,9 @@ import { CancellableChildLifecycle, DEFAULT_CHILD_DEADLINE_MS } from "../core/ch
 import { FailureSwarmRuntime, type FailureSwarmRequest, type ReadOnlyDiagnosisDescriptor } from "../core/failure-swarm-runtime.js";
 import { EvidenceCapsuleStore } from "../core/evidence-capsule.js";
 import { RunFlightLedger, diagnosisContractHash, type DiagnosisSelection, type FlightObservation } from "../core/run-flight-ledger.js";
+import { GOAL_BOUND_METADATA_KEY, goalFingerprint, selectGoalDelivery, validGoalEvidence,
+  type GoalAcceptanceContract, type GoalDeliveryMode, type GoalEvidence, type GoalFlightState,
+  type GoalStopReason, type GoalTerminalReceipt } from "../core/goal-bound.js";
 import { LUNA_FABRIC_MAX_ACTIVE } from "../core/luna-fabric-scheduler.js";
 import { terminalRescueModel } from "./terminal-rescue-binding.js";
 import type { ModelTarget } from "./model-routing.js";
@@ -116,7 +120,7 @@ import { AdaptiveRemediationRuntime, AdaptiveRunFlightLineage, type AdaptiveReme
 import { DEFAULT_ADAPTIVE_REMEDIATION_MODEL, GitAdaptiveRemediationHost, OpenCodeAdaptiveRemediationProvider,
   type AdaptiveRemediationSessionClient } from "./adaptive-remediation-host.js";
 import type { ChildTerminalEvidence, ChildTerminalObservation } from "../core/child-terminal-reconciliation.js";
-import { collectRunMetrics, insertRunMetrics, terminalRunOutcome } from "./run-metrics.js";
+import { collectRunMetrics, createSortieResult, insertRunMetrics, insertSortieResult, terminalRunOutcome } from "./run-metrics.js";
 import type { RunMetricsClient } from "./run-metrics.js";
 
 const INPUT_LIMITS = { config: 64 * 1024, manifest: 512 * 1024, handoff: 2 * 1024 * 1024, parallel: 512 * 1024 } as const;
@@ -423,6 +427,30 @@ interface TaskResultRepairOutput {
   [key: string]: unknown;
 }
 
+interface HostGoalExecution {
+  readonly root: string;
+  readonly projectRoot: string;
+  readonly sessionID: string;
+  readonly callID: string;
+  readonly tool: string;
+  readonly command: readonly string[];
+  readonly startedAt: string;
+  readonly binding: NonNullable<GoalEvidence["protected_binding"]>;
+  readonly source: string;
+  readonly candidate: string;
+  readonly validation?: { readonly ledger: RunFlightLedger; readonly request: ValidationBudgetRequest; readonly reservation: string };
+  endedAt?: string;
+  exitCode?: number | null;
+  outcome?: "pass" | "fail" | "skip" | "cancel";
+  immutableRef?: string;
+  fresh?: boolean;
+}
+
+interface HostToolTiming {
+  readonly start?: number;
+  readonly end?: number;
+}
+
 interface InspectionCacheEntry {
   fingerprint: string;
   expiresAt: number;
@@ -445,6 +473,7 @@ interface SessionAuthorization {
   readScopes: readonly string[];
   rootSessionID: string;
   suspended: boolean;
+  taskID: string;
   validationCommands: ReadonlySet<string>;
   writeScopes: readonly string[];
 }
@@ -482,6 +511,72 @@ async function durableScopeRoot(projectRoot: string): Promise<string | undefined
   } catch {
     return undefined;
   }
+}
+
+async function protectedScopeDigest(projectRoot: string, paths: readonly string[], manifestHash: string): Promise<string | undefined> {
+  const entries: Array<readonly [string, string, string?]> = [];
+  const visit = async (absolute: string): Promise<boolean> => {
+    const scoped = relative(projectRoot, absolute).replaceAll("\\", "/");
+    if (scoped === ".." || scoped.startsWith("../") || isAbsolute(scoped)) return false;
+    const metadata = await lstat(absolute).catch((error: unknown) => {
+      if (isRecord(error) && error.code === "ENOENT") return undefined;
+      throw error;
+    });
+    if (metadata === undefined) { entries.push([scoped, "missing"]); return true; }
+    if (metadata.isSymbolicLink()) return false;
+    if (metadata.isDirectory()) {
+      entries.push([scoped, "directory"]);
+      const children = await readdir(absolute);
+      for (const child of children.sort()) if (!await visit(join(absolute, child))) return false;
+      return true;
+    }
+    if (!metadata.isFile()) return false;
+    entries.push([scoped, "file", createHash("sha256").update(await readFile(absolute)).digest("hex")]);
+    return true;
+  };
+  for (const path of [...new Set(paths)].sort()) if (!await visit(path)) return undefined;
+  return goalFingerprint({ manifest_hash: `sha256:${manifestHash}`, entries });
+}
+
+async function protectedSnapshot(authorization: SessionAuthorization): Promise<{
+  readonly binding: NonNullable<GoalEvidence["protected_binding"]>;
+  readonly source: string;
+  readonly candidate: string;
+} | undefined> {
+  const manifestSource = await readFile(authorization.manifestPath).catch(() => undefined);
+  if (manifestSource === undefined) return undefined;
+  const manifestHash = createHash("sha256").update(manifestSource).digest("hex");
+  if (manifestHash !== authorization.manifestHash) return undefined;
+  const relativePath = relative(authorization.projectRoot, authorization.manifestPath).replaceAll("\\", "/");
+  const manifest = JSON.parse(manifestSource.toString("utf8")) as OperationManifest;
+  const actualPaths = (entries: readonly string[]) => entries.map((entry) => {
+    const path = normalizeManifestPath(entry);
+    return path.kind === "relative" ? resolve(authorization.projectRoot, path.path) : resolve(path.path);
+  });
+  // Ownership keys may be case-folded even on POSIX (for example DrvFS). Hash the actual manifest paths.
+  const candidatePaths = actualPaths(manifest.write);
+  const sourcePaths = [...new Set([...actualPaths(manifest.read), ...candidatePaths])];
+  const source = await protectedScopeDigest(authorization.projectRoot, sourcePaths, manifestHash);
+  const candidate = await protectedScopeDigest(authorization.projectRoot, candidatePaths, manifestHash);
+  if (source === undefined || candidate === undefined || relativePath.startsWith("../") || isAbsolute(relativePath)) return undefined;
+  return { binding: { manifest_hash: `sha256:${manifestHash}`, project_root: authorization.projectRoot,
+    manifest_path: relativePath,
+    source_paths: sourcePaths.map((path) => relative(authorization.projectRoot, path).replaceAll("\\", "/")),
+    candidate_paths: candidatePaths.map((path) => relative(authorization.projectRoot, path).replaceAll("\\", "/")) },
+    source, candidate };
+}
+
+async function refreshProtectedSnapshot(projectRoot: string, binding: NonNullable<GoalEvidence["protected_binding"]>): Promise<{
+  readonly source: string; readonly candidate: string;
+} | undefined> {
+  const manifestPath = resolve(projectRoot, binding.manifest_path);
+  const manifestSource = await readFile(manifestPath).catch(() => undefined);
+  if (manifestSource === undefined) return undefined;
+  const manifestHash = createHash("sha256").update(manifestSource).digest("hex");
+  if (`sha256:${manifestHash}` !== binding.manifest_hash) return undefined;
+  const source = await protectedScopeDigest(projectRoot, binding.source_paths.map((path) => resolve(projectRoot, path)), manifestHash);
+  const candidate = await protectedScopeDigest(projectRoot, binding.candidate_paths.map((path) => resolve(projectRoot, path)), manifestHash);
+  return source === undefined || candidate === undefined ? undefined : { source, candidate };
 }
 
 interface BindingPin {
@@ -726,6 +821,8 @@ function textPart(part: unknown): string | undefined {
 interface FreshSessionPromptPart {
   readonly type: "text";
   readonly text: string;
+  readonly synthetic?: boolean;
+  readonly metadata?: Record<string, unknown>;
 }
 
 function freshSessionPrompt(parts: readonly unknown[]): readonly FreshSessionPromptPart[] | undefined {
@@ -925,7 +1022,8 @@ export function isExplicitTaskHandoff(text: string): boolean {
 }
 
 function explicitTaskText(output: Parameters<OpenCodeChatMessageHook>[1]): string | undefined {
-  return output.parts.map(textPart).find((text) =>
+  return output.parts.map(textPart).map((text) =>
+    text === undefined || parallelDescriptor(text) !== undefined ? text : taskContractText(text)).find((text) =>
     text !== undefined && (isExplicitTaskHandoff(text) || isBlockTaskHandoff(text) || parallelDescriptor(text) !== undefined));
 }
 
@@ -969,8 +1067,8 @@ function taskBlockHasContent(text: string, keys: readonly string[]): boolean {
   return false;
 }
 
-function taskAcceptanceCriteria(text: string): readonly string[] | undefined {
-  const inline = taskInlineValues(text, ["acceptance"]);
+function taskAcceptanceCriteria(text: string, key = "acceptance"): readonly string[] | undefined {
+  const inline = taskInlineValues(text, [key]);
   if (inline.length === 1) {
     const array = parseStringArray(inline[0]);
     return normalizeAcceptanceCriteria(array ?? [unquoteValue(inline[0]!)]);
@@ -978,7 +1076,7 @@ function taskAcceptanceCriteria(text: string): readonly string[] | undefined {
   if (inline.length > 1) return undefined;
   const lines = text.split(/\r?\n/u);
   const headers = lines.flatMap((line, index) => {
-    const match = /^(\s*)acceptance\s*:\s*$/iu.exec(line);
+    const match = new RegExp(`^(\\s*)${key}\\s*:\\s*$`, "iu").exec(line);
     return match === null ? [] : [{ index, indent: match[1]!.replaceAll("\t", "  ").length }];
   });
   if (headers.length !== 1) return undefined;
@@ -1004,8 +1102,10 @@ function taskAcceptanceCriteria(text: string): readonly string[] | undefined {
 
 function taskContractText(text: string): string {
   const lines = text.split(/\r?\n/u);
-  const digestIndex = lines.findIndex((line) => /^\s*context_digest\s*:\s*$/iu.test(line));
-  if (digestIndex < 0) return text;
+  const digestIndexes = lines.flatMap((line, index) =>
+    /^\s*context_digest\s*:\s*$/iu.test(line) ? [index] : []);
+  if (digestIndexes.length !== 1) return text;
+  const digestIndex = digestIndexes[0]!;
   const digestIndent = /^\s*/u.exec(lines[digestIndex]!)![0].replaceAll("\t", "  ").length;
   const contractKeys = new Set([
     "task_id", "role", "project_root", "projectroot", "handoff_path", "handoffpath",
@@ -1014,6 +1114,7 @@ function taskContractText(text: string): string {
     "known_facts", "known_paths", "relevant_constraints", "preserve", "resume_delta",
     "parallel_group", "parallel_unit", "parallel_units",
   ]);
+  let contractEnd: number | undefined;
   for (let index = digestIndex + 1; index < lines.length; index += 1) {
     const match = HANDOFF_ENTRY.exec(lines[index]!);
     if (match === null) continue;
@@ -1028,12 +1129,32 @@ function taskContractText(text: string): string {
         const next = HANDOFF_ENTRY.exec(line);
         const nextKey = next === null ? undefined : (next[2] ?? next[3]).toLowerCase();
         if (nextKey !== undefined && contractKeys.has(nextKey)) continue;
-        return lines.slice(0, end).join("\n");
+        contractEnd = end;
+        break;
       }
-      return text;
+      contractEnd ??= lines.length;
+      break;
     }
   }
-  return text;
+  if (contractEnd === undefined) return text;
+
+  // The structured digest is the dispatch authority. A coordinator can quote a user-supplied flat
+  // contract before emitting that digest; counting both representations makes a complete handoff look
+  // ambiguous. Scope admission to the one digest and its trailing manifests, while carrying forward
+  // the single outer task_id required by the canonical fixture. Malformed or ambiguous shapes still
+  // fall back to the original text and fail closed in the existing uniqueness checks.
+  const scopedLines = lines.slice(digestIndex, contractEnd);
+  const scopedTaskIDs = taskValues(scopedLines.join("\n"), ["task_id"]);
+  const outerTaskLines = lines.slice(0, digestIndex).filter((line) => {
+    const match = HANDOFF_ENTRY.exec(line);
+    return match !== null && (match[2] ?? match[3]).toLowerCase() === "task_id";
+  });
+  if (scopedTaskIDs.length > 1 || (scopedTaskIDs.length === 1 && outerTaskLines.length > 0)) return text;
+  if (scopedTaskIDs.length === 0) {
+    if (outerTaskLines.length !== 1) return text;
+    scopedLines.unshift(outerTaskLines[0]!);
+  }
+  return scopedLines.join("\n");
 }
 
 function isBlockTaskHandoff(text: string): boolean {
@@ -1359,6 +1480,14 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   }>();
   const rootAcceptanceContinuity = new Map<string, AcceptanceContinuityLedger>();
   const parallelAcceptanceContinuity = new Map<string, AcceptanceContinuityLedger>();
+  const goalRootSessions = new Map<string, string>();
+  const goalLedgers = new Map<string, Promise<RunFlightLedger>>();
+  const goalReservations = new Map<string, { readonly root: string; readonly reservationID: string; readonly unitID: string; readonly started: number }>();
+  const hostGoalExecutions = new Map<string, HostGoalExecution>();
+  const goalDeclarationAuthority = new Map<string, string>();
+  const pendingRealGoalTurns = new Map<string, { readonly selectedAgent: string; readonly parts: readonly unknown[] }>();
+  const pendingGoalRecoveries = new Map<string, Promise<boolean>>();
+  const scheduledGoalRecoveries = new Map<string, Promise<void>>();
   const globalConfig = await readOptionalGlobalConfig();
   type SessionOperation = "hostSessionIdentity" | "bootstrapControlState" | "collectRunMetrics";
   interface OperationMeasurement {
@@ -1482,6 +1611,533 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     return value?.reduce((total, entry) => total + utf8Bytes(entry), 0) ?? 0;
   }
 
+  function goalRoot(sessionID: string): string {
+    return goalRootSessions.get(sessionID) ?? sessionID;
+  }
+
+  function goalLedger(sessionID: string): Promise<RunFlightLedger> {
+    const root = goalRoot(sessionID);
+    const existing = goalLedgers.get(root);
+    if (existing !== undefined) return existing;
+    const key = createHash("sha256").update(root).digest("hex");
+    const projectRoot = resolve(input.worktree ?? input.directory);
+    const legacyPath = join(projectRoot, ".sortie-dogs", "run-flight", `${key}.json`);
+    const opened = (async () => {
+      // Existing roots remain on their original owner so an in-flight pre-upgrade goal is not forked.
+      if (await stat(legacyPath).then((value) => value.isFile()).catch(() => false)) {
+        return await RunFlightLedger.openGoal(legacyPath);
+      }
+      const leaseRoot = await durableScopeRoot(projectRoot);
+      const filePath = leaseRoot === undefined
+        ? legacyPath
+        : join(dirname(leaseRoot), "run-flight", `${key}.json`);
+      return await RunFlightLedger.openGoal(filePath);
+    })();
+    goalLedgers.set(root, opened);
+    return opened;
+  }
+
+  async function currentGoal(sessionID: string): Promise<GoalFlightState> {
+    return (await (await goalLedger(sessionID)).readGoal()).state;
+  }
+
+  function realMessageID(chatInput: Parameters<OpenCodeChatMessageHook>[0], output: Parameters<OpenCodeChatMessageHook>[1]): string | undefined {
+    if (typeof chatInput.messageID === "string" && chatInput.messageID.length > 0) return chatInput.messageID;
+    return typeof output.message.id === "string" && output.message.id.length > 0 ? output.message.id : undefined;
+  }
+
+  async function persistedCurrentRealMessageID(sessionID: string, selectedAgent: string | undefined,
+    currentParts: readonly unknown[]): Promise<string | undefined> {
+    if (selectedAgent === undefined) return undefined;
+    const messages = input.client?.session?.messages;
+    if (messages === undefined) return undefined;
+    const currentText = currentParts.filter(isRecord).filter((part) => part.type === "text" && part.synthetic !== true)
+      .map((part) => part.text).filter((text): text is string => typeof text === "string");
+    if (currentText.length === 0) return undefined;
+    for (const delay of [0, 10, 50]) {
+      if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+      try {
+        const response = await messages.call(input.client!.session, {
+          path: { id: sessionID }, query: { directory: input.directory },
+        });
+        const payload = isRecord(response) && "data" in response ? response.data : response;
+        if (!Array.isArray(payload) || payload.length === 0) continue;
+        // The current host turn must already be the final persisted message. Never adopt an older
+        // same-text user message when the host has not yet made the current identity observable.
+        const message = payload.at(-1);
+        if (!isRecord(message) || (message.info !== undefined && !isRecord(message.info))) continue;
+        const info = isRecord(message.info) ? message.info : undefined;
+        if ((info?.role ?? message.role) !== "user" || (info?.agent ?? message.agent) !== selectedAgent ||
+          !Array.isArray(message.parts) || message.parts.some((part) => isRecord(part) && part.synthetic === true)) continue;
+        const persistedText = message.parts.filter(isRecord).filter((part) => part.type === "text")
+          .map((part) => part.text).filter((text): text is string => typeof text === "string");
+        if (JSON.stringify(persistedText) !== JSON.stringify(currentText)) continue;
+        const messageID = info?.id ?? message.id;
+        if (typeof messageID === "string" && messageID.length > 0) return messageID;
+      } catch { /* current-message persistence may race the hook */ }
+    }
+    return undefined;
+  }
+
+  async function recoverPendingRealGoalTurn(sessionID: string): Promise<boolean> {
+    const active = pendingGoalRecoveries.get(sessionID);
+    if (active !== undefined) return await active;
+    const operation = (async () => {
+      const pending = pendingRealGoalTurns.get(sessionID);
+      if (pending === undefined) return false;
+      const messageID = await persistedCurrentRealMessageID(sessionID, pending.selectedAgent, pending.parts);
+      if (messageID === undefined || pendingRealGoalTurns.get(sessionID) !== pending) return false;
+      await acceptRealGoalTurn(sessionID, messageID, pending.selectedAgent, pending.parts);
+      goalDeclarationAuthority.set(sessionID, messageID);
+      pendingRealGoalTurns.delete(sessionID);
+      return true;
+    })().finally(() => pendingGoalRecoveries.delete(sessionID));
+    pendingGoalRecoveries.set(sessionID, operation);
+    return await operation;
+  }
+
+  function schedulePendingRealGoalRecovery(sessionID: string): void {
+    if (scheduledGoalRecoveries.has(sessionID)) return;
+    const operation = (async () => {
+      // Current OpenCode hosts may persist the real user message only after chat.message returns.
+      // Keep this bounded task referenced so a one-shot CLI cannot exit before causal recovery.
+      for (const delay of [0, 50, 250, 1_000]) {
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        if (!pendingRealGoalTurns.has(sessionID) || await recoverPendingRealGoalTurn(sessionID)) return;
+      }
+    })().finally(() => scheduledGoalRecoveries.delete(sessionID));
+    scheduledGoalRecoveries.set(sessionID, operation);
+  }
+
+  async function recordHostGoalStart(toolInput: ToolExecuteBeforeInput, output: ToolExecuteBeforeOutput): Promise<void> {
+    if (toolInput.tool === "task" || isCoordinatorSession(toolInput.sessionID) || parallelChildBindings.has(toolInput.sessionID)) return;
+    const identity = await hostSessionIdentity(toolInput.sessionID);
+    if (identity?.parentID === undefined) return;
+    const authorization = sessionAuthorizations.get(toolInput.sessionID);
+    if (authorization === undefined || authorization.suspended || authorization.rootSessionID !== identity.parentID) return;
+    const args = isRecord(output.args) ? output.args : undefined;
+    const rawCommand = args !== undefined && typeof args.command === "string" ? normalizeCommand(args.command) : undefined;
+    if (rawCommand === undefined || rawCommand.length === 0 || !authorization.validationCommands.has(rawCommand)) return;
+    const snapshot = await protectedSnapshot(authorization).catch(() => undefined);
+    if (snapshot === undefined) return;
+    const root = goalRoot(identity.parentID);
+    const ledger = await goalLedger(root);
+    const goal = (await ledger.readGoal()).state;
+    let validation: HostGoalExecution["validation"];
+    if (goal.goal_id !== null) {
+      const unitID = authorization.taskID;
+      const unitBound = unitID !== undefined && goal.outstanding_reservations.some((reservation) =>
+        reservation.unit_id === unitID && reservation.session_id === identity.parentID);
+      const criteria = goal.acceptance_contract?.criteria.filter((criterion) =>
+        criterion.validation_command === rawCommand && criterion.expected_outcome === "pass") ?? [];
+      if (!unitBound || criteria.length === 0) throw new Error("SORTIE_VALIDATION_BUDGET_DENIED: requirement-unbound");
+      const scope = criteria.every((criterion) => criterion.proof_scope === "requested-full") ? "full" : "targeted";
+      const request: ValidationBudgetRequest = { run_id: goal.goal_id, operation_id: toolInput.callID,
+        source_snapshot: snapshot.source, candidate: snapshot.candidate, command: [rawCommand], scope,
+        expected_evidence: [...new Set(criteria.flatMap((criterion) => [criterion.criterion_id, ...criterion.oracle_coverage,
+          `unit:${unitID}`, "source_snapshot", "candidate", "command", "scope", "exit_code"]))], reason: "acceptance" };
+      let reservation: Awaited<ReturnType<RunFlightLedger["reserveValidation"]>>;
+      try {
+        reservation = await ledger.reserveValidation(request, goal.budget?.max_units ?? 1);
+      } catch (error) {
+        throw new Error(`SORTIE_VALIDATION_BUDGET_DENIED: authority-unavailable:${error instanceof Error ? error.name : "unknown"}`);
+      }
+      if (reservation.decision !== "ALLOW" || reservation.reservation_id === null) {
+        throw new Error(`SORTIE_VALIDATION_BUDGET_DENIED: ${reservation.reason}`);
+      }
+      validation = { ledger, request, reservation: reservation.reservation_id };
+    }
+    hostGoalExecutions.set(toolInput.callID, { root, projectRoot: authorization.projectRoot,
+      sessionID: toolInput.sessionID,
+      callID: toolInput.callID, tool: toolInput.tool, command: [rawCommand], startedAt: new Date().toISOString(),
+      binding: snapshot.binding, source: snapshot.source, candidate: snapshot.candidate, validation });
+  }
+
+  async function recordHostGoalEnd(toolInput: TaskToolExecuteAfterInput, output: TaskResultRepairOutput,
+    timing?: HostToolTiming): Promise<void> {
+    const execution = hostGoalExecutions.get(toolInput.callID ?? "");
+    if (execution === undefined || execution.endedAt !== undefined) return;
+    const metadata = isRecord(output.metadata) ? output.metadata : undefined;
+    const rawExit = metadata?.exit;
+    const exitCode = typeof rawExit === "number" && Number.isSafeInteger(rawExit) ? rawExit : undefined;
+    const rawStatus = metadata?.status ?? output.status;
+    const outcome = exitCode === 0 ? "pass" : exitCode !== undefined ? "fail"
+      : rawStatus === "cancel" || rawStatus === "cancelled" ? "cancel" : undefined;
+    const validationOutcome: ValidationOutcome = exitCode === 0 ? "passed" : exitCode !== undefined ? "failed" : "interrupted";
+    if (execution.validation !== undefined) {
+      await execution.validation.ledger.settleValidation(execution.validation.reservation, execution.validation.request,
+        validationOutcome, exitCode ?? null);
+    }
+    const refreshed = await refreshProtectedSnapshot(execution.projectRoot, execution.binding).catch(() => undefined);
+    const observedStartedAt = typeof timing?.start === "number" && Number.isFinite(timing.start)
+      ? new Date(timing.start).toISOString() : execution.startedAt;
+    const endedAt = typeof timing?.end === "number" && Number.isFinite(timing.end)
+      ? new Date(timing.end).toISOString() : new Date().toISOString();
+    // The candidate is expected to change during a valid implementation task (the goal fixture
+    // itself is a declared write). Protect the source snapshot across the task, then bind evidence
+    // to the post-task candidate snapshot instead of rejecting the genuine mutation.
+    const fresh = refreshed !== undefined && refreshed.source === execution.source;
+    const immutableRef = outcome === undefined ? undefined : goalFingerprint({ root: execution.root,
+      child_session_id: execution.sessionID, call_id: execution.callID, command: execution.command,
+      started_at: observedStartedAt, ended_at: endedAt, exit_code: exitCode ?? null, outcome,
+      source: execution.source, candidate: execution.candidate });
+    hostGoalExecutions.set(execution.callID, { ...execution,
+      ...(refreshed === undefined ? {} : { source: refreshed.source, candidate: refreshed.candidate }),
+      startedAt: observedStartedAt, endedAt, exitCode: exitCode ?? null,
+      ...(outcome === undefined ? {} : { outcome }), ...(immutableRef === undefined ? {} : { immutableRef }), fresh });
+  }
+
+  async function acceptRealGoalTurn(sessionID: string, messageID: string, selectedAgent: string,
+    parts: readonly unknown[]): Promise<void> {
+    const ledger = await goalLedger(sessionID);
+    const state = (await ledger.readGoal()).state;
+    if (state.latest_user_message_id === messageID) return;
+    const at = new Date().toISOString();
+    if (state.goal_id === null || state.phase === "terminal") {
+      const acceptance = goalFingerprint({ message_id: messageID, parts: parts.map(textPart).filter((value) => value !== undefined) });
+      await ledger.appendGoal({ kind: "goal.accepted", at,
+        goal_id: goalFingerprint({ root: goalRoot(sessionID), origin_user_message_id: messageID }),
+        revision: 1, scope_epoch: 1, acceptance_fingerprint: acceptance,
+         origin_user_message_id: messageID, origin_session_id: sessionID, selected_agent: selectedAgent,
+         delivery: "mvp-first", budget: { max_units: 32, time_ms: null, cost_usd: null, source: "policy-default" },
+         acceptance_contract: null });
+      return;
+    }
+    await ledger.appendGoal({ kind: "goal.user-continued", at, goal_id: state.goal_id,
+      origin_user_message_id: messageID, session_id: sessionID, selected_agent: selectedAgent });
+  }
+
+  async function acceptPersistedRealGoalEvent(sessionID: string, info: Record<string, unknown>): Promise<void> {
+    if (info.role !== "user" || info.agent !== COORDINATOR_AGENT || typeof info.id !== "string" || info.id.length === 0) return;
+    const messages = input.client?.session?.messages;
+    if (messages === undefined) return;
+    const response = await messages.call(input.client!.session, {
+      path: { id: sessionID }, query: { directory: input.directory },
+    }).catch(() => undefined);
+    const payload = isRecord(response) && "data" in response ? response.data : response;
+    if (!Array.isArray(payload)) return;
+    const message = payload.find((entry) => isRecord(entry) &&
+      ((isRecord(entry.info) ? entry.info.id : entry.id) === info.id));
+    if (!isRecord(message) || (message.info !== undefined && !isRecord(message.info))) return;
+    const persistedInfo = isRecord(message.info) ? message.info : undefined;
+    if ((persistedInfo?.role ?? message.role) !== "user" ||
+      (persistedInfo?.agent ?? message.agent) !== COORDINATOR_AGENT || !Array.isArray(message.parts) ||
+      message.parts.some((part) => isRecord(part) && part.synthetic === true)) return;
+    await acceptRealGoalTurn(sessionID, info.id, COORDINATOR_AGENT, message.parts);
+    goalDeclarationAuthority.set(sessionID, info.id);
+  }
+
+  function goalTicketMetadata(value: unknown): Record<string, unknown> | undefined {
+    if (!isRecord(value) || !isRecord(value.metadata)) return undefined;
+    const metadata = value.metadata[GOAL_BOUND_METADATA_KEY];
+    return isRecord(metadata) ? metadata : undefined;
+  }
+
+  async function consumeGoalTicket(sessionID: string, messageID: string, parts: readonly unknown[]): Promise<void> {
+    const candidates = parts.map(goalTicketMetadata).filter((value) => value !== undefined);
+    if (candidates.length !== 1) throw new Error("SORTIE_GOAL_CONTROL_DENIED: ticket-required");
+    const ticket = candidates[0]!;
+    const required = ["ticket_id", "goal_id", "origin_user_message_id"] as const;
+    if (!required.every((key) => typeof ticket[key] === "string") || ticket.session_id !== sessionID) {
+      throw new Error("SORTIE_GOAL_CONTROL_DENIED: ticket-malformed");
+    }
+    const ledger = await goalLedger(sessionID);
+    const before = (await ledger.readGoal()).state;
+    const issued = before.tickets.find((candidate) => candidate.ticket_id === ticket.ticket_id);
+    await ledger.appendGoal({ kind: "ticket.consumed", at: new Date().toISOString(),
+      ticket_id: ticket.ticket_id as string, goal_id: ticket.goal_id as string,
+      receiving_message_id: messageID, session_id: sessionID,
+      origin_user_message_id: ticket.origin_user_message_id as string });
+    if (issued?.checkpoint.startsWith("fresh-root:") === true && before.latest_user_message_id !== null) {
+      goalDeclarationAuthority.set(sessionID, before.latest_user_message_id);
+    }
+  }
+
+  async function issueGoalTicket(sessionID: string, checkpoint: string): Promise<{ issued: boolean; metadata: Record<string, unknown> }> {
+    const ledger = await goalLedger(sessionID);
+    const state = (await ledger.readGoal()).state;
+    if (state.goal_id === null || state.phase !== "active" || state.latest_user_message_id === null) {
+      throw new Error("SORTIE_GOAL_CONTROL_DENIED: active-goal-required");
+    }
+    const outstanding = state.tickets.find((ticket) => ticket.receiving_message_id === null);
+    if (outstanding !== undefined) return { issued: false, metadata: { [GOAL_BOUND_METADATA_KEY]: outstanding } };
+    const ticketID = goalFingerprint({ goal_id: state.goal_id, revision: state.revision,
+      scope_epoch: state.scope_epoch, sequence: state.tickets.length + 1, checkpoint, nonce: randomUUID() });
+    const next = await ledger.appendGoal({ kind: "ticket.issued", at: new Date().toISOString(), ticket_id: ticketID,
+      goal_id: state.goal_id, revision: state.revision, scope_epoch: state.scope_epoch, checkpoint,
+       sequence: state.tickets.length + 1, session_id: sessionID, origin_user_message_id: state.latest_user_message_id });
+    const ticket = next.tickets.at(-1)!;
+    return { issued: true, metadata: { [GOAL_BOUND_METADATA_KEY]: {
+      ticket_id: ticket.ticket_id, goal_id: next.goal_id, revision: ticket.revision, scope_epoch: ticket.scope_epoch,
+      checkpoint: ticket.checkpoint, sequence: ticket.sequence, session_id: ticket.session_id,
+      origin_user_message_id: ticket.origin_user_message_id,
+    } } };
+  }
+
+  async function terminalGoal(sessionID: string, stopReason: GoalStopReason, status: "succeeded" | "stopped"): Promise<GoalTerminalReceipt | undefined> {
+    const ledger = await goalLedger(sessionID);
+    const state = (await ledger.readGoal()).state;
+    if (state.goal_id === null || state.receipt !== null || state.outstanding_reservations.length > 0 || state.acceptance_fingerprint === null) return state.receipt ?? undefined;
+    const records = (await ledger.readGoal()).records;
+    const settledEvidence = records.flatMap(({ event }) => event.kind === "unit.settled" ? event.evidence : []);
+    if (status === "succeeded" && state.acceptance_contract !== null) {
+      for (const criterion of state.acceptance_contract.criteria) {
+        if (criterion.source_binding !== "current-protected" && criterion.candidate_binding !== "current-protected") continue;
+        const evidence = [...settledEvidence].reverse().find((entry) =>
+          entry.measurement.criterion_ids.includes(criterion.criterion_id) && validGoalEvidence(entry, state));
+        if (evidence?.protected_binding === undefined) return undefined;
+        const current = await refreshProtectedSnapshot(evidence.protected_binding.project_root,
+          evidence.protected_binding).catch(() => undefined);
+        if (current === undefined ||
+          (criterion.source_binding === "current-protected" && current.source !== evidence.identity.source) ||
+          (criterion.candidate_binding === "current-protected" && current.candidate !== evidence.identity.candidate)) return undefined;
+      }
+    }
+    const started = [...records].reverse().find(({ event }) => event.kind === "goal.accepted")?.event.at ?? new Date().toISOString();
+    const ended = new Date().toISOString();
+    const startTime = Date.parse(started);
+    const endTime = Date.parse(ended);
+    const milestone = settledEvidence.filter((entry) => validGoalEvidence(entry, state))
+      .map((entry) => entry.execution.ended_at)
+      .filter((instant) => {
+        const value = Date.parse(instant);
+        return Number.isFinite(value) && value >= startTime && value <= endTime;
+      })
+      .sort((left, right) => Date.parse(left) - Date.parse(right))[0] ?? null;
+    const receipt: GoalTerminalReceipt = { goal_id: state.goal_id, terminal_revision: state.revision,
+      acceptance_fingerprint: state.acceptance_fingerprint, started_at: started, ended_at: ended, status,
+      stop_reason: stopReason, unit_ids: state.unit_ids, session_ids: state.session_ids,
+      evidence_refs: state.evidence_refs, milestone_at: milestone };
+    await ledger.appendGoal({ kind: "goal.terminal", at: ended, goal_id: state.goal_id, receipt });
+    appLogInfo("goal.terminal", sessionID, { goalID: state.goal_id, revision: state.revision, status, stopReason,
+      evidenceCount: state.evidence_refs.length, unitCount: state.unit_ids.length });
+    return receipt;
+  }
+
+  async function terminalGoalFromHostText(sessionID: string, text: string): Promise<{
+    readonly outcome: ReturnType<typeof terminalRunOutcome>;
+    readonly goal: GoalFlightState | undefined;
+    readonly receipt: GoalTerminalReceipt | undefined;
+  }> {
+    const outcome = terminalRunOutcome(text);
+    if (outcome === undefined || !isCoordinatorSession(sessionID)) {
+      return { outcome, goal: undefined, receipt: undefined };
+    }
+    let goal = await currentGoal(sessionID).catch(() => undefined);
+    let receipt = goal?.receipt ?? undefined;
+    if (receipt === undefined && outcome === "DONE") {
+      receipt = await terminalGoal(sessionID, "completed", "succeeded").catch(() => undefined);
+    } else if (receipt === undefined && outcome === "BLOCKED") {
+      const reason: GoalStopReason = /(^|\n)TRUE_BLOCKER\s*:\s*user-decision\s*:/iu.test(text)
+        ? "awaiting_user"
+        : "external_dependency";
+      receipt = await terminalGoal(sessionID, reason, "stopped").catch(() => undefined);
+    }
+    if (receipt !== undefined) goal = await currentGoal(sessionID).catch(() => goal);
+    if (receipt !== undefined) rootAcceptanceContinuity.delete(sessionID);
+    return { outcome, goal, receipt };
+  }
+
+  function declaredDelivery(prompt: string): GoalDeliveryMode {
+    const entries = handoffEntries(prompt);
+    const explicit = handoffValue(entries, ["delivery_mode"]);
+    if (explicit === "planning-only" || explicit === "mvp-first" || explicit === "repair-first" || explicit === "controlled-change") return explicit;
+    const intent = handoffValue(entries, ["delivery_intent"]);
+    const declared = intent === "design" || intent === "registration" || intent === "repair" || intent === "controlled-change"
+      ? intent : "implementation";
+    return selectGoalDelivery({ declared_intent: declared,
+      requested_usable_path_established: handoffValue(entries, ["usable_path_established"]) === "true",
+      irreversible_or_major_scope: handoffValue(entries, ["controlled_change"]) === "true" });
+  }
+
+  function declaredGoalContract(prompt: string): GoalAcceptanceContract | null {
+    const lines = prompt.split(/\r?\n/u);
+    const criterionStarts = lines.flatMap((line, index) =>
+      /^\s*goal_criterion_id\s*:/u.test(line) ? [index] : []);
+    if (criterionStarts.length > 1) {
+      const validation = handoffValue(handoffEntries(prompt), ["validation"]);
+      const contracts = criterionStarts.map((start, index) =>
+        declaredGoalContract(lines.slice(start, criterionStarts[index + 1]).join("\n") +
+          (validation === undefined ? "" : `\nvalidation: ${validation}`)));
+      if (contracts.some((contract) => contract === null)) return null;
+      const criteria = contracts.flatMap((contract) => contract!.criteria);
+      return new Set(criteria.map((criterion) => criterion.criterion_id)).size === criteria.length
+        ? { criteria } : null;
+    }
+    const entries = handoffEntries(prompt);
+    const required = ["goal_criterion_id", "goal_target", "goal_entrypoint", "goal_workload",
+      "goal_oracle_coverage", "goal_build_boundary", "goal_source", "goal_candidate", "goal_fixture",
+      "goal_proof_scope", "goal_expected_outcome"] as const;
+    const values = Object.fromEntries(required.map((key) => [key, handoffValue(entries, [key])])) as
+      Record<(typeof required)[number], string | undefined>;
+    if (required.some((key) => key !== "goal_oracle_coverage" && values[key] === undefined)) return null;
+    let oracleCoverage: string[];
+    try {
+      const parsed = values.goal_oracle_coverage === undefined
+        ? taskAcceptanceCriteria(prompt, "goal_oracle_coverage") : JSON.parse(values.goal_oracle_coverage);
+      if (!Array.isArray(parsed) || !parsed.every((value) => typeof value === "string" && value.length > 0)) return null;
+      oracleCoverage = parsed;
+    } catch { return null; }
+    const buildBoundary = values.goal_build_boundary;
+    const proofScope = values.goal_proof_scope;
+    const expectedOutcome = values.goal_expected_outcome;
+    const sourceBinding = handoffValue(entries, ["goal_source_binding"]);
+    const candidateBinding = handoffValue(entries, ["goal_candidate_binding"]);
+    const declaredValidation = handoffValue(entries, ["validation"]);
+    const structuredCommands = declaredValidation?.startsWith("{") && declaredValidation.endsWith("}")
+      ? [...declaredValidation.matchAll(/(?:\{|,)\s*command\s*:\s*([^,}]+)/gu)] : [];
+    const validationCommand = handoffValue(entries, ["goal_validation_command"]) ??
+      (structuredCommands.length === 1 ? unquoteValue(structuredCommands[0]![1]!.trim()) : undefined);
+    if (buildBoundary !== "included" && buildBoundary !== "excluded" && buildBoundary !== "not-applicable") return null;
+    if (proofScope !== "requested-full" && proofScope !== "document-deliverable" && proofScope !== "expected-negative") return null;
+    if (expectedOutcome !== "pass" && expectedOutcome !== "fail") return null;
+    if (sourceBinding !== undefined && sourceBinding !== "declared" && sourceBinding !== "current-protected") return null;
+    if (candidateBinding !== undefined && candidateBinding !== "declared" && candidateBinding !== "current-protected") return null;
+    return { criteria: [{ criterion_id: values.goal_criterion_id!, target: values.goal_target!,
+      entrypoint: values.goal_entrypoint!, workload: values.goal_workload!, oracle_coverage: oracleCoverage,
+      build_boundary: buildBoundary, source: values.goal_source!, candidate: values.goal_candidate!,
+      source_binding: sourceBinding ?? "declared", candidate_binding: candidateBinding ?? "declared",
+      ...(validationCommand === undefined ? {} : { validation_command: normalizeCommand(validationCommand) }),
+      fixture: values.goal_fixture!, proof_scope: proofScope, expected_outcome: expectedOutcome }] };
+  }
+
+  async function bindGoalDeclaration(sessionID: string, prompt: string,
+    acceptance: AcceptanceContinuityLedger | undefined): Promise<GoalFlightState | undefined> {
+    const ledger = await goalLedger(sessionID);
+    let state = (await ledger.readGoal()).state;
+    if (state.goal_id === null || state.origin_user_message_id === null) return undefined;
+    const authority = goalDeclarationAuthority.get(sessionID);
+    if (authority === undefined || authority !== state.latest_user_message_id) return state;
+    goalDeclarationAuthority.delete(sessionID);
+    const entries = handoffEntries(prompt);
+    const explicitFingerprint = handoffValue(entries, ["goal_acceptance_fingerprint"]);
+    if (state.acceptance_contract !== null && explicitFingerprint === undefined) return state;
+    const declaredFingerprint = explicitFingerprint ?? acceptance?.fingerprint;
+    if (declaredFingerprint === undefined || !/^sha256:[a-f0-9]{64}$/u.test(declaredFingerprint) ||
+      declaredFingerprint === state.acceptance_fingerprint) return state;
+    const units = Number(handoffValue(entries, ["goal_budget_units"]));
+    const maxUnits = Number.isSafeInteger(units) && units >= state.consumed_units && units > 0
+      ? units : state.budget?.max_units ?? 32;
+    const declaredTime = Number(handoffValue(entries, ["goal_budget_time_ms"]));
+    const declaredCost = Number(handoffValue(entries, ["goal_budget_cost_usd"]));
+    const timeBudget = Number.isFinite(declaredTime) && declaredTime > 0 ? declaredTime : state.budget?.time_ms ?? null;
+    const costBudget = Number.isFinite(declaredCost) && declaredCost > 0 ? declaredCost : state.budget?.cost_usd ?? null;
+    state = await ledger.appendGoal({ kind: "goal.revised", at: new Date().toISOString(), goal_id: state.goal_id,
+      revision: state.revision + 1, scope_epoch: state.scope_epoch + 1,
+      acceptance_fingerprint: declaredFingerprint, origin_user_message_id: state.latest_user_message_id!,
+      session_id: sessionID, selected_agent: state.selected_agent ?? COORDINATOR_AGENT,
+      delivery: declaredDelivery(prompt), budget: { max_units: maxUnits,
+         time_ms: timeBudget, cost_usd: costBudget,
+         source: Number.isSafeInteger(units) ? "accepted-plan" : state.budget?.source ?? "policy-default" },
+      acceptance_contract: declaredGoalContract(prompt) });
+    return state;
+  }
+
+  async function reserveGoalDispatch(sessionID: string, callID: string, prompt: string,
+    acceptance: AcceptanceContinuityLedger | undefined): Promise<void> {
+    if (goalReservations.has(callID)) return;
+    const ledger = await goalLedger(sessionID);
+    let state = await bindGoalDeclaration(sessionID, prompt, acceptance) ?? (await ledger.readGoal()).state;
+    if (state.goal_id === null) return; // Legacy already-authorized roots may settle without inventing authority.
+    if (state.replan_required) {
+      if (state.replan_used) {
+        await terminalGoal(sessionID, "stop_no_progress", "stopped");
+        throw new Error("SORTIE_GOAL_CONTROL_DENIED: stop_no_progress");
+      }
+      state = await ledger.appendGoal({ kind: "goal.replanned", at: new Date().toISOString(),
+        goal_id: state.goal_id, revision: state.revision, reason: "no-progress" });
+    }
+    if (state.budget !== null && state.consumed_units + state.outstanding_reservations.length >= state.budget.max_units) {
+      await terminalGoal(sessionID, "stop_budget", "stopped");
+      throw new Error("SORTIE_GOAL_CONTROL_DENIED: stop_budget");
+    }
+    if (state.budget !== null && state.budget.time_ms !== null &&
+      (state.consumed_time_ms === null || state.consumed_time_ms >= state.budget.time_ms)) {
+      await terminalGoal(sessionID, "stop_budget", "stopped");
+      throw new Error("SORTIE_GOAL_CONTROL_DENIED: stop_budget");
+    }
+    if (state.budget !== null && state.budget.cost_usd !== null &&
+      (state.consumed_cost_usd === null || state.consumed_cost_usd >= state.budget.cost_usd)) {
+      await terminalGoal(sessionID, "stop_budget", "stopped");
+      throw new Error("SORTIE_GOAL_CONTROL_DENIED: stop_budget");
+    }
+    if (state.goal_id === null) return;
+    const unitID = handoffValue(handoffEntries(prompt), ["task_id"]) ?? callID;
+    const reservationID = goalFingerprint({ goal_id: state.goal_id, unit_id: unitID, call_id: callID });
+    const durableReservation = state.outstanding_reservations.find((entry) => entry.reservation_id === reservationID);
+    if (durableReservation !== undefined) {
+      if (durableReservation.unit_id !== unitID || durableReservation.session_id !== sessionID) {
+        throw new Error("SORTIE_GOAL_CONTROL_DENIED: reservation-identity-mismatch");
+      }
+      goalReservations.set(callID, { root: goalRoot(sessionID), reservationID, unitID, started: Date.now() });
+      return;
+    }
+    const consumedTicket = [...state.tickets].reverse().find((ticket) => ticket.receiving_message_id !== null)?.ticket_id ?? null;
+    await ledger.appendGoal({ kind: "dispatch.reserved", at: new Date().toISOString(), reservation_id: reservationID,
+      goal_id: state.goal_id, unit_id: unitID, session_id: sessionID, ticket_id: consumedTicket });
+    goalReservations.set(callID, { root: goalRoot(sessionID), reservationID, unitID, started: Date.now() });
+  }
+
+  async function settleGoalDispatch(callID: string, output: TaskResultRepairOutput): Promise<void> {
+    const reservation = goalReservations.get(callID);
+    if (reservation === undefined) return;
+    goalReservations.delete(callID);
+    const ledger = await goalLedger(reservation.root);
+    const state = (await ledger.readGoal()).state;
+    if (state.goal_id === null) return;
+    const outputText = typeof output.output === "string" ? output.output : "";
+    // Task text and Task result metadata are model/child-controlled. Only an exact declared command
+    // observed in the child tool hooks with a native host exit may produce goal evidence.
+    const childSessionID = taskChildSessionID(output);
+    const hostEvidence = [...hostGoalExecutions.values()]
+      .filter((execution) => childSessionID !== undefined && execution.sessionID === childSessionID &&
+        execution.root === reservation.root && execution.endedAt !== undefined &&
+        execution.startedAt.length > 0 && Date.parse(execution.startedAt) >= reservation.started - 1000 &&
+        execution.immutableRef !== undefined && execution.fresh === true)
+      .map((execution): GoalEvidence | undefined => {
+        const contract = state.acceptance_contract?.criteria.filter((criterion) =>
+          criterion.validation_command === execution.command[0] && criterion.expected_outcome === "pass" &&
+          criterion.proof_scope === "requested-full");
+        if (contract === undefined || contract.length === 0 || execution.exitCode !== 0 || execution.outcome !== "pass") return undefined;
+        const first = contract[0]!;
+        const compatible = contract.every((criterion) => criterion.target === first.target &&
+          criterion.entrypoint === first.entrypoint && criterion.workload === first.workload &&
+          criterion.fixture === first.fixture && criterion.build_boundary === first.build_boundary &&
+          criterion.proof_scope === first.proof_scope &&
+          JSON.stringify(criterion.oracle_coverage) === JSON.stringify(first.oracle_coverage));
+        if (!compatible) return undefined;
+        return { evidence_id: execution.immutableRef!,
+          goal_id: state.goal_id!, goal_revision: state.revision, scope_epoch: state.scope_epoch,
+          acceptance_fingerprint: state.acceptance_fingerprint!,
+          measurement: { criterion_ids: contract.map((criterion) => criterion.criterion_id), target: first.target,
+            entrypoint: first.entrypoint, workload: first.workload, oracle_coverage: first.oracle_coverage,
+            build_boundary: first.build_boundary },
+          identity: { source: first.source_binding === "current-protected" ? execution.source : first.source,
+            candidate: first.candidate_binding === "current-protected" ? execution.candidate : first.candidate,
+            fixture: first.fixture }, protected_binding: execution.binding,
+          execution: { command: execution.command, exit_code: execution.exitCode, outcome: execution.outcome,
+            started_at: execution.startedAt, ended_at: execution.endedAt!, units: [reservation.unitID] },
+          proof_scope: first.proof_scope };
+      }).filter((entry): entry is GoalEvidence => entry !== undefined);
+    // A worker may return after a user scope epoch changed. Settle its spend/reservation, but only
+    // adopt observations still bound to the current accepted source/candidate/criterion contract.
+    const acceptedEvidence = hostEvidence.filter((entry) => validGoalEvidence(entry, state) &&
+      entry.execution.units.includes(reservation.unitID));
+    const newEvidence = acceptedEvidence.filter((entry) => entry.measurement.criterion_ids.some((criterionID) =>
+      !state.satisfied_criteria.includes(criterionID)));
+    const progress = newEvidence.length > 0;
+    await ledger.appendGoal({ kind: "unit.settled", at: new Date().toISOString(),
+      reservation_id: reservation.reservationID, receipt_id: goalFingerprint({ call_id: callID, output: outputText.slice(0, 2048) }),
+      goal_id: state.goal_id, unit_id: reservation.unitID,
+      disposition: progress ? "succeeded" : "failed", progress_fingerprint: progress ? goalFingerprint(acceptedEvidence) : null,
+      evidence: acceptedEvidence, elapsed_ms: Math.max(0, Date.now() - reservation.started), cost_usd: null });
+    if (childSessionID !== undefined) {
+      for (const [executionCallID, execution] of hostGoalExecutions) {
+        if (execution.root === reservation.root && execution.sessionID === childSessionID) hostGoalExecutions.delete(executionCallID);
+      }
+    }
+  }
+
   // Project config read is required discovery for its opt-in; no reflection storage/version read
   // occurs unless that resolved config enables reflection. It stays isolated from write-gate load.
   try {
@@ -1534,6 +2190,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       attempts: transition.attempts,
       resumeAttempts: transition.resumeAttempts,
     }),
+    { issueTicket: issueGoalTicket },
   );
   const completedCoordinatorMessages = new Set<string>();
   const completedCoordinatorParts = new Set<string>();
@@ -1597,10 +2254,14 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           await deleteFreshSession(targetSessionID);
           return freshSessionFallback(reason, fallbackAction);
         }
+        goalRootSessions.set(targetSessionID, goalRoot(sourceSessionID));
+        const ticket = await issueGoalTicket(targetSessionID, `fresh-root:${reason}`);
+        if (!ticket.issued) throw new Error("fresh coordinator ticket already outstanding");
         const sent = await send.call(input.client!.session, {
           path: { id: targetSessionID },
           query: { directory: input.worktree ?? input.directory },
-          body: { agent: COORDINATOR_AGENT, parts: prompt },
+          body: { agent: COORDINATOR_AGENT, parts: prompt.map((part) => ({ ...part, synthetic: true,
+            metadata: ticket.metadata })) },
         });
         if (!promptAccepted(sent)) throw new Error("fresh coordinator prompt rejected");
         appLogInfo("fresh-session.redispatched", sourceSessionID, {
@@ -2709,6 +3370,25 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       const artifact = recovered ?? await produceWorktreeCommitArtifact(produceRequest, {
         signal: activeOperation.controller.signal,
         enterProtectedPhase: () => { activeOperation.phase = "protected"; },
+        beforeValidation: async (sourceSnapshot) => {
+          const ledger = await (await getParallelCoordinator()).childLedger(binding.ownerRoot, binding.descriptor,
+            binding.completionCallID, sessionID);
+          const executable = await resolveValidationExecutable(request.validation.executable);
+          if (executable === undefined) throw new WorktreeCommitArtifactError("invalid-request", "Validation executable does not exist.");
+          const validation: ValidationBudgetRequest = { run_id: binding.descriptor.run_id, operation_id: binding.descriptor.dispatch_id,
+            source_snapshot: `sha256:${sourceSnapshot}`, candidate: binding.descriptor.task_id, command: [executable, ...request.validation.args],
+            scope: "targeted", expected_evidence: ["source_snapshot", "candidate", "command", "scope", "exit_code"], reason: "preflight" };
+          const reservation = await ledger.reserveValidation(validation, 1);
+          if (reservation.decision !== "ALLOW" || reservation.reservation_id === null) throw new WorktreeCommitArtifactError("invalid-request",
+            `Validation denied: ${reservation.reason}.`);
+          (activeOperation as ParallelArtifactOperation & { validation?: { ledger: typeof ledger; request: ValidationBudgetRequest; reservation: string } }).validation = {
+            ledger, request: validation, reservation: reservation.reservation_id,
+          };
+        },
+        afterValidation: async (outcome, exitCode) => {
+          const validation = (activeOperation as ParallelArtifactOperation & { validation?: { ledger: RunFlightLedger; request: ValidationBudgetRequest; reservation: string } }).validation;
+          if (validation !== undefined) await validation.ledger.settleValidation(validation.reservation, validation.request, outcome, exitCode);
+        },
       });
       activeOperation.phase = "protected";
       await removeParallelControlFiles(binding.descriptor);
@@ -3956,6 +4636,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           readScopes,
           rootSessionID: inspectedEntry.rootSessionID,
           suspended: false,
+          taskID: handoffValidation.value.id,
           validationCommands: new Set(validation.value.validation.map(normalizeCommand)),
           writeScopes,
         });
@@ -4350,7 +5031,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     sessionID: string,
   ): Promise<{
     readonly hasForeignUserTurn: boolean;
-    readonly persistedTurn: { readonly agent: string; readonly synthetic: boolean } | undefined;
+    readonly persistedTurn: { readonly agent: string; readonly synthetic: false; readonly messageID: string } | undefined;
   } | undefined> {
     const messages = input.client?.session?.messages;
     if (messages === undefined) return undefined;
@@ -4361,8 +5042,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       });
       const payload = isRecord(response) && "data" in response ? response.data : response;
       if (!Array.isArray(payload)) return undefined;
-      let persistedTurn: { readonly agent: string; readonly synthetic: boolean } | undefined;
-      let hasForeignUserTurn = false;
+      let persistedTurn: { readonly agent: string; readonly synthetic: false; readonly messageID: string } | undefined;
       for (let index = payload.length - 1; index >= 0; index -= 1) {
         const message = payload[index];
         if (!isRecord(message)) return undefined;
@@ -4373,16 +5053,16 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         if (role !== "user") continue;
         const agent = info?.agent ?? message.agent;
         if (typeof agent !== "string") return undefined;
-        if (agent !== COORDINATOR_AGENT) hasForeignUserTurn = true;
-        if (persistedTurn === undefined) {
-          if (message.parts !== undefined && !Array.isArray(message.parts)) return undefined;
-          persistedTurn = {
-            agent,
-            synthetic: Array.isArray(message.parts) && message.parts.some((part) => isRecord(part) && part.synthetic === true),
-          };
-        }
+        if (message.parts !== undefined && !Array.isArray(message.parts)) return undefined;
+        const synthetic = Array.isArray(message.parts) && message.parts.some((part) => isRecord(part) && part.synthetic === true);
+        if (synthetic) continue;
+        const messageID = info?.id ?? message.id;
+        if (typeof messageID !== "string" || messageID.length === 0) return undefined;
+        persistedTurn = { agent, synthetic: false, messageID };
+        break;
       }
-      return { hasForeignUserTurn, persistedTurn };
+      return { hasForeignUserTurn: persistedTurn?.agent !== undefined && persistedTurn.agent !== COORDINATOR_AGENT,
+        persistedTurn };
     } catch {
       return undefined;
     }
@@ -4477,6 +5157,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     if (persistedTurn === undefined && identity.agent !== COORDINATOR_AGENT) return false;
     if (persistedTurn !== undefined && persistedTurn.agent !== COORDINATOR_AGENT) return false;
     await rememberCoordinatorRoot(sessionID);
+    if (persistedTurn !== undefined) {
+      await acceptRealGoalTurn(sessionID, persistedTurn.messageID, persistedTurn.agent, []);
+      goalDeclarationAuthority.set(sessionID, persistedTurn.messageID);
+    }
     await pinAssetVersion(sessionID);
     releaseSessionEnforcement(sessionID);
     fastLane.beginTurn(sessionID, persistedTurn?.synthetic ?? false);
@@ -4864,6 +5548,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       } : {}),
     },
     "experimental.text.complete": async (textInput, textOutput): Promise<void> => {
+      if (pendingRealGoalTurns.has(textInput.sessionID)) await recoverPendingRealGoalTurn(textInput.sessionID);
       if (fastLane.manualCompactionForbidden(textInput.sessionID)) {
         textOutput.text = textOutput.text
           .replaceAll(ROLLOVER_MARKER, "")
@@ -4871,22 +5556,43 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           .trimEnd();
       }
       const runOutcome = terminalRunOutcome(textOutput.text);
+      const terminal = runOutcome === undefined || !isCoordinatorSession(textInput.sessionID)
+        ? undefined
+        : await terminalGoalFromHostText(textInput.sessionID, textOutput.text);
+      if (runOutcome === "DONE" && terminal?.goal !== undefined &&
+        terminal.goal.acceptance_contract !== null && terminal.receipt === undefined) {
+        textOutput.text = textOutput.text.replace(/(^|\n)status:\s*DONE\b/iu,
+          "$1status: IN_PROGRESS\ngoal_control: accepted criteria remain unproved");
+      }
       if ((isCoordinatorSession(textInput.sessionID) || await recoverCoordinatorRoot(textInput.sessionID)) &&
         runOutcome !== undefined) {
         const metrics = await measureSessionOperation(
           textInput.sessionID,
           "collectRunMetrics",
-          () => collectRunMetrics(input.client, textInput.sessionID, input.directory).catch(() => undefined),
+          () => collectRunMetrics(input.client, textInput.sessionID, input.directory, Date.now(),
+            terminal?.receipt === undefined ? undefined : {
+              startedAt: terminal.receipt.started_at,
+              endedAt: terminal.receipt.ended_at,
+            }).catch(() => undefined),
         );
-        if (metrics !== undefined && runOutcome === "DONE") textOutput.text = insertRunMetrics(textOutput.text, metrics);
+        const sortieResult = terminal?.receipt === undefined || terminal.goal === undefined
+          ? undefined
+          : createSortieResult(terminal.receipt, terminal.goal, metrics, new Date().toISOString());
+        if (sortieResult !== undefined) textOutput.text = insertSortieResult(textOutput.text, sortieResult);
+        else if (metrics !== undefined && runOutcome === "DONE") textOutput.text = insertRunMetrics(textOutput.text, metrics);
         appLogInfo("run-metrics.snapshot", textInput.sessionID, {
           available: metrics !== undefined,
           outcome: runOutcome,
           runtimeAssetVersion: RUNTIME_ASSET_VERSION,
+          ...(sortieResult === undefined ? {} : {
+            resultID: sortieResult.result_id,
+            resultMission: sortieResult.mission.status,
+            resultProof: sortieResult.proof.overall,
+            accountingPhase: sortieResult.accounting_phase,
+          }),
           ...(metrics ?? {}),
           ...operationMetricsSnapshot(textInput.sessionID),
         });
-        if (runOutcome === "DONE") rootAcceptanceContinuity.delete(textInput.sessionID);
       }
       await completeContinuationText(textInput.sessionID, textOutput.text, false);
       if (runOutcome === "DONE" && isCoordinatorSession(textInput.sessionID)) {
@@ -4931,6 +5637,12 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         output.message.agent = chatInput.agent;
       }
       const requestedCoordinator = selectedAgent === COORDINATOR_AGENT;
+      const messageID = realMessageID(chatInput, output) ?? (synthetic ? undefined
+        : await persistedCurrentRealMessageID(chatInput.sessionID, selectedAgent, output.parts));
+      if (requestedCoordinator && !coordinatorRoot && (parentID !== undefined || knownChildSessions.has(chatInput.sessionID)) &&
+        !synthetic && messageID !== undefined) {
+        await acceptRealGoalTurn(chatInput.sessionID, messageID, selectedAgent, output.parts);
+      }
       if (requestedCoordinator && !coordinatorRoot) {
         const explicitChild = parentID !== undefined || knownChildSessions.has(chatInput.sessionID);
         const identity = input.client?.session?.get === undefined
@@ -4953,14 +5665,31 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       }
       const coordinatorOrigin = parentID === undefined && requestedCoordinator;
       if (coordinatorOrigin) {
+        if (synthetic) {
+          if (messageID === undefined) throw new Error("SORTIE_GOAL_CONTROL_DENIED: receiving-message-id-required");
+          await consumeGoalTicket(chatInput.sessionID, messageID, output.parts);
+        } else if (messageID !== undefined) {
+          await acceptRealGoalTurn(chatInput.sessionID, messageID, selectedAgent, output.parts);
+          goalDeclarationAuthority.set(chatInput.sessionID, messageID);
+        } else if (selectedAgent !== undefined) {
+          // Some native hosts persist the user message only after this hook returns. Defer to the
+          // system-transform boundary, but retain no synthetic authority and accept only the exact
+          // final persisted real-user parts through persistedCurrentRealMessageID.
+          pendingRealGoalTurns.set(chatInput.sessionID, { selectedAgent, parts: [...output.parts] });
+          pruneParallelChildMap(pendingRealGoalTurns);
+          schedulePendingRealGoalRecovery(chatInput.sessionID);
+        }
         const prompt = synthetic ? undefined : freshSessionPrompt(output.parts);
         if (prompt !== undefined) coordinatorPrompts.set(chatInput.sessionID, prompt);
-        fastLane.beginTurn(chatInput.sessionID, synthetic);
+        // Synthetic coordinator turns reach here only after consumeGoalTicket accepted the
+        // host-round-tripped one-use control. Raw synthetic markers never reach this authority.
+        fastLane.beginTurn(chatInput.sessionID, synthetic, synthetic);
         releaseSessionEnforcement(chatInput.sessionID);
         await rememberCoordinatorRoot(chatInput.sessionID);
         await pinAssetVersion(chatInput.sessionID);
       } else {
         if (!synthetic && isCoordinatorSession(chatInput.sessionID)) {
+          await terminalGoal(chatInput.sessionID, "agent_changed", "stopped").catch(() => undefined);
           fastLane.forget(chatInput.sessionID);
           abortCoordinatorTasks(chatInput.sessionID);
           continuation.forgetSession(chatInput.sessionID);
@@ -5079,6 +5808,30 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           "then return the terminal report and stop. Do not call a compaction capability or emit a continuation marker."];
       }
       if (isCoordinatorSession(transformInput.sessionID) || await recoverCoordinatorRoot(transformInput.sessionID)) {
+        await recoverPendingRealGoalTurn(transformInput.sessionID);
+        const goal = await currentGoal(transformInput.sessionID);
+        if (goal !== undefined && goal.goal_id !== null) {
+          transformOutput.system = [...(transformOutput.system ?? []), `SORTIE_GOAL_BOUND_STATE\n${JSON.stringify({
+            goal_id: goal.goal_id, revision: goal.revision, scope_epoch: goal.scope_epoch,
+            acceptance_fingerprint: goal.acceptance_fingerprint, delivery: goal.delivery,
+            budget: goal.budget, consumed_units: goal.consumed_units,
+            consumed_time_ms: goal.consumed_time_ms, consumed_cost_usd: goal.consumed_cost_usd,
+            phase: goal.phase, stop_reason: goal.stop_reason, no_progress_results: goal.no_progress_results,
+            replan_used: goal.replan_used, outstanding_reservations: goal.outstanding_reservations.length,
+            receipt: goal.receipt,
+          })}`];
+        }
+        const acceptedUnit = rootAcceptanceContinuity.get(transformInput.sessionID);
+        if (acceptedUnit !== undefined) {
+          transformOutput.system = [...(transformOutput.system ?? []),
+            `SORTIE_ACCEPTANCE_CONTINUITY_STATE\n${JSON.stringify({
+              authority: "accepted-dispatch", latest_accepted_task_id: acceptedUnit.task_id,
+              latest_accepted_fingerprint: acceptedUnit.fingerprint,
+              latest_accepted_parent_fingerprint: acceptedUnit.parent_fingerprint,
+              criteria_count: acceptedUnit.criteria.length,
+              next_sequential_parent_fingerprint: acceptedUnit.fingerprint,
+            })}`];
+        }
         const coordinator = parallelCoordinator ?? await getParallelCoordinator().catch(() => undefined);
         const snapshot = await coordinator?.snapshot(transformInput.sessionID).catch(() => undefined);
         if (snapshot !== undefined) {
@@ -5147,6 +5900,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
      * erases an answer the worker already produced and the coordinator re-dispatches the same work.
     */
     "tool.execute.after": async (toolInput, output): Promise<void> => {
+      await recordHostGoalEnd(toolInput, output);
       diagnosisChildren.get(toolInput.sessionID ?? "")?.tools.delete(toolInput.callID ?? "");
       const diagnosisCandidate = toolInput.tool === "task" ? diagnosisCalls.get(toolInput.callID ?? "") : undefined;
       const diagnosis = diagnosisCandidate?.context.ownerRoot === toolInput.sessionID ? diagnosisCandidate : undefined;
@@ -5285,6 +6039,13 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         parallelCalls.delete(toolInput.callID ?? "");
         activeSessions.get(toolInput.sessionID ?? "")?.inFlightCalls.delete(toolInput.callID ?? "");
         if (coordinatorTaskFinished && diagnosis === undefined) {
+          if (toolInput.callID !== undefined) {
+            await settleGoalDispatch(toolInput.callID, output).catch((error) => {
+              appLogInfo("goal.settlement_failed", toolInput.sessionID!, {
+                code: error instanceof Error ? error.name : "unknown",
+              });
+            });
+          }
           fastLane.workerCompleted(toolInput.sessionID!);
         }
         if (completedChildSessionID !== undefined && !recoverableWorkerChildren.has(completedChildSessionID)) {
@@ -5326,6 +6087,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         diagnosis.tools.add(toolInput.callID);
         return;
       }
+      await recordHostGoalStart(toolInput, output);
       const coordinatorRoot = isCoordinatorSession(toolInput.sessionID) || await recoverCoordinatorRoot(toolInput.sessionID);
       const readonlyDiagnosis = coordinatorRoot && toolInput.tool === "task" && isRecord(output.args)
         ? await claimDiagnosisTask(toolInput.sessionID, toolInput.callID, output.args) : false;
@@ -5581,9 +6343,11 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
                   });
                 }
               } else {
-                if (ledger.parent_fingerprint !== previous.fingerprint ||
-                  ledger.criteria.length <= previous.criteria.length ||
-                  previous.criteria.some((criterion, index) => criterion !== ledger.criteria[index])) {
+                const exactCarryForward = ledger.criteria.length === previous.criteria.length &&
+                  previous.criteria.every((criterion, index) => criterion === ledger.criteria[index]);
+                const strictAppend = ledger.criteria.length > previous.criteria.length &&
+                  previous.criteria.every((criterion, index) => criterion === ledger.criteria[index]);
+                if (ledger.parent_fingerprint !== previous.fingerprint || (!exactCarryForward && !strictAppend)) {
                   throw new HandoffDeniedError("contract-invalid", handoffPaths[0]!, {
                     defects: [contractDefect("handoff", "/ext/sortie-dogs~1acceptance-continuity",
                       "acceptance_parent_continuity_mismatch")],
@@ -5630,6 +6394,11 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           parallelWorkerAlreadyBound,
           parallelWorkerAuthorized,
         });
+        if (toolInput.tool === "task" && taskRole !== undefined && IMPLEMENTATION_AGENTS.has(taskRole) &&
+          isRecord(output.args)) {
+          await reserveGoalDispatch(toolInput.sessionID, toolInput.callID,
+            typeof output.args.prompt === "string" ? output.args.prompt : "", validatedRootAcceptance);
+        }
         if (validatedRootAcceptance !== undefined && reservedParallelDescriptor === undefined) {
           rootAcceptanceContinuity.delete(toolInput.sessionID);
           rootAcceptanceContinuity.set(toolInput.sessionID, validatedRootAcceptance);
@@ -5709,9 +6478,12 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         const command = isRecord(output.args) && typeof output.args.command === "string"
           ? normalizeCommand(output.args.command)
           : undefined;
+        // Declared validation has one budget owner: the controlled artifact/run path. A bound
+        // worker must not spawn the same command through a generic bash/shell tool, because that
+        // path has no reservation and cannot durably settle one. Keep the exact manifest command
+        // boundary; unrelated commands continue through the ordinary write gate.
         if (
-          activeState?.parallel === "valid" && command !== undefined &&
-          authorization?.validationCommands.has(command) === true
+          activeState?.parallel === "valid" && command !== undefined && authorization?.validationCommands.has(command) === true
         ) throw new WriteDeniedError("parallel-validation", "<parallel-unit>");
         if (activeState?.parallel === "valid") {
           const extracted = extractWritePaths(toolInput.tool, output.args);
@@ -5749,7 +6521,22 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         return;
       }
       if (eventSessionID === undefined) return;
+      if (event.type === "message.updated" && info !== undefined) {
+        await acceptPersistedRealGoalEvent(eventSessionID, info);
+      }
+      if (pendingRealGoalTurns.has(eventSessionID) &&
+        (event.type === "message.updated" || event.type === "message.part.updated")) {
+        await recoverPendingRealGoalTurn(eventSessionID);
+      }
       const eventPartTime = isRecord(eventPart?.time) ? eventPart.time : undefined;
+      if (event.type === "message.part.updated" && eventPart?.type === "tool" &&
+        typeof eventPart.callID === "string" && typeof eventPart.tool === "string" && isRecord(eventPart.state) &&
+        (eventPart.state.status === "completed" || eventPart.state.status === "error")) {
+        const state = eventPart.state;
+        await recordHostGoalEnd({ tool: eventPart.tool, sessionID: eventSessionID, callID: eventPart.callID,
+          args: state.input }, { output: state.output, metadata: state.metadata, status: state.status },
+        isRecord(state.time) ? state.time : undefined);
+      }
       if (event.type === "message.part.updated" && eventPart?.type === "tool" &&
         typeof eventPart.callID === "string" && isRecord(eventPart.state) && eventPart.state.status === "error") {
         activeSessions.get(eventSessionID)?.inFlightCalls.delete(eventPart.callID);
@@ -5776,6 +6563,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           while (completedCoordinatorMessages.size > ACTIVE_SESSION_CACHE.maximum) {
             completedCoordinatorMessages.delete(completedCoordinatorMessages.values().next().value!);
           }
+          await terminalGoalFromHostText(eventSessionID, text);
           await completeContinuationText(eventSessionID, text, false);
           return;
         }
@@ -5811,7 +6599,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         try {
           const text = await eventAssistantMessageText(eventSessionID, info.id, COORDINATOR_AGENT);
           if (text === undefined) completedCoordinatorMessages.delete(info.id);
-          else await completeContinuationText(eventSessionID, text);
+          else {
+            await terminalGoalFromHostText(eventSessionID, text);
+            await completeContinuationText(eventSessionID, text);
+          }
         } catch {
           completedCoordinatorMessages.delete(info.id);
         }

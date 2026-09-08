@@ -1,9 +1,16 @@
+import type { GoalFlightState, GoalTerminalReceipt } from "../core/goal-bound.js";
+
 export interface RunMetricsClient {
   readonly session?: {
     readonly get?: (request: { path: { id: string }; query?: { directory?: string } }) => Promise<unknown>;
     readonly children?: (request: { path: { id: string }; query?: { directory?: string } }) => Promise<unknown>;
     readonly messages?: (request: { path: { id: string }; query?: { directory?: string } }) => Promise<unknown>;
   };
+}
+
+export interface RunMetricsWindow {
+  readonly startedAt: string;
+  readonly endedAt: string;
 }
 
 export interface RunMetrics {
@@ -31,6 +38,126 @@ export interface RunRoleMetrics {
   readonly cost: number | undefined;
   readonly steps: number;
   readonly cacheRatio: number | undefined;
+}
+
+export type SortieResultUnavailableReason =
+  | "acceptance-contract-unavailable"
+  | "goal-clock-invalid"
+  | "goal-usage-unavailable"
+  | "host-metrics-unavailable"
+  | "incomplete-host-coverage"
+  | "matched-baseline-unavailable"
+  | "milestone-unavailable"
+  | "usable-milestone-unavailable"
+  | "worker-overlap-unavailable";
+
+export type SortieResultMetric<T> =
+  | { readonly availability: "available"; readonly value: T; readonly provenance: "goal-receipt" | "goal-ledger" | "host-reported" }
+  | { readonly availability: "unavailable"; readonly value: null; readonly reason: SortieResultUnavailableReason };
+
+export type SortieProofStatus = "PASS" | "FAIL" | "UNPROVEN" | "NOT_REQUIRED" | "WAIVED";
+
+export interface SortieResult {
+  readonly schema_version: "0.1";
+  readonly result_id: readonly [goalID: string, terminalRevision: number];
+  readonly accounting_phase: "pre-terminal";
+  readonly as_of: string;
+  readonly mission: {
+    readonly status: "COMPLETED" | "FAILED" | "STOPPED";
+    readonly stop_reason: GoalTerminalReceipt["stop_reason"];
+  };
+  readonly speed: {
+    readonly goal_wall_ms: SortieResultMetric<number>;
+    readonly worker_execution_ms: SortieResultMetric<number>;
+    readonly execution_compression: SortieResultMetric<number>;
+    readonly first_verifiable_ms: SortieResultMetric<number>;
+    readonly first_usable_ms: SortieResultMetric<number>;
+    readonly bare_comparison: SortieResultMetric<number>;
+  };
+  readonly cost: {
+    readonly total_tokens: SortieResultMetric<number>;
+    readonly cost_usd: SortieResultMetric<number>;
+    readonly model_steps: SortieResultMetric<number>;
+    readonly sessions: SortieResultMetric<number>;
+  };
+  readonly proof: {
+    readonly overall: SortieProofStatus;
+    readonly acceptance_fingerprint: string;
+    readonly criteria: SortieResultMetric<readonly { readonly criterion_id: string; readonly status: SortieProofStatus }[]>;
+    readonly evidence_refs: readonly string[];
+  };
+}
+
+type SortieGoalSnapshot = Pick<GoalFlightState,
+  "acceptance_contract" | "consumed_time_ms" | "satisfied_criteria">;
+
+const unavailable = <T>(reason: SortieResultUnavailableReason): SortieResultMetric<T> =>
+  ({ availability: "unavailable", value: null, reason });
+
+const available = <T>(value: T, provenance: "goal-receipt" | "goal-ledger" | "host-reported"): SortieResultMetric<T> =>
+  ({ availability: "available", value, provenance });
+
+function elapsedBetween(start: string, end: string): number | undefined {
+  const started = Date.parse(start);
+  const ended = Date.parse(end);
+  return Number.isFinite(started) && Number.isFinite(ended) && ended >= started ? ended - started : undefined;
+}
+
+/** Builds a pure terminal snapshot from the durable goal receipt and already-observed host metrics. */
+export function createSortieResult(
+  receipt: GoalTerminalReceipt,
+  goal: SortieGoalSnapshot,
+  metrics: RunMetrics | undefined,
+  asOf = receipt.ended_at,
+): SortieResult {
+  const goalWall = elapsedBetween(receipt.started_at, receipt.ended_at);
+  const firstVerifiable = receipt.milestone_at === null
+    ? undefined
+    : elapsedBetween(receipt.started_at, receipt.milestone_at);
+  const criteria = goal.acceptance_contract?.criteria.map(({ criterion_id }) => ({
+    criterion_id,
+    status: goal.satisfied_criteria.includes(criterion_id) ? "PASS" as const : "UNPROVEN" as const,
+  }));
+  const hostMetric = (value: number | undefined): SortieResultMetric<number> => value === undefined
+    ? unavailable(metrics === undefined ? "host-metrics-unavailable" : "incomplete-host-coverage")
+    : available(value, "host-reported");
+  const failed = receipt.stop_reason === "external_dependency" || receipt.stop_reason === "persistence_unavailable";
+  return {
+    schema_version: "0.1",
+    result_id: [receipt.goal_id, receipt.terminal_revision],
+    accounting_phase: "pre-terminal",
+    as_of: asOf,
+    mission: {
+      status: receipt.status === "succeeded" ? "COMPLETED" : failed ? "FAILED" : "STOPPED",
+      stop_reason: receipt.stop_reason,
+    },
+    speed: {
+      goal_wall_ms: goalWall === undefined ? unavailable("goal-clock-invalid") : available(goalWall, "goal-receipt"),
+      worker_execution_ms: goal.consumed_time_ms === null
+        ? unavailable("goal-usage-unavailable")
+        : available(goal.consumed_time_ms, "goal-ledger"),
+      execution_compression: unavailable("worker-overlap-unavailable"),
+      first_verifiable_ms: firstVerifiable === undefined
+        ? unavailable("milestone-unavailable")
+        : available(firstVerifiable, "goal-receipt"),
+      first_usable_ms: unavailable("usable-milestone-unavailable"),
+      bare_comparison: unavailable("matched-baseline-unavailable"),
+    },
+    cost: {
+      total_tokens: hostMetric(metrics?.tokens),
+      cost_usd: hostMetric(metrics?.cost),
+      model_steps: hostMetric(metrics?.steps),
+      sessions: hostMetric(metrics?.sessions),
+    },
+    proof: {
+      overall: receipt.status === "succeeded" ? "PASS" : "UNPROVEN",
+      acceptance_fingerprint: receipt.acceptance_fingerprint,
+      criteria: criteria === undefined
+        ? unavailable("acceptance-contract-unavailable")
+        : available(criteria, "goal-ledger"),
+      evidence_refs: receipt.evidence_refs,
+    },
+  };
 }
 
 export type RunTerminalOutcome = "DONE" | "BLOCKED" | "NEED_DECISION";
@@ -121,9 +248,13 @@ export async function collectRunMetrics(
   rootSessionID: string,
   directory?: string,
   now = Date.now(),
+  window?: RunMetricsWindow,
 ): Promise<RunMetrics | undefined> {
   const session = client?.session;
   if (session?.messages === undefined) return undefined;
+  const windowStart = window === undefined ? undefined : Date.parse(window.startedAt);
+  const windowEnd = window === undefined ? undefined : Date.parse(window.endedAt);
+  if (window !== undefined && (!Number.isFinite(windowStart) || !Number.isFinite(windowEnd) || windowEnd! < windowStart!)) return undefined;
   const ids = [rootSessionID];
   const visited = new Set(ids);
   let hierarchyComplete = session.children !== undefined;
@@ -163,6 +294,11 @@ export async function collectRunMetrics(
         const info = record(message.info) ?? message;
         const time = record(info.time) ?? record(message.time);
         if (time !== undefined && number(time.completed) === undefined) continue;
+        const completed = number(time?.completed);
+        if (window !== undefined) {
+          if (completed === undefined) { messagesComplete = false; continue; }
+          if (completed < windowStart! || completed > windowEnd!) continue;
+        }
         const messageID = typeof info.id === "string" ? info.id : typeof message.id === "string" ? message.id : undefined;
         if (messageID === undefined) { messagesComplete = false; continue; }
         if (uniqueMessages.has(messageID)) continue;
@@ -217,7 +353,9 @@ export async function collectRunMetrics(
     } catch { /* fallback below */ }
   }
   return {
-    durationMilliseconds: created === undefined ? undefined : Math.max(0, now - created),
+    durationMilliseconds: window === undefined
+      ? created === undefined ? undefined : Math.max(0, now - created)
+      : windowEnd! - windowStart!,
     tokens: hierarchyComplete && messagesComplete && tokensAvailable ? totalTokens : undefined,
     inputTokens: hierarchyComplete && messagesComplete && tokensAvailable ? inputTokens : undefined,
     outputTokens: hierarchyComplete && messagesComplete && tokensAvailable ? outputTokens : undefined,
@@ -249,6 +387,23 @@ function duration(milliseconds: number): string {
   if (seconds < 60) return `${seconds}s`;
   const minutes = Math.floor(seconds / 60);
   return `${minutes}m ${String(seconds % 60).padStart(2, "0")}s`;
+}
+
+function metricText<T>(metric: SortieResultMetric<T>, render: (value: T) => string): string {
+  return metric.availability === "available" ? render(metric.value) : `unavailable (${metric.reason})`;
+}
+
+export function formatSortieResult(result: SortieResult): string {
+  const criteria = metricText(result.proof.criteria, (entries) => {
+    const passing = entries.filter(({ status }) => status === "PASS").length;
+    return `${passing}/${entries.length} criteria`;
+  });
+  return [
+    "**Sortie Result**",
+    `**Speed:** goal ${metricText(result.speed.goal_wall_ms, duration)} · worker ${metricText(result.speed.worker_execution_ms, duration)} · compression ${metricText(result.speed.execution_compression, (value) => `${value.toFixed(2)}x`)}`,
+    `**Cost:** ${metricText(result.cost.total_tokens, (value) => `${value.toLocaleString("en-US")} tokens`)} · ${metricText(result.cost.cost_usd, (value) => `$${value.toFixed(4)}`)} · ${result.accounting_phase}`,
+    `**Proof:** ${result.proof.overall} · ${result.mission.status.toLowerCase()} (${result.mission.stop_reason}) · ${criteria} · ${result.proof.evidence_refs.length} evidence ref${result.proof.evidence_refs.length === 1 ? "" : "s"}`,
+  ].join("\n");
 }
 
 export function formatRunMetrics(metrics: RunMetrics): string {
@@ -322,5 +477,15 @@ export function insertRunMetrics(text: string, metrics: RunMetrics): string {
   const newline = text.includes("\r\n") ? "\r\n" : "\n";
   const lines = text.split(/\r?\n/u);
   lines.splice(checkpoint.index + 1, 0, "", formatRunMetrics(metrics));
+  return lines.join(newline);
+}
+
+export function insertSortieResult(text: string, result: SortieResult): string {
+  const checkpoint = terminalCheckpoint(text);
+  if (checkpoint === undefined) return text;
+  if (topLevelLines(text).some(({ index, line }) => index > checkpoint.index && /^\*\*Sortie Result\*\*/u.test(line))) return text;
+  const newline = text.includes("\r\n") ? "\r\n" : "\n";
+  const lines = text.split(/\r?\n/u);
+  lines.splice(checkpoint.index + 1, 0, "", formatSortieResult(result));
   return lines.join(newline);
 }

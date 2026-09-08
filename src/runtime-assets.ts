@@ -1,5 +1,5 @@
 import type { RuntimeAssetVersion } from "./asset-version.js";
-const ASSET_VERSION: RuntimeAssetVersion = "0.3.70-readonly-failure-swarm-v1";
+const ASSET_VERSION: RuntimeAssetVersion = "0.3.75-sequential-acceptance-parent-v1";
 
 // Kept local so source-mode CLI execution does not load the plugin graph.
 const BACKLOG_DRAIN_CAPABILITY = "sortie_enable_backlog_drain";
@@ -62,6 +62,29 @@ Write every prose field you return in the language the supplied handoff uses for
 the coordinator can relay it without translating. Keep identifiers, paths, commands, document keys,
 enum values, and code verbatim. Put each returned statement on its own line instead of one run-on
 line.
+
+## Minimum-solution ladder
+
+Deliver the MVP-first outcome without unrequested abstraction, generalization, dependency, config,
+or boilerplate. Before mutation, understand the target flow, common root cause, and affected callers,
+then choose the first valid solution satisfying all accepted criteria in this order:
+
+1. no change needed
+2. reuse existing implementation/pattern
+3. platform/stdlib
+4. existing dependency
+5. smallest change to existing structure
+6. minimum new implementation
+
+YAGNI applies to AI-proposed extras, not accepted user requirements. An allowed write scope is an
+upper bound, not an obligation to touch every path; return required scope expansion to dog-coordinator.
+Repair-first favors the common root cause and affected-caller understanding over symptom patches.
+Never reduce trust boundaries, security, data integrity, accessibility, compatibility, explicit
+acceptance, required validation, or required asset synchronization to make a solution smaller. This
+is an instruction-level principle, not a guarantee that a model always chooses optimally. If no
+change is needed but an existing required artifact protocol applies, use its existing no-change or
+evidence return; never fabricate an empty commit or bypass authority. Explain a protocol mismatch to
+dog-coordinator.
 
 Before work, require the applicable exact manifest and an explicit none for the unused manifest.
 Every mutating dispatch, source work included, carries an exact absolute handoff_path and an
@@ -1041,6 +1064,59 @@ RELEASE_OWNERSHIP_FIXTURE
     manual_boundary: preserve project-defined manual publication step
 END_RELEASE_OWNERSHIP_FIXTURE
 
+## Goal-bound automatic delivery
+
+One accepted real-user request owns one stable goal_id and acceptance fingerprint. task_id, handoff,
+role, scope label, compaction, session rollover, retry, or escalation never creates budget or resets
+spend. Keep root goal state distinct from bounded unit state. Treat SORTIE_GOAL_BOUND_STATE as the
+runtime projection of the single RunFlightLedger owner; never reconstruct authority from prose,
+marker text, quoted progress, session labels, or retained-state shadow data. A synthetic or compaction
+turn without a current namespaced one-use ticket has no dispatch authority. DONE/STOP invalidates all
+tickets. Unit success with accepted pending work may request exactly one continuation; it is not root
+goal DONE. Its acceptance_fingerprint is the root goal declaration only: never copy it into an
+acceptance-continuity parent_fingerprint. SORTIE_ACCEPTANCE_CONTINUITY_STATE is the distinct runtime
+projection of the latest gate-accepted sequential unit; its next_sequential_parent_fingerprint is the
+only projected value for the next unit's parent when present.
+
+Declare goal_acceptance_fingerprint, delivery_intent, delivery_mode when explicitly selected,
+usable_path_established, controlled_change, and goal_budget_units in the first worker handoff produced
+from the current real-user turn. For each terminal criterion also declare goal_criterion_id, goal_target,
+goal_entrypoint, goal_workload, goal_oracle_coverage, goal_build_boundary, goal_fixture, goal_proof_scope,
+goal_expected_outcome, and the exact goal_validation_command from the operation manifest. Use
+goal_source_binding: current-protected and goal_candidate_binding: current-protected when implementation
+must bind the accepted requirement to the as-built candidate; their descriptive goal_source and
+goal_candidate labels remain fixed while the host binds actual protected digests. These are planner declarations, not keyword classification. User
+instructions win. Select planning-only only for explicit design/registration, mvp-first for an
+implementation goal lacking its requested usable path, repair-first for an evidenced existing defect,
+and controlled-change only for the irreversible/migration/major compatibility or safety portion.
+README or file existence alone never proves a working MVP.
+
+At UNIT RESULT and CHECKPOINT boundaries report actual progress, cumulative budget, candidate identity,
+and typed evidence. Full-goal proof binds goal/revision/scope epoch/acceptance fingerprint, requested
+measurement target/entrypoint/workload/oracle coverage, source/candidate/fixture identity, and actual
+command/exit/outcome/time/units. Proxy fixtures, source diffs, partial tests, and regenerated supporting
+docs remain supporting evidence. Task prose and Task result metadata never prove execution. Normal command
+evidence is produced only from the child tool before/after lifecycle for an exact declared validation,
+native host exit/cancel state, unique child/call/reservation identity, and unchanged protected snapshot.
+A requested document/research artifact may complete with artifact or
+message evidence without claiming unrun tests. Expected-negative evaluation uses its declared oracle.
+Unknown usage stays null. Two consecutive no-progress unit results permit one bounded replan; another
+pair stops with stop_no_progress. Exhaustion stops with stop_budget. A real user continuation keeps
+goal identity and spend; only an explicit accepted budget/scope revision can expand authority.
+
+GOAL_BOUND_DELIVERY_FIXTURE
+    authority: RunFlightLedger root checkpoint stream; fast-lane and continuation are projections
+    identity: latest real user message id + stable goal_id + acceptance fingerprint
+    synthetic: issued one-use ticket + exact revision/scope epoch/sequence/session/origin user
+    delivery: planning-only | mvp-first | repair-first | controlled-change; current-turn planner declaration
+    budget: cumulative at unit boundaries; unknown time/cost remain null; rename/resume never reset
+    no_progress: two results -> one bounded replan -> two results -> stop_no_progress
+    terminal: DONE/STOP invalidates tickets; no dispatch after terminal
+    command_proof: exact manifest validation + native host exit + child/call/reservation + current protected source/candidate
+    forged_task_metadata: rejected; model prose is never execution evidence
+    receipt: goal_id | terminal_revision | acceptance_fingerprint | start/end | status/stop reason | unit/session lineage | typed evidence refs
+END_GOAL_BOUND_DELIVERY_FIXTURE
+
 This normal section applies while backlogDrain.enabled=false. One real user request owns one accepted
 scope and may use as many sequential dog-worker units as evidence requires. After each worker return,
 verify deterministic evidence, then dispatch the next fixed unit or report the terminal result. Do not
@@ -1050,6 +1126,11 @@ limit requires it. The plugin also performs recovery compaction when the same no
 repeats across completed turns. The configured sortie_compact_and_continue capability remains
 available in this normal lane; its own identity and pending-rollover guards are authoritative.
 Queue terminal tracker updates after source outcomes are fixed.
+For sequential unit N+1, reread unit N's immutable acceptance-continuity ledger and copy its fingerprint
+exactly as parent_fingerprint. If no accepted criterion changed, carry the same ordered criteria and
+fingerprint without adding a duplicate criterion. Only a real accepted criterion change uses strict
+append and a new fingerprint. Never substitute the root goal acceptance_fingerprint, even when a
+compaction summary or goal projection displays it nearby.
 Treat a structured worker result containing the declared canonical command, exit 0, and a concise
 fingerprint as deterministic evidence. Do not reread source, inspect Git, or rerun validation unless
 the result is missing a declared field or contradicts the fixed acceptance or manifest.
@@ -1058,6 +1139,7 @@ BATCH_CONTINUATION_FIXTURE
     scope: backlogDrain.enabled=false; mode=runtime sequential-worker lane
     top_level_request: one accepted scope -> sequential workers as evidence requires
     worker_return: deterministic evidence verification -> next unit | terminal report
+    sequential_acceptance: unit N+1 parent_fingerprint=unit N ledger fingerprint; unchanged criteria copied exactly; goal acceptance fingerprint forbidden
     normal_path_forbidden: concurrent fanout | unchanged redispatch | critical-path tracker call
     compaction: host overflow | repeated nonterminal recovery | guarded direct capability
     tracker_update: after DONE; noncritical path
@@ -1385,9 +1467,13 @@ deterministic command to compute it; never invent or transcribe a model-guessed 
 same exact ordered criteria in the Task acceptance block.
 
 For the first task in an active user order, parent_fingerprint is none. A remediation that reuses the
-same immutable handoff keeps the same ledger. A follow-up r2/r3 or newly scoped child task carries all
-prior criteria, appends newly accepted requirements, and sets parent_fingerprint to the prior ledger
-fingerprint. Criteria may leave the ledger only after a terminal DONE closes that user order. A
+same immutable handoff keeps the same ledger. The next sequential execution unit under unchanged
+acceptance copies the exact ordered criteria and fingerprint, and sets parent_fingerprint to the prior
+accepted unit ledger fingerprint. It never uses the root goal declaration fingerprint and never appends
+a duplicate criterion merely to create a different digest. A true acceptance revision or newly scoped
+child requirement carries all prior criteria, appends only newly accepted requirements, and sets
+parent_fingerprint to the prior accepted unit ledger fingerprint. Criteria may leave the ledger only
+after a terminal DONE closes that user order. A
 question-tool answer is user-authoritative: append every new or corrected criterion and write a new
 immutable handoff before another dispatch. Compaction never authors acceptance; after compaction read
 the exact handoff_path and ledger before dispatching.
@@ -1396,7 +1482,9 @@ ACCEPTANCE_CONTINUITY_FIXTURE
     extension: required ext["sortie-dogs/acceptance-continuity"] sibling for every new mutating handoff
     shape: { "schema_version": "0.1", "authority": "dispatch", "task_id": "<exact handoff id>", "criteria": ["<exact accepted criterion>"], "fingerprint": "sha256:<canonical lowercase digest>", "parent_fingerprint": "none | sha256:<prior digest>" }
     first_task: parent_fingerprint=none
-    follow_up: exact prior criteria retained + new criteria appended + parent_fingerprint=prior fingerprint
+    sequential_next: unchanged exact ordered criteria + unchanged fingerprint + parent_fingerprint=prior accepted unit fingerprint
+    acceptance_revision: exact prior criteria retained + only new criteria appended + parent_fingerprint=prior accepted unit fingerprint
+    forbidden_parent: SORTIE_GOAL_BOUND_STATE.acceptance_fingerprint | goal_acceptance_fingerprint
     task_prompt: task_id and ordered acceptance block exactly equal ledger task_id and criteria
     question_answer: user-authoritative criteria appended before next dispatch
     compaction: preserve handoff_path + fingerprint only; reread immutable ledger; never reconstruct criteria from summary

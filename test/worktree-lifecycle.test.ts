@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { lstat, mkdtemp, mkdir, readFile, readdir, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import nodeTest, { type TestContext } from "node:test";
+import ts from "typescript";
 
 import {
   WorktreeLifecycle,
@@ -18,6 +18,7 @@ type RegisteredTest = {
 };
 
 const registeredTests: RegisteredTest[] = [];
+const fixtureRoot = join(resolve("."), "_testenv", "worktree-lifecycle");
 
 function test(name: string, body: (context: TestContext) => unknown): void {
   registeredTests.push({ name, body });
@@ -39,7 +40,8 @@ async function git(cwd: string, ...args: string[]): Promise<string> {
 type Fixture = { root: string; repository: string; worktrees: string; lifecycle: WorktreeLifecycle };
 
 async function fixture(name: string): Promise<Fixture> {
-  const root = await mkdtemp(join(tmpdir(), `sortie-worktree-${name}-`));
+  await mkdir(fixtureRoot, { recursive: true });
+  const root = await mkdtemp(join(fixtureRoot, `sortie-worktree-${name}-`));
   const repository = join(root, "repository");
   await mkdir(repository);
   await writeFile(join(repository, ".gitignore"), "node_modules/\n");
@@ -372,7 +374,8 @@ test("authority validation keeps fresh HEAD and status checks without revalidati
 });
 
 test("bootstrap validates the combined checkout and bare repository booleans", async () => {
-  const root = await mkdtemp(join(tmpdir(), "sortie-worktree-bootstrap-"));
+  await mkdir(fixtureRoot, { recursive: true });
+  const root = await mkdtemp(join(fixtureRoot, "sortie-worktree-bootstrap-"));
   const repository = join(root, "bare.git");
   try {
     await git(root, "init", "--bare", "-q", repository);
@@ -436,9 +439,14 @@ test("cancelled cleanup discards only quiescent dirt inside the owned scope", as
   const value = await fixture("cancelled-dirty");
   try {
     const pin = await value.lifecycle.pinCleanBase();
+    const primaryHead = (await git(value.repository, "rev-parse", "HEAD")).trim();
     const created = await value.lifecycle.createMany({ pin, tasks: tasks(pin, ["owned", "foreign"]) });
     await writeFile(join(created[0]!.path, "shared.txt"), "owned tracked dirt\n");
     await writeFile(join(created[0]!.path, "file-0.txt"), "owned addition\n");
+    await errorCode(value.lifecycle.discardOwnedChanges("owned", created[0]!.path, pin.sha,
+      `${created[0]!.branch}-wrong`, ["shared.txt", "file-0.txt"]), "unsafe-cleanup");
+    assert.equal(await readFile(join(created[0]!.path, "shared.txt"), "utf8"), "owned tracked dirt\n");
+    assert.equal(await readFile(join(created[0]!.path, "file-0.txt"), "utf8"), "owned addition\n");
     await value.lifecycle.discardOwnedChanges("owned", created[0]!.path, pin.sha, created[0]!.branch,
       ["shared.txt", "file-0.txt"]);
     assert.equal(await readFile(join(created[0]!.path, "shared.txt"), "utf8"), "base\n");
@@ -451,6 +459,7 @@ test("cancelled cleanup discards only quiescent dirt inside the owned scope", as
     await writeFile(join(created[1]!.path, "shared.txt"), "base\n");
     await value.lifecycle.cleanup("owned");
     await value.lifecycle.cleanup("foreign");
+    assert.equal((await git(value.repository, "rev-parse", "HEAD")).trim(), primaryHead);
     assert.equal(await readFile(join(value.repository, "shared.txt"), "utf8"), "base\n");
   } finally {
     await cleanupFixture(value);
@@ -811,7 +820,7 @@ test("branch cleanup uses compare-and-delete and preserves a concurrently change
   }
 });
 
-test("base and branch requests fail closed and implementation contains no destructive Git commands", async () => {
+test("base and branch requests fail closed and destructive Git is confined to owned cancellation", async () => {
   const value = await fixture("validation");
   try {
     const pin = await value.lifecycle.pinCleanBase();
@@ -825,17 +834,32 @@ test("base and branch requests fail closed and implementation contains no destru
     await errorCode(value.lifecycle.createMany({ pin, tasks: tasks(pin, ["stale-a", "stale-b"]) }), "stale-base");
 
     const source = await readFile(resolve("src/core/worktree-lifecycle.ts"), "utf8");
-    for (const forbidden of [
-      '["reset"',
-      '["stash"',
-      '["clean"',
-      '["worktree", "prune"',
-      '["branch", "-D"',
-      '["worktree", "remove", "--force"',
-      '["worktree", "add", "--force"',
-    ]) {
-      assert.equal(source.includes(forbidden), false, forbidden);
+    const sourceFile = ts.createSourceFile("worktree-lifecycle.ts", source, ts.ScriptTarget.Latest, true,
+      ts.ScriptKind.TS);
+    const commands: Array<{ method: string | undefined; args: readonly ts.Expression[] }> = [];
+    function visit(node: ts.Node, method?: string): void {
+      const enclosingMethod = ts.isMethodDeclaration(node) && node.name !== undefined
+        ? node.name.getText(sourceFile) : method;
+      if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) &&
+        node.expression.expression.kind === ts.SyntaxKind.ThisKeyword && node.expression.name.text === "git" &&
+        node.arguments[0] !== undefined && ts.isArrayLiteralExpression(node.arguments[0])) {
+        commands.push({ method: enclosingMethod, args: node.arguments[0].elements });
+      }
+      ts.forEachChild(node, (child) => visit(child, enclosingMethod));
     }
+    visit(sourceFile);
+    const text = (expression: ts.Expression | undefined): string | undefined => expression?.getText(sourceFile);
+    const destructive = commands.filter(({ args }) => {
+      const command = text(args[0]);
+      return command === '"reset"' || command === '"clean"' || command === '"stash"' ||
+        (command === '"worktree"' && ["\"prune\"", "\"remove\"", "\"add\""].includes(text(args[1]) ?? "") &&
+          args.some((argument) => text(argument) === '"--force"')) ||
+        (command === '"branch"' && text(args[1]) === '"-D"');
+    });
+    assert.deepEqual(destructive.map(({ method, args }) => [method, ...args.map((argument) => text(argument))]), [
+      ["discardOwnedChanges", '"reset"', '"--hard"', "baseSha"],
+      ["discardOwnedChanges", '"clean"', '"-fd"', '"--"', "...paths"],
+    ]);
   } finally {
     await cleanupFixture(value);
   }
@@ -849,8 +873,9 @@ const exclusiveTestNames = new Set([
 nodeTest("worktree lifecycle registered tests", { concurrency: 4 }, async (context) => {
   assert.equal(registeredTests.length, 27);
   assert.equal(new Set(registeredTests.map(({ name }) => name)).size, 27);
+  await mkdir(fixtureRoot, { recursive: true });
   const initialFixtureRoots = new Set(
-    (await readdir(tmpdir())).filter((name) => name.startsWith("sortie-worktree-")),
+    (await readdir(fixtureRoot)).filter((name) => name.startsWith("sortie-worktree-")),
   );
 
   const safeTests = registeredTests.filter(({ name }) => !exclusiveTestNames.has(name));
@@ -890,7 +915,7 @@ nodeTest("worktree lifecycle registered tests", { concurrency: 4 }, async (conte
     });
   }
 
-  const fixtureResiduals = (await readdir(tmpdir()))
+  const fixtureResiduals = (await readdir(fixtureRoot))
     .filter((name) => name.startsWith("sortie-worktree-") && !initialFixtureRoots.has(name));
   assert.equal(activeSafe, 0);
   assert.equal(maximumActiveSafe <= 4, true);

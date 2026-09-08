@@ -6,6 +6,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const SOURCE_ROOT = dirname(fileURLToPath(import.meta.url));
 const REPOSITORY_ROOT = resolve(SOURCE_ROOT, "../../..");
+const REPOSITORY_PACKAGE_PATH = join(REPOSITORY_ROOT, "package.json");
 const PROJECT_SOURCE = join(SOURCE_ROOT, "project");
 const TESTENV_ROOT = join(REPOSITORY_ROOT, "_testenv");
 const CONFIG_NAME = "representative-config.json";
@@ -14,6 +15,7 @@ const OPENCODE_CONFIG_DIRECTORY = "opencode-config";
 const XDG_CONFIG_DIRECTORY = "xdg-config";
 const SHA = /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u;
 const SHA256 = /^[a-f0-9]{64}$/u;
+const PACKAGE_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/u;
 const RESULT_KEYS = [
   "accepted_candidate_sha", "accepted_cas_violations", "cleanup", "expected_outputs", "fixture_id",
   "fixture_source_sha256", "implementation_child_count", "package_sha256", "route", "scope_corruption",
@@ -116,7 +118,9 @@ function validateConfig(config) {
     "Runtime paths are absent.");
   invariant(SHA.test(config.target_sha), "Target SHA must be exact.");
   invariant(isRecord(config.package) && typeof config.package.path === "string" &&
-    config.package.version === "0.8.2" && SHA256.test(config.package.sha256), "Package provenance is invalid.");
+    resolve(config.package.path) === REPOSITORY_PACKAGE_PATH &&
+    typeof config.package.version === "string" && PACKAGE_VERSION.test(config.package.version) &&
+    SHA256.test(config.package.sha256), "Package provenance is invalid.");
   invariant(SHA256.test(config.fixture_source_sha256), "Fixture source identity is invalid.");
   invariant(Array.isArray(config.units) && config.units.length === 5, "Exactly five units are required.");
   invariant(Array.isArray(config.expected_writes) && config.expected_writes.length === 5 &&
@@ -149,8 +153,10 @@ export async function prepareRepresentativeRuntime({ runtimeRoot, packagePath })
   const root = boundedRuntimeRoot(runtimeRoot);
   const packageFile = resolve(packagePath);
   invariant((await stat(packageFile)).isFile(), "Package provenance path must identify a file.");
-  const repositoryPackage = await json(join(REPOSITORY_ROOT, "package.json"));
-  invariant(repositoryPackage.version === "0.8.2", "Representative fixture requires package version 0.8.2.");
+  invariant(packageFile === REPOSITORY_PACKAGE_PATH, "Package provenance must identify the repository package.");
+  const repositoryPackage = await json(REPOSITORY_PACKAGE_PATH);
+  invariant(typeof repositoryPackage.version === "string" && PACKAGE_VERSION.test(repositoryPackage.version),
+    "Repository package version is invalid.");
   const template = await json(join(SOURCE_ROOT, "representative-config.template.json"));
   validateTemplate(template);
   const contractTemplate = await json(join(PROJECT_SOURCE, "luna-fabric.template.json"));
@@ -304,6 +310,16 @@ export async function selfTestResultIdentity(configPath) {
     contract.units.length === 5, "Generated Luna contract identity is invalid.");
   validateRepresentativeResult(config, syntheticResult(config, "sol-serial"));
   validateRepresentativeResult(config, syntheticResult(config, "luna-fabric"));
+  for (const mutate of [
+    (value) => { value.package.version = "not-a-version"; },
+    (value) => { value.package.path = join(value.runtime_root, "package.json"); },
+  ]) {
+    const invalidConfig = structuredClone(config);
+    mutate(invalidConfig);
+    let rejected = false;
+    try { validateRepresentativeResult(invalidConfig, syntheticResult(config, "luna-fabric")); } catch { rejected = true; }
+    invariant(rejected, "Invalid representative package provenance was accepted.");
+  }
   for (const mutate of [
     (value) => { value.implementation_child_count += 1; },
     (value) => { value.validation_candidate_sha = "e".repeat(40); },

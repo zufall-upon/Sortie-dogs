@@ -13,7 +13,8 @@ import type {
   ParallelDispatchArchiveTask,
   WorktreeCommitArtifact,
 } from "./types.js";
-import { runContainedValidation } from "./worktree-commit-artifact.js";
+import { runBudgetedContainedValidation } from "./worktree-commit-artifact.js";
+import { validationEvidenceKey, type ValidationBudgetRequest } from "./validation-budget.js";
 import { normalizeWorktreeScopePath } from "./worktree-scope.js";
 import { WorktreeLifecycle } from "./worktree-lifecycle.js";
 
@@ -78,6 +79,7 @@ type Queue = {
   tasks: StoredTask[];
   cleanup_pending: string[];
   warnings: string[];
+  validation_budget: { consumed: number; evidence_keys: string[] };
 };
 
 type State = { version: 3; revision: number; active: Queue | null; archived: Queue[] };
@@ -183,7 +185,7 @@ function parseQueue(value: unknown): Queue {
   const queue = value;
   if (!record(queue) || !keys(queue, [
     "archive_fingerprint", "blocker", "candidate_head", "candidate_ref", "cleanup_pending", "contract_fingerprint", "failure_code", "owner_root",
-    "phase", "remediation_attempts_used", "review", "run_id", "target_base", "target_ref", "tasks", "validation", "warnings",
+    "phase", "remediation_attempts_used", "review", "run_id", "target_base", "target_ref", "tasks", "validation", "validation_budget", "warnings",
   ]) || !text(queue.owner_root, 256) || !text(queue.run_id, 128) || typeof queue.contract_fingerprint !== "string" ||
     !HASH.test(queue.contract_fingerprint) || typeof queue.archive_fingerprint !== "string" || !HASH.test(queue.archive_fingerprint) ||
     typeof queue.target_ref !== "string" || !REF.test(queue.target_ref) || typeof queue.target_base !== "string" ||
@@ -191,9 +193,12 @@ function parseQueue(value: unknown): Queue {
     typeof queue.candidate_ref !== "string" || !/^refs\/sortie-dogs\/integration-candidates\/[0-9a-f]{16}$/u.test(queue.candidate_ref) ||
     !(queue.candidate_head === null || (typeof queue.candidate_head === "string" && SHA.test(queue.candidate_head))) ||
     !(queue.failure_code === null || text(queue.failure_code, 64)) || !Array.isArray(queue.tasks) ||
-    queue.tasks.length === 0 || queue.tasks.length > MAX_TASKS || !Array.isArray(queue.cleanup_pending) ||
+     queue.tasks.length === 0 || queue.tasks.length > MAX_TASKS || !Array.isArray(queue.cleanup_pending) ||
     !queue.cleanup_pending.every((item) => text(item, 256)) || !Array.isArray(queue.warnings) ||
-    queue.warnings.length > MAX_TASKS || !queue.warnings.every((item) => text(item, 512)) || ![0, 1].includes(queue.remediation_attempts_used as number)) throw new Error("queue");
+     queue.warnings.length > MAX_TASKS || !queue.warnings.every((item) => text(item, 512)) || ![0, 1].includes(queue.remediation_attempts_used as number) ||
+     !record(queue.validation_budget) || !keys(queue.validation_budget, ["consumed", "evidence_keys"]) ||
+     !Number.isSafeInteger(queue.validation_budget.consumed) || (queue.validation_budget.consumed as number) < 0 ||
+     !Array.isArray(queue.validation_budget.evidence_keys) || !queue.validation_budget.evidence_keys.every((item) => typeof item === "string" && /^sha256:[a-f0-9]{64}$/u.test(item))) throw new Error("queue");
   const tasks = queue.tasks.map(parseTask);
   if (new Set(tasks.map(({ task_id }) => task_id)).size !== tasks.length ||
     new Set(tasks.map(({ source_commit }) => source_commit)).size !== tasks.length) throw new Error("identities");
@@ -363,6 +368,7 @@ export class WorktreeIntegrationQueue {
         })),
         cleanup_pending: order.filter(({ managed_path }) => managed_path !== null).map(({ worktree_id }) => worktree_id),
         warnings: [],
+        validation_budget: { consumed: 0, evidence_keys: [] },
       };
       if (!queue.tasks.every(({ validation_command }) => JSON.stringify(validation_command) === JSON.stringify(queue.validation.command))) {
         queue.phase = "failed";
@@ -723,8 +729,22 @@ export class WorktreeIntegrationQueue {
       const beforeHead = (await WorktreeIntegrationQueue.runGitAt(this.gitPath, path, ["rev-parse", "--verify", "HEAD^{commit}"])).toString("utf8").trim();
       const beforeStatus = await WorktreeIntegrationQueue.runGitAt(this.gitPath, path, ["status", "--porcelain=v1", "--untracked-files=normal"]);
       if (beforeHead !== queue.candidate_head || beforeStatus.length !== 0) throw new IntegrationQueueError("validation-failed", "Validation worktree is not exact and clean.");
-      const result = await runContainedValidation({ executable: queue.validation.command[0]!, args: queue.validation.command.slice(1),
-        cwd: path, timeout_ms: VALIDATION_TIMEOUT });
+      const request: ValidationBudgetRequest = { run_id: queue.run_id, operation_id: queue.run_id,
+        source_snapshot: queue.candidate_head!, candidate: queue.candidate_head!, command: queue.validation.command,
+        scope: "full", expected_evidence: ["source_snapshot", "command", "scope", "exit_code", "clean_worktree"], reason: "acceptance" };
+      const result = await runBudgetedContainedValidation({ executable: queue.validation.command[0]!, args: queue.validation.command.slice(1),
+        cwd: path, timeout_ms: VALIDATION_TIMEOUT }, {
+          request,
+          reserve: async () => {
+            const evidenceKey = validationEvidenceKey(request);
+            if (queue.validation_budget.evidence_keys.includes(evidenceKey)) return { decision: "DENY", reservation_id: null, reason: "duplicate-evidence" };
+            if (queue.validation_budget.consumed >= 1) return { decision: "DENY", reservation_id: null, reason: "budget-exhausted" };
+            queue.validation_budget.consumed += 1;
+            queue.validation_budget.evidence_keys.push(evidenceKey);
+            return { decision: "ALLOW", reservation_id: evidenceKey, reason: "allowed" };
+          },
+          settle: async () => undefined,
+        });
       const afterHead = (await WorktreeIntegrationQueue.runGitAt(this.gitPath, path, ["rev-parse", "--verify", "HEAD^{commit}"])).toString("utf8").trim();
       const afterStatus = await WorktreeIntegrationQueue.runGitAt(this.gitPath, path, ["status", "--porcelain=v1", "--untracked-files=normal"]);
       if (afterHead !== queue.candidate_head || afterStatus.length !== 0) {

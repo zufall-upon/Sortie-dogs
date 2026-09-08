@@ -79,6 +79,7 @@ test("recreates the representative benchmark from tracked source", { timeout: 30
     assert.equal(createHash("sha256").update(await readFile(join(runtimeRoot, "package.json"))).digest("hex"),
       first.package.sha256);
     assert.equal(first.package.sha256, createHash("sha256").update(await readFile(packagePath)).digest("hex"));
+    assert.equal(first.package.version, JSON.parse(await readFile(packagePath, "utf8")).version);
     assert.equal(new Set(first.expected_writes).size, 5);
     assert.match(await readFile(join(first.project_root, "AGENTS.md"), "utf8"),
       /representative-medium-sol-serial/u);

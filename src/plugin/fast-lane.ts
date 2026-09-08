@@ -156,11 +156,11 @@ export class FastLaneController {
     while (this.sessions.size > MAX_SESSIONS) this.sessions.delete(this.sessions.keys().next().value!);
   }
 
-  beginTurn(sessionID: string, synthetic: boolean): void {
+  beginTurn(sessionID: string, synthetic: boolean, authorizedSynthetic = false): void {
     if (synthetic) {
       const state = this.sessions.get(sessionID);
       if (state === undefined) {
-        this.setSession(sessionID, lockedState());
+        this.setSession(sessionID, authorizedSynthetic ? freshState() : lockedState());
       } else if (state.backlogDrain && state.continuationPending) {
         state.advisorRequests.clear();
         state.continuationPending = false;

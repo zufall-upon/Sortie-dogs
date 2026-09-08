@@ -26,10 +26,11 @@ import type {
 import { validateWorktreeParallelSchema } from "./validate-schema.js";
 import { validateWorktreeParallelContract } from "./validate-worktree-parallel.js";
 import { WorktreeLifecycle, WorktreeLifecycleError, type ManagedWorktree } from "./worktree-lifecycle.js";
-import { runContainedValidation } from "./worktree-commit-artifact.js";
+import { runBudgetedContainedValidation } from "./worktree-commit-artifact.js";
 import { inspectExecutionPlan, type ExecutionPlan } from "./execution-plan.js";
 import { appendRunFlightLedgerEvents, createRunFlightPlanPrefix, reconstructRunFlightLedger, RunFlightLedger, type RunFlightEventRecord } from "./run-flight-ledger.js";
 import { EvidenceCapsuleStore } from "./evidence-capsule.js";
+import { decideValidationBudget, validationEvidenceKey, type ValidationBudgetRequest } from "./validation-budget.js";
 import type { ChildTerminalEvidence } from "./child-terminal-reconciliation.js";
 import { isChildTerminalIdentity, sameChildTerminalIdentity, type ChildTerminalIdentity } from "./child-terminal-reconciliation.js";
 import { CancellableChildLifecycle } from "./child-lifecycle-runtime.js";
@@ -1422,7 +1423,48 @@ export class ParallelDispatchCoordinator {
             const beforeHead = (await this.gitBuffer(["rev-parse", "--verify", "HEAD^{commit}"], undefined, path)).toString("utf8").trim();
             const beforeStatus = await this.gitBuffer(["status", "--porcelain=v1", "--untracked-files=normal"], undefined, path);
             if (beforeHead !== evidence.fabric.candidate_head || beforeStatus.length !== 0) throw new Error("validation-worktree");
-            result = await runContainedValidation({ executable, args, cwd: path, timeout_ms: timeoutMs });
+            const validationRequest: ValidationBudgetRequest = { run_id: runID, operation_id: runID,
+              source_snapshot: evidence.fabric.candidate_head, candidate: evidence.fabric.candidate_head,
+              command: requestedCommand, scope: "full",
+              expected_evidence: ["source_snapshot", "command", "scope", "exit_code", "clean_worktree"], reason: "acceptance" };
+            result = await runBudgetedContainedValidation({ executable, args, cwd: path, timeout_ms: timeoutMs }, {
+              request: validationRequest,
+              reserve: async () => {
+                let reservation: { decision: "ALLOW" | "DENY"; reservation_id: string | null; reason: string } =
+                  { decision: "DENY", reservation_id: null, reason: "invalid-contract" };
+                await this.transaction((state) => {
+                  const run = this.requireRun(state, ownerRoot, runID);
+                  // Legacy/direct fabric runs have no compiled-plan ledger. Their durable
+                  // validation.running claim is still the single reservation authority.
+                  if (run.plan_ledger === null) {
+                    reservation = { decision: "ALLOW", reservation_id: validationEvidenceKey(validationRequest), reason: "allowed" };
+                    return { result: undefined, changed: false };
+                  }
+                  const current = reconstructRunFlightLedger(run.plan_ledger);
+                  const evidenceKeys = run.plan_ledger.flatMap(({ event }) => event.kind === "validation.admission" && event.decision === "ALLOW" ? [event.evidence_key] : []);
+                  const decision = decideValidationBudget(validationRequest, { limit: 1, consumed: current.validation_budget.consumed, evidence_keys: evidenceKeys });
+                  const reservationId = decision.decision === "ALLOW" ? validationEvidenceKey(validationRequest) : null;
+                  run.plan_ledger = appendRunFlightLedgerEvents(run.plan_ledger, [{ kind: "validation.admission", at: new Date().toISOString(),
+                    reservation_id: reservationId ?? `deny-${validationEvidenceKey(validationRequest)}`, operation_id: validationRequest.operation_id,
+                    evidence_key: decision.evidence_key ?? `sha256:${"0".repeat(64)}`, scope: decision.scope, decision: decision.decision,
+                    reason: decision.reason, consumed: decision.consumed, limit: 1 }]);
+                  reservation = { decision: decision.decision, reservation_id: reservationId, reason: decision.reason };
+                  return { result: undefined, changed: true };
+                });
+                return reservation;
+              },
+              settle: async (outcome, exitCode) => {
+                await this.transaction((state) => {
+                  const run = this.requireRun(state, ownerRoot, runID);
+                  // The enclosing fabric validation transition durably settles legacy/direct runs.
+                  if (run.plan_ledger === null) return { result: undefined, changed: false };
+                  run.plan_ledger = appendRunFlightLedgerEvents(run.plan_ledger, [{ kind: "validation.settled", at: new Date().toISOString(),
+                    reservation_id: validationEvidenceKey(validationRequest), operation_id: validationRequest.operation_id,
+                    evidence_key: validationEvidenceKey(validationRequest), outcome, exit_code: exitCode }]);
+                  return { result: undefined, changed: true };
+                });
+              },
+            });
             const afterHead = (await this.gitBuffer(["rev-parse", "--verify", "HEAD^{commit}"], undefined, path)).toString("utf8").trim();
             const afterStatus = await this.gitBuffer(["status", "--porcelain=v1", "--untracked-files=normal"], undefined, path);
             if (afterHead !== evidence.fabric.candidate_head || afterStatus.length !== 0) {

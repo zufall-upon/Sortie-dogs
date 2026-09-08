@@ -1056,7 +1056,9 @@ test("the compaction prompt preserves batch state and names no legacy workflow",
     "ordering",
     "implementation root",
     "exact handoff path",
-    "acceptance fingerprint",
+    "accepted-unit handoff fingerprint",
+    "required next parent fingerprint",
+    "root goal acceptance fingerprint",
     "pending tracker updates",
     "tracker flush state",
     "source_manifest",
@@ -1066,6 +1068,8 @@ test("the compaction prompt preserves batch state and names no legacy workflow",
     assert.ok(prompt.includes(preserved), `the rollover prompt must preserve ${preserved}`);
   }
   assert.match(prompt, /Never author, shorten, infer, or treat summary text as acceptance authority/u);
+  assert.match(prompt, /goal_acceptance_fingerprint separate/u);
+  assert.match(prompt, /must never be used as an acceptance-continuity parent_fingerprint/u);
   assert.doesNotMatch(prompt, /確定済みの受け入れ基準/u);
   assert.doesNotMatch(prompt, /acceptance hashes|acceptance digest|redacted acceptance digest/u);
   assert.doesNotMatch(prompt, /MK2A2|MKII|MK4|MK5|MK6/);

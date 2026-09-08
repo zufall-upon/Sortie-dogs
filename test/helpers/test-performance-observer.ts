@@ -5,6 +5,7 @@ import { performance } from "node:perf_hooks";
 
 type Metric = { count: number; bytes: number; ms: number; samples_ms?: number[] };
 type GitCommandMetric = { count: number; child_ms: number };
+type ObservedChild = { pid: number | null; spawned_at_ms: number; closed: boolean; closed_at_ms: number | null };
 type Summary = {
   schema: 1;
   pid: number;
@@ -18,6 +19,12 @@ type Summary = {
   methods: Record<string, Metric | GitCommandMetric>;
   git_commands: Record<string, GitCommandMetric>;
   fixture_roots: string[];
+  mode: "profile" | "process-only";
+  process_started_at_ms: number;
+  process_exit_observed: boolean;
+  child_spawns: number;
+  child_closes: number;
+  children: ObservedChild[];
 };
 
 const gitCommands = new Set([
@@ -32,6 +39,8 @@ const gitGlobalOptionsWithValue = new Set([
 const maxGitCommandsPerPhase = 64;
 
 const outputDirectory = process.env.SORTIE_PERF_OUTPUT_DIR;
+const observerMode = process.env.SORTIE_PERF_OBSERVER_MODE === "process-only" ? "process-only" : "profile";
+const processStartedAt = Date.now();
 const started = performance.now();
 const originalWriteFileSync = fs.writeFileSync.bind(fs);
 const summary: Summary = {
@@ -47,6 +56,12 @@ const summary: Summary = {
   methods: {},
   git_commands: {},
   fixture_roots: [],
+  mode: observerMode,
+  process_started_at_ms: processStartedAt,
+  process_exit_observed: false,
+  child_spawns: 0,
+  child_closes: 0,
+  children: [],
 };
 
 function metric(): Metric {
@@ -198,44 +213,62 @@ function patchDescriptorWrites(): void {
 
 function install(): void {
   if (outputDirectory === undefined) return;
-  patchCallbackWrite("writeFile");
-  patchCallbackWrite("appendFile");
-  patchPromiseWrite("writeFile");
-  patchPromiseWrite("appendFile");
-  patchSyncWrite("writeFileSync");
-  patchSyncWrite("appendFileSync");
-  patchOpen();
-  patchDescriptorWrites();
+  if (observerMode === "profile") {
+    patchCallbackWrite("writeFile");
+    patchCallbackWrite("appendFile");
+    patchPromiseWrite("writeFile");
+    patchPromiseWrite("appendFile");
+    patchSyncWrite("writeFileSync");
+    patchSyncWrite("appendFileSync");
+    patchOpen();
+    patchDescriptorWrites();
+  }
 
   const originalSpawn = childProcess.ChildProcess.prototype.spawn;
   childProcess.ChildProcess.prototype.spawn = function (options: { file?: string; args?: unknown }) {
-    if (basename(options.file ?? "").toLowerCase().replace(/\.exe$/u, "") !== "git") {
-      return originalSpawn.call(this, options);
-    }
-    summary.git_processes += 1;
-    const entry = gitCommandMetric(classifyGitCommand(options.args));
+    const git = observerMode === "profile" && basename(options.file ?? "").toLowerCase().replace(/\.exe$/u, "") === "git";
+    const entry = git ? gitCommandMetric(classifyGitCommand(options.args)) : undefined;
     const childStarted = performance.now();
-    entry.count += 1;
+    if (git) {
+      summary.git_processes += 1;
+      entry!.count += 1;
+    }
     try {
       const spawned = originalSpawn.call(this, options);
-      this.once("close", () => { entry.child_ms += Math.round(performance.now() - childStarted); });
+      const child: ObservedChild = { pid: this.pid ?? null, spawned_at_ms: Date.now(), closed: false, closed_at_ms: null };
+      summary.children.push(child);
+      summary.child_spawns += 1;
+      this.once("close", () => {
+        if (entry !== undefined) entry.child_ms += Math.round(performance.now() - childStarted);
+        child.closed = true;
+        child.closed_at_ms = Date.now();
+        summary.child_closes += 1;
+        if (observerMode === "process-only") {
+          const index = summary.children.indexOf(child);
+          if (index >= 0) summary.children.splice(index, 1);
+        }
+      });
       return spawned;
     } catch (error) {
-      entry.child_ms += Math.round(performance.now() - childStarted);
+      if (entry !== undefined) entry.child_ms += Math.round(performance.now() - childStarted);
       throw error;
     }
   };
 
   const checkpoint = setInterval(() => persist(), 3_000);
   checkpoint.unref();
-  process.once("exit", () => persist());
+  persist();
+  process.once("exit", () => {
+    summary.process_exit_observed = true;
+    persist();
+  });
 }
 
 function persist(): void {
   if (outputDirectory === undefined) return;
   summary.wall_ms = Math.round(performance.now() - started);
   summary.observer_writes += 1;
-  originalWriteFileSync(join(outputDirectory, `${process.pid}.json`), JSON.stringify(summary));
+  originalWriteFileSync(join(outputDirectory, `${process.pid}-${processStartedAt}.json`), JSON.stringify(summary));
 }
 
 export async function observeMethod<T>(name: string, operation: () => Promise<T> | T): Promise<T> {

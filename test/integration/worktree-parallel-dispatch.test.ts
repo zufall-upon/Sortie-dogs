@@ -970,31 +970,47 @@ test("live critical takeover stops only its source and durably resumes one attem
 });
 
 test("deadline takeover resumes from the last accepted candidate and completes one reviewed CAS", async () => {
-  const value = await fixture("fabric-live-takeover-after-wave");
+  const profileStarted = performance.now();
+  const stages: Array<{ name: string; duration_ms: number; total_ms: number }> = [];
+  const stage = async <T>(name: string, action: () => T | Promise<T>): Promise<T> => {
+    const started = performance.now();
+    try {
+      return await action();
+    } finally {
+      const now = performance.now();
+      stages.push({ name, duration_ms: now - started, total_ms: now - profileStarted });
+    }
+  };
+  let takeoverCalls = 0;
+  let takeoverLoopIterations = 0;
+  const value = await stage("fixture-setup", async () => await fixture("fabric-live-takeover-after-wave"));
   try {
-    const coordinator = await openParallelCoordinator(value.repository);
+    const coordinator = await stage("coordinator-open", async () => await openParallelCoordinator(value.repository));
     const units = [
       fabricUnit("seed", 0),
       fabricUnit("critical", 1, { depends_on: ["seed"] }),
       fabricUnit("sibling", 2, { depends_on: ["seed"] }),
       fabricUnit("final", 3, { depends_on: ["critical", "sibling"] }),
     ];
-    const prepared = await coordinator.prepareFabric(fabricContract(value.sha, units), "root");
+    const prepared = await stage("dag-prepare", async () =>
+      await coordinator.prepareFabric(fabricContract(value.sha, units), "root"));
     assert.equal(prepared.status, "prepared");
     if (prepared.status !== "prepared") return;
     const seed = prepared.snapshot.ready[0]!;
-    await coordinator.bindDispatch("root", "call-seed", seed);
-    await acceptAndComplete(coordinator, seed, "call-seed", "child-seed");
-    const firstWave = await coordinator.integrateFabricWave("root", prepared.snapshot.run_id);
+    await stage("bind-seed", async () => await coordinator.bindDispatch("root", "call-seed", seed));
+    await stage("accept-seed", async () => await acceptAndComplete(coordinator, seed, "call-seed", "child-seed"));
+    const firstWave = await stage("integrate-wave1", async () =>
+      await coordinator.integrateFabricWave("root", prepared.snapshot.run_id));
     const acceptedBase = firstWave.fabric!.candidate_head;
     assert.notEqual(acceptedBase, value.sha);
 
     const source = firstWave.ready.find(({ task_id }) => task_id === "critical")!;
     const sibling = firstWave.ready.find(({ task_id }) => task_id === "sibling")!;
     assert.equal(source.base_sha, acceptedBase);
-    await coordinator.bindDispatch("root", "call-critical", source);
-    await coordinator.bindDispatch("root", "call-sibling", sibling);
-    const acceptedSibling = await acceptAndComplete(coordinator, sibling, "call-sibling", "child-sibling");
+    await stage("bind-critical", async () => await coordinator.bindDispatch("root", "call-critical", source));
+    await stage("bind-sibling", async () => await coordinator.bindDispatch("root", "call-sibling", sibling));
+    const acceptedSibling = await stage("accept-sibling", async () =>
+      await acceptAndComplete(coordinator, sibling, "call-sibling", "child-sibling"));
     const sourceIdentity = { run_id: source.run_id, unit_id: source.task_id, attempt_id: source.dispatch_id,
       predecessor_attempt_id: null, candidate_id: source.base_sha, route_id: source.parallel_group,
       child_id: "child-critical", call_id: "call-critical" };
@@ -1003,18 +1019,24 @@ test("deadline takeover resumes from the last accepted candidate and completes o
     const evidence = (): ChildTerminalEvidence => ({ terminal: stopped ? "satisfied" : "unsatisfied",
       tools_quiescent: stopped ? "satisfied" : "unsatisfied", artifact_window_closed: "satisfied",
       gate_released: "satisfied", lease_released: "satisfied", writer_released: "satisfied", worktree_released: "satisfied" });
-    const lifecycle = await CancellableChildLifecycle.open({ identity: sourceIdentity, deadline_ms: Date.now() - 1 }, ledger, {
+    const lifecycle = await stage("lifecycle-open", async () => await CancellableChildLifecycle.open({ identity: sourceIdentity, deadline_ms: Date.now() - 1 }, ledger, {
       observe: async () => ({ observation: { identity: sourceIdentity, disposition: "cancelled" }, evidence: evidence() }),
       stop: async () => { stopped = true; },
       release: async () => { await coordinator.releaseChildWorktree("root", source, "call-critical", "child-critical", evidence()); },
       // Live takeover owns the durable failed transition after lifecycle terminal confirmation.
       terminal: async () => {},
-    });
-    const observation = await coordinator.criticalPathInput("root", source.run_id, sourceIdentity);
-    let takeover = await coordinator.takeoverCriticalFabricUnit("root", source.run_id, observation, sourceIdentity, lifecycle);
+    }));
+    const observation = await stage("critical-path-input", async () =>
+      await coordinator.criticalPathInput("root", source.run_id, sourceIdentity));
+    takeoverCalls += 1;
+    let takeover = await stage(`takeover-call-${takeoverCalls}`, async () =>
+      await coordinator.takeoverCriticalFabricUnit("root", source.run_id, observation, sourceIdentity, lifecycle));
     const finishBy = Date.now() + 60_000;
     while (takeover.status === "waiting" && Date.now() < finishBy) {
-      takeover = await coordinator.takeoverCriticalFabricUnit("root", source.run_id, observation, sourceIdentity, lifecycle);
+      takeoverLoopIterations += 1;
+      takeoverCalls += 1;
+      takeover = await stage(`takeover-call-${takeoverCalls}`, async () =>
+        await coordinator.takeoverCriticalFabricUnit("root", source.run_id, observation, sourceIdentity, lifecycle));
     }
     assert.equal(takeover.status, "taken-over");
     if (takeover.status !== "taken-over") return;
@@ -1026,36 +1048,48 @@ test("deadline takeover resumes from the last accepted candidate and completes o
     assert.deepEqual(sol.scope_write, source.scope_write);
     assert.deepEqual(takeover.snapshot.tasks.find(({ descriptor }) => descriptor.task_id === "sibling")!.artifact,
       acceptedSibling.artifact);
-    const replay = await coordinator.takeoverCriticalFabricUnit("root", source.run_id, observation, sourceIdentity, lifecycle);
+    const replay = await stage("replay-takeover", async () =>
+      await coordinator.takeoverCriticalFabricUnit("root", source.run_id, observation, sourceIdentity, lifecycle));
     assert.equal(replay.status, "taken-over");
     assert.equal(takeover.snapshot.fabric!.demotions.length, 1);
 
-    await coordinator.bindDispatch("root", "call-sol", sol);
-    await acceptAndComplete(coordinator, sol, "call-sol", "child-sol");
-    const secondWave = await coordinator.integrateFabricWave("root", source.run_id);
+    await stage("bind-sol", async () => await coordinator.bindDispatch("root", "call-sol", sol));
+    await stage("accept-sol", async () => await acceptAndComplete(coordinator, sol, "call-sol", "child-sol"));
+    const secondWave = await stage("integrate-wave2", async () =>
+      await coordinator.integrateFabricWave("root", source.run_id));
     const final = secondWave.ready.find(({ task_id }) => task_id === "final")!;
-    await coordinator.bindDispatch("root", "call-final", final);
-    await acceptAndComplete(coordinator, final, "call-final", "child-final");
-    const validated = await coordinator.integrateFabricWaveAndValidate(
+    await stage("bind-final", async () => await coordinator.bindDispatch("root", "call-final", final));
+    await stage("accept-final", async () => await acceptAndComplete(coordinator, final, "call-final", "child-final"));
+    const validated = await stage("integrate-validate", async () => await coordinator.integrateFabricWaveAndValidate(
       "root", source.run_id, process.execPath, ["-e", "process.exit(0)"],
-    );
+    ));
     assert.equal(validated.fabric!.validation.status, "pass");
     assert.equal((await run(value.repository, "rev-parse", "refs/heads/main")).trim(), value.sha);
-    await run(value.repository, "checkout", "--detach", value.sha);
-    const accepted = await coordinator.acceptFabricCandidate(
+    await stage("detach", async () => await run(value.repository, "checkout", "--detach", value.sha));
+    const accepted = await stage("accept-cas", async () => await coordinator.acceptFabricCandidate(
       "root", source.run_id, validated.fabric!.candidate_head, "pass", "a".repeat(64),
-    );
+    ));
     assert.equal(accepted.terminal_reason, "completed");
     assert.equal(accepted.fabric!.promoted, true);
-    assert.deepEqual(await coordinator.acceptFabricCandidate(
-      "root", source.run_id, validated.fabric!.candidate_head, "pass", "a".repeat(64),
-    ), accepted);
-    await assert.rejects(coordinator.acceptFabricCandidate(
-      "root", source.run_id, validated.fabric!.candidate_head, "pass", "b".repeat(64),
-    ), { code: "outcome-conflict" });
-    assert.equal((await run(value.repository, "worktree", "list", "--porcelain")).match(/^worktree /gmu)?.length, 1);
+    await stage("replay-assertions", async () => {
+      assert.deepEqual(await coordinator.acceptFabricCandidate(
+        "root", source.run_id, validated.fabric!.candidate_head, "pass", "a".repeat(64),
+      ), accepted);
+      await assert.rejects(coordinator.acceptFabricCandidate(
+        "root", source.run_id, validated.fabric!.candidate_head, "pass", "b".repeat(64),
+      ), { code: "outcome-conflict" });
+      assert.equal((await run(value.repository, "worktree", "list", "--porcelain")).match(/^worktree /gmu)?.length, 1);
+    });
   } finally {
-    await rm(value.root, { recursive: true, force: true });
+    await stage("cleanup", async () => await rm(value.root, { recursive: true, force: true }));
+    console.log("SORTIE_DEADLINE_PROFILE", JSON.stringify({
+      schema_version: 1,
+      case: "deadline takeover resumes from the last accepted candidate and completes one reviewed CAS",
+      total_ms: performance.now() - profileStarted,
+      takeover_calls: takeoverCalls,
+      takeover_loop_iterations: takeoverLoopIterations,
+      stages,
+    }));
   }
 });
 
@@ -1599,7 +1633,7 @@ function registerIntegrationWorktreeDispatchCases(): void {
     }));
   };
   if (selectedPhase === "s01") {
-    describe("six-unit and interrupted durable integration scenarios", { concurrency: 2 }, () => {
+    describe("six-unit and interrupted durable integration scenarios", { concurrency: 1 }, () => {
       for (const candidate of s01Cases) {
         nodeTest(candidate.name, candidate.options ?? {}, trackedRun("s01", candidate));
       }
@@ -1608,7 +1642,7 @@ function registerIntegrationWorktreeDispatchCases(): void {
     return;
   }
   if (selectedPhase === "remaining") {
-    describe("remaining worktree dispatch integration scenarios", { concurrency: Math.min(4, availableParallelism()) }, () => {
+    describe("remaining worktree dispatch integration scenarios", { concurrency: 1 }, () => {
       for (const candidate of remainingCases) {
         nodeTest(candidate.name, candidate.options ?? {}, trackedRun("remaining", candidate));
       }
@@ -1617,10 +1651,10 @@ function registerIntegrationWorktreeDispatchCases(): void {
     return;
   }
   describe("worktree dispatch integration barrier", { concurrency: false }, () => {
-    describe("six-unit and interrupted durable integration scenarios", { concurrency: 2 }, () => {
+    describe("six-unit and interrupted durable integration scenarios", { concurrency: 1 }, () => {
       for (const candidate of s01Cases) nodeTest(candidate.name, candidate.options ?? {}, trackedRun("s01", candidate));
     });
-    describe("remaining worktree dispatch integration scenarios", { concurrency: Math.min(4, availableParallelism()) }, () => {
+    describe("remaining worktree dispatch integration scenarios", { concurrency: 1 }, () => {
       for (const candidate of remainingCases) nodeTest(candidate.name, candidate.options ?? {}, trackedRun("remaining", candidate));
     });
     after(reportActivity);

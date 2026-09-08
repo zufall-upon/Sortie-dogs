@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { availableParallelism } from "node:os";
 import { join, relative } from "node:path";
@@ -23,6 +24,7 @@ import {
 import { ParallelDispatchError } from "../dist/core/worktree-parallel-dispatch.js";
 import { ParallelDispatchCoordinator } from "../dist/core/worktree-parallel-dispatch.js";
 import { compileAcceptanceCoverage } from "../dist/core/acceptance-compiler.js";
+import { goalFingerprint } from "../dist/core/goal-bound.js";
 import { createExecutionPlan, executionPlanManifestFingerprint } from "../dist/core/execution-plan.js";
 import { WorktreeLifecycle } from "../dist/core/worktree-lifecycle.js";
 import {
@@ -1269,7 +1271,7 @@ test("coordinator DONE output receives host-reported root and child run metrics"
       } }] }),
     } } as never });
     await hooks["chat.message"]!(
-      { sessionID: "root", agent: "dog-coordinator" },
+      { sessionID: "root", agent: "dog-coordinator", messageID: "metrics-user-1" },
       {
         message: { agent: "dog-coordinator", model: { providerID: "host", modelID: "selected" } },
         parts: [{ type: "text", text: "task" }],
@@ -1311,7 +1313,7 @@ test("coordinator DONE output receives host-reported root and child run metrics"
     assert.equal(body.extra.available, true);
     assert.equal(body.extra.outcome, "DONE");
     assert.equal(body.extra.sessionID, "root");
-    assert.equal(body.extra.runtimeAssetVersion, "0.3.70-readonly-failure-swarm-v1");
+    assert.equal(body.extra.runtimeAssetVersion, "0.3.75-sequential-acceptance-parent-v1");
     assert.equal(body.extra.inputTokens, 130);
     assert.equal(body.extra.outputTokens, 15);
     assert.equal(body.extra.reasoningTokens, 5);
@@ -2218,9 +2220,9 @@ async function beginTrackedTaskChild(
     "validation: npm test",
   ].join("\n");
   await chat(
-    { sessionID: parentID, agent: "dog-coordinator" },
+    { sessionID: parentID, agent: "dog-coordinator", messageID: `${parentID}-real-user` },
     {
-      message: { agent: "dog-coordinator", model: { providerID: "host", modelID: "selected" } },
+      message: { id: `${parentID}-real-user`, agent: "dog-coordinator", model: { providerID: "host", modelID: "selected" } },
       parts: [{ type: "text", text: "tracked task" }],
     },
   );
@@ -2232,9 +2234,9 @@ async function beginTrackedTaskChild(
     event: { type: "session.created", properties: { info: { id: childID, parentID, directory } } },
   });
   await chat(
-    { sessionID: childID, agent: "dog-worker", parentID } as never,
+    { sessionID: childID, agent: "dog-worker", parentID, messageID: `${childID}-handoff` } as never,
     {
-      message: { agent: "dog-worker", model: { providerID: "host", modelID: "selected" } },
+      message: { id: `${childID}-handoff`, agent: "dog-worker", model: { providerID: "host", modelID: "selected" } },
       parts: [{ type: "text", text: task }],
     },
   );
@@ -2827,9 +2829,9 @@ test("an explicit root coordinator model wins over a declared coordinator route"
 
     const synthetic = {
       message: { agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
-      parts: [{ type: "text", text: "continue", synthetic: true }],
+      parts: [{ type: "text", text: "continue" }],
     };
-    await chat({ sessionID: "declared-coordinator", agent: "dog-coordinator" }, synthetic);
+    await chat({ sessionID: "declared-coordinator", agent: "dog-coordinator", messageID: "declared-user-2" }, synthetic);
     assert.deepEqual(synthetic.message.model, {
       providerID: "openai",
       modelID: "gpt-5.6-sol",
@@ -2984,11 +2986,12 @@ test("coordinator task hooks permit autonomous sequential workers across synthet
     const chat = hooks["chat.message"]!;
     const before = hooks["tool.execute.before"]!;
     const after = hooks["tool.execute.after"]!;
-    const turn = (synthetic = false) => chat(
-      { sessionID: "root", agent: "dog-coordinator" },
+    let turnSequence = 0;
+    const turn = (_synthetic = false) => chat(
+      { sessionID: "root", agent: "dog-coordinator", messageID: `sequential-user-${++turnSequence}` },
       {
         message: { agent: "dog-coordinator", model: { providerID: "host", modelID: "selected" } },
-        parts: [{ type: "text", text: "task", ...(synthetic ? { synthetic: true } : {}) }],
+        parts: [{ type: "text", text: "task" }],
       },
     );
     const dispatch = (callID: string) => before(
@@ -3474,14 +3477,14 @@ test("typed parallel prepare is the only path to reserved dependency-aware worke
 
     const hooks = await SortieDogsPlugin({ directory });
     await hooks["chat.message"]!(
-      { sessionID: "literal-root", agent: "dog-coordinator" },
+      { sessionID: "literal-root", agent: "dog-coordinator", messageID: "literal-user-1" },
       {
         message: { agent: "dog-coordinator", model: { providerID: "host", modelID: "selected" } },
         parts: [{ type: "text", text: "literal fields are not opt-in" }],
       },
     );
     await hooks["chat.message"]!(
-      { sessionID: "root", agent: "dog-coordinator" },
+      { sessionID: "root", agent: "dog-coordinator", messageID: "parallel-user-1" },
       {
         message: { agent: "dog-coordinator", model: { providerID: "host", modelID: "selected" } },
         parts: [{ type: "text", text: "parallel" }],
@@ -3507,7 +3510,7 @@ test("typed parallel prepare is the only path to reserved dependency-aware worke
       { output: "<task_result>done</task_result>", metadata: {} },
     );
     await hooks["chat.message"]!(
-      { sessionID: "root", agent: "dog-coordinator" },
+      { sessionID: "root", agent: "dog-coordinator", messageID: "parallel-user-2" },
       {
         message: { agent: "dog-coordinator", model: { providerID: "host", modelID: "selected" } },
         parts: [{ type: "text", text: "parallel turn" }],
@@ -3555,7 +3558,7 @@ test("typed parallel prepare is the only path to reserved dependency-aware worke
     ].join("\n");
     const client = { session: {
       get: async () => ({ data: { agent: "dog-coordinator" } }),
-      messages: async () => ({ data: [{ info: { role: "user", agent: "dog-coordinator" }, parts: [{ type: "text", text: "resume" }] }] }),
+      messages: async () => ({ data: [{ info: { id: "parallel-user-2", role: "user", agent: "dog-coordinator" }, parts: [{ type: "text", text: "resume" }] }] }),
     } } as never;
     const restarted = await SortieDogsPlugin({ directory, client });
     const system = { system: [] as string[] };
@@ -3908,6 +3911,383 @@ test("an explicit Build selection relinquishes an established coordinator while 
   });
 });
 
+test("fresh-root control uses one host-round-tripped ticket and terminal state rejects stale replay", async () => {
+  await withProject("goal-bound-host-ticket", async (directory) => {
+    let forwarded: { agent: string; parts: unknown[] } | undefined;
+    const hostMessages: SessionMessage[] = [];
+    const client = { session: {
+      get: async (request: { path: { id: string } }) => request.path.id === "source-child"
+        ? { data: { agent: "dog-coordinator", parentID: "parent-root" } }
+        : request.path.id === "goal-worker" || request.path.id === "goal-worker-2"
+          ? { data: { agent: "dog-worker", parentID: "goal-root" } }
+          : { data: { agent: "dog-coordinator" } },
+      create: async () => ({ data: { id: "goal-root" } }),
+      delete: async () => ({ data: true }),
+      promptAsync: async (request: { body: { agent: string; parts: unknown[] } }) => {
+        forwarded = request.body;
+        return { response: { status: 204, ok: true } };
+      },
+      messages: async () => ({ data: hostMessages }),
+    } };
+    const hooks = await SortieDogsPlugin({ directory, client } as never);
+    await assert.rejects(hooks["chat.message"]!(
+      { sessionID: "source-child", parentID: "parent-root", agent: "dog-coordinator", messageID: "real-user-1" } as never,
+      { message: { agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+        parts: [{ type: "text", text: "deliver the accepted outcome" }] },
+    ), (error: unknown) => isFreshSessionError(error, "child-lineage", "redispatched"));
+    assert.ok(forwarded);
+    assert.equal(forwarded.agent, "dog-coordinator");
+    const part = forwarded.parts[0] as { synthetic?: boolean; metadata?: Record<string, unknown> };
+    assert.equal(part.synthetic, true);
+    assert.ok(part.metadata?.["sortie-dogs.goal-bound/v1"]);
+
+    const received = { message: { agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+      parts: forwarded.parts };
+    await hooks["chat.message"]!({ sessionID: "goal-root", agent: "dog-coordinator", messageID: "host-generated-1" }, received);
+    await assert.rejects(
+      hooks["chat.message"]!({ sessionID: "goal-root", agent: "dog-coordinator", messageID: "host-generated-duplicate" },
+        { ...received, parts: forwarded.parts }),
+      /SORTIE_GOAL_CONTROL_DENIED|Continuation ticket/u,
+    );
+
+    const goalFingerprintValue = `sha256:${"a".repeat(64)}`;
+    const validationCommand = "node --test candidate.test.mjs";
+    await writeFile(join(directory, "candidate.txt"), "accepted candidate\n");
+    await writeFile(join(directory, "candidate.test.mjs"), "import assert from 'node:assert/strict'; assert.equal('accepted candidate','accepted candidate');\n");
+    await writeFile(join(directory, "goal.operation-manifest.json"), JSON.stringify({
+      ...operationManifest(["candidate.txt"]), task_id: "goal-unit-proof",
+      read: ["candidate.test.mjs"], validation: [validationCommand],
+    }));
+    const handoffPath = join(directory, "handoff.json");
+    await writeFile(handoffPath, JSON.stringify({ ...writeGateHandoff(directory, "goal.operation-manifest.json"), id: "goal-unit-proof" }));
+    await writeFile(join(directory, "goal-2.operation-manifest.json"), JSON.stringify({
+      ...operationManifest(["candidate.txt"]), task_id: "goal-unit-proof-2",
+      read: ["candidate.test.mjs"], validation: [validationCommand],
+    }));
+    const secondHandoffPath = join(directory, "handoff.goal-unit-proof-2.json");
+    await writeFile(secondHandoffPath, JSON.stringify({
+      ...writeGateHandoff(directory, "goal-2.operation-manifest.json"), id: "goal-unit-proof-2",
+    }));
+    const singleGoalPrompt = ["role: implementation", `project_root: ${directory}`,
+      `handoff_path: ${handoffPath}`, "source_manifest: [candidate.test.mjs]",
+      "operation_manifest: goal.operation-manifest.json", "acceptance: requested runtime passes",
+      `validation: { level: full, command: ${validationCommand}, diagnostics: [] }`, `goal_acceptance_fingerprint: ${goalFingerprintValue}`,
+      "goal_criterion_id: requested-runtime", "goal_target: goal delivery", "goal_entrypoint: fixture",
+      "goal_workload: one unit", 'goal_oracle_coverage:\n  - terminal-rejection',
+      "goal_build_boundary: not-applicable", "goal_source: current protected source",
+      "goal_candidate: current protected candidate", "goal_source_binding: current-protected",
+      "goal_candidate_binding: current-protected",
+      "goal_fixture: host-ticket", "goal_proof_scope: requested-full", "goal_expected_outcome: pass",
+      "goal_budget_units: 4"].join("\n");
+    const criterionBlock = singleGoalPrompt.slice(singleGoalPrompt.indexOf("goal_criterion_id:"));
+    const goalPrompt = singleGoalPrompt + "\n" +
+      criterionBlock.replace("goal_criterion_id: requested-runtime", "goal_criterion_id: retained-runtime");
+    await hooks["chat.message"]!(
+      { sessionID: "goal-root", agent: "dog-coordinator", messageID: "goal-revision-turn" },
+      { message: { id: "goal-revision-turn", agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+        parts: [{ type: "text", text: "continue the accepted goal with native host evidence" }] },
+    );
+    await hooks["tool.execute.before"]!(
+      { tool: "task", sessionID: "goal-root", callID: "goal-unit" },
+      { args: { subagent_type: "dog-worker", prompt: goalPrompt } },
+    );
+    const bound = { system: [] as string[] };
+    await hooks["experimental.chat.system.transform"]!({ sessionID: "goal-root" }, bound);
+    const boundLine = bound.system.find((entry) => entry.startsWith("SORTIE_GOAL_BOUND_STATE\n"));
+    assert.ok(boundLine);
+    const boundState = JSON.parse(boundLine.slice(boundLine.indexOf("\n") + 1)) as {
+      goal_id: string; revision: number; scope_epoch: number; acceptance_fingerprint: string;
+    };
+    const evidence = { evidence_id: "host-evidence-1", goal_id: boundState.goal_id,
+      goal_revision: boundState.revision, scope_epoch: boundState.scope_epoch,
+      acceptance_fingerprint: boundState.acceptance_fingerprint,
+      measurement: { criterion_ids: ["requested-runtime"], target: "goal delivery", entrypoint: "fixture",
+        workload: "one unit", oracle_coverage: ["terminal-rejection"], build_boundary: "not-applicable" },
+      identity: { source: "sha256:forged", candidate: "sha256:forged", fixture: "host-ticket" },
+      execution: { command: ["host", "goal-bound-probe"], exit_code: 0, outcome: "pass",
+        started_at: "2026-09-08T00:00:00.000Z", ended_at: "2026-09-08T00:00:01.000Z", units: ["goal-unit"] },
+      proof_scope: "requested-full" };
+    const forged = { ...evidence, evidence_id: "forged-model-prose" };
+    await hooks["tool.execute.after"]!(
+      { tool: "task", sessionID: "goal-root", callID: "goal-unit" },
+      { output: `<task_result>claim only</task_result>\nSORTIE_GOAL_EVIDENCE ${JSON.stringify(forged)}` },
+    );
+    const premature = { text: "status: DONE" };
+    await hooks["experimental.text.complete"]!({ sessionID: "goal-root" }, premature);
+    assert.match(premature.text, /status: IN_PROGRESS/u);
+
+    await hooks["tool.execute.before"]!(
+      { tool: "task", sessionID: "goal-root", callID: "goal-unit-proof" },
+      { args: { subagent_type: "dog-worker", prompt: goalPrompt } },
+    );
+    await hooks.event!({ event: { type: "session.created", properties: { info: {
+      id: "goal-worker", parentID: "goal-root", directory,
+    } } } });
+    await hooks["chat.message"]!(
+      { sessionID: "goal-worker", parentID: "goal-root", agent: "dog-worker", messageID: "goal-worker-message" } as never,
+      { message: { id: "goal-worker-message", agent: "dog-worker", model: { providerID: "host", modelID: "selected" } },
+        parts: [{ type: "text", text: goalPrompt }] },
+    );
+    await inspectHandoffWithRead(hooks, handoffPath, "goal-worker");
+    assert.equal((await executeBindWriteGate(hooks, directory, "goal-worker", "goal.operation-manifest.json")).status, "bound");
+    await hooks["tool.execute.before"]!(
+      { tool: "bash", sessionID: "goal-worker", callID: "native-validation" },
+      { args: { command: validationCommand } },
+    );
+    await hooks.event!({ event: { type: "message.part.updated", properties: { part: {
+      id: "native-validation-part", messageID: "native-validation-message", sessionID: "goal-worker",
+      type: "tool", tool: "bash", callID: "native-validation", state: { status: "completed",
+        input: { command: validationCommand }, output: "native validation output", title: validationCommand,
+        metadata: { output: "native validation output", exit: 0, truncated: false },
+        time: { start: Date.now() - 5, end: Date.now() } },
+    } } } });
+    await hooks["tool.execute.after"]!(
+      { tool: "bash", sessionID: "goal-worker", callID: "native-validation", args: { command: validationCommand } },
+      { output: "native validation output", metadata: { exit: 0 } },
+    );
+    await hooks["tool.execute.after"]!(
+      { tool: "task", sessionID: "goal-root", callID: "goal-unit-proof" },
+      { output: "<task_result>native validation completed</task_result>",
+        metadata: { sessionId: "goal-worker" } },
+    );
+    const secondGoalPrompt = goalPrompt
+      .replaceAll("goal-unit-proof", "goal-unit-proof-2")
+      .replace(handoffPath, secondHandoffPath)
+      .replace("goal.operation-manifest.json", "goal-2.operation-manifest.json")
+      .split("\n").filter((line) => !line.startsWith("goal_") && !line.startsWith("  - ")).join("\n");
+    await hooks["chat.message"]!(
+      { sessionID: "goal-root", agent: "dog-coordinator", messageID: "goal-retained-turn" },
+      { message: { id: "goal-retained-turn", agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+        parts: [{ type: "text", text: "continue without changing the accepted goal" }] },
+    );
+    await hooks["tool.execute.before"]!(
+      { tool: "task", sessionID: "goal-root", callID: "goal-unit-proof-2" },
+      { args: { subagent_type: "dog-worker", prompt: secondGoalPrompt } },
+    );
+    await hooks.event!({ event: { type: "session.created", properties: { info: {
+      id: "goal-worker-2", parentID: "goal-root", directory,
+    } } } });
+    await hooks["chat.message"]!(
+      { sessionID: "goal-worker-2", parentID: "goal-root", agent: "dog-worker", messageID: "goal-worker-message-2" } as never,
+      { message: { id: "goal-worker-message-2", agent: "dog-worker", model: { providerID: "host", modelID: "selected" } },
+        parts: [{ type: "text", text: secondGoalPrompt }] },
+    );
+    await inspectHandoffWithRead(hooks, secondHandoffPath, "goal-worker-2");
+    assert.equal((await executeBindWriteGate(hooks, directory, "goal-worker-2", "goal-2.operation-manifest.json")).status, "bound");
+    await hooks["tool.execute.before"]!(
+      { tool: "bash", sessionID: "goal-worker-2", callID: "native-validation-2" },
+      { args: { command: validationCommand } },
+    );
+    await hooks.event!({ event: { type: "message.part.updated", properties: { part: {
+      id: "native-validation-part-2", messageID: "native-validation-message-2", sessionID: "goal-worker-2",
+      type: "tool", tool: "bash", callID: "native-validation-2", state: { status: "completed",
+        input: { command: validationCommand }, output: "second native validation output", title: validationCommand,
+        metadata: { output: "second native validation output", exit: 0, truncated: false },
+        time: { start: Date.now() - 5, end: Date.now() } },
+    } } } });
+    await hooks["tool.execute.after"]!(
+      { tool: "bash", sessionID: "goal-worker-2", callID: "native-validation-2", args: { command: validationCommand } },
+      { output: "second native validation output", metadata: { exit: 0 } },
+    );
+    await hooks["tool.execute.after"]!(
+      { tool: "task", sessionID: "goal-root", callID: "goal-unit-proof-2" },
+      { output: "<task_result>second native validation completed</task_result>",
+        metadata: { sessionId: "goal-worker-2" } },
+    );
+    hostMessages.push({ info: { id: "goal-terminal-message", role: "assistant", agent: "dog-coordinator" } as never,
+      parts: [{ id: "goal-terminal-part", type: "text", text: "status: DONE" } as never] });
+    await hooks.event!({ event: { type: "message.part.updated", properties: { part: {
+      id: "goal-terminal-part", messageID: "goal-terminal-message", sessionID: "goal-root",
+      type: "text", text: "status: DONE", time: { start: Date.now() - 5, end: Date.now() },
+    } } } });
+    await assert.rejects(
+      hooks["chat.message"]!({ sessionID: "goal-root", agent: "dog-coordinator", messageID: "host-generated-stale" },
+        { ...received, parts: forwarded.parts }),
+    );
+    const projected = { system: [] as string[] };
+    await hooks["experimental.chat.system.transform"]!({ sessionID: "goal-root" }, projected);
+    const state = projected.system.find((entry) => entry.startsWith("SORTIE_GOAL_BOUND_STATE\n"));
+    assert.ok(state);
+    const receipt = JSON.parse(state.slice(state.indexOf("\n") + 1)) as { phase: string; receipt: { status: string; session_ids: string[] } };
+    assert.equal(receipt.phase, "terminal");
+    assert.equal(receipt.receipt.status, "succeeded");
+    assert.deepEqual(receipt.receipt.session_ids, ["source-child", "goal-root"]);
+    assert.equal(receipt.receipt.evidence_refs.length, 2);
+    const ledgerPath = join(directory, ".git", "sortie-dogs", "run-flight",
+      `${createHash("sha256").update("source-child").digest("hex")}.json`);
+    const ledger = JSON.parse(await readFile(ledgerPath, "utf8")) as { goal_events: Array<{ event: { kind: string; unit_id?: string; evidence?: Array<{ identity: { source: string; candidate: string }; execution: { command: string[] } }> } }> };
+    assert.deepEqual(ledger.goal_events.find(({ event }) => event.kind === "goal.revised")?.event.acceptance_contract.criteria
+      .map(({ criterion_id }) => criterion_id), ["requested-runtime", "retained-runtime"]);
+    const produced = ledger.goal_events.filter(({ event }) => event.kind === "unit.settled" && event.evidence?.length === 1)
+      .map(({ event }) => ({ unitID: event.unit_id, evidence: event.evidence![0]! }));
+    assert.deepEqual(produced.map(({ unitID }) => unitID), ["goal-unit-proof", "goal-unit-proof-2"]);
+    for (const { evidence } of produced) {
+      assert.match(evidence.identity.source, /^sha256:[a-f0-9]{64}$/u);
+      assert.match(evidence.identity.candidate, /^sha256:[a-f0-9]{64}$/u);
+      assert.deepEqual(evidence.execution.command, [validationCommand]);
+    }
+  });
+});
+
+test("goal acceptance binds the final persisted host user message when the chat hook omits message ids", async () => {
+  await withProject("goal-bound-persisted-message", async (directory) => {
+    const text = "deliver the persisted host request";
+    let messageReads = 0;
+    const hooks = await SortieDogsPlugin({ directory, client: { session: {
+      messages: async () => ({ data: ++messageReads <= 3 ? [] : [
+        { info: { id: "persisted-user-1", role: "user", agent: "dog-coordinator" }, parts: [{ type: "text", text }] },
+      ] }),
+      get: async () => ({ data: { id: "persisted-root", agent: "dog-coordinator" } }),
+    } } as never });
+    await hooks["chat.message"]!(
+      { sessionID: "persisted-root", agent: "dog-coordinator" },
+      { message: { agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+        parts: [{ type: "text", text }] },
+    );
+    const projected = { system: [] as string[] };
+    await hooks["experimental.chat.system.transform"]!({ sessionID: "persisted-root" }, projected);
+    const line = projected.system.find((entry) => entry.startsWith("SORTIE_GOAL_BOUND_STATE\n"));
+    assert.ok(line);
+    const state = JSON.parse(line.slice(line.indexOf("\n") + 1)) as { goal_id: string; phase: string };
+    assert.equal(state.goal_id, goalFingerprint({ root: "persisted-root", origin_user_message_id: "persisted-user-1" }));
+    assert.equal(state.phase, "active");
+  });
+});
+
+test("goal acceptance recovers from the persisted real-user event after earlier hook races", async () => {
+  await withProject("goal-bound-persisted-event", async (directory) => {
+    const text = "deliver the event-persisted host request";
+    let messageReads = 0;
+    const messages = [{ info: { id: "persisted-event-user", role: "user", agent: "dog-coordinator" },
+      parts: [{ type: "text", text }] }];
+    const hooks = await SortieDogsPlugin({ directory, client: { session: {
+      messages: async () => ({ data: ++messageReads <= 6 ? [] : messages }),
+      get: async () => ({ data: { id: "persisted-event-root", agent: "dog-coordinator" } }),
+    } } as never });
+    await hooks["chat.message"]!(
+      { sessionID: "persisted-event-root", agent: "dog-coordinator" },
+      { message: { agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+        parts: [{ type: "text", text }] },
+    );
+    const raced = { system: [] as string[] };
+    await hooks["experimental.chat.system.transform"]!({ sessionID: "persisted-event-root" }, raced);
+    assert.equal(raced.system.some((entry) => entry.startsWith("SORTIE_GOAL_BOUND_STATE\n")), false);
+    await hooks.event!({ event: { type: "message.updated", properties: { info: {
+      id: "persisted-event-user", sessionID: "persisted-event-root", role: "user", agent: "dog-coordinator",
+    } } } });
+    const projected = { system: [] as string[] };
+    await hooks["experimental.chat.system.transform"]!({ sessionID: "persisted-event-root" }, projected);
+    const line = projected.system.find((entry) => entry.startsWith("SORTIE_GOAL_BOUND_STATE\n"));
+    assert.ok(line);
+    const state = JSON.parse(line.slice(line.indexOf("\n") + 1)) as { goal_id: string; phase: string };
+    assert.equal(state.goal_id, goalFingerprint({ root: "persisted-event-root", origin_user_message_id: "persisted-event-user" }));
+    assert.equal(state.phase, "active");
+  });
+});
+
+test("goal acceptance waits for real-user persistence after the chat hook returns", async () => {
+  await withProject("goal-bound-post-chat-persistence", async (directory) => {
+    const text = "deliver after host persistence";
+    let persisted = false;
+    const hooks = await SortieDogsPlugin({ directory, client: { session: {
+      messages: async () => ({ data: persisted ? [{ info: { id: "post-chat-user", role: "user", agent: "dog-coordinator" },
+        parts: [{ type: "text", text }] }] : [] }),
+      get: async () => ({ data: { id: "post-chat-root", agent: "dog-coordinator" } }),
+    } } as never });
+    await hooks["chat.message"]!(
+      { sessionID: "post-chat-root", agent: "dog-coordinator" },
+      { message: { agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+        parts: [{ type: "text", text }] },
+    );
+    persisted = true;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const projected = { system: [] as string[] };
+    await hooks["experimental.chat.system.transform"]!({ sessionID: "post-chat-root" }, projected);
+    const line = projected.system.find((entry) => entry.startsWith("SORTIE_GOAL_BOUND_STATE\n"));
+    assert.ok(line);
+    const state = JSON.parse(line.slice(line.indexOf("\n") + 1)) as { goal_id: string; phase: string };
+    assert.equal(state.goal_id, goalFingerprint({ root: "post-chat-root", origin_user_message_id: "post-chat-user" }));
+    assert.equal(state.phase, "active");
+  });
+});
+
+test("goal acceptance uses the exact persisted real-user event when chat metadata is unavailable", async () => {
+  await withProject("goal-bound-user-event", async (directory) => {
+    const text = "deliver from the native user event";
+    const hooks = await SortieDogsPlugin({ directory, client: { session: {
+      messages: async () => ({ data: [{ info: { id: "native-user-event", role: "user", agent: "dog-coordinator" },
+        parts: [{ type: "text", text }] }] }),
+      get: async () => ({ data: { id: "native-event-root", agent: "dog-coordinator" } }),
+    } } as never });
+    await hooks.event!({ event: { type: "message.updated", properties: { info: {
+      id: "native-user-event", sessionID: "native-event-root", role: "user", agent: "dog-coordinator",
+    } } } });
+    const projected = { system: [] as string[] };
+    await hooks["experimental.chat.system.transform"]!({ sessionID: "native-event-root" }, projected);
+    const line = projected.system.find((entry) => entry.startsWith("SORTIE_GOAL_BOUND_STATE\n"));
+    assert.ok(line);
+    const state = JSON.parse(line.slice(line.indexOf("\n") + 1)) as { goal_id: string; phase: string };
+    assert.equal(state.goal_id, goalFingerprint({ root: "native-event-root", origin_user_message_id: "native-user-event" }));
+    assert.equal(state.phase, "active");
+  });
+});
+
+test("goal checkpoints use the Git common metadata owner without dirtying clean repositories", async () => {
+  await testEnvironmentReady;
+  const repository = await mkdtemp(join(testEnvironment, "goal-owner-repository-"));
+  const linked = await mkdtemp(join(testEnvironment, "goal-owner-linked-parent-"));
+  await rm(linked, { recursive: true, force: true });
+  try {
+    await execFileAsync("git", ["init", "-q", "-b", "main"], { cwd: repository });
+    await execFileAsync("git", ["config", "user.name", "Sortie Test"], { cwd: repository });
+    await execFileAsync("git", ["config", "user.email", "sortie@example.invalid"], { cwd: repository });
+    await writeFile(join(repository, "base.txt"), "base\n");
+    await execFileAsync("git", ["add", "base.txt"], { cwd: repository });
+    await execFileAsync("git", ["commit", "-qm", "base"], { cwd: repository });
+    await execFileAsync("git", ["worktree", "add", "-q", "-b", "linked", linked], { cwd: repository });
+    const first = await SortieDogsPlugin({ directory: repository });
+    await first["chat.message"]!({ sessionID: "shared-goal", agent: "dog-coordinator", messageID: "real-main" },
+      { message: { id: "real-main", agent: "dog-coordinator", model: {} }, parts: [{ type: "text", text: "start" }] });
+    const second = await SortieDogsPlugin({ directory: linked });
+    await second["chat.message"]!({ sessionID: "shared-goal", agent: "dog-coordinator", messageID: "real-linked" },
+      { message: { id: "real-linked", agent: "dog-coordinator", model: {} }, parts: [{ type: "text", text: "continue" }] });
+    assert.equal((await execFileAsync("git", ["status", "--porcelain"], { cwd: repository })).stdout, "");
+    assert.equal((await execFileAsync("git", ["status", "--porcelain"], { cwd: linked })).stdout, "");
+    assert.equal(await stat(join(repository, ".sortie-dogs")).catch(() => undefined), undefined);
+    const owner = join(repository, ".git", "sortie-dogs", "run-flight",
+      `${createHash("sha256").update("shared-goal").digest("hex")}.json`);
+    const document = JSON.parse(await readFile(owner, "utf8")) as { goal_events: unknown[] };
+    assert.equal(document.goal_events.length, 2);
+  } finally {
+    await execFileAsync("git", ["worktree", "remove", "--force", linked], { cwd: repository }).catch(() => undefined);
+    await rm(repository, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
+    await rm(linked, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
+  }
+});
+
+test("non-Git goal checkpoints use the explicit local metadata path and fail honestly when it is unwritable", async () => {
+  await testEnvironmentReady;
+  const local = await mkdtemp(join(testEnvironment, "goal-owner-nongit-"));
+  const blocked = await mkdtemp(join(testEnvironment, "goal-owner-blocked-"));
+  try {
+    const hooks = await SortieDogsPlugin({ directory: local });
+    await hooks["chat.message"]!({ sessionID: "non-git", agent: "dog-coordinator", messageID: "real" },
+      { message: { id: "real", agent: "dog-coordinator", model: {} }, parts: [{ type: "text", text: "start" }] });
+    const path = join(local, ".sortie-dogs", "run-flight",
+      `${createHash("sha256").update("non-git").digest("hex")}.json`);
+    assert.ok((await stat(path)).isFile());
+    await writeFile(join(blocked, ".sortie-dogs"), "not a directory\n");
+    const denied = await SortieDogsPlugin({ directory: blocked });
+    await assert.rejects(denied["chat.message"]!(
+      { sessionID: "blocked", agent: "dog-coordinator", messageID: "real" },
+      { message: { id: "real", agent: "dog-coordinator", model: {} }, parts: [{ type: "text", text: "start" }] },
+    ));
+  } finally {
+    await rm(local, { recursive: true, force: true });
+    await rm(blocked, { recursive: true, force: true });
+  }
+});
+
 test("an explicit coordinator selection replaces a root agent but never promotes a child", async () => {
   await withProject("foreign-root-coordinator-command", async (directory) => {
     const hooks = await SortieDogsPlugin({ directory, client: { session: {
@@ -4055,7 +4435,7 @@ test("a child coordinator request with stale assets redispatches once to a fresh
       delete: async () => { deletes += 1; return { data: true }; },
     } } as never });
     const invoke = () => hooks["chat.message"]!(
-      { sessionID: "child", parentID: "parent", agent: "dog-coordinator" } as never,
+      { sessionID: "child", parentID: "parent", agent: "dog-coordinator", messageID: "fresh-user-1" } as never,
       {
         message: { agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
         parts: [{ type: "text", text: "continue the benchmark" }],
@@ -4074,14 +4454,14 @@ test("a child coordinator request with stale assets redispatches once to a fresh
     assert.equal(creates, 1);
     assert.equal(prompts, 1);
     assert.equal(deletes, 0);
-    assert.deepEqual(promptRequest, {
-      path: { id: "fresh-root" },
-      query: { directory },
-      body: {
-        agent: "dog-coordinator",
-        parts: [{ type: "text", text: "continue the benchmark" }],
-      },
-    });
+    const freshRequest = promptRequest as { path: { id: string }; query: { directory: string };
+      body: { agent: string; parts: Array<{ type: string; text: string; synthetic: boolean; metadata: Record<string, unknown> }> } };
+    assert.equal(freshRequest.path.id, "fresh-root");
+    assert.equal(freshRequest.query.directory, directory);
+    assert.equal(freshRequest.body.agent, "dog-coordinator");
+    assert.equal(freshRequest.body.parts[0]!.text, "continue the benchmark");
+    assert.equal(freshRequest.body.parts[0]!.synthetic, true);
+    assert.ok(freshRequest.body.parts[0]!.metadata["sortie-dogs.goal-bound/v1"]);
   });
 });
 
@@ -4122,7 +4502,7 @@ test("a rejected fresh-root prompt deletes the empty session and does not retry"
       delete: async () => { deletes += 1; return { data: true }; },
     } } as never });
     const invoke = () => hooks["chat.message"]!(
-      { sessionID: "child", parentID: "parent", agent: "dog-coordinator" } as never,
+      { sessionID: "child", parentID: "parent", agent: "dog-coordinator", messageID: "rejected-user-1" } as never,
       {
         message: { agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
         parts: [{ type: "text", text: "continue" }],
@@ -4161,9 +4541,9 @@ isolated("a completed coordinator message triggers checkpoint continuation when 
       promptAsync: async () => ({ data: true }),
     } } as never });
     await hooks["chat.message"]!(
-      { sessionID: "root", agent: "dog-coordinator" },
+      { sessionID: "root", agent: "dog-coordinator", messageID: "interim-user-1" },
       {
-        message: { agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+        message: { id: "interim-user-1", agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
         parts: [{ type: "text", text: "start" }],
       },
     );
@@ -4262,9 +4642,9 @@ isolated("an interim coordinator progress part does not recover until the messag
       promptAsync: async () => { prompts += 1; return { data: true }; },
     } } as never });
     await hooks["chat.message"]!(
-      { sessionID: "root", agent: "dog-coordinator" },
+      { sessionID: "root", agent: "dog-coordinator", messageID: "interim-progress-user-1" },
       {
-        message: { agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+        message: { id: "interim-progress-user-1", agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
         parts: [{ type: "text", text: "start" }],
       },
     );
@@ -4337,6 +4717,7 @@ isolated("coordinator children and foreign text parts cannot become continuation
 isolated("an owned compaction text part resumes the same coordinator root", async () => {
   await withProject("compaction-part-event-continuation", async (directory) => {
     let prompts = 0;
+    let resumeParts: unknown[] = [];
     let releaseSummary!: () => void;
     const summaryReleased = new Promise<void>((resolve) => { releaseSummary = resolve; });
     const messages: SessionMessage[] = [{
@@ -4354,12 +4735,16 @@ isolated("an owned compaction text part resumes the same coordinator root", asyn
       get: async () => ({ data: { agent: "dog-coordinator" } }),
       messages: async () => ({ data: messages }),
       summarize: async () => { await summaryReleased; return { data: true }; },
-      promptAsync: async () => { prompts += 1; return { data: true }; },
+      promptAsync: async ({ body }: { body: { parts: unknown[] } }) => {
+        prompts += 1;
+        resumeParts = body.parts;
+        return { data: true };
+      },
     } } as never });
     await hooks["chat.message"]!(
-      { sessionID: "root", agent: "dog-coordinator" },
+      { sessionID: "root", agent: "dog-coordinator", messageID: "compaction-user-1" },
       {
-        message: { agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+        message: { id: "compaction-user-1", agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
         parts: [{ type: "text", text: "start" }],
       },
     );
@@ -4388,10 +4773,10 @@ isolated("an owned compaction text part resumes the same coordinator root", asyn
     await new Promise((resolve) => setTimeout(resolve, 20));
     assert.equal(prompts, 1);
     await hooks["chat.message"]!(
-      { sessionID: "root", agent: "dog-coordinator" },
+      { sessionID: "root", agent: "dog-coordinator", messageID: "compaction-resume-1" },
       {
-        message: { agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
-        parts: [{ type: "text", text: "resume", synthetic: true }],
+        message: { id: "compaction-resume-1", agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+        parts: resumeParts,
       },
     );
     await hooks["tool.execute.before"]!(
@@ -4511,6 +4896,56 @@ test("worker dispatch rejects an unregistered handoff and trusts its inspected m
         assert.deepEqual(error.defects, ["contract / dispatch_inline_handoff_incomplete"]);
         return true;
       },
+    );
+    const wrappedDigest = [
+      "Execute the supplied worker contract.",
+      "role: implementation",
+      `project_root: ${directory}`,
+      `handoff_path: ${registered}`,
+      "task_id: task-a",
+      "source_manifest: [allowed.txt]",
+      "operation_manifest: operation-manifest.json",
+      "acceptance: safe change",
+      "validation: npm test",
+      "goal_acceptance_fingerprint: sha256:fixture",
+      "context_digest:",
+      `  project_root: ${directory}`,
+      `  handoff_path: ${registered}`,
+      "  acceptance:",
+      "    - safe change",
+      "  role: implementation",
+      "  validation: { level: full, command: npm test, diagnostics: [] }",
+      "  validation_attempts: { canonical: 0, diagnostic: 0 }",
+      "  known_facts: [the supplied contract is the candidate source of truth]",
+      "  relevant_constraints: [modify only declared files]",
+      "  resume_delta: none",
+      "source_manifest: [allowed.txt]",
+      `operation_manifest: ${join(directory, "operation-manifest.json")}`,
+      "Worker procedure: read, bind, mutate, and validate.",
+    ].join("\n");
+    await hooks["tool.execute.before"]!(
+      { tool: "task", sessionID: "root", callID: "wrapped-complete-worker" },
+      { args: { subagent_type: "dog-worker", prompt: wrappedDigest } },
+    );
+    await hooks["chat.message"]!(
+      { sessionID: "wrapped-child", parentID: "root", agent: "dog-worker" } as never,
+      { message: { agent: "dog-worker", model: { providerID: "host", modelID: "selected" } },
+        parts: [{ type: "text", text: wrappedDigest }] },
+    );
+    await inspectHandoffWithRead(hooks, registered, "wrapped-child");
+    assert.equal((await executeBindWriteGate(hooks, directory, "wrapped-child", "operation-manifest.json")).status, "bound");
+    await hooks["tool.execute.after"]!(
+      { tool: "task", sessionID: "root", callID: "wrapped-complete-worker" },
+      { output: "<task_result>done</task_result>", metadata: { sessionId: "wrapped-child" } },
+    );
+    await assert.rejects(
+      () => hooks["tool.execute.before"]!(
+        { tool: "task", sessionID: "root", callID: "wrapped-incomplete-worker" },
+        { args: { subagent_type: "dog-worker", prompt: wrappedDigest
+          .replace(/^source_manifest: \[allowed\.txt\]\r?\noperation_manifest: .*\r?\nWorker procedure:/mu, "Worker procedure:") } },
+      ),
+      (error: unknown) => error instanceof HandoffDeniedError &&
+        error.defects.includes("contract / dispatch_inline_handoff_incomplete"),
     );
     await hooks["tool.execute.before"]!(
       { tool: "task", sessionID: "root", callID: "readonly-worker-with-output-schema" },
@@ -4783,7 +5218,8 @@ test("follow-up mutating dispatch cannot drop parent acceptance criteria", async
       { sessionID: "root", agent: "dog-coordinator" },
       { message: { agent: "dog-coordinator", model: {} }, parts: [{ type: "text", text: "task" }] },
     );
-    const dispatch = async (taskID: string, handoffPath: string, criteria: string[], callID: string) => {
+    const dispatch = async (taskID: string, handoffPath: string, criteria: string[], callID: string,
+      extra: readonly string[] = []) => {
       await hooks["tool.execute.before"]!(
         { tool: "task", sessionID: "root", callID },
         { args: { subagent_type: "dog-worker", prompt: [
@@ -4796,11 +5232,25 @@ test("follow-up mutating dispatch cannot drop parent acceptance criteria", async
           "acceptance:",
           ...criteria.map((criterion) => `  - ${criterion}`),
           "validation: npm test",
+          ...extra,
         ].join("\n") } },
       );
     };
-    await dispatch("task-a", firstPath, firstCriteria, "first-continuity");
+    const goalDeclarationFingerprint = `sha256:${"9".repeat(64)}`;
+    await dispatch("task-a", firstPath, firstCriteria, "first-continuity",
+      [`goal_acceptance_fingerprint: ${goalDeclarationFingerprint}`]);
     await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "first-continuity" }, {});
+    const projected = { system: [] as string[] };
+    await hooks["experimental.chat.system.transform"]!({ sessionID: "root" }, projected);
+    const continuityLine = projected.system.find((entry) => entry.startsWith("SORTIE_ACCEPTANCE_CONTINUITY_STATE\n"));
+    assert.ok(continuityLine);
+    const continuityState = JSON.parse(continuityLine.slice(continuityLine.indexOf("\n") + 1)) as {
+      latest_accepted_task_id: string; latest_accepted_fingerprint: string; next_sequential_parent_fingerprint: string;
+    };
+    assert.equal(continuityState.latest_accepted_task_id, "task-a");
+    assert.equal(continuityState.latest_accepted_fingerprint, firstFingerprint);
+    assert.equal(continuityState.next_sequential_parent_fingerprint, firstFingerprint);
+    assert.notEqual(goalDeclarationFingerprint, continuityState.next_sequential_parent_fingerprint);
     await writeFile(firstPath, JSON.stringify({
       ...base, id: "task-a",
       ext: { ...base.ext, [ACCEPTANCE_CONTINUITY_EXTENSION]: acceptanceContinuity(
@@ -4810,10 +5260,11 @@ test("follow-up mutating dispatch cannot drop parent acceptance criteria", async
     await assert.rejects(() => dispatch("task-a", firstPath, firstCriteria, "unchanged-parent-drift"),
       (error: unknown) => error instanceof HandoffDeniedError &&
         error.defects.includes("handoff /ext/sortie-dogs~1acceptance-continuity acceptance_parent_continuity_mismatch"));
-    const dispatchFollowUp = async (criteria: string[], callID: string, accepted = false) => {
+    const dispatchFollowUp = async (criteria: string[], callID: string, accepted = false,
+      parentFingerprint = firstFingerprint) => {
       await writeFile(secondPath, JSON.stringify({
         ...base, id: "task-b",
-        ext: { ...base.ext, [ACCEPTANCE_CONTINUITY_EXTENSION]: acceptanceContinuity("task-b", criteria, firstFingerprint) },
+        ext: { ...base.ext, [ACCEPTANCE_CONTINUITY_EXTENSION]: acceptanceContinuity("task-b", criteria, parentFingerprint) },
       }));
       if (accepted) {
         await dispatch("task-b", secondPath, criteria, callID);
@@ -4824,7 +5275,9 @@ test("follow-up mutating dispatch cannot drop parent acceptance criteria", async
       }
     };
     await dispatchFollowUp([firstCriteria[1]!, firstCriteria[0]!], "reordered-parent");
-    await dispatchFollowUp(firstCriteria, "changed-task-without-strict-append");
+    await dispatchFollowUp(firstCriteria, "goal-fingerprint-is-not-parent", false, goalDeclarationFingerprint);
+    await dispatchFollowUp(firstCriteria, "sequential-exact-carry-forward", true);
+    await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "sequential-exact-carry-forward" }, {});
     await dispatchFollowUp(["add grass clusters", ...firstCriteria], "inserted-before-parent");
     await dispatchFollowUp([firstCriteria[0]!, "add grass clusters", firstCriteria[1]!], "inserted-between-parent");
     await hooks["tool.execute.before"]!(
@@ -5175,7 +5628,7 @@ test("a normal lane strips compaction markers but still recovers non-terminal pr
       promptAsync: async () => { prompts += 1; return { data: true }; },
     } } as never });
     await hooks["chat.message"]!(
-      { sessionID: "root", agent: "dog-coordinator" },
+      { sessionID: "root", agent: "dog-coordinator", messageID: "normal-progress-user-1" },
       {
         message: { agent: "dog-coordinator", model: { providerID: "host", modelID: "selected" } },
         parts: [{ type: "text", text: "task" }],
@@ -6696,7 +7149,7 @@ test("a late child re-proves expired coordinator lineage from host session ident
       session: {
         get: async ({ path }: { path: { id: string } }) => ({ data: identities[path.id] }),
         messages: async ({ path }: { path: { id: string } }) => ({ data: path.id === "host-root" ? [{
-          info: { role: "user", agent: "dog-coordinator" },
+          info: { id: "persisted-host-user-1", role: "user", agent: "dog-coordinator" },
           parts: [{ type: "text", text: "continue" }],
         }] : [] }),
       },
@@ -6705,7 +7158,7 @@ test("a late child re-proves expired coordinator lineage from host session ident
     const chat = hooks["chat.message"];
     assert.ok(chat);
     await chat(
-      { sessionID: "host-root", agent: "dog-coordinator" },
+      { sessionID: "host-root", agent: "dog-coordinator", messageID: "host-user-1" },
       {
         message: { agent: "dog-coordinator", model: { providerID: "host", modelID: "selected" } },
         parts: [{ type: "text", text: "ordinary" }],
@@ -7988,6 +8441,9 @@ test("root task watchdog aborts and resumes the same coordinator once when after
       },
     }, { continuation: { taskWatchdogMilliseconds: 20 } });
     await beginTrackedTaskChild(hooks, directory, "watchdog-root", "watchdog-child", "watchdog-call");
+    const goalProjection = { system: [] as string[] };
+    await hooks["experimental.chat.system.transform"]!({ sessionID: "watchdog-root" }, goalProjection);
+    assert.match(goalProjection.system.join("\n"), /"phase":"active"/u);
 
     await new Promise((resolve) => setTimeout(resolve, 60));
     assert.deepEqual(aborts, ["watchdog-root"]);
@@ -8012,13 +8468,19 @@ isolated("root task watchdog recovery is passive outside the coordinator abort a
     await writeFile(join(directory, "handoff.json"), JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
     await writeFile(join(directory, "tracked.txt"), "unchanged\n");
     const hostMutationCalls: string[] = [];
+    let resumeObserved!: () => void;
+    const resumed = new Promise<void>((resolve) => { resumeObserved = resolve; });
     const hooks = await SortieDogsPlugin({
       directory,
       client: {
         app: { log: async () => undefined },
         session: {
           abort: async ({ path }) => { hostMutationCalls.push(`session.abort:${path.id}`); return true; },
-          promptAsync: async ({ path }) => { hostMutationCalls.push(`session.promptAsync:${path.id}`); return true; },
+          promptAsync: async ({ path }) => {
+            hostMutationCalls.push(`session.promptAsync:${path.id}`);
+            resumeObserved();
+            return true;
+          },
           create: async () => { hostMutationCalls.push("session.create"); return true; },
           delete: async () => { hostMutationCalls.push("session.delete"); return true; },
           summarize: async () => { hostMutationCalls.push("session.summarize"); return true; },
@@ -8027,7 +8489,14 @@ isolated("root task watchdog recovery is passive outside the coordinator abort a
     }, { continuation: { taskWatchdogMilliseconds: 20 } });
     await beginTrackedTaskChild(hooks, directory, "passive-root", "passive-child", "passive-call");
 
-    await new Promise((resolve) => setTimeout(resolve, 60));
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([resumed, new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error("watchdog resume was not observed")), 5_000);
+      })]);
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout);
+    }
     assert.deepEqual(hostMutationCalls, ["session.abort:passive-root", "session.promptAsync:passive-root"]);
     assert.equal(await readFile(join(directory, "tracked.txt"), "utf8"), "unchanged\n");
     await hooks.event!({ event: { type: "session.idle", properties: { sessionID: "passive-root" } } });

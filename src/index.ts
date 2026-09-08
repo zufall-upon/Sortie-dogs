@@ -215,6 +215,27 @@ export {
   RunFlightLedger,
   RunFlightLedgerError,
 } from "./core/run-flight-ledger.js";
+export {
+  GOAL_BOUND_METADATA_KEY,
+  GOAL_BOUND_SCHEMA_VERSION,
+  GoalBoundError,
+  goalFingerprint,
+  reduceGoalFlight,
+  selectGoalDelivery,
+  validGoalEvidence,
+} from "./core/goal-bound.js";
+export type {
+  GoalBudget,
+  GoalDeliveryMode,
+  GoalEvidence,
+  GoalFlightEvent,
+  GoalFlightEventRecord,
+  GoalFlightState,
+  GoalPhase,
+  GoalStopReason,
+  GoalTerminalReceipt,
+  GoalTicketState,
+} from "./core/goal-bound.js";
 export { CancellableChildLifecycle, DEFAULT_CHILD_DEADLINE_MS } from "./core/child-lifecycle-runtime.js";
 export { FailureSwarmRuntime } from "./core/failure-swarm-runtime.js";
 export type { FailureSwarmRequest, ReadOnlyDiagnosisDescriptor, DiagnosisFinding } from "./core/failure-swarm-runtime.js";
@@ -243,6 +264,13 @@ export type {
   RunFlightState,
   TerminalDisposition,
 } from "./core/run-flight-ledger.js";
+export { createSortieResult, formatSortieResult, insertSortieResult } from "./plugin/run-metrics.js";
+export type {
+  SortieProofStatus,
+  SortieResult,
+  SortieResultMetric,
+  SortieResultUnavailableReason,
+} from "./plugin/run-metrics.js";
 export type {
   EvidenceAcceptanceLink,
   EvidenceCapsule,

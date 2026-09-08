@@ -152,7 +152,7 @@ export interface ContinuationClient {
       query?: { directory?: string };
       body: {
         agent: string;
-        parts: ReadonlyArray<{ type: "text"; synthetic?: boolean; text: string }>;
+        parts: ReadonlyArray<{ type: "text"; synthetic?: boolean; text: string; metadata?: Record<string, unknown> }>;
       };
     }) => Promise<unknown>;
   };
@@ -173,6 +173,13 @@ export interface ContinuationPolicy {
  * freezing whatever was known at construction.
  */
 export type ContinuationPolicySource = ContinuationPolicy | (() => ContinuationPolicy);
+
+export interface ContinuationTicketAuthority {
+  issueTicket(sessionID: string, checkpoint: string): Promise<{
+    readonly issued: boolean;
+    readonly metadata: Record<string, unknown>;
+  }>;
+}
 
 /**
  * The plugin already learns which sessions run the coordinator as a root from its own message hook.
@@ -266,12 +273,13 @@ const ROLLOVER_PROMPT = [
   "If a section has nothing, write exactly '- なし'. Never delete a heading.",
   "At most 2 content lines per section. Keep the whole output under 1200 characters.",
   "Copy task identity, manifest paths, commands, exit codes, and counter values character-for-character.",
-  "Never author, shorten, infer, or treat summary text as acceptance authority. Preserve the exact acceptance fingerprint and handoff path; the resumed coordinator rereads that immutable handoff before dispatch.",
+  "Never author, shorten, infer, or treat summary text as acceptance authority. Preserve the exact accepted-unit handoff fingerprint, its required next parent fingerprint, and handoff path; the resumed coordinator rereads that immutable handoff before dispatch.",
+  "Keep goal_acceptance_fingerprint separate: it identifies the root goal and must never be used as an acceptance-continuity parent_fingerprint.",
   "The unmet-user-requirements, constraints, candidate queue, blocker, and next-action sections never replace the immutable handoff acceptance ledger.",
   "The coordinator final report immediately before compaction is the newest source of truth. Its outcomes and next action override older context.",
   "Never list a unit as uncommitted or next when that final report says it was committed or completed.",
   "Drop the finished unit's conversation, raw logs, diffs, and tool output.",
-  "Preserve task identity, acceptance fingerprint, exact handoff path, both manifests, ordered validation history, batchTarget, batchAttempted, batchCommitted, batchReconciled, inventory fingerprint, bounded candidate queue, pending tracker updates, tracker flush state, blocker state, and the exact next action. If a value is absent, write なし; never guess one.",
+  "Preserve task identity, accepted-unit handoff fingerprint, required next parent fingerprint, root goal acceptance fingerprint, exact handoff path, both manifests, ordered validation history, batchTarget, batchAttempted, batchCommitted, batchReconciled, inventory fingerprint, bounded candidate queue, pending tracker updates, tracker flush state, blocker state, and the exact next action. If a value is absent, write なし; never guess one.",
   "Never write credentials, API keys, tokens, personal data, or source code.",
   "Never output an HTML comment.",
   "",
@@ -285,7 +293,8 @@ const ROLLOVER_PROMPT = [
   "- <守り続ける非acceptance制約。該当なしはなし>",
   "",
   "## manifest",
-  "- handoff_path: <exact path または none> / acceptance_fingerprint: <exact fingerprint または none>",
+  "- handoff_path: <exact path または none> / handoff_acceptance_fingerprint: <accepted unit fingerprint または none> / required_next_parent_fingerprint: <exact fingerprint または none>",
+  "- goal_acceptance_fingerprint: <root goal fingerprint または none。parentには使用禁止>",
   "- source_manifest: <exact entries または none> / operation_manifest: <exact path または none>",
   "",
   "## validation履歴",
@@ -311,8 +320,8 @@ const RECOVERY_ROLLOVER_PROMPT = ROLLOVER_PROMPT
     "The recovery report overrides only terminal outcomes and batch counters. Preserve unmet user requirements, ordered scope, no-stop constraints, and the exact next unit from the conversation.",
   )
   .replace(
-    "Preserve task identity, acceptance fingerprint, exact handoff path, both manifests, ordered validation history, batchTarget, batchAttempted, batchCommitted, batchReconciled, inventory fingerprint, bounded candidate queue, pending tracker updates, tracker flush state, blocker state, and the exact next action. If a value is absent, write なし; never guess one.",
-    "Preserve task identity, acceptance fingerprint, exact handoff path, both manifests, ordered validation history, batchTarget, batchAttempted, batchCommitted, batchReconciled, inventory fingerprint, bounded candidate queue, pending tracker updates, tracker flush state, blocker state, unmet ordered scope, and the exact next unit. Never derive acceptance from summary text. If a value is absent, write なし; never guess one.",
+    "Preserve task identity, accepted-unit handoff fingerprint, required next parent fingerprint, root goal acceptance fingerprint, exact handoff path, both manifests, ordered validation history, batchTarget, batchAttempted, batchCommitted, batchReconciled, inventory fingerprint, bounded candidate queue, pending tracker updates, tracker flush state, blocker state, and the exact next action. If a value is absent, write なし; never guess one.",
+    "Preserve task identity, accepted-unit handoff fingerprint, required next parent fingerprint, root goal acceptance fingerprint, exact handoff path, both manifests, ordered validation history, batchTarget, batchAttempted, batchCommitted, batchReconciled, inventory fingerprint, bounded candidate queue, pending tracker updates, tracker flush state, blocker state, unmet ordered scope, and the exact next unit. Never derive acceptance from summary text. If a value is absent, write なし; never guess one.",
   );
 
 const ROLLOVER_HEADINGS = [
@@ -479,6 +488,7 @@ export function createContinuationHooks(
   timings: ContinuationTimings = DEFAULT_TIMINGS,
   localIdentity?: LocalIdentitySource,
   transitionObserver?: ContinuationTransitionObserver,
+  ticketAuthority?: ContinuationTicketAuthority,
 ): ContinuationHooks {
   const sessions = new Map<string, SessionState>();
   const warned = new Set<string>();
@@ -604,6 +614,13 @@ export function createContinuationHooks(
     return summarizeModel === undefined ? state.model : openCodeModel(summarizeModel.model);
   }
 
+  async function ticketMetadata(sessionID: string, checkpoint: string): Promise<Record<string, unknown> | undefined> {
+    if (ticketAuthority === undefined) return undefined;
+    const ticket = await ticketAuthority.issueTicket(sessionID, checkpoint);
+    if (!ticket.issued) throw new Error("continuation ticket already outstanding");
+    return ticket.metadata;
+  }
+
   function summarizeCallSucceeded(response: unknown): boolean {
     if (response === true) return true;
     if (response === null || typeof response !== "object" || !("data" in response)) return false;
@@ -627,6 +644,7 @@ export function createContinuationHooks(
   ): Promise<void> {
     const resume = client?.session?.promptAsync;
     if (resume === undefined) throw new Error("resume capability unavailable");
+    const metadata = await ticketMetadata(sessionID, `compaction:${stateFor(sessionID).rolloverEpoch}`);
     const resumed = await resume.call(client!.session, {
       path: { id: sessionID },
       query: { directory },
@@ -634,7 +652,8 @@ export function createContinuationHooks(
         agent: policy().agent,
         parts: [{
           type: "text",
-          synthetic: true,
+           synthetic: true,
+           ...(metadata === undefined ? {} : { metadata }),
           text: preserveCompactionScope
             ? `${AUTO_CONTINUE_PREFIX}\n直前compaction summaryの未達user要求・ordered scope・no-stop制約を保持する。\n` +
               `以下の回復reportはterminal outcomeとbatch counterだけを上書きする:\n${report}\n` +
@@ -791,6 +810,7 @@ export function createContinuationHooks(
     state.stepRecoveryActive = true;
     state.latestCoordinatorReport = undefined;
     try {
+      const metadata = await ticketMetadata(sessionID, `step:${state.turnRevision}`);
       const resumed = await resume.call(client!.session, {
         path: { id: sessionID },
         query: { directory },
@@ -798,7 +818,8 @@ export function createContinuationHooks(
           agent,
           parts: [{
             type: "text",
-            synthetic: true,
+             synthetic: true,
+             ...(metadata === undefined ? {} : { metadata }),
             text: `${STEP_CONTINUE_PREFIX}\n直前出力は非terminal進捗またはlocal/process blocker。未達のuser order、sequential execution、no-stop制約、SOL/advisor consultation指示を保持し、interactionは真にuser-controlledな決定だけに限定する。local gate/routing/handoff/scope/retry/time/step defectはterminal reportにせず、自律修復・redispatchして継続する。同じBLOCKED文を再掲禁止。明示next_actionが欠落していれば未達要求から特定し、次の必要toolを同じturnで実行するか、進行にuser操作だけが必要ならcanonical NEED_DECISION、外部条件だけが必要ならvalid TRUE_BLOCKERを一度だけ返す。\n${report}`,
           }],
         },
@@ -1125,6 +1146,9 @@ export function createContinuationHooks(
     const resume = client?.session?.promptAsync;
     if (abort === undefined || resume === undefined) return "capability-unavailable";
     try {
+      // Reserve durable authority before mutating the host session. A configured authority that
+      // cannot issue a ticket must not cause an abort/retry loop or an unproven synthetic send.
+      const metadata = await ticketMetadata(sessionID, `watchdog:${callIDs.join(",")}`);
       await abort.call(client!.session, {
         path: { id: sessionID },
         query: { directory },
@@ -1140,7 +1164,8 @@ export function createContinuationHooks(
           agent: active.agent,
           parts: [{
             type: "text",
-            synthetic: true,
+             synthetic: true,
+             ...(metadata === undefined ? {} : { metadata }),
             text: `${STEP_CONTINUE_PREFIX}\n${evidence}\n停止したworker Taskを再実行せず、既存handoff、validation履歴、batch counterを保持して同一rootの次actionから継続する。`,
           }],
         },

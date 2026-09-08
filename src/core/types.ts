@@ -127,6 +127,8 @@ export interface WorktreeCommitProduceRequest {
 export interface WorktreeCommitProductionControl {
   readonly signal: AbortSignal;
   readonly enterProtectedPhase: () => void;
+  readonly beforeValidation?: (sourceSnapshot: string) => Promise<void>;
+  readonly afterValidation?: (outcome: "passed" | "failed" | "timeout" | "interrupted", exitCode: number | null) => Promise<void>;
 }
 
 export interface WorktreeCommitVerifyRequest {

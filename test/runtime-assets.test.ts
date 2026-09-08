@@ -15,12 +15,47 @@ test("parallel workers preserve descriptor validation command boundaries", () =>
   }
 });
 
+test("workers share the ordered minimum-solution ladder without weakening execution constraints", () => {
+  const ladder = [
+    "1. no change needed",
+    "2. reuse existing implementation/pattern",
+    "3. platform/stdlib",
+    "4. existing dependency",
+    "5. smallest change to existing structure",
+    "6. minimum new implementation",
+  ];
+  for (const name of ["dog-worker", "dog-luna-worker"] as const) {
+    const asset = runtimeAssets.find((candidate) => candidate.name === name);
+    assert.ok(asset);
+    const positions = ladder.map((stage) => asset.content.indexOf(stage));
+    assert.ok(positions.every((position) => position >= 0), `${name} needs every ladder stage`);
+    assert.deepEqual(positions, [...positions].sort((left, right) => left - right), `${name} ladder order`);
+    assert.match(asset.content, /YAGNI applies to AI-proposed extras, not accepted user requirements/u);
+    assert.match(asset.content, /allowed write scope is an\s+upper bound, not an obligation to touch every path/u);
+    assert.match(asset.content, /Never reduce trust boundaries, security, data integrity, accessibility, compatibility/u);
+    assert.match(asset.content, /never fabricate an empty commit or bypass authority/u);
+    assert.match(asset.content, /require the applicable exact manifest/u);
+    assert.match(asset.content, /sortie_bind_write_gate/u);
+    assert.match(asset.content, /## Parallel immutable commit artifact/u);
+    assert.match(asset.content, /Every failed validation must produce a concrete source or harness change/u);
+  }
+});
+
 test("runtime asset version fixture matches the shared marker", () => {
   const coordinator = runtimeAssets.find((candidate) => candidate.name === "dog-coordinator");
   assert.ok(coordinator);
   assert.match(coordinator.content, new RegExp(`runtime_version: ${RUNTIME_ASSET_VERSION}`));
   assert.match(coordinator.content, new RegExp(`packaged_expectation: test/plugin-loader\\.test\\.ts uses ${RUNTIME_ASSET_VERSION}`));
   assert.match(coordinator.content, new RegExp(`initialize_expectation: test/initialize\\.test\\.ts uses ${RUNTIME_ASSET_VERSION}`));
+});
+
+test("coordinator keeps root goal and sequential handoff acceptance fingerprints distinct", () => {
+  const coordinator = runtimeAssets.find((candidate) => candidate.name === "dog-coordinator");
+  assert.ok(coordinator);
+  assert.match(coordinator.content, /SORTIE_ACCEPTANCE_CONTINUITY_STATE/u);
+  assert.match(coordinator.content, /next_sequential_parent_fingerprint/u);
+  assert.match(coordinator.content, /never copy it into an\s+acceptance-continuity parent_fingerprint/u);
+  assert.match(coordinator.content, /If no accepted criterion changed, carry the same ordered criteria and\s+fingerprint without adding a duplicate criterion/u);
 });
 
 test("coordinator delegates parallel identity transcription to the runtime", () => {
