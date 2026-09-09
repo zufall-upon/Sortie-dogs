@@ -1920,16 +1920,45 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     readonly outcome: ReturnType<typeof terminalRunOutcome>;
     readonly goal: GoalFlightState | undefined;
     readonly receipt: GoalTerminalReceipt | undefined;
+    readonly delivery: "ready" | "running" | "failed";
   }> {
     const outcome = terminalRunOutcome(text);
     if (outcome === undefined || !isCoordinatorSession(sessionID)) {
-      return { outcome, goal: undefined, receipt: undefined };
+      return { outcome, goal: undefined, receipt: undefined, delivery: "ready" };
     }
+    let delivery: "ready" | "running" | "failed" = "ready";
+    const coordinator = await getParallelCoordinator().catch(() => undefined);
+    let parallel = await coordinator?.snapshot(sessionID).catch(() => undefined);
+    if (parallel !== undefined && !parallel.archived) {
+      await restoreChildLifecycles(sessionID, parallel).catch(() => undefined);
+      const knownCalls = coordinatorTaskCalls.get(sessionID) ?? new Set<string>();
+      const running = parallel.tasks.filter(({ phase }) => phase === "running");
+      if (running.length > 0 && running.every(({ call_id }) => call_id !== null && !knownCalls.has(call_id))) {
+        const status = (input.client?.session as unknown as { status?: (request: { query?: { directory?: string } }) => Promise<unknown> })?.status;
+        const response = status === undefined ? undefined : await status.call(input.client!.session, {
+          query: { directory: input.directory },
+        }).catch(() => undefined);
+        const payload = isRecord(response) && "data" in response ? response.data : response;
+        const statuses = isRecord(payload) ? payload : undefined;
+        const settled = statuses !== undefined && running.every(({ child_session_id }) => {
+          const observed = child_session_id === null ? undefined : statuses[child_session_id];
+          return isRecord(observed) && observed.type === "idle";
+        });
+        if (settled) parallel = await coordinator!.reconcile(sessionID, knownCalls, parallel.run_id).catch(() => parallel);
+      }
+      if (parallel !== undefined && !parallel.archived) delivery = "running";
+    }
+    if (parallel?.archived === true && parallel.terminal_reason !== "completed") delivery = "failed";
     let goal = await currentGoal(sessionID).catch(() => undefined);
     let receipt = goal?.receipt ?? undefined;
     const proved = goal?.acceptance_contract !== null && goal?.acceptance_contract !== undefined &&
       goal.acceptance_contract.criteria.every(({ criterion_id }) => goal!.satisfied_criteria.includes(criterion_id));
-    if (receipt === undefined && proved) {
+    if (delivery === "running") {
+      return { outcome, goal, receipt, delivery };
+    }
+    if (receipt === undefined && delivery === "failed") {
+      receipt = await terminalGoal(sessionID, "stopped", "stopped").catch(() => undefined);
+    } else if (receipt === undefined && proved) {
       receipt = await terminalGoal(sessionID, "completed", "succeeded").catch(() => undefined);
     } else if (receipt === undefined && outcome === "DONE") {
       receipt = await terminalGoal(sessionID, "completed", "succeeded").catch(() => undefined);
@@ -1945,7 +1974,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     }
     if (receipt !== undefined) goal = await currentGoal(sessionID).catch(() => goal);
     if (receipt !== undefined) rootAcceptanceContinuity.delete(sessionID);
-    return { outcome, goal, receipt };
+    return { outcome, goal, receipt, delivery };
   }
 
   interface GoalDeclaration {
@@ -3579,6 +3608,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           contract_fingerprint: structuralAdmission.contract_fingerprint, experience: experience.trace });
       }
       const coordinator = await getParallelCoordinator();
+      if (await coordinator.targetCheckedOut(`refs/heads/${structuralAdmission.contract.provenance.target_branch}`)) {
+        return JSON.stringify({ status: "sol-serial", reason: "target-checked-out", experience: experience.trace });
+      }
       const result = await coordinator.prepareFabric(
         contract,
         ownerRoot,
@@ -5670,13 +5702,17 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       const terminal = runOutcome === undefined || !isCoordinatorSession(textInput.sessionID)
         ? undefined
         : await terminalGoalFromHostText(textInput.sessionID, textOutput.text);
-      if (runOutcome === "DONE" && terminal?.goal !== undefined &&
-        terminal.goal.acceptance_contract !== null && terminal.receipt === undefined) {
-        textOutput.text = replaceDoneTerminalStatus(textOutput.text,
-          "status: IN_PROGRESS\ngoal_control: accepted criteria remain unproved");
+      if (runOutcome === "DONE" && terminal !== undefined && (terminal.delivery === "running" ||
+        (terminal.receipt === undefined && terminal.goal !== undefined && terminal.goal.acceptance_contract !== null))) {
+        textOutput.text = replaceDoneTerminalStatus(textOutput.text, terminal.delivery === "running"
+          ? "status: IN_PROGRESS — durable delivery active; same sessionでjoinまたはstale reconcileが必要"
+          : "status: IN_PROGRESS\ngoal_control: accepted criteria remain unproved");
       }
-      if (runOutcome !== "DONE" && terminal?.receipt?.status === "succeeded") {
+      if (runOutcome !== "DONE" && terminal?.delivery === "ready" && terminal.receipt?.status === "succeeded") {
         textOutput.text = replaceTerminalStatus(textOutput.text, "status: DONE");
+      }
+      if (runOutcome === "DONE" && terminal?.delivery === "failed") {
+        textOutput.text = replaceTerminalStatus(textOutput.text, "status: INTERRUPTED — durable delivery failed");
       }
       if (runOutcome !== undefined && isCoordinatorSession(textInput.sessionID)) {
         textOutput.text = sanitizeTerminalReport(textOutput.text);

@@ -1,0 +1,131 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sortie-dogs.invalid/frontierharness-local-manifest.schema.json",
+  "title": "Unofficial Docker-free FrontierHarness local matched case",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "methodology_comparable", "leaderboard", "task_id", "pins", "paths",
+    "official_sha256", "package", "source", "opencode", "tools", "verifier", "protocol"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "methodology_comparable": { "const": false },
+    "leaderboard": { "const": false },
+    "task_id": { "const": "datacurve/anko-typed-variable-bindings" },
+    "pins": {
+      "type": "object", "additionalProperties": false, "required": ["deepswe_commit", "anko_base"],
+      "properties": {
+        "deepswe_commit": { "const": "435ee89ec2f2e2289f33b0da4f992f0b7b7266b9" },
+        "anko_base": { "const": "3f269a72ff69398b1250c584171f32d12c0d8085" }
+      }
+    },
+    "paths": {
+      "type": "object", "additionalProperties": false,
+      "required": ["runtime_root", "official_root", "package_tgz"],
+      "properties": {
+        "runtime_root": { "type": "string", "minLength": 1 },
+        "official_root": { "type": "string", "minLength": 1 },
+        "package_tgz": { "type": "string", "minLength": 1 }
+      }
+    },
+    "official_sha256": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "instruction.md", "task.toml", "tests/test.patch", "tests/config.json", "tests/grader.py", "tests/test.sh"
+      ],
+      "properties": {
+        "instruction.md": { "$ref": "#/$defs/sha256" },
+        "task.toml": { "$ref": "#/$defs/sha256" },
+        "tests/test.patch": { "$ref": "#/$defs/sha256" },
+        "tests/config.json": { "$ref": "#/$defs/sha256" },
+        "tests/grader.py": { "$ref": "#/$defs/sha256" },
+        "tests/test.sh": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "package": {
+      "type": "object", "additionalProperties": false,
+      "required": ["sha256", "version", "runtime_marker", "required_assets"],
+      "properties": {
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "version": { "type": "string", "minLength": 1 },
+        "runtime_marker": { "type": "string", "minLength": 1 },
+        "required_assets": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/relativePath" } }
+      }
+    },
+    "source": {
+      "type": "object", "additionalProperties": false, "required": ["repository", "base"],
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "base": { "const": "3f269a72ff69398b1250c584171f32d12c0d8085" }
+      }
+    },
+    "opencode": {
+      "type": "object", "additionalProperties": false,
+      "required": ["wsl_executable", "executable", "version", "auth_file", "model", "variant"],
+      "properties": {
+        "wsl_executable": { "type": "string", "minLength": 1 },
+        "executable": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 },
+        "auth_file": { "type": "string", "minLength": 1 },
+        "model": { "const": "openai/gpt-5.6-sol" },
+        "variant": { "const": "high" }
+      }
+    },
+    "tools": {
+      "type": "object", "additionalProperties": false,
+      "required": ["git", "node", "go", "goyacc", "go_ctrf_json_reporter", "python", "npm", "bash", "script"],
+      "properties": {
+        "git": { "$ref": "#/$defs/command" }, "node": { "$ref": "#/$defs/command" },
+        "go": { "$ref": "#/$defs/command" }, "goyacc": { "$ref": "#/$defs/command" },
+        "go_ctrf_json_reporter": { "$ref": "#/$defs/command" }, "python": { "$ref": "#/$defs/command" },
+        "npm": { "$ref": "#/$defs/command" }, "bash": { "$ref": "#/$defs/command" },
+        "script": { "$ref": "#/$defs/command" }
+      }
+    },
+    "verifier": {
+      "type": "object", "additionalProperties": false, "required": ["environment", "result"],
+      "properties": {
+        "environment": { "const": "wsl" },
+        "result": {
+          "type": "object", "additionalProperties": false, "required": ["reward_file", "reward_field", "count_fields"],
+          "properties": {
+            "reward_file": { "const": "verifier/reward.json" },
+            "reward_field": { "const": "reward" },
+            "count_fields": {
+              "const": [
+                "f2p_total", "f2p_passed", "p2p_total", "p2p_passed",
+                "f2p", "p2p", "partial", "apply_failed"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "protocol": {
+      "type": "object", "additionalProperties": false,
+      "required": ["wall_seconds", "startup_seconds", "activity_seconds", "progress_seconds", "retry_count", "attempts_per_arm", "arm_order"],
+      "properties": {
+        "wall_seconds": { "const": 5400 }, "startup_seconds": { "const": 120 },
+        "activity_seconds": { "const": 5400 }, "progress_seconds": { "const": 5400 },
+        "retry_count": { "const": 0 }, "attempts_per_arm": { "const": 1 },
+        "arm_order": { "const": ["bare", "sortie"] }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "relativePath": { "type": "string", "minLength": 1, "pattern": "^(?![A-Za-z]:)(?![/\\\\])(?!.*(?:^|[/\\\\])\\.\\.(?:[/\\\\]|$)).+$" },
+    "command": {
+      "type": "object", "additionalProperties": false,
+      "required": ["environment", "executable", "args", "probe_args", "probe_exit"],
+      "properties": {
+        "environment": { "enum": ["host", "wsl"] },
+        "executable": { "type": "string", "minLength": 1 },
+        "args": { "type": "array", "items": { "type": "string" } },
+        "probe_args": { "type": "array", "items": { "type": "string" } },
+        "probe_exit": { "type": "integer" }
+      }
+    }
+  }
+}

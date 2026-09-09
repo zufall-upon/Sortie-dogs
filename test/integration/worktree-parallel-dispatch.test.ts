@@ -135,6 +135,22 @@ test("five independent units reserve five durable descriptors from one exact bas
   }
 });
 
+test("orphaned state authority expires inside the next CLI acquisition budget", async () => {
+  const value = await fixture("orphaned-state-authority");
+  try {
+    const coordinator = await openParallelCoordinator(value.repository);
+    const lease = await (coordinator as unknown as { acquire(): Promise<{ close(): void }> }).acquire();
+    lease.close(); // Simulate process loss: stop heartbeats without releasing the durable lease.
+    const path = join(value.repository, ".git", "sortie-dogs", "parallel-dispatch-v5", "authority", "scope-leases.json");
+    const state = JSON.parse(await readFile(path, "utf8"));
+    assert.equal(state.leases.length, 1);
+    assert.ok(state.leases[0].expiresAt - state.leases[0].createdAt < 30_000);
+    const restarted = await openParallelCoordinator(value.repository);
+    assert.equal(await restarted.snapshot("root"), undefined);
+    assert.equal(JSON.parse(await readFile(path, "utf8")).leases.length, 0);
+  } finally { await rm(value.root, { recursive: true, force: true }); }
+});
+
 test("parallel state authority retries transient lease mutex contention", async () => {
   const value = await fixture("state-lock-retry");
   let registry: ScopeLeaseRegistry | undefined;

@@ -103,7 +103,8 @@ export type FabricDispatchSolReason =
   | LunaFabricSolReason
   | "unit-count-exceeds-capacity"
   | "concurrent-scope-overlap"
-  | "contract-unmappable";
+  | "contract-unmappable"
+  | "target-checked-out";
 
 export type ParallelDispatchFabricPrepareResult =
   | {
@@ -2990,7 +2991,9 @@ export class ParallelDispatchCoordinator {
     }
   }
 
-  private async acquire(scope = STATE_SCOPE, ttlMs = 10 * 60_000): Promise<ScopeLease> {
+  // Heartbeats retain live ownership. A crashed CLI must not leave a lease whose expiry exceeds
+  // the next CLI's acquisition budget; keep room for mutex acquisition and filesystem latency.
+  private async acquire(scope = STATE_SCOPE, ttlMs = Math.floor(LOCK_TIMEOUT_MS / 2)): Promise<ScopeLease> {
     const deadline = Date.now() + LOCK_TIMEOUT_MS;
     while (true) {
       try {
@@ -3037,7 +3040,7 @@ export class ParallelDispatchCoordinator {
     }
   }
 
-  private async targetCheckedOut(targetRef: string): Promise<boolean> {
+  async targetCheckedOut(targetRef: string): Promise<boolean> {
     const output = (await this.gitBuffer(["worktree", "list", "--porcelain", "-z"])).toString("utf8");
     return output.split("\0").some((field) => field === `branch ${targetRef}`);
   }

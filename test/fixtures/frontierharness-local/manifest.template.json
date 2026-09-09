@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "methodology_comparable": false,
+  "leaderboard": false,
+  "task_id": "datacurve/anko-typed-variable-bindings",
+  "pins": {
+    "deepswe_commit": "435ee89ec2f2e2289f33b0da4f992f0b7b7266b9",
+    "anko_base": "3f269a72ff69398b1250c584171f32d12c0d8085"
+  },
+  "paths": {
+    "runtime_root": "frontierharness-local-RUN_ID",
+    "official_root": "ABSOLUTE_OR_MANIFEST_RELATIVE_OFFICIAL_TASK_ROOT",
+    "package_tgz": "sortie-dogs-VERSION.tgz"
+  },
+  "official_sha256": {
+    "instruction.md": "REPLACE_WITH_64_LOWERCASE_HEX",
+    "task.toml": "REPLACE_WITH_64_LOWERCASE_HEX",
+    "tests/test.patch": "REPLACE_WITH_64_LOWERCASE_HEX",
+    "tests/config.json": "REPLACE_WITH_64_LOWERCASE_HEX",
+    "tests/grader.py": "REPLACE_WITH_64_LOWERCASE_HEX",
+    "tests/test.sh": "REPLACE_WITH_64_LOWERCASE_HEX"
+  },
+  "package": {
+    "sha256": "REPLACE_WITH_64_LOWERCASE_HEX",
+    "version": "REPLACE_WITH_PACKAGE_VERSION",
+    "runtime_marker": "REPLACE_WITH_RUNTIME_ASSET_MARKER",
+    "required_assets": [
+      "agent/dog-coordinator.md",
+      "agent/dog-worker.md",
+      "command/sortie.md"
+    ]
+  },
+  "source": {
+    "repository": "REPLACE_WITH_ANKO_REPOSITORY_URL_OR_LOCAL_MIRROR",
+    "base": "3f269a72ff69398b1250c584171f32d12c0d8085"
+  },
+  "opencode": {
+    "wsl_executable": "wsl.exe",
+    "executable": "/home/rozen/.opencode/bin/opencode",
+    "version": "REPLACE_WITH_EXACT_OPENCODE_VERSION",
+    "auth_file": "/home/rozen/.local/share/opencode/auth.json",
+    "model": "openai/gpt-5.6-sol",
+    "variant": "high"
+  },
+  "tools": {
+    "git": { "environment": "host", "executable": "git", "args": [], "probe_args": ["--version"], "probe_exit": 0 },
+    "node": { "environment": "wsl", "executable": "/usr/bin/node", "args": [], "probe_args": ["--version"], "probe_exit": 0 },
+    "go": { "environment": "wsl", "executable": "/usr/local/go/bin/go", "args": [], "probe_args": ["version"], "probe_exit": 0 },
+    "goyacc": { "environment": "wsl", "executable": "/home/rozen/go/bin/goyacc", "args": [], "probe_args": ["-h"], "probe_exit": 2 },
+    "go_ctrf_json_reporter": { "environment": "wsl", "executable": "/home/rozen/go/bin/go-ctrf-json-reporter", "args": [], "probe_args": ["--help"], "probe_exit": 0 },
+    "python": { "environment": "wsl", "executable": "/usr/bin/python3", "args": [], "probe_args": ["--version"], "probe_exit": 0 },
+    "npm": { "environment": "wsl", "executable": "/usr/bin/npm", "args": [], "probe_args": ["--version"], "probe_exit": 0 },
+    "bash": { "environment": "wsl", "executable": "/usr/bin/bash", "args": [], "probe_args": ["--version"], "probe_exit": 0 },
+    "script": { "environment": "wsl", "executable": "/usr/bin/script", "args": [], "probe_args": ["--version"], "probe_exit": 0 }
+  },
+  "verifier": {
+    "environment": "wsl",
+    "result": {
+      "reward_file": "verifier/reward.json",
+      "reward_field": "reward",
+      "count_fields": [
+        "f2p_total", "f2p_passed", "p2p_total", "p2p_passed", "f2p", "p2p", "partial", "apply_failed"
+      ]
+    }
+  },
+  "protocol": {
+    "wall_seconds": 5400,
+    "startup_seconds": 120,
+    "activity_seconds": 5400,
+    "progress_seconds": 5400,
+    "retry_count": 0,
+    "attempts_per_arm": 1,
+    "arm_order": ["bare", "sortie"]
+  }
+}

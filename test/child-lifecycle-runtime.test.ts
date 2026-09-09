@@ -322,6 +322,7 @@ test("plugin deadline takes over one critical child and preserves an unrelated l
     await writeFile(join(value.repository, ".gitignore"), ".opencode/\n.sortie-dogs/\n");
     await run(value.repository, "add", ".gitignore"); await commit(value.repository, "-qm", "fixture controls");
     const base = (await run(value.repository, "rev-parse", "HEAD")).trim();
+    await run(value.repository, "checkout", "--detach", base);
     await mkdir(join(value.repository, ".opencode"));
     const contractPath = join(value.repository, ".opencode", "sortie-dogs-luna-fabric.json");
     await writeFile(contractPath, JSON.stringify(fabricContract(base, [

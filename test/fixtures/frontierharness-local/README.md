@@ -1,0 +1,94 @@
+# FrontierHarness local matched case
+
+Reusable, Docker-free runner for the single pinned task `datacurve/anko-typed-variable-bindings`.
+This is an unofficial local case study: `methodology_comparable:false`, non-leaderboard, no public
+publishing. Docker and Runta are intentionally unused.
+
+## Inputs
+
+Copy `manifest.template.json` into `_testenv/`, fill every `REPLACE_...` value, and keep `runtime_root`
+under this repository's `_testenv/`. `official_root` must be the task directory inside a Git checkout
+whose `HEAD` is the pinned DeepSWE commit. The runner copies only these six files and verifies each byte hash:
+
+- `instruction.md`
+- `task.toml`
+- `tests/test.patch`
+- `tests/config.json`
+- `tests/grader.py`
+- `tests/test.sh`
+
+No solution file is copied. The host OpenCode auth file is checked with `test -f`; it is never opened,
+copied, moved, printed, or placed under an isolated config root. `XDG_DATA_HOME` is never set. Every
+process uses an executable plus argument array; manifest values are never interpolated into shell text.
+
+Each tool declares `environment`, exact `executable`, invariant `args`, one-shot `probe_args`, and the
+probe's expected exit. `host` is reserved for Git workspace operations; WSL package/verifier tools use
+`wsl`. Set exact Linux executable paths and do not use aliases.
+
+## Exact phase sequence
+
+From repository root, with a completed manifest at `_testenv/frontierharness-manifest.json`:
+
+```powershell
+$runner = 'test/fixtures/frontierharness-local/run-local-case-study.mjs'
+$manifest = '_testenv/frontierharness-manifest.json'
+node $runner preflight --manifest $manifest
+node $runner prepare --manifest $manifest
+node $runner run-arm --arm bare --manifest $manifest
+node $runner run-arm --arm sortie --manifest $manifest
+node $runner verify-arm --arm bare --manifest $manifest
+node $runner verify-arm --arm sortie --manifest $manifest
+node $runner summarize --manifest $manifest
+node $runner cleanup --confirm --manifest $manifest
+```
+
+Do not skip or repeat phases. Durable state consumes each arm attempt before OpenCode starts and each
+verifier attempt before the grader starts. Bare must complete before Sortie. Both use the same WSL
+OpenCode executable, model `openai/gpt-5.6-sol`, variant `high`, and official instruction bytes. A
+120-second startup watchdog and 5400-second activity/workspace-progress watchdogs stop stalled process
+trees at the official agent timeout. The hard safety wall is also 5400 seconds. Retry count is zero.
+
+## What phases do
+
+- `preflight`: fail-closed pin/hash/schema checks; Git, Node, Go, goyacc, go-ctrf-json-reporter,
+  Python, npm, `/usr/bin/bash`, `/usr/bin/script`, WSL login-shell OpenCode path/version, auth-file
+  presence, package hash. Controlled `PATH` identity checks prove the official script resolves the
+  pinned Go tools rather than ambient alternatives. It records that Docker and Runta are intentionally unused.
+- `prepare`: copies only official inputs byte-identically; creates independent detached base clones;
+  removes upstream remote, refs, and reflogs; redirects hooks to an empty directory; creates per-arm
+  `OPENCODE_CONFIG_DIR` and `XDG_CONFIG_HOME`.
+- `run-arm`: resolves OpenCode config before launch. Bare rejects any Sortie package/plugin/agent/prompt/
+  config evidence. Sortie installs the exact tgz with WSL npm, initializes project-local canonical
+  assets, checks package version/hash/runtime marker/assets, and selects `dog-coordinator` explicitly.
+  Resolved config capture uses pinned `script -q -e -c` with a fixed command and executable supplied
+  through a quoted environment variable, preventing pipe truncation and shell interpolation. The
+  config body is parsed in memory and never retained. The official instruction is one final argv item.
+  No prompt or raw agent output is persisted.
+  While an arm is running, the harness writes a sanitized heartbeat to stderr every 120 seconds with
+  elapsed time, PID, activity/progress ages, workspace-change count, and captured byte counts.
+- `verify-arm`: makes a separate fresh base clone without applying either patch in the Node runner,
+  copies private `model.patch` into local artifacts, and invokes one wrapper copy of official
+  `tests/test.sh` once with pinned `/usr/bin/bash`. The wrapper changes only literal absolute `/app`,
+  `/tests`, and `/logs` prefixes; a local `config.json` copy changes only matching `/logs` report paths.
+  It preserves command options/order and invokes the original
+  byte-identical `grader.py` `prepare` and `grade` phases plus official `test.patch`. `TESTS_DIR`,
+  `VERIFIER_DIR`, `APP_DIR`, `ARTIFACTS_DIR`, and `GOCACHE` point only to local runtime paths.
+  `PATH` and `GOPATH` derive from pinned Go/goyacc/go-ctrf executables plus `/usr/bin:/bin`; ambient
+  alternatives are excluded. Official reward calculation remains authoritative.
+  Verifier runs emit the same 120-second heartbeat without exposing verifier output.
+- `summarize`: writes `_testenv/.../sanitized-summary.json`. Speed/cost ratios are refused unless both
+  deliveries succeeded and rewards equal `1`. Duration and cost availability are evaluated separately:
+  unavailable cost does not suppress a valid speed ratio. A zero cost denominator has no cost ratio.
+  Each arm has an explicit outcome/reason; exit zero alone cannot turn an empty patch or a CLI error
+  event into success. Usage aggregates identified `step-finish` events once, with `cli-stream-only`
+  coverage. Host-reported zero cost is preserved, not treated as proof of free service or invoice cost.
+- `cleanup --confirm`: only after summary, kills recorded process trees, confirms no remaining agent
+  process, and removes temporary OpenCode configs/workspaces/wrapper copies, verifier artifact copies,
+  and Go caches. It leaves private canonical patch
+  evidence, durable state, and sanitized summary under `_testenv`; raw verifier logs are deleted as soon
+  as reward/count evidence is extracted, and host auth remains untouched.
+
+`model.patch` is collected by `git diff --binary <ANKO_BASE>` without staging or changing the candidate.
+Tracked committed, staged, and unstaged work is retained; untracked work is reported but excluded. Reports contain only timings, exits/status, root session id,
+hashes, package/version/marker/model, reward counts, changed paths, and token metric field references.
+They exclude prompts, raw logs, provider URLs, credentials/auth JSON, source, and patch bodies.

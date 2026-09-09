@@ -225,6 +225,25 @@ function messageTokens(message: Record<string, unknown>): MessageTokens | undefi
   };
 }
 
+function usageRecords(message: Record<string, unknown>): Array<{ id: string; value: Record<string, unknown> }> | undefined {
+  const info = record(message.info) ?? message;
+  const messageID = typeof info.id === "string" ? info.id : typeof message.id === "string" ? message.id : undefined;
+  if (messageTokens(message) !== undefined) {
+    return messageID === undefined ? undefined : [{ id: `message:${messageID}`, value: message }];
+  }
+  const parts = Array.isArray(message.parts) ? message.parts : [];
+  const records = new Map<string, Record<string, unknown>>();
+  for (const entry of parts) {
+    const part = record(entry);
+    if (part?.type !== "step-finish") continue;
+    const id = typeof part.id === "string" ? part.id : undefined;
+    if (id === undefined) return undefined;
+    records.set(`part:${id}`, part);
+  }
+  if (records.size > 0) return [...records].map(([id, value]) => ({ id, value }));
+  return messageID === undefined ? undefined : [{ id: `message:${messageID}`, value: message }];
+}
+
 function messageAgent(message: Record<string, unknown>): string {
   const info = record(message.info) ?? message;
   const agent = info.agent ?? message.agent;
@@ -279,7 +298,7 @@ export async function collectRunMetrics(
     } catch { hierarchyComplete = false; break; }
   }
   if (ids.length >= MAX_SESSIONS) hierarchyComplete = false;
-  const uniqueMessages = new Set<string>();
+  const uniqueUsage = new Set<string>();
   let totalTokens = 0;
   let inputTokens = 0;
   let outputTokens = 0;
@@ -305,10 +324,11 @@ export async function collectRunMetrics(
           if (completed === undefined) { messagesComplete = false; continue; }
           if (completed < windowStart! || completed > windowEnd!) continue;
         }
-        const messageID = typeof info.id === "string" ? info.id : typeof message.id === "string" ? message.id : undefined;
-        if (messageID === undefined) { messagesComplete = false; continue; }
-        if (uniqueMessages.has(messageID)) continue;
-        uniqueMessages.add(messageID);
+        const records = usageRecords(message);
+        if (records === undefined) { messagesComplete = false; continue; }
+        const fresh = records.filter(({ id }) => !uniqueUsage.has(id));
+        if (fresh.length === 0) continue;
+        for (const { id } of fresh) uniqueUsage.add(id);
         steps += 1;
         const agent = messageAgent(message);
         const role = roleMetrics.get(agent) ?? {
@@ -324,28 +344,31 @@ export async function collectRunMetrics(
         };
         role.steps += 1;
         roleMetrics.set(agent, role);
-        const tokens = messageTokens(message);
-        if (tokens !== undefined) {
-          totalTokens += tokens.total;
-          inputTokens += tokens.input;
-          outputTokens += tokens.output;
-          reasoningTokens += tokens.reasoning;
-          cacheRead += tokens.cacheRead;
-          cacheWrite += tokens.cacheWrite;
-          role.tokens += tokens.total;
-          role.inputTokens += tokens.input;
-          role.outputTokens += tokens.output;
-          role.reasoningTokens += tokens.reasoning;
-          role.cacheReadTokens += tokens.cacheRead;
-          role.cacheWriteTokens += tokens.cacheWrite;
-        } else tokensAvailable = false;
-        const reportedCost = number(info.cost) ?? number(message.cost);
-        if (reportedCost === undefined) {
-          costAvailable = false;
-          role.costAvailable = false;
-        } else {
-          cost += reportedCost;
-          role.cost += reportedCost;
+        for (const usage of fresh) {
+          const tokens = messageTokens(usage.value);
+          if (tokens !== undefined) {
+            totalTokens += tokens.total;
+            inputTokens += tokens.input;
+            outputTokens += tokens.output;
+            reasoningTokens += tokens.reasoning;
+            cacheRead += tokens.cacheRead;
+            cacheWrite += tokens.cacheWrite;
+            role.tokens += tokens.total;
+            role.inputTokens += tokens.input;
+            role.outputTokens += tokens.output;
+            role.reasoningTokens += tokens.reasoning;
+            role.cacheReadTokens += tokens.cacheRead;
+            role.cacheWriteTokens += tokens.cacheWrite;
+          } else tokensAvailable = false;
+          const usageInfo = record(usage.value.info) ?? usage.value;
+          const reportedCost = number(usageInfo.cost) ?? number(usage.value.cost);
+          if (reportedCost === undefined) {
+            costAvailable = false;
+            role.costAvailable = false;
+          } else {
+            cost += reportedCost;
+            role.cost += reportedCost;
+          }
         }
       }
     } catch { return undefined; }

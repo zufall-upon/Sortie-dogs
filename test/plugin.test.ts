@@ -1292,7 +1292,7 @@ test("coordinator DONE output receives host-reported root and child run metrics"
     assert.equal(body.extra.available, true);
     assert.equal(body.extra.outcome, "DONE");
     assert.equal(body.extra.sessionID, "root");
-    assert.equal(body.extra.runtimeAssetVersion, "0.3.76-goal-control-report-v1");
+    assert.equal(body.extra.runtimeAssetVersion, "0.3.77-terminal-delivery-v1");
     assert.equal(body.extra.inputTokens, 130);
     assert.equal(body.extra.outputTokens, 15);
     assert.equal(body.extra.reasoningTokens, 5);
@@ -3264,7 +3264,7 @@ isolated("fabric prepare returns a luna-fabric run whose descriptors bind only d
       provenance: {
         source: "dog-coordinator",
         acceptance_fingerprint: "c".repeat(64),
-        target_branch: "main",
+        target_branch: "fabric-target",
         target_sha: sha,
       },
       acceptance_items: ["own-a", "own-b"],
@@ -3282,6 +3282,7 @@ isolated("fabric prepare returns a luna-fabric run whose descriptors bind only d
         scheduler_order: order,
       })),
     };
+    await execFileAsync("git", ["branch", "fabric-target", sha], { cwd: directory });
     await writeFile(contractPath, JSON.stringify(fabricValue));
     const capsule = `sha256:${"e".repeat(64)}`;
     const compileResult = compileAcceptanceCoverage({
@@ -3304,6 +3305,14 @@ isolated("fabric prepare returns a luna-fabric run whose descriptors bind only d
         parts: [{ type: "text", text: "fabric" }],
       },
     );
+    await writeFile(contractPath, JSON.stringify({ ...fabricValue,
+      provenance: { ...fabricValue.provenance, target_branch: "main" } }));
+    const fallback = JSON.parse(await hooks.tool!.sortie_prepare_luna_fabric!.execute(
+      { contract_path: contractPath }, { sessionID: "root", agent: "dog-coordinator" },
+    ));
+    assert.equal(fallback.status, "sol-serial");
+    assert.equal(fallback.reason, "target-checked-out");
+    await writeFile(contractPath, JSON.stringify(fabricValue));
     const prepared = JSON.parse(await hooks.tool!.sortie_prepare_luna_fabric!.execute(
       { contract_path: contractPath, execution_plan_path: executionPlanPath },
       { sessionID: "root", agent: "dog-coordinator" },
@@ -3317,6 +3326,10 @@ isolated("fabric prepare returns a luna-fabric run whose descriptors bind only d
     assert.equal(prepared.plan_id, executionPlan.plan_id);
     assert.equal(prepared.plan_binding_id, executionPlan.binding_id);
     assert.equal(prepared.ready.length, 2);
+    const premature = { text: "status: DONE" };
+    await hooks["experimental.text.complete"]!({ sessionID: "root" }, premature);
+    assert.match(premature.text, /status: IN_PROGRESS/u);
+    assert.doesNotMatch(premature.text, /status: DONE/u);
     assert.deepEqual(prepared.ready.map((descriptor) => descriptor.acceptance), [
       ["own-a", "Complete the prepared parallel descriptor within its declared scope."],
       ["own-b", "Complete the prepared parallel descriptor within its declared scope."],

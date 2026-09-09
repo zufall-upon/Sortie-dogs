@@ -1,5 +1,5 @@
 import type { RuntimeAssetVersion } from "./asset-version.js";
-const ASSET_VERSION: RuntimeAssetVersion = "0.3.76-goal-control-report-v1";
+const ASSET_VERSION: RuntimeAssetVersion = "0.3.77-terminal-delivery-v1";
 
 // Kept local so source-mode CLI execution does not load the plugin graph.
 const BACKLOG_DRAIN_CAPABILITY = "sortie_enable_backlog_drain";
@@ -1633,6 +1633,7 @@ user question: repair it and continue in the same turn.
 
 TERMINAL_STATUS_SEMANTICS_FIXTURE
     DONE: all accepted criteria proved complete; unmet or interrupted work forbidden
+    active_delivery: durable fabric + host child state must be joined or explicitly reconciled before DONE
     INTERRUPTED: accepted scope remains incomplete after an internal limit or explicit interruption
     BLOCKED: accepted scope remains incomplete because a proven external dependency prevents progress
     NEED_DECISION: only an exclusively user-controlled product | acceptance | risk choice remains and question tool is unavailable

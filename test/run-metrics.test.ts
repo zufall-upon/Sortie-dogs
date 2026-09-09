@@ -48,6 +48,19 @@ test("marks cost unavailable when an assistant has no finite host cost", async (
   assert.match(formatRunMetrics(metrics!), /cost unavailable/);
 });
 
+test("deduplicates part usage identities and keeps zero cost distinct from missing cost", async () => {
+  const part = { id: "shared-part", type: "step-finish", cost: 0, tokens: { input: 2, output: 1, reasoning: 0, cache: { read: 1, write: 0 } } };
+  const metrics = await collectRunMetrics({ session: {
+    children: async ({ path }) => ({ data: path.id === "root" ? [{ id: "child" }] : [] }),
+    messages: async () => ({ data: [{ info: { id: "wrapper", role: "assistant", agent: "dog-worker", cost: 0 },
+      parts: [part, part, { id: "tool", type: "tool", cost: 99 }] }] }),
+  } }, "root", undefined, 1);
+  assert.equal(metrics?.tokens, 4);
+  assert.equal(metrics?.cost, 0);
+  assert.equal(metrics?.steps, 1);
+  assert.equal(metrics?.roles?.["dog-worker"]?.tokens, 4);
+});
+
 test("scopes goal metrics to completed host messages inside the terminal receipt window", async () => {
   const message = (id: string, completed: number, input: number, cost: number) => ({ info: {
     id, role: "assistant", agent: "dog-coordinator", time: { completed }, cost,
