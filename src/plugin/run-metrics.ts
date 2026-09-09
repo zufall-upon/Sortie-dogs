@@ -63,7 +63,7 @@ export interface SortieResult {
   readonly accounting_phase: "pre-terminal";
   readonly as_of: string;
   readonly mission: {
-    readonly status: "COMPLETED" | "FAILED" | "STOPPED";
+    readonly status: "COMPLETED" | "INTERRUPTED" | "EXTERNAL_BLOCKER" | "USER_DECISION";
     readonly stop_reason: GoalTerminalReceipt["stop_reason"];
   };
   readonly speed: {
@@ -121,14 +121,20 @@ export function createSortieResult(
   const hostMetric = (value: number | undefined): SortieResultMetric<number> => value === undefined
     ? unavailable(metrics === undefined ? "host-metrics-unavailable" : "incomplete-host-coverage")
     : available(value, "host-reported");
-  const failed = receipt.stop_reason === "external_dependency" || receipt.stop_reason === "persistence_unavailable";
+  const missionStatus: SortieResult["mission"]["status"] = receipt.status === "succeeded"
+    ? "COMPLETED"
+    : receipt.stop_reason === "awaiting_user"
+      ? "USER_DECISION"
+      : receipt.stop_reason === "external_dependency" || receipt.stop_reason === "persistence_unavailable"
+        ? "EXTERNAL_BLOCKER"
+        : "INTERRUPTED";
   return {
     schema_version: "0.1",
     result_id: [receipt.goal_id, receipt.terminal_revision],
     accounting_phase: "pre-terminal",
     as_of: asOf,
     mission: {
-      status: receipt.status === "succeeded" ? "COMPLETED" : failed ? "FAILED" : "STOPPED",
+      status: missionStatus,
       stop_reason: receipt.stop_reason,
     },
     speed: {
@@ -160,7 +166,7 @@ export function createSortieResult(
   };
 }
 
-export type RunTerminalOutcome = "DONE" | "BLOCKED" | "NEED_DECISION";
+export type RunTerminalOutcome = "DONE" | "INTERRUPTED" | "BLOCKED" | "NEED_DECISION";
 
 const MAX_SESSIONS = 128;
 
@@ -236,10 +242,10 @@ function assistantMessages(value: unknown): Record<string, unknown>[] | undefine
 }
 
 function conclusionStatusAlias(line: string): RunTerminalOutcome | undefined {
-  const match = /^([✅⛔❓])[ \t]+conclusion:\s*status:\s*(DONE|BLOCKED|NEED_DECISION)\b/iu.exec(line);
+  const match = /^(✅|⚠️|⛔|❓)[ \t]+conclusion:\s*status:\s*(DONE|INTERRUPTED|BLOCKED|NEED_DECISION)\b/iu.exec(line);
   const outcome = match?.[2]?.toUpperCase();
-  if (outcome !== "DONE" && outcome !== "BLOCKED" && outcome !== "NEED_DECISION") return undefined;
-  const expectedIcon = outcome === "DONE" ? "✅" : outcome === "BLOCKED" ? "⛔" : "❓";
+  if (outcome !== "DONE" && outcome !== "INTERRUPTED" && outcome !== "BLOCKED" && outcome !== "NEED_DECISION") return undefined;
+  const expectedIcon = outcome === "DONE" ? "✅" : outcome === "INTERRUPTED" ? "⚠️" : outcome === "BLOCKED" ? "⛔" : "❓";
   return match?.[1] === expectedIcon ? outcome : undefined;
 }
 
@@ -390,19 +396,23 @@ function duration(milliseconds: number): string {
 }
 
 function metricText<T>(metric: SortieResultMetric<T>, render: (value: T) => string): string {
-  return metric.availability === "available" ? render(metric.value) : `unavailable (${metric.reason})`;
+  return metric.availability === "available" ? render(metric.value) : "計測不可";
 }
 
 export function formatSortieResult(result: SortieResult): string {
   const criteria = metricText(result.proof.criteria, (entries) => {
     const passing = entries.filter(({ status }) => status === "PASS").length;
-    return `${passing}/${entries.length} criteria`;
+    return `${passing}/${entries.length}`;
   });
+  const achievement = result.mission.status === "COMPLETED" ? "完了"
+    : result.mission.status === "INTERRUPTED" ? "中断（未完了）"
+      : result.mission.status === "EXTERNAL_BLOCKER" ? "外部要因で未完了"
+        : "ユーザー判断待ち（未完了）";
   return [
     "**Sortie Result**",
-    `**Speed:** goal ${metricText(result.speed.goal_wall_ms, duration)} · worker ${metricText(result.speed.worker_execution_ms, duration)} · compression ${metricText(result.speed.execution_compression, (value) => `${value.toFixed(2)}x`)}`,
-    `**Cost:** ${metricText(result.cost.total_tokens, (value) => `${value.toLocaleString("en-US")} tokens`)} · ${metricText(result.cost.cost_usd, (value) => `$${value.toFixed(4)}`)} · ${result.accounting_phase}`,
-    `**Proof:** ${result.proof.overall} · ${result.mission.status.toLowerCase()} (${result.mission.stop_reason}) · ${criteria} · ${result.proof.evidence_refs.length} evidence ref${result.proof.evidence_refs.length === 1 ? "" : "s"}`,
+    `**Speed:** 全体 ${metricText(result.speed.goal_wall_ms, duration)} · worker ${metricText(result.speed.worker_execution_ms, duration)}`,
+    `**Cost:** ${metricText(result.cost.total_tokens, (value) => `${value.toLocaleString("ja-JP")}トークン`)} · ${metricText(result.cost.cost_usd, (value) => `$${value.toFixed(4)}`)}`,
+    `**達成:** ${achievement} · acceptance ${criteria}`,
   ].join("\n");
 }
 
@@ -441,15 +451,16 @@ function terminalCheckpoint(text: string): { index: number; outcome: RunTerminal
   if (first === undefined) return undefined;
   const checkpoint = (() => {
     const { index, line } = first;
-    const normalized = /^status:\s*(DONE|BLOCKED|NEED_DECISION)\b/iu.exec(line)?.[1]?.toUpperCase();
-    const explicit: RunTerminalOutcome | undefined = normalized === "DONE" || normalized === "BLOCKED" || normalized === "NEED_DECISION"
+    const normalized = /^status:\s*(DONE|INTERRUPTED|BLOCKED|NEED_DECISION)\b/iu.exec(line)?.[1]?.toUpperCase();
+    const explicit: RunTerminalOutcome | undefined = normalized === "DONE" || normalized === "INTERRUPTED" || normalized === "BLOCKED" || normalized === "NEED_DECISION"
       ? normalized
       : undefined;
     const outcome = explicit ?? conclusionStatusAlias(line) ??
       (/^✅[ \t]+\*\*DONE\*\*/u.test(line) ? "DONE" :
+        /^⚠️[ \t]+\*\*INTERRUPTED\*\*/u.test(line) ? "INTERRUPTED" :
         /^⛔[ \t]+\*\*BLOCKED\*\*/u.test(line) ? "BLOCKED" :
         /^❓[ \t]+\*\*NEED_DECISION\*\*/u.test(line) ? "NEED_DECISION" : undefined);
-    return outcome === "DONE" || outcome === "BLOCKED" || outcome === "NEED_DECISION"
+    return outcome === "DONE" || outcome === "INTERRUPTED" || outcome === "BLOCKED" || outcome === "NEED_DECISION"
       ? { index, outcome }
       : undefined;
   })();
@@ -470,22 +481,49 @@ export function terminalRunOutcome(text: string): RunTerminalOutcome | undefined
     : undefined;
 }
 
-export function insertRunMetrics(text: string, metrics: RunMetrics): string {
+export function replaceTerminalStatus(text: string, replacement: string): string {
   const checkpoint = terminalCheckpoint(text);
-  if (checkpoint?.outcome !== "DONE") return text;
-  if (topLevelLines(text).some(({ index, line }) => index > checkpoint.index && /^\*\*Run:\*\*/u.test(line))) return text;
+  if (checkpoint === undefined) return text;
   const newline = text.includes("\r\n") ? "\r\n" : "\n";
   const lines = text.split(/\r?\n/u);
+  lines.splice(checkpoint.index, 1, ...replacement.split(/\r?\n/u));
+  return lines.join(newline);
+}
+
+export function replaceDoneTerminalStatus(text: string, replacement: string): string {
+  return terminalCheckpoint(text)?.outcome === "DONE" ? replaceTerminalStatus(text, replacement) : text;
+}
+
+export function sanitizeTerminalReport(text: string): string {
+  const newline = text.includes("\r\n") ? "\r\n" : "\n";
+  const internal = /\b(?:evidence_refs?|manifest|raw|raw_status|reason_code|goal_control|TRUE_BLOCKER)\s*:|\bEvidence\b/iu;
+  return text.replace(/^[ \t]*(`{3,}|~{3,})[^\r\n]*\r?\n([\s\S]*?)^[ \t]*\1[ \t]*$/gimu,
+    (block, _fence: string, body: string) => internal.test(body) ? "" : block)
+    .replace(/<details\b[^>]*>[\s\S]*?<\/details>/giu, "")
+    .split(/\r?\n/u)
+    .filter((line) => !/^\s*(?:(?:#{1,6}\s*)?\**Evidence\**\s*:|(?:TRUE_BLOCKER|goal_control|evidence_refs?|reason_code|raw|raw_status|manifest)\s*:)/iu.test(line))
+    .join(newline)
+    .trimEnd();
+}
+
+export function insertRunMetrics(text: string, metrics: RunMetrics): string {
+  const visible = sanitizeTerminalReport(text);
+  const checkpoint = terminalCheckpoint(visible);
+  if (checkpoint?.outcome !== "DONE") return visible;
+  if (topLevelLines(visible).some(({ index, line }) => index > checkpoint.index && /^\*\*Run:\*\*/u.test(line))) return visible;
+  const newline = visible.includes("\r\n") ? "\r\n" : "\n";
+  const lines = visible.split(/\r?\n/u);
   lines.splice(checkpoint.index + 1, 0, "", formatRunMetrics(metrics));
   return lines.join(newline);
 }
 
 export function insertSortieResult(text: string, result: SortieResult): string {
-  const checkpoint = terminalCheckpoint(text);
-  if (checkpoint === undefined) return text;
-  if (topLevelLines(text).some(({ index, line }) => index > checkpoint.index && /^\*\*Sortie Result\*\*/u.test(line))) return text;
-  const newline = text.includes("\r\n") ? "\r\n" : "\n";
-  const lines = text.split(/\r?\n/u);
+  const visible = sanitizeTerminalReport(text);
+  const checkpoint = terminalCheckpoint(visible);
+  if (checkpoint === undefined) return visible;
+  if (topLevelLines(visible).some(({ index, line }) => index > checkpoint.index && /^\*\*Sortie Result\*\*/u.test(line))) return visible;
+  const newline = visible.includes("\r\n") ? "\r\n" : "\n";
+  const lines = visible.split(/\r?\n/u);
   lines.splice(checkpoint.index + 1, 0, "", formatSortieResult(result));
   return lines.join(newline);
 }

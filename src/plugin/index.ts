@@ -120,7 +120,8 @@ import { AdaptiveRemediationRuntime, AdaptiveRunFlightLineage, type AdaptiveReme
 import { DEFAULT_ADAPTIVE_REMEDIATION_MODEL, GitAdaptiveRemediationHost, OpenCodeAdaptiveRemediationProvider,
   type AdaptiveRemediationSessionClient } from "./adaptive-remediation-host.js";
 import type { ChildTerminalEvidence, ChildTerminalObservation } from "../core/child-terminal-reconciliation.js";
-import { collectRunMetrics, createSortieResult, insertRunMetrics, insertSortieResult, terminalRunOutcome } from "./run-metrics.js";
+import { collectRunMetrics, createSortieResult, insertRunMetrics, insertSortieResult, replaceDoneTerminalStatus,
+  replaceTerminalStatus, sanitizeTerminalReport, terminalRunOutcome } from "./run-metrics.js";
 import type { RunMetricsClient } from "./run-metrics.js";
 
 const INPUT_LIMITS = { config: 64 * 1024, manifest: 512 * 1024, handoff: 2 * 1024 * 1024, parallel: 512 * 1024 } as const;
@@ -996,6 +997,7 @@ const LABELLED_VALUE = /^[\t ]*(?:[-*][\t ]+)?[^\r\n:=]{1,64}[\t ]*[=:][\t ]*(.*
 function roleTokenValues(text: string): string[] {
   const values: string[] = [];
   for (const line of text.split(/\r?\n/u)) {
+    if (/^[\t ]*(?:[-*][\t ]+)?(?:delivery_intent|goal_[a-z0-9_]+)[\t ]*[=:]/iu.test(line)) continue;
     const match = LABELLED_VALUE.exec(line);
     if (match === null) continue;
     const value = unquoteValue(unwrapMarkdownValue(match[1])).toLowerCase();
@@ -1925,8 +1927,16 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     }
     let goal = await currentGoal(sessionID).catch(() => undefined);
     let receipt = goal?.receipt ?? undefined;
-    if (receipt === undefined && outcome === "DONE") {
+    const proved = goal?.acceptance_contract !== null && goal?.acceptance_contract !== undefined &&
+      goal.acceptance_contract.criteria.every(({ criterion_id }) => goal!.satisfied_criteria.includes(criterion_id));
+    if (receipt === undefined && proved) {
       receipt = await terminalGoal(sessionID, "completed", "succeeded").catch(() => undefined);
+    } else if (receipt === undefined && outcome === "DONE") {
+      receipt = await terminalGoal(sessionID, "completed", "succeeded").catch(() => undefined);
+    } else if (receipt === undefined && outcome === "INTERRUPTED") {
+      receipt = await terminalGoal(sessionID, "stopped", "stopped").catch(() => undefined);
+    } else if (receipt === undefined && outcome === "NEED_DECISION") {
+      receipt = await terminalGoal(sessionID, "awaiting_user", "stopped").catch(() => undefined);
     } else if (receipt === undefined && outcome === "BLOCKED") {
       const reason: GoalStopReason = /(^|\n)TRUE_BLOCKER\s*:\s*user-decision\s*:/iu.test(text)
         ? "awaiting_user"
@@ -1938,83 +1948,173 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     return { outcome, goal, receipt };
   }
 
-  function declaredDelivery(prompt: string): GoalDeliveryMode {
-    const entries = handoffEntries(prompt);
-    const explicit = handoffValue(entries, ["delivery_mode"]);
-    if (explicit === "planning-only" || explicit === "mvp-first" || explicit === "repair-first" || explicit === "controlled-change") return explicit;
-    const intent = handoffValue(entries, ["delivery_intent"]);
-    const declared = intent === "design" || intent === "registration" || intent === "repair" || intent === "controlled-change"
-      ? intent : "implementation";
-    return selectGoalDelivery({ declared_intent: declared,
-      requested_usable_path_established: handoffValue(entries, ["usable_path_established"]) === "true",
-      irreversible_or_major_scope: handoffValue(entries, ["controlled_change"]) === "true" });
+  interface GoalDeclaration {
+    readonly fingerprint: string;
+    readonly delivery: GoalDeliveryMode;
+    readonly contract: GoalAcceptanceContract;
   }
 
-  function declaredGoalContract(prompt: string): GoalAcceptanceContract | null {
+  function goalDeclarationContract(prompt: string): {
+    readonly contract?: GoalAcceptanceContract;
+    readonly defects: readonly string[];
+  } {
     const lines = prompt.split(/\r?\n/u);
     const criterionStarts = lines.flatMap((line, index) =>
       /^\s*goal_criterion_id\s*:/u.test(line) ? [index] : []);
-    if (criterionStarts.length > 1) {
-      const validation = handoffValue(handoffEntries(prompt), ["validation"]);
-      const contracts = criterionStarts.map((start, index) =>
-        declaredGoalContract(lines.slice(start, criterionStarts[index + 1]).join("\n") +
-          (validation === undefined ? "" : `\nvalidation: ${validation}`)));
-      if (contracts.some((contract) => contract === null)) return null;
-      const criteria = contracts.flatMap((contract) => contract!.criteria);
-      return new Set(criteria.map((criterion) => criterion.criterion_id)).size === criteria.length
-        ? { criteria } : null;
+    if (criterionStarts.length === 0) {
+      return { defects: [contractDefect("contract", "/goal_acceptance/criteria", "goal_criteria_missing")] };
     }
-    const entries = handoffEntries(prompt);
+    const validation = handoffValue(handoffEntries(prompt), ["validation"]);
     const required = ["goal_criterion_id", "goal_target", "goal_entrypoint", "goal_workload",
       "goal_oracle_coverage", "goal_build_boundary", "goal_source", "goal_candidate", "goal_fixture",
       "goal_proof_scope", "goal_expected_outcome"] as const;
-    const values = Object.fromEntries(required.map((key) => [key, handoffValue(entries, [key])])) as
-      Record<(typeof required)[number], string | undefined>;
-    if (required.some((key) => key !== "goal_oracle_coverage" && values[key] === undefined)) return null;
-    let oracleCoverage: string[];
-    try {
-      const parsed = values.goal_oracle_coverage === undefined
-        ? taskAcceptanceCriteria(prompt, "goal_oracle_coverage") : JSON.parse(values.goal_oracle_coverage);
-      if (!Array.isArray(parsed) || !parsed.every((value) => typeof value === "string" && value.length > 0)) return null;
-      oracleCoverage = parsed;
-    } catch { return null; }
-    const buildBoundary = values.goal_build_boundary;
-    const proofScope = values.goal_proof_scope;
-    const expectedOutcome = values.goal_expected_outcome;
-    const sourceBinding = handoffValue(entries, ["goal_source_binding"]);
-    const candidateBinding = handoffValue(entries, ["goal_candidate_binding"]);
-    const declaredValidation = handoffValue(entries, ["validation"]);
-    const structuredCommands = declaredValidation?.startsWith("{") && declaredValidation.endsWith("}")
-      ? [...declaredValidation.matchAll(/(?:\{|,)\s*command\s*:\s*([^,}]+)/gu)] : [];
-    const validationCommand = handoffValue(entries, ["goal_validation_command"]) ??
-      (structuredCommands.length === 1 ? unquoteValue(structuredCommands[0]![1]!.trim()) : undefined);
-    if (buildBoundary !== "included" && buildBoundary !== "excluded" && buildBoundary !== "not-applicable") return null;
-    if (proofScope !== "requested-full" && proofScope !== "document-deliverable" && proofScope !== "expected-negative") return null;
-    if (expectedOutcome !== "pass" && expectedOutcome !== "fail") return null;
-    if (sourceBinding !== undefined && sourceBinding !== "declared" && sourceBinding !== "current-protected") return null;
-    if (candidateBinding !== undefined && candidateBinding !== "declared" && candidateBinding !== "current-protected") return null;
-    return { criteria: [{ criterion_id: values.goal_criterion_id!, target: values.goal_target!,
-      entrypoint: values.goal_entrypoint!, workload: values.goal_workload!, oracle_coverage: oracleCoverage,
-      build_boundary: buildBoundary, source: values.goal_source!, candidate: values.goal_candidate!,
-      source_binding: sourceBinding ?? "declared", candidate_binding: candidateBinding ?? "declared",
-      ...(validationCommand === undefined ? {} : { validation_command: normalizeCommand(validationCommand) }),
-      fixture: values.goal_fixture!, proof_scope: proofScope, expected_outcome: expectedOutcome }] };
+    const criteria: GoalAcceptanceContract["criteria"][number][] = [];
+    const defects: string[] = [];
+    for (const [criterionIndex, start] of criterionStarts.entries()) {
+      const block = lines.slice(start, criterionStarts[criterionIndex + 1]).join("\n") +
+        (validation === undefined ? "" : `\nvalidation: ${validation}`);
+      const entries = handoffEntries(block);
+      const values = Object.fromEntries(required.map((key) => [key, handoffValue(entries, [key])])) as
+        Record<(typeof required)[number], string | undefined>;
+      const pointer = (field: string) => `/goal_acceptance/criteria/${criterionIndex}/${field}`;
+      for (const key of required) {
+        if (key !== "goal_oracle_coverage" && values[key] === undefined) {
+          defects.push(contractDefect("contract", pointer(key), "goal_field_missing"));
+        }
+      }
+      const inlineOracle = values.goal_oracle_coverage;
+      let oracleCoverage: readonly string[] | undefined;
+      try {
+        const parsed = inlineOracle === undefined
+          ? taskAcceptanceCriteria(block, "goal_oracle_coverage")
+          : JSON.parse(inlineOracle) as unknown;
+        if (Array.isArray(parsed) && parsed.length > 0 && parsed.every((value) =>
+          typeof value === "string" && value.length > 0 && value.length <= 512) &&
+          new Set(parsed).size === parsed.length) oracleCoverage = parsed;
+      } catch { /* concrete defect below */ }
+      if (oracleCoverage === undefined) {
+        defects.push(contractDefect("contract", pointer("goal_oracle_coverage"),
+          inlineOracle === undefined ? "goal_field_missing_or_malformed" : "goal_oracle_coverage_invalid"));
+      }
+      const buildBoundary = values.goal_build_boundary;
+      const proofScope = values.goal_proof_scope;
+      const expectedOutcome = values.goal_expected_outcome;
+      const sourceBinding = handoffValue(entries, ["goal_source_binding"]);
+      const candidateBinding = handoffValue(entries, ["goal_candidate_binding"]);
+      if (buildBoundary !== undefined && buildBoundary !== "included" && buildBoundary !== "excluded" && buildBoundary !== "not-applicable") {
+        defects.push(contractDefect("contract", pointer("goal_build_boundary"), "goal_build_boundary_invalid"));
+      }
+      if (proofScope !== undefined && proofScope !== "requested-full" && proofScope !== "document-deliverable" && proofScope !== "expected-negative") {
+        defects.push(contractDefect("contract", pointer("goal_proof_scope"), "goal_proof_scope_invalid"));
+      }
+      if (expectedOutcome !== undefined && expectedOutcome !== "pass" && expectedOutcome !== "fail") {
+        defects.push(contractDefect("contract", pointer("goal_expected_outcome"), "goal_expected_outcome_invalid"));
+      }
+      if (sourceBinding !== undefined && sourceBinding !== "declared" && sourceBinding !== "current-protected") {
+        defects.push(contractDefect("contract", pointer("goal_source_binding"), "goal_source_binding_invalid"));
+      }
+      if (candidateBinding !== undefined && candidateBinding !== "declared" && candidateBinding !== "current-protected") {
+        defects.push(contractDefect("contract", pointer("goal_candidate_binding"), "goal_candidate_binding_invalid"));
+      }
+      const declaredValidation = handoffValue(entries, ["validation"]);
+      const structuredCommands = declaredValidation?.startsWith("{") && declaredValidation.endsWith("}")
+        ? [...declaredValidation.matchAll(/(?:\{|,)\s*command\s*:\s*([^,}]+)/gu)] : [];
+      const validationCommand = handoffValue(entries, ["goal_validation_command"]) ??
+        (structuredCommands.length === 1 ? unquoteValue(structuredCommands[0]![1]!.trim()) : undefined);
+      if (validationCommand === undefined || normalizeCommand(validationCommand).length === 0) {
+        defects.push(contractDefect("contract", pointer("goal_validation_command"), "goal_validation_command_missing"));
+      }
+      if (defects.some((defect) => defect.includes(`/criteria/${criterionIndex}/`))) continue;
+      criteria.push({ criterion_id: values.goal_criterion_id!, target: values.goal_target!,
+        entrypoint: values.goal_entrypoint!, workload: values.goal_workload!, oracle_coverage: oracleCoverage!,
+        build_boundary: buildBoundary as "included" | "excluded" | "not-applicable",
+        source: values.goal_source!, candidate: values.goal_candidate!,
+        source_binding: (sourceBinding ?? "declared") as "declared" | "current-protected",
+        candidate_binding: (candidateBinding ?? "declared") as "declared" | "current-protected",
+        validation_command: normalizeCommand(validationCommand!), fixture: values.goal_fixture!,
+        proof_scope: proofScope as "requested-full" | "document-deliverable" | "expected-negative",
+        expected_outcome: expectedOutcome as "pass" | "fail" });
+    }
+    const duplicateIDs = criteria.map(({ criterion_id }) => criterion_id)
+      .filter((id, index, all) => all.indexOf(id) !== index);
+    if (duplicateIDs.length > 0) {
+      defects.push(contractDefect("contract", "/goal_acceptance/criteria", "goal_criterion_id_duplicate"));
+    }
+    return defects.length === 0 ? { contract: { criteria }, defects } : { defects };
   }
 
-  async function bindGoalDeclaration(sessionID: string, prompt: string,
-    acceptance: AcceptanceContinuityLedger | undefined): Promise<GoalFlightState | undefined> {
+  function validateGoalDeclaration(prompt: string): { readonly declaration?: GoalDeclaration; readonly defects: readonly string[] } {
+    const entries = handoffEntries(prompt);
+    const defects: string[] = [];
+    const fingerprint = handoffValue(entries, ["goal_acceptance_fingerprint"]);
+    if (fingerprint === undefined) defects.push(contractDefect("contract", "/goal_acceptance_fingerprint", "goal_fingerprint_missing"));
+    else if (!/^sha256:[a-f0-9]{64}$/u.test(fingerprint)) {
+      defects.push(contractDefect("contract", "/goal_acceptance_fingerprint", "goal_fingerprint_format"));
+    }
+    const intent = handoffValue(entries, ["delivery_intent"]);
+    const intents = ["design", "registration", "implementation", "repair", "controlled-change"] as const;
+    if (intent === undefined) defects.push(contractDefect("contract", "/delivery_intent", "delivery_intent_missing"));
+    else if (!intents.includes(intent as typeof intents[number])) {
+      defects.push(contractDefect("contract", "/delivery_intent", "delivery_intent_invalid"));
+    }
+    const mode = handoffValue(entries, ["delivery_mode"]);
+    const modes: readonly GoalDeliveryMode[] = ["planning-only", "mvp-first", "repair-first", "controlled-change"];
+    if (mode !== undefined && !modes.includes(mode as GoalDeliveryMode)) {
+      defects.push(contractDefect("contract", "/delivery_mode", "delivery_mode_invalid"));
+    }
+    const usable = handoffValue(entries, ["usable_path_established"]);
+    const controlled = handoffValue(entries, ["controlled_change"]);
+    for (const [field, value] of [["usable_path_established", usable], ["controlled_change", controlled]] as const) {
+      if (value === undefined) defects.push(contractDefect("contract", `/${field}`, "goal_boolean_missing"));
+      else if (value !== "true" && value !== "false") defects.push(contractDefect("contract", `/${field}`, "goal_boolean_invalid"));
+    }
+    const contract = goalDeclarationContract(prompt);
+    defects.push(...contract.defects);
+    if (defects.length > 0 || fingerprint === undefined || intent === undefined || contract.contract === undefined) return { defects };
+    const delivery = mode as GoalDeliveryMode | undefined ?? selectGoalDelivery({
+      declared_intent: intent as typeof intents[number], requested_usable_path_established: usable === "true",
+      irreversible_or_major_scope: controlled === "true",
+    });
+    return { declaration: { fingerprint, delivery, contract: contract.contract }, defects };
+  }
+
+  async function bindGoalDeclaration(sessionID: string, prompt: string): Promise<GoalFlightState | undefined> {
     const ledger = await goalLedger(sessionID);
     let state = (await ledger.readGoal()).state;
     if (state.goal_id === null || state.origin_user_message_id === null) return undefined;
-    const authority = goalDeclarationAuthority.get(sessionID);
-    if (authority === undefined || authority !== state.latest_user_message_id) return state;
-    goalDeclarationAuthority.delete(sessionID);
     const entries = handoffEntries(prompt);
-    const explicitFingerprint = handoffValue(entries, ["goal_acceptance_fingerprint"]);
-    if (state.acceptance_contract !== null && explicitFingerprint === undefined) return state;
-    const declaredFingerprint = explicitFingerprint ?? acceptance?.fingerprint;
-    if (declaredFingerprint === undefined || !/^sha256:[a-f0-9]{64}$/u.test(declaredFingerprint) ||
-      declaredFingerprint === state.acceptance_fingerprint) return state;
+    const typedDeclarationPresent = prompt.split(/\r?\n/u).some((line) =>
+      /^\s*(?:goal_[a-z0-9_]+|delivery_intent|delivery_mode|usable_path_established|controlled_change)\s*:/iu.test(line));
+    // Accepted goals may retain their existing declaration on later units, but the first worker
+    // handoff and every handoff containing declaration fields must be complete.
+    if (!typedDeclarationPresent) {
+      if (state.acceptance_contract === null && goalDeclarationAuthority.get(sessionID) === state.latest_user_message_id) {
+        throw new HandoffDeniedError("contract-invalid", "<goal-declaration>", {
+          defects: validateGoalDeclaration(prompt).defects,
+        });
+      }
+      if (goalDeclarationAuthority.get(sessionID) === state.latest_user_message_id) goalDeclarationAuthority.delete(sessionID);
+      return state;
+    }
+    const validated = validateGoalDeclaration(prompt);
+    if (validated.declaration === undefined) {
+      throw new HandoffDeniedError("contract-invalid", "<goal-declaration>", { defects: validated.defects });
+    }
+    const declaration = validated.declaration;
+    const authority = goalDeclarationAuthority.get(sessionID);
+    if (authority === undefined || authority !== state.latest_user_message_id) {
+      if (declaration.fingerprint !== state.acceptance_fingerprint) {
+        throw new HandoffDeniedError("contract-invalid", "<goal-declaration>", { defects: [
+          contractDefect("contract", "/goal_acceptance_fingerprint", "goal_revision_unauthorized"),
+        ] });
+      }
+      return state;
+    }
+    if (declaration.fingerprint === state.acceptance_fingerprint &&
+      goalFingerprint(declaration.contract) === goalFingerprint(state.acceptance_contract)) {
+      goalDeclarationAuthority.delete(sessionID);
+      return state;
+    }
     const units = Number(handoffValue(entries, ["goal_budget_units"]));
     const maxUnits = Number.isSafeInteger(units) && units >= state.consumed_units && units > 0
       ? units : state.budget?.max_units ?? 32;
@@ -2024,21 +2124,24 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const costBudget = Number.isFinite(declaredCost) && declaredCost > 0 ? declaredCost : state.budget?.cost_usd ?? null;
     state = await ledger.appendGoal({ kind: "goal.revised", at: new Date().toISOString(), goal_id: state.goal_id,
       revision: state.revision + 1, scope_epoch: state.scope_epoch + 1,
-      acceptance_fingerprint: declaredFingerprint, origin_user_message_id: state.latest_user_message_id!,
+      acceptance_fingerprint: declaration.fingerprint, origin_user_message_id: state.latest_user_message_id!,
       session_id: sessionID, selected_agent: state.selected_agent ?? COORDINATOR_AGENT,
-      delivery: declaredDelivery(prompt), budget: { max_units: maxUnits,
+      delivery: declaration.delivery, budget: { max_units: maxUnits,
          time_ms: timeBudget, cost_usd: costBudget,
          source: Number.isSafeInteger(units) ? "accepted-plan" : state.budget?.source ?? "policy-default" },
-      acceptance_contract: declaredGoalContract(prompt) });
+      acceptance_contract: declaration.contract });
+    goalDeclarationAuthority.delete(sessionID);
     return state;
   }
 
-  async function reserveGoalDispatch(sessionID: string, callID: string, prompt: string,
-    acceptance: AcceptanceContinuityLedger | undefined): Promise<void> {
+  async function reserveGoalDispatch(sessionID: string, callID: string, prompt: string): Promise<void> {
     if (goalReservations.has(callID)) return;
     const ledger = await goalLedger(sessionID);
-    let state = await bindGoalDeclaration(sessionID, prompt, acceptance) ?? (await ledger.readGoal()).state;
+    let state = await bindGoalDeclaration(sessionID, prompt) ?? (await ledger.readGoal()).state;
     if (state.goal_id === null) return; // Legacy already-authorized roots may settle without inventing authority.
+    if (state.phase === "terminal" || state.receipt !== null) {
+      throw new Error("SORTIE_GOAL_CONTROL_DENIED: terminal");
+    }
     if (state.replan_required) {
       if (state.replan_used) {
         await terminalGoal(sessionID, "stop_no_progress", "stopped");
@@ -2126,10 +2229,18 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const newEvidence = acceptedEvidence.filter((entry) => entry.measurement.criterion_ids.some((criterionID) =>
       !state.satisfied_criteria.includes(criterionID)));
     const progress = newEvidence.length > 0;
+    const metadata = isRecord(output.metadata) ? output.metadata : undefined;
+    const interrupted = metadata?.status === "cancel" || metadata?.status === "cancelled" ||
+      output.status === "cancel" || output.status === "cancelled";
+    const hostBindingDefect = childSessionID !== undefined && [...(bindingDenials.get(reservation.root)?.values() ?? [])]
+      .some((candidateDenials) => [...candidateDenials.values()].includes(childSessionID));
+    const processDefect = childSessionID === undefined || hostBindingDefect;
+    const resultClass = progress ? "acceptance" : interrupted ? "interrupted" : processDefect ? "process-defect" : "acceptance";
     await ledger.appendGoal({ kind: "unit.settled", at: new Date().toISOString(),
       reservation_id: reservation.reservationID, receipt_id: goalFingerprint({ call_id: callID, output: outputText.slice(0, 2048) }),
       goal_id: state.goal_id, unit_id: reservation.unitID,
-      disposition: progress ? "succeeded" : "failed", progress_fingerprint: progress ? goalFingerprint(acceptedEvidence) : null,
+      disposition: progress ? "succeeded" : interrupted ? "cancelled" : "failed", result_class: resultClass,
+      progress_fingerprint: progress ? goalFingerprint(acceptedEvidence) : null,
       evidence: acceptedEvidence, elapsed_ms: Math.max(0, Date.now() - reservation.started), cost_usd: null });
     if (childSessionID !== undefined) {
       for (const [executionCallID, execution] of hostGoalExecutions) {
@@ -5561,8 +5672,14 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         : await terminalGoalFromHostText(textInput.sessionID, textOutput.text);
       if (runOutcome === "DONE" && terminal?.goal !== undefined &&
         terminal.goal.acceptance_contract !== null && terminal.receipt === undefined) {
-        textOutput.text = textOutput.text.replace(/(^|\n)status:\s*DONE\b/iu,
-          "$1status: IN_PROGRESS\ngoal_control: accepted criteria remain unproved");
+        textOutput.text = replaceDoneTerminalStatus(textOutput.text,
+          "status: IN_PROGRESS\ngoal_control: accepted criteria remain unproved");
+      }
+      if (runOutcome !== "DONE" && terminal?.receipt?.status === "succeeded") {
+        textOutput.text = replaceTerminalStatus(textOutput.text, "status: DONE");
+      }
+      if (runOutcome !== undefined && isCoordinatorSession(textInput.sessionID)) {
+        textOutput.text = sanitizeTerminalReport(textOutput.text);
       }
       if ((isCoordinatorSession(textInput.sessionID) || await recoverCoordinatorRoot(textInput.sessionID)) &&
         runOutcome !== undefined) {
@@ -6388,6 +6505,13 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
             counts.dispatched - currentContribution, counts.running - currentContribution, counts.total);
           parallelWorkerAuthorized = true;
         }
+        if (toolInput.tool === "task" && taskRole !== undefined && IMPLEMENTATION_AGENTS.has(taskRole) &&
+          isRecord(output.args)) {
+          // Declaration admission precedes routing state and reservation. A concrete field denial can
+          // therefore be repaired by a corrected Task call in this same coordinator turn.
+          await bindGoalDeclaration(toolInput.sessionID,
+            typeof output.args.prompt === "string" ? output.args.prompt : "");
+        }
         const resumedWorkerSessionID = fastLane.beforeTool(toolInput.sessionID, toolInput.tool, output.args, {
           readonlyDiagnosisAuthorized: readonlyDiagnosis,
           consultationFallbackAuthorized,
@@ -6397,7 +6521,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         if (toolInput.tool === "task" && taskRole !== undefined && IMPLEMENTATION_AGENTS.has(taskRole) &&
           isRecord(output.args)) {
           await reserveGoalDispatch(toolInput.sessionID, toolInput.callID,
-            typeof output.args.prompt === "string" ? output.args.prompt : "", validatedRootAcceptance);
+            typeof output.args.prompt === "string" ? output.args.prompt : "");
         }
         if (validatedRootAcceptance !== undefined && reservedParallelDescriptor === undefined) {
           rootAcceptanceContinuity.delete(toolInput.sessionID);

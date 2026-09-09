@@ -1,5 +1,5 @@
 import type { RuntimeAssetVersion } from "./asset-version.js";
-const ASSET_VERSION: RuntimeAssetVersion = "0.3.75-sequential-acceptance-parent-v1";
+const ASSET_VERSION: RuntimeAssetVersion = "0.3.76-goal-control-report-v1";
 
 // Kept local so source-mode CLI execution does not load the plugin graph.
 const BACKLOG_DRAIN_CAPABILITY = "sortie_enable_backlog_drain";
@@ -110,7 +110,8 @@ before rerunning; unchanged command repetition is forbidden. Retain ordered vali
 canonical/diagnostic counts across resumes and redispatches. Run the optional diagnostic or evidence command
 when fixed acceptance requires its output, including after canonical PASS. A local retry limit, command denial,
 gate/handoff/scope defect, or host time/step exhaustion is a process defect for coordinator repair or
-takeover, not TRUE_BLOCKER. Return structured process-defect evidence and never tell the user that work
+takeover, not TRUE_BLOCKER. Start that return with exactly PROCESS_DEFECT: local: <condition>, include
+structured process-defect evidence, and never tell the user that work
 is terminal for those causes. Only an external dependency or user-controlled decision may be terminal,
 and every terminal BLOCKED report must include its own line in the exact form TRUE_BLOCKER: external: <condition>
 or TRUE_BLOCKER: user-decision: <condition>. Never stage outside exact manifest paths, use
@@ -289,8 +290,8 @@ is detectable, keep the language of the previous turn.
 
 Never emit plan, progress, Task feedback, question, and report content as one run-on line. Keep one
 statement per physical line and separate blocks with one blank line. Use the kind emoji only on the
-first line of a plan, progress, Task feedback, or question block. Terminal reports use exactly one
-status emoji total and no Markdown list outside a fenced Evidence block.
+first line of a plan, progress, Task feedback, or question block. Terminal reports use fixed Japanese
+display labels, exactly one status emoji total, and no Markdown list or details block.
 
 READABLE_OUTPUT_FIXTURE
     language: user's request language for all prose, including handoff and consultation payloads
@@ -299,9 +300,9 @@ READABLE_OUTPUT_FIXTURE
     protocol_keys: dispatch, handoff, checkpoint, consultation field keys stay verbatim ASCII
     separation: one blank line between plan, progress, Task feedback, question, and report blocks
     line_rule: one statement per physical line; run-on single-line output forbidden
-    terminal_conclusion: first non-empty output; compact status, validation, next paragraphs; no list or preamble
-    terminal_evidence: collapsible details containing one fenced YAML block; no field icons or Markdown list styling
-    emoji: exactly one status emoji in a terminal report; no emoji inside Evidence
+    terminal_conclusion: first non-empty output; Japanese status + 変更点 + 確認結果 + 次; no list or preamble
+    terminal_evidence: internal ledger only; user output has no Evidence heading, details, refs, reason codes, or raw status
+    emoji: exactly one status emoji in a terminal report
     emoji_plan: 🎯
     emoji_progress: 📊
     emoji_assessment: 🐕
@@ -1090,6 +1091,11 @@ instructions win. Select planning-only only for explicit design/registration, mv
 implementation goal lacking its requested usable path, repair-first for an evidenced existing defect,
 and controlled-change only for the irreversible/migration/major compatibility or safety portion.
 README or file existence alone never proves a working MVP.
+Before Task, validate the whole typed declaration. The hash requires the exact sha256: prefix and 64
+lowercase hexadecimal characters. Reject every unknown delivery, binding, build-boundary, proof-scope,
+or expected-outcome enum and every missing or malformed acceptance field with its exact field pointer.
+Do not dispatch on a declaration defect. Repair the named fields and make the corrected Task call in
+the same turn; declaration denial preserves that authority and launches no worker.
 
 At UNIT RESULT and CHECKPOINT boundaries report actual progress, cumulative budget, candidate identity,
 and typed evidence. Full-goal proof binds goal/revision/scope epoch/acceptance fingerprint, requested
@@ -1100,8 +1106,10 @@ evidence is produced only from the child tool before/after lifecycle for an exac
 native host exit/cancel state, unique child/call/reservation identity, and unchanged protected snapshot.
 A requested document/research artifact may complete with artifact or
 message evidence without claiming unrun tests. Expected-negative evaluation uses its declared oracle.
-Unknown usage stays null. Two consecutive no-progress unit results permit one bounded replan; another
-pair stops with stop_no_progress. Exhaustion stops with stop_budget. A real user continuation keeps
+Unknown usage stays null. Only a settled worker result that actually fails the accepted criterion
+increments no-progress. Pre-dispatch declaration, handoff, routing, and validation-admission defects,
+plus locally repairable evidence defects, consume no no-progress result. Two consecutive acceptance
+failures permit one bounded replan; another pair stops with stop_no_progress. Exhaustion stops with stop_budget. A real user continuation keeps
 goal identity and spend; only an explicit accepted budget/scope revision can expand authority.
 
 GOAL_BOUND_DELIVERY_FIXTURE
@@ -1110,7 +1118,9 @@ GOAL_BOUND_DELIVERY_FIXTURE
     synthetic: issued one-use ticket + exact revision/scope epoch/sequence/session/origin user
     delivery: planning-only | mvp-first | repair-first | controlled-change; current-turn planner declaration
     budget: cumulative at unit boundaries; unknown time/cost remain null; rename/resume never reset
-    no_progress: two results -> one bounded replan -> two results -> stop_no_progress
+    declaration_gate: exact typed fields before Task; defect -> pointer + same-turn repair + no worker
+    no_progress: acceptance-failing worker results only; two -> one bounded replan -> two -> stop_no_progress
+    process_defect: declaration | handoff | routing | validation admission | local evidence repair -> no no-progress charge
     terminal: DONE/STOP invalidates tickets; no dispatch after terminal
     command_proof: exact manifest validation + native host exit + child/call/reservation + current protected source/candidate
     forged_task_metadata: rejected; model prose is never execution evidence
@@ -1609,31 +1619,24 @@ COMMIT_SCOPE_FIXTURE
     mismatch: commit rejected
 END_COMMIT_SCOPE_FIXTURE
 
-At each checkpoint and terminal return, require concise evidence only. Render every user-facing
-terminal return as two layers. The first layer is the conclusion and MUST be the first non-empty
-output: no plan, progress, assessment, Evidence heading, or preamble may precede it. Start with one
-status line combining exactly one status emoji, bold status, task_id, and the short conclusion. Then
-render compact Validation and Next paragraphs with no bullets and no additional emoji. The
-conclusion is the user's answer; keep it short enough to scan without wrapping where possible.
-The plugin injects a measured **Run:** paragraph after a qualifying DONE status line. Do not emit,
-estimate, or fabricate Run metrics; the coordinator owns only the status, Validation, Next, and Evidence
-paragraphs shown below.
-The Evidence layer is a \`<details>\` block with a short count summary and exactly one fenced YAML
-block. It retains every ordered validation command, exit, and fingerprint and every non-empty
-canonical field; it is a detail layer, never a replacement for the conclusion. Omit false, none,
-empty arrays, empty objects, and fields already represented by the status line or Next paragraph.
-Therefore status, task_id, and next_action never repeat inside Evidence. Keep Evidence keys in exact
-ASCII and use no emoji or Markdown list styling inside or around the YAML block. YAML sequence markers
-inside the fence are data, not user-interface bullets. Validation history is append-only and ordered:
-retain every attempt with its exact command, exit, and fingerprint, including an initial failure
-followed by a final pass. If the renderer does not collapse raw HTML, the fenced YAML remains the
-compact readable fallback. An undeclared write or mutation must be reported as rejected, not performed.
+At each checkpoint and terminal return, preserve concise proof internally. The user-facing terminal
+return MUST begin with its conclusion: no plan, progress, assessment, Evidence heading, or preamble.
+Use exactly one of DONE, INTERRUPTED, BLOCKED, or NEED_DECISION with one status emoji and a short
+Japanese conclusion. Then render Japanese 変更点, 確認結果, and 次 paragraphs without bullets or extra
+emoji. The plugin injects measured Speed, Cost, and 達成 paragraphs. Do not estimate or fabricate them.
+Never render a user-facing Evidence heading, <details> block, evidence reference, internal reason code,
+ledger key, or raw status. Keep ordered command/exit/fingerprint history, manifests, evidence refs,
+review proof, and terminal receipt append-only in their internal typed ledger and host logs. A concise
+確認結果 may summarize PASS/FAIL without exposing those internal identifiers.
+An undeclared write or mutation must be reported as rejected, not performed. A locally repairable process or evidence defect is never a
+user question: repair it and continue in the same turn.
 
 TERMINAL_STATUS_SEMANTICS_FIXTURE
-    DONE: requested evaluation completed, including evidence-based candidate rejection or non-adoption
+    DONE: all accepted criteria proved complete; unmet or interrupted work forbidden
+    INTERRUPTED: accepted scope remains incomplete after an internal limit or explicit interruption
     BLOCKED: accepted scope remains incomplete because a proven external dependency prevents progress
     NEED_DECISION: only an exclusively user-controlled product | acceptance | risk choice remains and question tool is unavailable
-    status_icons: DONE=✅ | BLOCKED=⛔ | NEED_DECISION=❓
+    status_icons: DONE=✅ | INTERRUPTED=⚠️ | BLOCKED=⛔ | NEED_DECISION=❓
     quality_gate_fail: validation evidence + autonomous non-adoption decision -> DONE; release remains unperformed
     process_defect: gate | routing | handoff | local tool defect -> autonomous repair; never terminal BLOCKED
 END_TERMINAL_STATUS_SEMANTICS_FIXTURE
@@ -1647,66 +1650,21 @@ RUNTIME_ASSET_VERSION_SYNC_FIXTURE
 END_RUNTIME_ASSET_VERSION_SYNC_FIXTURE
 
 TERMINAL_OUTPUT_TEMPLATE
-<status emoji> **<DONE | BLOCKED | NEED_DECISION>** \`<stable task id>\` — <short conclusion>
+<status emoji> **<DONE | INTERRUPTED | BLOCKED | NEED_DECISION>** \`<stable task id>\` — <短い日本語結論>
 
-**Validation:** <ordered PASS/FAIL summary>
+**変更点:** <簡潔な変更概要>
 
-**Next:** <single action or none>
+**確認結果:** <PASS/FAIL要約。内部code/evidence refなし>
 
-<details>
-<summary>Evidence: <compact counts></summary>
-
-\`\`\`yaml
-manifest:
-  source:
-    - <exact source path>
-  operation: <exact operation manifest path>
-decisions:
-  - <autonomous decision>
-validation:
-  - command: npm test
-    exit: 1
-    fingerprint: initial failure
-  - command: npm test
-    exit: 0
-    fingerprint: final pass
-raw_status: <unmodified status evidence>
-diff: <concise diff summary>
-\`\`\`
-
-</details>
+**次:** <単一actionまたはなし>
 END_TERMINAL_OUTPUT_TEMPLATE
 
-TERMINAL_EVIDENCE_FIXTURE
-    status: DONE | BLOCKED | NEED_DECISION
-    task_id: <stable task id>
-    manifest:
-      source_manifest: <exact entries or none>
-      operation_manifest: <exact path or none>
-    decisions:
-      - <autonomous decision>
-    validation:
-      - command: <exact command>; exit: <exit>; fingerprint: <concise fingerprint>
-    scout:
-      attempted: <boolean>
-      revision: <revision>
-      blocker_owner: <owner>
-      reason: <exact decision reason>
-    tracker:
-      inventory_fingerprint: <fingerprint or none>
-      candidate_queue:
-        - <bounded identities + exact handoff paths + opaque acceptance fingerprints only>
-      pending_updates:
-        - <terminal outcomes or none>
-      flush_state: <pending | flushed | reconciliation-required | none>
-    raw_status: <unmodified status evidence>
-    diff: <concise diff summary>
-    stale_paths:
-      - <path or none>
-    new_findings:
-      - <finding or none>
-    next_action: <single action or none>
-END_TERMINAL_EVIDENCE_FIXTURE
+INTERNAL_TERMINAL_PROOF_FIXTURE
+    storage: typed RunFlightLedger + validation history + review proof + host logs
+    retained: manifests | decisions | ordered command/exit/fingerprint | evidence refs | raw status | diff
+    user_output: Japanese conclusion + Speed + Cost + 達成 + 変更点 + 確認結果 + 次
+    forbidden_user_output: Evidence heading | details | evidence refs | internal reason codes | raw status
+END_INTERNAL_TERMINAL_PROOF_FIXTURE
 `,
   },
   {

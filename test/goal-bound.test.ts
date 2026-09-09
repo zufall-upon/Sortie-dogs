@@ -92,6 +92,29 @@ test("two no-progress boundaries permit one replan, then require stop", async ()
   assert.equal(replanned.replan_used, true);
 });
 
+test("process defects and interruptions do not consume no-progress while acceptance failures do", async () => {
+  const { ledger } = await accepted("process-defect-budget", 6);
+  for (const [index, resultClass] of ["process-defect", "process-defect", "interrupted"].entries()) {
+    await ledger.appendGoal({ kind: "dispatch.reserved", at, reservation_id: `process-r-${index}`,
+      goal_id: "goal-process-defect-budget", unit_id: `process-u-${index}`, session_id: "root-session", ticket_id: null });
+    const state = await ledger.appendGoal({ kind: "unit.settled", at, reservation_id: `process-r-${index}`,
+      receipt_id: `process-x-${index}`, goal_id: "goal-process-defect-budget", unit_id: `process-u-${index}`,
+      disposition: resultClass === "interrupted" ? "cancelled" : "failed", result_class: resultClass as "process-defect" | "interrupted",
+      progress_fingerprint: null, evidence: [], elapsed_ms: null, cost_usd: null });
+    assert.equal(state.no_progress_results, 0);
+    assert.equal(state.replan_required, false);
+  }
+  for (let index = 0; index < 2; index += 1) {
+    await ledger.appendGoal({ kind: "dispatch.reserved", at, reservation_id: `accept-r-${index}`,
+      goal_id: "goal-process-defect-budget", unit_id: `accept-u-${index}`, session_id: "root-session", ticket_id: null });
+    const state = await ledger.appendGoal({ kind: "unit.settled", at, reservation_id: `accept-r-${index}`,
+      receipt_id: `accept-x-${index}`, goal_id: "goal-process-defect-budget", unit_id: `accept-u-${index}`,
+      disposition: "failed", result_class: "acceptance", progress_fingerprint: null, evidence: [], elapsed_ms: null, cost_usd: null });
+    assert.equal(state.no_progress_results, index + 1);
+  }
+  assert.equal((await ledger.readGoal()).state.replan_required, true);
+});
+
 test("full proof requires requested oracle and exact revision while proxy and expected-negative stay typed", async () => {
   const { ledger, state: initialState } = await accepted("evidence");
   const contract = { criteria: [{ criterion_id: "criterion-1", target: "goal delivery", entrypoint: "fixture",

@@ -1118,7 +1118,7 @@ test("generated assets require the user's language and compact block-separated o
   assert.match(readable[1], /^ {4}verbatim: identifiers, paths, commands, document keys/m);
   assert.match(readable[1], /^ {4}separation: one blank line between plan, progress/m);
   assert.match(readable[1], /^ {4}line_rule: one statement per physical line; run-on single-line output forbidden$/m);
-  assert.match(readable[1], /^ {4}emoji: exactly one status emoji in a terminal report; no emoji inside Evidence$/m);
+  assert.match(readable[1], /^ {4}emoji: exactly one status emoji in a terminal report$/m);
   for (const emoji of ["🎯", "📊", "🐕", "🔍", "➡️", "⛔", "✅"]) {
     assert.ok(readable[1].includes(emoji), emoji);
   }
@@ -1198,19 +1198,20 @@ test("generated assets require the user's language and compact block-separated o
   assert.match(worker.content, /denied optional\s+check remains DENIED evidence and never justifies unchanged repetition/i);
 });
 
-test("generated coordinator renders a compact conclusion and collapsible YAML Evidence", () => {
+test("generated coordinator keeps proof internal and renders concise Japanese terminal states", () => {
   const coordinator = runtimeAssets.find((asset) => asset.name === "dog-coordinator");
   assert.ok(coordinator);
   const semantics = coordinator.content.match(
     /TERMINAL_STATUS_SEMANTICS_FIXTURE\r?\n([\s\S]+?)\r?\nEND_TERMINAL_STATUS_SEMANTICS_FIXTURE/,
   );
   assert.ok(semantics);
-  assert.match(semantics[1], /DONE: requested evaluation completed, including evidence-based candidate rejection or non-adoption/);
-  assert.match(semantics[1], /status_icons: DONE=✅ \| BLOCKED=⛔ \| NEED_DECISION=❓/u);
+  assert.match(semantics[1], /DONE: all accepted criteria proved complete; unmet or interrupted work forbidden/);
+  assert.match(semantics[1], /INTERRUPTED: accepted scope remains incomplete after an internal limit or explicit interruption/);
+  assert.match(semantics[1], /status_icons: DONE=✅ \| INTERRUPTED=⚠️ \| BLOCKED=⛔ \| NEED_DECISION=❓/u);
   assert.match(semantics[1], /quality_gate_fail: validation evidence \+ autonomous non-adoption decision -> DONE; release remains unperformed/);
   assert.match(semantics[1], /process_defect: gate \| routing \| handoff \| local tool defect -> autonomous repair; never terminal BLOCKED/);
-  assert.match(coordinator.content, /plugin injects a measured \*\*Run:\*\* paragraph/i);
-  assert.match(coordinator.content, /Do not emit,\s*estimate, or fabricate Run metrics/i);
+  assert.match(coordinator.content, /plugin injects measured Speed, Cost, and 達成 paragraphs/i);
+  assert.match(coordinator.content, /Do not estimate or fabricate them/i);
   assert.match(coordinator.content, /LUNA_FABRIC_CONTRACT_SHAPE_FIXTURE/);
   assert.match(coordinator.content, /"version": "0\.8\.0"/);
   assert.match(coordinator.content, /"validation": \{ "level": "targeted", "command":/);
@@ -1218,39 +1219,17 @@ test("generated coordinator renders a compact conclusion and collapsible YAML Ev
     /TERMINAL_OUTPUT_TEMPLATE\r?\n([\s\S]+?)\r?\nEND_TERMINAL_OUTPUT_TEMPLATE/,
   );
   assert.ok(output);
-  const [summary, evidence] = output[1].split(/\r?\n\r?\n(?=<details>)/);
-  assert.ok(summary);
-  assert.ok(evidence);
-  assert.deepEqual(summary.split(/\r?\n\r?\n/), [
-    "<status emoji> **<DONE | BLOCKED | NEED_DECISION>** `<stable task id>` — <short conclusion>",
-    "**Validation:** <ordered PASS/FAIL summary>",
-    "**Next:** <single action or none>",
-  ], "visible conclusion is three compact paragraphs without list styling");
-  assert.equal(summary.match(/<status emoji>/gu)?.length, 1, "template has one status emoji slot");
-  assert.doesNotMatch(summary, /^-/mu, "visible conclusion has no Markdown list items");
-  assert.match(evidence, /^<details>\r?\n<summary>Evidence: <compact counts><\/summary>/u);
-  assert.match(evidence, /\r?\n```yaml\r?\n[\s\S]+\r?\n```\r?\n\r?\n<\/details>$/u);
-  assert.doesNotMatch(evidence, /[✅⛔❓🎯📊🐕🔍➡️]/u, "Evidence has no icons");
-  const yaml = /```yaml\r?\n([\s\S]+?)\r?\n```/u.exec(evidence)?.[1];
-  assert.ok(yaml);
-  assert.match(yaml, /^manifest:\r?\n {2}source:\r?\n {4}- <exact source path>\r?\n {2}operation:/mu);
-  assert.match(yaml, /^decisions:\r?\n {2}- /mu);
-  assert.match(yaml, /^validation:$/mu);
-  assert.doesNotMatch(yaml, /^(?:status|task_id|next_action|scout|tracker):/mu, "empty and duplicated fields are omitted");
-  const validationEntries = [...yaml.matchAll(
-    /^ {2}- command: (.+)\r?\n {4}exit: (.+)\r?\n {4}fingerprint: (.+)$/gmu,
-  )].map((match) => ({ command: match[1], exit: Number(match[2]), fingerprint: match[3] }));
-  assert.deepEqual(validationEntries, [
-    { command: "npm test", exit: 1, fingerprint: "initial failure" },
-    { command: "npm test", exit: 0, fingerprint: "final pass" },
-  ], "fenced YAML retains append-only command, exit, and fingerprint evidence");
-  assert.match(
-    coordinator.content,
-    /conclusion is the user's answer[\s\S]+detail layer, never a replacement for the conclusion/i,
-  );
-  assert.match(coordinator.content, /first non-empty\s+output: no plan, progress, assessment, Evidence heading, or preamble may precede it/i);
-  assert.match(coordinator.content, /Omit false, none,\s+empty arrays, empty objects, and fields already represented by the status line or Next paragraph/i);
-  assert.match(coordinator.content, /status, task_id, and next_action never repeat inside Evidence/i);
+  assert.deepEqual(output[1].split(/\r?\n\r?\n/), [
+    "<status emoji> **<DONE | INTERRUPTED | BLOCKED | NEED_DECISION>** `<stable task id>` — <短い日本語結論>",
+    "**変更点:** <簡潔な変更概要>",
+    "**確認結果:** <PASS/FAIL要約。内部code/evidence refなし>",
+    "**次:** <単一actionまたはなし>",
+  ]);
+  assert.equal(output[1].match(/<status emoji>/gu)?.length, 1);
+  assert.doesNotMatch(output[1], /<details>|Evidence:|```yaml|evidence_refs|reason_code/u);
+  assert.match(coordinator.content, /return MUST begin with its conclusion: no plan, progress, assessment, Evidence heading, or preamble/i);
+  assert.match(coordinator.content, /Keep ordered command\/exit\/fingerprint history, manifests, evidence refs,\s*review proof, and terminal receipt append-only in their internal typed ledger and host logs/i);
+  assert.match(coordinator.content, /locally repairable process or evidence defect is never a\s+user question/i);
 });
 
 test("coordinator DONE output receives host-reported root and child run metrics", async () => {
@@ -1313,7 +1292,7 @@ test("coordinator DONE output receives host-reported root and child run metrics"
     assert.equal(body.extra.available, true);
     assert.equal(body.extra.outcome, "DONE");
     assert.equal(body.extra.sessionID, "root");
-    assert.equal(body.extra.runtimeAssetVersion, "0.3.75-sequential-acceptance-parent-v1");
+    assert.equal(body.extra.runtimeAssetVersion, "0.3.76-goal-control-report-v1");
     assert.equal(body.extra.inputTokens, 130);
     assert.equal(body.extra.outputTokens, 15);
     assert.equal(body.extra.reasoningTokens, 5);
@@ -2195,6 +2174,26 @@ function readOnlyWorkerPrompt(directory: string): string {
     "operation_manifest: none",
     "acceptance: read only",
     "validation: read only",
+    `goal_acceptance_fingerprint: sha256:${"d".repeat(64)}`,
+    "delivery_intent: implementation",
+    "delivery_mode: mvp-first",
+    "usable_path_established: false",
+    "controlled_change: false",
+    "goal_criterion_id: read-only-fixture",
+    "goal_target: read only",
+    "goal_entrypoint: read only",
+    "goal_workload: continuation fixture",
+    "goal_oracle_coverage:",
+    "  - continuation lifecycle",
+    "goal_build_boundary: not-applicable",
+    "goal_source: fixture input",
+    "goal_candidate: fixture output",
+    "goal_source_binding: declared",
+    "goal_candidate_binding: declared",
+    "goal_validation_command: read only",
+    "goal_fixture: plugin read only",
+    "goal_proof_scope: document-deliverable",
+    "goal_expected_outcome: pass",
   ].join("\n");
 }
 
@@ -2218,6 +2217,27 @@ async function beginTrackedTaskChild(
     "  source_manifest: [allowed.txt]",
     "operation_manifest: operation-manifest.json",
     "validation: npm test",
+    `goal_acceptance_fingerprint: sha256:${"c".repeat(64)}`,
+    "delivery_intent: implementation",
+    "delivery_mode: mvp-first",
+    "usable_path_established: false",
+    "controlled_change: false",
+    "goal_budget_units: 32",
+    "goal_criterion_id: tracked-safe-change",
+    "goal_target: safe change",
+    "goal_entrypoint: npm test",
+    "goal_workload: tracked fixture",
+    "goal_oracle_coverage:",
+    "  - safe change",
+    "goal_build_boundary: included",
+    "goal_source: protected fixture source",
+    "goal_candidate: protected fixture candidate",
+    "goal_source_binding: current-protected",
+    "goal_candidate_binding: current-protected",
+    "goal_validation_command: npm test",
+    "goal_fixture: plugin tracked task",
+    "goal_proof_scope: requested-full",
+    "goal_expected_outcome: pass",
   ].join("\n");
   await chat(
     { sessionID: parentID, agent: "dog-coordinator", messageID: `${parentID}-real-user` },
@@ -3503,6 +3523,26 @@ test("typed parallel prepare is the only path to reserved dependency-aware worke
         "acceptance:",
         ...parentCriteria.map((criterion) => `  - ${criterion}`),
         "validation: npm test",
+        `goal_acceptance_fingerprint: sha256:${"e".repeat(64)}`,
+        "delivery_intent: implementation",
+        "delivery_mode: mvp-first",
+        "usable_path_established: false",
+        "controlled_change: false",
+        "goal_criterion_id: sequential-parent",
+        "goal_target: preserve sequential parent",
+        "goal_entrypoint: npm test",
+        "goal_workload: typed parallel fixture",
+        "goal_oracle_coverage:",
+        "  - sequential parent criterion",
+        "goal_build_boundary: included",
+        "goal_source: fixture source",
+        "goal_candidate: fixture candidate",
+        "goal_source_binding: current-protected",
+        "goal_candidate_binding: current-protected",
+        "goal_validation_command: npm test",
+        "goal_fixture: typed parallel dispatch",
+        "goal_proof_scope: requested-full",
+        "goal_expected_outcome: pass",
       ].join("\n") } },
     );
     await hooks["tool.execute.after"]!(
@@ -3978,6 +4018,7 @@ test("fresh-root control uses one host-round-tripped ticket and terminal state r
       "goal_candidate: current protected candidate", "goal_source_binding: current-protected",
       "goal_candidate_binding: current-protected",
       "goal_fixture: host-ticket", "goal_proof_scope: requested-full", "goal_expected_outcome: pass",
+      "delivery_intent: implementation", "usable_path_established: false", "controlled_change: false",
       "goal_budget_units: 4"].join("\n");
     const criterionBlock = singleGoalPrompt.slice(singleGoalPrompt.indexOf("goal_criterion_id:"));
     const goalPrompt = singleGoalPrompt + "\n" +
@@ -3987,10 +4028,36 @@ test("fresh-root control uses one host-round-tripped ticket and terminal state r
       { message: { id: "goal-revision-turn", agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
         parts: [{ type: "text", text: "continue the accepted goal with native host evidence" }] },
     );
+    const missingGoalDeclaration = goalPrompt.slice(0, goalPrompt.indexOf("goal_acceptance_fingerprint:"));
+    await assert.rejects(hooks["tool.execute.before"]!(
+      { tool: "task", sessionID: "goal-root", callID: "goal-unit-missing-declaration" },
+      { args: { subagent_type: "dog-worker", prompt: missingGoalDeclaration } },
+    ), (error: unknown) => error instanceof HandoffDeniedError &&
+      error.defects.includes("contract /goal_acceptance_fingerprint goal_fingerprint_missing"));
+    await assert.rejects(hooks["tool.execute.before"]!(
+      { tool: "task", sessionID: "goal-root", callID: "goal-unit-invalid-declaration" },
+      { args: { subagent_type: "dog-worker", prompt: goalPrompt.replace(goalFingerprintValue, "sha256:malformed") } },
+    ), (error: unknown) => error instanceof HandoffDeniedError &&
+      error.defects.includes("contract /goal_acceptance_fingerprint goal_fingerprint_format"));
+    const deniedProjection = { system: [] as string[] };
+    await hooks["experimental.chat.system.transform"]!({ sessionID: "goal-root" }, deniedProjection);
+    const deniedLine = deniedProjection.system.find((entry) => entry.startsWith("SORTIE_GOAL_BOUND_STATE\n"));
+    assert.ok(deniedLine);
+    assert.equal(JSON.parse(deniedLine.slice(deniedLine.indexOf("\n") + 1)).outstanding_reservations, 0);
     await hooks["tool.execute.before"]!(
       { tool: "task", sessionID: "goal-root", callID: "goal-unit" },
       { args: { subagent_type: "dog-worker", prompt: goalPrompt } },
     );
+    await assert.rejects(hooks["tool.execute.before"]!(
+      { tool: "task", sessionID: "goal-root", callID: "goal-unit-invalid-after-bind" },
+      { args: { subagent_type: "dog-worker", prompt: goalPrompt.replace(goalFingerprintValue, "sha256:malformed") } },
+    ), (error: unknown) => error instanceof HandoffDeniedError &&
+      error.defects.includes("contract /goal_acceptance_fingerprint goal_fingerprint_format"));
+    await assert.rejects(hooks["tool.execute.before"]!(
+      { tool: "task", sessionID: "goal-root", callID: "goal-unit-revision-after-bind" },
+      { args: { subagent_type: "dog-worker", prompt: goalPrompt.replace(goalFingerprintValue, `sha256:${"b".repeat(64)}`) } },
+    ), (error: unknown) => error instanceof HandoffDeniedError &&
+      error.defects.includes("contract /goal_acceptance_fingerprint goal_revision_unauthorized"));
     const bound = { system: [] as string[] };
     await hooks["experimental.chat.system.transform"]!({ sessionID: "goal-root" }, bound);
     const boundLine = bound.system.find((entry) => entry.startsWith("SORTIE_GOAL_BOUND_STATE\n"));
@@ -4015,6 +4082,36 @@ test("fresh-root control uses one host-round-tripped ticket and terminal state r
     const premature = { text: "status: DONE" };
     await hooks["experimental.text.complete"]!({ sessionID: "goal-root" }, premature);
     assert.match(premature.text, /status: IN_PROGRESS/u);
+    const prematureEmoji = { text: "✅ **DONE** — claimed\n**EVIDENCE:** fake\nraw_status: fake" };
+    await hooks["experimental.text.complete"]!({ sessionID: "goal-root" }, prematureEmoji);
+    assert.match(prematureEmoji.text, /^status: IN_PROGRESS/u);
+    assert.doesNotMatch(prematureEmoji.text, /EVIDENCE|raw_status/iu);
+
+    await hooks["chat.message"]!(
+      { sessionID: "goal-root", agent: "dog-coordinator", messageID: "goal-declaration-validation-turn" },
+      { message: { id: "goal-declaration-validation-turn", agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+        parts: [{ type: "text", text: "repair typed declaration locally before dispatch" }] },
+    );
+    const invalidDeclarations = [
+      { code: "delivery_intent_invalid", prompt: goalPrompt.replace("delivery_intent: implementation", "delivery_intent: invalid") },
+      { code: "delivery_mode_invalid", prompt: `${goalPrompt}\ndelivery_mode: invalid` },
+      { code: "goal_boolean_invalid", prompt: goalPrompt.replace("usable_path_established: false", "usable_path_established: maybe") },
+      { code: "goal_boolean_invalid", prompt: goalPrompt.replace("controlled_change: false", "controlled_change: maybe") },
+      { code: "goal_build_boundary_invalid", prompt: goalPrompt.replace("goal_build_boundary: not-applicable", "goal_build_boundary: invalid") },
+      { code: "goal_source_binding_invalid", prompt: goalPrompt.replace("goal_source_binding: current-protected", "goal_source_binding: invalid") },
+      { code: "goal_candidate_binding_invalid", prompt: goalPrompt.replace("goal_candidate_binding: current-protected", "goal_candidate_binding: invalid") },
+      { code: "goal_proof_scope_invalid", prompt: goalPrompt.replace("goal_proof_scope: requested-full", "goal_proof_scope: invalid") },
+      { code: "goal_expected_outcome_invalid", prompt: goalPrompt.replace("goal_expected_outcome: pass", "goal_expected_outcome: invalid") },
+      { code: "goal_oracle_coverage_invalid", prompt: goalPrompt.replace("goal_oracle_coverage:\n  - terminal-rejection", "goal_oracle_coverage: []") },
+      { code: "goal_field_missing", prompt: goalPrompt.replace(/^goal_target:.*\n/mu, "") },
+    ];
+    for (const [index, declaration] of invalidDeclarations.entries()) {
+      await assert.rejects(hooks["tool.execute.before"]!(
+        { tool: "task", sessionID: "goal-root", callID: `goal-declaration-invalid-${index}` },
+        { args: { subagent_type: "dog-worker", prompt: declaration.prompt } },
+      ), (error: unknown) => error instanceof HandoffDeniedError &&
+        error.defects.some((defect) => defect.endsWith(` ${declaration.code}`)));
+    }
 
     await hooks["tool.execute.before"]!(
       { tool: "task", sessionID: "goal-root", callID: "goal-unit-proof" },
@@ -4054,7 +4151,9 @@ test("fresh-root control uses one host-round-tripped ticket and terminal state r
       .replaceAll("goal-unit-proof", "goal-unit-proof-2")
       .replace(handoffPath, secondHandoffPath)
       .replace("goal.operation-manifest.json", "goal-2.operation-manifest.json")
-      .split("\n").filter((line) => !line.startsWith("goal_") && !line.startsWith("  - ")).join("\n");
+      .split("\n").filter((line) => !line.startsWith("goal_") && !line.startsWith("delivery_") &&
+        !line.startsWith("usable_path_established:") && !line.startsWith("controlled_change:") &&
+        !line.startsWith("  - ")).join("\n");
     await hooks["chat.message"]!(
       { sessionID: "goal-root", agent: "dog-coordinator", messageID: "goal-retained-turn" },
       { message: { id: "goal-retained-turn", agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
@@ -4094,6 +4193,13 @@ test("fresh-root control uses one host-round-tripped ticket and terminal state r
       { output: "<task_result>second native validation completed</task_result>",
         metadata: { sessionId: "goal-worker-2" } },
     );
+    const staleDecision = { text: "status: NEED_DECISION — stale model conclusion" };
+    await hooks["experimental.text.complete"]!({ sessionID: "goal-root" }, staleDecision);
+    assert.match(staleDecision.text, /^status: DONE/u);
+    await assert.rejects(hooks["tool.execute.before"]!(
+      { tool: "task", sessionID: "goal-root", callID: "goal-after-terminal" },
+      { args: { subagent_type: "dog-worker", prompt: secondGoalPrompt } },
+    ), /SORTIE_GOAL_CONTROL_DENIED: terminal/u);
     hostMessages.push({ info: { id: "goal-terminal-message", role: "assistant", agent: "dog-coordinator" } as never,
       parts: [{ id: "goal-terminal-part", type: "text", text: "status: DONE" } as never] });
     await hooks.event!({ event: { type: "message.part.updated", properties: { part: {
@@ -5951,6 +6057,8 @@ test("worker activation accepts both inline digest and flat wrapper dispatch for
     "projectRoot=C:\\candidate",
     "source_manifest=[src/a.ts]",
     "acceptance: safe change",
+    "delivery_intent: implementation",
+    "goal_target: implementation",
   ].join("\n");
   assert.equal(isExplicitTaskHandoff(inlineDigest), true);
   assert.equal(isExplicitTaskHandoff(flatWrapper), true);

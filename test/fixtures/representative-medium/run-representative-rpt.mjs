@@ -118,8 +118,10 @@ function validateConfig(config) {
     "Runtime paths are absent.");
   invariant(SHA.test(config.target_sha), "Target SHA must be exact.");
   invariant(isRecord(config.package) && typeof config.package.path === "string" &&
-    resolve(config.package.path) === REPOSITORY_PACKAGE_PATH &&
     typeof config.package.version === "string" && PACKAGE_VERSION.test(config.package.version) &&
+    (resolve(config.package.path) === REPOSITORY_PACKAGE_PATH ||
+      (isInside(TESTENV_ROOT, resolve(config.package.path)) &&
+        basename(resolve(config.package.path)) === `sortie-dogs-${config.package.version}.tgz`)) &&
     SHA256.test(config.package.sha256), "Package provenance is invalid.");
   invariant(SHA256.test(config.fixture_source_sha256), "Fixture source identity is invalid.");
   invariant(Array.isArray(config.units) && config.units.length === 5, "Exactly five units are required.");
@@ -153,10 +155,12 @@ export async function prepareRepresentativeRuntime({ runtimeRoot, packagePath })
   const root = boundedRuntimeRoot(runtimeRoot);
   const packageFile = resolve(packagePath);
   invariant((await stat(packageFile)).isFile(), "Package provenance path must identify a file.");
-  invariant(packageFile === REPOSITORY_PACKAGE_PATH, "Package provenance must identify the repository package.");
   const repositoryPackage = await json(REPOSITORY_PACKAGE_PATH);
   invariant(typeof repositoryPackage.version === "string" && PACKAGE_VERSION.test(repositoryPackage.version),
     "Repository package version is invalid.");
+  invariant(packageFile === REPOSITORY_PACKAGE_PATH ||
+    (isInside(TESTENV_ROOT, packageFile) && basename(packageFile) === `sortie-dogs-${repositoryPackage.version}.tgz`),
+  "Package provenance must identify the repository package.");
   const template = await json(join(SOURCE_ROOT, "representative-config.template.json"));
   validateTemplate(template);
   const contractTemplate = await json(join(PROJECT_SOURCE, "luna-fabric.template.json"));

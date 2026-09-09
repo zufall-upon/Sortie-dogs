@@ -106,6 +106,8 @@ export type GoalFlightEvent =
       readonly unit_id: string; readonly session_id: string; readonly ticket_id: string | null })
   | (GoalEventBase & { readonly kind: "unit.settled"; readonly reservation_id: string; readonly receipt_id: string;
       readonly goal_id: string; readonly unit_id: string; readonly disposition: "succeeded" | "failed" | "cancelled";
+      /** Missing on pre-v0.9.1 ledgers and therefore interpreted as an acceptance result. */
+      readonly result_class?: "acceptance" | "process-defect" | "interrupted";
       readonly progress_fingerprint: string | null; readonly evidence: readonly GoalEvidence[];
       readonly elapsed_ms: number | null; readonly cost_usd: number | null })
   | (GoalEventBase & { readonly kind: "validation.admission"; readonly goal_id: string; readonly reservation_id: string;
@@ -342,7 +344,11 @@ export function reduceGoalFlight(records: readonly GoalFlightEventRecord[]): Goa
         .filter((criterionID) => !state.satisfied_criteria.includes(criterionID));
       const progress = newCriteria.length > 0;
       requireState(event.progress_fingerprint === (progress ? goalFingerprint(event.evidence) : null), "evidence", "Progress fingerprint does not represent newly accepted evidence.");
-      const nextNoProgress = progress ? 0 : state.no_progress_results + 1;
+      const acceptanceFailure = event.disposition === "failed" &&
+        (event.result_class === undefined || event.result_class === "acceptance");
+      const nextNoProgress = progress ? 0 : acceptanceFailure
+        ? state.no_progress_results + 1
+        : state.no_progress_results;
       const elapsed = state.consumed_time_ms === null || event.elapsed_ms === null ? null : state.consumed_time_ms + event.elapsed_ms;
       const cost = state.consumed_cost_usd === null || event.cost_usd === null ? null : state.consumed_cost_usd + event.cost_usd;
       state = { ...state, consumed_units: state.consumed_units + 1, consumed_time_ms: elapsed, consumed_cost_usd: cost,

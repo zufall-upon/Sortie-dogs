@@ -13,7 +13,7 @@ const BASELINE = join(ROOT, "baseline", "sortie-dogs-0.8.3.tgz");
 const attemptID = `${new Date().toISOString().replace(/[-:.TZ]/gu, "").slice(0, 14)}-${randomUUID().slice(0, 8)}`;
 const ATTEMPT = join(ROOT, "attempts", attemptID);
 const CANDIDATE_DIR = join(ATTEMPT, "candidate");
-const CANDIDATE = join(CANDIDATE_DIR, "sortie-dogs-0.9.0.tgz");
+const CANDIDATE = join(CANDIDATE_DIR, "sortie-dogs-0.9.1.tgz");
 const RESULT = join(ATTEMPT, "goal-bound-rpt-summary.json");
 const EXPECTED = "candidate-v09";
 const STAGE_ONE = "seed";
@@ -270,20 +270,20 @@ async function controls(taskID, parentFingerprint = "none", stage = "unit-1") {
       : ["goal.txt content", "fixed unit-1 node oracle"] };
 }
 
-function workerContract(control, goalDeclaration = false, additionalCriteria = []) {
-  const fingerprint = `sha256:${sha256(`goal-continuity-v09:${control.goalCriterionID}`)}`;
+function workerContract(control, goalDeclaration = false, additionalCriteria = [], declarationControl = control) {
+  const fingerprint = `sha256:${sha256(`goal-continuity-v09:${declarationControl.goalCriterionID}`)}`;
   return ["/sortie", "role: implementation", `project_root: ${PROJECT}`, `handoff_path: ${control.handoff}`,
     `task_id: ${control.taskID}`, 'source_manifest: ["AGENTS.md","validate.mjs","goal.txt","stage.txt"]',
     `operation_manifest: ${control.manifestRelative}`, `acceptance: ${JSON.stringify(control.criteria)}`,
     `validation: ${control.validation}`,
     ...(goalDeclaration ? [`goal_acceptance_fingerprint: ${fingerprint}`, "delivery_intent: implementation",
       "delivery_mode: mvp-first", "usable_path_established: false", "controlled_change: false", "goal_budget_units: 4",
-      `goal_criterion_id: ${control.goalCriterionID}`, `goal_target: ${control.goalTarget}`, "goal_entrypoint: validate.mjs",
-      `goal_workload: ${control.goalWorkload}`, '[goal placeholder]'] : [])].filter((line) => line !== "[goal placeholder]")
-    .concat(goalDeclaration ? [`goal_oracle_coverage: ${JSON.stringify(control.goalOracleCoverage)}`,
+      `goal_criterion_id: ${declarationControl.goalCriterionID}`, `goal_target: ${declarationControl.goalTarget}`, "goal_entrypoint: validate.mjs",
+      `goal_workload: ${declarationControl.goalWorkload}`, '[goal placeholder]'] : [])].filter((line) => line !== "[goal placeholder]")
+    .concat(goalDeclaration ? [`goal_oracle_coverage: ${JSON.stringify(declarationControl.goalOracleCoverage)}`,
       "goal_build_boundary: not-applicable", "goal_source: protected fixture seed", "goal_candidate: protected installed candidate",
       "goal_source_binding: current-protected", "goal_candidate_binding: current-protected",
-      `goal_validation_command: ${control.validation}`, "goal_fixture: goal-continuity-v09", "goal_proof_scope: requested-full",
+      `goal_validation_command: ${declarationControl.validation}`, "goal_fixture: goal-continuity-v09", "goal_proof_scope: requested-full",
       "goal_expected_outcome: pass"] : []).concat(additionalCriteria.map((criterion) => {
         const declaration = workerContract(criterion, true);
         return declaration.slice(declaration.indexOf("goal_criterion_id:"));
@@ -427,8 +427,8 @@ try {
   summary.phase = "candidate-build-pack";
   await buildCandidate();
   const candidateIdentity = await install(CANDIDATE, "candidate");
-  assert.equal(candidateIdentity.packageVersion, "0.9.0");
-  assert.equal(candidateIdentity.diskMarker, "0.3.75-sequential-acceptance-parent-v1");
+  assert.equal(candidateIdentity.packageVersion, "0.9.1");
+  assert.equal(candidateIdentity.diskMarker, "0.3.76-goal-control-report-v1");
 
   const recoveredOpen = process.argv.includes("--recovered-open");
   summary.phase = recoveredOpen ? "candidate-recovered-open" : "candidate-open-goal";
@@ -445,8 +445,10 @@ try {
   summary.phase = "candidate-goal-run";
   const first = await controls("candidate-unit-1");
   const second = await controls("candidate-unit-2", first.acceptanceFingerprint, "unit-2");
-  const candidatePrompt = `/sortie\nResume the already-open candidate goal. Preserve its real goal_id and spend. First call sortie_enable_backlog_drain with max_units 2. Dispatch candidate-unit-1 to dog-worker using exactly this contract, retaining BOTH goal_criterion_id declaration blocks verbatim as the single goal acceptance contract:\n${workerContract(first, true, [second])}\nAfter its actual ${first.validation} exit 0, call sortie_compact_and_continue exactly once. In the host synthetic resumed turn, dispatch candidate-unit-2 using exactly this contract without revising the goal declaration:\n${workerContract(second)}\nIt must bind, advance only stage.txt to ${STAGE_TWO}, retain goal.txt, and run exactly ${second.validation}. Then return status: DONE only after actual worker results. No scout, reviewer, fake receipts, shell from coordinator, extra dispatch, or preloaded execution facts.`;
-  const candidate = await runGoal(candidatePrompt, candidateSessionID, "candidate");
+  const firstPrompt = `/sortie\nResume the already-open candidate goal. Preserve its real goal_id and spend. First call sortie_enable_backlog_drain with max_units 2. Dispatch candidate-unit-1 to dog-worker using exactly this contract, retaining BOTH goal_criterion_id declaration blocks verbatim as the single goal acceptance contract. Repeating the field name is the canonical multi-criterion list syntax; the two ID values are distinct, not duplicates:\n${workerContract(first, true, [second])}\nAfter its actual ${first.validation} exit 0, call sortie_compact_and_continue exactly once. In the synthetic resumed turn return exactly CANDIDATE_UNIT_ONE_COMPACTED with no tool call, status, DONE, STOP, progress marker, next_action, or continuation marker. A second host process will resume the same session. No scout, reviewer, fake receipts, shell from coordinator, extra dispatch, or preloaded execution facts.`;
+  const unitOne = await runGoal(firstPrompt, candidateSessionID, "candidate-unit-1");
+  const secondPrompt = `/sortie\nResume the same accepted goal_id and cumulative spend. Dispatch candidate-unit-2 to dog-worker using exactly this contract. Its complete typed declaration is identical to the accepted two-criterion declaration and must not revise it:\n${workerContract(second, true, [second], first)}\nIt must bind, advance only stage.txt to ${STAGE_TWO}, retain goal.txt, and run exactly ${second.validation}. Return status: DONE only after the actual worker result. Do not call sortie_compact_and_continue, scout, reviewer, coordinator shell, or any extra dispatch.`;
+  const candidate = await runGoal(secondPrompt, candidateSessionID, "candidate-unit-2");
   const observation = await goalObservation(ledgerPath, goalID);
   assert.equal(observation.receipt?.status, "succeeded");
   assert.equal(observation.receipt?.goal_id, goalID);
@@ -465,6 +467,7 @@ try {
   assert.deepEqual(new Set(observation.evidence.map((entry) => entry.command[0])), new Set(VALIDATIONS));
   const ticketRejections = await rejectedTicketChecks(candidateIdentity.packageRoot, ledgerPath, observation);
   summary.candidate = { identity: { ...candidateIdentity, packageRoot: undefined }, checkpoint: checkpoint.metadata,
+    unitOneTranscript: unitOne.metadata,
     transcript: candidate.metadata, loadedPlugin: candidate.paths, sameSessionRestart: candidate.metadata.sessionIDs.includes(candidateSessionID),
     sessionID: candidateSessionID, baselineSessionID: sessionID, goalID, goalPreservedAcrossRestart: true, checkpointEventCount: checkpointObservation.eventCount,
     eventCount: observation.eventCount, eventKinds: observation.eventKinds, consumedUnits: observation.consumedUnits,

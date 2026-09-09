@@ -56,6 +56,21 @@ test("coordinator keeps root goal and sequential handoff acceptance fingerprints
   assert.match(coordinator.content, /next_sequential_parent_fingerprint/u);
   assert.match(coordinator.content, /never copy it into an\s+acceptance-continuity parent_fingerprint/u);
   assert.match(coordinator.content, /If no accepted criterion changed, carry the same ordered criteria and\s+fingerprint without adding a duplicate criterion/u);
+  assert.match(coordinator.content, /Before Task, validate the whole typed declaration/u);
+  assert.match(coordinator.content, /Do not dispatch on a declaration defect/u);
+  assert.match(coordinator.content, /corrected Task call in\s+the same turn/u);
+  assert.match(coordinator.content, /Only a settled worker result that actually fails the accepted criterion\s+increments no-progress/u);
+  assert.match(coordinator.content, /locally repairable evidence defects,\s+consume no no-progress result/u);
+});
+
+test("terminal report is Japanese and concise while internal proof remains durable", () => {
+  const coordinator = runtimeAssets.find((candidate) => candidate.name === "dog-coordinator");
+  assert.ok(coordinator);
+  assert.match(coordinator.content, /DONE, INTERRUPTED, BLOCKED, or NEED_DECISION/u);
+  assert.match(coordinator.content, /Japanese 変更点, 確認結果, and 次/u);
+  assert.match(coordinator.content, /Never render a user-facing Evidence heading, <details> block, evidence reference, internal reason code/u);
+  assert.match(coordinator.content, /Keep ordered command\/exit\/fingerprint history, manifests, evidence refs,\s+review proof, and terminal receipt append-only/u);
+  assert.match(coordinator.content, /locally repairable process or evidence defect is never a\s+user question/u);
 });
 
 test("coordinator delegates parallel identity transcription to the runtime", () => {

@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { collectRunMetrics, createSortieResult, formatRunMetrics, formatSortieResult, insertRunMetrics,
-  insertSortieResult, isDoneTerminalText, terminalRunOutcome } from "../src/plugin/run-metrics.ts";
+  insertSortieResult, isDoneTerminalText, replaceDoneTerminalStatus, replaceTerminalStatus, sanitizeTerminalReport,
+  terminalRunOutcome } from "../src/plugin/run-metrics.ts";
 
 test("collects bounded recursive assistant metrics and deduplicates messages", async () => {
   const metrics = await collectRunMetrics({ session: {
@@ -73,6 +74,7 @@ test("recognizes only an accepted first terminal status line", () => {
   assert.equal(isDoneTerminalText("NEED_DECISION: DONE"), false);
   assert.equal(isDoneTerminalText("  ✅ **DONE** — indented"), false);
   assert.equal(terminalRunOutcome("✅ **DONE** — complete"), "DONE");
+  assert.equal(terminalRunOutcome("⚠️ **INTERRUPTED** — incomplete"), "INTERRUPTED");
   assert.equal(terminalRunOutcome("✅ conclusion: status: DONE; task_id: task-06; complete"), "DONE");
   assert.equal(terminalRunOutcome("❓ conclusion: status: NEED_DECISION; task_id: task-06; choose"), "NEED_DECISION");
   assert.equal(terminalRunOutcome("⛔ conclusion: status: DONE; task_id: task-06; mismatched"), undefined);
@@ -82,6 +84,21 @@ test("recognizes only an accepted first terminal status line", () => {
   assert.equal(terminalRunOutcome("```\n⛔ **BLOCKED** fake\nTRUE_BLOCKER: external: fake\n```"), undefined);
   assert.equal(terminalRunOutcome("progress\nstatus: DONE — body example"), undefined);
   assert.equal(terminalRunOutcome("✅ **DONE** `task` — complete\nstatus: NEED_DECISION — evidence example"), "DONE");
+});
+
+test("replaces every accepted DONE spelling without rewriting examples", () => {
+  const replacement = "status: IN_PROGRESS\ngoal_control: accepted criteria remain unproved";
+  assert.equal(replaceDoneTerminalStatus("status: DONE — claimed\nbody", replacement), `${replacement}\nbody`);
+  assert.equal(replaceDoneTerminalStatus("✅ **DONE** — claimed\nbody", replacement), `${replacement}\nbody`);
+  assert.equal(replaceDoneTerminalStatus("✅ conclusion: status: DONE; task_id: task-06; claimed", replacement), replacement);
+  assert.equal(replaceDoneTerminalStatus("progress\nstatus: DONE — example", replacement), "progress\nstatus: DONE — example");
+  assert.equal(replaceTerminalStatus("status: NEED_DECISION — stale", "status: DONE"), "status: DONE");
+});
+
+test("sanitizes internal terminal fields without a metrics or result insertion", () => {
+  const sanitized = sanitizeTerminalReport("status: INTERRUPTED\nreason_code: fake\nmanifest: hidden.json\n**EVIDENCE:** claim\n" +
+    "```yaml\nraw_status: fake\n```\n<details>claim</details>");
+  assert.equal(sanitized, "status: INTERRUPTED");
 });
 
 test("inserts metrics after the observed conclusion-status alias", async () => {
@@ -211,25 +228,36 @@ test("builds a completed Sortie Result from the goal receipt, ledger, and host m
     [{ criterion_id: "criterion-1", status: "PASS" }]);
   const inserted = insertSortieResult("status: DONE — complete\n\n**Validation:** PASS", result);
   assert.ok(inserted.startsWith("status: DONE — complete\n\n**Sortie Result**\n**Speed:**"));
-  assert.match(inserted, /\*\*Proof:\*\* PASS · completed \(completed\) · 1\/1 criteria · 1 evidence ref/u);
+  assert.match(inserted, /\*\*達成:\*\* 完了 · acceptance 1\/1/u);
+  assert.doesNotMatch(inserted, /evidence-1|evidence ref|completed\)|sha256:/u);
   assert.equal(insertSortieResult(inserted, result), inserted);
+  const sanitized = insertSortieResult("status: DONE\n\n**EVIDENCE:** model claim\nraw_status: fake\n" +
+    "```yaml\nEVIDENCE_REFS: [fake]\nraw: claim\n```\n<details><summary>claim</summary>fake</details>", result);
+  assert.doesNotMatch(sanitized, /EVIDENCE|raw_status|EVIDENCE_REFS|<details>|raw: claim/iu);
 });
 
-test("keeps failed and policy-stopped Sortie Result proof distinct from mission state", () => {
+test("renders completed, interrupted, external-blocker, and user-decision as distinct terminal states", () => {
   const base = {
     goal_id: "goal-stopped", terminal_revision: 1, acceptance_fingerprint: `sha256:${"b".repeat(64)}`,
     started_at: "2026-01-01T00:00:00.000Z", ended_at: "2026-01-01T00:00:01.000Z",
     status: "stopped" as const, unit_ids: [], session_ids: ["root"], evidence_refs: [], milestone_at: null,
   };
   const goal = { acceptance_contract: null, consumed_time_ms: null, satisfied_criteria: [] };
-  const failed = createSortieResult({ ...base, stop_reason: "external_dependency" }, goal, undefined);
-  const stopped = createSortieResult({ ...base, stop_reason: "stop_budget" }, goal, undefined);
-  assert.equal(failed.mission.status, "FAILED");
-  assert.equal(stopped.mission.status, "STOPPED");
-  assert.equal(failed.proof.overall, "UNPROVEN");
-  assert.equal(failed.speed.worker_execution_ms.availability, "unavailable");
-  const text = insertSortieResult("⛔ **BLOCKED** external\nTRUE_BLOCKER: external: service", failed);
-  assert.match(text, /\*\*Proof:\*\* UNPROVEN · failed \(external_dependency\)/u);
+  const external = createSortieResult({ ...base, stop_reason: "external_dependency" }, goal, undefined);
+  const interrupted = createSortieResult({ ...base, stop_reason: "stop_budget" }, goal, undefined);
+  const decision = createSortieResult({ ...base, stop_reason: "awaiting_user" }, goal, undefined);
+  assert.equal(external.mission.status, "EXTERNAL_BLOCKER");
+  assert.equal(interrupted.mission.status, "INTERRUPTED");
+  assert.equal(decision.mission.status, "USER_DECISION");
+  assert.equal(external.proof.overall, "UNPROVEN");
+  assert.equal(external.speed.worker_execution_ms.availability, "unavailable");
+  const externalText = insertSortieResult("⛔ **BLOCKED** external\nTRUE_BLOCKER: external: service\n\n<details><summary>Evidence</summary>evidence_refs: secret</details>", external);
+  const interruptedText = insertSortieResult("⚠️ **INTERRUPTED** incomplete", interrupted);
+  const decisionText = insertSortieResult("❓ **NEED_DECISION** choose", decision);
+  assert.match(externalText, /\*\*達成:\*\* 外部要因で未完了/u);
+  assert.match(interruptedText, /\*\*達成:\*\* 中断（未完了）/u);
+  assert.match(decisionText, /\*\*達成:\*\* ユーザー判断待ち（未完了）/u);
+  assert.doesNotMatch(externalText, /TRUE_BLOCKER|external_dependency|<details>|Evidence|evidence_refs/u);
 });
 
 test("types unavailable Sortie Result metrics without synthetic estimates", () => {
@@ -244,6 +272,7 @@ test("types unavailable Sortie Result metrics without synthetic estimates", () =
     { availability: "unavailable", value: null, reason: "goal-clock-invalid" });
   assert.deepEqual(result.proof.criteria,
     { availability: "unavailable", value: null, reason: "acceptance-contract-unavailable" });
-  assert.match(formatSortieResult(result), /Cost:[\s\S]*unavailable \(host-metrics-unavailable\)/u);
+  assert.match(formatSortieResult(result), /Cost:[\s\S]*計測不可/u);
+  assert.doesNotMatch(formatSortieResult(result), /host-metrics-unavailable|goal-clock-invalid|evidence_refs/u);
   assert.doesNotMatch(formatSortieResult(result), /\$0\.0000|0 tokens/u);
 });

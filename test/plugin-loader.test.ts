@@ -125,7 +125,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       join(consumer, "node_modules", "sortie-dogs", "package.json"),
       "utf8",
     )) as { version?: string; scripts?: { prebuild?: string } };
-    assert.equal(installedPackage.version, "0.9.0");
+    assert.equal(installedPackage.version, "0.9.1");
     assert.equal(
       installedPackage.scripts?.prebuild,
       "node --input-type=module --eval \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true });\"",
@@ -445,7 +445,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     for (const asset of loaded.runtimeAssets) {
       assert.equal(asset.version, RUNTIME_ASSET_VERSION, `${asset.name} version must match the shared marker`);
     }
-    assert.equal(RUNTIME_ASSET_VERSION, "0.3.75-sequential-acceptance-parent-v1");
+    assert.equal(RUNTIME_ASSET_VERSION, "0.3.76-goal-control-report-v1");
     const coordinatorFrontmatter = /^---\r?\n([\s\S]*?)\r?\n---/u.exec(coordinator.content)?.[1];
     assert.ok(coordinatorFrontmatter);
     assert.match(coordinatorFrontmatter, /^model: openai\/gpt-5\.6-terra$/m);
@@ -938,37 +938,13 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(terminalSemantics[1], /BLOCKED:\s*accepted scope remains incomplete because a proven external dependency prevents progress/);
     assert.match(terminalSemantics[1], /NEED_DECISION:\s*only an exclusively user-controlled product \| acceptance \| risk choice remains/);
     const terminalEvidence = coordinator.content.match(
-      /TERMINAL_EVIDENCE_FIXTURE\r?\n([\s\S]+?)\r?\nEND_TERMINAL_EVIDENCE_FIXTURE/,
+      /INTERNAL_TERMINAL_PROOF_FIXTURE\r?\n([\s\S]+?)\r?\nEND_INTERNAL_TERMINAL_PROOF_FIXTURE/,
     );
-    assert.ok(terminalEvidence, "coordinator needs complete terminal evidence");
-    for (const field of [
-      "status",
-      "task_id",
-      "manifest",
-      "decisions",
-      "validation",
-      "scout",
-      "tracker",
-      "raw_status",
-      "diff",
-      "stale_paths",
-      "new_findings",
-      "next_action",
-    ]) {
-      assert.match(terminalEvidence[1], new RegExp(`^\\s*${field}:`, "m"));
-    }
-    assert.match(
-      terminalEvidence[1],
-      /manifest:\s*\r?\n\s+source_manifest: <exact entries or none>\r?\n\s+operation_manifest: <exact path or none>/,
-    );
-    assert.match(
-      terminalEvidence[1],
-      /validation:\s*\r?\n\s+- command: <exact command>; exit: <exit>; fingerprint: <concise fingerprint>/,
-    );
-    assert.match(
-      terminalEvidence[1],
-      /scout:\s*\r?\n\s+attempted: <boolean>\r?\n\s+revision: <revision>\r?\n\s+blocker_owner: <owner>\r?\n\s+reason: <exact decision reason>/,
-    );
+    assert.ok(terminalEvidence, "coordinator needs durable internal proof without user-facing evidence details");
+    assert.match(terminalEvidence[1], /storage: typed RunFlightLedger \+ validation history \+ review proof \+ host logs/);
+    assert.match(terminalEvidence[1], /retained: manifests \| decisions \| ordered command\/exit\/fingerprint \| evidence refs \| raw status \| diff/);
+    assert.match(terminalEvidence[1], /user_output: Japanese conclusion \+ Speed \+ Cost \+ 達成 \+ 変更点 \+ 確認結果 \+ 次/);
+    assert.match(terminalEvidence[1], /forbidden_user_output: Evidence heading \| details \| evidence refs \| internal reason codes \| raw status/);
     // A dispatched worker is gated by its session, so source work needs the same authorization.
     assert.match(
       worker.content,
@@ -1402,7 +1378,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(sortie.content, /never route a worker to the user/i);
 
     for (const asset of loaded.runtimeAssets) {
-      assert.equal(asset.version, "0.3.75-sequential-acceptance-parent-v1");
+      assert.equal(asset.version, "0.3.76-goal-control-report-v1");
       const frontmatter = asset.content.match(/^---\r?\n([\s\S]+?)\r?\n---\r?\n/);
       assert.ok(frontmatter, `${asset.name} must have frontmatter`);
       const entries = Object.fromEntries(
