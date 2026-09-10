@@ -9,7 +9,15 @@
     "official_sha256", "package", "source", "opencode", "tools", "verifier", "protocol"
   ],
   "properties": {
+    "expected_operation": {
+      "type": "object", "additionalProperties": false, "required": ["bare", "sortie"],
+      "properties": {
+        "bare": { "$ref": "#/$defs/expectedOperation" },
+        "sortie": { "$ref": "#/$defs/expectedOperation" }
+      }
+    },
     "schema_version": { "const": 1 },
+    "qualification_only": { "const": true },
     "methodology_comparable": { "const": false },
     "leaderboard": { "const": false },
     "task_id": { "const": "datacurve/anko-typed-variable-bindings" },
@@ -114,6 +122,15 @@
     }
   },
   "$defs": {
+    "expectedOperation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["min_patch_bytes", "min_implementation_children", "terminal_outcome"],
+      "properties": {
+        "min_patch_bytes": { "type": "integer", "minimum": 1 },
+        "min_implementation_children": { "type": "integer", "minimum": 0 },
+        "terminal_outcome": { "enum": ["DONE", null] }
+      }
+    },
     "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
     "relativePath": { "type": "string", "minLength": 1, "pattern": "^(?![A-Za-z]:)(?![/\\\\])(?!.*(?:^|[/\\\\])\\.\\.(?:[/\\\\]|$)).+$" },
     "command": {

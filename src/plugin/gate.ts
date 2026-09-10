@@ -810,6 +810,32 @@ export function normalizeCommand(command: string): string {
     : `${callOperator[2]}${normalized.slice(callOperator[0].length)}`;
 }
 
+function declaredCommandMatch(segment: string, declared: readonly string[]): string | undefined {
+  const normalized = normalizeCommand(segment);
+  const exact = declared.filter((command) => normalizeCommand(command) === normalized);
+  if (exact.length === 1) return normalizeCommand(exact[0]!);
+  const firstSpace = normalized.indexOf(" ");
+  const executable = firstSpace === -1 ? normalized : normalized.slice(0, firstSpace);
+  const suffix = firstSpace === -1 ? "" : normalized.slice(firstSpace);
+  if (isAbsolute(executable)) return undefined;
+  const equivalent = declared.map(normalizeCommand).filter((command) => {
+    const boundary = command.indexOf(" ");
+    const declaredExecutable = boundary === -1 ? command : command.slice(0, boundary);
+    const declaredSuffix = boundary === -1 ? "" : command.slice(boundary);
+    return isAbsolute(declaredExecutable) && basename(declaredExecutable) === executable && declaredSuffix === suffix;
+  });
+  return equivalent.length === 1 ? equivalent[0] : undefined;
+}
+
+/** Canonicalize only an exact or unambiguous basename-shortened sequence of declared validations. */
+export function canonicalDeclaredValidationSequence(command: string, declared: ReadonlySet<string>): string | undefined {
+  const normalized = normalizeCommand(command);
+  const segments = shellSegments(command, "posix").map((segment) => segment.trim()).filter(Boolean);
+  if (segments.length === 0 || normalized !== segments.map(normalizeCommand).join(" && ")) return undefined;
+  const canonical = segments.map((segment) => declaredCommandMatch(segment, [...declared]));
+  return canonical.every((segment): segment is string => segment !== undefined) ? canonical.join(" && ") : undefined;
+}
+
 /** Unbound sessions may invoke only tools whose complete input is known to be read-only. */
 export function isKnownReadOnlyTool(
   tool: string,

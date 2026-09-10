@@ -48,6 +48,40 @@ OpenCode executable, model `openai/gpt-5.6-sol`, variant `high`, and official in
 120-second startup watchdog and 5400-second activity/workspace-progress watchdogs stop stalled process
 trees at the official agent timeout. The hard safety wall is also 5400 seconds. Retry count is zero.
 
+Inspect each `run-arm` result before continuing. When the benchmark objective assumes normal delivery,
+stop immediately if a required-source-change task produces `patch_bytes: 0`, Sortie dispatches no
+implementation child, a successful terminal claim has incomplete delivery, or required parent/child session
+identity is absent. Do not start the next arm or either verifier and do not calculate a performance comparison.
+Preserve sanitized state for diagnosis and terminate any recorded process tree. After fixing the product, use a
+new runtime root and rerun the complete matched pair only after a focused reproduction passes.
+
+The runner stops the process tree on the first CLI error or failed tool event, returns nonzero, and saves
+a partial `sanitized-summary.json`. Post-run delivery checks likewise stop the pair before any next phase.
+Exploratory exceptions are `read` errors beginning with `File not found: ` or reporting an offset
+outside the file's line count; neither stops
+the run nor increments `event_errors`. Permission failures and other tool errors still stop the run.
+WSL runs use an owned Linux process group; stopping Windows `wsl.exe` alone is not accepted as cleanup proof.
+`summarize` and `cleanup --confirm` accept this stopped state without running missing arms or verifiers.
+Keep the workspace until diagnosis evidence is collected, then run cleanup. The shell sequence above is
+conditional: never paste it as an unconditional batch.
+
+Optional manifest `expected_operation` freezes thresholds before execution:
+```json
+{
+  "bare": { "min_patch_bytes": 1, "min_implementation_children": 0, "terminal_outcome": null },
+  "sortie": { "min_patch_bytes": 1, "min_implementation_children": 1, "terminal_outcome": "DONE" }
+}
+```
+These are also the defaults for existing manifests. Root session identity is always required. Child
+identity comes from completed implementation Task results; an attempted or rejected dispatch is not a child.
+
+Before release, a treatment qualification may set `qualification_only: true`. Its only legal measured
+sequence is `preflight`, `prepare`, `run-arm --arm sortie`, `verify-arm --arm sortie`, `summarize`, and
+`cleanup --confirm`. The report always refuses comparison as `qualification-only`; it cannot be reused as
+one side of a later matched pair. A release benchmark requires a fresh runtime root and normal Bare-first order.
+
+Model-free WSL stop check: `node test/fixtures/frontierharness-local/run-stop-rpt.mjs` inside a WSL login shell.
+
 ## What phases do
 
 - `preflight`: fail-closed pin/hash/schema checks; Git, Node, Go, goyacc, go-ctrf-json-reporter,
@@ -56,7 +90,8 @@ trees at the official agent timeout. The hard safety wall is also 5400 seconds. 
   pinned Go tools rather than ambient alternatives. It records that Docker and Runta are intentionally unused.
 - `prepare`: copies only official inputs byte-identically; creates independent detached base clones;
   removes upstream remote, refs, and reflogs; redirects hooks to an empty directory; creates per-arm
-  `OPENCODE_CONFIG_DIR` and `XDG_CONFIG_HOME`.
+  `OPENCODE_CONFIG_DIR` and `XDG_CONFIG_HOME`. Creates the pinned `$GOPATH/bin` directory before
+  execution because the upstream interactive tests write their log there.
 - `run-arm`: resolves OpenCode config before launch. Bare rejects any Sortie package/plugin/agent/prompt/
   config evidence. Sortie installs the exact tgz with WSL npm, initializes project-local canonical
   assets, checks package version/hash/runtime marker/assets, and selects `dog-coordinator` explicitly.
@@ -82,7 +117,7 @@ trees at the official agent timeout. The hard safety wall is also 5400 seconds. 
   Each arm has an explicit outcome/reason; exit zero alone cannot turn an empty patch or a CLI error
   event into success. Usage aggregates identified `step-finish` events once, with `cli-stream-only`
   coverage. Host-reported zero cost is preserved, not treated as proof of free service or invoice cost.
-- `cleanup --confirm`: only after summary, kills recorded process trees, confirms no remaining agent
+- `cleanup --confirm`: after complete or stopped partial summary, kills recorded process trees, confirms no remaining agent
   process, and removes temporary OpenCode configs/workspaces/wrapper copies, verifier artifact copies,
   and Go caches. It leaves private canonical patch
   evidence, durable state, and sanitized summary under `_testenv`; raw verifier logs are deleted as soon

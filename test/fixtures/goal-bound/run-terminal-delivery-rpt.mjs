@@ -220,6 +220,66 @@ async function arm(label, archive, candidate = false) {
     promoted: archiveState?.run?.fabric?.promoted ?? false };
 }
 
+async function declarationArm(label, archive, candidate) {
+  const project = join(ROOT, "project");
+  if (candidate) await rm(project, { recursive: true, force: true });
+  await seedProject(project);
+  const identity = await install(project, archive, label);
+  const config = join(ROOT, label, "host");
+  const taskID = "declaration-unit";
+  const manifestRelative = ".sortie-dogs/contracts/declaration.operation-manifest.json";
+  const handoff = join(project, ".sortie-dogs/contracts/handoff.declaration-unit.json");
+  const criteria = ["test/a.txt equals delivered-a and node validate.mjs a passes"];
+  const validation = "node validate.mjs a";
+  const { acceptanceContinuityFingerprint } = await import(pathToFileURL(join(REPO, "dist/core/acceptance-continuity.js")).href);
+  await write(join(project, manifestRelative), JSON.stringify({ version: "0.1.0", task_id: taskID,
+    read: ["validate.mjs", "base.txt"], write: ["test/a.txt"], validation: [validation] }));
+  await write(handoff, JSON.stringify({ version: "0.1.0", profile: "minimal", id: taskID,
+    created_at: new Date().toISOString(), task: { title: taskID, objective: criteria[0] },
+    state: { done: [], next: criteria, blocked: [] }, risks: [],
+    verification: [{ check: validation, status: "not_run", exit_code: null, summary: "Fixed oracle" }],
+    ext: { "sortie-dogs/write-gate": { operation_manifest: manifestRelative, project_root: project },
+      "sortie-dogs/acceptance-continuity": { schema_version: "0.1", authority: "dispatch", task_id: taskID,
+        criteria, fingerprint: acceptanceContinuityFingerprint(criteria), parent_fingerprint: "none" } } }));
+  const declaration = { goal_criterion_id: "file-oracle", goal_target: "test/a.txt content",
+    goal_entrypoint: "validate.mjs", goal_workload: "one file", goal_oracle_coverage: ["file content oracle"],
+    goal_build_boundary: "not-applicable", goal_source: "fixture seed", goal_candidate: "fixture candidate",
+    goal_source_binding: "current-protected", goal_candidate_binding: "current-protected", goal_fixture: "declaration-rpt",
+    goal_proof_scope: "requested-full", goal_expected_outcome: "pass", goal_validation_command: validation };
+  const prompt = ["/sortie", "role: implementation", `task_id: ${taskID}`, `project_root: ${project}`,
+    `handoff_path: ${handoff}`, `operation_manifest: ${manifestRelative}`, 'source_manifest: ["base.txt","validate.mjs"]',
+    `acceptance: ${JSON.stringify(criteria)}`, `validation: ${validation}`, `goal_acceptance_fingerprint: sha256:${sha256(criteria[0])}`,
+    "delivery_intent: true", "delivery_mode: mvp-first", "usable_path_established: false", "controlled_change: false",
+    "goal_budget_units: 2", `goal_acceptance:\n  criteria:\n    - ${JSON.stringify(declaration)}`,
+    "Read the exact handoff, bind the write gate, write test/a.txt with delivered-a, run node validate.mjs a, release, and return. No delegation or commits."].join("\n");
+  const checkpoint = await runCLI(project, config, `/sortie\nExpected-negative declaration probe. Call Task exactly once with the following arguments unchanged. The invalid declaration is intentional. After the rejection return only DECLARATION_REJECTED, without terminal status or retry; the host will resume this session.\n${JSON.stringify({ description: "Probe declaration", subagent_type: "dog-worker", prompt })}`,
+  undefined, `${label}-declaration`);
+  const sessionID = checkpoint.transcript.sessionIDs[0];
+  assert.equal(checkpoint.exit, 0);
+  assert.ok(sessionID);
+  const history = await checked(OPENCODE, ["db", "--format", "json",
+    `SELECT json_extract(data,'$.state.error') error FROM part WHERE session_id='${sessionID}' AND json_extract(data,'$.tool')='task' AND json_extract(data,'$.state.status')='error'`],
+  project, process.env, 30_000, "declaration-errors");
+  const errors = JSON.parse(history.stdout).map((row) => row.error);
+  assert.ok(errors.some((error) => error.includes("delivery_intent_invalid") && error.includes("goal_criteria_missing")));
+  const correctionPresent = errors.some((error) => error.includes("Use flat key: value lines"));
+  const observation = { identity, sessionID, checkpoint, correctionPresent, rejected: true };
+  if (!candidate) return observation;
+  assert.equal(correctionPresent, true);
+  const final = await runCLI(project, config, `/sortie\nResume the same implementation goal. Fix only the Task prompt declaration according to the runtime correction from the previous rejection. This is implementation lacking its usable path. Preserve all criterion meanings, IDs, acceptance, validation, handoff, and scope. Dispatch the corrected dog-worker once, ensure test/a.txt is delivered and validation passes, then report DONE. No source editing by coordinator, no advisor/reviewer, no additional worker.`, sessionID, "candidate-repair");
+  assert.equal(final.exit, 0);
+  assert.ok(final.transcript.sessionIDs.includes(sessionID));
+  const oracle = await checked(process.execPath, ["validate.mjs", "a"], project, process.env, 30_000, "delivered-oracle");
+  const ledger = await json(join(project, ".git/sortie-dogs/run-flight", `${sha256(sessionID)}.json`));
+  const receipt = ledger.goal_events.map(({ event }) => event).findLast((event) => event.kind === "goal.terminal")?.receipt;
+  assert.equal(receipt?.status, "succeeded");
+  const children = await checked(OPENCODE, ["db", "--format", "json",
+    `SELECT id,parent_id,agent FROM session WHERE parent_id='${sessionID}'`], project, process.env, 30_000, "child-lineage");
+  const lineage = JSON.parse(children.stdout);
+  assert.equal(lineage.filter((child) => child.agent === "dog-worker").length, 1);
+  return { ...observation, final, sameSession: true, lineage, oracleExit: oracle.exit, receiptStatus: receipt.status };
+}
+
 const summary = { schemaVersion: "terminal-delivery-rpt-v1", status: "running", phase: "preflight",
   processesStopped: false, root: relative(REPO, ROOT).replaceAll("\\", "/") };
 try {
@@ -257,7 +317,13 @@ try {
   await mkdir(ROOT, { recursive: true });
   summary.phase = "candidate-build";
   summary.candidateArchiveSha256 = await buildCandidate(process.env);
-  summary.phase = "baseline";
+   summary.phase = "baseline";
+   if (process.argv.includes("--declaration-probe")) {
+     summary.baseline = await declarationArm("baseline", BASELINE, false);
+     assert.equal(summary.baseline.correctionPresent, false);
+     summary.phase = "candidate";
+     summary.candidate = await declarationArm("candidate", CANDIDATE, true);
+   } else {
   summary.baseline = await arm("baseline", BASELINE, false);
   assert.equal(summary.baseline.successClaimVisible, true, "baseline did not reproduce premature success");
   summary.phase = "candidate";
@@ -269,7 +335,8 @@ try {
   assert.equal(summary.candidate.sameSession, true, "candidate did not resume the same session");
   assert.equal(summary.candidate.identity.packageVersion, packageVersion);
   assert.notEqual(summary.baseline.identity.pluginSha256, summary.candidate.identity.pluginSha256);
-  assert.equal(summary.candidate.identity.marker, "0.3.77-terminal-delivery-v1");
+  assert.equal(summary.candidate.identity.marker, "0.3.80-review-evidence-v1");
+   }
   }
   summary.status = "pass";
   summary.phase = "complete";

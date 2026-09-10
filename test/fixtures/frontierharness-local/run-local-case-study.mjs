@@ -86,7 +86,22 @@ function exactKeys(value, keys, gate) {
 export function validateManifest(value, manifestPath, repositoryRoot = process.cwd()) {
   invariant(record(value), "manifest-shape", "Manifest must be one JSON object.");
   exactKeys(value, ["schema_version", "methodology_comparable", "leaderboard", "task_id", "pins", "paths",
-    "official_sha256", "package", "source", "opencode", "tools", "verifier", "protocol"], "manifest-keys");
+    "official_sha256", "package", "source", "opencode", "tools", "verifier", "protocol",
+    ...(value.expected_operation === undefined ? [] : ["expected_operation"]),
+    ...(value.qualification_only === undefined ? [] : ["qualification_only"])], "manifest-keys");
+  invariant(value.qualification_only === undefined || value.qualification_only === true,
+    "qualification-mode", "qualification_only may only explicitly enable treatment qualification.");
+  if (value.expected_operation !== undefined) {
+    exactKeys(value.expected_operation, ARMS, "expected-operation-arms");
+    for (const arm of ARMS) {
+      const expected = value.expected_operation[arm];
+      exactKeys(expected, ["min_patch_bytes", "min_implementation_children", "terminal_outcome"], "expected-operation-fields");
+      invariant(Number.isSafeInteger(expected.min_patch_bytes) && expected.min_patch_bytes >= 1 &&
+        Number.isSafeInteger(expected.min_implementation_children) && expected.min_implementation_children >= 0 &&
+        (expected.terminal_outcome === null || expected.terminal_outcome === "DONE"),
+      "expected-operation-values", "Expected operation thresholds are invalid.");
+    }
+  }
   invariant(value.schema_version === 1 && value.methodology_comparable === false && value.leaderboard === false,
     "protocol-identity", "Manifest must identify an unofficial, non-leaderboard, methodology-incomparable run.");
   invariant(value.task_id === TASK_ID, "task-identity", "Manifest task id differs from the approved task.");
@@ -211,7 +226,7 @@ async function killTree(child) {
   }
 }
 
-async function execute(executable, args, options = {}) {
+export async function execute(executable, args, options = {}) {
   const spec = buildSpawnSpec(executable, args, options);
   return await new Promise((resolvePromise, reject) => {
     const child = spawn(spec.executable, spec.args, {
@@ -221,6 +236,14 @@ async function execute(executable, args, options = {}) {
     let stdout = Buffer.alloc(0);
     let stderr = Buffer.alloc(0);
     let settled = false;
+    let operationFailure = null;
+    let eventBuffer = "";
+    let stopOperation;
+    const stop = () => stopOperation ??= (async () => {
+      try { await options.stopTree?.(); }
+      catch { operationFailure = "process-cleanup-unconfirmed"; }
+      await killTree(child);
+    })();
     const startedAt = Date.now();
     const watchState = { started_at: startedAt, first_output_at: null, last_activity_at: startedAt,
       last_progress_at: startedAt };
@@ -231,7 +254,7 @@ async function execute(executable, args, options = {}) {
     const append = (current, chunk) => {
       const next = Buffer.concat([current, chunk]);
       if (next.length > (options.outputLimit ?? OUTPUT_LIMIT)) {
-        void killTree(child);
+        void stop();
         throw new HarnessFailure("bounded-output", "A child process exceeded bounded output.");
       }
       return next;
@@ -241,13 +264,26 @@ async function execute(executable, args, options = {}) {
       watchState.first_output_at ??= now;
       watchState.last_activity_at = now;
     };
-    child.stdout.on("data", (chunk) => { try { activity(); stdout = append(stdout, chunk); } catch (error) { reject(error); } });
+    child.stdout.on("data", (chunk) => { try {
+      activity(); stdout = append(stdout, chunk);
+      if (options.eventGate !== undefined && operationFailure === null) {
+        eventBuffer += chunk.toString("utf8");
+        const lines = eventBuffer.split(/\r?\n/u);
+        eventBuffer = lines.pop();
+        for (const line of lines) {
+          let event;
+          try { event = JSON.parse(line); } catch { continue; }
+          operationFailure = options.eventGate(event);
+          if (operationFailure !== null) { void stop(); break; }
+        }
+      }
+    } catch (error) { reject(error); } });
     child.stderr.on("data", (chunk) => { try { activity(); stderr = append(stderr, chunk); } catch (error) { reject(error); } });
     const finishTimeout = async (reason) => {
       if (settled) return;
       settled = true;
       await spawnEvidence.catch(() => undefined);
-      await killTree(child);
+      await stop();
       resolvePromise({ code: 124, signal: reason, stdout, stderr, timedOut: true, watchdog: reason, pid: child.pid });
     };
     const timer = setTimeout(() => void finishTimeout("hard-wall"), options.timeoutMs ?? 120_000);
@@ -298,7 +334,9 @@ async function execute(executable, args, options = {}) {
       if (settled) return;
       settled = true;
       try { await spawnEvidence; } catch (error) { reject(error); return; }
-      resolvePromise({ code: code ?? 1, signal, stdout, stderr, timedOut: false, watchdog: null, pid: child.pid });
+      if (stopOperation) await stopOperation;
+      resolvePromise({ code: code ?? 1, signal, stdout, stderr, timedOut: false, watchdog: null,
+        operationFailure, pid: child.pid });
     });
   });
 }
@@ -399,18 +437,22 @@ async function saveState(runtimeRoot, state) {
   await atomicJson(join(runtimeRoot, STATE_FILE), state);
 }
 
-export function assertRunArmAllowed(state, arm) {
+export function assertRunArmAllowed(state, arm, qualificationOnly = false) {
+  invariant(!state.stopped, "expected-operation", "Benchmark stopped; diagnose before a new matched pair.");
   invariant(ARMS.includes(arm), "arm", "Arm must be bare or sortie.");
   invariant(state.preflight?.status === "pass" && state.prepared?.status === "pass", "phase-order",
     "Preflight and prepare must pass before an arm starts.");
   invariant(!state.arms?.[arm]?.attempted, "attempt-once", "This arm already consumed its only attempt.");
-  if (arm === "sortie") invariant(state.arms?.bare?.run?.status === "complete", "arm-order",
+  if (qualificationOnly) invariant(arm === "sortie", "qualification-arm", "Qualification permits only Sortie.");
+  if (arm === "sortie") invariant(qualificationOnly || state.arms?.bare?.run?.status === "complete", "arm-order",
     "Bare must complete before Sortie starts.");
 }
 
-export function assertVerifyAllowed(state, arm) {
+export function assertVerifyAllowed(state, arm, qualificationOnly = false) {
+  invariant(!state.stopped, "expected-operation", "Benchmark stopped; verification is not permitted.");
   invariant(ARMS.includes(arm), "arm", "Arm must be bare or sortie.");
   invariant(state.arms?.[arm]?.run?.status === "complete", "verify-order", "Arm run must complete before verification.");
+  if (qualificationOnly) invariant(arm === "sortie", "qualification-arm", "Qualification permits only Sortie.");
   invariant(!state.arms?.[arm]?.verification?.attempted, "verify-once", "Verifier already consumed its one run.");
 }
 
@@ -580,14 +622,27 @@ export function eventMetadata(stdout) {
   const metricReferences = new Set();
   const usage = new Map();
   let eventErrors = 0;
+  const implementationChildren = new Set();
+  let terminalOutcome = null;
   for (const line of stdout.toString("utf8").split(/\r?\n/u)) {
     let value;
     try { value = JSON.parse(line); } catch { continue; }
     if (!record(value)) continue;
-    if (value.type === "error") eventErrors += 1;
+    if (expectedOperationEvent(value) !== null) eventErrors += 1;
     const session = value.sessionID ?? value.part?.sessionID;
     if (rootSessionId === null && typeof session === "string" && /^ses_[A-Za-z0-9_-]+$/u.test(session)) rootSessionId = session;
     const part = value.part;
+    if (record(part) && part.type === "tool" && part.tool === "task" && part.state?.status === "completed" &&
+      ["dog-worker", "dog-luna-worker"].includes(part.state.input?.subagent_type)) {
+      const child = part.state.metadata?.sessionId ?? part.state.metadata?.sessionID ??
+        /<task\s+id="(ses_[A-Za-z0-9_-]+)"/u.exec(part.state.output ?? "")?.[1];
+      if (session === rootSessionId && typeof child === "string" && /^ses_[A-Za-z0-9_-]+$/u.test(child) &&
+        child !== rootSessionId) implementationChildren.add(child);
+    }
+    if (session === rootSessionId && record(part) && part.type === "text" && typeof part.text === "string") {
+      const match = /^(?:[^\p{L}\p{N}\n]*)(?:status:\s*)?(DONE|INTERRUPTED|BLOCKED|NEED_DECISION|IN_PROGRESS)\b/u.exec(part.text.trim());
+      if (match) terminalOutcome = match[1];
+    }
     if (!record(part) || part.type !== "step-finish" || typeof part.id !== "string" || typeof session !== "string") continue;
     usage.set(`${session}:${part.id}`, part);
     if (record(part.tokens)) metricReferences.add("$.part.tokens");
@@ -608,6 +663,7 @@ export function eventMetadata(stdout) {
   }
   return { root_session_id: rootSessionId, token_metric_references: [...metricReferences].sort().slice(0, 64),
     cost: costAvailable ? cost : null, event_errors: eventErrors,
+    implementation_children: [...implementationChildren], terminal_outcome: terminalOutcome,
     usage: { coverage: "cli-stream-only", steps: usage.size, tokens: tokensAvailable ? totals : null,
       cost_provenance: costAvailable ? "host-reported-not-invoice" : "unavailable" },
     stdout_sha256: sha256Bytes(stdout) };
@@ -684,6 +740,28 @@ export function deliveryResult(run, verification) {
   return { outcome: reason === null ? "succeeded" : "failed", reason };
 }
 
+export function expectedOperation(run, arm, expected = {
+  min_patch_bytes: 1, min_implementation_children: arm === "sortie" ? 1 : 0,
+  terminal_outcome: arm === "sortie" ? "DONE" : null,
+}) {
+  const reason = run.operation_failure ?? (run.exit !== 0 || run.timed_out ? "agent-process-failed" :
+    run.event_errors > 0 ? "agent-event-error" :
+    !run.root_session_id ? "session-identity-missing" :
+    !(run.patch_bytes >= expected.min_patch_bytes) ? "no-delivered-patch" :
+    (run.implementation_children?.length ?? 0) < expected.min_implementation_children ? "implementation-child-missing" :
+    expected.terminal_outcome !== null && run.terminal_outcome !== expected.terminal_outcome ? "delivery-not-complete" : null);
+  return { status: reason === null ? "pass" : "fail", reason };
+}
+
+export function expectedOperationEvent(event) {
+  const exploratoryMiss = event?.part?.type === "tool" && event.part.state?.status === "error" &&
+    event.part.tool === "read" && typeof event.part.state.error === "string" &&
+    (/^File not found: /u.test(event.part.state.error) ||
+      /^Offset \d+ is out of range for this file \(\d+ lines\)$/u.test(event.part.state.error));
+  return event?.type === "error" || (event?.part?.type === "tool" && event.part.state?.status === "error" && !exploratoryMiss)
+    ? "agent-event-error" : null;
+}
+
 async function preflight(context) {
   invariant(!(await stat(context.runtimeRoot).catch(() => null)), "runtime-exists",
     "runtime_root already exists; use a new run directory or explicit cleanup.");
@@ -737,12 +815,15 @@ async function preflight(context) {
     "WSL OpenCode version differs from the manifest.");
   await runWsl(context.manifest, "/", "/usr/bin/test", ["-f", context.manifest.opencode.auth_file], {},
     { timeoutMs: 30_000 }, "auth-presence");
+  await runWsl(context.manifest, "/", "/usr/bin/test", ["-x", "/usr/bin/setsid"], {},
+    { timeoutMs: 30_000 }, "process-group-support");
   await mkdir(context.runtimeRoot, { recursive: false });
   const state = { schema_version: 1, protocol: { task_id: TASK_ID, methodology_comparable: false,
     leaderboard: false, docker: "intentionally_unused", runta: "intentionally_unused",
     wall_seconds: DEFAULT_WALL_SECONDS, startup_seconds: DEFAULT_STARTUP_SECONDS,
     activity_seconds: DEFAULT_ACTIVITY_SECONDS, progress_seconds: DEFAULT_PROGRESS_SECONDS,
-    retries: 0, arm_order: ARMS },
+    retries: 0, arm_order: context.manifest.qualification_only ? ["sortie"] : ARMS,
+    qualification_only: context.manifest.qualification_only === true },
   preflight: { status: "pass", official_sha256: pinned.official_sha256,
     package_sha256: pinned.package_sha256, deepswe_commit: deepSweHead,
     versions, opencode_version: context.manifest.opencode.version }, arms: {} };
@@ -755,30 +836,49 @@ async function prepare(context) {
   invariant(state.preflight?.status === "pass" && state.prepared === undefined, "prepare-order",
     "Prepare requires one successful preflight and cannot be repeated.");
   await verifyPinnedFiles(context);
+  const goEnvironment = pinnedGoEnvironment(context.manifest);
+  await runWsl(context.manifest, "/", "/usr/bin/mkdir", ["-p", `${goEnvironment.GOPATH}/bin`], {},
+    { timeoutMs: 30_000 }, "prepare-gopath-bin");
   const official = await copyOfficial(context);
   const officialWsl = await toWslPath(context.manifest, official);
   const workspaces = {};
   const configs = {};
-  for (const arm of ARMS) {
+  for (const arm of context.manifest.qualification_only ? ["sortie"] : ARMS) {
     workspaces[arm] = join(context.runtimeRoot, "workspaces", arm);
     await cloneAtBase(context, workspaces[arm]);
     await runWsl(context.manifest, await toWslPath(context.manifest, workspaces[arm]),
-      context.manifest.tools.go.executable, ["mod", "download"], pinnedGoEnvironment(context.manifest),
+      context.manifest.tools.go.executable, ["mod", "download"], goEnvironment,
       { timeoutMs: 600_000 }, "prepare-go-mod-download");
     const preparedStatus = await runTool(context.manifest.tools.git, ["status", "--porcelain=v1"],
       { cwd: workspaces[arm] }, "prepare-cleanliness");
     invariant(preparedStatus.stdout.length === 0, "prepare-dirty", "Dependency preparation changed the arm workspace.");
     configs[arm] = await createConfigRoots(context.runtimeRoot, arm);
   }
+  const count = context.manifest.qualification_only ? 1 : 2;
   state.prepared = { status: "pass", base: ANKO_BASE, official_sha256: state.preflight.official_sha256,
-    official_wsl_sha256: sha256Bytes(officialWsl), workspace_count: 2, isolated_config_count: 2 };
+    official_wsl_sha256: sha256Bytes(officialWsl), workspace_count: count, isolated_config_count: count };
   await saveState(context.runtimeRoot, state);
   return state.prepared;
 }
 
+export async function stopWslGroup(manifest, groupFile) {
+  const pid = (await readFile(groupFile, "utf8")).trim();
+  invariant(/^[1-9][0-9]*$/u.test(pid), "process-group", "Owned WSL process group identity is invalid.");
+  await runWsl(manifest, "/", "/usr/bin/bash", ["-c",
+    'kill -TERM -- "-$1" 2>/dev/null || true; sleep 0.5; kill -KILL -- "-$1" 2>/dev/null || true; sleep 0.2; ! kill -0 -- "-$1" 2>/dev/null',
+    "frontier-stop", pid], {}, { timeoutMs: 30_000 }, "process-group-stop");
+}
+
+export function ownedWslSpec(manifest, cwd, executable, args, environment, groupFileWsl) {
+  // A Windows taskkill of wsl.exe alone does not prove its Linux descendants stopped.
+  return wslSpec(manifest, cwd, "/usr/bin/setsid", ["--wait", "/usr/bin/bash", "-c",
+    'printf "%s\\n" "$$" > "$1"; shift; exec "$@"', "frontier-group", groupFileWsl,
+    executable, ...args], environment);
+}
+
 async function runArm(context, arm) {
   const state = await readState(context.runtimeRoot);
-  assertRunArmAllowed(state, arm);
+  assertRunArmAllowed(state, arm, context.manifest.qualification_only === true);
   state.arms[arm] = { attempted: true, started_at: new Date().toISOString(), active_pid: null };
   await saveState(context.runtimeRoot, state);
   const workspace = join(context.runtimeRoot, "workspaces", arm);
@@ -799,10 +899,16 @@ async function runArm(context, arm) {
   const args = ["run", "--dir", cwd, "--format", "json", "--model", context.manifest.opencode.model,
     "--variant", context.manifest.opencode.variant, "--agent", arm === "sortie" ? "dog-coordinator" : "build", instruction];
   const started = Date.now();
-  const spec = wslSpec(context.manifest, cwd, context.manifest.opencode.executable, args, inspected.environment);
+  const groupFile = join(context.runtimeRoot, `${arm}-process-group.pid`);
+  const groupFileWsl = await toWslPath(context.manifest, groupFile);
+  const stopGroup = () => stopWslGroup(context.manifest, groupFile);
+  const spec = ownedWslSpec(context.manifest, cwd, context.manifest.opencode.executable, args,
+    inspected.environment, groupFileWsl);
   const result = await execute(spec.executable, spec.args, { timeoutMs: DEFAULT_WALL_SECONDS * 1000,
     cwd: spec.cwd,
     heartbeat: `run-arm:${arm}`,
+    eventGate: expectedOperationEvent,
+    stopTree: stopGroup,
     initialProgressValue: sha256Bytes(preRunStatus.stdout),
     progressProbe: async () => sha256Bytes((await runTool(context.manifest.tools.git,
       ["status", "--porcelain=v1"], { cwd: workspace }, "watchdog-progress")).stdout),
@@ -811,12 +917,19 @@ async function runArm(context, arm) {
       activity_ms: context.manifest.protocol.activity_seconds * 1000,
       progress_ms: context.manifest.protocol.progress_seconds * 1000 },
     onSpawn: async (pid) => { state.arms[arm].active_pid = pid ?? null; await saveState(context.runtimeRoot, state); } });
+  try { await stopGroup(); }
+  catch { result.operationFailure = "process-cleanup-unconfirmed"; }
   state.arms[arm].active_pid = null;
-  const patch = await collectPatch(context, arm, workspace);
+  const patch = await collectPatch(context, arm, workspace).catch(() => {
+    result.operationFailure ??= "patch-capture-unavailable";
+    return { patch_sha256: null, patch_bytes: null, changed_paths: null, uncommitted_present: null, status_sha256: null };
+  });
   const metadata = eventMetadata(result.stdout);
   state.arms[arm].run = { status: "complete", exit: result.code, signal: result.signal, timed_out: result.timedOut,
     watchdog: result.watchdog,
+    operation_failure: result.operationFailure ?? null,
     event_errors: metadata.event_errors, usage: metadata.usage,
+    implementation_children: metadata.implementation_children, terminal_outcome: metadata.terminal_outcome,
     duration_ms: Date.now() - started, root_session_id: metadata.root_session_id,
     token_metric_references: metadata.token_metric_references, cost: metadata.cost, stdout_sha256: metadata.stdout_sha256,
     stderr_sha256: sha256Bytes(result.stderr), model: context.manifest.opencode.model,
@@ -825,7 +938,15 @@ async function runArm(context, arm) {
     patch_sha256: patch.patch_sha256,
     patch_bytes: patch.patch_bytes, changed_paths: patch.changed_paths, uncommitted_present: patch.uncommitted_present,
     status_sha256: patch.status_sha256 };
+  const gate = expectedOperation(state.arms[arm].run, arm, context.manifest.expected_operation?.[arm]);
+  state.arms[arm].run.expected_operation = gate;
+  if (gate.status === "fail") state.stopped = { arm, reason: gate.reason, at: new Date().toISOString() };
   await saveState(context.runtimeRoot, state);
+  if (state.stopped) {
+    await summarize(context);
+    // Keep candidate workspaces for diagnosis; cleanup remains an explicit operation.
+    throw new HarnessFailure("expected-operation", "Normal operation failed; partial summary saved. Stop and diagnose.");
+  }
   return sanitizeForReport(state.arms[arm].run, reportSecrets(context.manifest));
 }
 
@@ -923,7 +1044,7 @@ export function createLocalVerifierConfig(source, logsPath) {
 
 async function verifyArm(context, arm) {
   const state = await readState(context.runtimeRoot);
-  assertVerifyAllowed(state, arm);
+  assertVerifyAllowed(state, arm, context.manifest.qualification_only === true);
   state.arms[arm].verification = { attempted: true, started_at: new Date().toISOString(), active_pid: null };
   await saveState(context.runtimeRoot, state);
   const verifier = join(context.runtimeRoot, "verifiers", arm);
@@ -1001,11 +1122,22 @@ async function verifyArm(context, arm) {
   return sanitizeForReport(state.arms[arm].verification, reportSecrets(context.manifest));
 }
 
-async function summarize(context) {
+export async function summarize(context) {
   const state = await readState(context.runtimeRoot);
-  invariant(ARMS.every((arm) => state.arms?.[arm]?.verification?.status === "complete"), "summary-order",
+  if (state.stopped) {
+    const report = sanitizeForReport({ schema_version: 1, task_id: TASK_ID, unofficial: true,
+      methodology_comparable: false, leaderboard: false, public_publish: false,
+      stopped: state.stopped, arms: Object.fromEntries(ARMS.map((arm) => [arm,
+        state.arms?.[arm]?.run ?? { status: "not-run" }])),
+      comparison: { comparison_eligible: false, speed_ratio: null, cost_ratio: null, refusal: "expected-operation" } },
+    reportSecrets(context.manifest));
+    await atomicJson(join(context.runtimeRoot, REPORT_FILE), report);
+    return report;
+  }
+  const reportArms = context.manifest.qualification_only ? ["sortie"] : ARMS;
+  invariant(reportArms.every((arm) => state.arms?.[arm]?.verification?.status === "complete"), "summary-order",
     "Both one-shot verifiers must complete before summary.");
-  const armSummary = Object.fromEntries(ARMS.map((arm) => [arm, {
+  const armSummary = Object.fromEntries(reportArms.map((arm) => [arm, {
     ...deliveryResult(state.arms[arm].run, state.arms[arm].verification),
     usage: state.arms[arm].run.usage ?? null,
     exit: state.arms[arm].run.exit, status: state.arms[arm].run.status,
@@ -1021,14 +1153,17 @@ async function summarize(context) {
     counts: state.arms[arm].verification.counts,
     verifier_duration_ms: state.arms[arm].verification.duration_ms,
   }]));
-  const comparisonInput = Object.fromEntries(ARMS.map((arm) => [arm, {
+  const comparisonInput = Object.fromEntries(reportArms.map((arm) => [arm, {
     reward: armSummary[arm].outcome === "succeeded" ? armSummary[arm].reward : null, duration_ms: armSummary[arm].duration_ms,
     cost: state.arms[arm].run.cost,
   }]));
   const report = sanitizeForReport({ schema_version: 1, task_id: TASK_ID, unofficial: true,
     methodology_comparable: false, leaderboard: false, public_publish: false,
-    docker: "intentionally_unused", runta: "intentionally_unused", arms: armSummary,
-    comparison: computeSummary(comparisonInput) }, reportSecrets(context.manifest));
+    docker: "intentionally_unused", runta: "intentionally_unused",
+    qualification_only: context.manifest.qualification_only === true, arms: armSummary,
+    comparison: context.manifest.qualification_only
+      ? { comparison_eligible: false, speed_ratio: null, cost_ratio: null, refusal: "qualification-only" }
+      : computeSummary(comparisonInput) }, reportSecrets(context.manifest));
   await atomicJson(join(context.runtimeRoot, REPORT_FILE), report);
   return report;
 }
@@ -1038,9 +1173,11 @@ async function processExists(pid) {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
-async function cleanup(context, confirmed) {
+export async function cleanup(context, confirmed) {
   invariant(confirmed, "cleanup-confirmation", "Cleanup requires --confirm after evidence collection.");
   const state = await readState(context.runtimeRoot);
+  invariant(!ARMS.some((arm) => state.arms?.[arm]?.run?.operation_failure === "process-cleanup-unconfirmed"),
+    "cleanup-process", "Linux process cleanup is unconfirmed; preserve the process group and diagnosis evidence.");
   invariant(await stat(join(context.runtimeRoot, REPORT_FILE)).catch(() => null), "cleanup-evidence",
     "Sanitized summary must exist before cleanup.");
   const pids = ARMS.flatMap((arm) => [state.arms?.[arm]?.active_pid,

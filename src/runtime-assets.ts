@@ -1,5 +1,6 @@
 import type { RuntimeAssetVersion } from "./asset-version.js";
-const ASSET_VERSION: RuntimeAssetVersion = "0.3.77-terminal-delivery-v1";
+import { GOAL_DECLARATION_FORMAT } from "./core/goal-declaration-format.ts";
+const ASSET_VERSION: RuntimeAssetVersion = "0.3.80-review-evidence-v1";
 
 // Kept local so source-mode CLI execution does not load the plugin graph.
 const BACKLOG_DRAIN_CAPABILITY = "sortie_enable_backlog_drain";
@@ -365,13 +366,17 @@ material artifact revision, dispatch another verification with the revised evide
 review prompts remain forbidden, but prior verification findings never force a user stop while the
 coordinator can autonomously improve the artifact.
 Before SourceReview dispatch, verify that its inline artifact itself contains acceptance criteria,
+exact changed-code excerpts for the acceptance-critical branches and called helpers (including
+scope lookup stopping conditions and exemptions),
 exact manifest, a non-empty changedLogicSummary string list, and canonical validation
 command/exit/fingerprint. Every acceptance item must explicitly map to at least one
 changedLogicSummary entry, so the reviewer can verify all acceptance items against changed logic
 using only the supplied artifact. A path where the reviewer could obtain a diff, a statement that the
 working tree contains the diff, or an intent summary is not a changed logic summary: the reviewer is
 tool-free and treats only the supplied artifact as evidence. Do not spend the review call until every
-input is present and every acceptance item has that explicit mapping.
+input is present, every acceptance item has an explicit mapping, and every acceptance-critical
+clause is supported by the supplied code. On an evidence-gap finding, inspect
+the candidate and repair the artifact before changing source; an omitted summary detail is not a defect.
 Render that mapping as one indexed line per acceptance item in the exact form
 acceptance[i] -> changedLogicSummary[j]. Count the mapping lines and acceptance items before dispatch;
 unequal counts or an unmapped index fail preflight without spending a review call.
@@ -1096,6 +1101,11 @@ lowercase hexadecimal characters. Reject every unknown delivery, binding, build-
 or expected-outcome enum and every missing or malformed acceptance field with its exact field pointer.
 Do not dispatch on a declaration defect. Repair the named fields and make the corrected Task call in
 the same turn; declaration denial preserves that authority and launches no worker.
+Inside the worker, execute manifest validation commands exactly. Preserve absolute executable paths;
+never shorten them to a basename. Run commands separately, or join only complete manifest commands with
+the && operator in their declared order. Never alter arguments or combine a fragment with an undeclared command.
+
+${GOAL_DECLARATION_FORMAT}
 
 At UNIT RESULT and CHECKPOINT boundaries report actual progress, cumulative budget, candidate identity,
 and typed evidence. Full-goal proof binds goal/revision/scope epoch/acceptance fingerprint, requested
@@ -1765,7 +1775,7 @@ tools:
 
 Accept only one bounded SourceReview request from dog-coordinator after canonical
 validation for one high-risk candidate. Review only the supplied acceptance criteria, exact
-manifest, changedLogicSummary, and validation evidence. Confirm every acceptance item explicitly
+manifest, changedLogicSummary, supplied changed-code excerpts, and validation evidence. Confirm every acceptance item explicitly
 maps to at least one changedLogicSummary entry and assess that changed logic against the mapped
 acceptance item. Missing or incomplete coverage is a concrete finding, never PASS.
 Require one indexed acceptance[i] -> changedLogicSummary[j] mapping line per acceptance item and
@@ -1773,6 +1783,9 @@ reject a missing index or unequal mapping count before assessing the changed log
 Do not request raw logs or full source files, review low-risk candidates, expand scope, or dispatch
 another agent.
 Treat those supplied fields as the complete bounded SourceReview artifact; use only that artifact and invoke no tools.
+Do not infer that a branch or exemption is absent from source because a prose summary omits it.
+If the supplied excerpts do not establish a claim, report an evidence gap and request the exact
+branch/helper excerpt in the next artifact; do not prescribe a source fix for an unproven defect.
 
 Return one concise PASS or concrete-finding response only to dog-coordinator before the
 coordinator commit. Write every finding, evidence, and required-fix sentence in the language the

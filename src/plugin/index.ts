@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, mkdir, open, readFile, readdir, realpath, rm, stat } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import { RUNTIME_ASSET_VERSION } from "../asset-version.js";
+import { GOAL_DECLARATION_FORMAT, GOAL_DELIVERY_INTENTS, GOAL_DELIVERY_MODES } from "../core/goal-declaration-format.js";
 import {
   ACCEPTANCE_CONTINUITY_AUTHORITY,
   ACCEPTANCE_CONTINUITY_EXTENSION,
@@ -71,6 +72,7 @@ import {
   WriteDeniedError,
   canonicalManifestReadScopes,
   canonicalManifestWriteScopes,
+  canonicalDeclaredValidationSequence,
   createProjectPaths,
   createWriteGate,
   describeUnclassifiedCommand,
@@ -324,7 +326,8 @@ export class HandoffDeniedError extends Error {
     super(
       `Handoff denied for "${safePath(path)}": handoff and operation manifest contract.` +
         (defects.length === 0 ? "" : ` Defects: ${describeDefects(defects)}.`) +
-        " Correct the registered handoff or its operation manifest, then read the handoff again.",
+        (path === "<goal-declaration>" ? ` ${GOAL_DECLARATION_FORMAT}` :
+          " Correct the registered handoff or its operation manifest, then read the handoff again."),
       options,
     );
     this.name = "HandoffDeniedError";
@@ -1102,6 +1105,26 @@ function taskAcceptanceCriteria(text: string, key = "acceptance"): readonly stri
   return values.length === 0 ? undefined : normalizeAcceptanceCriteria(values);
 }
 
+function canonicalTaskAcceptance(text: string, criteria: readonly string[]): string | undefined {
+  const lines = text.split(/\r?\n/u);
+  const headers = lines.flatMap((line, index) => /^([\t ]*)acceptance[\t ]*:/iu.exec(line) === null ? [] : [index]);
+  if (headers.length !== 1) return undefined;
+  const index = headers[0]!;
+  const indent = /^[\t ]*/u.exec(lines[index]!)![0];
+  const headerIndent = indent.replaceAll("\t", "  ").length;
+  let end = index + 1;
+  if (/^\s*acceptance\s*:\s*$/iu.test(lines[index]!)) {
+    while (end < lines.length) {
+      const line = lines[end]!;
+      if (line.trim().length === 0) { end += 1; continue; }
+      if (/^\s*/u.exec(line)![0].replaceAll("\t", "  ").length <= headerIndent) break;
+      end += 1;
+    }
+  }
+  lines.splice(index, end - index, `${indent}acceptance: ${JSON.stringify(criteria)}`);
+  return lines.join("\n");
+}
+
 function taskContractText(text: string): string {
   const lines = text.split(/\r?\n/u);
   const digestIndexes = lines.flatMap((line, index) =>
@@ -1732,7 +1755,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         reservation.unit_id === unitID && reservation.session_id === identity.parentID);
       const criteria = goal.acceptance_contract?.criteria.filter((criterion) =>
         criterion.validation_command === rawCommand && criterion.expected_outcome === "pass") ?? [];
-      if (!unitBound || criteria.length === 0) throw new Error("SORTIE_VALIDATION_BUDGET_DENIED: requirement-unbound");
+      if (!unitBound) throw new Error("SORTIE_VALIDATION_BUDGET_DENIED: requirement-unbound");
+      // Exact generation and formatting checks may support acceptance without proving a criterion.
+      if (criteria.length === 0) return;
       const scope = criteria.every((criterion) => criterion.proof_scope === "requested-full") ? "full" : "targeted";
       const request: ValidationBudgetRequest = { run_id: goal.goal_id, operation_id: toolInput.callID,
         source_snapshot: snapshot.source, candidate: snapshot.candidate, command: [rawCommand], scope,
@@ -1882,6 +1907,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     if (state.goal_id === null || state.receipt !== null || state.outstanding_reservations.length > 0 || state.acceptance_fingerprint === null) return state.receipt ?? undefined;
     const records = (await ledger.readGoal()).records;
     const settledEvidence = records.flatMap(({ event }) => event.kind === "unit.settled" ? event.evidence : []);
+    if (status === "succeeded" && (state.acceptance_contract === null ||
+      state.acceptance_contract.criteria.length === 0 ||
+      !state.acceptance_contract.criteria.every(({ criterion_id }) => state.satisfied_criteria.includes(criterion_id)))) return undefined;
     if (status === "succeeded" && state.acceptance_contract !== null) {
       for (const criterion of state.acceptance_contract.criteria) {
         if (criterion.source_binding !== "current-protected" && criterion.candidate_binding !== "current-protected") continue;
@@ -2081,13 +2109,13 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       defects.push(contractDefect("contract", "/goal_acceptance_fingerprint", "goal_fingerprint_format"));
     }
     const intent = handoffValue(entries, ["delivery_intent"]);
-    const intents = ["design", "registration", "implementation", "repair", "controlled-change"] as const;
+    const intents = GOAL_DELIVERY_INTENTS;
     if (intent === undefined) defects.push(contractDefect("contract", "/delivery_intent", "delivery_intent_missing"));
     else if (!intents.includes(intent as typeof intents[number])) {
       defects.push(contractDefect("contract", "/delivery_intent", "delivery_intent_invalid"));
     }
     const mode = handoffValue(entries, ["delivery_mode"]);
-    const modes: readonly GoalDeliveryMode[] = ["planning-only", "mvp-first", "repair-first", "controlled-change"];
+    const modes: readonly GoalDeliveryMode[] = GOAL_DELIVERY_MODES;
     if (mode !== undefined && !modes.includes(mode as GoalDeliveryMode)) {
       defects.push(contractDefect("contract", "/delivery_mode", "delivery_mode_invalid"));
     }
@@ -5703,7 +5731,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         ? undefined
         : await terminalGoalFromHostText(textInput.sessionID, textOutput.text);
       if (runOutcome === "DONE" && terminal !== undefined && (terminal.delivery === "running" ||
-        (terminal.receipt === undefined && terminal.goal !== undefined && terminal.goal.acceptance_contract !== null))) {
+        (terminal.receipt === undefined && terminal.goal !== undefined && terminal.goal.goal_id !== null))) {
         textOutput.text = replaceDoneTerminalStatus(textOutput.text, terminal.delivery === "running"
           ? "status: IN_PROGRESS — durable delivery active; same sessionでjoinまたはstale reconcileが必要"
           : "status: IN_PROGRESS\ngoal_control: accepted criteria remain unproved");
@@ -6240,6 +6268,12 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         diagnosis.tools.add(toolInput.callID);
         return;
       }
+      if (isRecord(output.args) && typeof output.args.command === "string") {
+        const authorization = sessionAuthorizations.get(toolInput.sessionID);
+        const canonical = authorization === undefined ? undefined
+          : canonicalDeclaredValidationSequence(output.args.command, authorization.validationCommands);
+        if (canonical !== undefined) output.args.command = canonical;
+      }
       await recordHostGoalStart(toolInput, output);
       const coordinatorRoot = isCoordinatorSession(toolInput.sessionID) || await recoverCoordinatorRoot(toolInput.sessionID);
       const readonlyDiagnosis = coordinatorRoot && toolInput.tool === "task" && isRecord(output.args)
@@ -6463,21 +6497,31 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
               });
             }
             if (assetVersionStatus === "current") {
-              const ledger = identity.acceptanceContinuity;
-              if (ledger === undefined) {
+              const inspectedLedger = identity.acceptanceContinuity;
+              if (inspectedLedger === undefined) {
                 throw new HandoffDeniedError("contract-invalid", handoffPaths[0]!, {
                   defects: [contractDefect("handoff", "/ext/sortie-dogs~1acceptance-continuity",
                     `acceptance_continuity_${identity.acceptanceContinuityError ?? "missing"}`)],
                 });
               }
+              let ledger: AcceptanceContinuityLedger = inspectedLedger;
               const criteria = taskAcceptanceCriteria(contractPrompt);
               if (taskIDs.length !== 1 || taskIDs[0] !== identity.handoffID ||
-                ledger.task_id !== identity.handoffID || criteria === undefined ||
-                criteria.length !== ledger.criteria.length ||
-                criteria.some((criterion, index) => criterion !== ledger.criteria[index])) {
+                ledger.task_id !== identity.handoffID) {
                 throw new HandoffDeniedError("contract-invalid", handoffPaths[0]!, {
                   defects: [contractDefect("contract", "/acceptance", "acceptance_continuity_mismatch")],
                 });
+              }
+              if (criteria === undefined || criteria.length !== ledger.criteria.length ||
+                criteria.some((criterion, index) => criterion !== ledger.criteria[index])) {
+                const canonical = canonicalTaskAcceptance(prompt, ledger.criteria);
+                if (canonical === undefined) {
+                  throw new HandoffDeniedError("contract-invalid", handoffPaths[0]!, {
+                    defects: [contractDefect("contract", "/acceptance", "acceptance_continuity_mismatch")],
+                  });
+                }
+                output.args.prompt = canonical;
+                prompt = canonical;
               }
               const previous = rootAcceptanceContinuity.get(toolInput.sessionID);
               if (previous === undefined) {
@@ -6500,6 +6544,25 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
                   previous.criteria.every((criterion, index) => criterion === ledger.criteria[index]);
                 const strictAppend = ledger.criteria.length > previous.criteria.length &&
                   previous.criteria.every((criterion, index) => criterion === ledger.criteria[index]);
+                // Serial parent identity is controller-owned. Repair only an omitted link on
+                // an otherwise exact carry-forward/append; explicit conflicting links still fail.
+                // Persist it so the worker's Read and later recovery see the same contract.
+                if (reservedParallelDescriptor === undefined && ledger.parent_fingerprint === "none" &&
+                  (exactCarryForward || strictAppend)) {
+                  const handoff = JSON.parse(await readFile(handoffPaths[0]!, "utf8"));
+                  const validated = validateHandoffSchema(handoff);
+                  const current = validated.ok ? inspectAcceptanceContinuity(validated.value).ledger : undefined;
+                  if (current === undefined || JSON.stringify(current) !== JSON.stringify(ledger)) {
+                    throw new HandoffDeniedError("contract-invalid", handoffPaths[0]!, {
+                      defects: [contractDefect("handoff", "/ext/sortie-dogs~1acceptance-continuity",
+                        "acceptance_parent_continuity_mismatch")],
+                    });
+                  }
+                  ledger = { ...ledger, parent_fingerprint: previous.fingerprint };
+                  handoff.ext[ACCEPTANCE_CONTINUITY_EXTENSION] = ledger;
+                  await writeFile(handoffPaths[0]!, `${JSON.stringify(handoff, null, 2)}\n`);
+                  await inspect(handoffPaths[0]!, undefined, { report: true });
+                }
                 if (ledger.parent_fingerprint !== previous.fingerprint || (!exactCarryForward && !strictAppend)) {
                   throw new HandoffDeniedError("contract-invalid", handoffPaths[0]!, {
                     defects: [contractDefect("handoff", "/ext/sortie-dogs~1acceptance-continuity",
@@ -6645,6 +6708,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         if (
           activeState?.parallel === "valid" && command !== undefined && authorization?.validationCommands.has(command) === true
         ) throw new WriteDeniedError("parallel-validation", "<parallel-unit>");
+        const declaredSequence = command === undefined || authorization === undefined ? undefined
+          : canonicalDeclaredValidationSequence(command, authorization.validationCommands);
+        if (activeState?.parallel !== "valid" && declaredSequence !== undefined) return;
         if (activeState?.parallel === "valid") {
           const extracted = extractWritePaths(toolInput.tool, output.args);
           const relativeWrite = extracted.paths.find((path) => !isAbsolute(path));

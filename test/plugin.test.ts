@@ -57,7 +57,7 @@ import {
   type SessionMessage,
 } from "../dist/plugin/task-result-repair.js";
 import { REFLECTION_POLICY, ReflectionStore } from "../dist/reflection/index.js";
-import { normalizeCommand } from "../dist/plugin/gate.js";
+import { canonicalDeclaredValidationSequence, normalizeCommand } from "../dist/plugin/gate.js";
 import { configRoot } from "../dist/reflection/config.js";
 import {
   CONTINUATION_CAPABILITY,
@@ -1232,7 +1232,7 @@ test("generated coordinator keeps proof internal and renders concise Japanese te
   assert.match(coordinator.content, /locally repairable process or evidence defect is never a\s+user question/i);
 });
 
-test("coordinator DONE output receives host-reported root and child run metrics", async () => {
+test("unproved coordinator DONE is rejected while host root and child metrics remain observable", async () => {
   await withProject("done-run-metrics", async (directory) => {
     const created = Date.now() - 65_000;
     const logs: Array<Record<string, unknown>> = [];
@@ -1271,8 +1271,8 @@ test("coordinator DONE output receives host-reported root and child run metrics"
       text: "✅ **DONE** `metrics` — complete\n\n**Validation:** PASS\n\n**Next:** none\n\n<details>evidence</details>",
     };
     await hooks["experimental.text.complete"]!({ sessionID: "root" }, completed);
-    assert.match(completed.text, /^✅ \*\*DONE\*\*[^\n]+\n\n\*\*Run:\*\* pre-terminal host snapshot · 1m /u);
-    assert.match(completed.text, /pre-terminal host snapshot[\s\S]*215 tokens · \$0\.3000 · 2 completed assistant model steps · 2 sessions · 27\.9% cache ratio/u);
+    assert.match(completed.text, /^status: IN_PROGRESS/u);
+    assert.doesNotMatch(completed.text, /\*\*DONE\*\*/u);
     assert.match(completed.text, /\n\n\*\*Validation:\*\* PASS/u);
     const runLogs = () => logs.filter((entry) =>
       (entry.body as { message?: unknown } | undefined)?.message === "run-metrics.snapshot"
@@ -1292,7 +1292,7 @@ test("coordinator DONE output receives host-reported root and child run metrics"
     assert.equal(body.extra.available, true);
     assert.equal(body.extra.outcome, "DONE");
     assert.equal(body.extra.sessionID, "root");
-    assert.equal(body.extra.runtimeAssetVersion, "0.3.77-terminal-delivery-v1");
+    assert.equal(body.extra.runtimeAssetVersion, "0.3.80-review-evidence-v1");
     assert.equal(body.extra.inputTokens, 130);
     assert.equal(body.extra.outputTokens, 15);
     assert.equal(body.extra.reasoningTokens, 5);
@@ -1327,13 +1327,7 @@ test("coordinator DONE output receives host-reported root and child run metrics"
     const terminalTransition = logs.find((entry) =>
       (entry.body as { message?: unknown } | undefined)?.message === "continuation.not_required"
     );
-    assert.ok(terminalTransition);
-    assert.deepEqual(terminalTransition.query, { directory });
-    assert.deepEqual((terminalTransition.body as { level: string; extra: Record<string, unknown> }).level, "info");
-    assert.deepEqual(
-      Object.keys((terminalTransition.body as { extra: Record<string, unknown> }).extra).sort(),
-      ["attempts", "epoch", "reason", "resumeAttempts", "sessionID"],
-    );
+    assert.equal(terminalTransition, undefined, "unproved goal must not suppress continuation as completed");
 
     await hooks.event!({ event: { type: "session.deleted", properties: { sessionID: "root" } } });
     await hooks["chat.message"]!(
@@ -4004,18 +3998,19 @@ test("fresh-root control uses one host-round-tripped ticket and terminal state r
     );
 
     const goalFingerprintValue = `sha256:${"a".repeat(64)}`;
+    const supportingCommand = "node --version";
     const validationCommand = "node --test candidate.test.mjs";
     await writeFile(join(directory, "candidate.txt"), "accepted candidate\n");
     await writeFile(join(directory, "candidate.test.mjs"), "import assert from 'node:assert/strict'; assert.equal('accepted candidate','accepted candidate');\n");
     await writeFile(join(directory, "goal.operation-manifest.json"), JSON.stringify({
       ...operationManifest(["candidate.txt"]), task_id: "goal-unit-proof",
-      read: ["candidate.test.mjs"], validation: [validationCommand],
+      read: ["candidate.test.mjs"], validation: [supportingCommand, validationCommand],
     }));
     const handoffPath = join(directory, "handoff.json");
     await writeFile(handoffPath, JSON.stringify({ ...writeGateHandoff(directory, "goal.operation-manifest.json"), id: "goal-unit-proof" }));
     await writeFile(join(directory, "goal-2.operation-manifest.json"), JSON.stringify({
       ...operationManifest(["candidate.txt"]), task_id: "goal-unit-proof-2",
-      read: ["candidate.test.mjs"], validation: [validationCommand],
+      read: ["candidate.test.mjs"], validation: [supportingCommand, validationCommand],
     }));
     const secondHandoffPath = join(directory, "handoff.goal-unit-proof-2.json");
     await writeFile(secondHandoffPath, JSON.stringify({
@@ -4106,6 +4101,9 @@ test("fresh-root control uses one host-round-tripped ticket and terminal state r
         parts: [{ type: "text", text: "repair typed declaration locally before dispatch" }] },
     );
     const invalidDeclarations = [
+      { code: "delivery_intent_invalid", prompt: goalPrompt.replace("delivery_intent: implementation", "delivery_intent: Implement typed declarations") },
+      { code: "delivery_intent_invalid", prompt: goalPrompt.replace("delivery_intent: implementation", "delivery_intent: true") },
+      { code: "goal_criteria_missing", prompt: goalPrompt.replaceAll("goal_criterion_id:", "- { goal_criterion_id:") },
       { code: "delivery_intent_invalid", prompt: goalPrompt.replace("delivery_intent: implementation", "delivery_intent: invalid") },
       { code: "delivery_mode_invalid", prompt: `${goalPrompt}\ndelivery_mode: invalid` },
       { code: "goal_boolean_invalid", prompt: goalPrompt.replace("usable_path_established: false", "usable_path_established: maybe") },
@@ -4123,7 +4121,9 @@ test("fresh-root control uses one host-round-tripped ticket and terminal state r
         { tool: "task", sessionID: "goal-root", callID: `goal-declaration-invalid-${index}` },
         { args: { subagent_type: "dog-worker", prompt: declaration.prompt } },
       ), (error: unknown) => error instanceof HandoffDeniedError &&
-        error.defects.some((defect) => defect.endsWith(` ${declaration.code}`)));
+        error.defects.some((defect) => defect.endsWith(` ${declaration.code}`)) &&
+        error.message.includes("design | registration | implementation | repair | controlled-change") &&
+        error.message.includes("Use flat key: value lines"));
     }
 
     await hooks["tool.execute.before"]!(
@@ -4140,6 +4140,14 @@ test("fresh-root control uses one host-round-tripped ticket and terminal state r
     );
     await inspectHandoffWithRead(hooks, handoffPath, "goal-worker");
     assert.equal((await executeBindWriteGate(hooks, directory, "goal-worker", "goal.operation-manifest.json")).status, "bound");
+    await hooks["tool.execute.before"]!(
+      { tool: "bash", sessionID: "goal-worker", callID: "supporting-validation" },
+      { args: { command: supportingCommand } },
+    );
+    await hooks["tool.execute.after"]!(
+      { tool: "bash", sessionID: "goal-worker", callID: "supporting-validation", args: { command: supportingCommand } },
+      { output: "v22", metadata: { exit: 0 } },
+    );
     await hooks["tool.execute.before"]!(
       { tool: "bash", sessionID: "goal-worker", callID: "native-validation" },
       { args: { command: validationCommand } },
@@ -5251,6 +5259,7 @@ test("worker dispatch rejects an unregistered handoff and trusts its inspected m
 });
 
 test("current runtime assets require exact acceptance continuity on mutating dispatch", async () => {
+  for (const marker of ["-", "1."]) {
   await withProject("acceptance-continuity-dispatch", async (directory) => {
     await mkdir(join(directory, ".opencode"));
     await writeFile(join(directory, ".opencode", "sortie-dogs.version"), `${RUNTIME_ASSET_VERSION}\n`);
@@ -5266,9 +5275,8 @@ test("current runtime assets require exact acceptance continuity on mutating dis
       { sessionID: "root", agent: "dog-coordinator" },
       { message: { agent: "dog-coordinator", model: {} }, parts: [{ type: "text", text: "task" }] },
     );
-    const dispatch = (acceptance: string, callID: string, taskID = "task-a") => hooks["tool.execute.before"]!(
-      { tool: "task", sessionID: "root", callID },
-      { args: { subagent_type: "dog-worker", prompt: [
+    const dispatch = async (acceptance: string, callID: string, taskID = "task-a") => {
+      const output = { args: { subagent_type: "dog-worker", prompt: [
         `task_id: ${taskID}`,
         "role: implementation",
         `project_root: ${directory}`,
@@ -5276,10 +5284,12 @@ test("current runtime assets require exact acceptance continuity on mutating dis
         "source_manifest: [allowed.txt]",
         "operation_manifest: operation-manifest.json",
         "acceptance:",
-        `  - ${acceptance}`,
+        `  ${marker} ${acceptance}`,
         "validation: npm test",
-      ].join("\n") } },
-    );
+      ].join("\n") } };
+      await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID }, output);
+      return output.args.prompt;
+    };
     await assert.rejects(() => dispatch("preserve exact quality", "missing-continuity"),
       (error: unknown) => error instanceof HandoffDeniedError &&
         error.defects.includes("handoff /ext/sortie-dogs~1acceptance-continuity acceptance_continuity_absent"));
@@ -5307,11 +5317,12 @@ test("current runtime assets require exact acceptance continuity on mutating dis
       id: "task-a",
       ext: { ...base.ext, [ACCEPTANCE_CONTINUITY_EXTENSION]: acceptanceContinuity("task-a", criteria) },
     }));
-    await assert.rejects(() => dispatch("broad quality", "drifted-continuity"),
-      (error: unknown) => error instanceof HandoffDeniedError &&
-        error.defects.includes("contract /acceptance acceptance_continuity_mismatch"));
-    await dispatch(criteria[0]!, "valid-continuity");
+    const canonical = await dispatch("broad quality", "drifted-continuity");
+    assert.match(canonical, /acceptance: \["preserve exact quality"\]/u);
+    assert.doesNotMatch(canonical, /broad quality/u);
+    assert.match(canonical, /validation: npm test/u);
   });
+  }
 });
 
 test("follow-up mutating dispatch cannot drop parent acceptance criteria", async () => {
@@ -5394,8 +5405,13 @@ test("follow-up mutating dispatch cannot drop parent acceptance criteria", async
       }
     };
     await dispatchFollowUp([firstCriteria[1]!, firstCriteria[0]!], "reordered-parent");
+    await dispatchFollowUp([firstCriteria[0]!], "missing-parent-cannot-drop", false, "none");
+    await dispatchFollowUp([...firstCriteria].reverse(), "missing-parent-cannot-reorder", false, "none");
     await dispatchFollowUp(firstCriteria, "goal-fingerprint-is-not-parent", false, goalDeclarationFingerprint);
-    await dispatchFollowUp(firstCriteria, "sequential-exact-carry-forward", true);
+    await dispatchFollowUp(firstCriteria, "sequential-exact-carry-forward", true, "none");
+    const linked = JSON.parse(await readFile(secondPath, "utf8"));
+    assert.equal(linked.ext[ACCEPTANCE_CONTINUITY_EXTENSION].parent_fingerprint, firstFingerprint);
+    assert.deepEqual(linked.ext[ACCEPTANCE_CONTINUITY_EXTENSION].criteria, firstCriteria);
     await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "sequential-exact-carry-forward" }, {});
     await dispatchFollowUp(["add grass clusters", ...firstCriteria], "inserted-before-parent");
     await dispatchFollowUp([firstCriteria[0]!, "add grass clusters", firstCriteria[1]!], "inserted-between-parent");
@@ -9592,6 +9608,16 @@ test("declared Windows executable commands accept equivalent PowerShell call-ope
     normalizeCommand("& 'C:\\tools\\python.exe -c safe'"),
     normalizeCommand("C:\\tools\\python.exe -c safe"),
   );
+});
+
+test("declared validation sequences canonicalize only exact commands and unique executable basenames", () => {
+  const declared = new Set(["/pinned/bin/goyacc -o parser/parser.go parser/parser.go.y", "gofmt -w parser/parser.go"]);
+  assert.equal(canonicalDeclaredValidationSequence("goyacc -o parser/parser.go parser/parser.go.y && gofmt -w parser/parser.go", declared),
+    "/pinned/bin/goyacc -o parser/parser.go parser/parser.go.y && gofmt -w parser/parser.go");
+  assert.equal(canonicalDeclaredValidationSequence("goyacc -o other.go parser/parser.go.y", declared), undefined);
+  assert.equal(canonicalDeclaredValidationSequence("gofmt -w parser/parser.go; echo unsafe", declared), undefined);
+  assert.equal(canonicalDeclaredValidationSequence("goyacc -o parser/parser.go parser/parser.go.y",
+    new Set([...declared, "/other/bin/goyacc -o parser/parser.go parser/parser.go.y"])), undefined);
 });
 
 test("shell gate extracts bounded artifact download and archive paths", () => {

@@ -16,6 +16,11 @@ import {
   createLocalVerifierConfig,
   eventMetadata,
   deliveryResult,
+  expectedOperation,
+  expectedOperationEvent,
+  execute,
+  summarize,
+  cleanup,
   createPathOnlyWrapper,
   sanitizeForReport,
   validateManifest,
@@ -74,6 +79,19 @@ test("published manifest schema accepts the runner protocol", async () => {
   const schema = JSON.parse(await readFile(new URL("./fixtures/frontierharness-local/manifest.schema.json", import.meta.url), "utf8"));
   const validate = new Ajv2020().compile(schema);
   assert.equal(validate(manifest(join(tmpdir(), "schema-protocol"))), true, JSON.stringify(validate.errors));
+  const value = manifest(join(tmpdir(), "schema-protocol")) as any;
+  value.expected_operation = {
+    bare: { min_patch_bytes: 1, min_implementation_children: 0, terminal_outcome: null },
+    sortie: { min_patch_bytes: 1, min_implementation_children: 1, terminal_outcome: "DONE" },
+  };
+  assert.equal(validate(value), true, JSON.stringify(validate.errors));
+  assert.doesNotThrow(() => validateManifest(value, join(tmpdir(), "schema-protocol", "manifest.json"), join(tmpdir(), "schema-protocol")));
+  value.qualification_only = true;
+  assert.equal(validate(value), true, JSON.stringify(validate.errors));
+  assert.doesNotThrow(() => validateManifest(value, join(tmpdir(), "schema-protocol", "manifest.json"), join(tmpdir(), "schema-protocol")));
+  value.expected_operation.sortie.min_patch_bytes = 0;
+  assert.equal(validate(value), false);
+  assert.throws(() => validateManifest(value, join(tmpdir(), "schema-protocol", "manifest.json"), join(tmpdir(), "schema-protocol")));
 });
 
 test("rejects approved pin and byte hash mismatches", async () => {
@@ -111,10 +129,14 @@ test("enforces Bare-before-Sortie and one-shot run/verifier guards", () => {
   assert.throws(() => assertRunArmAllowed(completed, "bare"), (error: Error & { gate?: string }) =>
     error.gate === "attempt-once");
   assert.doesNotThrow(() => assertRunArmAllowed(completed, "sortie"));
+  assert.doesNotThrow(() => assertRunArmAllowed(base, "sortie", true));
+  assert.throws(() => assertRunArmAllowed(base, "bare", true), (error: Error & { gate?: string }) =>
+    error.gate === "qualification-arm");
   assert.doesNotThrow(() => assertVerifyAllowed(completed, "bare"));
   completed.arms.bare.verification = { attempted: true };
   assert.throws(() => assertVerifyAllowed(completed, "bare"), (error: Error & { gate?: string }) =>
     error.gate === "verify-once");
+  assert.doesNotThrow(() => assertVerifyAllowed({ arms: { sortie: { run: { status: "complete" } } } }, "sortie", true));
 });
 
 test("detects Bare filesystem and resolved-config contamination", async () => {
@@ -164,6 +186,67 @@ test("empty delivery and transport errors cannot be successful results", () => {
     { outcome: "failed", reason: "no-delivered-patch" });
   assert.equal(deliveryResult({ exit: 0, patch_bytes: 20, event_errors: 1 }, { exit: 0, reward: 1 }).reason, "agent-event-error");
   assert.equal(deliveryResult({ exit: 0, patch_bytes: 20 }, { exit: 0, reward: 0 }).reason, "acceptance-failed");
+});
+
+test("expected-operation failure blocks both remaining arms and verifiers", () => {
+  const run = { exit: 0, root_session_id: "ses_root", patch_bytes: 20, event_errors: 0,
+    implementation_children: ["ses_child"], terminal_outcome: "DONE" };
+  assert.equal(expectedOperation(run, "sortie").status, "pass");
+  for (const change of [{ patch_bytes: 0 }, { implementation_children: [] },
+    { root_session_id: null }, { terminal_outcome: "INTERRUPTED" }, { event_errors: 1 }]) {
+    assert.equal(expectedOperation({ ...run, ...change }, "sortie").status, "fail");
+  }
+  const state = { stopped: { reason: "no-delivered-patch" } };
+  for (const arm of ["bare", "sortie"]) {
+    assert.throws(() => assertRunArmAllowed(state, arm), /Benchmark stopped/u);
+    assert.throws(() => assertVerifyAllowed(state, arm), /Benchmark stopped/u);
+  }
+  assert.equal(expectedOperationEvent({ part: { type: "tool", tool: "task", state: { status: "error" } } }), "agent-event-error");
+  assert.equal(expectedOperationEvent({ part: { type: "tool", tool: "read",
+    state: { status: "error", error: "File not found: /project/ast/type.go" } } }), null);
+  assert.equal(expectedOperationEvent({ part: { type: "tool", tool: "read",
+    state: { status: "error", error: "Offset 495 is out of range for this file (458 lines)" } } }), null);
+  for (const tool of ["read", "glob", "grep", "task", "bash"]) {
+    assert.equal(expectedOperationEvent({ part: { type: "tool", tool,
+      state: { status: "error", error: "Permission denied" } } }), "agent-event-error");
+  }
+  assert.equal(eventMetadata(Buffer.from(JSON.stringify({
+    part: { type: "tool", tool: "read", state: { status: "error", error: "File not found: /project/ast/type.go" } },
+  }))).event_errors, 0);
+  assert.equal(expectedOperationEvent({ part: { type: "tool", state: { status: "running" } } }), null);
+});
+
+test("CLI records completed implementation child identity and canonical terminal outcome", () => {
+  const events = [{ sessionID: "ses_root", part: { type: "tool", tool: "task", state: {
+    status: "completed", input: { subagent_type: "dog-worker" }, metadata: { sessionId: "ses_child" } } } },
+  { sessionID: "ses_root", part: { type: "text", text: "✅ **DONE** task — complete" } }];
+  const result = eventMetadata(Buffer.from(events.map(JSON.stringify).join("\n")));
+  assert.deepEqual(result.implementation_children, ["ses_child"]);
+  assert.equal(result.terminal_outcome, "DONE");
+});
+
+test("first error stops a live process and partial summary permits cleanup without verifiers", async () => {
+  const root = await mkdtemp(join(process.cwd(), "_testenv", "frontier-stop-"));
+  try {
+    const result = await execute(process.execPath, ["-e",
+      `console.log(JSON.stringify({type:'error'}));setInterval(()=>{},60000)`],
+    { eventGate: expectedOperationEvent, timeoutMs: 10000 });
+    assert.equal(result.operationFailure, "agent-event-error");
+    assert.equal(result.timedOut, false);
+    assert.throws(() => process.kill(result.pid, 0));
+    const state = { stopped: { arm: "bare", reason: result.operationFailure },
+      arms: { bare: { active_pid: null, run: { exit: result.code, patch_bytes: 0 } } } };
+    await writeFile(join(root, "frontierharness-state.json"), JSON.stringify(state));
+    await mkdir(join(root, "workspaces"));
+    const context = { runtimeRoot: root, manifest: manifest(process.cwd()) };
+    const report = await summarize(context);
+    assert.equal(report.comparison.comparison_eligible, false);
+    assert.equal(report.arms.sortie.status, "not-run");
+    assert.equal((await cleanup(context, true)).remaining_agent_processes, 0);
+    const saved = JSON.parse(await readFile(join(root, "frontierharness-state.json"), "utf8"));
+    assert.equal(saved.arms.bare.verification, undefined);
+    assert.equal(saved.arms.sortie, undefined);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("CLI usage deduplicates step IDs, excludes tool bodies, and preserves zero versus missing", () => {
