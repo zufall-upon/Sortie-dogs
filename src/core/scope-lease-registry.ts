@@ -520,11 +520,14 @@ export class ScopeLeaseRegistry {
       await rmdir(this.lockPath).catch(() => undefined);
       return;
     }
-    if (names.length !== 1) return;
-    const match = OWNER_FILE.exec(names[0]!);
+    const owners = names.filter((name) => OWNER_FILE.test(name));
+    if (owners.length !== 1 || names.length > MAX_TEMP_CLEANUP + 1 ||
+      names.some((name) => name !== owners[0] && !TEMP_FILE.test(name))) return;
+    const ownerName = owners[0]!;
+    const match = OWNER_FILE.exec(ownerName);
     if (match === null || !UUID.test(match[1]!)) return;
     const owner = match[1]!;
-    const ownerPath = join(this.lockPath, names[0]!);
+    const ownerPath = join(this.lockPath, ownerName);
     const before = await this.mutexSnapshot(ownerPath);
     if (before === undefined || Date.now() - before.mtimeMs <= this.options.mutexStaleMs || before.content !== owner) return;
     const quarantineName = `.scope-leases.stale.${owner}.${randomUUID()}`;
@@ -534,7 +537,7 @@ export class ScopeLeaseRegistry {
     } catch {
       return;
     }
-    const movedOwnerPath = join(quarantine, names[0]!);
+    const movedOwnerPath = join(quarantine, ownerName);
     const after = await this.mutexSnapshot(movedOwnerPath);
     if (after === undefined || !this.sameMutexSnapshot(before, after)) {
       // The whole-directory rename already fenced this owner. Keep its quarantine until a later

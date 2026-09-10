@@ -133,7 +133,9 @@ test("accepted budget revision synchronizes validation limit without resetting c
   assert.deepEqual(revised.validation_budget.evidence_keys, before.validation_budget.evidence_keys);
   assert.equal(revised.consumed_units, before.consumed_units);
   assert.equal(revised.consumed_time_ms, before.consumed_time_ms);
-  assert.equal(revised.replan_used, before.replan_used);
+  assert.equal(revised.no_progress_results, 0);
+  assert.equal(revised.replan_required, false);
+  assert.equal(revised.replan_used, false);
   const duplicate = await ledger.reserveValidation({ ...request, operation_id: "duplicate" }, 3);
   assert.equal(duplicate.decision, "DENY");
   const next = { ...request, operation_id: "second", source_snapshot: "source-2" };
@@ -160,6 +162,81 @@ test("two no-progress boundaries permit one replan, then require stop", async ()
   const replanned = await ledger.appendGoal({ kind: "goal.replanned", at, goal_id: "goal-stall", revision: 1,
     reason: "no-progress" });
   assert.equal(replanned.replan_used, true);
+});
+
+test("accepted revision starts a fresh no-progress cycle without resetting spend", async () => {
+  const { ledger } = await accepted("revision-after-stall", 8);
+  for (let index = 1; index <= 4; index += 1) {
+    await ledger.appendGoal({ kind: "dispatch.reserved", at, reservation_id: `stall-r-${index}`,
+      goal_id: "goal-revision-after-stall", unit_id: `stall-u-${index}`, session_id: "root-session", ticket_id: null });
+    await ledger.appendGoal({ kind: "unit.settled", at, reservation_id: `stall-r-${index}`, receipt_id: `stall-x-${index}`,
+      goal_id: "goal-revision-after-stall", unit_id: `stall-u-${index}`, disposition: "failed",
+      result_class: "acceptance", progress_fingerprint: null, evidence: [], elapsed_ms: 10, cost_usd: null });
+    if (index === 2) {
+      await ledger.appendGoal({ kind: "goal.replanned", at, goal_id: "goal-revision-after-stall", revision: 1,
+        reason: "no-progress" });
+    }
+  }
+  const stalled = (await ledger.readGoal()).state;
+  assert.equal(stalled.consumed_units, 4);
+  assert.equal(stalled.replan_used, true);
+  assert.equal(stalled.replan_required, true);
+
+  const revised = await ledger.appendGoal({ kind: "goal.revised", at, goal_id: "goal-revision-after-stall",
+    revision: 2, scope_epoch: 2, acceptance_fingerprint: goalFingerprint(["revised-after-stall"]),
+    origin_user_message_id: "user-2", session_id: "root-session", selected_agent: "dog-coordinator",
+    delivery: "mvp-first", budget: { max_units: 8, time_ms: null, cost_usd: null, source: "user-revision" },
+    acceptance_contract: null, reset_no_progress: true });
+  assert.equal(revised.consumed_units, 4);
+  assert.equal(revised.no_progress_results, 0);
+  assert.equal(revised.replan_required, false);
+  assert.equal(revised.replan_used, false);
+  await ledger.appendGoal({ kind: "dispatch.reserved", at, reservation_id: "resumed-r-1",
+    goal_id: "goal-revision-after-stall", unit_id: "resumed-u-1", session_id: "root-session", ticket_id: null });
+});
+
+test("legacy revisions preserve their recorded no-progress semantics during replay", async () => {
+  const { ledger } = await accepted("legacy-revision-replay", 8);
+  for (let index = 1; index <= 2; index += 1) {
+    await ledger.appendGoal({ kind: "dispatch.reserved", at, reservation_id: `legacy-r-${index}`,
+      goal_id: "goal-legacy-revision-replay", unit_id: `legacy-u-${index}`, session_id: "root-session", ticket_id: null });
+    await ledger.appendGoal({ kind: "unit.settled", at, reservation_id: `legacy-r-${index}`, receipt_id: `legacy-x-${index}`,
+      goal_id: "goal-legacy-revision-replay", unit_id: `legacy-u-${index}`, disposition: "failed",
+      result_class: "acceptance", progress_fingerprint: null, evidence: [], elapsed_ms: 1, cost_usd: null });
+  }
+  await ledger.appendGoal({ kind: "goal.revised", at, goal_id: "goal-legacy-revision-replay", revision: 2,
+    scope_epoch: 2, acceptance_fingerprint: goalFingerprint(["legacy-revision"]), origin_user_message_id: "user-2",
+    session_id: "root-session", selected_agent: "dog-coordinator", delivery: "mvp-first",
+    budget: { max_units: 8, time_ms: null, cost_usd: null, source: "user-revision" }, acceptance_contract: null });
+  await ledger.appendGoal({ kind: "goal.replanned", at, goal_id: "goal-legacy-revision-replay", revision: 2,
+    reason: "no-progress" });
+  const replayed = (await ledger.readGoal()).state;
+  assert.equal(replayed.revision, 2);
+  assert.equal(replayed.replan_used, true);
+  assert.equal(replayed.replan_required, false);
+});
+
+test("pre-marker reset revisions replay an already accepted later dispatch", async () => {
+  const { ledger } = await accepted("pre-marker-reset-replay", 8);
+  for (let index = 1; index <= 4; index += 1) {
+    await ledger.appendGoal({ kind: "dispatch.reserved", at, reservation_id: `pre-marker-r-${index}`,
+      goal_id: "goal-pre-marker-reset-replay", unit_id: `pre-marker-u-${index}`, session_id: "root-session", ticket_id: null });
+    await ledger.appendGoal({ kind: "unit.settled", at, reservation_id: `pre-marker-r-${index}`, receipt_id: `pre-marker-x-${index}`,
+      goal_id: "goal-pre-marker-reset-replay", unit_id: `pre-marker-u-${index}`, disposition: "failed",
+      result_class: "acceptance", progress_fingerprint: null, evidence: [], elapsed_ms: 1, cost_usd: null });
+    if (index === 2) await ledger.appendGoal({ kind: "goal.replanned", at,
+      goal_id: "goal-pre-marker-reset-replay", revision: 1, reason: "no-progress" });
+  }
+  await ledger.appendGoal({ kind: "goal.revised", at, goal_id: "goal-pre-marker-reset-replay", revision: 2,
+    scope_epoch: 2, acceptance_fingerprint: goalFingerprint(["pre-marker-revision"]), origin_user_message_id: "user-2",
+    session_id: "root-session", selected_agent: "dog-coordinator", delivery: "mvp-first",
+    budget: { max_units: 8, time_ms: null, cost_usd: null, source: "user-revision" }, acceptance_contract: null });
+  const resumed = await ledger.appendGoal({ kind: "dispatch.reserved", at, reservation_id: "pre-marker-resumed",
+    goal_id: "goal-pre-marker-reset-replay", unit_id: "pre-marker-resumed", session_id: "root-session", ticket_id: null });
+  assert.equal(resumed.revision, 2);
+  assert.equal(resumed.consumed_units, 4);
+  assert.equal(resumed.replan_required, false);
+  assert.equal(resumed.outstanding_reservations.length, 1);
 });
 
 test("process defects and interruptions do not consume no-progress while acceptance failures do", async () => {

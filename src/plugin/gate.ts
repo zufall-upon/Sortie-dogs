@@ -989,7 +989,7 @@ export async function createProjectPaths(rootCandidate: string): Promise<Project
   };
 }
 
-export async function createWriteGate(project: ProjectPaths, value: unknown): Promise<WriteGate> {
+export async function createWriteGate(project: ProjectPaths, value: unknown, toolDirectory = project.root): Promise<WriteGate> {
   const validated = validateOperationManifestSchema(value);
   if (!validated.ok) throw new WriteDeniedError("manifest-unavailable", "<unknown>");
   const manifest: OperationManifest = validated.value;
@@ -1187,7 +1187,16 @@ export async function createWriteGate(project: ProjectPaths, value: unknown): Pr
         }
         throw new WriteDeniedError("path-required", "<missing-path>");
       }
-      for (const path of extracted.paths) await checkPath(path);
+      // OpenCode resolves native file-tool paths against its instance directory, not the
+      // manifest root. Check the same destination without rewriting the tool arguments.
+      const nativeFileTool = /^(?:write|edit)(?:$|[_-])/iu.test(_input.tool) || /patch/iu.test(_input.tool);
+      for (const path of extracted.paths) {
+        if (nativeFileTool) {
+          try { normalizeManifestPath(path); }
+          catch (error) { throw new WriteDeniedError("project-boundary", path, { cause: error }); }
+        }
+        await checkPath(nativeFileTool ? resolve(toolDirectory, path) : path);
+      }
       if (extracted.gitCommit) await checkCachedSet();
     },
   };

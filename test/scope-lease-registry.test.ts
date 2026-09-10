@@ -184,7 +184,7 @@ test("owner validation and strict bounded state schema fail closed", async () =>
   }
 });
 
-test("stale mutex recovery rechecks owner identity", async () => {
+for (const interruptedWrite of [false, true]) test(`stale mutex recovery rechecks owner identity with interrupted write=${interruptedWrite}`, async () => {
   const root = await mkdtemp(join(tmpdir(), "sortie-lease-stale-"));
   try {
     const lock = join(root, ".scope-leases.lock");
@@ -192,6 +192,7 @@ test("stale mutex recovery rechecks owner identity", async () => {
     await mkdir(lock);
     const marker = join(lock, `owner.${owner}`);
     await writeFile(marker, owner);
+    if (interruptedWrite) await writeFile(join(lock, `.scope-leases.${owner}.tmp`), "incomplete");
     const old = new Date(Date.now() - 1000);
     await utimes(marker, old, old);
     const registry = new ScopeLeaseRegistry(root, { mutexStaleMs: 20, mutexRetries: 20, mutexRetryMs: 5 });

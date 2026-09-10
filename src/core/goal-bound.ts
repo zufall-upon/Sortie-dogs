@@ -95,9 +95,10 @@ export type GoalFlightEvent =
   | (GoalEventBase & { readonly kind: "goal.user-continued"; readonly goal_id: string;
       readonly origin_user_message_id: string; readonly session_id: string; readonly selected_agent: string })
   | (GoalEventBase & { readonly kind: "goal.revised"; readonly goal_id: string; readonly revision: number;
-      readonly scope_epoch: number; readonly acceptance_fingerprint: string; readonly origin_user_message_id: string;
-      readonly session_id: string; readonly selected_agent: string; readonly delivery: GoalDeliveryMode;
-      readonly budget: GoalBudget; readonly acceptance_contract: GoalAcceptanceContract | null })
+       readonly scope_epoch: number; readonly acceptance_fingerprint: string; readonly origin_user_message_id: string;
+       readonly session_id: string; readonly selected_agent: string; readonly delivery: GoalDeliveryMode;
+       readonly budget: GoalBudget; readonly acceptance_contract: GoalAcceptanceContract | null;
+       readonly reset_no_progress?: boolean })
   | (GoalEventBase & { readonly kind: "ticket.issued"; readonly ticket_id: string; readonly goal_id: string;
       readonly revision: number; readonly scope_epoch: number; readonly checkpoint: string; readonly sequence: number;
       readonly session_id: string; readonly origin_user_message_id: string })
@@ -280,6 +281,8 @@ function addUnique(values: readonly string[], value: string): readonly string[] 
 
 export function reduceGoalFlight(records: readonly GoalFlightEventRecord[]): GoalFlightState {
   let state = initial();
+  let replanRevision: number | null = null;
+  let legacyResetRevision = false;
   let previous: string | null = null;
   for (const [index, record] of records.entries()) {
     requireState(record.sequence === index + 1 && record.previous_hash === previous && HASH.test(record.event_hash), "invalid", "Goal ledger chain is malformed.");
@@ -299,6 +302,8 @@ export function reduceGoalFlight(records: readonly GoalFlightEventRecord[]): Goa
         latest_user_message_id: event.origin_user_message_id, selected_agent: event.selected_agent,
         delivery: event.delivery, budget: event.budget, acceptance_contract: event.acceptance_contract, phase: "active",
         session_ids: [event.origin_session_id] };
+      replanRevision = null;
+      legacyResetRevision = false;
       continue;
     }
     requireState(state.goal_id !== null && event.goal_id === state.goal_id, "transition", "Goal identity mismatch.");
@@ -308,10 +313,12 @@ export function reduceGoalFlight(records: readonly GoalFlightEventRecord[]): Goa
         session_ids: addUnique(state.session_ids, event.session_id), phase: "active", stop_reason: null, receipt: null,
         tickets: [] };
     } else if (event.kind === "goal.revised") {
-      requireState(state.phase !== "terminal" && event.revision === state.revision + 1 && event.scope_epoch === state.scope_epoch + 1 &&
-        HASH.test(event.acceptance_fingerprint) && event.budget.max_units >= state.consumed_units &&
-        event.budget.max_units >= state.validation_budget.consumed &&
-        validAcceptanceContract(event.acceptance_contract), "transition", "Scope revision is stale or resets consumed budget.");
+       requireState(state.phase !== "terminal" && event.revision === state.revision + 1 && event.scope_epoch === state.scope_epoch + 1 &&
+         HASH.test(event.acceptance_fingerprint) && event.budget.max_units >= state.consumed_units &&
+         event.budget.max_units >= state.validation_budget.consumed &&
+         validAcceptanceContract(event.acceptance_contract) &&
+         (event.reset_no_progress === undefined || typeof event.reset_no_progress === "boolean"),
+         "transition", "Scope revision is stale or resets consumed budget.");
       state = { ...state, revision: event.revision, scope_epoch: event.scope_epoch,
         acceptance_fingerprint: event.acceptance_fingerprint, latest_user_message_id: event.origin_user_message_id,
         selected_agent: event.selected_agent, delivery: event.delivery, budget: event.budget,
@@ -319,7 +326,11 @@ export function reduceGoalFlight(records: readonly GoalFlightEventRecord[]): Goa
           limit: state.validation_budget.limit === null ? null : event.budget.max_units },
         acceptance_contract: event.acceptance_contract,
         session_ids: addUnique(state.session_ids, event.session_id), phase: "active", stop_reason: null,
-        receipt: null, tickets: [] };
+        receipt: null, tickets: [], ...(event.reset_no_progress === true
+          ? { no_progress_results: 0, replan_required: false, replan_used: false }
+          : {}) };
+      if (event.reset_no_progress === true) replanRevision = null;
+      legacyResetRevision = event.reset_no_progress === undefined;
     } else if (event.kind === "ticket.issued") {
       requireState(state.phase === "active" && event.revision === state.revision && event.scope_epoch === state.scope_epoch &&
         event.origin_user_message_id === state.latest_user_message_id && event.sequence === state.tickets.length + 1 &&
@@ -334,6 +345,13 @@ export function reduceGoalFlight(records: readonly GoalFlightEventRecord[]): Goa
         ? { ...candidate, receiving_message_id: event.receiving_message_id } : candidate),
         session_ids: addUnique(state.session_ids, event.session_id) };
     } else if (event.kind === "dispatch.reserved") {
+      // A short-lived pre-marker runtime reset no-progress on revision but persisted no flag.
+      // A later accepted dispatch proves that reset; older revisions followed by an explicit
+      // replan retain their original semantics.
+      if (legacyResetRevision && state.replan_required && state.replan_used && replanRevision !== null && state.revision > replanRevision) {
+        state = { ...state, no_progress_results: 0, replan_required: false, replan_used: false };
+        replanRevision = null;
+      }
       requireState(state.phase === "active" && !state.replan_required, "transition", "Dispatch requires terminal handling or one bounded replan.");
       requireState(state.budget !== null && state.consumed_units + state.outstanding_reservations.length < state.budget.max_units, "budget", "Goal unit budget exhausted.");
       requireState(state.budget.time_ms === null || (state.consumed_time_ms !== null && state.consumed_time_ms < state.budget.time_ms), "budget", "Goal time budget is exhausted or usage is unknown.");
@@ -389,6 +407,7 @@ export function reduceGoalFlight(records: readonly GoalFlightEventRecord[]): Goa
     } else if (event.kind === "goal.replanned") {
       requireState(state.phase === "active" && state.replan_required && !state.replan_used && event.revision === state.revision, "transition", "Bounded replan is unavailable.");
       state = { ...state, replan_used: true, replan_required: false, no_progress_results: 0 };
+      replanRevision = event.revision;
     } else if (event.kind === "goal.terminal") {
       const allAccepted = state.acceptance_contract !== null && state.acceptance_contract.criteria.every(({ criterion_id }) =>
         state.satisfied_criteria.includes(criterion_id));

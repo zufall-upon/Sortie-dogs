@@ -2203,7 +2203,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       delivery: declaration.delivery, budget: { max_units: maxUnits,
          time_ms: timeBudget, cost_usd: costBudget,
          source: Number.isSafeInteger(units) ? "accepted-plan" : state.budget?.source ?? "policy-default" },
-      acceptance_contract: declaration.contract });
+      acceptance_contract: declaration.contract, reset_no_progress: true });
     goalDeclarationAuthority.delete(sessionID);
     return state;
   }
@@ -2527,7 +2527,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         if (!validation.ok) throw new WriteDeniedError("manifest-unavailable", "<unknown>");
         loaded.manifest = validation.value;
         loaded.manifestFingerprint = inspectionFingerprint(validation.value, undefined);
-        loaded.gate = await createWriteGate(project, validation.value);
+        loaded.gate = await createWriteGate(project, validation.value, input.directory);
         bootstrapRequired = false;
         bootstrapCompleted = true;
         loadFailure = undefined;
@@ -4460,7 +4460,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           });
         }
         manifest = manifestValidation.value;
-        authorizationGate = await createWriteGate(candidateProject, manifest);
+        authorizationGate = await createWriteGate(candidateProject, manifest, input.directory);
         inspectedProjectRoot = candidateProject.root;
       } catch (error) {
         if (error instanceof HandoffDeniedError) throw error;
@@ -4788,7 +4788,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           idempotent: true,
         });
       }
-      const gate = await createWriteGate(candidate, validation.value);
+      const gate = await createWriteGate(candidate, validation.value, input.directory);
       const readScopes = await canonicalManifestReadScopes(candidate, validation.value);
       const writeScopes = await canonicalManifestWriteScopes(candidate, validation.value);
       // Keep conflict detection and registration in one JavaScript turn so competing binds fail closed.
@@ -6781,6 +6781,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         await gate.check(toolInput, output);
       } catch (error) {
         activeState?.inFlightCalls.delete(toolInput.callID);
+        if (error instanceof WriteDeniedError) goalValidationDefects.add(toolInput.sessionID);
         if (!(error instanceof WriteDeniedError) || error.reason === "repeated-denial") throw error;
         const signature = denialSignature(toolInput, output, error.reason);
         const activeSession = activeSessions.get(toolInput.sessionID);

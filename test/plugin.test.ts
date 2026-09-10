@@ -4300,6 +4300,21 @@ test("fresh-root control uses one host-round-tripped ticket and terminal state r
   });
 });
 
+test("native patch destinations use the host directory with a nested manifest root", async () => {
+  await withProject("nested-native-paths", async (directory) => {
+    const nested = join(directory, "child");
+    await mkdir(nested, { recursive: true });
+    const gate = await createWriteGate(await createProjectPaths(nested), operationManifest(["result.txt"]), directory);
+    const input = { tool: "apply_patch", sessionID: "child", callID: "patch" };
+    const output = (path: string) => ({ args: { patchText: `*** Begin Patch\n*** Add File: ${path}\n+recovered\n*** End Patch` } });
+    await gate.check(input, output("child/result.txt"));
+    await gate.check(input, output(join(nested, "result.txt")));
+    await assert.rejects(gate.check(input, output("result.txt")), /Write denied/u);
+    await assert.rejects(gate.check(input, output("child/outside.txt")), /Write denied/u);
+    await assert.rejects(gate.check(input, output("child/../outside.txt")), /Write denied/u);
+  });
+});
+
 test("validation admission-only failures do not consume no-progress and cannot erase a real failed check", async () => {
   await withProject("goal-validation-process-defect", async (directory) => {
     const command = "node --test candidate.test.mjs";
@@ -4314,7 +4329,7 @@ test("validation admission-only failures do not consume no-progress and cannot e
       message: { id: "goal-user", agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
       parts: [{ type: "text", text: "implement the accepted task" }],
     });
-    for (let index = 0; index < 3; index++) {
+    for (let index = 0; index < 4; index++) {
       const taskID = `unit-${index}`, child = `child-${index}`, manifest = `unit-${index}.json`;
       const handoff = join(directory, `handoff.unit-${index}.json`);
       await writeFile(join(directory, manifest), JSON.stringify({ ...operationManifest(["candidate.txt"]),
@@ -4336,11 +4351,15 @@ test("validation admission-only failures do not consume no-progress and cannot e
       });
       await inspectHandoffWithRead(hooks, handoff, child);
       assert.equal((await executeBindWriteGate(hooks, directory, child, manifest)).status, "bound");
-      await hooks["tool.execute.before"]!({ tool: "bash", sessionID: child, callID: `first-check-${index}` }, { args: { command } });
-      await hooks["tool.execute.after"]!({ tool: "bash", sessionID: child, callID: `first-check-${index}`, args: { command } },
-        { output: index === 0 ? "failed" : "host execution unavailable", metadata: index === 0 ? { exit: 1 } : {} });
-      await assert.rejects(hooks["tool.execute.before"]!({ tool: "bash", sessionID: child, callID: `denied-${index}` },
-        { args: { command } }), /SORTIE_VALIDATION_BUDGET_DENIED/u, `unit ${index} must reject duplicate validation`);
+      if (index !== 3) {
+        await hooks["tool.execute.before"]!({ tool: "bash", sessionID: child, callID: `first-check-${index}` }, { args: { command } });
+        await hooks["tool.execute.after"]!({ tool: "bash", sessionID: child, callID: `first-check-${index}`, args: { command } },
+          { output: index === 0 ? "failed" : "host execution unavailable", metadata: index === 0 ? { exit: 1 } : {} });
+        await assert.rejects(hooks["tool.execute.before"]!({ tool: "bash", sessionID: child, callID: `denied-${index}` },
+          { args: { command } }), /SORTIE_VALIDATION_BUDGET_DENIED/u, `unit ${index} must reject duplicate validation`);
+      }
+      await assert.rejects(hooks["tool.execute.before"]!({ tool: "apply_patch", sessionID: child, callID: `write-denied-${index}` },
+        { args: { patchText: "*** Begin Patch\n*** Add File: outside.txt\n+denied\n*** End Patch" } }), /Write denied/u);
       await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: taskID },
         { output: "<task_result>validation denied</task_result>", metadata: { sessionId: child } });
     }
@@ -4348,7 +4367,7 @@ test("validation admission-only failures do not consume no-progress and cannot e
     const ledger = JSON.parse(await readFile(path, "utf8"));
     const settled = ledger.goal_events.filter(({ event }: { event: { kind: string } }) => event.kind === "unit.settled");
     assert.deepEqual(settled.map(({ event }: { event: { result_class: string } }) => event.result_class),
-      ["acceptance", "process-defect", "process-defect"]);
+      ["acceptance", "process-defect", "process-defect", "process-defect"]);
   });
 });
 
@@ -7848,12 +7867,12 @@ test("handoff write authorization uses its candidate root when the parent worktr
     assert.ok(before);
     await before(
       { tool: "write", sessionID: "candidate", callID: "candidate-allowed" },
-      { args: { file: "allowed.txt", content: "not-written" } },
+      { args: { file: "subrepo/allowed.txt", content: "not-written" } },
     );
     await expectMessage(
       () => before(
         { tool: "write", sessionID: "candidate", callID: "candidate-denied" },
-        { args: { file: "parent.txt", content: "not-written" } },
+        { args: { file: "subrepo/parent.txt", content: "not-written" } },
       ),
       'Write denied for "parent.txt": operation manifest write scope.',
       "manifest-scope",
