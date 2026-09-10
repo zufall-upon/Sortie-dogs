@@ -6611,12 +6611,16 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           await bindGoalDeclaration(toolInput.sessionID,
             typeof output.args.prompt === "string" ? output.args.prompt : "");
         }
+        // Accounting is provisional until this dispatch is fully admitted. A later denial such as a
+        // budget stop must release the serial slot, or no worker could be dispatched or resumed again.
+        const workerAccounting = fastLane.snapshotWorkerAccounting(toolInput.sessionID);
         const resumedWorkerSessionID = fastLane.beforeTool(toolInput.sessionID, toolInput.tool, output.args, {
           readonlyDiagnosisAuthorized: readonlyDiagnosis,
           consultationFallbackAuthorized,
           parallelWorkerAlreadyBound,
           parallelWorkerAuthorized,
         });
+        try {
         if (toolInput.tool === "task" && taskRole !== undefined && IMPLEMENTATION_AGENTS.has(taskRole) &&
           isRecord(output.args)) {
           await reserveGoalDispatch(toolInput.sessionID, toolInput.callID,
@@ -6650,6 +6654,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
               completionCallID: toolInput.callID,
             });
           }
+        }
+        } catch (error) {
+          fastLane.restoreWorkerAccounting(toolInput.sessionID, workerAccounting);
+          throw error;
         }
         return;
       }

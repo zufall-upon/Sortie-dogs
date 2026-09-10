@@ -58,6 +58,16 @@ interface FastLaneTurnState {
   workerTaskID?: string;
 }
 
+export interface WorkerAccounting {
+  readonly totalWorkerDispatches: number;
+  readonly workerDispatches: number;
+  readonly workerInFlight: boolean;
+  readonly workerResumeUsed: boolean;
+  readonly workerResumeSessionID?: string;
+  readonly workerResumeTaskID?: string;
+  readonly workerTaskID?: string;
+}
+
 interface ReviewCandidateState {
   initialPrompts: Set<string>;
   verificationPrompts: Set<string>;
@@ -277,6 +287,30 @@ export class FastLaneController {
   workerCompleted(sessionID: string): void {
     const state = this.sessions.get(sessionID);
     if (state !== undefined) state.workerInFlight = false;
+  }
+
+  /** Snapshot worker accounting so a later denial in the same dispatch cannot leak the slot. */
+  snapshotWorkerAccounting(sessionID: string): WorkerAccounting | undefined {
+    const state = this.sessions.get(sessionID);
+    if (state === undefined) return undefined;
+    return { totalWorkerDispatches: state.totalWorkerDispatches, workerDispatches: state.workerDispatches,
+      workerInFlight: state.workerInFlight, workerResumeUsed: state.workerResumeUsed,
+      workerResumeSessionID: state.workerResumeSessionID, workerResumeTaskID: state.workerResumeTaskID,
+      workerTaskID: state.workerTaskID };
+  }
+
+  restoreWorkerAccounting(sessionID: string, snapshot: WorkerAccounting | undefined): void {
+    const state = this.sessions.get(sessionID);
+    if (state === undefined || snapshot === undefined) return;
+    state.totalWorkerDispatches = snapshot.totalWorkerDispatches;
+    state.workerDispatches = snapshot.workerDispatches;
+    state.workerInFlight = snapshot.workerInFlight;
+    state.workerResumeUsed = snapshot.workerResumeUsed;
+    for (const [key, value] of Object.entries({ workerResumeSessionID: snapshot.workerResumeSessionID,
+      workerResumeTaskID: snapshot.workerResumeTaskID, workerTaskID: snapshot.workerTaskID })) {
+      if (value === undefined) delete state[key as "workerTaskID"];
+      else state[key as "workerTaskID"] = value;
+    }
   }
 
   beforeTool(sessionID: string, tool: string, args: unknown, options: FastLaneToolOptions = {}): string | undefined {

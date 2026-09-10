@@ -13,6 +13,23 @@ function expectDenial(action: () => void, code: FastLaneDeniedError["code"]): vo
   });
 }
 
+test("a denial after fast-lane accounting releases the serial worker slot", () => {
+  const lane = new FastLaneController();
+  lane.beginTurn("root", false);
+  const before = lane.snapshotWorkerAccounting("root");
+  lane.beforeTool("root", "task", worker);
+  expectDenial(() => lane.beforeTool("root", "task", worker), "WORKER_LIMIT");
+  // A later gate (budget stop, reservation refusal) denies this dispatch; no child ever starts.
+  lane.restoreWorkerAccounting("root", before);
+  lane.beforeTool("root", "task", worker);
+  expectDenial(() => lane.beforeTool("root", "task", worker), "WORKER_LIMIT");
+  const admitted = lane.snapshotWorkerAccounting("root");
+  assert.equal(admitted.workerInFlight, true);
+  assert.equal(admitted.workerDispatches, 1);
+  lane.restoreWorkerAccounting("root", undefined);
+  expectDenial(() => lane.beforeTool("root", "task", worker), "WORKER_LIMIT");
+});
+
 test("normal turns permit autonomous sequential workers across synthetic continuation", () => {
   const lane = new FastLaneController();
   expectDenial(() => lane.beforeTool("root", "task", worker), "TURN_STATE_REQUIRED");
