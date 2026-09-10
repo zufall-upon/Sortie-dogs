@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -39,6 +39,44 @@ test("delivery selection follows explicit current-turn facts without a classifie
     irreversible_or_major_scope: false, explicit_mode: "mvp-first" }), "mvp-first");
 });
 
+test("terminal report snapshots are idempotent, receipt-bound, and cannot alter goal execution state", async () => {
+  const { ledger } = await accepted("report");
+  const receipt = { goal_id: "goal-report", terminal_revision: 1, acceptance_fingerprint: acceptance,
+    started_at: at, ended_at: "2026-09-08T00:00:01.000Z", status: "stopped" as const, stop_reason: "stopped" as const,
+    unit_ids: [], session_ids: ["root-session"], evidence_refs: [], milestone_at: null };
+  const before = await ledger.appendGoal({ kind: "goal.terminal", at: receipt.ended_at, goal_id: receipt.goal_id, receipt });
+  const report = { definition: "pre-terminal-host-tokens/v1" as const, terminal_key: goalFingerprint(receipt),
+    tokens: 10, models: [{ model: "fixture/model", tokens: 10 }], first_pass_eligible: false, traits: [] };
+  await assert.rejects(ledger.appendGoal({ kind: "goal.reported", at: receipt.ended_at, goal_id: receipt.goal_id,
+    report: { ...report, terminal_key: goalFingerprint("wrong receipt") } }), RunFlightLedgerError);
+  const after = await ledger.appendGoal({ kind: "goal.reported", at: receipt.ended_at, goal_id: receipt.goal_id, report });
+  assert.deepEqual(after, before);
+  await ledger.appendGoal({ kind: "goal.reported", at: receipt.ended_at, goal_id: receipt.goal_id, report });
+  assert.equal((await ledger.readGoal()).records.filter(({ event }) => event.kind === "goal.reported").length, 1);
+  await ledger.appendGoal({ kind: "goal.user-continued", at: "2026-09-08T00:00:02.000Z", goal_id: receipt.goal_id,
+    origin_user_message_id: "user-2", session_id: "root-session", selected_agent: "dog-coordinator" });
+  const resumed = { ...receipt, ended_at: "2026-09-08T00:00:03.000Z" };
+  await ledger.appendGoal({ kind: "goal.terminal", at: resumed.ended_at, goal_id: resumed.goal_id, receipt: resumed });
+  await ledger.appendGoal({ kind: "goal.reported", at: resumed.ended_at, goal_id: resumed.goal_id,
+    report: { ...report, terminal_key: goalFingerprint(resumed), tokens: 20, models: [{ model: "fixture/model", tokens: 20 }] } });
+  const { summarizeCareer } = await import("../dist/plugin/sortie-career.js");
+  const result = summarizeCareer([(await ledger.readGoal()).records], { files: 1, included: 1, unavailable: 0, truncated: false });
+  assert.equal(result.goals, 1);
+  assert.equal(result.interrupted, 1);
+  assert.equal(result.tokens.sum, 20);
+  const snapshot = await ledger.readGoal();
+  let previous: string | null = null;
+  const future = snapshot.records.map((entry) => {
+    const event = entry.event.kind === "goal.reported"
+      ? { ...entry.event, report: { ...entry.event.report, definition: "future-telemetry/v2" } } : entry.event;
+    const next = { ...entry, previous_hash: previous, event, event_hash: goalFingerprint({ sequence: entry.sequence, previous_hash: previous, event }) };
+    previous = next.event_hash;
+    return next;
+  });
+  await writeFile(path.join(root, "report", ".sortie-dogs", "run-flight", "root.json"), JSON.stringify({ schema_version: "0.1", goal_events: future }));
+  assert.deepEqual((await ledger.readGoal()).state, snapshot.state, "future presentation metadata must not block execution replay");
+});
+
 test("issued ticket is one-use and bound to goal revision, sequence, session, and origin user", async () => {
   const { ledger } = await accepted("ticket");
   await ledger.appendGoal({ kind: "ticket.issued", at, ticket_id: "ticket-1", goal_id: "goal-ticket",
@@ -74,6 +112,38 @@ test("rename and real continuation retain goal/spend; explicit revision cannot r
     scope_epoch: 2, acceptance_fingerprint: goalFingerprint(["revised"]), origin_user_message_id: "user-2",
     session_id: "root-session", selected_agent: "dog-coordinator", delivery: "mvp-first",
     budget: { max_units: 0, time_ms: null, cost_usd: null, source: "user-revision" } }), RunFlightLedgerError);
+});
+
+test("accepted budget revision synchronizes validation limit without resetting consumption", async () => {
+  const { ledger } = await accepted("validation-revision", 1);
+  const request = { run_id: "goal-validation-revision", operation_id: "first",
+    source_snapshot: "source-1", candidate: "candidate", command: ["node", "check"],
+    scope: "targeted" as const, expected_evidence: ["command", "source_snapshot"], reason: "preflight" as const };
+  const first = await ledger.reserveValidation(request, 1);
+  assert.equal(first.decision, "ALLOW");
+  await ledger.settleValidation(first.reservation_id!, request, "passed", 0);
+  const before = (await ledger.readGoal()).state;
+  const revised = await ledger.appendGoal({ kind: "goal.revised", at, goal_id: request.run_id,
+    revision: 2, scope_epoch: 2, acceptance_fingerprint: goalFingerprint(["expanded"]),
+    origin_user_message_id: "user-2", session_id: "root-session", selected_agent: "dog-coordinator",
+    delivery: "mvp-first", budget: { max_units: 3, time_ms: null, cost_usd: null, source: "user-revision" },
+    acceptance_contract: null });
+  assert.equal(revised.validation_budget.limit, 3);
+  assert.equal(revised.validation_budget.consumed, 1);
+  assert.deepEqual(revised.validation_budget.evidence_keys, before.validation_budget.evidence_keys);
+  assert.equal(revised.consumed_units, before.consumed_units);
+  assert.equal(revised.consumed_time_ms, before.consumed_time_ms);
+  assert.equal(revised.replan_used, before.replan_used);
+  const duplicate = await ledger.reserveValidation({ ...request, operation_id: "duplicate" }, 3);
+  assert.equal(duplicate.decision, "DENY");
+  const next = { ...request, operation_id: "second", source_snapshot: "source-2" };
+  assert.equal((await ledger.reserveValidation(next, 3)).decision, "ALLOW");
+  assert.equal((await ledger.readGoal()).state.validation_budget.consumed, 2);
+  await assert.rejects(ledger.appendGoal({ kind: "goal.revised", at, goal_id: request.run_id,
+    revision: 3, scope_epoch: 3, acceptance_fingerprint: acceptance, origin_user_message_id: "user-3",
+    session_id: "root-session", selected_agent: "dog-coordinator", delivery: "mvp-first",
+    budget: { max_units: 1, time_ms: null, cost_usd: null, source: "user-revision" },
+    acceptance_contract: null }), RunFlightLedgerError);
 });
 
 test("two no-progress boundaries permit one replan, then require stop", async () => {

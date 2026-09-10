@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { collectRunMetrics, createSortieResult, formatRunMetrics, formatSortieResult, insertRunMetrics,
   insertSortieResult, isDoneTerminalText, replaceDoneTerminalStatus, replaceTerminalStatus, sanitizeTerminalReport,
-  terminalRunOutcome } from "../src/plugin/run-metrics.ts";
+  terminalRunOutcome } from "../dist/plugin/run-metrics.js";
 
 test("collects bounded recursive assistant metrics and deduplicates messages", async () => {
   const metrics = await collectRunMetrics({ session: {
@@ -10,7 +10,9 @@ test("collects bounded recursive assistant metrics and deduplicates messages", a
     children: async ({ path }) => ({ data: path.id === "root" ? [{ id: "child" }] : [] }),
     messages: async () => ({ data: [{ info: { id: "same", role: "assistant", agent: "dog-coordinator", cost: 0.25, tokens: { input: 10, output: 2, reasoning: 1, cache: { read: 5, write: 1 } } }, time: { created: 2_000, completed: 3_000 } }] }),
   } }, "root", "test", 5_000);
-  assert.deepEqual(metrics, {
+  const { debrief, ...legacyMetrics } = metrics!;
+  assert.ok(debrief);
+  assert.deepEqual(legacyMetrics, {
     durationMilliseconds: 4_000,
     tokens: 19,
     inputTokens: 10,
@@ -147,7 +149,9 @@ test("reports a zero pre-terminal snapshot for a single-turn DONE", async () => 
     children: async () => ({ data: [] }),
     messages: async () => ({ data: [] }),
   } }, "root", undefined, 2_000);
-  assert.deepEqual(metrics, {
+  const { debrief, ...legacyMetrics } = metrics!;
+  assert.ok(debrief);
+  assert.deepEqual(legacyMetrics, {
     durationMilliseconds: 1_000,
     tokens: 0,
     inputTokens: 0,
@@ -240,8 +244,8 @@ test("builds a completed Sortie Result from the goal receipt, ledger, and host m
   assert.deepEqual(result.proof.criteria.availability === "available" ? result.proof.criteria.value : null,
     [{ criterion_id: "criterion-1", status: "PASS" }]);
   const inserted = insertSortieResult("status: DONE — complete\n\n**Validation:** PASS", result);
-  assert.ok(inserted.startsWith("status: DONE — complete\n\n**Sortie Result**\n**Speed:**"));
-  assert.match(inserted, /\*\*達成:\*\* 完了 · acceptance 1\/1/u);
+  assert.ok(inserted.startsWith("status: DONE — complete\n\n**🐾 SORTIE DOGS — 帰還報告**\n\n**⚡ 時間:**"));
+  assert.match(inserted, /\*\*🛡 達成:\*\* 完了 · 達成条件 1\/1/u);
   assert.doesNotMatch(inserted, /evidence-1|evidence ref|completed\)|sha256:/u);
   assert.equal(insertSortieResult(inserted, result), inserted);
   const sanitized = insertSortieResult("status: DONE\n\n**EVIDENCE:** model claim\nraw_status: fake\n" +
@@ -267,9 +271,9 @@ test("renders completed, interrupted, external-blocker, and user-decision as dis
   const externalText = insertSortieResult("⛔ **BLOCKED** external\nTRUE_BLOCKER: external: service\n\n<details><summary>Evidence</summary>evidence_refs: secret</details>", external);
   const interruptedText = insertSortieResult("⚠️ **INTERRUPTED** incomplete", interrupted);
   const decisionText = insertSortieResult("❓ **NEED_DECISION** choose", decision);
-  assert.match(externalText, /\*\*達成:\*\* 外部要因で未完了/u);
-  assert.match(interruptedText, /\*\*達成:\*\* 中断（未完了）/u);
-  assert.match(decisionText, /\*\*達成:\*\* ユーザー判断待ち（未完了）/u);
+  assert.match(externalText, /\*\*🛡 達成:\*\* 外部要因で未完了/u);
+  assert.match(interruptedText, /\*\*🛡 達成:\*\* 中断（未完了）/u);
+  assert.match(decisionText, /\*\*🛡 達成:\*\* ユーザー判断待ち（未完了）/u);
   assert.doesNotMatch(externalText, /TRUE_BLOCKER|external_dependency|<details>|Evidence|evidence_refs/u);
 });
 
@@ -285,7 +289,7 @@ test("types unavailable Sortie Result metrics without synthetic estimates", () =
     { availability: "unavailable", value: null, reason: "goal-clock-invalid" });
   assert.deepEqual(result.proof.criteria,
     { availability: "unavailable", value: null, reason: "acceptance-contract-unavailable" });
-  assert.match(formatSortieResult(result), /Cost:[\s\S]*計測不可/u);
+  assert.match(formatSortieResult(result), /使用量:[\s\S]*計測不可/u);
   assert.doesNotMatch(formatSortieResult(result), /host-metrics-unavailable|goal-clock-invalid|evidence_refs/u);
   assert.doesNotMatch(formatSortieResult(result), /\$0\.0000|0 tokens/u);
 });

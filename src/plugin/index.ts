@@ -122,7 +122,7 @@ import { AdaptiveRemediationRuntime, AdaptiveRunFlightLineage, type AdaptiveReme
 import { DEFAULT_ADAPTIVE_REMEDIATION_MODEL, GitAdaptiveRemediationHost, OpenCodeAdaptiveRemediationProvider,
   type AdaptiveRemediationSessionClient } from "./adaptive-remediation-host.js";
 import type { ChildTerminalEvidence, ChildTerminalObservation } from "../core/child-terminal-reconciliation.js";
-import { collectRunMetrics, createSortieResult, insertRunMetrics, insertSortieResult, replaceDoneTerminalStatus,
+import { collectRunMetrics, createSortieResult, createGoalReport, insertRunMetrics, insertSortieResult, replaceDoneTerminalStatus,
   replaceTerminalStatus, sanitizeTerminalReport, terminalRunOutcome } from "./run-metrics.js";
 import type { RunMetricsClient } from "./run-metrics.js";
 
@@ -1507,8 +1507,11 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   const parallelAcceptanceContinuity = new Map<string, AcceptanceContinuityLedger>();
   const goalRootSessions = new Map<string, string>();
   const goalLedgers = new Map<string, Promise<RunFlightLedger>>();
+  const goalLedgerFiles = new Map<string, string>();
+  const goalLedgerDirectories = new Set<string>();
   const goalReservations = new Map<string, { readonly root: string; readonly reservationID: string; readonly unitID: string; readonly started: number }>();
   const hostGoalExecutions = new Map<string, HostGoalExecution>();
+  const goalValidationDefects = new Set<string>();
   const goalDeclarationAuthority = new Map<string, string>();
   const pendingRealGoalTurns = new Map<string, { readonly selectedAgent: string; readonly parts: readonly unknown[] }>();
   const pendingGoalRecoveries = new Map<string, Promise<boolean>>();
@@ -1532,7 +1535,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   }
   const sessionOperationMetrics = new Map<string, SessionOperationMeasurements>();
 
-  function appLogInfo(message: string, sessionID: string, extra: Record<string, unknown>): void {
+  function appLogInfo(message: string, sessionID: string, extra: Record<string, unknown>, level: "info" | "warn" = "info"): void {
     const app = input.client?.app;
     const log = app?.log;
     if (log === undefined) return;
@@ -1540,7 +1543,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       const result = log.call(app, {
         body: {
           service: "sortie-dogs",
-          level: "info",
+          level,
           message,
           extra: { sessionID: sessionID.slice(0, 128), ...extra },
         },
@@ -1647,15 +1650,21 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const key = createHash("sha256").update(root).digest("hex");
     const projectRoot = resolve(input.worktree ?? input.directory);
     const legacyPath = join(projectRoot, ".sortie-dogs", "run-flight", `${key}.json`);
+    goalLedgerDirectories.add(dirname(legacyPath));
     const opened = (async () => {
+      const legacyExists = await stat(legacyPath).then((value) => value.isFile()).catch(() => false);
+      const leaseRoot = legacyExists ? await durableScopeRoot(projectRoot).catch(() => undefined) : await durableScopeRoot(projectRoot);
+      if (leaseRoot !== undefined) goalLedgerDirectories.add(join(dirname(leaseRoot), "run-flight"));
       // Existing roots remain on their original owner so an in-flight pre-upgrade goal is not forked.
-      if (await stat(legacyPath).then((value) => value.isFile()).catch(() => false)) {
+      if (legacyExists) {
+        goalLedgerFiles.set(root, legacyPath);
         return await RunFlightLedger.openGoal(legacyPath);
       }
-      const leaseRoot = await durableScopeRoot(projectRoot);
       const filePath = leaseRoot === undefined
         ? legacyPath
         : join(dirname(leaseRoot), "run-flight", `${key}.json`);
+      goalLedgerFiles.set(root, filePath);
+      goalLedgerDirectories.add(dirname(filePath));
       return await RunFlightLedger.openGoal(filePath);
     })();
     goalLedgers.set(root, opened);
@@ -1755,7 +1764,11 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         reservation.unit_id === unitID && reservation.session_id === identity.parentID);
       const criteria = goal.acceptance_contract?.criteria.filter((criterion) =>
         criterion.validation_command === rawCommand && criterion.expected_outcome === "pass") ?? [];
-      if (!unitBound) throw new Error("SORTIE_VALIDATION_BUDGET_DENIED: requirement-unbound");
+      const denyValidation = (reason: string): Error => {
+        goalValidationDefects.add(toolInput.sessionID);
+        return new Error(`SORTIE_VALIDATION_BUDGET_DENIED: ${reason}`);
+      };
+      if (!unitBound) throw denyValidation("requirement-unbound");
       // Exact generation and formatting checks may support acceptance without proving a criterion.
       if (criteria.length === 0) return;
       const scope = criteria.every((criterion) => criterion.proof_scope === "requested-full") ? "full" : "targeted";
@@ -1767,10 +1780,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       try {
         reservation = await ledger.reserveValidation(request, goal.budget?.max_units ?? 1);
       } catch (error) {
-        throw new Error(`SORTIE_VALIDATION_BUDGET_DENIED: authority-unavailable:${error instanceof Error ? error.name : "unknown"}`);
+        throw denyValidation(`authority-unavailable:${error instanceof Error ? error.name : "unknown"}`);
       }
       if (reservation.decision !== "ALLOW" || reservation.reservation_id === null) {
-        throw new Error(`SORTIE_VALIDATION_BUDGET_DENIED: ${reservation.reason}`);
+        throw denyValidation(reservation.reason);
       }
       validation = { ledger, request, reservation: reservation.reservation_id };
     }
@@ -1949,6 +1962,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     readonly goal: GoalFlightState | undefined;
     readonly receipt: GoalTerminalReceipt | undefined;
     readonly delivery: "ready" | "running" | "failed";
+    readonly records?: Awaited<ReturnType<RunFlightLedger["readGoal"]>>["records"];
   }> {
     const outcome = terminalRunOutcome(text);
     if (outcome === undefined || !isCoordinatorSession(sessionID)) {
@@ -2000,9 +2014,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         : "external_dependency";
       receipt = await terminalGoal(sessionID, reason, "stopped").catch(() => undefined);
     }
-    if (receipt !== undefined) goal = await currentGoal(sessionID).catch(() => goal);
+    const snapshot = receipt === undefined ? undefined : await goalLedger(sessionID).then((ledger) => ledger.readGoal()).catch(() => undefined);
+    if (snapshot !== undefined) goal = snapshot.state;
     if (receipt !== undefined) rootAcceptanceContinuity.delete(sessionID);
-    return { outcome, goal, receipt, delivery };
+    return { outcome, goal, receipt, delivery, records: snapshot?.records };
   }
 
   interface GoalDeclaration {
@@ -2158,20 +2173,6 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       throw new HandoffDeniedError("contract-invalid", "<goal-declaration>", { defects: validated.defects });
     }
     const declaration = validated.declaration;
-    const authority = goalDeclarationAuthority.get(sessionID);
-    if (authority === undefined || authority !== state.latest_user_message_id) {
-      if (declaration.fingerprint !== state.acceptance_fingerprint) {
-        throw new HandoffDeniedError("contract-invalid", "<goal-declaration>", { defects: [
-          contractDefect("contract", "/goal_acceptance_fingerprint", "goal_revision_unauthorized"),
-        ] });
-      }
-      return state;
-    }
-    if (declaration.fingerprint === state.acceptance_fingerprint &&
-      goalFingerprint(declaration.contract) === goalFingerprint(state.acceptance_contract)) {
-      goalDeclarationAuthority.delete(sessionID);
-      return state;
-    }
     const units = Number(handoffValue(entries, ["goal_budget_units"]));
     const maxUnits = Number.isSafeInteger(units) && units >= state.consumed_units && units > 0
       ? units : state.budget?.max_units ?? 32;
@@ -2179,6 +2180,22 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const declaredCost = Number(handoffValue(entries, ["goal_budget_cost_usd"]));
     const timeBudget = Number.isFinite(declaredTime) && declaredTime > 0 ? declaredTime : state.budget?.time_ms ?? null;
     const costBudget = Number.isFinite(declaredCost) && declaredCost > 0 ? declaredCost : state.budget?.cost_usd ?? null;
+    const budgetChanged = maxUnits !== state.budget?.max_units || timeBudget !== state.budget?.time_ms ||
+      costBudget !== state.budget?.cost_usd;
+    const authority = goalDeclarationAuthority.get(sessionID);
+    if (authority === undefined || authority !== state.latest_user_message_id) {
+      if (declaration.fingerprint !== state.acceptance_fingerprint || budgetChanged) {
+        throw new HandoffDeniedError("contract-invalid", "<goal-declaration>", { defects: [
+          contractDefect("contract", "/goal_acceptance_fingerprint", "goal_revision_unauthorized"),
+        ] });
+      }
+      return state;
+    }
+    if (!budgetChanged && declaration.fingerprint === state.acceptance_fingerprint &&
+      goalFingerprint(declaration.contract) === goalFingerprint(state.acceptance_contract)) {
+      goalDeclarationAuthority.delete(sessionID);
+      return state;
+    }
     state = await ledger.appendGoal({ kind: "goal.revised", at: new Date().toISOString(), goal_id: state.goal_id,
       revision: state.revision + 1, scope_epoch: state.scope_epoch + 1,
       acceptance_fingerprint: declaration.fingerprint, origin_user_message_id: state.latest_user_message_id!,
@@ -2291,7 +2308,12 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       output.status === "cancel" || output.status === "cancelled";
     const hostBindingDefect = childSessionID !== undefined && [...(bindingDenials.get(reservation.root)?.values() ?? [])]
       .some((candidateDenials) => [...candidateDenials.values()].includes(childSessionID));
-    const processDefect = childSessionID === undefined || hostBindingDefect;
+    const failedAcceptanceExecution = [...hostGoalExecutions.values()].some((execution) =>
+      execution.root === reservation.root && execution.sessionID === childSessionID &&
+      execution.endedAt !== undefined && Date.parse(execution.startedAt) >= reservation.started - 1000 &&
+      execution.outcome === "fail");
+    const processDefect = !failedAcceptanceExecution && (childSessionID === undefined || hostBindingDefect ||
+      goalValidationDefects.has(childSessionID));
     const resultClass = progress ? "acceptance" : interrupted ? "interrupted" : processDefect ? "process-defect" : "acceptance";
     await ledger.appendGoal({ kind: "unit.settled", at: new Date().toISOString(),
       reservation_id: reservation.reservationID, receipt_id: goalFingerprint({ call_id: callID, output: outputText.slice(0, 2048) }),
@@ -2300,6 +2322,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       progress_fingerprint: progress ? goalFingerprint(acceptedEvidence) : null,
       evidence: acceptedEvidence, elapsed_ms: Math.max(0, Date.now() - reservation.started), cost_usd: null });
     if (childSessionID !== undefined) {
+      goalValidationDefects.delete(childSessionID);
       for (const [executionCallID, execution] of hostGoalExecutions) {
         if (execution.root === reservation.root && execution.sessionID === childSessionID) hostGoalExecutions.delete(executionCallID);
       }
@@ -4531,7 +4554,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const remedies: Record<string, { recoverable: boolean; remedy: string }> = {
       "session-inactive": {
         recoverable: true,
-        remedy: "Freshly redispatch this worker with prompt text containing role, project_root, source_manifest or operation_manifest, and acceptance or validation fields; a bare resume or file read cannot activate the session.",
+        remedy: "Freshly redispatch through dog-coordinator's admitted dog-worker Task, with prompt text containing role, project_root, source_manifest or operation_manifest, and acceptance or validation fields. A standalone build/fixer Task is not a registered Sortie worker; copying these fields, a bare resume, or a file read cannot activate it. Preserve explicit agent selection and resolve any existing goal stop before using the Sortie workflow; do not repeat the same standalone redispatch or reset its ledger to bypass a stop.",
       },
       "session-expired": {
         recoverable: true,
@@ -5079,6 +5102,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   }
 
   function evictSession(sessionID: string): void {
+    goalValidationDefects.delete(sessionID);
     activeSessions.delete(sessionID);
     sessionOperationMetrics.delete(sessionID);
     rootAcceptanceContinuity.delete(sessionID);
@@ -5756,11 +5780,31 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
               endedAt: terminal.receipt.ended_at,
             }).catch(() => undefined),
         );
-        const sortieResult = terminal?.receipt === undefined || terminal.goal === undefined
+        let sortieResult = terminal?.receipt === undefined || terminal.goal === undefined
           ? undefined
-          : createSortieResult(terminal.receipt, terminal.goal, metrics, new Date().toISOString());
+          : createSortieResult(terminal.receipt, terminal.goal, metrics, new Date().toISOString(), terminal.records);
+        if (sortieResult !== undefined && terminal?.receipt !== undefined && terminal.records !== undefined) {
+          try {
+            const ledger = await goalLedger(textInput.sessionID);
+            const report = createGoalReport(sortieResult, terminal.receipt);
+            let records = terminal.records;
+            if (!records.some(({ event }) => event.kind === "goal.reported" && event.report?.terminal_key === report.terminal_key)) {
+              await ledger.appendGoal({ kind: "goal.reported", at: new Date().toISOString(), goal_id: terminal.receipt.goal_id, report });
+              records = (await ledger.readGoal()).records;
+            }
+            const currentPath = goalLedgerFiles.get(goalRoot(textInput.sessionID));
+            if (currentPath !== undefined) {
+              const { collectCareer } = await import("./sortie-career.js");
+              sortieResult = { ...sortieResult, career: await collectCareer([...goalLedgerDirectories], currentPath, records,
+                (path) => RunFlightLedger.readGoalFile(path)) };
+            }
+          } catch {
+            appLogInfo("run-metrics.career-unavailable", textInput.sessionID, { outcome: runOutcome }, "warn");
+          }
+        }
         if (sortieResult !== undefined) textOutput.text = insertSortieResult(textOutput.text, sortieResult);
         else if (metrics !== undefined && runOutcome === "DONE") textOutput.text = insertRunMetrics(textOutput.text, metrics);
+        const { debrief: _debriefObservation, ...metricSummary } = metrics ?? {};
         appLogInfo("run-metrics.snapshot", textInput.sessionID, {
           available: metrics !== undefined,
           outcome: runOutcome,
@@ -5771,7 +5815,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
             resultProof: sortieResult.proof.overall,
             accountingPhase: sortieResult.accounting_phase,
           }),
-          ...(metrics ?? {}),
+          ...metricSummary,
           ...operationMetricsSnapshot(textInput.sessionID),
         });
       }
@@ -6082,6 +6126,16 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     */
     "tool.execute.after": async (toolInput, output): Promise<void> => {
       await recordHostGoalEnd(toolInput, output);
+      // A completed host question is a new user-interaction boundary, just like chat input.
+      // It authorizes one subsequent typed declaration; it does not itself grant budget or clear a stop.
+      if (toolInput.tool === "question" && toolInput.sessionID !== undefined &&
+        isCoordinatorSession(toolInput.sessionID) && typeof output.output === "string" &&
+        output.output.trim().length > 0 && output.status !== "error" && output.status !== "cancelled") {
+        const goal = await currentGoal(toolInput.sessionID);
+        if (goal.phase !== "terminal" && goal.latest_user_message_id !== null) {
+          goalDeclarationAuthority.set(toolInput.sessionID, goal.latest_user_message_id);
+        }
+      }
       diagnosisChildren.get(toolInput.sessionID ?? "")?.tools.delete(toolInput.callID ?? "");
       const diagnosisCandidate = toolInput.tool === "task" ? diagnosisCalls.get(toolInput.callID ?? "") : undefined;
       const diagnosis = diagnosisCandidate?.context.ownerRoot === toolInput.sessionID ? diagnosisCandidate : undefined;

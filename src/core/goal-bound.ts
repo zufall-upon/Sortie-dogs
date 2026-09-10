@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { ValidationOutcome } from "./validation-budget.js";
+import type { GoalReport } from "./goal-report.js";
 
 export const GOAL_BOUND_SCHEMA_VERSION = "0.1" as const;
 export const GOAL_BOUND_METADATA_KEY = "sortie-dogs.goal-bound/v1" as const;
@@ -117,7 +118,8 @@ export type GoalFlightEvent =
       readonly operation_id: string; readonly evidence_key: string; readonly outcome: ValidationOutcome; readonly exit_code: number | null })
   | (GoalEventBase & { readonly kind: "goal.replanned"; readonly goal_id: string; readonly revision: number;
       readonly reason: "no-progress" })
-  | (GoalEventBase & { readonly kind: "goal.terminal"; readonly goal_id: string; readonly receipt: GoalTerminalReceipt });
+  | (GoalEventBase & { readonly kind: "goal.terminal"; readonly goal_id: string; readonly receipt: GoalTerminalReceipt })
+  | (GoalEventBase & { readonly kind: "goal.reported"; readonly goal_id: string; readonly report: GoalReport });
 
 export interface GoalFlightEventRecord {
   readonly sequence: number;
@@ -283,6 +285,9 @@ export function reduceGoalFlight(records: readonly GoalFlightEventRecord[]): Goa
     requireState(record.sequence === index + 1 && record.previous_hash === previous && HASH.test(record.event_hash), "invalid", "Goal ledger chain is malformed.");
     previous = record.event_hash;
     const event = record.event;
+    // Optional presentation records never participate in execution replay. Writers validate them;
+    // older/newer telemetry definitions must not prevent an existing goal from resuming.
+    if (event.kind === "goal.reported") continue;
     requireState(instant(event.at), "invalid", "Goal event timestamp is invalid.");
     if (event.kind === "goal.accepted") {
       requireState(state.goal_id === null || state.phase === "terminal", "transition", "An active goal already owns this root.");
@@ -305,13 +310,16 @@ export function reduceGoalFlight(records: readonly GoalFlightEventRecord[]): Goa
     } else if (event.kind === "goal.revised") {
       requireState(state.phase !== "terminal" && event.revision === state.revision + 1 && event.scope_epoch === state.scope_epoch + 1 &&
         HASH.test(event.acceptance_fingerprint) && event.budget.max_units >= state.consumed_units &&
+        event.budget.max_units >= state.validation_budget.consumed &&
         validAcceptanceContract(event.acceptance_contract), "transition", "Scope revision is stale or resets consumed budget.");
       state = { ...state, revision: event.revision, scope_epoch: event.scope_epoch,
         acceptance_fingerprint: event.acceptance_fingerprint, latest_user_message_id: event.origin_user_message_id,
         selected_agent: event.selected_agent, delivery: event.delivery, budget: event.budget,
+        validation_budget: { ...state.validation_budget,
+          limit: state.validation_budget.limit === null ? null : event.budget.max_units },
         acceptance_contract: event.acceptance_contract,
         session_ids: addUnique(state.session_ids, event.session_id), phase: "active", stop_reason: null,
-        tickets: [] };
+        receipt: null, tickets: [] };
     } else if (event.kind === "ticket.issued") {
       requireState(state.phase === "active" && event.revision === state.revision && event.scope_epoch === state.scope_epoch &&
         event.origin_user_message_id === state.latest_user_message_id && event.sequence === state.tickets.length + 1 &&

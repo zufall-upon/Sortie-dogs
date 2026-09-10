@@ -10,7 +10,7 @@ import { CHILD_TERMINAL_EVIDENCE_FIELDS, isChildTerminalIdentity, reconcileChild
   type ChildTerminalIdentity, type ChildTerminalEvidence, type ChildTerminalDisposition } from "./child-terminal-reconciliation.js";
 import type { TerminalRescueAcceptedBase } from "./terminal-rescue-policy.js";
 import type { ValidationBudgetRequest, ValidationBudgetDecision, ValidationOutcome } from "./validation-budget.js";
-import { GOAL_BOUND_SCHEMA_VERSION, GoalBoundError, reduceGoalFlight,
+import { GOAL_BOUND_SCHEMA_VERSION, GoalBoundError, reduceGoalFlight, goalFingerprint,
   type GoalFlightEvent, type GoalFlightEventRecord, type GoalFlightState } from "./goal-bound.js";
 
 export const RUN_FLIGHT_LEDGER_SCHEMA_VERSION = "0.1" as const;
@@ -855,6 +855,11 @@ export class RunFlightLedger {
     return ledger;
   }
 
+  /** Read-only Career inventory: validates one existing goal ledger without opening another store. */
+  static async readGoalFile(filePath: string): Promise<{ readonly records: readonly GoalFlightEventRecord[]; readonly state: GoalFlightState }> {
+    return new RunFlightLedger(filePath, undefined, true).readGoal();
+  }
+
   async read(): Promise<{ readonly records: readonly RunFlightEventRecord[]; readonly state: RunFlightState }> {
     if (this.#goalMode) throw new RunFlightLedgerError("invalid", "Goal ledger requires readGoal().");
     const records = await this.#readRecords();
@@ -988,6 +993,18 @@ export class RunFlightLedger {
     if (!handle) throw new RunFlightLedgerError("conflict", "Ledger lock remained busy.");
     try {
       const records = await this.#readGoalRecords();
+      if (event.kind === "goal.reported" && records.some(({ event: stored }) => stored.kind === "goal.reported" &&
+        stored.goal_id === event.goal_id && stored.report?.terminal_key === event.report.terminal_key)) {
+        return reduceGoalFlight(records);
+      }
+      if (event.kind === "goal.reported") {
+        const { validGoalReport } = await import("./goal-report.js");
+        const state = reduceGoalFlight(records);
+        if (state.receipt === null || event.goal_id !== state.goal_id || !validGoalReport(event.report) ||
+          event.report.terminal_key !== goalFingerprint(state.receipt)) {
+          throw new RunFlightLedgerError("invalid", "Report is not bound to the current terminal receipt.");
+        }
+      }
       const sequence = records.length + 1;
       const previousHash = records.at(-1)?.event_hash ?? null;
       const record: GoalFlightEventRecord = { sequence, previous_hash: previousHash,

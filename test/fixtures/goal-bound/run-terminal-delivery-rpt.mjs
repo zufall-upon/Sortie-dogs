@@ -335,7 +335,7 @@ try {
   assert.equal(summary.candidate.sameSession, true, "candidate did not resume the same session");
   assert.equal(summary.candidate.identity.packageVersion, packageVersion);
   assert.notEqual(summary.baseline.identity.pluginSha256, summary.candidate.identity.pluginSha256);
-  assert.equal(summary.candidate.identity.marker, "0.3.80-review-evidence-v1");
+  assert.equal(summary.candidate.identity.marker, "0.3.81-mission-debrief-v1");
    }
   }
   summary.status = "pass";

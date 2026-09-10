@@ -1,4 +1,8 @@
-import type { GoalFlightState, GoalTerminalReceipt } from "../core/goal-bound.js";
+import type { GoalFlightState, GoalTerminalReceipt, GoalFlightEventRecord } from "../core/goal-bound.js";
+import { buildDebrief, renderDebrief, observeDebriefSession, type Debrief, type DebriefObservation } from "./sortie-debrief.ts";
+import { goalFingerprint } from "../core/goal-bound.ts";
+import type { GoalReport } from "../core/goal-report.ts";
+import { renderCareer, type SortieCareer } from "./sortie-career.ts";
 
 export interface RunMetricsClient {
   readonly session?: {
@@ -26,6 +30,8 @@ export interface RunMetrics {
   readonly sessions: number | undefined;
   readonly cacheRatio: number | undefined;
   readonly roles: Readonly<Record<string, RunRoleMetrics>> | undefined;
+  /** Optional for compatibility with older host snapshots. Collected in the existing history pass. */
+  readonly debrief?: DebriefObservation;
 }
 
 export interface RunRoleMetrics {
@@ -62,6 +68,8 @@ export interface SortieResult {
   readonly result_id: readonly [goalID: string, terminalRevision: number];
   readonly accounting_phase: "pre-terminal";
   readonly as_of: string;
+  readonly debrief?: Debrief;
+  readonly career?: SortieCareer;
   readonly mission: {
     readonly status: "COMPLETED" | "INTERRUPTED" | "EXTERNAL_BLOCKER" | "USER_DECISION";
     readonly stop_reason: GoalTerminalReceipt["stop_reason"];
@@ -109,6 +117,7 @@ export function createSortieResult(
   goal: SortieGoalSnapshot,
   metrics: RunMetrics | undefined,
   asOf = receipt.ended_at,
+  records?: readonly GoalFlightEventRecord[],
 ): SortieResult {
   const goalWall = elapsedBetween(receipt.started_at, receipt.ended_at);
   const firstVerifiable = receipt.milestone_at === null
@@ -128,11 +137,13 @@ export function createSortieResult(
       : receipt.stop_reason === "external_dependency" || receipt.stop_reason === "persistence_unavailable"
         ? "EXTERNAL_BLOCKER"
         : "INTERRUPTED";
+  const debrief = buildDebrief(receipt, goal.acceptance_contract, metrics?.debrief, records);
   return {
     schema_version: "0.1",
     result_id: [receipt.goal_id, receipt.terminal_revision],
     accounting_phase: "pre-terminal",
     as_of: asOf,
+    debrief,
     mission: {
       status: missionStatus,
       stop_reason: receipt.stop_reason,
@@ -142,7 +153,9 @@ export function createSortieResult(
       worker_execution_ms: goal.consumed_time_ms === null
         ? unavailable("goal-usage-unavailable")
         : available(goal.consumed_time_ms, "goal-ledger"),
-      execution_compression: unavailable("worker-overlap-unavailable"),
+      execution_compression: debrief.overlap !== undefined && debrief.overlap.wallMilliseconds > 0
+        ? available(debrief.overlap.workerMilliseconds / debrief.overlap.wallMilliseconds, "host-reported")
+        : unavailable("worker-overlap-unavailable"),
       first_verifiable_ms: firstVerifiable === undefined
         ? unavailable("milestone-unavailable")
         : available(firstVerifiable, "goal-receipt"),
@@ -311,10 +324,14 @@ export async function collectRunMetrics(
   let cost = 0;
   let costAvailable = true;
   const roleMetrics = new Map<string, MutableRoleMetrics>();
+  const observedSessions: DebriefObservation["sessions"][number][] = [];
   for (const id of ids) {
     try {
       const messages = assistantMessages(await session.messages.call(session, { path: { id }, query: { directory } }));
       if (messages === undefined) return undefined;
+      const observed = observeDebriefSession(id, id === rootSessionID, messages,
+        window === undefined ? undefined : { start: windowStart!, end: windowEnd! });
+      observedSessions.push(observed);
       for (const message of messages) {
         const info = record(message.info) ?? message;
         const time = record(info.time) ?? record(message.time);
@@ -346,6 +363,12 @@ export async function collectRunMetrics(
         roleMetrics.set(agent, role);
         for (const usage of fresh) {
           const tokens = messageTokens(usage.value);
+          const modelInfo = record(usage.value.info) ?? usage.value;
+          const provider = modelInfo.providerID ?? info.providerID;
+          const model = modelInfo.modelID ?? info.modelID;
+          const modelKey = typeof provider === "string" && typeof model === "string" ? `${provider}/${model}` : "未分類";
+          observed.models[modelKey] = tokens === undefined || observed.models[modelKey] === null ? null
+            : (observed.models[modelKey] ?? 0) + tokens.total;
           if (tokens !== undefined) {
             totalTokens += tokens.total;
             inputTokens += tokens.input;
@@ -408,6 +431,8 @@ export async function collectRunMetrics(
         cacheRatio: role.tokens > 0 ? role.cacheReadTokens / role.tokens : undefined,
       }]))
       : undefined,
+    debrief: { complete: hierarchyComplete && messagesComplete, sessions: observedSessions,
+      window: window === undefined ? undefined : { start: windowStart!, end: windowEnd! } },
   };
 }
 
@@ -432,11 +457,14 @@ export function formatSortieResult(result: SortieResult): string {
       : result.mission.status === "EXTERNAL_BLOCKER" ? "外部要因で未完了"
         : "ユーザー判断待ち（未完了）";
   return [
-    "**Sortie Result**",
-    `**Speed:** 全体 ${metricText(result.speed.goal_wall_ms, duration)} · worker ${metricText(result.speed.worker_execution_ms, duration)}`,
-    `**Cost:** ${metricText(result.cost.total_tokens, (value) => `${value.toLocaleString("ja-JP")}トークン`)} · ${metricText(result.cost.cost_usd, (value) => `$${value.toFixed(4)}`)}`,
-    `**達成:** ${achievement} · acceptance ${criteria}`,
-  ].join("\n");
+    "**🐾 SORTIE DOGS — 帰還報告**",
+    `**⚡ 時間:** ${metricText(result.speed.goal_wall_ms, duration)}`,
+    `**🪙 使用量:** ${metricText(result.cost.total_tokens, (value) => `${value.toLocaleString("ja-JP")} tokens`)} · host推定額 ${metricText(result.cost.cost_usd, (value) => `$${value.toFixed(4)}`)}（実課金換算なし）`,
+    ...renderDebrief(result.debrief),
+    `**🛡 達成:** ${achievement} · 達成条件 ${criteria}`,
+    "*最終応答生成前の計測*",
+    ...renderCareer(result.career),
+  ].join("\n\n");
 }
 
 export function formatRunMetrics(metrics: RunMetrics): string {
@@ -544,9 +572,32 @@ export function insertSortieResult(text: string, result: SortieResult): string {
   const visible = sanitizeTerminalReport(text);
   const checkpoint = terminalCheckpoint(visible);
   if (checkpoint === undefined) return visible;
-  if (topLevelLines(visible).some(({ index, line }) => index > checkpoint.index && /^\*\*Sortie Result\*\*/u.test(line))) return visible;
+  // A title in model text is not trusted evidence. Replace existing cards, including legacy cards.
   const newline = visible.includes("\r\n") ? "\r\n" : "\n";
   const lines = visible.split(/\r?\n/u);
-  lines.splice(checkpoint.index + 1, 0, "", formatSortieResult(result));
-  return lines.join(newline);
+  const cardLines = new Set(topLevelLines(visible).filter(({ index, line }) => index > checkpoint.index &&
+    /^(?:\*\*(?:Sortie Result|🐾 SORTIE DOGS — 帰還報告|📜 PACK RECORD|↳\*\*|(?:Speed|Cost|達成|⚡ 時間|🪙 使用量|🐕 出撃隊|モデル別token内訳|実行重複率|🛡 達成|確認|🏅 今回の戦績|戦績|初回完遂|累積使用量|累積モデル|累積時間|累積実行重複率|保存範囲|🎖 隊の称号):)|\*最終応答生成前の計測\*)/u.test(line)).map(({ index }) => index));
+  const cleaned = lines.filter((_, index) => !cardLines.has(index));
+  while (cleaned[checkpoint.index + 1] === "") cleaned.splice(checkpoint.index + 1, 1);
+  let card: string;
+  try { card = formatSortieResult(result); }
+  catch { card = "**🐾 SORTIE DOGS — 帰還報告**\n**確認:** 表示集計を取得できません。任務結果は先頭の状態を参照。"; }
+  cleaned.splice(checkpoint.index + 1, 0, "", card, "");
+  return cleaned.join(newline).trimEnd();
+}
+
+export function createGoalReport(result: SortieResult, receipt: GoalTerminalReceipt): GoalReport {
+  const tokens = result.cost.total_tokens.availability === "available" && Number.isSafeInteger(result.cost.total_tokens.value)
+    ? result.cost.total_tokens.value : null;
+  const mix = result.debrief?.mix;
+  const traits: GoalReport["traits"][number][] = [];
+  if (result.debrief?.traits.includes("連携作戦")) traits.push("pack-tactics");
+  if (result.debrief?.traits.includes("修正から復帰")) traits.push("recovery");
+  if (result.debrief?.traits.includes("一発完遂")) traits.push("clean-sweep");
+  return { definition: "pre-terminal-host-tokens/v1", terminal_key: goalFingerprint(receipt), tokens,
+    models: mix != null && mix.length <= 128 && mix.every((entry) => entry.model.length <= 512) &&
+      mix.reduce((sum, entry) => sum + entry.tokens, 0) === tokens ? mix.map(({ model, tokens }) => ({ model, tokens })) : null,
+    first_pass_eligible: result.debrief?.firstPassEligible === true, traits,
+    ...(result.debrief?.overlap === undefined ? {} : { overlap: { definition: "worker-span-union/v1" as const,
+      worker_ms: result.debrief.overlap.workerMilliseconds, wall_ms: result.debrief.overlap.wallMilliseconds } }) };
 }

@@ -1,6 +1,6 @@
 import type { RuntimeAssetVersion } from "./asset-version.js";
 import { GOAL_DECLARATION_FORMAT } from "./core/goal-declaration-format.ts";
-const ASSET_VERSION: RuntimeAssetVersion = "0.3.80-review-evidence-v1";
+const ASSET_VERSION: RuntimeAssetVersion = "0.3.81-mission-debrief-v1";
 
 // Kept local so source-mode CLI execution does not load the plugin graph.
 const BACKLOG_DRAIN_CAPABILITY = "sortie_enable_backlog_drain";
@@ -1632,8 +1632,14 @@ END_COMMIT_SCOPE_FIXTURE
 At each checkpoint and terminal return, preserve concise proof internally. The user-facing terminal
 return MUST begin with its conclusion: no plan, progress, assessment, Evidence heading, or preamble.
 Use exactly one of DONE, INTERRUPTED, BLOCKED, or NEED_DECISION with one status emoji and a short
-Japanese conclusion. Then render Japanese 変更点, 確認結果, and 次 paragraphs without bullets or extra
-emoji. The plugin injects measured Speed, Cost, and 達成 paragraphs. Do not estimate or fabricate them.
+Japanese conclusion. Then render Japanese 変更点, 確認結果, and 次 paragraphs without bullets or decorative
+emoji. The plugin injects measured Speed, Cost, and 達成 paragraphs in a Japanese mission debrief card,
+with one fixed icon per section, observed pack/model usage, validation/review, and evidence-backed traits.
+Its Markdown token bars and PACK RECORD summarize retained project goals, with coverage and team titles;
+they never imply lifetime history, XP, levels, unmeasured savings, or a leaderboard rank.
+Never write the card, its metrics, or its badges yourself. Do not estimate or fabricate them.
+Use 任務完了 for DONE, 中断帰還（未完了） for INTERRUPTED, 外部要因で待機（未完了） for BLOCKED,
+and 指示待ち（未完了） for NEED_DECISION; preserve the machine status token and first-line checkpoint.
 Never render a user-facing Evidence heading, <details> block, evidence reference, internal reason code,
 ledger key, or raw status. Keep ordered command/exit/fingerprint history, manifests, evidence refs,
 review proof, and terminal receipt append-only in their internal typed ledger and host logs. A concise

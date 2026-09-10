@@ -1292,7 +1292,7 @@ test("unproved coordinator DONE is rejected while host root and child metrics re
     assert.equal(body.extra.available, true);
     assert.equal(body.extra.outcome, "DONE");
     assert.equal(body.extra.sessionID, "root");
-    assert.equal(body.extra.runtimeAssetVersion, "0.3.80-review-evidence-v1");
+    assert.equal(body.extra.runtimeAssetVersion, "0.3.81-mission-debrief-v1");
     assert.equal(body.extra.inputTokens, 130);
     assert.equal(body.extra.outputTokens, 15);
     assert.equal(body.extra.reasoningTokens, 5);
@@ -3958,6 +3958,50 @@ test("an explicit Build selection relinquishes an established coordinator while 
   });
 });
 
+test("host question permits a budget-only revision after budget stop without erasing spend", async () => {
+  await withProject("question-budget-revision", async (directory) => {
+    const hooks = await SortieDogsPlugin({ directory, client: { session: {
+      get: async ({ path }: { path: { id: string } }) => ({ data: path.id === "budget-child"
+        ? { agent: "dog-worker", parentID: "budget-root" } : { agent: "dog-coordinator" } }),
+    } } } as never);
+    await writeFile(join(directory, "candidate.txt"), "candidate\n");
+    await writeFile(join(directory, "budget.operation-manifest.json"), JSON.stringify({
+      ...operationManifest(["candidate.txt"]), task_id: "budget-unit", validation: ["node --version"],
+    }));
+    await writeFile(join(directory, "handoff.json"), JSON.stringify({
+      ...writeGateHandoff(directory, "budget.operation-manifest.json"), id: "budget-unit",
+    }));
+    await hooks["chat.message"]!({ sessionID: "budget-root", agent: "dog-coordinator", messageID: "user-budget" },
+      { message: { id: "user-budget", agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-sol" } },
+        parts: [{ type: "text", text: "Implement the accepted goal" }] });
+    const prompt = ["role: implementation", `project_root: ${directory}`, `handoff_path: ${join(directory, "handoff.json")}`,
+      "source_manifest: [candidate.txt]", "operation_manifest: budget.operation-manifest.json", "acceptance: runtime passes",
+      "validation: node --version", `goal_acceptance_fingerprint: sha256:${"a".repeat(64)}`,
+      "goal_criterion_id: runtime", "goal_target: delivery", "goal_entrypoint: fixture", "goal_workload: one unit",
+      'goal_oracle_coverage: ["runtime"]', "goal_build_boundary: not-applicable", "goal_source: protected source",
+      "goal_candidate: protected candidate", "goal_source_binding: current-protected", "goal_candidate_binding: current-protected",
+      "goal_fixture: budget", "goal_proof_scope: requested-full", "goal_expected_outcome: pass", "goal_validation_command: node --version",
+      "delivery_intent: implementation", "usable_path_established: false", "controlled_change: false", "goal_budget_units: 1"].join("\n");
+    const dispatch = (callID: string, text = prompt) => hooks["tool.execute.before"]!(
+      { tool: "task", sessionID: "budget-root", callID }, { args: { subagent_type: "dog-worker", prompt: text } });
+    await dispatch("first-budget-unit");
+    await hooks["tool.execute.after"]!({ tool: "task", sessionID: "budget-root", callID: "first-budget-unit" },
+      { output: "PROCESS_DEFECT: local: fixture validation unavailable", metadata: { sessionId: "budget-child" } });
+    await assert.rejects(dispatch("exhausted-budget"), /stop_budget/);
+    await assert.rejects(dispatch("unapproved-budget", prompt.replace("goal_budget_units: 1", "goal_budget_units: 3")),
+      (error: unknown) => error instanceof HandoffDeniedError && error.defects.some((value) => value.includes("goal_revision_unauthorized")));
+    await hooks["tool.execute.after"]!({ tool: "question", sessionID: "budget-root", callID: "approval" },
+      { output: "User approved two additional units; cumulative limit three." });
+    await dispatch("resumed-budget", prompt.replace("goal_budget_units: 1", "goal_budget_units: 3"));
+    const projection = { system: [] as string[] };
+    await hooks["experimental.chat.system.transform"]!({ sessionID: "budget-root" }, projection);
+    const line = projection.system.find((entry) => entry.startsWith("SORTIE_GOAL_BOUND_STATE\n"))!;
+    const state = JSON.parse(line.slice(line.indexOf("\n") + 1));
+    assert.equal(state.consumed_units, 1);
+    assert.equal(state.outstanding_reservations, 1);
+  });
+});
+
 test("fresh-root control uses one host-round-tripped ticket and terminal state rejects stale replay", async () => {
   await withProject("goal-bound-host-ticket", async (directory) => {
     let forwarded: { agent: string; parts: unknown[] } | undefined;
@@ -4253,6 +4297,91 @@ test("fresh-root control uses one host-round-tripped ticket and terminal state r
       assert.match(evidence.identity.candidate, /^sha256:[a-f0-9]{64}$/u);
       assert.deepEqual(evidence.execution.command, [validationCommand]);
     }
+  });
+});
+
+test("validation admission-only failures do not consume no-progress and cannot erase a real failed check", async () => {
+  await withProject("goal-validation-process-defect", async (directory) => {
+    const command = "node --test candidate.test.mjs";
+    await writeFile(join(directory, "candidate.txt"), "candidate\n");
+    await writeFile(join(directory, "candidate.test.mjs"), "// validation fixture\n");
+    const hooks = await SortieDogsPlugin({ directory, client: { session: {
+      get: async ({ path }: { path: { id: string } }) => ({ data: path.id === "root"
+        ? { agent: "dog-coordinator" } : { agent: "dog-worker", parentID: "root" } }),
+      messages: async () => ({ data: [] }),
+    } } as never });
+    await hooks["chat.message"]!({ sessionID: "root", agent: "dog-coordinator", messageID: "goal-user" }, {
+      message: { id: "goal-user", agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+      parts: [{ type: "text", text: "implement the accepted task" }],
+    });
+    for (let index = 0; index < 3; index++) {
+      const taskID = `unit-${index}`, child = `child-${index}`, manifest = `unit-${index}.json`;
+      const handoff = join(directory, `handoff.unit-${index}.json`);
+      await writeFile(join(directory, manifest), JSON.stringify({ ...operationManifest(["candidate.txt"]),
+        task_id: taskID, read: ["candidate.test.mjs"], validation: [command] }));
+      await writeFile(handoff, JSON.stringify({ ...writeGateHandoff(directory, manifest), id: taskID }));
+      const prompt = [`task_id: ${taskID}`, "role: implementation", `project_root: ${directory}`, `handoff_path: ${handoff}`,
+        "source_manifest: [candidate.test.mjs]", `operation_manifest: ${manifest}`, "acceptance: candidate passes",
+        `validation: { level: full, command: ${command}, diagnostics: [] }`, `goal_acceptance_fingerprint: sha256:${"a".repeat(64)}`,
+        "goal_criterion_id: candidate", "goal_target: candidate", "goal_entrypoint: fixture", "goal_workload: one unit",
+        "goal_oracle_coverage:\n  - acceptance", "goal_build_boundary: not-applicable", "goal_source: current protected source",
+        "goal_candidate: current protected candidate", "goal_source_binding: current-protected", "goal_candidate_binding: current-protected",
+        "goal_fixture: fixture", "goal_proof_scope: requested-full", "goal_expected_outcome: pass", "delivery_intent: implementation",
+        "usable_path_established: false", "controlled_change: false", "goal_budget_units: 6"].join("\n");
+      await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: taskID },
+        { args: { subagent_type: "dog-worker", prompt } });
+      await hooks.event!({ event: { type: "session.created", properties: { info: { id: child, parentID: "root", directory } } } });
+      await hooks["chat.message"]!({ sessionID: child, agent: "dog-worker", parentID: "root" } as never, {
+        message: { agent: "dog-worker", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: prompt }],
+      });
+      await inspectHandoffWithRead(hooks, handoff, child);
+      assert.equal((await executeBindWriteGate(hooks, directory, child, manifest)).status, "bound");
+      await hooks["tool.execute.before"]!({ tool: "bash", sessionID: child, callID: `first-check-${index}` }, { args: { command } });
+      await hooks["tool.execute.after"]!({ tool: "bash", sessionID: child, callID: `first-check-${index}`, args: { command } },
+        { output: index === 0 ? "failed" : "host execution unavailable", metadata: index === 0 ? { exit: 1 } : {} });
+      await assert.rejects(hooks["tool.execute.before"]!({ tool: "bash", sessionID: child, callID: `denied-${index}` },
+        { args: { command } }), /SORTIE_VALIDATION_BUDGET_DENIED/u, `unit ${index} must reject duplicate validation`);
+      await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: taskID },
+        { output: "<task_result>validation denied</task_result>", metadata: { sessionId: child } });
+    }
+    const path = join(directory, ".git", "sortie-dogs", "run-flight", `${createHash("sha256").update("root").digest("hex")}.json`);
+    const ledger = JSON.parse(await readFile(path, "utf8"));
+    const settled = ledger.goal_events.filter(({ event }: { event: { kind: string } }) => event.kind === "unit.settled");
+    assert.deepEqual(settled.map(({ event }: { event: { result_class: string } }) => event.result_class),
+      ["acceptance", "process-defect", "process-defect"]);
+  });
+});
+
+test("Career persistence failure preserves the terminal outcome and retry records one report", async (context) => {
+  await withProject("career-report-failure", async (directory) => {
+    const hooks = await SortieDogsPlugin({ directory, client: { session: {
+      get: async () => ({ data: { agent: "dog-coordinator" } }),
+      children: async () => ({ data: [] }), messages: async () => ({ data: [] }),
+    } } as never });
+    await hooks["chat.message"]!({ sessionID: "career-root", agent: "dog-coordinator", messageID: "career-user" }, {
+      message: { id: "career-user", agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+      parts: [{ type: "text", text: "deliver this task" }],
+    });
+    const { RunFlightLedger } = await import("../dist/core/run-flight-ledger.js");
+    const append = RunFlightLedger.prototype.appendGoal;
+    const mocked = context.mock.method(RunFlightLedger.prototype, "appendGoal", async function(event) {
+      if (event.kind === "goal.reported") throw new Error("fixture telemetry write failure");
+      return append.call(this, event);
+    });
+    const failed = { text: "status: INTERRUPTED — incomplete\n\n**次:** resume" };
+    await hooks["experimental.text.complete"]!({ sessionID: "career-root" }, failed);
+    assert.match(failed.text, /^status: INTERRUPTED/u);
+    assert.match(failed.text, /保存履歴を取得できません/u);
+    mocked.mock.restore();
+    const successful = { text: "status: INTERRUPTED — incomplete\n\n**次:** resume" };
+    await hooks["experimental.text.complete"]!({ sessionID: "career-root" }, successful);
+    assert.match(successful.text, /^status: INTERRUPTED/u);
+    assert.match(successful.text, /中断 1/u);
+    await hooks["experimental.text.complete"]!({ sessionID: "career-root" }, successful);
+    const path = join(directory, ".git", "sortie-dogs", "run-flight", `${createHash("sha256").update("career-root").digest("hex")}.json`);
+    const snapshot = await RunFlightLedger.readGoalFile(path);
+    assert.equal(snapshot.state.phase, "stopped");
+    assert.equal(snapshot.records.filter(({ event }) => event.kind === "goal.reported").length, 1);
   });
 });
 
@@ -6480,7 +6609,7 @@ test("session-inactive recovery requires a fresh inline-handoff dispatch", async
     const inactive = await executeBindWriteGate(hooks, directory, "recovery-child");
     assert.equal(
       inactive.remedy,
-      "Freshly redispatch this worker with prompt text containing role, project_root, source_manifest or operation_manifest, and acceptance or validation fields; a bare resume or file read cannot activate the session.",
+      "Freshly redispatch through dog-coordinator's admitted dog-worker Task, with prompt text containing role, project_root, source_manifest or operation_manifest, and acceptance or validation fields. A standalone build/fixer Task is not a registered Sortie worker; copying these fields, a bare resume, or a file read cannot activate it. Preserve explicit agent selection and resolve any existing goal stop before using the Sortie workflow; do not repeat the same standalone redispatch or reset its ledger to bypass a stop.",
     );
     assert.deepEqual(inactive.escalation, {
       action: "redispatch-worker",
@@ -7420,7 +7549,7 @@ test("a restarted plugin does not recover a coordinator over a foreign host root
       status: "denied",
       reason: "session-inactive",
       recoverable: true,
-      remedy: "Freshly redispatch this worker with prompt text containing role, project_root, source_manifest or operation_manifest, and acceptance or validation fields; a bare resume or file read cannot activate the session.",
+      remedy: "Freshly redispatch through dog-coordinator's admitted dog-worker Task, with prompt text containing role, project_root, source_manifest or operation_manifest, and acceptance or validation fields. A standalone build/fixer Task is not a registered Sortie worker; copying these fields, a bare resume, or a file read cannot activate it. Preserve explicit agent selection and resolve any existing goal stop before using the Sortie workflow; do not repeat the same standalone redispatch or reset its ledger to bypass a stop.",
       escalation: { action: "redispatch-worker", resume_session: false, true_blocker: false },
     });
   });
