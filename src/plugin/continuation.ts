@@ -443,6 +443,8 @@ interface SessionState {
   notRequiredRevision?: number | undefined;
   /** Debounced fallback for one-shot hosts that omit session.idle. */
   stepRecoveryTimer?: unknown;
+  /** Nonterminal text observed before its assistant message reached the completed state. */
+  stepRecoveryDeferredReport?: string | undefined;
   lastRollover?: number | undefined;
   cooldownTimer?: unknown;
   touched: number;
@@ -1307,6 +1309,7 @@ export function createContinuationHooks(
             state.stepRecoveryActive = false;
             clearTimer(state.stepRecoveryTimer);
             state.stepRecoveryTimer = undefined;
+            state.stepRecoveryDeferredReport = undefined;
             resetRecoveryStall(state);
             if (
               state.notRequiredRevision !== state.turnRevision &&
@@ -1336,7 +1339,15 @@ export function createContinuationHooks(
             nonTerminalProgress(state.latestCoordinatorReport) ||
             (state.stepRecoveryActive && !terminalCheckpoint(state.latestCoordinatorReport))
           ) {
-            if (input.allowStepRecoveryFallback !== false) {
+            if (input.allowStepRecoveryFallback === false) {
+              state.stepRecoveryDeferredReport = state.latestCoordinatorReport;
+            } else if (state.stepRecoveryDeferredReport === state.latestCoordinatorReport) {
+              // A completed text-part event is not message completion. Release its deferred
+              // recovery only when the persisted assistant message later confirms completion.
+              state.stepRecoveryDeferredReport = undefined;
+              state.idleDeferred = true;
+            } else {
+              state.stepRecoveryDeferredReport = undefined;
               scheduleStepRecovery(input.sessionID, state, state.latestCoordinatorReport);
             }
           }
@@ -1467,6 +1478,7 @@ export function createContinuationHooks(
       if (!synthetic && !state.pendingRollover && !state.active && !state.promptPending) state.attempts = 0;
       state.directUsed = false;
       state.latestCoordinatorReport = undefined;
+      state.stepRecoveryDeferredReport = undefined;
       if (!synthetic) {
         state.lastStepContinueReport = undefined;
         state.lastStepContinueRevision = undefined;
@@ -1486,6 +1498,7 @@ export function createContinuationHooks(
       state.stepRecoveryTimer = undefined;
       if (tool !== CONTINUATION_CAPABILITY) {
         state.latestCoordinatorReport = undefined;
+        state.stepRecoveryDeferredReport = undefined;
       }
     },
 

@@ -1514,6 +1514,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   const hostGoalExecutions = new Map<string, HostGoalExecution>();
   const goalValidationDefects = new Set<string>();
   const goalDeclarationAuthority = new Map<string, string>();
+  const explicitUserGoalUnitLimits = new Map<string, number>();
   const pendingRealGoalTurns = new Map<string, { readonly selectedAgent: string; readonly parts: readonly unknown[] }>();
   const pendingGoalRecoveries = new Map<string, Promise<boolean>>();
   const scheduledGoalRecoveries = new Map<string, Promise<void>>();
@@ -2280,8 +2281,14 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     }
     const declaration = validated.declaration;
     const units = Number(handoffValue(entries, ["goal_budget_units"]));
-    const maxUnits = Number.isSafeInteger(units) && units >= state.consumed_units && units > 0
-      ? units : state.budget?.max_units ?? 32;
+    const declaredUnits = Number.isSafeInteger(units) && units >= state.consumed_units && units > 0
+      ? units : undefined;
+    // A model-authored Task declaration must not silently shrink the host's policy allowance.
+    // It may request more capacity, while explicit later budget revisions remain cumulative.
+    const explicitUserLimit = explicitUserGoalUnitLimits.get(sessionID);
+    const maxUnits = declaredUnits === undefined ? state.budget?.max_units ?? 32 :
+      state.budget?.source === "policy-default" && explicitUserLimit !== declaredUnits
+        ? Math.max(state.budget.max_units, declaredUnits) : declaredUnits;
     const declaredTime = Number(handoffValue(entries, ["goal_budget_time_ms"]));
     const declaredCost = Number(handoffValue(entries, ["goal_budget_cost_usd"]));
     const timeBudget = Number.isFinite(declaredTime) && declaredTime > 0 ? declaredTime : state.budget?.time_ms ?? null;
@@ -2308,7 +2315,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       session_id: sessionID, selected_agent: state.selected_agent ?? COORDINATOR_AGENT,
       delivery: declaration.delivery, budget: { max_units: maxUnits,
          time_ms: timeBudget, cost_usd: costBudget,
-         source: Number.isSafeInteger(units) ? "accepted-plan" : state.budget?.source ?? "policy-default" },
+         source: declaredUnits !== undefined && maxUnits !== state.budget?.max_units
+           ? "accepted-plan" : state.budget?.source ?? "policy-default" },
       acceptance_contract: declaration.contract, reset_no_progress: true });
     goalDeclarationAuthority.delete(sessionID);
     return state;
@@ -2757,6 +2765,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     timer?: ReturnType<typeof setTimeout>;
   }
   const coordinatorTaskWatchdogs = new Map<string, CoordinatorTaskWatchdogState>();
+  // A deleted root is terminal for its current host lifetime. Retain only a bounded tombstone so
+  // late generic events and already queued watchdog callbacks cannot recreate recovery state.
+  const terminalCoordinatorTaskWatchdogs = new Set<string>();
   const chatTransitions = new Map<string, Promise<void>>();
   const reflectionOwnedRoots = new Set<string>();
   const reflectionClosingRoots = new Set<string>();
@@ -4275,6 +4286,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   }
 
   function beginCoordinatorTask(sessionID: string, callID: string): void {
+    if (terminalCoordinatorTaskWatchdogs.has(sessionID)) return;
     const calls = coordinatorTaskCalls.get(sessionID) ?? new Set<string>();
     calls.add(callID);
     coordinatorTaskCalls.set(sessionID, calls);
@@ -4311,7 +4323,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   }
 
   function armCoordinatorTaskWatchdog(sessionID: string, activity: number): void {
-    if (!coordinatorTaskCalls.has(sessionID)) return;
+    if (terminalCoordinatorTaskWatchdogs.has(sessionID) || !coordinatorTaskCalls.has(sessionID)) return;
     const state = coordinatorTaskWatchdogs.get(sessionID) ?? {
       generation: 0,
       lastActivity: activity,
@@ -4331,9 +4343,18 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
 
   function touchCoordinatorTaskWatchdog(sessionID: string): void {
     const root = coordinatorRootForSession(sessionID);
-    if (root !== undefined && coordinatorTaskWatchdogs.has(root)) {
+    if (root !== undefined && !terminalCoordinatorTaskWatchdogs.has(root) && coordinatorTaskWatchdogs.has(root)) {
       armCoordinatorTaskWatchdog(root, Date.now());
     }
+  }
+
+  function disarmDeletedCoordinatorTaskWatchdog(sessionID: string): void {
+    terminalCoordinatorTaskWatchdogs.delete(sessionID);
+    terminalCoordinatorTaskWatchdogs.add(sessionID);
+    while (terminalCoordinatorTaskWatchdogs.size > ACTIVE_SESSION_CACHE.maximum) {
+      terminalCoordinatorTaskWatchdogs.delete(terminalCoordinatorTaskWatchdogs.values().next().value!);
+    }
+    abortCoordinatorTasks(sessionID);
   }
 
   function sessionOwnedByRoot(sessionID: string, rootID: string): boolean {
@@ -4365,6 +4386,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   }
 
   async function sweepCoordinatorTaskWatchdog(sessionID: string, generation: number): Promise<void> {
+    if (terminalCoordinatorTaskWatchdogs.has(sessionID)) return;
     const state = coordinatorTaskWatchdogs.get(sessionID);
     const calls = coordinatorTaskCalls.get(sessionID);
     if (state === undefined || calls === undefined || state.generation !== generation || state.recovering) return;
@@ -4380,7 +4402,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       return;
     }
     const reasons = await watchdogProtectedReasons(sessionID);
-    if (coordinatorTaskWatchdogs.get(sessionID) !== state || state.generation !== generation) return;
+    if (terminalCoordinatorTaskWatchdogs.has(sessionID) ||
+      coordinatorTaskWatchdogs.get(sessionID) !== state || state.generation !== generation) return;
     if (reasons.length > 0) {
       state.recovering = false;
       appLogInfo("batch-watchdog.deferred", sessionID, {
@@ -4392,8 +4415,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       return;
     }
     const callIDs = [...calls];
+    if (terminalCoordinatorTaskWatchdogs.has(sessionID)) return;
     const result = await continuation.recoverStalledTask(sessionID, callIDs);
-    if (coordinatorTaskWatchdogs.get(sessionID) !== state || state.generation !== generation) return;
+    if (terminalCoordinatorTaskWatchdogs.has(sessionID) ||
+      coordinatorTaskWatchdogs.get(sessionID) !== state || state.generation !== generation) return;
     if (result === "recovered") {
       appLogInfo("batch-watchdog.recovered", sessionID, {
         type: "coordinator-task-watchdog-recovered",
@@ -6022,10 +6047,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       await serializeChatTransition(chatInput.sessionID, async () => {
       const parentID = chatParentID(chatInput);
       const synthetic = output.parts.some((part) => isRecord(part) && part.synthetic === true);
+      const selectedAgent = chatInput.agent ?? output.message.agent;
       if (parentID !== undefined) rememberParent(chatInput.sessionID, parentID);
       touchCoordinatorTaskWatchdog(chatInput.sessionID);
       const coordinatorRoot = isCoordinatorSession(chatInput.sessionID);
-      const selectedAgent = chatInput.agent ?? output.message.agent;
       if (chatInput.agent !== undefined && output.message.agent !== chatInput.agent) {
         output.message.agent = chatInput.agent;
       }
@@ -6058,6 +6083,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       }
       const coordinatorOrigin = parentID === undefined && requestedCoordinator;
       if (coordinatorOrigin) {
+        // A proven explicit real root turn may reuse a host session identifier after deletion. Child
+        // lineage rejection above runs first, so only a new root lifetime clears the tombstone.
+        if (!synthetic) terminalCoordinatorTaskWatchdogs.delete(chatInput.sessionID);
         if (!synthetic) interruptedCoordinatorMessages.delete(chatInput.sessionID);
         if (synthetic) {
           if (messageID === undefined) throw new Error("SORTIE_GOAL_CONTROL_DENIED: receiving-message-id-required");
@@ -6065,6 +6093,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         } else if (messageID !== undefined) {
           await acceptRealGoalTurn(chatInput.sessionID, messageID, selectedAgent, output.parts);
           goalDeclarationAuthority.set(chatInput.sessionID, messageID);
+          const explicitUnits = /^\s*goal_budget_units:\s*([1-9][0-9]*)\s*$/imu
+            .exec(output.parts.map(textPart).filter((text) => text !== undefined).join("\n"))?.[1];
+          if (explicitUnits === undefined) explicitUserGoalUnitLimits.delete(chatInput.sessionID);
+          else explicitUserGoalUnitLimits.set(chatInput.sessionID, Number(explicitUnits));
         } else if (selectedAgent !== undefined) {
           // Some native hosts persist the user message only after this hook returns. Defer to the
           // system-transform boundary, but retain no synthetic authority and accept only the exact
@@ -6991,6 +7023,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         return;
       }
       if (eventSessionID === undefined) return;
+      // Deletion is terminal for watchdog recovery. Disarm synchronously before any generic event
+      // processing can await, touch activity, or let a queued sweep recover the cancelled root.
+      if (event.type === "session.deleted") disarmDeletedCoordinatorTaskWatchdog(eventSessionID);
       if (event.type === "message.updated" && info !== undefined) {
         rememberCoordinatorInterruption(eventSessionID, info);
         await acceptPersistedRealGoalEvent(eventSessionID, info);
@@ -7094,7 +7129,6 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       touchCoordinatorTaskWatchdog(eventSessionID);
       if (event.type === "session.deleted") {
         fastLane.forget(eventSessionID);
-        abortCoordinatorTasks(eventSessionID);
         if (reflectionStore !== undefined && reflectionConfiguration?.layers.run && reflectionOwnedRoots.has(eventSessionID)) {
           reflectionClosingRoots.add(eventSessionID);
           await waitForReflections(eventSessionID);

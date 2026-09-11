@@ -4026,6 +4026,8 @@ test("a shared goal declaration starts a worker without copying its criterion bl
     const state = reduceGoalFlight(records);
     assert.equal(state.acceptance_contract?.criteria.length, 1);
     assert.equal(state.acceptance_contract?.criteria[0]?.target, "safe change");
+    assert.equal(state.budget?.max_units, 32, "a model-authored declaration cannot shrink the policy allowance");
+    assert.equal(state.budget?.source, "policy-default");
     assert.equal(state.outstanding_reservations.length, 1);
   });
 });
@@ -4060,7 +4062,7 @@ test("host question permits a budget-only revision after budget stop without era
     }));
     await hooks["chat.message"]!({ sessionID: "budget-root", agent: "dog-coordinator", messageID: "user-budget" },
       { message: { id: "user-budget", agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-sol" } },
-        parts: [{ type: "text", text: "Implement the accepted goal" }] });
+        parts: [{ type: "text", text: "Implement the accepted goal\ngoal_budget_units: 1" }] });
     const prompt = ["role: implementation", `project_root: ${directory}`, `handoff_path: ${join(directory, "handoff.json")}`,
       "source_manifest: [candidate.txt]", "operation_manifest: budget.operation-manifest.json", "acceptance: runtime passes",
       "validation: node --version", `goal_acceptance_fingerprint: sha256:${"a".repeat(64)}`,
@@ -8980,6 +8982,9 @@ isolated("normal Task completion and manual session cancellation disarm root wat
     );
     await beginTrackedTaskChild(hooks, directory, "cancel-root", "cancel-child", "cancel-call");
     await hooks.event!({ event: { type: "session.deleted", properties: { sessionID: "cancel-root" } } });
+    // Hosts may flush generic lifecycle events after deletion. They cannot re-arm the cancelled root
+    // or revive the watchdog callback that was already queued before the terminal event.
+    await hooks.event!({ event: { type: "session.updated", properties: { sessionID: "cancel-root" } } });
 
     await new Promise((resolve) => setTimeout(resolve, 55));
     assert.deepEqual(aborts, []);
