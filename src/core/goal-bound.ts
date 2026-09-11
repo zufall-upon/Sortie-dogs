@@ -170,8 +170,9 @@ export interface GoalFlightState {
 }
 
 export class GoalBoundError extends Error {
-  constructor(readonly code: "invalid" | "transition" | "budget" | "ticket" | "evidence", message: string) {
-    super(message); this.name = "GoalBoundError";
+  readonly code: "invalid" | "transition" | "budget" | "ticket" | "evidence";
+  constructor(code: GoalBoundError["code"], message: string) {
+    super(message); this.code = code; this.name = "GoalBoundError";
   }
 }
 

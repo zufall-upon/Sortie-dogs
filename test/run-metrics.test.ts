@@ -116,7 +116,16 @@ test("replaces every accepted DONE spelling without rewriting examples", () => {
 test("sanitizes internal terminal fields without a metrics or result insertion", () => {
   const sanitized = sanitizeTerminalReport("status: INTERRUPTED\nreason_code: fake\nmanifest: hidden.json\n**EVIDENCE:** claim\n" +
     "```yaml\nraw_status: fake\n```\n<details>claim</details>");
-  assert.equal(sanitized, "status: INTERRUPTED");
+  assert.equal(sanitized, "status: INTERRUPTED\n\n<details>claim</details>");
+});
+
+test("terminal cleanup preserves explanatory disclosures and code while removing only internal Evidence", () => {
+  const explanation = "作業の目的と背景。\n\n<details><summary>詳しい説明</summary>\n\n" +
+    "設計の理由を保持する。\n```yaml\nmanifest: example.json\n```\n</details>\n\n" +
+    "使い方の例:\n```yaml\nmanifest: user-example.json\n```";
+  assert.equal(sanitizeTerminalReport(explanation), explanation);
+  const cleaned = sanitizeTerminalReport(explanation + "\n\n<details><summary>Evidence: validation</summary>hidden</details>");
+  assert.equal(cleaned, explanation);
 });
 
 test("inserts metrics after the observed conclusion-status alias", async () => {
@@ -247,13 +256,14 @@ test("builds a completed Sortie Result from the goal receipt, ledger, and host m
   assert.deepEqual(result.proof.criteria.availability === "available" ? result.proof.criteria.value : null,
     [{ criterion_id: "criterion-1", status: "PASS" }]);
   const inserted = insertSortieResult("status: DONE — complete\n\n**Validation:** PASS", result);
-  assert.ok(inserted.startsWith("status: DONE — complete\n\n**🐾 SORTIE DOGS — 帰還報告**\n\n**⚡ 時間:**"));
-  assert.match(inserted, /\*\*🛡 達成:\*\* 完了 · 達成条件 1\/1/u);
+  assert.ok(inserted.startsWith("status: DONE — complete\n\n<details>\n<summary><strong>🐾 SORTIE DOGS — 帰還報告｜🟢 完了</strong></summary>"));
+  assert.match(inserted, /\*\*⚡ 任務経過（待機含む）:\*\*/u);
+  assert.match(inserted, /\*\*🛡 達成:\*\* 🟢 \*\*完了\*\* · 達成条件 \*\*1\/1\*\*/u);
   assert.doesNotMatch(inserted, /evidence-1|evidence ref|completed\)|sha256:/u);
   assert.equal(insertSortieResult(inserted, result), inserted);
   const sanitized = insertSortieResult("status: DONE\n\n**EVIDENCE:** model claim\nraw_status: fake\n" +
-    "```yaml\nEVIDENCE_REFS: [fake]\nraw: claim\n```\n<details><summary>claim</summary>fake</details>", result);
-  assert.doesNotMatch(sanitized, /EVIDENCE|raw_status|EVIDENCE_REFS|<details>|raw: claim/iu);
+    "```yaml\nEVIDENCE_REFS: [fake]\nraw: claim\n```\n<details><summary>Evidence</summary>fake</details>", result);
+  assert.doesNotMatch(sanitized, /EVIDENCE|raw_status|EVIDENCE_REFS|raw: claim/iu);
 });
 
 test("renders completed, interrupted, external-blocker, and user-decision as distinct terminal states", () => {
@@ -276,12 +286,13 @@ test("renders completed, interrupted, external-blocker, and user-decision as dis
   const screenshotText = insertSortieResult("⛔ **INTERRUPTED** `runner` — 保留\n\n**Validation:** PASS\n\n" +
     "<details>\n<summary>Evidence: commit 1、validation 1、Scout 1</summary>\n\n```yaml\nmanifest:\n  raw_status: hidden\n```\n</details>", interrupted);
   assert.match(screenshotText, /帰還報告/u);
-  assert.doesNotMatch(screenshotText, /<details>|Evidence|manifest:|raw_status/u);
+  assert.equal((screenshotText.match(/<details>/gu) ?? []).length, 1);
+  assert.doesNotMatch(screenshotText, /Evidence|manifest:|raw_status/u);
   const decisionText = insertSortieResult("❓ **NEED_DECISION** choose", decision);
-  assert.match(externalText, /\*\*🛡 達成:\*\* 外部要因で未完了/u);
-  assert.match(interruptedText, /\*\*🛡 達成:\*\* 中断（未完了）/u);
-  assert.match(decisionText, /\*\*🛡 達成:\*\* ユーザー判断待ち（未完了）/u);
-  assert.doesNotMatch(externalText, /TRUE_BLOCKER|external_dependency|<details>|Evidence|evidence_refs/u);
+  assert.match(externalText, /🔴 \*\*外部要因で未完了\*\*/u);
+  assert.match(interruptedText, /🟡 \*\*中断（未完了）\*\*/u);
+  assert.match(decisionText, /🟡 \*\*ユーザー判断待ち（未完了）\*\*/u);
+  assert.doesNotMatch(externalText, /TRUE_BLOCKER|external_dependency|Evidence|evidence_refs/u);
 });
 
 test("types unavailable Sortie Result metrics without synthetic estimates", () => {

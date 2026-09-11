@@ -24,7 +24,7 @@ import {
 import { ParallelDispatchError } from "../dist/core/worktree-parallel-dispatch.js";
 import { ParallelDispatchCoordinator } from "../dist/core/worktree-parallel-dispatch.js";
 import { compileAcceptanceCoverage } from "../dist/core/acceptance-compiler.js";
-import { goalFingerprint } from "../dist/core/goal-bound.js";
+import { goalFingerprint, reduceGoalFlight } from "../dist/core/goal-bound.js";
 import { createExecutionPlan, executionPlanManifestFingerprint } from "../dist/core/execution-plan.js";
 import { WorktreeLifecycle } from "../dist/core/worktree-lifecycle.js";
 import {
@@ -1294,7 +1294,7 @@ test("unproved coordinator DONE is rejected while host root and child metrics re
     assert.equal(body.extra.available, true);
     assert.equal(body.extra.outcome, "DONE");
     assert.equal(body.extra.sessionID, "root");
-    assert.equal(body.extra.runtimeAssetVersion, "0.3.82-terminal-continuation-v1");
+    assert.equal(body.extra.runtimeAssetVersion, "0.3.84-dispatch-recovery-v1");
     assert.equal(body.extra.inputTokens, 130);
     assert.equal(body.extra.outputTokens, 15);
     assert.equal(body.extra.reasoningTokens, 5);
@@ -4000,6 +4000,51 @@ test(`restart reconciles orphan reservations only from matching terminal host Ta
 });
 }
 
+test("a shared goal declaration starts a worker without copying its criterion blocks into Task", async () => {
+  await withProject("shared-goal-declaration", async directory => {
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(operationManifest(["allowed.txt"])));
+    await writeFile(join(directory, "handoff.json"), JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
+    await writeFile(join(directory, "goal.json"), JSON.stringify({ delivery_intent: "implementation",
+      delivery_mode: "repair-first", usable_path_established: true, controlled_change: false, goal_budget_units: 3,
+      defaults: { entrypoint: "validator", workload: "one fixture", oracle_coverage: ["content"], build_boundary: "not-applicable",
+        source: "source", candidate: "candidate", source_binding: "current-protected", candidate_binding: "current-protected",
+        fixture: "shared", proof_scope: "requested-full", expected_outcome: "pass", validation_command: "npm test" },
+      criteria: [{ target: "safe change" }] }));
+    const hooks = await SortieDogsPlugin({ directory, client: { session: {
+      get: async () => ({ data: { agent: "dog-coordinator" } }),
+    } } } as never);
+    await hooks["chat.message"]!({ sessionID: "shared-root", messageID: "shared-user", agent: "dog-coordinator" },
+      { message: { id: "shared-user", agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+        parts: [{ type: "text", text: "Implement the declared fixture" }] });
+    const prompt = `role: implementation\nproject_root: ${directory}\nhandoff_path: ${join(directory, "handoff.json")}\n` +
+      "acceptance: safe change\nvalidation: npm test\nsource_manifest: [allowed.txt]\noperation_manifest: operation-manifest.json\ngoal_declaration_path: goal.json";
+    const output = { args: { subagent_type: "dog-worker", prompt } };
+    await hooks["tool.execute.before"]!({ tool: "task", sessionID: "shared-root", callID: "shared-task" }, output);
+    assert.equal(output.args.prompt, prompt, "goal expansion is private to the host");
+    const records = JSON.parse(await readFile(join(directory, ".git", "sortie-dogs", "run-flight",
+      `${createHash("sha256").update("shared-root").digest("hex")}.json`), "utf8")).goal_events;
+    const state = reduceGoalFlight(records);
+    assert.equal(state.acceptance_contract?.criteria.length, 1);
+    assert.equal(state.acceptance_contract?.criteria[0]?.target, "safe change");
+    assert.equal(state.outstanding_reservations.length, 1);
+  });
+});
+
+test("Read admission and bind in the same tool round share one inspection", async () => {
+  await withProject("concurrent-read-bind", async directory => {
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(operationManifest(["allowed.txt"])));
+    await writeFile(join(directory, "handoff.json"), JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
+    const hooks = await SortieDogsPlugin({ directory } as never);
+    await beginTrackedTaskChild(hooks, directory, "read-root", "read-child", "read-parent-task");
+    const args = { filePath: join(directory, "handoff.json") };
+    await hooks["tool.execute.before"]!({ tool: "read", sessionID: "read-child", callID: "overlapping-read" }, { args });
+    // Native Read has not delivered its after event yet: this is the observed two-millisecond overlap.
+    assert.equal((await executeBindWriteGate(hooks, directory, "read-child")).status, "bound");
+    await hooks["tool.execute.after"]!({ tool: "read", sessionID: "read-child", callID: "overlapping-read", args }, { output: "read" });
+    assert.equal((await executeBindWriteGate(hooks, directory, "read-child")).status, "bound");
+  });
+});
+
 test("host question permits a budget-only revision after budget stop without erasing spend", async () => {
   await withProject("question-budget-revision", async (directory) => {
     const hooks = await SortieDogsPlugin({ directory, client: { session: {
@@ -4087,7 +4132,8 @@ test("a user-held INTERRUPTED report renders the debrief regardless of icon and 
     await hooks["experimental.text.complete"]!({ sessionID: "report-root", messageID: "report-2", partID: "part-2" }, report);
     assert.match(report.text, /帰還報告/u);
     assert.match(report.text, /INTERRUPTED/u);
-    assert.doesNotMatch(report.text, /Evidence|<details>|raw_status|manifest:/u);
+    assert.match(report.text, /<details>\n<summary><strong>🐾 SORTIE DOGS — 帰還報告/u);
+    assert.doesNotMatch(report.text, /Evidence|raw_status|manifest:/u);
   });
 });
 
@@ -9260,7 +9306,7 @@ test("parent idle retains only a recoverable worker until its same-child resume"
         args: {
           subagent_type: "dog-worker",
           task_id: "child",
-          prompt: "task_id: task-a\ncontext_digest:\n  mode: same-task-resume\n  resume_delta:\n    next_action: read then bind",
+          prompt: "task_id: task-a\ncontext_digest:\n  mode: same-task-resume\n  role: blocker-resolution\n  resume_delta:\n    next_action: read then bind",
         },
       },
     );

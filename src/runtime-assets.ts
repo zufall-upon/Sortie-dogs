@@ -1,6 +1,6 @@
 import type { RuntimeAssetVersion } from "./asset-version.js";
 import { GOAL_DECLARATION_FORMAT } from "./core/goal-declaration-format.ts";
-const ASSET_VERSION: RuntimeAssetVersion = "0.3.82-terminal-continuation-v1";
+const ASSET_VERSION: RuntimeAssetVersion = "0.3.84-dispatch-recovery-v1";
 
 // Kept local so source-mode CLI execution does not load the plugin graph.
 const BACKLOG_DRAIN_CAPABILITY = "sortie_enable_backlog_drain";
@@ -805,7 +805,8 @@ END_ONE_WORKER_EXECUTION_CLOSURE_FIXTURE
 
 Use a same-task resume only when the runtime denial explicitly returns resume_session=true for that
 exact child. A completed Task without that signal requires a fresh worker and full handoff. For an
-authorized same-task resume, retain the prior effective digest. Send the same task_id and only a
+authorized same-task resume, retain the prior effective digest. Optional role: blocker-resolution
+names the recovery action without replacing scope or acceptance. Send the same task_id and a
 resume_delta containing stale_paths, new_findings, the previous command exit/fingerprint, and
 next_action. Do not resend unchanged acceptance, role, validation, facts, constraints, manifests,
 or file content; the preserved values plus this delta form the effective digest.
@@ -1084,9 +1085,19 @@ acceptance-continuity parent_fingerprint. SORTIE_ACCEPTANCE_CONTINUITY_STATE is 
 projection of the latest gate-accepted sequential unit; its next_sequential_parent_fingerprint is the
 only projected value for the next unit's parent when present.
 
-Declare goal_acceptance_fingerprint, delivery_intent, delivery_mode when explicitly selected,
-usable_path_established, controlled_change, and goal_budget_units in the first worker handoff produced
-from the current real-user turn. For each terminal criterion also declare goal_criterion_id, goal_target,
+A goal may be declared once in JSON and referenced by goal_declaration_path in Task, or embedded as
+ext["sortie-dogs/goal-declaration"] in its registered handoff. Shared defaults apply to each item in
+criteria, with explicit criterion overrides. The host supplies stable IDs and a fingerprint if omitted.
+Do not expand this definition into worker instructions; the host resolves it privately. Acceptance,
+oracle coverage, delivery choice, and validation remain explicit. Legacy flat input remains supported:
+declare goal_acceptance_fingerprint, delivery_intent, delivery_mode when explicitly selected,
+usable_path_established, controlled_change, and goal_budget_units when first accepting a goal or changing
+its acceptance contract. A same-goal continuation with only an approved budget change may send just
+goal_budget_units (or the changed time/cost budget) beside the ordinary Task handoff: the host inherits
+the accepted goal declaration. Do not reconstruct or repeat that declaration merely because the user
+resumed the session. Optional task_prompt on sortie_check_contract previews declaration inheritance
+and current/proposed capacity before dispatch without consuming approval or reserving a unit.
+For each new or revised terminal criterion also declare goal_criterion_id, goal_target,
 goal_entrypoint, goal_workload, goal_oracle_coverage, goal_build_boundary, goal_fixture, goal_proof_scope,
 goal_expected_outcome, and the exact goal_validation_command from the operation manifest. Use
 goal_source_binding: current-protected and goal_candidate_binding: current-protected when implementation
@@ -1629,18 +1640,24 @@ COMMIT_SCOPE_FIXTURE
     mismatch: commit rejected
 END_COMMIT_SCOPE_FIXTURE
 
+When the user asks what you are doing, why, or requests an explanation, answer the actual question
+with sufficient context, completed work, remaining work, and rationale. The terminal format below
+applies only to a task's terminal report, not to ordinary questions. Do not replace a substantive
+explanation with a status/Validation/Next template. Preserve explanatory paragraphs, code examples,
+and explanatory disclosure sections; a status annotation must not erase the user's answer.
+
 At each checkpoint and terminal return, preserve concise proof internally. The user-facing terminal
 return MUST begin with its conclusion: no plan, progress, assessment, Evidence heading, or preamble.
 Use exactly one of DONE, INTERRUPTED, BLOCKED, or NEED_DECISION with one status emoji and a short
 Japanese conclusion. Then render Japanese 変更点, 確認結果, and 次 paragraphs without bullets or decorative
-emoji. The plugin injects measured Speed, Cost, and 達成 paragraphs in a Japanese mission debrief card,
+emoji. The plugin injects measured Speed, Cost, and 達成 paragraphs in a collapsed Japanese mission debrief card,
 with one fixed icon per section, observed pack/model usage, validation/review, and evidence-backed traits.
 Its Markdown token bars and PACK RECORD summarize retained project goals, with coverage and team titles;
 they never imply lifetime history, XP, levels, unmeasured savings, or a leaderboard rank.
 Never write the card, its metrics, or its badges yourself. Do not estimate or fabricate them.
 Use 任務完了 for DONE, 中断帰還（未完了） for INTERRUPTED, 外部要因で待機（未完了） for BLOCKED,
 and 指示待ち（未完了） for NEED_DECISION; preserve the machine status token and first-line checkpoint.
-Never render a user-facing Evidence heading, <details> block, evidence reference, internal reason code,
+Never render a user-facing Evidence heading or Evidence details block, evidence reference, internal reason code,
 ledger key, or raw status. Keep ordered command/exit/fingerprint history, manifests, evidence refs,
 review proof, and terminal receipt append-only in their internal typed ledger and host logs. A concise
 確認結果 may summarize PASS/FAIL without exposing those internal identifiers.

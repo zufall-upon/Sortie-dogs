@@ -14,13 +14,16 @@ Japanese change, verification, and next-action paragraphs remain intact.
   Resuming the same child does not add another dog. A child using multiple models is counted once as
   `混成`; its tokens remain allocated to their individual models. Coordinator tokens are included in
   model mix and total usage, but the coordinator is not included in pack counts.
-- Missing hierarchy, timestamps, model identity, or usage produces unavailable measurements rather
-  than zeros. The snapshot is pre-terminal: final-answer generation is not included.
+- Coverage is evaluated per metric. Missing elapsed-time metadata does not erase known model usage
+  or identified child sessions. Missing values are not replaced with invented zeros. The snapshot
+  is pre-terminal: final-answer generation is not included.
 - Dollar values are explicitly **host estimates**, not subscription billing or attributable actual
   spend. No subscription plan is inferred from a provider name.
 - Target validation uses native integer shell exit metadata for exact commands declared in the
-  acceptance contract. It is not a test-case count, and acceptance success alone does not imply
-  review success. Latest confirmed controller review is shown separately; skipped review is waived.
+  acceptance contract, including native evidence referenced by the terminal receipt. It is not a
+  test-case count, and acceptance success alone does not imply review success. Controller-confirmed
+  reviews and completed serial reviewer Task reports are distinguished; the latter are labeled
+  `reviewer報告`. Coordinator/worker claims do not become a review verdict. Skipped review is waived.
 - Detailed observations are extracted during the existing bounded host-history pass, then discarded.
   No raw conversation, patch, command, or tool output is included in the debrief snapshot. Commands
   used for matching are retained only as hashes. The final ledger read is reused for attempt coverage.
@@ -110,3 +113,29 @@ This writes `_testenv/mission-debrief/preview.md` using the actual renderer for 
 states. All values are **synthetic fixtures**, not performance measurements or a benchmark win.
 Open the Markdown preview in the intended host to check typography and emoji support. The generated
 file and any screenshots remain test artifacts; Desktop rendering is a separate visual check.
+## Terminal display compatibility
+
+The first terminal status determines the report, not its decorative icon. For example,
+`⛔ **INTERRUPTED**` and `⚠️ **INTERRUPTED**` both denote interruption. A different icon must not
+suppress the mission debrief or leave the obsolete collapsible Evidence block visible.
+
+Internal Evidence details are removed from terminal presentation; the host-generated mission
+debrief remains the user-facing report. A paused or interrupted goal is reported as such rather
+than converted to success merely to display the report.
+
+The debrief and PACK RECORD are inside one initially closed `<details>` area. Its summary contains
+the mission outcome; important values use bold emphasis and colored status markers (green success,
+yellow interruption/user decision, red external blocker). These markers remain legible without
+renderer-specific CSS. Goal elapsed time is labeled as including waits and uses hours for long goals.
+
+Completed-message membership follows the same time window as token aggregation. Execution spans
+crossing the beginning of the goal are clipped instead of invalidating pack/mix/validation together.
+Unknown metrics state the missing data category. Unrelated tool metadata gaps cannot erase a native
+canonical PASS or an observed serial review result; genuine incomplete first-pass history remains
+ineligible for a first-pass badge.
+
+Ordinary explanations are not terminal reports. The coordinator should answer explanatory questions
+with the requested context instead of forcing them into a status/Validation/Next template. Renderer
+cleanup removes internal Evidence blocks and replaces its own cards; it preserves user-facing prose,
+explanatory disclosure sections, and code examples. Legacy card cleanup is restricted to identified
+card blocks rather than deleting every paragraph with a familiar heading.

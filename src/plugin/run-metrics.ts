@@ -440,6 +440,7 @@ function duration(milliseconds: number): string {
   const seconds = Math.floor(milliseconds / 1000);
   if (seconds < 60) return `${seconds}s`;
   const minutes = Math.floor(seconds / 60);
+  if (minutes >= 60) return `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, "0")}m ${String(seconds % 60).padStart(2, "0")}s`;
   return `${minutes}m ${String(seconds % 60).padStart(2, "0")}s`;
 }
 
@@ -456,15 +457,16 @@ export function formatSortieResult(result: SortieResult): string {
     : result.mission.status === "INTERRUPTED" ? "中断（未完了）"
       : result.mission.status === "EXTERNAL_BLOCKER" ? "外部要因で未完了"
         : "ユーザー判断待ち（未完了）";
-  return [
-    "**🐾 SORTIE DOGS — 帰還報告**",
-    `**⚡ 時間:** ${metricText(result.speed.goal_wall_ms, duration)}`,
-    `**🪙 使用量:** ${metricText(result.cost.total_tokens, (value) => `${value.toLocaleString("ja-JP")} tokens`)} · host推定額 ${metricText(result.cost.cost_usd, (value) => `$${value.toFixed(4)}`)}（実課金換算なし）`,
+  const color = result.mission.status === "COMPLETED" ? "🟢" : result.mission.status === "EXTERNAL_BLOCKER" ? "🔴" : "🟡";
+  const body = [
+    `**⚡ 任務経過（待機含む）:** **${metricText(result.speed.goal_wall_ms, duration)}**`,
+    `**🪙 使用量:** **${metricText(result.cost.total_tokens, (value) => `${value.toLocaleString("ja-JP")} tokens`)}** · host推定額 ${metricText(result.cost.cost_usd, (value) => `$${value.toFixed(4)}`)}（実課金換算なし）`,
     ...renderDebrief(result.debrief),
-    `**🛡 達成:** ${achievement} · 達成条件 ${criteria}`,
+    `**🛡 達成:** ${color} **${achievement}** · 達成条件 **${criteria}**`,
     "*最終応答生成前の計測*",
     ...renderCareer(result.career),
   ].join("\n\n");
+  return `<details>\n<summary><strong>🐾 SORTIE DOGS — 帰還報告｜${color} ${achievement}</strong></summary>\n\n${body}\n\n</details>`;
 }
 
 export function formatRunMetrics(metrics: RunMetrics): string {
@@ -480,7 +482,15 @@ export function formatRunMetrics(metrics: RunMetrics): string {
 function topLevelLines(text: string): Array<{ index: number; line: string }> {
   const lines: Array<{ index: number; line: string }> = [];
   let fence: { character: string; length: number } | undefined;
+  let disclosureDepth = 0;
   for (const [index, line] of text.split(/\r?\n/u).entries()) {
+    if (fence === undefined) {
+      const opens = (line.match(/<details\b[^>]*>/giu) ?? []).length;
+      const closes = (line.match(/<\/details>/giu) ?? []).length;
+      const inside = disclosureDepth > 0 || opens > 0;
+      disclosureDepth = Math.max(0, disclosureDepth + opens - closes);
+      if (inside) continue;
+    }
     if (fence === undefined) {
       const opener = /^[ \t]*(`{3,}|~{3,})/u.exec(line)?.[1];
       if (opener === undefined) {
@@ -545,13 +555,21 @@ export function replaceDoneTerminalStatus(text: string, replacement: string): st
 
 export function sanitizeTerminalReport(text: string): string {
   const newline = text.includes("\r\n") ? "\r\n" : "\n";
-  const internal = /\b(?:evidence_refs?|manifest|raw|raw_status|reason_code|goal_control|TRUE_BLOCKER)\s*:|\bEvidence\b/iu;
-  return text.replace(/^[ \t]*(`{3,}|~{3,})[^\r\n]*\r?\n([\s\S]*?)^[ \t]*\1[ \t]*$/gimu,
-    (block, _fence: string, body: string) => internal.test(body) ? "" : block)
-    .replace(/<details\b[^>]*>[\s\S]*?<\/details>/giu, "")
+  const preserved: string[] = [];
+  const keep = (block: string): string => `\0SORTIE_PROSE_${preserved.push(block) - 1}\0`;
+  return text.replace(/<details\b[^>]*>[\s\S]*?<\/details>/giu, block => {
+      const summary = /<summary\b[^>]*>([\s\S]*?)<\/summary>/iu.exec(block)?.[1]?.replace(/<[^>]*>/gu, "").trim() ?? "";
+      return /^(?:Evidence\b|🐾\s*SORTIE DOGS\s*[—-]\s*帰還報告)/iu.test(summary) ? "" : keep(block);
+    })
+    .replace(/^[ \t]*(`{3,}|~{3,})[^\r\n]*\r?\n[\s\S]*?^[ \t]*\1[ \t]*$/gimu,
+      (block: string, _fence: string, offset: number, source: string) => {
+        const preceding = source.slice(0, offset).trimEnd().split(/\r?\n\s*\r?\n/u).at(-1) ?? "";
+        return /^[ \t]*(?:#{1,6}[ \t]*)?\**Evidence\**[ \t]*:/imu.test(preceding) ? "" : keep(block);
+      })
     .split(/\r?\n/u)
     .filter((line) => !/^\s*(?:(?:#{1,6}\s*)?\**Evidence\**\s*:|(?:TRUE_BLOCKER|goal_control|evidence_refs?|reason_code|raw|raw_status|manifest)\s*:)/iu.test(line))
     .join(newline)
+    .replace(/\0SORTIE_PROSE_(\d+)\0/gu, (_token, index: string) => preserved[Number(index)]!)
     .trimEnd();
 }
 
@@ -573,13 +591,24 @@ export function insertSortieResult(text: string, result: SortieResult): string {
   // A title in model text is not trusted evidence. Replace existing cards, including legacy cards.
   const newline = visible.includes("\r\n") ? "\r\n" : "\n";
   const lines = visible.split(/\r?\n/u);
-  const cardLines = new Set(topLevelLines(visible).filter(({ index, line }) => index > checkpoint.index &&
-    /^(?:\*\*(?:Sortie Result|🐾 SORTIE DOGS — 帰還報告|📜 PACK RECORD|↳\*\*|(?:Speed|Cost|達成|⚡ 時間|🪙 使用量|🐕 出撃隊|モデル別token内訳|実行重複率|🛡 達成|確認|🏅 今回の戦績|戦績|初回完遂|累積使用量|累積モデル|累積時間|累積実行重複率|保存範囲|🎖 隊の称号):)|\*最終応答生成前の計測\*)/u.test(line)).map(({ index }) => index));
+  const cardLines = new Set<number>();
+  let legacyCard = false;
+  let previousIndex = checkpoint.index;
+  for (const { index, line } of topLevelLines(visible)) {
+    if (index <= checkpoint.index) continue;
+    if (index > previousIndex + 1) legacyCard = false;
+    previousIndex = index;
+    if (/^\*\*(?:Sortie Result|🐾 SORTIE DOGS — 帰還報告|📜 PACK RECORD)/u.test(line)) legacyCard = true;
+    if (legacyCard && (line.trim() === "" ||
+      /^(?:\*\*(?:Sortie Result|🐾 SORTIE DOGS — 帰還報告|📜 PACK RECORD|↳\*\*|(?:Speed|Cost|達成|⚡ 時間|🪙 使用量|🐕 出撃隊|モデル別token内訳|実行重複率|🛡 達成|確認|🏅 今回の戦績|戦績|初回完遂|累積使用量|累積モデル|累積時間|累積実行重複率|保存範囲|🎖 隊の称号):)|\*最終応答生成前の計測\*)/u.test(line))) {
+      cardLines.add(index);
+    } else legacyCard = false;
+  }
   const cleaned = lines.filter((_, index) => !cardLines.has(index));
   while (cleaned[checkpoint.index + 1] === "") cleaned.splice(checkpoint.index + 1, 1);
   let card: string;
   try { card = formatSortieResult(result); }
-  catch { card = "**🐾 SORTIE DOGS — 帰還報告**\n**確認:** 表示集計を取得できません。任務結果は先頭の状態を参照。"; }
+  catch { card = "<details>\n<summary><strong>🐾 SORTIE DOGS — 帰還報告</strong></summary>\n\n**確認:** 表示集計を取得できません。任務結果は先頭の状態を参照。\n\n</details>"; }
   cleaned.splice(checkpoint.index + 1, 0, "", card, "");
   return cleaned.join(newline).trimEnd();
 }

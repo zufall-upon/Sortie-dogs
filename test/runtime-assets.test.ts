@@ -68,7 +68,8 @@ test("terminal report is Japanese and concise while internal proof remains durab
   assert.ok(coordinator);
   assert.match(coordinator.content, /DONE, INTERRUPTED, BLOCKED, or NEED_DECISION/u);
   assert.match(coordinator.content, /Japanese 変更点, 確認結果, and 次/u);
-  assert.match(coordinator.content, /Never render a user-facing Evidence heading, <details> block, evidence reference, internal reason code/u);
+  assert.match(coordinator.content, /Never render a user-facing Evidence heading or Evidence details block, evidence reference, internal reason code/u);
+  assert.match(coordinator.content, /Preserve explanatory paragraphs, code examples/u);
   assert.match(coordinator.content, /Keep ordered command\/exit\/fingerprint history, manifests, evidence refs,\s+review proof, and terminal receipt append-only/u);
   assert.match(coordinator.content, /locally repairable process or evidence defect is never a\s+user question/u);
 });

@@ -49,6 +49,46 @@ test("Pack Tactics requires actual positive overlap, not number of dispatches", 
   assert.deepEqual(make(missing).traits, []);
 });
 
+test("goal-boundary timing and unrelated tool metadata do not erase known tokens, pack, or validation", async () => {
+  const histories = {
+    root: [message("root", 90, 120, [tool("plain-control", "sortie_check_contract", 105, 110, {}, {}, "ok")])],
+    child: [message("child", 150, 200, [tool("validate", "bash", 160, 180, { command: "npm  test" }, { exit: 0 })])],
+  };
+  const metrics = await collectRunMetrics({ session: {
+    children: async ({ path }) => path.id === "root" ? [{ id: "child" }] : [],
+    messages: async ({ path }) => histories[path.id as keyof typeof histories],
+  } }, "root", undefined, 300, { startedAt: new Date(100).toISOString(), endedAt: new Date(300).toISOString() });
+  const result = buildDebrief(receipt, contract, metrics?.debrief);
+  assert.equal(metrics?.tokens, 24);
+  assert.deepEqual(result.pack, [{ model: "provider/cheap", count: 1 }]);
+  assert.deepEqual(result.mix, [{ model: "provider/cheap", tokens: 24, percent: 100 }]);
+  assert.equal(result.validation, "PASS");
+  assert.deepEqual(result.overlap, { workerMilliseconds: 50, wallMilliseconds: 50 });
+});
+
+test("serial reviewer outcomes are labeled as reviewer reports without treating worker prose as review", () => {
+  const make = (role: string) => buildDebrief(receipt, contract, { complete: true, window: undefined,
+    sessions: [observe("root", [message("root", 1, 30, [
+      tool("review", "task", 10, 20, { subagent_type: role }, { sessionId: "child" }, "<task_result>PASS\n\nMapping and implementation inspected.\n</task_result>"),
+      tool("control", "sortie_check_contract", 21, 22, {}, {}, "ok"),
+    ])], true)] });
+  assert.equal(make("dog-reviewer").review, "PASS");
+  assert.equal(make("dog-reviewer").reviewSource, "reviewer");
+  assert.equal(make("dog-worker").review, "未確認");
+});
+
+test("usage and model attribution remain available when only elapsed spans are missing", () => {
+  const known = observe("worker", [message("m", 1, 2)]);
+  known.models["provider/cheap"] = 12;
+  known.spans.length = 0;
+  known.timingComplete = false;
+  const result = buildDebrief(receipt, contract, { complete: true, sessions: [known], window: undefined });
+  assert.deepEqual(result.pack, [{ model: "provider/cheap", count: 1 }]);
+  assert.equal(result.mix?.[0]?.tokens, 12);
+  assert.equal(result.overlap, undefined);
+  assert.ok(result.notes?.some(note => note.includes("時刻")));
+});
+
 test("Recovery requires fail, intervening host edit, pass in same child, and completed goal", () => {
   const failed = tool("fail", "bash", 11, 12, { command: "npm test" }, { exit: 1 });
   const edit = tool("edit", "apply_patch", 13, 14, {}, { diff: "-old\n+new" });
@@ -97,6 +137,17 @@ test("cards overwrite model-authored numbers, are idempotent, retain status and 
   assert.equal(insertSortieResult(text, result), text);
   assert.equal(terminalRunOutcome(text), "DONE");
   assert.equal(insertSortieResult("```\nstatus: DONE\n```", result), "```\nstatus: DONE\n```");
+});
+
+test("adding a collapsed report preserves detailed explanation headings and disclosure examples", () => {
+  const result = createSortieResult(receipt, { acceptance_contract: contract, consumed_time_ms: 10, satisfied_criteria: ["c"] }, undefined);
+  const explanation = "今の作業は起動前契約の重複をなくすこと。\n\n**確認:** 欠落項目を検出する場所と予算継承を揃える。\n\n" +
+    "<details><summary>設計の詳細</summary>\n**Sortie Result** は表示名の例。\n```yaml\nmanifest: example.json\n```\n</details>";
+  const output = insertSortieResult(`status: DONE\n\n${explanation}`, result);
+  assert.ok(output.endsWith(explanation));
+  assert.equal((output.match(/<details>/gu) ?? []).length, 2);
+  assert.equal(insertSortieResult(output, result), output);
+  assert.equal(terminalRunOutcome("<details><summary>Example</summary>\nstatus: DONE\n</details>"), undefined);
 });
 
 test("unconfirmed mutation and later mutation cannot retain a review PASS or earn Recovery", () => {

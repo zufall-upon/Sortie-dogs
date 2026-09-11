@@ -3,7 +3,7 @@ import { lstat, mkdir, open, readFile, readdir, realpath, rm, stat, writeFile } 
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import { RUNTIME_ASSET_VERSION } from "../asset-version.js";
-import { GOAL_DECLARATION_FORMAT, GOAL_DELIVERY_INTENTS, GOAL_DELIVERY_MODES } from "../core/goal-declaration-format.js";
+import { GOAL_DECLARATION_FORMAT, GOAL_DELIVERY_INTENTS, GOAL_DELIVERY_MODES, expandGoalDeclaration } from "../core/goal-declaration-format.js";
 import {
   ACCEPTANCE_CONTINUITY_AUTHORITY,
   ACCEPTANCE_CONTINUITY_EXTENSION,
@@ -2234,7 +2234,29 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     return { ...validateGoalDeclaration(prompt), inherited: false };
   }
 
+  async function resolveGoalPrompt(prompt: string): Promise<string> {
+    const entries = handoffEntries(prompt);
+    if (entries.has("goal_criterion_id")) return prompt;
+    const reference = handoffValue(entries, ["goal_declaration_path"]);
+    let definition: unknown;
+    if (reference !== undefined) definition = await readJson(resolve(input.directory, reference), INPUT_LIMITS.handoff);
+    else {
+      const handoffPath = handoffValue(entries, ["handoff_path", "handoffpath"]);
+      if (handoffPath !== undefined) {
+        const handoff = await readJson(resolve(input.directory, handoffPath), INPUT_LIMITS.handoff);
+        if (isRecord(handoff) && isRecord(handoff.ext)) definition = handoff.ext["sortie-dogs/goal-declaration"];
+      }
+    }
+    if (definition === undefined) return prompt;
+    const expanded = expandGoalDeclaration(definition).split("\n").filter(line => {
+      const field = line.slice(0, line.indexOf(":"));
+      return !entries.has(field);
+    });
+    return `${prompt}\n${expanded.join("\n")}`;
+  }
+
   async function bindGoalDeclaration(sessionID: string, prompt: string): Promise<GoalFlightState | undefined> {
+    prompt = await resolveGoalPrompt(prompt);
     const ledger = await goalLedger(sessionID);
     let state = (await ledger.readGoal()).state;
     if (state.goal_id === null || state.origin_user_message_id === null) return undefined;
@@ -5199,6 +5221,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   }
 
   function expireSession(sessionID: string): void {
+    for (const key of inspectionOperations.keys()) if (key.startsWith(`${sessionID}\u0000`)) inspectionOperations.delete(key);
     activeSessions.delete(sessionID);
     sessionOperationMetrics.delete(sessionID);
     abandonSessionLease(sessionID);
@@ -5220,6 +5243,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   }
 
   function evictSession(sessionID: string): void {
+    for (const key of inspectionOperations.keys()) if (key.startsWith(`${sessionID}\u0000`)) inspectionOperations.delete(key);
     goalValidationDefects.delete(sessionID);
     activeSessions.delete(sessionID);
     sessionOperationMetrics.delete(sessionID);
@@ -5246,14 +5270,14 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     clearSessionLinks(sessionID);
   }
 
-  async function inspectSuccessfulRead(input: TaskToolExecuteAfterInput): Promise<void> {
-    if (input.tool.toLowerCase() !== "read" || input.sessionID === undefined) return;
-    if (activeSessionStatus(input.sessionID) !== "active" || !isRecord(input.args)) return;
-    const path = input.args.filePath;
+  async function inspectSuccessfulRead(toolInput: TaskToolExecuteAfterInput): Promise<void> {
+    if (toolInput.tool.toLowerCase() !== "read" || toolInput.sessionID === undefined) return;
+    if (activeSessionStatus(toolInput.sessionID) !== "active" || !isRecord(toolInput.args)) return;
+    const path = toolInput.args.filePath;
     if (typeof path !== "string" || path.length === 0) return;
-    const absolutePath = resolve(path);
-    const key = `${input.sessionID}\u0000${absolutePath}`;
-    const operation = inspect(path, input.sessionID).then(() => undefined);
+    const absolutePath = isAbsolute(path) ? resolve(path) : resolve(input.worktree ?? input.directory, path);
+    const key = `${toolInput.sessionID}\u0000${absolutePath}`;
+    const operation = inspectionOperations.get(key) ?? inspect(absolutePath, toolInput.sessionID).then(() => undefined);
     inspectionOperations.set(key, operation);
     try {
       await operation;
@@ -5678,11 +5702,12 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
             await inspect(args.handoff_path, undefined, { report: true });
             if (typeof args.task_prompt === "string") {
               const state = await currentGoal(context.sessionID);
-              const resolved = resolveGoalDeclaration(state, args.task_prompt);
+              const effectivePrompt = await resolveGoalPrompt(args.task_prompt);
+              const resolved = resolveGoalDeclaration(state, effectivePrompt);
               if (resolved.defects.length > 0) return JSON.stringify({ status: "defective",
                 defects: resolved.defects.slice(0, CONTRACT_DEFECTS.limit),
                 remedy: "Correct the Task declaration before dispatch. Budget-only changes may omit the already accepted goal fields." });
-              const units = Number(handoffValue(handoffEntries(args.task_prompt), ["goal_budget_units"]));
+              const units = Number(handoffValue(handoffEntries(effectivePrompt), ["goal_budget_units"]));
               const proposed = Number.isSafeInteger(units) && units > 0 && units >= state.consumed_units
                 ? units : state.budget?.max_units ?? null;
               const approvalAvailable = goalDeclarationAuthority.get(context.sessionID) === state.latest_user_message_id &&
@@ -6434,6 +6459,18 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       }
     },
     "tool.execute.before": async (toolInput, output): Promise<void> => {
+      // Publish the inspection at Read admission, before a concurrently scheduled bind can
+      // observe an empty cache. Bind joins this same host validation rather than asking the
+      // coordinator to launch another worker round merely for tool scheduling.
+      if (toolInput.tool.toLowerCase() === "read" && activeSessionStatus(toolInput.sessionID) === "active" &&
+        isRecord(output.args) && typeof output.args.filePath === "string") {
+        const path = output.args.filePath;
+        const absolutePath = isAbsolute(path) ? resolve(path) : resolve(input.worktree ?? input.directory, path);
+        const key = `${toolInput.sessionID}\u0000${absolutePath}`;
+        const operation = inspect(absolutePath, toolInput.sessionID).then(() => undefined);
+        inspectionOperations.set(key, operation);
+        void operation.catch(() => undefined); // The after hook/bind consumes the actual outcome.
+      }
       if (childLifecycles.get(toolInput.sessionID)?.stopping && toolInput.tool !== "sortie_release_write_gate") {
         throw new Error("child-cancellation-in-progress");
       }
@@ -6607,12 +6644,12 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           const resumeDeltaPresent = resumeDeltas.length === 1 && hasResumeContractShape(contractPrompt);
           const contractRedefinitions = [
             ...taskValues(contractPrompt, [
-              "role", "project_root", "projectroot", "source_manifest", "sourcemanifest",
+              "project_root", "projectroot", "source_manifest", "sourcemanifest",
               "acceptance", "validation", "validation_history", "validation_attempts", "scout",
               "known_facts", "known_paths", "relevant_constraints", "preserve",
               "parallel_group", "parallel_unit", "parallel_units",
             ]),
-            ...roleTokenValues(contractPrompt),
+            ...taskValues(contractPrompt, ["role"]).filter(role => !TASK_ROLES.has(role)),
           ];
           if (modes.length !== 0 && !resume) {
             throw new HandoffDeniedError("contract-invalid", "<worker-dispatch>", {

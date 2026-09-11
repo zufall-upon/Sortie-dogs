@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { GoalAcceptanceContract, GoalTerminalReceipt, GoalFlightEventRecord } from "../core/goal-bound.js";
 import { DEDICATED_WORKER_ROLES, LUNA_FABRIC_WORKER_ROLE } from "./model-routing.ts";
+import { normalizeCommand } from "./gate.ts";
 
 type Span = { start: number; end: number };
 type Check = Span & { command: string; passed: boolean };
@@ -11,11 +12,12 @@ export interface DebriefSession {
   readonly checks: Check[];
   readonly mutations: Span[];
   readonly models: Record<string, number | null>;
-  readonly reviews: Array<{ at: number; status: "PASS" | "FAIL" | "WAIVED" }>;
+  readonly reviews: Array<{ at: number; status: "PASS" | "FAIL" | "WAIVED"; source?: "reviewer" | "controller" }>;
   readonly tasks: string[];
   complete: boolean;
   timingComplete: boolean;
   failed: boolean;
+  lastPossibleMutation?: number;
 }
 export interface DebriefObservation {
   readonly complete: boolean;
@@ -27,6 +29,8 @@ export interface Debrief {
   readonly mix: readonly { readonly model: string; readonly tokens: number; readonly percent: number }[] | null;
   readonly validation: "PASS" | "FAIL" | "未確認";
   readonly review: "PASS" | "FAIL" | "WAIVED" | "未確認";
+  readonly reviewSource?: "reviewer" | "controller";
+  readonly notes?: readonly string[];
   readonly traits: readonly ("連携作戦" | "修正から復帰" | "一発完遂")[];
   readonly firstPassEligible?: boolean;
   readonly overlap?: { readonly workerMilliseconds: number; readonly wallMilliseconds: number };
@@ -36,7 +40,7 @@ const object = (value: unknown): Record<string, unknown> | undefined =>
   value !== null && typeof value === "object" ? value as Record<string, unknown> : undefined;
 const timeValue = (value: unknown): number | undefined =>
   typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
-const fingerprint = (value: string): string => createHash("sha256").update(value).digest("hex");
+const fingerprint = (value: string): string => createHash("sha256").update(normalizeCommand(value)).digest("hex");
 const workerRoles = new Set<string>([...DEDICATED_WORKER_ROLES, LUNA_FABRIC_WORKER_ROLE]);
 function unionDuration(spans: readonly Span[]): number {
   let end = -1, total = 0;
@@ -65,13 +69,10 @@ export function observeDebriefSession(id: string, root: boolean, messages: reado
     if (root && object(time) !== undefined && timeValue(object(time)?.completed) === undefined) continue;
     const span = spanOf(time);
     if (span === undefined) { session.complete = false; session.timingComplete = false; continue; }
-    if (!within(span, window)) {
-      if (window !== undefined && span.start < window.end && span.end > window.start) {
-        session.complete = false; session.timingComplete = false;
-      }
-      continue;
-    }
-    session.spans.push(span);
+    // Match the token collector's completed-message window. A message can start just before
+    // goal.accepted; clip its timing rather than invalidating every independent metric.
+    if (window !== undefined && (span.end < window.start || span.end > window.end)) continue;
+    session.spans.push(window === undefined ? span : { start: Math.max(span.start, window.start), end: span.end });
     if (info.error !== undefined) session.failed = true;
     for (const raw of Array.isArray(message.parts) ? message.parts : []) {
       const part = object(raw);
@@ -98,8 +99,20 @@ export function observeDebriefSession(id: string, root: boolean, messages: reado
           if (typeof child === "string") session.tasks.push(child);
           else session.complete = false;
         }
+        if (args?.subagent_type === "dog-reviewer" && typeof state.output === "string") {
+          const body = /<task_result>([\s\S]*?)<\/task_result>/u.exec(state.output)?.[1] ?? state.output;
+          const lines = body.replace(/^[ \t]*(`{3,}|~{3,})[^\r\n]*\r?\n[\s\S]*?^[ \t]*\1[ \t]*$/gmu, "")
+            .trim().split(/\r?\n/u);
+          const verdicts = [lines[0], lines.at(-1)].map(line => line?.trim().match(
+            /^(?:\*\*)?(?:(?:verdict|結論|判定)\s*:\s*)?(PASS|FAIL|MUST_FIX)(?:\*\*)?$/iu)?.[1]?.toUpperCase());
+          const verdict = verdicts.some(value => value === "FAIL" || value === "MUST_FIX") || /^FINDING\b/iu.test(lines[0] ?? "")
+            ? "FAIL" : verdicts.includes("PASS") ? "PASS" : undefined;
+          if (verdict !== undefined) session.reviews.push({ at: interval.end,
+            status: verdict === "PASS" ? "PASS" : "FAIL", source: "reviewer" });
+        }
       }
       if (["edit", "write", "apply_patch"].includes(tool)) {
+        session.lastPossibleMutation = Math.max(session.lastPossibleMutation ?? 0, interval.end);
         const metadata = object(state.metadata);
         const changed = typeof metadata?.diff === "string" && /^[+-](?![+-])/mu.test(metadata.diff) ||
           Array.isArray(metadata?.files) && metadata.files.some((file: unknown) => {
@@ -136,14 +149,14 @@ export function observeDebriefSession(id: string, root: boolean, messages: reado
 
 export function buildDebrief(receipt: GoalTerminalReceipt, contract: GoalAcceptanceContract | null,
   observation: DebriefObservation | undefined, records?: readonly GoalFlightEventRecord[]): Debrief {
-  const empty: Debrief = { pack: null, mix: null, validation: "未確認", review: "未確認", traits: [] };
-  if (observation === undefined) return empty;
+  observation ??= { complete: false, sessions: [], window: undefined };
   const sessions = observation.sessions;
   const complete = observation.complete && sessions.every((session) => session.complete);
   const timingComplete = observation.complete && sessions.every((session) => session.timingComplete);
-  const children = sessions.filter((session) => !session.root && session.spans.length > 0);
+  const children = sessions.filter((session) => !session.root &&
+    (session.spans.length > 0 || Object.keys(session.models).length > 0));
   const counts = new Map<string, number>(), totals = new Map<string, number>();
-  let usageComplete = timingComplete;
+  let usageComplete = observation.complete;
   for (const session of sessions) {
     for (const [model, tokens] of Object.entries(session.models)) {
       if (tokens === null || model === "未分類") usageComplete = false;
@@ -158,10 +171,22 @@ export function buildDebrief(receipt: GoalTerminalReceipt, contract: GoalAccepta
   const total = [...totals.values()].reduce((sum, tokens) => sum + tokens, 0);
   const commands = new Set(contract?.criteria.flatMap((criterion) => criterion.validation_command === undefined ? [] : [fingerprint(criterion.validation_command)]));
   const checks = sessions.flatMap((session) => session.checks.filter((check) => commands.has(check.command))).sort((a, b) => a.end - b.end);
+  // Retain canonical proof even when an unrelated host tool lacks timing/metadata.
+  for (const { event } of records ?? []) {
+    if (event.kind !== "unit.settled" || event.goal_id !== receipt.goal_id) continue;
+    for (const evidence of event.evidence ?? []) {
+      const command = fingerprint(evidence.execution.command.join(" "));
+      const start = Date.parse(evidence.execution.started_at), end = Date.parse(evidence.execution.ended_at);
+      if (receipt.evidence_refs.includes(evidence.evidence_id) && commands.has(command) &&
+        Number.isFinite(start) && Number.isFinite(end)) checks.push({ start, end, command,
+          passed: evidence.execution.exit_code === 0 && evidence.execution.outcome === "pass" });
+    }
+  }
+  checks.sort((a, b) => a.end - b.end);
   const latest = new Map<string, Check>();
   for (const check of checks) latest.set(check.command, check);
   const validation = [...latest.values()].some((check) => !check.passed) ? "FAIL"
-    : complete && commands.size > 0 && latest.size === commands.size ? "PASS" : "未確認";
+    : commands.size > 0 && latest.size === commands.size ? "PASS" : "未確認";
   const reviews = sessions.flatMap((session) => session.reviews).sort((a, b) => a.at - b.at);
   const traits: Debrief["traits"][number][] = [];
   const spans = children.flatMap((session) => session.spans.filter((span) => span.end > span.start)
@@ -205,9 +230,15 @@ export function buildDebrief(receipt: GoalTerminalReceipt, contract: GoalAccepta
     !events?.some((event) => event.kind === "goal.replanned" || event.kind === "goal.user-continued" || event.kind === "goal.revised" ||
       (event.kind === "validation.admission" && event.decision === "DENY") || (event.kind === "validation.settled" && event.outcome !== "passed")) &&
     sessions.every((session) => !session.failed && new Set(session.checks.map((check) => check.command)).size === session.checks.length)) traits.push("一発完遂");
-  return { pack: timingComplete ? [...counts].sort(([a], [b]) => a.localeCompare(b)).map(([model, count]) => ({ model, count })) : null,
+  const review = reviews.filter((entry) => !sessions.some((session) => (session.lastPossibleMutation ?? 0) > entry.at ||
+    session.mutations.some((edit) => edit.end > entry.at))).at(-1);
+  const packComplete = observation.complete && sessions.every(session => session.root || session.timingComplete || Object.keys(session.models).length > 0);
+  return { pack: packComplete ? [...counts].sort(([a], [b]) => a.localeCompare(b)).map(([model, count]) => ({ model, count })) : null,
     mix: usageComplete && total > 0 ? [...totals].sort(([a], [b]) => a.localeCompare(b)).map(([model, tokens]) => ({ model, tokens, percent: tokens / total * 100 })) : null,
-    validation, review: complete ? reviews.filter((review) => !sessions.some((session) => session.mutations.some((edit) => edit.end > review.at))).at(-1)?.status ?? "未確認" : "未確認", traits, firstPassEligible,
+    validation, review: review?.status ?? "未確認", reviewSource: review?.source ?? "controller", traits, firstPassEligible,
+    notes: [...(!observation.complete ? ["host履歴の取得が一部不足"] : []),
+      ...(!usageComplete ? ["モデルIDまたはusageの記録が不足"] : []),
+      ...(!timingComplete ? ["稼働区間の時刻が不足（token集計とは独立）"] : [])],
     ...(timingComplete ? { overlap: { workerMilliseconds: children.reduce((sum, child) => sum + unionDuration(child.spans), 0),
       wallMilliseconds: unionDuration(spans) } } : {}) };
 }
@@ -225,13 +256,17 @@ export function renderDebrief(debrief: Debrief | undefined): string[] {
     const filled = Math.max(0, Math.min(10, Math.round(percent / 10)));
     return "█".repeat(filled) + "░".repeat(10 - filled);
   };
+  const status = (value: string): string => value === "PASS" ? "🟢 **PASS**" : value === "FAIL" ? "🔴 **FAIL**"
+    : value === "WAIVED" ? "免除" : "未記録";
   return [
-    `**🐕 出撃隊:** ${pack === null ? "計測不可" : pack.length === 0 ? "出撃なし" : packVisible.map((entry) => `${label(entry.model)} ×${entry.count}`).join(" · ")}`,
-    `**モデル別token内訳:** ${mix === null ? "計測不可" : ""}`,
+    `**🐕 出撃隊:** ${pack === null ? "履歴未取得" : pack.length === 0 ? "出撃なし" : packVisible.map((entry) => `${label(entry.model)} **×${entry.count}**`).join(" · ")}`,
+    `**モデル別token内訳:** ${mix === null ? "usage未取得" : ""}`,
     ...visible.map((entry) => `**↳** ${label(entry.model)} \`${bars(entry.percent)}\` ${entry.percent.toFixed(1)}%`),
     `**実行重複率:** ${debrief?.overlap !== undefined && debrief.overlap.wallMilliseconds > 0
-      ? `${(debrief.overlap.workerMilliseconds / debrief.overlap.wallMilliseconds).toFixed(2)}×（worker区間・速度倍率ではありません）` : "計測不可"}`,
-    `**確認:** 対象検証 ${debrief?.validation ?? "未確認"} · 直近Review ${debrief?.review === "WAIVED" ? "免除" : debrief?.review ?? "未確認"}`,
+      ? `**${(debrief.overlap.workerMilliseconds / debrief.overlap.wallMilliseconds).toFixed(2)}×**（worker区間・速度倍率ではありません）`
+      : pack?.length === 0 ? "対象なし（出撃なし）" : "稼働区間の記録不足"}`,
+    `**確認:** 対象検証 ${status(debrief?.validation ?? "未確認")} · 直近Review ${status(debrief?.review ?? "未確認")}${debrief?.reviewSource === "reviewer" ? "（reviewer報告）" : ""}`,
+    ...(debrief?.notes?.length ? [`**計測範囲:** ${debrief.notes.join(" · ")}`] : []),
     ...(debrief?.traits.length ? [`**🏅 今回の戦績:** ${debrief.traits.join(" · ")}`] : []),
   ];
 }
