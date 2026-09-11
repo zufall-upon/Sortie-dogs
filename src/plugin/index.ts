@@ -1780,7 +1780,11 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           `unit:${unitID}`, "source_snapshot", "candidate", "command", "scope", "exit_code"]))], reason: "acceptance" };
       let reservation: Awaited<ReturnType<RunFlightLedger["reserveValidation"]>>;
       try {
-        reservation = await ledger.reserveValidation(request, goal.budget?.max_units ?? 1);
+        // A changed candidate produces a new evidence key and must not become a user-facing blocker
+        // merely because earlier necessary validations consumed the initial estimate. Duplicate
+        // evidence remains denied by reserveValidation before this limit is considered.
+        const validationLimit = Math.max(goal.budget?.max_units ?? 1, goal.validation_budget.consumed + 1);
+        reservation = await ledger.reserveValidation(request, validationLimit);
       } catch (error) {
         throw denyValidation(`authority-unavailable:${error instanceof Error ? error.name : "unknown"}`);
       }

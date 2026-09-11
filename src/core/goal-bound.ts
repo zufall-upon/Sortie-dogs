@@ -390,7 +390,7 @@ export function reduceGoalFlight(records: readonly GoalFlightEventRecord[]): Goa
         "invalid", "Validation admission is malformed.");
       if (event.decision === "ALLOW") {
         requireState(event.scope !== null && event.consumed === state.validation_budget.consumed + 1 &&
-          (state.validation_budget.limit === null || state.validation_budget.limit === event.limit) &&
+          (state.validation_budget.limit === null || event.limit >= state.validation_budget.limit) &&
           !state.validation_budget.evidence_keys.includes(event.evidence_key) &&
           !state.validation_budget.reservations.some((entry) => entry.reservation_id === event.reservation_id),
           "budget", "Validation admission is stale, duplicated, or exhausted.");

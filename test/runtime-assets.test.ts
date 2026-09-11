@@ -38,6 +38,10 @@ test("workers share the ordered minimum-solution ladder without weakening execut
     assert.match(asset.content, /sortie_bind_write_gate/u);
     assert.match(asset.content, /## Parallel immutable commit artifact/u);
     assert.match(asset.content, /Every failed validation must produce a concrete source or harness change/u);
+    assert.match(asset.content, /criterion-level trace for every accepted criterion/u);
+    assert.match(asset.content, /broad suite result alone does\s+not prove every criterion/u);
+    assert.match(asset.content, /Validation budget exhaustion, host counters, local routing, and unavailable host capabilities are process\s+defects/u);
+    assert.match(asset.content, /Treat generated-source boundaries as high risk/u);
   }
 });
 
@@ -61,6 +65,14 @@ test("coordinator keeps root goal and sequential handoff acceptance fingerprints
   assert.match(coordinator.content, /corrected Task call in\s+the same turn/u);
   assert.match(coordinator.content, /Only a settled worker result that actually fails the accepted criterion\s+increments no-progress/u);
   assert.match(coordinator.content, /locally repairable evidence defects,\s+consume no no-progress result/u);
+  assert.match(coordinator.content, /criterion -> changed or inspected implementation path -> concrete exercising test\/input\/branch -> PASS/u);
+  assert.match(coordinator.content, /generator command evidence, post-generation candidate identity, generated-output stability/u);
+  assert.match(coordinator.content, /always render one durable fallback card in the same assistant message/u);
+  assert.match(coordinator.content, /plugin replaces that exact persisted card in place/u);
+  const reviewer = runtimeAssets.find((candidate) => candidate.name === "dog-reviewer");
+  assert.ok(reviewer);
+  assert.match(reviewer.content, /broad\s+suite PASS without criterion-level exercise evidence is insufficient/u);
+  assert.match(reviewer.content, /validation executed after generation/u);
 });
 
 test("terminal report is Japanese and concise while internal proof remains durable", () => {

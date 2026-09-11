@@ -148,6 +148,21 @@ test("accepted budget revision synchronizes validation limit without resetting c
     acceptance_contract: null }), RunFlightLedgerError);
 });
 
+test("validation admission permits monotonic limit growth for a changed candidate", async () => {
+  const { ledger } = await accepted("validation-growth", 1);
+  const firstRequest = { run_id: "goal-validation-growth", operation_id: "first",
+    source_snapshot: "source-1", candidate: "candidate", command: ["node", "check"],
+    scope: "targeted" as const, expected_evidence: ["command", "source_snapshot"], reason: "acceptance" as const };
+  const first = await ledger.reserveValidation(firstRequest, 1);
+  assert.equal(first.decision, "ALLOW");
+  await ledger.settleValidation(first.reservation_id!, firstRequest, "failed", 1);
+  const changed = { ...firstRequest, operation_id: "second", source_snapshot: "source-2" };
+  assert.equal((await ledger.reserveValidation(changed, 2)).decision, "ALLOW");
+  const state = (await ledger.readGoal()).state;
+  assert.equal(state.validation_budget.limit, 2);
+  assert.equal(state.validation_budget.consumed, 2);
+});
+
 test("two no-progress boundaries permit one replan, then require stop", async () => {
   const { ledger } = await accepted("stall", 6);
   for (let index = 1; index <= 2; index += 1) {

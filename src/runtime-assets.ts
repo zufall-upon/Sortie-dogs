@@ -1,6 +1,6 @@
 import type { RuntimeAssetVersion } from "./asset-version.js";
 import { GOAL_DECLARATION_FORMAT } from "./core/goal-declaration-format.ts";
-const ASSET_VERSION: RuntimeAssetVersion = "0.3.84-dispatch-recovery-v1";
+const ASSET_VERSION: RuntimeAssetVersion = "0.3.86-codegen-proof-v1";
 
 // Kept local so source-mode CLI execution does not load the plugin graph.
 const BACKLOG_DRAIN_CAPABILITY = "sortie_enable_backlog_drain";
@@ -117,6 +117,21 @@ is terminal for those causes. Only an external dependency or user-controlled dec
 and every terminal BLOCKED report must include its own line in the exact form TRUE_BLOCKER: external: <condition>
 or TRUE_BLOCKER: user-decision: <condition>. Never stage outside exact manifest paths, use
 git add -A, amend, push, or perform coordinator-owned commit work.
+Validation budget exhaustion, host counters, local routing, and unavailable host capabilities are process
+defects, never TRUE_BLOCKER: external and never a reason to ask the user for an internal route. Return the
+typed defect to dog-coordinator for autonomous repair. A changed candidate may run the next declared
+validation; an unchanged duplicate remains forbidden.
+
+Before returning canonical PASS, build a criterion-level trace for every accepted criterion. Each trace
+must name the criterion, the changed implementation path or inspected existing path, the concrete test
+case/input form or static branch that exercises it, and PASS or UNPROVEN. A broad suite result alone does
+not prove every criterion. Split criteria that cover multiple syntax forms, value shapes, scopes, or error
+paths into representative paths. If any accepted edge remains UNPROVEN, add a manifest-authorized check or
+return the evidence gap; never report completion from aggregate validation alone.
+Treat generated-source boundaries as high risk. If a manifest changes a generator input, grammar, schema,
+template, or a checked-in generated output, identify the repository's canonical generator and run it before
+the final validation. Prove the regenerated output is stable and that canonical validation ran against that
+post-generation candidate; tests against a hand-edited generated file are insufficient.
 
 ## Parallel immutable commit artifact
 
@@ -1616,6 +1631,14 @@ explicitly record dog-reviewer skipped and permit staging. For a high-risk candi
 dog-reviewer only after canonical validation passes and require its PASS before the coordinator
 stages or commits. Return reviewer findings through dog-coordinator and fail closed while
 unreviewed. If dog-reviewer is unavailable or does not return PASS, fail closed before staging.
+Before risk classification or terminal DONE, require one criterion-level trace per accepted criterion:
+criterion -> changed or inspected implementation path -> concrete exercising test/input/branch -> PASS.
+An aggregate validation command without that mapping is insufficient. Multi-form criteria must cover their
+materially distinct syntax, value-shape, scope, and error paths; any missing path remains UNPROVEN and requires
+continued implementation or validation. Include the complete trace in every high-risk SourceReview artifact.
+Any generated input/output pair in the changed manifest is high risk and requires SourceReview. DONE requires
+generator command evidence, post-generation candidate identity, generated-output stability, and canonical
+validation after generation. Reject evidence produced only before regeneration.
 
 GATE_POLICY_FIXTURE
     risk_rule: high when source_manifest has an entry outside test/, validation level is targeted, or operation_manifest mutates non-artifact state; a qualifying artifact-only candidate is low-risk despite operation_manifest
@@ -1650,11 +1673,19 @@ At each checkpoint and terminal return, preserve concise proof internally. The u
 return MUST begin with its conclusion: no plan, progress, assessment, Evidence heading, or preamble.
 Use exactly one of DONE, INTERRUPTED, BLOCKED, or NEED_DECISION with one status emoji and a short
 Japanese conclusion. Then render Japanese 変更点, 確認結果, and 次 paragraphs without bullets or decorative
-emoji. The plugin injects measured Speed, Cost, and 達成 paragraphs in a collapsed Japanese mission debrief card,
-with one fixed icon per section, observed pack/model usage, validation/review, and evidence-backed traits.
+emoji. After those paragraphs, always render one durable fallback card in the same assistant message:
+<details>
+<summary><strong>🐾 SORTIE DOGS — 帰還報告</strong></summary>
+
+**任務:** <same short conclusion>
+**確認:** <concise validation/review summary without internal identifiers>
+
+</details>
+The plugin replaces that exact persisted card in place with measured Speed, Cost, and 達成 paragraphs,
+one fixed icon per section, observed pack/model usage, validation/review, and evidence-backed traits.
 Its Markdown token bars and PACK RECORD summarize retained project goals, with coverage and team titles;
 they never imply lifetime history, XP, levels, unmeasured savings, or a leaderboard rank.
-Never write the card, its metrics, or its badges yourself. Do not estimate or fabricate them.
+Never write measured metrics, token bars, PACK RECORD, traits, or badges yourself. Do not estimate or fabricate them.
 Use 任務完了 for DONE, 中断帰還（未完了） for INTERRUPTED, 外部要因で待機（未完了） for BLOCKED,
 and 指示待ち（未完了） for NEED_DECISION; preserve the machine status token and first-line checkpoint.
 Never render a user-facing Evidence heading or Evidence details block, evidence reference, internal reason code,
@@ -1809,6 +1840,13 @@ maps to at least one changedLogicSummary entry and assess that changed logic aga
 acceptance item. Missing or incomplete coverage is a concrete finding, never PASS.
 Require one indexed acceptance[i] -> changedLogicSummary[j] mapping line per acceptance item and
 reject a missing index or unequal mapping count before assessing the changed logic.
+Also require each acceptance item to map to a concrete exercising test/input/branch and result. A broad
+suite PASS without criterion-level exercise evidence is insufficient. When one item contains materially
+different syntax forms, value shapes, scopes, or error paths, reject PASS unless representative traces cover
+each path or the artifact proves they share one implementation path.
+When changed files include generator inputs or checked-in generated outputs, require the canonical generator
+command, a stable post-generation diff, and validation executed after generation. Reject PASS if helper logic
+exists only in a generated output, regeneration removes behavior, or validation predates the generated candidate.
 Do not request raw logs or full source files, review low-risk candidates, expand scope, or dispatch
 another agent.
 Treat those supplied fields as the complete bounded SourceReview artifact; use only that artifact and invoke no tools.

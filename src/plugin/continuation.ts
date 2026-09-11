@@ -763,6 +763,7 @@ export function createContinuationHooks(
   function nonTerminalProgress(text: string): boolean {
     if (text.startsWith(STEP_CONTINUE_PREFIX) || text.startsWith(AUTO_CONTINUE_PREFIX)) return false;
     if (terminalCheckpoint(text)) return false;
+    if (topLevelProtocolLines(text).some(({ line }) => /^status\s*:\s*IN_PROGRESS(?:\s|$)/iu.test(line))) return true;
     if (/➡️\s*(?:次action|next_action)\s*:\s*\S/iu.test(text)) return true;
     if (checkpointStatus(text) === "BLOCKED" && !trueBlockerReport(text)) return true;
     const percent = latestProgressPercent(text);

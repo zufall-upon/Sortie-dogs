@@ -958,6 +958,16 @@ test("ordinary terminal text does not force compaction and real user turns reset
   assert.equal(await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR }), "SORTIE_COMPACT_AND_CONTINUE_QUEUED");
 });
 
+test("bare IN_PROGRESS status schedules same-session recovery", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
+  await hooks.textComplete({ sessionID: "ses_root" },
+    { text: "status: IN_PROGRESS\ngoal_control: accepted criteria remain unproved" });
+  await settle();
+  assert.equal(host.promptCalls.length, 1);
+  assert.match(host.promptCalls[0]!.text, /SORTIE_STEP_CONTINUE/u);
+});
+
 test("synthetic continuation turns do not reset the continuation budget", async () => {
   const host = fakeHost({ agent: COORDINATOR });
   const hooks = createContinuationHooks(host.client, "/project", { ...POLICY, maxAutoContinues: 1 }, FAST);
