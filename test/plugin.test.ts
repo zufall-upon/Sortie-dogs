@@ -3958,6 +3958,46 @@ test("an explicit Build selection relinquishes an established coordinator while 
   });
 });
 
+for (const hostStatus of ["completed", "error", "running", "foreign", "missing"]) {
+test(`restart reconciles orphan reservations only from matching terminal host Tasks: ${hostStatus}`, async () => {
+  await withProject("orphan-goal-reservation", async (directory) => {
+    const { RunFlightLedger } = await import("../dist/core/run-flight-ledger.js");
+    const root = "recovery-root", callID = "old-task", unitID = "old-unit";
+    const path = join(directory, ".git", "sortie-dogs", "run-flight", `${createHash("sha256").update(root).digest("hex")}.json`);
+    const client = { session: {
+      get: async () => ({ data: { agent: "dog-coordinator" } }),
+      messages: async () => ({ data: hostStatus === "missing" ? [] : [{
+        info: { role: "assistant", sessionID: hostStatus === "foreign" ? "foreign-root" : root },
+        parts: [{ type: "tool", tool: "task", callID, state: {
+          status: hostStatus === "foreign" ? "completed" : hostStatus,
+          input: { subagent_type: "dog-worker", prompt: `task_id: ${unitID}` },
+          time: { start: 1000, end: 1010 }, output: "PASS (not native validation evidence)" } }]
+      }] }),
+    } };
+    const hooks = await SortieDogsPlugin({ directory, client } as never);
+    const turn = (id: string) => hooks["chat.message"]!({ sessionID: root, messageID: id, agent: "dog-coordinator" }, {
+      message: { id, agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+      parts: [{ type: "text", text: "Hold the existing task" }],
+    });
+    await turn("initial");
+    const ledger = await RunFlightLedger.openGoal(path);
+    const initial = (await ledger.readGoal()).state;
+    await ledger.appendGoal({ kind: "dispatch.reserved", at: new Date().toISOString(),
+      goal_id: initial.goal_id!, unit_id: unitID, session_id: root, ticket_id: null,
+      reservation_id: goalFingerprint({ goal_id: initial.goal_id, unit_id: unitID, call_id: callID }) });
+    await turn("resume");
+    await turn("hold-again");
+    const recovered = (await ledger.readGoal()).state;
+    const terminal = hostStatus === "completed" || hostStatus === "error";
+    assert.equal(recovered.outstanding_reservations.length, terminal ? 0 : 1);
+    assert.equal(recovered.consumed_units, terminal ? 1 : 0);
+    assert.equal(recovered.no_progress_results, 0);
+    assert.deepEqual(recovered.satisfied_criteria, []);
+    assert.equal(recovered.goal_id, initial.goal_id);
+  });
+});
+}
+
 test("host question permits a budget-only revision after budget stop without erasing spend", async () => {
   await withProject("question-budget-revision", async (directory) => {
     const hooks = await SortieDogsPlugin({ directory, client: { session: {
@@ -3987,7 +4027,19 @@ test("host question permits a budget-only revision after budget stop without era
     await dispatch("first-budget-unit");
     await hooks["tool.execute.after"]!({ tool: "task", sessionID: "budget-root", callID: "first-budget-unit" },
       { output: "PROCESS_DEFECT: local: fixture validation unavailable", metadata: { sessionId: "budget-child" } });
-    await assert.rejects(dispatch("exhausted-budget"), /stop_budget/);
+    await assert.rejects(dispatch("exhausted-budget"), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /^SORTIE_GOAL_CONTROL_DENIED: stop_budget\n/);
+      const status = JSON.parse(error.message.split("\n")[1]!);
+      assert.equal(status.exhausted_dimension, "units");
+      assert.equal(status.budget.max_units, 1);
+      assert.equal(status.consumed_units, 1);
+      assert.equal(status.reserved_units, 0);
+      assert.equal(status.remaining_units, 0);
+      assert.match(status.remedy, /cumulative limit/);
+      assert.match(status.remedy, /INTERRUPTED/);
+      return true;
+    });
     await assert.rejects(dispatch("unapproved-budget", prompt.replace("goal_budget_units: 1", "goal_budget_units: 3")),
       (error: unknown) => error instanceof HandoffDeniedError && error.defects.some((value) => value.includes("goal_revision_unauthorized")));
     await hooks["tool.execute.after"]!({ tool: "question", sessionID: "budget-root", callID: "approval" },

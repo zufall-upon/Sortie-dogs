@@ -24,7 +24,7 @@ Requirements: Node.js 22.6 or newer, npm, and OpenCode.
 
 Guides: [日本語](docs/guide-ja.md) · [简体中文](docs/guide-zh-CN.md) · [CLI testing](docs/cli-testing.md)
 
-Release: [v0.9.6](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.9.6)
+Release: [v0.9.7](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.9.7)
 
 ## Quick start
 
@@ -416,6 +416,11 @@ older runtime files, and records the installed version in
 `.opencode/sortie-dogs.version`. Conflicting or unrecognized files remain
 untouched and initialization stops safely. User-owned configuration—including
 `.opencode/sortie-dogs.json`—and standard OpenCode files are preserved.
+
+## Maintainer releases
+
+The [release batch guide](docs/release-batch.md) covers fixed-tarball CLI verification,
+global application, resumable GitHub publication, and manual npm publication checks.
 
 ## Safe manual removal
 

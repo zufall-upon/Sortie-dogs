@@ -1510,6 +1510,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   const goalLedgerFiles = new Map<string, string>();
   const goalLedgerDirectories = new Set<string>();
   const goalReservations = new Map<string, { readonly root: string; readonly reservationID: string; readonly unitID: string; readonly started: number }>();
+  const goalReservationRecoveries = new Map<string, Promise<void>>();
   const hostGoalExecutions = new Map<string, HostGoalExecution>();
   const goalValidationDefects = new Set<string>();
   const goalDeclarationAuthority = new Map<string, string>();
@@ -1827,8 +1828,62 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       ...(outcome === undefined ? {} : { outcome }), ...(immutableRef === undefined ? {} : { immutableRef }), fresh });
   }
 
+  async function recoverCompletedGoalReservations(sessionID: string): Promise<void> {
+    const root = goalRoot(sessionID);
+    const active = goalReservationRecoveries.get(root);
+    if (active !== undefined) return active;
+    const recovery = (async () => {
+      const ledger = await goalLedger(sessionID);
+      const state = (await ledger.readGoal()).state;
+      const pending = state.outstanding_reservations.filter(reservation =>
+        ![...goalReservations.values()].some(live => live.reservationID === reservation.reservation_id));
+      if (pending.length === 0 || state.goal_id === null || input.client?.session?.messages === undefined) return;
+      const messages = input.client.session.messages as unknown as (request: {
+        path: { id: string }; query: { directory: string; limit: number };
+      }) => Promise<unknown>;
+      const response = await messages.call(input.client.session, { path: { id: root },
+        query: { directory: input.directory, limit: 1000 } }).catch(() => undefined);
+      const data: unknown = isRecord(response) ? response.data : undefined;
+      if (!Array.isArray(data)) return;
+      for (const reservation of pending) {
+        const matches: Array<{ callID: string; status: string; elapsed: number | null }> = [];
+        for (const message of data.slice(-1000)) {
+          if (!isRecord(message) || !isRecord(message.info) || message.info.role !== "assistant" ||
+            message.info.sessionID !== root || !Array.isArray(message.parts)) continue;
+          for (const part of message.parts) {
+            if (!isRecord(part) || part.type !== "tool" || part.tool !== "task" || typeof part.callID !== "string" ||
+              !isRecord(part.state) || !["completed", "error"].includes(String(part.state.status)) ||
+              !isRecord(part.state.input) || typeof part.state.input.prompt !== "string" ||
+              !["dog-worker", "dog-luna-worker"].includes(String(part.state.input.subagent_type))) continue;
+            const unitID = handoffValue(handoffEntries(part.state.input.prompt), ["task_id"]) ?? part.callID;
+            if (unitID !== reservation.unit_id || goalFingerprint({ goal_id: state.goal_id, unit_id: unitID,
+              call_id: part.callID }) !== reservation.reservation_id) continue;
+            const time = isRecord(part.state.time) ? part.state.time : undefined;
+            const elapsed = typeof time?.start === "number" && typeof time.end === "number" &&
+              Number.isFinite(time.start) && Number.isFinite(time.end) && time.end >= time.start ? time.end - time.start : null;
+            matches.push({ callID: part.callID, status: String(part.state.status), elapsed });
+          }
+        }
+        if (matches.length !== 1) continue;
+        const match = matches[0]!;
+        // Reconcile lifecycle accounting only. Lost in-memory validation bindings cannot be
+        // reconstructed from worker prose and must not manufacture acceptance evidence.
+        await ledger.appendGoal({ kind: "unit.settled", at: new Date().toISOString(),
+          reservation_id: reservation.reservation_id,
+          receipt_id: goalFingerprint({ recovered_host_task: match.callID, reservation: reservation.reservation_id }),
+          goal_id: state.goal_id, unit_id: reservation.unit_id,
+          disposition: match.status === "completed" ? "succeeded" : "cancelled", result_class: "process-defect",
+          progress_fingerprint: null, evidence: [], elapsed_ms: match.elapsed, cost_usd: null });
+        appLogInfo("goal.reservation-recovered", root, { unitID: reservation.unit_id, hostStatus: match.status });
+      }
+    })();
+    goalReservationRecoveries.set(root, recovery);
+    try { await recovery; } finally { goalReservationRecoveries.delete(root); }
+  }
+
   async function acceptRealGoalTurn(sessionID: string, messageID: string, selectedAgent: string,
     parts: readonly unknown[]): Promise<void> {
+    await recoverCompletedGoalReservations(sessionID);
     const ledger = await goalLedger(sessionID);
     const state = (await ledger.readGoal()).state;
     if (state.latest_user_message_id === messageID) return;
@@ -2213,6 +2268,19 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const ledger = await goalLedger(sessionID);
     let state = await bindGoalDeclaration(sessionID, prompt) ?? (await ledger.readGoal()).state;
     if (state.goal_id === null) return; // Legacy already-authorized roots may settle without inventing authority.
+    const budgetDenied = (dimension: "units" | "time_ms" | "cost_usd") => new Error(
+      "SORTIE_GOAL_CONTROL_DENIED: stop_budget\n" + JSON.stringify({
+        goal_id: state.goal_id, revision: state.revision, exhausted_dimension: dimension,
+        budget: state.budget, consumed_units: state.consumed_units,
+        reserved_units: state.outstanding_reservations.length,
+        remaining_units: state.budget === null ? null : Math.max(0,
+          state.budget.max_units - state.consumed_units - state.outstanding_reservations.length),
+        consumed_time_ms: state.consumed_time_ms, consumed_cost_usd: state.consumed_cost_usd,
+        validation_consumed: state.validation_budget.consumed, validation_limit: state.validation_budget.limit,
+        remedy: "goal_budget_units is the cumulative limit across this goal's revisions, not an added allowance. " +
+          "Use these host counters when requesting an explicit budget revision. Renaming task_id or contracts does not create a new goal. " +
+          "If the user holds or stops, report status: INTERRUPTED and do not redispatch."
+      }));
     if (state.phase === "terminal" || state.receipt !== null) {
       throw new Error("SORTIE_GOAL_CONTROL_DENIED: terminal");
     }
@@ -2226,17 +2294,17 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     }
     if (state.budget !== null && state.consumed_units + state.outstanding_reservations.length >= state.budget.max_units) {
       await terminalGoal(sessionID, "stop_budget", "stopped");
-      throw new Error("SORTIE_GOAL_CONTROL_DENIED: stop_budget");
+      throw budgetDenied("units");
     }
     if (state.budget !== null && state.budget.time_ms !== null &&
       (state.consumed_time_ms === null || state.consumed_time_ms >= state.budget.time_ms)) {
       await terminalGoal(sessionID, "stop_budget", "stopped");
-      throw new Error("SORTIE_GOAL_CONTROL_DENIED: stop_budget");
+      throw budgetDenied("time_ms");
     }
     if (state.budget !== null && state.budget.cost_usd !== null &&
       (state.consumed_cost_usd === null || state.consumed_cost_usd >= state.budget.cost_usd)) {
       await terminalGoal(sessionID, "stop_budget", "stopped");
-      throw new Error("SORTIE_GOAL_CONTROL_DENIED: stop_budget");
+      throw budgetDenied("cost_usd");
     }
     if (state.goal_id === null) return;
     const unitID = handoffValue(handoffEntries(prompt), ["task_id"]) ?? callID;

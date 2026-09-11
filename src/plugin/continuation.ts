@@ -14,6 +14,7 @@
 
 import { openCodeModel } from "./model-routing-hook.js";
 import type { ModelTarget } from "./model-routing.js";
+import { terminalRunOutcome } from "./run-metrics.js";
 
 /** Plugin tool name the coordinator asset names as the direct continuation capability. */
 export const CONTINUATION_CAPABILITY = "sortie_compact_and_continue";
@@ -721,8 +722,8 @@ export function createContinuationHooks(
   }
 
   function terminalCheckpoint(text: string): boolean {
-    const status = checkpointStatus(text);
-    return status === "DONE" || status === "NEED_DECISION" || (status === "BLOCKED" && trueBlockerReport(text));
+    // Use the same terminal vocabulary as the receipt/debrief path, including INTERRUPTED.
+    return terminalRunOutcome(text) !== undefined;
   }
 
   function trueBlockerReport(text: string): boolean {

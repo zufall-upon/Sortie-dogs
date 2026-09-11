@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "repository": "zufall-upon/Sortie-dogs",
+  "remote": "origin",
+  "branch": "main",
+  "npm": "M:/@HyperV/node-v22.14.0-win-x64/npm.ps1",
+  "gh": "M:/@HyperV/gh-cli/bin/gh.exe",
+  "globalRoot": "C:/Users/rozen/.config/opencode",
+  "files": [
+    "package.json",
+    "package-lock.json",
+    "README.md",
+    "docs/guide-ja.md",
+    "docs/guide-zh-CN.md",
+    "test/plugin-loader.test.ts"
+  ],
+  "versionTextFiles": [
+    "README.md",
+    "docs/guide-ja.md",
+    "docs/guide-zh-CN.md",
+    "test/plugin-loader.test.ts"
+  ],
+  "targetTests": ["test/plugin-loader.test.ts"],
+  "notesFile": "temp/release-notes.md"
+}

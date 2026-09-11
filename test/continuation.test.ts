@@ -336,6 +336,25 @@ test("step recovery continues through unstructured deferrals until a canonical t
   assert.equal(host.promptCalls.length, 2);
 });
 
+for (const report of [
+  "status: INTERRUPTED — user requested a hold",
+  "⚠️ **INTERRUPTED** `task` — 停止状態維持。",
+  "⚠️ conclusion: status: INTERRUPTED — stopped",
+]) test(`interrupted terminal stops an active synthetic recovery: ${report}`, async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" });
+  await hooks.textComplete({ sessionID: "ses_root" }, { text: "📊 in progress: awaiting checkpoint" });
+  await hooks.sessionIdle("ses_root");
+  assert.equal(host.promptCalls.length, 1);
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" }, true);
+  await hooks.textComplete({ sessionID: "ses_root" }, { text: report });
+  await hooks.sessionIdle("ses_root");
+  await hooks.sessionIdle("ses_root");
+  assert.equal(host.promptCalls.length, 1);
+  assert.equal(host.summarizeCalls.length, 0);
+});
+
 test("a repeated nonterminal recovery report compacts and resumes instead of looping", async () => {
   const host = fakeHost({ agent: COORDINATOR });
   let hooks!: ReturnType<typeof createContinuationHooks>;
