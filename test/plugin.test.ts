@@ -1210,6 +1210,8 @@ test("generated coordinator keeps proof internal and renders concise Japanese te
   assert.match(semantics[1], /status_icons: DONE=✅ \| INTERRUPTED=⚠️ \| BLOCKED=⛔ \| NEED_DECISION=❓/u);
   assert.match(semantics[1], /quality_gate_fail: validation evidence \+ autonomous non-adoption decision -> DONE; release remains unperformed/);
   assert.match(semantics[1], /process_defect: gate \| routing \| handoff \| local tool defect -> autonomous repair; never terminal BLOCKED/);
+  assert.match(semantics[1], /interruption_marker: TRUE_INTERRUPTION: user: <condition> \| TRUE_INTERRUPTION: internal: <condition>/);
+  assert.match(semantics[1], /continuation_not_interruption: local process defect \| step boundary \| continuation request \| recoverable limit/);
   assert.match(coordinator.content, /plugin injects measured Speed, Cost, and 達成 paragraphs/i);
   assert.match(coordinator.content, /Do not estimate or fabricate them/i);
   assert.match(coordinator.content, /LUNA_FABRIC_CONTRACT_SHAPE_FIXTURE/);
@@ -1292,7 +1294,7 @@ test("unproved coordinator DONE is rejected while host root and child metrics re
     assert.equal(body.extra.available, true);
     assert.equal(body.extra.outcome, "DONE");
     assert.equal(body.extra.sessionID, "root");
-    assert.equal(body.extra.runtimeAssetVersion, "0.3.81-mission-debrief-v1");
+    assert.equal(body.extra.runtimeAssetVersion, "0.3.82-terminal-continuation-v1");
     assert.equal(body.extra.inputTokens, 130);
     assert.equal(body.extra.outputTokens, 15);
     assert.equal(body.extra.reasoningTokens, 5);
@@ -4040,17 +4042,90 @@ test("host question permits a budget-only revision after budget stop without era
       assert.match(status.remedy, /INTERRUPTED/);
       return true;
     });
-    await assert.rejects(dispatch("unapproved-budget", prompt.replace("goal_budget_units: 1", "goal_budget_units: 3")),
+    const amendment = prompt.split("\n").filter(line => !/^(?:goal_|delivery_intent:|usable_path_established:|controlled_change:)/u.test(line))
+      .concat("goal_budget_units: 3").join("\n");
+    const check = hooks.tool!.sortie_check_contract as unknown as {
+      execute(args: { handoff_path: string; task_prompt: string }, context: { sessionID: string }): Promise<string>;
+    };
+    const preview = JSON.parse(await check.execute({ handoff_path: join(directory, "handoff.json"), task_prompt: amendment },
+      { sessionID: "budget-root" }));
+    assert.equal(preview.status, "ok");
+    assert.equal(preview.goal.inherited, true);
+    assert.equal(preview.goal.max_units, 1);
+    assert.equal(preview.goal.proposed_max_units, 3);
+    assert.equal(preview.goal.budget_revision_requires_approval, true);
+    await assert.rejects(dispatch("unapproved-budget", amendment),
       (error: unknown) => error instanceof HandoffDeniedError && error.defects.some((value) => value.includes("goal_revision_unauthorized")));
     await hooks["tool.execute.after"]!({ tool: "question", sessionID: "budget-root", callID: "approval" },
       { output: "User approved two additional units; cumulative limit three." });
-    await dispatch("resumed-budget", prompt.replace("goal_budget_units: 1", "goal_budget_units: 3"));
+    const approved = JSON.parse(await check.execute({ handoff_path: join(directory, "handoff.json"), task_prompt: amendment },
+      { sessionID: "budget-root" }));
+    assert.equal(approved.goal.budget_revision_requires_approval, false);
+    await dispatch("resumed-budget", amendment);
     const projection = { system: [] as string[] };
     await hooks["experimental.chat.system.transform"]!({ sessionID: "budget-root" }, projection);
     const line = projection.system.find((entry) => entry.startsWith("SORTIE_GOAL_BOUND_STATE\n"))!;
     const state = JSON.parse(line.slice(line.indexOf("\n") + 1));
     assert.equal(state.consumed_units, 1);
     assert.equal(state.outstanding_reservations, 1);
+  });
+});
+
+test("a user-held INTERRUPTED report renders the debrief regardless of icon and removes Evidence", async () => {
+  await withProject("held-report-rendering", async (directory) => {
+    const hooks = await SortieDogsPlugin({ directory, client: { session: {
+      get: async () => ({ data: { agent: "dog-coordinator" } }),
+      messages: async () => ({ data: [] }),
+    } } } as never);
+    await hooks["chat.message"]!({ sessionID: "report-root", agent: "dog-coordinator", messageID: "report-user" },
+      { message: { id: "report-user", agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+        parts: [{ type: "text", text: "Pause until my decision" }] });
+    const paused = { text: "status: NEED_DECISION — awaiting user choice" };
+    await hooks["experimental.text.complete"]!({ sessionID: "report-root", messageID: "report-1", partID: "part-1" }, paused);
+    const report = { text: "⛔ **INTERRUPTED** `runner` — 利用者選択により保留\n\n**Validation:** PASS\n\n" +
+      "<details><summary>Evidence: commit 1、validation 1、Scout 1</summary>\n```yaml\nmanifest:\n raw_status: hidden\n```\n</details>" };
+    await hooks["experimental.text.complete"]!({ sessionID: "report-root", messageID: "report-2", partID: "part-2" }, report);
+    assert.match(report.text, /帰還報告/u);
+    assert.match(report.text, /INTERRUPTED/u);
+    assert.doesNotMatch(report.text, /Evidence|<details>|raw_status|manifest:/u);
+  });
+});
+
+test("an observed coordinator abort preserves markerless terminal INTERRUPTED while local continuation remains active", async () => {
+  await withProject("observed-terminal-interruption", async (directory) => {
+    const hooks = await SortieDogsPlugin({ directory, client: { session: {
+      get: async () => ({ data: { agent: "dog-coordinator" } }),
+      messages: async () => ({ data: [] }),
+    } } } as never);
+    await hooks["chat.message"]!({ sessionID: "interruption-root", agent: "dog-coordinator", messageID: "interruption-user" }, {
+      message: { id: "interruption-user", agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+      parts: [{ type: "text", text: "run until explicitly stopped" }],
+    });
+
+    const local = { text: "status: INTERRUPTED — local step limit requires continuation" };
+    await hooks["experimental.text.complete"]!({ sessionID: "interruption-root", messageID: "local-step" }, local);
+    assert.match(local.text, /^status: IN_PROGRESS/u);
+    assert.doesNotMatch(local.text, /status: INTERRUPTED/u);
+
+    await hooks.event!({ event: { type: "message.updated", properties: { info: {
+      id: "aborted-message", sessionID: "interruption-root", role: "assistant", agent: "dog-coordinator",
+      error: { name: "MessageAbortedError", data: { message: "aborted" } },
+    } } } });
+    const stopped = { text: "status: INTERRUPTED — output stopped before an interruption marker was emitted" };
+    await hooks["experimental.text.complete"]!({ sessionID: "interruption-root", messageID: "aborted-message" }, stopped);
+    assert.match(stopped.text, /^status: INTERRUPTED/u);
+
+    const markedHooks = await SortieDogsPlugin({ directory, client: { session: {
+      get: async () => ({ data: { agent: "dog-coordinator" } }),
+      messages: async () => ({ data: [] }),
+    } } } as never);
+    await markedHooks["chat.message"]!({ sessionID: "internal-root", agent: "dog-coordinator", messageID: "internal-user" }, {
+      message: { id: "internal-user", agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+      parts: [{ type: "text", text: "run the internal interruption fixture" }],
+    });
+    const internal = { text: "status: INTERRUPTED — internal interruption\nTRUE_INTERRUPTION: internal: host terminated execution" };
+    await markedHooks["experimental.text.complete"]!({ sessionID: "internal-root", messageID: "internal-message" }, internal);
+    assert.match(internal.text, /^status: INTERRUPTED/u);
   });
 });
 
@@ -4439,12 +4514,12 @@ test("Career persistence failure preserves the terminal outcome and retry record
       if (event.kind === "goal.reported") throw new Error("fixture telemetry write failure");
       return append.call(this, event);
     });
-    const failed = { text: "status: INTERRUPTED — incomplete\n\n**次:** resume" };
+    const failed = { text: "status: INTERRUPTED — incomplete\nTRUE_INTERRUPTION: internal: fixture telemetry interruption\n\n**次:** resume" };
     await hooks["experimental.text.complete"]!({ sessionID: "career-root" }, failed);
     assert.match(failed.text, /^status: INTERRUPTED/u);
     assert.match(failed.text, /保存履歴を取得できません/u);
     mocked.mock.restore();
-    const successful = { text: "status: INTERRUPTED — incomplete\n\n**次:** resume" };
+    const successful = { text: "status: INTERRUPTED — incomplete\nTRUE_INTERRUPTION: internal: fixture telemetry interruption\n\n**次:** resume" };
     await hooks["experimental.text.complete"]!({ sessionID: "career-root" }, successful);
     assert.match(successful.text, /^status: INTERRUPTED/u);
     assert.match(successful.text, /中断 1/u);

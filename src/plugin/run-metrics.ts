@@ -506,13 +506,11 @@ function terminalCheckpoint(text: string): { index: number; outcome: RunTerminal
     const explicit: RunTerminalOutcome | undefined = normalized === "DONE" || normalized === "INTERRUPTED" || normalized === "BLOCKED" || normalized === "NEED_DECISION"
       ? normalized
       : undefined;
-    const outcome = explicit ?? conclusionStatusAlias(line) ??
-      (/^✅[ \t]+\*\*DONE\*\*/u.test(line) ? "DONE" :
-        /^⚠️[ \t]+\*\*INTERRUPTED\*\*/u.test(line) ? "INTERRUPTED" :
-        /^⛔[ \t]+\*\*BLOCKED\*\*/u.test(line) ? "BLOCKED" :
-        /^❓[ \t]+\*\*NEED_DECISION\*\*/u.test(line) ? "NEED_DECISION" : undefined);
+    // The status carries meaning; a decorative icon must not suppress terminal rendering.
+    const decorated = /^(?:\p{Extended_Pictographic}\uFE0F?[ \t]+)?\*\*(DONE|INTERRUPTED|BLOCKED|NEED_DECISION)\*\*(?=[ \t]|$)/u.exec(line)?.[1] as RunTerminalOutcome | undefined;
+    const outcome = explicit ?? conclusionStatusAlias(line) ?? decorated;
     return outcome === "DONE" || outcome === "INTERRUPTED" || outcome === "BLOCKED" || outcome === "NEED_DECISION"
-      ? { index, outcome }
+      ? { index, outcome: outcome as RunTerminalOutcome }
       : undefined;
   })();
   return checkpoint;

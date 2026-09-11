@@ -90,6 +90,9 @@ test("recognizes only an accepted first terminal status line", () => {
   assert.equal(isDoneTerminalText("  ✅ **DONE** — indented"), false);
   assert.equal(terminalRunOutcome("✅ **DONE** — complete"), "DONE");
   assert.equal(terminalRunOutcome("⚠️ **INTERRUPTED** — incomplete"), "INTERRUPTED");
+  assert.equal(terminalRunOutcome("⛔ **INTERRUPTED** `mvp1-projection-runner-r2` — 利用者選択により保留"), "INTERRUPTED");
+  assert.equal(terminalRunOutcome("**INTERRUPTED** — user hold"), "INTERRUPTED");
+  assert.equal(terminalRunOutcome("status: INTERRUPTED — explicit stop\nTRUE_INTERRUPTION: user: requested stop"), "INTERRUPTED");
   assert.equal(terminalRunOutcome("✅ conclusion: status: DONE; task_id: task-06; complete"), "DONE");
   assert.equal(terminalRunOutcome("❓ conclusion: status: NEED_DECISION; task_id: task-06; choose"), "NEED_DECISION");
   assert.equal(terminalRunOutcome("⛔ conclusion: status: DONE; task_id: task-06; mismatched"), undefined);
@@ -270,6 +273,10 @@ test("renders completed, interrupted, external-blocker, and user-decision as dis
   assert.equal(external.speed.worker_execution_ms.availability, "unavailable");
   const externalText = insertSortieResult("⛔ **BLOCKED** external\nTRUE_BLOCKER: external: service\n\n<details><summary>Evidence</summary>evidence_refs: secret</details>", external);
   const interruptedText = insertSortieResult("⚠️ **INTERRUPTED** incomplete", interrupted);
+  const screenshotText = insertSortieResult("⛔ **INTERRUPTED** `runner` — 保留\n\n**Validation:** PASS\n\n" +
+    "<details>\n<summary>Evidence: commit 1、validation 1、Scout 1</summary>\n\n```yaml\nmanifest:\n  raw_status: hidden\n```\n</details>", interrupted);
+  assert.match(screenshotText, /帰還報告/u);
+  assert.doesNotMatch(screenshotText, /<details>|Evidence|manifest:|raw_status/u);
   const decisionText = insertSortieResult("❓ **NEED_DECISION** choose", decision);
   assert.match(externalText, /\*\*🛡 達成:\*\* 外部要因で未完了/u);
   assert.match(interruptedText, /\*\*🛡 達成:\*\* 中断（未完了）/u);

@@ -1,6 +1,6 @@
 import type { RuntimeAssetVersion } from "./asset-version.js";
 import { GOAL_DECLARATION_FORMAT } from "./core/goal-declaration-format.ts";
-const ASSET_VERSION: RuntimeAssetVersion = "0.3.81-mission-debrief-v1";
+const ASSET_VERSION: RuntimeAssetVersion = "0.3.82-terminal-continuation-v1";
 
 // Kept local so source-mode CLI execution does not load the plugin graph.
 const BACKLOG_DRAIN_CAPABILITY = "sortie_enable_backlog_drain";
@@ -1646,6 +1646,10 @@ review proof, and terminal receipt append-only in their internal typed ledger an
 確認結果 may summarize PASS/FAIL without exposing those internal identifiers.
 An undeclared write or mutation must be reported as rejected, not performed. A locally repairable process or evidence defect is never a
 user question: repair it and continue in the same turn.
+An INTERRUPTED root conclusion requires one machine line: \`TRUE_INTERRUPTION: user: <condition>\`
+for an explicit user stop, or \`TRUE_INTERRUPTION: internal: <condition>\` for a true internal
+interruption. Never emit that line for a local process defect, step boundary, continuation request, or
+recoverable limit; keep those on the same-session autonomous continuation path.
 
 TERMINAL_STATUS_SEMANTICS_FIXTURE
     DONE: all accepted criteria proved complete; unmet or interrupted work forbidden
@@ -1656,6 +1660,8 @@ TERMINAL_STATUS_SEMANTICS_FIXTURE
     status_icons: DONE=✅ | INTERRUPTED=⚠️ | BLOCKED=⛔ | NEED_DECISION=❓
     quality_gate_fail: validation evidence + autonomous non-adoption decision -> DONE; release remains unperformed
     process_defect: gate | routing | handoff | local tool defect -> autonomous repair; never terminal BLOCKED
+    interruption_marker: TRUE_INTERRUPTION: user: <condition> | TRUE_INTERRUPTION: internal: <condition>
+    continuation_not_interruption: local process defect | step boundary | continuation request | recoverable limit
 END_TERMINAL_STATUS_SEMANTICS_FIXTURE
 
 RUNTIME_ASSET_VERSION_SYNC_FIXTURE

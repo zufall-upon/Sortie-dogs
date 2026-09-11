@@ -212,7 +212,7 @@ export interface OpenCodeHooks {
   "experimental.chat.system.transform"?: (input: { sessionID: string }, output: { system?: string[]; model?: unknown }) => Promise<void>;
   /** Continuation observes the coordinator's completed final text to honour its fallback markers. */
   "experimental.text.complete"?: (
-    input: { sessionID: string },
+    input: { sessionID: string; messageID?: string; partID?: string },
     output: { text: string },
   ) => Promise<void>;
   /** Continuation replaces the compaction prompt so batch state survives the rollover. */
@@ -2075,6 +2075,19 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     return { outcome, goal, receipt, delivery, records: snapshot?.records };
   }
 
+  const ROOT_INTERRUPTION = /(^|\n)TRUE_INTERRUPTION\s*:\s*(?:user|internal)\s*:/iu;
+
+  async function preserveActiveGoalContinuation(sessionID: string, text: string, messageID?: string): Promise<string> {
+    if (!isCoordinatorSession(sessionID) || terminalRunOutcome(text) !== "INTERRUPTED" ||
+      ROOT_INTERRUPTION.test(text) || hasCoordinatorInterruption(sessionID, messageID)) {
+      return text;
+    }
+    const goal = await currentGoal(sessionID).catch(() => undefined);
+    if (goal === undefined || goal.goal_id === null || goal.receipt !== null) return text;
+    return replaceTerminalStatus(text,
+      "status: IN_PROGRESS — local/process/step continuation remains active in the same session");
+  }
+
   interface GoalDeclaration {
     readonly fingerprint: string;
     readonly delivery: GoalDeliveryMode;
@@ -2205,6 +2218,22 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     return { declaration: { fingerprint, delivery, contract: contract.contract }, defects };
   }
 
+  function resolveGoalDeclaration(state: GoalFlightState, prompt: string): {
+    readonly declaration?: GoalDeclaration; readonly defects: readonly string[]; readonly inherited: boolean;
+  } {
+    const keys = [...handoffEntries(prompt).keys()].filter(key =>
+      /^(?:goal_|delivery_intent$|delivery_mode$|usable_path_established$|controlled_change$)/u.test(key));
+    const budgetOnly = keys.every(key => ["goal_budget_units", "goal_budget_time_ms", "goal_budget_cost_usd",
+      "goal_acceptance_fingerprint"].includes(key));
+    const fingerprint = handoffValue(handoffEntries(prompt), ["goal_acceptance_fingerprint"]);
+    if (budgetOnly && state.acceptance_contract !== null && state.acceptance_fingerprint !== null && state.delivery !== null &&
+      (fingerprint === undefined || fingerprint === state.acceptance_fingerprint)) {
+      return { declaration: { fingerprint: state.acceptance_fingerprint, delivery: state.delivery,
+        contract: state.acceptance_contract }, defects: [], inherited: true };
+    }
+    return { ...validateGoalDeclaration(prompt), inherited: false };
+  }
+
   async function bindGoalDeclaration(sessionID: string, prompt: string): Promise<GoalFlightState | undefined> {
     const ledger = await goalLedger(sessionID);
     let state = (await ledger.readGoal()).state;
@@ -2212,8 +2241,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const entries = handoffEntries(prompt);
     const typedDeclarationPresent = prompt.split(/\r?\n/u).some((line) =>
       /^\s*(?:goal_[a-z0-9_]+|delivery_intent|delivery_mode|usable_path_established|controlled_change)\s*:/iu.test(line));
-    // Accepted goals may retain their existing declaration on later units, but the first worker
-    // handoff and every handoff containing declaration fields must be complete.
+    // A budget-only amendment retains the accepted goal contract, just like a later unit with
+    // no declaration fields. Explicit acceptance changes still use the existing full declaration.
     if (!typedDeclarationPresent) {
       if (state.acceptance_contract === null && goalDeclarationAuthority.get(sessionID) === state.latest_user_message_id) {
         throw new HandoffDeniedError("contract-invalid", "<goal-declaration>", {
@@ -2223,7 +2252,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       if (goalDeclarationAuthority.get(sessionID) === state.latest_user_message_id) goalDeclarationAuthority.delete(sessionID);
       return state;
     }
-    const validated = validateGoalDeclaration(prompt);
+    const validated = resolveGoalDeclaration(state, prompt);
     if (validated.declaration === undefined) {
       throw new HandoffDeniedError("contract-invalid", "<goal-declaration>", { defects: validated.defects });
     }
@@ -2265,6 +2294,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
 
   async function reserveGoalDispatch(sessionID: string, callID: string, prompt: string): Promise<void> {
     if (goalReservations.has(callID)) return;
+    await recoverCompletedGoalReservations(sessionID);
     const ledger = await goalLedger(sessionID);
     let state = await bindGoalDeclaration(sessionID, prompt) ?? (await ledger.readGoal()).state;
     if (state.goal_id === null) return; // Legacy already-authorized roots may settle without inventing authority.
@@ -2453,6 +2483,26 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   );
   const completedCoordinatorMessages = new Set<string>();
   const completedCoordinatorParts = new Set<string>();
+  const interruptedCoordinatorMessages = new Map<string, Set<string>>();
+
+  function rememberCoordinatorInterruption(sessionID: string, info: Record<string, unknown>): void {
+    const error = isRecord(info.error) ? info.error : undefined;
+    if (info.role !== "assistant" || info.agent !== COORDINATOR_AGENT || typeof info.id !== "string" ||
+      error?.name !== "MessageAbortedError") return;
+    const messages = interruptedCoordinatorMessages.get(sessionID) ?? new Set<string>();
+    messages.add(info.id);
+    interruptedCoordinatorMessages.delete(sessionID);
+    interruptedCoordinatorMessages.set(sessionID, messages);
+    while (messages.size > ACTIVE_SESSION_CACHE.maximum) messages.delete(messages.values().next().value!);
+    while (interruptedCoordinatorMessages.size > ACTIVE_SESSION_CACHE.maximum) {
+      interruptedCoordinatorMessages.delete(interruptedCoordinatorMessages.keys().next().value!);
+    }
+  }
+
+  function hasCoordinatorInterruption(sessionID: string, messageID?: string): boolean {
+    const messages = interruptedCoordinatorMessages.get(sessionID);
+    return messages !== undefined && (messageID === undefined || messages.has(messageID));
+  }
 
   function freshSessionFallback(
     reason: FreshSessionReason,
@@ -5185,6 +5235,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     assetVersionPins.delete(sessionID);
     coordinatorPrompts.delete(sessionID);
     explicitCoordinatorModels.delete(sessionID);
+    interruptedCoordinatorMessages.delete(sessionID);
     bindingDenials.delete(sessionID);
     sessionTaskIDs.delete(sessionID);
     recoverableWorkerChildren.delete(sessionID);
@@ -5620,10 +5671,32 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           "Report handoff and operation manifest contract defects before dispatch. Read-only: it never inspects, binds, or authorizes.",
         args: {
           handoff_path: defineTool.schema.string(),
+          task_prompt: optionalString(),
         },
-        async execute(args): Promise<string> {
+        async execute(args, context): Promise<string> {
           try {
             await inspect(args.handoff_path, undefined, { report: true });
+            if (typeof args.task_prompt === "string") {
+              const state = await currentGoal(context.sessionID);
+              const resolved = resolveGoalDeclaration(state, args.task_prompt);
+              if (resolved.defects.length > 0) return JSON.stringify({ status: "defective",
+                defects: resolved.defects.slice(0, CONTRACT_DEFECTS.limit),
+                remedy: "Correct the Task declaration before dispatch. Budget-only changes may omit the already accepted goal fields." });
+              const units = Number(handoffValue(handoffEntries(args.task_prompt), ["goal_budget_units"]));
+              const proposed = Number.isSafeInteger(units) && units > 0 && units >= state.consumed_units
+                ? units : state.budget?.max_units ?? null;
+              const approvalAvailable = goalDeclarationAuthority.get(context.sessionID) === state.latest_user_message_id &&
+                state.latest_user_message_id !== null;
+              return JSON.stringify({ status: "ok", defects: [], goal: {
+                goal_id: state.goal_id, revision: state.revision, inherited: resolved.inherited,
+                max_units: state.budget?.max_units ?? null, proposed_max_units: proposed,
+                consumed_units: state.consumed_units, reserved_units: state.outstanding_reservations.length,
+                remaining_units: state.budget === null ? null : Math.max(0,
+                  state.budget.max_units - state.consumed_units - state.outstanding_reservations.length),
+                proposed_remaining_units: proposed === null ? null : Math.max(0, proposed - state.consumed_units - state.outstanding_reservations.length),
+                budget_revision_requires_approval: proposed !== state.budget?.max_units && !approvalAvailable,
+              } });
+            }
             return JSON.stringify({ status: "ok", defects: [] });
           } catch (error) {
             if (!(error instanceof HandoffDeniedError)) throw error;
@@ -5812,12 +5885,14 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     },
     "experimental.text.complete": async (textInput, textOutput): Promise<void> => {
       if (pendingRealGoalTurns.has(textInput.sessionID)) await recoverPendingRealGoalTurn(textInput.sessionID);
+      const coordinatorReport = isCoordinatorSession(textInput.sessionID) || await recoverCoordinatorRoot(textInput.sessionID);
       if (fastLane.manualCompactionForbidden(textInput.sessionID)) {
         textOutput.text = textOutput.text
           .replaceAll(ROLLOVER_MARKER, "")
           .replaceAll(CONTINUATION_MARKER, "")
           .trimEnd();
       }
+      textOutput.text = await preserveActiveGoalContinuation(textInput.sessionID, textOutput.text, textInput.messageID);
       const runOutcome = terminalRunOutcome(textOutput.text);
       const terminal = runOutcome === undefined || !isCoordinatorSession(textInput.sessionID)
         ? undefined
@@ -5834,7 +5909,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       if (runOutcome === "DONE" && terminal?.delivery === "failed") {
         textOutput.text = replaceTerminalStatus(textOutput.text, "status: INTERRUPTED — durable delivery failed");
       }
-      if (runOutcome !== undefined && isCoordinatorSession(textInput.sessionID)) {
+      if (coordinatorReport && (runOutcome !== undefined || /<summary\b[^>]*>\s*Evidence\b/iu.test(textOutput.text))) {
         textOutput.text = sanitizeTerminalReport(textOutput.text);
       }
       if ((isCoordinatorSession(textInput.sessionID) || await recoverCoordinatorRoot(textInput.sessionID)) &&
@@ -5958,6 +6033,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       }
       const coordinatorOrigin = parentID === undefined && requestedCoordinator;
       if (coordinatorOrigin) {
+        if (!synthetic) interruptedCoordinatorMessages.delete(chatInput.sessionID);
         if (synthetic) {
           if (messageID === undefined) throw new Error("SORTIE_GOAL_CONTROL_DENIED: receiving-message-id-required");
           await consumeGoalTicket(chatInput.sessionID, messageID, output.parts);
@@ -6879,6 +6955,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       }
       if (eventSessionID === undefined) return;
       if (event.type === "message.updated" && info !== undefined) {
+        rememberCoordinatorInterruption(eventSessionID, info);
         await acceptPersistedRealGoalEvent(eventSessionID, info);
       }
       if (pendingRealGoalTurns.has(eventSessionID) &&
@@ -6920,8 +6997,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           while (completedCoordinatorMessages.size > ACTIVE_SESSION_CACHE.maximum) {
             completedCoordinatorMessages.delete(completedCoordinatorMessages.values().next().value!);
           }
-          await terminalGoalFromHostText(eventSessionID, text);
-          await completeContinuationText(eventSessionID, text, false);
+          const effectiveText = await preserveActiveGoalContinuation(eventSessionID, text, eventPart.messageID);
+          await terminalGoalFromHostText(eventSessionID, effectiveText);
+          await completeContinuationText(eventSessionID, effectiveText, false);
           return;
         }
         completedCoordinatorParts.delete(eventPart.id);
@@ -6957,8 +7035,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           const text = await eventAssistantMessageText(eventSessionID, info.id, COORDINATOR_AGENT);
           if (text === undefined) completedCoordinatorMessages.delete(info.id);
           else {
-            await terminalGoalFromHostText(eventSessionID, text);
-            await completeContinuationText(eventSessionID, text);
+            const effectiveText = await preserveActiveGoalContinuation(eventSessionID, text, info.id);
+            await terminalGoalFromHostText(eventSessionID, effectiveText);
+            await completeContinuationText(eventSessionID, effectiveText);
           }
         } catch {
           completedCoordinatorMessages.delete(info.id);
