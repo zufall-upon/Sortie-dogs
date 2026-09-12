@@ -6,7 +6,7 @@ const projectRoot = resolve(import.meta.dirname, "../..");
 const testRoot = resolve(projectRoot, "test");
 const suiteDeadlineMs = 1_790_000;
 const startMarker = "SORTIE_FULL_TEST_RUNNER_STARTED";
-const phase2Concurrency = 1;
+const phase2Concurrency = 2;
 const s01Paths = new Set([
   "test/integration/worktree-parallel-dispatch.test.ts",
 ]);
@@ -226,6 +226,38 @@ async function runBatch(
   return { exit: 0, stopped: true };
 }
 
+async function runConcurrentBatch(
+  paths: readonly string[],
+  laneConcurrency: number,
+  testConcurrency: number,
+  batch: string,
+  remaining: () => number,
+  record: ExecutionRecord,
+  startedAt: number,
+  controller: AbortController,
+): Promise<ChildResult> {
+  if (paths.length === 0) return { exit: 0, stopped: true };
+  let nextIndex = 0;
+  let firstFailure: ChildResult | undefined;
+  const workers = Array.from({ length: Math.min(laneConcurrency, paths.length) }, async () => {
+    while (!controller.signal.aborted) {
+      const index = nextIndex++;
+      if (index >= paths.length) return;
+      const path = paths[index];
+      recordExecution(record, "started", [path], startedAt, batch);
+      const result = await runPhase(path, testConcurrency, remaining(), batch, controller.signal);
+      if (result.exit === 0 && result.stopped) {
+        recordExecution(record, "completed", [path], startedAt, batch);
+        continue;
+      }
+      firstFailure ??= result;
+      controller.abort();
+    }
+  });
+  await Promise.all(workers);
+  return firstFailure ?? { exit: 0, stopped: true };
+}
+
 async function runScheduledTests(partition: Partition, remaining: () => number, record: ExecutionRecord, startedAt: number): Promise<ChildResult> {
   const controller = new AbortController();
   const distMutating = await runBatch(partition.distMutating, 1, "dist-mutating", remaining, record, startedAt, controller);
@@ -234,7 +266,14 @@ async function runScheduledTests(partition: Partition, remaining: () => number, 
   const nonintegration = [...partition.heavy, ...partition.light];
   const integrationResult = await runBatch(integration, 1, "integration", remaining, record, startedAt, controller);
   if (integrationResult.exit !== 0 || !integrationResult.stopped) return integrationResult;
-  return await runBatch(nonintegration, 1, "nonintegration", remaining, record, startedAt, controller);
+  return await runConcurrentBatch(nonintegration, phase2Concurrency, 1, "nonintegration", remaining, record, startedAt, controller);
+}
+
+async function runAllTests(partition: Partition, remaining: () => number, record: ExecutionRecord, startedAt: number): Promise<ChildResult> {
+  const processController = new AbortController();
+  const processExclusive = await runBatch(partition.processExclusive, 1, "process-exclusive", remaining, record, startedAt, processController);
+  if (processExclusive.exit !== 0 || !processExclusive.stopped) return processExclusive;
+  return await runScheduledTests(partition, remaining, record, startedAt);
 }
 
 async function selfTest(): Promise<number> {
@@ -243,9 +282,11 @@ async function selfTest(): Promise<number> {
   const integrationPhaseValid = partition.s01.every((path) => !partition.integrationRemaining.includes(path))
     && partition.integrationRemaining.every((path) => partition.integration.includes(path));
   const disjoint = partition.heavy.every((path) => !partition.light.includes(path));
-  const concurrencyValid = phase2Concurrency === 1;
+  const concurrencyValid = Number.isInteger(phase2Concurrency) && phase2Concurrency > 1;
   const nonintegration = [...partition.heavy, ...partition.light];
   const schedulerPartitionValid = exactExecutionSet(partition.all, [...partition.distMutating, ...partition.processExclusive, ...partition.integration, ...nonintegration]);
+  const distMutatingDisjoint = partition.distMutating.every((path) => !partition.processExclusive.includes(path) && !partition.integration.includes(path) && !partition.heavy.includes(path) && !partition.light.includes(path));
+  const processExclusiveDisjoint = partition.processExclusive.every((path) => !partition.distMutating.includes(path) && !partition.integration.includes(path) && !partition.heavy.includes(path) && !partition.light.includes(path));
   const batchLanesValid = partition.processExclusive.every((path) => !partition.integration.includes(path) && !nonintegration.includes(path))
     && partition.integration.every((path) => !nonintegration.includes(path));
   const root = await mkdtemp(join(projectRoot, "_testenv", "full-test-runner-self-test-"));
@@ -260,11 +301,49 @@ async function selfTest(): Promise<number> {
   await writeFile(unstartedFixture, "import { test } from 'node:test';\ntest('must remain unstarted', () => {});\n");
   const fixtureRecord: ExecutionRecord = { enqueued: [successFixture, failureFixture, unstartedFixture], started: [], completed: [], transitions: [] };
   const fixtureResult = await runBatch([successFixture, failureFixture, unstartedFixture], 1, "self-test-files", () => 10_000, fixtureRecord, performance.now(), new AbortController());
+  const parallelFixtures = [join(root, "parallel-a.test.ts"), join(root, "parallel-b.test.ts")];
+  await Promise.all(parallelFixtures.map(async (path) => await writeFile(path, "import { test } from 'node:test';\ntest('parallel fixture', async () => await new Promise((resolve) => setTimeout(resolve, 100)));\n")));
+  const parallelRecord: ExecutionRecord = { enqueued: [...parallelFixtures], started: [], completed: [], transitions: [] };
+  const parallelResult = await runConcurrentBatch(parallelFixtures, phase2Concurrency, 1, "self-test-parallel", () => 10_000, parallelRecord, performance.now(), new AbortController());
+  const laneFixtures = {
+    processExclusive: join(root, "lane-process-exclusive.test.ts"),
+    distMutating: join(root, "lane-dist-mutating.test.ts"),
+    integration: join(root, "lane-integration.test.ts"),
+    nonintegrationA: join(root, "lane-nonintegration-a.test.ts"),
+    nonintegrationB: join(root, "lane-nonintegration-b.test.ts"),
+  };
+  await Promise.all(Object.values(laneFixtures).map(async (path) => await writeFile(path, "import { test } from 'node:test';\ntest('lane fixture', async () => await new Promise((resolve) => setTimeout(resolve, 100)));\n")));
+  const lanePartition: Partition = {
+    all: Object.values(laneFixtures),
+    processExclusive: [laneFixtures.processExclusive],
+    distMutating: [laneFixtures.distMutating],
+    integration: [laneFixtures.integration],
+    s01: [laneFixtures.integration],
+    integrationRemaining: [],
+    heavy: [laneFixtures.nonintegrationA],
+    light: [laneFixtures.nonintegrationB],
+    remainingAll: [laneFixtures.nonintegrationB, laneFixtures.nonintegrationA],
+  };
+  const laneRecord: ExecutionRecord = { enqueued: [...lanePartition.all], started: [], completed: [], transitions: [] };
+  const laneResult = await runAllTests(lanePartition, () => 10_000, laneRecord, performance.now());
   await rm(root, { recursive: true, force: true });
   const cleanup = timeout.exit === 124 && timeout.stopped;
   const failedPathValid = fixtureResult.exit !== 0 && fixtureRecord.started.length === 2 && fixtureRecord.completed.length === 1 && fixtureRecord.completed[0] === successFixture && fixtureRecord.started[1] === failureFixture && !fixtureRecord.started.includes(unstartedFixture);
-  const passed = partitionValid && integrationPhaseValid && disjoint && concurrencyValid && schedulerPartitionValid && batchLanesValid && cleanup && failedPathValid;
-  console.log(JSON.stringify({ self_test: passed, files: partition.all.length, dist_mutating: partition.distMutating.length, process_exclusive: partition.processExclusive.length, integration: partition.integration.length, s01: partition.s01.length, integration_remaining: partition.integrationRemaining.length, heavy: partition.heavy.length, light: partition.light.length, remaining_all: partition.remainingAll.length, partition: partitionValid, duplicate_files: partition.all.length - new Set([...partition.distMutating, ...partition.processExclusive, ...partition.integration, ...partition.heavy, ...partition.light]).size, dist_mutating_disjoint: partition.distMutating.every((path) => !partition.processExclusive.includes(path) && !partition.integration.includes(path) && !partition.heavy.includes(path) && !partition.light.includes(path)), process_exclusive_disjoint: partition.processExclusive.every((path) => !partition.distMutating.includes(path) && !partition.integration.includes(path) && !partition.heavy.includes(path) && !partition.light.includes(path)), integration_phase: integrationPhaseValid, integration_remaining_first: partition.integrationRemaining.every((path, index) => partition.remainingAll[index] === path), heavy_light_disjoint: disjoint, scheduler_partition: schedulerPartitionValid, scheduler_batch_lanes: batchLanesValid, scheduler_max_lanes: phase2Concurrency, scheduler_nonintegration_concurrency: 1, total_deadline_ms: suiteDeadlineMs, phase_deadlines: "absolute-remaining", remaining_concurrency: phase2Concurrency, concurrency: concurrencyValid, timeout_exit: timeout.exit, stopped: timeout.stopped, cleanup, failed_path: failureFixture, failed_path_identified: failedPathValid, unstarted_path: unstartedFixture, unstarted_preserved: !fixtureRecord.started.includes(unstartedFixture), raw_log_saved: false }));
+  const firstParallelCompletion = parallelRecord.transitions.findIndex(({ status }) => status === "completed");
+  const parallelOverlap = parallelResult.exit === 0 && parallelResult.stopped
+    && firstParallelCompletion >= phase2Concurrency
+    && parallelRecord.transitions.slice(0, phase2Concurrency).every(({ status }) => status === "started");
+  const transitionIndex = (status: ExecutionStatus, phase: string) => laneRecord.transitions.findIndex((transition) => transition.status === status && transition.phase === phase);
+  const exclusiveLaneOrder = laneResult.exit === 0 && laneResult.stopped
+    && transitionIndex("completed", "process-exclusive") < transitionIndex("started", "dist-mutating")
+    && transitionIndex("completed", "dist-mutating") < transitionIndex("started", "integration")
+    && transitionIndex("completed", "integration") < transitionIndex("started", "nonintegration")
+    && laneRecord.transitions.filter(({ status, phase }) => status === "started" && phase === "nonintegration").length === 2
+    && laneRecord.transitions.findIndex(({ status, phase }) => status === "completed" && phase === "nonintegration")
+      > laneRecord.transitions.findLastIndex(({ status, phase }) => status === "started" && phase === "nonintegration");
+  const passed = partitionValid && integrationPhaseValid && disjoint && concurrencyValid && schedulerPartitionValid && batchLanesValid && cleanup && failedPathValid && parallelOverlap && exclusiveLaneOrder;
+  console.log(JSON.stringify({ self_test: passed, files: partition.all.length, dist_mutating: partition.distMutating.length, dist_mutating_paths: partition.distMutating, process_exclusive: partition.processExclusive.length, process_exclusive_paths: partition.processExclusive, integration: partition.integration.length, s01: partition.s01.length, integration_remaining: partition.integrationRemaining.length, heavy: partition.heavy.length, light: partition.light.length, remaining_all: partition.remainingAll.length, partition: partitionValid, duplicate_files: partition.all.length - new Set([...partition.distMutating, ...partition.processExclusive, ...partition.integration, ...partition.heavy, ...partition.light]).size, dist_mutating_disjoint: partition.distMutating.every((path) => !partition.processExclusive.includes(path) && !partition.integration.includes(path) && !partition.heavy.includes(path) && !partition.light.includes(path)), process_exclusive_disjoint: partition.processExclusive.every((path) => !partition.distMutating.includes(path) && !partition.integration.includes(path) && !partition.heavy.includes(path) && !partition.light.includes(path)), integration_phase: integrationPhaseValid, integration_remaining_first: partition.integrationRemaining.every((path, index) => partition.remainingAll[index] === path), heavy_light_disjoint: disjoint, scheduler_partition: schedulerPartitionValid, scheduler_batch_lanes: batchLanesValid, scheduler_max_lanes: phase2Concurrency, scheduler_nonintegration_concurrency: phase2Concurrency, scheduler_serial_lanes: ["process-exclusive", "dist-mutating", "integration"], scheduler_parallel_lanes: ["nonintegration"], parallel_overlap: parallelOverlap, total_deadline_ms: suiteDeadlineMs, phase_deadlines: "absolute-remaining", remaining_concurrency: phase2Concurrency, concurrency: concurrencyValid, timeout_exit: timeout.exit, stopped: timeout.stopped, cleanup, failed_path: failureFixture, failed_path_identified: failedPathValid, unstarted_path: unstartedFixture, unstarted_preserved: !fixtureRecord.started.includes(unstartedFixture), raw_log_saved: false }));
+  console.log(JSON.stringify({ self_test: passed, dist_mutating_paths: partition.distMutating, process_exclusive_paths: partition.processExclusive, dist_mutating_disjoint: distMutatingDisjoint, process_exclusive_disjoint: processExclusiveDisjoint, integration_phase: integrationPhaseValid, scheduler_batch_lanes: batchLanesValid, scheduler_serial_lanes: ["process-exclusive", "dist-mutating", "integration"], scheduler_parallel_lanes: ["nonintegration"], scheduler_nonintegration_concurrency: phase2Concurrency, scheduler_max_lanes: phase2Concurrency, parallel_overlap: parallelOverlap, exclusive_lane_order: exclusiveLaneOrder }));
   return passed ? 0 : 1;
 }
 
@@ -277,13 +356,7 @@ async function execute(): Promise<number> {
   if (!validPartition(partition)) return 2;
   const record: ExecutionRecord = { enqueued: [], started: [], completed: [], transitions: [] };
   recordExecution(record, "enqueued", partition.all, startedAt);
-  const processController = new AbortController();
-  const processExclusive = await runBatch(partition.processExclusive, 1, "process-exclusive", remaining, record, startedAt, processController);
-  if (processExclusive.exit !== 0 || !processExclusive.stopped) {
-    reportExecution(partition, record);
-    return processExclusive.exit || 1;
-  }
-  const scheduled = await runScheduledTests(partition, remaining, record, startedAt);
+  const scheduled = await runAllTests(partition, remaining, record, startedAt);
   const exact = reportExecution(partition, record);
   return scheduled.exit === 0 && scheduled.stopped && exact ? 0 : scheduled.exit || 1;
 }
