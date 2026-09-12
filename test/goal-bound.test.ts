@@ -77,6 +77,30 @@ test("terminal report snapshots are idempotent, receipt-bound, and cannot alter 
   assert.deepEqual((await ledger.readGoal()).state, snapshot.state, "future presentation metadata must not block execution replay");
 });
 
+test("a stopped goal may be followed by a distinct accepted goal on the same root", async () => {
+  const { ledger } = await accepted("fresh-after-stop");
+  const receipt = { goal_id: "goal-fresh-after-stop", terminal_revision: 1, acceptance_fingerprint: acceptance,
+    started_at: at, ended_at: "2026-09-08T00:00:01.000Z", status: "stopped" as const,
+    stop_reason: "stop_budget" as const, unit_ids: [], session_ids: ["root-session"], evidence_refs: [], milestone_at: null };
+  await ledger.appendGoal({ kind: "goal.terminal", at: receipt.ended_at, goal_id: receipt.goal_id, receipt });
+  const nextFingerprint = goalFingerprint(["new user order"]);
+  const nextEvent = { kind: "goal.accepted" as const, at: "2026-09-08T00:00:02.000Z",
+    goal_id: "goal-next", revision: 1, scope_epoch: 1, acceptance_fingerprint: nextFingerprint,
+    origin_user_message_id: "user-2", origin_session_id: "root-session", selected_agent: "dog-coordinator",
+    delivery: "mvp-first", budget: { max_units: 32, time_ms: null, cost_usd: null, source: "policy-default" },
+    acceptance_contract: null } as const;
+  const next = await ledger.appendGoal(nextEvent);
+  assert.equal(next.goal_id, "goal-next");
+  assert.equal(next.origin_user_message_id, "user-2");
+  assert.equal(next.consumed_units, 0);
+  assert.equal(next.receipt, null);
+  assert.equal((await ledger.appendGoal(nextEvent)).goal_id, "goal-next");
+  assert.equal((await ledger.readGoal()).records.filter(({ event }) => event.kind === "goal.accepted" &&
+    event.origin_user_message_id === "user-2").length, 1);
+  await assert.rejects(ledger.appendGoal({ ...nextEvent,
+    budget: { ...nextEvent.budget, max_units: 31 } }), RunFlightLedgerError);
+});
+
 test("issued ticket is one-use and bound to goal revision, sequence, session, and origin user", async () => {
   const { ledger } = await accepted("ticket");
   await ledger.appendGoal({ kind: "ticket.issued", at, ticket_id: "ticket-1", goal_id: "goal-ticket",

@@ -1893,7 +1893,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const state = (await ledger.readGoal()).state;
     if (state.latest_user_message_id === messageID) return;
     const at = new Date().toISOString();
-    if (state.goal_id === null || state.phase === "terminal") {
+    const explicitContinuation = parts.map(textPart).filter((value) => value !== undefined).join("\n")
+      .split(/\r?\n/u).some((line) =>
+        /^\s*(?:goal_acceptance_fingerprint|goal_budget_(?:units|time_ms|cost_usd))\s*:/iu.test(line));
+    if (state.goal_id === null || state.phase === "terminal" || (state.phase === "stopped" && !explicitContinuation)) {
       const acceptance = goalFingerprint({ message_id: messageID, parts: parts.map(textPart).filter((value) => value !== undefined) });
       await ledger.appendGoal({ kind: "goal.accepted", at,
         goal_id: goalFingerprint({ root: goalRoot(sessionID), origin_user_message_id: messageID }),
@@ -1901,6 +1904,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
          origin_user_message_id: messageID, origin_session_id: sessionID, selected_agent: selectedAgent,
          delivery: "mvp-first", budget: { max_units: 32, time_ms: null, cost_usd: null, source: "policy-default" },
          acceptance_contract: null });
+      rootAcceptanceContinuity.delete(sessionID);
       return;
     }
     await ledger.appendGoal({ kind: "goal.user-continued", at, goal_id: state.goal_id,
@@ -5963,7 +5967,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       if (runOutcome === "DONE" && terminal?.delivery === "failed") {
         textOutput.text = replaceTerminalStatus(textOutput.text, "status: INTERRUPTED — durable delivery failed");
       }
-      if (coordinatorReport && (runOutcome !== undefined || /<summary\b[^>]*>\s*Evidence\b/iu.test(textOutput.text))) {
+      if (coordinatorReport && runOutcome !== undefined) {
         textOutput.text = sanitizeTerminalReport(textOutput.text);
       }
       if ((isCoordinatorSession(textInput.sessionID) || await recoverCoordinatorRoot(textInput.sessionID)) &&

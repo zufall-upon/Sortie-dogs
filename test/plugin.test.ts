@@ -1212,7 +1212,7 @@ test("generated coordinator keeps proof internal and renders concise Japanese te
   assert.match(semantics[1], /process_defect: gate \| routing \| handoff \| local tool defect -> autonomous repair; never terminal BLOCKED/);
   assert.match(semantics[1], /interruption_marker: TRUE_INTERRUPTION: user: <condition> \| TRUE_INTERRUPTION: internal: <condition>/);
   assert.match(semantics[1], /continuation_not_interruption: local process defect \| step boundary \| continuation request \| recoverable limit/);
-  assert.match(coordinator.content, /plugin injects measured Speed, Cost, and 達成 paragraphs/i);
+  assert.match(coordinator.content, /plugin replaces that exact persisted card in place with measured Speed, Cost, and 達成 paragraphs/i);
   assert.match(coordinator.content, /Do not estimate or fabricate them/i);
   assert.match(coordinator.content, /LUNA_FABRIC_CONTRACT_SHAPE_FIXTURE/);
   assert.match(coordinator.content, /"version": "0\.8\.0"/);
@@ -4136,6 +4136,60 @@ test("a user-held INTERRUPTED report renders the debrief regardless of icon and 
     assert.match(report.text, /INTERRUPTED/u);
     assert.match(report.text, /<details>\n<summary><strong>🐾 SORTIE DOGS — 帰還報告/u);
     assert.doesNotMatch(report.text, /Evidence|raw_status|manifest:/u);
+  });
+});
+
+test("a stopped goal renders legacy Evidence as a return report and a new root order receives a fresh goal", async () => {
+  await withProject("stopped-goal-new-order", async (directory) => {
+    const { RunFlightLedger } = await import("../dist/core/run-flight-ledger.js");
+    const root = "stopped-root";
+    const path = join(directory, ".git", "sortie-dogs", "run-flight",
+      `${createHash("sha256").update(root).digest("hex")}.json`);
+    const ledger = await RunFlightLedger.openGoal(path);
+    const acceptance = goalFingerprint(["old order"]);
+    await ledger.appendGoal({ kind: "goal.accepted", at: "2026-09-11T00:00:00.000Z", goal_id: "old-goal",
+      revision: 1, scope_epoch: 1, acceptance_fingerprint: acceptance, origin_user_message_id: "old-user",
+      origin_session_id: root, selected_agent: "dog-coordinator", delivery: "mvp-first",
+      budget: { max_units: 1, time_ms: null, cost_usd: null, source: "policy-default" }, acceptance_contract: null });
+    const receipt = { goal_id: "old-goal", terminal_revision: 1, acceptance_fingerprint: acceptance,
+      started_at: "2026-09-11T00:00:00.000Z", ended_at: "2026-09-11T00:00:01.000Z", status: "stopped" as const,
+      stop_reason: "stop_budget" as const, unit_ids: [], session_ids: [root], evidence_refs: [], milestone_at: null };
+    await ledger.appendGoal({ kind: "goal.terminal", at: receipt.ended_at, goal_id: receipt.goal_id, receipt });
+    const hooks = await SortieDogsPlugin({ directory, client: { session: {
+      get: async () => ({ data: { agent: "dog-coordinator" } }),
+      messages: async () => ({ data: [] }),
+    } } } as never);
+    const report = { text: "⚠️ **INTERRUPTED** `full-test-timeout-r1` — stop budget\n\n" +
+      "<details><summary>Evidence: contract 1、dispatch deny 1</summary>\n```yaml\nmanifest: hidden\nraw_status: stop_budget\n```\n</details>" };
+    await hooks["experimental.text.complete"]!({ sessionID: root, messageID: "old-report" }, report);
+    assert.match(report.text, /🐾 SORTIE DOGS — 帰還報告｜🟡 中断（未完了）/u);
+    assert.doesNotMatch(report.text, /Evidence|manifest:|raw_status/u);
+
+    const resumeOutput = {
+      message: { id: "resume-user", agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-sol" } },
+      parts: [{ type: "text", text: "同じgoalを追加budgetで続行\ngoal_budget_units: 3" }],
+    };
+    await hooks["chat.message"]!({ sessionID: root, messageID: "resume-user", agent: "dog-coordinator" }, resumeOutput);
+    const resumed = (await ledger.readGoal()).state;
+    assert.equal(resumed.goal_id, "old-goal");
+    assert.equal(resumed.phase, "active");
+    assert.equal(resumed.receipt, null);
+    const resumedReceipt = { ...receipt, ended_at: "2026-09-11T00:00:02.000Z" };
+    await ledger.appendGoal({ kind: "goal.terminal", at: resumedReceipt.ended_at,
+      goal_id: resumedReceipt.goal_id, receipt: resumedReceipt });
+
+    const nextOutput = {
+      message: { id: "new-user", agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-sol" } },
+      parts: [{ type: "text", text: "full test timeoutを修正して" }],
+    };
+    await hooks["chat.message"]!({ sessionID: root, messageID: "new-user", agent: "dog-coordinator" }, nextOutput);
+    const snapshot = await ledger.readGoal();
+    const next = snapshot.state;
+    assert.notEqual(next.goal_id, "old-goal");
+    assert.equal(next.origin_user_message_id, "new-user");
+    assert.equal(next.consumed_units, 0);
+    assert.equal(next.budget?.max_units, 32);
+    assert.equal(next.receipt, null);
   });
 });
 

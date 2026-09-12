@@ -993,6 +993,16 @@ export class RunFlightLedger {
     if (!handle) throw new RunFlightLedgerError("conflict", "Ledger lock remained busy.");
     try {
       const records = await this.#readGoalRecords();
+      if (event.kind === "goal.accepted") {
+        const prior = records.find(({ event: stored }) => stored.kind === "goal.accepted" &&
+          stored.origin_user_message_id === event.origin_user_message_id);
+        if (prior !== undefined) {
+          if (recordHash(1, null, { ...event, at: prior.event.at }) !== recordHash(1, null, prior.event)) {
+            throw new RunFlightLedgerError("transition", "Accepted goal conflicts with its durable user message identity.");
+          }
+          return reduceGoalFlight(records);
+        }
+      }
       if (event.kind === "goal.reported" && records.some(({ event: stored }) => stored.kind === "goal.reported" &&
         stored.goal_id === event.goal_id && stored.report?.terminal_key === event.report.terminal_key)) {
         return reduceGoalFlight(records);

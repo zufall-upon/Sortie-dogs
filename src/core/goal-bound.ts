@@ -294,7 +294,8 @@ export function reduceGoalFlight(records: readonly GoalFlightEventRecord[]): Goa
     if (event.kind === "goal.reported") continue;
     requireState(instant(event.at), "invalid", "Goal event timestamp is invalid.");
     if (event.kind === "goal.accepted") {
-      requireState(state.goal_id === null || state.phase === "terminal", "transition", "An active goal already owns this root.");
+      requireState(state.goal_id === null || state.phase === "terminal" || state.phase === "stopped",
+        "transition", "An active goal already owns this root.");
       requireState(text(event.goal_id) && HASH.test(event.acceptance_fingerprint) && text(event.origin_user_message_id) &&
         text(event.origin_session_id) && text(event.selected_agent) && event.budget.max_units > 0 &&
         validAcceptanceContract(event.acceptance_contract), "invalid", "Accepted goal identity is incomplete.");
