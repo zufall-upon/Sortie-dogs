@@ -2439,6 +2439,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const newEvidence = acceptedEvidence.filter((entry) => entry.measurement.criterion_ids.some((criterionID) =>
       !state.satisfied_criteria.includes(criterionID)));
     const progress = newEvidence.length > 0;
+    // Revalidation can succeed for an already-satisfied criterion after a candidate change.
+    // New criterion coverage controls progress accounting, not the validation disposition.
+    const validated = acceptedEvidence.length > 0;
     const metadata = isRecord(output.metadata) ? output.metadata : undefined;
     const interrupted = metadata?.status === "cancel" || metadata?.status === "cancelled" ||
       output.status === "cancel" || output.status === "cancelled";
@@ -2449,12 +2452,12 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       execution.endedAt !== undefined && Date.parse(execution.startedAt) >= reservation.started - 1000 &&
       execution.outcome === "fail");
     const processDefect = !failedAcceptanceExecution && (childSessionID === undefined || hostBindingDefect ||
-      goalValidationDefects.has(childSessionID));
-    const resultClass = progress ? "acceptance" : interrupted ? "interrupted" : processDefect ? "process-defect" : "acceptance";
+      goalValidationDefects.has(childSessionID) || !validated);
+    const resultClass = validated ? "acceptance" : interrupted ? "interrupted" : processDefect ? "process-defect" : "acceptance";
     await ledger.appendGoal({ kind: "unit.settled", at: new Date().toISOString(),
       reservation_id: reservation.reservationID, receipt_id: goalFingerprint({ call_id: callID, output: outputText.slice(0, 2048) }),
       goal_id: state.goal_id, unit_id: reservation.unitID,
-      disposition: progress ? "succeeded" : interrupted ? "cancelled" : "failed", result_class: resultClass,
+      disposition: validated ? "succeeded" : interrupted ? "cancelled" : "failed", result_class: resultClass,
       progress_fingerprint: progress ? goalFingerprint(acceptedEvidence) : null,
       evidence: acceptedEvidence, elapsed_ms: Math.max(0, Date.now() - reservation.started), cost_usd: null });
     if (childSessionID !== undefined) {

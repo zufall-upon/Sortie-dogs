@@ -1,6 +1,6 @@
 import type { RuntimeAssetVersion } from "./asset-version.js";
 import { GOAL_DECLARATION_FORMAT } from "./core/goal-declaration-format.ts";
-const ASSET_VERSION: RuntimeAssetVersion = "0.3.86-codegen-proof-v1";
+const ASSET_VERSION: RuntimeAssetVersion = "0.3.89-completion-proof-v1";
 
 // Kept local so source-mode CLI execution does not load the plugin graph.
 const BACKLOG_DRAIN_CAPABILITY = "sortie_enable_backlog_drain";
@@ -121,6 +121,8 @@ Validation budget exhaustion, host counters, local routing, and unavailable host
 defects, never TRUE_BLOCKER: external and never a reason to ask the user for an internal route. Return the
 typed defect to dog-coordinator for autonomous repair. A changed candidate may run the next declared
 validation; an unchanged duplicate remains forbidden.
+Run the exact declared canonical validation string in its own tool call. Do not prepend or append
+formatting, generation, or cleanup commands: host evidence must match the declared command boundary.
 
 Before returning canonical PASS, build a criterion-level trace for every accepted criterion. Each trace
 must name the criterion, the changed implementation path or inspected existing path, the concrete test
@@ -128,6 +130,11 @@ case/input form or static branch that exercises it, and PASS or UNPROVEN. A broa
 not prove every criterion. Split criteria that cover multiple syntax forms, value shapes, scopes, or error
 paths into representative paths. If any accepted edge remains UNPROVEN, add a manifest-authorized check or
 return the evidence gap; never report completion from aggregate validation alone.
+Derive expected behavior from the accepted contract and existing public semantics, not the candidate.
+Only when an accepted criterion covers failure behavior, check the public return/result, error, and
+observable state together, paired with a valid case. For an accepted composite or wrapped-value feature,
+exercise its public entry point as well as its helper. Mark inapplicable dimensions N/A with a short reason;
+do not invent failure behavior, widen acceptance, or repeat a proved check to satisfy this guidance.
 Treat generated-source boundaries as high risk. If a manifest changes a generator input, grammar, schema,
 template, or a checked-in generated output, identify the repository's canonical generator and run it before
 the final validation. Prove the regenerated output is stable and that canonical validation ran against that
@@ -1636,6 +1643,9 @@ criterion -> changed or inspected implementation path -> concrete exercising tes
 An aggregate validation command without that mapping is insufficient. Multi-form criteria must cover their
 materially distinct syntax, value-shape, scope, and error paths; any missing path remains UNPROVEN and requires
 continued implementation or validation. Include the complete trace in every high-risk SourceReview artifact.
+For accepted failure behavior, require result/error/state evidence and a valid case; for accepted composite
+or wrapped-value behavior, require public-entry-point evidence. Accept justified N/A dimensions and existing
+sufficient evidence without extra validation or review. Do not accept expectations copied from the candidate's output.
 Any generated input/output pair in the changed manifest is high risk and requires SourceReview. DONE requires
 generator command evidence, post-generation candidate identity, generated-output stability, and canonical
 validation after generation. Reject evidence produced only before regeneration.
@@ -1844,6 +1854,9 @@ Also require each acceptance item to map to a concrete exercising test/input/bra
 suite PASS without criterion-level exercise evidence is insufficient. When one item contains materially
 different syntax forms, value shapes, scopes, or error paths, reject PASS unless representative traces cover
 each path or the artifact proves they share one implementation path.
+Check contract-derived expectations only for accepted behavior. For an applicable failure or composite-value
+criterion, error-only or helper-only assertions can leave public result/state behavior unproved. Accept justified
+N/A dimensions; do not demand new behavior, new review rounds, or redundant checks outside accepted scope.
 When changed files include generator inputs or checked-in generated outputs, require the canonical generator
 command, a stable post-generation diff, and validation executed after generation. Reject PASS if helper logic
 exists only in a generated output, regeneration removes behavior, or validation predates the generated candidate.

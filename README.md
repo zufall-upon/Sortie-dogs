@@ -22,7 +22,40 @@ Requirements: Node.js 22.6 or newer, npm, and OpenCode.
 
 Guides: [日本語](docs/guide-ja.md) · [简体中文](docs/guide-zh-CN.md) · [テスト実行](docs/testing.md) · [CLI testing](docs/cli-testing.md)
 
-Release: [v0.9.10](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.9.10)
+Release: [v0.9.11](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.9.11)
+
+## Provisional quality–cost position
+
+**Reference values, not a successful benchmark claim.** Quality and end-to-end completion
+problems remain. The latest completed qualification attempt ended at `IN_PROGRESS`, so its official
+verifier was not run. Further benchmarks are frozen while completion defects are repaired.
+
+The last complete measured **Bare OpenCode vs Sortie** pair below used one frozen task,
+`datacurve/anko-typed-variable-bindings`, on 2026-09-10. It used Sortie **v0.9.5**, not the
+current release. Both candidates failed the official verifier.
+
+| Metric · one task, one trial per arm | Bare OpenCode | Sortie v0.9.5 |
+| --- | ---: | ---: |
+| Verified PASS | 0/1 | 0/1 |
+| Task-check completion · F2P | 55.6% · 5/9 | 88.9% · 8/9 |
+| Retained checks · P2P | 94/94 | 93/94 |
+| Estimated API-equivalent total cost | $5.42 | $1.46 |
+| Median agent wall · n=1 | 28.7 min | 10.0 min |
+| Premium-model token share · Sol | 100% | 20.1% |
+
+Later Sortie-only evidence is weaker: the v0.9.9 recovery candidate passed **5/9** task
+checks with **0/1 Verified PASS**; `0.9.11-bench.2` did not reach a gradeable completion.
+Those attempts are not pooled into the historical pair above.
+
+![Historical quality–cost reference: Bare at $5.42 and 55.6% task-check completion; Sortie v0.9.5 at $1.46 and 88.9%. Neither achieved Verified PASS.](docs/assets/quality-cost-reference.svg)
+
+The goal is **higher OpenCode task success with selective use of premium models**.
+These reference observations do not yet establish that success-rate claim: Sortie missed
+one task check and regressed one retained check. Codex, Pi, and Oh My OpenCode belong to
+separate methodologies and are not assigned comparable positions on this chart.
+
+[Definitions, frozen inputs, current failure status, and limitations](docs/benchmark-reference.md)
+· [Machine-readable reference values](docs/benchmarks/provisional-reference.json)
 
 ## Why Sortie-dogs?
 

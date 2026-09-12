@@ -1294,7 +1294,7 @@ test("unproved coordinator DONE is rejected while host root and child metrics re
     assert.equal(body.extra.available, true);
     assert.equal(body.extra.outcome, "DONE");
     assert.equal(body.extra.sessionID, "root");
-    assert.equal(body.extra.runtimeAssetVersion, "0.3.86-codegen-proof-v1");
+    assert.equal(body.extra.runtimeAssetVersion, "0.3.89-completion-proof-v1");
     assert.equal(body.extra.inputTokens, 130);
     assert.equal(body.extra.outputTokens, 15);
     assert.equal(body.extra.reasoningTokens, 5);
@@ -4558,7 +4558,7 @@ test("validation admission-only failures do not consume no-progress and cannot e
       message: { id: "goal-user", agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
       parts: [{ type: "text", text: "implement the accepted task" }],
     });
-    for (let index = 0; index < 4; index++) {
+    for (let index = 0; index < 5; index++) {
       const taskID = `unit-${index}`, child = `child-${index}`, manifest = `unit-${index}.json`;
       const handoff = join(directory, `handoff.unit-${index}.json`);
       await writeFile(join(directory, manifest), JSON.stringify({ ...operationManifest(["candidate.txt"]),
@@ -4580,15 +4580,17 @@ test("validation admission-only failures do not consume no-progress and cannot e
       });
       await inspectHandoffWithRead(hooks, handoff, child);
       assert.equal((await executeBindWriteGate(hooks, directory, child, manifest)).status, "bound");
-      if (index !== 3) {
+      if (index < 3) {
         await hooks["tool.execute.before"]!({ tool: "bash", sessionID: child, callID: `first-check-${index}` }, { args: { command } });
         await hooks["tool.execute.after"]!({ tool: "bash", sessionID: child, callID: `first-check-${index}`, args: { command } },
           { output: index === 0 ? "failed" : "host execution unavailable", metadata: index === 0 ? { exit: 1 } : {} });
         await assert.rejects(hooks["tool.execute.before"]!({ tool: "bash", sessionID: child, callID: `denied-${index}` },
           { args: { command } }), /SORTIE_VALIDATION_BUDGET_DENIED/u, `unit ${index} must reject duplicate validation`);
       }
-      await assert.rejects(hooks["tool.execute.before"]!({ tool: "apply_patch", sessionID: child, callID: `write-denied-${index}` },
-        { args: { patchText: "*** Begin Patch\n*** Add File: outside.txt\n+denied\n*** End Patch" } }), /Write denied/u);
+      if (index < 4) {
+        await assert.rejects(hooks["tool.execute.before"]!({ tool: "apply_patch", sessionID: child, callID: `write-denied-${index}` },
+          { args: { patchText: "*** Begin Patch\n*** Add File: outside.txt\n+denied\n*** End Patch" } }), /Write denied/u);
+      }
       await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: taskID },
         { output: "<task_result>validation denied</task_result>", metadata: { sessionId: child } });
     }
@@ -4596,7 +4598,67 @@ test("validation admission-only failures do not consume no-progress and cannot e
     const ledger = JSON.parse(await readFile(path, "utf8"));
     const settled = ledger.goal_events.filter(({ event }: { event: { kind: string } }) => event.kind === "unit.settled");
     assert.deepEqual(settled.map(({ event }: { event: { result_class: string } }) => event.result_class),
-      ["acceptance", "process-defect", "process-defect", "process-defect"]);
+      ["acceptance", "process-defect", "process-defect", "process-defect", "process-defect"]);
+  });
+});
+
+test("successful revalidation of an existing criterion does not become a no-progress failure", async () => {
+  await withProject("goal-revalidated-criterion", async (directory) => {
+    const command = "node --test candidate.test.mjs";
+    await writeFile(join(directory, "candidate.test.mjs"), "// host validation fixture\n");
+    const hooks = await SortieDogsPlugin({ directory, client: { session: {
+      get: async ({ path }: { path: { id: string } }) => ({ data: path.id === "root"
+        ? { agent: "dog-coordinator" } : { agent: "dog-worker", parentID: "root" } }),
+      messages: async () => ({ data: [] }),
+    } } as never });
+    await hooks["chat.message"]!({ sessionID: "root", agent: "dog-coordinator", messageID: "goal-user" }, {
+      message: { id: "goal-user", agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+      parts: [{ type: "text", text: "implement and refine the accepted candidate" }],
+    });
+    for (let index = 0; index < 3; index++) {
+      const taskID = `unit-${index}`, child = `child-${index}`, manifest = `unit-${index}.json`;
+      const handoff = join(directory, `handoff.unit-${index}.json`);
+      await writeFile(join(directory, manifest), JSON.stringify({ ...operationManifest(["candidate.txt"]),
+        task_id: taskID, read: ["candidate.test.mjs"], validation: [command] }));
+      await writeFile(handoff, JSON.stringify({ ...writeGateHandoff(directory, manifest), id: taskID }));
+      const prompt = [`task_id: ${taskID}`, "role: implementation", `project_root: ${directory}`, `handoff_path: ${handoff}`,
+        "source_manifest: [candidate.txt]", `operation_manifest: ${manifest}`, "acceptance: candidate passes",
+        `validation: { level: full, command: ${command}, diagnostics: [] }`, `goal_acceptance_fingerprint: sha256:${"a".repeat(64)}`,
+        "goal_criterion_id: candidate", "goal_target: candidate", "goal_entrypoint: fixture", "goal_workload: one unit",
+        "goal_oracle_coverage:\n  - acceptance", "goal_build_boundary: not-applicable", "goal_source: current protected source",
+        "goal_candidate: current protected candidate", "goal_source_binding: current-protected", "goal_candidate_binding: current-protected",
+        "goal_fixture: fixture", "goal_proof_scope: requested-full", "goal_expected_outcome: pass", "delivery_intent: implementation",
+        "usable_path_established: false", "controlled_change: false", "goal_budget_units: 6"].join("\n");
+      await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: taskID },
+        { args: { subagent_type: "dog-worker", prompt } });
+      await hooks.event!({ event: { type: "session.created", properties: { info: { id: child, parentID: "root", directory } } } });
+      await hooks["chat.message"]!({ sessionID: child, agent: "dog-worker", parentID: "root" } as never, {
+        message: { agent: "dog-worker", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: prompt }],
+      });
+      await inspectHandoffWithRead(hooks, handoff, child);
+      assert.equal((await executeBindWriteGate(hooks, directory, child, manifest)).status, "bound");
+      await writeFile(join(directory, "candidate.txt"), `validated candidate revision ${index}\n`);
+      await hooks["tool.execute.before"]!({ tool: "bash", sessionID: child, callID: `check-${index}` }, { args: { command } });
+      await hooks["tool.execute.after"]!({ tool: "bash", sessionID: child, callID: `check-${index}`, args: { command } },
+        { output: "native host PASS", metadata: { exit: 0 } });
+      await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: taskID },
+        { output: "<task_result>validated revision</task_result>", metadata: { sessionId: child } });
+    }
+    const path = join(directory, ".git", "sortie-dogs", "run-flight", `${createHash("sha256").update("root").digest("hex")}.json`);
+    const { RunFlightLedger } = await import("../dist/core/run-flight-ledger.js");
+    const snapshot = await RunFlightLedger.readGoalFile(path);
+    const settlements = snapshot.records.map(record => record.event).filter(event => event.kind === "unit.settled");
+    assert.deepEqual(settlements.map(event => event.disposition), ["succeeded", "succeeded", "succeeded"]);
+    assert.equal(settlements[0].progress_fingerprint !== null, true);
+    assert.deepEqual(settlements.slice(1).map(event => event.progress_fingerprint), [null, null]);
+    assert.equal(snapshot.state.no_progress_results, 0);
+    assert.equal(snapshot.state.replan_required, false);
+    assert.deepEqual(snapshot.state.satisfied_criteria, ["candidate"]);
+    const final = { text: "status: DONE\n\nAll accepted revisions validated." };
+    await hooks["experimental.text.complete"]!({ sessionID: "root" }, final);
+    assert.match(final.text, /^status: DONE/u);
+    assert.match(final.text, /🐾 SORTIE DOGS — 帰還報告/u);
+    assert.equal((await RunFlightLedger.readGoalFile(path)).state.receipt?.status, "succeeded");
   });
 });
 
