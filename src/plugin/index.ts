@@ -125,6 +125,8 @@ import type { ChildTerminalEvidence, ChildTerminalObservation } from "../core/ch
 import { collectRunMetrics, createSortieResult, createGoalReport, insertRunMetrics, insertSortieResult, replaceDoneTerminalStatus,
   replaceTerminalStatus, sanitizeTerminalReport, terminalRunOutcome } from "./run-metrics.js";
 import type { RunMetricsClient } from "./run-metrics.js";
+import { STABLE_RUNTIME_PROFILE } from "../core/runtime-profile.js";
+import type { RuntimeBridge } from "./runtime-bridge.js";
 
 const INPUT_LIMITS = { config: 64 * 1024, manifest: 512 * 1024, handoff: 2 * 1024 * 1024, parallel: 512 * 1024 } as const;
 const INSPECTION_CACHE = { maximum: 256, ttlMilliseconds: 30 * 60 * 1000 } as const;
@@ -167,6 +169,8 @@ export interface OpenCodePluginInput {
   worktree?: string;
   /** Optional host-injected lifecycle observation window; production callers use the core default. */
   childLifecycleCheckWaitMs?: number;
+  /** Installed-profile adapter only; never supplied by a model or project configuration. */
+  runtimeBridge?: RuntimeBridge;
   /** The host SDK client. Absent in hosts that construct the plugin without one. */
   client?: SessionMessageReader & RunMetricsClient & ContinuationClient & OpenCodeModelAvailabilityClient & {
     app?: {
@@ -735,8 +739,8 @@ function isAbsentPathError(error: unknown): boolean {
     isRecord(error.cause) && (error.cause.code === "ENOENT" || error.cause.code === "ENOTDIR");
 }
 
-async function readOptionalProjectConfig(project: ProjectPaths): Promise<unknown> {
-  const path = project.absolute(PROJECT_CONFIG_PATH);
+async function readOptionalProjectConfig(project: ProjectPaths, configPath = PROJECT_CONFIG_PATH): Promise<unknown> {
+  const path = project.absolute(configPath);
   try {
     return await readJson(path, INPUT_LIMITS.config);
   } catch (error) {
@@ -745,9 +749,9 @@ async function readOptionalProjectConfig(project: ProjectPaths): Promise<unknown
   }
 }
 
-async function readOptionalGlobalConfig(): Promise<unknown> {
+async function readOptionalGlobalConfig(configFile = "sortie-dogs.json"): Promise<unknown> {
   try {
-    const value = await readJson(join(configRoot(), "sortie-dogs.json"), INPUT_LIMITS.config);
+    const value = await readJson(join(configRoot(), configFile), INPUT_LIMITS.config);
     if (resolvePluginConfiguration(value).kind === "invalid") {
       console.warn("[sortie-dogs] global configuration ignored: invalid or unavailable");
       return undefined;
@@ -760,8 +764,8 @@ async function readOptionalGlobalConfig(): Promise<unknown> {
   }
 }
 
-function readEnvironmentConfig(): unknown {
-  const source = process.env[ENV_CONFIG];
+function readEnvironmentConfig(environmentKey = ENV_CONFIG): unknown {
+  const source = process.env[environmentKey];
   if (source === undefined || source.length === 0) return undefined;
   try {
     return JSON.parse(source);
@@ -774,9 +778,10 @@ function loadConfigured(
   config: ConfiguredPluginSources,
   handoffBase: string,
   client?: OpenCodeModelAvailabilityClient,
+  canonicalHandoff = CANONICAL_CONTRACT_HANDOFF,
 ): LoadedConfiguration {
   const handoffPaths = config.handoffPaths.map((path) => resolve(handoffBase, path));
-  const handoffRelativePaths = [CANONICAL_CONTRACT_HANDOFF, ...config.handoffPaths].flatMap((path) => {
+  const handoffRelativePaths = [canonicalHandoff, ...config.handoffPaths].flatMap((path) => {
     try {
       return [normalizeRelativePath(path)];
     } catch {
@@ -1458,6 +1463,11 @@ function abandonDetachedLease(lease: ScopeLease | undefined): void {
 
 /** Named OpenCode plugin export. Importing the package has no side effects; invoking it installs active gates. */
 export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
+  const runtimeProfile = input.runtimeBridge?.profile ?? STABLE_RUNTIME_PROFILE;
+  const runtimeAssetVersion = input.runtimeBridge?.assetVersion ?? RUNTIME_ASSET_VERSION;
+  const stateDirectory = runtimeProfile.stateDirectory;
+  const contractDirectory = `${stateDirectory}/contracts`;
+  const projectConfigPath = `.opencode/${runtimeProfile.configFile}`;
   if (input.childLifecycleCheckWaitMs !== undefined &&
     (!Number.isSafeInteger(input.childLifecycleCheckWaitMs) || input.childLifecycleCheckWaitMs < 1)) {
     throw new Error("invalid-child-lifecycle-check-wait");
@@ -1518,7 +1528,13 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   const pendingRealGoalTurns = new Map<string, { readonly selectedAgent: string; readonly parts: readonly unknown[] }>();
   const pendingGoalRecoveries = new Map<string, Promise<boolean>>();
   const scheduledGoalRecoveries = new Map<string, Promise<void>>();
-  const globalConfig = await readOptionalGlobalConfig();
+  const declaredGlobalConfig = await readOptionalGlobalConfig(runtimeProfile.configFile);
+  const profileDefaults = input.runtimeBridge?.defaultModelRouting;
+  const globalConfig = profileDefaults === undefined ? declaredGlobalConfig : {
+    ...(isRecord(declaredGlobalConfig) ? declaredGlobalConfig : {}),
+    modelRouting: { ...profileDefaults,
+      ...(isRecord(declaredGlobalConfig) && isRecord(declaredGlobalConfig.modelRouting) ? declaredGlobalConfig.modelRouting : {}) },
+  };
   type SessionOperation = "hostSessionIdentity" | "bootstrapControlState" | "collectRunMetrics";
   interface OperationMeasurement {
     count: number;
@@ -1544,10 +1560,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     try {
       const result = log.call(app, {
         body: {
-          service: "sortie-dogs",
+          service: runtimeProfile.id === "stable" ? "sortie-dogs" : `sortie-dogs-${runtimeProfile.id}`,
           level,
           message,
-          extra: { sessionID: sessionID.slice(0, 128), ...extra },
+          extra: { sessionID: sessionID.slice(0, 128), ...(runtimeProfile.id === "stable" ? {} : { profile: runtimeProfile.id }), ...extra },
         },
         query: { directory: input.directory },
       });
@@ -1649,14 +1665,14 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const root = goalRoot(sessionID);
     const existing = goalLedgers.get(root);
     if (existing !== undefined) return existing;
-    const key = createHash("sha256").update(root).digest("hex");
+    const key = createHash("sha256").update(runtimeProfile.id === "stable" ? root : `${runtimeProfile.id}\u0000${root}`).digest("hex");
     const projectRoot = resolve(input.worktree ?? input.directory);
-    const legacyPath = join(projectRoot, ".sortie-dogs", "run-flight", `${key}.json`);
+    const legacyPath = join(projectRoot, stateDirectory, "run-flight", `${key}.json`);
     goalLedgerDirectories.add(dirname(legacyPath));
     const opened = (async () => {
       const legacyExists = await stat(legacyPath).then((value) => value.isFile()).catch(() => false);
       const leaseRoot = legacyExists ? await durableScopeRoot(projectRoot).catch(() => undefined) : await durableScopeRoot(projectRoot);
-      if (leaseRoot !== undefined) goalLedgerDirectories.add(join(dirname(leaseRoot), "run-flight"));
+      if (leaseRoot !== undefined) goalLedgerDirectories.add(join(dirname(leaseRoot), runtimeProfile.flightDirectory));
       // Existing roots remain on their original owner so an in-flight pre-upgrade goal is not forked.
       if (legacyExists) {
         goalLedgerFiles.set(root, legacyPath);
@@ -1664,7 +1680,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       }
       const filePath = leaseRoot === undefined
         ? legacyPath
-        : join(dirname(leaseRoot), "run-flight", `${key}.json`);
+        : join(dirname(leaseRoot), runtimeProfile.flightDirectory, `${key}.json`);
       goalLedgerFiles.set(root, filePath);
       goalLedgerDirectories.add(dirname(filePath));
       return await RunFlightLedger.openGoal(filePath);
@@ -2016,6 +2032,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       stop_reason: stopReason, unit_ids: state.unit_ids, session_ids: state.session_ids,
       evidence_refs: state.evidence_refs, milestone_at: milestone };
     await ledger.appendGoal({ kind: "goal.terminal", at: ended, goal_id: state.goal_id, receipt });
+    await input.runtimeBridge?.onRootTerminal?.(sessionID, receipt);
     appLogInfo("goal.terminal", sessionID, { goalID: state.goal_id, revision: state.revision, status, stopReason,
       evidenceCount: state.evidence_refs.length, unitCount: state.unit_ids.length });
     return receipt;
@@ -2457,6 +2474,12 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       disposition: progress ? "succeeded" : interrupted ? "cancelled" : "failed", result_class: resultClass,
       progress_fingerprint: progress ? goalFingerprint(acceptedEvidence) : null,
       evidence: acceptedEvidence, elapsed_ms: Math.max(0, Date.now() - reservation.started), cost_usd: null });
+    await input.runtimeBridge?.onSerialSettlement?.({
+      rootSessionID: reservation.root, callID, unitID: reservation.unitID,
+      ...(childSessionID === undefined ? {} : { childSessionID }),
+      disposition: progress ? "succeeded" : interrupted ? "cancelled" : "failed",
+      evidence: acceptedEvidence, resultClass,
+    });
     if (childSessionID !== undefined) {
       goalValidationDefects.delete(childSessionID);
       for (const [executionCallID, execution] of hostGoalExecutions) {
@@ -2471,11 +2494,11 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     project = await createProjectPaths(resolveProjectRoot(input));
     const probed = resolvePluginConfigurationSourcesWithGlobal(
       globalConfig,
-      await readOptionalProjectConfig(project),
-      readEnvironmentConfig(),
+      await readOptionalProjectConfig(project, projectConfigPath),
+      readEnvironmentConfig(runtimeProfile.configEnvironment),
       options,
     );
-    if (probed.kind === "configured" && reflectionEnabled(probed.reflection)) {
+    if (runtimeProfile.id === "stable" && probed.kind === "configured" && reflectionEnabled(probed.reflection)) {
       reflectionVersion = await nearestPackageVersion();
       reflectionConfiguration = probed.reflection;
       reflectionStore = new ReflectionStore(join(configRoot(), "sortie-dogs", "reflection"), project.root, {
@@ -2658,8 +2681,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     loading = (async () => {
       try {
         project ??= await createProjectPaths(resolveProjectRoot(input));
-        const projectConfig = await readOptionalProjectConfig(project);
-        const environmentConfig = readEnvironmentConfig();
+        const projectConfig = await readOptionalProjectConfig(project, projectConfigPath);
+        const environmentConfig = readEnvironmentConfig(runtimeProfile.configEnvironment);
         const parsed = resolvePluginConfigurationSourcesWithGlobal(
           globalConfig,
           projectConfig,
@@ -2667,7 +2690,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           options,
         );
         if (parsed.kind === "invalid") throw new WriteDeniedError("manifest-unavailable", "<unknown>");
-        loaded = loadConfigured(parsed, input.worktree ?? project.root, input.client);
+        loaded = loadConfigured(parsed, input.worktree ?? project.root, input.client, `${contractDirectory}/handoff.json`);
         const manifestPath = await project.toRelativePath(loaded.operationManifestPath);
         loaded.operationManifestAbsolutePath = project.absolute(manifestPath);
         let manifestValue: unknown;
@@ -2709,18 +2732,18 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   }
 
   async function currentAssetVersionStatus(paths: ProjectPaths): Promise<AssetVersionStatus> {
-    const local = await readAssetVersionMarker(paths.absolute(PROJECT_VERSION_MARKER));
+    const local = await readAssetVersionMarker(paths.absolute(`.opencode/${runtimeProfile.markerFile}`));
     if (local.kind === "corrupt") return "mismatch";
-    if (local.kind === "present") return local.value === RUNTIME_ASSET_VERSION ? "current" : "mismatch";
+    if (local.kind === "present") return local.value === runtimeAssetVersion ? "current" : "mismatch";
     let globalRoot: string;
     try {
       globalRoot = await resolveGlobalConfigRoot();
     } catch {
       return "mismatch";
     }
-    const global = await readAssetVersionMarker(join(globalRoot, "sortie-dogs.version"));
+    const global = await readAssetVersionMarker(join(globalRoot, runtimeProfile.markerFile));
     if (global.kind === "absent") return "unmarked";
-    return global.kind === "present" && global.value === RUNTIME_ASSET_VERSION ? "current" : "mismatch";
+    return global.kind === "present" && global.value === runtimeAssetVersion ? "current" : "mismatch";
   }
 
   async function pinAssetVersion(sessionID: string): Promise<AssetVersionStatus> {
@@ -2736,7 +2759,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     }
     if (status === "mismatch") {
       console.warn(
-        `Sortie-dogs: installed agent assets do not match ${RUNTIME_ASSET_VERSION}. ` +
+        `Sortie-dogs: installed agent assets do not match ${runtimeAssetVersion}. ` +
         "Worker dispatch will continue; run `sortie-dogs init .` to refresh project assets.",
       );
     }
@@ -2890,7 +2913,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     let handoffs = 0;
     for (const absolute of absolutes) {
       const relativePath = relative(project.root, absolute).replaceAll("\\", "/");
-      const canonical = relativePath.startsWith(`${CANONICAL_CONTRACT_DIRECTORY}/`) &&
+      const canonical = relativePath.startsWith(`${contractDirectory}/`) &&
         relativePath.split("/").length === 3;
       if (!await project.contains(absolute) || (!canonical && dirname(absolute) !== project.root)) return false;
       const name = basename(absolute);
@@ -2915,6 +2938,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   }
 
   async function getParallelCoordinator(): Promise<ParallelDispatchCoordinator> {
+    if (!runtimeProfile.parallel) throw new Error("parallel-not-enabled-for-runtime-profile");
     project ??= await createProjectPaths(resolveProjectRoot(input));
     if (parallelCoordinator === undefined) {
       const gitPath = await resolveValidationExecutable("git");
@@ -3363,8 +3387,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     readonly operation_manifest: string;
   } {
     return {
-      handoff_path: join(descriptor.managed_path, CANONICAL_CONTRACT_DIRECTORY, `handoff.${descriptor.task_id}.json`),
-      operation_manifest: join(descriptor.managed_path, CANONICAL_CONTRACT_DIRECTORY, `${descriptor.task_id}.operation-manifest.json`),
+      handoff_path: join(descriptor.managed_path, contractDirectory, `handoff.${descriptor.task_id}.json`),
+      operation_manifest: join(descriptor.managed_path, contractDirectory, `${descriptor.task_id}.operation-manifest.json`),
     };
   }
 
@@ -3397,7 +3421,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
 
   async function ensureParallelContractDirectory(canonicalRoot: string): Promise<string> {
     let parent = canonicalRoot;
-    for (const segment of [".sortie-dogs", "contracts"]) {
+    for (const segment of [stateDirectory, "contracts"]) {
       const candidate = join(parent, segment);
       let info = await lstat(candidate).catch((error: unknown) => {
         if (isRecord(error) && error.code === "ENOENT") return undefined;
@@ -3428,9 +3452,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       throw new ParallelDispatchError("lifecycle-failed", "Managed worktree identity changed before contract creation.");
     }
     const paths = parallelControlPaths(descriptor);
-    const contractDirectory = await ensureParallelContractDirectory(canonicalRoot);
-    const expectedContractDirectory = resolve(canonicalRoot, CANONICAL_CONTRACT_DIRECTORY);
-    if (!samePath(contractDirectory, expectedContractDirectory)) {
+    const createdDirectory = await ensureParallelContractDirectory(canonicalRoot);
+    const expectedContractDirectory = resolve(canonicalRoot, contractDirectory);
+    if (!samePath(createdDirectory, expectedContractDirectory)) {
       throw new ParallelDispatchError("lifecycle-failed", "Parallel contract directory escapes the managed worktree.");
     }
     const expectedAcceptance = generatedParallelAcceptance(descriptor, parentAcceptance, unitAcceptance);
@@ -4091,6 +4115,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   }
 
   async function retireParallelWorkflow(sessionID: string): Promise<void> {
+    if (!runtimeProfile.parallel) return;
     if (parallelCoordinator === undefined) {
       project ??= await createProjectPaths(resolveProjectRoot(input));
       const gitMarker = await lstat(join(project.root, ".git")).catch((error: unknown) => {
@@ -7228,6 +7253,27 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       }
     },
   };
+  input.runtimeBridge?.connected?.({
+    isRoot: async sessionID => isCoordinatorSession(sessionID) || await recoverCoordinatorRoot(sessionID),
+    enableUnits: (sessionID, maximum) => {
+      if (!isCoordinatorSession(sessionID)) throw new Error("operator-coordinator-required");
+      fastLane.grantSerialUnits(sessionID, maximum);
+    },
+    cancelChildren: async sessionID => {
+      for (const [callID, reservation] of [...goalReservations]) {
+        if (reservation.root !== sessionID) continue;
+        await settleGoalDispatch(callID, { status: "cancelled", metadata: { status: "cancelled" }, output: "Owned dispatch cancelled by its coordinator." });
+      }
+      abortCoordinatorTasks(sessionID);
+    },
+    stopAutomaticRecovery: sessionID => continuation.stopAutomaticRecovery(sessionID),
+    stopRoot: async sessionID => {
+      await continuation.stopAutomaticRecovery(sessionID);
+      abortCoordinatorTasks(sessionID);
+      await retireParallelWorkflow(sessionID);
+      evictSession(sessionID);
+    },
+  });
   return hooks;
 };
 

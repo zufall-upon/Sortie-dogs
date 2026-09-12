@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { readFile, writeFile, rename, mkdir, open, unlink, lstat } from 'node:fs/promises';
 import { resolve, relative, join, isAbsolute } from 'node:path';
+import { releaseProfile, validateReleaseProfile, compareReleaseVersions, parseReleaseVersion, githubReleaseFlags } from './release-profiles.mjs';
 
 export const digest = (data, algorithm = 'sha256') => createHash(algorithm).update(data).digest('hex');
 export const readJSON = async path => JSON.parse(await readFile(path, 'utf8'));
@@ -19,7 +20,8 @@ export function relativeFile(value) {
 }
 export function validateManifest(value) {
   ensure(value?.schema === 1 && /^[\w.-]+\/[\w.-]+$/.test(value.repository), 'Manifest schema/repository required');
-  ensure(value.branch === 'main' && value.remote === 'origin', 'Release target must be origin/main');
+  const profile = releaseProfile(value.releaseProfile);
+  ensure(value.branch === profile.branch && value.remote === 'origin', `Release target must be origin/${profile.branch}`);
   ensure(Array.isArray(value.files) && value.files.length > 0, 'Explicit intended files required');
   value.files.forEach(relativeFile);
   ensure(new Set(value.files).size === value.files.length, 'Duplicate intended files');
@@ -42,8 +44,9 @@ export function validateManifest(value) {
 
 export class Release {
   constructor({ root, version, manifest, execute, progress = () => {} }) {
-    ensure(/^\d+\.\d+\.\d+$/.test(version), 'Stable semver required');
     this.root = resolve(root); this.version = version; this.m = validateManifest(manifest);
+    this.profile = releaseProfile(this.m.releaseProfile);
+    validateReleaseProfile(this.profile, version, this.m.branch, this.root, this.m.globalRoot);
     this.execute = execute; this.progress = progress;
     this.directory = join(this.root, '_testenv', 'releases', version);
     this.statePath = join(this.directory, 'state.json');
@@ -102,9 +105,11 @@ export class Release {
       ensure(!readOnly, 'No prepared release receipt');
       ensure(await this.git('branch', '--show-current') === this.m.branch, 'Wrong branch');
       ensure(await this.git('diff', '--cached', '--name-only') === '', 'Index must start empty');
-      await this.git('fetch', this.m.remote, this.m.branch);
+      const remoteBefore = (await this.git('ls-remote', this.m.remote, `refs/heads/${this.m.branch}`)).split(/\s/)[0];
+      ensure(remoteBefore || this.profile.allowInitialBranch, 'Remote release branch is missing');
+      if (remoteBefore) await this.git('fetch', this.m.remote, this.m.branch);
       const head = await this.git('rev-parse', 'HEAD');
-      ensure(head === await this.git('rev-parse', `${this.m.remote}/${this.m.branch}`), 'Local and remote main must match before prepare');
+      ensure(!remoteBefore || head === remoteBefore, `Local and remote ${this.m.branch} must match before prepare`);
       ensure(await this.npmVersion() === null, 'npm version already exists: choose next patch');
       ensure(await this.api(`repos/${this.m.repository}/releases/tags/v${this.version}`, { optional: true }) === null, 'Release already exists: choose next patch');
       ensure(await this.git('ls-remote', this.m.remote, `refs/tags/v${this.version}`) === '', 'Remote tag exists: choose next patch');
@@ -120,10 +125,10 @@ export class Release {
         ensure(this.m.recovery, 'Continuation/goal changes require a baseline recovery driver');
       }
       const pkg = await readJSON(join(this.root, 'package.json'));
-      ensure(/^\d+\.\d+\.\d+$/.test(pkg.version), 'Current package version must be stable semver');
-      const oldParts = pkg.version.split('.').map(Number), nextParts = this.version.split('.').map(Number);
-      const changedPart = nextParts.findIndex((part, index) => part !== oldParts[index]);
-      ensure(changedPart >= 0 && nextParts[changedPart] > oldParts[changedPart], 'Target version must advance the current version');
+      const current = parseReleaseVersion(pkg.version);
+      ensure(this.profile.prerelease || current.prerelease.length === 0 || this.profile.id !== 'stable', 'Current package version must be stable semver');
+      const versionOrder = compareReleaseVersions(this.version, pkg.version);
+      ensure(versionOrder > 0 || (this.profile.allowInitialBranch && versionOrder === 0), 'Target version must advance the current version');
       this.state = { schema: 1, version: this.version, manifest: hash, base: head, oldVersion: pkg.version, steps: {}, pending: null };
       await this.save();
     }
@@ -149,6 +154,7 @@ export class Release {
         const file = join(this.root, path), data = await readJSON(file);
         ensure([this.state.oldVersion, this.version].includes(data.version), `Unexpected version: ${path}`);
         data.version = this.version;
+        if (path === 'package.json' && this.profile.id !== 'stable') data.publishConfig = { ...data.publishConfig, tag: this.profile.npmTag };
         if (path === 'package-lock.json') data.packages[''].version = this.version;
         await writeFile(file, JSON.stringify(data, null, 2) + '\n');
       }
@@ -220,7 +226,7 @@ export class Release {
     await this.phase('push', async () => {
       const remote = await this.git('ls-remote', this.m.remote, `refs/heads/${this.m.branch}`);
       const remoteHead = remote.split(/\s/)[0];
-      ensure([this.state.base, head].includes(remoteHead), 'Remote main advanced; do not overwrite');
+      ensure([this.state.base, head].includes(remoteHead) || (!remoteHead && this.profile.allowInitialBranch), 'Remote release branch advanced; do not overwrite');
       if (remoteHead !== head) await this.git('push', this.m.remote, this.m.branch);
       await this.checkRemote(head); return { head };
     }, async () => this.checkRemote(head));
@@ -238,10 +244,11 @@ export class Release {
       await writeFile(notes, `${this.state.notes}\n\nSHA-256 (${this.tgz.split(/[\\/]/).at(-1)}): \`${this.state.artifact.sha256}\`\n`);
       const existing = await this.api(`repos/${this.m.repository}/releases/tags/v${this.version}`, { optional: true });
       if (!existing) await this.command('gh', ['release', 'create', `v${this.version}`, this.tgz, '--verify-tag',
-        '--repo', this.m.repository, '--title', `v${this.version}`, '--notes-file', notes]);
+        '--repo', this.m.repository, '--title', `v${this.version}`, '--notes-file', notes, ...githubReleaseFlags(this.profile)]);
       return await this.checkRelease();
     }, async () => this.checkRelease());
-    return { version: this.version, tgz: this.tgz, ...this.state.artifact, url: this.state.steps.release.url, npmPublish: 'manual' };
+    return { version: this.version, profile: this.profile.id, npmTag: this.profile.npmTag, tgz: this.tgz,
+      ...this.state.artifact, url: this.state.steps.release.url, npmPublish: 'manual' };
   }
   checkCLI(receipt) {
     ensure(receipt?.schema === 1 && receipt.version === this.version && receipt.sha256 === this.state.artifact.sha256 &&
@@ -249,6 +256,7 @@ export class Release {
       typeof receipt.sessionID === 'string' && receipt.sessionID.startsWith('ses_') &&
       receipt.workerStarted === true && receipt.canonicalExit === 0 && receipt.terminal === 'succeeded' &&
       receipt.artifactMatch === true, 'CLI receipt does not prove the frozen candidate completed');
+    if (this.profile.runtimeProfile !== 'stable') ensure(receipt.profile === this.profile.runtimeProfile, 'CLI receipt runtime profile mismatch');
   }
   async checkCommit(head) {
     ensure(await this.git('rev-parse', `${head}^`) === this.state.base, 'Unexpected release commit ancestry');
@@ -269,6 +277,11 @@ export class Release {
     const assets = release.assets?.filter(asset => asset.name === `sortie-dogs-${this.version}.tgz`);
     ensure(release.draft === false && assets?.length === 1 && assets[0].digest === `sha256:${this.state.artifact.sha256}`,
       'Published Release artifact differs; do not recreate or replace it');
+    ensure((release.prerelease ?? false) === this.profile.prerelease, 'Release prerelease channel mismatch');
+    if (!this.profile.latest) {
+      const latest = await this.api(`repos/${this.m.repository}/releases/latest`, { optional: true });
+      ensure(latest?.tag_name !== `v${this.version}`, 'Independent/preview release must not replace Latest');
+    }
     return { url: release.html_url, digest: assets[0].digest };
   }
   async verifyPublish() {
@@ -281,8 +294,12 @@ export class Release {
     await this.checkTag(this.state.steps.commit.head);
     const release = await this.checkRelease();
     const latest = JSON.parse(await this.npm('view', 'sortie-dogs', 'version', '--json', '--registry=https://registry.npmjs.org/'));
+    const channelVersion = this.profile.npmTag === 'latest' ? latest
+      : JSON.parse(await this.npm('view', `sortie-dogs@${this.profile.npmTag}`, 'version', '--json', '--registry=https://registry.npmjs.org/'));
+    ensure(channelVersion === this.version, 'npm dist-tag does not point to the released version');
     const main = await this.git('ls-remote', this.m.remote, `refs/heads/${this.m.branch}`);
-    return { version: this.version, registrySHA1: shasum, latest, remoteMain: main.split(/\s/)[0], ...release, verified: true };
+    return { version: this.version, profile: this.profile.id, npmTag: this.profile.npmTag, channelVersion,
+      registrySHA1: shasum, latest, remoteMain: main.split(/\s/)[0], ...release, verified: true };
   }
 }
 

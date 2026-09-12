@@ -3,6 +3,8 @@ import { constants } from "node:fs";
 import { lstat, mkdir, open, readFile, realpath, rm, rmdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { RUNTIME_PROFILES, type RuntimeProfileId } from "./runtime-profile.ts";
+import type { RuntimeAsset } from "../runtime-assets.js";
 
 const assets: typeof import("../runtime-assets.js") = await import(
   `../runtime-assets.${import.meta.url.endsWith(".ts") ? "ts" : "js"}`
@@ -72,8 +74,8 @@ interface Version {
   readonly prerelease: readonly string[];
 }
 
-function assetVersion(): string {
-  const versions = new Set(runtimeAssets.map(({ version }) => version));
+function assetVersion(assets: readonly RuntimeAsset[] = runtimeAssets): string {
+  const versions = new Set(assets.map(({ version }) => version));
   if (versions.size !== 1) {
     throw new ProjectInitializationError("write-failed", "Runtime assets do not share one version.");
   }
@@ -364,6 +366,7 @@ interface InitializationLayout {
   readonly markerPath: string;
   readonly preserveAllLegacy: boolean;
   readonly invalidRootMessage: string;
+  readonly controlIgnore?: boolean;
 }
 
 const PROJECT_LAYOUT: InitializationLayout = {
@@ -389,6 +392,7 @@ function layoutLegacyPath(asset: LegacyRuntimeAsset, layout: InitializationLayou
 async function initializeRoot(
   requestedRoot: string,
   layout: InitializationLayout,
+  installAssets: readonly RuntimeAsset[] = runtimeAssets,
 ): Promise<InitializeProjectResult> {
   const root = resolve(requestedRoot);
   const rootInfo = await metadata(root);
@@ -396,8 +400,8 @@ async function initializeRoot(
     throw new ProjectInitializationError("invalid-project", layout.invalidRootMessage);
   }
 
-  const version = assetVersion();
-  const assetEntries: InstallEntry[] = runtimeAssets.map(({ installPath, content }) => ({
+  const version = assetVersion(installAssets);
+  const assetEntries: InstallEntry[] = installAssets.map(({ installPath, content }) => ({
     relativePath: safeAssetPath(installPath, layout.assetPrefix),
     content,
   }));
@@ -426,7 +430,7 @@ async function initializeRoot(
     existing[index]?.equals(Buffer.from(entry.content)) ?? false;
   const assetsMatch = assetEntries.every(matches);
   if (markerText !== undefined && parseMarker(markerText.toString("utf8")) === version && assetsMatch) {
-    if (!layout.preserveAllLegacy) await ensureProjectLunaControlIgnore(root);
+    if (layout.controlIgnore ?? !layout.preserveAllLegacy) await ensureProjectLunaControlIgnore(root);
     return {
       status: "unchanged",
       version,
@@ -466,7 +470,7 @@ async function initializeRoot(
   const removedFiles: Array<{ relativePath: string; content: Buffer }> = [];
   const createdDirectories: string[] = [];
   try {
-    if (!layout.preserveAllLegacy) {
+    if (layout.controlIgnore ?? !layout.preserveAllLegacy) {
       await ensureProjectLunaControlIgnore(root, createdFiles, modifiedFiles, createdDirectories);
     }
     for (let index = 0; index < entries.length; index += 1) {
@@ -536,8 +540,20 @@ export async function resolveGlobalConfigRoot(
 }
 
 /** Installs the packaged runtime into one existing project without changing user settings. */
-export async function initializeProject(projectRoot: string = process.cwd()): Promise<InitializeProjectResult> {
-  return initializeRoot(projectRoot, PROJECT_LAYOUT);
+async function profileInstallation(id: RuntimeProfileId, global: boolean): Promise<{ layout: InitializationLayout; assets: readonly RuntimeAsset[] }> {
+  if (!Object.hasOwn(RUNTIME_PROFILES, id)) throw new ProjectInitializationError("invalid-project", "Unknown runtime profile.");
+  const profile = RUNTIME_PROFILES[id];
+  if (!profile) throw new ProjectInitializationError("invalid-project", "Unknown runtime profile.");
+  if (id === "stable") return { layout: global ? GLOBAL_LAYOUT : PROJECT_LAYOUT, assets: runtimeAssets };
+  const module: typeof import("../runtime-assets-v010.js") = await import(`../runtime-assets-v010.${import.meta.url.endsWith(".ts") ? "ts" : "js"}`);
+  return { layout: { ...(global ? GLOBAL_LAYOUT : PROJECT_LAYOUT),
+    markerPath: global ? profile.markerFile : `${OPEN_CODE_DIRECTORY}/${profile.markerFile}`,
+    preserveAllLegacy: true, controlIgnore: false }, assets: module.runtimeAssets };
+}
+
+export async function initializeProject(projectRoot: string = process.cwd(), profile: RuntimeProfileId = "stable"): Promise<InitializeProjectResult> {
+  const install = await profileInstallation(profile, false);
+  return initializeRoot(projectRoot, install.layout, install.assets);
 }
 
 async function removeEmptyDirectories(paths: readonly string[]): Promise<unknown[]> {
@@ -551,7 +567,8 @@ async function removeEmptyDirectories(paths: readonly string[]): Promise<unknown
 }
 
 /** Installs the packaged runtime into OpenCode's global configuration directory. */
-export async function initializeGlobal(globalRoot?: string): Promise<InitializeProjectResult> {
+export async function initializeGlobal(globalRoot?: string, profile: RuntimeProfileId = "stable"): Promise<InitializeProjectResult> {
+  const install = await profileInstallation(profile, true);
   let root = resolve(globalRoot ?? await resolveGlobalConfigRoot());
   let existing = await metadata(root);
   if (existing?.isSymbolicLink()) {
@@ -600,7 +617,7 @@ export async function initializeGlobal(globalRoot?: string): Promise<InitializeP
     }
   }
   try {
-    return await initializeRoot(root, GLOBAL_LAYOUT);
+    return await initializeRoot(root, install.layout, install.assets);
   } catch (error) {
     const cleanupFailures = await removeEmptyDirectories(createdRootDirectories);
     if (cleanupFailures.length > 0) {

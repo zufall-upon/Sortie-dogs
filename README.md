@@ -1,5 +1,10 @@
 # Sortie-dogs
 
+> **v0.10.0-beta.1 development preview.** This branch provides the separately
+> named `dog-coordinator-v010` and a bounded Terra operator. See the
+> [preview architecture, coexistence and release guide](docs/v010-preview.md).
+> The sections below also document the retained stable compatibility runtime.
+
 **Add a bounded, cost-aware execution loop to OpenCode without taking OpenCode over.**
 
 Sortie-dogs is an opt-in overlay, not a replacement. It stays passive until you
@@ -22,7 +27,7 @@ Requirements: Node.js 22.6 or newer, npm, and OpenCode.
 
 Guides: [日本語](docs/guide-ja.md) · [简体中文](docs/guide-zh-CN.md) · [CLI testing](docs/cli-testing.md)
 
-Release: [v0.9.10](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.9.10)
+Preview release target: [v0.10.0-beta.1](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.10.0-beta.1)
 
 ## Why Sortie-dogs?
 

@@ -125,7 +125,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       join(consumer, "node_modules", "sortie-dogs", "package.json"),
       "utf8",
     )) as { version?: string; scripts?: { prebuild?: string } };
-    assert.equal(installedPackage.version, "0.9.10");
+    assert.equal(installedPackage.version, "0.10.0-beta.1");
     assert.equal(
       installedPackage.scripts?.prebuild,
       "node --input-type=module --eval \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true });\"",
@@ -224,13 +224,16 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       [
         "--input-type=module",
         "--eval",
-        `const [pluginEntry, serverEntry, { runtimeAssets }, root, consultation] = await Promise.all([
-          import('sortie-dogs/plugin'),
+        `const [pluginEntry, serverEntry, { runtimeAssets }, root, consultation, previewEntry, previewAssets] = await Promise.all([
+          import('sortie-dogs/plugin/stable'),
           import('sortie-dogs/server'),
-          import('sortie-dogs/assets'),
+          import('./node_modules/sortie-dogs/dist/runtime-assets.js'),
           import('sortie-dogs'),
           import('./node_modules/sortie-dogs/dist/core/consultation.js'),
+          import('sortie-dogs/plugin'),
+          import('sortie-dogs/assets'),
         ]);
+        const previewHooks = await previewEntry.SortieDogsPlugin({ directory: process.cwd() });
         const { SortieDogsPlugin } = pluginEntry;
         // OpenCode calls every runtime export of a plugin module as a plugin factory.
         const openCodeLoad = [];
@@ -266,7 +269,10 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
           pluginType: typeof SortieDogsPlugin,
           pluginEntryExports: Object.keys(pluginEntry),
           serverEntryExports: Object.keys(serverEntry),
-          serverMatchesPlugin: serverEntry.SortieDogsPlugin === SortieDogsPlugin,
+          serverMatchesPlugin: serverEntry.SortieDogsPlugin === previewEntry.SortieDogsPlugin,
+          previewEntryExports: Object.keys(previewEntry),
+          previewTools: Object.keys(previewHooks.tool ?? {}),
+          previewAssets: previewAssets.runtimeAssets.map(({name, version, installPath}) => ({name, version, installPath})),
           openCodeLoad,
           packedTools,
           packedHookKeys,
@@ -325,6 +331,9 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       pluginEntryExports: readonly string[];
       serverEntryExports: readonly string[];
       serverMatchesPlugin: boolean;
+      previewEntryExports: string[];
+      previewTools: string[];
+      previewAssets: Array<{ name: string; version: string; installPath: string }>;
       openCodeLoad: readonly string[];
       packedTools: readonly string[];
       packedHookKeys: readonly string[];
@@ -352,6 +361,11 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     );
     assert.deepEqual(loaded.serverEntryExports, ["SortieDogsPlugin"]);
     assert.equal(loaded.serverMatchesPlugin, true, "OpenCode package resolution must reach the plugin factory");
+    assert.deepEqual(loaded.previewEntryExports, ["SortieDogsPlugin"]);
+    assert.ok(loaded.previewTools.includes("sortie_v010_prepare_operator"));
+    assert.ok(loaded.previewTools.every(name => name.startsWith("sortie_v010_")));
+    assert.equal(loaded.previewAssets.length, 8);
+    assert.ok(loaded.previewAssets.every(asset => asset.version === "0.10.0-beta.1" && asset.name.endsWith("-v010")));
     assert.deepEqual(
       loaded.openCodeLoad,
       ["hooks"],

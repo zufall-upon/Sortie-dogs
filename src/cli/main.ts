@@ -41,8 +41,9 @@ const USAGE = `Usage: sortie-dogs lint <handoff.json> [<handoff.json> ...]
   [--changed-paths-from <file|->]
   [--changed-path <path> ...]
   [--format text|json] [--quiet] [--strict]`;
-const INIT_USAGE = `Usage: sortie-dogs init [project-root]
-       sortie-dogs init --global`;
+const INIT_USAGE = `Usage: sortie-dogs init [project-root] [--profile stable|v010]
+       sortie-dogs init --global [--profile stable|v010]
+This beta package defaults to the v010 profile.`;
 
 type OutputFormat = "text" | "json";
 
@@ -256,16 +257,20 @@ export async function run(argv: readonly string[]): Promise<number> {
       process.stdout.write(`${INIT_USAGE}\n`);
       return 0;
     }
-    const global = argv[1] === "--global";
-    if (argv.length > 2 || (argv[1]?.startsWith("-") === true && !global)) {
+    const initArgs = [...argv.slice(1)];
+    const profileIndex = initArgs.indexOf("--profile");
+    const profile = profileIndex < 0 ? "v010" : initArgs[profileIndex + 1];
+    if (profileIndex >= 0) initArgs.splice(profileIndex, 2);
+    const global = initArgs[0] === "--global";
+    if ((profile !== "stable" && profile !== "v010") || initArgs.length > 1 || (initArgs[0]?.startsWith("-") === true && !global)) {
       process.stderr.write(`${INIT_USAGE}\n`);
       return 2;
     }
     try {
       const target = global ? await initializer.resolveGlobalConfigRoot() : undefined;
       const initialized = global
-        ? await initializer.initializeGlobal(target)
-        : await initializer.initializeProject(argv[1]);
+        ? await initializer.initializeGlobal(target, profile)
+        : await initializer.initializeProject(initArgs[0], profile);
       if (global) {
         process.stdout.write(initialized.status === "installed"
           ? `Initialized Sortie-dogs ${initialized.version} globally at ${target}.\n`

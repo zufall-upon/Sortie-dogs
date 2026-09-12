@@ -83,6 +83,10 @@ export type {
   ProjectInitializationErrorCode,
 } from "./core/initialize.js";
 export { SortieDogsPlugin } from "./plugin/index.js";
+export { SortieDogsV010Plugin, createProfiledPlugin } from "./plugin/profiled.js";
+export * from "./core/runtime-profile.js";
+export { OperatorRuntime, parseOperatorPlan, OPERATOR_LIMITS } from "./core/operator-runtime.js";
+export type { OperatorPlan, OperatorState, OperatorUnit, OperatorTask } from "./core/operator-runtime.js";
 /*
  * The OpenCode entry at "sortie-dogs/plugin" must export the plugin factory alone, so every other
  * plugin runtime symbol is public here instead.

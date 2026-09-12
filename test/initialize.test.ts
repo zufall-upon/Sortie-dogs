@@ -392,15 +392,15 @@ test("CLI init supports an explicit project root, repeated init, and help", asyn
   try {
     assert.deepEqual(await runCli(["init", "--help"]), {
       exit: 0,
-      stdout: "Usage: sortie-dogs init [project-root]\n       sortie-dogs init --global\n",
+      stdout: "Usage: sortie-dogs init [project-root] [--profile stable|v010]\n       sortie-dogs init --global [--profile stable|v010]\nThis beta package defaults to the v010 profile.\n",
       stderr: "",
     });
-    assert.deepEqual(await runCli(["init", project]), {
+    assert.deepEqual(await runCli(["init", project, "--profile", "stable"]), {
       exit: 0,
       stdout: "Initialized Sortie-dogs 0.3.86-codegen-proof-v1.\n",
       stderr: "",
     });
-    assert.deepEqual(await runCli(["init", project]), {
+    assert.deepEqual(await runCli(["init", project, "--profile", "stable"]), {
       exit: 0,
       stdout: "Sortie-dogs 0.3.86-codegen-proof-v1 is already initialized.\n",
       stderr: "",
@@ -433,6 +433,17 @@ test("global root resolver honors OpenCode and XDG precedence", async () => {
   } finally {
     await clean(fixture);
   }
+});
+
+test("beta CLI defaults to namespaced preview assets", async () => {
+  const project = await fixtureDirectory();
+  try {
+    const result = await runCli(["init", project]);
+    assert.equal(result.exit, 0, result.stderr);
+    assert.equal(await readFile(join(project, ".opencode/sortie-dogs-v010.version"), "utf8"), "0.10.0-beta.1\n");
+    assert.match(await readFile(join(project, ".opencode/agent/dog-coordinator-v010.md"), "utf8"), /prepare_operator/);
+    await assert.rejects(readFile(join(project, ".opencode/agent/dog-coordinator.md")), { code: "ENOENT" });
+  } finally { await clean(project); }
 });
 
 test("symlinked global config directories resolve and install at the real target", async (context) => {
@@ -527,13 +538,13 @@ test("CLI global init reports its target, legacy preservation, and invalid combi
     await mkdir(join(globalRoot, "agent"), { recursive: true });
     await writeFile(join(globalRoot, "agent", "coordinator-mk2a2.md"), "legacy\n");
     const env = { OPENCODE_CONFIG_DIR: globalRoot };
-    assert.deepEqual(await runCli(["init", "--global"], env), {
+    assert.deepEqual(await runCli(["init", "--global", "--profile", "stable"], env), {
       exit: 0,
       stdout: `Initialized Sortie-dogs 0.3.86-codegen-proof-v1 globally at ${globalRoot}.\n` +
         "Preserved legacy runtime files: agent/coordinator-mk2a2.md.\n",
       stderr: "",
     });
-    assert.deepEqual(await runCli(["init", "--global"], env), {
+    assert.deepEqual(await runCli(["init", "--global", "--profile", "stable"], env), {
       exit: 0,
       stdout: `Sortie-dogs 0.3.86-codegen-proof-v1 is already initialized globally at ${globalRoot}.\n` +
         "Preserved legacy runtime files: agent/coordinator-mk2a2.md.\n",
@@ -543,7 +554,7 @@ test("CLI global init reports its target, legacy preservation, and invalid combi
       const result = await runCli(args, env);
       assert.equal(result.exit, 2);
       assert.equal(result.stdout, "");
-      assert.equal(result.stderr, "Usage: sortie-dogs init [project-root]\n       sortie-dogs init --global\n");
+      assert.equal(result.stderr, "Usage: sortie-dogs init [project-root] [--profile stable|v010]\n       sortie-dogs init --global [--profile stable|v010]\nThis beta package defaults to the v010 profile.\n");
     }
   } finally {
     await clean(fixture);

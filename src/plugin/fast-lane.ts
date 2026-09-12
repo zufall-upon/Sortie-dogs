@@ -229,6 +229,17 @@ export class FastLaneController {
     state.workerLimit = maxUnits;
   }
 
+  /** A fresh root-approved operator grant adds capacity without erasing earlier spend. */
+  grantSerialUnits(sessionID: string, remainingUnits: number): void {
+    const state = this.sessions.get(sessionID);
+    if (state === undefined) throw new FastLaneDeniedError("TURN_STATE_REQUIRED");
+    if (!Number.isSafeInteger(remainingUnits) || remainingUnits < 1 || state.parallelMode || state.workerInFlight) {
+      throw new FastLaneDeniedError("BACKLOG_DRAIN_INVALID");
+    }
+    state.backlogDrain = true;
+    state.workerLimit = state.totalWorkerDispatches + remainingUnits;
+  }
+
   enableParallelDispatch(
     sessionID: string,
     maxWorkers: number,
