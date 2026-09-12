@@ -50,6 +50,13 @@ function lifecycleOf(coordinator: ParallelDispatchCoordinator): WorktreeLifecycl
   return (coordinator as unknown as { lifecycle: WorktreeLifecycle }).lifecycle;
 }
 
+async function completeReadyArtifacts(coordinator: ParallelDispatchCoordinator, ready: readonly ParallelDispatchDescriptor[]): Promise<void> {
+  const entries = ready.map((descriptor, index) => ({ descriptor, callID: `call-${index}`, childSessionID: `child-${index}` }));
+  for (const { descriptor, callID } of entries) await coordinator.bindDispatch("root", callID, descriptor);
+  // Independent setup artifacts use the existing bounded producer pool; scenarios remain serial.
+  await acceptAndCompleteMany(coordinator, entries);
+}
+
 function registerCase(
   collection: RegisteredTest[],
   name: string,
@@ -572,10 +579,7 @@ test("fabric claims validation once and resumes acceptance after a completed tar
     assert.equal(prepared.status, "prepared");
     if (prepared.status !== "prepared") return;
     await errorCode(coordinator.integrateFabricWave("root", prepared.snapshot.run_id), "wave-not-ready");
-    for (const [index, descriptor] of prepared.snapshot.ready.entries()) {
-      await coordinator.bindDispatch("root", `call-${index}`, descriptor);
-      await acceptAndComplete(coordinator, descriptor, `call-${index}`, `child-${index}`);
-    }
+    await completeReadyArtifacts(coordinator, prepared.snapshot.ready);
 
     const integrated = await coordinator.integrateFabricWave("root", prepared.snapshot.run_id);
     const candidate = integrated.fabric!.candidate_head;
@@ -654,10 +658,7 @@ test("failed fabric target promotion releases its review claim for cancellation"
     );
     assert.equal(prepared.status, "prepared");
     if (prepared.status !== "prepared") return;
-    for (const [index, descriptor] of prepared.snapshot.ready.entries()) {
-      await coordinator.bindDispatch("root", `call-${index}`, descriptor);
-      await acceptAndComplete(coordinator, descriptor, `call-${index}`, `child-${index}`);
-    }
+    await completeReadyArtifacts(coordinator, prepared.snapshot.ready);
     const validated = await coordinator.integrateFabricWaveAndValidate(
       "root", prepared.snapshot.run_id, process.execPath, ["-e", "process.exit(0)"],
     );
@@ -694,10 +695,7 @@ test("fabric operation authority heartbeats throughout validation", async () => 
     );
     assert.equal(prepared.status, "prepared");
     if (prepared.status !== "prepared") return;
-    for (const [index, descriptor] of prepared.snapshot.ready.entries()) {
-      await coordinator.bindDispatch("root", `call-${index}`, descriptor);
-      await acceptAndComplete(coordinator, descriptor, `call-${index}`, `child-${index}`);
-    }
+    await completeReadyArtifacts(coordinator, prepared.snapshot.ready);
     await coordinator.integrateFabricWave("root", prepared.snapshot.run_id);
     registry = (coordinator as unknown as { registry: ScopeLeaseRegistry }).registry;
     originalAcquire = registry.acquire.bind(registry);
@@ -731,10 +729,7 @@ test("failed fabric validation archives cleanly and releases the active slot", a
     const prepared = await coordinator.prepareFabric(candidateContract, "root");
     assert.equal(prepared.status, "prepared");
     if (prepared.status !== "prepared") return;
-    for (const [index, descriptor] of prepared.snapshot.ready.entries()) {
-      await coordinator.bindDispatch("root", `call-${index}`, descriptor);
-      await acceptAndComplete(coordinator, descriptor, `call-${index}`, `child-${index}`);
-    }
+    await completeReadyArtifacts(coordinator, prepared.snapshot.ready);
     const integrated = await coordinator.integrateFabricWave("root", prepared.snapshot.run_id);
     const failed = await coordinator.validateFabricCandidate(
       "root", prepared.snapshot.run_id, process.execPath,
@@ -765,10 +760,7 @@ test("failed fabric review archives cleanly without moving the target", async ()
     );
     assert.equal(prepared.status, "prepared");
     if (prepared.status !== "prepared") return;
-    for (const [index, descriptor] of prepared.snapshot.ready.entries()) {
-      await coordinator.bindDispatch("root", `call-${index}`, descriptor);
-      await acceptAndComplete(coordinator, descriptor, `call-${index}`, `child-${index}`);
-    }
+    await completeReadyArtifacts(coordinator, prepared.snapshot.ready);
     const validated = await coordinator.integrateFabricWaveAndValidate(
       "root", prepared.snapshot.run_id, process.execPath, ["-e", "process.exit(0)"],
     );
@@ -796,10 +788,7 @@ test("integrateFabricWaveAndValidate rejects a relative executable before wave m
     );
     assert.equal(prepared.status, "prepared");
     if (prepared.status !== "prepared") return;
-    for (const [index, descriptor] of prepared.snapshot.ready.entries()) {
-      await coordinator.bindDispatch("root", `call-${index}`, descriptor);
-      await acceptAndComplete(coordinator, descriptor, `call-${index}`, `child-${index}`);
-    }
+    await completeReadyArtifacts(coordinator, prepared.snapshot.ready);
     const before = await coordinator.snapshot("root", prepared.snapshot.run_id);
     await errorCode(
       coordinator.integrateFabricWaveAndValidate("root", prepared.snapshot.run_id, "node"),
@@ -822,10 +811,7 @@ test("integrateFabricWaveAndValidate retries validation after final integration 
     );
     assert.equal(prepared.status, "prepared");
     if (prepared.status !== "prepared") return;
-    for (const [index, descriptor] of prepared.snapshot.ready.entries()) {
-      await coordinator.bindDispatch("root", `call-${index}`, descriptor);
-      await acceptAndComplete(coordinator, descriptor, `call-${index}`, `child-${index}`);
-    }
+    await completeReadyArtifacts(coordinator, prepared.snapshot.ready);
     const integrated = await coordinator.integrateFabricWave("root", prepared.snapshot.run_id);
     const retried = await coordinator.integrateFabricWaveAndValidate(
       "root", prepared.snapshot.run_id, process.execPath, ["-e", "process.exit(0)"],
