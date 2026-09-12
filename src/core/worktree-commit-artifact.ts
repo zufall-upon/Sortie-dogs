@@ -991,11 +991,10 @@ async function stagedPaths(context: Context): Promise<ReadonlySet<string>> {
 }
 
 async function assertNoSubmodules(context: Context, entries: readonly StatusEntry[]): Promise<void> {
-  for (const entry of entries) {
-    const index = await context.git(["ls-files", "--stage", "-z", "--", entry.path]);
-    if (index.toString("utf8").startsWith("160000 ")) {
-      throw new WorktreeCommitArtifactError("invalid-state", "Submodule changes are forbidden.");
-    }
+  if (entries.length === 0) return;
+  const index = await context.git(["ls-files", "--stage", "-z", "--", ...entries.map(({ path }) => path)]);
+  if (index.toString("utf8").split("\0").some((entry) => entry.startsWith("160000 "))) {
+    throw new WorktreeCommitArtifactError("invalid-state", "Submodule changes are forbidden.");
   }
 }
 
@@ -1309,7 +1308,7 @@ export async function produceWorktreeCommitArtifact(
   if (control?.signal.aborted) throw new WorktreeCommitArtifactError("validation-failed", "Validation was cancelled.");
   control?.enterProtectedPhase();
   await context.git(["add", "--", ...before.map(({ path }) => path)]);
-  await assertValidatedIndex(context, before, beforeFingerprint);
+  // Keep one fresh index check after staging, immediately before the protected commit.
   await assertValidatedIndex(context, before, beforeFingerprint);
   await context.git([
     "-c", "user.name=Sortie Fabric",

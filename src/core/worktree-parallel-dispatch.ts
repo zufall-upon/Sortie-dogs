@@ -2420,53 +2420,71 @@ export class ParallelDispatchCoordinator {
     base: string,
     tasks: readonly StoredTask[],
   ): Promise<string> {
+    if (tasks.length === 0) return base;
     let head = base;
-    for (const task of tasks) {
-      const artifact = task.artifact!;
-      const nonce = randomUUID();
-      const indexPath = join(this.stateRoot, `.fabric-index-${nonce}`);
-      const patchPath = join(this.stateRoot, `.fabric-patch-${nonce}`);
-      const messagePath = join(this.stateRoot, `.fabric-message-${nonce}`);
-      const indexEnvironment = this.cleanGitEnvironment({ GIT_INDEX_FILE: indexPath });
-      try {
-        await this.gitBuffer(["read-tree", head], indexEnvironment);
-        const patch = await this.gitBuffer([
-          "diff-tree", "-p", "--binary", "--full-index", "--no-ext-diff", "--no-renames",
-          artifact.base_sha, artifact.commit_sha, "--",
-        ]);
-        if (patch.byteLength > 8 * 1024 * 1024) {
-          throw new ParallelDispatchError("wave-integration-failed", "Fabric artifact patch exceeds the practical bound.");
+    const indexPath = join(this.stateRoot, `.fabric-index-${randomUUID()}`);
+    const indexEnvironment = this.cleanGitEnvironment({ GIT_INDEX_FILE: indexPath });
+    try {
+      // Commit objects are immutable; collect their timestamps once for this build only.
+      const commits = [...new Set(tasks.map((task) => task.artifact!.commit_sha))];
+      const metadata = (await this.gitBuffer([
+        "show", "-s", "--no-walk=unsorted", "--format=%H%x00%ct", ...commits, "--",
+      ])).toString("utf8").trimEnd();
+      const timestamps = new Map<string, string>();
+      for (const line of metadata.split(/\r?\n/u)) {
+        const fields = line.split("\0");
+        if (fields.length !== 2 || !SHA.test(fields[0]!) || !/^\d{1,12}$/u.test(fields[1]!) || timestamps.has(fields[0]!)) {
+          throw new Error("identity");
         }
-        await writeFile(patchPath, patch, { flag: "wx", mode: 0o600 });
-        await this.gitBuffer(["apply", "--cached", "--3way", "--binary", patchPath], indexEnvironment);
-        const tree = (await this.gitBuffer(["write-tree"], indexEnvironment)).toString("utf8").trim();
-        const timestamp = (await this.gitBuffer(["show", "-s", "--format=%ct", artifact.commit_sha])).toString("utf8").trim();
-        if (!SHA.test(tree) || !/^\d{1,12}$/u.test(timestamp)) throw new Error("identity");
-        const message = `Sortie fabric integration: ${task.descriptor.task_id}\n\n` +
-          `Sortie-Run: ${runID}\nSortie-Task: ${task.descriptor.task_id}\n` +
-          `Sortie-Artifact: ${artifact.commit_sha}\nSortie-Base: ${artifact.base_sha}\n`;
-        await writeFile(messagePath, message, { flag: "wx", mode: 0o600 });
-        const commitEnvironment = this.cleanGitEnvironment({
-          GIT_AUTHOR_NAME: "Sortie Fabric",
-          GIT_AUTHOR_EMAIL: "sortie@example.invalid",
-          GIT_COMMITTER_NAME: "Sortie Fabric",
-          GIT_COMMITTER_EMAIL: "sortie@example.invalid",
-          GIT_AUTHOR_DATE: `${timestamp} +0000`,
-          GIT_COMMITTER_DATE: `${timestamp} +0000`,
-        });
-        const commit = (await this.gitBuffer(["commit-tree", tree, "-p", head, "-F", messagePath], commitEnvironment))
-          .toString("utf8").trim();
-        if (!SHA.test(commit)) throw new Error("commit");
-        head = commit;
-      } catch (error) {
-        if (error instanceof ParallelDispatchError) throw error;
-        throw new ParallelDispatchError("wave-integration-failed", "Fabric artifact could not be applied to the hidden candidate.");
-      } finally {
-        await Promise.all([indexPath, `${indexPath}.lock`, patchPath, messagePath].map((path) =>
-          rm(path, { force: true }).catch(() => undefined)));
+        timestamps.set(fields[0]!, fields[1]!);
       }
+      if (timestamps.size !== commits.length || commits.some((commit) => !timestamps.has(commit))) throw new Error("identity");
+      await this.gitBuffer(["read-tree", base], indexEnvironment);
+      for (const task of tasks) {
+        const artifact = task.artifact!;
+        const nonce = randomUUID();
+        const patchPath = join(this.stateRoot, `.fabric-patch-${nonce}`);
+        const messagePath = join(this.stateRoot, `.fabric-message-${nonce}`);
+        try {
+          const patch = await this.gitBuffer([
+            "diff-tree", "-p", "--binary", "--full-index", "--no-ext-diff", "--no-renames",
+            artifact.base_sha, artifact.commit_sha, "--",
+          ]);
+          if (patch.byteLength > 8 * 1024 * 1024) {
+            throw new ParallelDispatchError("wave-integration-failed", "Fabric artifact patch exceeds the practical bound.");
+          }
+          await writeFile(patchPath, patch, { flag: "wx", mode: 0o600 });
+          await this.gitBuffer(["apply", "--cached", "--3way", "--binary", patchPath], indexEnvironment);
+          const tree = (await this.gitBuffer(["write-tree"], indexEnvironment)).toString("utf8").trim();
+          const timestamp = timestamps.get(artifact.commit_sha);
+          if (!SHA.test(tree) || timestamp === undefined) throw new Error("identity");
+          const message = `Sortie fabric integration: ${task.descriptor.task_id}\n\n` +
+            `Sortie-Run: ${runID}\nSortie-Task: ${task.descriptor.task_id}\n` +
+            `Sortie-Artifact: ${artifact.commit_sha}\nSortie-Base: ${artifact.base_sha}\n`;
+          await writeFile(messagePath, message, { flag: "wx", mode: 0o600 });
+          const commitEnvironment = this.cleanGitEnvironment({
+            GIT_AUTHOR_NAME: "Sortie Fabric",
+            GIT_AUTHOR_EMAIL: "sortie@example.invalid",
+            GIT_COMMITTER_NAME: "Sortie Fabric",
+            GIT_COMMITTER_EMAIL: "sortie@example.invalid",
+            GIT_AUTHOR_DATE: `${timestamp} +0000`,
+            GIT_COMMITTER_DATE: `${timestamp} +0000`,
+          });
+          const commit = (await this.gitBuffer(["commit-tree", tree, "-p", head, "-F", messagePath], commitEnvironment))
+            .toString("utf8").trim();
+          if (!SHA.test(commit)) throw new Error("commit");
+          head = commit;
+        } finally {
+          await Promise.all([patchPath, messagePath].map((path) => rm(path, { force: true }).catch(() => undefined)));
+        }
+      }
+      return head;
+    } catch (error) {
+      if (error instanceof ParallelDispatchError) throw error;
+      throw new ParallelDispatchError("wave-integration-failed", "Fabric artifact could not be applied to the hidden candidate.");
+    } finally {
+      await Promise.all([indexPath, `${indexPath}.lock`].map((path) => rm(path, { force: true }).catch(() => undefined)));
     }
-    return head;
   }
 
   private cleanGitEnvironment(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
