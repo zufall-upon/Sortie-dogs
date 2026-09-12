@@ -74,6 +74,15 @@ models are reserved for implementation, escalation, and independent review.
 Writes stay scoped, and completion requires validation evidence. Every completed
 run can return a concise Speed / Cost / Proof debrief.
 
+### Use only as much harness as the task needs
+
+Small changes can skip Scout and independent review when one worker and targeted
+validation are sufficient. Larger work can be decomposed into multiple units;
+units that are safely independent can use a Luna fabric DAG for bounded parallel
+execution. Higher-risk candidates add independent review, while full-suite and
+package verification are reserved for release work. Not every task pays the
+cost of the heaviest workflow.
+
 ## Designed to coexist with OpenCode
 
 Sortie-dogs adds a workflow to your existing setup rather than replacing it.
@@ -298,6 +307,18 @@ dog-coordinator: completion evidence accepted
 7. **Bounded continuation** — restart recovery and compaction handoffs preserve
    progress; repeated batches remain bounded rather than becoming endless
    delegation.
+
+## Built to work on itself
+
+Self-improvement keeps the same scoped manifests, worker ownership, validation,
+and review gates as other work. A loaded plugin is not treated as hot-reloadable:
+source changes are validated first, then packaged into an isolated `_testenv`
+fixture and exercised through the real OpenCode CLI. Continuation and compaction
+changes must demonstrate same-session recovery and terminal completion there.
+
+`npm run test:full` is reserved for explicit release validation; ordinary
+changes run targeted tests and `npm test`. The control plane coordinating a run
+is not replaced while that run is in flight.
 
 ## A visual walkthrough
 
