@@ -1,10 +1,45 @@
 # Sortie-dogs
 
-**Add a bounded, cost-aware execution loop to OpenCode without taking OpenCode over.**
+**A bounded, cost-aware execution harness for OpenCode
+that doesn't take your OpenCode setup over.**
 
-Sortie-dogs is an opt-in overlay, not a replacement. It stays passive until you
-invoke `/sortie` or select `dog-coordinator`. Standard OpenCode agents and
-unrelated sessions remain available and unchanged.
+Use OpenCode normally. Invoke Sortie only when you want
+scoped implementation, validation, review, and model routing.
+
+### Why?
+
+- 🐕 **Coexists with OpenCode** — Adds its own workflow without disabling your normal agents.
+- 💰 **Spend strong models where they matter** — Lower-cost models handle volume work; stronger models handle difficult implementation and review.
+- ⚙️ **Scales the harness with the task** — Small fixes stay small. Larger work can use bounded parallel execution and stronger validation.
+- 🛡 **Returns with proof** — Scope, validation, review status, cost, and run evidence are reported.
+
+## Try it
+
+Requirements: Node.js 22.6 or newer, npm, and OpenCode.
+Start in your project directory. This block covers all four steps;
+the JSON belongs in the configuration file, and `/sortie` runs inside OpenCode.
+If the configuration already exists, add `sortie-dogs` to its `plugin` array
+while keeping existing entries and settings.
+
+```text
+1. Install — run in your terminal
+   npm install --save-dev sortie-dogs
+   npx sortie-dogs init .
+
+2. Add plugin — save or merge into .opencode/opencode.json
+   {
+     "plugin": ["sortie-dogs"]
+   }
+
+3. Restart OpenCode
+
+4. Start a task — enter in OpenCode
+   /sortie <task>
+```
+
+Project-local setup is recommended. `init` installs runtime assets;
+the plugin entry enables the plugin, including model routing.
+See [configuration details](#quick-start) for model selection and other setup options.
 
 > **Project status: Beta.** v0.9.x is under active stabilization. Runtime
 > behavior, configuration, and runtime assets may still change before 1.0.
@@ -17,8 +52,6 @@ unrelated sessions remain available and unchanged.
 
 Sortie-dogs turns selected work into a scoped plan, optional evidence gathering,
 bounded implementation, canonical validation, and evidence-backed completion.
-
-Requirements: Node.js 22.6 or newer, npm, and OpenCode.
 
 Guides: [日本語](docs/guide-ja.md) · [简体中文](docs/guide-zh-CN.md) · [テスト実行](docs/testing.md) · [CLI testing](docs/cli-testing.md)
 

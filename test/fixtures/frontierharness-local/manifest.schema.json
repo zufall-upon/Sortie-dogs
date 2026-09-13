@@ -70,14 +70,25 @@
     },
     "opencode": {
       "type": "object", "additionalProperties": false,
-      "required": ["wsl_executable", "executable", "version", "auth_file", "model", "variant"],
+      "required": ["wsl_executable", "executable", "version", "auth_file"],
+      "oneOf": [
+        { "required": ["model", "variant"], "not": { "required": ["arm_models"] } },
+        { "required": ["arm_models"], "not": { "anyOf": [{ "required": ["model"] }, { "required": ["variant"] }] } }
+      ],
       "properties": {
         "wsl_executable": { "type": "string", "minLength": 1 },
         "executable": { "type": "string", "minLength": 1 },
         "version": { "type": "string", "minLength": 1 },
         "auth_file": { "type": "string", "minLength": 1 },
         "model": { "const": "openai/gpt-5.6-sol" },
-        "variant": { "const": "high" }
+        "variant": { "const": "high" },
+        "arm_models": {
+          "type": "object", "additionalProperties": false, "required": ["bare", "sortie"],
+          "properties": {
+            "bare": { "$ref": "#/$defs/bareModel" },
+            "sortie": { "$ref": "#/$defs/sortieModel" }
+          }
+        }
       }
     },
     "tools": {
@@ -114,7 +125,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["wall_seconds", "startup_seconds", "activity_seconds", "progress_seconds", "retry_count", "attempts_per_arm", "arm_order"],
       "properties": {
-        "wall_seconds": { "const": 5400 }, "startup_seconds": { "const": 120 },
+        "wall_seconds": { "const": 5400 }, "startup_seconds": { "const": 5400 },
         "activity_seconds": { "const": 5400 }, "progress_seconds": { "const": 5400 },
         "retry_count": { "const": 0 }, "attempts_per_arm": { "const": 1 },
         "arm_order": { "const": ["bare", "sortie"] }
@@ -130,6 +141,14 @@
         "min_implementation_children": { "type": "integer", "minimum": 0 },
         "terminal_outcome": { "enum": ["DONE", null] }
       }
+    },
+    "bareModel": {
+      "type": "object", "additionalProperties": false, "required": ["model", "variant"],
+      "properties": { "model": { "const": "openai/gpt-5.6-sol" }, "variant": { "const": "high" } }
+    },
+    "sortieModel": {
+      "type": "object", "additionalProperties": false, "required": ["model", "variant"],
+      "properties": { "model": { "const": "openai/gpt-5.6-terra" }, "variant": { "const": "high" } }
     },
     "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
     "relativePath": { "type": "string", "minLength": 1, "pattern": "^(?![A-Za-z]:)(?![/\\\\])(?!.*(?:^|[/\\\\])\\.\\.(?:[/\\\\]|$)).+$" },

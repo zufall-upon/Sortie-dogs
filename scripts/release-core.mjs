@@ -47,12 +47,26 @@ export class Release {
     this.execute = execute; this.progress = progress;
     this.directory = join(this.root, '_testenv', 'releases', version);
     this.statePath = join(this.directory, 'state.json');
+    this.failurePath = join(this.directory, 'failure.json');
     this.tgz = join(this.directory, `sortie-dogs-${version}.tgz`);
+    this.lastCommand = null;
   }
   async command(tool, args, { allowFailure = false, ...options } = {}) {
-    const result = await this.execute(tool, args, { cwd: this.root, ...options });
-    ensure(!result.timedOut && !result.overflow, `${tool}: deadline/output bound exceeded; release stopped`);
-    if (!allowFailure) ensure(result.code === 0, `${tool} ${args[0]} failed (exit ${result.code}); no raw log persisted`);
+    const command = [tool, ...args].join(' ');
+    this.lastCommand = { tool, command };
+    let result;
+    try { result = await this.execute(tool, args, { cwd: this.root, ...options }); }
+    catch (error) { error.command = command; error.toolCategory = tool; throw error; }
+    if (result.timedOut || result.overflow) {
+      const error = Error(`${command}: deadline/output bound exceeded; release stopped`);
+      Object.assign(error, { command, toolCategory: tool, exitCode: result.code, timedOut: !!result.timedOut, overflow: !!result.overflow });
+      throw error;
+    }
+    if (!allowFailure && result.code !== 0) {
+      const error = Error(`${command} failed (exit ${result.code}); no raw log persisted`);
+      Object.assign(error, { command, toolCategory: tool, exitCode: result.code, timedOut: false, overflow: false });
+      throw error;
+    }
     return result;
   }
   async git(...args) { return (await this.command('git', args)).stdout.trim(); }
@@ -74,6 +88,15 @@ export class Release {
     return JSON.parse(result.stdout);
   }
   async save() { await atomicJSON(this.statePath, this.state); }
+  async failure(error, phase) {
+    await mkdir(this.directory, { recursive: true });
+    await atomicJSON(this.failurePath, { schema: 1, version: this.version, phase,
+      command: error.command ?? this.lastCommand?.command ?? null,
+      toolCategory: error.toolCategory ?? this.lastCommand?.tool ?? 'release',
+      exitCode: Number.isInteger(error.exitCode) ? error.exitCode : null,
+      timedOut: error.timedOut === true, overflow: error.overflow === true, timestamp: new Date().toISOString() });
+  }
+  async clearFailure() { try { await unlink(this.failurePath); } catch (error) { if (error.code !== 'ENOENT') throw error; } }
   async artifact() {
     const bytes = await readFile(this.tgz);
     return { sha256: digest(bytes), sha1: digest(bytes, 'sha1'), bytes: bytes.length };
@@ -132,18 +155,53 @@ export class Release {
       if (this.state.source) await this.freezeCheck();
     }
   }
+  async preflight() {
+    try { return await this._preflight(); }
+    catch (error) { await this.failure(error, 'preflight'); throw error; }
+  }
+  async _preflight() {
+    const check = async (condition, message) => ensure(condition, message);
+    await check(await this.git('branch', '--show-current') === this.m.branch, 'Wrong branch');
+    await check(await this.git('diff', '--cached', '--name-only') === '', 'Index must start empty');
+    const head = await this.git('rev-parse', 'HEAD');
+    await check(head === await this.git('rev-parse', `${this.m.remote}/${this.m.branch}`), 'Local and remote main must match before release');
+    await check(await this.npmVersion() === null, 'npm version already exists: choose next patch');
+    await check(await this.api(`repos/${this.m.repository}/releases/tags/v${this.version}`, { optional: true }) === null, 'Release already exists: choose next patch');
+    await check(await this.git('ls-remote', this.m.remote, `refs/tags/v${this.version}`) === '', 'Remote tag exists: choose next patch');
+    const tag = await this.command('git', ['rev-parse', '--verify', `refs/tags/v${this.version}`], { allowFailure: true });
+    await check(tag.code !== 0, 'Local tag exists: choose next patch');
+    const dirty = await this.git('diff', '--name-only', 'HEAD');
+    const untracked = await this.git('ls-files', '--others', '--exclude-standard');
+    for (const path of [...dirty.split('\n'), ...untracked.split('\n')].filter(Boolean))
+      await check(!/^(src\/|package(?:-lock)?\.json$|scripts\/)/.test(path) || this.m.files.includes(path), `Unlisted release input: ${path}`);
+    for (const path of [...this.m.files, ...this.m.targetTests, this.m.notesFile])
+      await check(await exists(join(this.root, path)), `Release input missing: ${path}`);
+    if (this.m.recovery) {
+      const driver = await readFile(join(this.root, this.m.recovery.driver), 'utf8');
+      await check(driver.includes('process.argv'), 'Recovery driver must accept candidate, baseline, and release-directory inputs');
+      await check(await exists(join(this.root, this.m.recovery.baselineTgz)), 'Recovery baseline tgz missing');
+    }
+    await this.command('node', ['--experimental-strip-types', '--import', './test/setup.ts', '--test', ...this.m.targetTests]);
+    await this.clearFailure();
+    return { version: this.version, branch: this.m.branch, head, tests: this.m.targetTests, sideEffects: 'none' };
+  }
   async phase(name, operation, verify) {
     this.progress(name);
     if (this.state.source) await this.freezeCheck();
-    if (this.state.steps[name]) { if (verify) await verify(this.state.steps[name]); return this.state.steps[name]; }
+    if (Object.hasOwn(this.state.steps, name)) { if (verify) await verify(this.state.steps[name]); return this.state.steps[name]; }
     this.state.pending = name; await this.save();
-    const result = await operation();
-    this.state.steps[name] = result ?? { ok: true };
-    this.state.pending = null; await this.save();
-    return result;
+    try {
+      const result = await operation();
+      this.state.steps[name] = result ?? { ok: true };
+      this.state.pending = null; await this.save(); await this.clearFailure();
+      return result;
+    } catch (error) {
+      await this.failure(error, name); throw error;
+    }
   }
   async prepare() {
-    await this.initialize();
+    try { await this.initialize(); }
+    catch (error) { await this.failure(error, 'initialize'); throw error; }
     await this.phase('version', async () => {
       for (const path of ['package.json', 'package-lock.json']) {
         const file = join(this.root, path), data = await readJSON(file);
@@ -160,14 +218,11 @@ export class Release {
       this.state.source = await this.fingerprint();
       this.state.notes = await readFile(join(this.root, this.m.notesFile), 'utf8');
     });
-    await this.phase('tests', async () => {
-      await this.npm('run', 'build');
-      await this.command('node', ['--experimental-strip-types', '--import', './test/setup.ts', '--test', ...this.m.targetTests]);
-      await this.npm('test');
-      await this.npm('run', 'test:full');
-      await this.git('diff', '--check');
-      await this.freezeCheck();
-    });
+    await this.phase('build', () => this.npm('run', 'build'));
+    await this.phase('target-tests', () => this.command('node', ['--experimental-strip-types', '--import', './test/setup.ts', '--test', ...this.m.targetTests]));
+    await this.phase('npm-test', () => this.npm('test'));
+    await this.phase('full-test', () => this.npm('run', 'test:full'));
+    await this.phase('diff-check', async () => { await this.git('diff', '--check'); await this.freezeCheck(); });
     await this.phase('pack', async () => {
       ensure(!await exists(this.tgz), 'Unreceipted tarball exists; inspect interrupted pack, never overwrite it');
       await this.npm('pack', '--pack-destination', this.directory, '--json');

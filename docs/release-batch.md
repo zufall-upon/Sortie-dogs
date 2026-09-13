@@ -28,6 +28,15 @@ at its current value; the batch updates it to the requested new version. Start w
 on `main`, with local HEAD equal to `origin/main`. Existing release versions/tags are rejected; choose
 the next patch rather than reusing them.
 
+Freeze the candidate before preparation: finish and review the exact source files, manifest, and
+public notes, then stop unrelated edits. `preflight` checks manifest scope, tool/version
+availability, recovery-driver inputs, and target release tests without changing source, the index,
+tags, releases, global installation, or package version:
+
+```powershell
+.\scripts\release.ps1 preflight -Version 0.9.7 -Manifest .opencode/release.json
+```
+
 ```powershell
 .\scripts\release.ps1 prepare -Version 0.9.7 -Manifest .opencode/release.json
 ```
@@ -78,12 +87,14 @@ compaction, ticket, or budget bug being fixed.
 
 ## Recovery-driver contract
 
-For a recovery-related change, add a dedicated, reviewed fixture driver matching that defect:
+For a recovery-related change, add a dedicated, reviewed fixture driver matching that defect. The
+tracked `test/fixtures/release-recovery/driver.mjs` is a deterministic input/receipt contract
+fixture only. It does not run a model or prove continuation; do not report it as runtime proof:
 
 ```json
 {
   "recovery": {
-    "driver": "test/fixtures/recovery/run-release-rpt.mjs",
+    "driver": "test/fixtures/release-recovery/driver.mjs",
     "baselineTgz": "_testenv/sortie-dogs-previous.tgz"
   }
 }
@@ -128,7 +139,9 @@ Its source is included in the frozen input fingerprint. It may not edit real use
 Repeat the **same command with the same manifest** after resolving an external failure. State lives
 in `_testenv/releases/<version>/state.json`, with a pending phase recorded before effects.
 
-- Completed tests are reused only if the frozen input fingerprint still matches.
+- Completed test phases are reused only if the frozen input fingerprint still matches. The phases are
+  `build`, target tests, `npm test`, and `npm run test:full`; a later failure resumes at that phase
+  and does not rerun earlier passed tests.
 - Completed CLI receipts must still identify the same candidate digest.
 - Completed global application is reverified rather than assumed valid.
 - An interrupted commit is reconciled against its parent, author, subject, scope, and current files.
@@ -143,6 +156,18 @@ in `_testenv/releases/<version>/state.json`, with a pending phase recorded befor
 `_testenv/releases/release.lock` serializes prepare across versions. It records the process ID. An
 uncleanly terminated batch can leave this lock; confirm the owner and all children stopped before
 manually removing it. The batch never assumes an unknown live owner is stale.
+
+Every failed phase writes `_testenv/releases/<version>/failure.json` with typed phase, exact command,
+tool category, exit code, timeout/overflow flags, and timestamp. Raw logs and secrets are never
+persisted. The receipt is removed after a successful phase or successful preflight.
+
+## 2026-09-11 feedback
+
+The v0.9.7 first run took about 60 minutes. Causes: repeated broad validation during prepare/resume,
+recovery/CLI work mixed into the release path, and input/tool problems discovered after effects
+started. Target 20–35 minutes by freezing the candidate before `prepare`, running `preflight` first,
+and resuming at granular completed test phases instead of rerunning target tests, `npm test`, and
+`test:full`. This target excludes model capacity and external npm/GitHub delays.
 
 ## Manual npm publication and verification
 

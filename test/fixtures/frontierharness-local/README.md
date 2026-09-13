@@ -27,6 +27,17 @@ probe's expected exit. `host` is reserved for Git workspace operations; WSL pack
 
 ## Exact phase sequence
 
+Future completion semantics are specified in
+[Coding benchmark completion and correctness](../../../docs/benchmark-completion-contract.md).
+The measured commands below still use the original fail-fast protocol.
+
+For explicitly approved retrospective correctness checks, use `verify-snapshot --arm bare|sortie
+--confirm --manifest <manifest>`. It requires a stopped, exit-zero agent, no untracked source, and an
+exact match between the retained patch hash and current workspace diff. It grades a separate copy
+with the same verifier and shares the one-shot attempt guard with `verify-arm`. It does not restart
+an agent, repair source, clear the historical stopped state, or enable speed/cost ratios. `summarize`
+includes diagnostic correctness and verifier evidence alongside the original terminal outcome.
+
 From repository root, with a completed manifest at `_testenv/frontierharness-manifest.json`:
 
 ```powershell
@@ -42,9 +53,61 @@ node $runner summarize --manifest $manifest
 node $runner cleanup --confirm --manifest $manifest
 ```
 
+For a long arm that must survive an OpenCode/Desktop restart, launch the same one-shot `run-arm` through
+the detached controller and then exit the initiating chat:
+
+```powershell
+node test/fixtures/frontierharness-local/launch-detached-arm.mjs --arm bare --manifest $manifest
+```
+
+The detached controller owns the OpenCode stdout pipe and watchdog independently of the initiating
+OpenCode process. It writes only the runner's sanitized final JSON and heartbeat/error text beside the
+durable state; raw agent output remains in memory and is never redirected. The per-arm launch marker is
+created with exclusive-create semantics before spawning, so another chat cannot launch the arm again.
+After restart, inspect `frontierharness-state.json` and the recorded controller PID. Continue with the
+normal verifier or next arm only after `arms.<arm>.run.status` is `complete` and `active_pid` is null.
+An OS reboot is not recoverable: stop the recorded WSL process group, preserve the candidate, and mark
+the run infrastructure-invalid rather than relaunching the consumed arm.
+
+### Scheduled Sortie qualification with visible feedback
+
+For a `qualification_only:true` manifest whose `preflight` and `prepare` phases passed, use the reusable
+Task Scheduler launcher. The hidden scheduled controller remains independent of OpenCode and the visible
+monitor. The default launch opens a separate PowerShell monitor window:
+
+```powershell
+$manifest = '_testenv/frontierharness-qualification.json'
+pwsh -NoProfile -File test/fixtures/frontierharness-local/launch-scheduled-arm.ps1 -Manifest $manifest
+```
+
+Use `-NoMonitor` when launching noninteractively. Open or reopen an observer at any time from the manifest's
+`runtime_root`; a one-shot check also works without a window:
+
+```powershell
+pwsh -NoProfile -File test/fixtures/frontierharness-local/monitor-scheduled-arm.ps1 `
+  -RuntimeRoot _testenv/frontierharness-qualification -Arm sortie
+pwsh -NoProfile -NonInteractive -File test/fixtures/frontierharness-local/monitor-scheduled-arm.ps1 `
+  -RuntimeRoot _testenv/frontierharness-qualification -Arm sortie -Once
+```
+
+The launcher exclusively creates `sortie-controller-launch.json` before registration and rejects an
+existing marker, scheduled task, attempted arm, or non-qualification manifest. Task Scheduler uses
+`MultipleInstances=IgnoreNew`; the runner's durable attempt guard remains authoritative. Closing the
+monitor or restarting OpenCode cannot stop, signal, restart, or duplicate the scheduled controller or its
+owned WSL process group. Reopening the monitor reads current durable state.
+
+The monitor emits only allowlisted fields from `frontierharness-state.json`, parsed
+`[frontierharness]` heartbeat JSON, and the controller's bounded completion record. It never prints the
+controller streams, raw agent events, prompts, auth data, credential paths, or arbitrary error lines.
+After recording the terminal result, remove the completed task explicitly with
+`Unregister-ScheduledTask -TaskName SortieDogs-Frontier-Sortie -Confirm:$false`; do not remove the launch
+marker or reuse that runtime root.
+
 Do not skip or repeat phases. Durable state consumes each arm attempt before OpenCode starts and each
 verifier attempt before the grader starts. Bare must complete before Sortie. Both use the same WSL
-OpenCode executable, model `openai/gpt-5.6-sol`, variant `high`, and official instruction bytes. A
+OpenCode executable and official instruction bytes. Legacy manifests use Sol/high for both arms. Product
+comparison manifests pin Bare to `openai/gpt-5.6-sol`/`high` and the Sortie coordinator to
+`openai/gpt-5.6-terra`/`high`; Sortie's installed default routing selects its child models. A
 120-second startup watchdog and 5400-second activity/workspace-progress watchdogs stop stalled process
 trees at the official agent timeout. The hard safety wall is also 5400 seconds. Retry count is zero.
 

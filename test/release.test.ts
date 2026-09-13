@@ -94,6 +94,52 @@ test('release batch freezes one tarball, preserves user work, publishes once and
   });
 });
 
+test('preflight runs the target release test without release side effects', async () => {
+  await fixture(async ({ root, batch, calls, git }) => {
+    const before = await git('diff'), head = await git('rev-parse', 'HEAD');
+    const result = await batch().preflight();
+    assert.deepEqual(result.tests, ['test/widget.test.ts']);
+    assert.equal(result.sideEffects, 'none');
+    assert.equal(await git('diff'), before);
+    assert.equal(await git('rev-parse', 'HEAD'), head);
+    assert.equal(calls.some((call: string) => /^(global|cli|gh release|git (commit|push|tag))/.test(call)), false);
+    await assert.rejects(readFile(join(root, '_testenv/releases', version, 'state.json')), /ENOENT/);
+  });
+});
+
+test('failed phase writes a typed receipt with the exact command and success clears it', async () => {
+  await fixture(async ({ root, batch, service }) => {
+    service.fail = 'npm test';
+    await assert.rejects(batch().prepare(), /npm test failed/);
+    const receipt = JSON.parse(await readFile(join(root, '_testenv/releases', version, 'failure.json'), 'utf8'));
+    assert.deepEqual({ phase: receipt.phase, command: receipt.command, toolCategory: receipt.toolCategory,
+      exitCode: receipt.exitCode, timedOut: receipt.timedOut, overflow: receipt.overflow },
+      { phase: 'npm-test', command: 'npm test', toolCategory: 'npm', exitCode: 1, timedOut: false, overflow: false });
+    assert.equal(typeof receipt.timestamp, 'string');
+    await batch().prepare();
+    await assert.rejects(readFile(join(root, '_testenv/releases', version, 'failure.json')), /ENOENT/);
+  });
+});
+
+test('resume after full test failure skips completed test phases', async () => {
+  await fixture(async ({ root, batch, calls }) => {
+    const release = batch(), execute = release.execute;
+    let failed = false;
+    release.execute = async (tool: string, args: string[], options: any) => {
+      if (!failed && tool === 'npm' && args[0] === 'run' && args[1] === 'test:full') {
+        failed = true; return { code: 1, stdout: '', stderr: 'full test failure' };
+      }
+      return execute(tool, args, options);
+    };
+    await assert.rejects(release.prepare(), /npm run test:full failed/);
+    const targetBefore = calls.filter((call: string) => call === 'node --experimental-strip-types').length;
+    const npmBefore = calls.filter((call: string) => call === 'npm test').length;
+    await batch().prepare();
+    assert.equal(calls.filter((call: string) => call === 'node --experimental-strip-types').length, targetBefore);
+    assert.equal(calls.filter((call: string) => call === 'npm test').length, npmBefore);
+  });
+});
+
 for (const failure of ['npm test', 'cli', 'global', 'git push', 'git tag', 'gh release']) {
   test(`release resumes safely after ${failure} failure`, async () => {
     await fixture(async ({ batch, service, calls }) => {

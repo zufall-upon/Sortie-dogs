@@ -51,15 +51,17 @@ export function productionExecutor(root, manifest, version) {
 async function main() {
   const [action, ...args] = process.argv.slice(2);
   const option = name => { const index = args.indexOf(name); if (index < 0 || !args[index + 1]) throw Error(`${name} required`); return args[index + 1]; };
-  if (!['prepare', 'verify-publish'].includes(action)) throw Error('Usage: release.mjs prepare|verify-publish --version <version> --manifest <path>');
+  if (!['preflight', 'prepare', 'verify-publish'].includes(action)) throw Error('Usage: release.mjs preflight|prepare|verify-publish --version <version> --manifest <path>');
   const root = resolve(import.meta.dirname, '..');
   const version = option('--version');
   const manifest = await readJSON(resolve(root, option('--manifest')));
   const release = new Release({ root, version, manifest, execute: productionExecutor(root, manifest, version),
     progress: name => process.stderr.write(`release ${version}: ${name}\n`) });
-  const result = action === 'prepare'
-    ? await withReleaseLock(join(root, '_testenv/releases'), () => release.prepare())
-    : await release.verifyPublish();
+  const result = action === 'preflight'
+    ? await release.preflight()
+    : action === 'prepare'
+      ? await withReleaseLock(join(root, '_testenv/releases'), () => release.prepare())
+      : await release.verifyPublish();
   console.log(JSON.stringify(result, null, 2));
   if (action === 'prepare') {
     const quote = value => `'${value.replaceAll("'", "''")}'`;

@@ -10,6 +10,7 @@ import {
   assertBareIsolation,
   assertRunArmAllowed,
   assertVerifyAllowed,
+  assertSnapshotVerifyAllowed,
   buildSpawnSpec,
   buildVerifierEnvironment,
   computeSummary,
@@ -18,6 +19,7 @@ import {
   deliveryResult,
   expectedOperation,
   expectedOperationEvent,
+  recordPreAgentFailure,
   execute,
   summarize,
   cleanup,
@@ -29,6 +31,27 @@ import {
 } from "./fixtures/frontierharness-local/run-local-case-study.mjs";
 
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
+
+test("diagnostic snapshot verification preserves terminal failure and shares the one-shot guard", () => {
+  const state = { stopped: { reason: "delivery-not-complete" }, arms: { sortie: {
+    active_pid: null, run: { status: "complete", exit: 0, timed_out: false,
+      operation_failure: null, terminal_outcome: "NEED_DECISION" },
+  } } };
+  const before = JSON.stringify(state);
+  assertSnapshotVerifyAllowed(state, "sortie", true);
+  assert.equal(JSON.stringify(state), before);
+  assert.throws(() => assertVerifyAllowed(state, "sortie"));
+  assert.throws(() => assertSnapshotVerifyAllowed(state, "sortie", false));
+  assert.throws(() => assertSnapshotVerifyAllowed({ ...state, arms: { sortie: {
+    ...state.arms.sortie, verification: { attempted: true },
+  } } }, "sortie", true));
+  assert.throws(() => assertSnapshotVerifyAllowed({ ...state, arms: { sortie: {
+    ...state.arms.sortie, active_pid: 42,
+  } } }, "sortie", true));
+  assert.throws(() => assertSnapshotVerifyAllowed({ ...state, arms: { sortie: {
+    ...state.arms.sortie, run: { ...state.arms.sortie.run, exit: 15 },
+  } } }, "sortie", true));
+});
 const officialPaths = [
   "instruction.md", "task.toml", "tests/test.patch", "tests/config.json", "tests/grader.py", "tests/test.sh",
 ];
@@ -59,7 +82,7 @@ function manifest(root: string): Record<string, unknown> {
         args: [], probe_args: ["--version"], probe_exit: 0 }])),
     verifier: { environment: "wsl", result: { reward_file: "verifier/reward.json", reward_field: "reward",
       count_fields: rewardFields } },
-    protocol: { wall_seconds: 5400, startup_seconds: 120, activity_seconds: 5400, progress_seconds: 5400,
+    protocol: { wall_seconds: 5400, startup_seconds: 5400, activity_seconds: 5400, progress_seconds: 5400,
       retry_count: 0, attempts_per_arm: 1, arm_order: ["bare", "sortie"] },
   };
 }
@@ -92,6 +115,25 @@ test("published manifest schema accepts the runner protocol", async () => {
   value.expected_operation.sortie.min_patch_bytes = 0;
   assert.equal(validate(value), false);
   assert.throws(() => validateManifest(value, join(tmpdir(), "schema-protocol", "manifest.json"), join(tmpdir(), "schema-protocol")));
+});
+
+test("product comparison pins Bare Sol and Sortie Terra independently", async () => {
+  const root = join(tmpdir(), "frontier-product-models");
+  const value = manifest(root) as any;
+  delete value.opencode.model;
+  delete value.opencode.variant;
+  value.opencode.arm_models = {
+    bare: { model: "openai/gpt-5.6-sol", variant: "high" },
+    sortie: { model: "openai/gpt-5.6-terra", variant: "high" },
+  };
+  const schema = JSON.parse(await readFile(new URL("./fixtures/frontierharness-local/manifest.schema.json", import.meta.url), "utf8"));
+  const validate = new Ajv2020().compile(schema);
+  assert.equal(validate(value), true, JSON.stringify(validate.errors));
+  assert.doesNotThrow(() => validateManifest(value, join(root, "manifest.json"), root));
+  value.opencode.arm_models.sortie.model = "openai/gpt-5.6-sol";
+  assert.equal(validate(value), false);
+  assert.throws(() => validateManifest(value, join(root, "manifest.json"), root),
+    (error: Error & { gate?: string }) => error.gate === "opencode-arm-models");
 });
 
 test("rejects approved pin and byte hash mismatches", async () => {
@@ -169,6 +211,27 @@ test("sanitized output excludes credential paths/content and raw protocol materi
   assert.deepEqual((output as any).token_metric_references, ["$.usage.tokens"]);
 });
 
+test("scheduled qualification monitor is allowlisted and controller-independent", async () => {
+  const fixture = new URL("./fixtures/frontierharness-local/", import.meta.url);
+  const launcher = await readFile(new URL("launch-scheduled-arm.ps1", fixture), "utf8");
+  const monitor = await readFile(new URL("monitor-scheduled-arm.ps1", fixture), "utf8");
+  assert.match(launcher, /Register-ScheduledTask/u);
+  assert.match(launcher, /MultipleInstances IgnoreNew/u);
+  assert.match(launcher, /FileMode\]::CreateNew/u);
+  assert.match(launcher, /qualification_only -ne \$true/u);
+  const monitorResolution = launcher.indexOf("$monitor = Join-Path $PSScriptRoot 'monitor-scheduled-arm.ps1'");
+  const monitorLaunch = launcher.indexOf("Start-Process -FilePath $powerShell -WindowStyle Normal");
+  assert.notEqual(monitorResolution, -1);
+  assert.notEqual(monitorLaunch, -1);
+  assert.ok(monitorResolution < monitorLaunch);
+  assert.match(launcher, /Start-Process[\s\S]*-ArgumentList[\s\S]*\(Quote-TaskArgument \$monitor\)/u);
+  assert.match(monitor, /StartsWith\('\[frontierharness\] '\)/u);
+  for (const field of ["phase", "elapsed_seconds", "last_activity_seconds", "last_progress_seconds",
+    "progress_changes", "stdout_bytes", "stderr_bytes"]) assert.match(monitor, new RegExp(`\\b${field}\\b`, "u"));
+  assert.doesNotMatch(monitor, /Stop-ScheduledTask|taskkill|wsl\.exe|\.stdout\.jsonl/u);
+  assert.doesNotMatch(monitor, /auth_file|credential|prompt|raw_log|Get-Credential/u);
+});
+
 test("refuses ratios unless both rewards are one and all metrics exist", () => {
   assert.deepEqual(computeSummary({ bare: { reward: 0, duration_ms: 20, cost: 2 },
     sortie: { reward: 1, duration_ms: 10, cost: 1 } }),
@@ -193,26 +256,29 @@ test("expected-operation failure blocks both remaining arms and verifiers", () =
     implementation_children: ["ses_child"], terminal_outcome: "DONE" };
   assert.equal(expectedOperation(run, "sortie").status, "pass");
   for (const change of [{ patch_bytes: 0 }, { implementation_children: [] },
-    { root_session_id: null }, { terminal_outcome: "INTERRUPTED" }, { event_errors: 1 }]) {
+    { root_session_id: null }, { event_errors: 1 }]) {
     assert.equal(expectedOperation({ ...run, ...change }, "sortie").status, "fail");
   }
+  // Completion is agent stop plus a frozen candidate; terminal delivery gates only when declared.
+  const undelivered = { ...run, terminal_outcome: "NEED_DECISION" };
+  assert.equal(expectedOperation(undelivered, "sortie").status, "pass");
+  assert.equal(expectedOperation(undelivered, "sortie", { min_patch_bytes: 1,
+    min_implementation_children: 1, terminal_outcome: "DONE" }).reason, "delivery-not-complete");
   const state = { stopped: { reason: "no-delivered-patch" } };
   for (const arm of ["bare", "sortie"]) {
     assert.throws(() => assertRunArmAllowed(state, arm), /Benchmark stopped/u);
     assert.throws(() => assertVerifyAllowed(state, arm), /Benchmark stopped/u);
   }
-  assert.equal(expectedOperationEvent({ part: { type: "tool", tool: "task", state: { status: "error" } } }), "agent-event-error");
-  assert.equal(expectedOperationEvent({ part: { type: "tool", tool: "read",
-    state: { status: "error", error: "File not found: /project/ast/type.go" } } }), null);
-  assert.equal(expectedOperationEvent({ part: { type: "tool", tool: "read",
-    state: { status: "error", error: "Offset 495 is out of range for this file (458 lines)" } } }), null);
-  for (const tool of ["read", "glob", "grep", "task", "bash"]) {
+  assert.equal(expectedOperationEvent({ type: "error" }), "agent-event-error");
+  for (const tool of ["read", "glob", "grep", "task", "bash", "apply_patch"]) {
     assert.equal(expectedOperationEvent({ part: { type: "tool", tool,
-      state: { status: "error", error: "Permission denied" } } }), "agent-event-error");
+      state: { status: "error", error: "Permission denied" } } }), null);
   }
-  assert.equal(eventMetadata(Buffer.from(JSON.stringify({
-    part: { type: "tool", tool: "read", state: { status: "error", error: "File not found: /project/ast/type.go" } },
-  }))).event_errors, 0);
+  const recoverable = eventMetadata(Buffer.from(JSON.stringify({
+    part: { type: "tool", tool: "apply_patch", state: { status: "error", error: "Invalid patch format" } },
+  })));
+  assert.equal(recoverable.event_errors, 0);
+  assert.equal(recoverable.tool_errors, 1);
   assert.equal(expectedOperationEvent({ part: { type: "tool", state: { status: "running" } } }), null);
 });
 
@@ -246,6 +312,59 @@ test("first error stops a live process and partial summary permits cleanup witho
     const saved = JSON.parse(await readFile(join(root, "frontierharness-state.json"), "utf8"));
     assert.equal(saved.arms.bare.verification, undefined);
     assert.equal(saved.arms.sortie, undefined);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("pre-agent failure records only fixed terminal state and permits summary plus cleanup", async () => {
+  const root = await mkdtemp(join(process.cwd(), "_testenv", "frontier-pre-agent-"));
+  try {
+    const state: any = { preflight: { status: "pass" }, prepared: { status: "pass" }, arms: {
+      sortie: { attempted: true, started_at: "2026-09-10T00:00:00.000Z", active_pid: null },
+    } };
+    const run = recordPreAgentFailure(state, "sortie", "2026-09-10T00:00:01.000Z");
+    assert.deepEqual(run, { status: "complete", phase: "pre-agent", exit: 1, signal: null,
+      timed_out: false, operation_failure: "pre-agent-failure",
+      pre_agent_gate: "pre-agent-failure",
+      expected_operation: { status: "fail", reason: "pre-agent-failure" } });
+    assert.equal(state.arms.sortie.active_pid, null);
+    assert.deepEqual(state.stopped, { arm: "sortie", reason: "pre-agent-failure",
+      at: "2026-09-10T00:00:01.000Z" });
+    const encoded = JSON.stringify(state);
+    for (const forbidden of ["error", "message", "stack", "path", "prompt", "auth", "credential", "raw_log"])
+      assert.equal(encoded.includes(`"${forbidden}"`), false);
+    assert.equal(expectedOperation(run, "sortie").reason, "pre-agent-failure");
+    assert.throws(() => assertVerifyAllowed(state, "sortie"), /Benchmark stopped/u);
+
+    await writeFile(join(root, "frontierharness-state.json"), JSON.stringify(state));
+    await mkdir(join(root, "workspaces"));
+    const context = { runtimeRoot: root, manifest: manifest(process.cwd()) };
+    const report = await summarize(context);
+    assert.equal(report.stopped.reason, "pre-agent-failure");
+    assert.equal(report.arms.sortie.phase, "pre-agent");
+    assert.equal(report.arms.sortie.task_correctness, "UNKNOWN");
+    assert.equal(report.arms.sortie.verification, null);
+    assert.equal(report.comparison.comparison_eligible, false);
+    assert.equal((await cleanup(context, true)).remaining_agent_processes, 0);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("diagnostic correctness never promotes NEED_DECISION into a matched success", async () => {
+  const root = await mkdtemp(join(process.cwd(), "_testenv", "frontier-diagnostic-"));
+  try {
+    for (const [reward, expected] of [[1, "PASS"], [0, "FAIL"], [null, "UNKNOWN"]]) {
+      await writeFile(join(root, "frontierharness-state.json"), JSON.stringify({
+        stopped: { arm: "sortie", reason: "delivery-not-complete" }, arms: { sortie: {
+          run: { status: "complete", exit: 0, terminal_outcome: "NEED_DECISION" },
+          verification: { attempted: true, status: "complete", exit: 0, timed_out: false, reward },
+        } },
+      }));
+      const report = await summarize({ runtimeRoot: root, manifest: manifest(process.cwd()) });
+      assert.equal(report.arms.sortie.task_correctness, expected);
+      assert.equal(report.arms.sortie.terminal_outcome, "NEED_DECISION");
+      assert.equal(report.comparison.comparison_eligible, false);
+      assert.equal(report.comparison.speed_ratio, null);
+      assert.equal(report.comparison.cost_ratio, null);
+    }
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

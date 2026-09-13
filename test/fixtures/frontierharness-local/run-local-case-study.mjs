@@ -9,6 +9,9 @@ const DEEPSWE_COMMIT = "435ee89ec2f2e2289f33b0da4f992f0b7b7266b9";
 const ANKO_BASE = "3f269a72ff69398b1250c584171f32d12c0d8085";
 const TASK_ID = "datacurve/anko-typed-variable-bindings";
 const ARMS = ["bare", "sortie"];
+// Agent and harness control state is never part of a graded coding candidate.
+const CONTROL_PATHS = [".git/", ".opencode/", ".sortie-dogs/"];
+const BENCHMARK_GIT_IDENTITY = { "user.name": "zufall-upon", "user.email": "zufall@s151.xrea.com" };
 const OFFICIAL_FILES = [
   "instruction.md", "task.toml", "tests/test.patch", "tests/config.json", "tests/grader.py", "tests/test.sh",
 ];
@@ -20,7 +23,7 @@ const STATE_FILE = "frontierharness-state.json";
 const REPORT_FILE = "sanitized-summary.json";
 const OUTPUT_LIMIT = 64 * 1024 * 1024;
 const DEFAULT_WALL_SECONDS = 5400;
-const DEFAULT_STARTUP_SECONDS = 120;
+const DEFAULT_STARTUP_SECONDS = 5400;
 const DEFAULT_ACTIVITY_SECONDS = 5400;
 const DEFAULT_PROGRESS_SECONDS = 5400;
 const HEARTBEAT_SECONDS = 120;
@@ -132,11 +135,23 @@ export function validateManifest(value, manifestPath, repositoryRoot = process.c
     "source", "Source repository and approved base are required.");
   exactKeys(value.source, ["repository", "base"], "source-keys");
   invariant(record(value.opencode) && string(value.opencode.wsl_executable) && string(value.opencode.executable) &&
-    string(value.opencode.version) && string(value.opencode.auth_file) &&
-    value.opencode.model === "openai/gpt-5.6-sol" && value.opencode.variant === "high",
-  "opencode", "Pinned WSL OpenCode, auth presence path, model, and high variant are required.");
-  exactKeys(value.opencode, ["wsl_executable", "executable", "version", "auth_file", "model", "variant"],
-    "opencode-keys");
+    string(value.opencode.version) && string(value.opencode.auth_file),
+  "opencode", "Pinned WSL OpenCode and auth presence path are required.");
+  const legacyModel = value.opencode.arm_models === undefined;
+  exactKeys(value.opencode, legacyModel
+    ? ["wsl_executable", "executable", "version", "auth_file", "model", "variant"]
+    : ["wsl_executable", "executable", "version", "auth_file", "arm_models"], "opencode-keys");
+  if (legacyModel) invariant(value.opencode.model === "openai/gpt-5.6-sol" && value.opencode.variant === "high",
+    "opencode", "Legacy runs require the pinned Sol/high model.");
+  else {
+    exactKeys(value.opencode.arm_models, ARMS, "opencode-arm-models");
+    for (const arm of ARMS) exactKeys(value.opencode.arm_models[arm], ["model", "variant"], `opencode-${arm}-model`);
+    invariant(value.opencode.arm_models.bare.model === "openai/gpt-5.6-sol" &&
+      value.opencode.arm_models.bare.variant === "high" &&
+      value.opencode.arm_models.sortie.model === "openai/gpt-5.6-terra" &&
+      value.opencode.arm_models.sortie.variant === "high", "opencode-arm-models",
+    "Product comparison requires Bare Sol/high and Sortie Terra/high.");
+  }
   invariant(record(value.tools), "tools", "Tool commands are required.");
   exactKeys(value.tools, TOOL_NAMES, "tool-keys");
   for (const name of TOOL_NAMES) {
@@ -177,6 +192,10 @@ export function validateManifest(value, manifestPath, repositoryRoot = process.c
     "retry_count", "attempts_per_arm", "arm_order"], "protocol-keys");
   return { manifest: value, manifestPath: resolve(manifestPath), repositoryRoot: resolve(repositoryRoot),
     runtimeRoot, officialRoot, packagePath };
+}
+
+function armModel(manifest, arm) {
+  return manifest.opencode.arm_models?.[arm] ?? { model: manifest.opencode.model, variant: manifest.opencode.variant };
 }
 
 export async function verifyPinnedFiles(context) {
@@ -456,6 +475,18 @@ export function assertVerifyAllowed(state, arm, qualificationOnly = false) {
   invariant(!state.arms?.[arm]?.verification?.attempted, "verify-once", "Verifier already consumed its one run.");
 }
 
+export function assertSnapshotVerifyAllowed(state, arm, confirmed) {
+  invariant(confirmed === true, "snapshot-confirm", "Snapshot verification requires --confirm.");
+  invariant(ARMS.includes(arm), "arm", "Arm must be bare or sortie.");
+  const candidate = state.arms?.[arm];
+  const recovered = candidate?.run?.status === "snapshot-only" && candidate.run.exit === null &&
+    candidate.run.recovery?.writers_stopped === true && candidate.run.recovery?.controller_exit_unavailable === true;
+  invariant(candidate?.active_pid == null && (recovered || (candidate?.run?.status === "complete" &&
+    candidate.run.exit === 0 && !candidate.run.timed_out && !candidate.run.operation_failure)),
+  "snapshot-incomplete", "Snapshot requires an exited, non-interrupted agent run.");
+  invariant(!candidate.verification?.attempted, "verify-once", "Verifier already consumed its one run.");
+}
+
 function forbiddenText(value) {
   return /sortie-dogs|dog-coordinator|dog-worker|sortie_/iu.test(value);
 }
@@ -527,6 +558,10 @@ async function cloneAtBase(context, destination) {
   await mkdir(hooks, { recursive: true });
   await runTool(context.manifest.tools.git, ["config", "core.hooksPath", ".git/frontierharness-empty-hooks"],
     { cwd: destination }, "disable-hooks");
+  // Both arms receive one identical committer identity so Git bookkeeping cannot decide correctness.
+  for (const [key, value] of Object.entries(BENCHMARK_GIT_IDENTITY)) {
+    await runTool(context.manifest.tools.git, ["config", key, value], { cwd: destination }, "commit-identity");
+  }
   const head = (await runTool(context.manifest.tools.git, ["rev-parse", "HEAD"], { cwd: destination }, "head-pin"))
     .stdout.toString("utf8").trim();
   invariant(head === ANKO_BASE, "base-mismatch", "Fresh workspace HEAD differs from the approved Anko base.");
@@ -556,7 +591,7 @@ async function inspectResolvedConfig(context, arm, workspace, roots) {
   const script = context.manifest.tools.script;
   const result = await runWsl(context.manifest, cwd, script.executable,
     [...script.args, "-q", "-e", "-c", 'exec "$OPENCODE_EXE" debug config', "/dev/null"],
-    environment, { timeoutMs: 120_000 }, "resolved-config");
+    environment, { timeoutMs: 300_000 }, "resolved-config");
   let config;
   try { config = JSON.parse(completeJson(result.stdout.toString("utf8"))); }
   catch { throw new HarnessFailure("resolved-config-json", "OpenCode did not emit one resolved JSON configuration."); }
@@ -622,6 +657,7 @@ export function eventMetadata(stdout) {
   const metricReferences = new Set();
   const usage = new Map();
   let eventErrors = 0;
+  let toolErrors = 0;
   const implementationChildren = new Set();
   let terminalOutcome = null;
   for (const line of stdout.toString("utf8").split(/\r?\n/u)) {
@@ -629,6 +665,7 @@ export function eventMetadata(stdout) {
     try { value = JSON.parse(line); } catch { continue; }
     if (!record(value)) continue;
     if (expectedOperationEvent(value) !== null) eventErrors += 1;
+    if (record(value.part) && value.part.type === "tool" && value.part.state?.status === "error") toolErrors += 1;
     const session = value.sessionID ?? value.part?.sessionID;
     if (rootSessionId === null && typeof session === "string" && /^ses_[A-Za-z0-9_-]+$/u.test(session)) rootSessionId = session;
     const part = value.part;
@@ -662,28 +699,46 @@ export function eventMetadata(stdout) {
     else costAvailable = false;
   }
   return { root_session_id: rootSessionId, token_metric_references: [...metricReferences].sort().slice(0, 64),
-    cost: costAvailable ? cost : null, event_errors: eventErrors,
+    cost: costAvailable ? cost : null, event_errors: eventErrors, tool_errors: toolErrors,
     implementation_children: [...implementationChildren], terminal_outcome: terminalOutcome,
     usage: { coverage: "cli-stream-only", steps: usage.size, tokens: tokensAvailable ? totals : null,
       cost_provenance: costAvailable ? "host-reported-not-invoice" : "unavailable" },
     stdout_sha256: sha256Bytes(stdout) };
 }
 
-async function collectPatch(context, arm, workspace) {
+/** Freeze the stopped candidate in a copy so untracked source is graded without touching the original. */
+async function freezeCandidate(context, arm, workspace) {
+  const candidate = join(context.runtimeRoot, "candidates", arm);
+  await rm(candidate, { recursive: true, force: true });
+  await cp(workspace, candidate, { recursive: true });
+  const untracked = (await runTool(context.manifest.tools.git, ["ls-files", "--others", "--exclude-standard"],
+    { cwd: candidate }, "candidate-untracked")).stdout.toString("utf8").split(/\r?\n/u).filter(Boolean);
+  const source = untracked.filter((path) => !CONTROL_PATHS.some((prefix) => path.startsWith(prefix)));
+  if (source.length > 0) {
+    await runTool(context.manifest.tools.git, ["add", "--intent-to-add", "--", ...source],
+      { cwd: candidate }, "candidate-untracked-source");
+  }
+  return { candidate, untracked_source: source.sort(),
+    excluded_control_paths: untracked.filter((path) => !source.includes(path)).sort() };
+}
+
+export async function collectPatch(context, arm, workspace) {
+  const frozen = await freezeCandidate(context, arm, workspace);
   const patchResult = await runTool(context.manifest.tools.git,
-    ["diff", "--binary", ANKO_BASE], { cwd: workspace }, "model-patch");
+    ["diff", "--binary", ANKO_BASE], { cwd: frozen.candidate }, "model-patch");
   const evidence = join(context.runtimeRoot, "evidence", arm);
   await mkdir(evidence, { recursive: true });
   const patchPath = join(evidence, "model.patch");
   await writeFile(patchPath, patchResult.stdout, { mode: 0o600 });
   const changedResult = await runTool(context.manifest.tools.git,
-    ["diff", "--name-only", ANKO_BASE], { cwd: workspace }, "changed-paths");
+    ["diff", "--name-only", ANKO_BASE], { cwd: frozen.candidate }, "changed-paths");
   const changedPaths = changedResult.stdout.toString("utf8").split(/\r?\n/u).filter(Boolean).sort();
   const statusResult = await execute(context.manifest.tools.git.executable,
     commandArgs(context.manifest.tools.git, ["status", "--porcelain=v1"]), { cwd: workspace });
   invariant(statusResult.code === 0, "worktree-status", "Unable to classify post-run worktree status.");
   return { patchPath, patch_sha256: sha256Bytes(patchResult.stdout), patch_bytes: patchResult.stdout.length,
     changed_paths: changedPaths, uncommitted_present: statusResult.stdout.length > 0,
+    untracked_source: frozen.untracked_source, excluded_control_paths: frozen.excluded_control_paths,
     status_sha256: sha256Bytes(statusResult.stdout) };
 }
 
@@ -740,9 +795,10 @@ export function deliveryResult(run, verification) {
   return { outcome: reason === null ? "succeeded" : "failed", reason };
 }
 
+// Completion is agent stop plus a frozen candidate. Terminal delivery is graded separately and is
+// only gated when a manifest declares it explicitly, as in qualification mode.
 export function expectedOperation(run, arm, expected = {
-  min_patch_bytes: 1, min_implementation_children: arm === "sortie" ? 1 : 0,
-  terminal_outcome: arm === "sortie" ? "DONE" : null,
+  min_patch_bytes: 1, min_implementation_children: arm === "sortie" ? 1 : 0, terminal_outcome: null,
 }) {
   const reason = run.operation_failure ?? (run.exit !== 0 || run.timed_out ? "agent-process-failed" :
     run.event_errors > 0 ? "agent-event-error" :
@@ -753,13 +809,20 @@ export function expectedOperation(run, arm, expected = {
   return { status: reason === null ? "pass" : "fail", reason };
 }
 
+// Only transport/CLI failures invalidate a measured run. A failed tool call is ordinary recoverable
+// agent behavior, is counted as tool_errors, and never stops the benchmark on its own.
 export function expectedOperationEvent(event) {
-  const exploratoryMiss = event?.part?.type === "tool" && event.part.state?.status === "error" &&
-    event.part.tool === "read" && typeof event.part.state.error === "string" &&
-    (/^File not found: /u.test(event.part.state.error) ||
-      /^Offset \d+ is out of range for this file \(\d+ lines\)$/u.test(event.part.state.error));
-  return event?.type === "error" || (event?.part?.type === "tool" && event.part.state?.status === "error" && !exploratoryMiss)
-    ? "agent-event-error" : null;
+  return event?.type === "error" ? "agent-event-error" : null;
+}
+
+export function recordPreAgentFailure(state, arm, at = new Date().toISOString(), gate = "pre-agent-failure") {
+  const run = { status: "complete", phase: "pre-agent", exit: 1, signal: null, timed_out: false,
+    operation_failure: "pre-agent-failure", pre_agent_gate: gate };
+  run.expected_operation = expectedOperation(run, arm);
+  state.arms[arm].active_pid = null;
+  state.arms[arm].run = run;
+  state.stopped = { arm, reason: "pre-agent-failure", at };
+  return run;
 }
 
 async function preflight(context) {
@@ -839,6 +902,13 @@ async function prepare(context) {
   const goEnvironment = pinnedGoEnvironment(context.manifest);
   await runWsl(context.manifest, "/", "/usr/bin/mkdir", ["-p", `${goEnvironment.GOPATH}/bin`], {},
     { timeoutMs: 30_000 }, "prepare-gopath-bin");
+  // Publish pinned tools where `go env GOPATH`/bin resolves them, so neither arm must search the host.
+  for (const tool of ["goyacc", "go_ctrf_json_reporter"]) {
+    const executable = context.manifest.tools[tool].executable;
+    await runWsl(context.manifest, "/", "/usr/bin/cp",
+      [executable, `${goEnvironment.GOPATH}/bin/${posix.basename(executable)}`], {},
+      { timeoutMs: 30_000 }, "prepare-gopath-tool");
+  }
   const official = await copyOfficial(context);
   const officialWsl = await toWslPath(context.manifest, official);
   const workspaces = {};
@@ -885,25 +955,41 @@ async function runArm(context, arm) {
   const roots = { opencode: join(context.runtimeRoot, "configs", arm, "opencode"),
     xdg: join(context.runtimeRoot, "configs", arm, "xdg") };
   let packageEvidence = null;
-  if (arm === "sortie") packageEvidence = await installSortie(context, workspace, roots);
-  const inspected = await inspectResolvedConfig(context, arm, workspace, roots);
-  if (arm === "sortie") invariant(Array.isArray(inspected.config.plugin) &&
-    inspected.config.plugin.length === 1 && typeof inspected.config.plugin[0] === "string" &&
-    forbiddenText(inspected.config.plugin[0]),
-  "sortie-plugin-config", "Sortie resolved config is not the exact project-local plugin.");
-  const instruction = await readFile(join(context.runtimeRoot, "official", "instruction.md"), "utf8");
-  const preRunStatus = await runTool(context.manifest.tools.git, ["status", "--porcelain=v1"],
-    { cwd: workspace }, "pre-run-cleanliness");
-  invariant(preRunStatus.stdout.length === 0, "pre-run-dirty", "Arm workspace is dirty before the timed run.");
-  const cwd = await toWslPath(context.manifest, workspace);
-  const args = ["run", "--dir", cwd, "--format", "json", "--model", context.manifest.opencode.model,
-    "--variant", context.manifest.opencode.variant, "--agent", arm === "sortie" ? "dog-coordinator" : "build", instruction];
+  let inspected;
+  let preRunStatus;
+  let cwd;
+  let selectedModel;
+  let args;
+  let groupFile;
+  let groupFileWsl;
+  let spec;
+  try {
+    if (arm === "sortie") packageEvidence = await installSortie(context, workspace, roots);
+    inspected = await inspectResolvedConfig(context, arm, workspace, roots);
+    if (arm === "sortie") invariant(Array.isArray(inspected.config.plugin) &&
+      inspected.config.plugin.length === 1 && typeof inspected.config.plugin[0] === "string" &&
+      forbiddenText(inspected.config.plugin[0]),
+    "sortie-plugin-config", "Sortie resolved config is not the exact project-local plugin.");
+    const instruction = await readFile(join(context.runtimeRoot, "official", "instruction.md"), "utf8");
+    preRunStatus = await runTool(context.manifest.tools.git, ["status", "--porcelain=v1"],
+      { cwd: workspace }, "pre-run-cleanliness");
+    invariant(preRunStatus.stdout.length === 0, "pre-run-dirty", "Arm workspace is dirty before the timed run.");
+    cwd = await toWslPath(context.manifest, workspace);
+    selectedModel = armModel(context.manifest, arm);
+    args = ["run", "--dir", cwd, "--format", "json", "--model", selectedModel.model,
+      "--variant", selectedModel.variant, "--agent", arm === "sortie" ? "dog-coordinator" : "build", instruction];
+    groupFile = join(context.runtimeRoot, `${arm}-process-group.pid`);
+    groupFileWsl = await toWslPath(context.manifest, groupFile);
+    spec = ownedWslSpec(context.manifest, cwd, context.manifest.opencode.executable, args,
+      inspected.environment, groupFileWsl);
+  } catch (error) {
+    recordPreAgentFailure(state, arm, new Date().toISOString(),
+      error instanceof HarnessFailure ? error.gate : "internal");
+    await saveState(context.runtimeRoot, state);
+    throw new HarnessFailure("pre-agent-failure", "Arm failed before agent start; sanitized terminal state saved.");
+  }
   const started = Date.now();
-  const groupFile = join(context.runtimeRoot, `${arm}-process-group.pid`);
-  const groupFileWsl = await toWslPath(context.manifest, groupFile);
   const stopGroup = () => stopWslGroup(context.manifest, groupFile);
-  const spec = ownedWslSpec(context.manifest, cwd, context.manifest.opencode.executable, args,
-    inspected.environment, groupFileWsl);
   const result = await execute(spec.executable, spec.args, { timeoutMs: DEFAULT_WALL_SECONDS * 1000,
     cwd: spec.cwd,
     heartbeat: `run-arm:${arm}`,
@@ -932,8 +1018,8 @@ async function runArm(context, arm) {
     implementation_children: metadata.implementation_children, terminal_outcome: metadata.terminal_outcome,
     duration_ms: Date.now() - started, root_session_id: metadata.root_session_id,
     token_metric_references: metadata.token_metric_references, cost: metadata.cost, stdout_sha256: metadata.stdout_sha256,
-    stderr_sha256: sha256Bytes(result.stderr), model: context.manifest.opencode.model,
-    variant: context.manifest.opencode.variant, package: packageEvidence,
+    stderr_sha256: sha256Bytes(result.stderr), model: selectedModel.model,
+    variant: selectedModel.variant, package: packageEvidence,
     isolation: inspected.isolation, resolved_config_sha256: sha256Bytes(JSON.stringify(inspected.config)),
     patch_sha256: patch.patch_sha256,
     patch_bytes: patch.patch_bytes, changed_paths: patch.changed_paths, uncommitted_present: patch.uncommitted_present,
@@ -972,7 +1058,8 @@ async function replaceInfrastructureArm(context, arm, gate, confirmed) {
     "Infrastructure replacement requires --confirm and --gate.");
   const state = await readState(context.runtimeRoot);
   const attempted = state.arms?.[arm];
-  invariant(attempted?.attempted === true && attempted.run === undefined && attempted.active_pid === null,
+  invariant(attempted?.attempted === true && attempted.active_pid === null &&
+    (attempted.run === undefined || attempted.run?.phase === "pre-agent"),
     "replacement-order", "Only a stopped pre-agent infrastructure attempt can be replaced.");
   state.infrastructure_invalid ??= [];
   state.infrastructure_invalid.push({ arm, gate, started_at: attempted.started_at,
@@ -999,6 +1086,31 @@ async function replaceInfrastructureVerifier(context, arm, gate, confirmed) {
   delete state.arms[arm].verification;
   await saveState(context.runtimeRoot, state);
   return state.infrastructure_invalid.at(-1);
+}
+
+async function recoverStoppedSnapshot(context, arm, confirmed) {
+  invariant(confirmed === true, "snapshot-recovery-confirm", "Stopped snapshot recovery requires --confirm.");
+  const state = await readState(context.runtimeRoot);
+  const attempted = state.arms?.[arm];
+  invariant(attempted?.attempted === true && attempted.run === undefined,
+    "snapshot-recovery-order", "Recovery requires one attempted arm without a finalized run.");
+  await stopWslGroup(context.manifest, join(context.runtimeRoot, `${arm}-process-group.pid`));
+  const workspace = join(context.runtimeRoot, "workspaces", arm);
+  const patch = await collectPatch(context, arm, workspace);
+  attempted.active_pid = null;
+  attempted.run = { status: "snapshot-only", exit: null, signal: null, timed_out: null,
+    operation_failure: "controller-exit-unavailable", event_errors: null, tool_errors: null,
+    usage: { coverage: "unavailable", steps: null, tokens: null, cost_provenance: "unavailable" },
+    implementation_children: null, terminal_outcome: null,
+    duration_ms: null, root_session_id: null, token_metric_references: [], cost: null,
+    model: armModel(context.manifest, arm).model, variant: armModel(context.manifest, arm).variant,
+    patch_sha256: patch.patch_sha256, patch_bytes: patch.patch_bytes, changed_paths: patch.changed_paths,
+    uncommitted_present: patch.uncommitted_present, untracked_source: patch.untracked_source,
+    excluded_control_paths: patch.excluded_control_paths, status_sha256: patch.status_sha256,
+    recovery: { writers_stopped: true, controller_exit_unavailable: true, recovered_at: new Date().toISOString() } };
+  state.stopped = { arm, reason: "controller-exit-unavailable", at: new Date().toISOString() };
+  await saveState(context.runtimeRoot, state);
+  return sanitizeForReport(attempted.run, reportSecrets(context.manifest));
 }
 
 async function inspectArm(context, arm) {
@@ -1042,10 +1154,23 @@ export function createLocalVerifierConfig(source, logsPath) {
   return Buffer.from(`${JSON.stringify(config, null, 2)}\n`, "utf8");
 }
 
-async function verifyArm(context, arm) {
+export async function verifyArm(context, arm, snapshot = false, confirmed = false) {
   const state = await readState(context.runtimeRoot);
-  assertVerifyAllowed(state, arm, context.manifest.qualification_only === true);
-  state.arms[arm].verification = { attempted: true, started_at: new Date().toISOString(), active_pid: null };
+  if (snapshot) {
+    assertSnapshotVerifyAllowed(state, arm, confirmed);
+    const workspace = join(context.runtimeRoot,
+      state.arms[arm].run.status === "snapshot-only" ? "candidates" : "workspaces", arm);
+    const patch = await runTool(context.manifest.tools.git, ["diff", "--binary", ANKO_BASE],
+      { cwd: workspace }, "snapshot-diff");
+    const untracked = await runTool(context.manifest.tools.git, ["ls-files", "--others", "--exclude-standard"],
+      { cwd: workspace }, "snapshot-untracked");
+    invariant(untracked.stdout.toString("utf8").trim() === "", "snapshot-untracked",
+      "Untracked source is not represented by the retained patch.");
+    invariant(sha256Bytes(patch.stdout) === state.arms[arm].run.patch_sha256,
+      "snapshot-drift", "Workspace no longer matches its recorded terminal patch.");
+  } else assertVerifyAllowed(state, arm, context.manifest.qualification_only === true);
+  state.arms[arm].verification = { attempted: true, started_at: new Date().toISOString(), active_pid: null,
+    mode: snapshot ? "diagnostic-snapshot" : "measured", frozen_patch_sha256: state.arms[arm].run.patch_sha256 };
   await saveState(context.runtimeRoot, state);
   const verifier = join(context.runtimeRoot, "verifiers", arm);
   await cloneAtBase(context, verifier);
@@ -1127,8 +1252,15 @@ export async function summarize(context) {
   if (state.stopped) {
     const report = sanitizeForReport({ schema_version: 1, task_id: TASK_ID, unofficial: true,
       methodology_comparable: false, leaderboard: false, public_publish: false,
-      stopped: state.stopped, arms: Object.fromEntries(ARMS.map((arm) => [arm,
-        state.arms?.[arm]?.run ?? { status: "not-run" }])),
+      stopped: state.stopped, arms: Object.fromEntries(ARMS.map((arm) => {
+        const candidate = state.arms?.[arm];
+        const verification = candidate?.verification;
+        return [arm, { ...(candidate?.run ?? { status: "not-run" }),
+          task_correctness: verification?.status === "complete" && verification.exit === 0 &&
+            !verification.timed_out && [0, 1].includes(verification.reward)
+            ? verification.reward === 1 ? "PASS" : "FAIL" : "UNKNOWN",
+          verification: verification ?? null }];
+      })),
       comparison: { comparison_eligible: false, speed_ratio: null, cost_ratio: null, refusal: "expected-operation" } },
     reportSecrets(context.manifest));
     await atomicJson(join(context.runtimeRoot, REPORT_FILE), report);
@@ -1209,17 +1341,17 @@ function parseCli(argv) {
     invariant(argv[index + 1] !== undefined, "usage", "CLI option value is missing.");
     options[key.slice(2)] = argv[++index];
   }
-  invariant(["preflight", "prepare", "run-arm", "recapture-arm", "replace-infrastructure-arm",
+  invariant(["preflight", "prepare", "run-arm", "recapture-arm", "recover-stopped-snapshot", "replace-infrastructure-arm",
     "replace-infrastructure-verifier", "inspect-arm",
-    "verify-arm", "summarize", "cleanup"].includes(command) &&
+    "verify-arm", "verify-snapshot", "summarize", "cleanup"].includes(command) &&
     string(options.manifest), "usage", "Command and --manifest are required.");
-  if (["run-arm", "recapture-arm", "replace-infrastructure-arm", "replace-infrastructure-verifier",
-    "inspect-arm", "verify-arm"].includes(command)) invariant(ARMS.includes(options.arm), "usage",
+  if (["run-arm", "recapture-arm", "recover-stopped-snapshot", "replace-infrastructure-arm", "replace-infrastructure-verifier",
+    "inspect-arm", "verify-arm", "verify-snapshot"].includes(command)) invariant(ARMS.includes(options.arm), "usage",
     "--arm bare|sortie is required.");
   return { command, options };
 }
 
-async function loadContext(manifestPath) {
+export async function loadContext(manifestPath) {
   const absolute = resolve(manifestPath);
   const manifest = JSON.parse(await readFile(absolute, "utf8"));
   return validateManifest(manifest, absolute, process.cwd());
@@ -1233,12 +1365,15 @@ export async function main(argv = process.argv.slice(2)) {
   else if (command === "prepare") output = await prepare(context);
   else if (command === "run-arm") output = await runArm(context, options.arm);
   else if (command === "recapture-arm") output = await recaptureArm(context, options.arm);
+  else if (command === "recover-stopped-snapshot") output = await recoverStoppedSnapshot(context, options.arm,
+    options.confirm === true);
   else if (command === "replace-infrastructure-arm") output = await replaceInfrastructureArm(context,
     options.arm, options.gate, options.confirm === true);
   else if (command === "replace-infrastructure-verifier") output = await replaceInfrastructureVerifier(context,
     options.arm, options.gate, options.confirm === true);
   else if (command === "inspect-arm") output = await inspectArm(context, options.arm);
   else if (command === "verify-arm") output = await verifyArm(context, options.arm);
+  else if (command === "verify-snapshot") output = await verifyArm(context, options.arm, true, options.confirm);
   else if (command === "summarize") output = await summarize(context);
   else output = await cleanup(context, options.confirm === true);
   process.stdout.write(`${JSON.stringify(sanitizeForReport({ status: "pass", phase: command, evidence: output },

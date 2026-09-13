@@ -1,6 +1,42 @@
 # Sortie-dogs 简体中文指南
 
-**只需向 OpenCode 交付任务，即可获得边界清晰、经过验证的实现闭环。**
+**为 OpenCode 提供边界清晰、注重成本的执行框架，
+保留你现有的 OpenCode 配置。**
+
+平时照常使用 OpenCode。只有需要限定范围的实现、验证、审查和模型路由时，才调用 Sortie。
+
+### 为什么选择 Sortie？
+
+- 🐕 **与 OpenCode 共存** — 添加专属工作流，不禁用你平时使用的智能体。
+- 💰 **把强模型用在关键处** — 低成本模型处理批量工作，强模型负责困难的实现与审查。
+- ⚙️ **按任务规模调整流程** — 小修保持简单；大型任务可使用有界并行执行和更强的验证。
+- 🛡 **携带证据返回** — 报告修改范围、验证结果、审查状态、成本和运行证据。
+
+## 快速试用
+
+要求：Node.js 22.6 或更高版本、npm 和 OpenCode。
+从目标项目目录开始，按以下四步操作。
+JSON 应写入配置文件，`/sortie` 应在 OpenCode 内输入。
+如果配置已存在，请保留原有设置和条目，将 `sortie-dogs` 添加到 `plugin` 数组。
+
+```text
+1. 安装 — 在终端执行
+   npm install --save-dev sortie-dogs
+   npx sortie-dogs init .
+
+2. 添加插件 — 保存到 .opencode/opencode.json，或合并到现有配置
+   {
+     "plugin": ["sortie-dogs"]
+   }
+
+3. 重启 OpenCode
+
+4. 开始任务 — 在 OpenCode 内输入
+   /sortie <任务>
+```
+
+推荐按项目安装。`init` 安装 runtime asset；`plugin` 配置启用插件及其模型路由。
+模型选择及其他安装方式见[安装详情](#从-npm-安装)。
 
 [![Sortie-dogs 协调有明确边界的实现工作流](assets/sortie-workflow.png)](assets/sortie-workflow.gif)
 

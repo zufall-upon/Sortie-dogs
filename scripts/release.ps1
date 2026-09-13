@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-  [Parameter(Mandatory, Position=0)][ValidateSet('prepare','verify-publish')][string]$Action,
+  [Parameter(Mandatory, Position=0)][ValidateSet('preflight','prepare','verify-publish')][string]$Action,
   [Parameter(Mandatory)][ValidatePattern('^\d+\.\d+\.\d+$')][string]$Version,
   [string]$Manifest = '.opencode/release.json'
 )
