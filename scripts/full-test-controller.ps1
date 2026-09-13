@@ -3,7 +3,7 @@ param(
   [ValidateSet('Launch','Controller')][string]$Mode = 'Launch',
   [string]$RunId,
   [string]$Repository = (Split-Path -Parent $PSScriptRoot),
-  [ValidateRange(1791,86400)][int]$OuterDeadlineSeconds = 2100
+  [ValidateRange(1791,86400)][int]$OuterDeadlineSeconds = 1800
 )
 
 Set-StrictMode -Version Latest
@@ -15,6 +15,9 @@ $schema = 'sortie.full-test.v1'
 $runnerDeadlineSeconds = 1790
 $maxLogBytes = 1048576
 $maxProgressFiles = 512
+$writeRetryAttempts = 5
+$writeRetryDelayMilliseconds = 100
+$stateWriteIntervalMilliseconds = 1000
 
 function Assert-RunId([string]$value) {
   if ([string]::IsNullOrWhiteSpace($value) -or $value -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{2,79}$') { throw 'invalid run id' }
@@ -25,16 +28,34 @@ function Get-RunDirectory([string]$id) {
   if (-not $dir.StartsWith($testRoot.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'path traversal rejected' }
   return $dir
 }
+function Invoke-SharingViolationRetry([scriptblock]$operation) {
+  for ($attempt = 1; $attempt -le $writeRetryAttempts; $attempt++) {
+    try { & $operation; return }
+    catch [IO.IOException] {
+      $isSharingViolation = ($_.Exception.HResult -band 0xFFFF) -eq 32
+      if (-not $isSharingViolation -or $attempt -eq $writeRetryAttempts) { throw }
+      Start-Sleep -Milliseconds $writeRetryDelayMilliseconds
+    }
+  }
+}
 function Write-CreateNewJson([string]$path, $value) {
   $json = $value | ConvertTo-Json -Depth 20 -Compress
   $bytes = [Text.Encoding]::UTF8.GetBytes($json + "`n")
-  $stream = [IO.File]::Open($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
-  try { $stream.Write($bytes, 0, $bytes.Length) } finally { $stream.Dispose() }
+  Invoke-SharingViolationRetry {
+    $stream = [IO.File]::Open($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    try { $stream.Write($bytes, 0, $bytes.Length) } finally { $stream.Dispose() }
+  }
 }
 function Write-AtomicJson([string]$path, $value) {
   $tmp = "$path.$PID.$([guid]::NewGuid().ToString('N')).tmp"
-  [IO.File]::WriteAllText($tmp, (($value | ConvertTo-Json -Depth 20 -Compress) + "`n"), [Text.UTF8Encoding]::new($false))
-  if ([IO.File]::Exists($path)) { [IO.File]::Replace($tmp, $path, $null) } else { [IO.File]::Move($tmp, $path) }
+  try {
+    [IO.File]::WriteAllText($tmp, (($value | ConvertTo-Json -Depth 20 -Compress) + "`n"), [Text.UTF8Encoding]::new($false))
+    Invoke-SharingViolationRetry {
+      if ([IO.File]::Exists($path)) { [IO.File]::Move($tmp, $path, $true) } else { [IO.File]::Move($tmp, $path) }
+    }
+  } finally {
+    if ([IO.File]::Exists($tmp)) { [IO.File]::Delete($tmp) }
+  }
 }
 function Read-Json([string]$path) { Get-Content -LiteralPath $path -Raw | ConvertFrom-Json -ErrorAction Stop }
 function Get-GitEvidence {
@@ -92,6 +113,15 @@ function Parse-Progress([string]$line, $state) {
     }
     return
   }
+  if ($line -match '^SORTIE_FULL_PROGRESS\s+(.+)$') {
+    $data = Convert-MarkerJson $Matches[1]
+    if ($null -eq $data) { return }
+    $status = switch ([string]$data.status) { 'enqueued' {'enqueued'} 'started' {'running'} 'completed' {'complete'} default {$null} }
+    if ($null -eq $status) { return }
+    if ($status -eq 'enqueued' -and $data.phase -eq 'scheduler') { $state.total_files = @($data.paths).Count }
+    foreach ($path in @($data.paths)) { Set-FileProgress $state ([string]$path) $status ([string]$data.phase) $false }
+    return
+  }
   if ($line -match '^SORTIE_FULL_SCHEDULER\s+(.+)$') {
     $data = Convert-MarkerJson $Matches[1]
     if ($null -eq $data) { return }
@@ -110,6 +140,30 @@ function Add-BoundedLog([string]$path, [string]$line, $state, [string]$streamNam
   $length = if ([IO.File]::Exists($path)) { ([IO.FileInfo]$path).Length } else { 0 }
   if ($length + $bytes -gt $maxLogBytes) { $state.output_truncated.$streamName = $true; return }
   [IO.File]::AppendAllText($path, $line + "`n", [Text.UTF8Encoding]::new($false))
+}
+function Read-RedirectOutput([string]$redirectPath, [ref]$offset, [ref]$pending, [string]$logPath, $state, [string]$streamName, [bool]$parseProgress, [bool]$flush) {
+  if ([IO.File]::Exists($redirectPath)) {
+    $stream = [IO.File]::Open($redirectPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)
+    try {
+      if ($stream.Length -lt [long]$offset.Value) { $offset.Value = [long]0 }
+      $stream.Position = [long]$offset.Value
+      $remaining = [int]($stream.Length - $stream.Position)
+      if ($remaining -gt 0) {
+        $bytes = [byte[]]::new($remaining)
+        $read = $stream.Read($bytes, 0, $remaining)
+        $offset.Value = $stream.Position
+        if ($read -gt 0) { $pending.Value += [Text.Encoding]::UTF8.GetString($bytes, 0, $read) }
+      }
+    } finally { $stream.Dispose() }
+  }
+  $lines = @([string]$pending.Value -split "`r?`n")
+  $completeCount = if ($flush) { $lines.Count } else { [Math]::Max(0, $lines.Count - 1) }
+  for ($index = 0; $index -lt $completeCount; $index++) {
+    if ($flush -and $index -eq $lines.Count - 1 -and $lines[$index].Length -eq 0) { continue }
+    Add-BoundedLog $logPath $lines[$index] $state $streamName
+    if ($parseProgress) { Parse-Progress $lines[$index] $state }
+  }
+  $pending.Value = if ($flush -or $lines.Count -eq 0) { '' } else { $lines[$lines.Count - 1] }
 }
 function Assert-ManifestArtifact([string]$actual, [string]$expected) {
   if ([IO.Path]::GetFullPath($actual) -ne [IO.Path]::GetFullPath($expected)) { throw 'manifest artifact path rejected' }
@@ -133,6 +187,7 @@ if ($Mode -eq 'Launch') {
     controller_path=$scriptPath; powershell_path=$pwsh; npm_path=$npm; npm_arguments=@('run','test:full'); exact_command="`"$npm`" run test:full"
     runner_deadline_seconds=$runnerDeadlineSeconds; outer_deadline_seconds=$OuterDeadlineSeconds; max_log_bytes=$maxLogBytes; max_progress_files=$maxProgressFiles
     git=$evidence; state_path=(Join-Path $dir 'state.json'); result_path=(Join-Path $dir 'result.json'); stdout_path=(Join-Path $dir 'stdout.log'); stderr_path=(Join-Path $dir 'stderr.log')
+    stdout_redirect_path=(Join-Path $dir 'stdout.redirect'); stderr_redirect_path=(Join-Path $dir 'stderr.redirect')
   }
   Write-CreateNewJson $manifestPath $manifest
   $hash = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -176,6 +231,8 @@ Assert-ManifestArtifact $manifest.state_path (Join-Path $dir 'state.json')
 Assert-ManifestArtifact $manifest.result_path (Join-Path $dir 'result.json')
 Assert-ManifestArtifact $manifest.stdout_path (Join-Path $dir 'stdout.log')
 Assert-ManifestArtifact $manifest.stderr_path (Join-Path $dir 'stderr.log')
+Assert-ManifestArtifact $manifest.stdout_redirect_path (Join-Path $dir 'stdout.redirect')
+Assert-ManifestArtifact $manifest.stderr_redirect_path (Join-Path $dir 'stderr.redirect')
 if ([int]$manifest.outer_deadline_seconds -le [int]$manifest.runner_deadline_seconds -or $manifest.npm_arguments.Count -ne 2 -or $manifest.npm_arguments[0] -ne 'run' -or $manifest.npm_arguments[1] -ne 'test:full') { throw 'manifest command rejected' }
 if (-not [IO.Path]::IsPathFullyQualified([string]$manifest.npm_path) -or -not (Test-Path -LiteralPath $manifest.npm_path -PathType Leaf)) { throw 'manifest npm path rejected' }
 $state = Read-Json $manifest.state_path
@@ -187,6 +244,10 @@ $terminalStatus = 'failed'
 $terminalPhase = 'controller-failed'
 $cleanupEstablished = $true
 $exitCode = $null
+$stdoutOffset = [long]0
+$stderrOffset = [long]0
+$stdoutPending = ''
+$stderrPending = ''
 try {
   $startedAt = [DateTime]::UtcNow
   $deadline = $startedAt.AddSeconds([int]$manifest.outer_deadline_seconds)
@@ -196,38 +257,13 @@ try {
   Update-State $state 'running' @{ phase='starting' }
   [IO.File]::WriteAllText($manifest.stdout_path, '', [Text.UTF8Encoding]::new($false))
   [IO.File]::WriteAllText($manifest.stderr_path, '', [Text.UTF8Encoding]::new($false))
-  $process = [Diagnostics.Process]::new()
-  $process.StartInfo = [Diagnostics.ProcessStartInfo]::new()
-  $process.StartInfo.FileName = [IO.Path]::GetFullPath([string]$manifest.npm_path)
-  foreach ($argument in @($manifest.npm_arguments)) { $process.StartInfo.ArgumentList.Add([string]$argument) }
-  $process.StartInfo.WorkingDirectory = $repository
-  $process.StartInfo.UseShellExecute = $false
-  $process.StartInfo.RedirectStandardOutput = $true
-  $process.StartInfo.RedirectStandardError = $true
-  $process.StartInfo.CreateNoWindow = $true
-  $stateSync = [object]::new()
-  $outHandler = [Diagnostics.DataReceivedEventHandler]{
-    param($sender,$event)
-    if ($null -ne $event.Data) {
-      [Threading.Monitor]::Enter($stateSync)
-      try { Add-BoundedLog $manifest.stdout_path $event.Data $state 'stdout'; Parse-Progress $event.Data $state; Write-AtomicJson $state.state_path $state } finally { [Threading.Monitor]::Exit($stateSync) }
-    }
-  }
-  $errHandler = [Diagnostics.DataReceivedEventHandler]{
-    param($sender,$event)
-    if ($null -ne $event.Data) {
-      [Threading.Monitor]::Enter($stateSync)
-      try { Add-BoundedLog $manifest.stderr_path $event.Data $state 'stderr'; Write-AtomicJson $state.state_path $state } finally { [Threading.Monitor]::Exit($stateSync) }
-    }
-  }
-  $process.add_OutputDataReceived($outHandler)
-  $process.add_ErrorDataReceived($errHandler)
-  $process.Start() | Out-Null
+  [IO.File]::WriteAllText($manifest.stdout_redirect_path, '', [Text.UTF8Encoding]::new($false))
+  [IO.File]::WriteAllText($manifest.stderr_redirect_path, '', [Text.UTF8Encoding]::new($false))
+  $process = Start-Process -FilePath ([IO.Path]::GetFullPath([string]$manifest.npm_path)) -ArgumentList @($manifest.npm_arguments) -WorkingDirectory $repository -NoNewWindow -PassThru -RedirectStandardOutput $manifest.stdout_redirect_path -RedirectStandardError $manifest.stderr_redirect_path
   $processStarted = $true
   $state.child_pid = $process.Id
   Update-State $state 'running' @{ phase='npm' }
-  $process.BeginOutputReadLine()
-  $process.BeginErrorReadLine()
+  $nextStateWrite = [DateTime]::UtcNow
   while (-not $process.HasExited) {
     if ([DateTime]::UtcNow -ge $deadline) {
       & taskkill.exe /PID $process.Id /T /F | Out-Null
@@ -237,12 +273,31 @@ try {
       $terminalStatus = 'timed-out'; $terminalPhase = 'timeout'; break
     }
     Start-Sleep -Milliseconds 250
-    [Threading.Monitor]::Enter($stateSync)
-    try { $state.heartbeat=[DateTime]::UtcNow.ToString('o'); Write-AtomicJson $state.state_path $state } finally { [Threading.Monitor]::Exit($stateSync) }
+    try {
+      Read-RedirectOutput $manifest.stdout_redirect_path ([ref]$stdoutOffset) ([ref]$stdoutPending) $manifest.stdout_path $state 'stdout' $true $false
+      Read-RedirectOutput $manifest.stderr_redirect_path ([ref]$stderrOffset) ([ref]$stderrPending) $manifest.stderr_path $state 'stderr' $false $false
+    } catch {
+      # Redirect progress is best-effort; the main loop still owns heartbeat, deadline, and terminal result.
+    }
+    $now = [DateTime]::UtcNow
+    if ($now -ge $nextStateWrite) {
+      $state.heartbeat=$now.ToString('o')
+      Write-AtomicJson $state.state_path $state
+      $nextStateWrite = $now.AddMilliseconds($stateWriteIntervalMilliseconds)
+    }
   }
   $process.WaitForExit()
+  try {
+    Read-RedirectOutput $manifest.stdout_redirect_path ([ref]$stdoutOffset) ([ref]$stdoutPending) $manifest.stdout_path $state 'stdout' $true $true
+    Read-RedirectOutput $manifest.stderr_redirect_path ([ref]$stderrOffset) ([ref]$stderrPending) $manifest.stderr_path $state 'stderr' $false $true
+  } catch {
+    # Final redirect polling remains best-effort; terminal state is authoritative.
+  }
   $exitCode = $process.ExitCode
-  if ($terminalStatus -ne 'timed-out') { $terminalStatus = if ($exitCode -eq 0) {'complete'} else {'failed'}; $terminalPhase = 'complete' }
+  if ($terminalStatus -ne 'timed-out') {
+    if ($exitCode -eq 124) { $terminalStatus = 'timed-out'; $terminalPhase = 'runner-timeout' }
+    else { $terminalStatus = if ($exitCode -eq 0) {'complete'} else {'failed'}; $terminalPhase = 'complete' }
+  }
 } catch {
   if ($processStarted -and -not $process.HasExited) {
     & taskkill.exe /PID $process.Id /T /F | Out-Null
@@ -251,6 +306,9 @@ try {
     if (-not $process.HasExited) { $cleanupEstablished = $false; $terminalPhase = 'cleanup-failed' }
   }
 } finally {
+  foreach ($redirectPath in @($manifest.stdout_redirect_path, $manifest.stderr_redirect_path)) {
+    try { if ([IO.File]::Exists($redirectPath)) { [IO.File]::Delete($redirectPath) } } catch { $cleanupEstablished = $false; $terminalPhase = 'cleanup-failed' }
+  }
   $state.exit = $exitCode
   $state.cleanup_established = $cleanupEstablished
   $state.status = $terminalStatus

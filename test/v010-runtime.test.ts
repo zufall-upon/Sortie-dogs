@@ -209,7 +209,7 @@ test("preview host adapter pins the native worker route and forwards terminal te
   assert.deepEqual(explicitAstra.message.model, { providerID: "openai", modelID: "gpt-6-astra", variant: "high" });
   const premature = { text: "DONE — accepted without evidence" };
   await hooks["experimental.text.complete"]!({ sessionID: "root", messageID: "root-assistant" }, premature);
-  assert.equal(premature.text, "status: IN_PROGRESS");
+  assert.equal(premature.text, "status: INTERRUPTED — accepted criteria remain unproved\nTRUE_INTERRUPTION: internal: accepted criteria remain unproved");
 }));
 
 test("operator plan validates explicit scope and keeps criteria immutable", async () => fixture(async root => {

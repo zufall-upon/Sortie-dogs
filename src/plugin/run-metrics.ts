@@ -1,5 +1,5 @@
 import type { GoalFlightState, GoalTerminalReceipt, GoalFlightEventRecord } from "../core/goal-bound.js";
-import { buildDebrief, renderDebrief, observeDebriefSession, type Debrief, type DebriefObservation } from "./sortie-debrief.ts";
+import { buildDebrief, renderDebrief, renderDebriefProof, observeDebriefSession, type Debrief, type DebriefObservation } from "./sortie-debrief.ts";
 import { goalFingerprint } from "../core/goal-bound.ts";
 import type { GoalReport } from "../core/goal-report.ts";
 import { renderCareer, type SortieCareer } from "./sortie-career.ts";
@@ -448,25 +448,71 @@ function metricText<T>(metric: SortieResultMetric<T>, render: (value: T) => stri
   return metric.availability === "available" ? render(metric.value) : "計測不可";
 }
 
-export function formatSortieResult(result: SortieResult): string {
+export interface SortieResultPresentation {
+  readonly implementation?: string;
+  readonly pending?: string;
+  readonly next?: string;
+  readonly commit?: string;
+  readonly statusSummary?: string;
+  readonly stopReason?: string;
+}
+
+const displayText = (value: string | undefined): string => value?.replace(/[\r\n\t]+/gu, " ").trim() || "未取得";
+const reportFence = (body: string): string => {
+  const longest = Math.max(0, ...[...body.matchAll(/^~+/gmu)].map((match) => match[0].length));
+  const fence = "~".repeat(Math.max(3, longest + 1));
+  return `${fence}text\n${body}\n${fence}`;
+};
+
+export function formatSortieResult(result: SortieResult, presentation: SortieResultPresentation = {}): string {
   const criteria = metricText(result.proof.criteria, (entries) => {
     const passing = entries.filter(({ status }) => status === "PASS").length;
     return `${passing}/${entries.length}`;
   });
-  const achievement = result.mission.status === "COMPLETED" ? "完了"
+  const achievement = result.mission.status === "COMPLETED" ? "COMPLETED"
+    : result.mission.status === "INTERRUPTED" ? "INTERRUPTED"
+      : result.mission.status === "EXTERNAL_BLOCKER" ? "EXTERNAL_BLOCKER" : "USER_DECISION";
+  const summaryLabel = result.mission.status === "COMPLETED" ? "完了"
     : result.mission.status === "INTERRUPTED" ? "中断（未完了）"
-      : result.mission.status === "EXTERNAL_BLOCKER" ? "外部要因で未完了"
-        : "ユーザー判断待ち（未完了）";
+      : result.mission.status === "EXTERNAL_BLOCKER" ? "外部要因で未完了" : "ユーザー判断待ち（未完了）";
   const color = result.mission.status === "COMPLETED" ? "🟢" : result.mission.status === "EXTERNAL_BLOCKER" ? "🔴" : "🟡";
+  const proof = renderDebriefProof(result.debrief);
   const body = [
-    `**⚡ 任務経過（待機含む）:** **${metricText(result.speed.goal_wall_ms, duration)}**`,
-    `**🪙 使用量:** **${metricText(result.cost.total_tokens, (value) => `${value.toLocaleString("ja-JP")} tokens`)}** · host推定額 ${metricText(result.cost.cost_usd, (value) => `$${value.toFixed(4)}`)}（実課金換算なし）`,
+    "🐾 SORTIE DOGS — 帰還報告",
+    result.result_id[0],
+    "",
+    `${color} ${achievement} — ${displayText(presentation.statusSummary)}`,
+    "",
+    "⚔️ MISSION",
+    `経過          ⏱ ${metricText(result.speed.goal_wall_ms, duration)} ※待機含む`,
+    `最終達成条件  ◔ ${criteria}`,
+    `対象検証      ${proof.validation}`,
+    `SourceReview  ${proof.review}`,
+    `Commit        ${displayText(presentation.commit)}`,
+    "",
+    "🔧 実装",
+    displayText(presentation.implementation),
+    "",
+    "⏳ 未実施",
+    displayText(presentation.pending),
+    "",
+    "➡️ NEXT",
+    displayText(presentation.next),
+    "",
+    "🪙 COST / PACK",
+    `使用量        ${metricText(result.cost.total_tokens, (value) => `${value.toLocaleString("ja-JP")} tokens`)}`,
+    `host推定額    ${metricText(result.cost.cost_usd, (value) => `$${value.toFixed(4)}`)} ※実課金換算なし`,
+    "",
     ...renderDebrief(result.debrief),
-    `**🛡 達成:** ${color} **${achievement}** · 達成条件 **${criteria}**`,
-    "*最終応答生成前の計測*",
+    "",
     ...renderCareer(result.career),
-  ].join("\n\n");
-  return `<details>\n<summary><strong>🐾 SORTIE DOGS — 帰還報告｜${color} ${achievement}</strong></summary>\n\n${body}\n\n</details>`;
+    "",
+    "🛑 STOP REASON",
+    displayText(presentation.stopReason ?? result.mission.stop_reason),
+    "",
+    "※使用量は最終応答生成前の計測",
+  ].join("\n");
+  return `<details>\n<summary><strong>🐾 SORTIE DOGS — 帰還報告｜${color} ${summaryLabel}</strong></summary>\n\n${reportFence(body)}\n\n</details>`;
 }
 
 export function formatRunMetrics(metrics: RunMetrics): string {
@@ -585,6 +631,7 @@ export function insertRunMetrics(text: string, metrics: RunMetrics): string {
 }
 
 export function insertSortieResult(text: string, result: SortieResult): string {
+  const presentation = extractSortiePresentation(text);
   const visible = sanitizeTerminalReport(text);
   const checkpoint = terminalCheckpoint(visible);
   if (checkpoint === undefined) return visible;
@@ -607,10 +654,26 @@ export function insertSortieResult(text: string, result: SortieResult): string {
   const cleaned = lines.filter((_, index) => !cardLines.has(index));
   while (cleaned[checkpoint.index + 1] === "") cleaned.splice(checkpoint.index + 1, 1);
   let card: string;
-  try { card = formatSortieResult(result); }
+  try { card = formatSortieResult(result, presentation); }
   catch { card = "<details>\n<summary><strong>🐾 SORTIE DOGS — 帰還報告</strong></summary>\n\n**確認:** 表示集計を取得できません。任務結果は先頭の状態を参照。\n\n</details>"; }
   cleaned.splice(checkpoint.index + 1, 0, "", card, "");
   return cleaned.join(newline).trimEnd();
+}
+
+function extractSortiePresentation(text: string): SortieResultPresentation {
+  const first = topLevelLines(text).find(({ line }) => line.trim().length > 0)?.line ?? "";
+  const statusSummary = first.split(/\s+[—-]\s+/u).slice(1).join(" — ").trim() || undefined;
+  const section = (names: string): string | undefined => {
+    const expression = new RegExp(`^[ \\t]*(?:#{1,6}[ \\t]*)?(?:\\*\\*)?(?:${names})(?:\\*\\*)?[ \\t]*:?[ \\t]*(?:\\*\\*)?[ \\t]*(.*)$`, "imu");
+    const match = expression.exec(text);
+    if (match === null) return undefined;
+    if (match[1]?.trim()) return match[1].trim();
+    const tail = text.slice(match.index + match[0].length).split(/\r?\n/u);
+    return tail.find((line) => line.trim().length > 0 && !/^[ \\t]*(?:#{1,6}[ \\t]*)?(?:\\*\\*)?(?:変更点|実装|未実施|次|NEXT|Commit|コミット)/iu.test(line))?.trim();
+  };
+  const explicitStop = /^(?:TRUE_INTERRUPTION|TRUE_BLOCKER)[ \\t]*:[ \\t]*(.+)$/imu.exec(text)?.[1]?.trim();
+  return { statusSummary, implementation: section("変更点|実装"), pending: section("未実施"), next: section("次|NEXT"),
+    commit: section("Commit|コミット"), stopReason: explicitStop };
 }
 
 export function createGoalReport(result: SortieResult, receipt: GoalTerminalReceipt): GoalReport {

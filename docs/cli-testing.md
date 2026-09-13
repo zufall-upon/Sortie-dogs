@@ -4,6 +4,11 @@ This project has two distinct CLI test layers. Both are required before a
 release. Do not treat the automated `sortie-dogs` CLI suite as a substitute for
 a real OpenCode CLI run.
 
+For everyday test selection, build requirements, Windows detached full-test
+execution, monitoring, and timing history, see the
+[test execution guide (日本語)](testing.md). Full-suite commands below are release
+gates; ordinary development uses the relevant targeted tests plus `npm test`.
+
 ## 1. Automated package CLI regression
 
 Run from the repository root:
@@ -39,14 +44,18 @@ release gate. They import `dist/`, so rebuild it first:
 
 ```sh
 npm run build
-node --experimental-strip-types --test test/cli.test.ts
-node --experimental-strip-types --test test/initialize.test.ts
-node --experimental-strip-types --test test/security.test.ts
-node --experimental-strip-types --test test/plugin-loader.test.ts
+node --experimental-strip-types --import ./test/setup.ts --test test/cli.test.ts
+node --experimental-strip-types --import ./test/setup.ts --test test/initialize.test.ts
+node --experimental-strip-types --import ./test/setup.ts --test test/security.test.ts
+node --experimental-strip-types --import ./test/setup.ts --test test/plugin-loader.test.ts
 ```
 
-`test/plugin-loader.test.ts` requires `npm_execpath`, so use
-`npm run test:full` if a direct Node invocation reports that variable missing.
+`test/plugin-loader.test.ts` uses `npm_execpath` when available, otherwise it looks
+for `node_modules/npm/bin/npm-cli.js` beside the current Node executable. If a
+custom installation uses another layout, set `npm_execpath` to its actual
+`npm-cli.js` entry before running the targeted test. A missing npm entry is not a
+reason to start a full-suite run. Run package-loader tests separately from other
+commands that read or rebuild `dist/`, because `npm pack` runs the build lifecycle.
 
 ## 2. Packed OpenCode CLI acceptance
 
@@ -54,7 +63,9 @@ This layer proves that OpenCode can load and execute the package produced for
 release. It is manual because it needs an installed OpenCode CLI, provider
 access, and a fresh process/session.
 
-1. Run `npm run test:full`.
+1. Confirm a passing `npm run test:full` result for the exact release candidate.
+   Reuse a completed result for unchanged source rather than starting the same
+   full validation again.
 2. Create the tarball only under `_testenv`:
 
    ```powershell
@@ -69,13 +80,33 @@ access, and a fresh process/session.
    wsl.exe -e bash -ic 'command -v opencode; opencode --version'
    ```
 
-4. Create a fresh project under `_testenv`, install that exact tarball as a
-   project-local dependency, and run its packed CLI entry:
+4. Create a fresh project under `_testenv` with an explicit project-local
+   `.opencode/package.json` dependency on that exact tarball. For example:
+
+   ```text
+   _testenv/cli-acceptance/
+     sortie-dogs-<version>.tgz
+     project/
+       .opencode/package.json
+   ```
+
+   The dependency in this layout is
+   `"sortie-dogs": "file:../../sortie-dogs-<version>.tgz"`.
+   Install it in the same environment that will run OpenCode. In a WSL login
+   shell through `bash -ic`, run from the fixture's `.opencode` directory:
 
    ```sh
-   npm install --prefix <project>/.opencode --no-save <tarball>
-   node <project>/.opencode/node_modules/sortie-dogs/dist/cli/main.js init <project>
+   npm install --force
+   node node_modules/sortie-dogs/dist/cli/main.js init ..
    ```
+
+   From Windows, enter that directory with
+   `wsl.exe --cd "<absolute-WSL-project-path>/.opencode" -e bash -ic 'npm install --force && node node_modules/sortie-dogs/dist/cli/main.js init ..'`.
+   Do not use Windows `npm install --prefix` for a WSL fixture: nested fixtures
+   can be rewritten to a repository self-link instead of the packed tarball.
+   After installation, confirm that the declared `file:` dependency is unchanged,
+   the lockfile is not a repository link, and `node_modules/sortie-dogs` contains
+   the extracted package with the expected package version and runtime marker.
 
 5. Load the installed package either with an OpenCode `plugin` entry naming
    `sortie-dogs`, or with this project-local bridge and no other runtime export:
@@ -91,6 +122,11 @@ access, and a fresh process/session.
    opencode debug config
    opencode run --command sortie
    ```
+
+   On the Windows/WSL host, use
+   `wsl.exe --cd "<absolute-WSL-project-path>" -e bash -ic 'opencode debug config && opencode run --command sortie'`.
+   Keep `bash -ic` in the launch path so the plugin and its children inherit the
+   same executable resolution environment.
 
 The repository-local `AGENTS.md` records the currently approved executable and
 environment details. Those local details override examples in this document.
@@ -122,6 +158,13 @@ The packed OpenCode CLI run passes only when all applicable checks succeed:
 
 Windows Desktop acceptance remains separate. Installing or initializing over
 SSH does not prove the interactive Desktop `/sortie` path.
+
+For continuation or compaction repairs, unit tests and the generic packed CLI
+smoke are not sufficient. Reuse the same `_testenv` fixture for before/after WSL
+CLI runs with `opencode run --format json --print-logs`. Confirm the original
+stop, the synthetic turn or compaction summary, same-session resume, and terminal
+completion. Record the WSL-installed package version and runtime asset marker
+separately. Retain bounded results and sanitized evidence, not raw session logs.
 
 ## Historical U2/U3 harness
 

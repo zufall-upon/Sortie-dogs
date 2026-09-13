@@ -139,7 +139,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     ], { cwd: packedProject });
     assert.equal(
       await readFile(join(packedProject, ".opencode", "sortie-dogs-v010.version"), "utf8"),
-      "0.10.0-beta.1-role-names\n",
+      "0.10.0-beta.1-v0912\n",
     );
     const packedPrimary = await readFile(join(packedProject, ".opencode", "agent", "dog-operator.md"), "utf8");
     assert.match(packedPrimary, /^mode: primary$/m);
@@ -382,7 +382,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.ok(loaded.previewTools.includes("sortie_v010_prepare_operator"));
     assert.ok(loaded.previewTools.every(name => name.startsWith("sortie_v010_")));
     assert.equal(loaded.previewAssets.length, 8);
-    assert.ok(loaded.previewAssets.every(asset => asset.version === "0.10.0-beta.1-role-names"));
+    assert.ok(loaded.previewAssets.every(asset => asset.version === "0.10.0-beta.1-v0912"));
     assert.deepEqual(loaded.previewAssets.map(({ name, installPath }) => ({ name, installPath })), [
       { name: "dog-operator", installPath: "agent/dog-operator.md" },
       { name: "dog-worker-v010", installPath: "agent/dog-worker-v010.md" },
@@ -486,7 +486,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     for (const asset of loaded.runtimeAssets) {
       assert.equal(asset.version, RUNTIME_ASSET_VERSION, `${asset.name} version must match the shared marker`);
     }
-    assert.equal(RUNTIME_ASSET_VERSION, "0.3.86-codegen-proof-v1");
+    assert.equal(RUNTIME_ASSET_VERSION, "0.3.89-completion-proof-v1");
     const coordinatorFrontmatter = /^---\r?\n([\s\S]*?)\r?\n---/u.exec(coordinator.content)?.[1];
     assert.ok(coordinatorFrontmatter);
     assert.match(coordinatorFrontmatter, /^model: openai\/gpt-5\.6-terra$/m);
@@ -1419,7 +1419,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(sortie.content, /never route a worker to the user/i);
 
     for (const asset of loaded.runtimeAssets) {
-      assert.equal(asset.version, "0.3.86-codegen-proof-v1");
+      assert.equal(asset.version, "0.3.89-completion-proof-v1");
       const frontmatter = asset.content.match(/^---\r?\n([\s\S]+?)\r?\n---\r?\n/);
       assert.ok(frontmatter, `${asset.name} must have frontmatter`);
       const entries = Object.fromEntries(

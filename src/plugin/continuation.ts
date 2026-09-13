@@ -232,7 +232,11 @@ export interface ContinuationHooks {
   toolStarted(sessionID: string, tool: string): void;
   blocksTool(sessionID: string): boolean;
   sessionIdle(sessionID: string): Promise<void>;
-  stopAutomaticRecovery(sessionID: string, abortSession?: boolean): Promise<void>;
+  stopAutomaticRecovery(
+    sessionID: string,
+    abortSession?: boolean,
+    resumeOnRealUserTurn?: boolean,
+  ): Promise<void>;
   recoverStalledTask(
     sessionID: string,
     callIDs: readonly string[],
@@ -496,6 +500,7 @@ export function createContinuationHooks(
   const sessions = new Map<string, SessionState>();
   const warned = new Set<string>();
   const stoppedSessions = new Set<string>();
+  const realTurnResumableStops = new Set<string>();
 
   function observeTransition(
     type: ContinuationTransitionType,
@@ -1098,9 +1103,14 @@ export function createContinuationHooks(
     }
     sessions.delete(sessionID);
     stoppedSessions.delete(sessionID);
+    realTurnResumableStops.delete(sessionID);
   }
 
-  async function stopAutomaticRecovery(sessionID: string, abortSession = true): Promise<void> {
+  async function stopAutomaticRecovery(
+    sessionID: string,
+    abortSession = true,
+    resumeOnRealUserTurn = false,
+  ): Promise<void> {
     const state = sessions.get(sessionID);
     if (state !== undefined) {
       clearTimer(state.cooldownTimer);
@@ -1118,8 +1128,12 @@ export function createContinuationHooks(
     }
     stoppedSessions.delete(sessionID);
     stoppedSessions.add(sessionID);
+    if (resumeOnRealUserTurn) realTurnResumableStops.add(sessionID);
+    else realTurnResumableStops.delete(sessionID);
     while (stoppedSessions.size > MAX_TRACKED_SESSIONS) {
-      stoppedSessions.delete(stoppedSessions.values().next().value!);
+      const oldest = stoppedSessions.values().next().value!;
+      stoppedSessions.delete(oldest);
+      realTurnResumableStops.delete(oldest);
     }
     const abort = abortSession ? client?.session?.abort : undefined;
     if (abort !== undefined) {
@@ -1134,6 +1148,7 @@ export function createContinuationHooks(
     sessionID: string,
     callIDs: readonly string[],
   ): Promise<"recovered" | "identity-rejected" | "capability-unavailable" | "request-rejected"> {
+    if (stoppedSessions.has(sessionID)) return "request-rejected";
     const active = policy();
     const resolution = resolveContinuation({
       identity: await readIdentity(sessionID),
@@ -1153,6 +1168,7 @@ export function createContinuationHooks(
       // Reserve durable authority before mutating the host session. A configured authority that
       // cannot issue a ticket must not cause an abort/retry loop or an unproven synthetic send.
       const metadata = await ticketMetadata(sessionID, `watchdog:${callIDs.join(",")}`);
+      if (stoppedSessions.has(sessionID)) return "request-rejected";
       await abort.call(client!.session, {
         path: { id: sessionID },
         query: { directory },
@@ -1471,7 +1487,10 @@ export function createContinuationHooks(
     },
 
     observeModel(sessionID, model, synthetic = false): void {
-      if (stoppedSessions.has(sessionID)) return;
+      if (stoppedSessions.has(sessionID)) {
+        if (synthetic || !realTurnResumableStops.delete(sessionID)) return;
+        stoppedSessions.delete(sessionID);
+      }
       if (!nonEmpty(model.providerID) || !nonEmpty(model.modelID)) return;
       const state = stateFor(sessionID);
       clearTimer(state.stepRecoveryTimer);

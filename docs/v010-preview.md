@@ -2,6 +2,11 @@
 
 ## Limited dogfooding checkpoint
 
+The preview now incorporates the committed v0.9.12 attachment and continuation
+recovery baseline (9a59753668010fd8352753fe80be25cbb74828bf). The integrated
+runtime marker is `0.10.0-beta.1-v0912`; earlier smoke receipts describe their
+recorded pre-merge package and are not relabeled as integrated runtime tests.
+
 The renamed two-unit serial path has completed a packaged real-model smoke:
 `dog-operator` explicitly selected Astra/high, `dogs-coordinator` used Terra/high,
 and both workers used Sol/medium. Both original content oracles and unchanged

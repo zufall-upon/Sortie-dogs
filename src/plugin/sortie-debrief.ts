@@ -244,6 +244,12 @@ export function buildDebrief(receipt: GoalTerminalReceipt, contract: GoalAccepta
 }
 
 const label = (text: string): string => text.replace(/[\r\n\t]/gu, " ").replace(/[\\`*_{}\[\]()<>!|]/gu, "").slice(0, 120);
+const gauge = (percent: number): string => {
+  const eighths = Math.max(0, Math.min(80, Math.round(percent * 0.8)));
+  const whole = Math.floor(eighths / 8), remainder = eighths % 8;
+  const partial = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"][remainder]!;
+  return `${"█".repeat(whole)}${partial}${" ".repeat(10 - whole - (remainder === 0 ? 0 : 1))}`;
+};
 export function renderDebrief(debrief: Debrief | undefined): string[] {
   const pack = debrief?.pack == null ? null : [...debrief.pack].sort((a, b) => b.count - a.count || a.model.localeCompare(b.model));
   const packVisible = pack?.slice(0, 4) ?? [];
@@ -252,21 +258,25 @@ export function renderDebrief(debrief: Debrief | undefined): string[] {
   const visible = mix?.slice(0, 4) ?? [];
   if (mix !== null && mix.length > 4) visible.push({ model: "その他", tokens: mix.slice(4).reduce((sum, entry) => sum + entry.tokens, 0),
     percent: mix.slice(4).reduce((sum, entry) => sum + entry.percent, 0) });
-  const bars = (percent: number) => {
-    const filled = Math.max(0, Math.min(10, Math.round(percent / 10)));
-    return "█".repeat(filled) + "░".repeat(10 - filled);
-  };
-  const status = (value: string): string => value === "PASS" ? "🟢 **PASS**" : value === "FAIL" ? "🔴 **FAIL**"
+  const status = (value: string): string => value === "PASS" ? "🟢 PASS" : value === "FAIL" ? "🔴 FAIL"
     : value === "WAIVED" ? "免除" : "未記録";
+  const counts = new Map(packVisible.map((entry) => [entry.model, entry.count]));
   return [
-    `**🐕 出撃隊:** ${pack === null ? "履歴未取得" : pack.length === 0 ? "出撃なし" : packVisible.map((entry) => `${label(entry.model)} **×${entry.count}**`).join(" · ")}`,
-    `**モデル別token内訳:** ${mix === null ? "usage未取得" : ""}`,
-    ...visible.map((entry) => `**↳** ${label(entry.model)} \`${bars(entry.percent)}\` ${entry.percent.toFixed(1)}%`),
-    `**実行重複率:** ${debrief?.overlap !== undefined && debrief.overlap.wallMilliseconds > 0
-      ? `**${(debrief.overlap.workerMilliseconds / debrief.overlap.wallMilliseconds).toFixed(2)}×**（worker区間・速度倍率ではありません）`
+    ...(mix === null ? ["モデル内訳    usage未取得"] : visible.map((entry) => {
+      const count = counts.get(entry.model);
+      return `🐕 ${label(entry.model)} ${gauge(entry.percent)} ${entry.percent.toFixed(1)}% ${entry.tokens.toLocaleString("ja-JP")} tokens${count === undefined ? "" : ` ×${count}`}`;
+    })),
+    `⚡ 実行重複率 ${debrief?.overlap !== undefined && debrief.overlap.wallMilliseconds > 0
+      ? `${(debrief.overlap.workerMilliseconds / debrief.overlap.wallMilliseconds).toFixed(2)}×`
       : pack?.length === 0 ? "対象なし（出撃なし）" : "稼働区間の記録不足"}`,
-    `**確認:** 対象検証 ${status(debrief?.validation ?? "未確認")} · 直近Review ${status(debrief?.review ?? "未確認")}${debrief?.reviewSource === "reviewer" ? "（reviewer報告）" : ""}`,
-    ...(debrief?.notes?.length ? [`**計測範囲:** ${debrief.notes.join(" · ")}`] : []),
-    ...(debrief?.traits.length ? [`**🏅 今回の戦績:** ${debrief.traits.join(" · ")}`] : []),
+    "   ※worker区間・速度倍率ではありません",
+    ...(debrief?.notes?.length ? [`計測範囲      ${debrief.notes.join(" · ")}`] : []),
   ];
+}
+
+export function renderDebriefProof(debrief: Debrief | undefined): { validation: string; review: string } {
+  const status = (value: string): string => value === "PASS" ? "🟢 PASS" : value === "FAIL" ? "🔴 FAIL"
+    : value === "WAIVED" ? "免除" : "未記録";
+  return { validation: status(debrief?.validation ?? "未確認"),
+    review: `${status(debrief?.review ?? "未確認")}${debrief?.reviewSource === "reviewer" ? "（reviewer報告）" : ""}` };
 }

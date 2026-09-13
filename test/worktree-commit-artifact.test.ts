@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { ChildProcess, execFile } from "node:child_process";
+import { writeFileSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -266,6 +267,21 @@ test("validation-time drift of a scoped new file is rejected", async () => {
   } finally { await removeFixture(value); }
 });
 
+test("protected commit rejects index drift after validation", async () => {
+  const value = await fixture("protected-index-drift");
+  try {
+    const path = join(value.path, "src", "value.txt");
+    await writeFile(path, "validated\n");
+    await artifactError(produceWorktreeCommitArtifact({
+      descriptor: value.descriptor, managed_path: value.path, validation: validation(),
+    }, {
+      signal: new AbortController().signal,
+      enterProtectedPhase: () => { writeFileSync(path, "changed before staging\n"); },
+    }), "invalid-state");
+    assert.equal((await git(value.path, "rev-parse", "HEAD")).trim(), value.base);
+  } finally { await removeFixture(value); }
+});
+
 test("fingerprint base query is shared locally while validation and verify stay fresh", async () => {
   const value = await fixture("fingerprint-base-query");
   const originalSpawn = ChildProcess.prototype.spawn;
@@ -285,15 +301,15 @@ test("fingerprint base query is shared locally while validation and verify stay 
     const artifact = await produceWorktreeCommitArtifact({
       descriptor: value.descriptor, managed_path: value.path, validation: validation(),
     });
-    assert.equal(treeQueries, 6);
-    assert.equal(baseQueries, 5);
+    assert.equal(treeQueries, 5);
+    assert.equal(baseQueries, 4);
     const fingerprint = artifact.change_fingerprint;
     const verified = await verifyWorktreeCommitArtifact({
       descriptor: value.descriptor, managed_path: value.path, artifact,
     });
     assert.equal(verified.change_fingerprint, fingerprint);
-    assert.equal(treeQueries, 8);
-    assert.equal(baseQueries, 6);
+    assert.equal(treeQueries, 7);
+    assert.equal(baseQueries, 5);
   } finally {
     ChildProcess.prototype.spawn = originalSpawn;
     await removeFixture(value);

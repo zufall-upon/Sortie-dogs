@@ -1,12 +1,14 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { basename, join, relative, resolve, sep } from "node:path";
+import { pathToFileURL } from "node:url";
 
 const projectRoot = resolve(import.meta.dirname, "../..");
 const testRoot = resolve(projectRoot, "test");
 const suiteDeadlineMs = 1_790_000;
 const startMarker = "SORTIE_FULL_TEST_RUNNER_STARTED";
 const phase2Concurrency = 2;
+const timingHistoryPath = join(projectRoot, "_testenv", "full-test-timings.json");
 const s01Paths = new Set([
   "test/integration/worktree-parallel-dispatch.test.ts",
 ]);
@@ -31,7 +33,45 @@ type Partition = {
 type ChildResult = { exit: number; stopped: boolean };
 type ExecutionStatus = "enqueued" | "started" | "completed";
 type ExecutionTransition = { status: ExecutionStatus; paths: string[]; phase: string; at_ms: number };
-type ExecutionRecord = { enqueued: string[]; started: string[]; completed: string[]; transitions: ExecutionTransition[] };
+export type ExecutionRecord = { enqueued: string[]; started: string[]; completed: string[]; transitions: ExecutionTransition[] };
+
+export async function readTimingHistory(path: string): Promise<Record<string, number>> {
+  try {
+    const history = JSON.parse(await readFile(path, "utf8"));
+    if (history?.schema_version !== 1 || history.platform !== process.platform
+      || history.durations_ms === null || typeof history.durations_ms !== "object" || Array.isArray(history.durations_ms)) return {};
+    return Object.fromEntries(Object.entries(history.durations_ms)
+      .filter(([, duration]) => typeof duration === "number" && Number.isFinite(duration) && duration > 0));
+  } catch {
+    // Timing history is an optional scheduling hint, never a validation prerequisite.
+    return {};
+  }
+}
+
+export function orderByDuration(paths: readonly string[], durations: Readonly<Record<string, number>>): string[] {
+  return [...paths].sort((left, right) => (durations[right] ?? 0) - (durations[left] ?? 0));
+}
+
+export async function saveTimingHistory(path: string, record: ExecutionRecord): Promise<void> {
+  const starts = new Map<string, number>();
+  const durations = new Map<string, number>();
+  for (const transition of record.transitions) {
+    for (const file of transition.paths) {
+      if (transition.status === "started") starts.set(file, transition.at_ms);
+      if (transition.status !== "completed") continue;
+      const start = starts.get(file);
+      if (start !== undefined && transition.at_ms > start) durations.set(file, transition.at_ms - start);
+    }
+  }
+  const temporary = `${path}.${process.pid}.tmp`;
+  try {
+    await writeFile(temporary, JSON.stringify({ schema_version: 1, platform: process.platform,
+      durations_ms: Object.fromEntries(durations) }) + "\n");
+    await rename(temporary, path);
+  } finally {
+    await rm(temporary, { force: true });
+  }
+}
 
 function normalized(path: string): string {
   return path.split(sep).join("/");
@@ -199,7 +239,9 @@ function reportExecution(partition: Partition, record: ExecutionRecord): boolean
 
 function recordExecution(record: ExecutionRecord, status: ExecutionStatus, paths: readonly string[], startedAt: number, phase = "scheduler"): void {
   record[status].push(...paths);
-  record.transitions.push({ status, paths: [...paths], phase, at_ms: Math.round(performance.now() - startedAt) });
+  const transition = { status, paths: [...paths], phase, at_ms: Math.round(performance.now() - startedAt) };
+  record.transitions.push(transition);
+  console.log(`SORTIE_FULL_PROGRESS ${JSON.stringify(transition)}`);
 }
 
 async function runBatch(
@@ -258,22 +300,22 @@ async function runConcurrentBatch(
   return firstFailure ?? { exit: 0, stopped: true };
 }
 
-async function runScheduledTests(partition: Partition, remaining: () => number, record: ExecutionRecord, startedAt: number): Promise<ChildResult> {
+async function runScheduledTests(partition: Partition, remaining: () => number, record: ExecutionRecord, startedAt: number, durations: Readonly<Record<string, number>>): Promise<ChildResult> {
   const controller = new AbortController();
   const distMutating = await runBatch(partition.distMutating, 1, "dist-mutating", remaining, record, startedAt, controller);
   if (distMutating.exit !== 0 || !distMutating.stopped) return distMutating;
   const integration = [...partition.s01, ...partition.integrationRemaining];
-  const nonintegration = [...partition.heavy, ...partition.light];
+  const nonintegration = orderByDuration([...partition.heavy, ...partition.light], durations);
   const integrationResult = await runBatch(integration, 1, "integration", remaining, record, startedAt, controller);
   if (integrationResult.exit !== 0 || !integrationResult.stopped) return integrationResult;
   return await runConcurrentBatch(nonintegration, phase2Concurrency, 1, "nonintegration", remaining, record, startedAt, controller);
 }
 
-async function runAllTests(partition: Partition, remaining: () => number, record: ExecutionRecord, startedAt: number): Promise<ChildResult> {
+async function runAllTests(partition: Partition, remaining: () => number, record: ExecutionRecord, startedAt: number, durations: Readonly<Record<string, number>> = {}): Promise<ChildResult> {
   const processController = new AbortController();
   const processExclusive = await runBatch(partition.processExclusive, 1, "process-exclusive", remaining, record, startedAt, processController);
   if (processExclusive.exit !== 0 || !processExclusive.stopped) return processExclusive;
-  return await runScheduledTests(partition, remaining, record, startedAt);
+  return await runScheduledTests(partition, remaining, record, startedAt, durations);
 }
 
 async function selfTest(): Promise<number> {
@@ -354,11 +396,20 @@ async function execute(): Promise<number> {
   const remaining = () => Math.ceil(deadline - performance.now());
   const partition = await partitionTests();
   if (!validPartition(partition)) return 2;
+  const durations = await readTimingHistory(timingHistoryPath);
   const record: ExecutionRecord = { enqueued: [], started: [], completed: [], transitions: [] };
   recordExecution(record, "enqueued", partition.all, startedAt);
-  const scheduled = await runAllTests(partition, remaining, record, startedAt);
+  const scheduled = await runAllTests(partition, remaining, record, startedAt, durations);
   const exact = reportExecution(partition, record);
-  return scheduled.exit === 0 && scheduled.stopped && exact ? 0 : scheduled.exit || 1;
+  if (scheduled.exit !== 0 || !scheduled.stopped || !exact) return scheduled.exit || 1;
+  try {
+    await saveTimingHistory(timingHistoryPath, record);
+  } catch {
+    console.warn("SORTIE_FULL_TIMINGS_UNAVAILABLE");
+  }
+  return 0;
 }
 
-process.exitCode = process.argv.includes("--self-test") ? await selfTest() : await execute();
+if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  process.exitCode = process.argv.includes("--self-test") ? await selfTest() : await execute();
+}

@@ -42,6 +42,11 @@ test("workers share the ordered minimum-solution ladder without weakening execut
     assert.match(asset.content, /broad suite result alone does\s+not prove every criterion/u);
     assert.match(asset.content, /Validation budget exhaustion, host counters, local routing, and unavailable host capabilities are process\s+defects/u);
     assert.match(asset.content, /Treat generated-source boundaries as high risk/u);
+    assert.match(asset.content, /Only when an accepted criterion covers failure behavior/u);
+    assert.match(asset.content, /check the public return\/result, error, and\s+observable state together, paired with a valid case/u);
+    assert.match(asset.content, /public entry point as well as its helper/u);
+    assert.match(asset.content, /Mark inapplicable dimensions N\/A/u);
+    assert.match(asset.content, /Run the exact declared canonical validation string in its own tool call/u);
   }
 });
 
@@ -67,12 +72,14 @@ test("coordinator keeps root goal and sequential handoff acceptance fingerprints
   assert.match(coordinator.content, /locally repairable evidence defects,\s+consume no no-progress result/u);
   assert.match(coordinator.content, /criterion -> changed or inspected implementation path -> concrete exercising test\/input\/branch -> PASS/u);
   assert.match(coordinator.content, /generator command evidence, post-generation candidate identity, generated-output stability/u);
+  assert.match(coordinator.content, /Do not accept expectations copied from the candidate's output/u);
   assert.match(coordinator.content, /always render one durable fallback card in the same assistant message/u);
   assert.match(coordinator.content, /plugin replaces that exact persisted card in place/u);
   const reviewer = runtimeAssets.find((candidate) => candidate.name === "dog-reviewer");
   assert.ok(reviewer);
   assert.match(reviewer.content, /broad\s+suite PASS without criterion-level exercise evidence is insufficient/u);
   assert.match(reviewer.content, /validation executed after generation/u);
+  assert.match(reviewer.content, /do not demand new behavior, new review rounds, or redundant checks outside accepted scope/u);
 });
 
 test("terminal report is Japanese and concise while internal proof remains durable", () => {
