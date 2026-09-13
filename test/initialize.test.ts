@@ -440,8 +440,14 @@ test("beta CLI defaults to namespaced preview assets", async () => {
   try {
     const result = await runCli(["init", project]);
     assert.equal(result.exit, 0, result.stderr);
-    assert.equal(await readFile(join(project, ".opencode/sortie-dogs-v010.version"), "utf8"), "0.10.0-beta.1\n");
-    assert.match(await readFile(join(project, ".opencode/agent/dog-coordinator-v010.md"), "utf8"), /prepare_operator/);
+    assert.equal(await readFile(join(project, ".opencode/sortie-dogs-v010.version"), "utf8"), "0.10.0-beta.1-role-names\n");
+    const primary = await readFile(join(project, ".opencode/agent/dog-operator.md"), "utf8");
+    assert.match(primary, /prepare_operator/);
+    assert.match(primary, /^model: openai\/gpt-5\.6-sol$/m);
+    assert.match(primary, /^variant: low$/m);
+    assert.match(await readFile(join(project, ".opencode/agent/dogs-coordinator.md"), "utf8"), /^hidden: true$/m);
+    await assert.rejects(readFile(join(project, ".opencode/agent/dog-coordinator-v010.md")), { code: "ENOENT" });
+    await assert.rejects(readFile(join(project, ".opencode/agent/dog-operator-v010.md")), { code: "ENOENT" });
     await assert.rejects(readFile(join(project, ".opencode/agent/dog-coordinator.md")), { code: "ENOENT" });
   } finally { await clean(project); }
 });

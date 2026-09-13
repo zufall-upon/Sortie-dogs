@@ -7,14 +7,25 @@ import { taskChildSessionID } from "./task-result-repair.js";
 import type { RuntimeBridge } from "./runtime-bridge.js";
 import { relative, resolve, sep } from "node:path";
 import { readFile } from "node:fs/promises";
+import { BUILT_IN_MODEL_CATALOG } from "./model-routing.js";
 
 const SERIAL_CAPABILITIES = new Set([
   "sortie_bind_write_gate", "sortie_release_write_gate", "sortie_check_contract",
   "sortie_compact_and_continue", "sortie_enable_backlog_drain",
 ]);
+const PREVIEW_WORKER_ROUTE = Object.freeze({ model: "openai/gpt-5.6-sol", variant: "medium" });
+const PREVIEW_PRIMARY_ROUTE = Object.freeze({ model: "openai/gpt-5.6-sol", variant: "low" });
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 const payload = (value: unknown): unknown => record(value) && "data" in value ? value.data : value;
 type Tool = NonNullable<OpenCodeHooks["tool"]>[string];
+
+function forwardTerminalText(text: string): string {
+  const newline = text.includes("\r\n") ? "\r\n" : "\n";
+  const lines = text.split(/\r?\n/u);
+  const first = lines.findIndex(line => line.trim().length > 0);
+  if (first >= 0 && /^DONE(?=[ \t]*(?:[—-]|$))/u.test(lines[first]!)) lines[first] = `status: ${lines[first]}`;
+  return lines.join(newline);
+}
 
 /** One transport namespace around the existing MkII engine; no second write gate or acceptance engine. */
 export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: string): OpenCodePlugin {
@@ -118,9 +129,22 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     });
     const runtimeBridge: RuntimeBridge = {
       profile, assetVersion,
+      defaultModelCatalog: { global: BUILT_IN_MODEL_CATALOG.global?.map(entry => entry.model === PREVIEW_PRIMARY_ROUTE.model
+        ? { ...entry, variants: [...new Set([...(entry.variants ?? []), PREVIEW_PRIMARY_ROUTE.variant])] } : entry) },
+      transformConfiguration: value => {
+        if (!record(value) || !record(value.modelRouting)) return value;
+        const routes: Record<string, unknown> = {};
+        for (const [external, route] of Object.entries(value.modelRouting)) {
+          const canonical = canonicalAgent(profile, external) ?? external;
+          if (Object.hasOwn(routes, canonical)) throw new Error(`preview-model-route-collision: ${external} -> ${canonical}`);
+          routes[canonical] = route;
+        }
+        return { ...value, modelRouting: routes };
+      },
       defaultModelRouting: {
-        "dog-coordinator": { preferred: { model: "openai/gpt-6-astra", variant: "high" } },
+        "dog-coordinator": { preferred: PREVIEW_PRIMARY_ROUTE },
         "dog-operator": { preferred: { model: "openai/gpt-5.6-terra", variant: "high" } },
+        "dog-worker": { preferred: PREVIEW_WORKER_ROUTE },
       },
       connected: value => { control = value; },
       onSerialSettlement: result => operators.settled(result),
@@ -193,7 +217,13 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     const ownTools = new Set([prepare, next, status, cancel]);
     const protocolMap = CANONICAL_AGENT_ROLES.map(role => `${role}=${profileAgent(profile, role)}`).join(", ");
 
-    const hooks: OpenCodeHooks = {
+    const hooks: OpenCodeHooks & { config(config: Record<string, unknown>): Promise<void> } = {
+      config: async config => {
+        const agents = record(config.agent) ? config.agent : undefined;
+        const workerName = profileAgent(profile, "dog-worker");
+        const worker = agents && record(agents[workerName]) ? agents[workerName] : undefined;
+        if (worker !== undefined) Object.assign(worker, PREVIEW_WORKER_ROUTE);
+      },
       tool: tools,
       "chat.message": async (chat, output) => {
         const actual = chat.agent ?? output.message.agent;
@@ -206,7 +236,19 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           if (retired.has(chat.sessionID) && output.parts.some(part => record(part) && part.synthetic === true)) throw new Error("runtime-profile-revoked");
           retired.delete(chat.sessionID);
         }
-        if (role === "dog-operator" && !await rootFor(chat.sessionID)) throw new Error("operator-grant-invalid");
+        if (role === "dog-operator") {
+          // The host invokes this hook before persisting the first user message.
+          // Bind the actual incoming prompt against the already-admitted parent grant.
+          const who = await identity(chat.sessionID);
+          const root = who.parent === undefined ? undefined : await rootFor(who.parent);
+          if (!root || root !== who.parent) throw new Error("operator-grant-invalid");
+          const prompt = output.parts.filter(record).filter(part => part.type === "text" && typeof part.text === "string")
+            .map(part => part.text).join("\n");
+          const state = await operators.required(root);
+          if (state.operatorSessionID !== chat.sessionID) await operators.bindOperator(root, chat.sessionID, prompt);
+          operatorParents.set(chat.sessionID, root);
+          if (!await rootFor(chat.sessionID)) throw new Error("operator-grant-invalid");
+        }
         if (role === "dog-worker") {
           const root = await rootFor(chat.sessionID);
           const state = root ? await operators.read(root) : undefined;
@@ -317,7 +359,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       "experimental.text.complete": async (request, output) => {
         const role = (await identity(request.sessionID)).role;
         if (role === "dog-operator" || !await rootFor(request.sessionID)) return;
-        await core["experimental.text.complete"]?.(request, output);
+        const mapped = { text: role === "dog-coordinator" ? forwardTerminalText(output.text) : output.text };
+        await core["experimental.text.complete"]?.(request, mapped);
+        output.text = mapped.text;
       },
       "experimental.session.compacting": async (request, output) => {
         const root = await rootFor(request.sessionID);
@@ -349,7 +393,22 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           return;
         }
         if (!await rootFor(id)) return;
-        await core.event?.(translate({ event }, false) as { event: typeof event });
+        const mappedEvent = translate({ event }, false) as { event: typeof event };
+        const mappedPart = record(mappedEvent.event.properties?.part) ? mappedEvent.event.properties.part : undefined;
+        if ((await identity(id)).role === "dog-coordinator" && mappedPart?.type === "text" && typeof mappedPart.text === "string") {
+          mappedPart.text = forwardTerminalText(mappedPart.text);
+        }
+        await core.event?.(mappedEvent);
+        if (event.type === "message.part.updated" && part?.type === "tool" && part.tool === "task" &&
+          typeof part.callID === "string" && record(part.state) && part.state.status === "error") {
+          const ownership = taskOwners.get(part.callID);
+          if (ownership !== undefined && ownership.actor === id) {
+            const settled = ownership.operator
+              ? (await operators.operatorRejected(ownership.root), true)
+              : await control?.settleRejectedDispatch(ownership.root, part.callID) ?? false;
+            if (settled) taskOwners.delete(part.callID);
+          }
+        }
       },
     };
     return hooks;

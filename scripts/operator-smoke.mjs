@@ -8,6 +8,18 @@ import { shellQuote } from './release-process.mjs';
 const hash = value => createHash('sha256').update(value).digest('hex');
 const assert = (condition, message) => { if (!condition) throw Error(message); };
 const events = value => value.split(/\r?\n/).flatMap(line => { try { return [JSON.parse(line)]; } catch { return []; } });
+export const boundedToolErrors = records => records.flatMap(event => {
+  const part = event?.type === 'tool_use' ? event.part : null;
+  if (part?.state?.status !== 'error' || typeof part.tool !== 'string') return [];
+  const detail = typeof part.state.error === 'string' ? part.state.error.split(/\r?\n/)[0].trim() : 'unspecified tool error';
+  return [{ tool: part.tool.slice(0, 128), status: 'error', error: detail.slice(0, 1024) }];
+}).slice(0, 16);
+
+function failedCommandEvents(error) {
+  const result = error && typeof error === 'object' && 'processResult' in error ? error.processResult : null;
+  if (!result || typeof result !== 'object') return [];
+  return [result.stdout, result.stderr].filter(value => typeof value === 'string').flatMap(events);
+}
 
 async function collectFamily(root, project, env) {
   const queue = [root], seen = new Set(), agents = {};
@@ -48,7 +60,7 @@ export async function operatorSmoke(tgz, directory, arm = 'operator') {
   assert(['operator', 'astra', 'terra'].includes(arm), 'Unknown comparison arm');
   const profileId = arm === 'operator' ? 'beta-v010' : 'stable';
   const fixture = await installedFixture(tgz, directory, profileId);
-  const { project, env, runtime, installed, coordinatorAgent, workerAgent, reduceGoalFlight, acceptanceContinuityFingerprint } = fixture;
+  const { project, env, runtime, installed, coordinatorAgent, operatorAgent, workerAgent, reduceGoalFlight, acceptanceContinuityFingerprint } = fixture;
   const model = arm === 'terra' ? 'openai/gpt-5.6-terra' : 'openai/gpt-6-astra';
   const values = { first: 'first-complete', second: 'second-complete' };
   const oracleSources = {};
@@ -85,7 +97,7 @@ export async function operatorSmoke(tgz, directory, arm = 'operator') {
   await writeFile(planPath, JSON.stringify(plan));
   let prompt;
   if (arm === 'operator') {
-    prompt = `Continue the same goal. Read ${planPath}, freeze that exact plan with sortie_v010_prepare_operator, and dispatch the returned operator Task verbatim. Let it execute both units and return its complete packet. Do not edit source or use the direct worker fast path for these two units. This changes only requested local text artifacts; use the existing low-risk review policy. Accept only when both original criteria have host verification and the oracles remain unchanged.`;
+    prompt = `Continue the same goal. Read ${planPath}, freeze that exact plan with sortie_v010_prepare_operator, and dispatch the returned ${operatorAgent} Task verbatim. Let it execute both units and return its complete packet. Do not edit source or use the direct worker fast path for these two units. This changes only requested local text artifacts; use the existing low-risk review policy. Accept only when both original criteria have host verification and the oracles remain unchanged.`;
   } else {
     const controls = join(project, runtime.stateDirectory, 'contracts', 'smoke');
     await mkdir(controls, { recursive: true });
@@ -111,27 +123,45 @@ export async function operatorSmoke(tgz, directory, arm = 'operator') {
     }
     prompt = `Continue the same goal. Execute these two prepared worker Tasks sequentially, preserving each prompt verbatim. Do not edit source yourself. This changes only requested local text artifacts; use the existing low-risk review policy. Finish only when both have host verification and the oracles remain unchanged.\n${JSON.stringify(tasks)}`;
   }
-  const outcome = await cli(prompt, sessionID);
+  let outcome = [], runtimeBlocker = null;
+  try { outcome = await cli(prompt, sessionID); }
+  catch (error) {
+    outcome = failedCommandEvents(error);
+    runtimeBlocker = error instanceof Error ? error.message : 'Unknown host execution failure';
+  }
   const elapsedMs = Date.now() - started;
   const ledgerDirectory = runtime.flightDirectory ?? 'run-flight';
   const key = runtime.id === 'stable' ? sessionID : `${runtime.id}\u0000${sessionID}`;
-  const ledger = JSON.parse(await readFile(join(project, '.git/sortie-dogs', ledgerDirectory, `${hash(key)}.json`), 'utf8'));
-  const goal = reduceGoalFlight(ledger.goal_events);
+  const ledger = await readFile(join(project, '.git/sortie-dogs', ledgerDirectory, `${hash(key)}.json`), 'utf8')
+    .then(JSON.parse).catch(() => null);
+  const goal = ledger === null ? null : reduceGoalFlight(ledger.goal_events);
   const oracleChecks = {};
   for (const name of Object.keys(values)) {
     oracleChecks[name] = (await readFile(join(project, `${name}.txt`), 'utf8')).trim() === values[name] &&
       hash(await readFile(join(project, `check-${name}.mjs`))) === oracleSources[name];
   }
-  const metrics = await collectFamily(sessionID, project, env);
-  const operatorState = arm === 'operator' ? JSON.parse(await readFile(join(project, runtime.stateDirectory, 'operators', `${hash(sessionID)}.json`), 'utf8')) : null;
+  const metrics = await collectFamily(sessionID, project, env).catch(error => ({ sessionCount: null, agents: [], totalTokens: null,
+    modelSteps: null, reportedCost: null, pricingCoverage: null,
+    costInterpretation: `unavailable: ${error instanceof Error ? error.message : 'unknown export failure'}` }));
+  const operatorState = arm === 'operator' ? await readFile(join(project, runtime.stateDirectory, 'operators', `${hash(sessionID)}.json`), 'utf8')
+    .then(JSON.parse).catch(() => null) : null;
+  const toolErrors = boundedToolErrors(outcome);
+  const taskError = toolErrors.find(error => error.tool === 'task')?.error;
+  runtimeBlocker = taskError ?? operatorState?.decision ?? runtimeBlocker ?? (ledger === null ? 'Goal ledger unavailable after host execution'
+    : goal?.receipt?.status !== 'succeeded' ? `Root terminal status is ${goal?.receipt?.status ?? goal?.phase ?? 'unknown'}`
+      : arm === 'operator' && (operatorState === null || operatorState.phase !== 'completed')
+        ? `Operator terminal phase is ${operatorState?.phase ?? 'missing'}` : null);
   const report = { schema: 1, arm, version: fixture.pkg.version, profile: runtime.id, runtimeMarker: fixture.runtimeMarker,
     tgzSHA256: hash(await readFile(tgz)), sourceFixtureFingerprint: hash(JSON.stringify(oracleSources)), sessionID, requestedModel: model,
-    elapsedMs, oracleChecks, terminal: goal.receipt?.status ?? goal.phase, operatorPhase: operatorState?.phase ?? null,
+    elapsedMs, oracleChecks, terminal: goal?.receipt?.status ?? goal?.phase ?? null, operatorPhase: operatorState?.phase ?? null,
+    operatorDecision: operatorState?.decision ?? null,
     operatorUnits: operatorState?.units.map(unit => ({ id: unit.unit.id, status: unit.status, child: unit.childSessionID })) ?? [],
-    events: outcome.map(event => event.type), metrics, measurement: 'smoke only; not a representative efficiency benchmark' };
+    runtimeBlocker, toolErrors, events: outcome.map(event => event.type), metrics,
+    measurement: 'smoke only; not a representative efficiency benchmark' };
   await writeFile(join(fixture.run, 'operator-smoke.json'), JSON.stringify(report, null, 2) + '\n');
-  assert(Object.values(oracleChecks).every(Boolean) && goal.receipt?.status === 'succeeded', 'Smoke acceptance is incomplete');
-  if (arm === 'operator') assert(operatorState.phase === 'completed' && operatorState.units.every(unit => unit.status === 'succeeded'), 'Operator queue did not finish');
+  assert(Object.values(oracleChecks).every(Boolean) && goal?.receipt?.status === 'succeeded', `Smoke acceptance is incomplete: ${runtimeBlocker ?? 'oracle mismatch'}`);
+  if (arm === 'operator') assert(operatorState?.phase === 'completed' && operatorState.units.every(unit => unit.status === 'succeeded'),
+    `Operator queue did not finish: ${runtimeBlocker ?? 'terminal evidence incomplete'}`);
   return report;
 }
 

@@ -7,10 +7,10 @@ const coordinator = profileAgent(profile, "dog-coordinator");
 const operator = profileAgent(profile, "dog-operator");
 const worker = profileAgent(profile, "dog-worker");
 const coordinatorContent = `---
-description: Sortie-dogs v0.10 preview — strategic coordinator with an optional bounded operator.
+description: Sortie-dogs ${V010_RUNTIME_ASSET_VERSION} primary dog-operator — strategic authority with a bounded operations delegate.
 mode: primary
-model: openai/gpt-6-astra
-variant: high
+model: openai/gpt-5.6-sol
+variant: low
 permission:
   task:
     "*": deny
@@ -82,7 +82,7 @@ runtime's ownership; do not restart it from a stale summary. The initial preview
 `;
 
 const operatorContent = `---
-description: Sortie-dogs v0.10 bounded operations delegate; no source or acceptance authority.
+description: Sortie-dogs ${V010_RUNTIME_ASSET_VERSION} hidden dogs-coordinator operations delegate; no source or acceptance authority.
 mode: subagent
 hidden: true
 model: openai/gpt-5.6-terra
@@ -117,7 +117,7 @@ rather than reconstructing criteria from a summary. Never use a standalone/gener
 
 export const runtimeAssets: readonly RuntimeAsset[] = Object.freeze([
   ...canonicalAssets.map((asset): RuntimeAsset => {
-    const name = asset.name === "sortie" ? profile.commandName : `${asset.name}${profile.agentSuffix}`;
+    const name = asset.name === "sortie" ? profile.commandName : profileAgent(profile, asset.name as Parameters<typeof profileAgent>[1]);
     let content = asset.name === "dog-coordinator" ? coordinatorContent
       : renderProfileInstructions(profile, asset.content).replaceAll(RUNTIME_ASSET_VERSION, V010_RUNTIME_ASSET_VERSION);
     if (asset.name !== "dog-coordinator" && asset.installPath.startsWith("agent/")) {
@@ -126,6 +126,9 @@ export const runtimeAssets: readonly RuntimeAsset[] = Object.freeze([
     if (asset.name === "dog-worker" || asset.name === "dog-luna-worker") {
       content = content.replace("mode: subagent\n", `mode: subagent\ntools:\n  "sortie_*": false\n  ${profile.toolPrefix}bind_write_gate: true\n  ${profile.toolPrefix}release_write_gate: true\n`);
       content += `\n## Root-approved unit coverage\nWhen the immutable handoff contains ext["sortie-dogs/unit-coverage"], its indices identify this unit's assigned criteria within the unchanged global acceptance ledger. Prove those assigned criteria and preserve all global constraints. Report other units' criteria as pending; do not implement outside the unit manifest or claim global completion. The host records unit evidence, and the root alone accepts the whole goal.\n`;
+    }
+    if (asset.name !== "dog-coordinator") {
+      content = content.replace(/^description: .*$/m, match => `${match} [${V010_RUNTIME_ASSET_VERSION}]`);
     }
     return { name, version: V010_RUNTIME_ASSET_VERSION, installPath: `${asset.installPath.split("/")[0]}/${name}.md`, content };
   }),

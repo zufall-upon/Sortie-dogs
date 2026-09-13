@@ -10,30 +10,42 @@ export interface RuntimeProfile {
   readonly markerFile: string;
   readonly commandName: string;
   readonly parallel: boolean;
+  /** External OpenCode names keyed by stable logical MkII role identity. */
+  readonly agentNames: Readonly<Record<CanonicalAgentRole, string>>;
 }
-
-export const STABLE_RUNTIME_PROFILE: RuntimeProfile = Object.freeze({
-  id: "stable", agentSuffix: "", toolPrefix: "sortie_", stateDirectory: ".sortie-dogs", flightDirectory: "run-flight",
-  configFile: "sortie-dogs.json", configEnvironment: "SORTIE_DOGS_CONFIG",
-  markerFile: "sortie-dogs.version", commandName: "sortie", parallel: true,
-});
-
-export const V010_RUNTIME_PROFILE: RuntimeProfile = Object.freeze({
-  id: "v010", agentSuffix: "-v010", toolPrefix: "sortie_v010_", stateDirectory: ".sortie-dogs-v010", flightDirectory: "run-flight-v010",
-  configFile: "sortie-dogs-v010.json", configEnvironment: "SORTIE_DOGS_V010_CONFIG",
-  markerFile: "sortie-dogs-v010.version", commandName: "sortie-v010", parallel: false,
-});
-
-export const RUNTIME_PROFILES = Object.freeze({ stable: STABLE_RUNTIME_PROFILE, v010: V010_RUNTIME_PROFILE });
-export type RuntimeProfileId = keyof typeof RUNTIME_PROFILES;
 
 export const CANONICAL_AGENT_ROLES = Object.freeze([
   "dog-coordinator", "dog-worker", "dog-luna-worker", "dog-scout", "dog-reviewer", "dog-advisor", "dog-operator",
 ] as const);
 export type CanonicalAgentRole = (typeof CANONICAL_AGENT_ROLES)[number];
 
+function suffixedAgentNames(suffix: string): Readonly<Record<CanonicalAgentRole, string>> {
+  return Object.freeze(Object.fromEntries(CANONICAL_AGENT_ROLES.map(role => [role, `${role}${suffix}`])) as Record<CanonicalAgentRole, string>);
+}
+
+export const STABLE_RUNTIME_PROFILE: RuntimeProfile = Object.freeze({
+  id: "stable", agentSuffix: "", toolPrefix: "sortie_", stateDirectory: ".sortie-dogs", flightDirectory: "run-flight",
+  configFile: "sortie-dogs.json", configEnvironment: "SORTIE_DOGS_CONFIG",
+  markerFile: "sortie-dogs.version", commandName: "sortie", parallel: true,
+  agentNames: suffixedAgentNames(""),
+});
+
+export const V010_RUNTIME_PROFILE: RuntimeProfile = Object.freeze({
+  id: "v010", agentSuffix: "-v010", toolPrefix: "sortie_v010_", stateDirectory: ".sortie-dogs-v010", flightDirectory: "run-flight-v010",
+  configFile: "sortie-dogs-v010.json", configEnvironment: "SORTIE_DOGS_V010_CONFIG",
+  markerFile: "sortie-dogs-v010.version", commandName: "sortie-v010", parallel: false,
+  agentNames: Object.freeze({
+    ...suffixedAgentNames("-v010"),
+    "dog-coordinator": "dog-operator",
+    "dog-operator": "dogs-coordinator",
+  }),
+});
+
+export const RUNTIME_PROFILES = Object.freeze({ stable: STABLE_RUNTIME_PROFILE, v010: V010_RUNTIME_PROFILE });
+export type RuntimeProfileId = keyof typeof RUNTIME_PROFILES;
+
 export function profileAgent(profile: RuntimeProfile, role: CanonicalAgentRole): string {
-  return `${role}${profile.agentSuffix}`;
+  return profile.agentNames[role];
 }
 
 export function canonicalAgent(profile: RuntimeProfile, agent: string | undefined): CanonicalAgentRole | undefined {

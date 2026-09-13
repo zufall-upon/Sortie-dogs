@@ -131,6 +131,23 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       "node --input-type=module --eval \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true });\"",
     );
 
+    const packedProject = join(fixture, "packed-project");
+    await mkdir(packedProject);
+    await execFileAsync(process.execPath, [
+      join(consumer, "node_modules", "sortie-dogs", "dist", "cli", "main.js"),
+      "init", packedProject, "--profile", "v010",
+    ], { cwd: packedProject });
+    assert.equal(
+      await readFile(join(packedProject, ".opencode", "sortie-dogs-v010.version"), "utf8"),
+      "0.10.0-beta.1-role-names\n",
+    );
+    const packedPrimary = await readFile(join(packedProject, ".opencode", "agent", "dog-operator.md"), "utf8");
+    assert.match(packedPrimary, /^mode: primary$/m);
+    assert.match(packedPrimary, /^model: openai\/gpt-5\.6-sol$/m);
+    assert.match(packedPrimary, /^variant: low$/m);
+    assert.match(await readFile(join(packedProject, ".opencode", "agent", "dogs-coordinator.md"), "utf8"), /^hidden: true$/m);
+    await assert.rejects(readFile(join(packedProject, ".opencode", "agent", "dog-coordinator-v010.md")), { code: "ENOENT" });
+
     const rootDeclaration = await readFile(
       join(consumer, "node_modules", "sortie-dogs", "dist", "index.d.ts"),
       "utf8",
@@ -365,7 +382,17 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.ok(loaded.previewTools.includes("sortie_v010_prepare_operator"));
     assert.ok(loaded.previewTools.every(name => name.startsWith("sortie_v010_")));
     assert.equal(loaded.previewAssets.length, 8);
-    assert.ok(loaded.previewAssets.every(asset => asset.version === "0.10.0-beta.1" && asset.name.endsWith("-v010")));
+    assert.ok(loaded.previewAssets.every(asset => asset.version === "0.10.0-beta.1-role-names"));
+    assert.deepEqual(loaded.previewAssets.map(({ name, installPath }) => ({ name, installPath })), [
+      { name: "dog-operator", installPath: "agent/dog-operator.md" },
+      { name: "dog-worker-v010", installPath: "agent/dog-worker-v010.md" },
+      { name: "dog-luna-worker-v010", installPath: "agent/dog-luna-worker-v010.md" },
+      { name: "dog-scout-v010", installPath: "agent/dog-scout-v010.md" },
+      { name: "dog-reviewer-v010", installPath: "agent/dog-reviewer-v010.md" },
+      { name: "dog-advisor-v010", installPath: "agent/dog-advisor-v010.md" },
+      { name: "sortie-v010", installPath: "command/sortie-v010.md" },
+      { name: "dogs-coordinator", installPath: "agent/dogs-coordinator.md" },
+    ]);
     assert.deepEqual(
       loaded.openCodeLoad,
       ["hooks"],

@@ -36,6 +36,19 @@ const LEGACY_RUNTIME_ASSETS: readonly LegacyRuntimeAsset[] = [
   },
 ] as const;
 
+const V010_ROLE_NAME_LEGACY_ASSETS: readonly LegacyRuntimeAsset[] = [
+  {
+    relativePath: ".opencode/agent/dog-coordinator-v010.md",
+    markerVersions: ["0.10.0-beta.1"],
+    sha256: "50eb6392bdd98865b28ba3620781d1d27ab197c7211290745c6db39a0ed8db90",
+  },
+  {
+    relativePath: ".opencode/agent/dog-operator-v010.md",
+    markerVersions: ["0.10.0-beta.1"],
+    sha256: "6f2fc1b4ae2bdadcd61b0984636930b60dc84218187107e39c8e1c32c33260cf",
+  },
+] as const;
+
 export type InitializationStatus = "installed" | "unchanged";
 
 export interface InitializeProjectResult {
@@ -367,6 +380,8 @@ interface InitializationLayout {
   readonly preserveAllLegacy: boolean;
   readonly invalidRootMessage: string;
   readonly controlIgnore?: boolean;
+  readonly legacyAssets?: readonly LegacyRuntimeAsset[];
+  readonly renamedTargets?: readonly string[];
 }
 
 const PROJECT_LAYOUT: InitializationLayout = {
@@ -395,6 +410,7 @@ async function initializeRoot(
   installAssets: readonly RuntimeAsset[] = runtimeAssets,
 ): Promise<InitializeProjectResult> {
   const root = resolve(requestedRoot);
+  const legacyAssets = layout.legacyAssets ?? LEGACY_RUNTIME_ASSETS;
   const rootInfo = await metadata(root);
   if (rootInfo === undefined || !rootInfo.isDirectory() || rootInfo.isSymbolicLink()) {
     throw new ProjectInitializationError("invalid-project", layout.invalidRootMessage);
@@ -412,7 +428,7 @@ async function initializeRoot(
 
   const preservedGlobalLegacyPaths: string[] = [];
   if (layout.preserveAllLegacy) {
-    for (const asset of LEGACY_RUNTIME_ASSETS) {
+    for (const asset of legacyAssets) {
       const relativePath = layoutLegacyPath(asset, layout);
       if (await metadata(resolve(root, relativePath)) !== undefined) {
         preservedGlobalLegacyPaths.push(relativePath);
@@ -454,10 +470,18 @@ async function initializeRoot(
   }
 
   const installedVersion = markerText === undefined ? undefined : parseMarker(markerText.toString("utf8"));
+  if (installedVersion !== undefined && legacyAssets.some(asset => asset.markerVersions.includes(installedVersion))) {
+    for (const target of layout.renamedTargets ?? []) {
+      const index = assetEntries.findIndex(entry => entry.relativePath === safeAssetPath(target, layout.assetPrefix));
+      if (index >= 0 && existing[index] !== undefined && !matches(assetEntries[index]!, index)) {
+        throw new ProjectInitializationError("conflict", `Renamed runtime target has unknown ownership: ${target}`);
+      }
+    }
+  }
   const removableLegacyFiles: Array<{ asset: LegacyRuntimeAsset; content: Buffer }> = [];
   const preservedLegacyPaths: string[] = [...preservedGlobalLegacyPaths];
   if (!layout.preserveAllLegacy && installedVersion !== undefined) {
-    for (const asset of LEGACY_RUNTIME_ASSETS) {
+    for (const asset of legacyAssets) {
       if (!asset.markerVersions.includes(installedVersion)) continue;
       const state = await readableOwnedLegacyFile(root, asset);
       if (Buffer.isBuffer(state)) removableLegacyFiles.push({ asset, content: state });
@@ -548,7 +572,8 @@ async function profileInstallation(id: RuntimeProfileId, global: boolean): Promi
   const module: typeof import("../runtime-assets-v010.js") = await import(`../runtime-assets-v010.${import.meta.url.endsWith(".ts") ? "ts" : "js"}`);
   return { layout: { ...(global ? GLOBAL_LAYOUT : PROJECT_LAYOUT),
     markerPath: global ? profile.markerFile : `${OPEN_CODE_DIRECTORY}/${profile.markerFile}`,
-    preserveAllLegacy: true, controlIgnore: false }, assets: module.runtimeAssets };
+    preserveAllLegacy: false, controlIgnore: false, legacyAssets: V010_ROLE_NAME_LEGACY_ASSETS,
+    renamedTargets: ["agent/dog-operator.md", "agent/dogs-coordinator.md"] }, assets: module.runtimeAssets };
 }
 
 export async function initializeProject(projectRoot: string = process.cwd(), profile: RuntimeProfileId = "stable"): Promise<InitializeProjectResult> {

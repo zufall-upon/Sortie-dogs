@@ -195,18 +195,18 @@ export class OperatorRuntime {
       throw new Error("operator-active-contract-immutable");
     }
     const runID = `operator-${randomUUID()}`;
-    const directory = join(this.projectRoot, this.profile.stateDirectory, "contracts", runID);
+    const directory = join(this.projectRoot, this.profile.stateDirectory, "contracts");
     await mkdir(directory, { recursive: true });
-    const declarationPath = join(directory, "goal.json");
+    const declarationPath = join(directory, `${runID}.goal.json`);
     const declaration = JSON.stringify(plan.goal_declaration);
     await writeFile(declarationPath, declaration, { flag: "wx", mode: 0o600 });
     const acceptanceFingerprint = acceptanceContinuityFingerprint(plan.acceptance);
     const units: UnitState[] = [];
     for (const [index, unit] of plan.units.entries()) {
       const taskID = `${runID}-${index + 1}`;
-      const manifestPath = join(directory, `${unit.id}.operation-manifest.json`);
-      const manifestRelative = `${this.profile.stateDirectory}/contracts/${runID}/${unit.id}.operation-manifest.json`;
-      const handoffPath = join(directory, `handoff.${unit.id}.json`);
+      const manifestPath = join(directory, `${taskID}.operation-manifest.json`);
+      const manifestRelative = `${this.profile.stateDirectory}/contracts/${taskID}.operation-manifest.json`;
+      const handoffPath = join(directory, `handoff.${taskID}.json`);
       const manifest = { version: "0.1.0", task_id: taskID, read: unit.read, write: unit.write, validation: unit.validation };
       const handoff = {
         version: "0.1.0", profile: "minimal", id: taskID, created_at: new Date().toISOString(),
@@ -228,8 +228,8 @@ export class OperatorRuntime {
       await writeFile(manifestPath, contents[1]!, { flag: "wx", mode: 0o600 });
       const prompt = ["role: implementation", `task_id: ${taskID}`, `project_root: ${this.projectRoot}`,
         `source_manifest: ${unit.write.join(", ")}`, `operation_manifest: ${manifestRelative}`, `handoff_path: ${handoffPath}`,
-        `goal_declaration_path: ${declarationPath}`, "acceptance:", ...plan.acceptance.map(value => `- ${value}`),
-        "validation:", ...unit.validation.map(value => `- ${value}`),
+        `goal_declaration_path: ${declarationPath}`, "acceptance:", ...plan.acceptance.map(value => `  - ${value}`),
+        "validation:", ...unit.validation.map(value => `  - ${value}`),
         `unit_acceptance_indices: ${JSON.stringify(unit.acceptance_indices)}`, "", unit.objective].join("\n");
       units.push({ unit, task: { subagent_type: profileAgent(this.profile, "dog-worker"), description: unit.title, prompt },
         handoffPath, manifestPath, hashes: [...contents.map(hash), hash(declaration)], status: "pending", callID: null,
@@ -303,14 +303,26 @@ export class OperatorRuntime {
     await this.save(state);
   }
   async rejectedAdmission(root: string, callID: string): Promise<void> {
+    await this.rejectDispatch(root, callID, "dispatch-admission-rejected");
+  }
+  async rejectDispatch(root: string, callID: string, decision = "native-task-rejected"): Promise<void> {
     const state = await this.required(root);
     const unit = state.units.find(item => item.callID === callID && item.status === "running");
     if (!unit) return;
     unit.status = "failed";
     unit.resultClass = "process-defect";
     state.phase = "awaiting-decision";
-    state.decision = "dispatch-admission-rejected";
+    state.decision = decision;
     await this.save(state);
+  }
+  async operatorRejected(root: string): Promise<OperatorState> {
+    const state = await this.required(root);
+    if (state.phase === "running" && state.operatorCallID !== null && state.operatorSessionID === null) {
+      state.phase = "awaiting-decision";
+      state.decision = "native-operator-task-rejected";
+      await this.save(state);
+    }
+    return state;
   }
   async settled(result: SerialDispatchSettlement): Promise<void> {
     const state = await this.read(result.rootSessionID);
@@ -386,7 +398,8 @@ export class OperatorRuntime {
   }
   private async verifyControls(unit: UnitState): Promise<void> {
     if (!isAbsolute(unit.handoffPath) || !isAbsolute(unit.manifestPath)) throw new Error("operator-control-path-invalid");
-    const declaration = join(resolve(unit.handoffPath, ".."), "goal.json");
+    const declaration = /^goal_declaration_path: (.+)$/m.exec(unit.task.prompt)?.[1];
+    if (!declaration || !isAbsolute(declaration)) throw new Error("operator-declaration-path-invalid");
     const contents = await Promise.all([unit.handoffPath, unit.manifestPath, declaration].map(file => readFile(file, "utf8")));
     if (contents.some((value, index) => hash(value) !== unit.hashes[index])) throw new Error("operator-contract-changed");
   }

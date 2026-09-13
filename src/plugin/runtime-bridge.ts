@@ -17,12 +17,15 @@ export interface RuntimeBridge {
   readonly profile: RuntimeProfile;
   readonly assetVersion: string;
   readonly defaultModelRouting?: ModelRoutingConfig;
+  readonly defaultModelCatalog?: import("./model-routing.js").ModelCatalog;
+  transformConfiguration?(value: unknown): unknown;
   onSerialSettlement?(settlement: SerialDispatchSettlement): Promise<void>;
   onRootTerminal?(rootSessionID: string, receipt: GoalTerminalReceipt): Promise<void>;
   connected?(control: {
     enableUnits(rootSessionID: string, maximum: number): void;
     isRoot(rootSessionID: string): Promise<boolean>;
     cancelChildren(rootSessionID: string): Promise<void>;
+    settleRejectedDispatch(rootSessionID: string, callID: string): Promise<boolean>;
     stopAutomaticRecovery(rootSessionID: string): Promise<void>;
     stopRoot(rootSessionID: string): Promise<void>;
   }): void;

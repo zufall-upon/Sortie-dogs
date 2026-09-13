@@ -1528,9 +1528,12 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   const pendingRealGoalTurns = new Map<string, { readonly selectedAgent: string; readonly parts: readonly unknown[] }>();
   const pendingGoalRecoveries = new Map<string, Promise<boolean>>();
   const scheduledGoalRecoveries = new Map<string, Promise<void>>();
-  const declaredGlobalConfig = await readOptionalGlobalConfig(runtimeProfile.configFile);
+  const transformConfiguration = (value: unknown): unknown => input.runtimeBridge?.transformConfiguration?.(value) ?? value;
+  options = transformConfiguration(options) as typeof options;
+  const declaredGlobalConfig = transformConfiguration(await readOptionalGlobalConfig(runtimeProfile.configFile));
   const profileDefaults = input.runtimeBridge?.defaultModelRouting;
   const globalConfig = profileDefaults === undefined ? declaredGlobalConfig : {
+    ...(input.runtimeBridge?.defaultModelCatalog === undefined ? {} : { modelCatalog: input.runtimeBridge.defaultModelCatalog }),
     ...(isRecord(declaredGlobalConfig) ? declaredGlobalConfig : {}),
     modelRouting: { ...profileDefaults,
       ...(isRecord(declaredGlobalConfig) && isRecord(declaredGlobalConfig.modelRouting) ? declaredGlobalConfig.modelRouting : {}) },
@@ -2488,14 +2491,26 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     }
   }
 
+  async function settleRejectedGoalDispatch(rootSessionID: string, callID: string): Promise<boolean> {
+    const reservation = goalReservations.get(callID);
+    if (reservation === undefined || reservation.root !== rootSessionID) return false;
+    const finished = finishCoordinatorTask(rootSessionID, callID);
+    await settleGoalDispatch(callID, {
+      status: "error",
+      output: "Native Task failed after plugin admission.",
+    });
+    if (finished) fastLane.workerCompleted(rootSessionID);
+    return true;
+  }
+
   // Project config read is required discovery for its opt-in; no reflection storage/version read
   // occurs unless that resolved config enables reflection. It stays isolated from write-gate load.
   try {
     project = await createProjectPaths(resolveProjectRoot(input));
     const probed = resolvePluginConfigurationSourcesWithGlobal(
       globalConfig,
-      await readOptionalProjectConfig(project, projectConfigPath),
-      readEnvironmentConfig(runtimeProfile.configEnvironment),
+      transformConfiguration(await readOptionalProjectConfig(project, projectConfigPath)),
+      transformConfiguration(readEnvironmentConfig(runtimeProfile.configEnvironment)),
       options,
     );
     if (runtimeProfile.id === "stable" && probed.kind === "configured" && reflectionEnabled(probed.reflection)) {
@@ -2681,8 +2696,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     loading = (async () => {
       try {
         project ??= await createProjectPaths(resolveProjectRoot(input));
-        const projectConfig = await readOptionalProjectConfig(project, projectConfigPath);
-        const environmentConfig = readEnvironmentConfig(runtimeProfile.configEnvironment);
+        const projectConfig = transformConfiguration(await readOptionalProjectConfig(project, projectConfigPath));
+        const environmentConfig = transformConfiguration(readEnvironmentConfig(runtimeProfile.configEnvironment));
         const parsed = resolvePluginConfigurationSourcesWithGlobal(
           globalConfig,
           projectConfig,
@@ -7266,6 +7281,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       }
       abortCoordinatorTasks(sessionID);
     },
+    settleRejectedDispatch: settleRejectedGoalDispatch,
     stopAutomaticRecovery: sessionID => continuation.stopAutomaticRecovery(sessionID),
     stopRoot: async sessionID => {
       await continuation.stopAutomaticRecovery(sessionID);

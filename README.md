@@ -1,9 +1,12 @@
 # Sortie-dogs
 
-> **v0.10.0-beta.1 development preview.** This branch provides the separately
-> named `dog-coordinator-v010` and a bounded Terra operator. See the
+> **v0.10.0-beta.1 development preview.** This branch installs `dog-operator`
+> as the Sol/low primary and hidden `dogs-coordinator` as its bounded
+> Terra/high operations delegate. See the
 > [preview architecture, coexistence and release guide](docs/v010-preview.md).
 > The sections below also document the retained stable compatibility runtime.
+> This naming update does not establish dogfooding readiness: F001 still has an
+> unresolved `npm test` check, and broader runtime gates remain outstanding.
 
 **Add a bounded, cost-aware execution loop to OpenCode without taking OpenCode over.**
 
@@ -61,6 +64,13 @@ Sortie-dogs adds a workflow to your existing setup rather than replacing it.
 - Manual removal targets only known Sortie-owned runtime assets.
 
 Use OpenCode normally. Invoke the pack only when you want it.
+
+For the v0.10 preview, run it in a dedicated OpenCode process with a dedicated
+preview configuration. Set `subagent_depth: 2` only there, select
+`dog-operator`, and keep normal global configuration and stable measurements
+unchanged. OpenCode merges depth for a whole host process, so sharing that host
+also grants depth 2 to unrelated agents. See the preview guide for the isolated
+config/process setup and restart OpenCode after changing configuration.
 
 ## Quick start
 

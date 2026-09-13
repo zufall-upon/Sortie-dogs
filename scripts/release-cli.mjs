@@ -7,6 +7,8 @@ import { releaseProfile } from './release-profiles.mjs';
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const assert = (condition, message) => { if (!condition) throw Error(message); };
+export const fixtureOpenCodeConfig = (entry, runtime) => ({ $schema: 'https://opencode.ai/config.json',
+  ...(runtime.id === 'v010' ? { subagent_depth: 2 } : {}), plugin: [pathToFileURL(entry).href] });
 export async function command(executable, args, cwd, env, timeoutMs = 600_000) {
   const result = await runProcess(executable, args, { cwd, env: { ...process.env, ...env, PWD: cwd }, timeoutMs });
   if (executable === 'wsl.exe') {
@@ -15,7 +17,13 @@ export async function command(executable, args, cwd, env, timeoutMs = 600_000) {
       catch { /* only typed fixture diagnostics are forwarded */ }
     }
   }
-  assert(result.code === 0 && !result.timedOut && !result.overflow, `${executable} failed (exit ${result.code}); output not persisted`);
+  if (result.code !== 0 || result.timedOut || result.overflow) {
+    const error = Error(`${executable} failed (exit ${result.code}); output not persisted`);
+    // Keep bounded process output in memory so a caller can extract typed evidence.
+    // It is deliberately non-enumerable to prevent accidental raw-log persistence.
+    Object.defineProperty(error, 'processResult', { value: result });
+    throw error;
+  }
   return result.stdout;
 }
 
@@ -52,19 +60,20 @@ export async function installedFixture(tgz, directory, profileId = 'stable') {
   const { runtimeAssets } = await import(pathToFileURL(join(installed, 'dist', release.assetsModule)).href);
   const profiles = await import(pathToFileURL(join(installed, 'dist/core/runtime-profile.js')).href).catch(() => undefined);
   const runtime = profiles?.RUNTIME_PROFILES[release.runtimeProfile] ?? { id: 'stable', stateDirectory: '.sortie-dogs', agentSuffix: '' };
-  const coordinatorAgent = `dog-coordinator${runtime.agentSuffix}`, workerAgent = `dog-worker${runtime.agentSuffix}`;
+  const coordinatorAgent = profiles?.profileAgent(runtime, 'dog-coordinator') ?? `dog-coordinator${runtime.agentSuffix}`;
+  const operatorAgent = profiles?.profileAgent(runtime, 'dog-operator') ?? `dog-operator${runtime.agentSuffix}`;
+  const workerAgent = profiles?.profileAgent(runtime, 'dog-worker') ?? `dog-worker${runtime.agentSuffix}`;
   await mkdir(join(project, 'child', runtime.stateDirectory, 'contracts'), { recursive: true });
   const { acceptanceContinuityFingerprint } = await import(pathToFileURL(join(installed, 'dist/core/acceptance-continuity.js')).href);
   const { reduceGoalFlight } = await import(pathToFileURL(join(installed, 'dist/core/goal-bound.js')).href);
   const legacy = join(installed, 'dist/plugin/legacy.js');
   const entry = release.runtimeProfile === 'stable' && await lstat(legacy).then(info => info.isFile()).catch(() => false)
     ? legacy : join(installed, 'dist/plugin/opencode.js');
-  await writeFile(join(control, 'opencode.json'), JSON.stringify({ $schema: 'https://opencode.ai/config.json',
-    plugin: [pathToFileURL(entry).href] }, null, 2));
+  await writeFile(join(control, 'opencode.json'), JSON.stringify(fixtureOpenCodeConfig(entry, runtime), null, 2));
   await command('node', [join(installed, 'dist/cli/main.js'), 'init', project,
     ...(profiles ? ['--profile', release.runtimeProfile] : [])], project, env);
   for (const asset of runtimeAssets) assert((await readFile(join(control, asset.installPath), 'utf8')) === asset.content, 'CLI asset mismatch');
-  return { run, project, control, env, installed, pkg, runtime, release, coordinatorAgent, workerAgent,
+  return { run, project, control, env, installed, pkg, runtime, release, coordinatorAgent, operatorAgent, workerAgent,
     cliVersion, runtimeMarker: RUNTIME_ASSET_VERSION, acceptanceContinuityFingerprint, reduceGoalFlight };
 }
 

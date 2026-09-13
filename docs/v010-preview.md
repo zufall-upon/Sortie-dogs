@@ -1,31 +1,52 @@
 # v0.10 preview: strategic coordination and bounded operations
 
+## Limited dogfooding checkpoint
+
+The renamed two-unit serial path has completed a packaged real-model smoke:
+`dog-operator` explicitly selected Astra/high, `dogs-coordinator` used Terra/high,
+and both workers used Sol/medium. Both original content oracles and unchanged
+verification scripts passed; the root terminal was `succeeded` and the queue
+was `completed`, with no reported tool errors. This supports trying small,
+low-risk serial tasks in a dedicated preview configuration, not replacing the
+stable installation or claiming performance superiority.
+
+The primary default remains Sol/low. Explicit UI/CLI model and variant selection
+is authoritative; an Astra/low selection and its retention on the next turn are
+covered by a regression test. Plain prose alone does not change the host model.
+The latest focused profile/install tests, packed loader and normal `npm test`
+(286 tests) passed. Interruption, resume, compaction, Desktop-specific operation,
+and representative performance comparison remain outstanding validation gates.
+
 ## Implementation checkpoint
 
 This is an initial beta implementation, not a validated production release.
-Build, focused contract/install/release tests, packed-plugin loading, and the
-existing normal test suite have passed. Real-model operator execution,
-simultaneous stable/preview runtime coexistence, interruption/compaction recovery,
-and the three-arm performance comparison remain pending. Do not interpret the
-architecture described below as evidence that those runtime checks have passed.
-The smoke runner is supplied for that next validation stage.
+Earlier LH check records retain their historical failures; standalone remediation
+subsequently passed normal tests and the serial smoke described above. Those
+historical records have not been rewritten. Broader runtime gates remain pending.
 
-This development line starts at v0.9.10. It adds one logical role, `dog-operator`,
-to the existing MkII workflow. The coordinator retains interpretation of the
-original request, architecture, acceptance, scope changes, review, and final
-decisions. The operator executes a finite approved serial queue.
+This development line starts at v0.9.10. The existing logical coordinator remains
+the strategic authority but is exposed by the preview as `dog-operator`. The
+existing logical operator is exposed as `dogs-coordinator` and executes a finite
+approved serial queue. The profile mapping is bijective; these external names do
+not merge or reverse their internal responsibilities.
 
-## Two user-facing choices
+## Preview topology
 
 - `dog-coordinator`: the stable installation.
-- `dog-coordinator-v010`: the separately installed v0.10 preview.
+- `dog-operator`: the v0.10 primary (Sol/low), with user conversation,
+  specification interpretation, architecture, immutable acceptance, review and
+  final decision authority.
+- `dogs-coordinator`: the hidden v0.10 operations delegate (Terra/high), limited
+  to bounded approved dispatch, progress and evidence collection.
 
-The preview defaults to Astra/high for coordination and Terra/high for its
-operator. Explicit host agent/model choices remain authoritative. The existing
-worker route remains Sol/medium, and consultation retains its independent route.
-Only the coordinators are primary choices; preview child agents are hidden.
+The preview defaults `dog-operator` to `openai/gpt-5.6-sol` with variant `low`
+and `dogs-coordinator` to Terra/high. Explicit host agent/model/variant choices,
+including Astra, remain authoritative. The existing worker route remains
+Sol/medium, and consultation retains its independent route.
+Only `dog-operator` is a preview primary choice; every preview child agent,
+including `dogs-coordinator`, is hidden. Workers retain Sol/medium routing.
 
-Preview agents end in `-v010`; tools begin with `sortie_v010_`; the installed
+Preview worker and consultation agents end in `-v010`; tools begin with `sortie_v010_`; the installed
 marker is `sortie-dogs-v010.version`; project configuration is
 `.opencode/sortie-dogs-v010.json`; controls are under `.sortie-dogs-v010/`.
 Goal ledgers in a shared Git control directory use `run-flight-v010`. File-scope
@@ -39,7 +60,31 @@ testing two installed versions in one OpenCode configuration.
 
 ## Installation and measurement isolation
 
-The beta package's CLI defaults to preview assets:
+### Start limited dogfooding without changing global configuration
+
+Use the prepared package to create an independent scratch project. Preparation
+installs assets and checks configuration only; it does not execute an LLM task:
+
+```powershell
+node scripts/dogfood-preview.mjs prepare ./_testenv/routing-rpt/sortie-dogs-0.10.0-beta.1.tgz ./_testenv/dogfood-preview
+node scripts/dogfood-preview.mjs inspect ./_testenv/dogfood-preview/smoke-1/dogfood.json
+node scripts/dogfood-preview.mjs start ./_testenv/dogfood-preview/smoke-1/dogfood.json
+```
+
+Use the receipt path returned by preparation; subsequent preparations allocate a
+new directory instead of overwriting previous work. On Windows the launcher uses
+a WSL login shell. `start` opens the interactive CLI in the scratch project with
+`dog-operator`, Sol/low by default. Model selection in the UI remains available.
+Only this process receives the dedicated configuration and depth 2 setting.
+The launcher does not register a normal global plugin or change the stable
+checkout. Exit the preview process to leave that environment.
+
+Begin with a small low-risk task in this scratch project. This is not the beta
+source worktree or the stable project. The earlier full serial smoke used an
+explicit Astra/high override; preparation does not claim a new Sol/low RPT.
+
+The beta package's CLI defaults to preview assets with marker
+`0.10.0-beta.1-role-names`:
 
 ```text
 sortie-dogs init <project>
@@ -53,6 +98,25 @@ During development, use a dedicated OpenCode test configuration and package
 installation under `_testenv/`. Do not apply the preview to a stable benchmark's
 global configuration. Pin each test's package digest, asset marker, model and
 fixture revisions. Run heavy measurements in separate time windows or hosts.
+
+Use a dedicated preview config and process rather than adding preview depth to a
+normal shared host. For example, point `OPENCODE_CONFIG` and
+`OPENCODE_CONFIG_DIR` at an isolated directory under `_testenv/`, configure the
+packed preview plugin there, set `subagent_depth: 2`, restart OpenCode, and select
+`dog-operator`. Do not overwrite normal global assets or deploy this configuration
+into the v0.9 worktree or stable benchmark environment.
+
+OpenCode's published configuration schema defines top-level `subagent_depth` as
+a non-negative integer and defaults it to `1`, which prevents a subagent from
+launching another subagent. The preview's `dog-operator` -> `dogs-coordinator` ->
+worker path
+therefore requires `subagent_depth: 2`. The packaged smoke runner writes that
+setting only into its isolated v0.10 fixture configuration. It does not modify a
+normal global configuration or stable fixture. Because OpenCode merges config
+for the whole host process, enabling depth 2 in a shared host also permits that
+depth for other agents in that host; use a separate preview host/configuration
+when that coexistence is not acceptable, and restart OpenCode after changing
+configuration.
 
 WSL CLI execution must use a login shell and explicit project directory. Install
 fixture dependencies inside WSL, verify the tarball is not a working-tree link,
@@ -136,7 +200,10 @@ by the core goal engine.
 Agent changes revoke the old profile's grant and stop only its owned children.
 Compaction preserves root/run/generation/contract references instead of rebuilding
 criteria from summaries. A partial or unverifiable return becomes a decision
-packet; it is not silently retried or treated as success.
+packet; it is not silently retried or treated as success. A native Task error
+after admission settles the admitted unit and root reservation as
+failed/process-defect, retains spent retry accounting and root ownership, and
+adds no child or acceptance evidence when no child was created.
 
 ## Initial scope
 
