@@ -629,6 +629,22 @@ test("fabric claims validation once and resumes acceptance after a completed tar
       "root", prepared.snapshot.run_id, process.execPath, ["-e", "process.exit(9)"],
     ), "outcome-conflict");
 
+    const targetBeforeRejectedPromotion = (await run(value.repository, "rev-parse", "refs/heads/main")).trim();
+    const indexBeforeRejectedPromotion = (await run(value.repository, "write-tree")).trim();
+    const worktreeBeforeRejectedPromotion = await run(value.repository, "status", "--porcelain=v1");
+    await errorCode(coordinator.acceptFabricCandidate(
+      "root", prepared.snapshot.run_id, candidate, "skip", "d".repeat(64),
+    ), "candidate-invalid");
+    const retained = await coordinator.snapshot("root", prepared.snapshot.run_id);
+    assert.equal((await run(value.repository, "rev-parse", "refs/heads/main")).trim(), targetBeforeRejectedPromotion);
+    assert.equal((await run(value.repository, "write-tree")).trim(), indexBeforeRejectedPromotion);
+    assert.equal(await run(value.repository, "status", "--porcelain=v1"), worktreeBeforeRejectedPromotion);
+    assert.equal((await run(value.repository, "rev-parse", integrated.fabric!.candidate_ref)).trim(), candidate);
+    assert.equal(retained?.fabric?.candidate_head, candidate);
+    assert.equal(retained?.fabric?.candidate_ref, integrated.fabric!.candidate_ref);
+    assert.equal(retained?.fabric?.promoted, false);
+    assert.equal(retained?.fabric?.review.status, "pending");
+
     await run(value.repository, "checkout", "--detach", value.sha);
     // A process may stop after the target CAS but before durable promotion state is written.
     await run(value.repository, "update-ref", "refs/heads/main", candidate, value.sha);

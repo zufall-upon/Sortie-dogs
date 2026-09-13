@@ -257,8 +257,11 @@ test("builds a completed Sortie Result from the goal receipt, ledger, and host m
     [{ criterion_id: "criterion-1", status: "PASS" }]);
   const inserted = insertSortieResult("status: DONE — complete\n\n**Validation:** PASS", result);
   assert.ok(inserted.startsWith("status: DONE — complete\n\n<details>\n<summary><strong>🐾 SORTIE DOGS — 帰還報告｜🟢 完了</strong></summary>"));
-  assert.match(inserted, /\*\*⚡ 任務経過（待機含む）:\*\*/u);
-  assert.match(inserted, /\*\*🛡 達成:\*\* 🟢 \*\*完了\*\* · 達成条件 \*\*1\/1\*\*/u);
+  assert.match(inserted, /~~~text\n🐾 SORTIE DOGS — 帰還報告\ngoal-result\n\n🟢 COMPLETED — complete/u);
+  assert.match(inserted, /⚔️ MISSION[\s\S]*経過\s+⏱ 4s ※待機含む[\s\S]*最終達成条件\s+◔ 1\/1/u);
+  assert.match(inserted, /🔧 実装\n未取得[\s\S]*⏳ 未実施\n未取得[\s\S]*➡️ NEXT\n未取得/u);
+  assert.match(inserted, /🪙 COST \/ PACK[\s\S]*19 tokens[\s\S]*\$0\.2500 ※実課金換算なし/u);
+  assert.match(inserted, /🛑 STOP REASON\ncompleted[\s\S]*※使用量は最終応答生成前の計測\n~~~/u);
   assert.doesNotMatch(inserted, /evidence-1|evidence ref|completed\)|sha256:/u);
   assert.equal(insertSortieResult(inserted, result), inserted);
   const sanitized = insertSortieResult("status: DONE\n\n**EVIDENCE:** model claim\nraw_status: fake\n" +
@@ -289,9 +292,9 @@ test("renders completed, interrupted, external-blocker, and user-decision as dis
   assert.equal((screenshotText.match(/<details>/gu) ?? []).length, 1);
   assert.doesNotMatch(screenshotText, /Evidence|manifest:|raw_status/u);
   const decisionText = insertSortieResult("❓ **NEED_DECISION** choose", decision);
-  assert.match(externalText, /🔴 \*\*外部要因で未完了\*\*/u);
-  assert.match(interruptedText, /🟡 \*\*中断（未完了）\*\*/u);
-  assert.match(decisionText, /🟡 \*\*ユーザー判断待ち（未完了）\*\*/u);
+  assert.match(externalText, /🔴 EXTERNAL_BLOCKER/u);
+  assert.match(interruptedText, /🟡 INTERRUPTED/u);
+  assert.match(decisionText, /🟡 USER_DECISION/u);
   assert.doesNotMatch(externalText, /TRUE_BLOCKER|external_dependency|Evidence|evidence_refs/u);
 });
 
@@ -307,7 +310,23 @@ test("types unavailable Sortie Result metrics without synthetic estimates", () =
     { availability: "unavailable", value: null, reason: "goal-clock-invalid" });
   assert.deepEqual(result.proof.criteria,
     { availability: "unavailable", value: null, reason: "acceptance-contract-unavailable" });
-  assert.match(formatSortieResult(result), /使用量:[\s\S]*計測不可/u);
+  assert.match(formatSortieResult(result), /使用量\s+計測不可/u);
   assert.doesNotMatch(formatSortieResult(result), /host-metrics-unavailable|goal-clock-invalid|evidence_refs/u);
   assert.doesNotMatch(formatSortieResult(result), /\$0\.0000|0 tokens/u);
+});
+
+test("uses real terminal presentation fields without letting fenced status text become a checkpoint", () => {
+  const result = createSortieResult({
+    goal_id: "candidate-real", terminal_revision: 1, acceptance_fingerprint: `sha256:${"d".repeat(64)}`,
+    started_at: "2026-01-01T00:00:00.000Z", ended_at: "2026-01-01T00:00:01.000Z",
+    status: "stopped", stop_reason: "stop_budget", unit_ids: [], session_ids: [], evidence_refs: [], milestone_at: null,
+  }, { acceptance_contract: null, consumed_time_ms: null, satisfied_criteria: [] }, undefined);
+  const source = "status: INTERRUPTED — budget reached\nTRUE_INTERRUPTION: budget: exhausted\n\n" +
+    "**実装:** renderer `literal` and ``` input\n**未実施:** release\n**NEXT:** verify CLI\n**Commit:** abc123";
+  const output = insertSortieResult(source, result);
+  assert.match(output, /candidate-real[\s\S]*🟡 INTERRUPTED — budget reached/u);
+  assert.match(output, /🔧 実装\nrenderer `literal` and ``` input[\s\S]*⏳ 未実施\nrelease[\s\S]*➡️ NEXT\nverify CLI/u);
+  assert.match(output, /Commit\s+abc123[\s\S]*🛑 STOP REASON\nbudget: exhausted/u);
+  assert.equal(terminalRunOutcome(output), "INTERRUPTED");
+  assert.equal(insertSortieResult(output, result), output);
 });

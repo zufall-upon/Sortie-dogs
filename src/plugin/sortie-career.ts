@@ -115,21 +115,25 @@ export async function collectCareer(directories: readonly string[], currentPath:
 }
 
 export function renderCareer(career: SortieCareer | undefined): string[] {
-  if (career === undefined) return ["**📜 PACK RECORD:** 保存履歴を取得できません"];
+  if (career === undefined) return ["📜 PACK RECORD", "保存履歴を取得できません"];
   const terminal = career.goals - career.active;
-  const firstPass = career.firstPass.eligible === 0 ? "計測不可（対象0件）" : `${career.firstPass.count}/${career.firstPass.eligible}件`;
-  const minutes = (metric: { sum: number; covered: number }) => metric.covered === 0 ? "計測不可" : `${(metric.sum / 60000).toFixed(1)}分（${metric.covered}/${terminal}任務）`;
-  const models = [...career.models].sort((a, b) => b.tokens - a.tokens || a.model.localeCompare(b.model));
-  const modelText = models.slice(0, 4).map((entry) => `${entry.model.replace(/[\\`*_{}\[\]()<>!|\r\n]/gu, "").slice(0, 120)} ${entry.tokens.toLocaleString("ja-JP")}`).join(" · ");
+  const minutes = (metric: { sum: number; covered: number }) => metric.covered === 0 ? "計測不可" : `${(metric.sum / 60000).toFixed(1)}分 ※${metric.covered}/${terminal}任務`;
   return [
-    "**📜 PACK RECORD — 記録済み戦績**",
-    `**戦績:** 完了 ${career.completed} · 中断 ${career.interrupted} · 外部待機 ${career.external} · 指示待ち ${career.decision} · 進行中 ${career.active}`,
-    `**初回完遂:** ${firstPass} · 復帰 ${career.recoveries}件（計測記録 ${career.telemetryCovered}/${terminal}任務）`,
-    `**累積使用量:** ${career.tokens.covered === 0 ? "計測不可" : `${career.tokens.sum.toLocaleString("ja-JP")} tokens`}（計測 ${career.tokens.covered}/${terminal}任務）`,
-    `**累積モデル:** ${career.modelCovered === 0 ? "計測不可" : modelText || "出力なし"}${models.length > 4 ? " · ほか" : ""}（token計測 ${career.modelCovered}/${terminal}任務）`,
-    `**累積時間:** worker ${minutes(career.workerTime)} · goal期間合計 ${minutes(career.goalWall)}（待機含む・同時刻重複あり）`,
-    `**累積実行重複率:** ${career.overlap.ratio === null ? "計測不可" : `${career.overlap.ratio.toFixed(2)}×`}（総和の比・${career.overlap.covered}/${terminal}任務・速度倍率ではありません）`,
-    `**保存範囲:** ${career.since?.slice(0, 10) ?? "開始日不明"}以降の現存履歴 · ${career.coverage.included}/${career.coverage.files}ファイル${career.coverage.unavailable || career.coverage.truncated ? " · 部分集計" : ""} · 生涯戦績ではありません`,
-    ...(career.titles.length ? [`**🎖 隊の称号:** ${career.titles.join(" · ")}`] : []),
+    "📜 PACK RECORD",
+    `🏁 完了 ${career.completed}`,
+    `🟡 中断 ${career.interrupted}`,
+    `⏳ 外部待機 ${career.external}`,
+    `❓ 指示待ち ${career.decision}`,
+    `🔄 進行中 ${career.active}`,
+    `↩️ 復帰 ${career.recoveries}`,
+    "",
+    `🪙 累積使用量 ${career.tokens.covered === 0 ? "計測不可" : `${career.tokens.sum.toLocaleString("ja-JP")} tokens`} ※${career.tokens.covered}/${terminal}任務`,
+    `⏱ 累積worker ${minutes(career.workerTime)}`,
+    `🕰 累積goal ${minutes(career.goalWall)} ※待機・重複含む`,
+    `⚡ 累積重複率 ${career.overlap.ratio === null ? "計測不可" : `${career.overlap.ratio.toFixed(2)}×`} ※${career.overlap.covered}/${terminal}任務・速度倍率ではありません`,
+    "",
+    "📦 保存範囲",
+    `${career.since?.slice(0, 10) ?? "開始日不明"}以降 / ${career.coverage.included} of ${career.coverage.files} files${career.coverage.unavailable || career.coverage.truncated ? " ※部分集計" : ""}`,
+    "※生涯戦績ではありません",
   ];
 }

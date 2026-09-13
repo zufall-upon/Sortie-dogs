@@ -437,6 +437,28 @@ test("a real user turn cancels stale step recovery state", async () => {
   assert.equal(host.promptCalls.length, 1);
 });
 
+test("an unproved terminal claim cancels only its synthetic recovery cycle", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" });
+  await hooks.textComplete({ sessionID: "ses_root" }, { text: "status: BLOCKED\nLocal process defect" });
+  await hooks.sessionIdle("ses_root");
+  assert.equal(host.promptCalls.length, 1);
+
+  await hooks.stopAutomaticRecovery("ses_root", false, true);
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" }, true);
+  await hooks.textComplete({ sessionID: "ses_root" }, {
+    text: "status: INTERRUPTED — accepted criteria remain unproved\nTRUE_INTERRUPTION: internal: accepted criteria remain unproved",
+  });
+  await hooks.sessionIdle("ses_root");
+  assert.equal(host.promptCalls.length, 1, "idle and synthetic observations must not revive the stopped cycle");
+
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" });
+  await hooks.textComplete({ sessionID: "ses_root" }, { text: "📊 in progress: new user turn" });
+  await hooks.sessionIdle("ses_root");
+  assert.equal(host.promptCalls.length, 2, "a real user turn may begin a fresh recovery cycle");
+});
+
 test("step recovery rechecks a synthetic report that completes before promptAsync returns", async () => {
   const host = fakeHost({ agent: COORDINATOR });
   let releaseFirstPrompt!: () => void;

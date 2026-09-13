@@ -247,6 +247,12 @@ export type FreshSessionAction =
   | "restart-host-after-install";
 export type FreshSessionResult =
   | Readonly<{
+      status: "redispatch-queued";
+      reason: FreshSessionReason;
+      source_session_id: string;
+      retry_same_session: false;
+    }>
+  | Readonly<{
       status: "redispatched";
       reason: FreshSessionReason;
       source_session_id: string;
@@ -822,22 +828,71 @@ function textPart(part: unknown): string | undefined {
   return isRecord(part) && typeof part.text === "string" ? part.text : undefined;
 }
 
-interface FreshSessionPromptPart {
+interface FreshSessionTextPart {
   readonly type: "text";
   readonly text: string;
   readonly synthetic?: boolean;
   readonly metadata?: Record<string, unknown>;
 }
 
+interface FreshSessionFilePart {
+  readonly type: "file";
+  readonly mime: string;
+  readonly filename?: string;
+  readonly url: string;
+}
+
+type FreshSessionPromptPart = FreshSessionTextPart | FreshSessionFilePart;
+
+const FILE_PART_KEYS = new Set(["id", "sessionID", "messageID", "type", "mime", "filename", "url", "source"]);
+
+function safeFilePart(part: Record<string, unknown>): FreshSessionFilePart | undefined {
+  if (Object.keys(part).some((key) => !FILE_PART_KEYS.has(key)) ||
+    typeof part.mime !== "string" || part.mime.length === 0 ||
+    typeof part.url !== "string" || part.url.length === 0 ||
+    (part.filename !== undefined && typeof part.filename !== "string") ||
+    (part.id !== undefined && typeof part.id !== "string") ||
+    (part.sessionID !== undefined && typeof part.sessionID !== "string") ||
+    (part.messageID !== undefined && typeof part.messageID !== "string") ||
+    (part.source !== undefined && !isRecord(part.source))) return undefined;
+  return {
+    type: "file",
+    mime: part.mime,
+    ...(part.filename === undefined ? {} : { filename: part.filename }),
+    url: part.url,
+  };
+}
+
+/** OpenCode expands text attachments into synthetic explanatory text alongside the real file.
+ * Those derived text parts carry no user authority and are never copied into a fresh prompt.
+ * A ticket-bearing synthetic turn (or a turn without real user text and a safe file) stays synthetic.
+ */
+function realAttachmentParts(parts: readonly unknown[]): readonly unknown[] {
+  const hasUserText = parts.some((part) => isRecord(part) && part.type === "text" &&
+    part.synthetic !== true && typeof part.text === "string" && part.text.trim().length > 0);
+  const hasFile = parts.some((part) => isRecord(part) && part.type === "file" && part.synthetic !== true && safeFilePart(part) !== undefined);
+  if (!hasUserText || !hasFile || parts.some((part) => isRecord(part) && part.synthetic === true &&
+    (part.type !== "text" || typeof part.text !== "string" || part.metadata !== undefined))) return parts;
+  return parts.filter((part) => !isRecord(part) || part.synthetic !== true);
+}
+
+function syntheticPrompt(parts: readonly unknown[]): boolean {
+  return realAttachmentParts(parts).some((part) => isRecord(part) && part.synthetic === true);
+}
+
 function freshSessionPrompt(parts: readonly unknown[]): readonly FreshSessionPromptPart[] | undefined {
   const prompt: FreshSessionPromptPart[] = [];
-  for (const part of parts) {
-    if (!isRecord(part) || part.type !== "text" || part.synthetic === true || typeof part.text !== "string") {
-      return undefined;
-    }
-    prompt.push({ type: "text", text: part.text });
+  for (const part of realAttachmentParts(parts)) {
+    if (!isRecord(part) || part.synthetic === true) return undefined;
+    if (part.type === "text" && typeof part.text === "string") prompt.push({ type: "text", text: part.text });
+    else if (part.type === "file") {
+      const attachment = safeFilePart(part);
+      if (attachment === undefined) return undefined;
+      prompt.push(attachment);
+    } else return undefined;
   }
-  return prompt.length > 0 && prompt.some(({ text }) => text.trim().length > 0) ? prompt : undefined;
+  return prompt.length > 0 && prompt.some((part) => part.type === "text" && part.text.trim().length > 0)
+    ? prompt : undefined;
 }
 
 /**
@@ -1515,7 +1570,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   const goalValidationDefects = new Set<string>();
   const goalDeclarationAuthority = new Map<string, string>();
   const explicitUserGoalUnitLimits = new Map<string, number>();
-  const pendingRealGoalTurns = new Map<string, { readonly selectedAgent: string; readonly parts: readonly unknown[] }>();
+  const pendingRealGoalTurns = new Map<string, { readonly selectedAgent: string; readonly parts: readonly FreshSessionPromptPart[] }>();
   const pendingGoalRecoveries = new Map<string, Promise<boolean>>();
   const scheduledGoalRecoveries = new Map<string, Promise<void>>();
   const globalConfig = await readOptionalGlobalConfig();
@@ -1683,13 +1738,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   }
 
   async function persistedCurrentRealMessageID(sessionID: string, selectedAgent: string | undefined,
-    currentParts: readonly unknown[]): Promise<string | undefined> {
+    currentParts: readonly FreshSessionPromptPart[]): Promise<string | undefined> {
     if (selectedAgent === undefined) return undefined;
     const messages = input.client?.session?.messages;
     if (messages === undefined) return undefined;
-    const currentText = currentParts.filter(isRecord).filter((part) => part.type === "text" && part.synthetic !== true)
-      .map((part) => part.text).filter((text): text is string => typeof text === "string");
-    if (currentText.length === 0) return undefined;
     for (const delay of [0, 10, 50]) {
       if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
       try {
@@ -1704,10 +1756,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         if (!isRecord(message) || (message.info !== undefined && !isRecord(message.info))) continue;
         const info = isRecord(message.info) ? message.info : undefined;
         if ((info?.role ?? message.role) !== "user" || (info?.agent ?? message.agent) !== selectedAgent ||
-          !Array.isArray(message.parts) || message.parts.some((part) => isRecord(part) && part.synthetic === true)) continue;
-        const persistedText = message.parts.filter(isRecord).filter((part) => part.type === "text")
-          .map((part) => part.text).filter((text): text is string => typeof text === "string");
-        if (JSON.stringify(persistedText) !== JSON.stringify(currentText)) continue;
+          !Array.isArray(message.parts) || syntheticPrompt(message.parts)) continue;
+        const persistedParts = freshSessionPrompt(message.parts);
+        if (persistedParts === undefined || JSON.stringify(persistedParts) !== JSON.stringify(currentParts)) continue;
         const messageID = info?.id ?? message.id;
         if (typeof messageID === "string" && messageID.length > 0) return messageID;
       } catch { /* current-message persistence may race the hook */ }
@@ -1888,16 +1939,24 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
 
   async function acceptRealGoalTurn(sessionID: string, messageID: string, selectedAgent: string,
     parts: readonly unknown[]): Promise<void> {
+    // Root recovery can prove the persisted user message identity before its parts are available.
+    // Preserve that existing empty projection while every observed non-empty shape stays strict.
+    const safeParts: readonly FreshSessionPromptPart[] | undefined = parts.length === 0
+      ? []
+      : freshSessionPrompt(parts);
+    if (safeParts === undefined) throw new Error("SORTIE_GOAL_CONTROL_DENIED: unsafe-message-parts");
     await recoverCompletedGoalReservations(sessionID);
     const ledger = await goalLedger(sessionID);
     const state = (await ledger.readGoal()).state;
     if (state.latest_user_message_id === messageID) return;
     const at = new Date().toISOString();
-    const explicitContinuation = parts.map(textPart).filter((value) => value !== undefined).join("\n")
+    const explicitContinuation = safeParts.filter((part): part is FreshSessionTextPart => part.type === "text")
+      .map((part) => part.text).join("\n")
       .split(/\r?\n/u).some((line) =>
         /^\s*(?:goal_acceptance_fingerprint|goal_budget_(?:units|time_ms|cost_usd))\s*:/iu.test(line));
     if (state.goal_id === null || state.phase === "terminal" || (state.phase === "stopped" && !explicitContinuation)) {
-      const acceptance = goalFingerprint({ message_id: messageID, parts: parts.map(textPart).filter((value) => value !== undefined) });
+      const acceptance = goalFingerprint({ message_id: messageID, parts: safeParts.map((part) =>
+        part.type === "text" ? part.text : part) });
       await ledger.appendGoal({ kind: "goal.accepted", at,
         goal_id: goalFingerprint({ root: goalRoot(sessionID), origin_user_message_id: messageID }),
         revision: 1, scope_epoch: 1, acceptance_fingerprint: acceptance,
@@ -1926,7 +1985,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const persistedInfo = isRecord(message.info) ? message.info : undefined;
     if ((persistedInfo?.role ?? message.role) !== "user" ||
       (persistedInfo?.agent ?? message.agent) !== COORDINATOR_AGENT || !Array.isArray(message.parts) ||
-      message.parts.some((part) => isRecord(part) && part.synthetic === true)) return;
+      syntheticPrompt(message.parts)) return;
     await acceptRealGoalTurn(sessionID, info.id, COORDINATOR_AGENT, message.parts);
     goalDeclarationAuthority.set(sessionID, info.id);
   }
@@ -2065,8 +2124,6 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     if (receipt === undefined && delivery === "failed") {
       receipt = await terminalGoal(sessionID, "stopped", "stopped").catch(() => undefined);
     } else if (receipt === undefined && proved) {
-      receipt = await terminalGoal(sessionID, "completed", "succeeded").catch(() => undefined);
-    } else if (receipt === undefined && outcome === "DONE") {
       receipt = await terminalGoal(sessionID, "completed", "succeeded").catch(() => undefined);
     } else if (receipt === undefined && outcome === "INTERRUPTED") {
       receipt = await terminalGoal(sessionID, "stopped", "stopped").catch(() => undefined);
@@ -2584,8 +2641,13 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     }
     const key = `${sourceSessionID}\u0000${reason}`;
     const existing = freshSessionRedispatches.get(key);
-    if (existing !== undefined) return await existing.operation;
-    const operation = (async (): Promise<FreshSessionResult> => {
+    const queued: FreshSessionResult = { status: "redispatch-queued", reason,
+      source_session_id: sourceSessionID, retry_same_session: false };
+    if (existing !== undefined) return existing.settled ? await existing.operation : queued;
+    // Both session.create and promptAsync enter the host request scheduler. Defer the entire
+    // redispatch until the child chat hook has returned its typed control error.
+    const operation = new Promise<FreshSessionResult>((accept) => {
+      setTimeout(() => { void (async (): Promise<FreshSessionResult> => {
       let targetSessionID: string | undefined;
       try {
         const created = await create.call(input.client!.session, {
@@ -2607,11 +2669,17 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         goalRootSessions.set(targetSessionID, goalRoot(sourceSessionID));
         const ticket = await issueGoalTicket(targetSessionID, `fresh-root:${reason}`);
         if (!ticket.issued) throw new Error("fresh coordinator ticket already outstanding");
-        const sent = await send.call(input.client!.session, {
+        const sendFresh = send as unknown as (request: {
+          path: { id: string };
+          query: { directory: string };
+          body: { agent: string; parts: readonly FreshSessionPromptPart[] };
+        }) => Promise<unknown>;
+        const sent = await sendFresh.call(input.client!.session, {
           path: { id: targetSessionID },
           query: { directory: input.worktree ?? input.directory },
-          body: { agent: COORDINATOR_AGENT, parts: prompt.map((part) => ({ ...part, synthetic: true,
-            metadata: ticket.metadata })) },
+          body: { agent: COORDINATOR_AGENT, parts: prompt.map((part) => part.type === "text"
+            ? { ...part, synthetic: true, metadata: ticket.metadata }
+            : part) },
         });
         if (!promptAccepted(sent)) throw new Error("fresh coordinator prompt rejected");
         appLogInfo("fresh-session.redispatched", sourceSessionID, {
@@ -2629,7 +2697,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         if (targetSessionID !== undefined) await deleteFreshSession(targetSessionID);
         return freshSessionFallback(reason, fallbackAction);
       }
-    })();
+      })().then(accept); }, 0);
+    });
     const entry = { operation, settled: false };
     freshSessionRedispatches.set(key, entry);
     void operation.then((result) => {
@@ -2652,7 +2721,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       if (completed === undefined) break;
       freshSessionRedispatches.delete(completed[0]);
     }
-    return await operation;
+    return queued;
   }
 
   async function ensureLoaded(): Promise<void> {
@@ -3821,9 +3890,6 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           contract_fingerprint: structuralAdmission.contract_fingerprint, experience: experience.trace });
       }
       const coordinator = await getParallelCoordinator();
-      if (await coordinator.targetCheckedOut(`refs/heads/${structuralAdmission.contract.provenance.target_branch}`)) {
-        return JSON.stringify({ status: "sol-serial", reason: "target-checked-out", experience: experience.trace });
-      }
       const result = await coordinator.prepareFabric(
         contract,
         ownerRoot,
@@ -5405,7 +5471,12 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     sessionID: string,
   ): Promise<{
     readonly hasForeignUserTurn: boolean;
-    readonly persistedTurn: { readonly agent: string; readonly synthetic: false; readonly messageID: string } | undefined;
+    readonly persistedTurn: {
+      readonly agent: string;
+      readonly synthetic: false;
+      readonly messageID: string;
+      readonly parts: readonly FreshSessionPromptPart[];
+    } | undefined;
   } | undefined> {
     const messages = input.client?.session?.messages;
     if (messages === undefined) return undefined;
@@ -5416,7 +5487,12 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       });
       const payload = isRecord(response) && "data" in response ? response.data : response;
       if (!Array.isArray(payload)) return undefined;
-      let persistedTurn: { readonly agent: string; readonly synthetic: false; readonly messageID: string } | undefined;
+      let persistedTurn: {
+        readonly agent: string;
+        readonly synthetic: false;
+        readonly messageID: string;
+        readonly parts: readonly FreshSessionPromptPart[];
+      } | undefined;
       for (let index = payload.length - 1; index >= 0; index -= 1) {
         const message = payload[index];
         if (!isRecord(message)) return undefined;
@@ -5427,12 +5503,15 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         if (role !== "user") continue;
         const agent = info?.agent ?? message.agent;
         if (typeof agent !== "string") return undefined;
-        if (message.parts !== undefined && !Array.isArray(message.parts)) return undefined;
-        const synthetic = Array.isArray(message.parts) && message.parts.some((part) => isRecord(part) && part.synthetic === true);
+        const parts = message.parts === undefined ? [] : message.parts;
+        if (!Array.isArray(parts)) return undefined;
+        const synthetic = syntheticPrompt(parts);
         if (synthetic) continue;
+        const persistedParts = parts.length === 0 ? [] : freshSessionPrompt(parts);
+        if (persistedParts === undefined) return undefined;
         const messageID = info?.id ?? message.id;
         if (typeof messageID !== "string" || messageID.length === 0) return undefined;
-        persistedTurn = { agent, synthetic: false, messageID };
+        persistedTurn = { agent, synthetic: false, messageID, parts: persistedParts };
         break;
       }
       return { hasForeignUserTurn: persistedTurn?.agent !== undefined && persistedTurn.agent !== COORDINATOR_AGENT,
@@ -5532,7 +5611,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     if (persistedTurn !== undefined && persistedTurn.agent !== COORDINATOR_AGENT) return false;
     await rememberCoordinatorRoot(sessionID);
     if (persistedTurn !== undefined) {
-      await acceptRealGoalTurn(sessionID, persistedTurn.messageID, persistedTurn.agent, []);
+      await acceptRealGoalTurn(sessionID, persistedTurn.messageID, persistedTurn.agent, persistedTurn.parts);
       goalDeclarationAuthority.set(sessionID, persistedTurn.messageID);
     }
     await pinAssetVersion(sessionID);
@@ -5953,16 +6032,24 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           .replaceAll(CONTINUATION_MARKER, "")
           .trimEnd();
       }
+      const hostRunOutcome = terminalRunOutcome(textOutput.text);
       textOutput.text = await preserveActiveGoalContinuation(textInput.sessionID, textOutput.text, textInput.messageID);
-      const runOutcome = terminalRunOutcome(textOutput.text);
+      // Preserve a host DONE claim for proof checks while allowing an ordinary local INTERRUPTED
+      // response to remain presentation-only IN_PROGRESS continuation.
+      const runOutcome = hostRunOutcome === "DONE" ? hostRunOutcome : terminalRunOutcome(textOutput.text);
       const terminal = runOutcome === undefined || !isCoordinatorSession(textInput.sessionID)
         ? undefined
         : await terminalGoalFromHostText(textInput.sessionID, textOutput.text);
-      if (runOutcome === "DONE" && terminal !== undefined && (terminal.delivery === "running" ||
-        (terminal.receipt === undefined && terminal.goal !== undefined && terminal.goal.goal_id !== null))) {
-        textOutput.text = replaceDoneTerminalStatus(textOutput.text, terminal.delivery === "running"
-          ? "status: IN_PROGRESS — durable delivery active; same sessionでjoinまたはstale reconcileが必要"
-          : "status: IN_PROGRESS\ngoal_control: accepted criteria remain unproved");
+      if (runOutcome === "DONE" && terminal?.delivery === "running") {
+        textOutput.text = replaceDoneTerminalStatus(textOutput.text,
+          "status: IN_PROGRESS — durable delivery active; same sessionでjoinまたはstale reconcileが必要");
+        await continuation.stopAutomaticRecovery(textInput.sessionID, false, true);
+      } else if (runOutcome === "DONE" && terminal?.receipt === undefined &&
+        terminal?.goal !== undefined && terminal.goal.goal_id !== null) {
+        textOutput.text = replaceDoneTerminalStatus(textOutput.text,
+          "status: INTERRUPTED — accepted criteria remain unproved\n" +
+          "TRUE_INTERRUPTION: internal: accepted criteria remain unproved");
+        await continuation.stopAutomaticRecovery(textInput.sessionID, false, true);
       }
       if (runOutcome !== "DONE" && terminal?.delivery === "ready" && terminal.receipt?.status === "succeeded") {
         textOutput.text = replaceTerminalStatus(textOutput.text, "status: DONE");
@@ -6057,7 +6144,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       observedChildTerminals.delete(chatInput.sessionID);
       await serializeChatTransition(chatInput.sessionID, async () => {
       const parentID = chatParentID(chatInput);
-      const synthetic = output.parts.some((part) => isRecord(part) && part.synthetic === true);
+      const synthetic = syntheticPrompt(output.parts);
       const selectedAgent = chatInput.agent ?? output.message.agent;
       if (parentID !== undefined) rememberParent(chatInput.sessionID, parentID);
       touchCoordinatorTaskWatchdog(chatInput.sessionID);
@@ -6066,8 +6153,15 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         output.message.agent = chatInput.agent;
       }
       const requestedCoordinator = selectedAgent === COORDINATOR_AGENT;
+      const projectedCoordinatorParts = requestedCoordinator && !synthetic && output.parts.length > 0
+        ? freshSessionPrompt(output.parts)
+        : undefined;
+      if (requestedCoordinator && !synthetic && output.parts.length > 0 && projectedCoordinatorParts === undefined) {
+        throw new Error("SORTIE_GOAL_CONTROL_DENIED: unsafe-message-parts");
+      }
       const messageID = realMessageID(chatInput, output) ?? (synthetic ? undefined
-        : await persistedCurrentRealMessageID(chatInput.sessionID, selectedAgent, output.parts));
+        : projectedCoordinatorParts === undefined ? undefined
+          : await persistedCurrentRealMessageID(chatInput.sessionID, selectedAgent, projectedCoordinatorParts));
       if (requestedCoordinator && !coordinatorRoot && (parentID !== undefined || knownChildSessions.has(chatInput.sessionID)) &&
         !synthetic && messageID !== undefined) {
         await acceptRealGoalTurn(chatInput.sessionID, messageID, selectedAgent, output.parts);
@@ -6112,11 +6206,11 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           // Some native hosts persist the user message only after this hook returns. Defer to the
           // system-transform boundary, but retain no synthetic authority and accept only the exact
           // final persisted real-user parts through persistedCurrentRealMessageID.
-          pendingRealGoalTurns.set(chatInput.sessionID, { selectedAgent, parts: [...output.parts] });
+          pendingRealGoalTurns.set(chatInput.sessionID, { selectedAgent, parts: projectedCoordinatorParts ?? [] });
           pruneParallelChildMap(pendingRealGoalTurns);
           schedulePendingRealGoalRecovery(chatInput.sessionID);
         }
-        const prompt = synthetic ? undefined : freshSessionPrompt(output.parts);
+        const prompt = projectedCoordinatorParts;
         if (prompt !== undefined) coordinatorPrompts.set(chatInput.sessionID, prompt);
         // Synthetic coordinator turns reach here only after consumeGoalTicket accepted the
         // host-round-tripped one-use control. Raw synthetic markers never reach this authority.
@@ -7036,13 +7130,17 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       if (eventSessionID === undefined) return;
       // Deletion is terminal for watchdog recovery. Disarm synchronously before any generic event
       // processing can await, touch activity, or let a queued sweep recover the cancelled root.
-      if (event.type === "session.deleted") disarmDeletedCoordinatorTaskWatchdog(eventSessionID);
+      if (event.type === "session.deleted") {
+        disarmDeletedCoordinatorTaskWatchdog(eventSessionID);
+        await continuation.stopAutomaticRecovery(eventSessionID, false);
+      }
       if (event.type === "message.updated" && info !== undefined) {
         rememberCoordinatorInterruption(eventSessionID, info);
-        await acceptPersistedRealGoalEvent(eventSessionID, info);
+        if (pendingRealGoalTurns.has(eventSessionID)) await recoverPendingRealGoalTurn(eventSessionID);
+        else await acceptPersistedRealGoalEvent(eventSessionID, info);
       }
       if (pendingRealGoalTurns.has(eventSessionID) &&
-        (event.type === "message.updated" || event.type === "message.part.updated")) {
+        event.type === "message.part.updated") {
         await recoverPendingRealGoalTurn(eventSessionID);
       }
       const eventPartTime = isRecord(eventPart?.time) ? eventPart.time : undefined;

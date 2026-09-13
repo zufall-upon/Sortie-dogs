@@ -30,6 +30,9 @@ async function fixture(name: string) {
   await git(repository, "init", "-q", "-b", "main");
   await git(repository, "config", "user.name", "Sortie Test");
   await git(repository, "config", "user.email", "sortie@example.invalid");
+  // Validation deliberately excludes global Git config. Keep checkout line endings identical
+  // in the fixture and the contained validator even when the host enables core.autocrlf.
+  await git(repository, "config", "core.autocrlf", "false");
   await writeFile(join(repository, "shared.txt"), "base\n");
   await git(repository, "add", "shared.txt");
   await git(repository, "commit", "-q", "-m", "base");

@@ -54,7 +54,7 @@ test("unknown telemetry, clock gaps, and active goals never become zero-cost suc
   assert.deepEqual(result.tokens, { sum: 0, covered: 1 });
   assert.equal(result.goalWall.covered, 2);
   assert.equal(result.telemetryCovered, 1);
-  assert.match(renderCareer(result).join("\n"), /計測 1\/3任務/u);
+  assert.match(renderCareer(result).join("\n"), /累積使用量 0 tokens ※1\/3任務/u);
   assert.doesNotMatch(renderCareer(result).join("\n"), /XP|Level|faster|saved/u);
 });
 
@@ -99,4 +99,13 @@ test("bounded read-only inventory exposes gaps and reflects retention without re
   assert.equal(retained.goals, 1);
   assert.equal(retained.tokens.sum, 10);
   assert.match(renderCareer(retained).join("\n"), /生涯戦績ではありません/u);
+});
+
+test("renders PACK RECORD in ordered icon rows with measured coverage and retention scope", () => {
+  const result = summarizeCareer([history(receipt("done"), 25), history(receipt("waiting", "stopped")).slice(0, 3)], coverage);
+  const text = renderCareer(result).join("\n");
+  assert.match(text, /^📜 PACK RECORD\n🏁 完了 1\n🟡 中断 1\n⏳ 外部待機 0\n❓ 指示待ち 0\n🔄 進行中 0\n↩️ 復帰 0/u);
+  assert.match(text, /🪙 累積使用量 25 tokens ※1\/2任務/u);
+  assert.match(text, /🕰 累積goal 0\.3分 ※2\/2任務 ※待機・重複含む/u);
+  assert.match(text, /📦 保存範囲\n1970-01-01以降 \/ 1 of 1 files\n※生涯戦績ではありません$/u);
 });

@@ -139,7 +139,7 @@ test("cards overwrite model-authored numbers, are idempotent, retain status and 
   assert.equal(insertSortieResult("```\nstatus: DONE\n```", result), "```\nstatus: DONE\n```");
 });
 
-test("adding a collapsed report preserves detailed explanation headings and disclosure examples", () => {
+test("adding a fenced collapsed report preserves detailed explanation headings and disclosure examples", () => {
   const result = createSortieResult(receipt, { acceptance_contract: contract, consumed_time_ms: 10, satisfied_criteria: ["c"] }, undefined);
   const explanation = "今の作業は起動前契約の重複をなくすこと。\n\n**確認:** 欠落項目を検出する場所と予算継承を揃える。\n\n" +
     "<details><summary>設計の詳細</summary>\n**Sortie Result** は表示名の例。\n```yaml\nmanifest: example.json\n```\n</details>";
@@ -190,7 +190,8 @@ test("token bars use observed shares, group the tail, and remain idempotent with
     mix: Array.from({ length: 6 }, (_, index) => ({ model: `fixture/${index}`, tokens: 10, percent: 100 / 6 })),
     validation: "未確認", review: "未確認", traits: [] } } as typeof result;
   const text = insertSortieResult("status: DONE", populated);
-  assert.equal((text.match(/\*\*↳\*\*/gu) ?? []).length, 5);
-  assert.match(text, /その他 `███░░░░░░░` 33\.3%/u);
+  assert.equal((text.match(/^🐕 /gmu) ?? []).length, 5);
+  assert.match(text, /🐕 その他 ███▍\s+33\.3% 20 tokens/u);
+  assert.match(text, /⚡ 実行重複率 稼働区間の記録不足\n   ※worker区間・速度倍率ではありません/u);
   assert.equal(insertSortieResult(text, populated), text);
 });
