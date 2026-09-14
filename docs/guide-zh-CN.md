@@ -194,6 +194,10 @@ sortie-dogs init --global
 
 ```json
 {
+  "dedicatedWorkerModel": {
+    "model": "openai/gpt-5.6-sol",
+    "variant": "medium"
+  },
   "modelRouting": {
     "dog-coordinator": {
       "preferred": { "model": "provider/model" }
@@ -356,6 +360,10 @@ policy。这里不强制任何厂商：两个角色都可配置，声明你实�
 
 ```json
 {
+  "dedicatedWorkerModel": {
+    "model": "openai/gpt-5.6-sol",
+    "variant": "medium"
+  },
   "modelRouting": {
     "dog-coordinator": {
       "preferred": { "model": "openai/gpt-5.6-terra", "variant": "high" }
@@ -381,6 +389,9 @@ policy。这里不强制任何厂商：两个角色都可配置，声明你实�
   }
 }
 ```
+
+`dog-worker`没有`modelRouting`条目是有意设计。它与其他stable serial implementation role共用
+`dedicatedWorkerModel`；`dog-luna-worker`仍是单独的固定fabric route。
 
 将配置保存为 `.opencode/sortie-dogs.json`。`modelCatalog` 只声明实际可用的 provider model 与
 named variant；Sortie-dogs 不会猜测、探测或转换 variant。内置 catalog 有意不包含

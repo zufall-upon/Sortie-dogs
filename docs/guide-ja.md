@@ -201,6 +201,10 @@ global asset なら `~/.config/opencode/opencode.json`、project なら `.openco
 
 ```json
 {
+  "dedicatedWorkerModel": {
+    "model": "openai/gpt-5.6-sol",
+    "variant": "medium"
+  },
   "modelRouting": {
     "dog-coordinator": {
       "preferred": { "model": "provider/model" }
@@ -371,6 +375,10 @@ fallbackへ決定的に解決する。Built-in defaultも明示routeもないrol
 
 ```json
 {
+  "dedicatedWorkerModel": {
+    "model": "openai/gpt-5.6-sol",
+    "variant": "medium"
+  },
   "modelRouting": {
     "dog-coordinator": {
       "preferred": { "model": "openai/gpt-5.6-terra", "variant": "high" }
@@ -396,6 +404,9 @@ fallbackへ決定的に解決する。Built-in defaultも明示routeもないrol
   }
 }
 ```
+
+`dog-worker`に`modelRouting` entryがないのは意図した設計。`dog-worker`は他のstable serial
+implementation roleと共有する`dedicatedWorkerModel`を使う。`dog-luna-worker`は別の固定fabric route。
 
 設定先は `.opencode/sortie-dogs.json`。`modelCatalog` には実在する provider model と named
 variant だけを宣言する。Sortie-dogs は variant を推測、probe、変換しない。Built-in catalog は

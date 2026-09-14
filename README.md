@@ -199,6 +199,10 @@ as `.opencode/sortie-dogs.json`:
 
 ```json
 {
+  "dedicatedWorkerModel": {
+    "model": "openai/gpt-5.6-sol",
+    "variant": "medium"
+  },
   "modelRouting": {
     "dog-coordinator": {
       "preferred": { "model": "provider/model" }
@@ -482,6 +486,10 @@ model you can actually serve.
 
 ```json
 {
+  "dedicatedWorkerModel": {
+    "model": "openai/gpt-5.6-sol",
+    "variant": "medium"
+  },
   "modelRouting": {
     "dog-coordinator": {
       "preferred": { "model": "openai/gpt-5.6-luna", "variant": "max" }
@@ -506,6 +514,10 @@ model you can actually serve.
   }
 }
 ```
+
+`dog-worker` intentionally has no `modelRouting` entry. It uses
+`dedicatedWorkerModel`, shared with the other stable serial implementation roles.
+`dog-luna-worker` remains a separate fixed fabric route.
 
 Save project configuration as `.opencode/sortie-dogs.json`. `modelCatalog`
 declares provider models and named variants that are actually available;
