@@ -50,7 +50,7 @@ while keeping existing entries and settings.
 
 Project-local setup is recommended. `init` installs runtime assets;
 the plugin entry enables the plugin, including model routing.
-See [configuration details](#quick-start) for model selection and other setup options.
+See [configuration details](#configuration) for model selection and other setup options.
 
 > **Project status: Beta.** v0.9.x is under active stabilization. Runtime
 > behavior, configuration, and runtime assets may still change before 1.0.
@@ -119,7 +119,10 @@ separate methodologies and are not assigned quantitative positions from these ob
 [Definitions, frozen inputs, current failure status, and limitations](docs/benchmark-reference.md)
 · [Machine-readable reference values](docs/benchmarks/provisional-reference.json)
 
-## Why Sortie-dogs?
+## How the design is enforced
+
+The four pillars above become operational constraints rather than a second set
+of product promises:
 
 ### 1. Keep the goal invariant
 
@@ -171,17 +174,11 @@ Sortie-dogs adds a workflow to your existing setup rather than replacing it.
 
 Use OpenCode normally. Invoke the pack only when you want it.
 
-## Quick start
+## Configuration
 
-Install the public npm package in the project and generate the project-local
-OpenCode runtime files:
-
-```sh
-npm install --save-dev sortie-dogs
-npx sortie-dogs init .
-```
-
-This is the recommended setup. Runtime assets stay project-local.
+The [Try it](#try-it) steps above are the recommended project-local installation.
+Runtime assets stay with the project. This section covers plugin behavior, model
+selection, and alternative loading after installation.
 
 Installing the runtime assets does not load the plugin, and without the plugin
 every role runs on whichever model the caller happened to use. Add the package
