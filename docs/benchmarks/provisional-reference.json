@@ -1,88 +1,65 @@
 {
-  "schema_version": 1,
-  "status": "historical-reference-only",
-  "observed_date": "2026-09-10",
+  "schema_version": 2,
+  "status": "failure-inclusive-local-case-study",
+  "observed_date": "2026-09-14",
   "task_id": "datacurve/anko-typed-variable-bindings",
   "task_count": 1,
-  "trials_per_arm": 1,
+  "completed_runs_per_configuration": 3,
+  "trial_design": "completion-filtered-separate-serial-batches-not-matched-pairs",
   "methodology_comparable": false,
   "leaderboard": false,
-  "current_release_benchmark": false,
+  "current_release_benchmark": true,
   "task_source_commit": "435ee89ec2f2e2289f33b0da4f992f0b7b7266b9",
   "candidate_base": "3f269a72ff69398b1250c584171f32d12c0d8085",
   "opencode_version": "1.18.29",
-  "task_check_definition": "f2p_passed / f2p_total",
-  "premium_share_definition": "Sol tokens / all model tokens, including cache and reasoning",
-  "cost_basis": "API-equivalent estimate; frozen audit rate schedule 2026-07-30; not an invoice",
-  "arms": {
+  "docker": "intentionally_unused",
+  "runta": "intentionally_unused",
+  "task_check_definition": "sum(f2p_passed) / sum(f2p_total) over completed official verifiers",
+  "cost_evidence": {
+    "kind": "api-equivalent-estimate-not-invoice",
+    "rate_schedule": "2026-07-30-standard-short-context",
+    "reasoning_priced_as": "output",
+    "host_reported_cost_interpreted": false,
+    "allocation_source": "OpenCode session export assistant-message modelID and tokens",
+    "terra_per_million": { "input": 2.0, "cache_read": 0.2, "output_or_reasoning": 12.0 },
+    "sol_per_million": { "input": 5.0, "cache_read": 0.5, "output_or_reasoning": 30.0 }
+  },
+  "configurations": {
     "bare": {
-      "model": "gpt-5.6-sol/high",
-      "expected_operation": "pass",
-      "verification_mode": "measured",
-      "verified_pass": 0,
-      "f2p_passed": 5,
-      "f2p_total": 9,
-      "p2p_passed": 94,
-      "p2p_total": 94,
-      "agent_wall_ms": 1724139,
-      "api_equivalent_total_cost_usd": 5.420935,
-      "total_tokens": 6013580,
-      "premium_model_tokens": 6013580,
-      "premium_model_share_percent": 100,
-      "model_steps": 73,
-      "child_sessions": 1,
-      "by_model": [
-        { "model": "gpt-5.6-sol", "tokens": 6013580, "input": 279689, "cache_read": 5694720, "cache_write": 0, "output": 20798, "reasoning": 18373, "api_equivalent_cost_usd": 5.420935 }
-      ]
+      "model": "openai/gpt-5.6-sol/high",
+      "plugin_loaded": false,
+      "trials": [
+        { "id": "r1", "expected_operation": "pass", "official_reward": 0, "f2p_passed": 1, "f2p_total": 9, "p2p_passed": 94, "p2p_total": 94, "agent_wall_ms": 1341621, "model_steps": 47, "implementation_children": 0, "tokens": { "input": 182836, "output": 15447, "reasoning": 11048, "cache_read": 4400384, "cache_write": 0 } },
+        { "id": "r2", "expected_operation": "pass", "official_reward": 0, "f2p_passed": 1, "f2p_total": 9, "p2p_passed": 94, "p2p_total": 94, "agent_wall_ms": 1513737, "model_steps": 43, "implementation_children": 0, "tokens": { "input": 128195, "output": 13874, "reasoning": 10873, "cache_read": 3752704, "cache_write": 0 } },
+        { "id": "r3", "expected_operation": "pass", "official_reward": 0, "f2p_passed": 1, "f2p_total": 9, "p2p_passed": 94, "p2p_total": 94, "agent_wall_ms": 1469164, "model_steps": 42, "implementation_children": 0, "tokens": { "input": 223883, "output": 15803, "reasoning": 11380, "cache_read": 3181056, "cache_write": 0 } }
+      ],
+      "aggregate": { "verified_pass": 0, "launched_trials": 3, "official_verifier_runs": 3, "f2p_passed": 3, "f2p_total": 27, "p2p_passed": 282, "p2p_total": 282, "median_agent_wall_ms": 1469164, "median_model_steps": 43, "implementation_children": 0, "estimated_api_equivalent_cost_usd": { "median_trial": 3.525433, "all_trials": 10.694392, "model_allocation": "all-sol-observed" } }
     },
     "sortie": {
-      "package_version": "0.9.5",
-      "coordinator_model": "gpt-5.6-terra/high",
-      "expected_operation": "pass",
-      "verification_mode": "measured",
-      "verified_pass": 0,
-      "f2p_passed": 8,
-      "f2p_total": 9,
-      "p2p_passed": 93,
-      "p2p_total": 94,
-      "agent_wall_ms": 598940,
-      "api_equivalent_total_cost_usd": 1.460531,
-      "total_tokens": 2062950,
-      "premium_model_tokens": 414708,
-      "premium_model_share_percent": 20.1,
-      "model_steps": 26,
-      "child_sessions": 1,
-      "by_model": [
-        { "model": "gpt-5.6-terra", "tokens": 1648242, "input": 133970, "cache_read": 1499648, "cache_write": 0, "output": 9606, "reasoning": 5018, "api_equivalent_cost_usd": 0.743358 },
-        { "model": "gpt-5.6-sol", "tokens": 414708, "input": 73691, "cache_read": 334976, "cache_write": 0, "output": 4550, "reasoning": 1491, "api_equivalent_cost_usd": 0.717173 }
-      ]
+      "package_version": "0.9.12",
+      "package_sha256": "15c92dc9f8db35f9508319061eab5b6117ebcf6073086d384e85def88d02d72c",
+      "runtime_marker": "0.3.89-completion-proof-v1",
+      "coordinator_model": "openai/gpt-5.6-terra/high",
+      "completed_run_ids": ["r2", "r3", "r5"],
+      "trials": [
+        { "id": "r1", "terminal_outcome": "INTERRUPTED", "expected_operation": "fail", "official_reward": null, "f2p_passed": null, "f2p_total": null, "p2p_passed": null, "p2p_total": null, "agent_wall_ms": 1509597, "model_steps": 33, "implementation_children": 4, "estimated_api_equivalent_cost_usd": 3.067403, "root_tokens": { "input": 140536, "output": 26219, "reasoning": 8507, "cache_read": 2933248, "cache_write": 0 }, "child_tokens": { "input": 186917, "output": 9574, "reasoning": 4666, "cache_read": 842368, "cache_write": 0 } },
+        { "id": "r2", "terminal_outcome": "DONE", "expected_operation": "pass", "official_reward": 0, "f2p_passed": 7, "f2p_total": 9, "p2p_passed": 94, "p2p_total": 94, "agent_wall_ms": 1541342, "model_steps": 35, "implementation_children": 4, "estimated_api_equivalent_cost_usd": 4.106797, "root_tokens": { "input": 195690, "output": 20455, "reasoning": 8075, "cache_read": 4371968, "cache_write": 0 }, "child_tokens": { "input": 197943, "output": 12425, "reasoning": 8525, "cache_read": 1760896, "cache_write": 0 } },
+        { "id": "r3", "terminal_outcome": "DONE", "expected_operation": "pass", "official_reward": 0, "f2p_passed": 8, "f2p_total": 9, "p2p_passed": 94, "p2p_total": 94, "agent_wall_ms": 1539867, "model_steps": 44, "implementation_children": 5, "estimated_api_equivalent_cost_usd": 2.848424, "root_tokens": { "input": 148959, "output": 26045, "reasoning": 14134, "cache_read": 3866624, "cache_write": 0 }, "child_tokens": { "input": 115155, "output": 8803, "reasoning": 3968, "cache_read": 672256, "cache_write": 0 } },
+        { "id": "r4", "terminal_outcome": "INTERRUPTED", "expected_operation": "fail", "official_reward": null, "f2p_passed": null, "f2p_total": null, "p2p_passed": null, "p2p_total": null, "agent_wall_ms": 1357872, "model_steps": 38, "implementation_children": 4, "estimated_api_equivalent_cost_usd": 3.129358, "root_tokens": { "input": 149806, "output": 20391, "reasoning": 8120, "cache_read": 3685376, "cache_write": 0 }, "child_tokens": { "input": 149221, "output": 9872, "reasoning": 6679, "cache_read": 1015808, "cache_write": 0 } },
+        { "id": "r5", "terminal_outcome": "DONE", "expected_operation": "pass", "official_reward": 0, "f2p_passed": 8, "f2p_total": 9, "p2p_passed": 94, "p2p_total": 94, "agent_wall_ms": 1296965, "model_steps": 39, "implementation_children": 4, "estimated_api_equivalent_cost_usd": 2.786201, "root_tokens": { "input": 142030, "output": 21935, "reasoning": 8706, "cache_read": 2983936, "cache_write": 0 }, "child_tokens": { "input": 148290, "output": 10742, "reasoning": 4912, "cache_read": 653184, "cache_write": 0 } }
+      ],
+      "aggregate": { "verified_pass": 0, "launched_trials": 5, "completed_runs": 3, "official_verifier_runs": 3, "f2p_passed": 23, "f2p_total": 27, "p2p_passed": 282, "p2p_total": 282, "median_agent_wall_ms": 1539867, "median_model_steps": 39, "implementation_children": 13, "estimated_api_equivalent_cost_usd": { "median_completed_run": 2.848424, "completed_runs": 9.741422, "interrupted_attempts": 6.196761, "all_attempts": 15.938182, "model_allocation": "session-export-observed" } }
     }
   },
-  "later_standalone": {
-    "observed_date": "2026-09-12",
-    "package_version": "0.9.9 recovery candidate",
-    "package_sha256": "c5c6320445c5d6a3f52c4bb665caac60a7416bf5b54ce035cf6c767028a35f80",
-    "expected_operation": "pass",
-    "verified_pass": 0,
-    "f2p_passed": 5,
-    "f2p_total": 9,
-    "p2p_passed": 94,
-    "p2p_total": 94,
-    "agent_wall_ms": 936590,
-    "api_equivalent_total_cost_usd": 2.148156,
-    "paired_control": false
-  },
-  "latest_completed_qualification_attempt": {
-    "observed_date": "2026-09-12",
-    "package_version": "0.9.11-bench.2",
-    "terminal_outcome": "IN_PROGRESS",
-    "expected_operation": "fail",
-    "reason": "delivery-not-complete",
-    "agent_wall_ms": 2166749,
-    "official_verifier_attempted": false,
-    "task_check_completion": null,
-    "benchmark_status": "frozen"
-  },
+  "limitations": [
+    "single task",
+    "three completed runs selected from five Sortie attempts",
+    "separate batches rather than matched pairs",
+    "different model routes",
+    "provider cache and time-of-day effects uncontrolled",
+    "Docker and Runta intentionally unused",
+    "API-equivalent estimates are not invoices or subscription usage"
+  ],
   "external_references": {
     "systems": ["Codex", "Pi", "Oh My OpenCode"],
     "comparable_coordinates_available": false,

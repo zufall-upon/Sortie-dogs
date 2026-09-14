@@ -1,16 +1,26 @@
 # Sortie-dogs 简体中文指南
 
-**为 OpenCode 提供边界清晰、注重成本的执行框架，
-保留你现有的 OpenCode 配置。**
+**在保留既有 OpenCode 环境的同时，守住目标、按任务调整执行方式，
+并优化成本、时间与证据的执行框架。**
 
 平时照常使用 OpenCode。只有需要限定范围的实现、验证、审查和模型路由时，才调用 Sortie。
 
-### 为什么选择 Sortie？
+### 四项设计原则
 
-- 🐕 **与 OpenCode 共存** — 添加专属工作流，不禁用你平时使用的智能体。
-- 💰 **把强模型用在关键处** — 低成本模型处理批量工作，强模型负责困难的实现与审查。
-- ⚙️ **按任务规模调整流程** — 小修保持简单；大型任务可使用有界并行执行和更强的验证。
-- 🛡 **携带证据返回** — 报告修改范围、验证结果、审查状态、成本和运行证据。
+- **Goal invariance** — accepted outcome与proof要求在委派、续跑和修复中保持不变。child agent不能为了更容易完成而自行削弱目标。
+- **Adaptive execution** — 小任务保持小规模。只有任务形状和风险确有需要时，才增加并行worker、强模型和独立review。
+- **Coexistence / portability** — 仅在明确调用时启用，保留OpenCode的标准agent与设置，默认采用project-local安装。
+- **Cost / time / proof** — 目标不是最大化agent数量，而是以最低可行成本和工时取得verified outcome；未完成与失败也必须明确报告。
+
+### v0.10.x方向
+
+v0.10.x系列正围绕 **Astra operator / Terra dogs** 分工持续改进。最上层决策入口由Astra operator
+负责，以保护accepted goal、质量门槛、escalation决策与最终acceptance。由于Astra成本较高，
+它只承担确实需要该级判断能力的最少工作；大部分有明确边界的规划、协调与执行交给Terra-based dogs。
+目标是在Astra级判断质量与Terra级运行成本之间取得平衡。
+
+这是正在验证的架构方向，并非已经由benchmark证明的性能结论。Goal与质量authority集中，
+实现工作量不集中。
 
 ## 快速试用
 
@@ -38,6 +48,8 @@ JSON 应写入配置文件，`/sortie` 应在 OpenCode 内输入。
 推荐按项目安装。`init` 安装 runtime asset；`plugin` 配置启用插件及其模型路由。
 模型选择及其他安装方式见[安装详情](#从-npm-安装)。
 
+> **Project status: Beta.** v0.9.x仍在稳定化；1.0之前runtime behavior、配置和runtime asset可能变化。
+
 [![Sortie-dogs 协调有明确边界的实现工作流](assets/sortie-workflow.png)](assets/sortie-workflow.gif)
 
 _点击图片可播放工作流动画。_
@@ -49,28 +61,67 @@ Sortie-dogs 是一个按需启用的 OpenCode 编排插件。它把任务依次�
 
 [English README](../README.md) · [日本語](guide-ja.md)
 
+## 最新本地benchmark case study
+
+**这是按completed run整理的参考值，不是成功benchmark或leaderboard声明。** 2026-09-14，
+Bare OpenCode与Sortie-dogs v0.9.12在同一固定任务`datacurve/anko-typed-variable-bindings`上
+各收集3个completed run。Bare用了3次attempt；Sortie有2次返回`INTERRUPTED`，因此用了5次。
+两边是分别执行的serial batch，不是3组matched pair。Docker与Runta有意未使用。
+
+- **Bare OpenCode:** 标准`build` agent，`openai/gpt-5.6-sol` / `high`；effective config中没有
+  Sortie plugin或runtime asset。
+- **Sortie v0.9.12:** `dog-coordinator`使用`openai/gpt-5.6-terra` / `high`，观测到的实现child使用
+  `openai/gpt-5.6-sol` / `medium`；使用固定package与runtime asset。未观测到Luna、Astra或Opus message。
+
+| Metric · 1个任务、各3个completed run | Bare OpenCode | Sortie v0.9.12 |
+| --- | ---: | ---: |
+| 所需attempt数 | 3 | 5 |
+| 纳入比较的completed run | 3 | 3 |
+| Verified PASS | 0/3 | 0/3 |
+| Task checks · F2P | 11.1% · 3/27 | 85.2% · 23/27 |
+| Retained checks · P2P | 282/282 | 282/282 |
+| Median agent wall | 24.5 min | 25.7 min |
+| Median model steps | 43 | 39 |
+| Implementation child sessions · total | 0 | 13 |
+| 估算API-equivalent cost · median completed run | $3.53 | $2.85 |
+| 估算cost · 3个completed run | $10.69 | $9.74 |
+| 额外interrupted-attempt cost | $0 | $6.20 |
+| 获得3个completed run的总cost | $10.69 | $15.94 |
+
+Bare的3个run各通过F2P 1/9。Sortie的completed run分别通过7/9、8/9、8/9。所有候选都保留
+P2P 94/94，但official verifier reward均为0。两次中断不计入completed-run质量、时间与cost聚合，
+但attempt数量和额外cost仍明确列出。
+
+![最新本地case study的质量与cost](assets/quality-cost-reference.svg)
+
+Cost按导出的root/child session token及其实际生成message的model归类，再应用固定standard
+short-context单价，属于API-equivalent估算而非账单。单一任务、小样本、分批执行、model route不同，
+因此不能证明一般成功率或cost优势。
+
+[定义、固定输入与限制](benchmark-reference.md) · [machine-readable reference values](benchmarks/provisional-reference.json)
+
 ## 为什么使用 Sortie-dogs
 
-- **需要时启用，其余时间保持安静** — 使用 `/sortie` 或选择 `dog-coordinator` 才会激活；
-  普通 OpenCode 会话不受影响。
-- **限定调研不会失控** — 每当出现明确的 manifest、validation 或 owner 证据缺口时使用 scout；不重复未变化的请求。
-- **写入范围精确可控** — source manifest 或 operation manifest 约束编辑和 handoff。
-- **自主顺序实现** — accepted scope 所需的 worker 逐个执行，普通 lane 不设次数上限；并发 fan-out 仍需显式 contract。
-- **运行时冲突保护** — 在修改前拒绝相同或祖先/后代 write scope 的并发绑定；
-  所有并行单元 join 后只运行一次 full validation。
-- **先验证，后完成** — canonical validation、按风险 review 和 terminal evidence 共同控制由
-  coordinator 负责的完成与 commit。
-- **长任务能够恢复** — restart recovery 与有界 compaction 沿用 handoff context，不会静默重来。
+- **固定Goal** — acceptance criteria贯穿规划、委派、续跑、validation与remediation。Child result或
+  局部实现不能删除未满足criterion；只有用户明确授权才能改变目标。
+- **适应任务** — 小改动使用1个worker与targeted validation；只有大型工作才增加bounded parallel、
+  stronger model或独立review。
+- **与OpenCode共存** — 只在使用`/sortie`或选择`dog-coordinator`时启用，不替换标准agent、setting或
+  user-owned file。
+- **同时优化cost、time与proof** — lower-cost model负责限定调研和volume work，stronger model只用于
+  能改变outcome的判断、实现与review。Speed / Cost / Proof也会暴露失败。
+- **精确写入边界** — source manifest或operation manifest限制编辑与handoff，并在修改前拒绝冲突scope。
+- **有界续跑** — restart recovery与compaction handoff保留进度；普通lane同样不是无限执行。
 
 ## 实际工作闭环
 
-1. **Brief / plan** — `dog-coordinator` 明确 acceptance criteria、写入 manifest 和验证要求。
-2. **可选 scout** — 明确 evidence gap 出现时运行只读、范围受限的 scout。
-3. **专用 worker** — 按固定 manifest 顺序执行，直到 accepted scope 完成。
+1. **固定Goal / plan** — `dog-coordinator`明确不变的acceptance criteria、写入manifest与验证要求。
+2. **可选scout** — 仅在worker开始前存在明确evidence gap时运行只读、范围受限的scout。
+3. **Adaptive execution** — 按任务形状选择1个worker或bounded parallel unit，只实现approved manifest。
 4. **Canonical validation** — 运行声明的 test / build command，保留可核验结果。
 5. **按风险 review** — 高风险候选项接受独立 review；低风险项通过验证后可跳过额外审查。
-6. **Coordinator 收尾** — 只有 manifest、validation、review 和 evidence gate 全部通过，
-   coordinator 才负责完成与 commit。
+6. **Goal-level完成** — 只有全部accepted criterion都有manifest、validation、review与evidence coverage，
+   coordinator才负责完成。
 7. **有界续跑** — restart recovery 和 compaction handoff 保留进度，每个 batch 仍有明确上限。
 
 ## 运行示例
@@ -112,14 +163,17 @@ npm install --save-dev sortie-dogs
 npx sortie-dogs init .
 ```
 
-也可以全局安装 CLI，再初始化 OpenCode 的全局配置：
+### 可选的global availability
+
+只有明确希望在多个项目中使用Sortie角色时，才全局安装CLI并初始化OpenCode全局配置：
 
 ```sh
 npm install --global sortie-dogs
 sortie-dogs init --global
 ```
 
-`sortie-dogs init --global` 会把 runtime file 安装到 OpenCode 的全局配置根目录。
+`sortie-dogs init --global` 会把canonical runtime file安装到OpenCode全局配置根目录。
+它不会把project-local初始化自动变成全局，而是单独的明确opt-in。
 若采用项目级配置，仍需另行运行 `sortie-dogs init .`，并使用下面的项目级配置或 plugin bridge。
 
 只安装 runtime asset 不会加载插件；未加载插件时，所有角色都会沿用调用方的模型。
@@ -211,6 +265,7 @@ handoff 与 operation manifest 在检查和绑定之前都会做 schema 校验�
   "handoffPaths": ["handoff.json"],
   "readOnlyTools": ["my_mcp_search"],
   "dedicatedWorkerModel": { "model": "provider/model", "variant": "deep" },
+  "continuation": { "enabled": true, "maxAutoContinues": 10 },
   "reflection": {
     "enabled": false,
     "layers": { "run": true, "project": true, "global": false },
@@ -230,7 +285,8 @@ factory options，请使用全局文件保存持久的全局设置。
   对 operational work，coordinator 必须在派发前创建有效 handoff 并传递其绝对路径；执行绑定的 child
   必须在 bind 前立即使用 built-in Read 读取该文件。
   新 contract 会写入 candidate 相对的 `.sortie-dogs/contracts/`，文件名为
-  `handoff.<id>.json` 和 `<id>.operation-manifest.json`。建议在 `.gitignore` 中忽略该目录。
+  `handoff.<id>.json` 和 `<id>.operation-manifest.json`。本repository已在`.gitignore`中忽略该目录；
+  使用方项目也应排除它。
   legacy 根目录/作用域路径和自定义配置路径不会自动移动或删除，继续兼容读取、preflight 与 bind。
   只有没有正在运行的 Sortie run 时才可安全删除该目录。
 - `readOnlyTools`：追加不会修改文件的宿主专用工具名，例如 MCP 工具。
@@ -241,6 +297,9 @@ factory options，请使用全局文件保存持久的全局设置。
   `openai/gpt-5.6-luna` 的 `max` variant。若串行 target 指向同一个 Luna 模型，配置将因两个 route identity
   合并而被拒绝。coordinator 只对已 prepared 的 `luna-fabric` run 的 ready descriptor 派发该角色；
   `sol-serial` run 仍然使用 `dog-worker`。
+- `continuation`：为batch loop设置边界。`maxAutoContinues`默认且最大为`10`。terminal unit与
+  checkpoint之后，只续跑同一个root `dog-coordinator` session；不会把child提升为root，也不会接管
+  另一个coordinator。terminal response会compact，避免把已完成tool output带入下一次请求。
 - `reflection`：仅供已激活的 root `dog-coordinator` 使用的 process prevention，默认关闭。
   opt-in 后 run / project 层默认开启；跨项目共享的 global storage 层只有显式开启才生效。
   child 与其他 agent 会被拒绝，`SORTIE_REFLECTION=0` 可立即停止该功能。governing `REFLECTION_POLICY`
@@ -265,6 +324,9 @@ OpenCode 的标准智能体、角色、设置和其他会话均保持原样。
 真实的 assistant text。非空结果、其他 tool、无法读取的 child session 都不会被改动。
 
 ## 模型路由
+
+默认route按能力与重复context成本分工：限定retrieval使用Luna，coordination使用Terra，serial
+implementation使用Sol，独立review使用Opus或Sol，而不是把所有工作都交给最强模型。
 
 `dog-coordinator` 的 built-in route 是 `openai/gpt-5.6-terra` 的 `high` variant。为避免规划质量和进度判断成为
 workflow 的瓶颈，默认配置优先平衡能力与成本。若宿主确认 Terra 不可用，

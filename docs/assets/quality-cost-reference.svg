@@ -1,38 +1,48 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="960" height="420" viewBox="0 0 960 420" role="img" aria-labelledby="title description">
-  <title id="title">Historical Bare OpenCode versus Sortie quality–cost reference</title>
-  <desc id="description">One frozen task, one trial per arm, September 10 2026. Bare: 55.6 percent task-check completion at 5.42 dollars API-equivalent cost. Sortie v0.9.5: 88.9 percent at 1.46 dollars. Both have zero of one verified passes. External systems use different methodologies and have no plotted coordinates.</desc>
-  <rect width="960" height="420" rx="12" fill="#101827"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="440" viewBox="0 0 960 440" role="img" aria-labelledby="title description">
+  <title id="title">Bare OpenCode versus Sortie local quality and estimated cost</title>
+  <desc id="description">Three completed local runs per configuration on one frozen task, September 14 2026. Bare completed 11.1 percent of task checks at a median estimated API-equivalent cost of 3.53 dollars. Sortie completed 85.2 percent at 2.85 dollars. Sortie needed five attempts and 15.94 dollars total estimated acquisition cost. Neither configuration achieved a Verified PASS.</desc>
+  <rect width="960" height="440" rx="14" fill="#0b1220"/>
   <g font-family="system-ui, -apple-system, Segoe UI, sans-serif">
-    <text x="80" y="32" fill="#f1f5f9" font-size="20" font-weight="700">Quality–cost reference · historical n=1</text>
-    <text x="80" y="52" fill="#b8c4d6" font-size="12">2026-09-10 · Sortie v0.9.5 · neither arm achieved Verified PASS</text>
-    <g stroke="#334155" stroke-width="1">
-      <path d="M80 70H620M80 130H620M80 190H620M80 250H620M80 310H620"/>
-      <path d="M80 70V310M260 70V310M440 70V310M620 70V310"/>
+    <text x="68" y="38" fill="#f8fafc" font-size="21" font-weight="700">Local quality–cost case study · 3 completed runs each</text>
+    <text x="68" y="60" fill="#94a3b8" font-size="13">2026-09-14 · attempts: Bare 3, Sortie 5 · Verified PASS: 0/3 each</text>
+    <text x="68" y="78" fill="#718096" font-size="11">Bare: build · Sol/high · no plugin   |   Sortie: Terra/high coordinator · Sol/medium implementation children</text>
+
+    <g stroke="#243247" stroke-width="1">
+      <path d="M68 94H650M68 152H650M68 210H650M68 268H650M68 326H650"/>
+      <path d="M68 94V326M184.4 94V326M300.8 94V326M417.2 94V326M533.6 94V326M650 94V326"/>
     </g>
-    <path d="M80 64V310H634" fill="none" stroke="#d1d9e6" stroke-width="2"/>
-    <g fill="#b8c4d6" font-size="12" text-anchor="end">
-      <text x="68" y="74">100%</text><text x="68" y="134">75%</text>
-      <text x="68" y="194">50%</text><text x="68" y="254">25%</text><text x="68" y="314">0%</text>
+    <path d="M68 88V326H660" fill="none" stroke="#cbd5e1" stroke-width="2"/>
+
+    <g fill="#94a3b8" font-size="12" text-anchor="end">
+      <text x="58" y="98">100%</text><text x="58" y="156">75%</text>
+      <text x="58" y="214">50%</text><text x="58" y="272">25%</text><text x="58" y="330">0%</text>
     </g>
-    <g fill="#b8c4d6" font-size="12" text-anchor="middle">
-      <text x="80" y="331">$0</text><text x="260" y="331">$2</text>
-      <text x="440" y="331">$4</text><text x="620" y="331">$6</text>
+    <g fill="#94a3b8" font-size="12" text-anchor="middle">
+      <text x="68" y="347">$0</text><text x="184.4" y="347">$1</text><text x="300.8" y="347">$2</text>
+      <text x="417.2" y="347">$3</text><text x="533.6" y="347">$4</text><text x="650" y="347">$5</text>
     </g>
-    <text transform="translate(22 250) rotate(-90)" fill="#d1d9e6" font-size="13">Task-check completion ↑</text>
-    <text x="80" y="360" fill="#d1d9e6" font-size="13">Estimated API-equivalent total cost →</text>
-    <circle cx="211.45" cy="96.67" r="7" fill="#fb923c"/>
-    <text x="226" y="88" fill="#fdba74" font-size="16" font-weight="700">Sortie v0.9.5</text>
-    <text x="226" y="109" fill="#d1d9e6" font-size="13">$1.46 · 8/9 task checks</text>
-    <circle cx="567.88" cy="176.67" r="7" fill="#60a5fa"/>
-    <text x="552" y="157" fill="#93c5fd" font-size="16" font-weight="700" text-anchor="end">Bare OpenCode</text>
-    <text x="552" y="198" fill="#d1d9e6" font-size="13" text-anchor="end">$5.42 · 5/9 task checks</text>
-    <rect x="676" y="70" width="254" height="240" rx="8" fill="#172133" stroke="#334155"/>
-    <text x="694" y="100" fill="#a0adbf" font-size="14" font-weight="600">Separate-methodology references</text>
-    <g fill="#8190a5" font-size="15">
-      <text x="698" y="142">Codex</text><text x="698" y="173">Pi</text><text x="698" y="204">Oh My OpenCode</text>
-    </g>
-    <text x="694" y="248" fill="#a0adbf" font-size="12">Not plotted: no comparable</text>
-    <text x="694" y="267" fill="#a0adbf" font-size="12">cost / quality coordinates.</text>
-    <text x="80" y="397" fill="#fbbf24" font-size="13">Quality issues remain. Latest qualification did not finish; new benchmarks are frozen.</text>
+    <text transform="translate(20 276) rotate(-90)" fill="#cbd5e1" font-size="13">Graded task-check completion ↑</text>
+    <text x="68" y="375" fill="#cbd5e1" font-size="13">Median estimated API-equivalent cost →</text>
+
+    <circle cx="399.7" cy="128.3" r="8" fill="#fb923c"/>
+    <text x="385" y="112" fill="#fdba74" font-size="16" font-weight="700" text-anchor="end">Sortie v0.9.12</text>
+    <text x="385" y="150" fill="#cbd5e1" font-size="13" text-anchor="end">85.2% · $2.85</text>
+
+    <circle cx="478.5" cy="300.2" r="8" fill="#60a5fa"/>
+    <text x="464" y="283" fill="#93c5fd" font-size="16" font-weight="700" text-anchor="end">Bare OpenCode</text>
+    <text x="464" y="320" fill="#cbd5e1" font-size="13" text-anchor="end">11.1% · $3.53</text>
+
+    <rect x="694" y="86" width="232" height="240" rx="10" fill="#111c2e" stroke="#334155"/>
+    <text x="712" y="116" fill="#e2e8f0" font-size="14" font-weight="700">How to read this</text>
+    <text x="712" y="143" fill="#a8b5c7" font-size="12">Observed model split:</text>
+    <text x="712" y="162" fill="#a8b5c7" font-size="12">Bare: Sol only</text>
+    <text x="712" y="181" fill="#a8b5c7" font-size="12">Sortie: Terra + Sol</text>
+    <text x="712" y="215" fill="#a8b5c7" font-size="12">Completed totals: $10.69 / $9.74</text>
+    <text x="712" y="234" fill="#a8b5c7" font-size="12">Attempts: Bare 3 / Sortie 5</text>
+    <text x="712" y="263" fill="#fbbf24" font-size="12">Sortie acquisition: $15.94</text>
+    <text x="712" y="282" fill="#fbbf24" font-size="12">No official task pass.</text>
+    <text x="712" y="307" fill="#718096" font-size="11">API-equivalent, not invoices</text>
+
+    <text x="68" y="414" fill="#94a3b8" font-size="12">Single-task local case study · separate serial batches · Docker and Runta intentionally unused</text>
   </g>
 </svg>
