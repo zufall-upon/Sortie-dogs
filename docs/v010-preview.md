@@ -4,7 +4,7 @@
 
 The preview now incorporates the committed v0.9.12 attachment and continuation
 recovery baseline (9a59753668010fd8352753fe80be25cbb74828bf). The integrated
-runtime marker is `0.10.0-v0912-language4-cost-rpt10-compaction-ref1-proposal1-review-remediation1-surface3-proposal-recovery2-quality1`; earlier smoke receipts describe their
+runtime marker is `0.10.0-v0912-language4-cost-rpt10-compaction-ref1-proposal1-review-remediation1-surface3-proposal-recovery2-quality1-terminal1`; earlier smoke receipts describe their
 recorded pre-merge package and are not relabeled as integrated runtime tests.
 
 The renamed two-unit serial path has completed a packaged real-model smoke:
@@ -223,7 +223,7 @@ source worktree or the stable project. The earlier full serial smoke used an
 explicit Astra/high override; preparation does not claim a new Sol/low RPT.
 
 The beta package's CLI defaults to preview assets with marker
-`0.10.0-v0912-language4-cost-rpt10-compaction-ref1-proposal1-review-remediation1-surface3-proposal-recovery2-quality1`:
+`0.10.0-v0912-language4-cost-rpt10-compaction-ref1-proposal1-review-remediation1-surface3-proposal-recovery2-quality1-terminal1`:
 
 ```text
 sortie-dogs init <project>

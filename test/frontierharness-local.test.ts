@@ -72,7 +72,7 @@ function manifest(root: string): Record<string, unknown> {
         args: [], probe_args: ["--version"], probe_exit: 0 }])),
     verifier: { environment: "wsl", result: { reward_file: "verifier/reward.json", reward_field: "reward",
       count_fields: rewardFields } },
-    protocol: { wall_seconds: 5400, startup_seconds: 120, activity_seconds: 5400, progress_seconds: 5400,
+    protocol: { wall_seconds: 5400, startup_seconds: 5400, activity_seconds: 5400, progress_seconds: 5400,
       retry_count: 0, attempts_per_arm: 1, arm_order: ["bare", "sortie"] },
   };
 }
@@ -129,6 +129,14 @@ test("v010 profile is closed, qualification-only, and pins its runtime surface",
   assert.equal(context.profile.markerExport, "V010_RUNTIME_ASSET_VERSION");
   assert.equal(isolatedConfig("v010").subagent_depth, 2);
   assert.equal("subagent_depth" in isolatedConfig("stable"), false);
+  const terra = structuredClone(value);
+  terra.opencode.model = "openai/gpt-5.6-terra";
+  terra.opencode.variant = "xhigh";
+  assert.equal(validate(terra), true, JSON.stringify(validate.errors));
+  assert.doesNotThrow(() => validateManifest(terra, join(root, "terra-manifest.json"), root));
+  terra.opencode.variant = "high";
+  assert.throws(() => validateManifest(terra, join(root, "invalid-terra-manifest.json"), root),
+    (error: Error & { gate?: string }) => error.gate === "opencode");
   value.package.required_assets.pop();
   assert.equal(validate(value), false);
   assert.throws(() => validateManifest(value, join(root, "manifest.json"), root),

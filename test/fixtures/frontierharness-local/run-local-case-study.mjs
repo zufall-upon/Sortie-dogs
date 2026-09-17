@@ -22,7 +22,7 @@ const REPORT_FILE = "sanitized-summary.json";
 const CANCEL_FILE = "frontierharness-cancel.json";
 const OUTPUT_LIMIT = 64 * 1024 * 1024;
 const DEFAULT_WALL_SECONDS = 5400;
-const DEFAULT_STARTUP_SECONDS = 120;
+const DEFAULT_STARTUP_SECONDS = 5400;
 const DEFAULT_ACTIVITY_SECONDS = 5400;
 const DEFAULT_PROGRESS_SECONDS = 5400;
 const HEARTBEAT_SECONDS = 120;
@@ -65,13 +65,15 @@ const RUNNER_PROFILES = Object.freeze({
   stable: Object.freeze({
     agent: "dog-coordinator", initArgs: [], runtimeModule: "runtime-assets.js",
     markerExport: "RUNTIME_ASSET_VERSION", implementationAgents: ["dog-worker", "dog-luna-worker"],
-    requiredAssets: [],
+    requiredAssets: [], operatorRoutes: [{ model: "openai/gpt-5.6-sol", variant: "high" }],
   }),
   v010: Object.freeze({
     agent: "dog-operator", initArgs: ["--profile", "v010"], runtimeModule: "runtime-assets-v010.js",
     markerExport: "V010_RUNTIME_ASSET_VERSION", implementationAgents: ["dog-worker-v010"],
     requiredAssets: ["agent/dog-operator.md", "agent/dogs-coordinator.md", "agent/dog-worker-v010.md",
       "command/sortie-v010.md"],
+    operatorRoutes: [{ model: "openai/gpt-5.6-sol", variant: "high" },
+      { model: "openai/gpt-5.6-terra", variant: "xhigh" }],
   }),
 });
 
@@ -194,11 +196,13 @@ export function validateManifest(value, manifestPath, repositoryRoot = process.c
   invariant(record(value.source) && string(value.source.repository) && value.source.base === ANKO_BASE,
     "source", "Source repository and approved base are required.");
   exactKeys(value.source, ["repository", "base"], "source-keys");
+  const approvedOperatorRoute = resolvedProfile.operatorRoutes.some((route) =>
+    value.opencode?.model === route.model && value.opencode?.variant === route.variant);
   invariant(record(value.opencode) && string(value.opencode.wsl_executable) && string(value.opencode.executable) &&
     string(value.opencode.version) && string(value.opencode.auth_file) &&
     (profile !== "v010" || safeWslPath(value.opencode.host_database)) &&
-    value.opencode.model === "openai/gpt-5.6-sol" && value.opencode.variant === "high",
-  "opencode", "Pinned WSL OpenCode, auth presence path, model, and high variant are required.");
+    approvedOperatorRoute,
+  "opencode", "Pinned WSL OpenCode, auth presence path, and an approved profile operator route are required.");
   exactKeys(value.opencode, ["wsl_executable", "executable", "version", "auth_file", "model", "variant",
     ...(profile === "v010" ? ["host_database"] : [])],
     "opencode-keys");

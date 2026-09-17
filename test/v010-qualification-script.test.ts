@@ -33,7 +33,7 @@ function baseManifest(root: string) {
       args: [], probe_args: ["--version"], probe_exit: 0 }])),
     verifier: { environment: "wsl", result: { reward_file: "verifier/reward.json", reward_field: "reward",
       count_fields: ["f2p_total", "f2p_passed", "p2p_total", "p2p_passed", "f2p", "p2p", "partial", "apply_failed"] } },
-    protocol: { wall_seconds: 5400, startup_seconds: 120, activity_seconds: 5400, progress_seconds: 5400,
+    protocol: { wall_seconds: 5400, startup_seconds: 5400, activity_seconds: 5400, progress_seconds: 5400,
       retry_count: 0, attempts_per_arm: 1, arm_order: ["bare", "sortie"] },
   };
 }

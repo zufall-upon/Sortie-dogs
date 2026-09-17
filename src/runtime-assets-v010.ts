@@ -9,9 +9,13 @@ const coordinator = profileAgent(profile, "dog-coordinator");
 const operator = profileAgent(profile, "dog-operator");
 const worker = profileAgent(profile, "dog-worker");
 const canonicalCoordinator = canonicalAssets.find(asset => asset.name === "dog-coordinator")!.content;
-const presentationStart = canonicalCoordinator.indexOf("READABLE_OUTPUT_FIXTURE\n");
-const presentationEnd = canonicalCoordinator.indexOf("END_READABLE_OUTPUT_FIXTURE", presentationStart);
-if (presentationStart < 0 || presentationEnd < 0) throw new Error("canonical-presentation-fixture-missing");
+/** Reuse the canonical fixture bodies so this profile cannot drift from the shared terminal vocabulary. */
+function canonicalFixture(marker: string): string {
+  const start = canonicalCoordinator.indexOf(`${marker}\n`);
+  const end = start < 0 ? -1 : canonicalCoordinator.indexOf(`END_${marker}`, start);
+  if (start < 0 || end < 0) throw new Error(`canonical-fixture-missing:${marker}`);
+  return canonicalCoordinator.slice(start, end + `END_${marker}`.length);
+}
 export const PREVIEW_PRESENTATION_POLICY = `
 ## Sortie presentation continuity
 
@@ -20,7 +24,34 @@ Use the user's language for prose, concise icon-led plan/progress/evidence block
 after the host accepts the result. The host supplies the 🐾 return report, mission/proof, cost/pack and career panels;
 do not fabricate scores, counts, medals or success, and do not suppress these panels as redundant decoration.
 
-${canonicalCoordinator.slice(presentationStart, presentationEnd + "END_READABLE_OUTPUT_FIXTURE".length)}
+${canonicalFixture("READABLE_OUTPUT_FIXTURE")}
+`;
+export const PREVIEW_TERMINAL_REPORT_POLICY = `
+## Terminal report contract
+
+A task turn that ends without another tool call is a terminal return. Its first non-empty line must be one
+machine checkpoint: exactly one of DONE, INTERRUPTED, BLOCKED, or NEED_DECISION with that status icon,
+followed by a short conclusion in the user's language. Never close a task turn with bare prose, an unlabeled
+summary, a plan, a progress note, or a preamble, and never leave the run without one of these four tokens.
+The status token, its icon, TRUE_INTERRUPTION and TRUE_BLOCKER are protocol tokens: keep them verbatim
+even when the surrounding conclusion is translated. Translate only the display labels and keep their order.
+
+DONE requires a succeeded ${profile.toolPrefix}complete_operator receipt for the accepted goal; the host renders
+the measured return report from that receipt. Without it, return INTERRUPTED, BLOCKED, or NEED_DECISION naming
+the exact unresolved condition. An exhausted budget, an unapproved or failed proposal, a terminated child, a
+refused contract operation, or an unreachable acceptance is an INTERRUPTED return, never a silent stop.
+A genuine interruption also requires the canonical machine line \`TRUE_INTERRUPTION: user: <condition>\` or
+\`TRUE_INTERRUPTION: internal: <condition>\`; without it the host keeps the run on its same-session continuation path.
+
+A refused control operation is a local process defect, not a terminal blocker. Read the returned status and
+next_action, apply that one correction, and continue in the same turn. Never reissue an unchanged refused
+request: an active contract returns ${profile.toolPrefix}operator_status and the existing next Task, and an
+unavailable contract-repair validation resume returns the preserved run state and its decision. When the same
+refusal repeats with unchanged state, stop retrying and return one INTERRUPTED checkpoint naming that refusal.
+
+${canonicalFixture("TERMINAL_STATUS_SEMANTICS_FIXTURE")}
+
+${canonicalFixture("TERMINAL_OUTPUT_TEMPLATE")}
 `;
 export const COMMUNICATION_LANGUAGE_POLICY = `
 ## Communication language continuity
@@ -255,7 +286,7 @@ Use ${profile.toolPrefix}cancel_operator to stop an active grant before changing
 operator-acceptance-remediation-required replacement action, or performing the bounded awaiting-acceptance
 reason=review-blocking replacement above. Agent switching revokes this
 runtime's ownership; do not restart it from a stale summary. The initial preview supports the serial lane only.
-${PREVIEW_PRESENTATION_POLICY}
+${PREVIEW_PRESENTATION_POLICY}${PREVIEW_TERMINAL_REPORT_POLICY}
 `;
 
 const operatorContent = `---

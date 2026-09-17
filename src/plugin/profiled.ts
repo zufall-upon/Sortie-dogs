@@ -337,6 +337,14 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           state = proposal.state;
         } catch (error) {
           if (error instanceof OperatorContractError) return JSON.stringify({ status: "invalid-plan", diagnostics: error.diagnostics, diagnostics_truncated: error.diagnostics_truncated });
+          // An immutable active contract is a local routing defect, not an external blocker. Return the
+          // existing durable state and its next action so the root continues instead of retrying prepare.
+          if (error instanceof Error && error.message === "operator-active-contract-immutable") {
+            return JSON.stringify({ status: "active-contract-immutable", code: error.message,
+              packet: await operatorPacket(await operators.required(context.sessionID)),
+              next_action: `This root already owns an immutable active contract. Do not resend a plan or cancel an unchanged contract: ` +
+                `read ${status} and continue the existing run's next_task_ref or next_action. Cancel only for an actual scope change or explicit stop.` });
+          }
           throw error;
         }
         await registerPreparedGoal(context.sessionID, state);
@@ -451,8 +459,14 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         try {
           await control!.authorizeOperatorContractRepairValidation(context.sessionID, taskID, unit.childSessionID, args.repair_fingerprint);
         } catch (error) {
+          // The repair is aborted and the run keeps a durable decision. Return that preserved state so an
+          // unauthorized resume cannot leave the root without a recognizable terminal or next action.
           applied = await operators.abortAppliedContractRepair(context.sessionID, "operator-contract-repair-validation-resume-unavailable");
-          throw error;
+          return JSON.stringify({ status: "contract-repair-validation-unavailable",
+            code: error instanceof Error ? error.message : "operator-contract-repair-validation-resume-unavailable",
+            packet: await operatorPacket(applied),
+            next_action: `The validation-only resume was not authorized and this repair is closed. Do not retry ${resolveContractRepair} or ` +
+              `${resume} for the same fingerprint: read ${status}, then either continue the reported decision or return one terminal checkpoint naming this refusal.` });
         }
         return JSON.stringify({ status: "repair-applied", run_id: applied.runID, unit_id: unit.unit.id,
           repair_generation: applied.repairGeneration, task: operators.nextWorkerTask(applied) });

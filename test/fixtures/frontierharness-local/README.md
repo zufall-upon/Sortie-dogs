@@ -103,8 +103,10 @@ node $runner cleanup --confirm --manifest $manifest
 
 Do not skip or repeat phases. Durable state consumes each arm attempt before OpenCode starts and each
 verifier attempt before the grader starts. Bare must complete before Sortie. Both use the same WSL
-OpenCode executable, model `openai/gpt-5.6-sol`, variant `high`, and official instruction bytes. A
-120-second startup watchdog and 5400-second activity/workspace-progress watchdogs stop stalled process
+OpenCode executable, one approved profile operator route, and official instruction bytes. The stable
+profile pins `openai/gpt-5.6-sol` with variant `high`; the `v010` profile also accepts
+`openai/gpt-5.6-terra` with variant `xhigh`. A
+5400-second startup watchdog and 5400-second activity/workspace-progress watchdogs stop stalled process
 trees at the official agent timeout. The hard safety wall is also 5400 seconds. Retry count is zero.
 
 Inspect each `run-arm` result before continuing. When the benchmark objective assumes normal delivery,

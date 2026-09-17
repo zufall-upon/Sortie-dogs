@@ -10,7 +10,8 @@ import { OperatorProposalRuntime } from "../dist/core/operator-proposal.js";
 import { V010_RUNTIME_PROFILE, STABLE_RUNTIME_PROFILE, canonicalAgent, profileAgent, profileTool } from "../dist/core/runtime-profile.js";
 import { initializeProject } from "../dist/core/initialize.js";
 import { runtimeAssets as stableAssets } from "../dist/runtime-assets.js";
-import { runtimeAssets as previewAssets, COMMUNICATION_LANGUAGE_POLICY, PREVIEW_PRESENTATION_POLICY } from "../dist/runtime-assets-v010.js";
+import { runtimeAssets as previewAssets, COMMUNICATION_LANGUAGE_POLICY, PREVIEW_PRESENTATION_POLICY,
+  PREVIEW_TERMINAL_REPORT_POLICY } from "../dist/runtime-assets-v010.js";
 import { RUNTIME_ASSET_VERSION, V010_RUNTIME_ASSET_VERSION } from "../dist/asset-version.js";
 import { SortieDogsV010Plugin } from "../dist/plugin/profiled.js";
 import { fixtureOpenCodeConfig } from "../scripts/release-cli.mjs";
@@ -275,6 +276,26 @@ test("preview keeps canonical game-style guidance and does not decorate unproved
   assert.equal(decoratePreviewHeadings("    ## Changes\ncode"), "    ## Changes\ncode");
 });
 
+test("preview primary closes every task turn with one machine terminal checkpoint", () => {
+  const primary = previewAssets.find(asset => asset.name === "dog-operator")!.content;
+  assert.ok(primary.includes(PREVIEW_TERMINAL_REPORT_POLICY));
+  const stable = stableAssets.find(asset => asset.name === "dog-coordinator")!.content;
+  for (const marker of ["TERMINAL_STATUS_SEMANTICS_FIXTURE", "TERMINAL_OUTPUT_TEMPLATE"]) {
+    const start = stable.indexOf(`${marker}\n`);
+    const fixtureText = stable.slice(start, stable.indexOf(`END_${marker}`, start) + `END_${marker}`.length);
+    assert.ok(start >= 0 && primary.includes(fixtureText), `${marker} must reuse the canonical body`);
+  }
+  assert.match(primary, /first non-empty line must be one\nmachine checkpoint: exactly one of DONE, INTERRUPTED, BLOCKED, or NEED_DECISION/);
+  assert.match(primary, /Never close a task turn with bare prose/);
+  assert.match(primary, /DONE requires a succeeded sortie_v010_complete_operator receipt/);
+  assert.match(primary, /TRUE_INTERRUPTION: user: <condition>/);
+  assert.match(primary, /TRUE_INTERRUPTION: internal: <condition>/);
+  assert.match(primary, /an active contract returns sortie_v010_operator_status and the existing next Task/);
+  assert.match(primary, /unavailable contract-repair validation resume returns the preserved run state/);
+  assert.match(primary, /stop retrying and return one INTERRUPTED checkpoint naming that refusal/);
+  for (const icon of ["✅", "⚠️", "⛔", "❓"]) assert.ok(primary.includes(icon), icon);
+});
+
 test("preview primary continues approved sequential scope and uses interactive questions", () => {
   const primary = previewAssets.find(asset => asset.name === "dog-operator")!.content;
   assert.match(primary, /accepted finite scope without asking for confirmation after each unit/);
@@ -372,6 +393,7 @@ function oldRoleAsset(name: "dog-operator" | "dogs-coordinator"): string {
     .replace(/For a nontrivial request whose source facts,[\s\S]*?whose complete contract is already known\.\n\n/u, "")
     .replace(/^  sortie_v010_submit_operator_proposal: true\n/m, "")
     .replace(/When the prompt starts SORTIE_OPERATOR_PROPOSAL[\s\S]*?For an admitted execution queue, call\n/u, "Call ")
+    .replace(PREVIEW_TERMINAL_REPORT_POLICY, "")
     .replace(PREVIEW_PRESENTATION_POLICY + "\n", "")
     .replace(/## Existing-run evidence reconciliation[\s\S]*?bypasses the delegate\.\n\n/u, "")
     .replace(/When operator_status returns decision=operator-acceptance-remediation-required,[\s\S]*?A reviewer finding alone is not such an increase\.\n\n/u, "")
@@ -1389,6 +1411,31 @@ test("status includes a pending draft alongside a cancelled run", async () => fi
   assert.equal(status.run_id, old.runID);
   assert.equal(status.pending_draft.draft_id, draft.draft_id);
   assert.equal(status.pending_draft.diagnostics[0].code, "operator-unit-coverage-invalid");
+}));
+
+test("re-registering a plan on an active contract returns the existing run status and next action", async () => fixture(async root => {
+  const runtime = new OperatorRuntime(root, V010_RUNTIME_PROFILE);
+  const active = await runtime.prepare("root", plan());
+  const hooks = await SortieDogsV010Plugin({ directory: root });
+  await hooks["chat.message"]!({ sessionID: "root", messageID: "user", agent: "dog-operator" }, {
+    message: { agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-5.6-sol" } },
+    parts: [{ type: "text", text: "Continue approved work." }],
+  });
+  const different = plan();
+  different.acceptance = ["Weaker objective", plan().acceptance[1]!];
+  const refused = JSON.parse(await hooks.tool!.sortie_v010_prepare_operator.execute(
+    { plan_json: JSON.stringify(different) }, { sessionID: "root" }));
+  assert.equal(refused.status, "active-contract-immutable");
+  assert.equal(refused.code, "operator-active-contract-immutable");
+  assert.equal(refused.packet.run_id, active.runID);
+  assert.equal(refused.packet.status, "prepared");
+  assert.deepEqual(refused.packet.acceptance, active.acceptance);
+  assert.ok(refused.packet.next_task_ref, "the existing next Task reference stays available");
+  assert.match(refused.next_action, /sortie_v010_operator_status/);
+  assert.match(refused.next_action, /Do not resend a plan or cancel an unchanged contract/);
+  const unchanged = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
+  assert.equal(unchanged.run_id, active.runID);
+  assert.deepEqual(unchanged.acceptance, active.acceptance);
 }));
 
 test("generated contract validation and storage failure leave no partial controls", async () => fixture(async root => {
