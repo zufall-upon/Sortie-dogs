@@ -4029,6 +4029,34 @@ test("a shared goal declaration starts a worker without copying its criterion bl
   });
 });
 
+test("a model-authored unit estimate receives bounded remediation headroom", async () => {
+  await withProject("model-budget-headroom", async directory => {
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(operationManifest(["allowed.txt"])));
+    await writeFile(join(directory, "handoff.json"), JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
+    await writeFile(join(directory, "goal.json"), JSON.stringify({ delivery_intent: "implementation",
+      delivery_mode: "repair-first", usable_path_established: true, controlled_change: false, goal_budget_units: 40,
+      defaults: { entrypoint: "validator", workload: "one fixture", oracle_coverage: ["content"], build_boundary: "not-applicable",
+        source: "source", candidate: "candidate", source_binding: "current-protected", candidate_binding: "current-protected",
+        fixture: "headroom", proof_scope: "requested-full", expected_outcome: "pass", validation_command: "npm test" },
+      criteria: [{ target: "safe change" }] }));
+    const hooks = await SortieDogsPlugin({ directory, client: { session: {
+      get: async () => ({ data: { agent: "dog-coordinator" } }),
+    } } } as never);
+    await hooks["chat.message"]!({ sessionID: "headroom-root", messageID: "headroom-user", agent: "dog-coordinator" },
+      { message: { id: "headroom-user", agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+        parts: [{ type: "text", text: "Implement the declared fixture" }] });
+    const prompt = `role: implementation\nproject_root: ${directory}\nhandoff_path: ${join(directory, "handoff.json")}\n` +
+      "acceptance: safe change\nvalidation: npm test\nsource_manifest: [allowed.txt]\noperation_manifest: operation-manifest.json\ngoal_declaration_path: goal.json";
+    await hooks["tool.execute.before"]!({ tool: "task", sessionID: "headroom-root", callID: "headroom-task" },
+      { args: { subagent_type: "dog-worker", prompt } });
+    const records = JSON.parse(await readFile(join(directory, ".git", "sortie-dogs", "run-flight",
+      `${createHash("sha256").update("headroom-root").digest("hex")}.json`), "utf8")).goal_events;
+    const state = reduceGoalFlight(records);
+    assert.equal(state.budget?.max_units, 80, "the host grants bounded headroom above a model-authored estimate");
+    assert.equal(state.budget?.source, "accepted-plan");
+  });
+});
+
 test("Read admission and bind in the same tool round share one inspection", async () => {
   await withProject("concurrent-read-bind", async directory => {
     await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(operationManifest(["allowed.txt"])));

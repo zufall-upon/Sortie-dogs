@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { CONTRACT_TEXT_LIMITS } from "./contract-limits.ts";
 import type { ValidationOutcome } from "./validation-budget.js";
 import type { GoalReport } from "./goal-report.js";
 
@@ -87,6 +88,20 @@ export interface GoalTerminalReceipt {
 }
 
 interface GoalEventBase { readonly at: string }
+export interface GoalValidationRetryAuthorization {
+  readonly authority: "operator-repair-validation-retry";
+  readonly operator_run_id: string;
+  readonly unit_id: string;
+  readonly operator_generation: number;
+  readonly plan_hash: string;
+  readonly control_hash: string;
+  readonly goal_fingerprint: string;
+  readonly repair_fingerprint: string;
+}
+export interface GoalValidationReopen extends GoalValidationRetryAuthorization {
+  readonly prior_reservation_id: string;
+  readonly prior_operation_id: string;
+}
 export type GoalFlightEvent =
   | (GoalEventBase & { readonly kind: "goal.accepted"; readonly goal_id: string; readonly revision: 1;
       readonly scope_epoch: 1; readonly acceptance_fingerprint: string; readonly origin_user_message_id: string;
@@ -111,10 +126,13 @@ export type GoalFlightEvent =
       /** Missing on pre-v0.9.1 ledgers and therefore interpreted as an acceptance result. */
       readonly result_class?: "acceptance" | "process-defect" | "interrupted";
       readonly progress_fingerprint: string | null; readonly evidence: readonly GoalEvidence[];
-      readonly elapsed_ms: number | null; readonly cost_usd: number | null })
+       readonly elapsed_ms: number | null; readonly cost_usd: number | null })
+  | (GoalEventBase & { readonly kind: "unit.evidence-reconciled"; readonly goal_id: string; readonly unit_id: string;
+      readonly previous_receipt_id: string; readonly evidence: readonly GoalEvidence[] })
   | (GoalEventBase & { readonly kind: "validation.admission"; readonly goal_id: string; readonly reservation_id: string;
       readonly operation_id: string; readonly evidence_key: string; readonly scope: "targeted" | "full" | null;
-      readonly decision: "ALLOW" | "DENY"; readonly reason: string; readonly consumed: number; readonly limit: number })
+      readonly decision: "ALLOW" | "DENY"; readonly reason: string; readonly consumed: number; readonly limit: number;
+      readonly reopen?: GoalValidationReopen })
   | (GoalEventBase & { readonly kind: "validation.settled"; readonly goal_id: string; readonly reservation_id: string;
       readonly operation_id: string; readonly evidence_key: string; readonly outcome: ValidationOutcome; readonly exit_code: number | null })
   | (GoalEventBase & { readonly kind: "goal.replanned"; readonly goal_id: string; readonly revision: number;
@@ -178,6 +196,7 @@ export class GoalBoundError extends Error {
 
 const HASH = /^sha256:[a-f0-9]{64}$/u;
 const text = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= 512;
+const commandText = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= CONTRACT_TEXT_LIMITS.command;
 const integer = (value: unknown): value is number => Number.isSafeInteger(value) && Number(value) >= 0;
 const instant = (value: unknown): value is string => text(value) && Number.isFinite(Date.parse(value));
 
@@ -212,7 +231,7 @@ function validAcceptanceContract(value: GoalAcceptanceContract | null): boolean 
       text(criterion.source) && text(criterion.candidate) && text(criterion.fixture) &&
       (criterion.source_binding === undefined || criterion.source_binding === "declared" || criterion.source_binding === "current-protected") &&
       (criterion.candidate_binding === undefined || criterion.candidate_binding === "declared" || criterion.candidate_binding === "current-protected") &&
-      (criterion.validation_command === undefined || text(criterion.validation_command)) &&
+      (criterion.validation_command === undefined || commandText(criterion.validation_command)) &&
       (criterion.proof_scope === "requested-full" || criterion.proof_scope === "document-deliverable" || criterion.proof_scope === "expected-negative") &&
       (criterion.expected_outcome === "pass" || criterion.expected_outcome === "fail")));
 }
@@ -255,7 +274,7 @@ export function validGoalEvidence(value: GoalEvidence, state: Pick<GoalFlightSta
     text(value.measurement.target) && text(value.measurement.entrypoint) && text(value.measurement.workload) &&
     value.measurement.oracle_coverage.length > 0 && value.measurement.oracle_coverage.every(text) &&
     text(value.identity.source) && text(value.identity.candidate) && text(value.identity.fixture) &&
-    value.execution.command.length > 0 && value.execution.command.every(text) &&
+    value.execution.command.length > 0 && value.execution.command.every(commandText) &&
     value.execution.exit_code === 0 && instant(value.execution.started_at) &&
     instant(value.execution.ended_at) && Date.parse(value.execution.ended_at) >= Date.parse(value.execution.started_at) &&
     value.execution.units.length > 0 && value.execution.units.every(text) &&
@@ -285,6 +304,10 @@ export function reduceGoalFlight(records: readonly GoalFlightEventRecord[]): Goa
   let replanRevision: number | null = null;
   let legacyResetRevision = false;
   let previous: string | null = null;
+  const processDefects = new Map<string, { unitID: string; revision: number; epoch: number }>();
+  const validationAdmissions = new Map<string, Extract<GoalFlightEvent, { readonly kind: "validation.admission" }>>();
+  const validationSettlements = new Map<string, Extract<GoalFlightEvent, { readonly kind: "validation.settled" }>>();
+  const reopenedValidationEvidence = new Set<string>();
   for (const [index, record] of records.entries()) {
     requireState(record.sequence === index + 1 && record.previous_hash === previous && HASH.test(record.event_hash), "invalid", "Goal ledger chain is malformed.");
     previous = record.event_hash;
@@ -306,6 +329,10 @@ export function reduceGoalFlight(records: readonly GoalFlightEventRecord[]): Goa
         session_ids: [event.origin_session_id] };
       replanRevision = null;
       legacyResetRevision = false;
+      processDefects.clear();
+      validationAdmissions.clear();
+      validationSettlements.clear();
+      reopenedValidationEvidence.clear();
       continue;
     }
     requireState(state.goal_id !== null && event.goal_id === state.goal_id, "transition", "Goal identity mismatch.");
@@ -385,27 +412,55 @@ export function reduceGoalFlight(records: readonly GoalFlightEventRecord[]): Goa
         unit_ids: addUnique(state.unit_ids, event.unit_id),
         evidence_refs: event.evidence.reduce((refs, evidence) => addUnique(refs, evidence.evidence_id), state.evidence_refs),
         satisfied_criteria: event.evidence.reduce((ids, evidence) => evidence.measurement.criterion_ids.reduce(addUnique, ids), state.satisfied_criteria) };
+      if (event.result_class === "process-defect" && event.evidence.length === 0 && event.disposition !== "cancelled") {
+        processDefects.set(event.receipt_id, { unitID: event.unit_id, revision: state.revision, epoch: state.scope_epoch });
+      }
+    } else if (event.kind === "unit.evidence-reconciled") {
+      const old = processDefects.get(event.previous_receipt_id);
+      requireState(state.phase === "active" && state.receipt === null && old?.unitID === event.unit_id &&
+        old.revision === state.revision && old.epoch === state.scope_epoch && state.outstanding_reservations.length === 0,
+        "transition", "Evidence reconciliation requires a current settled process defect.");
+      requireState(event.evidence.length > 0 && event.evidence.every(entry => validGoalEvidence(entry, state) && entry.execution.units.includes(event.unit_id)),
+        "evidence", "Reconciled evidence must retain the current goal and unit identity.");
+      processDefects.delete(event.previous_receipt_id);
+      state = { ...state, evidence_refs: event.evidence.reduce((refs, evidence) => addUnique(refs, evidence.evidence_id), state.evidence_refs),
+        satisfied_criteria: event.evidence.reduce((ids, evidence) => evidence.measurement.criterion_ids.reduce(addUnique, ids), state.satisfied_criteria) };
     } else if (event.kind === "validation.admission") {
       requireState(event.limit > 0 && Number.isSafeInteger(event.limit) && Number.isSafeInteger(event.consumed) &&
         event.consumed >= 0 && event.consumed <= event.limit && event.operation_id.length > 0 && event.evidence_key.length > 0,
         "invalid", "Validation admission is malformed.");
       if (event.decision === "ALLOW") {
+        const reopen = event.reopen;
+        const prior = reopen === undefined ? undefined : validationAdmissions.get(reopen.prior_reservation_id);
+        const settlement = reopen === undefined ? undefined : validationSettlements.get(reopen.prior_reservation_id);
+        const validReopen = reopen !== undefined && reopen.authority === "operator-repair-validation-retry" &&
+          text(reopen.operator_run_id) && text(reopen.unit_id) && Number.isSafeInteger(reopen.operator_generation) &&
+          reopen.operator_generation > 0 && /^[a-f0-9]{64}$/u.test(reopen.plan_hash) && HASH.test(reopen.control_hash) &&
+          reopen.goal_fingerprint === state.acceptance_fingerprint && HASH.test(reopen.repair_fingerprint) &&
+          prior?.decision === "ALLOW" && prior.evidence_key === event.evidence_key && prior.operation_id === reopen.prior_operation_id &&
+          settlement?.operation_id === reopen.prior_operation_id && settlement.evidence_key === event.evidence_key &&
+          settlement.outcome === "interrupted" && event.operation_id !== reopen.prior_operation_id &&
+          !reopenedValidationEvidence.has(event.evidence_key);
+        const duplicate = state.validation_budget.evidence_keys.includes(event.evidence_key);
         requireState(event.scope !== null && event.consumed === state.validation_budget.consumed + 1 &&
           (state.validation_budget.limit === null || event.limit >= state.validation_budget.limit) &&
-          !state.validation_budget.evidence_keys.includes(event.evidence_key) &&
+          ((!duplicate && reopen === undefined) || (duplicate && validReopen)) &&
           !state.validation_budget.reservations.some((entry) => entry.reservation_id === event.reservation_id),
           "budget", "Validation admission is stale, duplicated, or exhausted.");
         state = { ...state, validation_budget: { consumed: event.consumed, limit: event.limit,
-          evidence_keys: [...state.validation_budget.evidence_keys, event.evidence_key],
+          evidence_keys: addUnique(state.validation_budget.evidence_keys, event.evidence_key),
           reservations: [...state.validation_budget.reservations,
             { reservation_id: event.reservation_id, operation_id: event.operation_id, evidence_key: event.evidence_key }] } };
-      }
+        validationAdmissions.set(event.reservation_id, event);
+        if (reopen !== undefined) reopenedValidationEvidence.add(event.evidence_key);
+      } else requireState(event.reopen === undefined, "invalid", "Denied validation cannot carry reopen authority.");
     } else if (event.kind === "validation.settled") {
       const reservation = state.validation_budget.reservations.find((entry) => entry.reservation_id === event.reservation_id);
       requireState(reservation?.operation_id === event.operation_id && reservation.evidence_key === event.evidence_key,
         "transition", "Validation settlement is unknown or mismatched.");
       state = { ...state, validation_budget: { ...state.validation_budget,
         reservations: state.validation_budget.reservations.filter((entry) => entry.reservation_id !== event.reservation_id) } };
+      validationSettlements.set(event.reservation_id, event);
     } else if (event.kind === "goal.replanned") {
       requireState(state.phase === "active" && state.replan_required && !state.replan_used && event.revision === state.revision, "transition", "Bounded replan is unavailable.");
       state = { ...state, replan_used: true, replan_required: false, no_progress_results: 0 };

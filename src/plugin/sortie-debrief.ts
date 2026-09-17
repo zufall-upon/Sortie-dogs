@@ -12,6 +12,18 @@ export interface DebriefSession {
   readonly checks: Check[];
   readonly mutations: Span[];
   readonly models: Record<string, number | null>;
+  /** Optional per-model input/cache/cost observations for compatibility with older snapshots. */
+  readonly modelUsage?: Record<string, {
+    tokens: number;
+    uncachedInputTokens: number;
+    cacheReadTokens: number;
+    cacheWriteTokens: number;
+    cost: number;
+    costAvailable: boolean;
+    estimatedCost?: number;
+    pricedRequests?: number;
+    unpricedRequests?: number;
+  }>;
   readonly reviews: Array<{ at: number; status: "PASS" | "FAIL" | "WAIVED"; source?: "reviewer" | "controller" }>;
   readonly tasks: string[];
   complete: boolean;
@@ -26,7 +38,22 @@ export interface DebriefObservation {
 }
 export interface Debrief {
   readonly pack: readonly { readonly model: string; readonly count: number }[] | null;
-  readonly mix: readonly { readonly model: string; readonly tokens: number; readonly percent: number }[] | null;
+  readonly mix: readonly {
+    readonly model: string;
+    readonly tokens: number;
+    readonly percent: number;
+    readonly inputCache?: {
+      readonly uncachedInputTokens: number;
+      readonly cacheReadTokens: number;
+      readonly cacheWriteTokens: number;
+    };
+    readonly hostCostZero?: boolean;
+  }[] | null;
+  readonly estimatedCost?: {
+    readonly usd: number;
+    readonly pricedRequests: number;
+    readonly unpricedRequests: number;
+  };
   readonly validation: "PASS" | "FAIL" | "未確認";
   readonly review: "PASS" | "FAIL" | "WAIVED" | "未確認";
   readonly reviewSource?: "reviewer" | "controller";
@@ -60,7 +87,7 @@ const spanOf = (value: unknown): Span | undefined => {
 
 /** Extract only bounded typed metadata during the existing host history traversal. No conversation text survives. */
 export function observeDebriefSession(id: string, root: boolean, messages: readonly Record<string, unknown>[], window?: Span): DebriefSession {
-  const session: DebriefSession = { id, root, spans: [], checks: [], mutations: [], models: {}, reviews: [], tasks: [], complete: true, timingComplete: true, failed: false };
+  const session: DebriefSession = { id, root, spans: [], checks: [], mutations: [], models: {}, modelUsage: {}, reviews: [], tasks: [], complete: true, timingComplete: true, failed: false };
   const calls = new Set<string>();
   for (const message of messages) {
     const info = object(message.info) ?? message;
@@ -156,11 +183,34 @@ export function buildDebrief(receipt: GoalTerminalReceipt, contract: GoalAccepta
   const children = sessions.filter((session) => !session.root &&
     (session.spans.length > 0 || Object.keys(session.models).length > 0));
   const counts = new Map<string, number>(), totals = new Map<string, number>();
+  const modelUsage = new Map<string, { uncachedInputTokens: number; cacheReadTokens: number; cacheWriteTokens: number;
+    cost: number; costAvailable: boolean; estimatedCost: number; pricedRequests: number; unpricedRequests: number;
+    pricingComplete: boolean; complete: boolean }>();
   let usageComplete = observation.complete;
   for (const session of sessions) {
     for (const [model, tokens] of Object.entries(session.models)) {
       if (tokens === null || model === "未分類") usageComplete = false;
-      else totals.set(model, (totals.get(model) ?? 0) + tokens);
+      else {
+        totals.set(model, (totals.get(model) ?? 0) + tokens);
+        const observed = session.modelUsage?.[model];
+        const aggregate = modelUsage.get(model) ?? { uncachedInputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0,
+          cost: 0, costAvailable: true, estimatedCost: 0, pricedRequests: 0, unpricedRequests: 0,
+          pricingComplete: true, complete: true };
+        if (observed === undefined || observed.tokens !== tokens) aggregate.complete = false;
+        else {
+          aggregate.uncachedInputTokens += observed.uncachedInputTokens;
+          aggregate.cacheReadTokens += observed.cacheReadTokens;
+          aggregate.cacheWriteTokens += observed.cacheWriteTokens;
+          aggregate.cost += observed.cost;
+          aggregate.costAvailable &&= observed.costAvailable;
+          aggregate.pricingComplete &&= observed.estimatedCost !== undefined && observed.pricedRequests !== undefined &&
+            observed.unpricedRequests !== undefined;
+          aggregate.estimatedCost += observed.estimatedCost ?? 0;
+          aggregate.pricedRequests += observed.pricedRequests ?? 0;
+          aggregate.unpricedRequests += observed.unpricedRequests ?? 0;
+        }
+        modelUsage.set(model, aggregate);
+      }
     }
   }
   for (const session of children) {
@@ -169,11 +219,14 @@ export function buildDebrief(receipt: GoalTerminalReceipt, contract: GoalAccepta
     counts.set(label, (counts.get(label) ?? 0) + 1);
   }
   const total = [...totals.values()].reduce((sum, tokens) => sum + tokens, 0);
+  const pricing = [...modelUsage.values()].reduce((sum, usage) => ({ usd: sum.usd + usage.estimatedCost,
+    pricedRequests: sum.pricedRequests + usage.pricedRequests, unpricedRequests: sum.unpricedRequests + usage.unpricedRequests,
+    complete: sum.complete && usage.pricingComplete }), { usd: 0, pricedRequests: 0, unpricedRequests: 0, complete: true });
   const commands = new Set(contract?.criteria.flatMap((criterion) => criterion.validation_command === undefined ? [] : [fingerprint(criterion.validation_command)]));
   const checks = sessions.flatMap((session) => session.checks.filter((check) => commands.has(check.command))).sort((a, b) => a.end - b.end);
   // Retain canonical proof even when an unrelated host tool lacks timing/metadata.
   for (const { event } of records ?? []) {
-    if (event.kind !== "unit.settled" || event.goal_id !== receipt.goal_id) continue;
+    if ((event.kind !== "unit.settled" && event.kind !== "unit.evidence-reconciled") || event.goal_id !== receipt.goal_id) continue;
     for (const evidence of event.evidence ?? []) {
       const command = fingerprint(evidence.execution.command.join(" "));
       const start = Date.parse(evidence.execution.started_at), end = Date.parse(evidence.execution.ended_at);
@@ -234,7 +287,15 @@ export function buildDebrief(receipt: GoalTerminalReceipt, contract: GoalAccepta
     session.mutations.some((edit) => edit.end > entry.at))).at(-1);
   const packComplete = observation.complete && sessions.every(session => session.root || session.timingComplete || Object.keys(session.models).length > 0);
   return { pack: packComplete ? [...counts].sort(([a], [b]) => a.localeCompare(b)).map(([model, count]) => ({ model, count })) : null,
-    mix: usageComplete && total > 0 ? [...totals].sort(([a], [b]) => a.localeCompare(b)).map(([model, tokens]) => ({ model, tokens, percent: tokens / total * 100 })) : null,
+    mix: usageComplete && total > 0 ? [...totals].sort(([a], [b]) => a.localeCompare(b)).map(([model, tokens]) => {
+      const usage = modelUsage.get(model);
+      return { model, tokens, percent: tokens / total * 100,
+        ...(usage?.complete ? { inputCache: { uncachedInputTokens: usage.uncachedInputTokens,
+          cacheReadTokens: usage.cacheReadTokens, cacheWriteTokens: usage.cacheWriteTokens } } : {}),
+        ...(usage?.complete && usage.costAvailable && tokens > 0 && usage.cost === 0 ? { hostCostZero: true } : {}) };
+    }) : null,
+    ...(pricing.complete && pricing.pricedRequests + pricing.unpricedRequests > 0 ? { estimatedCost: {
+      usd: pricing.usd, pricedRequests: pricing.pricedRequests, unpricedRequests: pricing.unpricedRequests } } : {}),
     validation, review: review?.status ?? "未確認", reviewSource: review?.source ?? "controller", traits, firstPassEligible,
     notes: [...(!observation.complete ? ["host履歴の取得が一部不足"] : []),
       ...(!usageComplete ? ["モデルIDまたはusageの記録が不足"] : []),
@@ -256,16 +317,30 @@ export function renderDebrief(debrief: Debrief | undefined): string[] {
   if (pack !== null && pack.length > 4) packVisible.push({ model: "その他", count: pack.slice(4).reduce((sum, entry) => sum + entry.count, 0) });
   const mix = debrief?.mix == null ? null : [...debrief.mix].sort((a, b) => b.tokens - a.tokens || a.model.localeCompare(b.model));
   const visible = mix?.slice(0, 4) ?? [];
-  if (mix !== null && mix.length > 4) visible.push({ model: "その他", tokens: mix.slice(4).reduce((sum, entry) => sum + entry.tokens, 0),
-    percent: mix.slice(4).reduce((sum, entry) => sum + entry.percent, 0) });
+  if (mix !== null && mix.length > 4) {
+    const tail = mix.slice(4);
+    const cacheKnown = tail.every((entry) => entry.inputCache !== undefined);
+    visible.push({ model: "その他", tokens: tail.reduce((sum, entry) => sum + entry.tokens, 0),
+      percent: tail.reduce((sum, entry) => sum + entry.percent, 0),
+      ...(cacheKnown ? { inputCache: {
+        uncachedInputTokens: tail.reduce((sum, entry) => sum + entry.inputCache!.uncachedInputTokens, 0),
+        cacheReadTokens: tail.reduce((sum, entry) => sum + entry.inputCache!.cacheReadTokens, 0),
+        cacheWriteTokens: tail.reduce((sum, entry) => sum + entry.inputCache!.cacheWriteTokens, 0),
+      } } : {}),
+      ...(tail.some((entry) => entry.hostCostZero) ? { hostCostZero: true } : {}) });
+  }
   const status = (value: string): string => value === "PASS" ? "🟢 PASS" : value === "FAIL" ? "🔴 FAIL"
     : value === "WAIVED" ? "免除" : "未記録";
   const counts = new Map(packVisible.map((entry) => [entry.model, entry.count]));
   return [
     ...(mix === null ? ["モデル内訳    usage未取得"] : visible.map((entry) => {
       const count = counts.get(entry.model);
-      return `🐕 ${label(entry.model)} ${gauge(entry.percent)} ${entry.percent.toFixed(1)}% ${entry.tokens.toLocaleString("ja-JP")} tokens${count === undefined ? "" : ` ×${count}`}`;
-    })),
+       const input = entry.inputCache === undefined ? 0 : entry.inputCache.uncachedInputTokens +
+         entry.inputCache.cacheReadTokens + entry.inputCache.cacheWriteTokens;
+       const cache = entry.inputCache === undefined || input === 0 ? "未取得" : `${(entry.inputCache.cacheReadTokens / input * 100).toFixed(0)}%`;
+       return `🐕 ${label(entry.model)} ${gauge(entry.percent)} ${entry.percent.toFixed(1)}% ${entry.tokens.toLocaleString("ja-JP")} tokens${count === undefined ? "" : ` ×${count}`} ↺${cache}${entry.hostCostZero ? "†" : ""}`;
+     })),
+    ...(visible.some((entry) => entry.hostCostZero) ? ["   †host費用0計上あり（無料・全体価格の評価ではありません）"] : []),
     `⚡ 実行重複率 ${debrief?.overlap !== undefined && debrief.overlap.wallMilliseconds > 0
       ? `${(debrief.overlap.workerMilliseconds / debrief.overlap.wallMilliseconds).toFixed(2)}×`
       : pack?.length === 0 ? "対象なし（出撃なし）" : "稼働区間の記録不足"}`,

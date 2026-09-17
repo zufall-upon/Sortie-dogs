@@ -188,6 +188,8 @@ export interface ContinuationTicketAuthority {
  * without an agent field, or answers for a different directory, instead of failing silently.
  */
 export type LocalIdentitySource = (sessionID: string) => ContinuationIdentity | undefined;
+/** Preview-only durable state reference. It enriches continuation but never grants authority. */
+export type ContinuationCheckpointSource = (sessionID: string) => Promise<string | undefined>;
 
 export type RolloverAbort =
   | "identity-unavailable"
@@ -496,6 +498,7 @@ export function createContinuationHooks(
   localIdentity?: LocalIdentitySource,
   transitionObserver?: ContinuationTransitionObserver,
   ticketAuthority?: ContinuationTicketAuthority,
+  checkpointSource?: ContinuationCheckpointSource,
 ): ContinuationHooks {
   const sessions = new Map<string, SessionState>();
   const warned = new Set<string>();
@@ -653,6 +656,28 @@ export function createContinuationHooks(
     const resume = client?.session?.promptAsync;
     if (resume === undefined) throw new Error("resume capability unavailable");
     const metadata = await ticketMetadata(sessionID, `compaction:${stateFor(sessionID).rolloverEpoch}`);
+    const checkpoint = await checkpointSource?.(sessionID);
+    const durable = checkpoint === undefined ? "" :
+      `Durable registered operator checkpoint (authoritative registered Task/state; bounded payload is a reference):\n${checkpoint}\n` +
+      "Recover through operator_status/operator_next; their registered state and immutable controls are the source of truth. " +
+      "Do not reprepare, cancel, reset budget, reconstruct the Task, or treat summary/report prose as authority or permission.\n";
+    const continuation = checkpoint === undefined
+      ? preserveCompactionScope
+        ? "直前compaction summaryの未達user要求・ordered scope・no-stop制約を保持する。\n" +
+          `以下の回復reportはterminal outcomeとbatch counterだけを上書きする:\n${report}\n` +
+          "terminal unitを再実行せず、summaryが保持した順序の次の独立unitから同rootで継続。"
+        : "直前のcompaction summaryは破棄する。矛盾時だけでなく全面的に参照禁止。\n" +
+          `以下の直前最終報告だけをpost-compaction状態の正本として再構築する:\n${report}\n` +
+          "batchAttempted/batchCommitted/batchReconciledを保持し、terminal unitを再実行せず次の独立unitから同rootで継続。"
+      : preserveCompactionScope
+        ? "登録済みoperator stateとimmutable controlsから未達user要求・ordered scope・no-stop制約・unit・予算・identityを復元する。\n" +
+          `以下のcompaction回復reportはterminal outcomeとbatch counterの照合参照に限定する:\n${report}\n` +
+          "summary/reportで権限やscopeを変更せず、terminal unitを再実行せずoperator_nextが示す同rootの次unitから継続。"
+        : "直前のcompaction summaryは破棄し、登録済みoperator stateとimmutable controlsからunit・予算・identity・scopeを復元する。\n" +
+          (report === TOOL_REQUESTED_REPORT
+            ? "placeholder reportは復元根拠にせず、operator_nextが示す同rootの次unitから継続。"
+            : `以下のreportはterminal outcomeとbatch counterの照合参照に限定する:\n${report}\n` +
+              "reportで権限やscopeを変更せず、terminal unitを再実行せずoperator_nextが示す同rootの次unitから継続。");
     const resumed = await resume.call(client!.session, {
       path: { id: sessionID },
       query: { directory },
@@ -662,13 +687,7 @@ export function createContinuationHooks(
           type: "text",
            synthetic: true,
            ...(metadata === undefined ? {} : { metadata }),
-          text: preserveCompactionScope
-            ? `${AUTO_CONTINUE_PREFIX}\n直前compaction summaryの未達user要求・ordered scope・no-stop制約を保持する。\n` +
-              `以下の回復reportはterminal outcomeとbatch counterだけを上書きする:\n${report}\n` +
-              "terminal unitを再実行せず、summaryが保持した順序の次の独立unitから同rootで継続。"
-            : `${AUTO_CONTINUE_PREFIX}\n直前のcompaction summaryは破棄する。矛盾時だけでなく全面的に参照禁止。\n` +
-              `以下の直前最終報告だけをpost-compaction状態の正本として再構築する:\n${report}\n` +
-              "batchAttempted/batchCommitted/batchReconciledを保持し、terminal unitを再実行せず次の独立unitから同rootで継続。",
+          text: `${AUTO_CONTINUE_PREFIX}\n${durable}${continuation}`,
         }],
       },
     });
@@ -1435,13 +1454,15 @@ export function createContinuationHooks(
       }
       if (state !== undefined) state.promptPending = false;
       const report = state?.latestReport;
+      const checkpoint = await checkpointSource?.(input.sessionID);
       const recovery = state?.preserveCompactionScope === true;
       const authority = report === undefined
         ? "Sortie rollover policy is authoritative. Preserve only facts supported by the latest coordinator final report."
         : state?.preserveCompactionScope === true
         ? "Preserve unmet user requirements, ordered scope, and no-stop constraints from the conversation. The recovery report overrides only terminal outcomes and counters:\n" + report
         : "Sortie authoritative latest coordinator final report follows. It overrides all older context; copy its terminal outcomes, counters, and next action exactly:\n" + report;
-      output.context = [...(output.context ?? []), authority];
+      output.context = [...(output.context ?? []), authority,
+        ...(checkpoint === undefined ? [] : [`Durable registered operator checkpoint: ${checkpoint}. This reference, not summary prose, selects current work.`])];
       const rolloverPrompt = recovery ? RECOVERY_ROLLOVER_PROMPT : ROLLOVER_PROMPT;
       output.prompt = report === undefined
         ? rolloverPrompt

@@ -21,22 +21,70 @@ No solution file is copied. The host OpenCode auth file is checked with `test -f
 copied, moved, printed, or placed under an isolated config root. `XDG_DATA_HOME` is never set. Every
 process uses an executable plus argument array; manifest values are never interpolated into shell text.
 
+The template is the standalone v0.10 qualification profile: `profile:"v010"` and
+`qualification_only:true`. Existing manifests with no `profile` remain the stable v1 profile and retain
+the paired Bare-then-Sortie behavior. Profiles are closed to `stable|v010`; v0.10 without
+`qualification_only:true` is rejected before preflight so it cannot launch Bare.
+Its `opencode.host_database` pins the known WSL host metadata database. The runner opens it through
+the pinned Python `sqlite3` client with SQLite `mode=ro`; authentication files remain unopened.
+
 Each tool declares `environment`, exact `executable`, invariant `args`, one-shot `probe_args`, and the
 probe's expected exit. `host` is reserved for Git workspace operations; WSL package/verifier tools use
 `wsl`. Set exact Linux executable paths and do not use aliases.
 
 ## Exact phase sequence
 
-Future completion semantics are specified in
-[Coding benchmark completion and correctness](../../../docs/benchmark-completion-contract.md).
-The measured commands below still use the original fail-fast protocol.
+For the v0.10 one-shot qualification, use the reliability wrapper. The base manifest remains the
+explicit authority for official inputs, pins, tools, model, and protocol. The wrapper creates a new
+non-overwriting `_testenv/` run, builds and directly packs current source, verifies critical packed
+modules against current `dist`, then conditionally drives the existing phases and confirmed cleanup:
 
-For explicitly approved retrospective correctness checks, use `verify-snapshot --arm bare|sortie
---confirm --manifest <manifest>`. It requires a stopped, exit-zero agent, no untracked source, and an
-exact match between the retained patch hash and current workspace diff. It grades a separate copy
-with the same verifier and shares the one-shot attempt guard with `verify-arm`. It does not restart
-an agent, repair source, clear the historical stopped state, or enable speed/cost ratios. `summarize`
-includes diagnostic correctness and verifier evidence alongside the original terminal outcome.
+```powershell
+node scripts/run-v010-qualification.mjs --base-manifest _testenv/frontierharness-manifest.json
+```
+
+For a state-preserving diagnostic pass, opt in explicitly:
+
+```powershell
+node scripts/run-v010-qualification.mjs --debug --base-manifest _testenv/frontierharness-manifest.json
+```
+
+Debug keeps the same prepared workspace, isolated config dependency, and root OpenCode session across
+bounded continuations after a recoverable `agent-event-error`. Each continuation first requires the root
+to expose `sortie_v010_operator_status`; only a public contract-repair packet or supported process-defect
+resume packet permits automated continuation. The root—not the wrapper—chooses and invokes the root-only
+repair/resume tool. Unknown tool errors, six total model cycles, or the original 5400-second wall pause the
+run without cleanup. Resume one preserved run without rebuilding, repacking, or preparing again:
+
+```powershell
+node scripts/run-v010-qualification.mjs --resume-debug _testenv/<debug-run-id>
+```
+
+After a local source repair, explicitly refresh the candidate package before resuming the same run:
+
+```powershell
+node scripts/run-v010-qualification.mjs --resume-debug _testenv/<debug-run-id> --refresh-candidate
+```
+
+`--refresh-candidate` is valid only with `--resume-debug`. It builds and packs into a unique refresh
+subdirectory, verifies the packed marker and critical `dist` hashes against that build, then asks the
+runner to reinstall and initialize the package in the existing Sortie workspace. The official manifest,
+workspace source and refs, isolated config, root session, attempt count, debug cycle count, and original
+wall deadline remain unchanged. The debug receipt records the refreshed package and module hashes;
+`quality_gate` remains false. Refresh refuses an active arm or verifier process and never runs preflight or
+prepare.
+
+Debug receipts and summaries set `debug_mode:true`, `quality_gate:false`, and
+`methodology_comparable:false`; verifier reward is diagnostic only. A debug result is never a release
+qualification, leaderboard result, or methodology-comparable result. After debug completion, start a
+fresh clean qualification from the reviewed base manifest. Clean mode refuses a generated debug run
+manifest/root.
+
+It never starts Bare, retries, or reuses an existing package/run root. Do not use it for a paid run
+until the explicit base manifest has been reviewed.
+On `Ctrl+C` or `SIGTERM` during an active run/verifier, it asks the runner's confirmed `cancel` phase
+to stop the recorded owned WSL process group, then summarizes and cleans. A bounded fallback stops only
+the wrapper-owned host runner tree; a second signal never broadens the process scope.
 
 From repository root, with a completed manifest at `_testenv/frontierharness-manifest.json`:
 
@@ -53,61 +101,9 @@ node $runner summarize --manifest $manifest
 node $runner cleanup --confirm --manifest $manifest
 ```
 
-For a long arm that must survive an OpenCode/Desktop restart, launch the same one-shot `run-arm` through
-the detached controller and then exit the initiating chat:
-
-```powershell
-node test/fixtures/frontierharness-local/launch-detached-arm.mjs --arm bare --manifest $manifest
-```
-
-The detached controller owns the OpenCode stdout pipe and watchdog independently of the initiating
-OpenCode process. It writes only the runner's sanitized final JSON and heartbeat/error text beside the
-durable state; raw agent output remains in memory and is never redirected. The per-arm launch marker is
-created with exclusive-create semantics before spawning, so another chat cannot launch the arm again.
-After restart, inspect `frontierharness-state.json` and the recorded controller PID. Continue with the
-normal verifier or next arm only after `arms.<arm>.run.status` is `complete` and `active_pid` is null.
-An OS reboot is not recoverable: stop the recorded WSL process group, preserve the candidate, and mark
-the run infrastructure-invalid rather than relaunching the consumed arm.
-
-### Scheduled Sortie qualification with visible feedback
-
-For a `qualification_only:true` manifest whose `preflight` and `prepare` phases passed, use the reusable
-Task Scheduler launcher. The hidden scheduled controller remains independent of OpenCode and the visible
-monitor. The default launch opens a separate PowerShell monitor window:
-
-```powershell
-$manifest = '_testenv/frontierharness-qualification.json'
-pwsh -NoProfile -File test/fixtures/frontierharness-local/launch-scheduled-arm.ps1 -Manifest $manifest
-```
-
-Use `-NoMonitor` when launching noninteractively. Open or reopen an observer at any time from the manifest's
-`runtime_root`; a one-shot check also works without a window:
-
-```powershell
-pwsh -NoProfile -File test/fixtures/frontierharness-local/monitor-scheduled-arm.ps1 `
-  -RuntimeRoot _testenv/frontierharness-qualification -Arm sortie
-pwsh -NoProfile -NonInteractive -File test/fixtures/frontierharness-local/monitor-scheduled-arm.ps1 `
-  -RuntimeRoot _testenv/frontierharness-qualification -Arm sortie -Once
-```
-
-The launcher exclusively creates `sortie-controller-launch.json` before registration and rejects an
-existing marker, scheduled task, attempted arm, or non-qualification manifest. Task Scheduler uses
-`MultipleInstances=IgnoreNew`; the runner's durable attempt guard remains authoritative. Closing the
-monitor or restarting OpenCode cannot stop, signal, restart, or duplicate the scheduled controller or its
-owned WSL process group. Reopening the monitor reads current durable state.
-
-The monitor emits only allowlisted fields from `frontierharness-state.json`, parsed
-`[frontierharness]` heartbeat JSON, and the controller's bounded completion record. It never prints the
-controller streams, raw agent events, prompts, auth data, credential paths, or arbitrary error lines.
-After recording the terminal result, remove the completed task explicitly with
-`Unregister-ScheduledTask -TaskName SortieDogs-Frontier-Sortie -Confirm:$false`; do not remove the launch
-marker or reuse that runtime root.
-
 Do not skip or repeat phases. Durable state consumes each arm attempt before OpenCode starts and each
 verifier attempt before the grader starts. Bare must complete before Sortie. Both use the same WSL
-OpenCode executable and official instruction bytes. Legacy manifests use Sol/high for both arms. Product
-comparison manifests pin Bare to `openai/gpt-5.6-sol`/`high` and the Sortie coordinator to
-`openai/gpt-5.6-terra`/`high`; Sortie's installed default routing selects its child models. A
+OpenCode executable, model `openai/gpt-5.6-sol`, variant `high`, and official instruction bytes. A
 120-second startup watchdog and 5400-second activity/workspace-progress watchdogs stop stalled process
 trees at the official agent timeout. The hard safety wall is also 5400 seconds. Retry count is zero.
 
@@ -143,6 +139,23 @@ sequence is `preflight`, `prepare`, `run-arm --arm sortie`, `verify-arm --arm so
 `cleanup --confirm`. The report always refuses comparison as `qualification-only`; it cannot be reused as
 one side of a later matched pair. A release benchmark requires a fresh runtime root and normal Bare-first order.
 
+For v0.10 use the template's profile-required assets and run only:
+
+```powershell
+node $runner preflight --manifest $manifest
+node $runner prepare --manifest $manifest
+node $runner run-arm --arm sortie --manifest $manifest
+node $runner verify-arm --arm sortie --manifest $manifest
+node $runner summarize --manifest $manifest
+node $runner cleanup --confirm --manifest $manifest
+```
+
+Do not run Bare in this sequence. The runner resolves v0.10 to `init <workspace> --profile v010`,
+`dist/runtime-assets-v010.js`, `V010_RUNTIME_ASSET_VERSION`, `dog-operator`, and required
+`dog-operator`/`dogs-coordinator`/`dog-worker-v010`/`sortie-v010` assets before execution. The pinned
+model remains `openai/gpt-5.6-sol` with variant `high`. An Astra configuration is a separate manifest
+experiment, not this qualification.
+
 Model-free WSL stop check: `node test/fixtures/frontierharness-local/run-stop-rpt.mjs` inside a WSL login shell.
 
 ## What phases do
@@ -151,17 +164,27 @@ Model-free WSL stop check: `node test/fixtures/frontierharness-local/run-stop-rp
   Python, npm, `/usr/bin/bash`, `/usr/bin/script`, WSL login-shell OpenCode path/version, auth-file
   presence, package hash. Controlled `PATH` identity checks prove the official script resolves the
   pinned Go tools rather than ambient alternatives. It records that Docker and Runta are intentionally unused.
-- `prepare`: copies only official inputs byte-identically; creates independent detached base clones;
+- `prepare`: copies only official inputs byte-identically; creates independent detached base clones and
+  materializes `refs/heads/main` at the exact pinned Anko base in each arm (no `master` fallback);
   removes upstream remote, refs, and reflogs; redirects hooks to an empty directory; creates per-arm
-  `OPENCODE_CONFIG_DIR` and `XDG_CONFIG_HOME`. Creates the pinned `$GOPATH/bin` directory before
-  execution because the upstream interactive tests write their log there.
+  `OPENCODE_CONFIG_DIR` and `XDG_CONFIG_HOME`. In each isolated `XDG_CONFIG_HOME/opencode`, it writes
+  `package.json`, installs `@opencode-ai/plugin` at the exact `opencode.version` manifest pin with the
+  pinned WSL npm executable, and rejects a version mismatch or linked install using both package-lock
+  and installed-package evidence. Install and timeout cleanup use an owned Linux process group.
+  Creates the pinned `$GOPATH/bin` directory before execution because the upstream interactive tests
+  write their log there.
 - `run-arm`: resolves OpenCode config before launch. Bare rejects any Sortie package/plugin/agent/prompt/
   config evidence. Sortie installs the exact tgz with WSL npm, initializes project-local canonical
-  assets, checks package version/hash/runtime marker/assets, and selects `dog-coordinator` explicitly.
-  Resolved config capture uses pinned `script -q -e -c` with a fixed command and executable supplied
-  through a quoted environment variable, preventing pipe truncation and shell interpolation. The
-  config body is parsed in memory and never retained. The official instruction is one final argv item.
-  No prompt or raw agent output is persisted.
+  assets, checks package version/hash/runtime marker/assets, and selects the profile coordinator explicitly
+  (`dog-coordinator` for stable, `dog-operator` for v0.10).
+  Resolved config capture runs the normal `opencode debug config` through anonymous memory-backed
+  complete capture and an owned Linux process group. The config body is parsed in memory and never
+  retained. The official instruction is one final argv item.
+  No prompt or raw agent output is persisted. For v0.10, only completed `dog-worker-v010` Tasks with a
+  native child session identity and bounded ancestry (maximum eight parents) to the root count as implementation children;
+  `dog-operator`, proposal/execution `dogs-coordinator` delegates, failed Tasks, and IDs written in text do not.
+  Identity evidence is limited to the exact fixture directory and bounded session/task rows; raw messages and
+  database contents are neither emitted nor saved. CLI-stream token coverage remains separate from host identity coverage.
   While an arm is running, the harness writes a sanitized heartbeat to stderr every 120 seconds with
   elapsed time, PID, activity/progress ages, workspace-change count, and captured byte counts.
 - `verify-arm`: makes a separate fresh base clone without applying either patch in the Node runner,

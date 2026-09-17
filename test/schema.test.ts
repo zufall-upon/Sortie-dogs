@@ -199,6 +199,20 @@ test("operation manifest enforces version and string length boundaries", () => {
   }
 });
 
+test("runtime handoff and manifest schemas share the validation command limit", () => {
+  const command = "v".repeat(1000);
+  const handoff = clone(minimal);
+  handoff.verification = [{ check: command, status: "not_run", exit_code: null, summary: "Boundary command." }];
+  const manifest = clone(validOperation);
+  manifest.validation = [command];
+  assert.equal(validateHandoffSchema(handoff).ok, true);
+  assert.equal(validateOperationManifestSchema(manifest).ok, true);
+  handoff.verification[0].check += "v";
+  manifest.validation[0] += "v";
+  assert.equal(validateHandoffSchema(handoff).ok, false);
+  assert.equal(validateOperationManifestSchema(manifest).ok, false);
+});
+
 test("accepts minimal investigation, minimal interruption, and full completion fixtures", () => {
   assertValid(minimal);
   assertValid(interrupted);

@@ -36,6 +36,10 @@ test("collects bounded recursive assistant metrics and deduplicates messages", a
       cacheRatio: 5 / 19,
     } },
   });
+  assert.deepEqual(debrief?.sessions[0]?.modelUsage?.["未分類"], {
+    tokens: 19, uncachedInputTokens: 10, cacheReadTokens: 5, cacheWriteTokens: 1,
+    cost: 0.25, costAvailable: true, estimatedCost: 0, pricedRequests: 0, unpricedRequests: 1,
+  });
   assert.match(formatRunMetrics(metrics!), /pre-terminal host snapshot[\s\S]*\$0\.2500/u);
   const original = "✅ **DONE** x\n\n**Validation:** keep\n\n<details>";
   const inserted = insertRunMetrics(original, metrics!);
@@ -241,7 +245,7 @@ test("builds a completed Sortie Result from the goal receipt, ledger, and host m
   };
   const metrics = {
     durationMilliseconds: 4_100, tokens: 19, inputTokens: 10, outputTokens: 2, reasoningTokens: 1,
-    cacheReadTokens: 5, cacheWriteTokens: 1, cost: 0.25, steps: 1, sessions: 2, cacheRatio: 5 / 19, roles: {},
+    cacheReadTokens: 5, cacheWriteTokens: 1, cost: 0.25, steps: 1, sessions: 2, cacheRatio: 5 / 16, roles: {},
   };
   const result = createSortieResult(receipt, {
     acceptance_contract: { criteria: [criterion] }, consumed_time_ms: 2_500, satisfied_criteria: ["criterion-1"],
@@ -260,7 +264,7 @@ test("builds a completed Sortie Result from the goal receipt, ledger, and host m
   assert.match(inserted, /~~~text\n🐾 SORTIE DOGS — 帰還報告\ngoal-result\n\n🟢 COMPLETED — complete/u);
   assert.match(inserted, /⚔️ MISSION[\s\S]*経過\s+⏱ 4s ※待機含む[\s\S]*最終達成条件\s+◔ 1\/1/u);
   assert.match(inserted, /🔧 実装\n未取得[\s\S]*⏳ 未実施\n未取得[\s\S]*➡️ NEXT\n未取得/u);
-  assert.match(inserted, /🪙 COST \/ PACK[\s\S]*19 tokens[\s\S]*\$0\.2500 ※実課金換算なし/u);
+  assert.match(inserted, /🪙 COST \/ PACK[\s\S]*19 tokens[\s\S]*予測費用\s+計測不可 ※予測概算/u);
   assert.match(inserted, /🛑 STOP REASON\ncompleted[\s\S]*※使用量は最終応答生成前の計測\n~~~/u);
   assert.doesNotMatch(inserted, /evidence-1|evidence ref|completed\)|sha256:/u);
   assert.equal(insertSortieResult(inserted, result), inserted);

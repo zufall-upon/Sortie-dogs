@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 export type ValidationScope = "targeted" | "full";
 export type ValidationReason = "preflight" | "acceptance" | "retry";
-export type ValidationOutcome = "passed" | "failed" | "timeout" | "interrupted";
+export type ValidationOutcome = "passed" | "failed" | "timeout" | "interrupted" | "cancelled";
 
 export interface ValidationBudgetRequest {
   readonly run_id: string;

@@ -4,6 +4,28 @@ import { goalFingerprint } from "./goal-bound.ts";
 export const GOAL_DELIVERY_INTENTS = ["design", "registration", "implementation", "repair", "controlled-change"] as const;
 export const GOAL_DELIVERY_MODES = ["planning-only", "mvp-first", "repair-first", "controlled-change"] as const;
 
+const CRITERION_FIELDS = ["criterion_id", "target", "entrypoint", "workload", "oracle_coverage", "build_boundary", "source",
+  "candidate", "source_binding", "candidate_binding", "fixture", "proof_scope", "expected_outcome", "validation_command"] as const;
+export function hasGoalCommandAliasConflict(values: Record<string, unknown>): boolean {
+  return Object.hasOwn(values, "goal_validation_command") && Object.hasOwn(values, "validation_command") &&
+    values.goal_validation_command !== values.validation_command;
+}
+function normalizedCriterionFields(values: Record<string, unknown>): Record<string, unknown> {
+  if (hasGoalCommandAliasConflict(values)) throw new Error("goal-validation-command-alias-conflict");
+  return Object.fromEntries(CRITERION_FIELDS.flatMap(field => {
+    const found = values[`goal_${field}`] ?? values[field];
+    return found === undefined ? [] : [[`goal_${field}`, found]];
+  }));
+}
+
+/** Shared root fields are defaults too. Explicit defaults and then per-criterion
+ * fields take precedence; no commands, identifiers or criteria are rewritten. */
+export function goalDeclarationDefaults(object: Record<string, unknown>): Record<string, unknown> {
+  const defaults = object.defaults !== null && typeof object.defaults === "object" && !Array.isArray(object.defaults)
+    ? object.defaults as Record<string, unknown> : {};
+  return { ...normalizedCriterionFields(object), ...normalizedCriterionFields(defaults) };
+}
+
 export const GOAL_DECLARATION_FORMAT = `Declare a goal once, then reference it with goal_declaration_path in the Task prompt.
 The referenced JSON may contain shared defaults and a criteria array; the host expands them privately.
 An inline ext["sortie-dogs/goal-declaration"] in the registered handoff is also supported.
@@ -43,24 +65,17 @@ export function expandGoalDeclaration(value: unknown): string {
   if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error("goal declaration must be an object");
   const object = value as Record<string, unknown>;
   if (!Array.isArray(object.criteria) || object.criteria.length === 0) throw new Error("goal declaration requires criteria");
-  const defaults = object.defaults !== null && typeof object.defaults === "object" && !Array.isArray(object.defaults)
-    ? object.defaults as Record<string, unknown> : {};
-  const fields = ["criterion_id", "target", "entrypoint", "workload", "oracle_coverage", "build_boundary", "source",
-    "candidate", "source_binding", "candidate_binding", "fixture", "proof_scope", "expected_outcome", "validation_command"];
+  const defaults = goalDeclarationDefaults(object);
+  const fields = CRITERION_FIELDS;
   const scalar = (value: unknown): string => {
     if (Array.isArray(value)) return JSON.stringify(value);
     if (typeof value === "string" && !/[\r\n]/u.test(value)) return value;
     if (typeof value === "boolean" || typeof value === "number") return String(value);
     throw new Error("goal declaration field must be a single-line scalar or array");
   };
-  const normalizedFields = (values: Record<string, unknown>): Record<string, unknown> =>
-    Object.fromEntries(fields.flatMap(field => {
-      const found = values[`goal_${field}`] ?? values[field];
-      return found === undefined ? [] : [[`goal_${field}`, found]];
-    }));
   const criteria = object.criteria.map(raw => {
     if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw new Error("goal criterion must be an object");
-    return { ...normalizedFields(defaults), ...normalizedFields(raw as Record<string, unknown>) };
+    return { ...defaults, ...normalizedCriterionFields(raw as Record<string, unknown>) };
   });
   const identity = { criteria, delivery_intent: object.delivery_intent, delivery_mode: object.delivery_mode,
     usable_path_established: object.usable_path_established, controlled_change: object.controlled_change };

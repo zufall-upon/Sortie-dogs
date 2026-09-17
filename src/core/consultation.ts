@@ -1,4 +1,5 @@
 export const CONSULTATION_CAPABILITIES = ["strategy", "sourceReview"] as const;
+export const SOURCE_REVIEW_PHASES = ["initial", "verification", "final"] as const;
 
 export type ConsultationCapability = typeof CONSULTATION_CAPABILITIES[number];
 

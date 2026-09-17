@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import { goalFingerprint, selectGoalDelivery, validGoalEvidence, type GoalEvidence } from "../dist/core/goal-bound.js";
 import { RunFlightLedger, RunFlightLedgerError } from "../dist/core/run-flight-ledger.js";
+import { evidenceFromObservedExecution } from "../dist/core/observed-goal-evidence.js";
 
 const root = fileURLToPath(new URL(`../_testenv/goal-bound-${process.pid}/`, import.meta.url));
 const at = "2026-09-08T00:00:00.000Z";
@@ -37,6 +38,41 @@ test("delivery selection follows explicit current-turn facts without a classifie
     irreversible_or_major_scope: true }), "controlled-change");
   assert.equal(selectGoalDelivery({ declared_intent: "repair", requested_usable_path_established: true,
     irreversible_or_major_scope: false, explicit_mode: "mvp-first" }), "mvp-first");
+});
+
+test("one passing command preserves distinct criterion measurements and can reconcile a settled bookkeeping defect", async () => {
+  const { ledger } = await accepted("multi-oracle");
+  const command = `node verify.mjs ${"--fixture ".repeat(55)}`.trim();
+  const criteria = ["identity", "permission", "preservation"].map(id => ({ criterion_id: id, target: `target-${id}`,
+    entrypoint: "fixture", workload: "shared test", oracle_coverage: [`oracle-${id}`], build_boundary: "not-applicable" as const,
+    source: "declared source", candidate: "declared candidate", source_binding: "current-protected" as const,
+    candidate_binding: "current-protected" as const, fixture: "fixture", proof_scope: "requested-full" as const,
+    expected_outcome: "pass" as const, validation_command: command }));
+  await ledger.appendGoal({ kind: "goal.revised", at, goal_id: "goal-multi-oracle", revision: 2, scope_epoch: 2,
+    acceptance_fingerprint: acceptance, origin_user_message_id: "user-1", session_id: "root-session", selected_agent: "dog-coordinator",
+    delivery: "mvp-first", budget: { max_units: 4, time_ms: null, cost_usd: null, source: "accepted-plan" }, acceptance_contract: { criteria } });
+  await ledger.appendGoal({ kind: "dispatch.reserved", at, reservation_id: "reservation", goal_id: "goal-multi-oracle", unit_id: "unit", session_id: "root-session", ticket_id: null });
+  const before = await ledger.appendGoal({ kind: "unit.settled", at, reservation_id: "reservation", receipt_id: "old-receipt", goal_id: "goal-multi-oracle",
+    unit_id: "unit", disposition: "failed", result_class: "process-defect", progress_fingerprint: null, evidence: [], elapsed_ms: 10, cost_usd: 1 });
+  const execution = { immutableRef: goalFingerprint("execution"), command: [command], startedAt: at, endedAt: at, exitCode: 0, outcome: "pass", fresh: true,
+    source: goalFingerprint("source"), candidate: goalFingerprint("candidate"),
+    binding: { manifest_hash: goalFingerprint("manifest"), project_root: root, manifest_path: "manifest.json", source_paths: ["source"], candidate_paths: ["output"] } };
+  const evidence = evidenceFromObservedExecution(execution, before, "unit");
+  assert.equal(evidence.length, 3);
+  assert.equal(new Set(evidence.map(entry => entry.evidence_id)).size, 3);
+  assert.ok(evidence.every(entry => validGoalEvidence(entry, before)));
+  assert.deepEqual(evidence.map(entry => entry.measurement.target), criteria.map(criterion => criterion.target));
+  assert.deepEqual(evidenceFromObservedExecution({ ...execution, exitCode: 1 }, before, "unit"), []);
+  assert.deepEqual(evidenceFromObservedExecution({ ...execution, fresh: false }, before, "unit"), []);
+  await assert.rejects(ledger.appendGoal({ kind: "unit.evidence-reconciled", at, goal_id: "goal-multi-oracle", unit_id: "other",
+    previous_receipt_id: "old-receipt", evidence }), RunFlightLedgerError);
+  const reconciled = await ledger.appendGoal({ kind: "unit.evidence-reconciled", at, goal_id: "goal-multi-oracle", unit_id: "unit", previous_receipt_id: "old-receipt", evidence });
+  assert.deepEqual(reconciled.satisfied_criteria, criteria.map(criterion => criterion.criterion_id));
+  assert.equal(reconciled.consumed_units, before.consumed_units);
+  assert.equal(reconciled.consumed_time_ms, before.consumed_time_ms);
+  assert.equal(reconciled.consumed_cost_usd, before.consumed_cost_usd);
+  await assert.rejects(ledger.appendGoal({ kind: "unit.evidence-reconciled", at: "2026-09-08T00:00:02Z", goal_id: "goal-multi-oracle",
+    unit_id: "unit", previous_receipt_id: "old-receipt", evidence }), RunFlightLedgerError);
 });
 
 test("terminal report snapshots are idempotent, receipt-bound, and cannot alter goal execution state", async () => {
@@ -187,6 +223,54 @@ test("validation admission permits monotonic limit growth for a changed candidat
   assert.equal(state.validation_budget.consumed, 2);
 });
 
+test("one operator-authorized repair retry reopens only interrupted evidence and charges a second execution", async () => {
+  const { ledger } = await accepted("validation-interrupted-reopen", 32);
+  const request = { run_id: "goal-validation-interrupted-reopen", operation_id: "validation-first",
+    source_snapshot: "source", candidate: "candidate", command: ["node", "check"], scope: "targeted" as const,
+    expected_evidence: ["criterion", "unit:repair-unit"], reason: "acceptance" as const };
+  const first = await ledger.reserveValidation(request, 32);
+  assert.equal(first.decision, "ALLOW");
+  await ledger.settleValidation(first.reservation_id!, request, "interrupted", 128);
+  const generic = await ledger.reserveValidation({ ...request, operation_id: "validation-generic" }, 32);
+  assert.equal(generic.reason, "duplicate-evidence");
+  assert.equal(generic.consumed, 1);
+  const authorization = { authority: "operator-repair-validation-retry" as const, operator_run_id: "operator-run",
+    unit_id: "repair-unit", operator_generation: 2, plan_hash: "a".repeat(64),
+    control_hash: `sha256:${"b".repeat(64)}`, goal_fingerprint: acceptance,
+    repair_fingerprint: `sha256:${"c".repeat(64)}` };
+  const retryRequest = { ...request, operation_id: "validation-retry" };
+  const retry = await ledger.reserveInterruptedValidationRetry(retryRequest, 32, authorization);
+  assert.equal(retry.decision, "ALLOW");
+  assert.equal(retry.consumed, 2);
+  await ledger.settleValidation(retry.reservation_id!, retryRequest, "passed", 0);
+  const third = await ledger.reserveInterruptedValidationRetry({ ...request, operation_id: "validation-third" }, 32, authorization);
+  assert.equal(third.reason, "duplicate-evidence");
+  const snapshot = await ledger.readGoal();
+  assert.equal(snapshot.state.validation_budget.consumed, 2);
+  assert.equal(snapshot.state.validation_budget.evidence_keys.length, 1);
+  const allowed = snapshot.records.map(({ event }) => event).filter(event => event.kind === "validation.admission" &&
+    event.decision === "ALLOW" && event.evidence_key === first.evidence_key);
+  assert.deepEqual(allowed.map(event => event.kind === "validation.admission" ? event.operation_id : ""),
+    ["validation-first", "validation-retry"]);
+  assert.equal(allowed[1]?.kind === "validation.admission" ? allowed[1].reopen?.prior_reservation_id : undefined,
+    first.reservation_id);
+});
+
+for (const outcome of ["passed", "failed", "cancelled"] as const) test(`operator retry cannot reopen ${outcome} evidence`, async () => {
+  const { ledger } = await accepted(`validation-no-reopen-${outcome}`, 4);
+  const request = { run_id: `goal-validation-no-reopen-${outcome}`, operation_id: "first", source_snapshot: "source",
+    candidate: "candidate", command: ["node", "check"], scope: "targeted" as const,
+    expected_evidence: ["criterion", "unit:repair-unit"], reason: "acceptance" as const };
+  const first = await ledger.reserveValidation(request, 4);
+  await ledger.settleValidation(first.reservation_id!, request, outcome, outcome === "passed" ? 0 : outcome === "failed" ? 1 : null);
+  const retry = await ledger.reserveInterruptedValidationRetry({ ...request, operation_id: "retry" }, 4, {
+    authority: "operator-repair-validation-retry", operator_run_id: "operator-run", unit_id: "repair-unit",
+    operator_generation: 2, plan_hash: "a".repeat(64), control_hash: `sha256:${"b".repeat(64)}`,
+    goal_fingerprint: acceptance, repair_fingerprint: `sha256:${"c".repeat(64)}` });
+  assert.equal(retry.reason, "duplicate-evidence");
+  assert.equal((await ledger.readGoal()).state.validation_budget.consumed, 1);
+});
+
 test("two no-progress boundaries permit one replan, then require stop", async () => {
   const { ledger } = await accepted("stall", 6);
   for (let index = 1; index <= 2; index += 1) {
@@ -276,6 +360,25 @@ test("pre-marker reset revisions replay an already accepted later dispatch", asy
   assert.equal(resumed.consumed_units, 4);
   assert.equal(resumed.replan_required, false);
   assert.equal(resumed.outstanding_reservations.length, 1);
+});
+
+test("a proposal enabler reserves and settles one goal unit without satisfying acceptance", async () => {
+  const { ledger } = await accepted("proposal-budget", 3);
+  await ledger.appendGoal({ kind: "dispatch.reserved", at, reservation_id: "proposal-reservation",
+    goal_id: "goal-proposal-budget", unit_id: "proposal:intent-one", session_id: "root-session", ticket_id: null });
+  const reserved = (await ledger.readGoal()).state;
+  assert.equal(reserved.consumed_units, 0);
+  assert.equal(reserved.outstanding_reservations.length, 1);
+  const settled = await ledger.appendGoal({ kind: "unit.settled", at, reservation_id: "proposal-reservation",
+    receipt_id: "proposal-receipt", goal_id: "goal-proposal-budget", unit_id: "proposal:intent-one",
+    disposition: "succeeded", result_class: "acceptance", progress_fingerprint: null, evidence: [],
+    elapsed_ms: null, cost_usd: null });
+  assert.equal(settled.consumed_units, 1);
+  assert.deepEqual(settled.satisfied_criteria, []);
+  assert.equal(settled.no_progress_results, 0);
+  assert.equal(settled.outstanding_reservations.length, 0);
+  const reopened = await RunFlightLedger.openGoal(path.join(root, "proposal-budget", ".sortie-dogs", "run-flight", "root.json"));
+  assert.equal((await reopened.readGoal()).state.consumed_units, 1);
 });
 
 test("process defects and interruptions do not consume no-progress while acceptance failures do", async () => {

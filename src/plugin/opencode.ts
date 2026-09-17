@@ -10,7 +10,7 @@
  * load and silently disables the plugin. This entry exposes the factory and nothing else; every
  * other runtime symbol stays on the package root.
  */
-export { SortieDogsPlugin } from "./index.js";
+export { SortieDogsV010Plugin as SortieDogsPlugin } from "./profiled.js";
 export type {
   OpenCodeEvent,
   OpenCodeHooks,
