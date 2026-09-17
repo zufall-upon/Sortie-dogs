@@ -70,7 +70,7 @@ bounded implementation, canonical validation, and evidence-backed completion.
 
 Guides: [日本語](docs/guide-ja.md) · [简体中文](docs/guide-zh-CN.md) · [テスト実行](docs/testing.md) · [CLI testing](docs/cli-testing.md)
 
-Release: [v0.10.0-beta.1](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.10.0-beta.1)
+Release: [v0.10.0](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.10.0)
 
 ## Latest local benchmark case study
 
@@ -88,7 +88,7 @@ Run configuration was fixed per product configuration:
   children on `openai/gpt-5.6-sol` / `medium`, with the pinned Sortie package and runtime assets.
   No Luna, Astra, or Opus messages were observed in these trials.
 
-| Metric · one frozen task | Bare OpenCode | Sortie v0.9.12 | Sortie v0.10.0-beta.1 clean qualification |
+| Metric · one frozen task | Bare OpenCode | Sortie v0.9.12 | Sortie v0.10.0 clean qualification |
 | --- | ---: | ---: | ---: |
 | Attempts needed | 3 | 5 | 1 |
 | Completed runs compared | 3 | 3 | 1 |
