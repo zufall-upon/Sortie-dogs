@@ -139,6 +139,14 @@ export interface OperatorProposalState {
   approval_rationale: string | null;
 }
 
+interface OperatorProposalSpend {
+  readonly schema_version: "0.1";
+  readonly profile: string;
+  readonly root_session_id: string;
+  reads: number;
+  submissions: number;
+}
+
 function parseIntent(value: unknown): OperatorIntent {
   const proposalBudget = record(value) && Object.hasOwn(value, "proposal_budget")
     ? value.proposal_budget
@@ -165,23 +173,52 @@ function parseIntent(value: unknown): OperatorIntent {
 
 function parsePacket(value: unknown, state: OperatorProposalState): OperatorProposalPacket {
   if (Buffer.byteLength(JSON.stringify(value)) > 128 * 1024) throw new Error("operator-proposal-too-large");
-  if (!record(value) || !exact(value, ["schema_version", "revision", "coverage", "existing_surface", "uncovered", "negative_handling", "read_scope", "write_scope", "budget_estimate", "plan"])) {
-    return proposalError("/", "operator-proposal-invalid", "proposal-fields");
+  if (!record(value)) return proposalError("/", "operator-proposal-invalid", "object", { expected: "object", actual_type: jsonType(value) });
+  const diagnostics: OperatorContractDiagnostic[] = [];
+  const invalid = (pointer: string, rule: string, expected: string, actual: unknown, code = "operator-proposal-invalid"): void => {
+    diagnostics.push({ document: "proposal", pointer, code, rule, repair_kind: "repair-field",
+      repair_paths: [pointer], expected, actual_type: jsonType(actual) });
+  };
+  const fields = ["schema_version", "revision", "coverage", "existing_surface", "uncovered", "negative_handling", "read_scope", "write_scope", "budget_estimate", "plan"];
+  for (const key of Object.keys(value).filter(key => !fields.includes(key)).sort()) {
+    invalid(`/${pointerToken(key)}`, "unknown-field", "remove-unknown-field", value[key]);
   }
-  if (value.schema_version !== "0.1") return proposalError("/schema_version", "operator-proposal-invalid", "schema-version", { repair_paths: ["/schema_version"] });
-  if (!Number.isSafeInteger(value.revision) || (value.revision as number) < 1) {
-    return proposalError("/revision", "operator-proposal-revision-invalid", "positive-integer",
-      { repair_paths: ["/revision"], expected: "positive-integer", actual_type: jsonType(value.revision) });
+  for (const key of fields) if (!Object.hasOwn(value, key)) invalid(`/${key}`, "required", "required-field", undefined);
+  if (Object.hasOwn(value, "schema_version") && value.schema_version !== "0.1") {
+    invalid("/schema_version", "schema-version", 'literal-"0.1"', value.schema_version);
   }
-  if (!Array.isArray(value.coverage) || !Array.isArray(value.uncovered) || !Array.isArray(value.negative_handling) ||
-      !Array.isArray(value.read_scope) || !value.read_scope.every(normalizedRelativePath) ||
-      !Array.isArray(value.write_scope) || !value.write_scope.every(normalizedRelativePath) || !record(value.budget_estimate) ||
-      !exact(value.budget_estimate, ["proposal_reads", "execution_units"]) || !Number.isSafeInteger(value.budget_estimate.proposal_reads) || !Number.isSafeInteger(value.budget_estimate.execution_units)) {
-    return proposalError("/", "operator-proposal-invalid", "proposal-fields");
+  if (Object.hasOwn(value, "revision") && (!Number.isSafeInteger(value.revision) || (value.revision as number) < 1)) {
+    invalid("/revision", "positive-integer", "positive-integer", value.revision, "operator-proposal-revision-invalid");
   }
+  for (const key of ["coverage", "existing_surface", "uncovered", "negative_handling", "read_scope", "write_scope"]) {
+    if (!Object.hasOwn(value, key)) continue;
+    const items = value[key];
+    if (!Array.isArray(items)) { invalid(`/${key}`, "array", "array", items); continue; }
+    if (key === "read_scope" || key === "write_scope") items.forEach((item, index) => {
+      if (!normalizedRelativePath(item)) invalid(`/${key}/${index}`, "normalized-relative-path",
+        "nonempty repository-relative path; forward slashes; no trailing slash, dot segments, traversal, or absolute path", item);
+    });
+  }
+  if (Object.hasOwn(value, "budget_estimate")) {
+    const budget = value.budget_estimate;
+    if (!record(budget)) invalid("/budget_estimate", "object", "object", budget);
+    else {
+      const keys = ["proposal_reads", "execution_units"];
+      for (const key of Object.keys(budget).filter(key => !keys.includes(key)).sort()) {
+        invalid(`/budget_estimate/${pointerToken(key)}`, "unknown-field", "remove-unknown-field", budget[key]);
+      }
+      for (const key of keys) if (!Number.isSafeInteger(budget[key])) {
+        invalid(`/budget_estimate/${key}`, Object.hasOwn(budget, key) ? "integer" : "required", "integer", budget[key]);
+      }
+    }
+  }
+  if (diagnostics.length > 0) throw new OperatorContractError(diagnostics);
+  // The shape checks above are batched for repair; semantic checks below remain strict.
+  const coverage = value.coverage as unknown[], uncovered = value.uncovered as unknown[], negatives = value.negative_handling as unknown[];
+  const budget = value.budget_estimate as Record<string, unknown>;
   const requirementIDs = new Set(state.intent.requirements.map(item => item.id));
   const coverageIDs = new Set<string>(), uncoveredIDs = new Set<string>();
-  for (const item of value.coverage) {
+  for (const item of coverage) {
     if (!record(item) || !exact(item, ["requirement_id", "approach", "validation"]) || !identifier(item.requirement_id) ||
         !requirementIDs.has(item.requirement_id) || coverageIDs.has(item.requirement_id) || !text(item.approach) || !text(item.validation)) throw new Error("operator-proposal-coverage-invalid");
     coverageIDs.add(item.requirement_id);
@@ -200,7 +237,7 @@ function parsePacket(value: unknown, state: OperatorProposalState): OperatorProp
     surfaced.add(item.requirement_id);
   }
   if ([...coverageIDs].some(id => !surfaced.has(id))) throw new Error("operator-proposal-existing-surface-incomplete");
-  for (const item of value.uncovered) {
+  for (const item of uncovered) {
     if (!record(item) || !exact(item, ["requirement_id", "reason"]) || !identifier(item.requirement_id) || !requirementIDs.has(item.requirement_id) ||
         coverageIDs.has(item.requirement_id) || uncoveredIDs.has(item.requirement_id) || !text(item.reason)) throw new Error("operator-proposal-uncovered-invalid");
     uncoveredIDs.add(item.requirement_id);
@@ -208,7 +245,7 @@ function parsePacket(value: unknown, state: OperatorProposalState): OperatorProp
   if ([...requirementIDs].some(id => !coverageIDs.has(id) && !uncoveredIDs.has(id))) throw new Error("operator-proposal-requirement-coverage-incomplete");
   const negativeIDs = new Set(state.intent.requirements.filter(item => item.kind === "negative").map(item => item.id));
   const handled = new Set<string>();
-  for (const item of value.negative_handling) {
+  for (const item of negatives) {
     if (!record(item) || !exact(item, ["requirement_id", "handling"]) || !identifier(item.requirement_id) || !negativeIDs.has(item.requirement_id) || handled.has(item.requirement_id) || !text(item.handling)) throw new Error("operator-proposal-negative-handling-invalid");
     handled.add(item.requirement_id);
   }
@@ -237,8 +274,18 @@ function parsePacket(value: unknown, state: OperatorProposalState): OperatorProp
   }
   if (plan.acceptance.length !== acceptance.length || plan.acceptance.some((item, index) => item !== acceptance[index])) throw new Error("operator-proposal-acceptance-rewritten");
   const writes = [...new Set(plan.units.flatMap(unit => unit.write))].sort();
-  if (JSON.stringify([...new Set(value.write_scope as string[])].sort()) !== JSON.stringify(writes)) throw new Error("operator-proposal-write-scope-mismatch");
-  if (value.budget_estimate.proposal_reads !== state.read_count || value.budget_estimate.execution_units !== plan.units.length) throw new Error("operator-proposal-budget-estimate-mismatch");
+  if (JSON.stringify([...new Set(value.write_scope as string[])].sort()) !== JSON.stringify(writes)) {
+    proposalError("/write_scope", "operator-proposal-write-scope-mismatch", "exact-union-of-unit-write-scopes",
+      { repair_paths: ["/write_scope", "/plan/units"] });
+  }
+  for (const [unitIndex, unit] of plan.units.entries()) for (const [pathIndex, path] of unit.read.entries()) {
+    const executionReads = [...value.read_scope as string[], ...plan.units.slice(0, unitIndex + 1).flatMap(item => item.write)];
+    if (!executionReads.some(scope => path === scope || path.startsWith(`${scope}/`))) {
+      proposalError(`/plan/units/${unitIndex}/read/${pathIndex}`, "operator-proposal-unit-read-scope-expanded",
+        "unit-input-within-declared-read-scope-or-generated-write-scope");
+    }
+  }
+  if (budget.proposal_reads !== state.read_count || budget.execution_units !== plan.units.length) throw new Error("operator-proposal-budget-estimate-mismatch");
   return { ...structuredClone(materialized), plan } as unknown as OperatorProposalPacket;
 }
 
@@ -256,6 +303,29 @@ export class OperatorProposalRuntime {
   readonly projectRoot: string;
   constructor(projectRoot: string, readonly profile: RuntimeProfile) { this.projectRoot = resolve(projectRoot); }
   private file(root: string): string { return join(this.projectRoot, this.profile.stateDirectory, "operator-proposals", `${hash(root)}.json`); }
+  private spendFile(root: string): string { return join(this.projectRoot, this.profile.stateDirectory, "operator-proposals", `${hash(root)}.spend.json`); }
+  private async readSpend(root: string): Promise<OperatorProposalSpend> {
+    let source: string;
+    try { source = await readFile(this.spendFile(root), "utf8"); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        return { schema_version: "0.1", profile: this.profile.id, root_session_id: root, reads: 0, submissions: 0 };
+      }
+      throw error;
+    }
+    const spend = JSON.parse(source) as OperatorProposalSpend;
+    if (spend.schema_version !== "0.1" || spend.profile !== this.profile.id || spend.root_session_id !== root ||
+        !Number.isSafeInteger(spend.reads) || spend.reads < 0 || !Number.isSafeInteger(spend.submissions) || spend.submissions < 0) {
+      throw new Error("operator-proposal-spend-invalid");
+    }
+    return spend;
+  }
+  private async saveSpend(spend: OperatorProposalSpend): Promise<void> {
+    const directory = join(this.projectRoot, this.profile.stateDirectory, "operator-proposals"); await mkdir(directory, { recursive: true });
+    const temporary = `${this.spendFile(spend.root_session_id)}.${randomUUID()}.tmp`;
+    try { await writeFile(temporary, JSON.stringify(spend), { flag: "wx", mode: 0o600 }); await rename(temporary, this.spendFile(spend.root_session_id)); }
+    finally { await rm(temporary, { force: true }).catch(() => undefined); }
+  }
   async read(root: string): Promise<OperatorProposalState | undefined> {
     return this.serial(root, () => this.readUnlocked(root));
   }
@@ -306,6 +376,11 @@ export class OperatorProposalRuntime {
         "Git mutationが明示要件の時だけplan.git_lifecycleを追加する。exact shape: {\"branch_create\":{\"branch\":\"validated destination branch\",\"start_ref\":\"existing commit/ref\"},\"commit\":{\"message\":\"single-line commit message\"},\"post_commit_validation\":[\"exact declared validation command\"]}。post_commit_validationは既存canonical command identityでgoal criterion commandと一致し、final unit.validationの同順・連続suffixでなければならない。全non-post validationを先に実行し、全source write完了後にsuffixを実行する。hostはworker spend前にclean root、existing start_ref、nonexisting destinationを検証し、fixed argvでbranch作成する。suffix先頭command直前に全unit.write union内変更を明示stageしてcommitし、以後のsource writeを拒否する。既存validation executorが各post-commit commandのfresh evidenceを記録し、全evidenceなしのroot acceptanceは禁止。任意Git command、git add -A、commit -a、amend、force、push、既存branch上書きは禁止。git_lifecycle省略時のGit mutationはない。",
         "acceptance_indicesは0-based。各unitのacceptance_indicesに置く全indexについて、そのacceptance_proof[index]が参照するcriterionのresolved validation_commandを同じunit.validationへ文字列完全一致で最低1個含める。範囲外index禁止。さらに各unitはそれ以前のunitにないgoal criterion validation_commandを少なくとも1個validationへ含める。同じvalidation commandだけを全unitで再利用禁止。順序付き2 unitなら例としてunit 1に中間状態を許すcommand、unit 2に最終commandを割り当てる。",
         "existing_surfaceは各covered requirementにつき最低1件。対象codebaseで、その要件が制約・変更する既存構文や既存経路を実際にReadして特定し、そのfileのproject相対pathと見つけた形(form)を書く。formは文面の言い換えでなく、observedした構文形・node種別・dispatch分岐を書く。生成・宣言・束縛の経路と変更・代入の経路は別項目として挙げる。単数形しか要件に書かれていなくても、grammarやdispatchに複数値・分配・入れ子・暗黙形があればそれも挙げる。既存形が無いと判断した場合も、探索したfileのpathと「既存形なし」の根拠をformへ書く。pathはこのTaskで実際にReadしたfileでなければhostが拒否する。",
+        "調査順: authoritative_refsと既知entrypointから始める。対象pathが分かっているならdirectory巡回を挟まず直接そこへ進み、path未知の時だけ許可scope内のdirectoryやindexをReadして実在を確認する。名前を推測しただけのReadをしない。各requirementについて、それが変更する既存経路、symbol、validation oracle、build recipeを結び付ける。巨大な概念書やtest群を既定で全文読込せず、既知location・目次・周辺範囲から必要なoffset/limitを選ぶ。部分Readは探索手段であって完了条件ではない。既存分岐、関連呼出先、値の表現、負要件の影響範囲が不明なら範囲を広げ、必要ならfile全体を読む。読込量の少なさ自体を達成度にしない。authoritative Makefile、言語のgenerator directive、package/build scriptは後回しにせず関連実装経路と併せて早期に確認する。同じ内容の再読は、新しい未解決点、参照先、範囲不足、source変化のいずれかを理由とする。Read以外のtoolは要求しない。",
+        "記述は既存fieldで簡潔に行う。raw sourceやlogの全文再掲、同じplanの自然文による二重転記をしない。ただしcoverage、existing_surface、ordered validation、read/write、negative_handling、uncoveredは省略しない。初回提出で全requirementを扱えるproposalを目指し、調査できなかった点はuncoveredへ正直に残す。薄いproposalを出してrootへ追加調査を戻す往復を前提にしない。",
+        "提出前に正本commandと照合する。観測済みのexecutable、引数、test path、build target範囲をそのまま保持し、全体buildを一部targetへ縮めたり未確認の絶対executable pathを補完したりしない。検証script自身の副作用まで確認し、全生成物をunit.writeへ宣言する。unit.readはread_scopeまたは宣言済みwrite_scope内。再提出は診断fieldとactual_readsだけを直し、既に正しいcommand・scopeを再生成しない。",
+        "unit.validationとcriterionのvalidation_commandには実行commandだけを書く。手動GUI確認、root専有review、運用上の予算会計を説明文やラベル付きの疑似commandへ変換しない。fixture・新規Sessionの自動生成は実Backendの既存Session表示の証拠とは限らず、oracleが実際に確認する対象と副作用を照合する。現行契約で表現できない要件はuncoveredへ理由を残し、無関係なtestを全要件の証明として割り当てない。",
+        "status=submittedが返ったら、この調査Taskは完了。追加toolなしで親へ返す。汎用の続行指示が来てもoperator_nextやworker起動へ進まない。提出は承認でも実行許可でもない。",
         "許可sourceをReadで1回以上調査後、返答前にproposal packetをsortie_v010_submit_operator_proposalへ提出する。invalid-proposal返却時だけ、そのcodeに該当するfieldを修正する。返却されたactual_readsはhostのcanonical accountingであり、再提出時はcodeに関係なくbudget_estimate.proposal_readsをその値へ一致させる。これはread budgetをresetせず、成功/失敗tool表示からcountを推測しない。失敗したReadが一律に未計上とも仮定しない。有限submission budget内で再提出する。proseだけ返して終了禁止。未対応要件はuncoveredへ明示する。承認・実行を主張しない。"].join("\n") };
   }
   /** Root-visible bounded handle; the canonical prompt remains only in durable host state. */
@@ -352,9 +427,10 @@ export class OperatorProposalRuntime {
       if (previous.phase !== "approved") throw new Error("operator-proposal-active-intent-immutable");
       throw new Error("operator-proposal-new-intent-requires-explicit-root-revision");
     }
+    const spend = await this.readSpend(root);
     const state: OperatorProposalState = { schema_version: "0.1", profile: this.profile.id, root_session_id: root,
       intent_id: `intent-${intentHash.slice(0, 24)}`, intent_hash: intentHash, intent, created_at: new Date().toISOString(), phase: "investigating",
-      goal_binding: null, proposal_call_id: null, proposal_session_id: null, read_count: 0, read_paths: [], submission_count: 0, proposal_id: null,
+      goal_binding: null, proposal_call_id: null, proposal_session_id: null, read_count: spend.reads, read_paths: [], submission_count: spend.submissions, proposal_id: null,
       proposal_revision: null, proposal_hash: null, proposal: null, approval_rationale: null };
     await this.save(state); return state;
   }
@@ -423,13 +499,19 @@ export class OperatorProposalRuntime {
     await this.save(state); return state;
   }
   async submit(root: string, actor: string, raw: unknown): Promise<OperatorProposalState> {
-    return this.serial(root, () => this.submitUnlocked(root, actor, raw));
+    return this.serial(root, () => this.submitUnlocked(root, actor, () => raw));
   }
-  private async submitUnlocked(root: string, actor: string, raw: unknown): Promise<OperatorProposalState> {
+  async submitJSON(root: string, actor: string, source: string): Promise<OperatorProposalState> {
+    return this.serial(root, () => this.submitUnlocked(root, actor, () => {
+      try { return JSON.parse(source) as unknown; }
+      catch { return proposalError("/", "operator-proposal-json-invalid", "json"); }
+    }));
+  }
+  private async submitUnlocked(root: string, actor: string, readPacket: () => unknown): Promise<OperatorProposalState> {
     const state = await this.requiredUnlocked(root); if (state.proposal_session_id !== actor || state.phase !== "investigating") throw new Error("operator-proposal-submit-grant-invalid");
     if (state.submission_count >= state.intent.proposal_budget.max_submissions) throw new Error("operator-proposal-submission-budget-exhausted");
     let packet: OperatorProposalPacket;
-    try { packet = parsePacket(raw, state); }
+    try { packet = parsePacket(readPacket(), state); }
     catch (error) { state.submission_count++; await this.save(state); throw error; }
     state.submission_count++;
     state.proposal = packet; state.proposal_revision = packet.revision; state.proposal_hash = hash(JSON.stringify(packet));
@@ -449,6 +531,22 @@ export class OperatorProposalRuntime {
     if (state.phase !== "submitted" || !state.proposal || state.proposal.uncovered.length > 0) throw new Error("operator-proposal-not-approvable");
     if (commit) { state.phase = "approved"; state.approval_rationale = approval.rationale; await this.save(state); }
     return state;
+  }
+  /**
+   * Release a pre-approval proposal grant on explicit root cancellation. Without this the root holds an
+   * immutable investigating intent whose admitted child can no longer bind, so no retry path exists at all.
+   * An approved proposal is already connected to the execution lane and stays durable.
+   */
+  async discardPreApproval(root: string): Promise<OperatorProposalState | undefined> {
+    return this.serial(root, async () => {
+      const state = await this.readUnlocked(root);
+      if (!state || state.phase === "approved") return undefined;
+      await this.saveSpend({ schema_version: "0.1", profile: this.profile.id, root_session_id: root,
+        reads: state.read_count, submissions: state.submission_count });
+      await rm(this.file(root), { force: true });
+      this.states.delete(root);
+      return state;
+    });
   }
   async required(root: string): Promise<OperatorProposalState> { const state = await this.read(root); if (!state) throw new Error("operator-proposal-missing"); return state; }
   async assertExecutionApproved(root: string, planHash: string): Promise<void> {

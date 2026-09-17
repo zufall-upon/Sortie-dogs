@@ -201,6 +201,15 @@ export function operatorGitPathAuthorized(path: string, scopes: readonly string[
 const contractError = (diagnostic: OperatorContractDiagnostic): never => { throw new OperatorContractError([diagnostic]); };
 const planError = (pointer: string, code: string, rule: string, repair_kind: OperatorContractDiagnostic["repair_kind"] = "repair-field"): never =>
   contractError({ document: "plan", pointer, code, rule, repair_kind });
+function rejectValidationAnnotation(command: string, pointer: string): void {
+  // A bare multi-character label followed by ':' and whitespace is an instruction annotation,
+  // not a supported executable validation. Do not interpret or strip it into a fake passing oracle.
+  // This is deliberately not a shell parser or a claim of semantic proof; quoted commands, drive
+  // paths, URLs in arguments, and shell syntax remain the executor's responsibility.
+  if (/^\s*[A-Za-z][A-Za-z0-9_-]*(?:\s+[A-Za-z][A-Za-z0-9_-]*)*:(?:\s|$)/u.test(command)) {
+    planError(pointer, "operator-validation-annotation-invalid", "executable-command-not-instruction-label");
+  }
+}
 function strings(value: unknown, nonempty = false): value is string[] {
   return Array.isArray(value) && (!nonempty || value.length > 0) && value.every(text);
 }
@@ -254,6 +263,12 @@ export function parseOperatorPlan(value: unknown): OperatorPlan {
     if (!text(command)) return contractError({ document: "plan", pointer: `/goal_declaration/criteria/${proofCommands.size}/goal_validation_command`,
       code: "operator-goal-command-required", rule: "declared-validation-command-for-criterion", repair_kind: "repair-proof-mapping",
       repair_paths: [`/goal_declaration/criteria/${proofCommands.size}/goal_validation_command`] });
+    const commandOwner = raw.goal_validation_command != null || raw.validation_command != null ? raw
+      : record(declaration.defaults) && (declaration.defaults.goal_validation_command != null || declaration.defaults.validation_command != null)
+        ? declaration.defaults : declaration;
+    const commandPrefix = commandOwner === raw ? `/goal_declaration/criteria/${proofCommands.size}`
+      : commandOwner === declaration ? "/goal_declaration" : "/goal_declaration/defaults";
+    rejectValidationAnnotation(command, `${commandPrefix}/${commandOwner.goal_validation_command != null ? "goal_validation_command" : "validation_command"}`);
     proofCommands.set(id, command);
   }
   if (!Array.isArray(value.acceptance_proof) || value.acceptance_proof.length !== value.acceptance.length ||
@@ -266,7 +281,8 @@ export function parseOperatorPlan(value: unknown): OperatorPlan {
   for (const [unitIndex, unit] of value.units.entries()) {
     if (!record(unit) || !exactKeys(unit, ["id", "title", "objective", "read", "write", "validation", "acceptance_indices"]) ||
         !identifier(unit.id) || ids.has(unit.id) || !text(unit.title) || !text(unit.objective) ||
-         !strings(unit.read) || !strings(unit.write, true) || !strings(unit.validation, true)) return planError(`/units/${unitIndex}`, "operator-unit-invalid", "operator-unit-shape");
+          !strings(unit.read) || !strings(unit.write, true) || !strings(unit.validation, true)) return planError(`/units/${unitIndex}`, "operator-unit-invalid", "operator-unit-shape");
+    unit.validation.forEach((command, index) => rejectValidationAnnotation(command, `/units/${unitIndex}/validation/${index}`));
     ids.add(unit.id);
     if (!Array.isArray(unit.acceptance_indices) || unit.acceptance_indices.length === 0 ||
         unit.acceptance_indices.some(index => !Number.isSafeInteger(index) || index < 0 || index >= acceptanceCount ||

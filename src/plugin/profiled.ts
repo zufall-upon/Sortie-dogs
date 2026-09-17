@@ -258,8 +258,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       : { ...(record(stringSchema) ? stringSchema : { type: "string" }), description: OPERATOR_INTENT_CONTRACT };
     const proposalContract = "proposal_json must encode one JSON object with exactly these required fields and types: " +
       'schema_version string "0.1"; revision positive integer, for example "revision":1, never string "revision":"1"; ' +
-      "coverage array of {requirement_id:string,approach:string,validation:string}; uncovered array of {requirement_id:string,reason:string}; " +
-      "negative_handling array of {requirement_id:string,handling:string}; read_scope string array; write_scope string array; " +
+      "coverage array of {requirement_id:string,approach:string,validation:string}; " +
+      "existing_surface array of {requirement_id:string,path:string,form:string}, with at least one observed form per covered requirement and each path actually Read by this child; " +
+      "uncovered array of {requirement_id:string,reason:string}; " +
+      "negative_handling array of {requirement_id:string,handling:string}, containing only and all IDs whose intent kind is negative; " +
+      "read_scope string array; write_scope string array; all scope and existing_surface paths must be normalized repository-relative paths with forward slashes, no trailing slash, dot segments, traversal, or absolute paths; " +
       "budget_estimate object with proposal_reads:integer and execution_units:integer; plan object with schema_version:string, " +
       "acceptance_proof:string[][], source_refs:string[], goal_declaration:object, units:object[], and optional git_lifecycle with exact shape " +
       "Each unit.validation is the complete ordered execution list, not a tests-only list: commands required by observed authoritative Makefiles, language generator directives, or repository scripts for generation, build, formatting, and exact cleanup precede post-commit or canonical criterion tests. Put every required input in unit.read and every persistent or transient generated output in unit.write. Cleanup may remove only declared unit.write outputs; never approve arbitrary ignore rules or removal of undeclared paths. Do not guess a tool-specific command or output, claim an unobserved capability, or add a preparatory or cleanup command as a goal criterion unless it independently proves acceptance. The host preserves declared order and authority but does not statically discover or inject every build dependency or generator output. " +
@@ -299,7 +302,12 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       if (retireRoot) await control?.stopAutomaticRecovery(root);
       const proposal = await proposals.read(root);
       if (proposal?.phase === "investigating" && proposal.proposal_call_id !== null) {
-        await control?.settleProposalBudget(root, proposal.intent_id, proposal.proposal_call_id, "cancelled");
+        // The admitted proposal Task already settles this reservation when its child returns. A terminal
+        // settlement is final, so an explicit cancellation must release the grant instead of failing on it.
+        try { await control?.settleProposalBudget(root, proposal.intent_id, proposal.proposal_call_id, "cancelled"); }
+        catch (error) {
+          if (!(error instanceof Error) || error.message !== "operator-proposal-budget-settlement-conflict") throw error;
+        }
       }
       const children = await operators.interrupted(root, reason);
       for (const child of children) {
@@ -377,7 +385,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         const proposal = await proposals.read(context.sessionID);
         const proposalNextAction = proposal?.phase === "investigating"
           ? proposal.proposal_call_id !== null
-            ? "proposal Task is already admitted; do not redispatch it or call operator_next. Continue submission repairs only in the same active claimed child. If that child terminated without submission, report the terminal proposal failure; remaining read or submission capacity does not authorize a new Task, budget reset, or replacement child"
+            ? "proposal Task is already admitted; do not redispatch it or call operator_next. Continue submission repairs only in the same active claimed child. If that child terminated without submission, report the terminal proposal failure; remaining read or submission capacity does not authorize a new Task, budget reset, or replacement child. Only an explicit root decision to retry may call cancel_operator with no reason to release this grant, which discards the spent proposal accounting and never reuses the terminated child"
             : proposal.submission_count >= proposal.intent.proposal_budget.max_submissions
             ? "proposal submission budget exhausted; do not call operator_next; report the bounded proposal failure"
             : "proposal is not submitted; do not call operator_next; complete or repair the bounded proposal submission"
@@ -393,12 +401,26 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
               next_action: proposalNextAction }
               : { status: "absent", profile: profile.id });
       } };
-    tools[cancel] = { description: "Revoke this root's operator grant and stop only its owned children before releasing core state. reason is a closed set: omit it for a plain cancellation, including replanning or contract revision, and never send free text such as a written justification. Use reason=acceptance-remediation only for decision=operator-acceptance-remediation-required. At awaiting-acceptance, reason=review-blocking authorizes a same-goal review-remediation replacement only within the exact acceptance, committed head, approved write union, and retained remaining budget.",
+    tools[cancel] = { description: "Revoke this root's operator grant and stop only its owned children before releasing core state. Before approval it instead releases the bounded proposal grant, including one whose admitted child already terminated, so the root can begin a new investigation; it never reuses that child or restores spent proposal budget. reason is a closed set: omit it for a plain cancellation, including replanning, contract revision, and any pre-approval proposal release, and never send free text such as a written justification. Use reason=acceptance-remediation only for decision=operator-acceptance-remediation-required. At awaiting-acceptance, reason=review-blocking authorizes a same-goal review-remediation replacement only within the exact acceptance, committed head, approved write union, and retained remaining budget.",
       args: { reason: optionalStringSchema as never }, execute: async (args, context) => {
         await requireRoot(context.sessionID);
         const requestedReason = (args as { reason?: unknown }).reason;
         if (requestedReason !== undefined && requestedReason !== "review-blocking" && requestedReason !== "acceptance-remediation") throw new Error("operator-cancel-reason-invalid");
-        const current = await operators.required(context.sessionID);
+        const pending = await operators.read(context.sessionID);
+        if (!pending) {
+          // A pre-approval proposal owns no execution lane. Its admitted child can never be rebound, so without
+          // this release the root can neither resume, redispatch, nor start any replacement investigation.
+          const proposal = await proposals.read(context.sessionID);
+          if (!proposal || proposal.phase === "approved") throw new Error("operator-run-missing");
+          if (requestedReason !== undefined) throw new Error("operator-cancel-reason-invalid");
+          await stop(context.sessionID, "explicit-cancellation", false);
+          const discarded = await proposals.discardPreApproval(context.sessionID);
+          return JSON.stringify({ profile: profile.id, status: "cancelled", scope: "proposal",
+            released_proposal: discarded ? proposals.packet(discarded) : null,
+            next_action: "the bounded proposal grant is released and its spent reads/submissions are not restored; " +
+              "begin a new proposal investigation only on an explicit root decision to retry, and never reuse the cancelled child" });
+        }
+        const current = pending;
         if (requestedReason === "acceptance-remediation" && current.decision !== "operator-acceptance-remediation-required") throw new Error("operator-cancel-reason-invalid");
         if (requestedReason === "review-blocking" && current.phase !== "awaiting-acceptance") throw new Error("operator-cancel-reason-invalid");
         await stop(context.sessionID, requestedReason === "review-blocking"
@@ -544,12 +566,18 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     tools[submitProposal] = { description: "Proposal-child-only: submit a requirement-mapped contract proposal without editing source or starting workers. " + proposalContract + " Omit plan.acceptance; the host derives its exact ordered text from durable intent.requirements. A legacy explicit plan.acceptance is accepted only when byte-exact in content and order; null, subsets, reorder, normalization, and acceptance_ids aliases are rejected.",
       args: { proposal_json: proposalSchema }, execute: async (args, context) => {
         const root = await rootFor(context.sessionID); if (!root) throw new Error("operator-proposal-session-inactive");
-        try { return JSON.stringify(proposals.packet(await proposals.submit(root, context.sessionID, JSON.parse(args.proposal_json)))); }
+        try {
+          const submitted = await proposals.submitJSON(root, context.sessionID, args.proposal_json);
+          return JSON.stringify({ ...proposals.packet(submitted) as object,
+            next_action: "Proposal submitted. This investigation child must now return to its parent without further tools. " +
+              "Do not call operator_next, start a worker, or claim approval; the root must compare and approve the proposal." });
+        }
         catch (error) {
           const contract = error instanceof OperatorContractError;
           if (!contract && (!(error instanceof Error) || !error.message.startsWith("operator-proposal-"))) throw error;
           const state = await proposals.required(root);
           return JSON.stringify({ status: "invalid-proposal", code: error.message, actual_reads: state.read_count,
+            remaining_reads: state.intent.proposal_budget.max_reads - state.read_count,
             submissions: state.submission_count, remaining_submissions: state.intent.proposal_budget.max_submissions - state.submission_count,
             ...(contract ? { diagnostics: error.diagnostics, diagnostics_truncated: error.diagnostics_truncated } : {}) });
         }
@@ -964,6 +992,14 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         (output.system ??= []).push(`SORTIE_RUNTIME_PROFILE ${profile.id}; marker ${assetVersion}. ` +
           `Shared MkII protocol role names are logical: ${protocolMap}. Use only ${profile.toolPrefix} tools for this profile. ` +
           "Never rewrite user acceptance or evidence to rename protocol roles. Final acceptance belongs only to the root coordinator.");
+        const proposal = await proposals.read(root);
+        if (proposal?.phase === "investigating" && proposal.proposal_session_id === request.sessionID) {
+          (output.system ??= []).push(`SORTIE_PROPOSAL_PHASE investigating; intent=${proposal.intent_id}; root=${root}; child=${request.sessionID}. ` +
+            `This durable phase remains authoritative after compaction even when the latest message is a generic continuation. ` +
+            `Continue the admitted read-only investigation and submit through ${submitProposal}. Do not call ${next} or dispatch workers: no execution run exists yet. ` +
+            `actual_reads=${proposal.read_count}; remaining_reads=${proposal.intent.proposal_budget.max_reads - proposal.read_count}; ` +
+            `submissions=${proposal.submission_count}; remaining_submissions=${proposal.intent.proposal_budget.max_submissions - proposal.submission_count}.`);
+        }
       },
       "experimental.text.complete": async (request, output) => {
         const role = (await identity(request.sessionID)).role;
@@ -984,6 +1020,18 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         const root = await rootFor(request.sessionID);
         if (!root) return;
         if ((await identity(request.sessionID)).role === "dog-operator") {
+          const proposal = await proposals.read(root);
+          if (proposal?.phase === "investigating" && proposal.proposal_session_id === request.sessionID) {
+            (output.context ??= []).push(`Proposal continuation: ${JSON.stringify({
+              root, child: request.sessionID, intent_id: proposal.intent_id, intent_hash: proposal.intent_hash,
+              intent: proposal.intent, goal_binding: proposal.goal_binding, read_paths: proposal.read_paths,
+              actual_reads: proposal.read_count, remaining_reads: proposal.intent.proposal_budget.max_reads - proposal.read_count,
+              submissions: proposal.submission_count, remaining_submissions: proposal.intent.proposal_budget.max_submissions - proposal.submission_count,
+            })}. Preserve the latest proposal draft and field diagnostics in the summary. Continue only in this same claimed read-only proposal child. ` +
+              `Repair only diagnosed fields, then call ${submitProposal}; do not call ${next}, dispatch Tasks, execute work, or reset budgets. ` +
+              "This is investigation, not an execution run. Compaction grants no new reads or submissions.");
+            return;
+          }
           const state = await operators.required(root);
           (output.context ??= []).push(`Operator continuation: root=${root}; run=${state.runID}; generation=${state.generation}; contract=${state.planHash}. ` +
             `Read ${next} for current authoritative state. Do not reconstruct acceptance or reset the queue.`);
@@ -992,8 +1040,14 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         await core["experimental.session.compacting"]?.(request, output);
       },
       "experimental.compaction.autocontinue": async (request, output) => {
-        if (!await rootFor(request.sessionID)) return;
-        if ((await identity(request.sessionID)).role === "dog-operator") { output.enabled = false; return; }
+        const root = await rootFor(request.sessionID);
+        if (!root) return;
+        if ((await identity(request.sessionID)).role === "dog-operator") {
+          const proposal = await proposals.read(root);
+          if (proposal?.phase === "investigating" && proposal.proposal_session_id === request.sessionID) return;
+          output.enabled = false;
+          return;
+        }
         await core["experimental.compaction.autocontinue"]?.(request, output);
       },
       event: async ({ event }) => {

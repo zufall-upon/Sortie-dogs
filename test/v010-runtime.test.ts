@@ -371,7 +371,7 @@ function oldRoleAsset(name: "dog-operator" | "dogs-coordinator"): string {
   return content
     .replace(/For a nontrivial request whose source facts,[\s\S]*?whose complete contract is already known\.\n\n/u, "")
     .replace(/^  sortie_v010_submit_operator_proposal: true\n/m, "")
-    .replace(/When the prompt starts SORTIE_OPERATOR_PROPOSAL,[\s\S]*?Otherwise call\n/u, "Call ")
+    .replace(/When the prompt starts SORTIE_OPERATOR_PROPOSAL[\s\S]*?For an admitted execution queue, call\n/u, "Call ")
     .replace(PREVIEW_PRESENTATION_POLICY + "\n", "")
     .replace(/## Existing-run evidence reconciliation[\s\S]*?bypasses the delegate\.\n\n/u, "")
     .replace(/When operator_status returns decision=operator-acceptance-remediation-required,[\s\S]*?A reviewer finding alone is not such an increase\.\n\n/u, "")
@@ -389,7 +389,7 @@ function oldRoleAsset(name: "dog-operator" | "dogs-coordinator"): string {
     .replace(/Do not manually reconstruct,[\s\S]*?to work around an admission error\.\n/u, "")
     .replace(/Copy the returned Task's subagent_type, description, and prompt verbatim into Task\. Worker prompts may be a short\nSORTIE_OPERATOR_TASK_REF[\s\S]*?reference\. A one-unit request returns/u,
       "Copy the returned Task's subagent_type, description, and prompt verbatim into Task. A one-unit request returns")
-    .replace(/After compaction, call next to read authoritative state\nand its current short Task reference rather than reconstructing criteria from a summary\./u,
+    .replace(/After compaction in the proposal phase, preserve the\n[\s\S]*?reconstructing criteria from a summary\./u,
       "After compaction, call next to read authoritative state\nrather than reconstructing criteria from a summary.")
     .replace(/Cancellation does not close[\s\S]*?unrelated historical contracts\.\n/u, "")
     .replace(/Use sortie_v010_cancel_operator to stop an active grant before changing its scope, following an explicit\noperator-acceptance-remediation-required replacement action, or performing the bounded awaiting-acceptance\nreason=review-blocking replacement above\./u,

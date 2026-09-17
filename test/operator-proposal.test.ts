@@ -7,7 +7,7 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 import { DEFAULT_OPERATOR_PROPOSAL_BUDGET, OPERATOR_PROPOSAL_BUDGET_CAPS, OperatorProposalRuntime } from "../dist/core/operator-proposal.js";
-import { OperatorContractError, OperatorRuntime } from "../dist/core/operator-runtime.js";
+import { OperatorContractError, OperatorRuntime, parseOperatorPlan } from "../dist/core/operator-runtime.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
 import { SortieDogsPlugin } from "../dist/plugin/index.js";
 import { SortieDogsV010Plugin } from "../dist/plugin/profiled.js";
@@ -55,7 +55,7 @@ async function previewHooks(root: string, rootSessionID = "root") {
     messages: async () => ({ data: [] }),
   } } } as never);
 }
-async function previewProposal(root: string) {
+async function previewProposal(root: string, submissions = 1) {
   await mkdir(join(root, "src"), { recursive: true });
   await writeFile(join(root, "src", "input.ts"), "export {};\n");
   const hooks = await previewHooks(root);
@@ -65,7 +65,7 @@ async function previewProposal(root: string) {
     parts: [{ type: "text", text: "Implement the approved result.\ngoal_budget_units: 2" }],
   });
   const started = JSON.parse(await hooks.tool!.sortie_v010_begin_operator_proposal.execute(
-    { intent_json: JSON.stringify(intent()) }, { sessionID: "root" }));
+    { intent_json: JSON.stringify({ ...intent(), proposal_budget: { ...intent().proposal_budget, max_submissions: submissions } }) }, { sessionID: "root" }));
   const key = createHash("sha256").update("v010\0root").digest("hex");
   const ledgerPath = join(root, ".git/sortie-dogs/run-flight-v010", `${key}.json`);
   return { hooks, started, ledgerPath };
@@ -211,6 +211,232 @@ test("proposal admission save failure settles its durable reservation without a 
   assert.equal(snapshot.state.consumed_units, 2);
 }));
 
+test("proposal shape diagnostics identify every malformed scope and missing field without rewriting the packet", async () => fixture(async root => {
+  const { hooks, started } = await previewProposal(root, 2);
+  await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "shape-proposal" }, { args: started.task });
+  await hooks["chat.message"]!({ sessionID: "child", messageID: "shape-child", agent: "dogs-coordinator" }, {
+    message: { agent: "dogs-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+    parts: [{ type: "text", text: started.task.prompt }],
+  });
+  await hooks["tool.execute.before"]!({ tool: "read", sessionID: "child", callID: "shape-read" },
+    { args: { filePath: "src/input.ts" } });
+  const value = { ...packet(1), read_scope: ["src/", "test"], write_scope: ["src/result.ts", "build/", "../private"], extra: true };
+  delete (value as { existing_surface?: unknown }).existing_surface;
+  const original = JSON.stringify(value);
+  const invalid = JSON.parse(await hooks.tool!.sortie_v010_submit_operator_proposal.execute(
+    { proposal_json: original }, { sessionID: "child" }));
+  assert.equal(invalid.status, "invalid-proposal");
+  assert.deepEqual(new Set(invalid.diagnostics.map((d: { pointer: string }) => d.pointer)),
+    new Set(["/extra", "/existing_surface", "/read_scope/0", "/write_scope/1", "/write_scope/2"]));
+  assert.equal(invalid.actual_reads, 1);
+  assert.equal(invalid.remaining_reads, 1);
+  assert.equal(invalid.submissions, 1);
+  assert.equal(JSON.stringify(value), original);
+  assert.doesNotMatch(JSON.stringify(invalid.diagnostics), /private|src\/result|build\//u);
+  assert.equal((await new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE).required("root")).proposal, null);
+  const corrected = JSON.parse(await hooks.tool!.sortie_v010_submit_operator_proposal.execute(
+    { proposal_json: JSON.stringify(packet(1)) }, { sessionID: "child" }));
+  assert.equal(corrected.status, "submitted");
+  assert.equal(corrected.submissions, 2);
+  assert.equal(corrected.remaining_submissions, 0);
+  assert.deepEqual(corrected.proposal.plan.acceptance, requirements.map(item => item.text));
+}));
+
+test("active proposal compaction preserves the claimed child and budgets without an execution run", async () => fixture(async root => {
+  const { hooks, started } = await previewProposal(root);
+  await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "compact-proposal" }, { args: started.task });
+  await hooks["chat.message"]!({ sessionID: "child", messageID: "compact-child", agent: "dogs-coordinator" }, {
+    message: { agent: "dogs-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+    parts: [{ type: "text", text: started.task.prompt }],
+  });
+  await hooks["tool.execute.before"]!({ tool: "read", sessionID: "child", callID: "compact-read" },
+    { args: { filePath: "src/input.ts" } });
+  const runtime = new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE);
+  const before = await runtime.required("root");
+  const summary = { context: [] as string[] };
+  const cold = await previewHooks(root);
+  const system = { system: [] as string[] };
+  await cold["experimental.chat.system.transform"]!({ sessionID: "child" }, system);
+  assert.match(system.system.join("\n"), /SORTIE_PROPOSAL_PHASE investigating/u);
+  assert.match(system.system.join("\n"), /generic continuation/u);
+  const foreign = { system: [] as string[] };
+  await cold["experimental.chat.system.transform"]!({ sessionID: "foreign" }, foreign);
+  assert.equal(foreign.system.length, 0, "unclaimed children receive no proposal context");
+  await cold["experimental.session.compacting"]!({ sessionID: "child" }, summary);
+  assert.match(summary.context.join("\n"), /Proposal continuation/u);
+  assert.match(summary.context.join("\n"), new RegExp(before.intent_id, "u"));
+  assert.match(summary.context.join("\n"), /src\/input\.ts/u);
+  assert.match(summary.context.join("\n"), /remaining_reads.*1/u);
+  assert.doesNotMatch(summary.context.join("\n"), /Read sortie_v010_operator_next/u);
+  const continuation = { enabled: true };
+  await cold["experimental.compaction.autocontinue"]!({ sessionID: "child" }, continuation);
+  assert.equal(continuation.enabled, true);
+  assert.deepEqual(await new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE).required("root"), before);
+  assert.equal(await new OperatorRuntime(root, V010_RUNTIME_PROFILE).read("root"), undefined);
+  const submitted = JSON.parse(await hooks.tool!.sortie_v010_submit_operator_proposal.execute(
+    { proposal_json: JSON.stringify(packet(1)) }, { sessionID: "child" }));
+  assert.equal(submitted.status, "submitted");
+  assert.equal(submitted.reads, 1);
+  assert.equal(submitted.submissions, 1);
+}));
+
+test("proposal shape diagnostics are bounded and never coerce scope paths", async () => fixture(async root => {
+  const runtime = new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE);
+  const state = await runtime.begin("bounded", intent());
+  await runtime.admit("bounded", "shape-call", runtime.task(state));
+  await runtime.bind("bounded", "shape-child", runtime.task(state).prompt);
+  const value = { ...packet(), write_scope: Array.from({ length: 25 }, (_, i) => `output-${i}/`) };
+  await assert.rejects(runtime.submit("bounded", "shape-child", value), error => {
+    assert.ok(error instanceof OperatorContractError);
+    assert.equal(error.diagnostics.length, 16);
+    assert.equal(error.diagnostics_truncated, true);
+    assert.equal(error.diagnostics[0].pointer, "/write_scope/0");
+    assert.equal(error.diagnostics[15].pointer, "/write_scope/15");
+    return true;
+  });
+  assert.equal(value.write_scope[0], "output-0/");
+  assert.equal((await runtime.required("bounded")).submission_count, 1);
+}));
+
+test("malformed proposal JSON gets bounded diagnostics and consumes the same finite submission budget", async () => fixture(async root => {
+  const { hooks, started } = await previewProposal(root, 3);
+  await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "json-proposal" }, { args: started.task });
+  await hooks["chat.message"]!({ sessionID: "child", messageID: "json-child", agent: "dogs-coordinator" }, {
+    message: { agent: "dogs-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+    parts: [{ type: "text", text: started.task.prompt }],
+  });
+  await hooks["tool.execute.before"]!({ tool: "read", sessionID: "child", callID: "json-read" },
+    { args: { filePath: "src/input.ts" } });
+  const malformed = '{"sensitive-placeholder":';
+  for (const count of [1, 2]) {
+    const output = await hooks.tool!.sortie_v010_submit_operator_proposal.execute(
+      { proposal_json: malformed }, { sessionID: "child" });
+    const result = JSON.parse(output);
+    assert.equal(result.status, "invalid-proposal");
+    assert.equal(result.code, "operator-proposal-json-invalid");
+    assert.equal(result.diagnostics[0].pointer, "/");
+    assert.equal(result.diagnostics[0].rule, "json");
+    assert.equal(result.actual_reads, 1);
+    assert.equal(result.submissions, count);
+    assert.equal(result.remaining_submissions, 3 - count);
+    assert.doesNotMatch(output, /sensitive-placeholder|SyntaxError/);
+  }
+  const result = JSON.parse(await hooks.tool!.sortie_v010_submit_operator_proposal.execute(
+    { proposal_json: JSON.stringify(packet(1)) }, { sessionID: "child" }));
+  assert.equal(result.status, "submitted");
+  assert.equal(result.submissions, 3);
+  assert.match(result.next_action, /return to its parent without further tools/u);
+  assert.match(result.next_action, /Do not call operator_next/u);
+  assert.equal(await new OperatorRuntime(root, V010_RUNTIME_PROFILE).read("root"), undefined);
+}));
+
+test("malformed JSON cannot spend a foreign grant or bypass an exhausted submission budget", async () => fixture(async root => {
+  const runtime = new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE);
+  const state = await runtime.begin("json-root", intent());
+  const task = runtime.task(state);
+  await runtime.admit("json-root", "json-call", task);
+  await runtime.bind("json-root", "json-child", task.prompt);
+  await assert.rejects(runtime.submitJSON("json-root", "foreign-child", "{"), /submit-grant-invalid/u);
+  assert.equal((await runtime.required("json-root")).submission_count, 0);
+  await assert.rejects(runtime.submitJSON("json-root", "json-child", "{"), /operator-proposal-json-invalid/u);
+  await assert.rejects(runtime.submitJSON("json-root", "json-child", "{"), /submission-budget-exhausted/u);
+  assert.equal((await runtime.required("json-root")).submission_count, 1);
+}));
+
+test("worker input scopes cannot silently expand a proposal's read declaration", async () => fixture(async root => {
+  const runtime = new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE);
+  const state = await runtime.begin("scope-root", { ...intent(), proposal_budget: { max_reads: 2, max_submissions: 2 } });
+  const task = runtime.task(state);
+  await runtime.admit("scope-root", "scope-call", task);
+  await runtime.bind("scope-root", "scope-child", task.prompt);
+  await runtime.accountRead("scope-root", "scope-child", "src/input.ts");
+  const invalid = packet(1);
+  invalid.plan.units[0]!.read.push("unobserved/input");
+  await assert.rejects(runtime.submit("scope-root", "scope-child", invalid), error => {
+    assert.ok(error instanceof OperatorContractError);
+    assert.equal(error.diagnostics[0]!.code, "operator-proposal-unit-read-scope-expanded");
+    assert.equal(error.diagnostics[0]!.pointer, "/plan/units/0/read/2");
+    assert.doesNotMatch(JSON.stringify(error.diagnostics), /unobserved\/input/u);
+    return true;
+  });
+  const valid = packet(1);
+  valid.plan.units[0]!.write.push("generated/cache");
+  valid.write_scope.push("generated/cache");
+  valid.plan.units[0]!.read.push("generated/cache/result.json");
+  const submitted = await runtime.submit("scope-root", "scope-child", valid);
+  assert.equal(submitted.phase, "submitted", "declared generated output may be read during execution");
+  assert.equal(submitted.submission_count, 2);
+}));
+
+test("a unit cannot read a generated output declared only by a later unit", async () => fixture(async root => {
+  const runtime = new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE);
+  const state = await runtime.begin("ordered-scope-root", intent());
+  const task = runtime.task(state);
+  await runtime.admit("ordered-scope-root", "ordered-scope-call", task);
+  await runtime.bind("ordered-scope-root", "ordered-scope-child", task.prompt);
+  await runtime.accountRead("ordered-scope-root", "ordered-scope-child", "src/input.ts");
+  const invalid = packet(1);
+  invalid.plan.acceptance_proof[0] = ["later-proof"];
+  invalid.plan.goal_declaration.criteria.push({ criterion_id: "later-proof", validation_command: "node test/later.mjs" });
+  invalid.plan.units[0]!.acceptance_indices = [1, 2];
+  invalid.plan.units.push({ ...structuredClone(invalid.plan.units[0]!), id: "u2", title: "Generate later",
+    write: ["generated/later.json"], validation: ["node test/later.mjs"], acceptance_indices: [0] });
+  invalid.plan.units[0]!.read.push("generated/later.json");
+  invalid.write_scope.push("generated/later.json");
+  invalid.budget_estimate.execution_units = 2;
+  invalid.plan.goal_declaration.goal_budget_units = 3;
+  await assert.rejects(runtime.submit("ordered-scope-root", "ordered-scope-child", invalid), error => {
+    assert.ok(error instanceof OperatorContractError);
+    assert.equal(error.diagnostics[0]!.code, "operator-proposal-unit-read-scope-expanded");
+    return true;
+  });
+}));
+
+test("validation annotations are rejected without inventing a command or accepting a manual gate", () => {
+  for (const label of ["root-only", "manual_review", "manual review", "approval"]) {
+    const value = plan();
+    const command = `${label}: inspect the protected user outcome`;
+    value.goal_declaration.criteria[0]!.validation_command = command;
+    value.units[0]!.validation = [command];
+    assert.throws(() => parseOperatorPlan(value), error => {
+      assert.ok(error instanceof OperatorContractError);
+      assert.equal(error.diagnostics[0]!.code, "operator-validation-annotation-invalid");
+      assert.equal(error.diagnostics[0]!.pointer, "/goal_declaration/criteria/0/validation_command");
+      assert.doesNotMatch(JSON.stringify(error.diagnostics), /protected user outcome/u);
+      return true;
+    });
+    assert.equal(value.units[0]!.validation[0], command, "rejection does not strip or rewrite instructions");
+  }
+  const preparatory = plan();
+  preparatory.units[0]!.validation.unshift("prepare: wait for approval");
+  assert.throws(() => parseOperatorPlan(preparatory), error => {
+    assert.ok(error instanceof OperatorContractError);
+    assert.equal(error.diagnostics[0]!.pointer, "/units/0/validation/0");
+    return true;
+  });
+  const inherited: any = plan();
+  delete inherited.goal_declaration.criteria[0].validation_command;
+  inherited.goal_declaration.defaults.validation_command = "manual: inspect outcome";
+  inherited.units[0].validation = [inherited.goal_declaration.defaults.validation_command];
+  assert.throws(() => parseOperatorPlan(inherited), error => {
+    assert.ok(error instanceof OperatorContractError);
+    assert.equal(error.diagnostics[0]!.pointer, "/goal_declaration/defaults/validation_command");
+    return true;
+  });
+  for (const command of [
+    'node test/check.mjs --label "manual: assertion"',
+    '& "C:\\Program Files\\Validator\\check.exe" --mode verify',
+    'C:\\tools\\check.exe --target all',
+    '"./check:custom" --verify',
+    'npm run check:all',
+  ]) {
+    const value = plan();
+    value.goal_declaration.criteria[0]!.validation_command = command;
+    value.units[0]!.validation = [command];
+    assert.equal(parseOperatorPlan(value).units[0]!.validation[0], command);
+  }
+});
+
 test("proposal short reference rejects near misses before spend and expands only in the claimed direct child", async () => fixture(async root => {
   const { hooks, started, ledgerPath } = await previewProposal(root);
   const begin = hooks.tool!.sortie_v010_begin_operator_proposal;
@@ -289,6 +515,41 @@ test("proposal reference survives cold state and legacy exact canonical prompt r
   const changedState = await reopened.begin("legacy-near-miss", intent());
   await assert.rejects(reopened.admit("legacy-near-miss", "changed", { ...changed,
     prompt: `${reopened.task(changedState).prompt} ` }), /dispatch-not-authorized/);
+}));
+
+test("cold single-loader hooks admit the root's saved proposal reference without an execution run", async () => fixture(async root => {
+  const { started, ledgerPath } = await previewProposal(root);
+  const before = await new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE).required("root");
+  const cold = await previewHooks(root);
+  const status = JSON.parse(await cold.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
+  assert.equal(status.proposal.intent_id, before.intent_id);
+  assert.deepEqual(status.task, started.task, "status and begin address the same durable root grant");
+  assert.equal(await new OperatorRuntime(root, V010_RUNTIME_PROFILE).read("root"), undefined);
+
+  const args = structuredClone(started.task);
+  await cold["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "cold-proposal" }, { args });
+  assert.deepEqual(args, started.task, "native Task keeps the exact saved reference");
+  const admitted = await new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE).required("root");
+  assert.equal(admitted.root_session_id, before.root_session_id);
+  assert.equal(admitted.intent_hash, before.intent_hash);
+  assert.deepEqual(admitted.goal_binding, before.goal_binding);
+  assert.equal(admitted.proposal_call_id, "cold-proposal");
+  assert.equal(admitted.read_count, before.read_count);
+  assert.equal(admitted.submission_count, before.submission_count);
+  assert.equal(await new OperatorRuntime(root, V010_RUNTIME_PROFILE).read("root"), undefined,
+    "proposal dispatch never falls through to execution admission");
+  const reserved = await (await RunFlightLedger.openGoal(ledgerPath)).readGoal();
+  assert.equal(reserved.state.outstanding_reservations.length, 1);
+
+  const child = { message: { agent: "dogs-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+    parts: [{ type: "text", text: started.task.prompt }] };
+  await cold["chat.message"]!({ sessionID: "cold-child", messageID: "cold-child-user", agent: "dogs-coordinator" }, child);
+  assert.match(child.parts[0]!.text, /^SORTIE_OPERATOR_PROPOSAL /u);
+  assert.equal((await new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE).required("root")).proposal_session_id, "cold-child");
+  await cold["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "cold-proposal" }, { output: "End fixture." });
+  const settled = await (await RunFlightLedger.openGoal(ledgerPath)).readGoal();
+  assert.equal(settled.state.outstanding_reservations.length, 0);
+  assert.equal(settled.state.consumed_units, 1);
 }));
 
 test("proposal child claim is serialized, direct-parent-bound, replay-safe, and first-child immutable", async () => fixture(async root => {
@@ -731,6 +992,9 @@ test("proposal tool returns bounded typed proof diagnostics and accepts correcte
   assert.match(hooks.tool!.sortie_v010_submit_operator_proposal.description, /Omit plan\.acceptance.*host derives its exact ordered text/u);
   for (const description of [hooks.tool!.sortie_v010_submit_operator_proposal.description,
     (hooks.tool!.sortie_v010_submit_operator_proposal.args.proposal_json as { description: string }).description]) {
+    assert.match(description, /existing_surface array of \{requirement_id:string,path:string,form:string\}/u);
+    assert.match(description, /no trailing slash/u);
+    assert.match(description, /only and all IDs whose intent kind is negative/u);
     assert.match(description, /revision positive integer, for example "revision":1, never string "revision":"1"/u);
     assert.match(description, /strictly rejects invalid types without coercion/u);
     assert.match(description, /unit\.validation is the complete ordered execution list, not a tests-only list/u);
@@ -1064,4 +1328,107 @@ test("cold proposal state rejects stale proposal content or identity without res
     content_hash: submitted.proposal_hash, compared_requirement_ids: requirements.map(item => item.id), decision: "approve",
     rationale: "Persist a valid approved phase." });
   assert.equal((await new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE).required("valid-approved")).phase, "approved");
+}));
+
+test("the canonical investigation prompt guides bounded reading without weakening the packet contract", async () => fixture(async root => {
+  const runtime = new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE);
+  const prompt = runtime.task(await runtime.begin("reading-root", intent())).prompt;
+  for (const fragment of [
+    "authoritative_refsと既知entrypointから始める",
+    "directory巡回を挟まず直接そこへ進み",
+    "path未知の時だけ許可scope内のdirectoryやindexをReadして実在を確認する",
+    "名前を推測しただけのReadをしない",
+    "既存経路、symbol、validation oracle、build recipeを結び付ける",
+    "既知location・目次・周辺範囲から必要なoffset/limitを選ぶ",
+    "部分Readは探索手段であって完了条件ではない",
+    "必要ならfile全体を読む",
+    "読込量の少なさ自体を達成度にしない",
+    "package/build scriptは後回しにせず",
+    "新しい未解決点、参照先、範囲不足、source変化のいずれかを理由とする",
+    "Read以外のtoolは要求しない",
+    "raw sourceやlogの全文再掲",
+    "初回提出で全requirementを扱えるproposalを目指し",
+    "uncoveredへ正直に残す",
+    "薄いproposalを出してrootへ追加調査を戻す往復を前提にしない",
+  ]) assert.ok(prompt.includes(fragment), `bounded reading guidance must state: ${fragment}`);
+
+  // The revision must not smuggle in a new capability, role, schema or a fixed read quota.
+  assert.ok(prompt.includes("許可read scope外、source編集、bash、Task、worker実行は禁止"),
+    "the existing read-only prohibition must stay intact");
+  for (const tool of ["grep", "glob", "webfetch", "sortie_v010_operator_next",
+    "dog-scout", "dog-worker", "dog-reviewer"]) {
+    assert.ok(!prompt.toLowerCase().includes(tool), `the read-only investigation must not grant ${tool}`);
+  }
+  assert.doesNotMatch(prompt, /\d+\s*(read|Read)(以内|まで|上限)/u, "no fixed read quota may replace the host budget");
+  assert.doesNotMatch(prompt, /全文読込(禁止|不可)/u, "a full read must stay available when the range is insufficient");
+  for (const preserved of ["existing_surfaceは各covered requirementにつき最低1件",
+    "coverageはnegative/qualityを含む全ordered requirement IDを各1回含める",
+    "unit.validationはtestだけでなく実行順の完全なcommand列",
+    "永続・一時を問わず全generator outputはunit.writeへ含める",
+    "budget_estimate.proposal_readsは推測したfile数でなく、このTaskで完了したRead tool call数",
+    "actual_readsはhostのcanonical accounting"]) {
+    assert.ok(prompt.includes(preserved), `existing contract must survive: ${preserved}`);
+  }
+}));
+
+test("an admitted proposal child that terminates without submission is released only by explicit cancellation", async () => fixture(async root => {
+  const { hooks, started } = await previewProposal(root, 3);
+  await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "stuck-proposal" }, { args: started.task });
+  await hooks["chat.message"]!({ sessionID: "child", messageID: "stuck-child", agent: "dogs-coordinator" }, {
+    message: { agent: "dogs-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+    parts: [{ type: "text", text: started.task.prompt }],
+  });
+  await hooks["tool.execute.before"]!({ tool: "read", sessionID: "child", callID: "stuck-read" }, { args: { filePath: "src/input.ts" } });
+  // The native child returns without a submitted proposal, which settles its reservation as failed.
+  const returned: { output: string } = { output: "" };
+  await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "stuck-proposal" }, returned as never);
+  assert.equal(JSON.parse(returned.output).status, "investigating");
+
+  const stuck = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
+  assert.equal(stuck.proposal.task_admitted, true);
+  assert.equal(Object.hasOwn(stuck, "task"), false);
+  assert.match(stuck.next_action, /cancel_operator with no reason to release this grant/u);
+  const registry = new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE);
+  const admitted = await registry.required("root");
+  await assert.rejects(registry.admit("root", "replacement-call", registry.task(admitted)), /operator-proposal-dispatch-not-authorized/,
+    "the terminated child must never be redispatched or replaced");
+  await assert.rejects(registry.bind("root", "replacement-child", registry.task(admitted).prompt), /operator-proposal-grant-invalid/);
+  await assert.rejects(hooks.tool!.sortie_v010_begin_operator_proposal.execute(
+    { intent_json: JSON.stringify({ ...intent(), authoritative_refs: ["user:u2"] }) }, { sessionID: "root" }),
+    /operator-proposal-active-intent-immutable/, "the frozen intent stays immutable while the grant is held");
+  await assert.rejects(hooks.tool!.sortie_v010_cancel_operator.execute({ reason: "review-blocking" }, { sessionID: "root" }),
+    /operator-cancel-reason-invalid/, "a pre-approval release takes no reason");
+
+  const cancelled = JSON.parse(await hooks.tool!.sortie_v010_cancel_operator.execute({}, { sessionID: "root" }));
+  assert.equal(cancelled.status, "cancelled");
+  assert.equal(cancelled.scope, "proposal");
+  assert.equal(cancelled.released_proposal.reads, 1);
+  assert.equal(cancelled.released_proposal.submissions, 0);
+  assert.match(cancelled.next_action, /spent reads\/submissions are not restored/u);
+  assert.equal(await new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE).read("root"), undefined);
+  await assert.rejects(hooks.tool!.sortie_v010_cancel_operator.execute({}, { sessionID: "root" }), /operator-run-missing/,
+    "a released root without any grant stays absent");
+
+  const retried = JSON.parse(await hooks.tool!.sortie_v010_begin_operator_proposal.execute(
+    { intent_json: JSON.stringify({ ...intent(), authoritative_refs: ["user:u2"] }) }, { sessionID: "root" }));
+  assert.equal(retried.status, "investigating");
+  assert.equal(retried.reads, 1);
+  assert.equal(retried.remaining_reads, 1);
+  assert.notEqual(retried.intent_id, stuck.proposal.intent_id);
+  await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "retry-proposal" }, { args: retried.task });
+  assert.equal((await new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE).required("root")).proposal_call_id, "retry-proposal");
+}));
+
+test("cancellation keeps an approved proposal bound to its execution lane", async () => fixture(async root => {
+  const registry = new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE);
+  const started = await registry.begin("approved-root", intent()); const task = registry.task(started);
+  await registry.admit("approved-root", "approved-call", task);
+  await registry.bind("approved-root", "approved-child", task.prompt);
+  await registry.accountRead("approved-root", "approved-child", "src/input.ts");
+  const submitted = await registry.submit("approved-root", "approved-child", packet(1));
+  await registry.approve("approved-root", { proposal_id: submitted.proposal_id, revision: submitted.proposal_revision,
+    content_hash: submitted.proposal_hash, compared_requirement_ids: requirements.map(item => item.id), decision: "approve",
+    rationale: "Approve the exact resubmitted proposal." });
+  assert.equal(await registry.discardPreApproval("approved-root"), undefined);
+  assert.equal((await new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE).required("approved-root")).phase, "approved");
 }));

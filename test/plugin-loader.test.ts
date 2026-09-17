@@ -125,7 +125,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       join(consumer, "node_modules", "sortie-dogs", "package.json"),
       "utf8",
     )) as { version?: string; scripts?: { prebuild?: string } };
-    assert.equal(installedPackage.version, "0.10.0");
+    assert.equal(installedPackage.version, "0.10.1");
     assert.equal(
       installedPackage.scripts?.prebuild,
       "node --input-type=module --eval \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true });\"",
@@ -139,7 +139,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     ], { cwd: packedProject });
     assert.equal(
       await readFile(join(packedProject, ".opencode", "sortie-dogs-v010.version"), "utf8"),
-      "0.10.0-v0912-language4-cost-rpt10-compaction-ref1-proposal1-review-remediation1-surface3\n",
+      "0.10.0-v0912-language4-cost-rpt10-compaction-ref1-proposal1-review-remediation1-surface3-proposal-recovery2-quality1\n",
     );
     const packedPrimary = await readFile(join(packedProject, ".opencode", "agent", "dog-operator.md"), "utf8");
     assert.match(packedPrimary, /^mode: primary$/m);
@@ -382,7 +382,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.ok(loaded.previewTools.includes("sortie_v010_prepare_operator"));
     assert.ok(loaded.previewTools.every(name => name.startsWith("sortie_v010_")));
     assert.equal(loaded.previewAssets.length, 8);
-    assert.ok(loaded.previewAssets.every(asset => asset.version === "0.10.0-v0912-language4-cost-rpt10-compaction-ref1-proposal1-review-remediation1-surface3"));
+    assert.ok(loaded.previewAssets.every(asset => asset.version === "0.10.0-v0912-language4-cost-rpt10-compaction-ref1-proposal1-review-remediation1-surface3-proposal-recovery2-quality1"));
     assert.deepEqual(loaded.previewAssets.map(({ name, installPath }) => ({ name, installPath })), [
       { name: "dog-operator", installPath: "agent/dog-operator.md" },
       { name: "dog-worker-v010", installPath: "agent/dog-worker-v010.md" },
