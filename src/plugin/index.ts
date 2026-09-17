@@ -112,7 +112,7 @@ import { EvidenceCapsuleStore } from "../core/evidence-capsule.js";
 import { RunFlightLedger, diagnosisContractHash, type DiagnosisSelection, type FlightObservation } from "../core/run-flight-ledger.js";
 import { GOAL_BOUND_METADATA_KEY, goalFingerprint, selectGoalDelivery, validGoalEvidence,
   type GoalAcceptanceContract, type GoalDeliveryMode, type GoalEvidence, type GoalFlightState,
-  type GoalStopReason, type GoalTerminalReceipt } from "../core/goal-bound.js";
+  type GoalStopReason, type GoalTerminalReceipt, type GoalValidationRetryAuthorization } from "../core/goal-bound.js";
 import { LUNA_FABRIC_MAX_ACTIVE } from "../core/luna-fabric-scheduler.js";
 import { terminalRescueModel } from "./terminal-rescue-binding.js";
 import type { ModelTarget } from "./model-routing.js";
@@ -125,8 +125,11 @@ import type { ChildTerminalEvidence, ChildTerminalObservation } from "../core/ch
 import { collectRunMetrics, createSortieResult, createGoalReport, insertRunMetrics, insertSortieResult, replaceDoneTerminalStatus,
   replaceTerminalStatus, sanitizeTerminalReport, terminalRunOutcome } from "./run-metrics.js";
 import type { RunMetricsClient } from "./run-metrics.js";
-import { STABLE_RUNTIME_PROFILE } from "../core/runtime-profile.js";
+import { profileAgent, STABLE_RUNTIME_PROFILE } from "../core/runtime-profile.js";
 import type { RuntimeBridge } from "./runtime-bridge.js";
+import { evidenceFromObservedExecution } from "../core/observed-goal-evidence.js";
+import { validationEvidenceKey } from "../core/validation-budget.js";
+import { receiptBoundTerminalText } from "./receipt-presentation.js";
 
 const INPUT_LIMITS = { config: 64 * 1024, manifest: 512 * 1024, handoff: 2 * 1024 * 1024, parallel: 512 * 1024 } as const;
 const INSPECTION_CACHE = { maximum: 256, ttlMilliseconds: 30 * 60 * 1000 } as const;
@@ -159,6 +162,12 @@ const FAILURE_SWARM_PREPARE = "sortie_prepare_failure_swarm";
 const FAILURE_SWARM_SELECT = "sortie_select_failure_diagnosis";
 /** Both implementation roles share one dispatch contract; the durable run route selects which one. */
 const IMPLEMENTATION_AGENTS = new Set([SERIAL_WORKER_AGENT, LUNA_FABRIC_WORKER_AGENT]);
+/**
+ * A model-authored unit estimate covers the planned path and routinely omits in-goal remediation,
+ * which strands unattended runs on an approval they cannot obtain. Bounded headroom above that
+ * estimate keeps repairs inside the same accepted goal; an explicit user limit is never expanded.
+ */
+const GOAL_UNIT_HEADROOM_RATIO = 2;
 const CANONICAL_CONTRACT_DIRECTORY = ".sortie-dogs/contracts";
 const CANONICAL_CONTRACT_HANDOFF = `${CANONICAL_CONTRACT_DIRECTORY}/handoff.json`;
 const GENERATED_PARALLEL_ACCEPTANCE = "Complete the prepared parallel descriptor within its declared scope.";
@@ -552,7 +561,7 @@ async function protectedScopeDigest(projectRoot: string, paths: readonly string[
   return goalFingerprint({ manifest_hash: `sha256:${manifestHash}`, entries });
 }
 
-async function protectedSnapshot(authorization: SessionAuthorization): Promise<{
+async function protectedSnapshot(authorization: Pick<SessionAuthorization, "manifestPath" | "manifestHash" | "projectRoot">): Promise<{
   readonly binding: NonNullable<GoalEvidence["protected_binding"]>;
   readonly source: string;
   readonly candidate: string;
@@ -1575,6 +1584,11 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   const goalLedgerFiles = new Map<string, string>();
   const goalLedgerDirectories = new Set<string>();
   const goalReservations = new Map<string, { readonly root: string; readonly reservationID: string; readonly unitID: string; readonly started: number }>();
+  const operatorContractRepairResumes = new Map<string, { readonly root: string; readonly unitID: string;
+    readonly childSessionID: string; readonly repairFingerprint: string;
+    readonly retryAuthorization: GoalValidationRetryAuthorization | null;
+    readonly retryBinding: import("../core/operator-runtime.js").OperatorRepairValidationRetryBinding | null;
+    callID: string | null }>();
   const goalReservationRecoveries = new Map<string, Promise<void>>();
   const hostGoalExecutions = new Map<string, HostGoalExecution>();
   const goalValidationDefects = new Set<string>();
@@ -1731,6 +1745,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       const legacyExists = await stat(legacyPath).then((value) => value.isFile()).catch(() => false);
       const leaseRoot = legacyExists ? await durableScopeRoot(projectRoot).catch(() => undefined) : await durableScopeRoot(projectRoot);
       if (leaseRoot !== undefined) goalLedgerDirectories.add(join(dirname(leaseRoot), runtimeProfile.flightDirectory));
+      // Career history is read-only and spans the stable predecessor. Execution
+      // ledgers, grants and dispatch continue to use this profile's own directory.
+      if (leaseRoot !== undefined && runtimeProfile.id !== "stable") goalLedgerDirectories.add(join(dirname(leaseRoot), STABLE_RUNTIME_PROFILE.flightDirectory));
       // Existing roots remain on their original owner so an in-flight pre-upgrade goal is not forked.
       if (legacyExists) {
         goalLedgerFiles.set(root, legacyPath);
@@ -1828,12 +1845,14 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     if (snapshot === undefined) return;
     const root = goalRoot(identity.parentID);
     const ledger = await goalLedger(root);
-    const goal = (await ledger.readGoal()).state;
+    const goalSnapshot = await ledger.readGoal(), goal = goalSnapshot.state;
     let validation: HostGoalExecution["validation"];
     if (goal.goal_id !== null) {
       const unitID = authorization.taskID;
-      const unitBound = unitID !== undefined && goal.outstanding_reservations.some((reservation) =>
-        reservation.unit_id === unitID && reservation.session_id === identity.parentID);
+      const repairResume = operatorContractRepairResumes.get(root);
+      const unitBound = unitID !== undefined && (goal.outstanding_reservations.some((reservation) =>
+        reservation.unit_id === unitID && reservation.session_id === identity.parentID) ||
+        (repairResume?.unitID === unitID && repairResume.childSessionID === toolInput.sessionID && repairResume.callID !== null));
       const criteria = goal.acceptance_contract?.criteria.filter((criterion) =>
         criterion.validation_command === rawCommand && criterion.expected_outcome === "pass") ?? [];
       const denyValidation = (reason: string): Error => {
@@ -1848,20 +1867,28 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         source_snapshot: snapshot.source, candidate: snapshot.candidate, command: [rawCommand], scope,
         expected_evidence: [...new Set(criteria.flatMap((criterion) => [criterion.criterion_id, ...criterion.oracle_coverage,
           `unit:${unitID}`, "source_snapshot", "candidate", "command", "scope", "exit_code"]))], reason: "acceptance" };
-      let reservation: Awaited<ReturnType<RunFlightLedger["reserveValidation"]>>;
-      try {
-        // A changed candidate produces a new evidence key and must not become a user-facing blocker
-        // merely because earlier necessary validations consumed the initial estimate. Duplicate
-        // evidence remains denied by reserveValidation before this limit is considered.
-        const validationLimit = Math.max(goal.budget?.max_units ?? 1, goal.validation_budget.consumed + 1);
-        reservation = await ledger.reserveValidation(request, validationLimit);
-      } catch (error) {
-        throw denyValidation(`authority-unavailable:${error instanceof Error ? error.name : "unknown"}`);
+      const retained = repairResume?.childSessionID === toolInput.sessionID && repairResume.unitID === unitID &&
+        repairResume.callID !== null
+        ? goal.validation_budget.reservations.filter(item => item.evidence_key === validationEvidenceKey(request)) : [];
+      if (retained.length === 1) {
+        const continued = { ...request, operation_id: retained[0]!.operation_id };
+        validation = { ledger, request: continued, reservation: retained[0]!.reservation_id };
+      } else {
+        let reservation: Awaited<ReturnType<RunFlightLedger["reserveValidation"]>>;
+        try {
+          // A changed candidate produces a new evidence key and must not become a user-facing blocker
+          // merely because earlier necessary validations consumed the initial estimate. Duplicate
+          // evidence remains denied by reserveValidation before this limit is considered.
+          const validationLimit = Math.max(goal.budget?.max_units ?? 1, goal.validation_budget.consumed + 1);
+          reservation = repairResume?.retryAuthorization === null || repairResume === undefined
+            ? await ledger.reserveValidation(request, validationLimit)
+            : await ledger.reserveInterruptedValidationRetry(request, validationLimit, repairResume.retryAuthorization);
+        } catch (error) {
+          throw denyValidation(`authority-unavailable:${error instanceof Error ? error.name : "unknown"}`);
+        }
+        if (reservation.decision !== "ALLOW" || reservation.reservation_id === null) throw denyValidation(reservation.reason);
+        validation = { ledger, request, reservation: reservation.reservation_id };
       }
-      if (reservation.decision !== "ALLOW" || reservation.reservation_id === null) {
-        throw denyValidation(reservation.reason);
-      }
-      validation = { ledger, request, reservation: reservation.reservation_id };
     }
     hostGoalExecutions.set(toolInput.callID, { root, projectRoot: authorization.projectRoot,
       sessionID: toolInput.sessionID,
@@ -1879,7 +1906,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const rawStatus = metadata?.status ?? output.status;
     const outcome = exitCode === 0 ? "pass" : exitCode !== undefined ? "fail"
       : rawStatus === "cancel" || rawStatus === "cancelled" ? "cancel" : undefined;
-    const validationOutcome: ValidationOutcome = exitCode === 0 ? "passed" : exitCode !== undefined ? "failed" : "interrupted";
+    const validationOutcome: ValidationOutcome = exitCode === 0 ? "passed" : exitCode !== undefined ? "failed"
+      : rawStatus === "cancel" || rawStatus === "cancelled" ? "cancelled" : "interrupted";
     if (execution.validation !== undefined) {
       await execution.validation.ledger.settleValidation(execution.validation.reservation, execution.validation.request,
         validationOutcome, exitCode ?? null);
@@ -2061,7 +2089,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const state = (await ledger.readGoal()).state;
     if (state.goal_id === null || state.receipt !== null || state.outstanding_reservations.length > 0 || state.acceptance_fingerprint === null) return state.receipt ?? undefined;
     const records = (await ledger.readGoal()).records;
-    const settledEvidence = records.flatMap(({ event }) => event.kind === "unit.settled" ? event.evidence : []);
+    const settledEvidence = records.flatMap(({ event }) => event.kind === "unit.settled" || event.kind === "unit.evidence-reconciled" ? event.evidence : []);
     if (status === "succeeded" && (state.acceptance_contract === null ||
       state.acceptance_contract.criteria.length === 0 ||
       !state.acceptance_contract.criteria.every(({ criterion_id }) => state.satisfied_criteria.includes(criterion_id)))) return undefined;
@@ -2371,9 +2399,11 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     // A model-authored Task declaration must not silently shrink the host's policy allowance.
     // It may request more capacity, while explicit later budget revisions remain cumulative.
     const explicitUserLimit = explicitUserGoalUnitLimits.get(sessionID);
-    const maxUnits = declaredUnits === undefined ? state.budget?.max_units ?? 32 :
+    const plannedUnits = declaredUnits === undefined || explicitUserLimit === declaredUnits
+      ? declaredUnits : Math.ceil(declaredUnits * GOAL_UNIT_HEADROOM_RATIO);
+    const maxUnits = plannedUnits === undefined ? state.budget?.max_units ?? 32 :
       state.budget?.source === "policy-default" && explicitUserLimit !== declaredUnits
-        ? Math.max(state.budget.max_units, declaredUnits) : declaredUnits;
+        ? Math.max(state.budget.max_units, plannedUnits) : plannedUnits;
     const declaredTime = Number(handoffValue(entries, ["goal_budget_time_ms"]));
     const declaredCost = Number(handoffValue(entries, ["goal_budget_cost_usd"]));
     const timeBudget = Number.isFinite(declaredTime) && declaredTime > 0 ? declaredTime : state.budget?.time_ms ?? null;
@@ -2484,31 +2514,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         execution.root === reservation.root && execution.endedAt !== undefined &&
         execution.startedAt.length > 0 && Date.parse(execution.startedAt) >= reservation.started - 1000 &&
         execution.immutableRef !== undefined && execution.fresh === true)
-      .map((execution): GoalEvidence | undefined => {
-        const contract = state.acceptance_contract?.criteria.filter((criterion) =>
-          criterion.validation_command === execution.command[0] && criterion.expected_outcome === "pass" &&
-          criterion.proof_scope === "requested-full");
-        if (contract === undefined || contract.length === 0 || execution.exitCode !== 0 || execution.outcome !== "pass") return undefined;
-        const first = contract[0]!;
-        const compatible = contract.every((criterion) => criterion.target === first.target &&
-          criterion.entrypoint === first.entrypoint && criterion.workload === first.workload &&
-          criterion.fixture === first.fixture && criterion.build_boundary === first.build_boundary &&
-          criterion.proof_scope === first.proof_scope &&
-          JSON.stringify(criterion.oracle_coverage) === JSON.stringify(first.oracle_coverage));
-        if (!compatible) return undefined;
-        return { evidence_id: execution.immutableRef!,
-          goal_id: state.goal_id!, goal_revision: state.revision, scope_epoch: state.scope_epoch,
-          acceptance_fingerprint: state.acceptance_fingerprint!,
-          measurement: { criterion_ids: contract.map((criterion) => criterion.criterion_id), target: first.target,
-            entrypoint: first.entrypoint, workload: first.workload, oracle_coverage: first.oracle_coverage,
-            build_boundary: first.build_boundary },
-          identity: { source: first.source_binding === "current-protected" ? execution.source : first.source,
-            candidate: first.candidate_binding === "current-protected" ? execution.candidate : first.candidate,
-            fixture: first.fixture }, protected_binding: execution.binding,
-          execution: { command: execution.command, exit_code: execution.exitCode, outcome: execution.outcome,
-            started_at: execution.startedAt, ended_at: execution.endedAt!, units: [reservation.unitID] },
-          proof_scope: first.proof_scope };
-      }).filter((entry): entry is GoalEvidence => entry !== undefined);
+      .flatMap(execution => execution.exitCode === undefined || execution.outcome === undefined ? [] : evidenceFromObservedExecution({
+        ...execution, immutableRef: execution.immutableRef!, endedAt: execution.endedAt!, fresh: execution.fresh!,
+        exitCode: execution.exitCode, outcome: execution.outcome }, state, reservation.unitID));
     // A worker may return after a user scope epoch changed. Settle its spend/reservation, but only
     // adopt observations still bound to the current accepted source/candidate/criterion contract.
     const acceptedEvidence = hostEvidence.filter((entry) => validGoalEvidence(entry, state) &&
@@ -2524,11 +2532,11 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       output.status === "cancel" || output.status === "cancelled";
     const hostBindingDefect = childSessionID !== undefined && [...(bindingDenials.get(reservation.root)?.values() ?? [])]
       .some((candidateDenials) => [...candidateDenials.values()].includes(childSessionID));
-    const failedAcceptanceExecution = [...hostGoalExecutions.values()].some((execution) =>
+    const failedAcceptanceExecution = [...hostGoalExecutions.values()].find((execution) =>
       execution.root === reservation.root && execution.sessionID === childSessionID &&
       execution.endedAt !== undefined && Date.parse(execution.startedAt) >= reservation.started - 1000 &&
       execution.outcome === "fail");
-    const processDefect = !failedAcceptanceExecution && (childSessionID === undefined || hostBindingDefect ||
+    const processDefect = failedAcceptanceExecution === undefined && (childSessionID === undefined || hostBindingDefect ||
       goalValidationDefects.has(childSessionID) || !validated);
     const resultClass = validated ? "acceptance" : interrupted ? "interrupted" : processDefect ? "process-defect" : "acceptance";
     await ledger.appendGoal({ kind: "unit.settled", at: new Date().toISOString(),
@@ -2540,8 +2548,12 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     await input.runtimeBridge?.onSerialSettlement?.({
       rootSessionID: reservation.root, callID, unitID: reservation.unitID,
       ...(childSessionID === undefined ? {} : { childSessionID }),
-      disposition: progress ? "succeeded" : interrupted ? "cancelled" : "failed",
+      disposition: validated ? "succeeded" : interrupted ? "cancelled" : "failed",
       evidence: acceptedEvidence, resultClass,
+      ...(resultClass === "acceptance" && failedAcceptanceExecution !== undefined ? { failure: {
+        command: failedAcceptanceExecution.command.slice(0, 8), outcome: "fail" as const,
+        exitCode: failedAcceptanceExecution.exitCode ?? null,
+      } } : {}),
     });
     if (childSessionID !== undefined) {
       goalValidationDefects.delete(childSessionID);
@@ -2561,6 +2573,90 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     });
     if (finished) fastLane.workerCompleted(rootSessionID);
     return true;
+  }
+
+  async function recoverUnitEvidence(root: string, request: { unitID: string; childSessionID: string; manifestPath: string;
+    manifestHash: string; goalFingerprint: string }): Promise<readonly GoalEvidence[]> {
+    if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) throw new Error("operator-coordinator-required");
+    const ledger = await goalLedger(root), snapshot = await ledger.readGoal(), goal = snapshot.state;
+    if (goal.acceptance_fingerprint !== request.goalFingerprint || goal.phase !== "active" || goal.receipt !== null || goal.outstanding_reservations.length) {
+      throw new Error("operator-recovery-goal-not-ready");
+    }
+    const defect = [...snapshot.records].reverse().map(record => record.event).find(event => event.kind === "unit.settled" &&
+      event.unit_id === request.unitID && event.result_class === "process-defect" && !event.evidence.length);
+    if (defect?.kind !== "unit.settled") throw new Error("operator-recovery-defect-missing");
+    const identity = await hostSessionIdentity(request.childSessionID);
+    if (identity?.parentID === undefined || (identity.parentID !== root && coordinatorRootForSession(request.childSessionID) !== root)) {
+      throw new Error("operator-recovery-child-owner-mismatch");
+    }
+    const current = await protectedSnapshot({ projectRoot: input.directory, manifestPath: request.manifestPath, manifestHash: request.manifestHash });
+    if (!current) throw new Error("operator-recovery-snapshot-unavailable");
+    const prior = snapshot.records.map(record => record.event).find(event => event.kind === "unit.evidence-reconciled" && event.previous_receipt_id === defect.receipt_id);
+    if (prior?.kind === "unit.evidence-reconciled") {
+      if (!prior.evidence.every(entry => entry.identity.source === current.source && entry.identity.candidate === current.candidate && validGoalEvidence(entry, goal))) {
+        throw new Error("operator-recovery-evidence-stale");
+      }
+      return prior.evidence;
+    }
+    const liveEvidence = [...hostGoalExecutions.values()]
+      .filter(execution => execution.root === root && execution.sessionID === request.childSessionID && execution.endedAt !== undefined &&
+        execution.exitCode === 0 && execution.outcome === "pass" && execution.immutableRef !== undefined && execution.fresh === true &&
+        execution.source === current.source && execution.candidate === current.candidate)
+      .flatMap(execution => evidenceFromObservedExecution({ ...execution, endedAt: execution.endedAt!, exitCode: 0,
+        outcome: "pass", immutableRef: execution.immutableRef!, fresh: true }, goal, request.unitID))
+      .filter(entry => validGoalEvidence(entry, goal));
+    if (liveEvidence.length > 0) {
+      const refreshed = await refreshProtectedSnapshot(input.directory, current.binding);
+      if (!refreshed || refreshed.source !== current.source || refreshed.candidate !== current.candidate) {
+        throw new Error("operator-recovery-proof-unavailable-or-stale");
+      }
+      await ledger.appendGoal({ kind: "unit.evidence-reconciled", at: new Date().toISOString(), goal_id: goal.goal_id!, unit_id: request.unitID,
+        previous_receipt_id: defect.receipt_id, evidence: liveEvidence });
+      return liveEvidence;
+    }
+    const messages = input.client?.session?.messages;
+    if (!messages) throw new Error("operator-recovery-host-evidence-unavailable");
+    const response = await messages.call(input.client!.session, { path: { id: request.childSessionID }, query: { directory: input.directory } });
+    const payload: unknown = isRecord(response) && "data" in response ? response.data : response;
+    if (!Array.isArray(payload) || payload.length > 1000) throw new Error("operator-recovery-host-evidence-invalid");
+    const evidence: GoalEvidence[] = [];
+    const seen = new Set<string>();
+    for (const message of payload) {
+      if (!isRecord(message) || !isRecord(message.info) || message.info.role !== "assistant" || message.info.sessionID !== request.childSessionID || !Array.isArray(message.parts)) continue;
+      for (const part of message.parts) {
+        if (!isRecord(part) || part.type !== "tool" || !["bash", "shell"].includes(String(part.tool)) || typeof part.callID !== "string" || seen.has(part.callID) ||
+            !isRecord(part.state) || part.state.status !== "completed" || !isRecord(part.state.metadata) || part.state.metadata.exit !== 0 ||
+            !isRecord(part.state.input) || typeof part.state.input.command !== "string" || !isRecord(part.state.time)) continue;
+        const timing = part.state.time;
+        if (typeof timing.start !== "number" || typeof timing.end !== "number" || !Number.isFinite(timing.start) || !Number.isFinite(timing.end) || timing.end < timing.start) continue;
+        const command = [normalizeCommand(part.state.input.command)];
+        const criteria = goal.acceptance_contract?.criteria.filter(criterion => criterion.validation_command === command[0] && criterion.expected_outcome === "pass") ?? [];
+        if (!criteria.length) continue;
+        const scope = criteria.every(criterion => criterion.proof_scope === "requested-full") ? "full" : "targeted";
+        const expected = [...new Set(criteria.flatMap(criterion => [criterion.criterion_id, ...criterion.oracle_coverage,
+          `unit:${request.unitID}`, "source_snapshot", "candidate", "command", "scope", "exit_code"]))];
+        const key = validationEvidenceKey({ run_id: goal.goal_id!, operation_id: part.callID, source_snapshot: current.source,
+          candidate: current.candidate, command, scope, expected_evidence: expected, reason: "acceptance" });
+        const admission = snapshot.records.map(record => record.event).find(event => event.kind === "validation.admission" &&
+          event.operation_id === part.callID && event.decision === "ALLOW" && event.evidence_key === key);
+        if (admission?.kind !== "validation.admission") continue;
+        const settled = snapshot.records.some(({ event }) => event.kind === "validation.settled" && event.reservation_id === admission.reservation_id &&
+          event.operation_id === part.callID && event.evidence_key === key && event.outcome === "passed" && event.exit_code === 0);
+        if (!settled) continue;
+        seen.add(part.callID);
+        const startedAt = new Date(timing.start).toISOString(), endedAt = new Date(timing.end).toISOString();
+        const immutableRef = goalFingerprint({ root, child_session_id: request.childSessionID, call_id: part.callID, command,
+          started_at: startedAt, ended_at: endedAt, exit_code: 0, outcome: "pass", source: current.source, candidate: current.candidate });
+        evidence.push(...evidenceFromObservedExecution({ ...current, command, immutableRef, startedAt, endedAt, exitCode: 0, outcome: "pass", fresh: true }, goal, request.unitID));
+      }
+    }
+    const refreshed = await refreshProtectedSnapshot(input.directory, current.binding);
+    if (!evidence.length || !refreshed || refreshed.source !== current.source || refreshed.candidate !== current.candidate || !evidence.every(entry => validGoalEvidence(entry, goal))) {
+      throw new Error("operator-recovery-proof-unavailable-or-stale");
+    }
+    await ledger.appendGoal({ kind: "unit.evidence-reconciled", at: new Date().toISOString(), goal_id: goal.goal_id!, unit_id: request.unitID,
+      previous_receipt_id: defect.receipt_id, evidence });
+    return evidence;
   }
 
   // Project config read is required discovery for its opt-in; no reflection storage/version read
@@ -2616,6 +2712,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       resumeAttempts: transition.resumeAttempts,
     }),
     { issueTicket: issueGoalTicket },
+    input.runtimeBridge?.continuationCheckpoint,
   );
   const completedCoordinatorMessages = new Set<string>();
   const completedCoordinatorParts = new Set<string>();
@@ -6139,7 +6236,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         appLogInfo("run-metrics.snapshot", textInput.sessionID, {
           available: metrics !== undefined,
           outcome: runOutcome,
-          runtimeAssetVersion: RUNTIME_ASSET_VERSION,
+          runtimeAssetVersion,
           ...(sortieResult === undefined ? {} : {
             resultID: sortieResult.result_id,
             resultMission: sortieResult.mission.status,
@@ -6628,6 +6725,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
             });
           }
           fastLane.workerCompleted(toolInput.sessionID!);
+          const repair = operatorContractRepairResumes.get(toolInput.sessionID!);
+          if (repair?.callID === toolInput.callID) operatorContractRepairResumes.delete(toolInput.sessionID!);
         }
         if (completedChildSessionID !== undefined && !recoverableWorkerChildren.has(completedChildSessionID)) {
           evictSession(completedChildSessionID);
@@ -7026,18 +7125,52 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         // Accounting is provisional until this dispatch is fully admitted. A later denial such as a
         // budget stop must release the serial slot, or no worker could be dispatched or resumed again.
         const workerAccounting = fastLane.snapshotWorkerAccounting(toolInput.sessionID);
+        if (toolInput.tool === "task" && isRecord(output.args) && output.args.subagent_type === REVIEWER_AGENT &&
+            typeof output.args.prompt === "string" && /^\s*review_phase:\s*(verification|final)\s*$/mu.test(output.args.prompt) &&
+            !fastLane.hasReviewLineage(toolInput.sessionID, output.args.prompt) && isCoordinatorSession(toolInput.sessionID)) {
+          const reviewGoal = await goalLedger(toolInput.sessionID).then(ledger => ledger.readGoal());
+          let reviewSince = Number.POSITIVE_INFINITY, reviewFingerprint: string | undefined;
+          for (const { event } of reviewGoal.records) {
+            if (event.kind === "goal.accepted" || (event.kind === "goal.revised" && event.acceptance_fingerprint !== reviewFingerprint)) {
+              reviewSince = Date.parse(event.at); reviewFingerprint = event.acceptance_fingerprint;
+            }
+          }
+          const response = await input.client?.session?.messages?.({ path: { id: toolInput.sessionID },
+            query: { directory: input.directory } }).catch(() => undefined);
+          const messages = isRecord(response) && "data" in response ? response.data : response;
+          const prompts: string[] = [];
+          if (Array.isArray(messages)) for (const message of messages.slice(-1000)) {
+            if (!isRecord(message) || !isRecord(message.info) || message.info.role !== "assistant" ||
+                message.info.sessionID !== toolInput.sessionID || !Array.isArray(message.parts)) continue;
+            if (!isRecord(message.info.time) || typeof message.info.time.created !== "number" || message.info.time.created < reviewSince) continue;
+            for (const part of message.parts) {
+              if (isRecord(part) && part.type === "tool" && part.tool === "task" && isRecord(part.state) && part.state.status === "completed" &&
+                  isRecord(part.state.input) && part.state.input.subagent_type === REVIEWER_AGENT && typeof part.state.input.prompt === "string") prompts.push(part.state.input.prompt);
+            }
+          }
+          fastLane.restoreReviewLineage(toolInput.sessionID, output.args.prompt, prompts);
+        }
         const resumedWorkerSessionID = fastLane.beforeTool(toolInput.sessionID, toolInput.tool, output.args, {
           readonlyDiagnosisAuthorized: readonlyDiagnosis,
           consultationFallbackAuthorized,
           parallelWorkerAlreadyBound,
           parallelWorkerAuthorized,
         });
+        const registeredRepair = operatorContractRepairResumes.get(toolInput.sessionID);
+        const repairResume = registeredRepair !== undefined && resumedWorkerSessionID === registeredRepair.childSessionID &&
+          isRecord(output.args) && output.args.task_id === registeredRepair.childSessionID &&
+          handoffValue(handoffEntries(String(output.args.prompt ?? "")), ["task_id"]) === registeredRepair.unitID &&
+          String(output.args.prompt ?? "").includes(`repair_fingerprint: ${registeredRepair.repairFingerprint}`);
+        if (registeredRepair !== undefined && resumedWorkerSessionID !== undefined && !repairResume) {
+          throw new Error("operator-contract-repair-resume-identity-mismatch");
+        }
         try {
         if (toolInput.tool === "task" && taskRole !== undefined && IMPLEMENTATION_AGENTS.has(taskRole) &&
-          isRecord(output.args)) {
+          isRecord(output.args) && !repairResume) {
           await reserveGoalDispatch(toolInput.sessionID, toolInput.callID,
             typeof output.args.prompt === "string" ? output.args.prompt : "");
         }
+        if (repairResume) registeredRepair!.callID = toolInput.callID;
         if (validatedRootAcceptance !== undefined && reservedParallelDescriptor === undefined) {
           rootAcceptanceContinuity.delete(toolInput.sessionID);
           rootAcceptanceContinuity.set(toolInput.sessionID, validatedRootAcceptance);
@@ -7051,7 +7184,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
             parallelCalls.set(toolInput.callID, recoverableParallel);
             parallelRecoverableChildren.delete(resumedWorkerSessionID);
           }
-          recoverableWorkerChildren.delete(resumedWorkerSessionID);
+          if (!repairResume) recoverableWorkerChildren.delete(resumedWorkerSessionID);
         }
         if (toolInput.tool === "task" && taskRole !== undefined && IMPLEMENTATION_AGENTS.has(taskRole)) {
           if (readonlyDiagnosis && isRecord(output.args)) await claimDiagnosisTask(toolInput.sessionID, toolInput.callID, output.args, true);
@@ -7370,6 +7503,376 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     },
   };
   input.runtimeBridge?.connected?.({
+    renderReturnReport: async (root, text, expectedReceipt) => {
+      let rendered: string | undefined;
+      await serializeChatTransition(root, async () => {
+      if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) return undefined;
+      const ledger = await goalLedger(root), snapshot = await ledger.readGoal(), receipt = snapshot.state.receipt;
+      if (receipt?.status !== "succeeded" || goalFingerprint(receipt) !== expectedReceipt) return undefined;
+      const metrics = await collectRunMetrics(input.client, root, input.directory, Date.now(), {
+        startedAt: receipt.started_at, endedAt: receipt.ended_at,
+      }).catch(() => undefined);
+      let result = createSortieResult(receipt, snapshot.state, metrics, new Date().toISOString(), snapshot.records);
+      let records = snapshot.records;
+      try {
+        const report = createGoalReport(result, receipt);
+        if (!records.some(({ event }) => event.kind === "goal.reported" && event.report.terminal_key === report.terminal_key)) {
+          await ledger.appendGoal({ kind: "goal.reported", at: new Date().toISOString(), goal_id: receipt.goal_id, report });
+          records = (await ledger.readGoal()).records;
+        }
+        const currentPath = goalLedgerFiles.get(goalRoot(root));
+        if (currentPath) {
+          const { collectCareer } = await import("./sortie-career.js");
+          result = { ...result, career: await collectCareer([...goalLedgerDirectories], currentPath, records, path => RunFlightLedger.readGoalFile(path)) };
+        }
+      } catch { appLogInfo("run-metrics.career-unavailable", root, { profile: runtimeProfile.id }, "warn"); }
+      rendered = insertSortieResult(receiptBoundTerminalText(text, receipt), result);
+      });
+      return rendered;
+    },
+    currentReceipt: async root => {
+      if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) return undefined;
+      return (await currentGoal(root))?.receipt ?? undefined;
+    },
+    assertActiveGoal: async (root, fingerprint) => {
+      if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) throw new Error("operator-coordinator-required");
+      const goal = await currentGoal(root);
+      if (!goal || goal.phase !== "active" || goal.receipt !== null || goal.acceptance_fingerprint !== fingerprint || goal.outstanding_reservations.length) {
+        throw new Error("operator-resume-goal-identity-mismatch");
+      }
+    },
+    retainOperatorContractRepairWorker: async (root, taskID, childSessionID) => {
+      if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) throw new Error("operator-coordinator-required");
+      if (sessionTaskIDs.get(childSessionID) !== taskID || coordinatorRootForSession(childSessionID) !== root) {
+        throw new Error("operator-contract-repair-child-identity-mismatch");
+      }
+      recoverableWorkerChildren.add(childSessionID);
+    },
+    assertOperatorContractRepairValidationAvailable: async (root, taskID, childSessionID) => {
+      if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) throw new Error("operator-coordinator-required");
+      const snapshot = await goalLedger(root).then(ledger => ledger.readGoal()), state = snapshot.state;
+      if (state.goal_id === null || state.acceptance_fingerprint === null || state.phase !== "active" || state.receipt !== null || state.outstanding_reservations.length !== 0 ||
+          (state.validation_budget.limit !== null && state.validation_budget.consumed >= state.validation_budget.limit)) {
+        throw new Error("operator-contract-repair-validation-budget-unavailable");
+      }
+      const defect = [...snapshot.records].reverse().map(item => item.event).find(event => event.kind === "unit.settled" &&
+        event.unit_id === taskID && event.result_class === "process-defect" && event.evidence.length === 0);
+      const accounting = fastLane.snapshotWorkerAccounting(root);
+      const child = await hostSessionIdentity(childSessionID);
+      // Host identities reach this layer as canonical roles; a profile-suffixed name never matches.
+      const durableChild = child?.agent === SERIAL_WORKER_AGENT && child?.parentID === root;
+      if (durableChild && defect?.kind === "unit.settled") {
+        sessionTaskIDs.set(childSessionID, taskID);
+        recoverableWorkerChildren.add(childSessionID);
+      }
+      // A resumed root process holds no dispatch memory. Refusing the repair on that absence alone
+      // strands the diagnosed candidate, so only live accounting that contradicts the repair denies it.
+      const liveAccountingInvalid = accounting !== undefined && !fastLane.workerAccountingCold(root) &&
+        (accounting.workerDispatches < 1 || accounting.workerResumeUsed || accounting.workerTaskID !== taskID);
+      if (defect?.kind !== "unit.settled" || !recoverableWorkerChildren.has(childSessionID) || sessionTaskIDs.get(childSessionID) !== taskID ||
+          (!durableChild && coordinatorRootForSession(childSessionID) !== root) || liveAccountingInvalid) {
+        throw new Error("operator-contract-repair-validation-resume-unavailable");
+      }
+    },
+    authorizeOperatorContractRepairValidation: async (root, taskID, childSessionID, repairFingerprint) => {
+      if (!/^sha256:[a-f0-9]{64}$/u.test(repairFingerprint)) throw new Error("operator-contract-repair-fingerprint-invalid");
+      const snapshot = await goalLedger(root).then(ledger => ledger.readGoal()), state = snapshot.state;
+      const child = await hostSessionIdentity(childSessionID);
+      const durableChild = child?.agent === SERIAL_WORKER_AGENT && child?.parentID === root;
+      if (durableChild) {
+        sessionTaskIDs.set(childSessionID, taskID);
+        recoverableWorkerChildren.add(childSessionID);
+      }
+      // In a resumed root process the durable worker identity, not lost dispatch memory, carries
+      // the single validation-only continuation this repair is allowed to hand back.
+      const resumeAuthorized = fastLane.authorizeRecoverableWorkerResume(root, taskID, childSessionID) ||
+        (durableChild && fastLane.workerAccountingCold(root) &&
+          fastLane.authorizeRepairValidationRetry(root, taskID, childSessionID));
+      if (state.goal_id === null || state.phase !== "active" || state.receipt !== null || state.outstanding_reservations.length !== 0 ||
+          !recoverableWorkerChildren.has(childSessionID) || !resumeAuthorized) {
+        throw new Error("operator-contract-repair-validation-resume-unavailable");
+      }
+      operatorContractRepairResumes.set(root, { root, unitID: taskID, childSessionID, repairFingerprint,
+        retryAuthorization: null, retryBinding: null, callID: null });
+    },
+    authorizeOperatorContractRepairValidationRetry: async (root, source) => {
+      if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) throw new Error("operator-coordinator-required");
+      const { taskID, operatorRunID, operatorUnitID, childSessionID, operatorAcceptanceFingerprint,
+        validationCommands, repairFingerprint, declarationFingerprint, binding } = source;
+      if (!/^sha256:[a-f0-9]{64}$/u.test(repairFingerprint)) throw new Error("operator-contract-repair-fingerprint-invalid");
+      const snapshot = await goalLedger(root).then(ledger => ledger.readGoal()), state = snapshot.state;
+      const defect = [...snapshot.records].reverse().map(item => item.event).find(event => event.kind === "unit.settled" &&
+        event.unit_id === taskID && event.result_class === "process-defect" && event.evidence.length === 0);
+      const child = await hostSessionIdentity(childSessionID);
+      const sameRoot = child?.parentID === root || coordinatorRootForSession(childSessionID) === root;
+      const declaredCommands = new Set((state.acceptance_contract?.criteria ?? [])
+        .filter(criterion => criterion.expected_outcome === "pass" && criterion.validation_command !== undefined)
+        .map(criterion => normalizeCommand(criterion.validation_command!)));
+      const commands = validationCommands.map(normalizeCommand);
+      if (state.goal_id === null || state.acceptance_fingerprint === null || state.phase !== "active" || state.receipt !== null || state.outstanding_reservations.length !== 0 ||
+          state.acceptance_fingerprint !== declarationFingerprint || defect?.kind !== "unit.settled" || !sameRoot ||
+          commands.length === 0 || commands.some(command => !declaredCommands.has(command)) ||
+          binding.authority !== "operator-repair-validation-retry" || binding.operator_run_id !== operatorRunID ||
+          binding.unit_id !== operatorUnitID || binding.operator_acceptance_fingerprint !== operatorAcceptanceFingerprint ||
+          JSON.stringify(binding.validation_commands) !== JSON.stringify(validationCommands) ||
+          binding.repair_fingerprint !== repairFingerprint ||
+          !fastLane.authorizeRepairValidationRetry(root, taskID, childSessionID)) {
+        throw new Error("operator-contract-repair-validation-retry-unavailable");
+      }
+      sessionTaskIDs.set(childSessionID, taskID);
+      sessionParents.set(childSessionID, child!.parentID!);
+      sessionRoots.set(childSessionID, root);
+      recoverableWorkerChildren.add(childSessionID);
+      operatorContractRepairResumes.set(root, { root, unitID: taskID, childSessionID, repairFingerprint,
+        retryAuthorization: { authority: binding.authority, operator_run_id: binding.operator_run_id, unit_id: taskID,
+          operator_generation: binding.operator_generation, plan_hash: binding.plan_hash, control_hash: binding.control_hash,
+          goal_fingerprint: state.acceptance_fingerprint, repair_fingerprint: binding.repair_fingerprint },
+        retryBinding: structuredClone(binding), callID: null });
+    },
+    activateOperatorContractRepairValidationRetry: async (root, request) => {
+      if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) throw new Error("operator-coordinator-required");
+      const child = await hostSessionIdentity(request.childSessionID);
+      const registered = operatorContractRepairResumes.get(root);
+      if (child?.agent !== SERIAL_WORKER_AGENT || child.parentID !== root ||
+          !/^sha256:[a-f0-9]{64}$/u.test(request.repairFingerprint) ||
+          registered === undefined || registered.root !== root || registered.unitID !== request.taskID ||
+             registered.childSessionID !== request.childSessionID || registered.repairFingerprint !== request.repairFingerprint ||
+             registered.callID !== request.callID || JSON.stringify(registered.retryBinding) !== JSON.stringify(request.binding)) {
+        throw new Error("operator-contract-repair-validation-retry-identity-mismatch");
+      }
+      rememberParent(request.childSessionID, root);
+      sessionRoots.set(request.childSessionID, root);
+      sessionTaskIDs.set(request.childSessionID, request.taskID);
+      recoverableWorkerChildren.add(request.childSessionID);
+      operatorContractRepairResumes.set(root, { root, unitID: request.taskID, childSessionID: request.childSessionID,
+        repairFingerprint: request.repairFingerprint, retryAuthorization: registered.retryAuthorization,
+        retryBinding: structuredClone(request.binding), callID: request.callID });
+      activateSession(request.childSessionID);
+    },
+    finishOperatorContractRepairValidation: async (root, childSessionID) => {
+      if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) throw new Error("operator-coordinator-required");
+      const child = await hostSessionIdentity(childSessionID);
+      if (child?.parentID !== root && coordinatorRootForSession(childSessionID) !== root) {
+        throw new Error("operator-contract-repair-child-identity-mismatch");
+      }
+      recoverableWorkerChildren.delete(childSessionID);
+      for (const [callID, execution] of hostGoalExecutions) {
+        if (execution.root === root && execution.sessionID === childSessionID) hostGoalExecutions.delete(callID);
+      }
+      evictSession(childSessionID);
+    },
+    restoreAcceptedUnit: async (root, request) => {
+      if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) throw new Error("operator-coordinator-required");
+      const snapshot = await goalLedger(root).then(ledger => ledger.readGoal());
+      if (snapshot.state.phase !== "active" || snapshot.state.receipt !== null) throw new Error("operator-continuity-goal-not-active");
+      const proved = snapshot.records.some(({ event }) => (event.kind === "unit.settled" || event.kind === "unit.evidence-reconciled") &&
+        event.goal_id === snapshot.state.goal_id && event.unit_id === request.taskID && event.evidence.length > 0);
+      if (!proved) throw new Error("operator-continuity-accepted-unit-missing");
+      const source = await readFile(request.handoffPath);
+      if (createHash("sha256").update(source).digest("hex") !== request.handoffHash) throw new Error("operator-continuity-control-changed");
+      const handoff = validateHandoffSchema(JSON.parse(source.toString("utf8")));
+      if (!handoff.ok || handoff.value.id !== request.taskID) throw new Error("operator-continuity-handoff-invalid");
+      const accepted = inspectAcceptanceContinuity(handoff.value);
+      if (!accepted.ledger || accepted.ledger.task_id !== request.taskID) throw new Error("operator-continuity-ledger-invalid");
+      const current = rootAcceptanceContinuity.get(root);
+      if (current !== undefined) {
+        if (current.fingerprint !== accepted.ledger.fingerprint) throw new Error("operator-continuity-newer-state");
+        if (current.task_id === accepted.ledger.task_id) return;
+      }
+      rootAcceptanceContinuity.set(root, accepted.ledger);
+    },
+    restoreAcceptanceLineage: async (root, request) => {
+      if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) throw new Error("operator-coordinator-required");
+      if (request.fingerprint !== acceptanceContinuityFingerprint(request.criteria) || request.currentTaskIDs.length === 0 ||
+          new Set(request.currentTaskIDs).size !== request.currentTaskIDs.length) throw new Error("operator-continuity-lineage-invalid");
+      const snapshot = await goalLedger(root).then(ledger => ledger.readGoal());
+      if (snapshot.state.phase !== "active" || snapshot.state.receipt !== null) throw new Error("operator-continuity-goal-not-active");
+      const current = new Set(request.currentTaskIDs);
+      let acceptedUnitID: string | undefined;
+      for (const { event } of [...snapshot.records].reverse()) {
+        if ((event.kind === "unit.settled" || event.kind === "unit.evidence-reconciled") && !current.has(event.unit_id) &&
+            event.evidence.length > 0 && (event.kind === "unit.evidence-reconciled" ||
+              (event.disposition === "succeeded" && (event.result_class ?? "acceptance") === "acceptance"))) {
+          acceptedUnitID = event.unit_id;
+          break;
+        }
+      }
+      // A predecessor that never had a unit accepted leaves no lineage to restore. The replacement's
+      // ordered acceptance is still carried forward by contract preparation, so absence is not a defect.
+      if (acceptedUnitID === undefined) return;
+      const ledger: AcceptanceContinuityLedger = { schema_version: "0.1", authority: "dispatch", task_id: acceptedUnitID,
+        criteria: [...request.criteria], fingerprint: request.fingerprint, parent_fingerprint: "none" };
+      const existing = rootAcceptanceContinuity.get(root);
+      if (existing !== undefined && (existing.fingerprint !== ledger.fingerprint || existing.task_id !== ledger.task_id)) {
+        throw new Error("operator-continuity-newer-state");
+      }
+      rootAcceptanceContinuity.set(root, ledger);
+    },
+    restoreAcceptanceRemediationBaseline: async (root, request) => {
+      if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) throw new Error("operator-coordinator-required");
+      if (request.fingerprint !== acceptanceContinuityFingerprint(request.criteria)) {
+        throw new Error("operator-acceptance-remediation-lineage-invalid");
+      }
+      const snapshot = await goalLedger(root).then(ledger => ledger.readGoal());
+      if (snapshot.state.phase !== "active" || snapshot.state.receipt !== null) throw new Error("operator-continuity-goal-not-active");
+      const failed = [...snapshot.records].reverse().find(({ event }) => event.kind === "unit.settled" &&
+        event.goal_id === snapshot.state.goal_id && event.unit_id === request.failedTaskID && event.disposition === "failed" &&
+        event.result_class === "acceptance" && event.evidence.length === 0);
+      const processDefectReverseIndex = [...snapshot.records].reverse().findIndex(({ event }) => event.kind === "unit.settled" &&
+        event.goal_id === snapshot.state.goal_id && event.unit_id === request.failedTaskID && event.disposition === "failed" &&
+        event.result_class === "process-defect" && event.evidence.length === 0);
+      const processDefectIndex = processDefectReverseIndex < 0 ? -1 : snapshot.records.length - processDefectReverseIndex - 1;
+      const repairValidationFailure = processDefectIndex < 0 ? undefined : snapshot.records.slice(processDefectIndex + 1)
+        .find(({ event }, index, records) => event.kind === "validation.settled" && event.goal_id === snapshot.state.goal_id &&
+          event.outcome === "failed" && Number.isSafeInteger(event.exit_code) && records.some(({ event: admission }) =>
+            admission.kind === "validation.admission" && admission.goal_id === event.goal_id &&
+            admission.reservation_id === event.reservation_id && admission.operation_id === event.operation_id &&
+            admission.evidence_key === event.evidence_key));
+      // A host-reconciled committed process defect can require new acceptance proof without a
+      // failing validator. Restoring its baseline must not claim that missing proof passed.
+      if (failed === undefined && repairValidationFailure === undefined && processDefectIndex < 0) {
+        throw new Error("operator-acceptance-remediation-failure-missing");
+      }
+      const current = rootAcceptanceContinuity.get(root);
+      // The replacement's own dispatched unit is this run's in-flight state, not newer accepted state.
+      // Only a different goal fingerprint or a unit outside this baseline and run is a real conflict.
+      const known = current !== undefined && current.fingerprint === request.fingerprint &&
+        (current.task_id === request.failedTaskID || request.currentTaskIDs.includes(current.task_id));
+      if (current !== undefined && !known) throw new Error("operator-continuity-newer-state");
+      rootAcceptanceContinuity.delete(root);
+    },
+    currentBudget: async root => {
+      if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) throw new Error("operator-coordinator-required");
+      const state = await currentGoal(root);
+      if (state.goal_id === null || state.budget === null) return null;
+      const reserved = state.outstanding_reservations.length;
+      return { max_units: state.budget.max_units, consumed_units: state.consumed_units,
+        reserved_units: reserved, remaining_units: Math.max(0, state.budget.max_units - state.consumed_units - reserved) };
+    },
+    registerGoalDeclaration: async (root, prompt) => {
+      if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) throw new Error("operator-coordinator-required");
+      const registered = await bindGoalDeclaration(root, prompt);
+      if (registered?.goal_id === null || registered === undefined) throw new Error("operator-goal-registration-unavailable");
+    },
+    relinkRegisteredGoal: async (root, request) => {
+      if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) throw new Error("operator-coordinator-required");
+      const ledger = await goalLedger(root), snapshot = await ledger.readGoal(), state = snapshot.state;
+      if (state.phase !== "active" || state.receipt !== null) throw new Error("operator-resume-goal-not-active");
+      if (state.outstanding_reservations.length > 0) throw new Error("operator-resume-goal-reservation-active");
+      const expanded = await resolveGoalPrompt(request.prompt);
+      const declaration = resolveGoalDeclaration(state, expanded).declaration;
+      if (declaration?.fingerprint !== request.expectedFingerprint) throw new Error("operator-resume-registered-goal-control-mismatch");
+      if (state.acceptance_fingerprint === request.expectedFingerprint) return;
+      const registeredAt = Date.parse(request.registeredAt);
+      if (!Number.isFinite(registeredAt)) throw new Error("operator-resume-registration-time-invalid");
+      if (state.latest_user_message_id === null || goalDeclarationAuthority.get(root) !== state.latest_user_message_id) {
+        throw new Error("operator-resume-latest-approval-missing");
+      }
+      const related = snapshot.records.some(({ event }) => event.kind === "goal.accepted" &&
+        event.goal_id === state.goal_id && Date.parse(event.at) <= registeredAt);
+      const latestApproval = [...snapshot.records].reverse().find(({ event }) => event.kind === "goal.user-continued" &&
+        event.goal_id === state.goal_id && event.origin_user_message_id === state.latest_user_message_id);
+      if (!related || latestApproval === undefined || Date.parse(latestApproval.event.at) < registeredAt) {
+        throw new Error("operator-resume-registered-goal-relation-missing");
+      }
+      if (snapshot.records.some(({ event }) => (event.kind === "goal.accepted" || event.kind === "goal.revised") &&
+        event.goal_id === state.goal_id && Date.parse(event.at) >= registeredAt)) {
+        throw new Error("operator-resume-registered-goal-newer-scope");
+      }
+      const continuity = { goalID: state.goal_id, origin: state.origin_user_message_id,
+        consumedUnits: state.consumed_units, consumedTime: state.consumed_time_ms, consumedCost: state.consumed_cost_usd,
+        validation: JSON.stringify(state.validation_budget), outstanding: JSON.stringify(state.outstanding_reservations) };
+      const registered = await bindGoalDeclaration(root, request.prompt);
+      if (registered === undefined || registered.goal_id !== continuity.goalID || registered.origin_user_message_id !== continuity.origin ||
+          registered.acceptance_fingerprint !== request.expectedFingerprint || registered.consumed_units !== continuity.consumedUnits ||
+          registered.consumed_time_ms !== continuity.consumedTime || registered.consumed_cost_usd !== continuity.consumedCost ||
+          JSON.stringify(registered.validation_budget) !== continuity.validation ||
+          JSON.stringify(registered.outstanding_reservations) !== continuity.outstanding) {
+        throw new Error("operator-resume-goal-relink-continuity-mismatch");
+      }
+    },
+    proposalGoalBinding: async root => {
+      if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) throw new Error("operator-coordinator-required");
+      const state = await currentGoal(root);
+      if (state === undefined || state.goal_id === null || state.acceptance_fingerprint === null || state.phase !== "active" || state.receipt !== null) {
+        throw new Error("operator-proposal-active-goal-required");
+      }
+      return { goal_id: state.goal_id, revision: state.revision, scope_epoch: state.scope_epoch,
+        acceptance_fingerprint: state.acceptance_fingerprint };
+    },
+    reserveProposalBudget: (root, intentID, callID, binding) => serializeChatTransition(root, async () => {
+      if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) throw new Error("operator-coordinator-required");
+      const ledger = await goalLedger(root), snapshot = await ledger.readGoal(), state = snapshot.state;
+      if (state.goal_id !== binding.goal_id || state.revision !== binding.revision || state.scope_epoch !== binding.scope_epoch ||
+          state.acceptance_fingerprint !== binding.acceptance_fingerprint || state.phase !== "active" || state.receipt !== null) {
+        throw new Error("operator-proposal-goal-binding-stale");
+      }
+      const unitID = `proposal:${intentID}`;
+      const reservationID = goalFingerprint({ goal_id: binding.goal_id, unit_id: unitID, call_id: callID });
+      const prior = snapshot.records.find(({ event }) => event.kind === "dispatch.reserved" && event.reservation_id === reservationID);
+      if (prior !== undefined) {
+        if (prior.event.kind !== "dispatch.reserved" || prior.event.unit_id !== unitID || prior.event.session_id !== root) {
+          throw new Error("operator-proposal-budget-reservation-conflict");
+        }
+        return;
+      }
+      await ledger.appendGoal({ kind: "dispatch.reserved", at: new Date().toISOString(), reservation_id: reservationID,
+        goal_id: binding.goal_id, unit_id: unitID, session_id: root, ticket_id: null });
+    }),
+    settleProposalBudget: (root, intentID, callID, disposition) => serializeChatTransition(root, async () => {
+      if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) throw new Error("operator-coordinator-required");
+      const ledger = await goalLedger(root), snapshot = await ledger.readGoal(), state = snapshot.state;
+      if (state.goal_id === null) throw new Error("operator-proposal-active-goal-required");
+      const unitID = `proposal:${intentID}`;
+      const reservationID = goalFingerprint({ goal_id: state.goal_id, unit_id: unitID, call_id: callID });
+      const reserved = snapshot.records.find(({ event }) => event.kind === "dispatch.reserved" && event.reservation_id === reservationID);
+      if (reserved === undefined) throw new Error("operator-proposal-budget-reservation-missing");
+      const settled = snapshot.records.find(({ event }) => event.kind === "unit.settled" && event.reservation_id === reservationID);
+      if (settled !== undefined) {
+        if (settled.event.kind !== "unit.settled" || settled.event.disposition !== disposition) {
+          throw new Error("operator-proposal-budget-settlement-conflict");
+        }
+        return;
+      }
+      await ledger.appendGoal({ kind: "unit.settled", at: new Date().toISOString(), reservation_id: reservationID,
+        receipt_id: goalFingerprint({ proposal_intent_id: intentID, call_id: callID, disposition }), goal_id: state.goal_id,
+        unit_id: unitID, disposition, result_class: disposition === "succeeded" ? "acceptance" : disposition === "cancelled" ? "interrupted" : "process-defect",
+        progress_fingerprint: null, evidence: [], elapsed_ms: null, cost_usd: null });
+    }),
+    assertProposalExecutionBudget: async (root, binding, executionUnits) => {
+      if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) throw new Error("operator-coordinator-required");
+      const state = await currentGoal(root);
+      if (state === undefined || state.goal_id !== binding.goal_id || state.revision !== binding.revision ||
+          state.scope_epoch !== binding.scope_epoch || state.acceptance_fingerprint !== binding.acceptance_fingerprint ||
+          state.phase !== "active" || state.receipt !== null) throw new Error("operator-proposal-goal-binding-stale");
+      if (!Number.isSafeInteger(executionUnits) || executionUnits < 1 || state.budget === null ||
+          state.budget.max_units - state.consumed_units - state.outstanding_reservations.length < executionUnits) {
+        throw new Error("operator-proposal-execution-budget-insufficient");
+      }
+    },
+    hasNoGoalReservation: async (root, unitID, callID) => {
+      if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) return false;
+      const snapshot = await goalLedger(root).then(ledger => ledger.readGoal());
+      if (!snapshot.state.goal_id || snapshot.state.phase !== "active" || snapshot.state.receipt !== null || snapshot.state.outstanding_reservations.length) return false;
+      const expected = goalFingerprint({ goal_id: snapshot.state.goal_id, unit_id: unitID, call_id: callID });
+      return !snapshot.records.some(({ event }) => event.kind === "dispatch.reserved" && event.reservation_id === expected);
+    },
+    recoverUnitEvidence,
+    completeRoot: async (sessionID, acceptanceFingerprint) => {
+      if (!isCoordinatorSession(sessionID) && !await recoverCoordinatorRoot(sessionID)) throw new Error("operator-coordinator-required");
+      await recoverCompletedGoalReservations(sessionID);
+      const goal = await currentGoal(sessionID);
+      if (goal?.acceptance_fingerprint !== acceptanceFingerprint) throw new Error("operator-acceptance-fingerprint-mismatch");
+      if (goal.receipt?.status === "stopped" || goal.phase === "stopped") throw new Error("operator-goal-stopped");
+      // Same proof/freshness/reservation gate used by terminal text, requested
+      // explicitly by the root instead of inferred from a model's wording.
+      const receipt = goal.receipt ?? await terminalGoal(sessionID, "completed", "succeeded");
+      if (receipt?.status !== "succeeded") return { status: "awaiting-evidence" };
+      // Acceptance must return its receipt to the active tool call. Revoking
+      // continuation timers is not a user-requested session cancellation.
+      await continuation.stopAutomaticRecovery(sessionID, false, true);
+      return { status: "succeeded", receipt };
+    },
     isRoot: async sessionID => isCoordinatorSession(sessionID) || await recoverCoordinatorRoot(sessionID),
     enableUnits: (sessionID, maximum) => {
       if (!isCoordinatorSession(sessionID)) throw new Error("operator-coordinator-required");

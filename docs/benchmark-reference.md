@@ -19,6 +19,15 @@ three revisions changed from `succeeded / failed / failed` to three successful
 settlements, followed by a successful terminal receipt and persisted return report.
 This regression check is **not** a benchmark quality result for the fixed release.
 
+The v0.10 runner profile is qualification-only. It preserves the pinned official task inputs, commits,
+one attempt, zero retries, 90-minute limits, verifier, stop gates, and cleanup contract, but runs only the
+Sortie arm; the already-collected Bare baseline is not rerun. Before execution it fixes project initialization
+to `--profile v010`, the v0.10 runtime asset module/marker and required assets, `dog-operator`, and Sol/high.
+Only native completed `dog-worker-v010` descendant identities recovered read-only from the pinned host metadata
+database count as implementation children; proposal and execution delegates do not. The v0.10 isolated config
+sets `subagent_depth:2` while stable config remains unchanged. This qualification cannot be used as a paired baseline comparison. Astra model
+composition remains a separate-manifest experiment.
+
 ## Which historical observations are shown?
 
 The README shows the latest archived **complete measured pair**, not the best result

@@ -34,9 +34,11 @@ Preview release target: [v0.10.0-beta.1](https://github.com/zufall-upon/Sortie-d
 
 ## Provisional quality–cost position
 
-**Reference values, not a successful benchmark claim.** Quality and end-to-end completion
-problems remain. The latest completed qualification attempt ended at `IN_PROGRESS`, so its official
-verifier was not run. Further benchmarks are frozen while completion defects are repaired.
+**Reference values, not a successful benchmark claim.** The 2026-09-17 v0.10 qualification-only
+run completed its operation and official verifier, but returned reward **0**: F2P **8/9** and P2P
+**94/94**. It used only the Sortie arm, no fresh Bare control, and a localized Docker-free verifier,
+so it is not a paired benchmark or a FrontierHarness leaderboard result. A preceding debug run
+returned reward 1 (F2P 9/9, P2P 94/94), showing single-run variance rather than a reproducible pass.
 
 The last complete measured **Bare OpenCode vs Sortie** pair below used one frozen task,
 `datacurve/anko-typed-variable-bindings`, on 2026-09-10. It used Sortie **v0.9.5**, not the
@@ -51,9 +53,23 @@ current release. Both candidates failed the official verifier.
 | Median agent wall · n=1 | 28.7 min | 10.0 min |
 | Premium-model token share · Sol | 100% | 20.1% |
 
+The current v0.10 release candidate also has this standalone clean qualification
+reference. It is shown separately because it has no fresh Bare control and is not
+methodology-comparable to the paired table above.
+
+| Metric · one task, one clean qualification | Sortie v0.10.0-beta.1 |
+| --- | ---: |
+| Verified PASS | 0/1 |
+| Task-check completion · F2P | 88.9% · 8/9 |
+| Retained checks · P2P | 94/94 |
+| Agent wall · n=1 | 29.9 min |
+| Comparison eligibility | No · qualification-only |
+| FrontierHarness leaderboard result | No · localized Docker-free verifier |
+
 Later Sortie-only evidence is weaker: the v0.9.9 recovery candidate passed **5/9** task
-checks with **0/1 Verified PASS**; `0.9.11-bench.2` did not reach a gradeable completion.
-Those attempts are not pooled into the historical pair above.
+checks with **0/1 Verified PASS**; `0.9.11-bench.2` did not reach a gradeable completion;
+the 2026-09-17 v0.10 clean qualification completed at **8/9 F2P**, **94/94 P2P**, and
+**0/1 Verified PASS**. These attempts are not pooled into the historical pair above.
 
 ![Historical quality–cost reference: Bare at $5.42 and 55.6% task-check completion; Sortie v0.9.5 at $1.46 and 88.9%. Neither achieved Verified PASS.](docs/assets/quality-cost-reference.svg)
 

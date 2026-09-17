@@ -357,6 +357,9 @@ for (const report of [
 
 test("a repeated nonterminal recovery report compacts and resumes instead of looping", async () => {
   const host = fakeHost({ agent: COORDINATOR });
+  const checkpoint = JSON.stringify({ authority: "durable-operator-state", root_session_id: "ses_root",
+    run_id: "operator-run", generation: 5, current_unit_id: "unit-3", current_unit_status: "pending",
+    next_task_ref: "SORTIE_OPERATOR_TASK_REF recovery", next_action: "call operator_status, then operator_next" });
   let hooks!: ReturnType<typeof createContinuationHooks>;
   const mutableSession = host.client.session as {
     summarize: NonNullable<NonNullable<ContinuationClient["session"]>["summarize"]>;
@@ -369,7 +372,8 @@ test("a repeated nonterminal recovery report compacts and resumes instead of loo
     await hooks.textComplete({ sessionID: request.path.id }, { text: recoverySummary() });
     return { data: true };
   };
-  hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
+  hooks = createContinuationHooks(host.client, "/project", POLICY, FAST, undefined, undefined, undefined,
+    async sessionID => sessionID === "ses_root" ? checkpoint : undefined);
   const report = "⛔ **BLOCKED** `task` — waiting without progress";
 
   hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" });
@@ -389,6 +393,10 @@ test("a repeated nonterminal recovery report compacts and resumes instead of loo
   assert.equal(host.promptCalls.length, 2);
   assert.ok(host.promptCalls[1]!.text.startsWith(AUTO_CONTINUE_PREFIX));
   assert.match(host.promptCalls[1]!.text, /同一BLOCKEDを再掲せず/);
+  assert.match(host.promptCalls[1]!.text, /registered state and immutable controls are the source of truth/u);
+  assert.match(host.promptCalls[1]!.text, /compaction回復reportはterminal outcomeとbatch counterの照合参照に限定/u);
+  assert.doesNotMatch(host.promptCalls[1]!.text, /summaryが保持した順序/u);
+  assert.doesNotMatch(host.promptCalls[1]!.text, /reportだけをpost-compaction状態の正本/u);
 });
 
 test("repeated progress recovery uses the standard compaction summary", async () => {
@@ -524,6 +532,33 @@ test("the direct capability uses the current report in both compaction and resum
   assert.match(compactionContext.join("\n"), new RegExp(report));
   assert.match(host.promptCalls[0]!.text, new RegExp(report));
   assert.match(host.promptCalls[0]!.text, /直前のcompaction summaryは破棄する/);
+});
+
+test("preview continuation carries a bounded durable operator checkpoint instead of treating summary prose as work authority", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  let hooks!: ReturnType<typeof createContinuationHooks>;
+  const checkpoint = JSON.stringify({ authority: "durable-operator-state", root_session_id: "ses_root",
+    run_id: "operator-run", generation: 4, current_unit_id: "unit-2", current_unit_status: "pending",
+    next_task_ref: "SORTIE_OPERATOR_TASK_REF opaque", next_action: "call operator_status, then operator_next" });
+  let context: string[] = [];
+  host.client.session!.summarize = async request => {
+    const output: { context?: string[]; prompt?: string } = {};
+    await hooks.sessionCompacting({ sessionID: request.path.id }, output);
+    context = output.context ?? [];
+    return { data: true };
+  };
+  hooks = createContinuationHooks(host.client, "/project", POLICY, FAST, undefined, undefined, undefined,
+    async sessionID => sessionID === "ses_root" ? checkpoint : undefined);
+  await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR });
+  await settle();
+  assert.match(context.join("\n"), /Durable registered operator checkpoint/);
+  assert.match(host.promptCalls[0]!.text, /operator_status\/operator_next/);
+  assert.match(host.promptCalls[0]!.text, /SORTIE_OPERATOR_TASK_REF opaque/);
+  assert.match(host.promptCalls[0]!.text, /^SORTIE_AUTO_CONTINUE/);
+  assert.match(host.promptCalls[0]!.text, /Do not reprepare, cancel, reset budget/u);
+  assert.match(host.promptCalls[0]!.text, /registered state and immutable controls are the source of truth/u);
+  assert.doesNotMatch(host.promptCalls[0]!.text, /直前最終報告だけをpost-compaction状態の正本/u);
+  assert.doesNotMatch(host.promptCalls[0]!.text, /Tool-requested Sortie rollover/u);
 });
 
 test("the direct capability keeps its generic fallback when no current report exists", async () => {

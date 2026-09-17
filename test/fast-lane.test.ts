@@ -5,6 +5,69 @@ import { FastLaneController, FastLaneDeniedError } from "../dist/plugin/fast-lan
 
 const worker = { subagent_type: "dog-worker", prompt: "role: implementation" };
 
+test("review verification retains lineage identity and restores completed host history", () => {
+  const lane = new FastLaneController(); lane.beginTurn("review-lineage", false);
+  const initial = "review_phase: initial\ncanonical_validation_exit: 0\nrisk_tags: [security]\ncandidate_id: logical-candidate\nrevision: old";
+  const verification = initial.replace("initial", "verification").replace("revision: old", "revision: new");
+  lane.beforeTool("review-lineage", "task", { subagent_type: "dog-reviewer", prompt: initial });
+  assert.throws(() => lane.beforeTool("review-lineage", "task", { subagent_type: "dog-reviewer", prompt: verification.replace("logical-candidate", "new-source-hash") }), /Preserve the initial candidate_id/);
+  lane.beginTurn("review-lineage", false);
+  assert.equal(lane.hasReviewLineage("review-lineage", verification), false);
+  lane.restoreReviewLineage("review-lineage", verification, [initial.replace("logical-candidate", "unrelated")]);
+  assert.equal(lane.hasReviewLineage("review-lineage", verification), false);
+  lane.restoreReviewLineage("review-lineage", verification, [initial]);
+  assert.equal(lane.hasReviewLineage("review-lineage", verification), true);
+  assert.doesNotThrow(() => lane.beforeTool("review-lineage", "task", { subagent_type: "dog-reviewer", prompt: verification }));
+});
+
+test("MobAds reviewer rejection explains evidence and phase together before any review is spent", () => {
+  const lane = new FastLaneController(); lane.beginTurn("mobads-review", false);
+  const request = (tags: string, phase: string) => ({ subagent_type: "dog-reviewer", prompt:
+    `review_phase: ${phase}\ncanonical_validation_exit: 0\nrisk_tags: [${tags}]\ncandidate_id: candidate-mobads-review` });
+  assert.throws(() => lane.beforeTool("mobads-review", "task", request("concurrency, process-lifecycle, security", "SourceReview")), error => {
+    assert.ok(error instanceof FastLaneDeniedError);
+    assert.equal(error.code, "REVIEW_EVIDENCE_REQUIRED");
+    assert.match(error.message, /review_phase: <initial \| verification \| final>/);
+    assert.match(error.message, /risk_tags: \[nonempty subset of/);
+    return true;
+  });
+  assert.throws(() => lane.beforeTool("mobads-review", "task", request("concurrency, security", "SourceReview")), error => {
+    assert.ok(error instanceof FastLaneDeniedError);
+    assert.equal(error.code, "REVIEW_PHASE_INVALID");
+    return true;
+  });
+  assert.doesNotThrow(() => lane.beforeTool("mobads-review", "task", request("concurrency, security", "initial")));
+});
+
+test("Vibe scout header refusal carries its repair and preserves a corrected dispatch", () => {
+  const lane = new FastLaneController(); lane.beginTurn("vibe", false);
+  assert.throws(() => lane.beforeTool("vibe", "task", { subagent_type: "dog-scout", prompt: "Inspect the API boundary" }), error => {
+    assert.ok(error instanceof FastLaneDeniedError);
+    assert.equal(error.code, "SCOUT_GAP_REQUIRED");
+    assert.match(error.message, /missing_evidence_code: <manifest \| validation \| owner-risk>/);
+    return true;
+  });
+  assert.doesNotThrow(() => lane.beforeTool("vibe", "task", {
+    subagent_type: "dog-scout", prompt: "missing_evidence_code: manifest\nIdentify the exact editable files for the accepted API boundary.",
+  }));
+});
+
+test("MobAds missing and invented advisor headers explain the canonical repair without spending a consultation", () => {
+  const lane = new FastLaneController();
+  lane.beginTurn("mobads", false);
+  for (const prompt of ["Read-only architecture advice", "advisor_trigger: material-architecture-question\nRead-only architecture advice"]) {
+    assert.throws(() => lane.beforeTool("mobads", "task", { subagent_type: "dog-advisor", prompt }), error => {
+      assert.ok(error instanceof FastLaneDeniedError);
+      assert.equal(error.code, "ADVISOR_TRIGGER_REQUIRED");
+      assert.match(error.message, /strategy_trigger: <architecture-choice \| cross-boundary-tradeoff \| material-uncertainty>/);
+      return true;
+    });
+  }
+  assert.doesNotThrow(() => lane.beforeTool("mobads", "task", {
+    subagent_type: "dog-advisor", prompt: "strategy_trigger: architecture-choice\nRead-only architecture advice",
+  }));
+});
+
 function expectDenial(action: () => void, code: FastLaneDeniedError["code"]): void {
   assert.throws(action, (error: unknown) => {
     assert.ok(error instanceof FastLaneDeniedError);

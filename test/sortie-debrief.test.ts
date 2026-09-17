@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildDebrief, observeDebriefSession } from "../dist/plugin/sortie-debrief.js";
+import { buildDebrief, observeDebriefSession, renderDebrief } from "../dist/plugin/sortie-debrief.js";
 import { collectRunMetrics, createSortieResult, insertSortieResult, terminalRunOutcome } from "../dist/plugin/run-metrics.js";
 import type { GoalAcceptanceContract, GoalFlightEventRecord, GoalTerminalReceipt } from "../src/core/goal-bound.ts";
 
@@ -61,7 +61,8 @@ test("goal-boundary timing and unrelated tool metadata do not erase known tokens
   const result = buildDebrief(receipt, contract, metrics?.debrief);
   assert.equal(metrics?.tokens, 24);
   assert.deepEqual(result.pack, [{ model: "provider/cheap", count: 1 }]);
-  assert.deepEqual(result.mix, [{ model: "provider/cheap", tokens: 24, percent: 100 }]);
+  assert.deepEqual(result.mix, [{ model: "provider/cheap", tokens: 24, percent: 100,
+    inputCache: { uncachedInputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0 }, hostCostZero: true }]);
   assert.equal(result.validation, "PASS");
   assert.deepEqual(result.overlap, { workerMilliseconds: 50, wallMilliseconds: 50 });
 });
@@ -192,6 +193,40 @@ test("token bars use observed shares, group the tail, and remain idempotent with
   const text = insertSortieResult("status: DONE", populated);
   assert.equal((text.match(/^🐕 /gmu) ?? []).length, 5);
   assert.match(text, /🐕 その他 ███▍\s+33\.3% 20 tokens/u);
+  assert.match(text, /↺未取得/u);
   assert.match(text, /⚡ 実行重複率 稼働区間の記録不足\n   ※worker区間・速度倍率ではありません/u);
   assert.equal(insertSortieResult(text, populated), text);
+});
+
+test("model rows show input cache ratios, weight the tail, and distinguish host zero cost", () => {
+  const base = (model: string, tokens: number, uncachedInputTokens: number, cacheReadTokens: number,
+    cacheWriteTokens: number, hostCostZero = false) => ({ model, tokens, percent: tokens / 120 * 100,
+      inputCache: { uncachedInputTokens, cacheReadTokens, cacheWriteTokens }, ...(hostCostZero ? { hostCostZero: true } : {}) });
+  const debrief = { pack: [], mix: [
+    ...["a", "b", "c", "d"].map(model => base(model, 25, 10, 90, 0)),
+    base("e", 10, 0, 100, 0, true),
+    base("f", 10, 300, 0, 0),
+  ], validation: "未確認" as const, review: "未確認" as const, traits: [] };
+  const rendered = renderDebrief(debrief);
+  assert.match(rendered.join("\n"), /🐕 a .+ ↺90%/u);
+  assert.match(rendered.join("\n"), /🐕 その他 .+ ↺25%†/u);
+  assert.match(rendered.join("\n"), /†host費用0計上あり（無料・全体価格の評価ではありません）/u);
+
+  const unknownTail = { ...debrief, mix: debrief.mix.map(entry => entry.model === "f"
+    ? { model: entry.model, tokens: entry.tokens, percent: entry.percent } : entry) };
+  assert.match(renderDebrief(unknownTail).join("\n"), /🐕 その他 .+ ↺未取得†/u);
+});
+
+test("return report renders request estimates without replacing unknown prices with zero", async () => {
+  const priced = message("priced", 1, 2, [], "gpt-5.6-sol");
+  priced.info.providerID = "openai";
+  const unknown = message("unknown", 3, 4, [], "private-model");
+  unknown.info.providerID = "private";
+  const collect = async (messages: ReturnType<typeof message>[]) => collectRunMetrics({ session: {
+    children: async () => [], messages: async () => messages,
+  } }, "root", undefined, 5);
+  const partial = createSortieResult(receipt, { acceptance_contract: null, consumed_time_ms: null, satisfied_criteria: [] }, await collect([priced, unknown]));
+  assert.match(insertSortieResult("status: DONE", partial), /予測費用\s+\$0\.0001（一部未換算） ※予測概算/u);
+  const unpriced = createSortieResult(receipt, { acceptance_contract: null, consumed_time_ms: null, satisfied_criteria: [] }, await collect([unknown]));
+  assert.match(insertSortieResult("status: DONE", unpriced), /予測費用\s+未換算 ※予測概算/u);
 });

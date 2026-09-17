@@ -11,7 +11,8 @@ import { CHILD_TERMINAL_EVIDENCE_FIELDS, isChildTerminalIdentity, reconcileChild
 import type { TerminalRescueAcceptedBase } from "./terminal-rescue-policy.js";
 import type { ValidationBudgetRequest, ValidationBudgetDecision, ValidationOutcome } from "./validation-budget.js";
 import { GOAL_BOUND_SCHEMA_VERSION, GoalBoundError, reduceGoalFlight, goalFingerprint,
-  type GoalFlightEvent, type GoalFlightEventRecord, type GoalFlightState } from "./goal-bound.js";
+  type GoalFlightEvent, type GoalFlightEventRecord, type GoalFlightState,
+  type GoalValidationRetryAuthorization } from "./goal-bound.js";
 
 export const RUN_FLIGHT_LEDGER_SCHEMA_VERSION = "0.1" as const;
 export const MAX_RUN_FLIGHT_EVENTS = 2048;
@@ -411,7 +412,7 @@ function validEvent(value: unknown): value is RunFlightEvent {
     case "recovery.recorded": return only(value, [...base, "recovery_id", "failed_attempt_id", "kind_detail", "candidate_id"]) && text(value.recovery_id) && text(value.failed_attempt_id) && enumValue(value.kind_detail, ["normal_remediation", "adaptive_probe", "read_only_diagnosis", "model_rescue"]) && text(value.candidate_id);
     case "validation.recorded": return only(value, [...base, "validation_id", "unit_id", "command_fingerprint", "result", "artifact_id"]) && text(value.validation_id) && text(value.unit_id) && hash(value.command_fingerprint) && enumValue(value.result, ["passed", "failed"]) && (value.artifact_id === null || hash(value.artifact_id));
     case "validation.admission": return only(value, [...base, "reservation_id", "operation_id", "evidence_key", "scope", "decision", "reason", "consumed", "limit"]) && text(value.reservation_id) && text(value.operation_id) && hash(value.evidence_key) && (value.scope === null || enumValue(value.scope, ["targeted", "full"])) && enumValue(value.decision, ["ALLOW", "DENY"]) && text(value.reason) && integer(value.consumed) && integer(value.limit) && value.limit > 0 && value.consumed <= value.limit && (value.decision === "ALLOW" ? value.scope !== null && value.consumed > 0 : value.scope === null || value.consumed >= 0);
-    case "validation.settled": return only(value, [...base, "reservation_id", "operation_id", "evidence_key", "outcome", "exit_code"]) && text(value.reservation_id) && text(value.operation_id) && hash(value.evidence_key) && enumValue(value.outcome, ["passed", "failed", "timeout", "interrupted"]) && (value.exit_code === null || Number.isSafeInteger(value.exit_code));
+    case "validation.settled": return only(value, [...base, "reservation_id", "operation_id", "evidence_key", "outcome", "exit_code"]) && text(value.reservation_id) && text(value.operation_id) && hash(value.evidence_key) && enumValue(value.outcome, ["passed", "failed", "timeout", "interrupted", "cancelled"]) && (value.exit_code === null || Number.isSafeInteger(value.exit_code));
     case "unit.completed": return only(value, [...base, "unit_id", "disposition"]) && text(value.unit_id) && enumValue(value.disposition, ["succeeded", "failed"]);
     case "wave.completed": return only(value, [...base, "wave_id", "produced_candidate_id", "artifact_id"]) && text(value.wave_id) && text(value.produced_candidate_id) && hash(value.artifact_id);
     case "candidate.advanced": return only(value, [...base, "from_candidate_id", "candidate_id", "wave_id", "artifact_id"]) && text(value.from_candidate_id) && text(value.candidate_id) && text(value.wave_id) && hash(value.artifact_id);
@@ -902,6 +903,37 @@ export class RunFlightLedger {
     await this.append({ kind: "validation.admission", at: new Date().toISOString(), reservation_id: reservation_id ?? `deny-${randomUUID()}`,
       operation_id: request.operation_id, evidence_key: decision.evidence_key ?? "sha256:" + "0".repeat(64), scope: decision.scope,
       decision: decision.decision, reason: decision.reason, consumed: decision.consumed, limit });
+    return { ...decision, reservation_id };
+  }
+
+  /** Internal operator retry path. Generic reserveValidation remains strict evidence-key dedupe. */
+  async reserveInterruptedValidationRetry(request: ValidationBudgetRequest, limit: number,
+    authorization: GoalValidationRetryAuthorization): Promise<ValidationBudgetDecision & { readonly reservation_id: string | null }> {
+    if (!this.#goalMode) throw new RunFlightLedgerError("invalid", "Interrupted validation retry requires a goal ledger.");
+    const { decideValidationBudget, validationEvidenceKey } = await import("./validation-budget.js");
+    const snapshot = await this.readGoal(), evidenceKey = validationEvidenceKey(request);
+    const admissions = snapshot.records.filter(({ event }) => event.kind === "validation.admission" &&
+      event.decision === "ALLOW" && event.evidence_key === evidenceKey);
+    const alreadyReopened = admissions.some(({ event }) => event.kind === "validation.admission" && event.reopen !== undefined);
+    const prior = admissions.at(-1)?.event;
+    const settlement = prior?.kind === "validation.admission" ? snapshot.records.find(({ event }) =>
+      event.kind === "validation.settled" && event.reservation_id === prior.reservation_id)?.event : undefined;
+    const bound = snapshot.state.goal_id !== null && request.run_id === snapshot.state.goal_id &&
+      authorization.goal_fingerprint === snapshot.state.acceptance_fingerprint &&
+      request.expected_evidence.includes(`unit:${authorization.unit_id}`);
+    if (!bound || alreadyReopened || prior?.kind !== "validation.admission" || settlement?.kind !== "validation.settled" ||
+        settlement.operation_id !== prior.operation_id || settlement.evidence_key !== evidenceKey || settlement.outcome !== "interrupted") {
+      return this.reserveValidation(request, limit);
+    }
+    const decision = decideValidationBudget(request, { limit, consumed: snapshot.state.validation_budget.consumed,
+      evidence_keys: snapshot.state.validation_budget.evidence_keys.filter(key => key !== evidenceKey) });
+    const reservation_id = decision.decision === "ALLOW" ? randomUUID() : null;
+    await this.appendGoal({ kind: "validation.admission", at: new Date().toISOString(), goal_id: snapshot.state.goal_id,
+      reservation_id: reservation_id ?? `deny-${randomUUID()}`, operation_id: request.operation_id,
+      evidence_key: decision.evidence_key ?? `sha256:${"0".repeat(64)}`, scope: decision.scope,
+      decision: decision.decision, reason: decision.reason, consumed: decision.consumed, limit,
+      ...(decision.decision === "ALLOW" ? { reopen: { ...authorization, prior_reservation_id: prior.reservation_id,
+        prior_operation_id: prior.operation_id } } : {}) });
     return { ...decision, reservation_id };
   }
 

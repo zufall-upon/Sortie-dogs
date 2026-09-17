@@ -17,6 +17,9 @@ import type {
 
 type JsonSchema = Record<string, unknown>;
 
+export { CONTRACT_TEXT_LIMITS } from "./contract-limits.ts";
+import { CONTRACT_TEXT_LIMITS } from "./contract-limits.ts";
+
 const Ajv2020 = Ajv2020Module as unknown as typeof import("ajv/dist/2020.js").default;
 const addFormats = addFormatsModule as unknown as typeof import("ajv-formats").default;
 
@@ -36,8 +39,8 @@ const HANDOFF_SCHEMA: JsonSchema = {
       additionalProperties: false,
       required: ["title", "objective"],
       properties: {
-        title: { type: "string", minLength: 1, maxLength: 160 },
-        objective: { type: "string", minLength: 1, maxLength: 2000 },
+        title: { type: "string", minLength: 1, maxLength: CONTRACT_TEXT_LIMITS.title },
+        objective: { type: "string", minLength: 1, maxLength: CONTRACT_TEXT_LIMITS.objective },
       },
     },
     scope: {
@@ -113,7 +116,7 @@ const HANDOFF_SCHEMA: JsonSchema = {
         additionalProperties: false,
         required: ["check", "status", "summary"],
         properties: {
-          check: { type: "string", minLength: 1, maxLength: 256 },
+          check: { type: "string", minLength: 1, maxLength: CONTRACT_TEXT_LIMITS.command },
           status: { enum: ["pass", "fail", "not_run"] },
           exit_code: { type: ["integer", "null"] },
           summary: { type: "string", minLength: 1, maxLength: 1000 },
@@ -128,7 +131,7 @@ const HANDOFF_SCHEMA: JsonSchema = {
   $defs: {
     statements: {
       type: "array",
-      items: { type: "string", minLength: 1, maxLength: 1000 },
+      items: { type: "string", minLength: 1, maxLength: CONTRACT_TEXT_LIMITS.statement },
     },
   },
 };
@@ -157,8 +160,8 @@ const OPERATION_MANIFEST_SCHEMA: JsonSchema = {
     },
   },
   $defs: {
-    path: { type: "string", minLength: 1, maxLength: 512 },
-    validationCommand: { type: "string", minLength: 1, maxLength: 1000 },
+    path: { type: "string", minLength: 1, maxLength: CONTRACT_TEXT_LIMITS.path },
+    validationCommand: { type: "string", minLength: 1, maxLength: CONTRACT_TEXT_LIMITS.command },
   },
 };
 

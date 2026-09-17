@@ -9,6 +9,7 @@
     "official_sha256", "package", "source", "opencode", "tools", "verifier", "protocol"
   ],
   "properties": {
+    "profile": { "type": "string", "enum": ["stable", "v010"] },
     "expected_operation": {
       "type": "object", "additionalProperties": false, "required": ["bare", "sortie"],
       "properties": {
@@ -17,7 +18,7 @@
       }
     },
     "schema_version": { "const": 1 },
-    "qualification_only": { "const": true },
+    "qualification_only": { "type": "boolean", "const": true },
     "methodology_comparable": { "const": false },
     "leaderboard": { "const": false },
     "task_id": { "const": "datacurve/anko-typed-variable-bindings" },
@@ -76,6 +77,7 @@
         "executable": { "type": "string", "minLength": 1 },
         "version": { "type": "string", "minLength": 1 },
         "auth_file": { "type": "string", "minLength": 1 },
+        "host_database": { "type": "string", "minLength": 1, "pattern": "^/[A-Za-z0-9._/-]+$" },
         "model": { "const": "openai/gpt-5.6-sol" },
         "variant": { "const": "high" }
       }
@@ -121,6 +123,34 @@
       }
     }
   },
+  "allOf": [
+    {
+      "if": { "properties": { "profile": { "const": "v010" } }, "required": ["profile"] },
+      "then": {
+        "required": ["qualification_only"],
+        "properties": {
+          "package": {
+            "type": "object",
+            "properties": {
+              "required_assets": {
+                "type": "array",
+                "allOf": [
+                  { "contains": { "const": "agent/dog-operator.md" } },
+                  { "contains": { "const": "agent/dogs-coordinator.md" } },
+                  { "contains": { "const": "agent/dog-worker-v010.md" } },
+                  { "contains": { "const": "command/sortie-v010.md" } }
+                ]
+              }
+            }
+          },
+          "opencode": {
+            "type": "object",
+            "required": ["host_database"]
+          }
+        }
+      }
+    }
+  ],
   "$defs": {
     "expectedOperation": {
       "type": "object", "additionalProperties": false,

@@ -3,6 +3,7 @@ import { buildDebrief, renderDebrief, renderDebriefProof, observeDebriefSession,
 import { goalFingerprint } from "../core/goal-bound.ts";
 import type { GoalReport } from "../core/goal-report.ts";
 import { renderCareer, type SortieCareer } from "./sortie-career.ts";
+import { estimateModelUsageCost } from "./model-cost.ts";
 
 export interface RunMetricsClient {
   readonly session?: {
@@ -370,6 +371,22 @@ export async function collectRunMetrics(
           observed.models[modelKey] = tokens === undefined || observed.models[modelKey] === null ? null
             : (observed.models[modelKey] ?? 0) + tokens.total;
           if (tokens !== undefined) {
+            const modelUsage = observed.modelUsage![modelKey] ?? { tokens: 0, uncachedInputTokens: 0, cacheReadTokens: 0,
+              cacheWriteTokens: 0, cost: 0, costAvailable: true, estimatedCost: 0, pricedRequests: 0, unpricedRequests: 0 };
+            modelUsage.tokens += tokens.total;
+            modelUsage.uncachedInputTokens += tokens.input;
+            modelUsage.cacheReadTokens += tokens.cacheRead;
+            modelUsage.cacheWriteTokens += tokens.cacheWrite;
+            const requestInfo = record(usage.value.info) ?? usage.value;
+            const estimate = estimateModelUsageCost({ providerID: typeof provider === "string" ? provider : undefined,
+              modelID: typeof model === "string" ? model : undefined, uncachedInputTokens: tokens.input,
+              cacheReadTokens: tokens.cacheRead, cacheWriteTokens: tokens.cacheWrite, outputTokens: tokens.output,
+              reasoningTokens: tokens.reasoning, serviceTier: typeof requestInfo.serviceTier === "string" ? requestInfo.serviceTier : undefined });
+            if (estimate.status === "priced") {
+              modelUsage.estimatedCost = (modelUsage.estimatedCost ?? 0) + estimate.usd;
+              modelUsage.pricedRequests = (modelUsage.pricedRequests ?? 0) + 1;
+            } else modelUsage.unpricedRequests = (modelUsage.unpricedRequests ?? 0) + 1;
+            observed.modelUsage![modelKey] = modelUsage;
             totalTokens += tokens.total;
             inputTokens += tokens.input;
             outputTokens += tokens.output;
@@ -388,9 +405,11 @@ export async function collectRunMetrics(
           if (reportedCost === undefined) {
             costAvailable = false;
             role.costAvailable = false;
+            if (tokens !== undefined) observed.modelUsage![modelKey]!.costAvailable = false;
           } else {
             cost += reportedCost;
             role.cost += reportedCost;
+            if (tokens !== undefined) observed.modelUsage![modelKey]!.cost += reportedCost;
           }
         }
       }
@@ -417,7 +436,8 @@ export async function collectRunMetrics(
     cost: hierarchyComplete && messagesComplete && costAvailable ? cost : undefined,
     steps: hierarchyComplete && messagesComplete ? steps : undefined,
     sessions: hierarchyComplete ? ids.length : undefined,
-    cacheRatio: hierarchyComplete && messagesComplete && tokensAvailable && totalTokens > 0 ? cacheRead / totalTokens : undefined,
+    cacheRatio: hierarchyComplete && messagesComplete && tokensAvailable && totalTokens > 0
+      ? cacheRead / totalTokens : undefined,
     roles: hierarchyComplete && messagesComplete && tokensAvailable
       ? Object.fromEntries([...roleMetrics].map(([agent, role]) => [agent, {
         tokens: role.tokens,
@@ -477,6 +497,10 @@ export function formatSortieResult(result: SortieResult, presentation: SortieRes
       : result.mission.status === "EXTERNAL_BLOCKER" ? "外部要因で未完了" : "ユーザー判断待ち（未完了）";
   const color = result.mission.status === "COMPLETED" ? "🟢" : result.mission.status === "EXTERNAL_BLOCKER" ? "🔴" : "🟡";
   const proof = renderDebriefProof(result.debrief);
+  const estimate = result.debrief?.estimatedCost;
+  const estimatedCost = estimate === undefined ? "計測不可"
+    : estimate.pricedRequests === 0 ? "未換算"
+      : `$${estimate.usd.toFixed(4)}${estimate.unpricedRequests > 0 ? "（一部未換算）" : ""}`;
   const body = [
     "🐾 SORTIE DOGS — 帰還報告",
     result.result_id[0],
@@ -501,7 +525,7 @@ export function formatSortieResult(result: SortieResult, presentation: SortieRes
     "",
     "🪙 COST / PACK",
     `使用量        ${metricText(result.cost.total_tokens, (value) => `${value.toLocaleString("ja-JP")} tokens`)}`,
-    `host推定額    ${metricText(result.cost.cost_usd, (value) => `$${value.toFixed(4)}`)} ※実課金換算なし`,
+    `予測費用      ${estimatedCost} ※予測概算`,
     "",
     ...renderDebrief(result.debrief),
     "",
@@ -664,7 +688,7 @@ function extractSortiePresentation(text: string): SortieResultPresentation {
   const first = topLevelLines(text).find(({ line }) => line.trim().length > 0)?.line ?? "";
   const statusSummary = first.split(/\s+[—-]\s+/u).slice(1).join(" — ").trim() || undefined;
   const section = (names: string): string | undefined => {
-    const expression = new RegExp(`^[ \\t]*(?:#{1,6}[ \\t]*)?(?:\\*\\*)?(?:${names})(?:\\*\\*)?[ \\t]*:?[ \\t]*(?:\\*\\*)?[ \\t]*(.*)$`, "imu");
+    const expression = new RegExp(`^[ \\t]*(?:#{1,6}[ \\t]*)?(?:\\p{Extended_Pictographic}\\uFE0F?[ \\t]+)?(?:\\*\\*)?(?:${names})(?:\\*\\*)?[ \\t]*:?[ \\t]*(?:\\*\\*)?[ \\t]*(.*)$`, "imu");
     const match = expression.exec(text);
     if (match === null) return undefined;
     if (match[1]?.trim()) return match[1].trim();

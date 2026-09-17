@@ -1,7 +1,8 @@
-import { isSourceReviewRiskTag, STRATEGY_TRIGGERS } from "../core/consultation.js";
+import { isSourceReviewRiskTag, STRATEGY_TRIGGERS, SOURCE_REVIEW_PHASES, SOURCE_REVIEW_RISK_TAGS } from "../core/consultation.js";
+import { SCOUT_EVIDENCE_CODES } from "../core/scout-contract.js";
 
 const MAX_SESSIONS = 256;
-const GAP_CODES = new Set(["manifest", "validation", "owner-risk"]);
+const GAP_CODES = new Set<string>(SCOUT_EVIDENCE_CODES);
 const STRATEGY_TRIGGER_SET = new Set<string>(STRATEGY_TRIGGERS);
 // The plugin-owned capability has root identity, pending-rollover, and continuation guards.
 // Fast-lane only blocks the untyped host compaction tool.
@@ -159,6 +160,26 @@ function reviewCandidateBasis(prompt: string): string {
 
 export class FastLaneController {
   private readonly sessions = new Map<string, FastLaneTurnState>();
+  hasReviewLineage(sessionID: string, prompt: string): boolean {
+    return (this.sessions.get(sessionID)?.reviewCandidates.get(reviewCandidateBasis(prompt))?.initialPrompts.size ?? 0) > 0;
+  }
+  restoreReviewLineage(sessionID: string, requestedPrompt: string, completedHostPrompts: readonly string[]): void {
+    const state = this.sessions.get(sessionID);
+    if (!state) return;
+    const key = reviewCandidateBasis(requestedPrompt);
+    for (const prompt of completedHostPrompts) {
+      if (!hasReviewEvidence(prompt) || reviewCandidateBasis(prompt) !== key) continue;
+      const phase = lineValue(prompt, "review_phase");
+      if (!SOURCE_REVIEW_PHASES.includes(phase as typeof SOURCE_REVIEW_PHASES[number])) continue;
+      let candidate = state.reviewCandidates.get(key);
+      if (!candidate) { candidate = { initialPrompts: new Set(), verificationPrompts: new Set(), fallbackRetries: new Set() }; state.reviewCandidates.set(key, candidate); }
+      const initial = phase === "initial" || (phase === "final" && candidate.initialPrompts.size === 0);
+      if (!initial && !candidate.initialPrompts.size) continue;
+      const basis = fallbackBasis(prompt);
+      (initial ? candidate.initialPrompts : candidate.verificationPrompts).add(basis);
+      if (lineValue(prompt, "fallback_retry") === "true") candidate.fallbackRetries.add(`${initial ? "initial" : "verification"}\0${basis}`);
+    }
+  }
 
   private setSession(sessionID: string, state: FastLaneTurnState): void {
     this.sessions.delete(sessionID);
@@ -295,6 +316,30 @@ export class FastLaneController {
     return true;
   }
 
+  /**
+   * A turn that never dispatched a worker holds no live accounting to validate against. Durable
+   * operator state, not process-local dispatch memory, authorizes continuations in such a turn.
+   */
+  workerAccountingCold(sessionID: string): boolean {
+    const state = this.sessions.get(sessionID);
+    if (state === undefined) return false;
+    return state.workerTaskID === undefined && state.workerDispatches < 1 && state.totalWorkerDispatches < 1 &&
+      !state.workerResumeUsed && !state.workerInFlight;
+  }
+
+  /** Rehydrate one host-validation-only continuation from durable operator state. */
+  authorizeRepairValidationRetry(sessionID: string, taskID: string, childSessionID: string): boolean {
+    const state = this.sessions.get(sessionID);
+    if (state === undefined || state.dispatchLocked || state.workerInFlight) return false;
+    state.totalWorkerDispatches = Math.max(1, state.totalWorkerDispatches);
+    state.workerDispatches = Math.max(1, state.workerDispatches);
+    state.workerTaskID = taskID;
+    state.workerResumeTaskID = taskID;
+    state.workerResumeSessionID = childSessionID;
+    state.workerResumeUsed = false;
+    return true;
+  }
+
   workerCompleted(sessionID: string): void {
     const state = this.sessions.get(sessionID);
     if (state !== undefined) state.workerInFlight = false;
@@ -387,15 +432,22 @@ export class FastLaneController {
     }
     if (role === "dog-scout") {
       const gap = lineValue(prompt, "missing_evidence_code");
-      if (gap === undefined || !GAP_CODES.has(gap)) throw new FastLaneDeniedError("SCOUT_GAP_REQUIRED");
+      if (gap === undefined || !GAP_CODES.has(gap)) {
+        const error = new FastLaneDeniedError("SCOUT_GAP_REQUIRED");
+        error.message += `; required: missing_evidence_code: <${SCOUT_EVIDENCE_CODES.join(" | ")}>; identify one concrete gap, not general exploration`;
+        throw error;
+      }
       state.scoutDispatches += 1;
       return;
     }
     if (role === "dog-reviewer") {
-      if (!hasReviewEvidence(prompt)) throw new FastLaneDeniedError("REVIEW_EVIDENCE_REQUIRED");
       const requestedPhase = lineValue(prompt, "review_phase");
-      if (requestedPhase !== "initial" && requestedPhase !== "verification" && requestedPhase !== "final") {
-        throw new FastLaneDeniedError("REVIEW_PHASE_INVALID");
+      const evidenceValid = hasReviewEvidence(prompt);
+      if (!evidenceValid || !SOURCE_REVIEW_PHASES.includes(requestedPhase as typeof SOURCE_REVIEW_PHASES[number])) {
+        const error = new FastLaneDeniedError(!evidenceValid ? "REVIEW_EVIDENCE_REQUIRED" : "REVIEW_PHASE_INVALID");
+        error.message += `; required: canonical_validation_exit: 0; review_phase: <${SOURCE_REVIEW_PHASES.join(" | ")}>; ` +
+          `risk_tags: [nonempty subset of ${SOURCE_REVIEW_RISK_TAGS.join(", ")}]. SourceReview is not a review_phase.`;
+        throw error;
       }
       if (state.reviewsLocked) throw new FastLaneDeniedError("REVIEW_LIMIT");
       const candidateKey = reviewCandidateBasis(prompt);
@@ -414,7 +466,9 @@ export class FastLaneController {
         throw new FastLaneDeniedError("REVIEW_PHASE_INVALID");
       }
       if (phase === "verification" && candidate.initialPrompts.size === 0) {
-        throw new FastLaneDeniedError("REVIEW_PHASE_INVALID");
+        const error = new FastLaneDeniedError("REVIEW_PHASE_INVALID");
+        error.message += "; verification has no completed initial review for this candidate_id. Preserve the initial candidate_id across fixes; put the changed source hash in revision/validation evidence instead. A genuinely new candidate requires initial review.";
+        throw error;
       }
       if (retry !== undefined) {
         if (retry !== "true" || !prompts.has(basis)) throw new FastLaneDeniedError("CONSULTATION_RETRY_INVALID");
@@ -435,7 +489,9 @@ export class FastLaneController {
     if (role === "dog-advisor") {
       const trigger = lineValue(prompt, "strategy_trigger");
       if (trigger === undefined || !STRATEGY_TRIGGER_SET.has(trigger)) {
-        throw new FastLaneDeniedError("ADVISOR_TRIGGER_REQUIRED");
+        const error = new FastLaneDeniedError("ADVISOR_TRIGGER_REQUIRED");
+        error.message += `; required: strategy_trigger: <${STRATEGY_TRIGGERS.join(" | ")}>; repair the request header, not runtime policy`;
+        throw error;
       }
       const basis = fallbackBasis(prompt);
       const dispatches = state.advisorRequests.get(basis) ?? 0;

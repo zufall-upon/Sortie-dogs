@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
@@ -8,23 +8,36 @@ import Ajv2020 from "ajv/dist/2020.js";
 
 import {
   assertBareIsolation,
+  anonymousMemoryCaptureArgs,
   assertRunArmAllowed,
   assertVerifyAllowed,
   buildSpawnSpec,
   buildVerifierEnvironment,
   computeSummary,
+  createConfigRoots,
   createLocalVerifierConfig,
+  debugEventEvidence,
+  debugRecoveryPacket,
+  debugResumeArgs,
   eventMetadata,
+  isolatedConfig,
   deliveryResult,
   expectedOperation,
   expectedOperationEvent,
   execute,
+  nativeCommandEvidence,
+  pinnedWorkspaceRefCommands,
+  recordPreAgentFailure,
+  resolvedConfigCommandArgs,
   summarize,
   cleanup,
+  classifyNativeImplementationChildren,
   createPathOnlyWrapper,
   sanitizeForReport,
+  resolveRunnerProfile,
   validateManifest,
   verifyPinnedFiles,
+  verifyConfigLoaderDependency,
   watchdogReason,
 } from "./fixtures/frontierharness-local/run-local-case-study.mjs";
 
@@ -92,6 +105,36 @@ test("published manifest schema accepts the runner protocol", async () => {
   value.expected_operation.sortie.min_patch_bytes = 0;
   assert.equal(validate(value), false);
   assert.throws(() => validateManifest(value, join(tmpdir(), "schema-protocol", "manifest.json"), join(tmpdir(), "schema-protocol")));
+});
+
+test("v010 profile is closed, qualification-only, and pins its runtime surface", async () => {
+  const root = join(tmpdir(), "schema-v010");
+  const schema = JSON.parse(await readFile(new URL("./fixtures/frontierharness-local/manifest.schema.json", import.meta.url), "utf8"));
+  const validate = new Ajv2020().compile(schema);
+  const value = manifest(root) as any;
+  value.profile = "v010";
+  assert.equal(validate(value), false);
+  assert.throws(() => validateManifest(value, join(root, "manifest.json"), root),
+    (error: Error & { gate?: string }) => error.gate === "qualification-mode");
+  value.qualification_only = true;
+  value.opencode.host_database = "/home/fixture/.local/share/opencode/opencode.db";
+  value.package.required_assets = ["agent/dog-operator.md", "agent/dogs-coordinator.md",
+    "agent/dog-worker-v010.md", "command/sortie-v010.md"];
+  assert.equal(validate(value), true, JSON.stringify(validate.errors));
+  const context = validateManifest(value, join(root, "manifest.json"), root);
+  assert.equal(context.profile, resolveRunnerProfile("v010"));
+  assert.deepEqual(context.profile.initArgs, ["--profile", "v010"]);
+  assert.equal(context.profile.agent, "dog-operator");
+  assert.equal(context.profile.runtimeModule, "runtime-assets-v010.js");
+  assert.equal(context.profile.markerExport, "V010_RUNTIME_ASSET_VERSION");
+  assert.equal(isolatedConfig("v010").subagent_depth, 2);
+  assert.equal("subagent_depth" in isolatedConfig("stable"), false);
+  value.package.required_assets.pop();
+  assert.equal(validate(value), false);
+  assert.throws(() => validateManifest(value, join(root, "manifest.json"), root),
+    (error: Error & { gate?: string }) => error.gate === "package-assets");
+  value.profile = "future";
+  assert.equal(validate(value), false);
 });
 
 test("rejects approved pin and byte hash mismatches", async () => {
@@ -216,6 +259,30 @@ test("expected-operation failure blocks both remaining arms and verifiers", () =
   assert.equal(expectedOperationEvent({ part: { type: "tool", state: { status: "running" } } }), null);
 });
 
+test("typed refusals are recorded as recoverable instead of ending the run", () => {
+  const refusals = [
+    { tool: "sortie_v010_cancel_operator", error: "operator-cancel-reason-invalid" },
+    { tool: "task", error: "SORTIE_FAST_LANE_DENIED: REVIEW_EVIDENCE_REQUIRED; required: canonical_validation_exit: 0" },
+  ];
+  for (const { tool, error } of refusals) {
+    assert.equal(expectedOperationEvent({ part: { type: "tool", tool, state: { status: "error", error } } }), null);
+  }
+  for (const error of ["Permission denied", "ENOENT: no such file or directory, open '/app/vm/vm.go'",
+    "TypeError: Cannot read properties of undefined (reading 'units')"]) {
+    assert.equal(expectedOperationEvent({ part: { type: "tool", tool: "task", state: { status: "error", error } } }),
+      "agent-event-error");
+  }
+  const stream = [...refusals, { tool: "sortie_v010_cancel_operator", error: "operator-cancel-reason-invalid" }]
+    .map(({ tool, error }) => ({ part: { type: "tool", tool, state: { status: "error", error } } }));
+  const metadata = eventMetadata(Buffer.from(stream.map(value => JSON.stringify(value)).join("\n")));
+  assert.equal(metadata.event_errors, 0);
+  assert.equal(metadata.recoverable_refusals, 3);
+  assert.deepEqual(metadata.refusal_codes, [{ code: "SORTIE_FAST_LANE_DENIED", count: 1 },
+    { code: "operator-cancel-reason-invalid", count: 2 }]);
+  assert.equal(expectedOperation({ exit: 0, root_session_id: "ses_root", patch_bytes: 20, event_errors: 0,
+    recoverable_refusals: 3, implementation_children: ["ses_child"], terminal_outcome: "DONE" }, "sortie").status, "pass");
+});
+
 test("CLI records completed implementation child identity and canonical terminal outcome", () => {
   const events = [{ sessionID: "ses_root", part: { type: "tool", tool: "task", state: {
     status: "completed", input: { subagent_type: "dog-worker" }, metadata: { sessionId: "ses_child" } } } },
@@ -223,6 +290,143 @@ test("CLI records completed implementation child identity and canonical terminal
   const result = eventMetadata(Buffer.from(events.map(JSON.stringify).join("\n")));
   assert.deepEqual(result.implementation_children, ["ses_child"]);
   assert.equal(result.terminal_outcome, "DONE");
+});
+
+test("debug continuation pins the same session and accepts only bounded public recovery packets", () => {
+  const root = join(tmpdir(), "debug-resume");
+  const value = manifest(root) as any;
+  value.profile = "v010";
+  value.qualification_only = true;
+  value.opencode.host_database = "/home/fixture/.local/share/opencode/opencode.db";
+  value.package.required_assets = ["agent/dog-operator.md", "agent/dogs-coordinator.md",
+    "agent/dog-worker-v010.md", "command/sortie-v010.md"];
+  const args = debugResumeArgs(value, "/tmp/debug-workspace", "ses_exact_root");
+  assert.deepEqual(args.slice(0, 4), ["run", "--dir", "/tmp/debug-workspace", "--format"]);
+  assert.deepEqual(args.slice(args.indexOf("--session"), args.indexOf("--session") + 2),
+    ["--session", "ses_exact_root"]);
+  assert.match(args.at(-1)!, /First call sortie_v010_operator_status/u);
+  assert.match(args.at(-1)!, /follow its exact public next_action/u);
+  assert.match(args.at(-1)!, /awaiting-acceptance[\s\S]+independent review/u);
+  assert.match(args.at(-1)!, /reason=review-blocking[\s\S]+without user approval/u);
+  assert.doesNotMatch(args.at(-1)!, /discard y\.output|typed variable binding|modify parser|edit source/u);
+
+  const packet = { status: "awaiting-decision", decision: "operator-contract-repair-required",
+    contract_repair: { mode: "discard-transient", repair_fingerprint: `sha256:${"a".repeat(64)}`,
+      files: [{ path: "y.output", size: 3, sha256: "b".repeat(64) }] },
+    resume_requires_host_reconciliation: false };
+  const stream = Buffer.from(JSON.stringify({ sessionID: "ses_exact_root", part: { type: "tool",
+    tool: "sortie_v010_operator_status", state: { status: "completed", output: JSON.stringify(packet) } } }));
+  assert.deepEqual(debugRecoveryPacket(stream, "ses_exact_root"), { route: "contract-repair",
+    decision: "operator-contract-repair-required", repair_fingerprint: `sha256:${"a".repeat(64)}`,
+    files: [{ path: "y.output", size: 3, sha256: "b".repeat(64) }] });
+  assert.equal(debugRecoveryPacket(stream, "ses_other"), null);
+
+  const acceptancePacket = { status: "awaiting-decision", decision: "operator-acceptance-remediation-required",
+    resume_requires_host_reconciliation: false, repair_generation: 1,
+    next_action: "call sortie_v010_cancel_operator, then call sortie_v010_prepare_operator for the same acceptance",
+    acceptance_remediation: { failed_criteria: [{ index: 0, criterion: "canonical test passes" }],
+      failed_evidence: { command: ["go test ./..."], outcome: "fail", exit_code: 1 } },
+    units: [{ result_class: "acceptance", repair_validation: null }] };
+  const acceptanceStream = Buffer.from(JSON.stringify({ sessionID: "ses_exact_root", part: { type: "tool",
+    tool: "sortie_v010_operator_status", state: { status: "completed", output: JSON.stringify(acceptancePacket) } } }));
+  assert.deepEqual(debugRecoveryPacket(acceptanceStream, "ses_exact_root"), {
+    route: "acceptance-remediation", decision: "operator-acceptance-remediation-required" });
+
+  const reviewPacket = { status: "awaiting-acceptance", review_decision: "root-assess-independent-review",
+    run_id: "operator-review-ready", acceptance_fingerprint: `sha256:${"d".repeat(64)}`,
+    next_action: "assess independent-review; review PASS calls complete_operator; blocking findings use review-blocking replacement",
+    units: [{ status: "succeeded" }] };
+  const reviewStream = Buffer.from(JSON.stringify({ sessionID: "ses_exact_root", part: { type: "tool",
+    tool: "sortie_v010_operator_status", state: { status: "completed", output: JSON.stringify(reviewPacket) } } }));
+  assert.deepEqual(debugRecoveryPacket(reviewStream, "ses_exact_root"), { route: "awaiting-acceptance-review",
+    decision: "root-assess-independent-review", run_id: "operator-review-ready",
+    acceptance_fingerprint: `sha256:${"d".repeat(64)}` });
+});
+
+test("debug evidence fingerprints errors and process-defect resume requires public support", () => {
+  const errors = Buffer.from([
+    { sessionID: "ses_root", part: { type: "tool", tool: "task", state: { status: "error", error: "private task error" } } },
+    { sessionID: "ses_root", part: { type: "tool", tool: "bash", state: { status: "error", error: "private shell error" } } },
+  ].map(JSON.stringify).join("\n"));
+  const evidence = debugEventEvidence(errors);
+  assert.deepEqual(evidence.map(item => item.tool), ["task", "bash"]);
+  assert.match(evidence[0]!.error_sha256, /^[a-f0-9]{64}$/u);
+  assert.doesNotMatch(JSON.stringify(evidence), /private/u);
+
+  const packet = { status: "awaiting-decision", decision: "dispatch-admission-rejected", contract_repair: null,
+    resume_requires_host_reconciliation: true, run_id: "operator-run",
+    acceptance_fingerprint: `sha256:${"c".repeat(64)}`,
+    units: [{ status: "failed", result_class: "process-defect" }] };
+  const stream = Buffer.from(JSON.stringify({ sessionID: "ses_root", part: { type: "tool",
+    tool: "sortie_v010_operator_status", state: { status: "completed", output: JSON.stringify(packet) } } }));
+  assert.deepEqual(debugRecoveryPacket(stream, "ses_root"), { route: "process-defect-resume",
+    decision: "dispatch-admission-rejected", run_id: "operator-run",
+    acceptance_fingerprint: `sha256:${"c".repeat(64)}` });
+  packet.resume_requires_host_reconciliation = false;
+  const unsupported = Buffer.from(JSON.stringify({ sessionID: "ses_root", part: { type: "tool",
+    tool: "sortie_v010_operator_status", state: { status: "completed", output: JSON.stringify(packet) } } }));
+  assert.equal(debugRecoveryPacket(unsupported, "ses_root"), null);
+});
+
+test("prepare materializes only main at the exact pinned base without changing the six official inputs", () => {
+  assert.deepEqual(pinnedWorkspaceRefCommands(), [["update-ref", "refs/heads/main",
+    "3f269a72ff69398b1250c584171f32d12c0d8085"]]);
+  assert.equal(pinnedWorkspaceRefCommands().flat().includes("master"), false);
+  assert.deepEqual(officialPaths, [
+    "instruction.md", "task.toml", "tests/test.patch", "tests/config.json", "tests/grader.py", "tests/test.sh",
+  ]);
+});
+
+test("isolated config roots pin and verify a non-linked OpenCode loader package", async () => {
+  const root = await mkdtemp(join(tmpdir(), "frontier-loader-"));
+  const version = "1.18.29";
+  try {
+    const roots = [];
+    for (const arm of ["bare", "sortie"]) {
+      const armRoots = await createConfigRoots(root, arm, "stable", version);
+      roots.push(armRoots);
+      const declared = JSON.parse(await readFile(join(armRoots.loader, "package.json"), "utf8"));
+      assert.deepEqual(declared.dependencies, { "@opencode-ai/plugin": version });
+      const installed = join(armRoots.loader, "node_modules", "@opencode-ai", "plugin");
+      await mkdir(installed, { recursive: true });
+      await writeFile(join(installed, "package.json"), JSON.stringify({ name: "@opencode-ai/plugin", version }));
+      await writeFile(join(armRoots.loader, "package-lock.json"), JSON.stringify({ lockfileVersion: 3, packages: {
+        "": { dependencies: { "@opencode-ai/plugin": version } },
+        "node_modules/@opencode-ai/plugin": { version },
+      } }));
+      assert.deepEqual(await verifyConfigLoaderDependency(armRoots.loader, version), {
+        package: "@opencode-ai/plugin", version, installed_copy_symlink: false, package_lock_link: false,
+      });
+    }
+    const linkedLock = JSON.parse(await readFile(join(roots[1].loader, "package-lock.json"), "utf8"));
+    linkedLock.packages["node_modules/@opencode-ai/plugin"].link = true;
+    await writeFile(join(roots[1].loader, "package-lock.json"), JSON.stringify(linkedLock));
+    await assert.rejects(verifyConfigLoaderDependency(roots[1].loader, version),
+      (error: Error & { gate?: string }) => error.gate === "config-loader-identity");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("v010 counts only native completed worker descendants in the exact fixture family", () => {
+  const directory = "/fixture/project";
+  const sessions = [
+    { id: "ses_root", parent: null, directory }, { id: "ses_proposal", parent: "ses_root", directory },
+    { id: "ses_delegate", parent: "ses_root", directory }, { id: "ses_worker", parent: "ses_delegate", directory },
+    { id: "ses_operator", parent: "ses_root", directory }, { id: "ses_failed", parent: "ses_delegate", directory },
+    { id: "ses_cycle_a", parent: "ses_cycle_b", directory }, { id: "ses_cycle_b", parent: "ses_cycle_a", directory },
+  ];
+  const tasks = [
+    { caller: "ses_root", child: "ses_proposal", agent: "dog-operator", status: "completed" },
+    { caller: "ses_root", child: "ses_delegate", agent: "dogs-coordinator", status: "completed" },
+    { caller: "ses_delegate", child: "ses_worker", agent: "dog-worker-v010", status: "completed" },
+    { caller: "ses_root", child: "ses_operator", agent: "dog-worker-v010", status: "failed" },
+    { caller: "ses_delegate", child: "ses_failed", agent: "dog-worker-v010", status: "failed" },
+    { caller: "ses_cycle_a", child: "ses_cycle_b", agent: "dog-worker-v010", status: "completed" },
+    { caller: "ses_root", child: "ses_worker", agent: "dog-worker-v010", status: "completed" },
+  ];
+  assert.deepEqual(classifyNativeImplementationChildren({ sessions, tasks }, "ses_root", directory), ["ses_worker"]);
+  const stream = [{ sessionID: "ses_root", part: { type: "tool", tool: "task", state: { status: "completed",
+    input: { subagent_type: "dog-worker-v010" }, metadata: { sessionId: "ses_fake" } } } }];
+  assert.deepEqual(eventMetadata(Buffer.from(stream.map(JSON.stringify).join("\n")), "v010").implementation_children, []);
 });
 
 test("first error stops a live process and partial summary permits cleanup without verifiers", async () => {
@@ -249,6 +453,101 @@ test("first error stops a live process and partial summary permits cleanup witho
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("pre-agent native failure consumes attempt and persists only bounded evidence for summary and cleanup", async () => {
+  const root = await mkdtemp(join(process.cwd(), "_testenv", "frontier-pre-agent-"));
+  try {
+    const result = await execute(process.execPath, ["-e",
+      "process.stdout.write('provider-secret-body');process.stderr.write('auth-secret-body');process.exit(17)"]);
+    const state: any = { schema_version: 1, arms: { sortie: { attempted: true,
+      started_at: "2026-09-14T00:00:00.000Z", active_pid: null } } };
+    const context = { runtimeRoot: root, manifest: manifest(process.cwd()) };
+    await mkdir(join(root, "configs"));
+    await mkdir(join(root, "workspaces"));
+    const report = await recordPreAgentFailure(context, state, "sortie", "resolved-config",
+      nativeCommandEvidence(result), { version: "fixture" });
+    assert.equal(report.comparison.comparison_eligible, false);
+    assert.equal(report.comparison.refusal, "expected-operation");
+    assert.equal(report.arms.sortie.status, "pre-agent-failure");
+    const savedText = await readFile(join(root, "frontierharness-state.json"), "utf8");
+    const saved = JSON.parse(savedText);
+    assert.equal(saved.arms.sortie.attempted, true);
+    assert.equal(saved.arms.sortie.run.attempt, 1);
+    assert.equal(saved.arms.sortie.run.retry, 0);
+    assert.equal(saved.arms.sortie.run.exit, 17);
+    assert.equal(saved.arms.sortie.run.stdout_sha256, hash("provider-secret-body"));
+    assert.equal(saved.arms.sortie.run.stderr_sha256, hash("auth-secret-body"));
+    assert.equal(saved.stopped.gate, "resolved-config");
+    assert.equal(savedText.includes("provider-secret-body"), false);
+    assert.equal(savedText.includes("auth-secret-body"), false);
+    assert.equal((await cleanup(context, true)).remaining_agent_processes, 0);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("pre-agent WSL timeout keeps cleanup fail-closed when Linux process cleanup is unconfirmed", async () => {
+  const root = await mkdtemp(join(process.cwd(), "_testenv", "frontier-pre-agent-wsl-timeout-"));
+  try {
+    const state: any = { schema_version: 1, arms: { sortie: { attempted: true,
+      started_at: "2026-09-14T00:00:00.000Z", active_pid: null } } };
+    const context = { runtimeRoot: root, manifest: manifest(process.cwd()) };
+    await mkdir(join(root, "configs"));
+    await mkdir(join(root, "workspaces"));
+    await writeFile(join(root, "configs", "must-remain"), "diagnosis-evidence");
+    const timeout = nativeCommandEvidence({ code: 124, signal: "hard-wall", timedOut: true,
+      watchdog: "hard-wall", stdout: Buffer.from("provider-secret-body"), stderr: Buffer.from("auth-secret-body") });
+    await recordPreAgentFailure(context, state, "sortie", "resolved-config",
+      { ...timeout, process_scope: "wsl" }, { version: "fixture" });
+    const savedText = await readFile(join(root, "frontierharness-state.json"), "utf8");
+    const saved = JSON.parse(savedText);
+    assert.equal(saved.arms.sortie.run.operation_failure, "process-cleanup-unconfirmed");
+    assert.equal(saved.arms.sortie.run.cleanup_confirmation, "unconfirmed");
+    assert.equal(saved.arms.sortie.run.watchdog, "hard-wall");
+    assert.equal(savedText.includes("provider-secret-body"), false);
+    assert.equal(savedText.includes("auth-secret-body"), false);
+    await assert.rejects(cleanup(context, true),
+      (error: Error & { gate?: string }) => error.gate === "cleanup-process");
+    assert.equal(await readFile(join(root, "configs", "must-remain"), "utf8"), "diagnosis-evidence");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("confirmed owned WSL timeout records sanitized failure and permits normal cleanup", async () => {
+  const root = await mkdtemp(join(process.cwd(), "_testenv", "frontier-pre-agent-wsl-confirmed-"));
+  try {
+    const state: any = { schema_version: 1, arms: { sortie: { attempted: true,
+      started_at: "2026-09-14T00:00:00.000Z", active_pid: null } } };
+    const context = { runtimeRoot: root, manifest: manifest(process.cwd()) };
+    await mkdir(join(root, "configs"));
+    await mkdir(join(root, "workspaces"));
+    const timeout = nativeCommandEvidence({ code: 124, signal: "hard-wall", timedOut: true,
+      watchdog: "hard-wall", stdout: Buffer.from("provider-secret-body"), stderr: Buffer.from("auth-secret-body"),
+      processScope: "wsl", processGroup: 1234, cleanupConfirmation: "confirmed" });
+    await recordPreAgentFailure(context, state, "sortie", "resolved-config", timeout, { version: "fixture" });
+    const savedText = await readFile(join(root, "frontierharness-state.json"), "utf8");
+    const saved = JSON.parse(savedText);
+    assert.equal(saved.arms.sortie.run.operation_failure, "pre-agent-failure");
+    assert.equal(saved.arms.sortie.run.cleanup_confirmation, "confirmed");
+    assert.equal(saved.arms.sortie.run.process_group, 1234);
+    assert.equal(savedText.includes("provider-secret-body"), false);
+    assert.equal(savedText.includes("auth-secret-body"), false);
+    assert.equal((await cleanup(context, true)).remaining_agent_processes, 0);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("anonymous memory capture preserves complete JSON beyond 64 KiB without files", {
+  skip: process.platform !== "linux" || !process.execPath,
+}, async () => {
+  const root = await mkdtemp(join(tmpdir(), "frontier-memory-config-"));
+  try {
+    const payloadBytes = 70 * 1024;
+    const child = ["-e", `process.stdout.write(JSON.stringify({config:"x".repeat(${payloadBytes})}))`];
+    const result = await execute("/usr/bin/python3", anonymousMemoryCaptureArgs(process.execPath, child),
+      { cwd: root, timeoutMs: 10_000 });
+    assert.equal(result.code, 0);
+    assert.ok(result.stdout.length > 64 * 1024);
+    assert.equal(JSON.parse(result.stdout.toString("utf8")).config.length, payloadBytes);
+    assert.deepEqual(await readdir(root), []);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("CLI usage deduplicates step IDs, excludes tool bodies, and preserves zero versus missing", () => {
   const step = { sessionID: "ses_test", part: { id: "step1", type: "step-finish", cost: 0,
     tokens: { input: 10, output: 2, reasoning: 1, cache: { read: 5, write: 0 } } } };
@@ -266,6 +565,9 @@ test("constructs processes with literal argument arrays and shell disabled", () 
   assert.deepEqual(spec.args, ["--value", hostile]);
   assert.equal(spec.options.shell, false);
   assert.equal(spec.options.cwd, "/safe/root");
+  const capture = anonymousMemoryCaptureArgs("/exact/tool", ["--value", hostile]);
+  assert.deepEqual(capture.slice(-3), ["/exact/tool", "--value", hostile]);
+  assert.deepEqual(resolvedConfigCommandArgs(), ["debug", "config"]);
 });
 
 test("watchdog prioritizes hard wall, startup, activity, and workspace progress", () => {
