@@ -4,7 +4,12 @@ export const ACCEPTANCE_CONTINUITY_EXTENSION = "sortie-dogs/acceptance-continuit
 export const ACCEPTANCE_CONTINUITY_SCHEMA_VERSION = "0.1" as const;
 export const ACCEPTANCE_CONTINUITY_AUTHORITY = "dispatch" as const;
 export const MAX_ACCEPTANCE_CONTINUITY_BYTES = 32 * 1024;
-export const MAX_ACCEPTANCE_CRITERIA = 24;
+/**
+ * One shared criterion bound for frozen intent requirements, parsed operator plans, and this
+ * ledger. A lower ledger bound silently rejects an otherwise valid accepted scope at worker
+ * inspection, so the count stays aligned here and the byte cap above remains the real payload limit.
+ */
+export const MAX_ACCEPTANCE_CRITERIA = 64;
 
 const FINGERPRINT = /^sha256:[0-9a-f]{64}$/u;
 const MAX_TASK_ID = 256;

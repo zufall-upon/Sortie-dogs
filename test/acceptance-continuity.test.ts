@@ -6,6 +6,7 @@ import {
   acceptanceContinuityFingerprint,
   inspectAcceptanceContinuity,
   MAX_ACCEPTANCE_CONTINUITY_BYTES,
+  MAX_ACCEPTANCE_CRITERIA,
   normalizeAcceptanceCriteria,
 } from "../src/core/acceptance-continuity.ts";
 
@@ -42,6 +43,21 @@ test("acceptance continuity rejects drift, unknown fields, and oversize input", 
   const huge = { ext: { [ACCEPTANCE_CONTINUITY_EXTENSION]: "x".repeat(MAX_ACCEPTANCE_CONTINUITY_BYTES) } };
   assert.equal(inspectAcceptanceContinuity(huge).error, "oversize");
   assert.equal(inspectAcceptanceContinuity({}).error, "absent");
+});
+
+test("acceptance continuity carries the same criterion count the frozen intent admits", () => {
+  assert.equal(MAX_ACCEPTANCE_CRITERIA, 64, "intent requirements, plans, and this ledger share one bound");
+  const criterion = (index: number) => `Criterion ${index + 1} holds`;
+  for (const count of [1, 24, 25, 27, MAX_ACCEPTANCE_CRITERIA]) {
+    const criteria = Array.from({ length: count }, (_value, index) => criterion(index));
+    const inspected = inspectAcceptanceContinuity(handoff(criteria));
+    assert.equal(inspected.error, undefined, `${count} criteria must stay readable`);
+    assert.deepEqual(inspected.ledger?.criteria, criteria, `${count} criteria must keep exact order`);
+  }
+  const excessive = Array.from({ length: MAX_ACCEPTANCE_CRITERIA + 1 }, (_value, index) => criterion(index));
+  assert.equal(inspectAcceptanceContinuity(handoff(excessive)).error, "malformed");
+  const wide = Array.from({ length: 30 }, (_value, index) => `${criterion(index)} `.padEnd(1500, "x"));
+  assert.equal(inspectAcceptanceContinuity(handoff(wide)).error, "oversize");
 });
 
 test("acceptance continuity permits redundant criteria without weakening their ordered fingerprint", () => {

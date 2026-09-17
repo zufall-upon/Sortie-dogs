@@ -3,7 +3,8 @@ import { execFile } from "node:child_process";
 import { lstat, mkdir, open, readFile, realpath, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
-import { acceptanceContinuityFingerprint, normalizeAcceptanceCriteria, ACCEPTANCE_CONTINUITY_EXTENSION } from "./acceptance-continuity.js";
+import { acceptanceContinuityFingerprint, inspectAcceptanceContinuity, normalizeAcceptanceCriteria,
+  ACCEPTANCE_CONTINUITY_EXTENSION, MAX_ACCEPTANCE_CONTINUITY_BYTES, MAX_ACCEPTANCE_CRITERIA } from "./acceptance-continuity.js";
 import { expandGoalDeclaration, goalDeclarationDefaults, hasGoalCommandAliasConflict } from "./goal-declaration-format.js";
 import { normalizeRelativePath } from "./path.js";
 import { CONTRACT_TEXT_LIMITS, validateHandoffSchema, validateOperationManifestSchema } from "./validate-schema.js";
@@ -227,6 +228,11 @@ export function parseOperatorPlan(value: unknown): OperatorPlan {
   }
   if (value.schema_version !== "0.1") return planError("/schema_version", "operator-plan-invalid", "schema-version");
   if (!strings(value.acceptance, true)) return planError("/acceptance", "operator-plan-invalid", "nonempty-string-array");
+  if (value.acceptance.length > MAX_ACCEPTANCE_CRITERIA) {
+    return contractError({ document: "plan", pointer: "/acceptance", code: "operator-plan-acceptance-too-many",
+      rule: "bounded-accepted-criteria", repair_kind: "repair-field",
+      length: value.acceptance.length, limit: MAX_ACCEPTANCE_CRITERIA });
+  }
   if (!strings(value.source_refs, true)) return planError("/source_refs", "operator-plan-invalid", "nonempty-string-array");
   if (!record(value.goal_declaration)) return planError("/goal_declaration", "operator-plan-invalid", "goal-object");
   if (!Array.isArray(value.units) || !value.units.length || value.units.length > OPERATOR_LIMITS.units) {
@@ -802,6 +808,18 @@ export class OperatorRuntime {
       }
       if (!h.ok) diagnostics.push(...h.diagnostics.map(item => diagnostic("handoff", item)));
       if (!m.ok) diagnostics.push(...m.diagnostics.map(item => diagnostic("manifest", item)));
+      // The worker refuses a malformed or oversize continuity ledger before it reads any source, so the
+      // generated ledger is inspected here instead of exposing that internal mismatch after dispatch.
+      const continuity = inspectAcceptanceContinuity(handoff);
+      if (continuity.error !== undefined) {
+        diagnostics.push({ document: "handoff", pointer: "/ext/acceptance-continuity", unit_index: index,
+          code: `operator-acceptance-continuity-${continuity.error}`, rule: "worker-readable-acceptance-ledger",
+          repair_kind: "repair-field",
+          ...(continuity.error === "oversize"
+            ? { length: new TextEncoder().encode(JSON.stringify(handoff.ext[ACCEPTANCE_CONTINUITY_EXTENSION])).byteLength,
+              limit: MAX_ACCEPTANCE_CONTINUITY_BYTES }
+            : {}) });
+      }
       if (h.ok && m.ok) diagnostics.push(...validateManifest(h.value, m.value, undefined, false, { requirePassedValidation: false })
         .filter(item => item.severity === "error").map(item => ({ document: "handoff" as const, pointer: item.pointer,
           code: item.code, rule: "handoff-manifest-consistency", repair_kind: "repair-field" as const })));

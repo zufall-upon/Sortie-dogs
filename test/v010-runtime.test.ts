@@ -23,6 +23,8 @@ import { RunFlightLedger } from "../dist/core/run-flight-ledger.js";
 import { goalFingerprint } from "../dist/core/goal-bound.js";
 import type { RuntimeBridge } from "../dist/plugin/runtime-bridge.js";
 import { decoratePreviewHeadings, receiptBoundTerminalText } from "../dist/plugin/receipt-presentation.js";
+import { inspectAcceptanceContinuity, MAX_ACCEPTANCE_CONTINUITY_BYTES,
+  MAX_ACCEPTANCE_CRITERIA } from "../dist/core/acceptance-continuity.js";
 
 async function fixture(run: (root: string) => Promise<void>) {
   const area = resolve("_testenv");
@@ -509,6 +511,58 @@ test("preview host adapter pins the native worker route and forwards terminal te
   const premature = { text: "DONE — accepted without evidence" };
   await hooks["experimental.text.complete"]!({ sessionID: "root", messageID: "root-assistant" }, premature);
   assert.equal(premature.text, "status: INTERRUPTED — accepted criteria remain unproved\nTRUE_INTERRUPTION: internal: accepted criteria remain unproved");
+}));
+
+function wideAcceptancePlan(count: number, criterion = (index: number) => `Criterion ${index + 1} holds`) {
+  const ids = Array.from({ length: count }, (_value, index) => `c${index + 1}`);
+  const value = plan();
+  value.acceptance = ids.map((_id, index) => criterion(index));
+  value.acceptance_proof = ids.map(id => [id]);
+  value.goal_declaration.criteria = ids.map(id => ({ criterion_id: id, validation_command: "node check-first.mjs" }));
+  value.units = [{ id: "first", title: "Implement every accepted criterion", objective: "Complete all accepted criteria in one unit.",
+    read: ["check-first.mjs"], write: ["first.txt"], validation: ["node check-first.mjs"],
+    acceptance_indices: ids.map((_id, index) => index) }];
+  return value;
+}
+
+test("a wide accepted scope reaches the worker with an exact readable continuity ledger", async () => fixture(async root => {
+  for (const count of [1, 25, 27, MAX_ACCEPTANCE_CRITERIA]) {
+    const request = wideAcceptancePlan(count);
+    const state = await new OperatorRuntime(join(root, `wide-${count}`), V010_RUNTIME_PROFILE).prepare("root", request);
+    const handoff = JSON.parse(await readFile(state.units[0]!.handoffPath, "utf8"));
+    const inspected = inspectAcceptanceContinuity(handoff);
+    assert.equal(inspected.error, undefined, `${count} accepted criteria must dispatch a readable ledger`);
+    assert.deepEqual(inspected.ledger?.criteria, request.acceptance, `${count} accepted criteria must keep exact order`);
+    assert.deepEqual(state.acceptance, request.acceptance);
+  }
+}));
+
+test("an unreadable acceptance ledger is refused at preparation instead of at worker inspection", async () => fixture(async root => {
+  const excessive = join(root, "excessive");
+  await assert.rejects(new OperatorRuntime(excessive, V010_RUNTIME_PROFILE).prepare("root", wideAcceptancePlan(MAX_ACCEPTANCE_CRITERIA + 1)),
+    (error: unknown) => {
+      assert.ok(error instanceof OperatorContractError);
+      assert.deepEqual(error.diagnostics, [{ document: "plan", pointer: "/acceptance", code: "operator-plan-acceptance-too-many",
+        rule: "bounded-accepted-criteria", repair_kind: "repair-field", length: MAX_ACCEPTANCE_CRITERIA + 1, limit: MAX_ACCEPTANCE_CRITERIA }]);
+      return true;
+    });
+  await assert.rejects(lstat(join(excessive, V010_RUNTIME_PROFILE.stateDirectory, "contracts")), { code: "ENOENT" });
+
+  const oversize = join(root, "oversize");
+  await assert.rejects(new OperatorRuntime(oversize, V010_RUNTIME_PROFILE).prepare("root",
+    wideAcceptancePlan(30, index => `Criterion ${index + 1} holds `.padEnd(1500, "x"))),
+  (error: unknown) => {
+    assert.ok(error instanceof OperatorContractError);
+    const [diagnostic] = error.diagnostics;
+    assert.equal(diagnostic?.document, "handoff");
+    assert.equal(diagnostic?.pointer, "/ext/acceptance-continuity");
+    assert.equal(diagnostic?.code, "operator-acceptance-continuity-oversize");
+    assert.equal(diagnostic?.rule, "worker-readable-acceptance-ledger");
+    assert.equal(diagnostic?.limit, MAX_ACCEPTANCE_CONTINUITY_BYTES);
+    assert.ok((diagnostic?.length ?? 0) > MAX_ACCEPTANCE_CONTINUITY_BYTES);
+    return true;
+  });
+  await assert.rejects(lstat(join(oversize, V010_RUNTIME_PROFILE.stateDirectory, "contracts")), { code: "ENOENT" });
 }));
 
 test("operator plan validates explicit scope and keeps criteria immutable", async () => fixture(async root => {
