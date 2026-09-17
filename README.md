@@ -88,38 +88,50 @@ Run configuration was fixed per product configuration:
   children on `openai/gpt-5.6-sol` / `medium`, with the pinned Sortie package and runtime assets.
   No Luna, Astra, or Opus messages were observed in these trials.
 
-| Metric · one frozen task | Bare OpenCode | Sortie v0.9.12 | Sortie v0.10.0 clean qualification |
+| Metric · one frozen task | Bare OpenCode | Sortie v0.9.12 | Sortie v0.10.1 RC qualification |
 | --- | ---: | ---: | ---: |
 | Attempts needed | 3 | 5 | 1 |
 | Completed runs compared | 3 | 3 | 1 |
 | Verified PASS | 0/3 | 0/3 | 0/1 |
 | Task checks · F2P | 11.1% · 3/27 | 85.2% · 23/27 | 88.9% · 8/9 |
 | Retained checks · P2P | 282/282 | 282/282 | 94/94 |
-| Median agent wall | 24.5 min | 25.7 min | 29.9 min · n=1 |
-| Median model steps | 43 | 39 | 33 · CLI stream only |
-| Implementation child sessions · total | 0 | 13 | 4 |
-| Estimated API-equivalent cost · median completed run | $3.53 | $2.85 | **$3.94** · n=1 |
-| Estimated cost · completed runs | $10.69 | $9.74 | **$3.94** |
-| Additional interrupted-attempt cost | $0 | $6.20 | $0 |
-| Total cost to acquire completed runs | $10.69 | $15.94 | **$3.94** |
+| Median agent wall | 24.5 min | 25.7 min | 23.2 min · n=1 |
+| Median model steps | 43 | 39 | 41 · CLI stream only |
+| Implementation child sessions · total | 0 | 13 | 3 |
+| Estimated API-equivalent cost · median completed run | $3.53 | $2.85 | **$4.48** · n=1 |
+| Estimated cost · completed runs | $10.69 | $9.74 | **$4.48** |
+| Additional interrupted-attempt cost · same fixed snapshot | $0 | $6.20 | $0 |
+| Total cost to acquire completed runs · same fixed snapshot | $10.69 | $15.94 | **$4.48** |
 
 All three Bare runs passed 1/9 task checks. The three completed Sortie runs passed 7/9, 8/9,
 and 8/9. Every compared candidate retained 94/94 prior checks, but every official verifier still
 returned reward 0. The two interrupted Sortie attempts are excluded from completed-run quality,
 time, and cost aggregates; their attempt count and estimated cost remain visible above.
 
-The v0.10 value is a standalone qualification-only reference, not a fourth matched run or a
+The v0.10.1 RC value is a standalone qualification-only reference, not a fourth matched run or a
 FrontierHarness leaderboard result. It used no fresh Bare control and a localized Docker-free
-verifier. Its estimated API-equivalent cost is **$3.94**: $3.26 from Sol and $0.68 from Terra,
-calculated from the root and descendant session tokens with 100% pricing coverage. A preceding
-debug run returned reward 1 (F2P 9/9, P2P 94/94), so that pass is not presented as reproducible.
+verifier. The RC label identifies an unreleased working-tree snapshot; the benchmark tarball's
+package metadata remained `0.10.0`, fixed by package SHA-256
+`67582ee023c3bd57813262e292c067a3f90f30d61c01d8caf6f91f09ae78f61d`.
+
+Its estimated API-equivalent cost is **$4.478613**: $3.23 Sol and $1.25 Terra when rounded to cents.
+The audit prices all root and descendant assistant messages: 84 priced requests, 4,215,698 tokens,
+100% pricing coverage, and no unpriced requests. It uses the product's 2026-09-14 Standard schedule
+per request, including cached input, reasoning as output, and the long-context rate band. The earlier
+delivery-incomplete package was a different source snapshot (`32dea0a3…`): it spent **$4.276578**
+across 90 priced requests and 3,704,649 tokens, with no terminal outcome or verifier. It is not folded
+into this RC's same-snapshot acquisition cost. Observed spend across both distinct snapshots was
+**$8.755191**, which is development spend rather than this RC's acquisition cost. Historical Bare and
+v0.9.12 costs retain their 2026-07-30 schedule; their cost cells are not same-rate comparisons with
+this RC estimate.
 
 ![Latest local case study: Bare completed 11.1 percent of task checks at a median estimated API-equivalent cost of $3.53; Sortie completed 85.2 percent at $2.85. Sortie needed five attempts and $15.94 to collect three completed runs. Neither configuration achieved a Verified PASS.](docs/assets/quality-cost-reference.svg)
 
-Cost uses exported root and child session tokens, grouped by the model that produced each message,
-with a fixed standard short-context rate schedule. Completed-run cost shows execution efficiency;
-total acquisition cost includes the two interrupted Sortie attempts and shows reliability overhead.
-These are API-equivalent estimates, not invoices.
+Cost audits use deduplicated root and descendant session tokens, grouped by the model that produced
+each message. Historical values retain their frozen 2026-07-30 short-context schedule; the RC uses
+the product's 2026-09-14 per-request schedule described above. Completed-run cost shows execution
+efficiency; same-snapshot acquisition cost adds interrupted attempts. These are API-equivalent
+estimates, not invoices.
 
 The product objective is **more verified outcomes per unit of cost and time without weakening the
 accepted goal**. This small, single-task local case study does not establish that claim, isolate

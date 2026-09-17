@@ -2,11 +2,11 @@
 
 ## Current status
 
-The README shows the latest completion-filtered local case study, run on 2026-09-14.
-Bare OpenCode and Sortie-dogs v0.9.12 each contributed three completed runs on the same
-frozen task. Bare needed three attempts; Sortie needed five because two attempts returned
-`INTERRUPTED`. They were executed as separate serial batches rather than interleaved matched
-pairs. No completed run achieved official verifier reward 1.
+The README shows a completion-filtered local case study, run on 2026-09-14, followed by a
+separate v0.10.1 RC qualification reference. Bare OpenCode and Sortie-dogs v0.9.12 each
+contributed three completed runs on the same frozen task. Bare needed three attempts; Sortie
+needed five because two attempts returned `INTERRUPTED`. They were executed as separate serial
+batches rather than interleaved matched pairs. No completed run achieved official verifier reward 1.
 
 - Task: `datacurve/anko-typed-variable-bindings` (DeepSWE).
 - Task source commit: `435ee89ec2f2e2289f33b0da4f992f0b7b7266b9`.
@@ -24,6 +24,41 @@ pairs. No completed run achieved official verifier reward 1.
 - Two additional Sortie attempts returned `INTERRUPTED`. Their official verifiers did not
   run, so correctness is unknown. They are excluded from completed-run quality, time, and
   cost aggregates, but their count and estimated acquisition cost remain reported.
+
+## v0.10.1 RC qualification
+
+The 2026-09-17 v0.10.1 RC reference is one standalone, qualification-only run. The RC label
+identifies an unreleased working-tree candidate; the benchmark tarball's package metadata remained
+`0.10.0`.
+The package SHA-256 was `67582ee023c3bd57813262e292c067a3f90f30d61c01d8caf6f91f09ae78f61d`.
+It reached terminal `DONE`, then the localized Docker-free official verifier returned reward **0**,
+F2P **8/9**, and P2P **94/94**. Agent wall was **1,391,159 ms** (23.2 min), the CLI stream
+recorded 41 model steps, and the operation created three implementation child sessions.
+
+The exact API-equivalent estimate is **$4.478613**. A read-only audit walked the root and all
+seven descendants, pricing 84 assistant requests and 4,215,698 tokens with 100% coverage; no
+message was unpriced, pending, or outside the tree. It attributes $2.057850 to Sol/high,
+$1.169238 to Sol/low, and $1.251526 to Terra/xhigh. The one-microdollar rounding difference
+between these displayed model buckets and the total comes from rounding only after per-request
+pricing.
+
+The audit used the product's 2026-09-14 Standard pricing snapshot and applied rates per request,
+including cached input, reasoning as output, and the OpenAI long-context band above 272,000 input
+and cache tokens. It is an API-equivalent estimate, not an invoice or subscription usage.
+
+| Model assumption · per million tokens · v0.10.1 RC | Input | Cached input | Output / reasoning |
+| --- | ---: | ---: | ---: |
+| Terra | $2.00 | $0.20 | $12.00 |
+| Sol | $4.00 | $0.40 | $20.00 |
+
+An earlier delivery-incomplete run was a different packed source snapshot
+(`32dea0a3c33bb658633b6c4edf15a109e347fd362f2c9ab9e6d235cf51fc1852`). Its full-tree audit
+found 90 priced assistant requests, 3,704,649 tokens, 100% pricing coverage, and **$4.276578**;
+it reached neither a terminal outcome nor the verifier. It is excluded from this RC's acquisition
+cost. Observed spend across both distinct snapshots was **$8.755191**, but that is development spend,
+not the cost to acquire this fixed RC result. This RC has one attempt and one completed run, so its
+same-snapshot additional interruption cost is **$0**. It has no fresh Bare control and is neither a
+matched comparison nor a FrontierHarness leaderboard result.
 
 This compares two product configurations, including different model routes. It does
 not isolate orchestration from model quality, establish a population success rate,
@@ -45,8 +80,11 @@ Sol. All exported root token totals match the corresponding CLI-stream records.
 - **Model steps and tokens:** values observed from the OpenCode CLI event stream across
   the root and child sessions. The zero host cost value is not interpreted as free use.
 - **Estimated API-equivalent cost:** observed input, cached input, output, and reasoning
-  tokens priced with the frozen 2026-07-30 standard short-context schedule. Reasoning is
-  priced as output. It is neither an invoice nor subscription usage.
+  tokens priced per request. Reasoning is priced as output. It is neither an invoice nor
+  subscription usage. Historical and RC rate schedules are retained separately below.
+
+The historical 2026-09-14 Bare and v0.9.12 case study retains the frozen 2026-07-30
+standard short-context schedule used when those values were collected:
 
 | Model assumption · per million tokens | Input | Cached input | Output / reasoning |
 | --- | ---: | ---: | ---: |
@@ -57,7 +95,8 @@ Bare's median completed-run estimate is **$3.53**, totaling **$10.69** across th
 Sortie's completed runs estimate to **$4.11**, **$2.85**, and **$2.79**: median **$2.85**,
 total **$9.74**. Its two interrupted attempts add **$6.20**, making total acquisition cost
 for three completed Sortie runs **$15.94**. Completed-run cost and acquisition cost answer
-different questions and are both reported.
+different questions and are both reported. These historical cost values are not same-rate
+comparisons with the v0.10.1 RC estimate.
 
 Exact trial values are retained in the [reference data](benchmarks/provisional-reference.json).
 
