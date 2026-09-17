@@ -59,9 +59,13 @@ See [configuration details](#configuration) for model selection and other setup 
 > **Project status: Beta.** v0.10.x is under active stabilization. Runtime
 > behavior, configuration, and runtime assets may still change before 1.0.
 
-[![npm](https://img.shields.io/npm/v/sortie-dogs)](https://www.npmjs.com/package/sortie-dogs)
-[![license](https://img.shields.io/npm/l/sortie-dogs)](LICENSE)
+[![GitHub Release](https://img.shields.io/github/v/release/zufall-upon/Sortie-dogs)](https://github.com/zufall-upon/Sortie-dogs/releases/latest)
+[![npm](https://img.shields.io/npm/v/sortie-dogs?label=npm)](https://www.npmjs.com/package/sortie-dogs)
+[![Tests](https://github.com/zufall-upon/Sortie-dogs/actions/workflows/test.yml/badge.svg)](https://github.com/zufall-upon/Sortie-dogs/actions/workflows/test.yml)
+[![OpenCode Plugin](https://img.shields.io/badge/OpenCode-Plugin-5C5CFF)](https://opencode.ai/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.9-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Node.js](https://img.shields.io/node/v/sortie-dogs)](https://www.npmjs.com/package/sortie-dogs)
+[![MIT License](https://img.shields.io/npm/l/sortie-dogs)](LICENSE)
 
 ![Sortie-dogs coordinating a bounded implementation workflow](https://raw.githubusercontent.com/zufall-upon/Sortie-dogs/main/docs/assets/sortie-workflow.gif)
 
