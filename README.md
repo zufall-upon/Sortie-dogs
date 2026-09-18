@@ -67,14 +67,22 @@ Release: [v0.10.5](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.10
 
 ### Direction for v0.10.x
 
-The v0.10.x line is being developed around an **Astra operator / Terra dogs** split. Astra is the
-top-level decision authority that protects the accepted goal, quality bar, escalation decisions,
-and final acceptance. Because Astra is expensive, it should do only the small amount of work that
-requires that level of judgment. Terra-based dogs handle most bounded planning, coordination, and
-execution. The intended result is Astra-level judgment with Terra-level operating cost.
+The v0.10.x line is focused on one outcome: **verified work at the lowest practical cost without
+giving up quality or acceptable speed.**
 
-This is an architectural direction under active validation, not a demonstrated benchmark result.
-Goal and quality authority remain centralized; implementation volume does not.
+Sortie-dogs does not assume that the strongest model should do every step. Lower-cost models should
+handle as much bounded execution as they can. Stronger models, independent review, and rescue paths
+are added only when task shape, observed failure, or risk provides evidence that the extra capability
+is worth the cost.
+
+The goal is not to minimize any one metric in isolation. It is to preserve the accepted goal and
+quality bar while balancing **cost, quality, and wall time**. Execution depth and model strength
+should adapt to the work: cheaper models first when they are sufficient, escalation only when
+evidence says it is needed, and no silent weakening of acceptance criteria to make a run cheaper or
+faster.
+
+v0.10.x is still being validated against that objective. The direction is simple: **keep it cheap
+enough to run often, good enough to trust, and fast enough to stay practical.**
 
 ## Latest local benchmark case study
 
