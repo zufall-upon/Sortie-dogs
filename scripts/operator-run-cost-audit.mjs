@@ -63,6 +63,39 @@ function bucketOf(map, key) {
   const created = emptyBucket(); map.set(key, created); return created;
 }
 function round(value) { return Math.round(value * 1e6) / 1e6; }
+function round3(value) { return Math.round(value * 1e3) / 1e3; }
+
+/**
+ * Prompt prefix reuse per session, in request order.
+ *
+ * A total cache ratio hides the failure this exists to catch: when a mutating element sits in the
+ * system block, every later request re-sends the whole prompt uncached while the small stable head
+ * keeps reporting the same cacheRead, so the run still looks "partly cached". Comparing each
+ * request's cacheRead against the previous request's whole prompt exposes that directly, because a
+ * healthy continuation reuses nearly all of it and a broken prefix reuses almost none.
+ *
+ * @param {Array<{input: number, cacheRead: number}>} ordered requests in creation order
+ */
+export function prefixReuse(ordered) {
+  const ratios = [];
+  for (let index = 1; index < ordered.length; index += 1) {
+    const previous = ordered[index - 1].input + ordered[index - 1].cacheRead;
+    if (previous <= 0) continue;
+    ratios.push(round3(Math.min(1, ordered[index].cacheRead / previous)));
+  }
+  const sorted = [...ratios].sort((left, right) => left - right);
+  const stalled = ratios.filter(ratio => ratio < 0.5).length;
+  return {
+    comparisons: ratios.length,
+    ratios,
+    min: sorted.length === 0 ? null : sorted[0],
+    median: sorted.length === 0 ? null : sorted[Math.floor(sorted.length / 2)],
+    stalledRequests: stalled,
+    // Three consecutive continuations that all reuse under half of the prior prompt is not latency or
+    // a cold start: the prefix itself is changing. Fewer requests stay reported but unflagged.
+    prefixStalled: ratios.length >= 3 && stalled === ratios.length,
+  };
+}
 function finishBucket(bucket) { return { ...bucket, estimatedUsd: round(bucket.estimatedUsd), hostReportedUsd: round(bucket.hostReportedUsd) }; }
 
 /**
@@ -135,6 +168,7 @@ export function aggregateRun(input, options) {
   const inheritedPhase = timeline.filter(event => event.at < startMs).at(-1)?.phase ?? null;
 
   const phases = new Map(); const roles = new Map(); const models = new Map(); const sessionTotals = new Map();
+  const trajectories = new Map();
   const total = emptyBucket();
   const counted = new Set();
   let duplicateMessages = 0; let pendingUsage = 0; let outOfWindow = 0; let nonTreeMessages = 0;
@@ -160,6 +194,24 @@ export function aggregateRun(input, options) {
       ? `${message.providerID}/${message.modelID}${message.variant ? `:${message.variant}` : ""}` : "unclassified";
     for (const bucket of [total, bucketOf(phases, phase), bucketOf(roles, roleKey), bucketOf(models, modelKey),
       bucketOf(sessionTotals, message.sessionID)]) addUsage(bucket, tokens, estimate, message.cost);
+    if (tokens !== null) {
+      if (!trajectories.has(message.sessionID)) trajectories.set(message.sessionID, []);
+      trajectories.get(message.sessionID).push({ createdMs: message.createdMs, input: tokens.input, cacheRead: tokens.cacheRead });
+    }
+  }
+
+  const cacheBySession = {};
+  const cacheStalled = [];
+  for (const session of tree) {
+    const ordered = (trajectories.get(session.id) ?? []).sort((left, right) => left.createdMs - right.createdMs);
+    if (ordered.length === 0) continue;
+    const reuse = prefixReuse(ordered);
+    const uncached = ordered.reduce((sum, entry) => sum + entry.input, 0);
+    const cached = ordered.reduce((sum, entry) => sum + entry.cacheRead, 0);
+    cacheBySession[session.id] = { agent: session.agent ?? null, requests: ordered.length,
+      uncachedInput: uncached, cacheRead: cached,
+      cacheRatio: cached + uncached === 0 ? null : round3(cached / (cached + uncached)), ...reuse };
+    if (reuse.prefixStalled) cacheStalled.push(session.id);
   }
 
   const reads = { calls: 0, errors: 0, bytes: 0, uniquePaths: 0, repeatCalls: 0, rangedCalls: 0, bySession: {} };
@@ -207,6 +259,7 @@ export function aggregateRun(input, options) {
     byRole: sorted(roles),
     byModel: sorted(models),
     reads,
+    cacheHealth: { bySession: cacheBySession, stalledSessions: cacheStalled },
     tools: { calls: Object.fromEntries([...toolCalls.entries()].sort((a, b) => b[1] - a[1])),
       errors: Object.fromEntries([...toolErrors.entries()].sort((a, b) => b[1] - a[1])) },
     integrity: {

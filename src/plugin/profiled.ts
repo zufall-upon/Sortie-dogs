@@ -962,6 +962,15 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           if (repairAccess.expected_command === null) throw new Error("operator-contract-repair-validation-command-missing");
           await operators.recordRepairValidationResult((await rootFor(id))!, id, repairAccess.expected_command, exit as number);
         }
+        if (!ownership && request.tool.toLowerCase() === "read") {
+          const proposal = await proposals.read((await rootFor(id))!);
+          if (proposal?.phase === "investigating" && proposal.proposal_session_id === id) {
+            output.output = `${output.output ?? ""}\n\nSORTIE_PROPOSAL_BUDGET actual_reads=${proposal.read_count}; ` +
+              `remaining_reads=${proposal.intent.proposal_budget.max_reads - proposal.read_count}; ` +
+              `submissions=${proposal.submission_count}; ` +
+              `remaining_submissions=${proposal.intent.proposal_budget.max_submissions - proposal.submission_count}.`;
+          }
+        }
         if (ownership) {
           const child = taskChildSessionID(output);
           if (child) await operators.observeChild(ownership.root, request.callID!, child);
@@ -1008,11 +1017,16 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           "Never rewrite user acceptance or evidence to rename protocol roles. Final acceptance belongs only to the root coordinator.");
         const proposal = await proposals.read(root);
         if (proposal?.phase === "investigating" && proposal.proposal_session_id === request.sessionID) {
+          // Only immutable identity and the frozen budget caps belong here. Consumed counters move with
+          // every accounted read, and a system element is an absolute prompt prefix: restating them here
+          // invalidated the whole cached prefix on every later request of the same investigation, so the
+          // Task prompt and all accumulated reads were re-billed uncached. They are reported on the read
+          // result instead, which is appended after the stable prefix.
           (output.system ??= []).push(`SORTIE_PROPOSAL_PHASE investigating; intent=${proposal.intent_id}; root=${root}; child=${request.sessionID}. ` +
             `This durable phase remains authoritative after compaction even when the latest message is a generic continuation. ` +
             `Continue the admitted read-only investigation and submit through ${submitProposal}. Do not call ${next} or dispatch workers: no execution run exists yet. ` +
-            `actual_reads=${proposal.read_count}; remaining_reads=${proposal.intent.proposal_budget.max_reads - proposal.read_count}; ` +
-            `submissions=${proposal.submission_count}; remaining_submissions=${proposal.intent.proposal_budget.max_submissions - proposal.submission_count}.`);
+            `max_reads=${proposal.intent.proposal_budget.max_reads}; max_submissions=${proposal.intent.proposal_budget.max_submissions}. ` +
+            `Consumed budget is reported as SORTIE_PROPOSAL_BUDGET on each read result and by ${submitProposal}; never infer it from this element.`);
         }
       },
       "experimental.text.complete": async (request, output) => {

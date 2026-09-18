@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 // The audit adapter is a repository script, not shipped runtime code. It is imported directly so the
 // aggregation rules are proved without a host database.
-import { aggregateRun, collectTree, normalizeTokens, phaseForAgent, proposalPacketStatus, proposalTaskStatus } from "../scripts/operator-run-cost-audit.mjs";
+import { aggregateRun, collectTree, normalizeTokens, phaseForAgent, prefixReuse, proposalPacketStatus, proposalTaskStatus } from "../scripts/operator-run-cost-audit.mjs";
 
 const ROOT = "ses_root";
 const at = (iso: string) => Date.parse(iso);
@@ -162,6 +162,44 @@ test("a resumed window inherits the active phase and excludes earlier spend", ()
   assert.equal(report.integrity.messagesOutsideWindow, 5);
   assert.equal(report.integrity.phaseTokensMatchTotal, true);
   assert.equal(report.reads.calls, 0, "earlier reads belong to the earlier window");
+});
+
+test("prefix reuse separates a stalled prompt cache from a normal cold start", () => {
+  // Observed shapes from one v0.10.3 qualification run: the proposal child kept reporting the same
+  // small cached head while its prompt grew past 129k, and the root reused nearly the whole prompt
+  // after the usual first-continuation miss.
+  const stalledShape = [[7640, 0], [9514, 2560], [37058, 2560], [103964, 2560], [118862, 2560], [129164, 2560]];
+  const healthyShape = [[7222, 0], [8199, 0], [19799, 8064], [16996, 27776], [2083, 44672], [4655, 46592]];
+  const requests = (sessionID: string, agent: string, shape: number[][]) => shape.map(([input, cacheRead], index) => ({
+    id: `m-${sessionID}-${index}`, sessionID, role: "assistant", providerID: "openai", modelID: "gpt-5.6-terra",
+    variant: "xhigh", agent, createdMs: at("2026-09-17T00:00:00Z") + index * 12_000,
+    tokens: tokens(input!, 0, 0, cacheRead!), cost: null,
+  }));
+  const report = aggregateRun({
+    sessions: [{ id: ROOT, parentID: null, agent: "dog-operator", title: "root" },
+      { id: "ses_proposal", parentID: ROOT, agent: "dogs-coordinator", title: "proposal child" }],
+    messages: [...requests(ROOT, "dog-operator", healthyShape), ...requests("ses_proposal", "dogs-coordinator", stalledShape)],
+    toolParts: [],
+  }, { rootID: ROOT, asOfMs: at("2026-09-17T01:00:00Z") });
+
+  assert.deepEqual(report.cacheHealth.stalledSessions, ["ses_proposal"]);
+  const child = report.cacheHealth.bySession["ses_proposal"];
+  assert.equal(child.agent, "dogs-coordinator");
+  assert.equal(child.comparisons, 5);
+  assert.equal(child.stalledRequests, 5);
+  assert.equal(child.prefixStalled, true);
+  assert.equal(child.cacheRatio, 0.031);
+  assert.deepEqual(child.ratios, [0.335, 0.212, 0.065, 0.024, 0.021]);
+
+  const root = report.cacheHealth.bySession[ROOT];
+  assert.equal(root.prefixStalled, false, "one cold continuation is not a broken prefix");
+  assert.equal(root.stalledRequests, 1);
+  assert.equal(root.median, 0.997);
+
+  assert.equal(prefixReuse([]).comparisons, 0);
+  assert.equal(prefixReuse([{ input: 10, cacheRead: 0 }]).prefixStalled, false);
+  assert.equal(prefixReuse([{ input: 0, cacheRead: 0 }, { input: 5, cacheRead: 0 }]).comparisons, 0,
+    "an empty prior prompt proves nothing about reuse");
 });
 
 test("long context pricing and read accounting stay observable", () => {

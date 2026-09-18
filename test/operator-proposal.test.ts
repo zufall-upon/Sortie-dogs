@@ -242,6 +242,40 @@ test("proposal shape diagnostics identify every malformed scope and missing fiel
   assert.deepEqual(corrected.proposal.plan.acceptance, requirements.map(item => item.text));
 }));
 
+test("proposal system elements stay identical across accounted reads and report consumed budget on the read result", async () => fixture(async root => {
+  const { hooks, started } = await previewProposal(root);
+  await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "prefix-proposal" }, { args: started.task });
+  await hooks["chat.message"]!({ sessionID: "child", messageID: "prefix-child", agent: "dogs-coordinator" }, {
+    message: { agent: "dogs-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+    parts: [{ type: "text", text: started.task.prompt }],
+  });
+  const snapshot = async () => {
+    const system = { system: [] as string[] };
+    await hooks["experimental.chat.system.transform"]!({ sessionID: "child" }, system);
+    return system.system;
+  };
+  const before = await snapshot();
+  assert.match(before.join("\n"), /SORTIE_PROPOSAL_PHASE investigating/u);
+  assert.match(before.join("\n"), /max_reads=2; max_submissions=1\./u);
+  for (const element of before) {
+    assert.doesNotMatch(element, /actual_reads=|remaining_reads=|remaining_submissions=/u,
+      "a system element is an absolute prompt prefix: a counter that moves on every read discards the cached prefix");
+  }
+  const results: string[] = [];
+  for (const callID of ["prefix-read-1", "prefix-read-2"]) {
+    await hooks["tool.execute.before"]!({ tool: "read", sessionID: "child", callID }, { args: { filePath: "src/input.ts" } });
+    const output = { output: "observed" };
+    await hooks["tool.execute.after"]!({ tool: "read", sessionID: "child", callID, args: { filePath: "src/input.ts" } }, output);
+    results.push(output.output);
+    assert.deepEqual(await snapshot(), before, "an accounted read must not change the cached prompt prefix");
+  }
+  assert.equal(results[0], "observed\n\nSORTIE_PROPOSAL_BUDGET actual_reads=1; remaining_reads=1; submissions=0; remaining_submissions=1.");
+  assert.equal(results[1], "observed\n\nSORTIE_PROPOSAL_BUDGET actual_reads=2; remaining_reads=0; submissions=0; remaining_submissions=1.");
+  const foreign = { output: "observed" };
+  await hooks["tool.execute.after"]!({ tool: "read", sessionID: "foreign", callID: "foreign-read", args: { filePath: "src/input.ts" } }, foreign);
+  assert.equal(foreign.output, "observed", "an unclaimed child receives no proposal budget accounting");
+}));
+
 test("active proposal compaction preserves the claimed child and budgets without an execution run", async () => fixture(async root => {
   const { hooks, started } = await previewProposal(root);
   await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "compact-proposal" }, { args: started.task });
