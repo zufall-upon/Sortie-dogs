@@ -74,7 +74,7 @@ bounded implementation, canonical validation, and evidence-backed completion.
 
 Guides: [日本語](docs/guide-ja.md) · [简体中文](docs/guide-zh-CN.md) · [テスト実行](docs/testing.md) · [CLI testing](docs/cli-testing.md)
 
-Release: [v0.10.4](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.10.4)
+Release: [v0.10.5](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.10.5)
 
 ## Latest local benchmark case study
 
@@ -92,20 +92,20 @@ Run configuration was fixed per product configuration:
   children on `openai/gpt-5.6-sol` / `medium`, with the pinned Sortie package and runtime assets.
   No Luna, Astra, or Opus messages were observed in these trials.
 
-| Metric · one frozen task | Bare OpenCode | Sortie v0.9.12 | Sortie v0.10.1 RC qualification | Sortie v0.10.3 qualification · Terra/xhigh | Sortie v0.10.4 qualification · Terra/xhigh |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Attempts needed | 3 | 5 | 1 | 1 | 2 |
-| Completed runs compared | 3 | 3 | 1 | 1 | 2 |
-| Verified PASS | 0/3 | 0/3 | 0/1 | 0/1 | 0/2 |
-| Task checks · F2P | 11.1% · 3/27 | 85.2% · 23/27 | 88.9% · 8/9 | 77.8% · 7/9 | 72.2% · 5/9 and 8/9 |
-| Retained checks · P2P | 282/282 | 282/282 | 94/94 | 94/94 | 94/94 |
-| Median agent wall | 24.5 min | 25.7 min | 23.2 min · n=1 | 22.7 min · n=1 | 31.1 min · n=2 |
-| Median model steps | 43 | 39 | 41 · CLI stream only | 36 · CLI stream only | 44 · CLI stream only |
-| Implementation child sessions · total | 0 | 13 | 3 | 5 | 10 |
-| Estimated API-equivalent cost · median completed run | $3.53 | $2.85 | **$4.48** · n=1 | **$3.79** · n=1 | **$3.82** · n=2 |
-| Estimated cost · completed runs | $10.69 | $9.74 | **$4.48** | **$3.79** | **$7.64** |
-| Additional interrupted-attempt cost · same fixed snapshot | $0 | $6.20 | $0 | $0 | $0 |
-| Total cost to acquire completed runs · same fixed snapshot | $10.69 | $15.94 | **$4.48** | **$3.79** | **$7.64** |
+| Metric · one frozen task | Bare OpenCode | Sortie v0.9.12 | Sortie v0.10.1 RC qualification | Sortie v0.10.3 qualification · Terra/xhigh | Sortie v0.10.4 qualification · Terra/xhigh | Sortie v0.10.5 candidate qualification · Terra/xhigh + Luna/max |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Attempts needed | 3 | 5 | 1 | 1 | 2 | 1 recorded success |
+| Completed runs compared | 3 | 3 | 1 | 1 | 2 | 1 recorded success |
+| Verified PASS | 0/3 | 0/3 | 0/1 | 0/1 | 0/2 | **1/1** |
+| Task checks · F2P | 11.1% · 3/27 | 85.2% · 23/27 | 88.9% · 8/9 | 77.8% · 7/9 | 72.2% · 5/9 and 8/9 | **100% · 9/9** |
+| Retained checks · P2P | 282/282 | 282/282 | 94/94 | 94/94 | 94/94 | **94/94** |
+| Median agent wall | 24.5 min | 25.7 min | 23.2 min · n=1 | 22.7 min · n=1 | 31.1 min · n=2 | 43.1 min · n=1 |
+| Median model steps | 43 | 39 | 41 · CLI stream only | 36 · CLI stream only | 44 · CLI stream only | 25 · CLI stream only |
+| Implementation child sessions · total | 0 | 13 | 3 | 5 | 10 | 3 |
+| Estimated API-equivalent cost · median completed run | $3.53 | $2.85 | **$4.48** · n=1 | **$3.79** · n=1 | **$3.82** · n=2 | **$1.72** · n=1 |
+| Estimated cost · completed runs | $10.69 | $9.74 | **$4.48** | **$3.79** | **$7.64** | **$1.72** |
+| Additional interrupted-attempt cost · same fixed snapshot | $0 | $6.20 | $0 | $0 | $0 | Not reported |
+| Total cost to acquire completed runs · same fixed snapshot | $10.69 | $15.94 | **$4.48** | **$3.79** | **$7.64** | Not reported |
 
 All three Bare runs passed 1/9 task checks. The three completed Sortie runs passed 7/9, 8/9,
 and 8/9. Every compared candidate retained 94/94 prior checks, but every official verifier still
@@ -143,6 +143,20 @@ Docker-free official verifier returned reward **0** with P2P **94/94** each time
 **8/9**, so the single v0.10.3 observation of 7/9 sits inside this spread: neither release solves the
 task, and the per-run difference is run-to-run variance at n=1 and n=2, not a measured quality change.
 
+The **v0.10.5 candidate** switches the v0.10 implementation worker default from Sol/low to
+Luna/max. One separate qualification on the same frozen task, pins, and localized Docker-free
+official verifier reached `DONE` and returned reward **1**, F2P **9/9**, and P2P **94/94**. Agent
+wall was **2,583,374 ms** (43.1 min), the CLI stream recorded 25 model steps, and the operation
+created three implementation child sessions. Its full root-plus-five-descendant audit prices 106
+assistant requests and 8,830,131 tokens at **$1.719999** API-equivalent cost: **$1.436725** for
+Terra/xhigh and **$0.283274** for Luna/max. Pricing coverage was 100%, with no unpriced or pending
+requests. The candidate package was built before the release version bump and reported package
+metadata `0.10.4`; this is a source-snapshot reference, not a released-package measurement.
+
+The v0.10.5 column deliberately reports this one verified success only. It is not a success-rate or
+acquisition-cost aggregate, and its `Not reported` cells do not imply zero cost or zero failed
+attempts outside this recorded success.
+
 The release payload this qualification exists to check is a prompt-cache correctness fix, and that
 effect is separable from task quality. Before the fix the proposal investigation child re-sent its
 whole prompt uncached on every request, because a consumed-read counter sat in the system block and a
@@ -155,7 +169,7 @@ cost is not a clean measure of the same fix, because each run performed a differ
 the two v0.10.4 runs priced 97 requests at **$3.268415** and 119 requests at **$4.368122**, both at
 100% pricing coverage on the 2026-09-14 per-request schedule.
 
-![Latest local case study: Bare completed 11.1 percent of task checks at a median estimated API-equivalent cost of $3.53; Sortie v0.9.12 completed 85.2 percent at $2.85. The one-shot v0.10.3 Terra/xhigh qualification completed 77.8 percent at $3.79. Neither configuration achieved a Verified PASS.](docs/assets/quality-cost-reference.svg)
+![Historical local case study: Bare completed 11.1 percent of task checks at a median estimated API-equivalent cost of $3.53; Sortie v0.9.12 completed 85.2 percent at $2.85. The one-shot v0.10.3 Terra/xhigh qualification completed 77.8 percent at $3.79. Neither configuration achieved a Verified PASS.](docs/assets/quality-cost-reference.svg)
 
 Cost audits use deduplicated root and descendant session tokens, grouped by the model that produced
 each message. Historical values retain their frozen 2026-07-30 short-context schedule; the v0.10

@@ -124,6 +124,65 @@
         "included_in_same_snapshot_acquisition_cost": false
       },
       "combined_distinct_snapshot_spend_usd": 8.755191
+    },
+    "v0105_luna_max": {
+      "candidate_label": "v0.10.5-candidate-luna-max",
+      "observed_date": "2026-09-18",
+      "package_version": "0.10.4",
+      "package_sha256": "8c8f17dc8b60891307cb6862db246b213102419207f0ef4273e3250cb41502b6",
+      "package_metadata_note": "Candidate package built before the v0.10.5 version bump.",
+      "runtime_marker": "0.10.0-v0912-language4-cost-rpt10-compaction-ref1-proposal1-review-remediation1-surface3-proposal-recovery2-quality1-terminal1",
+      "qualification_only": true,
+      "methodology_comparable": false,
+      "leaderboard": false,
+      "worker_route": "openai/gpt-5.6-luna/max",
+      "cost_evidence": {
+        "kind": "api-equivalent-estimate-not-invoice",
+        "pricing_snapshot_checked_at": "2026-09-14",
+        "pricing_source": "product estimateModelUsageCost",
+        "rate_schedule": "standard-per-request-with-openai-long-context-band",
+        "reasoning_priced_as": "output",
+        "audit_scope": "root-and-all-descendant-assistant-messages",
+        "pricing_coverage": 1,
+        "unpriced_requests": 0,
+        "host_reported_cost_interpreted": false
+      },
+      "trials": [
+        {
+          "id": "luna-max-r1",
+          "terminal_outcome": "DONE",
+          "expected_operation": "pass",
+          "official_reward": 1,
+          "f2p_passed": 9,
+          "f2p_total": 9,
+          "p2p_passed": 94,
+          "p2p_total": 94,
+          "agent_wall_ms": 2583374,
+          "model_steps": 25,
+          "implementation_children": 3,
+          "cost_audit": {
+            "assistant_requests": 106,
+            "tokens": { "input": 691149, "output": 33061, "reasoning": 73665, "cache_read": 8032256, "cache_write": 0, "total": 8830131 },
+            "estimated_api_equivalent_cost_usd": 1.719999,
+            "model_costs_usd": { "openai/gpt-5.6-terra:xhigh": 1.436725, "openai/gpt-5.6-luna:max": 0.283274 }
+          }
+        }
+      ],
+      "aggregate": {
+        "verified_pass": 1,
+        "launched_trials": 1,
+        "completed_runs": 1,
+        "official_verifier_runs": 1,
+        "f2p_passed": 9,
+        "f2p_total": 9,
+        "p2p_passed": 94,
+        "p2p_total": 94,
+        "median_agent_wall_ms": 2583374,
+        "median_model_steps": 25,
+        "implementation_children": 3,
+        "estimated_api_equivalent_cost_usd": { "median_completed_run": 1.719999, "completed_runs": 1.719999 },
+        "acquisition_cost_reported": false
+      }
     }
   },
   "limitations": [
@@ -135,7 +194,8 @@
     "Docker and Runta intentionally unused",
     "API-equivalent estimates are not invoices or subscription usage",
     "v0.10.1 RC is one standalone qualification with no fresh Bare control",
-    "Historical case-study and v0.10.1 RC estimates use different frozen pricing schedules"
+    "Historical case-study and v0.10.1 RC estimates use different frozen pricing schedules",
+    "v0.10.5 Luna/max is one verified-success reference only; no rate or acquisition estimate is reported"
   ],
   "external_references": {
     "systems": ["Codex", "Pi", "Oh My OpenCode"],

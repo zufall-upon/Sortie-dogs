@@ -6,7 +6,9 @@ The README shows a completion-filtered local case study, run on 2026-09-14, foll
 separate v0.10.1 RC qualification reference. Bare OpenCode and Sortie-dogs v0.9.12 each
 contributed three completed runs on the same frozen task. Bare needed three attempts; Sortie
 needed five because two attempts returned `INTERRUPTED`. They were executed as separate serial
-batches rather than interleaved matched pairs. No completed run achieved official verifier reward 1.
+batches rather than interleaved matched pairs. No run in that historical batch achieved official
+verifier reward 1. A later single v0.10.5 Luna/max qualification success is documented separately
+below and is not aggregated with the historical batch.
 
 - Task: `datacurve/anko-typed-variable-bindings` (DeepSWE).
 - Task source commit: `435ee89ec2f2e2289f33b0da4f992f0b7b7266b9`.
@@ -67,6 +69,24 @@ The observed host cost field was zero and is not treated as attributable cost ev
 costs are instead estimated from exported root and child session tokens, attributed to each message's
 recorded model. Bare used Sol. Sortie root messages used Terra and implementation child messages used
 Sol. All exported root token totals match the corresponding CLI-stream records.
+
+## v0.10.5 Luna/max qualification
+
+The 2026-09-18 v0.10.5 candidate reference is one standalone, qualification-only success on the
+same pinned task and localized Docker-free verifier. It uses Terra/xhigh for the root and Luna/max for
+the v0.10 implementation worker. It reached `DONE`; the verifier returned reward **1**, F2P **9/9**,
+and P2P **94/94**. Agent wall was **2,583,374 ms** (43.1 min), the CLI stream recorded 25 model
+steps, and the operation created three implementation child sessions.
+
+The candidate package SHA-256 was
+`8c8f17dc8b60891307cb6862db246b213102419207f0ef4273e3250cb41502b6`. Its package metadata reported
+`0.10.4` because the version bump followed qualification; it is a source-snapshot reference for the
+v0.10.5 release, not a released-package measurement.
+
+The full root-plus-five-descendant audit priced 106 assistant requests and 8,830,131 tokens at
+**$1.719999** API-equivalent cost: **$1.436725** for Terra/xhigh and **$0.283274** for Luna/max.
+Pricing coverage was 100%, with no unpriced or pending request. This is one verified-success
+reference only. It does not estimate a success rate, reliability, or same-snapshot acquisition cost.
 
 ## Metric definitions
 

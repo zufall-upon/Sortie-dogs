@@ -19,7 +19,7 @@ const SERIAL_CAPABILITIES = new Set([
   "sortie_bind_write_gate", "sortie_release_write_gate", "sortie_check_contract",
   "sortie_compact_and_continue", "sortie_enable_backlog_drain",
 ]);
-const PREVIEW_WORKER_ROUTE = Object.freeze({ model: "openai/gpt-5.6-sol", variant: "low" });
+const PREVIEW_WORKER_ROUTE = Object.freeze({ model: "openai/gpt-5.6-luna", variant: "max" });
 const PREVIEW_SCOUT_ROUTE = Object.freeze({ model: "openai/gpt-5.6-luna", variant: "xhigh" });
 const PREVIEW_OPERATIONS_ROUTE = Object.freeze({ model: "openai/gpt-5.6-terra", variant: "xhigh" });
 const PREVIEW_PRIMARY_ROUTE = Object.freeze({ model: "openai/gpt-5.6-sol", variant: "low" });
@@ -125,6 +125,24 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         operatorParents.set(id, parentRoot);
       }
       return parentRoot;
+    }
+    /**
+     * Resolve the owning root of a proposal investigation child for prompt assembly only.
+     *
+      * `rootFor` stops resolving this child as soon as the proposal leaves `investigating`, which is the
+     * correct authorization answer: the child must not run another tool. It is the wrong answer for the
+     * system prefix, because losing the root also drops every profile element and changes the absolute
+     * prompt prefix, so the child's post-submit turn re-sent its whole investigation uncached. This
+     * resolver grants no tool authority and is never consulted on an execute path.
+     */
+    async function proposalPromptRoot(id: string): Promise<string | undefined> {
+      if (retired.has(id)) return undefined;
+      const who = await identity(id);
+      if (who.role !== "dog-operator" || !who.parent) return undefined;
+      const parentRoot = await rootFor(who.parent, 1);
+      if (!parentRoot) return undefined;
+      const proposal = await proposals.read(parentRoot);
+      return proposal?.phase === "submitted" && proposal.proposal_session_id === id ? parentRoot : undefined;
     }
     function mapAgent(value: string, outward: boolean): string {
       if (outward) {
@@ -385,6 +403,19 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       }
       return { ...packet, budget };
     }
+    /**
+     * Proposal accounting without the submitted packet body.
+     *
+     * The full proposal carries the plan, every unit, and the acceptance text a further time. Once the
+     * root has compared it, approval froze it into the execution run, whose own packet already reports
+     * acceptance, units, and scopes. Re-emitting it on approval and on every later status call appended
+     * a redundant copy to the one session that re-reads its whole context on every turn. `content_hash`
+     * stays, so the exact submitted revision is still identifiable.
+     */
+    function proposalIdentity(state: import("../core/operator-proposal.js").OperatorProposalState) {
+      const { proposal: _packet, ...identity } = proposals.packet(state) as Record<string, unknown>;
+      return identity;
+    }
     tools[status] = { description: "Read the durable root-owned operator outcome and host budget counters (max_units, consumed_units, reserved_units, remaining_units) without claiming acceptance or retrying work. An investigating proposal returns its exact short Task reference only before a Task has been admitted; an existing admission never yields a redispatch Task.",
       args: {}, execute: async (_args, context) => {
         await requireRoot(context.sessionID);
@@ -401,7 +432,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             ? "compare and approve the exact proposal; do not call operator_next before approval prepares a run"
             : "approved proposal has no operator run; do not call operator_next; reconcile the approval or preparation failure";
         return JSON.stringify(state ? { ...await operatorPacket(state), ...(draft ? { pending_draft: draft } : {}),
-          ...(proposal ? { proposal: proposals.packet(proposal) } : {}) }
+          ...(proposal ? { proposal: proposalIdentity(proposal) } : {}) }
           : draft ? { ...draft as object, ...(proposal ? { proposal: proposals.packet(proposal) } : {}) }
             : proposal ? { profile: profile.id, proposal: proposals.packet(proposal),
               ...(proposal.phase === "investigating" && proposal.proposal_call_id === null ? { task: proposals.referenceTask(proposal),
@@ -623,7 +654,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           if (prepared.status !== "prepared") throw new Error("operator-proposal-approved-plan-invalid");
           await registerPreparedGoal(context.sessionID, prepared.state);
           const committed = await proposals.approve(context.sessionID, approval);
-          return JSON.stringify({ ...proposals.packet(committed) as object, execution: JSON.parse(preparedTask(prepared.state)) });
+          return JSON.stringify({ ...proposalIdentity(committed), execution: JSON.parse(preparedTask(prepared.state)) });
         });
       } };
     const ownTools = new Set([prepare, repair, next, status, cancel, complete, resume, resolveContractRepair,
@@ -1009,19 +1040,24 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         await core["permission.ask"]?.(request, output);
       },
       "experimental.chat.system.transform": async (request, output) => {
-        const root = await rootFor(request.sessionID);
+        const root = await rootFor(request.sessionID) ?? await proposalPromptRoot(request.sessionID);
         if (!root) return;
         await core["experimental.chat.system.transform"]?.(request, output);
         (output.system ??= []).push(`SORTIE_RUNTIME_PROFILE ${profile.id}; marker ${assetVersion}. ` +
           `Shared MkII protocol role names are logical: ${protocolMap}. Use only ${profile.toolPrefix} tools for this profile. ` +
           "Never rewrite user acceptance or evidence to rename protocol roles. Final acceptance belongs only to the root coordinator.");
         const proposal = await proposals.read(root);
-        if (proposal?.phase === "investigating" && proposal.proposal_session_id === request.sessionID) {
+        if (proposal?.phase !== "approved" && proposal?.proposal_session_id === request.sessionID) {
           // Only immutable identity and the frozen budget caps belong here. Consumed counters move with
           // every accounted read, and a system element is an absolute prompt prefix: restating them here
           // invalidated the whole cached prefix on every later request of the same investigation, so the
           // Task prompt and all accumulated reads were re-billed uncached. They are reported on the read
           // result instead, which is appended after the stable prefix.
+          //
+          // The phase is deliberately not part of this condition. Removing an element is the same absolute
+          // prefix change as rewriting one: gating on `investigating` dropped this block the moment a
+          // submission succeeded, so the child's final turn re-sent the entire accumulated investigation
+          // uncached. The terminal submit result is appended after this prefix and is more recent.
           (output.system ??= []).push(`SORTIE_PROPOSAL_PHASE investigating; intent=${proposal.intent_id}; root=${root}; child=${request.sessionID}. ` +
             `This durable phase remains authoritative after compaction even when the latest message is a generic continuation. ` +
             `Continue the admitted read-only investigation and submit through ${submitProposal}. Do not call ${next} or dispatch workers: no execution run exists yet. ` +

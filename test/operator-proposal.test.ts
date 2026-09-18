@@ -276,6 +276,56 @@ test("proposal system elements stay identical across accounted reads and report 
   assert.equal(foreign.output, "observed", "an unclaimed child receives no proposal budget accounting");
 }));
 
+test("proposal system elements survive a successful submission so the final child turn keeps its cached prefix", async () => fixture(async root => {
+  const { hooks, started } = await previewProposal(root);
+  await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "submit-proposal" }, { args: started.task });
+  await hooks["chat.message"]!({ sessionID: "child", messageID: "submit-child", agent: "dogs-coordinator" }, {
+    message: { agent: "dogs-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+    parts: [{ type: "text", text: started.task.prompt }],
+  });
+  const snapshot = async (sessionID: string) => {
+    const system = { system: [] as string[] };
+    await hooks["experimental.chat.system.transform"]!({ sessionID }, system);
+    return system.system;
+  };
+  await hooks["tool.execute.before"]!({ tool: "read", sessionID: "child", callID: "submit-read" }, { args: { filePath: "src/input.ts" } });
+  await hooks["tool.execute.after"]!({ tool: "read", sessionID: "child", callID: "submit-read", args: { filePath: "src/input.ts" } }, { output: "observed" });
+  const investigating = await snapshot("child");
+  assert.match(investigating.join("\n"), /SORTIE_PROPOSAL_PHASE investigating/u);
+
+  const submitted = JSON.parse(await hooks.tool!.sortie_v010_submit_operator_proposal.execute(
+    { proposal_json: JSON.stringify(packet(1)) }, { sessionID: "child" }));
+  assert.equal(submitted.status, "submitted");
+  assert.equal((await new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE).required("root")).phase, "submitted");
+
+  // Dropping an element is the same absolute prefix change as rewriting one. Gating the profile and
+  // proposal elements on `investigating` discarded them the moment a submission succeeded, so the
+  // child's final turn re-sent its entire accumulated investigation uncached.
+  assert.deepEqual(await snapshot("child"), investigating,
+    "a successful submission must not change the cached prompt prefix of its own child");
+  assert.deepEqual(await snapshot("foreign"), [], "prompt-only root resolution never claims an unrelated session");
+}));
+
+test("a submitted proposal child keeps its stable prefix without regaining any tool authority", async () => fixture(async root => {
+  const { hooks, started } = await previewProposal(root);
+  await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "authority-proposal" }, { args: started.task });
+  await hooks["chat.message"]!({ sessionID: "child", messageID: "authority-child", agent: "dogs-coordinator" }, {
+    message: { agent: "dogs-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+    parts: [{ type: "text", text: started.task.prompt }],
+  });
+  await hooks["tool.execute.before"]!({ tool: "read", sessionID: "child", callID: "authority-read" }, { args: { filePath: "src/input.ts" } });
+  await hooks.tool!.sortie_v010_submit_operator_proposal.execute({ proposal_json: JSON.stringify(packet(1)) }, { sessionID: "child" });
+  const system = { system: [] as string[] };
+  await hooks["experimental.chat.system.transform"]!({ sessionID: "child" }, system);
+  assert.match(system.system.join("\n"), /SORTIE_PROPOSAL_PHASE investigating/u);
+  await assert.rejects(hooks["tool.execute.before"]!({ tool: "read", sessionID: "child", callID: "authority-denied" },
+    { args: { filePath: "src/input.ts" } }), /runtime-profile-session-inactive|operator-proposal-read-grant-invalid/u,
+    "prompt-only root resolution must not restore a spent read grant");
+  await assert.rejects(hooks.tool!.sortie_v010_submit_operator_proposal.execute(
+    { proposal_json: JSON.stringify(packet(1)) }, { sessionID: "child" }), /grant-invalid|budget-exhausted|inactive/u,
+    "prompt-only root resolution must not restore the submit grant");
+}));
+
 test("active proposal compaction preserves the claimed child and budgets without an execution run", async () => fixture(async root => {
   const { hooks, started } = await previewProposal(root);
   await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "compact-proposal" }, { args: started.task });
@@ -648,6 +698,21 @@ test("approved multi-unit execution returns one delegate reference that expands 
   const next = JSON.parse(await hooks.tool!.sortie_v010_operator_next.execute({}, { sessionID: "root" }));
   assert.equal(status.next_task_ref, delegate.prompt);
   assert.deepEqual(next.task, delegate);
+
+  // The root re-reads its whole context on every later turn, so a root-facing packet must identify the
+  // approved proposal rather than restate it. Approval already froze the plan into the execution run.
+  for (const [label, identity] of [["approval", approved], ["status", status.proposal]] as const) {
+    assert.equal(identity.proposal, undefined, `${label} must not re-echo the submitted proposal body`);
+    assert.equal(identity.content_hash, submitted.content_hash, `${label} must still identify the exact approved revision`);
+  }
+  assert.equal(JSON.stringify(status).includes(value.plan.units[1]!.objective), false,
+    "an approved plan is frozen into the execution run and must not be restated by operator_status");
+  assert.deepEqual(status.acceptance, value.plan.acceptance, "the execution packet remains the single acceptance source");
+  assert.deepEqual(status.requirements.map((item: { index: number }) => item.index), value.plan.acceptance.map((_: string, index: number) => index));
+  for (const requirement of status.requirements) {
+    assert.equal(requirement.criterion, undefined,
+      "requirements[] is index-aligned with acceptance; restating each criterion duplicated the acceptance text");
+  }
 
   const runtime = new OperatorRuntime(root, V010_RUNTIME_PROFILE);
   const state = await runtime.required("root");

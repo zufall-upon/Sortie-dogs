@@ -1573,7 +1573,9 @@ export class OperatorRuntime {
         committed_head: state.gitLifecycle.committedHead,
         inherited: state.gitLifecycle.commitProvenance === "inherited-parent",
         carried_uncommitted_paths: (state.gitLifecycle.carriedPaths ?? []).slice(0, 32) },
-      requirements: state.acceptance.map((criterion, index) => ({ criterion,
+      // Index-aligned with this packet's own `acceptance`. Restating each criterion here duplicated the
+      // whole acceptance text inside a packet the root re-reads on every later turn of its session.
+      requirements: state.acceptance.map((_criterion, index) => ({ index,
         proof_ids: state.acceptanceProof[index], status: state.acceptanceProof[index]!.every(id => proved.has(id)) ? "observed-pass" : "unproven" })),
       source_refs: state.sourceRefs, decision: state.decision,
       contract_repair: state.contractRepair === null ? null : { code: state.contractRepair.code, unit_id: state.contractRepair.unit_id,

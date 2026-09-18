@@ -477,7 +477,7 @@ test("operator smoke retains only bounded typed tool errors", () => {
 test("preview host adapter pins the native worker route and forwards terminal text through goal verification", async () => fixture(async root => {
   const client = { config: { providers: async () => ({ data: { providers: [{ id: "openai", models: {
     "gpt-6-astra": { id: "gpt-6-astra" }, "gpt-5.6-terra": { id: "gpt-5.6-terra" },
-    "gpt-5.6-sol": { id: "gpt-5.6-sol" },
+    "gpt-5.6-sol": { id: "gpt-5.6-sol" }, "gpt-5.6-luna": { id: "gpt-5.6-luna" },
   } }] } }) } };
   const hooks = await SortieDogsV010Plugin({ directory: root, client } as never, { modelCatalog: { global: [
     { model: "openai/gpt-6-astra", variants: ["high"] },
@@ -491,7 +491,7 @@ test("preview host adapter pins the native worker route and forwards terminal te
   } };
   await (hooks as typeof hooks & { config(value: Record<string, unknown>): Promise<void> }).config(config);
   assert.deepEqual(config.agent["dog-worker-v010"], {
-    mode: "subagent", model: "openai/gpt-5.6-sol", variant: "low",
+    mode: "subagent", model: "openai/gpt-5.6-luna", variant: "max",
   });
   assert.deepEqual(config.agent["dog-operator"], { mode: "primary", model: "user/selected", variant: "custom" });
   const explicit = { agent: { "dog-worker-v010": { mode: "subagent", model: "openai/gpt-6-astra", variant: "low" } } };
