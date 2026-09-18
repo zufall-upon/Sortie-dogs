@@ -1,48 +1,73 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="960" height="440" viewBox="0 0 960 440" role="img" aria-labelledby="title description">
-  <title id="title">Bare OpenCode versus Sortie local quality and estimated cost</title>
-  <desc id="description">Three completed local runs per configuration on one frozen task, September 14 2026. Bare completed 11.1 percent of task checks at a median estimated API-equivalent cost of 3.53 dollars. Sortie completed 85.2 percent at 2.85 dollars. Sortie needed five attempts and 15.94 dollars total estimated acquisition cost. Neither configuration achieved a Verified PASS.</desc>
+  <title id="title">Sortie-dogs local quality and estimated cost history</title>
+  <desc id="description">Local single-task quality-cost history from September 14 to September 18 2026. Bare OpenCode: 11.1 percent task-check completion at 3.53 dollars. Sortie v0.9.12: 85.2 percent at 2.85 dollars. Sortie v0.10.1 RC: 88.9 percent at 4.48 dollars. Sortie v0.10.3: 77.8 percent at 3.79 dollars. A v0.10.5 Luna max probe reached 100 percent at 1.72 dollars. The latest Luna-fast max probe reached 100 percent at 2.58 dollars and a Verified PASS. Batch and one-shot samples are not directly interchangeable.</desc>
   <rect width="960" height="440" rx="14" fill="#0b1220"/>
   <g font-family="system-ui, -apple-system, Segoe UI, sans-serif">
-    <text x="68" y="38" fill="#f8fafc" font-size="21" font-weight="700">Local quality–cost case study · 3 completed runs each</text>
-    <text x="68" y="60" fill="#94a3b8" font-size="13">2026-09-14 · attempts: Bare 3, Sortie 5 · Verified PASS: 0/3 each</text>
-    <text x="68" y="78" fill="#718096" font-size="11">Bare: build · Sol/high · no plugin   |   Sortie: Terra/high coordinator · Sol/medium implementation children</text>
+    <text x="68" y="38" fill="#f8fafc" font-size="21" font-weight="700">Local quality–cost history · one frozen task</text>
+    <text x="68" y="60" fill="#94a3b8" font-size="13">2026-09-14 → 2026-09-18 · completed batches + qualification probes</text>
+    <text x="68" y="79" fill="#718096" font-size="11">X: API-equivalent run cost · Y: F2P task-check completion · not a matched-pair leaderboard</text>
 
     <g stroke="#243247" stroke-width="1">
-      <path d="M68 94H650M68 152H650M68 210H650M68 268H650M68 326H650"/>
-      <path d="M68 94V326M184.4 94V326M300.8 94V326M417.2 94V326M533.6 94V326M650 94V326"/>
+      <path d="M68 104H650M68 159.5H650M68 215H650M68 270.5H650M68 326H650"/>
+      <path d="M68 104V326M184.4 104V326M300.8 104V326M417.2 104V326M533.6 104V326M650 104V326"/>
     </g>
-    <path d="M68 88V326H660" fill="none" stroke="#cbd5e1" stroke-width="2"/>
+    <path d="M68 98V326H660" fill="none" stroke="#cbd5e1" stroke-width="2"/>
 
     <g fill="#94a3b8" font-size="12" text-anchor="end">
-      <text x="58" y="98">100%</text><text x="58" y="156">75%</text>
-      <text x="58" y="214">50%</text><text x="58" y="272">25%</text><text x="58" y="330">0%</text>
+      <text x="58" y="108">100%</text><text x="58" y="163.5">75%</text>
+      <text x="58" y="219">50%</text><text x="58" y="274.5">25%</text><text x="58" y="330">0%</text>
     </g>
     <g fill="#94a3b8" font-size="12" text-anchor="middle">
       <text x="68" y="347">$0</text><text x="184.4" y="347">$1</text><text x="300.8" y="347">$2</text>
       <text x="417.2" y="347">$3</text><text x="533.6" y="347">$4</text><text x="650" y="347">$5</text>
     </g>
     <text transform="translate(20 276) rotate(-90)" fill="#cbd5e1" font-size="13">Graded task-check completion ↑</text>
-    <text x="68" y="375" fill="#cbd5e1" font-size="13">Median estimated API-equivalent cost →</text>
+    <text x="68" y="375" fill="#cbd5e1" font-size="13">Estimated API-equivalent cost / run →</text>
 
-    <circle cx="399.7" cy="128.3" r="8" fill="#fb923c"/>
-    <text x="385" y="112" fill="#fdba74" font-size="16" font-weight="700" text-anchor="end">Sortie v0.9.12</text>
-    <text x="385" y="150" fill="#cbd5e1" font-size="13" text-anchor="end">85.2% · $2.85</text>
+    <!-- Historical completed batches -->
+    <circle cx="478.4" cy="301.4" r="7" fill="#60a5fa"/>
+    <text x="490" y="295" fill="#93c5fd" font-size="12">Bare</text>
 
-    <circle cx="478.5" cy="300.2" r="8" fill="#60a5fa"/>
-    <text x="464" y="283" fill="#93c5fd" font-size="16" font-weight="700" text-anchor="end">Bare OpenCode</text>
-    <text x="464" y="320" fill="#cbd5e1" font-size="13" text-anchor="end">11.1% · $3.53</text>
+    <circle cx="399.6" cy="136.9" r="7" fill="#fb923c"/>
+    <text x="389" y="126" fill="#fdba74" font-size="12" text-anchor="end">v0.9.12</text>
 
-    <rect x="694" y="86" width="232" height="240" rx="10" fill="#111c2e" stroke="#334155"/>
-    <text x="712" y="116" fill="#e2e8f0" font-size="14" font-weight="700">How to read this</text>
-    <text x="712" y="143" fill="#a8b5c7" font-size="12">Observed model split:</text>
-    <text x="712" y="162" fill="#a8b5c7" font-size="12">Bare: Sol only</text>
-    <text x="712" y="181" fill="#a8b5c7" font-size="12">Sortie: Terra + Sol</text>
-    <text x="712" y="215" fill="#a8b5c7" font-size="12">Completed totals: $10.69 / $9.74</text>
-    <text x="712" y="234" fill="#a8b5c7" font-size="12">Attempts: Bare 3 / Sortie 5</text>
-    <text x="712" y="263" fill="#fbbf24" font-size="12">Sortie acquisition: $15.94</text>
-    <text x="712" y="282" fill="#fbbf24" font-size="12">No official task pass.</text>
-    <text x="712" y="307" fill="#718096" font-size="11">API-equivalent, not invoices</text>
+    <!-- One-shot historical qualifications -->
+    <polygon points="589.3,121.6 596.3,128.6 589.3,135.6 582.3,128.6" fill="#f59e0b" opacity="0.76"/>
+    <text x="601" y="125" fill="#fbbf24" font-size="11">v0.10.1 RC</text>
 
-    <text x="68" y="414" fill="#94a3b8" font-size="12">Single-task local case study · separate serial batches · Docker and Runta intentionally unused</text>
+    <polygon points="509.2,146.3 516.2,153.3 509.2,160.3 502.2,153.3" fill="#f59e0b" opacity="0.9"/>
+    <text x="521" y="169" fill="#fbbf24" font-size="11">v0.10.3</text>
+
+    <!-- v0.10.5 matched Luna/max probe -->
+    <polygon points="268.2,97 275.2,104 268.2,111 261.2,104" fill="#fbbf24"/>
+    <text x="255" y="124" fill="#fde68a" font-size="12" text-anchor="middle">Luna/max · $1.72</text>
+
+    <!-- Latest qualification probe -->
+    <circle cx="367.9" cy="104" r="14" fill="none" stroke="#34d399" stroke-width="3" opacity="0.95"/>
+    <polygon points="367.9,94 377.9,104 367.9,114 357.9,104" fill="#34d399"/>
+    <text x="382" y="95" fill="#6ee7b7" font-size="13" font-weight="800">LATEST · VERIFIED PASS</text>
+    <text x="382" y="116" fill="#d1fae5" font-size="12">Luna-fast/max · 100% · $2.58</text>
+
+    <rect x="692" y="94" width="236" height="248" rx="10" fill="#111c2e" stroke="#334155"/>
+    <text x="710" y="122" fill="#e2e8f0" font-size="14" font-weight="700">How to read this</text>
+
+    <circle cx="717" cy="147" r="5" fill="#60a5fa"/>
+    <text x="730" y="151" fill="#a8b5c7" font-size="11">Bare · 3-run median</text>
+    <circle cx="717" cy="169" r="5" fill="#fb923c"/>
+    <text x="730" y="173" fill="#a8b5c7" font-size="11">Sortie v0.9.12 · 3-run median</text>
+    <polygon points="717,185 723,191 717,197 711,191" fill="#f59e0b"/>
+    <text x="730" y="195" fill="#a8b5c7" font-size="11">One-shot qualification</text>
+    <circle cx="717" cy="215" r="8" fill="none" stroke="#34d399" stroke-width="2"/>
+    <polygon points="717,209 723,215 717,221 711,215" fill="#34d399"/>
+    <text x="730" y="219" fill="#a8b5c7" font-size="11">Latest measured probe</text>
+
+    <text x="710" y="248" fill="#f8fafc" font-size="12" font-weight="700">Latest</text>
+    <text x="710" y="268" fill="#6ee7b7" font-size="12">100% F2P · Verified PASS 1/1</text>
+    <text x="710" y="287" fill="#a8b5c7" font-size="11">$2.58 · Luna-fast/max</text>
+
+    <text x="710" y="313" fill="#718096" font-size="10.5">Different sample sizes and rate schedules.</text>
+    <text x="710" y="329" fill="#718096" font-size="10.5">API-equivalent estimates, not invoices.</text>
+
+    <text x="68" y="414" fill="#94a3b8" font-size="12">Single-task local history · preserved prior checks · qualification probes are not success-rate claims</text>
   </g>
 </svg>
