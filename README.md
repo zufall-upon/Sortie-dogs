@@ -13,17 +13,6 @@ scoped implementation, validation, review, and model routing.
 - **Coexistence and portability** — Sortie activates only when invited, preserves normal OpenCode agents and settings, and keeps project-local setup as the default.
 - **Cost, time, and proof** — The objective is not maximum agent count. It is the lowest practical cost and effort for a verified outcome, with explicit evidence when work does or does not pass.
 
-### Direction for v0.10.x
-
-The v0.10.x line is being developed around an **Astra operator / Terra dogs** split. Astra is the
-top-level decision authority that protects the accepted goal, quality bar, escalation decisions,
-and final acceptance. Because Astra is expensive, it should do only the small amount of work that
-requires that level of judgment. Terra-based dogs handle most bounded planning, coordination, and
-execution. The intended result is Astra-level judgment with Terra-level operating cost.
-
-This is an architectural direction under active validation, not a demonstrated benchmark result.
-Goal and quality authority remain centralized; implementation volume does not.
-
 ## Try it
 
 Requirements: Node.js 22.6 or newer, npm, and OpenCode.
@@ -76,106 +65,93 @@ Guides: [日本語](docs/guide-ja.md) · [简体中文](docs/guide-zh-CN.md) · 
 
 Release: [v0.10.5](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.10.5)
 
+### Direction for v0.10.x
+
+The v0.10.x line is being developed around an **Astra operator / Terra dogs** split. Astra is the
+top-level decision authority that protects the accepted goal, quality bar, escalation decisions,
+and final acceptance. Because Astra is expensive, it should do only the small amount of work that
+requires that level of judgment. Terra-based dogs handle most bounded planning, coordination, and
+execution. The intended result is Astra-level judgment with Terra-level operating cost.
+
+This is an architectural direction under active validation, not a demonstrated benchmark result.
+Goal and quality authority remain centralized; implementation volume does not.
+
 ## Latest local benchmark case study
 
 **Completion-filtered reference values, not a successful benchmark or leaderboard claim.**
-On 2026-09-14, Bare OpenCode and Sortie-dogs v0.9.12 each collected three completed runs of the
-same frozen task, `datacurve/anko-typed-variable-bindings`. Bare needed three attempts; Sortie
-needed five because two attempts returned `INTERRUPTED`. These were separate local trial batches,
-not three matched pairs. Docker and Runta were intentionally unused.
+Every column below runs the same frozen task, `datacurve/anko-typed-variable-bindings`, with pinned
+official inputs and a localized Docker-free official verifier, recorded between 2026-09-14 and
+2026-09-18. They are separate local trial batches, not matched pairs. Docker and Runta were
+intentionally unused.
 
 Run configuration was fixed per product configuration:
 
 - **Bare OpenCode:** standard `build` agent, `openai/gpt-5.6-sol` / `high`, with no Sortie plugin
   or Sortie runtime assets in the effective configuration.
-- **Sortie v0.9.12:** `dog-coordinator` on `openai/gpt-5.6-terra` / `high`; observed implementation
-  children on `openai/gpt-5.6-sol` / `medium`, with the pinned Sortie package and runtime assets.
-  No Luna, Astra, or Opus messages were observed in these trials.
+- **Sortie v0.9.12:** `dog-coordinator` on `openai/gpt-5.6-terra` / `high`; implementation children
+  on `openai/gpt-5.6-sol` / `medium`.
+- **Sortie v0.10.3:** `dog-operator` on `openai/gpt-5.6-terra` / `xhigh`; implementation children on
+  `openai/gpt-5.6-sol` / `low`.
+- **Sortie v0.10.5:** `dog-operator` on `openai/gpt-5.6-terra` / `xhigh`; implementation children on
+  `openai/gpt-5.6-luna-fast` / `max`.
 
-| Metric · one frozen task | Bare OpenCode | Sortie v0.9.12 | Sortie v0.10.1 RC qualification | Sortie v0.10.3 qualification · Terra/xhigh | Sortie v0.10.4 qualification · Terra/xhigh | Sortie v0.10.5 candidate qualification · Terra/xhigh + Luna/max |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Attempts needed | 3 | 5 | 1 | 1 | 2 | 1 recorded success |
-| Completed runs compared | 3 | 3 | 1 | 1 | 2 | 1 recorded success |
-| Verified PASS | 0/3 | 0/3 | 0/1 | 0/1 | 0/2 | **1/1** |
-| Task checks · F2P | 11.1% · 3/27 | 85.2% · 23/27 | 88.9% · 8/9 | 77.8% · 7/9 | 72.2% · 5/9 and 8/9 | **100% · 9/9** |
-| Retained checks · P2P | 282/282 | 282/282 | 94/94 | 94/94 | 94/94 | **94/94** |
-| Median agent wall | 24.5 min | 25.7 min | 23.2 min · n=1 | 22.7 min · n=1 | 31.1 min · n=2 | 43.1 min · n=1 |
-| Median model steps | 43 | 39 | 41 · CLI stream only | 36 · CLI stream only | 44 · CLI stream only | 25 · CLI stream only |
-| Implementation child sessions · total | 0 | 13 | 3 | 5 | 10 | 3 |
-| Estimated API-equivalent cost · median completed run | $3.53 | $2.85 | **$4.48** · n=1 | **$3.79** · n=1 | **$3.82** · n=2 | **$1.72** · n=1 |
-| Estimated cost · completed runs | $10.69 | $9.74 | **$4.48** | **$3.79** | **$7.64** | **$1.72** |
-| Additional interrupted-attempt cost · same fixed snapshot | $0 | $6.20 | $0 | $0 | $0 | Not reported |
-| Total cost to acquire completed runs · same fixed snapshot | $10.69 | $15.94 | **$4.48** | **$3.79** | **$7.64** | Not reported |
+| Metric · one frozen task | Bare OpenCode | Sortie v0.9.12 | Sortie v0.10.3 | Sortie v0.10.5 |
+| --- | ---: | ---: | ---: | ---: |
+| Verified PASS | 0/3 | 0/3 | 0/1 | **1/1** |
+| Task checks · F2P | 11.1% · 3/27 | 85.2% · 23/27 | 77.8% · 7/9 | **100% · 9/9** |
+| Median agent wall | 24.5 min | 25.7 min | 22.7 min | 43.8 min |
+| Median model steps | 43 | 39 | 36 | 39 |
+| Estimated API-equivalent cost · median completed run | $3.53 | $2.85 | $3.79 | **$2.58** |
 
-All three Bare runs passed 1/9 task checks. The three completed Sortie runs passed 7/9, 8/9,
-and 8/9. Every compared candidate retained 94/94 prior checks, but every official verifier still
-returned reward 0. The two interrupted Sortie attempts are excluded from completed-run quality,
-time, and cost aggregates; their attempt count and estimated cost remain visible above.
+Sample sizes differ and the columns are not interchangeable. Bare and v0.9.12 are three completed
+runs each; v0.10.3 and v0.10.5 are one-shot qualifications with no fresh Bare control. Bare needed
+three attempts, v0.9.12 needed five because two returned `INTERRUPTED`, and those two interrupted
+attempts add **$6.20** on top of the **$9.74** spent on its three completed runs. Every candidate in
+every column retained all prior checks — 282/282 for the three-run columns, 94/94 for the one-shot
+columns — so no column bought task checks by breaking existing behavior.
 
-The v0.10.1 RC value is a standalone qualification-only reference, not a fourth matched run or a
-FrontierHarness leaderboard result. It used no fresh Bare control and a localized Docker-free
-verifier. The RC label identifies an unreleased working-tree snapshot; the benchmark tarball's
-package metadata remained `0.10.0`, fixed by package SHA-256
-`67582ee023c3bd57813262e292c067a3f90f30d61c01d8caf6f91f09ae78f61d`.
+**v0.10.5** is the first configuration here to reach a Verified PASS. It reached `DONE`, and the
+official verifier returned reward **1**, F2P **9/9**, and P2P **94/94**. Its full
+root-plus-ten-descendant audit covers 123 assistant requests and 9,227,381 tokens at **$2.576731**
+API-equivalent cost: **$2.033098** for Terra/xhigh and **$0.543633** for Luna-fast/max. The measured
+package is a candidate source snapshot built before the version bump and reports package metadata
+`0.10.4`, so it is a source-snapshot reference rather than a released-package measurement. One
+verified success is not a success rate.
 
-Its estimated API-equivalent cost is **$4.478613**: $3.23 Sol and $1.25 Terra when rounded to cents.
-The audit prices all root and descendant assistant messages: 84 priced requests, 4,215,698 tokens,
-100% pricing coverage, and no unpriced requests. It uses the product's 2026-09-14 Standard schedule
-per request, including cached input, reasoning as output, and the long-context rate band. The earlier
-delivery-incomplete package was a different source snapshot (`32dea0a3…`): it spent **$4.276578**
-across 90 priced requests and 3,704,649 tokens, with no terminal outcome or verifier. It is not folded
-into this RC's same-snapshot acquisition cost. Observed spend across both distinct snapshots was
-**$8.755191**, which is development spend rather than this RC's acquisition cost. Historical Bare and
-v0.9.12 costs retain their 2026-07-30 schedule; their cost cells are not same-rate comparisons with
-this RC estimate.
+**v0.10.5 is also the slowest column, and that is orchestration rather than the worker model.** A
+matched probe on the same snapshot, changing only the worker route to `openai/gpt-5.6-luna` / `max`,
+also returned reward **1**, in 43.1 min at **$1.72**. Against it, Luna-fast/max cut worker model step
+time from **29.3 min** to **19.5 min** and raised output-plus-reasoning throughput from **39.4** to
+**63.0** tokens per second on comparable worker load — 70 requests and 6,544,422 tokens against 72
+requests and 5,825,953 tokens. Wall still rose 1.8%, because every non-worker session runs Terra/xhigh
+on the serial critical path: Terra/xhigh requests rose from 36 to 51 and root-only wall outside all
+child sessions rose from **7.9 min** to **15.0 min**, with five reviewer sessions against none. The
+same split explains the cost. Of the **$0.86** increase, **$0.60** is additional Terra/xhigh
+orchestration and **$0.26** is the worker model at twice the unit price. At n=1 against n=1 that
+orchestration difference is not attributed to the worker model, and neither the wall nor the cost cell
+ranks the two worker models against each other.
 
-The released **v0.10.3** Terra/xhigh treatment is a separate one-shot qualification, not a matched
-comparison or leaderboard result. It reached `DONE` and the localized Docker-free official verifier,
-which returned reward **0**, F2P **7/9**, and P2P **94/94**. Its full root-plus-eight-descendant audit
-prices 93 assistant requests and 4,809,706 tokens at **$3.789190** API-equivalent cost: **$2.186540**
-for Terra/xhigh and **$1.602650** for Sol/low. Pricing coverage is 100%, with no unpriced or pending
-requests. This uses the same 2026-09-14 per-request schedule; the observed host cost of $0 is not used
-as cost evidence, and the estimate is not an invoice or subscription charge.
+`gpt-5.6-luna-fast` has no published model page. Its rates are the resolved host model catalog entry:
+$0.40 input, $0.04 cached input, and $2.40 output per million tokens, exactly twice the Luna Standard
+schedule. No request in the measured run crossed the 272,000-token long-context threshold, so no band
+multiplier applies.
 
-The released **v0.10.4** Terra/xhigh treatment repeats that qualification twice on the same frozen
-task, pins, and verifier. Both runs reached `DONE` with confirmed cleanup, and the localized
-Docker-free official verifier returned reward **0** with P2P **94/94** each time. F2P was **5/9** and
-**8/9**, so the single v0.10.3 observation of 7/9 sits inside this spread: neither release solves the
-task, and the per-run difference is run-to-run variance at n=1 and n=2, not a measured quality change.
-
-The **v0.10.5 candidate** switches the v0.10 implementation worker default from Sol/low to
-Luna/max. One separate qualification on the same frozen task, pins, and localized Docker-free
-official verifier reached `DONE` and returned reward **1**, F2P **9/9**, and P2P **94/94**. Agent
-wall was **2,583,374 ms** (43.1 min), the CLI stream recorded 25 model steps, and the operation
-created three implementation child sessions. Its full root-plus-five-descendant audit prices 106
-assistant requests and 8,830,131 tokens at **$1.719999** API-equivalent cost: **$1.436725** for
-Terra/xhigh and **$0.283274** for Luna/max. Pricing coverage was 100%, with no unpriced or pending
-requests. The candidate package was built before the release version bump and reported package
-metadata `0.10.4`; this is a source-snapshot reference, not a released-package measurement.
-
-The v0.10.5 column deliberately reports this one verified success only. It is not a success-rate or
-acquisition-cost aggregate, and its `Not reported` cells do not imply zero cost or zero failed
-attempts outside this recorded success.
-
-The release payload this qualification exists to check is a prompt-cache correctness fix, and that
-effect is separable from task quality. Before the fix the proposal investigation child re-sent its
-whole prompt uncached on every request, because a consumed-read counter sat in the system block and a
-system element is an absolute prompt prefix. The audit now reports per-session prefix reuse, which
-isolates exactly that failure: the v0.10.3 proposal child reused a median **0.065** of the previous
-prompt and was the only flagged session in its run, while both v0.10.4 runs reuse **0.957** and
-**0.986** and flag none. Its uncached input fell from **406,202** tokens to **213,115** and
-**285,060**, and its estimated cost fell from **$0.943508** to **$0.574788** and **$0.802139**. Whole-run
-cost is not a clean measure of the same fix, because each run performed a different amount of work:
-the two v0.10.4 runs priced 97 requests at **$3.268415** and 119 requests at **$4.368122**, both at
-100% pricing coverage on the 2026-09-14 per-request schedule.
+v0.10.4 is not shown as a column but repeated the v0.10.3 qualification twice at F2P **5/9** and
+**8/9**, so the single v0.10.3 observation of 7/9 sits inside that spread: the pre-v0.10.5 releases do
+not solve this task, and their per-run differences are run-to-run variance rather than measured
+quality changes. The v0.10.4 payload was a prompt-cache correctness fix, and it is measured directly
+instead of through whole-run cost: the v0.10.3 proposal child reused a median **0.065** of the
+previous prompt and was the only flagged session in its run, while both v0.10.4 runs reuse **0.957**
+and **0.986** and flag none, cutting that child's uncached input from **406,202** tokens to
+**213,115** and **285,060**.
 
 ![Historical local case study: Bare completed 11.1 percent of task checks at a median estimated API-equivalent cost of $3.53; Sortie v0.9.12 completed 85.2 percent at $2.85. The one-shot v0.10.3 Terra/xhigh qualification completed 77.8 percent at $3.79. Neither configuration achieved a Verified PASS.](docs/assets/quality-cost-reference.svg)
 
 Cost audits use deduplicated root and descendant session tokens, grouped by the model that produced
-each message. Historical values retain their frozen 2026-07-30 short-context schedule; the v0.10
-qualifications use the product's 2026-09-14 per-request schedule described above. Completed-run cost shows execution
-efficiency; same-snapshot acquisition cost adds interrupted attempts. These are API-equivalent
-estimates, not invoices.
+each message, and price cached input and reasoning per request. Bare and v0.9.12 retain their frozen
+2026-07-30 short-context schedule, so their cost cells are not same-rate comparisons with the v0.10
+columns, which use the product's 2026-09-14 per-request schedule. The observed host cost field was
+zero and is not used as cost evidence. These are API-equivalent estimates, not invoices.
 
 The product objective is **more verified outcomes per unit of cost and time without weakening the
 accepted goal**. This small, single-task local case study does not establish that claim, isolate

@@ -14,6 +14,7 @@ export const MODEL_COST_PRICING_SNAPSHOT = {
     "OpenAI Standard pricing; requests above 272,000 total input/cache tokens use 2x input/cache and 1.5x output pricing.",
     "Anthropic Standard pricing with the 5-minute cache-write rate; Fast, Batch, Flex, regional, tool, and subscription charges are excluded.",
     "variant and serviceTier are separate; model variants do not alter the selected Standard token price.",
+    "gpt-5.6-luna-fast has no published model page; its rates are the resolved host model catalog entry for openai/gpt-5.6-luna-fast, exactly twice the Luna Standard schedule. That entry declares no separate long-context band, so the shared OpenAI band above is applied rather than a second assumed schedule.",
   ],
 } as const;
 
@@ -40,6 +41,7 @@ const OPENAI: Readonly<Record<string, Prices>> = {
   "gpt-5.6": { input: 4, cacheRead: 0.4, cacheWrite: 5, output: 20 },
   "gpt-5.6-terra": { input: 2, cacheRead: 0.2, cacheWrite: 2.5, output: 12 },
   "gpt-5.6-luna": { input: 0.2, cacheRead: 0.02, cacheWrite: 0.25, output: 1.2 },
+  "gpt-5.6-luna-fast": { input: 0.4, cacheRead: 0.04, cacheWrite: 0.5, output: 2.4 },
 };
 const ANTHROPIC: Readonly<Record<string, Prices>> = {
   "claude-opus-5": { input: 5, cacheRead: 0.5, cacheWrite: 6.25, output: 25 },
