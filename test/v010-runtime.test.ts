@@ -219,8 +219,8 @@ test("preview assets coexist with stable assets and markers", async () => fixtur
     "dog-reviewer-v010", "dog-advisor-v010", "sortie-v010", "dogs-coordinator",
   ]);
   const primary = previewAssets.find(asset => asset.name === "dog-operator")!.content;
-  assert.match(primary, /^model: openai\/gpt-5\.6-sol$/m);
-  assert.match(primary, /^variant: low$/m);
+  assert.match(primary, /^model: openai\/gpt-5\.6-luna-fast$/m);
+  assert.match(primary, /^variant: max$/m);
   assert.match(primary, /^  compact_and_continue: false$/m);
   assert.match(primary, /^  "sortie_v010_\*": true$/m);
   assert.match(previewAssets.find(asset => asset.name === "sortie-v010")!.content, /^agent: dog-operator$/m);
@@ -309,10 +309,12 @@ test("preview primary continues approved sequential scope and uses interactive q
   assert.match(primary, /decision=operator-acceptance-remediation-required/);
   assert.match(primary, /cancel the current run, then\nprepare one approved replacement plan for the same goal and byte-exact ordered acceptance/);
   assert.match(primary, /failed committed run with no accepted predecessor/);
-  assert.match(primary, /awaiting-acceptance[\s\S]+blocking findings[\s\S]+autonomous\nroot authority/);
+  assert.match(primary, /awaiting-acceptance[\s\S]+blocking findings[\s\S]+remediation is autonomous root authority/);
+  // The refused-scope path must stay documented: it is the only way a blocked candidate survives.
+  assert.match(primary, /blocked_write_paths[\s\S]+remediation_scope_expansion/);
   assert.match(primary, /reason=review-blocking/);
   assert.match(primary, /do not complete, ask the user for approval/);
-  assert.match(primary, /Ask the\nuser only when acceptance, write scope, or budget must increase/);
+  assert.match(primary, /Ask the user when acceptance or budget must\nincrease\./);
   assert.match(primary, /worker's success or canonical validation PASS never auto-accepts/);
   assert.match(primary, /Do not refresh the same inventory after every child return/);
   assert.match(primary, /missing_evidence_code: <one of manifest \| validation \| owner-risk>/);
@@ -332,14 +334,14 @@ test("operator control packet preserves Japanese user prose as language context"
   assert.match(task.prompt, /^operator_contract: /m);
 }));
 
-test("preview default Sol low resolves without an injected catalog", async () => fixture(async root => {
+test("preview default primary route resolves without an injected catalog", async () => fixture(async root => {
   const hooks = await SortieDogsV010Plugin({ directory: root, client: { config: { providers: async () => ({ data: {
-    providers: [{ id: "openai", models: { "gpt-5.6-sol": { id: "gpt-5.6-sol" } } }],
+    providers: [{ id: "openai", models: { "gpt-5.6-luna-fast": { id: "gpt-5.6-luna-fast" } } }],
   } }) } } } as never);
-  const output = { message: { agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-5.6-sol", variant: undefined as string | undefined } }, parts: [] };
+  const output = { message: { agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-5.6-luna-fast", variant: undefined as string | undefined } }, parts: [] };
   await hooks["chat.message"]!({ sessionID: "default", agent: "dog-operator", messageID: "user" }, output);
-  assert.equal(output.message.model.modelID, "gpt-5.6-sol");
-  assert.equal(output.message.model.variant, "low");
+  assert.equal(output.message.model.modelID, "gpt-5.6-luna-fast");
+  assert.equal(output.message.model.variant, "max");
 }));
 
 test("preview preserves the user's Astra Low selection across subsequent turns", async () => fixture(async root => {
@@ -398,7 +400,7 @@ function oldRoleAsset(name: "dog-operator" | "dogs-coordinator"): string {
     .replace(PREVIEW_TERMINAL_REPORT_POLICY, "")
     .replace(PREVIEW_PRESENTATION_POLICY + "\n", "")
     .replace(/## Existing-run evidence reconciliation[\s\S]*?bypasses the delegate\.\n\n/u, "")
-    .replace(/When operator_status returns decision=operator-acceptance-remediation-required,[\s\S]*?A reviewer finding alone is not such an increase\.\n\n/u, "")
+    .replace(/When operator_status returns decision=operator-acceptance-remediation-required,[\s\S]*?Ask the user when acceptance or budget must\nincrease\.\n\n/u, "")
     .replace(/Keep candidate_id stable for the logical review lineage[\s\S]*?it does not invent it\.\n/u, "")
     .replace(/^  question: allow\n/m, "")
     .replace(/^  compact_and_continue: false\n/m, "")
@@ -420,8 +422,8 @@ function oldRoleAsset(name: "dog-operator" | "dogs-coordinator"): string {
       "Use sortie_v010_cancel_operator to stop an active grant before changing its scope.")
     .replace(/Every advisor Task must include exactly one standalone line:[\s\S]*?just to repair this header\.\n\n/u, "")
     .replace(/^description: .*$/m, oldDescription)
-    .replace(/^model: openai\/gpt-5\.6-sol$/m, "model: openai/gpt-6-astra")
-    .replace(/^variant: low$/m, "variant: high")
+    .replace(/^model: openai\/gpt-5\.6-luna-fast$/m, "model: openai/gpt-6-astra")
+    .replace(/^variant: max$/m, "variant: high")
     .replaceAll(V010_RUNTIME_ASSET_VERSION, "0.10.0-beta.1")
     .replaceAll("dogs-coordinator", "__OLD_OPERATIONS__")
     .replaceAll("dog-operator", "dog-coordinator-v010")
@@ -478,12 +480,14 @@ test("preview host adapter pins the native worker route and forwards terminal te
   const client = { config: { providers: async () => ({ data: { providers: [{ id: "openai", models: {
     "gpt-6-astra": { id: "gpt-6-astra" }, "gpt-5.6-terra": { id: "gpt-5.6-terra" },
     "gpt-5.6-sol": { id: "gpt-5.6-sol" }, "gpt-5.6-luna": { id: "gpt-5.6-luna" },
+    "gpt-5.6-luna-fast": { id: "gpt-5.6-luna-fast" },
   } }] } }) } };
   const hooks = await SortieDogsV010Plugin({ directory: root, client } as never, { modelCatalog: { global: [
     { model: "openai/gpt-6-astra", variants: ["high"] },
     { model: "openai/gpt-5.6-terra", variants: ["high", "xhigh"] },
     { model: "openai/gpt-5.6-sol", variants: ["low", "medium"] },
     { model: "openai/gpt-5.6-luna", variants: ["max", "high", "xhigh"] },
+    { model: "openai/gpt-5.6-luna-fast", variants: ["max", "xhigh"] },
   ] } });
   const config = { agent: {
     "dog-operator": { mode: "primary", model: "user/selected", variant: "custom" },
@@ -491,7 +495,7 @@ test("preview host adapter pins the native worker route and forwards terminal te
   } };
   await (hooks as typeof hooks & { config(value: Record<string, unknown>): Promise<void> }).config(config);
   assert.deepEqual(config.agent["dog-worker-v010"], {
-    mode: "subagent", model: "openai/gpt-5.6-luna", variant: "max",
+    mode: "subagent", model: "openai/gpt-5.6-luna-fast", variant: "max",
   });
   assert.deepEqual(config.agent["dog-operator"], { mode: "primary", model: "user/selected", variant: "custom" });
   const explicit = { agent: { "dog-worker-v010": { mode: "subagent", model: "openai/gpt-6-astra", variant: "low" } } };
@@ -605,6 +609,33 @@ test("Git lifecycle uses the existing canonical command identity and requires an
   windows.units[0]!.validation[1] = canonical;
   windows.git_lifecycle.post_commit_validation = [quoted];
   assert.doesNotThrow(() => parseOperatorPlan(windows));
+});
+
+test("a remediation reserve declares bounded paths outside the implementation write union", () => {
+  const reserved = lifecyclePlan() as Record<string, never>;
+  (reserved.git_lifecycle as Record<string, unknown>).remediation_reserve = ["src/engine.ts"];
+  assert.deepEqual(parseOperatorPlan(reserved).git_lifecycle?.remediation_reserve, ["src/engine.ts"]);
+
+  // A reserve entry already inside unit.write grants nothing and hides the real margin.
+  const redundant = lifecyclePlan() as Record<string, never>;
+  (redundant.git_lifecycle as Record<string, unknown>).remediation_reserve = ["first.txt"];
+  assert.throws(() => parseOperatorPlan(redundant), (error: unknown) => error instanceof OperatorContractError &&
+    error.diagnostics[0]?.code === "operator-git-remediation-reserve-redundant");
+
+  // A path nested under a declared write scope is equally redundant, not a new grant.
+  const nested = lifecyclePlan() as Record<string, never>;
+  (nested.units as unknown as { write: string[] }[])[0]!.write = ["generated"];
+  (nested.git_lifecycle as Record<string, unknown>).remediation_reserve = ["generated/main.txt"];
+  assert.throws(() => parseOperatorPlan(nested), /operator-git-remediation-reserve-redundant/);
+
+  for (const invalid of [["../escape"], ["src/engine.ts", "src/engine.ts"], ["/abs/path"], [], ["a/./b"]]) {
+    const plan = lifecyclePlan() as Record<string, never>;
+    (plan.git_lifecycle as Record<string, unknown>).remediation_reserve = invalid;
+    assert.throws(() => parseOperatorPlan(plan), /operator-git-remediation-scope-invalid/, JSON.stringify(invalid));
+  }
+  const unknown = lifecyclePlan() as Record<string, never>;
+  (unknown.git_lifecycle as Record<string, unknown>).remediation_budget = ["src/engine.ts"];
+  assert.throws(() => parseOperatorPlan(unknown), /operator-git-lifecycle-invalid/);
 });
 
 test("typed Git lifecycle creates a general branch at the pinned start and commits only the approved write union", async () => fixture(async root => {
@@ -2343,6 +2374,111 @@ test("blocking review replaces a succeeded awaiting-acceptance run from its comm
   const complete = JSON.parse(await replacementHooks.tool!.sortie_v010_complete_operator.execute({ run_id: ready.run_id,
     acceptance_fingerprint: ready.acceptance_fingerprint }, { sessionID: "root" }));
   assert.equal(complete.status, "succeeded");
+}));
+
+/**
+ * Drive one generated-output run to awaiting-acceptance and cancel it as review-blocking, returning
+ * the hooks a replacement plan is prepared against. Both remediation-scope tests need this exact
+ * committed baseline; only what the replacement declares as writes differs between them.
+ */
+async function reviewBlockedBaseline(root: string, firstPlan: ReturnType<typeof generatedOutputLifecyclePlan>) {
+  await generatedOutputRepository(root);
+  const validator = "node scripts/validate-generated.mjs";
+  const { hooks } = await startGeneratedOutputWorker(root, firstPlan);
+  await executeGeneratedCommand(hooks, root, "scope-generate", "node scripts/generate.mjs", "scripts/generate.mjs");
+  await executeGeneratedCommand(hooks, root, "scope-cleanup", "node scripts/cleanup.mjs", "scripts/cleanup.mjs");
+  await hooks["tool.execute.before"]!({ tool: "bash", sessionID: "worker", callID: "scope-validator" },
+    { args: { command: validator } });
+  const result = await promisify(execFile)(process.execPath, ["scripts/validate-generated.mjs"], { cwd: root, encoding: "utf8" });
+  const now = Date.now();
+  await hooks.event!({ event: { type: "message.part.updated", properties: { part: {
+    id: "scope-validator-part", messageID: "scope-validator-message", sessionID: "worker", type: "tool", tool: "bash",
+    callID: "scope-validator", state: { status: "completed", input: { command: validator }, output: result.stdout,
+      metadata: { exit: 0 }, time: { start: now - 5, end: now } },
+  } } } });
+  await hooks["tool.execute.after"]!({ tool: "bash", sessionID: "worker", callID: "scope-validator" },
+    { output: result.stdout, metadata: { exit: 0, status: "completed" } });
+  await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "worker-call" },
+    { output: "<task_result>canonical validation passed; independent review remains</task_result>",
+      metadata: { sessionId: "worker" } });
+  const awaiting = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
+  assert.equal(awaiting.status, "awaiting-acceptance", JSON.stringify(awaiting));
+  const committedHead = awaiting.git_lifecycle.committed_head;
+  assert.match(committedHead, /^[a-f0-9]{40,64}$/u);
+  assert.equal(JSON.parse(await hooks.tool!.sortie_v010_cancel_operator.execute(
+    { reason: "review-blocking" }, { sessionID: "root" })).decision, "operator-review-remediation-required");
+  const identities: Record<string, { agent: string; parentID?: string }> = {
+    root: { agent: "dog-operator" }, "scope-worker": { agent: "dog-worker-v010", parentID: "root" },
+  };
+  const replacementHooks = await SortieDogsV010Plugin({ directory: root, client: { session: {
+    get: async ({ path }: { path: { id: string } }) => ({ data: identities[path.id] }),
+    messages: async () => ({ data: [] }), abort: async () => ({ data: true }),
+  } } } as never);
+  await replacementHooks["chat.message"]!({ sessionID: "root", messageID: "scope-root", agent: "dog-operator" }, {
+    message: { agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-5.6-luna-fast" } },
+    parts: [{ type: "text", text: "Apply the blocking review finding." }],
+  });
+  const replacementOf = (branch: string, write: string[]) => {
+    const value = structuredClone(firstPlan) as ReturnType<typeof generatedOutputLifecyclePlan> & {
+      git_lifecycle: { remediation_reserve?: string[]; remediation_scope_expansion?: string[] } };
+    value.git_lifecycle.branch_create = { branch, start_ref: committedHead };
+    value.units[0] = { ...value.units[0]!, objective: "Correct only the review-blocking content.", write,
+      validation: [validator] };
+    // A reserve entry the replacement now writes has become part of its own union, so it stops being
+    // a reserve. Carrying it in both places is the redundancy the plan parser rejects.
+    const remaining = (value.git_lifecycle.remediation_reserve ?? []).filter(path => !write.includes(path));
+    if (remaining.length > 0) value.git_lifecycle.remediation_reserve = remaining;
+    else delete value.git_lifecycle.remediation_reserve;
+    return value;
+  };
+  return { replacementHooks, replacementOf, awaiting };
+}
+
+test("a pre-approved remediation reserve admits a review replacement that writes outside the implementation union", async () => fixture(async root => {
+  const firstPlan = generatedOutputLifecyclePlan("feature/reserve-first", true, true) as
+    ReturnType<typeof generatedOutputLifecyclePlan> & { git_lifecycle: { remediation_reserve?: string[] } };
+  // Declared at approval time and never writable by the implementation unit itself.
+  firstPlan.git_lifecycle.remediation_reserve = ["scripts/generate.mjs"];
+  const { replacementHooks, replacementOf, awaiting } = await reviewBlockedBaseline(root, firstPlan);
+  assert.deepEqual(awaiting.git_lifecycle.remediation_reserve, ["scripts/generate.mjs"]);
+  assert.deepEqual(awaiting.replacement_constraints.remediation_reserve, ["scripts/generate.mjs"]);
+  assert.deepEqual(awaiting.replacement_constraints.blocked_write_paths, []);
+
+  const replacement = JSON.parse(await replacementHooks.tool!.sortie_v010_prepare_operator.execute(
+    { plan_json: JSON.stringify(replacementOf("feature/reserve-remediation",
+      ["generated/main.txt", "scripts/generate.mjs"])) }, { sessionID: "root" }));
+  assert.match(replacement.run_id, /^operator-/u);
+  assert.equal(replacement.diagnostics, undefined);
+  assert.equal(replacement.task.subagent_type, "dog-worker-v010");
+}));
+
+test("a refused remediation scope is reported by path and only that exact list may be consented to", async () => fixture(async root => {
+  const firstPlan = generatedOutputLifecyclePlan("feature/expansion-first", true, true);
+  const { replacementHooks, replacementOf } = await reviewBlockedBaseline(root, firstPlan);
+  const prepare = (plan: unknown) => replacementHooks.tool!.sortie_v010_prepare_operator.execute(
+    { plan_json: JSON.stringify(plan) }, { sessionID: "root" });
+
+  const outside = replacementOf("feature/expansion-refused", ["generated/main.txt", "scripts/generate.mjs"]);
+  const refused = JSON.parse(await prepare(outside).catch((error: Error) => error.message));
+  assert.equal(refused.diagnostics[0].code, "operator-acceptance-remediation-write-scope-invalid");
+  assert.deepEqual(refused.diagnostics[0].repair_paths, ["scripts/generate.mjs"]);
+
+  // The refusal is durable, so the root can return the exact paths to the user before consenting.
+  const blocked = JSON.parse(await replacementHooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
+  assert.deepEqual(blocked.blocked_write_paths, ["scripts/generate.mjs"]);
+
+  // Consent is bounded by that record: a path the host never refused cannot be smuggled in with it.
+  const invented = replacementOf("feature/expansion-invented", ["generated/main.txt", "scripts/generate.mjs"]);
+  invented.git_lifecycle.remediation_scope_expansion = ["scripts/generate.mjs", "scripts/cleanup.mjs"];
+  const rejected = JSON.parse(await prepare(invented).catch((error: Error) => error.message));
+  assert.equal(rejected.diagnostics[0].code, "operator-remediation-scope-expansion-unrecorded");
+  assert.deepEqual(rejected.diagnostics[0].repair_paths, ["scripts/cleanup.mjs"]);
+
+  const consented = replacementOf("feature/expansion-approved", ["generated/main.txt", "scripts/generate.mjs"]);
+  consented.git_lifecycle.remediation_scope_expansion = ["scripts/generate.mjs"];
+  const admitted = JSON.parse(await prepare(consented));
+  assert.match(admitted.run_id, /^operator-/u);
+  assert.equal(admitted.diagnostics, undefined);
 }));
 
 test("failed post-commit acceptance cancels into a same-contract replacement from the committed candidate", async () => fixture(async root => {

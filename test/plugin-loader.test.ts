@@ -20,6 +20,10 @@ import {
  */
 delete process.env.SORTIE_DOGS_CONFIG;
 
+const repositoryPackageVersion = (JSON.parse(await readFile(
+  join(dirname(fileURLToPath(import.meta.url)), "..", "package.json"), "utf8",
+)) as { version: string }).version;
+
 const testEnvironment = fileURLToPath(new URL("../_testenv/", import.meta.url));
 const projectRoot = fileURLToPath(new URL("../", import.meta.url));
 const execFileAsync = promisify(execFile);
@@ -125,7 +129,9 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       join(consumer, "node_modules", "sortie-dogs", "package.json"),
       "utf8",
     )) as { version?: string; scripts?: { prebuild?: string } };
-    assert.equal(installedPackage.version, "0.10.4");
+    // Derived, not pinned: a hardcoded copy silently went stale at the 0.10.5 release because this
+    // file is outside `npm test`, so the packed artifact stopped being compared to the repository.
+    assert.equal(installedPackage.version, repositoryPackageVersion);
     assert.equal(
       installedPackage.scripts?.prebuild,
       "node --input-type=module --eval \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true });\"",
@@ -143,8 +149,8 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     );
     const packedPrimary = await readFile(join(packedProject, ".opencode", "agent", "dog-operator.md"), "utf8");
     assert.match(packedPrimary, /^mode: primary$/m);
-    assert.match(packedPrimary, /^model: openai\/gpt-5\.6-sol$/m);
-    assert.match(packedPrimary, /^variant: low$/m);
+    assert.match(packedPrimary, /^model: openai\/gpt-5\.6-luna-fast$/m);
+    assert.match(packedPrimary, /^variant: max$/m);
     assert.match(await readFile(join(packedProject, ".opencode", "agent", "dogs-coordinator.md"), "utf8"), /^hidden: true$/m);
     await assert.rejects(readFile(join(packedProject, ".opencode", "agent", "dog-coordinator-v010.md")), { code: "ENOENT" });
 

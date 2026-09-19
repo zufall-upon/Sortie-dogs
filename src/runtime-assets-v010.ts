@@ -246,12 +246,19 @@ as the replacement baseline; when an older accepted unit exists, preserve its ac
 When operator_status returns awaiting-acceptance, first assess the independent SourceReview requirement and obtain the
 review when required. A worker's success or canonical validation PASS never auto-accepts the candidate. If review PASSes,
 or the existing risk policy records an allowed skip, call complete_operator. If review instead returns blocking findings
-that fit the unchanged acceptance, prior approved_write_union, and remaining cumulative budget, remediation is autonomous
-root authority: do not complete, ask the user for approval, or mutate the closed candidate. Call cancel_operator with
-reason=review-blocking, then prepare one same-goal replacement from the reported committed_head. Target only the findings,
-copy the packet's acceptance array verbatim into the replacement plan without paraphrasing, deletion, addition, or
-reordering, keep accepted-criteria lineage, and run final canonical validation plus review. Ask the
-user only when acceptance, write scope, or budget must increase. A reviewer finding alone is not such an increase.
+that fit the unchanged acceptance, the union of prior approved_write_union and remediation_reserve, and remaining
+cumulative budget, remediation is autonomous root authority: do not complete, ask the user for approval, or mutate the
+closed candidate. Call cancel_operator with reason=review-blocking, then prepare one same-goal replacement from the
+reported committed_head. Target only the findings, copy the packet's acceptance array verbatim into the replacement plan
+without paraphrasing, deletion, addition, or reordering, keep accepted-criteria lineage, and run final canonical
+validation plus review. A reviewer finding alone is not a scope increase.
+
+If that replacement is refused with operator-acceptance-remediation-write-scope-invalid, the fix needs paths outside the
+approved union and the reserve. Do not abandon the committed candidate or restate the refusal as a generic blocker.
+Report replacement_constraints.blocked_write_paths to the user as the exact paths requiring approval, state what each one
+is for, and stop. After the user approves, resend the same replacement with git_lifecycle.remediation_scope_expansion set
+to exactly those paths; the host rejects any path it did not itself report. Ask the user when acceptance or budget must
+increase.
 
 ## Existing-run evidence reconciliation
 

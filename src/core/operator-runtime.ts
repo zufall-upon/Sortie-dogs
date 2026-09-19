@@ -18,7 +18,8 @@ import { operatorContractRepairFingerprint, type OperatorContractRepairFileIdent
 import { classifyUnitResult } from "./unit-result-classification.js";
 import { SOURCE_REVIEW_PHASES, SOURCE_REVIEW_RISK_TAGS } from "./consultation.js";
 
-export const OPERATOR_LIMITS = Object.freeze({ units: 32, planBytes: 256 * 1024, packetBytes: 24 * 1024 });
+export const OPERATOR_LIMITS = Object.freeze({ units: 32, planBytes: 256 * 1024, packetBytes: 24 * 1024,
+  remediationReserve: 32 });
 export interface OperatorContractDiagnostic {
   readonly document: "approval" | "proposal" | "plan" | "handoff" | "manifest" | "controls";
   readonly pointer: string;
@@ -55,6 +56,19 @@ export interface OperatorGitLifecycle {
   readonly branch_create: { readonly branch: string; readonly start_ref: string };
   readonly commit: { readonly message: string };
   readonly post_commit_validation: readonly string[];
+  /**
+   * Paths no unit may write during implementation, pre-approved for remediation only. A write union
+   * has to be authored before any implementation or review exists, so a review finding whose fix sits
+   * one file outside it otherwise strands a complete candidate on a user decision. The reserve makes
+   * that margin explicit at approval time instead of leaving it to be predicted exactly.
+   */
+  readonly remediation_reserve?: readonly string[];
+  /**
+   * Exactly the paths the host itself named in a prior remediation write-scope rejection. It is not a
+   * free-form expansion: the host rejects any entry it did not record, so the root can only consent to
+   * the host's own list after returning the blocked decision to the user.
+   */
+  readonly remediation_scope_expansion?: readonly string[];
 }
 export interface OperatorPlan {
   readonly schema_version: "0.1";
@@ -130,6 +144,11 @@ interface OperatorGitLifecycleState {
   readonly originalRef: string | null;
   readonly commitMessage: string;
   readonly writeUnion: readonly string[];
+  /**
+   * Approved for remediation replacements only. Never widens this run's own unit write enforcement.
+   * Optional because states persisted before the reserve existed load without it.
+   */
+  readonly remediationReserve?: readonly string[];
   readonly postCommitValidation: readonly string[];
   committedHead: string | null;
   commitProvenance?: "host-created" | "existing-history" | "inherited-parent" | "uncommitted-baseline" | null;
@@ -171,6 +190,7 @@ export interface OperatorState {
     readonly runID?: string;
     readonly acceptanceFingerprint?: string;
     readonly approvedWriteUnion?: readonly string[];
+    readonly approvedRemediationReserve?: readonly string[];
     readonly commitMessage?: string;
     readonly commitProvenance?: "host-created" | "existing-history" | "inherited-parent" | "uncommitted-baseline";
   } | null;
@@ -178,6 +198,11 @@ export interface OperatorState {
   contractRepair: OperatorContractRepairState | null;
   /** Transient paths a cancelled active repair left behind; clearing them reopens replacement. */
   repairResidualPaths: readonly string[];
+  /**
+   * Paths this host refused on the most recent remediation write-scope rejection. It is the only list
+   * a later remediation_scope_expansion may name, so consent cannot widen beyond what was reported.
+   */
+  pendingScopeExpansion: readonly string[];
   repairGeneration: number;
   generation: number;
   sequence: number;
@@ -217,6 +242,17 @@ function strings(value: unknown, nonempty = false): value is string[] {
 function exactKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
   return Object.keys(value).every(key => allowed.includes(key));
 }
+/** A declared scope list: normalized repository-relative paths, no duplicates, bounded length. */
+function scopePaths(value: unknown, limit: number): value is string[] {
+  if (!strings(value, true) || value.length > limit) return false;
+  const paths = value as string[];
+  // normalizeRelativePath rejects traversal and absolute input by throwing; that is a failed scope
+  // declaration here, not a runtime fault to propagate out of plan parsing.
+  const normalized = (path: string): boolean => {
+    try { return path === normalizeRelativePath(path); } catch { return false; }
+  };
+  return paths.every(normalized) && new Set(paths).size === paths.length;
+}
 
 export function parseOperatorPlan(value: unknown): OperatorPlan {
   if (!record(value) || !exactKeys(value, ["schema_version", "acceptance", "acceptance_proof", "source_refs", "goal_declaration", "units", "git_lifecycle"])) {
@@ -240,7 +276,8 @@ export function parseOperatorPlan(value: unknown): OperatorPlan {
   }
   if (value.git_lifecycle !== undefined) {
     const lifecycle = value.git_lifecycle;
-    if (!record(lifecycle) || !exactKeys(lifecycle, ["branch_create", "commit", "post_commit_validation"]) ||
+    if (!record(lifecycle) || !exactKeys(lifecycle, ["branch_create", "commit", "post_commit_validation",
+          "remediation_reserve", "remediation_scope_expansion"]) ||
         !record(lifecycle.branch_create) || !exactKeys(lifecycle.branch_create, ["branch", "start_ref"]) ||
         !text(lifecycle.branch_create.branch) || !text(lifecycle.branch_create.start_ref) ||
         !record(lifecycle.commit) || !exactKeys(lifecycle.commit, ["message"]) || !text(lifecycle.commit.message) ||
@@ -250,6 +287,21 @@ export function parseOperatorPlan(value: unknown): OperatorPlan {
         (lifecycle.commit.message as string).length > 512 || (lifecycle.branch_create.branch as string).startsWith("-") ||
         (lifecycle.branch_create.start_ref as string).startsWith("-")) {
       return planError("/git_lifecycle", "operator-git-lifecycle-invalid", "exact-typed-branch-create-and-commit");
+    }
+    for (const field of ["remediation_reserve", "remediation_scope_expansion"] as const) {
+      if (lifecycle[field] !== undefined && !scopePaths(lifecycle[field], OPERATOR_LIMITS.remediationReserve)) {
+        return planError(`/git_lifecycle/${field}`, "operator-git-remediation-scope-invalid",
+          "bounded-unique-normalized-relative-paths");
+      }
+    }
+    const declaredWrites = new Set((value.units as OperatorUnit[]).flatMap(unit => unit.write ?? []));
+    // A reserve entry already inside the implementation write union is contract noise: it grants
+    // nothing beyond the union and hides which paths the margin actually covers.
+    const redundant = (lifecycle.remediation_reserve as string[] | undefined)
+      ?.filter(path => operatorGitPathAuthorized(path, [...declaredWrites])) ?? [];
+    if (redundant.length > 0) {
+      return planError("/git_lifecycle/remediation_reserve", "operator-git-remediation-reserve-redundant",
+        "reserve-paths-must-lie-outside-the-implementation-write-union");
     }
   }
   const declaration = value.goal_declaration;
@@ -374,6 +426,7 @@ export class OperatorRuntime {
     const repairGeneration = parsed.repairGeneration === undefined ? 0 : parsed.repairGeneration;
     const state = { ...parsed,
       repairResidualPaths: parsed.repairResidualPaths === undefined ? [] : parsed.repairResidualPaths,
+      pendingScopeExpansion: parsed.pendingScopeExpansion === undefined ? [] : parsed.pendingScopeExpansion,
       parentRunID: parsed.parentRunID === undefined ? null : parsed.parentRunID,
       priorAcceptedUnits: parsed.priorAcceptedUnits === undefined ? [] : parsed.priorAcceptedUnits,
       remediationParent: parsed.remediationParent === undefined ? null : parsed.remediationParent,
@@ -401,12 +454,15 @@ export class OperatorRuntime {
           (state.remediationParent.acceptanceFingerprint !== undefined &&
             !/^sha256:[a-f0-9]{64}$/u.test(String(state.remediationParent.acceptanceFingerprint))) ||
           (state.remediationParent.approvedWriteUnion !== undefined && !strings(state.remediationParent.approvedWriteUnion, true)) ||
+          (state.remediationParent.approvedRemediationReserve !== undefined &&
+            !strings(state.remediationParent.approvedRemediationReserve)) ||
           (state.remediationParent.commitMessage !== undefined && !text(state.remediationParent.commitMessage)) ||
           (state.remediationParent.commitProvenance !== undefined &&
             !["host-created", "existing-history", "inherited-parent", "uncommitted-baseline"].includes(state.remediationParent.commitProvenance)))) ||
         !this.validGitLifecycleState(state.gitLifecycle) ||
         !Number.isSafeInteger(state.repairGeneration) || state.repairGeneration < 0 || state.repairGeneration > 1 ||
         !strings(state.repairResidualPaths) || state.repairResidualPaths.length > OPERATOR_LIMITS.units ||
+        !strings(state.pendingScopeExpansion) || state.pendingScopeExpansion.length > OPERATOR_LIMITS.remediationReserve ||
         !this.validContractRepairState(state.contractRepair, state.units) || !state.units.every(unit =>
           Number.isSafeInteger(unit.repairValidationAttempts) && unit.repairValidationAttempts >= 0 && unit.repairValidationAttempts <= 2 &&
           this.validRepairValidationState(unit.repairValidation))) {
@@ -448,8 +504,9 @@ export class OperatorRuntime {
     return next;
   }
   private validGitLifecycleState(value: unknown): value is OperatorGitLifecycleState | null {
-    return value === null || (record(value) && exactKeys(value, ["branch", "startRef", "startOID", "originalHead", "originalRef", "commitMessage", "writeUnion", "postCommitValidation", "committedHead", "commitProvenance", "carriedPaths"]) &&
+    return value === null || (record(value) && exactKeys(value, ["branch", "startRef", "startOID", "originalHead", "originalRef", "commitMessage", "writeUnion", "remediationReserve", "postCommitValidation", "committedHead", "commitProvenance", "carriedPaths"]) &&
       (value.carriedPaths === undefined || strings(value.carriedPaths)) &&
+      (value.remediationReserve === undefined || strings(value.remediationReserve)) &&
       text(value.branch) && text(value.startRef) && /^[a-f0-9]{40,64}$/u.test(String(value.startOID)) &&
       /^[a-f0-9]{40,64}$/u.test(String(value.originalHead)) && (value.originalRef === null || text(value.originalRef)) &&
       text(value.commitMessage) && strings(value.writeUnion, true) && strings(value.postCommitValidation, true) &&
@@ -567,7 +624,8 @@ export class OperatorRuntime {
     const original = await this.git(["symbolic-ref", "--quiet", "HEAD"], [0, 1]);
     const state: OperatorGitLifecycleState = { branch, startRef, startOID, originalHead,
       originalRef: original.exit === 0 ? original.stdout.trim() : null, commitMessage: request.commit.message,
-      writeUnion, postCommitValidation: request.post_commit_validation.map(normalizeCommand),
+      writeUnion, remediationReserve: request.remediation_reserve ?? [],
+      postCommitValidation: request.post_commit_validation.map(normalizeCommand),
       committedHead: null, commitProvenance: null, ...(carried.length === 0 ? {} : { carriedPaths: carried }) };
     try {
       await this.git(["switch", "--create", branch, startOID]);
@@ -741,11 +799,20 @@ export class OperatorRuntime {
           parent.sourceRefs.some((source, index) => plan.source_refs[index] !== source)) {
         throw new Error("operator-acceptance-remediation-same-goal-required");
       }
-      const approvedWrites = parent.gitLifecycle!.writeUnion;
+      // The reserve was approved with the original contract; the expansion is a later consent limited
+      // to paths this host already refused by name. Neither lets the replacement invent new scope.
+      const reserve = parent.gitLifecycle!.remediationReserve ?? [];
+      const expansion = this.authorizedScopeExpansion(parent, plan.git_lifecycle.remediation_scope_expansion);
+      const approvedWrites = [...parent.gitLifecycle!.writeUnion, ...reserve, ...expansion];
       const replacementWrites = [...new Set(plan.units.flatMap(unit => unit.write))];
-      if (replacementWrites.some(path => !approvedWrites.some(scope => this.pathAuthorized(path, [scope])))) {
+      const outside = replacementWrites.filter(path => !this.pathAuthorized(path, approvedWrites));
+      if (outside.length > 0) {
+        // Record exactly what was refused so the root can return a concrete decision to the user and,
+        // once the user consents, replay the same paths as remediation_scope_expansion.
+        await this.recordPendingScopeExpansion(parent, outside);
         return contractError({ document: "plan", pointer: "/units", code: "operator-acceptance-remediation-write-scope-invalid",
-          rule: "replacement-writes-must-stay-within-approved-union", repair_kind: "repair-field" });
+          rule: "replacement-writes-must-stay-within-approved-union", repair_kind: "repair-field",
+          repair_paths: outside.slice(0, OPERATOR_LIMITS.remediationReserve) });
       }
     }
     if (parent && (plan.acceptance.length < parent.acceptance.length ||
@@ -848,6 +915,8 @@ export class OperatorRuntime {
       remediationParent: remediationTaskID && remediationHead && parent?.gitLifecycle ? {
         taskID: remediationTaskID, committedHead: remediationHead, runID: parent.runID,
         acceptanceFingerprint: parent.acceptanceFingerprint, approvedWriteUnion: parent.gitLifecycle.writeUnion,
+        approvedRemediationReserve: [...(parent.gitLifecycle.remediationReserve ?? []),
+          ...this.authorizedScopeExpansion(parent, plan.git_lifecycle?.remediation_scope_expansion)],
         commitMessage: parent.gitLifecycle.commitMessage,
         ...(parent.gitLifecycle.commitProvenance === undefined || parent.gitLifecycle.commitProvenance === null
           ? {} : { commitProvenance: parent.gitLifecycle.commitProvenance }),
@@ -855,7 +924,7 @@ export class OperatorRuntime {
       gitLifecycle,
       generation: (previous?.generation ?? 0) + 1, sequence: previous?.sequence ?? 0, phase: "prepared", repairGeneration: 0,
       operatorCallID: null, operatorSessionID: null, dispatched: 0, units, decision: null, receipt: null, contractRepair: null,
-      repairResidualPaths: [] };
+      repairResidualPaths: [], pendingScopeExpansion: [] };
     const created: string[] = [];
     try {
       await mkdir(directory, { recursive: true });
@@ -1557,7 +1626,7 @@ export class OperatorRuntime {
     const remediationNextAction = state.phase === "cancelled"
       ? `call ${this.profile.toolPrefix}prepare_operator with an approved replacement plan for the same goal and exact acceptance; start from git_lifecycle.committed_head, keep writes within git_lifecycle.approved_write_union, retain consumed budget, and do not call resume_operator or edit the committed candidate${carriedAction}`
       : `call ${this.profile.toolPrefix}cancel_operator, then call ${this.profile.toolPrefix}prepare_operator with an approved replacement plan for the same goal and exact acceptance; start from git_lifecycle.committed_head, keep writes within git_lifecycle.approved_write_union, retain consumed budget, and do not call resume_operator or edit the committed candidate${carriedAction}`;
-    const awaitingAcceptanceNextAction = `assess the independent-review requirement and obtain review when required, copying review_dispatch_contract.required_prompt_lines into the reviewer Task prompt with real values; if review PASSes (or policy records an allowed skip), call ${this.profile.toolPrefix}complete_operator with this run_id and acceptance_fingerprint; if review has blocking findings wholly inside the existing exact acceptance, git_lifecycle.approved_write_union, and remaining cumulative budget, do not complete or ask for user approval: call ${this.profile.toolPrefix}cancel_operator with reason review-blocking, then call ${this.profile.toolPrefix}prepare_operator for one same-goal replacement from git_lifecycle.committed_head targeting only those findings; copy this packet's acceptance array verbatim into the replacement plan without paraphrase, deletion, addition, or reordering, preserve accepted-criteria lineage, and run final canonical validation/review; if acceptance, write scope, or budget must increase, stop for the user decision`;
+    const awaitingAcceptanceNextAction = `assess the independent-review requirement and obtain review when required, copying review_dispatch_contract.required_prompt_lines into the reviewer Task prompt with real values; if review PASSes (or policy records an allowed skip), call ${this.profile.toolPrefix}complete_operator with this run_id and acceptance_fingerprint; if review has blocking findings wholly inside the existing exact acceptance, the union of git_lifecycle.approved_write_union and git_lifecycle.remediation_reserve, and remaining cumulative budget, do not complete or ask for user approval: call ${this.profile.toolPrefix}cancel_operator with reason review-blocking, then call ${this.profile.toolPrefix}prepare_operator for one same-goal replacement from git_lifecycle.committed_head targeting only those findings; copy this packet's acceptance array verbatim into the replacement plan without paraphrase, deletion, addition, or reordering, preserve accepted-criteria lineage, and run final canonical validation/review; if the replacement is refused for write scope, report replacement_constraints.blocked_write_paths to the user as the exact paths needing approval and stop, then after the user approves resend the same replacement with git_lifecycle.remediation_scope_expansion set to exactly those paths; if acceptance or budget must increase, stop for the user decision`;
     const packet = { profile: state.profile, run_id: state.runID, root_session_id: state.rootSessionID, generation: state.generation,
       sequence: state.sequence, status: state.phase, repair_generation: state.repairGeneration,
       acceptance: state.acceptance, acceptance_fingerprint: state.acceptanceFingerprint,
@@ -1569,6 +1638,7 @@ export class OperatorRuntime {
          committed_head: state.remediationParent.committedHead },
       git_lifecycle: state.gitLifecycle === null ? null : { branch: state.gitLifecycle.branch, start_ref: state.gitLifecycle.startRef,
         start_oid: state.gitLifecycle.startOID, approved_write_union: state.gitLifecycle.writeUnion,
+        remediation_reserve: state.gitLifecycle.remediationReserve ?? [],
         post_commit_validation: state.gitLifecycle.postCommitValidation,
         committed_head: state.gitLifecycle.committedHead,
         inherited: state.gitLifecycle.commitProvenance === "inherited-parent",
@@ -1585,10 +1655,19 @@ export class OperatorRuntime {
         files: state.contractRepair.files.map(file => ({ path: file.path, size: file.size, sha256: file.sha256 })) },
       resume_requires_host_reconciliation: hostReconciliationRequired,
       repair_validation_retry_available: repairValidationRetryAvailable,
+      // Top-level because the refusal is recorded while preparing a replacement, by which point the
+      // run has already left awaiting-acceptance. Surfacing it only there would hide the exact paths
+      // in precisely the state the root must report to the user.
+      blocked_write_paths: state.pendingScopeExpansion ?? [],
       ...(state.phase === "awaiting-acceptance" ? { review_decision: "root-assess-independent-review",
         replacement_constraints: { copy_acceptance_verbatim: true, acceptance: state.acceptance,
           committed_head: state.gitLifecycle?.committedHead ?? null,
-          approved_write_union: state.gitLifecycle?.writeUnion ?? [], cumulative_budget: "retain-consumed-spend" },
+          approved_write_union: state.gitLifecycle?.writeUnion ?? [],
+          remediation_reserve: state.gitLifecycle?.remediationReserve ?? [],
+          // Populated only after this host refused named paths. It is the exact list the user must
+          // approve, and the only list a replacement may replay as remediation_scope_expansion.
+          blocked_write_paths: state.pendingScopeExpansion ?? [],
+          cumulative_budget: "retain-consumed-spend" },
         // The host refuses a review dispatch that omits this exact evidence header, so it states the
         // accepted line forms here instead of relying on the caller to recall them.
         review_dispatch_contract: { required_prompt_lines: ["canonical_validation_exit: 0",
@@ -1664,6 +1743,32 @@ export class OperatorRuntime {
   }
   private pathAuthorized(path: string, scopes: readonly string[]): boolean {
     return operatorGitPathAuthorized(path, scopes);
+  }
+  /**
+   * Persist the exact paths a remediation write-scope rejection refused. The root reports them to the
+   * user; only these may later reappear as remediation_scope_expansion.
+   */
+  private async recordPendingScopeExpansion(parent: OperatorState, paths: readonly string[]): Promise<void> {
+    const recorded = [...new Set(paths)].slice(0, OPERATOR_LIMITS.remediationReserve);
+    if (JSON.stringify(parent.pendingScopeExpansion ?? []) === JSON.stringify(recorded)) return;
+    parent.pendingScopeExpansion = recorded;
+    await this.save(parent);
+  }
+  /**
+   * Accept a declared expansion only when the parent durably recorded every path as refused. An
+   * undeclared or invented entry is a contract error, not a silently narrowed grant.
+   */
+  private authorizedScopeExpansion(parent: OperatorState, declared: readonly string[] | undefined): readonly string[] {
+    if (declared === undefined || declared.length === 0) return [];
+    const pending = parent.pendingScopeExpansion ?? [];
+    const unrecorded = declared.filter(path => !pending.includes(path));
+    if (pending.length === 0 || unrecorded.length > 0) {
+      return contractError({ document: "plan", pointer: "/git_lifecycle/remediation_scope_expansion",
+        code: "operator-remediation-scope-expansion-unrecorded",
+        rule: "expansion-must-name-only-host-reported-refused-paths", repair_kind: "repair-field",
+        repair_paths: unrecorded.slice(0, OPERATOR_LIMITS.remediationReserve) });
+    }
+    return declared;
   }
   private gitAcceptanceReadiness(state: OperatorState): string | null {
     const lifecycle = state.gitLifecycle;
@@ -1835,7 +1940,9 @@ export class OperatorRuntime {
         parent.acceptanceFingerprint !== state.acceptanceFingerprint) {
       throw new Error("operator-git-inherited-commit-lineage-invalid");
     }
-    const approvedWriteUnion = parent.approvedWriteUnion;
+    // Remediation may write inside the reserve and any consented expansion, so the inherited-commit
+    // check uses the same union the replacement plan was admitted against.
+    const approvedWriteUnion = [...parent.approvedWriteUnion, ...(parent.approvedRemediationReserve ?? [])];
     if (!approvedWriteUnion.length || lifecycle.writeUnion.some(path => !this.pathAuthorized(path, approvedWriteUnion))) {
       throw new Error("operator-git-inherited-commit-scope-invalid");
     }
