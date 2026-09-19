@@ -77,8 +77,8 @@ Generated control labels are not a reason to switch the surrounding explanation 
 const coordinatorContent = `---
 description: Sortie-dogs ${V010_RUNTIME_ASSET_VERSION} primary dog-operator — strategic authority with a bounded operations delegate.
 mode: primary
-model: openai/gpt-5.6-sol
-variant: low
+model: openai/gpt-5.6-luna-fast
+variant: max
 permission:
   question: allow
   task:

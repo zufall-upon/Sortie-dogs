@@ -19,13 +19,21 @@ const SERIAL_CAPABILITIES = new Set([
   "sortie_bind_write_gate", "sortie_release_write_gate", "sortie_check_contract",
   "sortie_compact_and_continue", "sortie_enable_backlog_drain",
 ]);
-const PREVIEW_WORKER_ROUTE = Object.freeze({ model: "openai/gpt-5.6-luna", variant: "max" });
-const PREVIEW_SCOUT_ROUTE = Object.freeze({ model: "openai/gpt-5.6-luna", variant: "xhigh" });
+const PREVIEW_WORKER_ROUTE = Object.freeze({ model: "openai/gpt-5.6-luna-fast", variant: "max" });
+const PREVIEW_SCOUT_ROUTE = Object.freeze({ model: "openai/gpt-5.6-luna-fast", variant: "xhigh" });
+/**
+ * Contract authorship, not throughput. Qualification observed a cheaper operations model emit
+ * structurally valid but under-scoped contracts: a write union narrower than the remediation the
+ * review it also schedules demands, which strands an otherwise complete run on NEED_DECISION.
+ */
 const PREVIEW_OPERATIONS_ROUTE = Object.freeze({ model: "openai/gpt-5.6-terra", variant: "xhigh" });
-const PREVIEW_PRIMARY_ROUTE = Object.freeze({ model: "openai/gpt-5.6-sol", variant: "low" });
+const PREVIEW_PRIMARY_ROUTE = Object.freeze({ model: "openai/gpt-5.6-luna-fast", variant: "max" });
+/** Review must be able to reject the worker's output, so it never shares the worker's model family. */
+const PREVIEW_REVIEW_ROUTE = Object.freeze({ model: "openai/gpt-5.6-terra", variant: "xhigh" });
 /** Every preview route the profile can bind a role to. Catalog declaration reads this one list. */
 const PREVIEW_ROUTES: readonly { readonly model: string; readonly variant: string }[] = Object.freeze([
   PREVIEW_PRIMARY_ROUTE, PREVIEW_WORKER_ROUTE, PREVIEW_SCOUT_ROUTE, PREVIEW_OPERATIONS_ROUTE,
+  PREVIEW_REVIEW_ROUTE,
 ]);
 
 /**
@@ -233,6 +241,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       defaultModelRouting: {
         "dog-coordinator": { preferred: PREVIEW_PRIMARY_ROUTE },
         "dog-operator": { preferred: PREVIEW_OPERATIONS_ROUTE },
+        "dog-reviewer": { preferred: PREVIEW_REVIEW_ROUTE },
         "dog-scout": { preferred: PREVIEW_SCOUT_ROUTE },
         "dog-worker": { preferred: PREVIEW_WORKER_ROUTE },
       },

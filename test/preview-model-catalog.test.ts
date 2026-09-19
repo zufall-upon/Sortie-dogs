@@ -9,9 +9,8 @@ const declares = (catalog, model, variant) =>
 test("every shipped preview route is declared, so no role resolves against an absent catalog entry", () => {
   const catalog = previewModelCatalog();
   const routes = [
-    { model: "openai/gpt-5.6-sol", variant: "low" },
-    { model: "openai/gpt-5.6-luna", variant: "max" },
-    { model: "openai/gpt-5.6-luna", variant: "xhigh" },
+    { model: "openai/gpt-5.6-luna-fast", variant: "max" },
+    { model: "openai/gpt-5.6-luna-fast", variant: "xhigh" },
     { model: "openai/gpt-5.6-terra", variant: "xhigh" },
   ];
   for (const route of routes) {
