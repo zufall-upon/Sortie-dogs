@@ -8,7 +8,7 @@ import { taskChildSessionID } from "./task-result-repair.js";
 import type { RuntimeBridge } from "./runtime-bridge.js";
 import { relative, resolve, sep } from "node:path";
 import { readFile, realpath } from "node:fs/promises";
-import { BUILT_IN_MODEL_CATALOG } from "./model-routing.js";
+import { BUILT_IN_MODEL_CATALOG, type CatalogModel } from "./model-routing.js";
 import { goalFingerprint } from "../core/goal-bound.js";
 import { decoratePreviewHeadings } from "./receipt-presentation.js";
 import { terminalRunOutcome } from "./run-metrics.js";
@@ -23,6 +23,36 @@ const PREVIEW_WORKER_ROUTE = Object.freeze({ model: "openai/gpt-5.6-luna", varia
 const PREVIEW_SCOUT_ROUTE = Object.freeze({ model: "openai/gpt-5.6-luna", variant: "xhigh" });
 const PREVIEW_OPERATIONS_ROUTE = Object.freeze({ model: "openai/gpt-5.6-terra", variant: "xhigh" });
 const PREVIEW_PRIMARY_ROUTE = Object.freeze({ model: "openai/gpt-5.6-sol", variant: "low" });
+/** Every preview route the profile can bind a role to. Catalog declaration reads this one list. */
+const PREVIEW_ROUTES: readonly { readonly model: string; readonly variant: string }[] = Object.freeze([
+  PREVIEW_PRIMARY_ROUTE, PREVIEW_WORKER_ROUTE, PREVIEW_SCOUT_ROUTE, PREVIEW_OPERATIONS_ROUTE,
+]);
+
+/**
+ * Declare every preview route in the catalog, adding the variant to a listed model and the whole model
+ * when the built-in catalog never listed it. Augmenting only pre-existing entries silently drops a
+ * route whose model is absent, and role resolution then denies every child bound to that route with
+ * `unresolved-role` instead of reporting the undeclared model.
+ */
+export function previewModelCatalog(
+  routes: readonly { readonly model: string; readonly variant: string }[] = PREVIEW_ROUTES,
+  base: readonly CatalogModel[] = BUILT_IN_MODEL_CATALOG.global ?? [],
+): readonly CatalogModel[] {
+  const variantsOf = (model: string): string[] =>
+    [...new Set(routes.filter(route => route.model === model).map(route => route.variant))];
+  const listed = new Set(base.map(entry => entry.model));
+  return [
+    ...base.map(entry => {
+      const variants = variantsOf(entry.model);
+      return variants.length === 0
+        ? entry
+        : { ...entry, variants: [...new Set([...(entry.variants ?? []), ...variants])] };
+    }),
+    ...[...new Set(routes.map(route => route.model))]
+      .filter(model => !listed.has(model))
+      .map(model => ({ model, variants: variantsOf(model) })),
+  ];
+}
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 const payload = (value: unknown): unknown => record(value) && "data" in value ? value.data : value;
 const OPERATOR_INTENT_CONTRACT = 'intent_json must encode exactly this JSON object (proposal_budget optional; all other fields required, no aliases or extra keys): '
@@ -189,11 +219,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     const runtimeBridge: RuntimeBridge = {
       profile, assetVersion,
       continuationCheckpoint: root => operators.continuationCheckpoint(root),
-      defaultModelCatalog: { global: BUILT_IN_MODEL_CATALOG.global?.map(entry => {
-        const variants = [PREVIEW_PRIMARY_ROUTE, PREVIEW_WORKER_ROUTE, PREVIEW_SCOUT_ROUTE, PREVIEW_OPERATIONS_ROUTE]
-          .filter(route => route.model === entry.model).map(route => route.variant);
-        return variants.length === 0 ? entry : { ...entry, variants: [...new Set([...(entry.variants ?? []), ...variants])] };
-      }) },
+      defaultModelCatalog: { global: previewModelCatalog() },
       transformConfiguration: value => {
         if (!record(value) || !record(value.modelRouting)) return value;
         const routes: Record<string, unknown> = {};
