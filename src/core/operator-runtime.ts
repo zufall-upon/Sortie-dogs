@@ -203,6 +203,8 @@ export interface OperatorState {
    * a later remediation_scope_expansion may name, so consent cannot widen beyond what was reported.
    */
   pendingScopeExpansion: readonly string[];
+  /** Real user turn carrying host approval when pendingScopeExpansion was recorded. */
+  pendingScopeExpansionApprovalTurnID?: string | null;
   repairGeneration: number;
   generation: number;
   sequence: number;
@@ -461,9 +463,12 @@ export class OperatorRuntime {
             !["host-created", "existing-history", "inherited-parent", "uncommitted-baseline"].includes(state.remediationParent.commitProvenance)))) ||
         !this.validGitLifecycleState(state.gitLifecycle) ||
         !Number.isSafeInteger(state.repairGeneration) || state.repairGeneration < 0 || state.repairGeneration > 1 ||
-        !strings(state.repairResidualPaths) || state.repairResidualPaths.length > OPERATOR_LIMITS.units ||
-        !strings(state.pendingScopeExpansion) || state.pendingScopeExpansion.length > OPERATOR_LIMITS.remediationReserve ||
-        !this.validContractRepairState(state.contractRepair, state.units) || !state.units.every(unit =>
+         !strings(state.repairResidualPaths) || state.repairResidualPaths.length > OPERATOR_LIMITS.units ||
+         !strings(state.pendingScopeExpansion) || state.pendingScopeExpansion.length > OPERATOR_LIMITS.remediationReserve ||
+         (state.pendingScopeExpansionApprovalTurnID !== undefined && state.pendingScopeExpansionApprovalTurnID !== null &&
+           (typeof state.pendingScopeExpansionApprovalTurnID !== "string" || state.pendingScopeExpansionApprovalTurnID.length === 0 ||
+             /[\r\n]/u.test(state.pendingScopeExpansionApprovalTurnID))) ||
+         !this.validContractRepairState(state.contractRepair, state.units) || !state.units.every(unit =>
           Number.isSafeInteger(unit.repairValidationAttempts) && unit.repairValidationAttempts >= 0 && unit.repairValidationAttempts <= 2 &&
           this.validRepairValidationState(unit.repairValidation))) {
       throw new Error("operator-state-invalid");
@@ -653,16 +658,16 @@ export class OperatorRuntime {
     else await this.git([...noHooks, "switch", "--detach", state.originalHead]);
     await this.git(["update-ref", "-d", `refs/heads/${state.branch}`, state.startOID]);
   }
-  prepare(root: string, raw: unknown): Promise<OperatorState> {
-    return this.serial(root, () => this.prepareOnce(root, raw));
+  prepare(root: string, raw: unknown, scopeApprovalTurnID?: string): Promise<OperatorState> {
+    return this.serial(root, () => this.prepareOnce(root, raw, scopeApprovalTurnID));
   }
   private draftFile(root: string): string { return `${this.file(root)}.draft.json`; }
-  propose(root: string, raw: unknown): Promise<OperatorProposal> {
-    return this.serial(root, () => this.proposeOnce(root, raw));
+  propose(root: string, raw: unknown, scopeApprovalTurnID?: string): Promise<OperatorProposal> {
+    return this.serial(root, () => this.proposeOnce(root, raw, scopeApprovalTurnID));
   }
-  private async proposeOnce(root: string, raw: unknown): Promise<OperatorProposal> {
+  private async proposeOnce(root: string, raw: unknown, scopeApprovalTurnID?: string): Promise<OperatorProposal> {
     try {
-      const state = await this.prepareOnce(root, raw);
+      const state = await this.prepareOnce(root, raw, scopeApprovalTurnID);
       await rm(this.draftFile(root), { force: true });
       return { status: "prepared", state };
     } catch (error) {
@@ -736,7 +741,7 @@ export class OperatorRuntime {
       return this.proposeOnce(root, draft.plan);
     });
   }
-  private async prepareOnce(root: string, raw: unknown): Promise<OperatorState> {
+  private async prepareOnce(root: string, raw: unknown, scopeApprovalTurnID?: string): Promise<OperatorState> {
     const previous = await this.read(root);
     let immutableReplacement = previous?.phase === "cancelled" &&
       [ACCEPTANCE_REMEDIATION_DECISION, REVIEW_REMEDIATION_DECISION].includes(previous.decision ?? "") && record(raw)
@@ -802,14 +807,14 @@ export class OperatorRuntime {
       // The reserve was approved with the original contract; the expansion is a later consent limited
       // to paths this host already refused by name. Neither lets the replacement invent new scope.
       const reserve = parent.gitLifecycle!.remediationReserve ?? [];
-      const expansion = this.authorizedScopeExpansion(parent, plan.git_lifecycle.remediation_scope_expansion);
+      const expansion = this.authorizedScopeExpansion(parent, plan.git_lifecycle.remediation_scope_expansion, scopeApprovalTurnID);
       const approvedWrites = [...parent.gitLifecycle!.writeUnion, ...reserve, ...expansion];
       const replacementWrites = [...new Set(plan.units.flatMap(unit => unit.write))];
       const outside = replacementWrites.filter(path => !this.pathAuthorized(path, approvedWrites));
       if (outside.length > 0) {
         // Record exactly what was refused so the root can return a concrete decision to the user and,
         // once the user consents, replay the same paths as remediation_scope_expansion.
-        await this.recordPendingScopeExpansion(parent, outside);
+        await this.recordPendingScopeExpansion(parent, outside, scopeApprovalTurnID);
         return contractError({ document: "plan", pointer: "/units", code: "operator-acceptance-remediation-write-scope-invalid",
           rule: "replacement-writes-must-stay-within-approved-union", repair_kind: "repair-field",
           repair_paths: outside.slice(0, OPERATOR_LIMITS.remediationReserve) });
@@ -916,7 +921,7 @@ export class OperatorRuntime {
         taskID: remediationTaskID, committedHead: remediationHead, runID: parent.runID,
         acceptanceFingerprint: parent.acceptanceFingerprint, approvedWriteUnion: parent.gitLifecycle.writeUnion,
         approvedRemediationReserve: [...(parent.gitLifecycle.remediationReserve ?? []),
-          ...this.authorizedScopeExpansion(parent, plan.git_lifecycle?.remediation_scope_expansion)],
+          ...this.authorizedScopeExpansion(parent, plan.git_lifecycle?.remediation_scope_expansion, scopeApprovalTurnID)],
         commitMessage: parent.gitLifecycle.commitMessage,
         ...(parent.gitLifecycle.commitProvenance === undefined || parent.gitLifecycle.commitProvenance === null
           ? {} : { commitProvenance: parent.gitLifecycle.commitProvenance }),
@@ -1748,17 +1753,21 @@ export class OperatorRuntime {
    * Persist the exact paths a remediation write-scope rejection refused. The root reports them to the
    * user; only these may later reappear as remediation_scope_expansion.
    */
-  private async recordPendingScopeExpansion(parent: OperatorState, paths: readonly string[]): Promise<void> {
+  private async recordPendingScopeExpansion(parent: OperatorState, paths: readonly string[], scopeApprovalTurnID?: string): Promise<void> {
     const recorded = [...new Set(paths)].slice(0, OPERATOR_LIMITS.remediationReserve);
-    if (JSON.stringify(parent.pendingScopeExpansion ?? []) === JSON.stringify(recorded)) return;
+    const approvalTurnID = typeof scopeApprovalTurnID === "string" && scopeApprovalTurnID.length > 0 ? scopeApprovalTurnID : null;
+    if (JSON.stringify(parent.pendingScopeExpansion ?? []) === JSON.stringify(recorded) &&
+        (parent.pendingScopeExpansionApprovalTurnID ?? null) === approvalTurnID) return;
     parent.pendingScopeExpansion = recorded;
+    parent.pendingScopeExpansionApprovalTurnID = approvalTurnID;
     await this.save(parent);
   }
   /**
    * Accept a declared expansion only when the parent durably recorded every path as refused. An
    * undeclared or invented entry is a contract error, not a silently narrowed grant.
    */
-  private authorizedScopeExpansion(parent: OperatorState, declared: readonly string[] | undefined): readonly string[] {
+  private authorizedScopeExpansion(parent: OperatorState, declared: readonly string[] | undefined,
+    scopeApprovalTurnID?: string): readonly string[] {
     if (declared === undefined || declared.length === 0) return [];
     const pending = parent.pendingScopeExpansion ?? [];
     const unrecorded = declared.filter(path => !pending.includes(path));
@@ -1767,6 +1776,21 @@ export class OperatorRuntime {
         code: "operator-remediation-scope-expansion-unrecorded",
         rule: "expansion-must-name-only-host-reported-refused-paths", repair_kind: "repair-field",
         repair_paths: unrecorded.slice(0, OPERATOR_LIMITS.remediationReserve) });
+    }
+    const omitted = pending.filter(path => !declared.includes(path));
+    if (omitted.length > 0) {
+      return contractError({ document: "plan", pointer: "/git_lifecycle/remediation_scope_expansion",
+        code: "operator-remediation-scope-expansion-incomplete",
+        rule: "expansion-must-name-the-exact-host-reported-refused-path-list", repair_kind: "repair-field",
+        repair_paths: omitted.slice(0, OPERATOR_LIMITS.remediationReserve) });
+    }
+    const recordedAt = parent.pendingScopeExpansionApprovalTurnID;
+    if (typeof recordedAt !== "string" || recordedAt.length === 0 ||
+        typeof scopeApprovalTurnID !== "string" || scopeApprovalTurnID.length === 0 || scopeApprovalTurnID === recordedAt) {
+      return contractError({ document: "plan", pointer: "/git_lifecycle/remediation_scope_expansion",
+        code: "operator-remediation-scope-expansion-approval-required",
+        rule: "expansion-requires-a-later-real-user-turn-with-host-approval-authority", repair_kind: "repair-field",
+        repair_paths: declared.slice(0, OPERATOR_LIMITS.remediationReserve) });
     }
     return declared;
   }

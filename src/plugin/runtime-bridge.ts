@@ -51,6 +51,7 @@ export interface RuntimeBridge {
     assertActiveGoal(rootSessionID: string, goalFingerprint: string): Promise<void>;
     retainOperatorContractRepairWorker(rootSessionID: string, taskID: string, childSessionID: string): Promise<void>;
     assertOperatorContractRepairValidationAvailable(rootSessionID: string, taskID: string, childSessionID: string): Promise<void>;
+    remediationScopeExpansionAuthority(rootSessionID: string): Promise<string | undefined>;
     authorizeOperatorContractRepairValidation(rootSessionID: string, taskID: string, childSessionID: string,
       repairFingerprint: string): Promise<void>;
     authorizeOperatorContractRepairValidationRetry(rootSessionID: string,

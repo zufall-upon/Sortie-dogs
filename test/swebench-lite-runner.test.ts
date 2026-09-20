@@ -363,6 +363,71 @@ test("live run writes one prediction per instance and removes dedicated workspac
   await assert.rejects(stat(join(runRoot, "candidate-runtime")));
 });
 
+test("cost enforcement failures stop later instances with deterministic replay evidence", async t => {
+  for (const reason of ["pricing-coverage-missing", "usage-monitor-failed"]) {
+    await t.test(reason, async () => {
+      const root = await mkdtemp(join(tmpdir(), "swebench-replay-usage-stop-"));
+      const runRoot = join(root, "run");
+      let executeCalls = 0;
+      try {
+        const result = await runTestLive(manifest(), {
+          agent: "dog-operator",
+          modelNameOrPath: "sortie-dogs",
+          timeoutSeconds: 1800,
+          watchdogSeconds: 120,
+          costLimitUsd: 50,
+          runRoot,
+          output: join(root, "predictions.jsonl"),
+        }, {
+          prepareCandidate: async (candidateValue: typeof candidate, _packagePath: string, preparedRoot: string) => {
+            const runtimeRoot = join(preparedRoot, "candidate-runtime");
+            await mkdir(runtimeRoot, { recursive: true });
+            return {
+              environment: { HOME: "/isolated/home" },
+              runtimeRoot,
+              evidence: {
+                package_sha256: candidateValue.sha256,
+                version: candidateValue.version,
+                runtime_marker: candidateValue.runtime_marker,
+                profile: candidateValue.profile,
+                agent: candidateValue.agent,
+              },
+            };
+          },
+          clone: async () => undefined,
+          execute: async () => {
+            executeCalls += 1;
+            return {
+              command: "host",
+              exit: 1,
+              signal: null,
+              reason,
+              stdout: "",
+              stderr: "",
+              usage: { usd: 0, requests: 0, unpriced: [] },
+            };
+          },
+        });
+        const notRunStatus = `not-run-${reason}`;
+        assert.equal(executeCalls, 1);
+        assert.deepEqual(result.results.map(item => item.status), [reason, notRunStatus]);
+        const replayManifest = JSON.parse(await readFile(result.replay.manifest.path, "utf8"));
+        assert.deepEqual(replayManifest.artifacts.map((item: { status: string }) => item.status), [reason, notRunStatus]);
+        const failedArtifact = JSON.parse(await readFile(join(runRoot, "replay", replayManifest.artifacts[0].path), "utf8"));
+        const skippedArtifact = JSON.parse(await readFile(join(runRoot, "replay", replayManifest.artifacts[1].path), "utf8"));
+        assert.equal(failedArtifact.status, reason);
+        assert.equal(failedArtifact.execution.reason, reason);
+        assert.equal(skippedArtifact.status, notRunStatus);
+        assert.equal(skippedArtifact.execution.reason, notRunStatus);
+        assert.equal(skippedArtifact.execution.exit_code, null);
+        assert.equal(skippedArtifact.patch, "");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
 test("failed instance replay records public input, command output, patch state, and hashes", async () => {
   const root = await mkdtemp(join(tmpdir(), "swebench-replay-failure-"));
   const runRoot = join(root, "run");

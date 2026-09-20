@@ -454,6 +454,7 @@ function oldRoleAsset(name: "dog-operator" | "dogs-coordinator"): string {
     .replace(/^  "sortie_v010_\*": allow\n/m, "")
     .replace(/^  sortie_v010_operator_next: allow\n/m, "")
     .replace(/^  sortie_v010_submit_operator_proposal: allow\n/m, "")
+    .replace(/Before approving a proposal, inventory the executable[\s\S]*?source-writing worker starts\.\n/u, "")
     .replace(/## Existing-run evidence reconciliation[\s\S]*?bypasses the delegate\.\n\n/u, "")
     .replace(/When operator_status returns decision=operator-acceptance-remediation-required,[\s\S]*?Ask the user when acceptance or budget must\nincrease\.\n\n/u, "")
     .replace(/Keep candidate_id stable for the logical review lineage[\s\S]*?it does not invent it\.\n/u, "")
@@ -2646,16 +2647,48 @@ test("a refused remediation scope is reported by path and only that exact list m
   const blocked = JSON.parse(await replacementHooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
   assert.deepEqual(blocked.blocked_write_paths, ["scripts/generate.mjs"]);
 
+  // The refusal turn itself is not approval authority for replaying the exact path.
+  const sameTurn = replacementOf("feature/expansion-same-turn", ["generated/main.txt", "scripts/generate.mjs"]);
+  sameTurn.git_lifecycle.remediation_scope_expansion = ["scripts/generate.mjs"];
+  const sameTurnRejected = JSON.parse(await prepare(sameTurn).catch((error: Error) => error.message));
+  assert.equal(sameTurnRejected.diagnostics[0].code, "operator-remediation-scope-expansion-approval-required");
+
+  const subset = replacementOf("feature/expansion-subset", ["generated/main.txt", "scripts/generate.mjs"]);
+  subset.git_lifecycle.remediation_scope_expansion = [];
+  const secondOutside = replacementOf("feature/expansion-two-paths",
+    ["generated/main.txt", "scripts/generate.mjs", "scripts/cleanup.mjs"]);
+  const secondRefusal = JSON.parse(await prepare(secondOutside).catch((error: Error) => error.message));
+  assert.deepEqual(secondRefusal.diagnostics[0].repair_paths, ["scripts/generate.mjs", "scripts/cleanup.mjs"]);
+  subset.git_lifecycle.remediation_scope_expansion = ["scripts/generate.mjs"];
+  const subsetRejected = JSON.parse(await prepare(subset).catch((error: Error) => error.message));
+  assert.equal(subsetRejected.diagnostics[0].code, "operator-remediation-scope-expansion-incomplete");
+  assert.deepEqual(subsetRejected.diagnostics[0].repair_paths, ["scripts/cleanup.mjs"]);
+
   // Consent is bounded by that record: a path the host never refused cannot be smuggled in with it.
   const invented = replacementOf("feature/expansion-invented", ["generated/main.txt", "scripts/generate.mjs"]);
-  invented.git_lifecycle.remediation_scope_expansion = ["scripts/generate.mjs", "scripts/cleanup.mjs"];
+  invented.git_lifecycle.remediation_scope_expansion = ["scripts/generate.mjs", "scripts/cleanup.mjs", "scripts/other.mjs"];
   const rejected = JSON.parse(await prepare(invented).catch((error: Error) => error.message));
   assert.equal(rejected.diagnostics[0].code, "operator-remediation-scope-expansion-unrecorded");
-  assert.deepEqual(rejected.diagnostics[0].repair_paths, ["scripts/cleanup.mjs"]);
+  assert.deepEqual(rejected.diagnostics[0].repair_paths, ["scripts/other.mjs"]);
 
-  const consented = replacementOf("feature/expansion-approved", ["generated/main.txt", "scripts/generate.mjs"]);
-  consented.git_lifecycle.remediation_scope_expansion = ["scripts/generate.mjs"];
-  const admitted = JSON.parse(await prepare(consented));
+  const identities: Record<string, { agent: string; parentID?: string }> = { root: { agent: "dog-operator" } };
+  const coldHooks = await SortieDogsV010Plugin({ directory: root, client: { session: {
+    get: async ({ path }: { path: { id: string } }) => ({ data: identities[path.id] }),
+    messages: async () => ({ data: [] }), abort: async () => ({ data: true }),
+  } } } as never);
+  const exact = replacementOf("feature/expansion-approved",
+    ["generated/main.txt", "scripts/generate.mjs", "scripts/cleanup.mjs"]);
+  exact.git_lifecycle.remediation_scope_expansion = ["scripts/generate.mjs", "scripts/cleanup.mjs"];
+  const coldRejected = JSON.parse(await coldHooks.tool!.sortie_v010_prepare_operator.execute(
+    { plan_json: JSON.stringify(exact) }, { sessionID: "root" }).catch((error: Error) => error.message));
+  assert.equal(coldRejected.diagnostics[0].code, "operator-remediation-scope-expansion-approval-required");
+
+  await coldHooks["chat.message"]!({ sessionID: "root", messageID: "scope-root-approval", agent: "dog-operator" }, {
+    message: { agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-5.6-luna-fast" } },
+    parts: [{ type: "text", text: "Approve the exact blocked path for the later remediation turn." }],
+  });
+  const admitted = JSON.parse(await coldHooks.tool!.sortie_v010_prepare_operator.execute(
+    { plan_json: JSON.stringify(exact) }, { sessionID: "root" }));
   assert.match(admitted.run_id, /^operator-/u);
   assert.equal(admitted.diagnostics, undefined);
 }));

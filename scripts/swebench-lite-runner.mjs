@@ -1020,6 +1020,14 @@ function emptyLiveResult(instance, status) {
   };
 }
 
+function costEnforcementStopReason(execution) {
+  const reason = execution?.reason;
+  if (["pricing-coverage-missing", "usage-monitor-failed", "watchdog-usage-failed", "usage-read-failed"].includes(reason)) {
+    return reason;
+  }
+  return undefined;
+}
+
 export async function runLive(value, options, dependencies = {}) {
   const plan = createLiveRunPlan(value, options, dependencies.publicRowHashes);
   ensure(typeof options.runRoot === "string" && options.runRoot.length > 0, "live-run-root-required");
@@ -1080,10 +1088,11 @@ export async function runLive(value, options, dependencies = {}) {
   const results = [];
   const replayArtifacts = [];
   let spentUsd = 0;
-  let stoppedByBudget = false;
+  let stopRemainingReason;
   try { for (const [index, instance] of plan.instances.entries()) {
     const replayArtifactPath = join(replayRoot, "instances", `${String(index).padStart(3, "0")}-${encodeURIComponent(instance.instance_id)}.json`);
-    if (stoppedByBudget) {
+    if (stopRemainingReason !== undefined) {
+      const notRunStatus = `not-run-${stopRemainingReason}`;
       const artifact = createInstanceReplayArtifact({
         dataset: plan.dataset,
         instance,
@@ -1092,8 +1101,8 @@ export async function runLive(value, options, dependencies = {}) {
         candidate_sha256: candidateSha256,
         candidate_evidence_sha256: candidateEvidenceSha256,
         environment_sha256: environmentSha256,
-        execution: { reason: "not-run-cost-limit" },
-        status: "not-run-cost-limit",
+        execution: { reason: notRunStatus },
+        status: notRunStatus,
         patch: "",
         max_bytes: replayMaxBytes,
       });
@@ -1102,10 +1111,10 @@ export async function runLive(value, options, dependencies = {}) {
         instance_id: instance.instance_id,
         path: relative(replayRoot, replayArtifactPath).replaceAll("\\", "/"),
         sha256: storedArtifact.sha256,
-        status: "not-run-cost-limit",
+        status: notRunStatus,
       });
       predictions.push(formatPrediction({ instance_id: instance.instance_id, model_name_or_path: plan.execution.model_name_or_path, model_patch: "" }));
-      results.push({ ...emptyLiveResult(instance, "not-run-cost-limit"), replay_artifact: storedArtifact });
+      results.push({ ...emptyLiveResult(instance, notRunStatus), replay_artifact: storedArtifact });
       continue;
     }
     const workspace = join(runRoot, "instances", `${String(index).padStart(3, "0")}-${encodeURIComponent(instance.instance_id)}`);
@@ -1164,7 +1173,9 @@ export async function runLive(value, options, dependencies = {}) {
       failure = String(cleanupError.message ?? cleanupError);
       fatalError ??= replayFailure(`replay-artifact-cleanup-failed:${failure}`);
     }
-    if (plan.execution.cost_limit_usd !== undefined && spentUsd >= plan.execution.cost_limit_usd) stoppedByBudget = true;
+    const monitoringFailure = costEnforcementStopReason(execution);
+    if (monitoringFailure !== undefined) stopRemainingReason = monitoringFailure;
+    else if (plan.execution.cost_limit_usd !== undefined && spentUsd >= plan.execution.cost_limit_usd) stopRemainingReason = "cost-limit";
     const artifactExecution = execution === undefined ? undefined : { ...execution, output_limit_exceeded: false };
     const artifact = createInstanceReplayArtifact({
       dataset: plan.dataset,

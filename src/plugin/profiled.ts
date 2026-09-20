@@ -344,7 +344,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       "fixed-argv branch create before dispatch and one explicit-path commit of the host-declared union of all unit.write paths immediately before the final unit's canonical same-order contiguous post-commit validation suffix. " +
       "Missing start refs, existing destinations, dirty roots, invalid refs, and extra lifecycle fields return typed diagnostics before worker spend. " +
       "remediation_reserve declares paths no unit may write during implementation, pre-approved only for a later same-goal remediation replacement; entries must lie outside the unit.write union. " +
-      "remediation_scope_expansion is valid only on a remediation replacement and must name exactly the paths this host already refused and reported as replacement_constraints.blocked_write_paths. Send it only after returning those paths to the user and receiving explicit approval; any path the host did not record is rejected, so it can never invent scope. " +
+      "remediation_scope_expansion is valid only on a remediation replacement and must name exactly the paths this host already refused and reported as replacement_constraints.blocked_write_paths. Send it only after returning those paths to the user and receiving explicit approval on a later real user turn carrying host approval authority; same-turn replay is rejected, and any path the host did not record is rejected, so it can never invent scope. " +
       "Omission preserves the existing no-Git-lifecycle behavior. Each unit.validation is an ordered execution list, not tests only: include observed required generator/build/format commands and exact cleanup after generation but before post-commit or canonical criterion tests, with required inputs in unit.read and every persistent or transient generated output in unit.write. Cleanup may remove only declared unit.write outputs; arbitrary ignore rules and removal of undeclared paths are forbidden. Missing commands, outputs, or cleanup require contract repair, not resume evidence. The root must review this semantic completeness; the host does not infer or inject missing build dependencies or generator outputs.";
     const planSchema = record(stringSchema) && typeof stringSchema.describe === "function"
       ? stringSchema.describe(planContract)
@@ -398,7 +398,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           let plan: unknown;
           try { plan = JSON.parse(args.plan_json); }
           catch { return JSON.stringify({ status: "invalid-plan", diagnostics: [{ document: "plan", pointer: "/", code: "operator-plan-json-invalid", rule: "json", repair_kind: "repair-field" }] }); }
-          const proposal = await operators.propose(context.sessionID, plan);
+          const scopeApprovalTurnID = await control?.remediationScopeExpansionAuthority(context.sessionID);
+          const proposal = await operators.propose(context.sessionID, plan, scopeApprovalTurnID);
           if (proposal.status === "invalid-plan") return JSON.stringify(proposal);
           state = proposal.state;
         } catch (error) {

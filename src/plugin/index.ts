@@ -1620,6 +1620,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   const settledPassNotices = new Map<string, { readonly sessionID: string; readonly command: string }>();
   const goalValidationDefects = new Set<string>();
   const goalDeclarationAuthority = new Map<string, string>();
+  const liveUserTurnAuthority = new Map<string, string>();
   const explicitUserGoalUnitLimits = new Map<string, number>();
   const pendingRealGoalTurns = new Map<string, { readonly selectedAgent: string; readonly parts: readonly FreshSessionPromptPart[] }>();
   const pendingGoalRecoveries = new Map<string, Promise<boolean>>();
@@ -1839,6 +1840,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       if (messageID === undefined || pendingRealGoalTurns.get(sessionID) !== pending) return false;
       await acceptRealGoalTurn(sessionID, messageID, pending.selectedAgent, pending.parts);
       goalDeclarationAuthority.set(sessionID, messageID);
+      liveUserTurnAuthority.set(sessionID, messageID);
       pendingRealGoalTurns.delete(sessionID);
       return true;
     })().finally(() => pendingGoalRecoveries.delete(sessionID));
@@ -2115,6 +2117,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       syntheticPrompt(message.parts)) return;
     await acceptRealGoalTurn(sessionID, info.id, COORDINATOR_AGENT, message.parts);
     goalDeclarationAuthority.set(sessionID, info.id);
+    liveUserTurnAuthority.set(sessionID, info.id);
   }
 
   function goalTicketMetadata(value: unknown): Record<string, unknown> | undefined {
@@ -5579,6 +5582,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   function evictSession(sessionID: string): void {
     for (const key of inspectionOperations.keys()) if (key.startsWith(`${sessionID}\u0000`)) inspectionOperations.delete(key);
     goalValidationDefects.delete(sessionID);
+    liveUserTurnAuthority.delete(sessionID);
     activeSessions.delete(sessionID);
     sessionOperationMetrics.delete(sessionID);
     rootAcceptanceContinuity.delete(sessionID);
@@ -6430,6 +6434,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         } else if (messageID !== undefined) {
           await acceptRealGoalTurn(chatInput.sessionID, messageID, selectedAgent, output.parts);
           goalDeclarationAuthority.set(chatInput.sessionID, messageID);
+          liveUserTurnAuthority.set(chatInput.sessionID, messageID);
           const explicitUnits = /^\s*goal_budget_units:\s*([1-9][0-9]*)\s*$/imu
             .exec(output.parts.map(textPart).filter((text) => text !== undefined).join("\n"))?.[1];
           if (explicitUnits === undefined) explicitUserGoalUnitLimits.delete(chatInput.sessionID);
@@ -7887,6 +7892,13 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) throw new Error("operator-coordinator-required");
       const registered = await bindGoalDeclaration(root, prompt);
       if (registered?.goal_id === null || registered === undefined) throw new Error("operator-goal-registration-unavailable");
+    },
+    remediationScopeExpansionAuthority: async root => {
+      if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) throw new Error("operator-coordinator-required");
+      const state = await currentGoal(root);
+      const authority = goalDeclarationAuthority.get(root);
+      return state.latest_user_message_id !== null && authority === state.latest_user_message_id &&
+        liveUserTurnAuthority.get(root) === authority ? authority : undefined;
     },
     relinkRegisteredGoal: async (root, request) => {
       if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) throw new Error("operator-coordinator-required");
