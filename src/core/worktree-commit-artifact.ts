@@ -801,25 +801,36 @@ export async function runBudgetedContainedValidation(
   request: ContainedValidationRequest,
   budget: {
     readonly request: ValidationBudgetRequest;
-    readonly reserve: () => Promise<{ readonly decision: "ALLOW" | "DENY"; readonly reservation_id: string | null; readonly reason: string }>;
-    readonly settle: (outcome: ValidationOutcome, exitCode: number | null) => Promise<void>;
+    readonly reserve: () => Promise<{ readonly decision: "ALLOW" | "SKIP" | "DENY"; readonly reservation_id: string | null; readonly reason: string; readonly reused?: ContainedValidationResult }>;
+    readonly settle: (outcome: ValidationOutcome, exitCode: number | null, duration_ms?: number) => Promise<void>;
   },
   signal?: AbortSignal,
 ): Promise<ContainedValidationResult> {
   const admission = await budget.reserve();
+  if (admission.decision === "SKIP") {
+    if (admission.reused?.ok === true) return admission.reused;
+    return Object.freeze({ ok: false as const, command: [request.executable, ...(request.args ?? [])], exit_code: null,
+      fingerprint: createHash("sha256").update(JSON.stringify([request.executable, request.args ?? [], "skip-evidence-unavailable"])).digest("hex"),
+      error: "invalid-request" as const });
+  }
   if (admission.decision !== "ALLOW" || admission.reservation_id === null) {
     return Object.freeze({ ok: false as const, command: [request.executable, ...(request.args ?? [])], exit_code: null,
       fingerprint: createHash("sha256").update(JSON.stringify([request.executable, request.args ?? [], "denied", admission.reason])).digest("hex"),
       error: "invalid-request" as const });
   }
   let result: ContainedValidationResult;
+  const startedAt = Date.now();
+  const duration = (): number | undefined => {
+    const elapsed = Date.now() - startedAt;
+    return Number.isSafeInteger(elapsed) && elapsed >= 0 ? elapsed : undefined;
+  };
   try {
     result = await runContainedValidation(request, signal);
   } catch {
-    await budget.settle("interrupted", null);
+    await budget.settle("interrupted", null, duration());
     throw new WorktreeCommitArtifactError("validation-failed", "Validation execution failed.");
   }
-  await budget.settle(result.ok ? "passed" : "failed", result.exit_code);
+  await budget.settle(result.ok ? "passed" : "failed", result.exit_code, duration());
   return result;
 }
 
@@ -1272,24 +1283,26 @@ export async function produceWorktreeCommitArtifact(
   }
   const beforeFingerprint = await changeFingerprint(context, before, "worktree");
 
-  await control?.beforeValidation?.(beforeFingerprint);
-  let validation: { readonly code: number; readonly stdout: Buffer };
-  try {
-    validation = await runBounded(executable, request.validation.args ?? [], context.managedPath,
-      request.validation.timeout_ms ?? GIT_TIMEOUT, boundedCommandKind(executable, request.validation.args ?? []), control?.signal);
-  } catch (error) {
-    await control?.afterValidation?.(error instanceof WorktreeCommitArtifactError && /resource bound/iu.test(error.message) ? "timeout" : "interrupted", null);
-    throw error;
+  const validationControl = await control?.beforeValidation?.(beforeFingerprint);
+  if (validationControl?.decision !== "reuse-passed") {
+    let validation: { readonly code: number; readonly stdout: Buffer };
+    try {
+      validation = await runBounded(executable, request.validation.args ?? [], context.managedPath,
+        request.validation.timeout_ms ?? GIT_TIMEOUT, boundedCommandKind(executable, request.validation.args ?? []), control?.signal);
+    } catch (error) {
+      await control?.afterValidation?.(error instanceof WorktreeCommitArtifactError && /resource bound/iu.test(error.message) ? "timeout" : "interrupted", null);
+      throw error;
+    }
+    if (validation.code !== 0) {
+      await control?.afterValidation?.(validation.code === 238 ? "timeout" : "failed", validation.code);
+      throw new WorktreeCommitArtifactError("validation-failed",
+      validation.code === 240 ? "Validation containment setup failed."
+        : validation.code === 241 ? "Validation left a descendant process."
+        : validation.code === 238 ? "Validation exceeded its resource bound."
+            : "Validation exited unsuccessfully.");
+    }
+    await control?.afterValidation?.("passed", 0);
   }
-  if (validation.code !== 0) {
-    await control?.afterValidation?.(validation.code === 238 ? "timeout" : "failed", validation.code);
-    throw new WorktreeCommitArtifactError("validation-failed",
-    validation.code === 240 ? "Validation containment setup failed."
-      : validation.code === 241 ? "Validation left a descendant process."
-      : validation.code === 238 ? "Validation exceeded its resource bound."
-          : "Validation exited unsuccessfully.");
-  }
-  await control?.afterValidation?.("passed", 0);
   if (hostStaged) {
     const stagedValidation = await runBounded(executable, ["diff", "--cached", "--check"], context.managedPath,
       request.validation.timeout_ms ?? GIT_TIMEOUT, "git");

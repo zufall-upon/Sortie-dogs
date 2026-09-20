@@ -17,6 +17,7 @@ import {
   createConfigRoots,
   createLocalVerifierConfig,
   debugEventEvidence,
+  debugRecoveryFailure,
   debugRecoveryPacket,
   debugResumeArgs,
   eventMetadata,
@@ -136,6 +137,13 @@ test("v010 profile is closed, qualification-only, and pins its runtime surface",
   assert.doesNotThrow(() => validateManifest(terra, join(root, "terra-manifest.json"), root));
   terra.opencode.variant = "high";
   assert.throws(() => validateManifest(terra, join(root, "invalid-terra-manifest.json"), root),
+    (error: Error & { gate?: string }) => error.gate === "opencode");
+  const lunaFast = structuredClone(value);
+  lunaFast.opencode.model = "openai/gpt-5.6-luna-fast";
+  lunaFast.opencode.variant = "max";
+  assert.doesNotThrow(() => validateManifest(lunaFast, join(root, "luna-fast-manifest.json"), root));
+  lunaFast.opencode.variant = "xhigh";
+  assert.throws(() => validateManifest(lunaFast, join(root, "invalid-luna-fast-manifest.json"), root),
     (error: Error & { gate?: string }) => error.gate === "opencode");
   value.package.required_assets.pop();
   assert.equal(validate(value), false);
@@ -314,6 +322,7 @@ test("debug continuation pins the same session and accepts only bounded public r
     ["--session", "ses_exact_root"]);
   assert.match(args.at(-1)!, /First call sortie_v010_operator_status/u);
   assert.match(args.at(-1)!, /follow its exact public next_action/u);
+  assert.match(args.at(-1)!, /status is absent[\s\S]+repository-relative tool paths/u);
   assert.match(args.at(-1)!, /awaiting-acceptance[\s\S]+independent review/u);
   assert.match(args.at(-1)!, /reason=review-blocking[\s\S]+without user approval/u);
   assert.doesNotMatch(args.at(-1)!, /discard y\.output|typed variable binding|modify parser|edit source/u);
@@ -349,6 +358,9 @@ test("debug continuation pins the same session and accepts only bounded public r
   assert.deepEqual(debugRecoveryPacket(reviewStream, "ses_exact_root"), { route: "awaiting-acceptance-review",
     decision: "root-assess-independent-review", run_id: "operator-review-ready",
     acceptance_fingerprint: `sha256:${"d".repeat(64)}` });
+  assert.equal(debugRecoveryFailure(null, { status: "fail" }), "debug-public-recovery-unproven");
+  assert.equal(debugRecoveryFailure(null, { status: "pass" }), null);
+  assert.equal(debugRecoveryFailure({ route: "process-defect-resume" }, { status: "fail" }), null);
 });
 
 test("debug evidence fingerprints errors and process-defect resume requires public support", () => {

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { GoalAcceptanceContract, GoalTerminalReceipt, GoalFlightEventRecord } from "../core/goal-bound.js";
+import { validationDurationGuidance } from "../core/validation-budget.js";
 import { DEDICATED_WORKER_ROLES, LUNA_FABRIC_WORKER_ROLE } from "./model-routing.ts";
 import { normalizeCommand } from "./gate.ts";
 
@@ -61,6 +62,14 @@ export interface Debrief {
   readonly traits: readonly ("連携作戦" | "修正から復帰" | "一発完遂")[];
   readonly firstPassEligible?: boolean;
   readonly overlap?: { readonly workerMilliseconds: number; readonly wallMilliseconds: number };
+  readonly validationEfficiency: {
+    readonly completed: number;
+    readonly skipped: number;
+    readonly rejected: number;
+    readonly redundantMilliseconds: number;
+    readonly medianMilliseconds: number | null;
+    readonly p90Milliseconds: number | null;
+  };
 }
 
 const object = (value: unknown): Record<string, unknown> | undefined =>
@@ -241,6 +250,20 @@ export function buildDebrief(receipt: GoalTerminalReceipt, contract: GoalAccepta
   const validation = [...latest.values()].some((check) => !check.passed) ? "FAIL"
     : commands.size > 0 && latest.size === commands.size ? "PASS" : "未確認";
   const reviews = sessions.flatMap((session) => session.reviews).sort((a, b) => a.at - b.at);
+  const validationEvents = records?.filter(({ event }) => event.goal_id === receipt.goal_id &&
+    (event.kind === "validation.admission" || event.kind === "validation.settled")).map(({ event }) => event) ?? [];
+  const validationDurations = validationEvents.flatMap(event => event.kind === "validation.settled" &&
+    event.outcome === "passed" && event.exit_code === 0 && event.duration_ms !== undefined ? [event.duration_ms] : []);
+  const durationGuidance = validationDurationGuidance(validationDurations);
+  const validationEfficiency: Debrief["validationEfficiency"] = {
+    completed: validationEvents.filter(event => event.kind === "validation.settled").length,
+    skipped: validationEvents.filter(event => event.kind === "validation.admission" && event.decision === "SKIP").length,
+    rejected: validationEvents.filter(event => event.kind === "validation.admission" && event.decision === "DENY").length,
+    redundantMilliseconds: validationEvents.reduce((total, event) => total +
+      (event.kind === "validation.admission" && event.decision === "SKIP" ? event.saved_ms ?? 0 : 0), 0),
+    medianMilliseconds: durationGuidance.median_ms,
+    p90Milliseconds: durationGuidance.p90_ms,
+  };
   const traits: Debrief["traits"][number][] = [];
   const spans = children.flatMap((session) => session.spans.filter((span) => span.end > span.start)
     .map((span) => ({ ...span, session: session.id }))).sort((a, b) => a.start - b.start);
@@ -281,7 +304,7 @@ export function buildDebrief(receipt: GoalTerminalReceipt, contract: GoalAccepta
     reserved.length === settled.length && tasks.length === reserved.length && new Set(tasks).size === tasks.length &&
     settled.every((event) => event.disposition === "succeeded" && event.result_class === "acceptance") &&
     !events?.some((event) => event.kind === "goal.replanned" || event.kind === "goal.user-continued" || event.kind === "goal.revised" ||
-      (event.kind === "validation.admission" && event.decision === "DENY") || (event.kind === "validation.settled" && event.outcome !== "passed")) &&
+      (event.kind === "validation.admission" && event.decision !== "ALLOW") || (event.kind === "validation.settled" && event.outcome !== "passed")) &&
     sessions.every((session) => !session.failed && new Set(session.checks.map((check) => check.command)).size === session.checks.length)) traits.push("一発完遂");
   const review = reviews.filter((entry) => !sessions.some((session) => (session.lastPossibleMutation ?? 0) > entry.at ||
     session.mutations.some((edit) => edit.end > entry.at))).at(-1);
@@ -297,6 +320,7 @@ export function buildDebrief(receipt: GoalTerminalReceipt, contract: GoalAccepta
     ...(pricing.complete && pricing.pricedRequests + pricing.unpricedRequests > 0 ? { estimatedCost: {
       usd: pricing.usd, pricedRequests: pricing.pricedRequests, unpricedRequests: pricing.unpricedRequests } } : {}),
     validation, review: review?.status ?? "未確認", reviewSource: review?.source ?? "controller", traits, firstPassEligible,
+    validationEfficiency,
     notes: [...(!observation.complete ? ["host履歴の取得が一部不足"] : []),
       ...(!usageComplete ? ["モデルIDまたはusageの記録が不足"] : []),
       ...(!timingComplete ? ["稼働区間の時刻が不足（token集計とは独立）"] : [])],
@@ -305,6 +329,8 @@ export function buildDebrief(receipt: GoalTerminalReceipt, contract: GoalAccepta
 }
 
 const label = (text: string): string => text.replace(/[\r\n\t]/gu, " ").replace(/[\\`*_{}\[\]()<>!|]/gu, "").slice(0, 120);
+const milliseconds = (value: number | null): string => value === null ? "未記録"
+  : value < 1000 ? `${value}ms` : `${(value / 1000).toFixed(2)}s`;
 const gauge = (percent: number): string => {
   const eighths = Math.max(0, Math.min(80, Math.round(percent * 0.8)));
   const whole = Math.floor(eighths / 8), remainder = eighths % 8;
@@ -312,6 +338,9 @@ const gauge = (percent: number): string => {
   return `${"█".repeat(whole)}${partial}${" ".repeat(10 - whole - (remainder === 0 ? 0 : 1))}`;
 };
 export function renderDebrief(debrief: Debrief | undefined): string[] {
+  const validationEfficiency = debrief?.validationEfficiency ?? {
+    completed: 0, skipped: 0, rejected: 0, redundantMilliseconds: 0, medianMilliseconds: null, p90Milliseconds: null,
+  };
   const pack = debrief?.pack == null ? null : [...debrief.pack].sort((a, b) => b.count - a.count || a.model.localeCompare(b.model));
   const packVisible = pack?.slice(0, 4) ?? [];
   if (pack !== null && pack.length > 4) packVisible.push({ model: "その他", count: pack.slice(4).reduce((sum, entry) => sum + entry.count, 0) });
@@ -345,6 +374,8 @@ export function renderDebrief(debrief: Debrief | undefined): string[] {
       ? `${(debrief.overlap.workerMilliseconds / debrief.overlap.wallMilliseconds).toFixed(2)}×`
       : pack?.length === 0 ? "対象なし（出撃なし）" : "稼働区間の記録不足"}`,
     "   ※worker区間・速度倍率ではありません",
+    `検証効率      完了${validationEfficiency.completed} · skip${validationEfficiency.skipped} · reject${validationEfficiency.rejected} · 重複回避${milliseconds(validationEfficiency.redundantMilliseconds)}`,
+    `検証時間      median ${milliseconds(validationEfficiency.medianMilliseconds)} · p90 ${milliseconds(validationEfficiency.p90Milliseconds)}`,
     ...(debrief?.notes?.length ? [`計測範囲      ${debrief.notes.join(" · ")}`] : []),
   ];
 }
@@ -352,6 +383,8 @@ export function renderDebrief(debrief: Debrief | undefined): string[] {
 export function renderDebriefProof(debrief: Debrief | undefined): { validation: string; review: string } {
   const status = (value: string): string => value === "PASS" ? "🟢 PASS" : value === "FAIL" ? "🔴 FAIL"
     : value === "WAIVED" ? "免除" : "未記録";
-  return { validation: status(debrief?.validation ?? "未確認"),
+  const efficiency = debrief?.validationEfficiency;
+  return { validation: `${status(debrief?.validation ?? "未確認")}${efficiency === undefined || efficiency.skipped === 0
+    ? "" : `（再実行skip ${efficiency.skipped} / ${milliseconds(efficiency.redundantMilliseconds)}）`}`,
     review: `${status(debrief?.review ?? "未確認")}${debrief?.reviewSource === "reviewer" ? "（reviewer報告）" : ""}` };
 }

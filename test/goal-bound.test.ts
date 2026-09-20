@@ -54,7 +54,7 @@ test("one passing command preserves distinct criterion measurements and can reco
   await ledger.appendGoal({ kind: "dispatch.reserved", at, reservation_id: "reservation", goal_id: "goal-multi-oracle", unit_id: "unit", session_id: "root-session", ticket_id: null });
   const before = await ledger.appendGoal({ kind: "unit.settled", at, reservation_id: "reservation", receipt_id: "old-receipt", goal_id: "goal-multi-oracle",
     unit_id: "unit", disposition: "failed", result_class: "process-defect", progress_fingerprint: null, evidence: [], elapsed_ms: 10, cost_usd: 1 });
-  const execution = { immutableRef: goalFingerprint("execution"), command: [command], startedAt: at, endedAt: at, exitCode: 0, outcome: "pass", fresh: true,
+  const execution = { owner: "coordinator" as const, immutableRef: goalFingerprint("execution"), command: [command], startedAt: at, endedAt: at, exitCode: 0, outcome: "pass", fresh: true,
     source: goalFingerprint("source"), candidate: goalFingerprint("candidate"),
     binding: { manifest_hash: goalFingerprint("manifest"), project_root: root, manifest_path: "manifest.json", source_paths: ["source"], candidate_paths: ["output"] } };
   const evidence = evidenceFromObservedExecution(execution, before, "unit");
@@ -73,6 +73,41 @@ test("one passing command preserves distinct criterion measurements and can reco
   assert.equal(reconciled.consumed_cost_usd, before.consumed_cost_usd);
   await assert.rejects(ledger.appendGoal({ kind: "unit.evidence-reconciled", at: "2026-09-08T00:00:02Z", goal_id: "goal-multi-oracle",
     unit_id: "unit", previous_receipt_id: "old-receipt", evidence }), RunFlightLedgerError);
+});
+
+test("coordinator-owned requested-full evidence satisfies an exact settled-pass reuse", async () => {
+  const name = "canonical-reuse", goalID = `goal-${name}`, unitID = "canonical-unit";
+  const { ledger } = await accepted(name);
+  const command = "node --test canonical.test.mjs";
+  await ledger.appendGoal({ kind: "goal.revised", at, goal_id: goalID, revision: 2, scope_epoch: 2,
+    acceptance_fingerprint: acceptance, origin_user_message_id: "user-1", session_id: "root-session", selected_agent: "dog-coordinator",
+    delivery: "mvp-first", budget: { max_units: 4, time_ms: null, cost_usd: null, source: "accepted-plan" },
+    acceptance_contract: { criteria: [{ criterion_id: "canonical", target: "canonical target", entrypoint: "fixture",
+      workload: "full requested validation", oracle_coverage: ["canonical"], build_boundary: "not-applicable",
+      source: "declared source", candidate: "declared candidate", source_binding: "current-protected",
+      candidate_binding: "current-protected", fixture: "canonical fixture", proof_scope: "requested-full",
+      expected_outcome: "pass", validation_command: command }] } });
+  const state = await ledger.appendGoal({ kind: "dispatch.reserved", at, reservation_id: "canonical-reservation",
+    goal_id: goalID, unit_id: unitID, session_id: "root-session", ticket_id: null });
+  const source = goalFingerprint("canonical source"), candidate = goalFingerprint("canonical candidate");
+  const request = { run_id: goalID, operation_id: "canonical-first", source_snapshot: source, candidate,
+    command: [command], environment: { platform: "linux", arch: "x64", runtime: "node-22" }, scope: "full" as const,
+    owner: "coordinator" as const, expected_evidence: ["canonical", `unit:${unitID}`],
+    marginal_value: { unmet_criteria: ["canonical"], risk_hypothesis: null }, reason: "acceptance" as const };
+  const first = await ledger.reserveValidation(request, 4);
+  assert.equal(first.decision, "ALLOW");
+  await ledger.settleValidation(first.reservation_id!, request, "passed", 0, 19);
+  const execution = { owner: "coordinator" as const, immutableRef: goalFingerprint("canonical execution"),
+    command: [command], startedAt: at, endedAt: at, exitCode: 0, outcome: "pass", fresh: true, source, candidate,
+    binding: { manifest_hash: goalFingerprint("canonical manifest"), project_root: root, manifest_path: "manifest.json",
+      source_paths: ["source"], candidate_paths: ["candidate"] } };
+  const evidence = evidenceFromObservedExecution(execution, state, unitID);
+  assert.equal(evidence.length, 1);
+  assert.equal(evidence[0]!.proof_scope, "requested-full");
+  const reused = await ledger.reserveValidation({ ...request, operation_id: "canonical-duplicate" }, 4,
+    { unit_id: unitID, source, candidate, command: [command], evidence });
+  assert.deepEqual({ decision: reused.decision, redundant_time_ms: reused.redundant_time_ms },
+    { decision: "SKIP", redundant_time_ms: 19 });
 });
 
 test("terminal report snapshots are idempotent, receipt-bound, and cannot alter goal execution state", async () => {
@@ -178,7 +213,8 @@ test("accepted budget revision synchronizes validation limit without resetting c
   const { ledger } = await accepted("validation-revision", 1);
   const request = { run_id: "goal-validation-revision", operation_id: "first",
     source_snapshot: "source-1", candidate: "candidate", command: ["node", "check"],
-    scope: "targeted" as const, expected_evidence: ["command", "source_snapshot"], reason: "preflight" as const };
+    environment: { platform: "win32", arch: "x64", runtime: "node-22" }, scope: "targeted" as const, owner: "worker" as const,
+    expected_evidence: ["command", "source_snapshot"], marginal_value: { unmet_criteria: ["criterion"], risk_hypothesis: null }, reason: "preflight" as const };
   const first = await ledger.reserveValidation(request, 1);
   assert.equal(first.decision, "ALLOW");
   await ledger.settleValidation(first.reservation_id!, request, "passed", 0);
@@ -197,8 +233,8 @@ test("accepted budget revision synchronizes validation limit without resetting c
   assert.equal(revised.replan_required, false);
   assert.equal(revised.replan_used, false);
   const duplicate = await ledger.reserveValidation({ ...request, operation_id: "duplicate" }, 3);
-  assert.equal(duplicate.decision, "DENY");
-  const next = { ...request, operation_id: "second", source_snapshot: "source-2" };
+  assert.equal(duplicate.decision, "SKIP");
+  const next = { ...request, operation_id: "second", candidate: "candidate-2" };
   assert.equal((await ledger.reserveValidation(next, 3)).decision, "ALLOW");
   assert.equal((await ledger.readGoal()).state.validation_budget.consumed, 2);
   await assert.rejects(ledger.appendGoal({ kind: "goal.revised", at, goal_id: request.run_id,
@@ -212,25 +248,58 @@ test("validation admission permits monotonic limit growth for a changed candidat
   const { ledger } = await accepted("validation-growth", 1);
   const firstRequest = { run_id: "goal-validation-growth", operation_id: "first",
     source_snapshot: "source-1", candidate: "candidate", command: ["node", "check"],
-    scope: "targeted" as const, expected_evidence: ["command", "source_snapshot"], reason: "acceptance" as const };
+    environment: { platform: "win32", arch: "x64", runtime: "node-22" }, scope: "targeted" as const, owner: "worker" as const,
+    expected_evidence: ["command", "source_snapshot"], marginal_value: { unmet_criteria: ["criterion"], risk_hypothesis: null }, reason: "acceptance" as const };
   const first = await ledger.reserveValidation(firstRequest, 1);
   assert.equal(first.decision, "ALLOW");
   await ledger.settleValidation(first.reservation_id!, firstRequest, "failed", 1);
-  const changed = { ...firstRequest, operation_id: "second", source_snapshot: "source-2" };
+  const changed = { ...firstRequest, operation_id: "second", candidate: "candidate-2" };
   assert.equal((await ledger.reserveValidation(changed, 2)).decision, "ALLOW");
   const state = (await ledger.readGoal()).state;
   assert.equal(state.validation_budget.limit, 2);
   assert.equal(state.validation_budget.consumed, 2);
 });
 
+test("goal validation evidence becomes reusable only after a passed settlement", async () => {
+  const { ledger } = await accepted("validation-settlement-gate", 4);
+  const request = { run_id: "goal-validation-settlement-gate", operation_id: "first",
+    source_snapshot: "source", candidate: "candidate", command: ["node", "check"], scope: "targeted" as const,
+    environment: { platform: "win32", arch: "x64", runtime: "node-22" }, owner: "worker" as const,
+    expected_evidence: ["criterion"], marginal_value: { unmet_criteria: ["criterion"], risk_hypothesis: null }, reason: "acceptance" as const };
+  const first = await ledger.reserveValidation(request, 4);
+  assert.equal(first.decision, "ALLOW");
+  await assert.rejects(ledger.settleValidation(first.reservation_id!, request, "passed", 9, 3), RunFlightLedgerError);
+  const inFlight = await ledger.reserveValidation({ ...request, operation_id: "in-flight" }, 4);
+  assert.deepEqual({ decision: inFlight.decision, reason: inFlight.reason }, { decision: "DENY", reason: "duplicate-evidence" });
+  await ledger.settleValidation(first.reservation_id!, request, "failed", 1, 7);
+  const failed = await ledger.reserveValidation({ ...request, operation_id: "after-failure" }, 4);
+  assert.deepEqual({ decision: failed.decision, reason: failed.reason }, { decision: "DENY", reason: "duplicate-evidence" });
+  assert.deepEqual((await ledger.readGoal()).state.validation_budget.evidence_keys, []);
+  const passedRequest = { ...request, operation_id: "passed" , candidate: "changed" };
+  const passed = await ledger.reserveValidation(passedRequest, 4);
+  assert.equal(passed.decision, "ALLOW");
+  await ledger.settleValidation(passed.reservation_id!, passedRequest, "passed", 0, 11);
+  await assert.rejects(ledger.reserveValidation({ ...passedRequest, operation_id: "guarded-reuse" }, 4, {
+    unit_id: "unit", source: "source", candidate: "candidate", command: passedRequest.command, evidence: [],
+  }), RunFlightLedgerError);
+  const beforeReuse = (await ledger.readGoal()).state.validation_budget;
+  assert.equal(beforeReuse.skipped, 0);
+  assert.equal(beforeReuse.redundant_time_ms, 0);
+  const reusable = await ledger.reserveValidation({ ...passedRequest, operation_id: "reuse" }, 4);
+  assert.deepEqual({ decision: reusable.decision, redundant_time_ms: reusable.redundant_time_ms }, { decision: "SKIP", redundant_time_ms: 11 });
+  assert.deepEqual((await ledger.readGoal()).state.validation_budget.durations_ms, [11],
+    "failed and rejected passed/nonzero settlements must not enter successful duration guidance");
+});
+
 test("one operator-authorized repair retry reopens only interrupted evidence and charges a second execution", async () => {
   const { ledger } = await accepted("validation-interrupted-reopen", 32);
   const request = { run_id: "goal-validation-interrupted-reopen", operation_id: "validation-first",
     source_snapshot: "source", candidate: "candidate", command: ["node", "check"], scope: "targeted" as const,
-    expected_evidence: ["criterion", "unit:repair-unit"], reason: "acceptance" as const };
+    environment: { platform: "win32", arch: "x64", runtime: "node-22" }, owner: "worker" as const,
+    expected_evidence: ["criterion", "unit:repair-unit"], marginal_value: { unmet_criteria: ["criterion"], risk_hypothesis: null }, reason: "acceptance" as const };
   const first = await ledger.reserveValidation(request, 32);
   assert.equal(first.decision, "ALLOW");
-  await ledger.settleValidation(first.reservation_id!, request, "interrupted", 128);
+  await ledger.settleValidation(first.reservation_id!, request, "interrupted", 128, 999);
   const generic = await ledger.reserveValidation({ ...request, operation_id: "validation-generic" }, 32);
   assert.equal(generic.reason, "duplicate-evidence");
   assert.equal(generic.consumed, 1);
@@ -242,9 +311,10 @@ test("one operator-authorized repair retry reopens only interrupted evidence and
   const retry = await ledger.reserveInterruptedValidationRetry(retryRequest, 32, authorization);
   assert.equal(retry.decision, "ALLOW");
   assert.equal(retry.consumed, 2);
-  await ledger.settleValidation(retry.reservation_id!, retryRequest, "passed", 0);
+  await ledger.settleValidation(retry.reservation_id!, retryRequest, "passed", 0, 11);
   const third = await ledger.reserveInterruptedValidationRetry({ ...request, operation_id: "validation-third" }, 32, authorization);
   assert.equal(third.reason, "duplicate-evidence");
+  assert.equal(third.redundant_time_ms, 11, "failed or interrupted duration must not inflate saved time");
   const snapshot = await ledger.readGoal();
   assert.equal(snapshot.state.validation_budget.consumed, 2);
   assert.equal(snapshot.state.validation_budget.evidence_keys.length, 1);
@@ -260,7 +330,8 @@ for (const outcome of ["passed", "failed", "cancelled"] as const) test(`operator
   const { ledger } = await accepted(`validation-no-reopen-${outcome}`, 4);
   const request = { run_id: `goal-validation-no-reopen-${outcome}`, operation_id: "first", source_snapshot: "source",
     candidate: "candidate", command: ["node", "check"], scope: "targeted" as const,
-    expected_evidence: ["criterion", "unit:repair-unit"], reason: "acceptance" as const };
+    environment: { platform: "win32", arch: "x64", runtime: "node-22" }, owner: "worker" as const,
+    expected_evidence: ["criterion", "unit:repair-unit"], marginal_value: { unmet_criteria: ["criterion"], risk_hypothesis: null }, reason: "acceptance" as const };
   const first = await ledger.reserveValidation(request, 4);
   await ledger.settleValidation(first.reservation_id!, request, outcome, outcome === "passed" ? 0 : outcome === "failed" ? 1 : null);
   const retry = await ledger.reserveInterruptedValidationRetry({ ...request, operation_id: "retry" }, 4, {

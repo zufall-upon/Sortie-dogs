@@ -962,8 +962,8 @@ export class OperatorRuntime {
   /** Root-visible handle for the bounded operations delegate; its contract stays host-internal. */
   dispatchTask(state: OperatorState): OperatorTask {
     const canonical = this.operatorTask(state);
-    const reference = { k: "delegate", r: state.rootSessionID, n: state.runID, g: state.generation,
-      p: state.planHash, h: hash(JSON.stringify(canonical)) };
+    const reference = { k: "delegate", r: state.rootSessionID, n: state.runID,
+      p: state.planHash, h: hash(JSON.stringify(canonical)), g: state.generation };
     return { ...canonical, prompt: `${OPERATOR_DELEGATE_TASK_REFERENCE} ${JSON.stringify(reference)}` };
   }
   private resolveOperatorTask(state: OperatorState, args: unknown): OperatorTask {
@@ -991,8 +991,8 @@ export class OperatorRuntime {
   private workerTask(state: OperatorState, unit: UnitState): OperatorTask {
     const taskID = /^task_id: (.+)$/m.exec(unit.task.prompt)?.[1];
     if (!taskID) throw new Error("operator-task-id-missing");
-    const reference = { r: state.rootSessionID, n: state.runID, g: state.generation, u: unit.unit.id,
-      t: taskID, p: state.planHash, h: hash(JSON.stringify(unit.task)) };
+    const reference = { r: state.rootSessionID, n: state.runID, u: unit.unit.id,
+      t: taskID, p: state.planHash, h: hash(JSON.stringify(unit.task)), g: state.generation };
     return { ...unit.task, prompt: `${OPERATOR_TASK_REFERENCE} ${JSON.stringify(reference)}` };
   }
   private repairWorkerTask(state: OperatorState, unit: UnitState): OperatorTask {

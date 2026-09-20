@@ -14,7 +14,7 @@ import type {
   WorktreeCommitArtifact,
 } from "./types.js";
 import { runBudgetedContainedValidation } from "./worktree-commit-artifact.js";
-import { validationEvidenceKey, type ValidationBudgetRequest } from "./validation-budget.js";
+import { validationEvidenceKey, type ValidationBudgetRequest, type ValidationOutcome } from "./validation-budget.js";
 import { normalizeWorktreeScopePath } from "./worktree-scope.js";
 import { WorktreeLifecycle } from "./worktree-lifecycle.js";
 
@@ -731,23 +731,36 @@ export class WorktreeIntegrationQueue {
       if (beforeHead !== queue.candidate_head || beforeStatus.length !== 0) throw new IntegrationQueueError("validation-failed", "Validation worktree is not exact and clean.");
       const request: ValidationBudgetRequest = { run_id: queue.run_id, operation_id: queue.run_id,
         source_snapshot: queue.candidate_head!, candidate: queue.candidate_head!, command: queue.validation.command,
-        scope: "full", expected_evidence: ["source_snapshot", "command", "scope", "exit_code", "clean_worktree"], reason: "acceptance" };
+        environment: { platform: process.platform, arch: process.arch, runtime: process.version },
+        scope: "canonical", owner: "coordinator",
+        expected_evidence: ["source_snapshot", "command", "scope", "exit_code", "clean_worktree"],
+        marginal_value: { unmet_criteria: ["integrated-candidate"], risk_hypothesis: null }, reason: "acceptance" };
+      let settlementOutcome: ValidationOutcome | undefined;
       const result = await runBudgetedContainedValidation({ executable: queue.validation.command[0]!, args: queue.validation.command.slice(1),
         cwd: path, timeout_ms: VALIDATION_TIMEOUT }, {
           request,
           reserve: async () => {
             const evidenceKey = validationEvidenceKey(request);
-            if (queue.validation_budget.evidence_keys.includes(evidenceKey)) return { decision: "DENY", reservation_id: null, reason: "duplicate-evidence" };
+            if (queue.validation_budget.evidence_keys.includes(evidenceKey)) return {
+              decision: "SKIP", reservation_id: null, reason: "duplicate-evidence",
+              ...(queue.validation.status === "pass" && queue.validation.candidate_head === queue.candidate_head && queue.validation.fingerprint !== null
+                ? { reused: Object.freeze({ ok: true as const, command: Object.freeze([...queue.validation.command]), exit_code: 0 as const,
+                  fingerprint: queue.validation.fingerprint, error: null }) } : {}),
+            };
             if (queue.validation_budget.consumed >= 1) return { decision: "DENY", reservation_id: null, reason: "budget-exhausted" };
             queue.validation_budget.consumed += 1;
-            queue.validation_budget.evidence_keys.push(evidenceKey);
             return { decision: "ALLOW", reservation_id: evidenceKey, reason: "allowed" };
           },
-          settle: async () => undefined,
+          settle: async (outcome) => { settlementOutcome = outcome; },
         });
       const afterHead = (await WorktreeIntegrationQueue.runGitAt(this.gitPath, path, ["rev-parse", "--verify", "HEAD^{commit}"])).toString("utf8").trim();
       const afterStatus = await WorktreeIntegrationQueue.runGitAt(this.gitPath, path, ["status", "--porcelain=v1", "--untracked-files=normal"]);
-      if (afterHead !== queue.candidate_head || afterStatus.length !== 0) {
+      const postconditionsPassed = afterHead === queue.candidate_head && afterStatus.length === 0;
+      if (postconditionsPassed && settlementOutcome === "passed" && result.ok &&
+        !queue.validation_budget.evidence_keys.includes(validationEvidenceKey(request))) {
+        queue.validation_budget.evidence_keys.push(validationEvidenceKey(request));
+      }
+      if (!postconditionsPassed) {
         return { ok: false, command: result.command, exit_code: result.exit_code,
           fingerprint: result.fingerprint, error: "execution-failed" };
       }

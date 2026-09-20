@@ -219,10 +219,26 @@ test("preview assets coexist with stable assets and markers", async () => fixtur
     "dog-reviewer-v010", "dog-advisor-v010", "sortie-v010", "dogs-coordinator",
   ]);
   const primary = previewAssets.find(asset => asset.name === "dog-operator")!.content;
+  for (const asset of previewAssets.filter(asset => asset.installPath.startsWith("agent/"))) {
+    assert.match(asset.content, /Treat the current working directory and every project_root value as opaque/u);
+    assert.match(asset.content, /Never shorten, hand-normalize,[\s\S]+generated path segment/u);
+  }
+  for (const name of ["dog-worker-v010", "dog-luna-worker-v010"]) {
+    const asset = previewAssets.find(item => item.name === name)!.content;
+    assert.match(asset, /^permission:\r?\n  bash: allow\r?\n  sortie_v010_bind_write_gate: allow\r?\n  sortie_v010_release_write_gate: allow$/mu);
+    assert.match(asset, /Treat independently selected syntax or dispatch dimensions as combinations/u);
+    assert.match(asset, /multi-target route prove the rule and result for every target/u);
+  }
+  const reviewer = previewAssets.find(asset => asset.name === "dog-reviewer-v010")!.content;
+  assert.match(reviewer, /Reject a matrix that lists independent syntax or dispatch dimensions but traces them only in isolation/u);
+  assert.match(reviewer, /proving only the first target is a concrete asymmetry finding/u);
   assert.match(primary, /^model: openai\/gpt-5\.6-luna-fast$/m);
   assert.match(primary, /^variant: max$/m);
+  assert.match(primary, /^  "sortie_v010_\*": allow$/m);
   assert.match(primary, /^  compact_and_continue: false$/m);
   assert.match(primary, /^  "sortie_v010_\*": true$/m);
+  assert.match(primary, /Before approving a proposal, inventory the executable of every declared validation command/u);
+  assert.match(primary, /declare every dependency manifest, lockfile,[\s\S]+project-local output/u);
   assert.match(previewAssets.find(asset => asset.name === "sortie-v010")!.content, /^agent: dog-operator$/m);
   assert.equal((await initializeProject(root, "v010")).status, "unchanged");
 }));
@@ -245,7 +261,11 @@ test("operations defaults do not overwrite an explicit native model variant", as
   const hooks = await SortieDogsV010Plugin({ directory: root }) as Awaited<ReturnType<typeof SortieDogsV010Plugin>> & { config(value: Record<string, unknown>): Promise<void> };
   const uninstalled = { agent: {} };
   await hooks.config(uninstalled);
-  assert.deepEqual(uninstalled.agent, {}, "do not synthesize a permissionless agent when its asset is absent");
+  assert.equal("dog-operator" in uninstalled.agent, false, "do not synthesize a profile agent when its asset is absent");
+  assert.deepEqual(uninstalled.agent, {
+    build: { permission: { "sortie_v010_*": "deny" } },
+    plan: { permission: { "sortie_v010_*": "deny" } },
+  });
   const defaults = { agent: { "dogs-coordinator": { mode: "subagent" } } };
   await hooks.config(defaults);
   assert.deepEqual(defaults.agent["dogs-coordinator"], { mode: "subagent", model: "openai/gpt-5.6-terra", variant: "xhigh" });
@@ -254,6 +274,38 @@ test("operations defaults do not overwrite an explicit native model variant", as
   assert.equal(chosen.agent["dogs-coordinator"].variant, "max");
   const asset = previewAssets.find(item => item.name === "dogs-coordinator")!.content;
   assert.doesNotMatch(asset, /^model:|^variant:/m, "markdown must not overwrite the user's native JSON setting");
+}));
+
+test("preview tools are denied globally and allowed only by profile agents", async () => fixture(async root => {
+  const hooks = await SortieDogsV010Plugin({ directory: root }) as Awaited<ReturnType<typeof SortieDogsV010Plugin>> & { config(value: Record<string, unknown>): Promise<void> };
+  const defaults: Record<string, unknown> = {};
+  await hooks.config(defaults);
+  assert.deepEqual(defaults.permission, { "sortie_v010_*": "deny" });
+  assert.deepEqual(defaults.agent, {
+    build: { permission: { "sortie_v010_*": "deny" } },
+    plan: { permission: { "sortie_v010_*": "deny" } },
+  });
+  const allow: Record<string, unknown> = { permission: "allow" };
+  await hooks.config(allow);
+  assert.deepEqual(allow.permission, { "*": "allow", "sortie_v010_*": "deny" });
+  const configured: Record<string, unknown> = {
+    permission: { bash: "ask", "custom_*": "allow" },
+    agent: { custom: { permission: "allow" } },
+  };
+  await hooks.config(configured);
+  assert.deepEqual(configured.permission, { bash: "ask", "custom_*": "allow", "sortie_v010_*": "deny" });
+  assert.deepEqual((configured.agent as Record<string, unknown>).custom, {
+    permission: { "*": "allow", "sortie_v010_*": "deny" },
+  });
+
+  const operations = previewAssets.find(asset => asset.name === "dogs-coordinator")!.content;
+  assert.match(operations, /^  sortie_v010_operator_next: allow$/m);
+  assert.match(operations, /^  sortie_v010_submit_operator_proposal: allow$/m);
+  for (const name of ["dog-worker-v010", "dog-luna-worker-v010"]) {
+    const worker = previewAssets.find(asset => asset.name === name)!.content;
+    assert.match(worker, /^  sortie_v010_bind_write_gate: allow$/m);
+    assert.match(worker, /^  sortie_v010_release_write_gate: allow$/m);
+  }
 }));
 
 test("every preview role carries the same user-language contract without translating protocol keys", () => {
@@ -399,6 +451,9 @@ function oldRoleAsset(name: "dog-operator" | "dogs-coordinator"): string {
     .replace(/When the prompt starts SORTIE_OPERATOR_PROPOSAL[\s\S]*?For an admitted execution queue, call\n/u, "Call ")
     .replace(PREVIEW_TERMINAL_REPORT_POLICY, "")
     .replace(PREVIEW_PRESENTATION_POLICY + "\n", "")
+    .replace(/^  "sortie_v010_\*": allow\n/m, "")
+    .replace(/^  sortie_v010_operator_next: allow\n/m, "")
+    .replace(/^  sortie_v010_submit_operator_proposal: allow\n/m, "")
     .replace(/## Existing-run evidence reconciliation[\s\S]*?bypasses the delegate\.\n\n/u, "")
     .replace(/When operator_status returns decision=operator-acceptance-remediation-required,[\s\S]*?Ask the user when acceptance or budget must\nincrease\.\n\n/u, "")
     .replace(/Keep candidate_id stable for the logical review lineage[\s\S]*?it does not invent it\.\n/u, "")
@@ -515,6 +570,119 @@ test("preview host adapter pins the native worker route and forwards terminal te
   const premature = { text: "DONE — accepted without evidence" };
   await hooks["experimental.text.complete"]!({ sessionID: "root", messageID: "root-assistant" }, premature);
   assert.equal(premature.text, "status: INTERRUPTED — accepted criteria remain unproved\nTRUE_INTERRUPTION: internal: accepted criteria remain unproved");
+}));
+
+test("a cancelled historical operator run does not gate DONE on a later ordinary turn", async () => fixture(async root => {
+  const sessionID = "historical-cancelled-root";
+  const turn = (text: string) => ({
+    message: { agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-5.6-sol" } },
+    parts: [{ type: "text", text }],
+  });
+  const hooks = await SortieDogsV010Plugin({ directory: root });
+  await hooks["chat.message"]!({ sessionID, agent: "dog-operator", messageID: "initial-user" },
+    turn("Start the bounded operator run."));
+  const prepared = JSON.parse(await hooks.tool!.sortie_v010_prepare_operator.execute(
+    { plan_json: JSON.stringify(plan()) }, { sessionID }));
+  assert.equal(prepared.profile, "v010");
+  const cancelled = JSON.parse(await hooks.tool!.sortie_v010_cancel_operator.execute({}, { sessionID }));
+  assert.equal(cancelled.status, "cancelled");
+  const sameTurn = { text: "DONE — cancelled run completed" };
+  await hooks["experimental.text.complete"]!({ sessionID, messageID: "cancelled-assistant" }, sameTurn);
+  assert.equal(sameTurn.text, "status: INTERRUPTED — accepted criteria remain unproved\nTRUE_INTERRUPTION: internal: accepted criteria remain unproved");
+
+  const cold = await SortieDogsV010Plugin({ directory: root });
+  const ordinaryTurn = { ...turn("Complete this new ordinary task."),
+    message: { ...turn("").message, id: "ordinary-user" } };
+  await cold["chat.message"]!({ sessionID, agent: "dog-operator" }, ordinaryTurn);
+  const ledger = await RunFlightLedger.openGoal(join(root, ".sortie-dogs-v010", "run-flight",
+    `${createHash("sha256").update(`v010\0${sessionID}`).digest("hex")}.json`));
+  const ordinarySnapshot = await ledger.readGoal();
+  const ordinaryGoal = ordinarySnapshot.state;
+  const historicalOperator = await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required(sessionID);
+  assert.deepEqual({ phase: ordinaryGoal.phase, receipt: ordinaryGoal.receipt, latest: ordinaryGoal.latest_user_message_id,
+    acceptance: ordinaryGoal.acceptance_contract, reservations: ordinaryGoal.outstanding_reservations.length,
+    operator: historicalOperator.phase, events: ordinarySnapshot.records.slice(-2).map(({ event }) => event.kind) },
+  { phase: "active", receipt: null, latest: "ordinary-user", acceptance: null, reservations: 0,
+    operator: "cancelled", events: ["goal.terminal", "goal.accepted"] });
+  const output = { text: "DONE — ordinary task completed\nEvidence: untrusted\nraw: secret\nkept prose" };
+  await cold["experimental.text.complete"]!({ sessionID, messageID: "ordinary-assistant" }, output);
+  assert.equal(output.text, "status: DONE — ordinary task completed\nkept prose");
+
+  await cold["chat.message"]!({ sessionID, agent: "dog-operator", messageID: "replacement-user" },
+    turn("Start a replacement operator run."));
+  const replacement = JSON.parse(await cold.tool!.sortie_v010_prepare_operator.execute(
+    { plan_json: JSON.stringify(plan()) }, { sessionID }));
+  assert.equal(replacement.profile, "v010");
+  const contracted = { text: "DONE — replacement accepted without evidence" };
+  await cold["experimental.text.complete"]!({ sessionID, messageID: "replacement-assistant" }, contracted);
+  assert.equal(contracted.text, "status: INTERRUPTED — accepted criteria remain unproved\nTRUE_INTERRUPTION: internal: accepted criteria remain unproved");
+}));
+
+test("an investigating proposal on historical operator state still fails DONE closed", async () => fixture(async root => {
+  await mkdir(join(root, "src"));
+  const sessionID = "historical-proposal-root";
+  const turn = (text: string) => ({
+    message: { agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-5.6-sol" } },
+    parts: [{ type: "text", text }],
+  });
+  const hooks = await SortieDogsV010Plugin({ directory: root });
+  await hooks["chat.message"]!({ sessionID, agent: "dog-operator", messageID: "initial-user" }, turn("Start the bounded run."));
+  await hooks.tool!.sortie_v010_prepare_operator.execute({ plan_json: JSON.stringify(plan()) }, { sessionID });
+  await hooks.tool!.sortie_v010_cancel_operator.execute({}, { sessionID });
+
+  const cold = await SortieDogsV010Plugin({ directory: root });
+  await cold["chat.message"]!({ sessionID, agent: "dog-operator", messageID: "historical-proposal-user" },
+    turn("Investigate before starting a replacement run."));
+  const intent = { schema_version: "0.1", original_request: { text: "Investigate before starting a replacement run.",
+    source_ref: "user:historical-proposal-user" }, requirements: [{ id: "R1", text: "Inspect the existing source", kind: "requirement" }],
+    authoritative_refs: ["user:historical-proposal-user"], allow_read: ["src"] };
+  const started = JSON.parse(await cold.tool!.sortie_v010_begin_operator_proposal.execute(
+    { intent_json: JSON.stringify(intent) }, { sessionID }));
+  assert.equal(started.status, "investigating");
+  const output = { text: "DONE — proposal investigation completed" };
+  await cold["experimental.text.complete"]!({ sessionID, messageID: "historical-proposal-assistant" }, output);
+  assert.equal(output.text, "status: INTERRUPTED — accepted criteria remain unproved\nTRUE_INTERRUPTION: internal: accepted criteria remain unproved");
+}));
+
+test("a prepared operator run still fails an unproved DONE claim closed", async () => fixture(async root => {
+  const sessionID = "prepared-unproved-root";
+  const hooks = await SortieDogsV010Plugin({ directory: root });
+  await hooks["chat.message"]!({ sessionID, agent: "dog-operator", messageID: "prepared-user" }, {
+    message: { agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-5.6-sol" } },
+    parts: [{ type: "text", text: "Start the prepared operator run." }],
+  });
+  const prepared = JSON.parse(await hooks.tool!.sortie_v010_prepare_operator.execute(
+    { plan_json: JSON.stringify(plan()) }, { sessionID }));
+  assert.equal(prepared.profile, "v010");
+  const output = { text: "DONE — accepted without evidence" };
+  await hooks["experimental.text.complete"]!({ sessionID, messageID: "prepared-assistant" }, output);
+  assert.equal(output.text, "status: INTERRUPTED — accepted criteria remain unproved\nTRUE_INTERRUPTION: internal: accepted criteria remain unproved");
+}));
+
+test("a cancelled proposal grant does not gate DONE on its next ordinary turn", async () => fixture(async root => {
+  await mkdir(join(root, "src"));
+  const sessionID = "cancelled-proposal-root";
+  const hooks = await SortieDogsV010Plugin({ directory: root });
+  const turn = (messageID: string, text: string) => hooks["chat.message"]!({ sessionID, agent: "dog-operator", messageID }, {
+    message: { agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-5.6-sol" } },
+    parts: [{ type: "text", text }],
+  });
+  await turn("proposal-user", "Investigate the bounded proposal.");
+  const intent = { schema_version: "0.1", original_request: { text: "Investigate the bounded proposal.", source_ref: "user:proposal-user" },
+    requirements: [{ id: "R1", text: "Inspect the existing source", kind: "requirement" }],
+    authoritative_refs: ["user:proposal-user"], allow_read: ["src"] };
+  const started = JSON.parse(await hooks.tool!.sortie_v010_begin_operator_proposal.execute(
+    { intent_json: JSON.stringify(intent) }, { sessionID }));
+  assert.equal(started.status, "investigating");
+  const cancelled = JSON.parse(await hooks.tool!.sortie_v010_cancel_operator.execute({}, { sessionID }));
+  assert.equal(cancelled.status, "cancelled");
+  const sameTurn = { text: "DONE — cancelled proposal completed" };
+  await hooks["experimental.text.complete"]!({ sessionID, messageID: "proposal-cancelled-assistant" }, sameTurn);
+  assert.equal(sameTurn.text, "status: INTERRUPTED — accepted criteria remain unproved\nTRUE_INTERRUPTION: internal: accepted criteria remain unproved");
+  await turn("ordinary-after-proposal", "Complete this new ordinary task.");
+  const ordinary = { text: "DONE — ordinary task completed" };
+  await hooks["experimental.text.complete"]!({ sessionID, messageID: "ordinary-after-proposal-assistant" }, ordinary);
+  assert.equal(ordinary.text, "status: DONE — ordinary task completed");
 }));
 
 function wideAcceptancePlan(count: number, criterion = (index: number) => `Criterion ${index + 1} holds`) {
@@ -900,8 +1068,10 @@ test("discard-transient repair preserves files and state when validation budget 
     `${createHash("sha256").update("v010\0root").digest("hex")}.json`);
   const ledger = await RunFlightLedger.openGoal(ledgerPath), goal = (await ledger.readGoal()).state;
   const budgetRequest = { run_id: goal.goal_id!, operation_id: "consume-repair-budget", source_snapshot: "sha256:source",
-    candidate: "sha256:candidate", command: ["node budget-check.mjs"], scope: "targeted" as const,
-    expected_evidence: ["budget-check"], reason: "acceptance" as const };
+    candidate: "sha256:candidate", command: ["node budget-check.mjs"], scope: "targeted" as const, owner: "worker" as const,
+    environment: { platform: process.platform, arch: process.arch, runtime: process.version },
+    expected_evidence: ["budget-check"], marginal_value: { unmet_criteria: ["budget-check"], risk_hypothesis: null },
+    reason: "acceptance" as const };
   const reservation = await ledger.reserveValidation(budgetRequest, 1);
   assert.equal(reservation.decision, "ALLOW");
   await ledger.settleValidation(reservation.reservation_id!, budgetRequest, "passed", 0);
@@ -1057,6 +1227,13 @@ for (const exhaustBudget of [false, true]) test(`failed repair validation expose
   const complete = JSON.parse(await replacementHooks.tool!.sortie_v010_complete_operator.execute({ run_id: ready.run_id,
     acceptance_fingerprint: ready.acceptance_fingerprint }, { sessionID: "root" }));
   assert.equal(complete.status, "succeeded");
+  await replacementHooks["chat.message"]!({ sessionID: "root", messageID: "post-completion-user", agent: "dog-operator" }, {
+    message: { agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-5.6-sol" } },
+    parts: [{ type: "text", text: "Complete this later ordinary task." }],
+  });
+  const ordinary = { text: "DONE — later ordinary task completed" };
+  await replacementHooks["experimental.text.complete"]!({ sessionID: "root", messageID: "post-completion-assistant" }, ordinary);
+  assert.equal(ordinary.text, "status: DONE — later ordinary task completed");
 }));
 
 test("fresh repair validation reopens one interrupted admission once without implementation spend", async () => fixture(async root => {
@@ -1651,6 +1828,7 @@ test("delegate and worker references expand only for the exact live root generat
   const restored = await cold.required("reference-root");
   const delegate = cold.dispatchTask(restored);
   assert.match(delegate.prompt, /^SORTIE_OPERATOR_DELEGATE_REF /);
+  assert.match(delegate.prompt, /,"g":\d+\}$/u);
   assert.ok(delegate.prompt.length < cold.operatorTask(restored).prompt.length);
   const rootNext = await cold.next("reference-root", "reference-root") as { task: OperatorTask };
   assert.deepEqual(rootNext.task, delegate);
@@ -1687,6 +1865,7 @@ test("delegate and worker references expand only for the exact live root generat
     "root status must not expose a worker reference after the delegate is bound");
   const ready = await cold.next("reference-root", delegateID) as { task: OperatorTask };
   assert.match(ready.task.prompt, /^SORTIE_OPERATOR_TASK_REF /);
+  assert.match(ready.task.prompt, /,"g":\d+\}$/u);
   assert.ok(ready.task.prompt.length < restored.units[0]!.task.prompt.length / 2);
   const packet = cold.packet(await cold.required("reference-root")) as { next_task_ref: string; units: Array<{ task_ref: string }> };
   assert.equal(packet.next_task_ref, null);
@@ -2737,13 +2916,19 @@ test("recorded native validation can be reconciled without rerun only for the sa
     oracle_coverage: [`oracle-${id}`], build_boundary: "not-applicable" as const, source: "source", candidate: "candidate",
     source_binding: "current-protected" as const, candidate_binding: "current-protected" as const, validation_command: command,
     fixture: "fixture", proof_scope: "requested-full" as const, expected_outcome: "pass" as const }));
-  const fp = goalFingerprint(criteria), at = new Date(now).toISOString();
+  const criteriaText = criteria.map(criterion => criterion.target);
+  const fp = `sha256:${hash(JSON.stringify(criteriaText))}`, at = new Date(now).toISOString();
   await ledger.appendGoal({ kind: "goal.revised", at, goal_id: initial.goal_id!, revision: 2, scope_epoch: 2,
     acceptance_fingerprint: fp, origin_user_message_id: "user-1", session_id: "root", selected_agent: "dog-coordinator", delivery: "mvp-first",
     budget: { max_units: 4, time_ms: null, cost_usd: null, source: "accepted-plan" }, acceptance_contract: { criteria } });
   await ledger.appendGoal({ kind: "dispatch.reserved", at, goal_id: initial.goal_id!, reservation_id: "dispatch", unit_id: "unit", session_id: "root", ticket_id: null });
-  const validation = { run_id: initial.goal_id!, operation_id: "validate-call", source_snapshot: source, candidate, command: [command], scope: "full" as const,
-    expected_evidence: [...new Set(criteria.flatMap(c => [c.criterion_id, ...c.oracle_coverage, "unit:unit", "source_snapshot", "candidate", "command", "scope", "exit_code"]))], reason: "acceptance" as const };
+  const validation = { run_id: initial.goal_id!, operation_id: "validate-call", source_snapshot: source,
+    candidate: goalFingerprint({ source, candidate }), command: [command], scope: "full" as const,
+    owner: "coordinator" as const,
+    environment: { platform: process.platform, arch: process.arch, runtime: process.version },
+    expected_evidence: [...new Set(criteria.flatMap(c => [c.criterion_id, ...c.oracle_coverage, "unit:unit", "source_snapshot", "candidate", "command", "scope", "exit_code"]))],
+    marginal_value: { unmet_criteria: criteria.map(criterion => criterion.criterion_id), risk_hypothesis: null },
+    reason: "acceptance" as const };
   const reservation = await ledger.reserveValidation(validation, 4);
   assert.equal(reservation.decision, "ALLOW");
   await ledger.settleValidation(reservation.reservation_id!, validation, "passed", 0);
@@ -2761,9 +2946,8 @@ test("recorded native validation can be reconciled without rerun only for the sa
   assert.equal((await ledger.readGoal()).state.validation_budget.consumed, 1);
   assert.deepEqual(await control!.recoverUnitEvidence("root", request), evidence);
   assert.equal((await ledger.readGoal()).records.filter(({ event }) => event.kind === "unit.evidence-reconciled").length, 1);
-  const criteriaText = criteria.map(criterion => criterion.target);
   const continuity = { schema_version: "0.1", authority: "dispatch", task_id: "unit", criteria: criteriaText,
-    fingerprint: `sha256:${hash(JSON.stringify(criteriaText))}`, parent_fingerprint: "none" };
+    fingerprint: fp, parent_fingerprint: "none" };
   const handoffPath = join(root, "handoff.unit.json");
   const handoffSource = JSON.stringify({ version: "0.1.0", profile: "minimal", id: "unit", created_at: at,
     task: { title: "accepted unit", objective: "same criteria" }, state: { done: [], next: ["continue"], blocked: [] }, risks: [], verification: [],
@@ -2817,6 +3001,23 @@ test("recorded native validation can be reconciled without rerun only for the sa
   assert.ok(storedPart.text.includes("🐾 SORTIE DOGS — 帰還報告"));
   await viewer.event!({ event: { type: "message.updated", properties: { info } } });
   assert.equal(updates, 1, "native echo events must not duplicate the card");
+
+  const nextAt = new Date(completed + 2).toISOString();
+  await ledger.appendGoal({ kind: "goal.accepted", at: nextAt, goal_id: goalFingerprint("replacement goal"), revision: 1,
+    scope_epoch: 1, acceptance_fingerprint: goalFingerprint("new user turn"), origin_user_message_id: "user-2",
+    origin_session_id: "root", selected_agent: "dog-coordinator", delivery: "mvp-first",
+    budget: { max_units: 4, time_ms: null, cost_usd: null, source: "policy-default" }, acceptance_contract: null });
+  const unrelatedCriteria = ["unrelated acceptance"];
+  const unrelatedContinuity = { ...continuity, criteria: unrelatedCriteria,
+    fingerprint: `sha256:${hash(JSON.stringify(unrelatedCriteria))}` };
+  const unrelatedHandoffPath = join(root, "handoff.unrelated.json");
+  const unrelatedHandoffSource = JSON.stringify({ ...JSON.parse(handoffSource),
+    ext: { "sortie-dogs/acceptance-continuity": unrelatedContinuity } });
+  await writeFile(unrelatedHandoffPath, unrelatedHandoffSource);
+  await assert.rejects(control!.restoreAcceptedUnit("root", { taskID: "unit", handoffPath: unrelatedHandoffPath,
+    handoffHash: hash(unrelatedHandoffSource) }), /accepted-unit-missing/);
+  await control!.restoreAcceptedUnit("root", { taskID: "unit", handoffPath, handoffHash: hash(handoffSource) });
+  assert.equal((await ledger.readGoal()).state.goal_id, goalFingerprint("replacement goal"));
 }));
 
 test("root resumes only remaining units after verified evidence without resetting spend", async () => fixture(async root => {
@@ -3140,4 +3341,69 @@ test("cold resume relinks legacy registered runs only from the latest same-goal 
   assert.equal(wrongAfter.runID, wrong.runID);
   assert.equal(wrongAfter.dispatched, 1);
   assert.equal((await wrongLedger.readGoal()).state.acceptance_fingerprint, goalFingerprint(["unrelated goal"]));
+}));
+
+test("a real turn resumes a stopped goal while its durable operator contract remains unfinished", async () => fixture(async root => {
+  const sessionID = "stopped-operator-root";
+  const turn = (text: string) => ({
+    message: { agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-5.6-sol" } },
+    parts: [{ type: "text", text }],
+  });
+  const initial = await SortieDogsV010Plugin({ directory: root });
+  await initial["chat.message"]!({ sessionID, agent: "dog-operator", messageID: "stopped-initial" },
+    turn("Start the bounded registered run."));
+  await new OperatorRuntime(root, V010_RUNTIME_PROFILE).prepare(sessionID, plan());
+  const ledger = await RunFlightLedger.openGoal(join(root, ".sortie-dogs-v010", "run-flight",
+    `${createHash("sha256").update(`v010\0${sessionID}`).digest("hex")}.json`));
+  const before = (await ledger.readGoal()).state;
+  const ended = new Date().toISOString();
+  await ledger.appendGoal({ kind: "goal.terminal", at: ended, goal_id: before.goal_id!, receipt: {
+    goal_id: before.goal_id!, terminal_revision: before.revision,
+    acceptance_fingerprint: before.acceptance_fingerprint!, started_at: ended, ended_at: ended,
+    status: "stopped", stop_reason: "stopped", unit_ids: [], session_ids: before.session_ids,
+    evidence_refs: [], milestone_at: null,
+  } });
+
+  const cold = await SortieDogsV010Plugin({ directory: root });
+  await cold["chat.message"]!({ sessionID, agent: "dog-operator", messageID: "stopped-latest" },
+    turn("Continue the exact unfinished operator run."));
+  const resumed = (await ledger.readGoal()).state;
+  assert.equal(resumed.goal_id, before.goal_id);
+  assert.equal(resumed.phase, "active");
+  assert.equal(resumed.receipt, null);
+  assert.equal(resumed.latest_user_message_id, "stopped-latest");
+}));
+
+test("cold completion relinks an awaiting operator from the latest same-goal approval", async () => fixture(async root => {
+  const sessionID = "legacy-completion-root";
+  const turn = (text: string) => ({
+    message: { agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-5.6-sol" } },
+    parts: [{ type: "text", text }],
+  });
+  const initial = await SortieDogsV010Plugin({ directory: root });
+  await initial["chat.message"]!({ sessionID, agent: "dog-operator", messageID: "completion-initial" },
+    turn("Start the legacy registered run."));
+  const value = plan();
+  value.units = value.units.slice(0, 1);
+  value.goal_declaration.criteria = value.goal_declaration.criteria.slice(0, 1);
+  value.acceptance_proof = [["first"], ["first"]];
+  const runtime = new OperatorRuntime(root, V010_RUNTIME_PROFILE);
+  const prepared = await runtime.prepare(sessionID, value);
+  const next = await runtime.next(sessionID, sessionID) as { task: object };
+  await runtime.admitWorker(sessionID, sessionID, "completion-call", next.task);
+  await runtime.settled({ rootSessionID: sessionID, callID: "completion-call", unitID: "first",
+    disposition: "succeeded", resultClass: "acceptance",
+    evidence: [{ measurement: { criterion_ids: ["first"] } }] as never });
+  assert.equal((await runtime.required(sessionID)).phase, "awaiting-acceptance");
+
+  const cold = await SortieDogsV010Plugin({ directory: root });
+  await cold["chat.message"]!({ sessionID, agent: "dog-operator", messageID: "completion-latest" },
+    turn("Complete the exact awaiting registered run."));
+  const result = JSON.parse(await cold.tool!.sortie_v010_complete_operator.execute({ run_id: prepared.runID,
+    acceptance_fingerprint: prepared.acceptanceFingerprint }, { sessionID }));
+  assert.equal(result.status, "awaiting-evidence");
+  const ledger = await RunFlightLedger.openGoal(join(root, ".sortie-dogs-v010", "run-flight",
+    `${createHash("sha256").update(`v010\0${sessionID}`).digest("hex")}.json`));
+  assert.equal((await ledger.readGoal()).state.acceptance_fingerprint,
+    await runtime.completionGoalFingerprint(await runtime.required(sessionID)));
 }));

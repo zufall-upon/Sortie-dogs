@@ -1804,9 +1804,9 @@ test("host auto-continue is disabled only while a Sortie rollover is pending", a
   await hooks.compactionAutoContinue({ sessionID: "ses_root", overflow: true }, overflow);
   assert.equal(overflow.enabled, true, "an untracked overflow keeps the host behaviour");
 
-  const nonOverflow = { enabled: true };
+  const nonOverflow = { enabled: false };
   await hooks.compactionAutoContinue({ sessionID: "ses_root", overflow: false }, nonOverflow);
-  assert.equal(nonOverflow.enabled, true, "normal host auto-compaction keeps its continuation");
+  assert.equal(nonOverflow.enabled, true, "normal host auto-compaction explicitly enables its continuation");
 
   await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR });
   const pending = { enabled: true };

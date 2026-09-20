@@ -9,9 +9,9 @@ import { normalizeRelativePath } from "./path.js";
 import { CHILD_TERMINAL_EVIDENCE_FIELDS, isChildTerminalIdentity, reconcileChildTerminal, sameChildTerminalIdentity,
   type ChildTerminalIdentity, type ChildTerminalEvidence, type ChildTerminalDisposition } from "./child-terminal-reconciliation.js";
 import type { TerminalRescueAcceptedBase } from "./terminal-rescue-policy.js";
-import type { ValidationBudgetRequest, ValidationBudgetDecision, ValidationOutcome } from "./validation-budget.js";
-import { GOAL_BOUND_SCHEMA_VERSION, GoalBoundError, reduceGoalFlight, goalFingerprint,
-  type GoalFlightEvent, type GoalFlightEventRecord, type GoalFlightState,
+import { validationEvidenceState, type ValidationBudgetRequest, type ValidationBudgetDecision, type ValidationOutcome, type ValidationScope } from "./validation-budget.js";
+import { GOAL_BOUND_SCHEMA_VERSION, GoalBoundError, reduceGoalFlight, goalFingerprint, validGoalEvidence,
+  type GoalEvidence, type GoalFlightEvent, type GoalFlightEventRecord, type GoalFlightState,
   type GoalValidationRetryAuthorization } from "./goal-bound.js";
 
 export const RUN_FLIGHT_LEDGER_SCHEMA_VERSION = "0.1" as const;
@@ -162,8 +162,8 @@ export type RunFlightEvent =
   | (EventBase & { readonly kind: "attempt.finished"; readonly attempt_id: string; readonly observed_model: string | null; readonly observed_variant: string | null; readonly failure: { readonly category: FailureCategory; readonly code: string } | null; readonly disposition: TerminalDisposition; readonly observation: FlightObservation; readonly references: FlightReferenceSet })
   | (EventBase & { readonly kind: "recovery.recorded"; readonly recovery_id: string; readonly failed_attempt_id: string; readonly kind_detail: RecoveryKind; readonly candidate_id: string })
    | (EventBase & { readonly kind: "validation.recorded"; readonly validation_id: string; readonly unit_id: string; readonly command_fingerprint: string; readonly result: "passed" | "failed"; readonly artifact_id: string | null })
-  | (EventBase & { readonly kind: "validation.admission"; readonly reservation_id: string; readonly operation_id: string; readonly evidence_key: string; readonly scope: "targeted" | "full" | null; readonly decision: "ALLOW" | "DENY"; readonly reason: string; readonly consumed: number; readonly limit: number })
-  | (EventBase & { readonly kind: "validation.settled"; readonly reservation_id: string; readonly operation_id: string; readonly evidence_key: string; readonly outcome: ValidationOutcome; readonly exit_code: number | null })
+   | (EventBase & { readonly kind: "validation.admission"; readonly reservation_id: string; readonly operation_id: string; readonly evidence_key: string; readonly scope: ValidationScope | null; readonly decision: "ALLOW" | "SKIP" | "DENY"; readonly reason: string; readonly consumed: number; readonly limit: number; readonly saved_ms?: number })
+  | (EventBase & { readonly kind: "validation.settled"; readonly reservation_id: string; readonly operation_id: string; readonly evidence_key: string; readonly outcome: ValidationOutcome; readonly exit_code: number | null; readonly evidence_fingerprint?: string; readonly duration_ms?: number; readonly reason?: string })
   | (EventBase & { readonly kind: "unit.completed"; readonly unit_id: string; readonly disposition: "succeeded" | "failed" })
   | (EventBase & { readonly kind: "wave.completed"; readonly wave_id: string; readonly produced_candidate_id: string; readonly artifact_id: string })
   | (EventBase & { readonly kind: "candidate.advanced"; readonly from_candidate_id: string; readonly candidate_id: string; readonly wave_id: string; readonly artifact_id: string })
@@ -203,7 +203,8 @@ export interface RunFlightState {
   readonly resource_budget_reserved: FlightResourceUsage;
   readonly child_counts: Readonly<Record<FlightRole, number>>;
   readonly validation_reruns: number;
-  readonly validation_budget: { readonly consumed: number; readonly reservations: number; readonly limit: number | null };
+  readonly validation_budget: { readonly consumed: number; readonly reservations: number; readonly limit: number | null;
+    readonly completed: number; readonly skipped: number; readonly rejected: number; readonly redundant_time_ms: number };
   readonly observations: readonly FlightObservation[];
   readonly terminal_disposition: "succeeded" | "failed" | "cancelled" | null;
   readonly plan_decisions: readonly { readonly plan_id: string; readonly proposal_id: string; readonly decision: "accepted" | "rejected"; readonly gap_codes: readonly AcceptanceCompileGapCode[] }[];
@@ -219,6 +220,14 @@ export class RunFlightLedgerError extends Error {
     this.name = "RunFlightLedgerError";
     this.code = code;
   }
+}
+
+export interface ValidationSkipReconciliation {
+  readonly unit_id: string;
+  readonly source: string;
+  readonly candidate: string;
+  readonly command: readonly string[];
+  readonly evidence: readonly GoalEvidence[];
 }
 
 export interface RunFlightEvidenceAccess {
@@ -411,8 +420,8 @@ function validEvent(value: unknown): value is RunFlightEvent {
     }
     case "recovery.recorded": return only(value, [...base, "recovery_id", "failed_attempt_id", "kind_detail", "candidate_id"]) && text(value.recovery_id) && text(value.failed_attempt_id) && enumValue(value.kind_detail, ["normal_remediation", "adaptive_probe", "read_only_diagnosis", "model_rescue"]) && text(value.candidate_id);
     case "validation.recorded": return only(value, [...base, "validation_id", "unit_id", "command_fingerprint", "result", "artifact_id"]) && text(value.validation_id) && text(value.unit_id) && hash(value.command_fingerprint) && enumValue(value.result, ["passed", "failed"]) && (value.artifact_id === null || hash(value.artifact_id));
-    case "validation.admission": return only(value, [...base, "reservation_id", "operation_id", "evidence_key", "scope", "decision", "reason", "consumed", "limit"]) && text(value.reservation_id) && text(value.operation_id) && hash(value.evidence_key) && (value.scope === null || enumValue(value.scope, ["targeted", "full"])) && enumValue(value.decision, ["ALLOW", "DENY"]) && text(value.reason) && integer(value.consumed) && integer(value.limit) && value.limit > 0 && value.consumed <= value.limit && (value.decision === "ALLOW" ? value.scope !== null && value.consumed > 0 : value.scope === null || value.consumed >= 0);
-    case "validation.settled": return only(value, [...base, "reservation_id", "operation_id", "evidence_key", "outcome", "exit_code"]) && text(value.reservation_id) && text(value.operation_id) && hash(value.evidence_key) && enumValue(value.outcome, ["passed", "failed", "timeout", "interrupted", "cancelled"]) && (value.exit_code === null || Number.isSafeInteger(value.exit_code));
+    case "validation.admission": return only(value, [...base, "reservation_id", "operation_id", "evidence_key", "scope", "decision", "reason", "consumed", "limit", "saved_ms"]) && text(value.reservation_id) && text(value.operation_id) && hash(value.evidence_key) && (value.scope === null || enumValue(value.scope, ["static", "targeted", "related", "canonical", "full-suite", "full"])) && enumValue(value.decision, ["ALLOW", "SKIP", "DENY"]) && text(value.reason) && integer(value.consumed) && integer(value.limit) && value.limit > 0 && value.consumed <= value.limit && (!Object.hasOwn(value, "saved_ms") || integer(value.saved_ms)) && (value.decision === "ALLOW" ? value.scope !== null && value.consumed > 0 : value.consumed >= 0);
+    case "validation.settled": return only(value, [...base, "reservation_id", "operation_id", "evidence_key", "outcome", "exit_code", "evidence_fingerprint", "duration_ms", "reason"]) && text(value.reservation_id) && text(value.operation_id) && hash(value.evidence_key) && enumValue(value.outcome, ["passed", "failed", "timeout", "interrupted", "cancelled"]) && (value.exit_code === null || Number.isSafeInteger(value.exit_code)) && (!Object.hasOwn(value, "evidence_fingerprint") || hash(value.evidence_fingerprint)) && (!Object.hasOwn(value, "duration_ms") || integer(value.duration_ms)) && (!Object.hasOwn(value, "reason") || text(value.reason));
     case "unit.completed": return only(value, [...base, "unit_id", "disposition"]) && text(value.unit_id) && enumValue(value.disposition, ["succeeded", "failed"]);
     case "wave.completed": return only(value, [...base, "wave_id", "produced_candidate_id", "artifact_id"]) && text(value.wave_id) && text(value.produced_candidate_id) && hash(value.artifact_id);
     case "candidate.advanced": return only(value, [...base, "from_candidate_id", "candidate_id", "wave_id", "artifact_id"]) && text(value.from_candidate_id) && text(value.candidate_id) && text(value.wave_id) && hash(value.artifact_id);
@@ -435,7 +444,9 @@ interface MutableState {
   plan_decisions: { plan_id: string; proposal_id: string; decision: "accepted" | "rejected"; gap_codes: AcceptanceCompileGapCode[] }[]; plan_ids: Set<string>; accepted_plan: string | null;
   accepted_fabric_waves: Extract<RunFlightEvent, { readonly kind: "fabric.wave.accepted" }>[];
   resource_budget_limits: FlightResourceBudget | null;
-  validation_consumed: number; validation_limit: number | null; validation_reservations: Set<string>; validation_evidence: Set<string>;
+  validation_consumed: number; validation_limit: number | null; validation_reservations: Set<string>; validation_reservation_evidence: Map<string, string>;
+  validation_active_evidence: Set<string>; validation_evidence: Set<string>;
+  validation_completed: number; validation_skipped: number; validation_rejected: number; redundant_validation_time_ms: number;
   resource_budget_consumed: FlightResourceUsage;
   resource_reservations: Map<string, FlightResourceUsage>;
 }
@@ -463,7 +474,9 @@ function initialState(): MutableState {
     current_route_id: null, pending_candidate: null, candidate_completed: false, cleanup_completed: false,
     ids: new Set(), validation_fingerprints: new Set(), attempts: new Map(), units: new Map(), plan_decisions: [], plan_ids: new Set(), accepted_plan: null, accepted_fabric_waves: [],
      resource_budget_limits: null, resource_budget_consumed: { time_ms: 0, cost_usd: 0 }, resource_reservations: new Map(), children: new Map(), diagnoses: new Map(),
-     validation_consumed: 0, validation_limit: null, validation_reservations: new Set(), validation_evidence: new Set() };
+      validation_consumed: 0, validation_limit: null, validation_reservations: new Set(), validation_reservation_evidence: new Map(),
+      validation_active_evidence: new Set(), validation_evidence: new Set(),
+     validation_completed: 0, validation_skipped: 0, validation_rejected: 0, redundant_validation_time_ms: 0 };
 }
 
 function claim(state: MutableState, id: string): void {
@@ -709,15 +722,26 @@ function applyEvent(state: MutableState, event: RunFlightEvent): void {
     case "validation.admission": {
       requireTransition(!state.validation_reservations.has(event.reservation_id), "Validation reservation is duplicated.");
       if (event.decision === "ALLOW") {
-        requireTransition(!state.validation_evidence.has(event.evidence_key), "Validation evidence is duplicated.");
+        requireTransition(!state.validation_evidence.has(event.evidence_key) && !state.validation_active_evidence.has(event.evidence_key), "Validation evidence is duplicated.");
         requireTransition(event.limit === (state.validation_limit ?? event.limit) && event.consumed === state.validation_consumed + 1 && event.consumed <= event.limit, "Validation budget reservation is stale or exhausted.");
-        state.validation_consumed = event.consumed; state.validation_limit = event.limit; state.validation_reservations.add(event.reservation_id); state.validation_evidence.add(event.evidence_key);
-      }
+        state.validation_consumed = event.consumed; state.validation_limit = event.limit; state.validation_reservations.add(event.reservation_id);
+        state.validation_reservation_evidence.set(event.reservation_id, event.evidence_key); state.validation_active_evidence.add(event.evidence_key);
+      } else if (event.decision === "SKIP") {
+        requireTransition(state.validation_evidence.has(event.evidence_key) && !state.validation_active_evidence.has(event.evidence_key) && event.consumed === state.validation_consumed,
+          "Skipped validation must reuse unchanged evidence without budget spend.");
+        state.validation_skipped += 1; state.redundant_validation_time_ms += event.saved_ms ?? 0;
+      } else { requireTransition(event.consumed === state.validation_consumed, "Rejected validation cannot consume budget."); state.validation_rejected += 1; }
       break;
     }
     case "validation.settled": {
-      requireTransition(state.validation_reservations.has(event.reservation_id), "Validation settlement has no reservation.");
-      state.validation_reservations.delete(event.reservation_id); break;
+      requireTransition(state.validation_reservations.has(event.reservation_id) &&
+        state.validation_reservation_evidence.get(event.reservation_id) === event.evidence_key, "Validation settlement has no reservation.");
+      requireTransition(event.outcome !== "passed" || event.exit_code === 0,
+        "Passed validation settlement requires exit code zero.");
+      state.validation_reservations.delete(event.reservation_id); state.validation_reservation_evidence.delete(event.reservation_id);
+      state.validation_active_evidence.delete(event.evidence_key);
+      if (event.outcome === "passed") state.validation_evidence.add(event.evidence_key);
+      state.validation_completed += 1; break;
     }
     case "unit.completed": {
       const unit = state.units.get(event.unit_id);
@@ -746,7 +770,10 @@ function publicState(state: MutableState): RunFlightState {
   return { run_id: state.run_id, current_candidate_id: state.current_candidate_id, active_wave_id: state.active_wave_id, active_unit_id: soleUnit?.[0] ?? null,
     active_attempt_id: soleUnit?.[1].active_attempt_id ?? null, last_attempt_id: openUnits.length > 1 ? null : soleUnit?.[1].last_attempt_id ?? state.last_attempt_id, completed_wave_count: state.completed_wave_count,
     budget_limits: state.budget_limits, budget_consumed: { ...state.budget_consumed }, child_counts: { ...state.child_counts },
-     validation_reruns: state.validation_reruns, validation_budget: { consumed: state.validation_consumed, reservations: state.validation_reservations.size, limit: state.validation_limit }, observations: state.observations.map((entry) => structuredClone(entry)), terminal_disposition: state.terminal_disposition,
+     validation_reruns: state.validation_reruns, validation_budget: { consumed: state.validation_consumed,
+       reservations: state.validation_reservations.size, limit: state.validation_limit, completed: state.validation_completed,
+       skipped: state.validation_skipped, rejected: state.validation_rejected,
+       redundant_time_ms: state.redundant_validation_time_ms }, observations: state.observations.map((entry) => structuredClone(entry)), terminal_disposition: state.terminal_disposition,
     plan_decisions: state.plan_decisions.map((entry) => ({ ...entry, gap_codes: [...entry.gap_codes] })),
     resource_budget_limits: state.resource_budget_limits === null ? null : { ...state.resource_budget_limits },
     resource_budget_consumed: { ...state.resource_budget_consumed }, resource_budget_reserved: reservedResources(state),
@@ -882,36 +909,50 @@ export class RunFlightLedger {
     return this.append({ kind: "plan.compiled", at, plan_id: result.plan_id, proposal_id: result.proposal_id, decision: result.status, gap_codes: result.status === "accepted" ? [] : [...new Set(result.gaps.map((entry) => entry.code))] });
   }
 
-  async reserveValidation(request: ValidationBudgetRequest, limit: number): Promise<ValidationBudgetDecision & { readonly reservation_id: string | null }> {
-    const { decideValidationBudget } = await import("./validation-budget.js");
+  async reserveValidation(request: ValidationBudgetRequest, limit: number,
+    skipReconciliation?: ValidationSkipReconciliation): Promise<ValidationBudgetDecision & { readonly reservation_id: string | null }> {
+    const { decideValidationBudget, passedValidationDurationGuidance, validationEvidenceKey } = await import("./validation-budget.js");
+    const evidenceKey = validationEvidenceKey(request);
     if (this.#goalMode) {
       const snapshot = await this.readGoal();
+      const evidence = validationEvidenceState(snapshot.records.map(({ event }) => event));
+      const guidance = passedValidationDurationGuidance(snapshot.records.map(({ event }) => event), evidenceKey);
       const decision = decideValidationBudget(request, { limit, consumed: snapshot.state.validation_budget.consumed,
-        evidence_keys: snapshot.state.validation_budget.evidence_keys });
+        evidence_keys: evidence.reusable, blocked_evidence_keys: evidence.blocked, prior_duration_ms: guidance.median_ms ?? undefined });
       const reservation_id = decision.decision === "ALLOW" ? randomUUID() : null;
-      await this.appendGoal({ kind: "validation.admission", at: new Date().toISOString(), goal_id: snapshot.state.goal_id!,
-        reservation_id: reservation_id ?? `deny-${randomUUID()}`, operation_id: request.operation_id,
+      const admission = { kind: "validation.admission" as const, at: new Date().toISOString(), goal_id: snapshot.state.goal_id!,
+        reservation_id: reservation_id ?? `${decision.decision === "SKIP" ? "skip" : "deny"}-${randomUUID()}`, operation_id: request.operation_id,
         evidence_key: decision.evidence_key ?? `sha256:${"0".repeat(64)}`, scope: decision.scope, decision: decision.decision,
-        reason: decision.reason, consumed: decision.consumed, limit });
+        reason: decision.reason, consumed: decision.consumed, limit, saved_ms: decision.redundant_time_ms };
+      if (decision.decision === "SKIP" && skipReconciliation !== undefined) {
+        await this.#appendGoalWithSkipReconciliation(admission, skipReconciliation);
+      }
+      else await this.appendGoal(admission);
       return { ...decision, reservation_id };
     }
     const snapshot = await this.read();
     const current = snapshot.state;
-    const evidence_keys = snapshot.records.flatMap(({ event }) => event.kind === "validation.admission" && event.decision === "ALLOW" ? [event.evidence_key] : []);
-    const decision = decideValidationBudget(request, { limit, consumed: current.validation_budget.consumed, evidence_keys });
+    const evidence = validationEvidenceState(snapshot.records.map(({ event }) => event));
+    const guidance = passedValidationDurationGuidance(snapshot.records.map(({ event }) => event), evidenceKey);
+    const decision = decideValidationBudget(request, { limit, consumed: current.validation_budget.consumed,
+      evidence_keys: evidence.reusable, blocked_evidence_keys: evidence.blocked, prior_duration_ms: guidance.median_ms ?? undefined });
     const reservation_id = decision.decision === "ALLOW" ? randomUUID() : null;
-    await this.append({ kind: "validation.admission", at: new Date().toISOString(), reservation_id: reservation_id ?? `deny-${randomUUID()}`,
+    await this.append({ kind: "validation.admission", at: new Date().toISOString(),
+      reservation_id: reservation_id ?? `${decision.decision === "SKIP" ? "skip" : "deny"}-${randomUUID()}`,
       operation_id: request.operation_id, evidence_key: decision.evidence_key ?? "sha256:" + "0".repeat(64), scope: decision.scope,
-      decision: decision.decision, reason: decision.reason, consumed: decision.consumed, limit });
+      decision: decision.decision, reason: decision.reason, consumed: decision.consumed, limit,
+      saved_ms: decision.redundant_time_ms });
     return { ...decision, reservation_id };
   }
 
   /** Internal operator retry path. Generic reserveValidation remains strict evidence-key dedupe. */
   async reserveInterruptedValidationRetry(request: ValidationBudgetRequest, limit: number,
-    authorization: GoalValidationRetryAuthorization): Promise<ValidationBudgetDecision & { readonly reservation_id: string | null }> {
+    authorization: GoalValidationRetryAuthorization,
+    skipReconciliation?: ValidationSkipReconciliation): Promise<ValidationBudgetDecision & { readonly reservation_id: string | null }> {
     if (!this.#goalMode) throw new RunFlightLedgerError("invalid", "Interrupted validation retry requires a goal ledger.");
     const { decideValidationBudget, validationEvidenceKey } = await import("./validation-budget.js");
     const snapshot = await this.readGoal(), evidenceKey = validationEvidenceKey(request);
+    const evidence = validationEvidenceState(snapshot.records.map(({ event }) => event));
     const admissions = snapshot.records.filter(({ event }) => event.kind === "validation.admission" &&
       event.decision === "ALLOW" && event.evidence_key === evidenceKey);
     const alreadyReopened = admissions.some(({ event }) => event.kind === "validation.admission" && event.reopen !== undefined);
@@ -923,30 +964,37 @@ export class RunFlightLedger {
       request.expected_evidence.includes(`unit:${authorization.unit_id}`);
     if (!bound || alreadyReopened || prior?.kind !== "validation.admission" || settlement?.kind !== "validation.settled" ||
         settlement.operation_id !== prior.operation_id || settlement.evidence_key !== evidenceKey || settlement.outcome !== "interrupted") {
-      return this.reserveValidation(request, limit);
+      return this.reserveValidation(request, limit, skipReconciliation);
     }
     const decision = decideValidationBudget(request, { limit, consumed: snapshot.state.validation_budget.consumed,
-      evidence_keys: snapshot.state.validation_budget.evidence_keys.filter(key => key !== evidenceKey) });
+      evidence_keys: evidence.reusable.filter(key => key !== evidenceKey),
+      blocked_evidence_keys: evidence.blocked.filter(key => key !== evidenceKey) });
     const reservation_id = decision.decision === "ALLOW" ? randomUUID() : null;
     await this.appendGoal({ kind: "validation.admission", at: new Date().toISOString(), goal_id: snapshot.state.goal_id,
       reservation_id: reservation_id ?? `deny-${randomUUID()}`, operation_id: request.operation_id,
       evidence_key: decision.evidence_key ?? `sha256:${"0".repeat(64)}`, scope: decision.scope,
       decision: decision.decision, reason: decision.reason, consumed: decision.consumed, limit,
+      saved_ms: decision.redundant_time_ms,
       ...(decision.decision === "ALLOW" ? { reopen: { ...authorization, prior_reservation_id: prior.reservation_id,
         prior_operation_id: prior.operation_id } } : {}) });
     return { ...decision, reservation_id };
   }
 
-  async settleValidation(reservation_id: string, request: ValidationBudgetRequest, outcome: ValidationOutcome, exit_code: number | null): Promise<RunFlightState | GoalFlightState> {
+  async settleValidation(reservation_id: string, request: ValidationBudgetRequest, outcome: ValidationOutcome,
+    exit_code: number | null, duration_ms?: number): Promise<RunFlightState | GoalFlightState> {
+    const { validationEvidenceKey, validationResultFingerprint } = await import("./validation-budget.js");
+    const evidenceKey = validationEvidenceKey(request), evidenceFingerprint = validationResultFingerprint(request, outcome, exit_code);
     if (this.#goalMode) {
       const goalID = (await this.readGoal()).state.goal_id;
       if (goalID === null) throw new RunFlightLedgerError("invalid", "Goal validation requires an active goal.");
       await this.appendGoal({ kind: "validation.settled", at: new Date().toISOString(), goal_id: goalID,
-        reservation_id, operation_id: request.operation_id, evidence_key: (await import("./validation-budget.js")).validationEvidenceKey(request), outcome, exit_code });
+        reservation_id, operation_id: request.operation_id, evidence_key: evidenceKey, outcome, exit_code,
+        evidence_fingerprint: evidenceFingerprint, ...(duration_ms === undefined ? {} : { duration_ms }), reason: outcome });
       return (await this.readGoal()).state;
     }
     return this.append({ kind: "validation.settled", at: new Date().toISOString(), reservation_id, operation_id: request.operation_id,
-      evidence_key: (await import("./validation-budget.js")).validationEvidenceKey(request), outcome, exit_code });
+      evidence_key: evidenceKey, outcome, exit_code, evidence_fingerprint: evidenceFingerprint,
+      ...(duration_ms === undefined ? {} : { duration_ms }), reason: outcome });
   }
 
   async readGoal(): Promise<{ readonly records: readonly GoalFlightEventRecord[]; readonly state: GoalFlightState }> {
@@ -962,6 +1010,26 @@ export class RunFlightLedger {
     this.#tail = new Promise<void>((done) => { resolveTail = done; });
     await previous;
     try { return await this.#appendGoalLocked(structuredClone(event)); } finally { resolveTail(); }
+  }
+
+  async #appendGoalWithSkipReconciliation(event: Extract<GoalFlightEvent, { readonly kind: "validation.admission" }>,
+    reconciliation: ValidationSkipReconciliation | undefined): Promise<GoalFlightState> {
+    let resolveTail!: () => void;
+    const previous = this.#tail;
+    this.#tail = new Promise<void>((resolve) => { resolveTail = resolve; });
+    await previous;
+    try {
+      return await this.#appendGoalLocked(event, (state) => {
+        if (reconciliation === undefined || reconciliation.evidence.length === 0 || state.goal_id !== event.goal_id ||
+          reconciliation.evidence.some(entry => !validGoalEvidence(entry, state) ||
+            !entry.execution.units.includes(reconciliation.unit_id) || entry.identity.source !== reconciliation.source ||
+            entry.identity.candidate !== reconciliation.candidate ||
+            entry.execution.command.length !== reconciliation.command.length ||
+            entry.execution.command.some((part, index) => part !== reconciliation.command[index]))) {
+          throw new RunFlightLedgerError("transition", "Settled-pass reconciliation is unavailable or stale.");
+        }
+      });
+    } finally { resolveTail(); }
   }
 
   async #appendLocked(event: RunFlightEvent): Promise<RunFlightState> {
@@ -1011,7 +1079,7 @@ export class RunFlightLedger {
     } finally { await handle.close(); await unlink(lockPath).catch(() => undefined); }
   }
 
-  async #appendGoalLocked(event: GoalFlightEvent): Promise<GoalFlightState> {
+  async #appendGoalLocked(event: GoalFlightEvent, guard?: (state: GoalFlightState) => void): Promise<GoalFlightState> {
     await mkdir(path.dirname(this.#filePath), { recursive: true });
     const lockPath = `${this.#filePath}.lock`;
     let handle;
@@ -1025,6 +1093,7 @@ export class RunFlightLedger {
     if (!handle) throw new RunFlightLedgerError("conflict", "Ledger lock remained busy.");
     try {
       const records = await this.#readGoalRecords();
+      if (guard !== undefined) guard(reduceGoalFlight(records));
       if (event.kind === "goal.accepted") {
         const prior = records.find(({ event: stored }) => stored.kind === "goal.accepted" &&
           stored.origin_user_message_id === event.origin_user_message_id);

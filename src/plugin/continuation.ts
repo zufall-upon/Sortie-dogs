@@ -1504,7 +1504,16 @@ export function createContinuationHooks(
           identity.agent !== policy().agent
         ) return;
       }
-      if (pending) output.enabled = false;
+      if (pending) {
+        output.enabled = false;
+        return;
+      }
+      // The host can enter this hook with auto-continue disabled for the current compaction even
+      // though Sortie's continuation policy is enabled. Merely preserving the incoming value then
+      // leaves a valid root at the compaction summary until a user manually prompts it. An eligible
+      // coordinator root opts in explicitly; pending Sortie-owned rollovers and stopped sessions
+      // remain fail-closed above.
+      output.enabled = policy().enabled;
     },
 
     observeModel(sessionID, model, synthetic = false): void {

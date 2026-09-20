@@ -11,7 +11,7 @@ import { readFile, realpath } from "node:fs/promises";
 import { BUILT_IN_MODEL_CATALOG, type CatalogModel } from "./model-routing.js";
 import { goalFingerprint } from "../core/goal-bound.js";
 import { decoratePreviewHeadings } from "./receipt-presentation.js";
-import { terminalRunOutcome } from "./run-metrics.js";
+import { sanitizeTerminalReport, terminalRunOutcome } from "./run-metrics.js";
 import { normalizeCommand } from "./gate.js";
 import { normalizeRelativePath } from "../core/path.js";
 
@@ -96,6 +96,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     const selected = new Map<string, string>();
     const operatorParents = new Map<string, string>();
     const taskOwners = new Map<string, { root: string; actor: string; operator: boolean; proposal?: boolean }>();
+    const operatorTurnLifecycle = new Map<string, "historical" | "cancelled">();
+    const historicalTurnMessages = new Map<string, string>();
     const dispatchTransitions = new Map<string, Promise<unknown>>();
     async function serializeDispatchTransition<T>(root: string, operation: () => Promise<T>): Promise<T> {
       const current = (dispatchTransitions.get(root) ?? Promise.resolve()).catch(() => undefined).then(operation);
@@ -227,6 +229,14 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     const runtimeBridge: RuntimeBridge = {
       profile, assetVersion,
       continuationCheckpoint: root => operators.continuationCheckpoint(root),
+      ownsCanonicalValidation: async (root, taskID, child, command) => {
+        const state = await operators.read(root);
+        if (state === undefined || state.phase === "cancelled" || state.phase === "completed") return false;
+        const unit = state.units.find(candidate => /^task_id: (.+)$/m.exec(candidate.task.prompt)?.[1] === taskID);
+        const active = unit?.status === "running" || (unit?.status === "failed" && unit.repairValidation !== null);
+        return active && unit.childSessionID === child &&
+          unit.unit.validation.some(candidate => normalizeCommand(candidate) === command);
+      },
       defaultModelCatalog: { global: previewModelCatalog() },
       transformConfiguration: value => {
         if (!record(value) || !record(value.modelRouting)) return value;
@@ -492,6 +502,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           if (requestedReason !== undefined) throw new Error("operator-cancel-reason-invalid");
           await stop(context.sessionID, "explicit-cancellation", false);
           const discarded = await proposals.discardPreApproval(context.sessionID);
+          operatorTurnLifecycle.set(context.sessionID, "cancelled");
           return JSON.stringify({ profile: profile.id, status: "cancelled", scope: "proposal",
             released_proposal: discarded ? proposals.packet(discarded) : null,
             next_action: "the bounded proposal grant is released and its spent reads/submissions are not restored; " +
@@ -505,6 +516,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           : requestedReason === "acceptance-remediation"
             ? "operator-acceptance-remediation-required"
             : "explicit-cancellation", false);
+        operatorTurnLifecycle.set(context.sessionID, "cancelled");
         return JSON.stringify(await operatorPacket(await operators.required(context.sessionID)));
       } };
     const pathsSchema = record(stringSchema) && typeof stringSchema.array === "function"
@@ -550,6 +562,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           return JSON.stringify({ status: "not-ready", packet: operators.packet(state) });
         }
         const goalFingerprint = await operators.completionGoalFingerprint(state);
+        if (state.phase === "awaiting-acceptance") {
+          await relinkRegisteredGoal(context.sessionID, state, goalFingerprint);
+          await control!.assertActiveGoal(context.sessionID, goalFingerprint);
+        }
         const result = await control!.completeRoot(context.sessionID, goalFingerprint);
         if (result.receipt) await operators.terminal(context.sessionID, result.receipt);
         return JSON.stringify({ status: result.status, run_id: state.runID,
@@ -755,9 +771,24 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
 
     const hooks: OpenCodeHooks & { config(config: Record<string, unknown>): Promise<void> } = {
       config: async config => {
-        const agents = record(config.agent) ? config.agent : undefined;
+        const configuredPermission = config.permission;
+        const permission = typeof configuredPermission === "string"
+          ? { "*": configuredPermission }
+          : record(configuredPermission) ? { ...configuredPermission } : {};
+        config.permission = { ...permission, [`${profile.toolPrefix}*`]: "deny" };
+        const agents = record(config.agent) ? config.agent : {};
+        config.agent = agents;
+        for (const name of ["build", "plan"]) agents[name] ??= {};
+        for (const [name, value] of Object.entries(agents)) {
+          if (canonicalAgent(profile, name) || !record(value)) continue;
+          const configured = value.permission;
+          const rules = typeof configured === "string"
+            ? { "*": configured }
+            : record(configured) ? { ...configured } : {};
+          value.permission = { ...rules, [`${profile.toolPrefix}*`]: "deny" };
+        }
         const workerName = profileAgent(profile, "dog-worker");
-        const worker = agents && record(agents[workerName]) ? agents[workerName] : undefined;
+        const worker = record(agents[workerName]) ? agents[workerName] : undefined;
         if (worker !== undefined) {
           explicitWorkerSelection = {
             ...(typeof worker.model === "string" ? { model: worker.model } : {}),
@@ -767,7 +798,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           if (worker.variant === undefined && worker.model === PREVIEW_WORKER_ROUTE.model) worker.variant = PREVIEW_WORKER_ROUTE.variant;
         }
         const operationsName = profileAgent(profile, "dog-operator");
-        const operations = agents && record(agents[operationsName]) ? agents[operationsName] : undefined;
+        const operations = record(agents[operationsName]) ? agents[operationsName] : undefined;
         if (operations) {
           operations.model ??= PREVIEW_OPERATIONS_ROUTE.model;
           if (operations.variant === undefined && operations.model === PREVIEW_OPERATIONS_ROUTE.model) operations.variant = PREVIEW_OPERATIONS_ROUTE.variant;
@@ -782,6 +813,23 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         if (previous === "dog-coordinator" && role !== "dog-coordinator") await stop(chat.sessionID, "agent-changed");
         if (!role && previous === undefined) return;
         if (role === "dog-coordinator") {
+          const realTurn = !output.parts.some(part => record(part) && part.synthetic === true) &&
+            output.parts.some(part => record(part) && part.type === "text" && typeof part.text === "string" && part.text.trim().length > 0);
+          if (realTurn) {
+            const state = await operators.read(chat.sessionID);
+            if ((state !== undefined && (state.phase === "cancelled" || state.phase === "completed")) ||
+                operatorTurnLifecycle.get(chat.sessionID) === "cancelled") {
+              operatorTurnLifecycle.set(chat.sessionID, "historical");
+              const messageID = typeof chat.messageID === "string" && chat.messageID.length > 0
+                ? chat.messageID
+                : typeof output.message.id === "string" && output.message.id.length > 0 ? output.message.id : undefined;
+              if (messageID !== undefined) historicalTurnMessages.set(chat.sessionID, messageID);
+              await control?.retireHistoricalGoal(chat.sessionID);
+            } else {
+              operatorTurnLifecycle.delete(chat.sessionID);
+              historicalTurnMessages.delete(chat.sessionID);
+            }
+          }
           if (retired.has(chat.sessionID) && output.parts.some(part => record(part) && part.synthetic === true)) throw new Error("runtime-profile-revoked");
           retired.delete(chat.sessionID);
         }
@@ -1107,8 +1155,20 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         const role = (await identity(request.sessionID)).role;
         if (role === "dog-operator" || !await rootFor(request.sessionID)) return;
         const mapped = { text: role === "dog-coordinator" ? forwardTerminalText(output.text) : output.text };
+        const originalText = sanitizeTerminalReport(mapped.text);
         const hadTerminalHeading = terminalRunOutcome(mapped.text) !== undefined;
         await core["experimental.text.complete"]?.(request, mapped);
+        if (role === "dog-coordinator" && terminalRunOutcome(originalText) === "DONE" &&
+            operatorTurnLifecycle.get(request.sessionID) === "historical") {
+          const state = await operators.read(request.sessionID);
+          const proposal = await proposals.read(request.sessionID);
+          const receipt = await control!.currentReceipt(request.sessionID);
+          const userMessageID = historicalTurnMessages.get(request.sessionID);
+          if (proposal === undefined &&
+              (state === undefined || state.phase === "cancelled" || state.phase === "completed") && receipt === undefined &&
+              userMessageID !== undefined && await control!.isUncontractedGoal(request.sessionID, userMessageID) &&
+              terminalRunOutcome(mapped.text) === "INTERRUPTED") mapped.text = originalText;
+        }
         output.text = role === "dog-coordinator" ? decoratePreviewHeadings(mapped.text) : mapped.text;
         if (role === "dog-coordinator") {
           const receipt = await control!.currentReceipt(request.sessionID);

@@ -156,6 +156,27 @@ test("accepted fabric wave evidence preserves a legacy plan prefix and fails clo
   ]) assert.throws(() => reconstructRunFlightLedger(mutate(records)), RunFlightLedgerError);
 });
 
+test("run validation evidence is reusable only after a passed settlement", () => {
+  const planId = digest("a");
+  const prefix = createRunFlightPlanPrefix({ kind: "plan.compiled", at, plan_id: planId,
+    proposal_id: digest("b"), decision: "accepted", gap_codes: [] });
+  const admission = { kind: "validation.admission" as const, at, reservation_id: "reservation-1", operation_id: "operation-1",
+    evidence_key: digest("c"), scope: "targeted" as const, decision: "ALLOW" as const, reason: "allowed", consumed: 1, limit: 2 };
+  const failed = appendRunFlightLedgerEvents(prefix, [admission, { kind: "validation.settled", at, reservation_id: "reservation-1",
+    operation_id: "operation-1", evidence_key: digest("c"), outcome: "failed", exit_code: 1, evidence_fingerprint: digest("d"), duration_ms: 9, reason: "failed" }]);
+  assert.throws(() => appendRunFlightLedgerEvents(failed, [{ kind: "validation.admission", at, reservation_id: "skip-1",
+    operation_id: "operation-2", evidence_key: digest("c"), scope: "targeted", decision: "SKIP", reason: "duplicate-evidence", consumed: 1, limit: 2, saved_ms: 9 }]), RunFlightLedgerError);
+  assert.throws(() => appendRunFlightLedgerEvents(prefix, [admission, { kind: "validation.settled", at,
+    reservation_id: "reservation-1", operation_id: "operation-1", evidence_key: digest("c"), outcome: "passed",
+    exit_code: 7, evidence_fingerprint: digest("f"), duration_ms: 3, reason: "passed" }]), RunFlightLedgerError);
+  const passed = appendRunFlightLedgerEvents(prefix, [admission, { kind: "validation.settled", at, reservation_id: "reservation-1",
+    operation_id: "operation-1", evidence_key: digest("c"), outcome: "passed", exit_code: 0, evidence_fingerprint: digest("e"), duration_ms: 12, reason: "passed" },
+    { kind: "validation.admission", at, reservation_id: "skip-1", operation_id: "operation-2", evidence_key: digest("c"),
+      scope: "targeted", decision: "SKIP", reason: "duplicate-evidence", consumed: 1, limit: 2, saved_ms: 12 }]);
+  assert.equal(reconstructRunFlightLedger(passed).validation_budget.skipped, 1);
+  assert.equal(reconstructRunFlightLedger(passed).validation_budget.completed, 1);
+});
+
 test("rejects undeclared capsules, out-of-scope capsule sources, unknown fields, and non-hash artifacts", async () => {
   const { ledger, file, access, capsuleId } = await fixture("scope");
   await ledger.append(event({ kind: "run.planned", at, run_id: "run4", initial_candidate_id: "c0", budget_limits: { recovery_actions: 1, probe_iterations: 1, model_attempts: 1 } }));

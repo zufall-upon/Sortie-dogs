@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { CONTRACT_TEXT_LIMITS } from "./contract-limits.ts";
-import type { ValidationOutcome } from "./validation-budget.js";
+import type { ValidationOutcome, ValidationScope } from "./validation-budget.js";
 import type { GoalReport } from "./goal-report.js";
 
 export const GOAL_BOUND_SCHEMA_VERSION = "0.1" as const;
@@ -130,11 +130,13 @@ export type GoalFlightEvent =
   | (GoalEventBase & { readonly kind: "unit.evidence-reconciled"; readonly goal_id: string; readonly unit_id: string;
       readonly previous_receipt_id: string; readonly evidence: readonly GoalEvidence[] })
   | (GoalEventBase & { readonly kind: "validation.admission"; readonly goal_id: string; readonly reservation_id: string;
-      readonly operation_id: string; readonly evidence_key: string; readonly scope: "targeted" | "full" | null;
-      readonly decision: "ALLOW" | "DENY"; readonly reason: string; readonly consumed: number; readonly limit: number;
-      readonly reopen?: GoalValidationReopen })
+       readonly operation_id: string; readonly evidence_key: string; readonly scope: ValidationScope | null;
+       readonly decision: "ALLOW" | "SKIP" | "DENY"; readonly reason: string; readonly consumed: number; readonly limit: number;
+       readonly saved_ms?: number;
+       readonly reopen?: GoalValidationReopen })
   | (GoalEventBase & { readonly kind: "validation.settled"; readonly goal_id: string; readonly reservation_id: string;
-      readonly operation_id: string; readonly evidence_key: string; readonly outcome: ValidationOutcome; readonly exit_code: number | null })
+       readonly operation_id: string; readonly evidence_key: string; readonly outcome: ValidationOutcome; readonly exit_code: number | null;
+       readonly evidence_fingerprint?: string; readonly duration_ms?: number; readonly reason?: string })
   | (GoalEventBase & { readonly kind: "goal.replanned"; readonly goal_id: string; readonly revision: number;
       readonly reason: "no-progress" })
   | (GoalEventBase & { readonly kind: "goal.terminal"; readonly goal_id: string; readonly receipt: GoalTerminalReceipt })
@@ -179,7 +181,9 @@ export interface GoalFlightState {
   readonly replan_required: boolean;
   readonly tickets: readonly GoalTicketState[];
   readonly outstanding_reservations: readonly { readonly reservation_id: string; readonly unit_id: string; readonly session_id: string }[];
-  readonly validation_budget: { readonly consumed: number; readonly reservations: readonly { readonly reservation_id: string; readonly operation_id: string; readonly evidence_key: string }[]; readonly evidence_keys: readonly string[]; readonly limit: number | null };
+  readonly validation_budget: { readonly consumed: number; readonly reservations: readonly { readonly reservation_id: string; readonly operation_id: string; readonly evidence_key: string }[]; readonly evidence_keys: readonly string[]; readonly limit: number | null;
+    readonly completed: number; readonly skipped: number; readonly rejected: number; readonly redundant_time_ms: number;
+    readonly durations_ms: readonly number[] };
   readonly unit_ids: readonly string[];
   readonly session_ids: readonly string[];
   readonly evidence_refs: readonly string[];
@@ -287,7 +291,8 @@ function initial(): GoalFlightState {
     acceptance_contract: null, consumed_units: 0,
     consumed_time_ms: 0, consumed_cost_usd: 0, phase: "stopped", stop_reason: null,
     no_progress_results: 0, replan_used: false, replan_required: false, tickets: [],
-    outstanding_reservations: [], validation_budget: { consumed: 0, reservations: [], evidence_keys: [], limit: null },
+    outstanding_reservations: [], validation_budget: { consumed: 0, reservations: [], evidence_keys: [], limit: null,
+      completed: 0, skipped: 0, rejected: 0, redundant_time_ms: 0, durations_ms: [] },
     unit_ids: [], session_ids: [], evidence_refs: [], satisfied_criteria: [], receipt: null };
 }
 
@@ -442,23 +447,50 @@ export function reduceGoalFlight(records: readonly GoalFlightEventRecord[]): Goa
           settlement.outcome === "interrupted" && event.operation_id !== reopen.prior_operation_id &&
           !reopenedValidationEvidence.has(event.evidence_key);
         const duplicate = state.validation_budget.evidence_keys.includes(event.evidence_key);
+        const inFlight = state.validation_budget.reservations.some((entry) => entry.evidence_key === event.evidence_key);
+        const blocked = [...validationSettlements.values()].some((entry) =>
+          entry.evidence_key === event.evidence_key && entry.outcome !== "passed");
         requireState(event.scope !== null && event.consumed === state.validation_budget.consumed + 1 &&
           (state.validation_budget.limit === null || event.limit >= state.validation_budget.limit) &&
-          ((!duplicate && reopen === undefined) || (duplicate && validReopen)) &&
+          ((!duplicate && !blocked && !inFlight && reopen === undefined) || (validReopen && !inFlight)) &&
           !state.validation_budget.reservations.some((entry) => entry.reservation_id === event.reservation_id),
           "budget", "Validation admission is stale, duplicated, or exhausted.");
-        state = { ...state, validation_budget: { consumed: event.consumed, limit: event.limit,
-          evidence_keys: addUnique(state.validation_budget.evidence_keys, event.evidence_key),
+        state = { ...state, validation_budget: { ...state.validation_budget, consumed: event.consumed, limit: event.limit,
           reservations: [...state.validation_budget.reservations,
             { reservation_id: event.reservation_id, operation_id: event.operation_id, evidence_key: event.evidence_key }] } };
         validationAdmissions.set(event.reservation_id, event);
         if (reopen !== undefined) reopenedValidationEvidence.add(event.evidence_key);
-      } else requireState(event.reopen === undefined, "invalid", "Denied validation cannot carry reopen authority.");
+      } else {
+        requireState(event.reopen === undefined && event.consumed === state.validation_budget.consumed,
+          "invalid", "Skipped or denied validation cannot carry reopen authority or consume budget.");
+        const saved = event.saved_ms ?? 0;
+        requireState(Number.isSafeInteger(saved) && saved >= 0, "invalid", "Validation saved duration is invalid.");
+        if (event.decision === "SKIP") {
+          requireState(state.validation_budget.evidence_keys.includes(event.evidence_key) &&
+            !state.validation_budget.reservations.some((entry) => entry.evidence_key === event.evidence_key) && event.scope !== null,
+            "evidence", "Skipped validation must reference existing unchanged evidence.");
+          state = { ...state, validation_budget: { ...state.validation_budget,
+            skipped: state.validation_budget.skipped + 1,
+            redundant_time_ms: state.validation_budget.redundant_time_ms + saved } };
+        } else {
+          requireState(saved === 0, "invalid", "Rejected validation cannot claim saved execution time.");
+          state = { ...state, validation_budget: { ...state.validation_budget,
+            rejected: state.validation_budget.rejected + 1 } };
+        }
+      }
     } else if (event.kind === "validation.settled") {
       const reservation = state.validation_budget.reservations.find((entry) => entry.reservation_id === event.reservation_id);
       requireState(reservation?.operation_id === event.operation_id && reservation.evidence_key === event.evidence_key,
         "transition", "Validation settlement is unknown or mismatched.");
+      requireState((event.evidence_fingerprint === undefined || HASH.test(event.evidence_fingerprint)) &&
+        (event.duration_ms === undefined || Number.isSafeInteger(event.duration_ms) && event.duration_ms >= 0) &&
+        (event.reason === undefined || text(event.reason)) && (event.outcome !== "passed" || event.exit_code === 0),
+        "invalid", "Validation settlement evidence is malformed.");
       state = { ...state, validation_budget: { ...state.validation_budget,
+        evidence_keys: event.outcome === "passed" ? addUnique(state.validation_budget.evidence_keys, event.evidence_key) : state.validation_budget.evidence_keys,
+        completed: state.validation_budget.completed + 1,
+        durations_ms: event.outcome !== "passed" || event.exit_code !== 0 || event.duration_ms === undefined
+          ? state.validation_budget.durations_ms : [...state.validation_budget.durations_ms, event.duration_ms],
         reservations: state.validation_budget.reservations.filter((entry) => entry.reservation_id !== event.reservation_id) } };
       validationSettlements.set(event.reservation_id, event);
     } else if (event.kind === "goal.replanned") {

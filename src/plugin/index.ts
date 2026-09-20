@@ -27,7 +27,14 @@ import {
   WorktreeCommitArtifactError,
 } from "../core/worktree-commit-artifact.js";
 import { normalizeWorktreeScope } from "../core/worktree-scope.js";
-import type { ValidationBudgetRequest, ValidationOutcome } from "../core/validation-budget.js";
+import {
+  validationEvidenceKey,
+  validationOwner,
+  type ValidationBudgetRequest,
+  type ValidationEnvironment,
+  type ValidationOutcome,
+  type ValidationProfile,
+} from "../core/validation-budget.js";
 import {
   ParallelDispatchCoordinator,
   ParallelDispatchError,
@@ -128,7 +135,6 @@ import type { RunMetricsClient } from "./run-metrics.js";
 import { profileAgent, STABLE_RUNTIME_PROFILE } from "../core/runtime-profile.js";
 import type { RuntimeBridge } from "./runtime-bridge.js";
 import { evidenceFromObservedExecution } from "../core/observed-goal-evidence.js";
-import { validationEvidenceKey } from "../core/validation-budget.js";
 import { receiptBoundTerminalText } from "./receipt-presentation.js";
 
 const INPUT_LIMITS = { config: 64 * 1024, manifest: 512 * 1024, handoff: 2 * 1024 * 1024, parallel: 512 * 1024 } as const;
@@ -435,6 +441,7 @@ interface LoadedConfiguration {
   modelRoutingHook?: OpenCodeChatMessageHook;
   continuation: ContinuationConfiguration;
   reflection: ConfiguredPluginSources["reflection"];
+  validationProfile: ValidationProfile;
 }
 
 interface TaskToolExecuteAfterInput {
@@ -457,11 +464,13 @@ interface HostGoalExecution {
   readonly callID: string;
   readonly tool: string;
   readonly command: readonly string[];
+  readonly owner: "worker" | "coordinator";
   readonly startedAt: string;
   readonly binding: NonNullable<GoalEvidence["protected_binding"]>;
   readonly source: string;
   readonly candidate: string;
   readonly validation?: { readonly ledger: RunFlightLedger; readonly request: ValidationBudgetRequest; readonly reservation: string };
+  readonly reusedEvidence?: readonly GoalEvidence[];
   endedAt?: string;
   exitCode?: number | null;
   outcome?: "pass" | "fail" | "skip" | "cancel";
@@ -656,6 +665,22 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+function validationEnvironment(): ValidationEnvironment {
+  return { platform: process.platform, arch: process.arch, runtime: process.version };
+}
+
+function validationCandidate(source: string, candidate: string): string {
+  return goalFingerprint({ source, candidate });
+}
+
+function settledPassNoticeCommand(): string {
+  const script = 'process.stdout.write("SORTIE_VALIDATION_REUSED\\n")';
+  if (process.platform === "win32") {
+    return `& '${process.execPath.replaceAll("'", "''")}' -e '${script}'`;
+  }
+  return `'${process.execPath.replaceAll("'", `'\\''`)}' -e '${script}'`;
+}
+
 function proposeExperienceRoute(requestJson: string): string {
   let request: unknown;
   try {
@@ -822,6 +847,7 @@ function loadConfigured(
     modelRoutingHook,
     continuation: config.continuation,
     reflection: config.reflection,
+    validationProfile: config.validationProfile,
   };
 }
 
@@ -1591,6 +1617,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     callID: string | null }>();
   const goalReservationRecoveries = new Map<string, Promise<void>>();
   const hostGoalExecutions = new Map<string, HostGoalExecution>();
+  const settledPassNotices = new Map<string, { readonly sessionID: string; readonly command: string }>();
   const goalValidationDefects = new Set<string>();
   const goalDeclarationAuthority = new Map<string, string>();
   const explicitUserGoalUnitLimits = new Map<string, number>();
@@ -1847,6 +1874,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const ledger = await goalLedger(root);
     const goalSnapshot = await ledger.readGoal(), goal = goalSnapshot.state;
     let validation: HostGoalExecution["validation"];
+    let reusedEvidence: readonly GoalEvidence[] | undefined;
     if (goal.goal_id !== null) {
       const unitID = authorization.taskID;
       const repairResume = operatorContractRepairResumes.get(root);
@@ -1862,11 +1890,44 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       if (!unitBound) throw denyValidation("requirement-unbound");
       // Exact generation and formatting checks may support acceptance without proving a criterion.
       if (criteria.length === 0) return;
-      const scope = criteria.every((criterion) => criterion.proof_scope === "requested-full") ? "full" : "targeted";
+      const requestedFull = criteria.some((criterion) => criterion.proof_scope === "requested-full");
+      const coordinatorOwned = requestedFull && unitID !== undefined &&
+        await input.runtimeBridge?.ownsCanonicalValidation?.(root, unitID, toolInput.sessionID, rawCommand) === true;
+      if (requestedFull && !coordinatorOwned) throw denyValidation("owner-mismatch: coordinator-routing-unavailable");
+      const profile = loaded?.validationProfile ?? DEFAULT_PLUGIN_OPTIONS.validationProfile;
+      const scope = coordinatorOwned ? "full" : profile === "fast" ? "static" : profile === "assurance" ? "related" : "targeted";
+      const owner = validationOwner(scope);
       const request: ValidationBudgetRequest = { run_id: goal.goal_id, operation_id: toolInput.callID,
-        source_snapshot: snapshot.source, candidate: snapshot.candidate, command: [rawCommand], scope,
+        source_snapshot: snapshot.source, candidate: validationCandidate(snapshot.source, snapshot.candidate),
+        command: [rawCommand], environment: validationEnvironment(), scope, owner,
         expected_evidence: [...new Set(criteria.flatMap((criterion) => [criterion.criterion_id, ...criterion.oracle_coverage,
-          `unit:${unitID}`, "source_snapshot", "candidate", "command", "scope", "exit_code"]))], reason: "acceptance" };
+          `unit:${unitID}`, "source_snapshot", "candidate", "command", "scope", "exit_code"]))],
+        marginal_value: { unmet_criteria: criteria.map(criterion => criterion.criterion_id), risk_hypothesis: null },
+        reason: "acceptance" };
+      const evidenceKey = validationEvidenceKey(request);
+      const durable = goalSnapshot.records.flatMap(({ event }) =>
+        event.kind === "unit.settled" || event.kind === "unit.evidence-reconciled" ? event.evidence : [])
+        .filter(entry => validGoalEvidence(entry, goal) && (entry.proof_scope !== "requested-full" || coordinatorOwned) &&
+          entry.identity.source === snapshot.source && entry.identity.candidate === snapshot.candidate &&
+          entry.execution.command.length === 1 && entry.execution.command[0] === rawCommand)
+        .map(entry => ({ ...entry, execution: { ...entry.execution, units: [unitID] } }));
+      const live = [...hostGoalExecutions.values()].filter(execution => execution.root === root &&
+        execution.sessionID === toolInput.sessionID && execution.endedAt !== undefined && execution.exitCode === 0 &&
+        execution.outcome === "pass" && execution.immutableRef !== undefined && execution.fresh === true &&
+        execution.source === snapshot.source && execution.candidate === snapshot.candidate &&
+        execution.command.length === 1 && execution.command[0] === rawCommand)
+        .flatMap(execution => evidenceFromObservedExecution({ ...execution, owner,
+          endedAt: execution.endedAt!, exitCode: 0, outcome: "pass", immutableRef: execution.immutableRef!, fresh: true }, goal, unitID));
+      const uniqueReconciliation = new Map<string, GoalEvidence>();
+      for (const entry of [...live, ...durable]) {
+        if (validGoalEvidence(entry, goal) && entry.execution.units.includes(unitID)) uniqueReconciliation.set(entry.evidence_id, entry);
+      }
+      const reconciliationEvidence = [...uniqueReconciliation.values()];
+      const skipReconciliation = { unit_id: unitID, source: snapshot.source, candidate: snapshot.candidate,
+        command: request.command, evidence: reconciliationEvidence };
+      if (goal.validation_budget.evidence_keys.includes(evidenceKey) && reconciliationEvidence.length === 0) {
+        throw denyValidation("settled-pass-reconciliation-unavailable");
+      }
       const retained = repairResume?.childSessionID === toolInput.sessionID && repairResume.unitID === unitID &&
         repairResume.callID !== null
         ? goal.validation_budget.reservations.filter(item => item.evidence_key === validationEvidenceKey(request)) : [];
@@ -1881,19 +1942,28 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           // evidence remains denied by reserveValidation before this limit is considered.
           const validationLimit = Math.max(goal.budget?.max_units ?? 1, goal.validation_budget.consumed + 1);
           reservation = repairResume?.retryAuthorization === null || repairResume === undefined
-            ? await ledger.reserveValidation(request, validationLimit)
-            : await ledger.reserveInterruptedValidationRetry(request, validationLimit, repairResume.retryAuthorization);
+            ? await ledger.reserveValidation(request, validationLimit, skipReconciliation)
+            : await ledger.reserveInterruptedValidationRetry(request, validationLimit, repairResume.retryAuthorization, skipReconciliation);
         } catch (error) {
           throw denyValidation(`authority-unavailable:${error instanceof Error ? error.name : "unknown"}`);
         }
-        if (reservation.decision !== "ALLOW" || reservation.reservation_id === null) throw denyValidation(reservation.reason);
-        validation = { ledger, request, reservation: reservation.reservation_id };
+        if (reservation.decision === "SKIP") {
+          reusedEvidence = reconciliationEvidence;
+          const notice = settledPassNoticeCommand();
+          args!.command = notice;
+          settledPassNotices.set(toolInput.callID, { sessionID: toolInput.sessionID, command: notice });
+        } else {
+          if (reservation.decision !== "ALLOW" || reservation.reservation_id === null) throw denyValidation(reservation.reason);
+          validation = { ledger, request, reservation: reservation.reservation_id };
+        }
       }
     }
     hostGoalExecutions.set(toolInput.callID, { root, projectRoot: authorization.projectRoot,
       sessionID: toolInput.sessionID,
       callID: toolInput.callID, tool: toolInput.tool, command: [rawCommand], startedAt: new Date().toISOString(),
-      binding: snapshot.binding, source: snapshot.source, candidate: snapshot.candidate, validation });
+      binding: snapshot.binding, source: snapshot.source, candidate: snapshot.candidate,
+      owner: validation?.request.owner ?? "worker", validation,
+      ...(reusedEvidence === undefined ? {} : { reusedEvidence }) });
   }
 
   async function recordHostGoalEnd(toolInput: TaskToolExecuteAfterInput, output: TaskResultRepairOutput,
@@ -1904,14 +1974,18 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const rawExit = metadata?.exit;
     const exitCode = typeof rawExit === "number" && Number.isSafeInteger(rawExit) ? rawExit : undefined;
     const rawStatus = metadata?.status ?? output.status;
-    const outcome = exitCode === 0 ? "pass" : exitCode !== undefined ? "fail"
+    const outcome = exitCode === 0 ? execution.reusedEvidence === undefined ? "pass" : "skip" : exitCode !== undefined ? "fail"
       : rawStatus === "cancel" || rawStatus === "cancelled" ? "cancel" : undefined;
     const validationOutcome: ValidationOutcome = exitCode === 0 ? "passed" : exitCode !== undefined ? "failed"
       : rawStatus === "cancel" || rawStatus === "cancelled" ? "cancelled" : "interrupted";
     if (execution.validation !== undefined) {
+      const duration = typeof timing?.start === "number" && typeof timing.end === "number" &&
+        Number.isFinite(timing.start) && Number.isFinite(timing.end) && timing.end >= timing.start
+        ? Math.round(timing.end - timing.start) : undefined;
       await execution.validation.ledger.settleValidation(execution.validation.reservation, execution.validation.request,
-        validationOutcome, exitCode ?? null);
+        validationOutcome, exitCode ?? null, duration);
     }
+    settledPassNotices.delete(execution.callID);
     const refreshed = await refreshProtectedSnapshot(execution.projectRoot, execution.binding).catch(() => undefined);
     const observedStartedAt = typeof timing?.start === "number" && Number.isFinite(timing.start)
       ? new Date(timing.start).toISOString() : execution.startedAt;
@@ -1921,7 +1995,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     // itself is a declared write). Protect the source snapshot across the task, then bind evidence
     // to the post-task candidate snapshot instead of rejecting the genuine mutation.
     const fresh = refreshed !== undefined && refreshed.source === execution.source;
-    const immutableRef = outcome === undefined ? undefined : goalFingerprint({ root: execution.root,
+    const immutableRef = outcome === undefined || execution.reusedEvidence !== undefined ? undefined : goalFingerprint({ root: execution.root,
       child_session_id: execution.sessionID, call_id: execution.callID, command: execution.command,
       started_at: observedStartedAt, ended_at: endedAt, exit_code: exitCode ?? null, outcome,
       source: execution.source, candidate: execution.candidate });
@@ -2001,7 +2075,13 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       .map((part) => part.text).join("\n")
       .split(/\r?\n/u).some((line) =>
         /^\s*(?:goal_acceptance_fingerprint|goal_budget_(?:units|time_ms|cost_usd))\s*:/iu.test(line));
-    if (state.goal_id === null || state.phase === "terminal" || (state.phase === "stopped" && !explicitContinuation)) {
+    // A model can stop the core goal while the profile still owns a durable unfinished operator
+    // contract. The next real turn continues that contract; accepting a fresh goal here would detach
+    // its immutable controls and evidence from the only root that can complete them.
+    const durableContinuation = state.phase === "stopped" &&
+      await input.runtimeBridge?.continuationCheckpoint?.(sessionID) !== undefined;
+    if (state.goal_id === null || state.phase === "terminal" ||
+        (state.phase === "stopped" && !explicitContinuation && !durableContinuation)) {
       const acceptance = goalFingerprint({ message_id: messageID, parts: safeParts.map((part) =>
         part.type === "text" ? part.text : part) });
       await ledger.appendGoal({ kind: "goal.accepted", at,
@@ -2509,14 +2589,19 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     // Task text and Task result metadata are model/child-controlled. Only an exact declared command
     // observed in the child tool hooks with a native host exit may produce goal evidence.
     const childSessionID = taskChildSessionID(output);
-    const hostEvidence = [...hostGoalExecutions.values()]
+    const observedEvidence = [...hostGoalExecutions.values()]
       .filter((execution) => childSessionID !== undefined && execution.sessionID === childSessionID &&
         execution.root === reservation.root && execution.endedAt !== undefined &&
         execution.startedAt.length > 0 && Date.parse(execution.startedAt) >= reservation.started - 1000 &&
-        execution.immutableRef !== undefined && execution.fresh === true)
-      .flatMap(execution => execution.exitCode === undefined || execution.outcome === undefined ? [] : evidenceFromObservedExecution({
-        ...execution, immutableRef: execution.immutableRef!, endedAt: execution.endedAt!, fresh: execution.fresh!,
-        exitCode: execution.exitCode, outcome: execution.outcome }, state, reservation.unitID));
+        execution.fresh === true && (execution.reusedEvidence !== undefined
+          ? execution.exitCode === 0 && execution.outcome === "skip"
+          : execution.immutableRef !== undefined))
+      .flatMap(execution => execution.reusedEvidence !== undefined
+        ? execution.reusedEvidence
+        : execution.exitCode === undefined || execution.outcome === undefined ? [] : evidenceFromObservedExecution({
+          ...execution, immutableRef: execution.immutableRef!, endedAt: execution.endedAt!, fresh: execution.fresh!,
+          exitCode: execution.exitCode, outcome: execution.outcome }, state, reservation.unitID));
+    const hostEvidence = [...new Map(observedEvidence.map(entry => [entry.evidence_id, entry])).values()];
     // A worker may return after a user scope epoch changed. Settle its spend/reservation, but only
     // adopt observations still bound to the current accepted source/candidate/criterion contract.
     const acceptedEvidence = hostEvidence.filter((entry) => validGoalEvidence(entry, state) &&
@@ -2632,11 +2717,18 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         const command = [normalizeCommand(part.state.input.command)];
         const criteria = goal.acceptance_contract?.criteria.filter(criterion => criterion.validation_command === command[0] && criterion.expected_outcome === "pass") ?? [];
         if (!criteria.length) continue;
-        const scope = criteria.every(criterion => criterion.proof_scope === "requested-full") ? "full" : "targeted";
+        const requestedFull = criteria.some(criterion => criterion.proof_scope === "requested-full");
+        if (requestedFull && runtimeProfile.parallel) continue;
+        const profile = loaded?.validationProfile ?? DEFAULT_PLUGIN_OPTIONS.validationProfile;
+        const scope = requestedFull ? "full" : profile === "fast" ? "static" : profile === "assurance" ? "related" : "targeted";
+        const owner = validationOwner(scope);
         const expected = [...new Set(criteria.flatMap(criterion => [criterion.criterion_id, ...criterion.oracle_coverage,
           `unit:${request.unitID}`, "source_snapshot", "candidate", "command", "scope", "exit_code"]))];
         const key = validationEvidenceKey({ run_id: goal.goal_id!, operation_id: part.callID, source_snapshot: current.source,
-          candidate: current.candidate, command, scope, expected_evidence: expected, reason: "acceptance" });
+          candidate: validationCandidate(current.source, current.candidate), command, environment: validationEnvironment(),
+           scope, owner, expected_evidence: expected,
+          marginal_value: { unmet_criteria: criteria.map(criterion => criterion.criterion_id), risk_hypothesis: null },
+          reason: "acceptance" });
         const admission = snapshot.records.map(record => record.event).find(event => event.kind === "validation.admission" &&
           event.operation_id === part.callID && event.decision === "ALLOW" && event.evidence_key === key);
         if (admission?.kind !== "validation.admission") continue;
@@ -2647,7 +2739,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         const startedAt = new Date(timing.start).toISOString(), endedAt = new Date(timing.end).toISOString();
         const immutableRef = goalFingerprint({ root, child_session_id: request.childSessionID, call_id: part.callID, command,
           started_at: startedAt, ended_at: endedAt, exit_code: 0, outcome: "pass", source: current.source, candidate: current.candidate });
-        evidence.push(...evidenceFromObservedExecution({ ...current, command, immutableRef, startedAt, endedAt, exitCode: 0, outcome: "pass", fresh: true }, goal, request.unitID));
+        evidence.push(...evidenceFromObservedExecution({ ...current, owner, command, immutableRef, startedAt, endedAt, exitCode: 0, outcome: "pass", fresh: true }, goal, request.unitID));
       }
     }
     const refreshed = await refreshProtectedSnapshot(input.directory, current.binding);
@@ -3934,10 +4026,13 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           const executable = await resolveValidationExecutable(request.validation.executable);
           if (executable === undefined) throw new WorktreeCommitArtifactError("invalid-request", "Validation executable does not exist.");
           const validation: ValidationBudgetRequest = { run_id: binding.descriptor.run_id, operation_id: binding.descriptor.dispatch_id,
-            source_snapshot: `sha256:${sourceSnapshot}`, candidate: binding.descriptor.task_id, command: [executable, ...request.validation.args],
-            scope: "targeted", expected_evidence: ["source_snapshot", "candidate", "command", "scope", "exit_code"], reason: "preflight" };
+            source_snapshot: `sha256:${sourceSnapshot}`, candidate: `sha256:${sourceSnapshot}`,
+            command: [executable, ...request.validation.args], environment: validationEnvironment(),
+            scope: "targeted", owner: "worker", expected_evidence: ["source_snapshot", "candidate", "command", "scope", "exit_code"],
+            marginal_value: { unmet_criteria: [], risk_hypothesis: "candidate-integrity" }, reason: "preflight" };
           const reservation = await ledger.reserveValidation(validation, 1);
-          if (reservation.decision !== "ALLOW" || reservation.reservation_id === null) throw new WorktreeCommitArtifactError("invalid-request",
+          if (reservation.decision === "SKIP") return { decision: "reuse-passed" };
+          if (reservation.decision !== "ALLOW" || reservation.reservation_id === null) throw new WorktreeCommitArtifactError("validation-failed",
             `Validation denied: ${reservation.reason}.`);
           (activeOperation as ParallelArtifactOperation & { validation?: { ledger: typeof ledger; request: ValidationBudgetRequest; reservation: string } }).validation = {
             ledger, request: validation, reservation: reservation.reservation_id,
@@ -6475,7 +6570,23 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           "Dispatch at most the one allowed worker, perform any required risk-based review or coordinator-owned finalization, " +
           "then return the terminal report and stop. Do not call a compaction capability or emit a continuation marker."];
       }
-      if (isCoordinatorSession(transformInput.sessionID) || await recoverCoordinatorRoot(transformInput.sessionID)) {
+      const validationPolicyHeading = "SORTIE_VALIDATION_POLICY";
+      const validationEligible = isCoordinatorSession(transformInput.sessionID) || await recoverCoordinatorRoot(transformInput.sessionID);
+      if (transformOutput.system !== undefined) {
+        transformOutput.system = transformOutput.system.filter((item) =>
+          item !== validationPolicyHeading && !item.startsWith(`${validationPolicyHeading}\n`));
+      }
+      if (validationEligible) {
+        await ensureLoaded().catch(() => undefined);
+        const validationProfile = loaded?.validationProfile ?? DEFAULT_PLUGIN_OPTIONS.validationProfile;
+        transformOutput.system = [...(transformOutput.system ?? []), `${validationPolicyHeading}\n${JSON.stringify({
+          profile: validationProfile,
+          ladder: ["static", "targeted", "related", "canonical", "full-suite"],
+          ownership: { worker: ["static", "targeted", "related"], coordinator: ["canonical", "full-suite"],
+            reviewer_reruns_by_default: false },
+          controls: { unchanged_candidate_canonical_runs: 1, full_suite_requires: "release-or-explicit-risk",
+            additional_work_requires: "unmet-criterion-or-concrete-risk-hypothesis" },
+        })}`];
         await recoverPendingRealGoalTurn(transformInput.sessionID);
         const goal = await currentGoal(transformInput.sessionID);
         if (goal !== undefined && goal.goal_id !== null) {
@@ -7263,6 +7374,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         ) throw new WriteDeniedError("parallel-validation", "<parallel-unit>");
         const declaredSequence = command === undefined || authorization === undefined ? undefined
           : canonicalDeclaredValidationSequence(command, authorization.validationCommands);
+        const settledPassNotice = settledPassNotices.get(toolInput.callID);
+        if (activeState?.parallel !== "valid" && settledPassNotice?.sessionID === toolInput.sessionID &&
+          isRecord(output.args) && output.args.command === settledPassNotice.command) return;
         if (activeState?.parallel !== "valid" && declaredSequence !== undefined) return;
         if (activeState?.parallel === "valid") {
           const extracted = extractWritePaths(toolInput.tool, output.args);
@@ -7534,6 +7648,25 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) return undefined;
       return (await currentGoal(root))?.receipt ?? undefined;
     },
+    retireHistoricalGoal: async root => {
+      if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) {
+        // The profiled wrapper authenticates the incoming root-agent turn before the core
+        // chat hook can populate its cold in-memory root cache.
+        await rememberCoordinatorRoot(root);
+      }
+      const goal = await currentGoal(root);
+      if (goal === undefined || goal.goal_id === null) return true;
+      if (goal.receipt !== null || goal.phase === "terminal") return true;
+      if (goal.outstanding_reservations.length > 0) return false;
+      return (await terminalGoal(root, "stopped", "stopped"))?.status === "stopped";
+    },
+    isUncontractedGoal: async (root, latestUserMessageID) => {
+      if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) return false;
+      const goal = await currentGoal(root);
+      return goal?.phase === "active" && goal.receipt === null && goal.latest_user_message_id === latestUserMessageID &&
+        goal.acceptance_contract === null && goal.outstanding_reservations.length === 0 &&
+        goal.satisfied_criteria.length === 0 && goal.evidence_refs.length === 0;
+    },
     assertActiveGoal: async (root, fingerprint) => {
       if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) throw new Error("operator-coordinator-required");
       const goal = await currentGoal(root);
@@ -7665,15 +7798,16 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) throw new Error("operator-coordinator-required");
       const snapshot = await goalLedger(root).then(ledger => ledger.readGoal());
       if (snapshot.state.phase !== "active" || snapshot.state.receipt !== null) throw new Error("operator-continuity-goal-not-active");
-      const proved = snapshot.records.some(({ event }) => (event.kind === "unit.settled" || event.kind === "unit.evidence-reconciled") &&
-        event.goal_id === snapshot.state.goal_id && event.unit_id === request.taskID && event.evidence.length > 0);
-      if (!proved) throw new Error("operator-continuity-accepted-unit-missing");
       const source = await readFile(request.handoffPath);
       if (createHash("sha256").update(source).digest("hex") !== request.handoffHash) throw new Error("operator-continuity-control-changed");
       const handoff = validateHandoffSchema(JSON.parse(source.toString("utf8")));
       if (!handoff.ok || handoff.value.id !== request.taskID) throw new Error("operator-continuity-handoff-invalid");
       const accepted = inspectAcceptanceContinuity(handoff.value);
       if (!accepted.ledger || accepted.ledger.task_id !== request.taskID) throw new Error("operator-continuity-ledger-invalid");
+      const proved = snapshot.records.some(({ event }) => (event.kind === "unit.settled" || event.kind === "unit.evidence-reconciled") &&
+        event.unit_id === request.taskID && event.evidence.some(evidence =>
+          event.goal_id === snapshot.state.goal_id || evidence.acceptance_fingerprint === accepted.ledger!.fingerprint));
+      if (!proved) throw new Error("operator-continuity-accepted-unit-missing");
       const current = rootAcceptanceContinuity.get(root);
       if (current !== undefined) {
         if (current.fingerprint !== accepted.ledger.fingerprint) throw new Error("operator-continuity-newer-state");

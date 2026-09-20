@@ -27,7 +27,7 @@ const DEFAULT_ACTIVITY_SECONDS = 5400;
 const DEFAULT_PROGRESS_SECONDS = 5400;
 const HEARTBEAT_SECONDS = 120;
 const DEBUG_MAX_CYCLES = 12;
-const DEBUG_CONTINUATION_PROMPT = "DEBUG continuation for the same accepted goal. First call sortie_v010_operator_status and follow its exact public next_action. Use only a packet-authorized contract repair, process-defect resume, acceptance-remediation replacement, or awaiting-acceptance review disposition. For operator-acceptance-remediation-required, do not call resume_operator or edit the committed candidate: cancel the failed run, then prepare an approved replacement for the same goal and exact acceptance, preserving approved write scope and cumulative budget. For awaiting-acceptance, do not stop after reporting status: dispatch the required independent reviewer in this turn, apply its disposition, and call complete_operator on PASS. Blocking findings within unchanged acceptance, approved write scope, and remaining budget require autonomous reason=review-blocking cancellation and same-goal replacement from the committed head without user approval. Copy the status packet's acceptance array verbatim into that replacement plan; do not summarize or rewrite it. Preserve the workspace and root session; do not infer a code solution from this instruction. Complete the original goal.";
+const DEBUG_CONTINUATION_PROMPT = "DEBUG continuation for the same accepted goal. First call sortie_v010_operator_status and follow its exact public next_action. If status is absent, no operator grant exists: continue the original goal from this exact --dir and use repository-relative tool paths; do not stop merely because there is no packet. Otherwise use only a packet-authorized contract repair, process-defect resume, acceptance-remediation replacement, or awaiting-acceptance review disposition. For operator-acceptance-remediation-required, do not call resume_operator or edit the committed candidate: cancel the failed run, then prepare an approved replacement for the same goal and exact acceptance, preserving approved write scope and cumulative budget. For awaiting-acceptance, do not stop after reporting status: dispatch the required independent reviewer in this turn, apply its disposition, and call complete_operator on PASS. Blocking findings within unchanged acceptance, approved write scope, and remaining budget require autonomous reason=review-blocking cancellation and same-goal replacement from the committed head without user approval. Copy the status packet's acceptance array verbatim into that replacement plan; do not summarize or rewrite it. Preserve the workspace and root session; do not infer a code solution from this instruction. Complete the original goal.";
 const MEMORY_CAPTURE_EXIT_BOUNDED = 243;
 const MEMORY_CAPTURE_PYTHON = String.raw`import os, subprocess, sys, time
 limit = int(sys.argv[1])
@@ -73,7 +73,8 @@ const RUNNER_PROFILES = Object.freeze({
     requiredAssets: ["agent/dog-operator.md", "agent/dogs-coordinator.md", "agent/dog-worker-v010.md",
       "command/sortie-v010.md"],
     operatorRoutes: [{ model: "openai/gpt-5.6-sol", variant: "high" },
-      { model: "openai/gpt-5.6-terra", variant: "xhigh" }],
+      { model: "openai/gpt-5.6-terra", variant: "xhigh" },
+      { model: "openai/gpt-5.6-luna-fast", variant: "max" }],
   }),
 });
 
@@ -990,6 +991,10 @@ export function debugRecoveryPacket(stdout, rootSessionId) {
   return packet;
 }
 
+export function debugRecoveryFailure(recovery, gate) {
+  return recovery === null && gate?.status !== "pass" ? "debug-public-recovery-unproven" : null;
+}
+
 export function debugResumeArgs(manifest, cwd, rootSessionId) {
   invariant(manifest?.profile === "v010" && manifest?.qualification_only === true && safeWslPath(cwd) &&
     /^ses_[A-Za-z0-9_-]+$/u.test(rootSessionId ?? ""), "debug-resume-identity",
@@ -1572,7 +1577,6 @@ async function resumeArm(context, arm) {
   if (errors.some(item => item.kind !== "refusal" && item.tool !== "task") && recovery?.route !== "acceptance-remediation") {
     result.operationFailure = "debug-unknown-agent-event-error";
   }
-  if (recovery === null) result.operationFailure = "debug-public-recovery-unproven";
   if (metadata.root_session_id === rootSessionId) {
     try { metadata.implementation_children = await nativeImplementationChildren(context, rootSessionId, workspace); }
     catch { result.operationFailure ??= "native-child-evidence-unavailable"; metadata.implementation_children = []; }
@@ -1581,6 +1585,11 @@ async function resumeArm(context, arm) {
     result.operationFailure ??= "patch-capture-unavailable";
     return { patch_sha256: null, patch_bytes: null, changed_paths: null, uncommitted_present: null, status_sha256: null };
   });
+  result.operationFailure ??= debugRecoveryFailure(recovery, expectedOperation({
+    exit: result.code, timed_out: result.timedOut, operation_failure: result.operationFailure ?? null,
+    event_errors: metadata.event_errors, root_session_id: rootSessionId, patch_bytes: patch.patch_bytes,
+    implementation_children: metadata.implementation_children, terminal_outcome: metadata.terminal_outcome,
+  }, arm, context.manifest.expected_operation?.[arm]));
   const durationMs = Date.now() - started;
   state.debug.executions.push({ cycle: state.debug.executions.length + 1, command: "resume-arm", exit: result.code,
     signal: result.signal, timed_out: result.timedOut, watchdog: result.watchdog,

@@ -36,10 +36,13 @@ summary, a plan, a progress note, or a preamble, and never leave the run without
 The status token, its icon, TRUE_INTERRUPTION and TRUE_BLOCKER are protocol tokens: keep them verbatim
 even when the surrounding conclusion is translated. Translate only the display labels and keep their order.
 
-DONE requires a succeeded ${profile.toolPrefix}complete_operator receipt for the accepted goal; the host renders
-the measured return report from that receipt. Without it, return INTERRUPTED, BLOCKED, or NEED_DECISION naming
-the exact unresolved condition. An exhausted budget, an unapproved or failed proposal, a terminated child, a
-refused contract operation, or an unreachable acceptance is an INTERRUPTED return, never a silent stop.
+DONE requires a succeeded ${profile.toolPrefix}complete_operator receipt only when a current active operator contract
+owns the turn; the host renders the measured return report from that receipt. Without it, return INTERRUPTED, BLOCKED, or NEED_DECISION naming
+the exact unresolved condition. An exhausted budget, an unapproved or failed proposal, a terminated child, a refused
+contract operation, or an unreachable acceptance is an INTERRUPTED return, never a silent stop. A cancelled or completed
+historical operator run does not gate a later ordinary turn, but an explicit cancel in the same turn still requires
+INTERRUPTED. A later ordinary turn with no active operator contract or accepted execution criteria may use DONE
+without that receipt; the host verifies that exact uncontracted turn boundary before preserving it.
 A genuine interruption also requires the canonical machine line \`TRUE_INTERRUPTION: user: <condition>\` or
 \`TRUE_INTERRUPTION: internal: <condition>\`; without it the host keeps the run on its same-session continuation path.
 
@@ -73,6 +76,13 @@ For example strategy_trigger, architecture-choice, review_phase and PASS must no
 their explanatory prose, not these tokens. Preserve immutable criteria and host-generated Task packets
 verbatim; author their user-controlled prose in the correct language before the contract is frozen.
 Generated control labels are not a reason to switch the surrounding explanation to English.
+
+## Generated workspace path integrity
+
+Treat the current working directory and every project_root value as opaque. Never shorten, hand-normalize,
+or reconstruct a generated path segment. For Read, copy the exact current project root and append only the
+repository-relative path. For Glob and Grep, prefer the repository-relative path accepted by the tool. If a
+permission rejection shows a different project root, do not repeat that path; retry once with the exact root.
 `;
 const coordinatorContent = `---
 description: Sortie-dogs ${V010_RUNTIME_ASSET_VERSION} primary dog-operator — strategic authority with a bounded operations delegate.
@@ -81,6 +91,7 @@ model: openai/gpt-5.6-luna-fast
 variant: max
 permission:
   question: allow
+  "${profile.toolPrefix}*": allow
   task:
     "*": deny
     ${operator}: allow
@@ -181,6 +192,11 @@ Each unit's validation must prove its intended milestone. Avoid a plan where an 
 implementation to pass. The final evidence must cover the entire original goal against the current protected candidate.
 Every unit must add a previously uncovered goal criterion. Keep technical prerequisite edits inside that milestone rather
 than creating a separate unit with no acceptance progress. Unit coverage is an explicit projection, never a rewritten criterion.
+Before approving a proposal, inventory the executable of every declared validation command. Probe availability once at
+the root for each nonstandard executable and inspect the project's own CI or bootstrap references when one is absent.
+If setup belongs inside the approved task, order it before validation and declare every dependency manifest, lockfile,
+generated file, or other project-local output it may create or modify; explicitly clean transient outputs before canonical
+validation. Do not defer executable discovery until after a source-writing worker starts.
 Do not put shell-generated manifests or long operational transcripts in your context: the host generates and validates
 the existing canonical handoff, operation manifest, acceptance ledger, and worker Task from this approved plan.
 
@@ -303,6 +319,8 @@ hidden: true
 permission:
   edit: deny
   bash: deny
+  ${profile.toolPrefix}operator_next: allow
+  ${profile.toolPrefix}submit_operator_proposal: allow
   task:
     "*": deny
     ${worker}: allow
@@ -360,6 +378,12 @@ stays out of scope, and exercise each intercepted form in the declared validatio
 a case that exercises the form while the new rule is inactive proves only the pre-existing behavior. Return
 the enumeration and its derivation source with the unit evidence. An enumerated form without a trace or a
 stated exclusion is an open defect, not a completed unit.
+
+Treat independently selected syntax or dispatch dimensions as combinations, not as interchangeable labels.
+For example, cardinality, optional-clause presence, scope, and value representation can select different
+branches even when each dimension works in one other case. Exercise the material combinations needed to cover
+those branches, and for a multi-target route prove the rule and result for every target rather than only the
+first target. A trace for one combination or one target does not cover the others.
 `;
 const EXISTING_SURFACE_COVERAGE_REVIEWER = `
 ## Existing-surface coverage
@@ -373,6 +397,11 @@ that reach the rule to be listed too, and require each trace to exercise the for
 trace whose case leaves the new rule inactive evidences only the pre-existing behavior. A missing enumeration, an
 excluded form without a reason, or an enumerated form without a trace is a concrete finding, never PASS.
 Report it as an evidence gap when the supplied excerpts cannot settle the form.
+
+Reject a matrix that lists independent syntax or dispatch dimensions but traces them only in isolation. Require
+the material combinations that can select different branches, including cardinality with optional-clause
+presence, scope, and value representation where applicable. For a multi-target route, require evidence for every
+target; proving only the first target is a concrete asymmetry finding.
 `;
 
 export const runtimeAssets: readonly RuntimeAsset[] = Object.freeze([
@@ -384,7 +413,7 @@ export const runtimeAssets: readonly RuntimeAsset[] = Object.freeze([
       content = content.replace("mode: subagent\n", "mode: subagent\nhidden: true\n");
     }
     if (asset.name === "dog-worker" || asset.name === "dog-luna-worker") {
-      content = content.replace("mode: subagent\n", `mode: subagent\ntools:\n  "sortie_*": false\n  ${profile.toolPrefix}bind_write_gate: true\n  ${profile.toolPrefix}release_write_gate: true\n`);
+      content = content.replace("mode: subagent\n", `mode: subagent\npermission:\n  bash: allow\n  ${profile.toolPrefix}bind_write_gate: allow\n  ${profile.toolPrefix}release_write_gate: allow\ntools:\n  "sortie_*": false\n  ${profile.toolPrefix}bind_write_gate: true\n  ${profile.toolPrefix}release_write_gate: true\n`);
       content += `\n## Root-approved unit coverage\nWhen the immutable handoff contains ext["sortie-dogs/unit-coverage"], its indices identify this unit's assigned criteria within the unchanged global acceptance ledger. Prove those assigned criteria and preserve all global constraints. Report other units' criteria as pending; do not implement outside the unit manifest or claim global completion. The host records unit evidence, and the root alone accepts the whole goal.\n`;
       content += EXISTING_SURFACE_COVERAGE_WORKER;
     }

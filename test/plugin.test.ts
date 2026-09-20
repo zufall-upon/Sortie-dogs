@@ -1775,6 +1775,17 @@ async function configuredHooks(directory: string) {
   return await SortieDogsPlugin({ directory });
 }
 
+const validationPolicyPrefix = "SORTIE_VALIDATION_POLICY\n";
+const validationPolicyElements = (system: readonly string[]): readonly string[] =>
+  system.filter((element) => element.startsWith(validationPolicyPrefix));
+const withoutValidationPolicy = (system: readonly string[]): string[] =>
+  system.filter((element) => !element.startsWith(validationPolicyPrefix));
+function assertValidationPolicy(system: readonly string[], profile = "balanced"): void {
+  const policies = validationPolicyElements(system);
+  assert.equal(policies.length, 1);
+  assert.equal(JSON.parse(policies[0]!.slice(validationPolicyPrefix.length)).profile, profile);
+}
+
 test("reflection policy injection is disabled by default, complete when empty or seeded, and exactly once", async () => {
   await withProject("reflection-policy-injection", async (directory) => {
     const oldXdg = process.env.XDG_CONFIG_HOME;
@@ -1794,7 +1805,8 @@ test("reflection policy injection is disabled by default, complete when empty or
       );
       const disabledSystem = { system: ["base"] };
       await disabled["experimental.chat.system.transform"]!({ sessionID: "reflection-disabled" }, disabledSystem);
-      assert.deepEqual(disabledSystem.system, ["base"]);
+      assertValidationPolicy(disabledSystem.system);
+      assert.deepEqual(withoutValidationPolicy(disabledSystem.system), ["base"]);
 
       const enabled = await SortieDogsPlugin(
         { directory, client },
@@ -1807,9 +1819,12 @@ test("reflection policy injection is disabled by default, complete when empty or
       );
       const empty = { system: ["base"] };
       await enabled["experimental.chat.system.transform"]!({ sessionID: rootSession }, empty);
-      assert.deepEqual(empty.system, ["base", REFLECTION_POLICY]);
+      assertValidationPolicy(empty.system);
+      assert.deepEqual(withoutValidationPolicy(empty.system), ["base", REFLECTION_POLICY]);
+      const currentValidationPolicy = validationPolicyElements(empty.system)[0]!;
       await enabled["experimental.chat.system.transform"]!({ sessionID: rootSession }, empty);
-      assert.equal(empty.system.filter((element) => element.includes(REFLECTION_POLICY)).length, 1);
+      assertValidationPolicy(empty.system);
+      assert.equal(withoutValidationPolicy(empty.system).filter((element) => element.includes(REFLECTION_POLICY)).length, 1);
 
       const execute = enabled.tool!.sortie_reflection.execute;
       const first = JSON.parse(await execute({ action: "record", layer: "run", scope: "first", trigger: "t", cause: "c", prevention: "First.", evidence: "user-correction", evidenceRef: "r" }, { sessionID: rootSession, agent: "dog-coordinator" }));
@@ -1817,17 +1832,20 @@ test("reflection policy injection is disabled by default, complete when empty or
       await execute({ action: "replace", layer: "run", id: first.id, scope: "first", trigger: "t2", cause: "c2", prevention: "First updated." }, { sessionID: rootSession, agent: "dog-coordinator" });
       const seeded = { system: [] as string[] };
       await enabled["experimental.chat.system.transform"]!({ sessionID: rootSession }, seeded);
-      assert.deepEqual(seeded.system, [
+      assertValidationPolicy(seeded.system);
+      assert.deepEqual(withoutValidationPolicy(seeded.system), [
         `${REFLECTION_POLICY}\n\nSORTIE_PROCESS_REFLECTIONS\n- [${first.id}] first (hits=2): First updated.\n- [${second.id}] second (hits=1): Second.`,
       ]);
-      const seededElement = seeded.system[0]!;
+      const seededElement = withoutValidationPolicy(seeded.system)[0]!;
       process.env.SORTIE_REFLECTION = "0";
       await enabled["experimental.chat.system.transform"]!({ sessionID: rootSession }, seeded);
-      assert.deepEqual(seeded.system, []);
+      assertValidationPolicy(seeded.system);
+      assert.deepEqual(withoutValidationPolicy(seeded.system), []);
       delete process.env.SORTIE_REFLECTION;
 
-      seeded.system = [seededElement];
+      seeded.system = [currentValidationPolicy, seededElement];
       await enabled["experimental.chat.system.transform"]!({ sessionID: "reflection-rejected" }, seeded);
+      assert.equal(validationPolicyElements(seeded.system).length, 0);
       assert.deepEqual(seeded.system, []);
 
       const injectBuckets = ReflectionStore.prototype.injectBuckets;
@@ -1835,15 +1853,17 @@ test("reflection policy injection is disabled by default, complete when empty or
       try {
         ReflectionStore.prototype.injectBuckets = async () => { throw new Error("injected storage failure"); };
         await enabled["experimental.chat.system.transform"]!({ sessionID: rootSession }, seeded);
-        assert.deepEqual(seeded.system, [REFLECTION_POLICY]);
-        assert.equal(seeded.system[0]!.includes(first.id), false);
-        assert.equal(seeded.system[0]!.includes(second.id), false);
+        assertValidationPolicy(seeded.system);
+        assert.deepEqual(withoutValidationPolicy(seeded.system), [REFLECTION_POLICY]);
+        assert.equal(withoutValidationPolicy(seeded.system)[0]!.includes(first.id), false);
+        assert.equal(withoutValidationPolicy(seeded.system)[0]!.includes(second.id), false);
       } finally {
         ReflectionStore.prototype.injectBuckets = injectBuckets;
       }
       await enabled["experimental.session.compacting"]!({ sessionID: rootSession }, { context: [], prompt: "" });
       await enabled["experimental.chat.system.transform"]!({ sessionID: rootSession }, seeded);
-      assert.deepEqual(seeded.system, [seededElement]);
+      assertValidationPolicy(seeded.system);
+      assert.deepEqual(withoutValidationPolicy(seeded.system), [seededElement]);
     } finally {
       if (oldXdg === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = oldXdg;
       if (oldConfig === undefined) delete process.env.SORTIE_DOGS_CONFIG; else process.env.SORTIE_DOGS_CONFIG = oldConfig;
@@ -1988,13 +2008,15 @@ test("reflection integration is opt-in, layered, guarded, kill-switchable, and d
       await hooks["chat.message"]!({ sessionID: rootSession, agent: "dog-coordinator" }, { message: { model: {} }, parts: [{ type: "text", text: "root" }] });
       const empty = { system: ["base"] };
       await hooks["experimental.chat.system.transform"]!({ sessionID: rootSession }, empty);
-      assert.deepEqual(empty.system, ["base", REFLECTION_POLICY]);
+      assertValidationPolicy(empty.system);
+      assert.deepEqual(withoutValidationPolicy(empty.system), ["base", REFLECTION_POLICY]);
       assert.deepEqual(logs, [{ level: "warn", service: "sortie-dogs", message: "reflection_corrupt_json" }]);
       const execute = hooks.tool!.sortie_reflection.execute;
       const recorded = JSON.parse(await execute({ action: "record", layer: "run", scope: "integration", trigger: "trigger", cause: "cause", prevention: "Prevent this.", evidence: "user-correction", evidenceRef: "ref" }, { sessionID: rootSession, agent: "dog-coordinator" }));
       const injected = { system: [] as string[] };
       await hooks["experimental.chat.system.transform"]!({ sessionID: rootSession }, injected);
-      assert.equal(injected.system[0], `${REFLECTION_POLICY}\n\nSORTIE_PROCESS_REFLECTIONS\n- [${recorded.id}] integration (hits=1): Prevent this.`);
+      assertValidationPolicy(injected.system);
+      assert.equal(withoutValidationPolicy(injected.system)[0], `${REFLECTION_POLICY}\n\nSORTIE_PROCESS_REFLECTIONS\n- [${recorded.id}] integration (hits=1): Prevent this.`);
       const listed = JSON.parse(await execute({ action: "list", layer: "run" }, { sessionID: rootSession, agent: "dog-coordinator" }));
       assert.equal(listed.entries[0].id, recorded.id);
       const replaced = JSON.parse(await execute({ action: "replace", layer: "run", id: recorded.id, scope: "integration", trigger: "new trigger", cause: "new cause", prevention: "Use the improved prevention." }, { sessionID: rootSession, agent: "dog-coordinator" }));
@@ -2007,7 +2029,8 @@ test("reflection integration is opt-in, layered, guarded, kill-switchable, and d
       await hooks["experimental.session.compacting"]!({ sessionID: rootSession }, compacted);
       const afterCompaction = { system: [] as string[] };
       await hooks["experimental.chat.system.transform"]!({ sessionID: rootSession }, afterCompaction);
-      assert.equal(afterCompaction.system[0], `${REFLECTION_POLICY}\n\nSORTIE_PROCESS_REFLECTIONS\n- [${recorded.id}] integration (hits=2): Use the improved prevention.`);
+      assertValidationPolicy(afterCompaction.system);
+      assert.equal(withoutValidationPolicy(afterCompaction.system)[0], `${REFLECTION_POLICY}\n\nSORTIE_PROCESS_REFLECTIONS\n- [${recorded.id}] integration (hits=2): Use the improved prevention.`);
       assert.equal(await execute({ action: "promote", layer: "run", id: recorded.id, promotedRef: "fix", }, { sessionID: rootSession, agent: "dog-coordinator" }), "promoted");
       assert.equal(await execute({ action: "clear", layer: "run" }, { sessionID: rootSession, agent: "dog-coordinator" }), "cleared");
       await execute({ action: "record", layer: "run", scope: "survive", trigger: "trigger", cause: "cause", prevention: "Keep this.", evidence: "user-correction", evidenceRef: "ref" }, { sessionID: rootSession, agent: "dog-coordinator" });
@@ -2016,7 +2039,8 @@ test("reflection integration is opt-in, layered, guarded, kill-switchable, and d
       assert.equal(JSON.parse(await execute({ action: "list", layer: "project" }, { sessionID: rootSession, agent: "dog-coordinator" })).entries[0].id, projectEntry.id);
       const layered = { system: [] as string[] };
       await hooks["experimental.chat.system.transform"]!({ sessionID: rootSession }, layered);
-      assert.equal(layered.system[0]?.slice(REFLECTION_POLICY.length).trim().split("\n").length, 3);
+      assertValidationPolicy(layered.system);
+      assert.equal(withoutValidationPolicy(layered.system)[0]?.slice(REFLECTION_POLICY.length).trim().split("\n").length, 3);
       const child = await execute({ action: "clear", layer: "run" }, { sessionID: "child", agent: "dog-coordinator" });
       assert.equal(child, "reflection_not_permitted");
       assert.equal(await execute({ action: "clear", layer: "run" }, { sessionID: rootSession, agent: "other-agent" }), "reflection_not_permitted");
@@ -2038,7 +2062,8 @@ test("reflection integration is opt-in, layered, guarded, kill-switchable, and d
       await tinyHooks.tool!.sortie_reflection.execute({ action: "record", layer: "run", scope: "tiny", trigger: "t", cause: "c", prevention: "p", evidence: "user-correction", evidenceRef: "r" }, { sessionID: tinyRoot, agent: "dog-coordinator" });
       const entryBudgetSuppressesEntries = { system: [] as string[] };
       await tinyHooks["experimental.chat.system.transform"]!({ sessionID: tinyRoot }, entryBudgetSuppressesEntries);
-      assert.deepEqual(entryBudgetSuppressesEntries.system, [REFLECTION_POLICY], "maxInjectedTokens=1 suppresses entries while preserving the enabled reflection policy");
+      assertValidationPolicy(entryBudgetSuppressesEntries.system);
+      assert.deepEqual(withoutValidationPolicy(entryBudgetSuppressesEntries.system), [REFLECTION_POLICY], "maxInjectedTokens=1 suppresses entries while preserving the enabled reflection policy");
       process.env.SORTIE_REFLECTION = "0";
       const killed = await SortieDogsPlugin({ directory }, { reflection: { enabled: true } });
       assert.equal(killed.tool?.sortie_reflection, undefined);
@@ -2046,7 +2071,8 @@ test("reflection integration is opt-in, layered, guarded, kill-switchable, and d
       assert.equal(await execute({ action: "clear", layer: "run" }, { sessionID: rootSession, agent: "dog-coordinator" }), "reflection_not_permitted");
       const unchanged = { system: ["base"] };
       await hooks["experimental.chat.system.transform"]!({ sessionID: rootSession }, unchanged);
-      assert.deepEqual(unchanged.system, ["base"]);
+      assertValidationPolicy(unchanged.system);
+      assert.deepEqual(withoutValidationPolicy(unchanged.system), ["base"]);
       delete process.env.SORTIE_REFLECTION;
        const originalNow = Date.now;
        Date.now = () => originalNow() + 30 * 60 * 1000 + 1;
@@ -2089,7 +2115,12 @@ test("reflection host identity failures and children leave storage absent", asyn
         await mkdir(join(xdg, "opencode", "sortie-dogs", "reflection", "runs"), { recursive: true }); await writeFile(runFile, original);
         assert.equal(await hooks.tool!.sortie_reflection.execute({ action: "record", layer: "run", scope: "identity", trigger: "t", cause: "c", prevention: "p", evidence: "user-correction", evidenceRef: "r" }, { sessionID, agent: "dog-coordinator" }), "reflection_not_permitted");
         const system = { system: ["base"] }; await hooks["experimental.chat.system.transform"]!({ sessionID }, system);
-        assert.deepEqual(system.system, ["base"]); assert.equal(await readFile(runFile, "utf8"), original);
+        if (sessionID === "child") assert.deepEqual(system.system, ["base"]);
+        else {
+          assertValidationPolicy(system.system);
+          assert.deepEqual(withoutValidationPolicy(system.system), ["base"]);
+        }
+        assert.equal(await readFile(runFile, "utf8"), original);
       }
     } finally { if (oldXdg === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = oldXdg; await rm(xdg, { recursive: true, force: true }); }
   });
@@ -4318,13 +4349,13 @@ test("fresh-root control uses one host-round-tripped ticket and terminal state r
     const singleGoalPrompt = ["role: implementation", `project_root: ${directory}`,
       `handoff_path: ${handoffPath}`, "source_manifest: [candidate.test.mjs]",
       "operation_manifest: goal.operation-manifest.json", "acceptance: requested runtime passes",
-      `validation: { level: full, command: ${validationCommand}, diagnostics: [] }`, `goal_acceptance_fingerprint: ${goalFingerprintValue}`,
+      `validation: { level: targeted, command: ${validationCommand}, diagnostics: [] }`, `goal_acceptance_fingerprint: ${goalFingerprintValue}`,
       "goal_criterion_id: requested-runtime", "goal_target: goal delivery", "goal_entrypoint: fixture",
       "goal_workload: one unit", 'goal_oracle_coverage:\n  - terminal-rejection',
       "goal_build_boundary: not-applicable", "goal_source: current protected source",
       "goal_candidate: current protected candidate", "goal_source_binding: current-protected",
       "goal_candidate_binding: current-protected",
-      "goal_fixture: host-ticket", "goal_proof_scope: requested-full", "goal_expected_outcome: pass",
+      "goal_fixture: host-ticket", "goal_proof_scope: document-deliverable", "goal_expected_outcome: pass",
       "delivery_intent: implementation", "usable_path_established: false", "controlled_change: false",
       "goal_budget_units: 4"].join("\n");
     const criterionBlock = singleGoalPrompt.slice(singleGoalPrompt.indexOf("goal_criterion_id:"));
@@ -4412,7 +4443,7 @@ test("fresh-root control uses one host-round-tripped ticket and terminal state r
       { code: "goal_build_boundary_invalid", prompt: goalPrompt.replace("goal_build_boundary: not-applicable", "goal_build_boundary: invalid") },
       { code: "goal_source_binding_invalid", prompt: goalPrompt.replace("goal_source_binding: current-protected", "goal_source_binding: invalid") },
       { code: "goal_candidate_binding_invalid", prompt: goalPrompt.replace("goal_candidate_binding: current-protected", "goal_candidate_binding: invalid") },
-      { code: "goal_proof_scope_invalid", prompt: goalPrompt.replace("goal_proof_scope: requested-full", "goal_proof_scope: invalid") },
+      { code: "goal_proof_scope_invalid", prompt: goalPrompt.replace("goal_proof_scope: document-deliverable", "goal_proof_scope: invalid") },
       { code: "goal_expected_outcome_invalid", prompt: goalPrompt.replace("goal_expected_outcome: pass", "goal_expected_outcome: invalid") },
       { code: "goal_oracle_coverage_invalid", prompt: goalPrompt.replace("goal_oracle_coverage:\n  - terminal-rejection", "goal_oracle_coverage: []") },
       { code: "goal_field_missing", prompt: goalPrompt.replace(/^goal_target:.*\n/mu, "") },
@@ -4495,6 +4526,7 @@ test("fresh-root control uses one host-round-tripped ticket and terminal state r
     );
     await inspectHandoffWithRead(hooks, secondHandoffPath, "goal-worker-2");
     assert.equal((await executeBindWriteGate(hooks, directory, "goal-worker-2", "goal-2.operation-manifest.json")).status, "bound");
+    await writeFile(join(directory, "candidate.txt"), "accepted candidate revision 2\n");
     await hooks["tool.execute.before"]!(
       { tool: "bash", sessionID: "goal-worker-2", callID: "native-validation-2" },
       { args: { command: validationCommand } },
@@ -4782,6 +4814,116 @@ test("native patch destinations use the host directory with a nested manifest ro
   });
 });
 
+test("worker requested-full validation fails closed without manufacturing canonical evidence", async () => {
+  await withProject("goal-validation-owner-mismatch", async (directory) => {
+    const command = "node --test candidate.test.mjs";
+    await writeFile(join(directory, "candidate.txt"), "candidate\n");
+    await writeFile(join(directory, "candidate.test.mjs"), "// canonical validation fixture\n");
+    const hooks = await SortieDogsPlugin({ directory, client: { session: {
+      get: async ({ path }: { path: { id: string } }) => ({ data: path.id === "root"
+        ? { agent: "dog-coordinator" } : { agent: "dog-worker", parentID: "root" } }),
+      messages: async () => ({ data: [] }),
+    } } as never });
+    await hooks["chat.message"]!({ sessionID: "root", agent: "dog-coordinator", messageID: "goal-user" }, {
+      message: { id: "goal-user", agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+      parts: [{ type: "text", text: "implement the accepted task" }],
+    });
+    const taskID = "canonical-unit", child = "canonical-child", manifest = "canonical-unit.json";
+    const handoff = join(directory, "handoff.canonical-unit.json");
+    await writeFile(join(directory, manifest), JSON.stringify({ ...operationManifest(["candidate.txt"]),
+      task_id: taskID, read: ["candidate.test.mjs"], validation: [command] }));
+    await writeFile(handoff, JSON.stringify({ ...writeGateHandoff(directory, manifest), id: taskID }));
+    const prompt = [`task_id: ${taskID}`, "role: implementation", `project_root: ${directory}`, `handoff_path: ${handoff}`,
+      "source_manifest: [candidate.test.mjs]", `operation_manifest: ${manifest}`, "acceptance: candidate passes",
+      `validation: { level: full, command: ${command}, diagnostics: [] }`, `goal_acceptance_fingerprint: sha256:${"a".repeat(64)}`,
+      "goal_criterion_id: candidate", "goal_target: candidate", "goal_entrypoint: fixture", "goal_workload: one unit",
+      "goal_oracle_coverage:\n  - acceptance", "goal_build_boundary: not-applicable", "goal_source: current protected source",
+      "goal_candidate: current protected candidate", "goal_source_binding: current-protected", "goal_candidate_binding: current-protected",
+      "goal_fixture: fixture", "goal_proof_scope: requested-full", "goal_expected_outcome: pass", "delivery_intent: implementation",
+      "usable_path_established: false", "controlled_change: false", "goal_budget_units: 2"].join("\n");
+    await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: taskID },
+      { args: { subagent_type: "dog-worker", prompt } });
+    await hooks.event!({ event: { type: "session.created", properties: { info: { id: child, parentID: "root", directory } } } });
+    await hooks["chat.message"]!({ sessionID: child, agent: "dog-worker", parentID: "root" } as never, {
+      message: { agent: "dog-worker", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: prompt }],
+    });
+    await inspectHandoffWithRead(hooks, handoff, child);
+    assert.equal((await executeBindWriteGate(hooks, directory, child, manifest)).status, "bound");
+    await assert.rejects(hooks["tool.execute.before"]!({ tool: "bash", sessionID: child, callID: "canonical-check" },
+      { args: { command } }), (error: unknown) => error instanceof Error &&
+        error.message === "SORTIE_VALIDATION_BUDGET_DENIED: owner-mismatch: coordinator-routing-unavailable");
+    await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: taskID },
+      { output: "<task_result>canonical validation rejected</task_result>", metadata: { sessionId: child } });
+    const path = join(directory, ".git", "sortie-dogs", "run-flight", `${createHash("sha256").update("root").digest("hex")}.json`);
+    const ledger = JSON.parse(await readFile(path, "utf8"));
+    assert.equal(ledger.goal_events.some(({ event }: { event: { kind: string } }) => event.kind === "validation.admission"), false);
+    const settlement = ledger.goal_events.find(({ event }: { event: { kind: string } }) => event.kind === "unit.settled")?.event;
+    assert.deepEqual({ disposition: settlement?.disposition, result_class: settlement?.result_class, evidence: settlement?.evidence },
+      { disposition: "failed", result_class: "process-defect", evidence: [] });
+  });
+});
+
+test("serial settled-pass reuse replaces only the duplicate call and reconciles existing goal evidence", async () => {
+  await withProject("goal-validation-settled-pass-reuse", async (directory) => {
+    const command = "node --test candidate.test.mjs";
+    await writeFile(join(directory, "candidate.txt"), "candidate\n");
+    await writeFile(join(directory, "candidate.test.mjs"), "// expensive validation fixture\n");
+    const hooks = await SortieDogsPlugin({ directory, client: { session: {
+      get: async ({ path }: { path: { id: string } }) => ({ data: path.id === "root"
+        ? { agent: "dog-coordinator" } : { agent: "dog-worker", parentID: "root" } }),
+      messages: async () => ({ data: [] }),
+    } } as never });
+    await hooks["chat.message"]!({ sessionID: "root", agent: "dog-coordinator", messageID: "goal-user" }, {
+      message: { id: "goal-user", agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+      parts: [{ type: "text", text: "implement the accepted task" }],
+    });
+    const taskID = "reuse-unit", child = "reuse-child", manifest = "reuse-unit.json";
+    const handoff = join(directory, "handoff.reuse-unit.json");
+    await writeFile(join(directory, manifest), JSON.stringify({ ...operationManifest(["candidate.txt"]),
+      task_id: taskID, read: ["candidate.test.mjs"], validation: [command] }));
+    await writeFile(handoff, JSON.stringify({ ...writeGateHandoff(directory, manifest), id: taskID }));
+    const prompt = [`task_id: ${taskID}`, "role: implementation", `project_root: ${directory}`, `handoff_path: ${handoff}`,
+      "source_manifest: [candidate.test.mjs]", `operation_manifest: ${manifest}`, "acceptance: candidate passes",
+      `validation: { level: targeted, command: ${command}, diagnostics: [] }`, `goal_acceptance_fingerprint: sha256:${"a".repeat(64)}`,
+      "goal_criterion_id: candidate", "goal_target: candidate", "goal_entrypoint: fixture", "goal_workload: one unit",
+      "goal_oracle_coverage:\n  - acceptance", "goal_build_boundary: not-applicable", "goal_source: current protected source",
+      "goal_candidate: current protected candidate", "goal_source_binding: current-protected", "goal_candidate_binding: current-protected",
+      "goal_fixture: fixture", "goal_proof_scope: document-deliverable", "goal_expected_outcome: pass", "delivery_intent: implementation",
+      "usable_path_established: false", "controlled_change: false", "goal_budget_units: 2"].join("\n");
+    await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: taskID },
+      { args: { subagent_type: "dog-worker", prompt } });
+    await hooks.event!({ event: { type: "session.created", properties: { info: { id: child, parentID: "root", directory } } } });
+    await hooks["chat.message"]!({ sessionID: child, agent: "dog-worker", parentID: "root" } as never, {
+      message: { agent: "dog-worker", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: prompt }],
+    });
+    await inspectHandoffWithRead(hooks, handoff, child);
+    assert.equal((await executeBindWriteGate(hooks, directory, child, manifest)).status, "bound");
+
+    await hooks["tool.execute.before"]!({ tool: "bash", sessionID: child, callID: "first-check" }, { args: { command } });
+    await hooks["tool.execute.after"]!({ tool: "bash", sessionID: child, callID: "first-check", args: { command } },
+      { output: "passed", metadata: { exit: 0 } });
+    const duplicate = { args: { command } };
+    await hooks["tool.execute.before"]!({ tool: "bash", sessionID: child, callID: "duplicate-check" }, duplicate);
+    assert.notEqual(duplicate.args.command, command);
+    assert.match(duplicate.args.command, /SORTIE_VALIDATION_REUSED/u);
+    await hooks["tool.execute.after"]!({ tool: "bash", sessionID: child, callID: "duplicate-check", args: duplicate.args },
+      { output: "SORTIE_VALIDATION_REUSED", metadata: { exit: 0 } });
+    await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: taskID },
+      { output: "<task_result>settled pass reused</task_result>", metadata: { sessionId: child } });
+
+    const path = join(directory, ".git", "sortie-dogs", "run-flight", `${createHash("sha256").update("root").digest("hex")}.json`);
+    const ledger = JSON.parse(await readFile(path, "utf8"));
+    const admissions = ledger.goal_events.map(({ event }: { event: { kind: string } }) => event)
+      .filter((event: { kind: string }) => event.kind === "validation.admission");
+    assert.deepEqual(admissions.map((event: { decision: string }) => event.decision), ["ALLOW", "SKIP"]);
+    assert.equal(ledger.goal_events.filter(({ event }: { event: { kind: string } }) => event.kind === "validation.settled").length, 1);
+    const settlement = ledger.goal_events.find(({ event }: { event: { kind: string } }) => event.kind === "unit.settled")?.event;
+    assert.equal(settlement?.disposition, "succeeded");
+    assert.equal(settlement?.evidence.length, 1);
+    assert.deepEqual(settlement?.evidence[0].execution.command, [command]);
+  });
+});
+
 test("validation admission-only failures do not consume no-progress and cannot erase a real failed check", async () => {
   await withProject("goal-validation-process-defect", async (directory) => {
     const command = "node --test candidate.test.mjs";
@@ -4804,11 +4946,11 @@ test("validation admission-only failures do not consume no-progress and cannot e
       await writeFile(handoff, JSON.stringify({ ...writeGateHandoff(directory, manifest), id: taskID }));
       const prompt = [`task_id: ${taskID}`, "role: implementation", `project_root: ${directory}`, `handoff_path: ${handoff}`,
         "source_manifest: [candidate.test.mjs]", `operation_manifest: ${manifest}`, "acceptance: candidate passes",
-        `validation: { level: full, command: ${command}, diagnostics: [] }`, `goal_acceptance_fingerprint: sha256:${"a".repeat(64)}`,
+        `validation: { level: targeted, command: ${command}, diagnostics: [] }`, `goal_acceptance_fingerprint: sha256:${"a".repeat(64)}`,
         "goal_criterion_id: candidate", "goal_target: candidate", "goal_entrypoint: fixture", "goal_workload: one unit",
         "goal_oracle_coverage:\n  - acceptance", "goal_build_boundary: not-applicable", "goal_source: current protected source",
         "goal_candidate: current protected candidate", "goal_source_binding: current-protected", "goal_candidate_binding: current-protected",
-        "goal_fixture: fixture", "goal_proof_scope: requested-full", "goal_expected_outcome: pass", "delivery_intent: implementation",
+        "goal_fixture: fixture", "goal_proof_scope: document-deliverable", "goal_expected_outcome: pass", "delivery_intent: implementation",
         "usable_path_established: false", "controlled_change: false", "goal_budget_units: 6"].join("\n");
       await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: taskID },
         { args: { subagent_type: "dog-worker", prompt } });
@@ -4819,6 +4961,7 @@ test("validation admission-only failures do not consume no-progress and cannot e
       await inspectHandoffWithRead(hooks, handoff, child);
       assert.equal((await executeBindWriteGate(hooks, directory, child, manifest)).status, "bound");
       if (index < 3) {
+        await writeFile(join(directory, "candidate.txt"), `candidate revision ${index}\n`);
         await hooks["tool.execute.before"]!({ tool: "bash", sessionID: child, callID: `first-check-${index}` }, { args: { command } });
         await hooks["tool.execute.after"]!({ tool: "bash", sessionID: child, callID: `first-check-${index}`, args: { command } },
           { output: index === 0 ? "failed" : "host execution unavailable", metadata: index === 0 ? { exit: 1 } : {} });
@@ -4861,11 +5004,11 @@ test("successful revalidation of an existing criterion does not become a no-prog
       await writeFile(handoff, JSON.stringify({ ...writeGateHandoff(directory, manifest), id: taskID }));
       const prompt = [`task_id: ${taskID}`, "role: implementation", `project_root: ${directory}`, `handoff_path: ${handoff}`,
         "source_manifest: [candidate.txt]", `operation_manifest: ${manifest}`, "acceptance: candidate passes",
-        `validation: { level: full, command: ${command}, diagnostics: [] }`, `goal_acceptance_fingerprint: sha256:${"a".repeat(64)}`,
+        `validation: { level: targeted, command: ${command}, diagnostics: [] }`, `goal_acceptance_fingerprint: sha256:${"a".repeat(64)}`,
         "goal_criterion_id: candidate", "goal_target: candidate", "goal_entrypoint: fixture", "goal_workload: one unit",
         "goal_oracle_coverage:\n  - acceptance", "goal_build_boundary: not-applicable", "goal_source: current protected source",
         "goal_candidate: current protected candidate", "goal_source_binding: current-protected", "goal_candidate_binding: current-protected",
-        "goal_fixture: fixture", "goal_proof_scope: requested-full", "goal_expected_outcome: pass", "delivery_intent: implementation",
+        "goal_fixture: fixture", "goal_proof_scope: document-deliverable", "goal_expected_outcome: pass", "delivery_intent: implementation",
         "usable_path_established: false", "controlled_change: false", "goal_budget_units: 6"].join("\n");
       await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: taskID },
         { args: { subagent_type: "dog-worker", prompt } });

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -178,6 +178,27 @@ test("combined validation nonzero persists failure evidence and removes its temp
     const persisted = await reopened.snapshot("root", "run-validation-fail");
     assert.deepEqual(persisted?.validation, failed.validation);
     assert.deepEqual(persisted?.blocker, failed.blocker);
+  } finally { await rm(value.root, { recursive: true, force: true }); }
+});
+
+test("exit zero followed by a dirty validation worktree remains failed and non-reusable", async () => {
+  const value = await fixture("validation-dirty-after-pass");
+  try {
+    const command = [process.execPath, "-e", "require('node:fs').writeFileSync('validation-dirty.txt','dirty')"];
+    const a = await artifact(value.repository, value.base, "a", "a.txt", "a\n", command);
+    const b = await artifact(value.repository, value.base, "b", "b.txt", "b\n", command);
+    const queue = await WorktreeIntegrationQueue.open({ repositoryRoot: value.repository, targetBranch: "target" });
+    await queue.enqueue("root", archive(value.base, [a, b], {}, "run-validation-dirty"));
+    const failed = await queue.prepare("root", "run-validation-dirty");
+    assert.equal(failed.phase, "failed");
+    assert.equal(failed.failure_code, "validation-failed");
+    const state = JSON.parse(await readFile(join(value.repository, ".git", "sortie-dogs", "integration-queue-v2", "state.json"), "utf8")) as {
+      active: { validation_budget: { consumed: number; evidence_keys: string[] } };
+    };
+    assert.equal(state.active.validation_budget.consumed, 1);
+    assert.deepEqual(state.active.validation_budget.evidence_keys, [],
+      "dirty postconditions must not publish reusable pass evidence");
+    assert.equal((await git(value.repository, "rev-parse", "target")).trim(), value.base);
   } finally { await rm(value.root, { recursive: true, force: true }); }
 });
 

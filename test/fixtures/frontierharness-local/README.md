@@ -155,8 +155,9 @@ node $runner cleanup --confirm --manifest $manifest
 Do not run Bare in this sequence. The runner resolves v0.10 to `init <workspace> --profile v010`,
 `dist/runtime-assets-v010.js`, `V010_RUNTIME_ASSET_VERSION`, `dog-operator`, and required
 `dog-operator`/`dogs-coordinator`/`dog-worker-v010`/`sortie-v010` assets before execution. The pinned
-model remains `openai/gpt-5.6-sol` with variant `high`. An Astra configuration is a separate manifest
-experiment, not this qualification.
+model remains one of the approved v0.10 operator routes: `openai/gpt-5.6-sol` / `high`,
+`openai/gpt-5.6-terra` / `xhigh`, or `openai/gpt-5.6-luna-fast` / `max`. An Astra configuration is a separate
+manifest experiment, not this qualification.
 
 Model-free WSL stop check: `node test/fixtures/frontierharness-local/run-stop-rpt.mjs` inside a WSL login shell.
 

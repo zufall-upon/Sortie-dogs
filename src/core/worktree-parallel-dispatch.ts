@@ -13,6 +13,7 @@ import {
   type LunaFabricSchedulerState,
 } from "./luna-fabric-scheduler.js";
 import type {
+  ContainedValidationResult,
   ParallelDispatchArchive,
   ParallelDispatchDescriptor,
   ParallelDispatchOutcome,
@@ -30,7 +31,8 @@ import { runBudgetedContainedValidation } from "./worktree-commit-artifact.js";
 import { inspectExecutionPlan, type ExecutionPlan } from "./execution-plan.js";
 import { appendRunFlightLedgerEvents, createRunFlightPlanPrefix, reconstructRunFlightLedger, RunFlightLedger, type RunFlightEventRecord } from "./run-flight-ledger.js";
 import { EvidenceCapsuleStore } from "./evidence-capsule.js";
-import { decideValidationBudget, validationEvidenceKey, type ValidationBudgetRequest } from "./validation-budget.js";
+import { decideValidationBudget, validationDurationGuidance, validationEvidenceKey, validationEvidenceState, validationResultFingerprint,
+  type ValidationBudgetRequest, type ValidationOutcome } from "./validation-budget.js";
 import type { ChildTerminalEvidence } from "./child-terminal-reconciliation.js";
 import { isChildTerminalIdentity, sameChildTerminalIdentity, type ChildTerminalIdentity } from "./child-terminal-reconciliation.js";
 import { CancellableChildLifecycle } from "./child-lifecycle-runtime.js";
@@ -67,6 +69,43 @@ const STATE_SCOPE = Object.freeze({ read: [] as string[], write: ["sortie-dogs/p
 const PREPARE_SCOPE = Object.freeze({ read: [] as string[], write: ["sortie-dogs/parallel-dispatch-prepare"] });
 const FABRIC_OPERATION_SCOPE = Object.freeze({ read: [] as string[], write: ["sortie-dogs/luna-fabric-operation"] });
 const activeFabricValidations = new Set<string>();
+
+export function decideFabricValidationAdmission(request: ValidationBudgetRequest, consumed: number,
+  events: readonly unknown[]) {
+  const evidenceKey = validationEvidenceKey(request);
+  const evidence = validationEvidenceState(events);
+  const passed = events.flatMap(value => {
+    if (value === null || typeof value !== "object") return [];
+    const event = value as Record<string, unknown>;
+    return event.kind === "validation.settled" && event.evidence_key === evidenceKey && event.outcome === "passed" &&
+      event.exit_code === 0 && typeof event.evidence_fingerprint === "string" &&
+      /^sha256:[a-f0-9]{64}$/u.test(event.evidence_fingerprint)
+      ? [{ fingerprint: event.evidence_fingerprint.slice("sha256:".length),
+        duration_ms: typeof event.duration_ms === "number" ? event.duration_ms : undefined }] : [];
+  });
+  const guidance = validationDurationGuidance(passed.flatMap(({ duration_ms }) => duration_ms === undefined ? [] : [duration_ms]));
+  const decision = decideValidationBudget(request, { limit: 1, consumed,
+    evidence_keys: evidence.reusable, blocked_evidence_keys: evidence.blocked,
+    prior_duration_ms: guidance.median_ms ?? undefined });
+  if (decision.decision === "SKIP" && passed.length === 0) {
+    return { ...decision, decision: "DENY" as const, reason: "evidence-proof-unavailable",
+      redundant_time_ms: 0, reused_fingerprint: null };
+  }
+  return { ...decision, reused_fingerprint: decision.decision === "SKIP" ? passed.at(-1)!.fingerprint : null };
+}
+
+export interface FabricValidationSettlement {
+  readonly outcome: ValidationOutcome;
+  readonly exitCode: number | null;
+  readonly duration_ms?: number;
+}
+
+export function finalizeFabricValidationSettlement(settlement: FabricValidationSettlement,
+  postconditionsPassed: boolean): FabricValidationSettlement {
+  return postconditionsPassed || settlement.outcome !== "passed"
+    ? settlement
+    : { ...settlement, outcome: "failed" };
+}
 
 export type ParallelDispatchErrorCode =
   | "invalid-contract"
@@ -1418,20 +1457,39 @@ export class ParallelDispatchCoordinator {
           const path = join(this.stateRoot, `fabric-validation-${randomUUID()}`);
           let added = false;
           let result;
+          let pendingSettlement: FabricValidationSettlement | undefined;
+          let settlementPersisted = false;
+          const validationRequest: ValidationBudgetRequest = { run_id: runID, operation_id: runID,
+            source_snapshot: evidence.fabric.candidate_head, candidate: evidence.fabric.candidate_head,
+            command: requestedCommand, environment: { platform: process.platform, arch: process.arch, runtime: process.version },
+            scope: "canonical", owner: "coordinator",
+            expected_evidence: ["source_snapshot", "command", "scope", "exit_code", "clean_worktree"],
+            marginal_value: { unmet_criteria: ["fabric-candidate"], risk_hypothesis: null }, reason: "acceptance" };
+          const persistSettlement = async (settlement: FabricValidationSettlement): Promise<void> => {
+            await this.transaction((state) => {
+              const run = this.requireRun(state, ownerRoot, runID);
+              // The enclosing fabric validation transition durably settles legacy/direct runs.
+              if (run.plan_ledger === null) return { result: undefined, changed: false };
+              run.plan_ledger = appendRunFlightLedgerEvents(run.plan_ledger, [{ kind: "validation.settled", at: new Date().toISOString(),
+                reservation_id: validationEvidenceKey(validationRequest), operation_id: validationRequest.operation_id,
+                evidence_key: validationEvidenceKey(validationRequest), outcome: settlement.outcome, exit_code: settlement.exitCode,
+                evidence_fingerprint: validationResultFingerprint(validationRequest, settlement.outcome, settlement.exitCode),
+                ...(settlement.duration_ms === undefined ? {} : { duration_ms: settlement.duration_ms }), reason: settlement.outcome }]);
+              return { result: undefined, changed: true };
+            });
+            settlementPersisted = true;
+          };
           try {
             await this.gitBuffer(["worktree", "add", "--detach", path, evidence.fabric.candidate_head]);
             added = true;
             const beforeHead = (await this.gitBuffer(["rev-parse", "--verify", "HEAD^{commit}"], undefined, path)).toString("utf8").trim();
             const beforeStatus = await this.gitBuffer(["status", "--porcelain=v1", "--untracked-files=normal"], undefined, path);
             if (beforeHead !== evidence.fabric.candidate_head || beforeStatus.length !== 0) throw new Error("validation-worktree");
-            const validationRequest: ValidationBudgetRequest = { run_id: runID, operation_id: runID,
-              source_snapshot: evidence.fabric.candidate_head, candidate: evidence.fabric.candidate_head,
-              command: requestedCommand, scope: "full",
-              expected_evidence: ["source_snapshot", "command", "scope", "exit_code", "clean_worktree"], reason: "acceptance" };
             result = await runBudgetedContainedValidation({ executable, args, cwd: path, timeout_ms: timeoutMs }, {
               request: validationRequest,
               reserve: async () => {
-                let reservation: { decision: "ALLOW" | "DENY"; reservation_id: string | null; reason: string } =
+                let reservation: { decision: "ALLOW" | "SKIP" | "DENY"; reservation_id: string | null; reason: string;
+                  reused?: ContainedValidationResult } =
                   { decision: "DENY", reservation_id: null, reason: "invalid-contract" };
                 await this.transaction((state) => {
                   const run = this.requireRun(state, ownerRoot, runID);
@@ -1441,37 +1499,39 @@ export class ParallelDispatchCoordinator {
                     reservation = { decision: "ALLOW", reservation_id: validationEvidenceKey(validationRequest), reason: "allowed" };
                     return { result: undefined, changed: false };
                   }
-                  const current = reconstructRunFlightLedger(run.plan_ledger);
-                  const evidenceKeys = run.plan_ledger.flatMap(({ event }) => event.kind === "validation.admission" && event.decision === "ALLOW" ? [event.evidence_key] : []);
-                  const decision = decideValidationBudget(validationRequest, { limit: 1, consumed: current.validation_budget.consumed, evidence_keys: evidenceKeys });
+                   const current = reconstructRunFlightLedger(run.plan_ledger);
+                   const decision = decideFabricValidationAdmission(validationRequest, current.validation_budget.consumed,
+                     run.plan_ledger.map(({ event }) => event));
                   const reservationId = decision.decision === "ALLOW" ? validationEvidenceKey(validationRequest) : null;
                   run.plan_ledger = appendRunFlightLedgerEvents(run.plan_ledger, [{ kind: "validation.admission", at: new Date().toISOString(),
                     reservation_id: reservationId ?? `deny-${validationEvidenceKey(validationRequest)}`, operation_id: validationRequest.operation_id,
-                    evidence_key: decision.evidence_key ?? `sha256:${"0".repeat(64)}`, scope: decision.scope, decision: decision.decision,
-                    reason: decision.reason, consumed: decision.consumed, limit: 1 }]);
-                  reservation = { decision: decision.decision, reservation_id: reservationId, reason: decision.reason };
+                     evidence_key: decision.evidence_key ?? `sha256:${"0".repeat(64)}`, scope: decision.scope, decision: decision.decision,
+                     reason: decision.reason, consumed: decision.consumed, limit: 1, saved_ms: decision.redundant_time_ms }]);
+                   reservation = { decision: decision.decision, reservation_id: reservationId, reason: decision.reason,
+                     ...(decision.decision === "SKIP" && decision.reused_fingerprint !== null ? { reused: Object.freeze({ ok: true as const,
+                       command: Object.freeze([...requestedCommand]), exit_code: 0 as const,
+                       fingerprint: decision.reused_fingerprint, error: null }) } : {}) };
                   return { result: undefined, changed: true };
                 });
                 return reservation;
               },
-              settle: async (outcome, exitCode) => {
-                await this.transaction((state) => {
-                  const run = this.requireRun(state, ownerRoot, runID);
-                  // The enclosing fabric validation transition durably settles legacy/direct runs.
-                  if (run.plan_ledger === null) return { result: undefined, changed: false };
-                  run.plan_ledger = appendRunFlightLedgerEvents(run.plan_ledger, [{ kind: "validation.settled", at: new Date().toISOString(),
-                    reservation_id: validationEvidenceKey(validationRequest), operation_id: validationRequest.operation_id,
-                    evidence_key: validationEvidenceKey(validationRequest), outcome, exit_code: exitCode }]);
-                  return { result: undefined, changed: true };
-                });
-              },
+               settle: async (outcome, exitCode, duration_ms) => {
+                 pendingSettlement = { outcome, exitCode, ...(duration_ms === undefined ? {} : { duration_ms }) };
+               },
             });
             const afterHead = (await this.gitBuffer(["rev-parse", "--verify", "HEAD^{commit}"], undefined, path)).toString("utf8").trim();
             const afterStatus = await this.gitBuffer(["status", "--porcelain=v1", "--untracked-files=normal"], undefined, path);
-            if (afterHead !== evidence.fabric.candidate_head || afterStatus.length !== 0) {
+            const postconditionsPassed = afterHead === evidence.fabric.candidate_head && afterStatus.length === 0;
+            if (pendingSettlement !== undefined) {
+              await persistSettlement(finalizeFabricValidationSettlement(pendingSettlement, postconditionsPassed));
+            }
+            if (!postconditionsPassed) {
               result = { ...result, ok: false as const, error: "execution-failed" as const };
             }
           } catch {
+            if (pendingSettlement !== undefined && !settlementPersisted) {
+              await persistSettlement(finalizeFabricValidationSettlement(pendingSettlement, false)).catch(() => undefined);
+            }
             throw new ParallelDispatchError("candidate-invalid", "Final fabric validation worktree failed closed.");
           } finally {
             if (added) {

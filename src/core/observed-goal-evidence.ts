@@ -1,6 +1,8 @@
 import { goalFingerprint, type GoalEvidence, type GoalFlightState } from "./goal-bound.js";
 
 export interface ObservedGoalExecution {
+  /** Host-derived executor identity; never accept a worker-provided owner label. */
+  readonly owner: "worker" | "coordinator";
   readonly immutableRef: string;
   readonly command: readonly string[];
   readonly startedAt: string;
@@ -17,8 +19,11 @@ export interface ObservedGoalExecution {
  * Preserve each measurement identity instead of dropping all heterogeneous ones. */
 export function evidenceFromObservedExecution(execution: ObservedGoalExecution, state: GoalFlightState, unitID: string): GoalEvidence[] {
   if (!execution.fresh || execution.exitCode !== 0 || execution.outcome !== "pass" || !state.goal_id || !state.acceptance_fingerprint) return [];
+  // Canonical requested-full proof is coordinator-owned and must never be manufactured from a
+  // child shell result. The caller derives owner from the observed host session lineage.
   const matching = state.acceptance_contract?.criteria.filter(criterion =>
-    criterion.validation_command === execution.command[0] && criterion.expected_outcome === "pass" && criterion.proof_scope === "requested-full") ?? [];
+    criterion.validation_command === execution.command[0] && criterion.expected_outcome === "pass" &&
+    (criterion.proof_scope !== "requested-full" || execution.owner === "coordinator")) ?? [];
   const groups = new Map<string, typeof matching>();
   for (const criterion of matching) {
     const { criterion_id: _id, ...measurement } = criterion;

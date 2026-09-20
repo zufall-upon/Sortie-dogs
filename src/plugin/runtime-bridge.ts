@@ -23,6 +23,8 @@ export interface RuntimeBridge {
   readonly defaultModelCatalog?: import("./model-routing.js").ModelCatalog;
   transformConfiguration?(value: unknown): unknown;
   continuationCheckpoint?(rootSessionID: string): Promise<string | undefined>;
+  ownsCanonicalValidation?(rootSessionID: string, unitID: string, childSessionID: string,
+    command: string): Promise<boolean>;
   onSerialSettlement?(settlement: SerialDispatchSettlement): Promise<void>;
   onRootTerminal?(rootSessionID: string, receipt: GoalTerminalReceipt): Promise<void>;
   connected?(control: {
@@ -57,6 +59,8 @@ export interface RuntimeBridge {
       callID: string; repairFingerprint: string; binding: OperatorRepairValidationRetryBinding }): Promise<void>;
     finishOperatorContractRepairValidation(rootSessionID: string, childSessionID: string): Promise<void>;
     currentReceipt(rootSessionID: string): Promise<GoalTerminalReceipt | undefined>;
+    retireHistoricalGoal(rootSessionID: string): Promise<boolean>;
+    isUncontractedGoal(rootSessionID: string, latestUserMessageID: string): Promise<boolean>;
     currentBudget(rootSessionID: string): Promise<{
       readonly max_units: number;
       readonly consumed_units: number;

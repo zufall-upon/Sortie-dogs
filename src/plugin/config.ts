@@ -15,6 +15,7 @@ import {
   type ModelTarget,
 } from "./model-routing.js";
 import { CONSULTATION_ROLE_POLICY } from "../core/consultation.js";
+import { VALIDATION_PROFILES, type ValidationProfile } from "../core/validation-budget.js";
 import {
   CONTINUATION_CAPABILITY,
   DEFAULT_MAX_AUTO_CONTINUES,
@@ -54,6 +55,8 @@ export interface SortieDogsPluginOptions {
    */
   continuation?: ContinuationPolicyInput;
   reflection?: ReflectionPolicyInput;
+  /** Validation depth policy. Full-suite execution still requires release context or explicit risk. */
+  validationProfile?: ValidationProfile;
 }
 
 export type ContinuationPolicyInput = Partial<ContinuationConfiguration>;
@@ -113,6 +116,7 @@ export interface ConfiguredPlugin {
   consultation: ConsultationPolicy;
   continuation: ContinuationConfiguration;
   reflection: ReflectionConfiguration;
+  validationProfile: ValidationProfile;
 }
 
 export type PluginConfiguration = ConfiguredPlugin | { kind: "invalid" };
@@ -159,6 +163,7 @@ export const DEFAULT_PLUGIN_OPTIONS: Readonly<
     taskWatchdogMilliseconds: DEFAULT_TASK_WATCHDOG_MILLISECONDS,
   }),
   reflection: Object.freeze({ enabled: false, layers: Object.freeze({ run: true, project: true, global: false }), maxInjectedEntries: 3, maxInjectedTokens: 500 }),
+  validationProfile: "balanced",
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -349,7 +354,7 @@ function parseLayer(value: unknown): SortieDogsPluginOptions | undefined {
   if (Object.keys(value).some(
     (key) => ![
       "operationManifestPath", "handoffPaths", "readOnlyTools", "dedicatedWorkerModel",
-      "modelRouting", "modelCatalog", "freeTierFallbackModels", "consultation", "continuation", "reflection",
+      "modelRouting", "modelCatalog", "freeTierFallbackModels", "consultation", "continuation", "reflection", "validationProfile",
     ].includes(key),
   )) {
     return undefined;
@@ -410,6 +415,7 @@ function parseLayer(value: unknown): SortieDogsPluginOptions | undefined {
   ) return undefined;
   if (value.consultation !== undefined && consultation === undefined) return undefined;
   if (value.continuation !== undefined && continuation === undefined) return undefined;
+  if (value.validationProfile !== undefined && !VALIDATION_PROFILES.includes(value.validationProfile as ValidationProfile)) return undefined;
   return {
     operationManifestPath: manifestPath as string | undefined,
     handoffPaths: handoffPaths as readonly string[] | undefined,
@@ -421,6 +427,7 @@ function parseLayer(value: unknown): SortieDogsPluginOptions | undefined {
     consultation,
     continuation,
     reflection,
+    validationProfile: value.validationProfile as ValidationProfile | undefined,
   };
 }
 
@@ -436,6 +443,7 @@ export function resolvePluginConfiguration(...values: readonly unknown[]): Plugi
   let consultation = DEFAULT_PLUGIN_OPTIONS.consultation;
   let continuation = DEFAULT_PLUGIN_OPTIONS.continuation;
   let reflection: ReflectionConfiguration = DEFAULT_PLUGIN_OPTIONS.reflection as ReflectionConfiguration;
+  let validationProfile = DEFAULT_PLUGIN_OPTIONS.validationProfile;
   const configuredRoles = new Set<string>();
   for (const value of values) {
     const layer = parseLayer(value);
@@ -473,6 +481,7 @@ export function resolvePluginConfiguration(...values: readonly unknown[]): Plugi
       continuation = Object.freeze({ ...continuation, ...layer.continuation });
     }
     if (layer.reflection !== undefined) reflection = Object.freeze({ ...reflection, ...layer.reflection, layers: Object.freeze({ ...reflection.layers, ...(layer.reflection.layers ?? {}) }) });
+    if (layer.validationProfile !== undefined) validationProfile = layer.validationProfile;
   }
   if (dedicatedWorkerModel.model === LUNA_FABRIC_WORKER_MODEL) return { kind: "invalid" };
   modelRouting = {
@@ -506,6 +515,7 @@ export function resolvePluginConfiguration(...values: readonly unknown[]): Plugi
     consultation,
     continuation,
     reflection,
+    validationProfile,
   };
 }
 

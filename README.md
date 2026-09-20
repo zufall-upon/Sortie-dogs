@@ -63,7 +63,7 @@ bounded implementation, canonical validation, and evidence-backed completion.
 
 Guides: [日本語](docs/guide-ja.md) · [简体中文](docs/guide-zh-CN.md) · [テスト実行](docs/testing.md) · [CLI testing](docs/cli-testing.md)
 
-Release: [v0.10.5](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.10.5)
+Release: [v0.10.6-rc.1](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.10.6-rc.1)
 
 ### Direction for v0.10.x
 

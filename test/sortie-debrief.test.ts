@@ -67,6 +67,18 @@ test("goal-boundary timing and unrelated tool metadata do not erase known tokens
   assert.deepEqual(result.overlap, { workerMilliseconds: 50, wallMilliseconds: 50 });
 });
 
+test("validation efficiency counts every settlement but samples only successful durations", () => {
+  const result = buildDebrief(receipt, null, { complete: true, sessions: [], window: undefined }, records([
+    { kind: "validation.settled", goal_id: "g", outcome: "failed", exit_code: 1, duration_ms: 900 },
+    { kind: "validation.settled", goal_id: "g", outcome: "interrupted", exit_code: null, duration_ms: 500 },
+    { kind: "validation.settled", goal_id: "g", outcome: "passed", exit_code: 0, duration_ms: 37 },
+  ]));
+  assert.deepEqual(result.validationEfficiency, {
+    completed: 3, skipped: 0, rejected: 0, redundantMilliseconds: 0,
+    medianMilliseconds: 37, p90Milliseconds: 37,
+  });
+});
+
 test("serial reviewer outcomes are labeled as reviewer reports without treating worker prose as review", () => {
   const make = (role: string) => buildDebrief(receipt, contract, { complete: true, window: undefined,
     sessions: [observe("root", [message("root", 1, 30, [

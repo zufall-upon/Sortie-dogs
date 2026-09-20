@@ -28,6 +28,21 @@ Japanese change, verification, and next-action paragraphs remain intact.
   No raw conversation, patch, command, or tool output is included in the debrief snapshot. Commands
   used for matching are retained only as hashes. The final ledger read is reused for attempt coverage.
 
+## Validation efficiency
+
+The validation profile chooses depth for non-canonical checks: `fast` selects static checks,
+`balanced` selects targeted checks, and `assurance` selects related checks. Canonical proof remains
+canonical; explicit risk or release context escalates to the coordinator-owned full suite. Static,
+targeted, and related checks are worker-owned; canonical and full-suite checks are coordinator-owned.
+
+An unchanged candidate, command, and execution environment has one stable evidence identity. A repeat
+is recorded as `SKIP`, consumes no additional validation budget, and reports the saved prior duration.
+Any change to those inputs prevents deduplication. Invalid marginal-value declarations, owner mismatches,
+and unsubstantiated retries fail closed.
+
+The efficiency card reports completed, skipped, and rejected validations, redundant time avoided, and
+the median/p90 duration of completed validations. These are ledger-derived measurements, not estimates.
+
 ## Traits
 
 - **連携作戦**: distinct worker execution intervals positively overlap. Mere dispatch count is

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { ChildProcess, execFile } from "node:child_process";
 import { writeFileSync } from "node:fs";
-import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -10,6 +10,7 @@ import test from "node:test";
 import {
   produceWorktreeCommitArtifact,
   recoverWorktreeCommitArtifact,
+  runBudgetedContainedValidation,
   runContainedValidation,
   verifyWorktreeCommitArtifact,
   WorktreeCommitArtifactError,
@@ -144,6 +145,65 @@ test("produces frozen evidence, reverifies it, accepts lifecycle commit, and cle
     await value.lifecycle.acceptCommit(value.worktreeId, value.path, value.base, artifact.commit_sha, value.branch);
     await value.lifecycle.cleanup(value.worktreeId);
     await value.lifecycle.cleanup(`other-valid`);
+  } finally {
+    await removeFixture(value);
+  }
+});
+
+test("budgeted validation reuses valid SKIP evidence without spawning and records measured duration", async () => {
+  let settled = false;
+  const reused = Object.freeze({ ok: true as const, command: Object.freeze([process.execPath, "prior"]),
+    exit_code: 0 as const, fingerprint: "passed-fingerprint", error: null });
+  const skipped = await runBudgetedContainedValidation({ executable: process.execPath, args: ["-e", "process.exit(41)"], cwd: process.cwd(), timeout_ms: 5_000 }, {
+    request: {} as never,
+    reserve: async () => ({ decision: "SKIP" as const, reservation_id: null, reason: "duplicate-evidence", reused }),
+    settle: async () => { settled = true; },
+  });
+  assert.equal(skipped, reused);
+  assert.equal(settled, false);
+
+  const unsupported = await runBudgetedContainedValidation({ executable: process.execPath, cwd: process.cwd(), timeout_ms: 5_000 }, {
+    request: {} as never,
+    reserve: async () => ({ decision: "SKIP" as const, reservation_id: null, reason: "duplicate-evidence" }),
+    settle: async () => { settled = true; },
+  });
+  assert.equal(unsupported.ok, false);
+  assert.equal(unsupported.error, "invalid-request");
+
+  let duration: number | undefined;
+  const passed = await runBudgetedContainedValidation({ executable: process.execPath, args: ["-e", "setTimeout(() => {}, 20)"], cwd: process.cwd(), timeout_ms: 5_000 }, {
+    request: {} as never,
+    reserve: async () => ({ decision: "ALLOW" as const, reservation_id: "reservation", reason: "allowed" }),
+    settle: async (_outcome, _exitCode, measured) => { duration = measured; },
+  });
+  assert.equal(passed.ok, true);
+  assert.equal(passed.exit_code, 0);
+  assert.equal(Number.isSafeInteger(duration) && duration! >= 0, true);
+});
+
+test("artifact settled-pass reuse skips process launch and settlement while preserving artifact invariants", async () => {
+  const value = await fixture("reuse-passed");
+  try {
+    await writeFile(join(value.path, "src", "value.txt"), "implemented\n");
+    const marker = join(value.root, "validator-ran.txt");
+    let afterValidation = false;
+    const artifact = await produceWorktreeCommitArtifact({
+      descriptor: value.descriptor,
+      managed_path: value.path,
+      validation: { executable: process.execPath,
+        args: ["-e", "require('node:fs').writeFileSync(process.argv[1], 'ran')", marker], timeout_ms: 5_000 },
+    }, {
+      signal: new AbortController().signal,
+      enterProtectedPhase: () => undefined,
+      beforeValidation: async () => ({ decision: "reuse-passed" }),
+      afterValidation: async () => { afterValidation = true; },
+    });
+    assert.equal(await stat(marker).catch(() => undefined), undefined);
+    assert.equal(afterValidation, false);
+    assert.deepEqual(artifact.validation.command, [process.execPath,
+      "-e", "require('node:fs').writeFileSync(process.argv[1], 'ran')", marker]);
+    assert.deepEqual(await verifyWorktreeCommitArtifact({ descriptor: value.descriptor,
+      managed_path: value.path, artifact }), artifact);
   } finally {
     await removeFixture(value);
   }

@@ -326,6 +326,18 @@ test("a submitted proposal child keeps its stable prefix without regaining any t
     "prompt-only root resolution must not restore the submit grant");
 }));
 
+test("preview root explicitly enables native auto-continuation after compaction", async () => fixture(async root => {
+  const hooks = await previewHooks(root);
+  await hooks["chat.message"]!({ sessionID: "root", messageID: "auto-continue-user", agent: "dog-operator",
+    model: { providerID: "openai", modelID: "gpt-5.6-luna-fast" } }, {
+    message: { agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-5.6-luna-fast" } },
+    parts: [{ type: "text", text: "Continue the same unfinished goal after native compaction." }],
+  });
+  const continuation = { enabled: false };
+  await hooks["experimental.compaction.autocontinue"]!({ sessionID: "root", overflow: true }, continuation);
+  assert.equal(continuation.enabled, true);
+}));
+
 test("active proposal compaction preserves the claimed child and budgets without an execution run", async () => fixture(async root => {
   const { hooks, started } = await previewProposal(root);
   await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "compact-proposal" }, { args: started.task });
