@@ -1,441 +1,252 @@
 # Sortie-dogs 日本語ガイド
 
-**既定の OpenCode 環境を維持しながら、goalを守り、実行方法を適応させ、
-cost・time・proofを最適化するOpenCode向け実行ハーネス。**
+**既存のOpenCode環境を維持しながらgoalを固定し、taskに応じて実行方法を変え、
+cost・time・proofを最適化する実行ハーネス。**
 
-普段は OpenCode をそのまま使い、範囲を決めた実装・検証・レビュー・モデル振り分けが
-必要なときだけ Sortie を呼び出します。
+通常はOpenCodeをそのまま使用する。範囲を限定した調査、実装、検証、review、
+model routingが必要なtaskだけSortieを起動する。
 
-### 4つの設計原則
+- **Goal invariance**: accepted outcomeとproof要件を委譲、継続、remediation、再起動後も維持
+- **Adaptive execution**: 小さい仕事は小さいまま処理。追加agentや強いmodelはtask形状・riskが必要とする場合だけ使用
+- **Coexistence**: 選択時だけ有効化。通常のOpenCode agent、設定、user-owned fileを維持
+- **Cost / time / proof**: agent数最大化ではなく、verified resultを得る実用上最小のcostとwall timeを目標化
 
-- **Goal invariance** — 委譲、継続、修復をまたいでもaccepted outcomeとproof要件を維持する。完了しやすくするためにchild agentがgoalを勝手に弱めることはできない。
-- **Adaptive execution** — 小さい仕事は小さいまま処理する。並列worker、強いmodel、独立reviewはtask形状とriskが必要とする場合だけ追加する。
-- **Coexistence / portability** — 招待時だけ有効化し、通常のOpenCode agentと設定を維持する。project-local導入を既定とする。
-- **Cost / time / proof** — agent数最大化ではなく、verified outcomeを得るためのcostと工数を最適化する。未完了や失敗もevidenceとして明示する。
+[English README](../README.md) · [简体中文](guide-zh-CN.md) ·
+[テスト](testing.md) · [CLI testing](cli-testing.md)
 
-### v0.10.xの方向性
+[Release v0.10.6](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.10.6)
 
-v0.10.x系は **Astra operator / Terra dogs** の分担を軸に改善中。最上位の意思決定窓口を
-Astra operatorとし、accepted goal、品質基準、escalation、最終acceptanceを守らせる。一方、
-Astraは高コストなので、その判断能力が必要な最小限の仕事だけを担当する。範囲を限定した計画、
-coordination、実行の大部分はTerraベースのdogsへ委譲する。狙いはAstra水準の判断品質と
-Terra水準の運用コストの両立。
-
-これは検証中の設計方針であり、benchmarkで実証済みの性能主張ではない。Goalと品質のauthorityは
-集中させ、実装量は集中させない。
+> **Beta:** v0.10.xは安定化中。1.0まではruntime behavior、設定、生成assetが
+> 変更される可能性がある。
 
 ## まず試す
 
-要件: Node.js 22.6 以降、npm、OpenCode。
-対象プロジェクトのディレクトリから、次の4手順で開始できます。
-JSON は設定ファイルへ、`/sortie` は OpenCode 内へ入力します。
-設定が既にある場合、既存の項目を保持し、`plugin` 配列へ `sortie-dogs` を追加してください。
+要件: Node.js 22.6以降、npm、OpenCode。
 
-```text
-1. インストール — ターミナルで実行
-   npm install --save-dev sortie-dogs
-   npx sortie-dogs init .
-
-2. プラグイン追加 — .opencode/opencode.json に保存、または既存設定へ統合
-   {
-     "plugin": ["sortie-dogs"]
-   }
-
-3. OpenCode を再起動
-
-4. タスク開始 — OpenCode 内で入力
-   /sortie <タスク>
-```
-
-プロジェクト単位の導入を推奨します。`init` は runtime asset を配置し、
-`plugin` 設定でモデル振り分けを含むプラグインが有効になります。
-モデル選択やその他の導入方法は[インストール詳細](#npm-からインストール)を参照してください。
-
-> **Project status: Beta.** v0.9.xは安定化中。1.0まではruntime behavior、設定、runtime assetが変更される可能性がある。
-
-[![Sortie-dogs が境界付き実装ワークフローを統括する様子](assets/sortie-workflow.png)](assets/sortie-workflow.gif)
-
-_画像を選択するとワークフローのアニメーションを再生できる。_
-
-Sortie-dogs は、必要なセッションだけで動く OpenCode オーケストレーションプラグイン。
-タスクを明確な計画、必要時だけの限定調査、自律的な逐次実装、canonical validation、証拠付き完了へつなげる。
-OpenCode 標準のエージェントや設定は置き換えない。
-
-要件: Node.js 22.6 以降、npm、OpenCode。
-
-[English README](../README.md) · [简体中文](guide-zh-CN.md)
-
-## 最新local benchmark case study
-
-**完了runで揃えた参考値であり、成功benchmarkやleaderboardの主張ではない。** 2026-09-14、
-同じ固定task `datacurve/anko-typed-variable-bindings` でBare OpenCodeとSortie-dogs v0.9.12の
-completed runを各3件収集した。Bareは3 attempts、Sortieは2件が`INTERRUPTED`となったため5 attempts。
-別々のserial batchであり、3組のmatched pairではない。DockerとRuntaは意図的に未使用。
-
-- **Bare OpenCode:** 標準`build` agent、`openai/gpt-5.6-sol` / `high`。effective configに
-  Sortie pluginもruntime assetもなし。
-- **Sortie v0.9.12:** `dog-coordinator`は`openai/gpt-5.6-terra` / `high`、観測された実装childは
-  `openai/gpt-5.6-sol` / `medium`。固定packageとruntime assetを使用。Luna、Astra、Opus messageは未観測。
-
-| Metric · 1 task、completed run各3件 | Bare OpenCode | Sortie v0.9.12 |
-| --- | ---: | ---: |
-| 必要attempt数 | 3 | 5 |
-| 比較対象completed run | 3 | 3 |
-| Verified PASS | 0/3 | 0/3 |
-| Task checks · F2P | 11.1% · 3/27 | 85.2% · 23/27 |
-| Retained checks · P2P | 282/282 | 282/282 |
-| Median agent wall | 24.5 min | 25.7 min |
-| Median model steps | 43 | 39 |
-| Implementation child sessions · total | 0 | 13 |
-| 推定API-equivalent cost · median completed run | $3.53 | $2.85 |
-| 推定cost · completed run 3件 | $10.69 | $9.74 |
-| 追加interrupted-attempt cost | $0 | $6.20 |
-| completed run 3件の総獲得cost | $10.69 | $15.94 |
-
-Bareの3件は各F2P 1/9。Sortieのcompleted runは7/9、8/9、8/9。全候補がP2P 94/94を
-維持したが、official verifier rewardはすべて0。中断2件はcompleted-runの品質・時間・cost集計から
-除外し、attempt数と追加costは表示する。
-
-![最新local case studyの品質・cost](assets/quality-cost-reference.svg)
-
-Costはexport済みroot/child session tokenをmessage生成model別に集計し、固定standard short-context
-単価を適用したAPI-equivalent推定。請求額ではない。単一task、小標本、別batch、model route差があるため、
-一般的な成功率やcost優位を実証しない。
-
-[定義、固定入力、制約](benchmark-reference.md) · [machine-readable reference values](benchmarks/provisional-reference.json)
-
-## Sortie-dogs の利点
-
-- **Goalを固定** — acceptance criteriaを計画、委譲、継続、validation、remediationまで維持する。
-  Child resultや部分実装は未達criterionを消せず、変更には利用者の明示承認が必要。
-- **Taskへ適応** — 小さい変更は1 workerとtargeted validation。大きい作業だけbounded parallel、
-  stronger model、独立reviewを追加。
-- **OpenCodeと共存** — `/sortie`または`dog-coordinator`選択時だけ有効。標準agent、setting、
-  user-owned fileを置換しない。
-- **Cost・time・proofを同時最適化** — lower-cost modelは限定調査とvolume work、stronger modelは
-  outcomeを変える判断・実装・reviewへ限定。Speed / Cost / Proofで失敗も可視化。
-- **厳密な変更範囲** — source manifestまたはoperation manifestが編集とhandoffを制限し、
-  競合write scopeの同時bindを変更前に拒否。
-- **境界付き継続** — restart recoveryとcompaction handoffが進捗を保持。通常laneも無制限ではない。
-
-## 実際のループ
-
-1. **Goal固定 / plan** — `dog-coordinator` が不変のacceptance criteria、変更manifest、検証条件を確定。
-2. **任意の scout** — worker開始前に具体的evidence gapがある場合だけ、read-only限定調査を実行。
-3. **Adaptive execution** — task形状に応じて1 workerまたはbounded parallel unitを選び、approved manifestだけを実装。
-4. **Canonical validation** — 指定された test / build command の結果を evidence 化。
-5. **リスク別 review** — 高リスク候補だけ独立 review。低リスク候補は validation 後に省略可能。
-6. **Goal-level完了** — 全accepted criterionにmanifest、validation、review、evidence coverageがある場合だけcoordinatorが完了を管理。
-7. **境界付き継続** — restart recovery と compaction handoff で進捗を引き継ぎ、batch の無制限化を防止。
-
-## 実行例
-
-低リスクの実行例では、各 gate を示しながら境界内で完了する。
-
-```text
-利用者: /sortie 要求された動作を追加する
-dog-coordinator: manifest 確定
-dog-scout: 省略 — 具体的なevidence gapなし
-dog-worker: 実装完了
-validation: npm test — PASS
-review: 省略 — 低リスク
-dog-coordinator: 完了 evidence 承認
-```
-
-## 画面で見る流れ
-
-### 複雑さを抑える
-
-![役割とgateがオーケストレーションの複雑さを抑える構成](assets/sortie-complexity.png)
-
-Coordinator が調査、実装、validation、review を別々の role に分ける。Project が複雑でも、
-manifest gate が各 role の write scope を限定する。
-
-### 証拠付きで完了する
-
-![検証済み成果がcoordinator管理の完了へ到達する様子](assets/sortie-complete.png)
-
-Canonical validation とリスク別 review を通過してから coordinator が完了を確定する。
-変更内容と確認方法を示す簡潔な evidence を伴ってタスクを返す。
-
-## npm からインストール
-
-対象プロジェクトで公開 npm package を依存関係へ追加し、project-local な OpenCode runtime
-file を生成する。
+対象projectで実行する。
 
 ```sh
 npm install --save-dev sortie-dogs
 npx sortie-dogs init .
 ```
 
-### 任意のglobal availability
-
-Sortie roleを複数projectで意図的に使う場合だけ、CLIをglobal installし、OpenCodeのglobal設定を初期化する。
-
-```sh
-npm install --global sortie-dogs
-sortie-dogs init --global
-```
-
-`sortie-dogs init --global` はOpenCodeのglobal設定rootへcanonical runtime fileを設置する。
-project-local初期化をglobal化する操作ではなく、明示的opt-in。
-project-local運用では別途 `sortie-dogs init .` を実行し、以下のproject-local設定または
-plugin bridgeを使用する。
-
-runtime asset の設置だけでは plugin は読み込まれず、その場合すべての role が呼び出し元と
-同じ model で動作する。agent が動作する OpenCode 設定の `plugin` 配列へ package を追加する。
-global asset なら `~/.config/opencode/opencode.json`、project なら `.opencode/opencode.json`。
+Beta packageの既定profileはv0.10。既存値を保持しながら、
+`.opencode/opencode.json`へpluginと2階層subagent設定を追加する。
 
 ```json
 {
-  "plugin": ["sortie-dogs"]
+  "plugin": ["sortie-dogs"],
+  "subagent_depth": 2
 }
 ```
 
-追加後は OpenCode を再起動する。`plugin` エントリには package 名を指定する。
-`sortie-dogs/plugin` は import specifier であり plugin specifier ではない。
-
-`dog-coordinator` のデフォルト model は `openai/gpt-5.6-terra` の `high` variant、`dog-scout` は
-`openai/gpt-5.6-luna` の `high` variant。いずれかの role を変更する場合、次を
-`.opencode/sortie-dogs.json` に保存する。
-
-```json
-{
-  "dedicatedWorkerModel": {
-    "model": "openai/gpt-5.6-sol",
-    "variant": "medium"
-  },
-  "modelRouting": {
-    "dog-coordinator": {
-      "preferred": { "model": "provider/model" }
-    },
-    "dog-scout": {
-      "preferred": { "model": "provider/model" }
-    }
-  },
-  "modelCatalog": {
-    "project": [{ "model": "provider/model" }]
-  }
-}
-```
-
-`provider/model` は利用可能な model に置き換える。
-
-package を依存関係に持つ project では、`plugin` 配列の代わりに
-`.opencode/plugins/sortie-dogs.ts` から読み込むこともできる。
-
-```ts
-export { SortieDogsPlugin } from "sortie-dogs/plugin";
-```
-
-この file は OpenCode が自動検出する。export は plugin だけにする。OpenCode は plugin module の
-runtime export をすべて plugin factory として呼び出すため、余分な export が 1 つあるだけで
-module 全体が無効になる。OpenCode 再起動後に開始する。
+OpenCodeを完全再起動して開始する。
 
 ```text
-/sortie <タスク>
+/sortie-v010 <タスク>
 ```
 
-`dog-coordinator` を直接選択しても起動できる。
+`dog-operator`の直接選択でも同じworkflowが起動する。v0.10でuser-facing authorityを
+持つのは`dog-operator`だけ。`dogs-coordinator`と`*-v010` roleは内部childであり、
+task開始agentとして選択しない。
 
-## Write gate
+`init`はruntime assetを設置し、`plugin` entryはruntime enforcementとmodel routingを
+読み込む。両方必要。plugin moduleはprocess単位のため、更新後は新sessionだけでなく
+OpenCode host全体を再起動する。
 
-Write gate は project ごとの opt-in。project root に `operation-manifest.json` が無い間、
-plugin は passive でありツール呼び出しを一切拒否しない。この file を作ることが opt-in であり、
-だから coordinator はいつでもこの file を作成できる。
+## v0.10.x方針
+
+v0.10.xはstrategic authorityとbounded operationsを分離する。
+
+- `dog-operator`: original request、acceptance criteria、scope、review判断、final acceptanceを保持
+- hidden `dogs-coordinator`: 限定調査または承認済みserial queueを進行。source edit、acceptance変更、review、publishは禁止
+- `dog-worker-v010`: host生成の1 unitをexact read/write/validation境界内で実装
+- scout、advisor、reviewer: 明示evidence gap、strategy trigger、risk判断がある場合だけ限定起動
+
+v0.10 profileは意図的にserial。stable profileのLuna fabricとparallel integrationは
+このprofileでは公開しない。agent数ではなく、品質を落とさず高cost作業を減らすことが目的。
+
+### v0.10.6以降のSWE-bench方針
+
+v0.10.6以降、継続的にSWE-bench計測を取りながら開発する。未実行suiteの成功を
+主張するものではなく、開発と計測を分離しない方針。
+
+- 比較前にtask input、package/source snapshot、model route、budget、tool、stop endpointを固定
+- 全writer停止後にcandidateをfreezeし、別copyへpinned official verifierを1回実行
+- benchmark completion、official task correctness、harness terminalを別々に記録。Sortieの`DONE`やreview `PASS`をofficial reward扱いしない
+- agent-to-freezeとverifier時間を分離し、root/descendant token、model step、child、cache、推定cost、coverageも記録
+- infrastructure failureとscored failureを分離。小標本・unmatched結果をleaderboardや一般成功率に拡張しない
+
+v0.10.6より前のlocal benchmark条件はhistorical evidenceとして完了扱い。以降の判断は
+[Coding benchmark completion and correctness](benchmark-completion-contract.md)に従う
+SWE-bench計測を使用する。
+
+## 旧local case study
+
+2026-09-14から2026-09-18に、固定DeepSWE task
+`datacurve/anko-typed-variable-bindings`で収集したcompletion-filtered参考値。
+matched pairでもleaderboard結果でもない。
+
+- Bare OpenCode: Verified PASS `0/3`、F2P `3/27`、median agent wall `24.5 min`、median completed-run推定cost `$3.53`
+- Sortie v0.9.12: Verified PASS `0/3`、F2P `23/27`、median wall `25.7 min`、median completed-run推定cost `$2.85`。追加interrupted attempt 2件の推定cost `$6.20`
+- Sortie v0.10.3 one-shot: Verified PASS `0/1`、F2P `7/9`、wall `22.7 min`、推定cost `$3.79`
+- Sortie v0.10.5 one-shot: Verified PASS `1/1`、F2P `9/9`、P2P `94/94`、wall `43.8 min`、推定cost `$2.58`
+
+v0.10.5はverified success 1件であり成功率ではない。historical rate scheduleとendpointは
+同一でなく、host cost 0も請求額として扱わない。詳細は
+[定義、固定入力、制約](benchmark-reference.md)と
+[machine-readable values](benchmarks/provisional-reference.json)。
+
+## v0.10.6内部動作
+
+1. **Intent固定**: `dog-operator`が完全なrequestをordered requirement、negative constraint、quality threshold、reference、有限proposal/execution budgetとして保持
+2. **必要時だけ調査**: nontrivial taskはhidden `dogs-coordinator`へbounded read-only proposal調査を1件委譲可能。edit、shell、worker dispatch、read prefix拡大は禁止
+3. **Exact plan承認**: rootがproposalをoriginal requestと比較し、exact revision/hashを承認。uncovered requirementやscope拡大はfail closed。complete contractが既知のsimple taskはdirect worker fast path
+4. **Control生成**: hostがhandoff、operation manifest、acceptance ledger、short task referenceを生成しschema検証。model自身がwrite scopeを認可しない
+5. **Serial unit実行**: 1 unitは`dog-worker-v010`へ直接、multi-unit planはhidden `dogs-coordinator`が逐次進行。workerは1回bindし、宣言pathだけ変更、宣言validationだけ実行
+6. **Host evidence収集**: validation identityはsource snapshot、candidate、command、environment、scope、ownerを結合。prose上のPASSをproofにしない
+7. **Risk別review**: high-risk candidateは独立SourceReview、low-riskは明示skip可能。reviewerはtool-freeで修正を実装しない
+8. **Goalを弱めずremediation**: acceptance failureまたはblocking review findingはcommitted candidateからsame-goal replacementを作り、acceptanceとcumulative budgetを維持。scope拡大は後続user turnの明示承認が必要
+9. **明示acceptance**: rootのcompletion operation成功時だけrunを閉じる。terminalは`DONE`、`INTERRUPTED`、`BLOCKED`、`NEED_DECISION`。return reportはhost observationから生成
+
+Durable profile stateとhash-bound task referenceにより、summary proseからcriteriaを再構築せず
+restart/compaction recoveryを行う。stale、foreign-root、変更済みreferenceは拒否。
+任意Git lifecycleはnon-overwriting branchを1回作成し、exact path commitを1回実行できるが、
+arbitrary Git、force push、release、publish authorityは付与しない。
+
+## 設定
+
+### Profile fileと優先順
+
+既定package entryはv0.10 profile。
+
+- Command: `/sortie-v010`
+- Primary agent: `dog-operator`
+- Project設定: `.opencode/sortie-dogs-v010.json`
+- Global設定: `~/.config/opencode/sortie-dogs-v010.json`
+- JSON環境変数override: `SORTIE_DOGS_V010_CONFIG`
+- Runtime state: `.sortie-dogs-v010/`
+- Installed asset marker: `.opencode/sortie-dogs-v010.version`
+
+優先順はbuilt-in default、global file、project file、environment JSON、plugin factory options。
+未知propertyまたは不正typeは拒否。`modelRouting`には`dog-operator`、
+`dogs-coordinator`、`dog-reviewer-v010`などv0.10 external role名を使い、stable aliasを併記しない。
+
+`.opencode/sortie-dogs-v010.json`例:
 
 ```json
 {
-  "version": "0.1.0",
-  "task_id": "add-requested-behavior",
-  "read": ["src/feature.ts", "test/feature.test.ts"],
-  "write": ["src/feature.ts", "test/feature.test.ts"],
-  "validation": ["npm test"]
-}
-```
-
-- `write`: bind 済み worker が変更できる唯一の path 集合。directory 指定は配下を含み、
-  それ以外は exact path。
-- `validation`: bind 済み worker が実行できる exact command。build / test command は path 抽出で
-  分類できないため、宣言と完全一致した command だけを許可し、それ以外は unclassified として拒否する。
-- `read`: 読み取り範囲の記録。read は拒否しない。
-
-この file は `dog-coordinator` が所有する。worker は candidate ごとに一度だけ
-`sortie_bind_write_gate` で bind し、bind は coordinator の handoff 検査後にのみ成立する。
-coordinator session は gate 対象外。
-
-handoff と operation manifest は inspection と bind の前に schema 検査され、どの object も
-未知 property を拒否する。拒否時は必ず失敗した document、正確な JSON pointer、違反した規則を
-返す。例: `Defects: handoff /state/blocked/0 schema_type`。coordinator は同じ document を
-再送せず、その pointer を修復する。dispatch 前の確認には read-only の `sortie_check_contract`
-tool を使う。inspection も bind も行わずに同じ defect を報告する。
-`sortie-dogs lint <handoff.json> --manifest <operation-manifest.json>` でも同じ結果を得られる。
-頻出 defect は 2 つ。`state.blocked` を `{ reason, needed }` object ではなく string 配列に
-した場合と、operation manifest に `version` / `task_id` / `read` / `write` / `validation`
-以外の property を宣言した場合。
-
-`.opencode/sortie-dogs.json` の任意設定:
-
-```json
-{
-  "operationManifestPath": "operation-manifest.json",
-  "handoffPaths": ["handoff.json"],
+  "validationProfile": "balanced",
   "readOnlyTools": ["my_mcp_search"],
-  "dedicatedWorkerModel": { "model": "provider/model", "variant": "deep" },
-  "continuation": { "enabled": true, "maxAutoContinues": 10 },
-  "reflection": {
-    "enabled": false,
-    "layers": { "run": true, "project": true, "global": false },
-    "maxInjectedTokens": 500
-  }
-}
-```
-
-同じ schema を global の `~/.config/opencode/sortie-dogs.json`（Windows は
-`%USERPROFILE%\.config\opencode\sortie-dogs.json`）にも保存できる。優先順は built-in default、
-global file、project file、`SORTIE_DOGS_CONFIG`、plugin factory options。OpenCode の plugin
-正規化で factory options が失われる環境では、global file を使う。
-
-- `operationManifestPath`: manifest の位置。project 相対。
-- `handoffPaths`: plugin が検査する handoff file。worker はこの検査を通過して初めて bind できる。
-  空配列にすると bind 自体が成立しない。相対 entry は親 workspace 配下の nested repo でも
-  candidate 相対として扱う。operational work では coordinator が dispatch 前に有効な handoff を
-  作成して絶対 path を渡し、bind する child 自身が直前に built-in Read で読む。
-  新規 contract は candidate 相対の `.sortie-dogs/contracts/` に
-  `handoff.<id>.json` と `<id>.operation-manifest.json` として出力する。このrepositoryでは
-  `.gitignore` 済み。利用projectでもversion管理対象外にする。legacy の root/scoped path と custom 設定 path は移動・削除せず、読み取り・preflight・bind
-  互換を維持する。Sortie run が active でない場合だけ directory を削除する。
-- `readOnlyTools`: MCP tool など、file を変更しない host 固有 tool 名を追加する。
-  未知の tool は bind 済み session では既定で拒否される。
-- `dedicatedWorkerModel`: `implementation`、`remediation`、`blocker-resolution`、
-  `sol-worker-mk2a2`、`dog-worker` が使う serial implementation target。既定は
-  `openai/gpt-5.6-sol` / variant `medium`。配布済み `dog-luna-worker` fabric route は
-  `openai/gpt-5.6-luna` / variant `max` に固定される。serial target に同じ Luna model を指定すると
-  route identity が収束するため、設定全体を無効として拒否する。coordinatorは prepared `luna-fabric` run の
-  ready descriptor にだけこの role を dispatch し、`sol-serial` run では `dog-worker` を使う。
-- `continuation`: batch loopを境界付ける。既定・最大`maxAutoContinues`は`10`。terminal unitと
-  checkpoint後、root `dog-coordinator`だけを同じsessionで再開する。childをrootへ昇格せず、
-  別coordinatorも採用しない。terminal responseは次requestへtool outputを持ち越さないようcompactする。
-- `reflection`: activated root `dog-coordinator` だけが使える process prevention。既定無効。
-  opt-in 後の run / project layer は既定有効、project 間で共有する global storage layer は明示的に
-  有効化しない限り無効。child / 他 agent は拒否され、`SORTIE_REFLECTION=0` で即時停止する。
-  governing `REFLECTION_POLICY` は reflection 有効時だけ注入する。`maxInjectedTokens` は動的な
-  `SORTIE_PROCESS_REFLECTIONS` heading と永続化 entry 行の budget で、policy は対象外。
-  解決済みblocker / review defect後とterminal unit時だけ評価し、1 run最大3件。通常のcode bugや
-  外部障害は記録しない。
-- 通常の OpenCode auto-compaction は host の auto-continue を維持する。Sortie が明示的に queue
-  した rollover の処理中だけ、二重継続を防ぐため host auto-continue を抑止する。
-
-## セッション lifecycle
-
-プラグインは通常時 passive。`/sortie` を使うか `dog-coordinator` を選択したセッションだけを
-有効化する。Source / operation manifest の exact write scope と worker handoff を検証し、
-範囲外変更を通さない。標準 OpenCode agent、role、setting、無関係な session は維持される。
-
-`session.idle` で最終 handoff を検証して session を解放し、`session.deleted` でも解放する。
-後続 request では再度有効化が必要。
-
-host 側の欠陥を 1 つだけ in-place で修復する。subagent の結果は child の最終メッセージの
-「最後の text part」から構築されるため、reasoning model が turn の末尾に空の text part を
-付けると結果が空になり、coordinator は worker が完了済みの作業を再 dispatch する。完了した
-`task` の結果が空の場合、Sortie-dogs はその child session の最後の実 assistant text を復元する。
-空でない結果、他の tool、読めない child session には触れない。
-
-## モデルルーティング
-
-既定routeは限定retrievalをLuna、coordinationをTerra、serial implementationをSol、独立reviewを
-OpusまたはSolへ分離する。すべてを最上位modelで処理せず、必要能力と反復context costで選ぶ。
-
-`dog-coordinator` の built-in route は `openai/gpt-5.6-terra` の `high` variant。計画品質と進捗判断を
-workflowのbottleneckにしないため、能力とcostの均衡を優先する。host が Terra unavailable と
-証明した場合は設定済みfree-tier fallbackを使い、それもなければsession modelを維持する。`dog-scout` のデフォルトは
-`openai/gpt-5.6-luna` の `high` variant。Project-local routing でどちらも上書きできる。
-
-`implementation`、`remediation`、`blocker-resolution`、`sol-worker-mk2a2`、`dog-worker` は
-stable serial target `openai/gpt-5.6-sol` の `medium` variant に固定される。host が提供できない場合だけ
-`dedicatedWorkerModel` でserial targetを移動できる。配布済み `dog-luna-worker` はfabric admission後だけ使う
-別routeで、`openai/gpt-5.6-luna` の `max` variantに固定される。coordinatorは v0.8 DAG contract を
-`sortie_admit_luna_fabric` で admit し、`sortie_prepare_luna_fabric` で prepare した後にのみ、その
-`luna-fabric` run のcurrent ready waveにある別々のunitを最大5つdispatchできる。DAG全体は最大64 unit。
-active artifactがすべて検証された後、`sortie_advance_luna_fabric_wave` がruntime-owned hidden candidateへ統合し、
-旧worktreeをcleanupして、そのexact snapshotから次waveのfresh worktreeを作る。最終wave後は
-`sortie_validate_luna_fabric_candidate` がcanonical validationを1回実行し、review後の
-`sortie_accept_luna_fabric_candidate` だけがtargetを1回CASする。宣言済みshared-path ownershipは重複unitをwave間で直列化する。
-未所有overlapまたはadmission defectはjob全体を1つの `dog-worker` へ戻す。同じunitの複製実行は禁止。
-`modelRouting` はどちらも置換できず、
-serial targetに同じLuna modelを指定した設定も拒否する。0.7.0の`dog-worker`はLuna Maxだったが、v0.8は
-その履歴を残した上でstable Solとfabric Lunaを分離する。その他の明示routeはPreferred targetから順序付き
-fallbackへ決定的に解決する。Built-in defaultも明示routeもないroleはOpenCodeで選択済みmodelを維持する。
-
-`dog-reviewer` と `dog-advisor` は呼び出し元の model を継承してはならない。候補を生成した model
-で review / strategy を実行すると独立性が失われるため。両 role は catalog に
-`anthropic/claude-opus-5` が宣言されていればそれを、なければserial workerより高effortの
-`openai/gpt-5.6-sol` `xhigh` を使う。`dedicatedWorkerModel` の移動はconsultation policyを変更しない。
-特定vendorは必須ではなく、両roleとも設定可能なので、実際に利用できるmodelを宣言すればよい。
-
-```json
-{
-  "dedicatedWorkerModel": {
-    "model": "openai/gpt-5.6-sol",
-    "variant": "medium"
-  },
+  "freeTierFallbackModels": ["opencode/deepseek-v4-flash-free"],
   "modelRouting": {
-    "dog-coordinator": {
-      "preferred": { "model": "openai/gpt-5.6-terra", "variant": "high" }
+    "dog-operator": {
+      "preferred": { "model": "provider/model", "variant": "high" }
     },
-    "dog-scout": {
-      "preferred": { "model": "openai/gpt-5.6-luna", "variant": "high" }
-    },
-    "dog-reviewer": {
-      "preferred": { "model": "anthropic/claude-opus-5" },
-      "fallback": [{ "model": "openai/gpt-5.6-sol", "variant": "xhigh" }]
-    },
-    "dog-advisor": {
-      "preferred": { "model": "openai/gpt-5.6-sol", "variant": "xhigh" }
+    "dogs-coordinator": {
+      "preferred": { "model": "provider/model", "variant": "deep" }
     }
   },
   "modelCatalog": {
     "project": [
-      { "model": "openai/gpt-5.6-terra", "variants": ["high"] },
-      { "model": "openai/gpt-5.6-sol", "variants": ["medium", "xhigh"] },
-      { "model": "openai/gpt-5.6-luna", "variants": ["max", "high"] },
-      { "model": "anthropic/claude-opus-5" }
+      { "model": "provider/model", "variants": ["high", "deep"] }
     ]
+  },
+  "continuation": {
+    "enabled": true,
+    "maxAutoContinues": 10,
+    "taskWatchdogMilliseconds": 300000
   }
 }
 ```
 
-`dog-worker`に`modelRouting` entryがないのは意図した設計。`dog-worker`は他のstable serial
-implementation roleと共有する`dedicatedWorkerModel`を使う。`dog-luna-worker`は別の固定fabric route。
+hostが実際に提供するmodelとnamed variantだけを宣言する。Sortieはvariantを推測、probe、変換しない。
 
-設定先は `.opencode/sortie-dogs.json`。`modelCatalog` には実在する provider model と named
-variant だけを宣言する。Sortie-dogs は variant を推測、probe、変換しない。Built-in catalog は
-`anthropic/claude-opus-5` を意図的に含めないため、宣言して初めて推奨 consultation model が適用される。
-Preferred、fallback の順で解決し、明示 route の候補が catalog に一つもなければ拒否する。
+### 設定reference
 
-`dog-advisor` は coordinator からの限定 Strategy / SourceReview 相談専用。
-`dog-reviewer` は canonical validation 後、高リスク候補だけを独立 review する。どちらも実装、
-stage、commit、ユーザー対応を行わない。
+- `readOnlyTools`: project fileを変更しないhost固有tool名を追加。layer間で累積。bind済みworkerでは未知toolを拒否
+- `modelRouting`: external profile role別preferred targetとordered fallback
+- `modelCatalog`: 利用可能な`project` / `global` model・variant宣言
+- `freeTierFallbackModels`: global last-resort model ID。既定`opencode/deepseek-v4-flash-free`、`[]`で無効
+- `dedicatedWorkerModel`: canonical stable serial target。既定`openai/gpt-5.6-sol` / `medium`。v0.10 profileは下記explicit role routeも持つため、このstable設定からv0.10 worker routeを推定しない
+- `consultation.strategy`: 固定advisor identity、任意`required`、正整数`maxCallsPerCandidate`。既定はnot required、1 call
+- `consultation.sourceReview`: risk-based review。`maxCallsPerCandidate`既定`1`、`maxArtifactBytes`既定・最大`30720`。review必須時だけunavailableをblock扱い
+- `continuation.enabled`: 既定`true`
+- `continuation.maxAutoContinues`: 正整数、既定・最大`10`
+- `continuation.taskWatchdogMilliseconds`: implementation Task待機中root inactivity。既定`300000`、範囲`10..1800000`
+- `continuation.summarizeModel`: 任意compaction model。省略時は最新root modelを再利用
+- `validationProfile`: `fast` / `balanced` / `assurance`。既定`balanced`
+- `reflection`: shared schemaでは受理するが、serial v0.10 profileはreflection writeを公開しない。stable reflectionも既定無効のopt-in
 
-## 更新と移行
+v0.10 hostは`.sortie-dogs-v010/contracts/`配下のhandoffとmanifestを所有する。
+このprofile用にlegacy root `operation-manifest.json`を作らず、生成controlを編集しない。
+`.sortie-dogs-v010/`削除はactive Sortie runがない時だけ行う。
 
-[Release v0.10.6-rc.1](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.10.6-rc.1)
+### Validation policy
 
-依存 asset を新しい release に更新後、対象 project root で再実行する。
+`validationProfile`はnon-canonical depthを選択する。
+
+- `fast`: static check
+- `balanced`: targeted check
+- `assurance`: related check
+
+Canonical proofは常にcanonical。full-suiteはrelease contextまたはexplicit riskが必要。
+workerはstatic/targeted/related、rootはcanonical/full-suiteを所有する。同一candidate、command、
+environmentのevidenceは再利用し、validation budgetを重複消費しない。
+
+### v0.10既定route
+
+- `dog-operator`: `openai/gpt-5.6-luna-fast` / `max`
+- `dogs-coordinator`: `openai/gpt-5.6-terra` / `xhigh`
+- `dog-worker-v010`: `openai/gpt-5.6-luna-fast` / `max`
+- `dog-scout-v010`: `openai/gpt-5.6-luna-fast` / `xhigh`
+- `dog-reviewer-v010`: `openai/gpt-5.6-terra` / `xhigh`
+- `dog-advisor-v010`: catalog宣言済み`anthropic/claude-opus-5`を優先、なければ`openai/gpt-5.6-sol` / `xhigh`
+
+OpenCodeで明示選択したmodel/variantはそのsessionで最優先。child defaultはnative設定がない時だけ補完し、
+有効なprofile routingで上書き可能。reviewがimplementation modelを暗黙継承することはない。
+
+## Stable互換profile
+
+従来のparallel-capable runtimeは明示的に利用可能。
+
+```sh
+npx sortie-dogs init . --profile stable
+```
+
+既定package plugin entryではなくproject bridgeから読み込む。
+
+```ts
+export { SortieDogsPlugin } from "sortie-dogs/plugin/stable";
+```
+
+Stable profileは`/sortie`、`dog-coordinator`、`.opencode/sortie-dogs.json`、
+`SORTIE_DOGS_CONFIG`、`.sortie-dogs/`を使用。同一package install pathからstableとv0.10を
+同じhostへ同時登録しない。
+
+## Global利用
+
+Project-local導入を推奨。複数projectへv0.10 assetを明示公開する場合:
+
+```sh
+npm install --global sortie-dogs
+sortie-dogs init --global --profile v010
+```
+
+global OpenCode configへ`sortie-dogs`と`subagent_depth: 2`を追加する。Global initはassetだけを
+設置し、default agentやuser settingを暗黙変更しない。
+
+## 更新と削除
+
+dependency更新後、initを再実行してOpenCodeを完全再起動する。
 
 ```sh
 npx sortie-dogs init .
 ```
 
-初期化後、coordinator の再開または新規 session 作成前に OpenCode host を完全に再起動する。
-plugin module は process 単位で読み込まれるため、新規 session だけでは更新されない。
+`init`は冪等。認識済みSortie-owned assetを更新しversionを記録する。user configを保持し、
+unknown ownershipまたは競合fileでは安全に停止する。
 
-`init` は冪等。Sortie-dogs 所有 file を更新し、認識済み旧 runtime file を移行して、version を
-`.opencode/sortie-dogs.version` に記録する。競合または未認識 file は変更せず安全に停止する。
-`.opencode/sortie-dogs.json` を含むユーザー所有設定と OpenCode 標準 file は維持される。
-
-## 安全な手動削除
-
-Sortie-dogs にサポート対象の uninstall command はない。npm dependency は別途削除し、生成
-runtime file は[安全な手動削除ガイド](uninstall.md)に従って削除する。Sortie-dogs 所有を確認した
-exact path だけを対象とし、`.opencode` directory、wildcard、ユーザー所有 file は削除しない。
+uninstall commandは未提供。npm dependencyを別途削除後、
+[安全な手動削除ガイド](uninstall.md)に従う。既知のSortie-owned exact pathだけを削除し、
+`.opencode`全体やbroad wildcardを使用しない。
