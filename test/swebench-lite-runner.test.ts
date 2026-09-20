@@ -37,6 +37,9 @@ const manifest = (instances = [instance("example__project-2"), instance("example
   instances,
 });
 
+const dev23Manifest = () => manifest(Array.from({ length: 23 }, (_, index) =>
+  instance(`example__project-${String(index + 1).padStart(2, "0")}`, { problem_statement: `Issue ${index + 1}.` })));
+
 const canonicalize = (value: unknown): unknown => Array.isArray(value)
   ? value.map(canonicalize)
   : value !== null && typeof value === "object"
@@ -138,6 +141,34 @@ test("dry-run records the host/scoring boundary without starting a process or pr
     live_process_started: false,
     provider_requests_started: false,
   });
+});
+
+test("fixed Lite dev23 adapter contract is public-only pass@1 with no retries", () => {
+  const result = createTestDryRunPlan(dev23Manifest());
+  assert.deepEqual(result.candidate, candidate);
+  assert.deepEqual(result.dataset, {
+    id: "princeton-nlp/SWE-bench_Lite",
+    revision: "6ec7bb89b9342f664a54a6e0a6ea6501d3437cc2",
+    split: "dev",
+  });
+  assert.equal(result.instances.length, 23);
+  assert.deepEqual(result.instances.map(item => item.instance_id),
+    Array.from({ length: 23 }, (_, index) => `example__project-${String(index + 1).padStart(2, "0")}`));
+  assert.deepEqual(result.policy, {
+    attempts_per_instance: 1,
+    retry_count: 0,
+    scoring: "official-swebench-harness",
+    live_process_started: false,
+  });
+  assert.equal(result.execution.inference, "host-wsl-opencode");
+  assert.equal(result.execution.scoring, "external-official-docker-harness-after-patch-freeze");
+  assert.equal(result.execution.live_process_started, false);
+  assert.equal(result.execution.provider_requests_started, false);
+  for (const item of result.instances) {
+    for (const field of ["patch", "test_patch", "hints_text", "FAIL_TO_PASS", "PASS_TO_PASS"]) {
+      assert.equal(Object.hasOwn(item, field), false);
+    }
+  }
 });
 
 test("dry-run verifies the candidate package without creating a live execution", async () => {
@@ -345,10 +376,19 @@ test("live run writes one prediction per instance and removes dedicated workspac
   assert.ok(gitEnvironments.every(environment => environment === isolatedEnvironment));
   assert.ok(gitCommands.filter(args => args.includes("diff")).every(args => args.includes("HEAD")));
   assert.equal((await readFile(output, "utf8")).trim().split("\n").length, 2);
-  const replayManifest = JSON.parse(await readFile(result.replay.manifest.path, "utf8"));
-  assert.equal(replayManifest.official_scoring_boundary, "external-official-docker-harness-after-patch-freeze");
-  assert.equal(replayManifest.policy.retry_count, 0);
-  assert.equal(replayManifest.artifacts.length, 2);
+    const replayManifest = JSON.parse(await readFile(result.replay.manifest.path, "utf8"));
+    assert.equal(replayManifest.schema_version, 1);
+    assert.equal(replayManifest.mode, "host-inference-for-official-docker-scoring");
+    assert.equal(replayManifest.official_scoring_boundary, "external-official-docker-harness-after-patch-freeze");
+    assert.equal(replayManifest.candidate_sha256, candidate.sha256);
+    assert.match(replayManifest.environment_sha256, /^[a-f0-9]{64}$/u);
+    assert.deepEqual(replayManifest.policy, {
+      attempts_per_instance: 1,
+      retry_count: 0,
+      scoring: "official-swebench-harness",
+    });
+    assert.equal(replayManifest.policy.retry_count, 0);
+    assert.equal(replayManifest.artifacts.length, 2);
   const replayArtifact = JSON.parse(await readFile(join(runRoot, "replay", replayManifest.artifacts[0].path), "utf8"));
   assert.equal(replayArtifact.execution.command, "bash -ic opencode");
   assert.equal(replayArtifact.execution.stdout, "agent output\n");
@@ -546,6 +586,43 @@ test("candidate environment hash mismatch fails closed", async () => {
         };
       },
     }), /replay-environment-hash-mismatch/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("candidate hash binding fails closed before replay or prediction output", async () => {
+  const root = await mkdtemp(join(tmpdir(), "swebench-replay-candidate-hash-"));
+  const runRoot = join(root, "run");
+  const output = join(root, "predictions.jsonl");
+  try {
+    await assert.rejects(runTestLive(manifest([instance("example__project-1")]), {
+      agent: "dog-operator",
+      modelNameOrPath: "sortie-dogs",
+      timeoutSeconds: 1800,
+      watchdogSeconds: 120,
+      costLimitUsd: 50,
+      runRoot,
+      output,
+    }, {
+      prepareCandidate: async (candidateValue: typeof candidate, _packagePath: string, preparedRoot: string) => {
+        const runtimeRoot = join(preparedRoot, "candidate-runtime");
+        await mkdir(runtimeRoot, { recursive: true });
+        return {
+          environment: { HOME: "/isolated/home" },
+          runtimeRoot,
+          evidence: {
+            package_sha256: candidateValue.sha256,
+            candidate_sha256: "b".repeat(64),
+            version: candidateValue.version,
+            runtime_marker: candidateValue.runtime_marker,
+            profile: candidateValue.profile,
+            agent: candidateValue.agent,
+          },
+        };
+      },
+    }), /replay-candidate-hash-mismatch/);
+    await assert.rejects(stat(output));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
