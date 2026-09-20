@@ -154,7 +154,6 @@ arbitrary Git、force push、release、publish authorityは付与しない。
   },
   "continuation": {
     "enabled": true,
-    "maxAutoContinues": 10,
     "taskWatchdogMilliseconds": 300000
   }
 }
@@ -172,7 +171,7 @@ hostが実際に提供するmodelとnamed variantだけを宣言する。Sortie�
 - `consultation.strategy`: 固定advisor identity、任意`required`、正整数`maxCallsPerCandidate`。既定はnot required、1 call
 - `consultation.sourceReview`: risk-based review。`maxCallsPerCandidate`既定`1`、`maxArtifactBytes`既定・最大`30720`。review必須時だけunavailableをblock扱い
 - `continuation.enabled`: 既定`true`
-- `continuation.maxAutoContinues`: 正整数、既定・最大`10`
+- 自動継続にturn数上限なし。旧`continuation.maxAutoContinues`正整数設定は受理するが無視
 - `continuation.taskWatchdogMilliseconds`: implementation Task待機中root inactivity。既定`300000`、範囲`10..1800000`
 - `continuation.summarizeModel`: 任意compaction model。省略時は最新root modelを再利用
 - `validationProfile`: `fast` / `balanced` / `assurance`。既定`balanced`

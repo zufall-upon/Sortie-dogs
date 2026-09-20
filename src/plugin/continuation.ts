@@ -1,5 +1,5 @@
 /**
- * Bounded batch continuation for the canonical Sortie-dogs coordinator.
+ * Scope-bounded batch continuation for the canonical Sortie-dogs coordinator.
  *
  * The coordinator asset requires a continuation loop: after a terminal unit and its checkpoint it
  * must compact and resume the same root session on the next independent unit. That policy is only
@@ -30,7 +30,6 @@ const TOOL_REQUESTED_REPORT =
   "batch counters, blocker state, and the exact next action from the latest messages.";
 /** First line the rollover summary must emit, mirroring the batch target of three attempts. */
 export const ROLLOVER_TOKEN = "SORTIE_ROLLOVER_COMPACTED";
-export const DEFAULT_MAX_AUTO_CONTINUES = 10;
 /** One centrally configured default for stalled implementation Task recovery. */
 export const DEFAULT_TASK_WATCHDOG_MILLISECONDS = 5 * 60 * 1000;
 
@@ -63,7 +62,6 @@ export type ContinuationRejection =
   | "agent-mismatch"
   | "capability-unavailable"
   | "continuation-disabled"
-  | "limit-reached"
   | "pending-autocontinue"
   | "fresh-session-required"
   | "summarize-model-unavailable";
@@ -88,9 +86,6 @@ export interface ContinuationResolutionInput {
   readonly configuredCapability: string | undefined;
   readonly requestedCapability: string;
   readonly enabled: boolean;
-  /** Continuations already granted to this session. */
-  readonly attempts: number;
-  readonly maxAutoContinues: number;
   readonly pendingAutoContinue: boolean;
 }
 
@@ -120,10 +115,6 @@ export function resolveContinuation(input: ContinuationResolutionInput): Continu
   if (childIdentity(input.identity)) return reject("child-session");
   if (input.identity.agent !== input.configuredAgent) return reject("agent-mismatch");
   if (input.pendingAutoContinue) return reject("pending-autocontinue");
-  // A batch that reached its continuation ceiling still compacts; it just stops resuming itself.
-  if (input.attempts >= input.maxAutoContinues) {
-    return { compact: true, continue: false, reason: "limit-reached" };
-  }
   return { compact: true, continue: true };
 }
 
@@ -163,7 +154,6 @@ export interface ContinuationPolicy {
   readonly enabled: boolean;
   readonly agent: string;
   readonly capability: string;
-  readonly maxAutoContinues: number;
   /** Absent means the host chooses the compaction model; this package never pins one. */
   readonly summarizeModel?: ModelTarget | undefined;
 }
@@ -393,10 +383,8 @@ interface SessionState {
   preserveCompactionScope: boolean;
   /** Recovery cannot resume until this instance observes a structurally complete summary. */
   recoverySummaryValidated: boolean;
-  /** A deliberate terminal marker starts a fresh batch; a limit-reached compaction does not. */
+  /** A deliberate terminal marker starts a fresh batch. */
   resetAttemptsAfterCompaction: boolean;
-  /** The terminal unit at the continuation ceiling was already compacted. */
-  limitCompacted: boolean;
   /** Latest authoritative coordinator report, handed to the compaction prompt. */
   latestReport?: string | undefined;
   /** Latest non-compaction coordinator text observed during the current user turn. */
@@ -581,7 +569,6 @@ export function createContinuationHooks(
       preserveCompactionScope: false,
       recoverySummaryValidated: false,
       resetAttemptsAfterCompaction: false,
-      limitCompacted: false,
       active: false,
       compactedRollover: false,
       promptPending: false,
@@ -989,7 +976,6 @@ export function createContinuationHooks(
         state.preserveCompactionScope = false;
         state.recoverySummaryValidated = false;
         if (state.resetAttemptsAfterCompaction) state.attempts = 0;
-        state.limitCompacted = !state.resetAttemptsAfterCompaction;
         state.resetAttemptsAfterCompaction = false;
         state.latestReport = undefined;
         return true;
@@ -1101,13 +1087,8 @@ export function createContinuationHooks(
       configuredCapability: active.capability,
       requestedCapability: active.capability,
       enabled: active.enabled,
-      attempts: state.attempts,
-      maxAutoContinues: active.maxAutoContinues,
       pendingAutoContinue: state.pendingRollover,
     });
-    if (resolution.reason === "limit-reached" && state.limitCompacted) {
-      return reject("limit-reached");
-    }
     if (resolution.compact) {
       queueRollover(sessionID, report, resolution.continue, false, preserveCompactionScope);
     }
@@ -1175,8 +1156,6 @@ export function createContinuationHooks(
       configuredCapability: active.capability,
       requestedCapability: active.capability,
       enabled: active.enabled,
-      attempts: 0,
-      maxAutoContinues: active.maxAutoContinues,
       pendingAutoContinue: false,
     });
     if (!resolution.continue) return "identity-rejected";
@@ -1233,7 +1212,7 @@ export function createContinuationHooks(
   const tool: ContinuationTool = {
     name: CONTINUATION_CAPABILITY,
     description:
-      "Compact the coordinator session and continue the bounded batch on the next independent unit.",
+      "Compact the coordinator session and continue its scope-bounded batch on the next independent unit.",
     async execute(_args, context): Promise<string> {
       if (stoppedSessions.has(context.sessionID)) {
         return "SORTIE_CONTINUATION_REJECTED: fresh-session-required";
@@ -1262,14 +1241,9 @@ export function createContinuationHooks(
         configuredCapability: active.capability,
         requestedCapability: active.capability,
         enabled: active.enabled,
-        attempts: activeRecovery ? 0 : state.attempts,
-        maxAutoContinues: active.maxAutoContinues,
         // A tool call is the request itself, so an already pending rollover is the only conflict.
         pendingAutoContinue: state.pendingRollover,
       });
-      if (resolution.reason === "limit-reached" && state.limitCompacted) {
-        return "SORTIE_CONTINUATION_REJECTED: limit-reached";
-      }
       if (!resolution.compact) return `SORTIE_CONTINUATION_REJECTED: ${resolution.reason}`;
       if (client?.session?.summarize === undefined) {
         return "SORTIE_CONTINUATION_REJECTED: capability-unavailable";
@@ -1287,9 +1261,7 @@ export function createContinuationHooks(
         preserveRecoveryScope,
         !activeRecovery,
       );
-      return resolution.continue
-        ? "SORTIE_COMPACT_AND_CONTINUE_QUEUED"
-        : "SORTIE_COMPACT_QUEUED: auto-continue limit reached";
+      return "SORTIE_COMPACT_AND_CONTINUE_QUEUED";
     },
   };
 
@@ -1359,6 +1331,10 @@ export function createContinuationHooks(
                 state,
                 "terminal-checkpoint",
               );
+            }
+            if (!output.text.includes(ROLLOVER_MARKER) && !output.text.includes(CONTINUATION_MARKER)) {
+              await stopAutomaticRecovery(input.sessionID, false, true);
+              return;
             }
           }
           if (batchCheckpointNeedsContinuation(state.latestCoordinatorReport)) {
@@ -1538,7 +1514,6 @@ export function createContinuationHooks(
       state.compactingEpoch = undefined;
       state.model = { providerID: model.providerID, modelID: model.modelID };
       state.turnRevision += 1;
-      if (!synthetic) state.limitCompacted = false;
     },
 
     toolStarted(sessionID, tool): void {

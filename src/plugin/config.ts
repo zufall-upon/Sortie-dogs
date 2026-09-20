@@ -18,7 +18,6 @@ import { CONSULTATION_ROLE_POLICY } from "../core/consultation.js";
 import { VALIDATION_PROFILES, type ValidationProfile } from "../core/validation-budget.js";
 import {
   CONTINUATION_CAPABILITY,
-  DEFAULT_MAX_AUTO_CONTINUES,
   DEFAULT_TASK_WATCHDOG_MILLISECONDS,
 } from "./continuation.js";
 
@@ -50,8 +49,8 @@ export interface SortieDogsPluginOptions {
   freeTierFallbackModels?: readonly string[];
   consultation?: ConsultationPolicyInput;
   /**
-   * Bounded batch continuation. The shipped defaults already resolve to a working route, so a host
-   * only states this to raise the ceiling, choose a compaction model, or switch continuation off.
+   * Scope-bounded batch continuation. The shipped defaults already resolve to a working route, so a
+   * host only states this to choose a compaction model or switch continuation off.
    */
   continuation?: ContinuationPolicyInput;
   reflection?: ReflectionPolicyInput;
@@ -59,22 +58,22 @@ export interface SortieDogsPluginOptions {
   validationProfile?: ValidationProfile;
 }
 
-export type ContinuationPolicyInput = Partial<ContinuationConfiguration>;
+export type ContinuationPolicyInput = Partial<ContinuationConfiguration> & {
+  /** @deprecated Automatic continuation is unlimited; retained only to accept existing config. */
+  readonly maxAutoContinues?: number;
+};
 
 export interface ContinuationConfiguration {
   readonly enabled: boolean;
   /** Only the packaged coordinator may be resumed on the user's behalf. */
   readonly agent: string;
   readonly capability: string;
-  readonly maxAutoContinues: number;
   /** Root coordinator inactivity allowed while an implementation Task is outstanding. */
   readonly taskWatchdogMilliseconds: number;
   /** Absent reuses the latest coordinator model observed for this session. */
   readonly summarizeModel?: ModelTarget;
 }
 
-/** A continuation ceiling beyond this stops being a bounded batch. */
-const MAX_AUTO_CONTINUE_LIMIT = 10;
 const MIN_TASK_WATCHDOG_MILLISECONDS = 10;
 const MAX_TASK_WATCHDOG_MILLISECONDS = 30 * 60 * 1000;
 const CONTINUATION_AGENT = "dog-coordinator";
@@ -159,7 +158,6 @@ export const DEFAULT_PLUGIN_OPTIONS: Readonly<
     enabled: true,
     agent: CONTINUATION_AGENT,
     capability: CONTINUATION_CAPABILITY,
-    maxAutoContinues: DEFAULT_MAX_AUTO_CONTINUES,
     taskWatchdogMilliseconds: DEFAULT_TASK_WATCHDOG_MILLISECONDS,
   }),
   reflection: Object.freeze({ enabled: false, layers: Object.freeze({ run: true, project: true, global: false }), maxInjectedEntries: 3, maxInjectedTokens: 500 }),
@@ -260,7 +258,7 @@ function parseContinuationPolicy(value: unknown): ContinuationPolicyInput | unde
   if (value.capability !== undefined && value.capability !== CONTINUATION_CAPABILITY) return undefined;
   if (
     value.maxAutoContinues !== undefined &&
-    (!positiveInteger(value.maxAutoContinues) || value.maxAutoContinues > MAX_AUTO_CONTINUE_LIMIT)
+    !positiveInteger(value.maxAutoContinues)
   ) return undefined;
   if (
     value.taskWatchdogMilliseconds !== undefined &&
@@ -276,7 +274,6 @@ function parseContinuationPolicy(value: unknown): ContinuationPolicyInput | unde
     ...(value.enabled === undefined ? {} : { enabled: value.enabled }),
     ...(value.agent === undefined ? {} : { agent: value.agent }),
     ...(value.capability === undefined ? {} : { capability: value.capability }),
-    ...(value.maxAutoContinues === undefined ? {} : { maxAutoContinues: value.maxAutoContinues }),
     ...(value.taskWatchdogMilliseconds === undefined
       ? {}
       : { taskWatchdogMilliseconds: value.taskWatchdogMilliseconds }),

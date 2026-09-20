@@ -1273,18 +1273,18 @@ test("unproved coordinator DONE is rejected while host root and child metrics re
       text: "✅ **DONE** `metrics` — complete\n\n**Validation:** PASS\n\n**Next:** none\n\n<details>evidence</details>",
     };
     await hooks["experimental.text.complete"]!({ sessionID: "root" }, completed);
-    assert.match(completed.text, /^status: INTERRUPTED — accepted criteria remain unproved/u);
-    assert.match(completed.text, /^TRUE_INTERRUPTION: internal: accepted criteria remain unproved$/mu);
+    assert.match(completed.text, /^status: IN_PROGRESS — accepted criteria remain unproved/u);
+    assert.doesNotMatch(completed.text, /TRUE_INTERRUPTION/u);
     assert.doesNotMatch(completed.text, /\*\*DONE\*\*/u);
     assert.match(completed.text, /\n\n\*\*Validation:\*\* PASS/u);
     const repeatedCompletion = { text: completed.text };
     await hooks["experimental.text.complete"]!({ sessionID: "root" }, repeatedCompletion);
-    assert.match(repeatedCompletion.text, /^status: INTERRUPTED — accepted criteria remain unproved/u,
-      "a persisted completion event must not revive the stopped synthetic cycle");
+    assert.match(repeatedCompletion.text, /^status: IN_PROGRESS — accepted criteria remain unproved/u,
+      "a persisted completion event must retain the active recovery state");
     const runLogs = () => logs.filter((entry) =>
       (entry.body as { message?: unknown } | undefined)?.message === "run-metrics.snapshot"
     );
-    assert.equal(runLogs().length, 2);
+    assert.equal(runLogs().length, 1, "the synthetic IN_PROGRESS replay must not emit a second terminal snapshot");
     const first = runLogs()[0]!;
     assert.deepEqual(first.query, { directory });
     const body = first.body as {
@@ -1355,8 +1355,8 @@ test("unproved coordinator DONE is rejected while host root and child metrics re
     await hooks.event!({ event: { type: "session.idle", properties: { sessionID: "root" } } });
     const second = { text: "✅ **DONE** `metrics-2` — complete" };
     await hooks["experimental.text.complete"]!({ sessionID: "root" }, second);
-    assert.equal(runLogs().length, 3);
-    const reset = (runLogs()[2]!.body as { extra: Record<string, unknown> }).extra;
+    assert.equal(runLogs().length, 2);
+    const reset = (runLogs()[1]!.body as { extra: Record<string, unknown> }).extra;
     assert.equal(reset.hostSessionIdentityCount, 1);
     assert.equal(reset.bootstrapControlStateCount, 2);
     assert.equal(reset.collectRunMetricsCount, 1);
@@ -1698,7 +1698,7 @@ test("runtime contract requires interactive continuation and deterministic recov
   ]) assert.ok(drain[1].includes(contract), contract);
 });
 
-test("continuation configuration ships a working default and rejects an unsafe override", () => {
+test("continuation configuration ships an unlimited default and accepts the legacy ceiling as a no-op", () => {
   const shipped = resolvePluginConfiguration({});
   assert.equal(shipped.kind, "configured");
   if (shipped.kind === "configured") {
@@ -1707,7 +1707,6 @@ test("continuation configuration ships a working default and rejects an unsafe o
       enabled: true,
       agent: "dog-coordinator",
       capability: CONTINUATION_CAPABILITY,
-      maxAutoContinues: 10,
       taskWatchdogMilliseconds: DEFAULT_TASK_WATCHDOG_MILLISECONDS,
     });
   }
@@ -1718,7 +1717,7 @@ test("continuation configuration ships a working default and rejects an unsafe o
   });
   assert.equal(tuned.kind, "configured");
   if (tuned.kind === "configured") {
-    assert.equal(tuned.continuation.maxAutoContinues, 5);
+    assert.equal(Object.hasOwn(tuned.continuation, "maxAutoContinues"), false);
     assert.deepEqual(tuned.continuation.summarizeModel, { model: "vendor-a/compact" });
     assert.equal(tuned.continuation.agent, "dog-coordinator");
   }
@@ -1731,7 +1730,6 @@ test("continuation configuration ships a working default and rejects an unsafe o
     { continuation: { agent: "coordinator-mk2a2" } },
     { continuation: { capability: "compact_and_continue" } },
     { continuation: { maxAutoContinues: 0 } },
-    { continuation: { maxAutoContinues: 11 } },
     { continuation: { maxAutoContinues: 2.5 } },
     { continuation: { taskWatchdogMilliseconds: 9 } },
     { continuation: { taskWatchdogMilliseconds: 30 * 60 * 1000 + 1 } },
@@ -4024,9 +4022,51 @@ test(`restart reconciles orphan reservations only from matching terminal host Ta
     assert.equal(recovered.no_progress_results, 0);
     assert.deepEqual(recovered.satisfied_criteria, []);
     assert.equal(recovered.goal_id, initial.goal_id);
+    const settlement = (await ledger.readGoal()).records.find(({ event }) => event.kind === "unit.settled");
+    if (terminal) {
+      assert.equal(settlement?.event.kind === "unit.settled" && settlement.event.disposition, "failed");
+      assert.equal(settlement?.event.kind === "unit.settled" && settlement.event.result_class, "process-defect");
+    }
   });
 });
 }
+
+test("a terminal host Task overrides stale process-local reservation accounting", async () => {
+  await withProject("live-orphan-goal-reservation", async directory => {
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(operationManifest(["allowed.txt"])));
+    await writeFile(join(directory, "handoff.json"), JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
+    await writeFile(join(directory, "goal.json"), JSON.stringify({ delivery_intent: "implementation",
+      delivery_mode: "repair-first", usable_path_established: true, controlled_change: false,
+      defaults: { entrypoint: "validator", workload: "one fixture", oracle_coverage: ["content"], build_boundary: "not-applicable",
+        source: "source", candidate: "candidate", source_binding: "current-protected", candidate_binding: "current-protected",
+        fixture: "live recovery", proof_scope: "requested-full", expected_outcome: "pass", validation_command: "npm test" },
+      criteria: [{ target: "safe change" }] }));
+    const root = "live-recovery-root", callID = "live-task", unitID = "live-unit";
+    const prompt = `role: implementation\ntask_id: ${unitID}\nproject_root: ${directory}\nhandoff_path: ${join(directory, "handoff.json")}\n` +
+      "acceptance: safe change\nvalidation: npm test\nsource_manifest: [allowed.txt]\noperation_manifest: operation-manifest.json\ngoal_declaration_path: goal.json";
+    const client = { session: {
+      get: async () => ({ data: { agent: "dog-coordinator" } }),
+      messages: async () => ({ data: [{ info: { role: "assistant", sessionID: root }, parts: [{ type: "tool", tool: "task", callID,
+        state: { status: "completed", input: { subagent_type: "dog-worker", prompt }, time: { start: 1000, end: 1010 }, output: "done" } }] }] }),
+    } };
+    const hooks = await SortieDogsPlugin({ directory, client } as never);
+    const turn = (id: string) => hooks["chat.message"]!({ sessionID: root, messageID: id, agent: "dog-coordinator" }, {
+      message: { id, agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+      parts: [{ type: "text", text: "Continue the accepted task." }],
+    });
+    await turn("initial");
+    await hooks["tool.execute.before"]!({ tool: "task", sessionID: root, callID },
+      { args: { subagent_type: "dog-worker", prompt } });
+    const path = join(directory, ".git", "sortie-dogs", "run-flight", `${createHash("sha256").update(root).digest("hex")}.json`);
+    const ledger = await (await import("../dist/core/run-flight-ledger.js")).RunFlightLedger.openGoal(path);
+    assert.equal((await ledger.readGoal()).state.outstanding_reservations.length, 1);
+    await turn("resume");
+    const recovered = (await ledger.readGoal()).state;
+    assert.equal(recovered.outstanding_reservations.length, 0);
+    assert.equal(recovered.consumed_units, 1);
+    assert.deepEqual(recovered.satisfied_criteria, []);
+  });
+});
 
 test("a shared goal declaration starts a worker without copying its criterion blocks into Task", async () => {
   await withProject("shared-goal-declaration", async directory => {
@@ -4281,9 +4321,11 @@ test("an observed coordinator abort preserves markerless terminal INTERRUPTED wh
       message: { id: "internal-user", agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
       parts: [{ type: "text", text: "run the internal interruption fixture" }],
     });
-    const internal = { text: "status: INTERRUPTED — internal interruption\nTRUE_INTERRUPTION: internal: host terminated execution" };
+    const internal = { text: "status: INTERRUPTED — internal interruption\nTRUE_INTERRUPTION: internal: local recovery required" };
     await markedHooks["experimental.text.complete"]!({ sessionID: "internal-root", messageID: "internal-message" }, internal);
-    assert.match(internal.text, /^status: INTERRUPTED/u);
+    assert.match(internal.text, /^status: IN_PROGRESS/u);
+    assert.match(internal.text, /^goal_control: internal recovery required: local recovery required$/mu);
+    assert.doesNotMatch(internal.text, /TRUE_INTERRUPTION/u);
   });
 });
 
@@ -4419,12 +4461,12 @@ test("fresh-root control uses one host-round-tripped ticket and terminal state r
     );
     const premature = { text: "status: DONE" };
     await hooks["experimental.text.complete"]!({ sessionID: "goal-root" }, premature);
-    assert.match(premature.text, /^status: INTERRUPTED — accepted criteria remain unproved/u);
-    assert.match(premature.text, /^TRUE_INTERRUPTION: internal: accepted criteria remain unproved$/mu);
+    assert.match(premature.text, /^status: IN_PROGRESS — accepted criteria remain unproved/u);
+    assert.doesNotMatch(premature.text, /TRUE_INTERRUPTION/u);
     const prematureEmoji = { text: "✅ **DONE** — claimed\n**EVIDENCE:** fake\nraw_status: fake" };
     await hooks["experimental.text.complete"]!({ sessionID: "goal-root" }, prematureEmoji);
-    assert.match(prematureEmoji.text, /^status: INTERRUPTED — accepted criteria remain unproved/u);
-    assert.match(prematureEmoji.text, /^TRUE_INTERRUPTION: internal: accepted criteria remain unproved$/mu);
+    assert.match(prematureEmoji.text, /^status: IN_PROGRESS — accepted criteria remain unproved/u);
+    assert.doesNotMatch(prematureEmoji.text, /TRUE_INTERRUPTION/u);
     assert.doesNotMatch(prematureEmoji.text, /EVIDENCE|raw_status/iu);
 
     await hooks["chat.message"]!(
@@ -5059,12 +5101,12 @@ test("Career persistence failure preserves the terminal outcome and retry record
       if (event.kind === "goal.reported") throw new Error("fixture telemetry write failure");
       return append.call(this, event);
     });
-    const failed = { text: "status: INTERRUPTED — incomplete\nTRUE_INTERRUPTION: internal: fixture telemetry interruption\n\n**次:** resume" };
+    const failed = { text: "status: INTERRUPTED — incomplete\nTRUE_INTERRUPTION: user: fixture telemetry interruption\n\n**次:** resume" };
     await hooks["experimental.text.complete"]!({ sessionID: "career-root" }, failed);
     assert.match(failed.text, /^status: INTERRUPTED/u);
     assert.match(failed.text, /保存履歴を取得できません/u);
     mocked.mock.restore();
-    const successful = { text: "status: INTERRUPTED — incomplete\nTRUE_INTERRUPTION: internal: fixture telemetry interruption\n\n**次:** resume" };
+    const successful = { text: "status: INTERRUPTED — incomplete\nTRUE_INTERRUPTION: user: fixture telemetry interruption\n\n**次:** resume" };
     await hooks["experimental.text.complete"]!({ sessionID: "career-root" }, successful);
     assert.match(successful.text, /^status: INTERRUPTED/u);
     assert.match(successful.text, /中断 1/u);

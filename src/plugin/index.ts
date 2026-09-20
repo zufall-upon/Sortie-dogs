@@ -2014,27 +2014,32 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const recovery = (async () => {
       const ledger = await goalLedger(sessionID);
       const state = (await ledger.readGoal()).state;
-      const pending = state.outstanding_reservations.filter(reservation =>
-        ![...goalReservations.values()].some(live => live.reservationID === reservation.reservation_id));
+      // A terminal host Task is authoritative even when a missed after hook left process-local
+      // dispatch accounting behind. Treating that memory as live made the reservation permanent.
+      const pending = state.outstanding_reservations;
       if (pending.length === 0 || state.goal_id === null || input.client?.session?.messages === undefined) return;
       const messages = input.client.session.messages as unknown as (request: {
-        path: { id: string }; query: { directory: string; limit: number };
+        path: { id: string }; query: { directory: string };
       }) => Promise<unknown>;
       const response = await messages.call(input.client.session, { path: { id: root },
-        query: { directory: input.directory, limit: 1000 } }).catch(() => undefined);
+        query: { directory: input.directory } }).catch(() => undefined);
       const data: unknown = isRecord(response) ? response.data : undefined;
       if (!Array.isArray(data)) return;
       for (const reservation of pending) {
         const matches: Array<{ callID: string; status: string; elapsed: number | null }> = [];
-        for (const message of data.slice(-1000)) {
+        for (const message of data) {
           if (!isRecord(message) || !isRecord(message.info) || message.info.role !== "assistant" ||
             message.info.sessionID !== root || !Array.isArray(message.parts)) continue;
           for (const part of message.parts) {
             if (!isRecord(part) || part.type !== "tool" || part.tool !== "task" || typeof part.callID !== "string" ||
               !isRecord(part.state) || !["completed", "error"].includes(String(part.state.status)) ||
-              !isRecord(part.state.input) || typeof part.state.input.prompt !== "string" ||
-              !["dog-worker", "dog-luna-worker"].includes(String(part.state.input.subagent_type))) continue;
-            const unitID = handoffValue(handoffEntries(part.state.input.prompt), ["task_id"]) ?? part.callID;
+              !isRecord(part.state.input) || typeof part.state.input.prompt !== "string") continue;
+            const proposal = reservation.unit_id.startsWith("proposal:");
+            const role = String(part.state.input.subagent_type);
+            if (proposal ? role !== "dog-operator" : !["dog-worker", "dog-luna-worker"].includes(role)) continue;
+            const unitID = proposal
+              ? reservation.unit_id
+              : handoffValue(handoffEntries(part.state.input.prompt), ["task_id"]) ?? part.callID;
             if (unitID !== reservation.unit_id || goalFingerprint({ goal_id: state.goal_id, unit_id: unitID,
               call_id: part.callID }) !== reservation.reservation_id) continue;
             const time = isRecord(part.state.time) ? part.state.time : undefined;
@@ -2051,8 +2056,12 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           reservation_id: reservation.reservation_id,
           receipt_id: goalFingerprint({ recovered_host_task: match.callID, reservation: reservation.reservation_id }),
           goal_id: state.goal_id, unit_id: reservation.unit_id,
-          disposition: match.status === "completed" ? "succeeded" : "cancelled", result_class: "process-defect",
+          // Host terminal state proves lifecycle closure, not acceptance or cancellation semantics.
+          disposition: "failed", result_class: "process-defect",
           progress_fingerprint: null, evidence: [], elapsed_ms: match.elapsed, cost_usd: null });
+        const local = goalReservations.get(match.callID);
+        if (local?.reservationID === reservation.reservation_id) goalReservations.delete(match.callID);
+        if (finishCoordinatorTask(root, match.callID)) fastLane.workerCompleted(root);
         appLogInfo("goal.reservation-recovered", root, { unitID: reservation.unit_id, hostStatus: match.status });
       }
     })();
@@ -2272,17 +2281,19 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     return { outcome, goal, receipt, delivery, records: snapshot?.records };
   }
 
-  const ROOT_INTERRUPTION = /(^|\n)TRUE_INTERRUPTION\s*:\s*(?:user|internal)\s*:/iu;
+  const USER_ROOT_INTERRUPTION = /(^|\n)TRUE_INTERRUPTION\s*:\s*user\s*:/iu;
+  const INTERNAL_ROOT_INTERRUPTION = /^TRUE_INTERRUPTION[ \t]*:[ \t]*internal[ \t]*:[ \t]*(\S.*)$/gimu;
 
   async function preserveActiveGoalContinuation(sessionID: string, text: string, messageID?: string): Promise<string> {
     if (!isCoordinatorSession(sessionID) || terminalRunOutcome(text) !== "INTERRUPTED" ||
-      ROOT_INTERRUPTION.test(text) || hasCoordinatorInterruption(sessionID, messageID)) {
+      USER_ROOT_INTERRUPTION.test(text) || hasCoordinatorInterruption(sessionID, messageID)) {
       return text;
     }
     const goal = await currentGoal(sessionID).catch(() => undefined);
     if (goal === undefined || goal.goal_id === null || goal.receipt !== null) return text;
     return replaceTerminalStatus(text,
-      "status: IN_PROGRESS — local/process/step continuation remains active in the same session");
+      "status: IN_PROGRESS — local/process/step continuation remains active in the same session")
+      .replace(INTERNAL_ROOT_INTERRUPTION, "goal_control: internal recovery required: $1");
   }
 
   interface GoalDeclaration {
@@ -6279,13 +6290,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       if (runOutcome === "DONE" && terminal?.delivery === "running") {
         textOutput.text = replaceDoneTerminalStatus(textOutput.text,
           "status: IN_PROGRESS — durable delivery active; same sessionでjoinまたはstale reconcileが必要");
-        await continuation.stopAutomaticRecovery(textInput.sessionID, false, true);
       } else if (runOutcome === "DONE" && terminal?.receipt === undefined &&
         terminal?.goal !== undefined && terminal.goal.goal_id !== null) {
         textOutput.text = replaceDoneTerminalStatus(textOutput.text,
-          "status: INTERRUPTED — accepted criteria remain unproved\n" +
-          "TRUE_INTERRUPTION: internal: accepted criteria remain unproved");
-        await continuation.stopAutomaticRecovery(textInput.sessionID, false, true);
+          "status: IN_PROGRESS — accepted criteria remain unproved; same-session recovery required");
       }
       if (runOutcome !== "DONE" && terminal?.delivery === "ready" && terminal.receipt?.status === "succeeded") {
         textOutput.text = replaceTerminalStatus(textOutput.text, "status: DONE");
@@ -7902,6 +7910,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     },
     relinkRegisteredGoal: async (root, request) => {
       if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) throw new Error("operator-coordinator-required");
+      await recoverCompletedGoalReservations(root);
       const ledger = await goalLedger(root), snapshot = await ledger.readGoal(), state = snapshot.state;
       if (state.phase !== "active" || state.receipt !== null) throw new Error("operator-resume-goal-not-active");
       if (state.outstanding_reservations.length > 0) throw new Error("operator-resume-goal-reservation-active");

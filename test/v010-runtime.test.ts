@@ -570,10 +570,10 @@ test("preview host adapter pins the native worker route and forwards terminal te
   assert.deepEqual(explicitAstra.message.model, { providerID: "openai", modelID: "gpt-6-astra", variant: "high" });
   const premature = { text: "DONE — accepted without evidence" };
   await hooks["experimental.text.complete"]!({ sessionID: "root", messageID: "root-assistant" }, premature);
-  assert.equal(premature.text, "status: INTERRUPTED — accepted criteria remain unproved\nTRUE_INTERRUPTION: internal: accepted criteria remain unproved");
+  assert.equal(premature.text, "status: IN_PROGRESS — accepted criteria remain unproved; same-session recovery required");
 }));
 
-test("a cancelled historical operator run does not gate DONE on a later ordinary turn", async () => fixture(async root => {
+test("a cancelled historical operator run does not leak its contract into a later ordinary turn", async () => fixture(async root => {
   const sessionID = "historical-cancelled-root";
   const turn = (text: string) => ({
     message: { agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-5.6-sol" } },
@@ -589,7 +589,7 @@ test("a cancelled historical operator run does not gate DONE on a later ordinary
   assert.equal(cancelled.status, "cancelled");
   const sameTurn = { text: "DONE — cancelled run completed" };
   await hooks["experimental.text.complete"]!({ sessionID, messageID: "cancelled-assistant" }, sameTurn);
-  assert.equal(sameTurn.text, "status: INTERRUPTED — accepted criteria remain unproved\nTRUE_INTERRUPTION: internal: accepted criteria remain unproved");
+  assert.equal(sameTurn.text, "status: IN_PROGRESS — accepted criteria remain unproved; same-session recovery required");
 
   const cold = await SortieDogsV010Plugin({ directory: root });
   const ordinaryTurn = { ...turn("Complete this new ordinary task."),
@@ -607,7 +607,7 @@ test("a cancelled historical operator run does not gate DONE on a later ordinary
     operator: "cancelled", events: ["goal.terminal", "goal.accepted"] });
   const output = { text: "DONE — ordinary task completed\nEvidence: untrusted\nraw: secret\nkept prose" };
   await cold["experimental.text.complete"]!({ sessionID, messageID: "ordinary-assistant" }, output);
-  assert.equal(output.text, "status: DONE — ordinary task completed\nkept prose");
+  assert.equal(output.text, "status: IN_PROGRESS — accepted criteria remain unproved; same-session recovery required\nkept prose");
 
   await cold["chat.message"]!({ sessionID, agent: "dog-operator", messageID: "replacement-user" },
     turn("Start a replacement operator run."));
@@ -616,7 +616,7 @@ test("a cancelled historical operator run does not gate DONE on a later ordinary
   assert.equal(replacement.profile, "v010");
   const contracted = { text: "DONE — replacement accepted without evidence" };
   await cold["experimental.text.complete"]!({ sessionID, messageID: "replacement-assistant" }, contracted);
-  assert.equal(contracted.text, "status: INTERRUPTED — accepted criteria remain unproved\nTRUE_INTERRUPTION: internal: accepted criteria remain unproved");
+  assert.equal(contracted.text, "status: IN_PROGRESS — accepted criteria remain unproved; same-session recovery required");
 }));
 
 test("an investigating proposal on historical operator state still fails DONE closed", async () => fixture(async root => {
@@ -642,7 +642,7 @@ test("an investigating proposal on historical operator state still fails DONE cl
   assert.equal(started.status, "investigating");
   const output = { text: "DONE — proposal investigation completed" };
   await cold["experimental.text.complete"]!({ sessionID, messageID: "historical-proposal-assistant" }, output);
-  assert.equal(output.text, "status: INTERRUPTED — accepted criteria remain unproved\nTRUE_INTERRUPTION: internal: accepted criteria remain unproved");
+  assert.equal(output.text, "status: IN_PROGRESS — accepted criteria remain unproved; same-session recovery required");
 }));
 
 test("a prepared operator run still fails an unproved DONE claim closed", async () => fixture(async root => {
@@ -657,10 +657,10 @@ test("a prepared operator run still fails an unproved DONE claim closed", async 
   assert.equal(prepared.profile, "v010");
   const output = { text: "DONE — accepted without evidence" };
   await hooks["experimental.text.complete"]!({ sessionID, messageID: "prepared-assistant" }, output);
-  assert.equal(output.text, "status: INTERRUPTED — accepted criteria remain unproved\nTRUE_INTERRUPTION: internal: accepted criteria remain unproved");
+  assert.equal(output.text, "status: IN_PROGRESS — accepted criteria remain unproved; same-session recovery required");
 }));
 
-test("a cancelled proposal grant does not gate DONE on its next ordinary turn", async () => fixture(async root => {
+test("a cancelled proposal grant does not leak into its next ordinary turn", async () => fixture(async root => {
   await mkdir(join(root, "src"));
   const sessionID = "cancelled-proposal-root";
   const hooks = await SortieDogsV010Plugin({ directory: root });
@@ -679,11 +679,11 @@ test("a cancelled proposal grant does not gate DONE on its next ordinary turn", 
   assert.equal(cancelled.status, "cancelled");
   const sameTurn = { text: "DONE — cancelled proposal completed" };
   await hooks["experimental.text.complete"]!({ sessionID, messageID: "proposal-cancelled-assistant" }, sameTurn);
-  assert.equal(sameTurn.text, "status: INTERRUPTED — accepted criteria remain unproved\nTRUE_INTERRUPTION: internal: accepted criteria remain unproved");
+  assert.equal(sameTurn.text, "status: IN_PROGRESS — accepted criteria remain unproved; same-session recovery required");
   await turn("ordinary-after-proposal", "Complete this new ordinary task.");
   const ordinary = { text: "DONE — ordinary task completed" };
   await hooks["experimental.text.complete"]!({ sessionID, messageID: "ordinary-after-proposal-assistant" }, ordinary);
-  assert.equal(ordinary.text, "status: DONE — ordinary task completed");
+  assert.equal(ordinary.text, "status: IN_PROGRESS — accepted criteria remain unproved; same-session recovery required");
 }));
 
 function wideAcceptancePlan(count: number, criterion = (index: number) => `Criterion ${index + 1} holds`) {
@@ -1234,7 +1234,7 @@ for (const exhaustBudget of [false, true]) test(`failed repair validation expose
   });
   const ordinary = { text: "DONE — later ordinary task completed" };
   await replacementHooks["experimental.text.complete"]!({ sessionID: "root", messageID: "post-completion-assistant" }, ordinary);
-  assert.equal(ordinary.text, "status: DONE — later ordinary task completed");
+  assert.equal(ordinary.text, "status: IN_PROGRESS — accepted criteria remain unproved; same-session recovery required");
 }));
 
 test("fresh repair validation reopens one interrupted admission once without implementation spend", async () => fixture(async root => {
@@ -3407,7 +3407,7 @@ test("a real turn resumes a stopped goal while its durable operator contract rem
   assert.equal(resumed.latest_user_message_id, "stopped-latest");
 }));
 
-test("cold completion relinks an awaiting operator from the latest same-goal approval", async () => fixture(async root => {
+test("cold completion reconciles a terminal proposal reservation before relinking an awaiting operator", async () => fixture(async root => {
   const sessionID = "legacy-completion-root";
   const turn = (text: string) => ({
     message: { agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-5.6-sol" } },
@@ -3429,14 +3429,37 @@ test("cold completion relinks an awaiting operator from the latest same-goal app
     evidence: [{ measurement: { criterion_ids: ["first"] } }] as never });
   assert.equal((await runtime.required(sessionID)).phase, "awaiting-acceptance");
 
-  const cold = await SortieDogsV010Plugin({ directory: root });
+  const proposalCallID = "stale-proposal-call", proposalUnitID = "proposal:stale-intent";
+  const now = Date.now();
+  const terminalProposal = { info: { id: "proposal-finished", role: "assistant", agent: "dog-operator",
+    sessionID, finish: "stop", time: { created: now, completed: now + 1 } }, parts: [{ type: "tool", tool: "task",
+      callID: proposalCallID, state: { status: "completed", input: { subagent_type: "dogs-coordinator",
+        prompt: "Investigate the approved goal before execution." }, time: { start: now, end: now + 1 }, output: "Submitted." } }] };
+  const laterMessages = Array.from({ length: 1001 }, (_value, index) => ({ info: { id: `later-${index}`, role: "assistant",
+    agent: "dog-operator", sessionID, finish: "stop", time: { created: now + index + 2, completed: now + index + 3 } },
+    parts: [{ type: "text", text: "continuing" }] }));
+  const cold = await SortieDogsV010Plugin({ directory: root, client: { session: {
+    get: async () => ({ data: { id: sessionID, agent: "dog-operator" } }),
+    messages: async () => ({ data: [terminalProposal, ...laterMessages] }),
+  } } } as never);
   await cold["chat.message"]!({ sessionID, agent: "dog-operator", messageID: "completion-latest" },
     turn("Complete the exact awaiting registered run."));
+  const ledger = await RunFlightLedger.openGoal(join(root, ".sortie-dogs-v010", "run-flight",
+    `${createHash("sha256").update(`v010\0${sessionID}`).digest("hex")}.json`));
+  const goal = (await ledger.readGoal()).state;
+  await ledger.appendGoal({ kind: "dispatch.reserved", at: new Date().toISOString(), goal_id: goal.goal_id!,
+    reservation_id: goalFingerprint({ goal_id: goal.goal_id, unit_id: proposalUnitID, call_id: proposalCallID }),
+    unit_id: proposalUnitID, session_id: sessionID, ticket_id: null });
   const result = JSON.parse(await cold.tool!.sortie_v010_complete_operator.execute({ run_id: prepared.runID,
     acceptance_fingerprint: prepared.acceptanceFingerprint }, { sessionID }));
   assert.equal(result.status, "awaiting-evidence");
-  const ledger = await RunFlightLedger.openGoal(join(root, ".sortie-dogs-v010", "run-flight",
-    `${createHash("sha256").update(`v010\0${sessionID}`).digest("hex")}.json`));
-  assert.equal((await ledger.readGoal()).state.acceptance_fingerprint,
-    await runtime.completionGoalFingerprint(await runtime.required(sessionID)));
+  const completed = (await ledger.readGoal()).state;
+  assert.equal(completed.acceptance_fingerprint, await runtime.completionGoalFingerprint(await runtime.required(sessionID)));
+  assert.equal(completed.outstanding_reservations.length, 0);
+  assert.equal(completed.consumed_units, 1);
+  const recovered = (await ledger.readGoal()).records.find(({ event }) =>
+    event.kind === "unit.settled" && event.reservation_id === goalFingerprint({ goal_id: goal.goal_id,
+      unit_id: proposalUnitID, call_id: proposalCallID }));
+  assert.equal(recovered?.event.kind === "unit.settled" && recovered.event.disposition, "failed");
+  assert.equal(recovered?.event.kind === "unit.settled" && recovered.event.result_class, "process-defect");
 }));

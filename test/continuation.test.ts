@@ -5,7 +5,6 @@ import {
   AUTO_CONTINUE_PREFIX,
   CONTINUATION_CAPABILITY,
   CONTINUATION_MARKER,
-  DEFAULT_MAX_AUTO_CONTINUES,
   ROLLOVER_MARKER,
   ROLLOVER_TOKEN,
   STEP_CONTINUE_PREFIX,
@@ -25,7 +24,6 @@ const UNPINNED_POLICY: ContinuationPolicy = {
   enabled: true,
   agent: COORDINATOR,
   capability: CONTINUATION_CAPABILITY,
-  maxAutoContinues: DEFAULT_MAX_AUTO_CONTINUES,
 };
 const POLICY: ContinuationPolicy = {
   ...UNPINNED_POLICY,
@@ -108,8 +106,6 @@ function resolution(overrides: Partial<Parameters<typeof resolveContinuation>[0]
     configuredCapability: CONTINUATION_CAPABILITY,
     requestedCapability: CONTINUATION_CAPABILITY,
     enabled: true,
-    attempts: 0,
-    maxAutoContinues: DEFAULT_MAX_AUTO_CONTINUES,
     pendingAutoContinue: false,
     ...overrides,
   });
@@ -144,12 +140,6 @@ test("continuation resolver grants only a configured root coordinator", () => {
   );
   assert.equal(resolution({ pendingAutoContinue: true }).reason, "pending-autocontinue");
 
-  // The ceiling stops the resume, not the compaction.
-  assert.deepEqual(resolution({ attempts: DEFAULT_MAX_AUTO_CONTINUES }), {
-    compact: true,
-    continue: false,
-    reason: "limit-reached",
-  });
 });
 
 test("the direct capability compacts the root coordinator and resumes the same session", async () => {
@@ -898,38 +888,24 @@ test("a child session and a foreign agent are both refused without any host call
   assert.deepEqual([foreign.summarizeCalls.length, foreign.promptCalls.length], [0, 0]);
 });
 
-test("continuation stops resuming at its ceiling but still compacts", async () => {
+test("continuation remains eligible beyond the former automatic ceiling", async () => {
   const host = fakeHost({ agent: COORDINATOR });
-  const hooks = createContinuationHooks(host.client, "/project", { ...POLICY, maxAutoContinues: 2 }, FAST);
+  const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
 
-  for (let call = 0; call < 2; call += 1) {
+  for (let call = 0; call < 12; call += 1) {
     assert.equal(
       await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR }),
       "SORTIE_COMPACT_AND_CONTINUE_QUEUED",
     );
     await settle();
   }
-  assert.equal(
-    await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR }),
-    "SORTIE_COMPACT_QUEUED: auto-continue limit reached",
-  );
-  await settle();
-
-  assert.equal(host.summarizeCalls.length, 3);
-  assert.equal(host.promptCalls.length, 2);
-  assert.equal(
-    await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR }),
-    "SORTIE_CONTINUATION_REJECTED: limit-reached",
-    "a fourth dispatch in the same synthetic batch stays rejected",
-  );
-  await settle();
-  assert.equal(host.summarizeCalls.length, 3);
-  assert.equal(host.promptCalls.length, 2);
+  assert.equal(host.summarizeCalls.length, 12);
+  assert.equal(host.promptCalls.length, 12);
 });
 
 test("blocked units continue only by preserving the coordinator report below batchTarget", async () => {
   const host = fakeHost({ agent: COORDINATOR });
-  const hooks = createContinuationHooks(host.client, "/project", { ...POLICY, maxAutoContinues: 2 }, FAST);
+  const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
   const reports = [
     "batchTarget=3 batchAttempted=1 batchCommitted=0 batchReconciled=0 blocker=unit-1 blocked next=independent-unit-2",
     "batchTarget=3 batchAttempted=2 batchCommitted=1 batchReconciled=0 blocker=unit-1 blocked next=independent-unit-3",
@@ -1002,9 +978,9 @@ test("the marker fallback continues only when the direct capability did not run"
   assert.equal(both.summarizeCalls.length, 2, "the next user turn clears the direct-tool flag");
 });
 
-test("ordinary terminal text does not force compaction and real user turns reset the continuation budget", async () => {
+test("ordinary terminal text does not force compaction and later real user turns can continue", async () => {
   const host = fakeHost({ agent: COORDINATOR });
-  const hooks = createContinuationHooks(host.client, "/project", { ...POLICY, maxAutoContinues: 1 }, FAST);
+  const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
   await hooks.textComplete({ sessionID: "ses_root" }, { text: "terminal with no continuation" });
   await settle();
   assert.deepEqual([host.summarizeCalls.length, host.promptCalls.length], [0, 0]);
@@ -1025,18 +1001,18 @@ test("bare IN_PROGRESS status schedules same-session recovery", async () => {
   assert.match(host.promptCalls[0]!.text, /SORTIE_STEP_CONTINUE/u);
 });
 
-test("synthetic continuation turns do not reset the continuation budget", async () => {
+test("synthetic continuation turns remain eligible", async () => {
   const host = fakeHost({ agent: COORDINATOR });
-  const hooks = createContinuationHooks(host.client, "/project", { ...POLICY, maxAutoContinues: 1 }, FAST);
+  const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
   assert.equal(await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR }), "SORTIE_COMPACT_AND_CONTINUE_QUEUED");
   await settle();
   hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-luna" }, true);
-  assert.equal(await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR }), "SORTIE_COMPACT_QUEUED: auto-continue limit reached");
+  assert.equal(await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR }), "SORTIE_COMPACT_AND_CONTINUE_QUEUED");
 });
 
-test("the stop marker compacts without resuming and clears the continuation budget", async () => {
+test("the stop marker compacts without resuming and permits a fresh batch", async () => {
   const host = fakeHost({ agent: COORDINATOR });
-  const hooks = createContinuationHooks(host.client, "/project", { ...POLICY, maxAutoContinues: 1 }, FAST);
+  const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
 
   await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR });
   await settle();
@@ -1507,9 +1483,9 @@ test("a tool start cancels partial-text recovery for the active assistant turn",
   assert.equal(host.promptCalls.length, 0);
 });
 
-test("active recovery compaction ignores the ordinary batch continuation ceiling", async () => {
+test("active recovery compaction remains eligible after an earlier rollover", async () => {
   const host = fakeHost({ agent: COORDINATOR });
-  const hooks = createContinuationHooks(host.client, "/project", { ...POLICY, maxAutoContinues: 1 }, FAST);
+  const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
   hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-terra" });
   assert.equal(await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR }),
     "SORTIE_COMPACT_AND_CONTINUE_QUEUED");
@@ -1833,6 +1809,22 @@ test("host auto-continue is disabled only while a Sortie rollover is pending", a
   assert.equal(resumed.enabled, true, "the observed resumed turn releases host auto-continue");
 });
 
+test("canonical terminal text disables host auto-continue until a real user turn", async () => {
+  const host = fakeHost({ agent: COORDINATOR });
+  const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
+  await hooks.textComplete({ sessionID: "ses_root" }, {
+    text: "status: NEED_DECISION — task scope required",
+  });
+  const stopped = { enabled: true };
+  await hooks.compactionAutoContinue({ sessionID: "ses_root", overflow: true }, stopped);
+  assert.equal(stopped.enabled, false);
+
+  hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-luna" }, false);
+  const resumed = { enabled: false };
+  await hooks.compactionAutoContinue({ sessionID: "ses_root", overflow: true }, resumed);
+  assert.equal(resumed.enabled, true);
+});
+
 test("exhausted rollover retries release host auto-continue", async () => {
   const host = fakeHost({ agent: COORDINATOR });
   host.client.session!.summarize = async () => {
@@ -2015,12 +2007,12 @@ test("idle starts an explicitly queued rollover before its delayed fallback", as
   assert.equal(host.promptCalls.length, 1);
 });
 
-test("the stop marker clears stale reports and resets the continuation budget", async () => {
+test("the stop marker clears stale reports before the next continuation", async () => {
   const host = fakeHost({ agent: COORDINATOR });
   const hooks = createContinuationHooks(
     host.client,
     "/project",
-    { ...UNPINNED_POLICY, maxAutoContinues: 1 },
+    UNPINNED_POLICY,
     FAST,
   );
   hooks.observeModel("ses_root", { providerID: "openai", modelID: "gpt-5.6-luna" });
@@ -2099,9 +2091,9 @@ test("host auto-continue stays untouched for sessions the loop never owns", asyn
   assert.equal(blindOutput.enabled, true, "an unreadable identity never changes host behaviour");
 });
 
-test("forgetting a session clears its continuation budget", async () => {
+test("forgetting a session clears its rollover state", async () => {
   const host = fakeHost({ agent: COORDINATOR });
-  const hooks = createContinuationHooks(host.client, "/project", { ...POLICY, maxAutoContinues: 1 }, FAST);
+  const hooks = createContinuationHooks(host.client, "/project", POLICY, FAST);
 
   await hooks.tool.execute({}, { sessionID: "ses_root", agent: COORDINATOR });
   await settle();

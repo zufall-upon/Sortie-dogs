@@ -145,7 +145,6 @@ exact-path commit，不授予arbitrary Git、force push、release或publish auth
   },
   "continuation": {
     "enabled": true,
-    "maxAutoContinues": 10,
     "taskWatchdogMilliseconds": 300000
   }
 }
@@ -163,7 +162,7 @@ exact-path commit，不授予arbitrary Git、force push、release或publish auth
 - `consultation.strategy`：固定advisor identity、可选`required`及正整数`maxCallsPerCandidate`；默认not required、1次call
 - `consultation.sourceReview`：risk-based review；`maxCallsPerCandidate`默认`1`，`maxArtifactBytes`默认且最大`30720`；仅review必需时因unavailable而阻塞
 - `continuation.enabled`：默认`true`
-- `continuation.maxAutoContinues`：正整数，默认且最大`10`
+- 自动续行无turn次数上限；旧`continuation.maxAutoContinues`正整数配置仍可接收，但会被忽略
 - `continuation.taskWatchdogMilliseconds`：implementation Task进行时允许的root inactivity；默认`300000`，范围`10..1800000`
 - `continuation.summarizeModel`：可选compaction model；省略时复用最新root model
 - `validationProfile`：`fast` / `balanced` / `assurance`；默认`balanced`
