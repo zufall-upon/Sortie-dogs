@@ -543,6 +543,7 @@ export function createInstancePrompt(instance) {
     "Before editing, reproduce the public issue with its smallest concrete example and locate the existing focused regression test or tests that express the expected behavior.",
     "After editing, rerun that exact reproduction plus the focused regression test and at least one adjacent relevant test; do not finalize a patch that only passes syntax checks or a self-invented test while the issue's focused test still fails.",
     "Read the complete focused test failure and adjust the implementation until the public scenario and focused regression pass; keep the final diff limited to the fix and necessary regression coverage.",
+    "Derive assertions from the public issue and existing project tests; never invent an unreported return value just to make a new test pass. If the issue reports only an exception, verify the exact call completes without exception and preserve the project's established return conventions.",
     "Do not commit, push, access Git remotes or history beyond the checked-out base commit, browse the web, or access benchmark solution metadata.",
     "Do not use issue or pull-request pages, mirrors, hints, gold patches, test patches, or hidden evaluation tests.",
     `Repository: ${instance.repo}`,
