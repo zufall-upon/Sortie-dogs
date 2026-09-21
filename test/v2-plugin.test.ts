@@ -275,7 +275,7 @@ test("actual v0.10 tools preserve required, optional, and described schemas thro
     const check = tools.find(tool => tool.name === "sortie_v010_check_contract")!;
     assert.deepEqual(prepare.input.required, ["plan_json"]);
     assert.match(prepare.input.properties.plan_json!.description!, /plan_json must encode the exact operator plan object/u);
-    assert.deepEqual(cancel.input.required, []);
+    assert.deepEqual(cancel.input.required, ["reason"]);
     assert.deepEqual(begin.input.required, ["intent_json"]);
     assert.match(begin.input.properties.intent_json!.description!, /intent_json must encode exactly this JSON object/u);
     assert.deepEqual(check.input.required, ["handoff_path"]);

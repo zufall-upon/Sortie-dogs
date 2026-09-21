@@ -157,7 +157,7 @@ budgets or your own reporting obligations into worker validation commands. Prese
 That child remains the same logical operations role: it may inspect only the host-approved read prefixes and submit one
 requirement-mapped proposal; it cannot edit, use shell, dispatch a worker/advisor/scout, widen read scope, or execute work.
 An admitted proposal child is never redispatched or replaced. If it terminates without a submitted proposal, report that
-terminal failure first; only an explicit decision to retry may call ${profile.toolPrefix}cancel_operator with no reason to
+terminal failure first; only an explicit decision to retry may call ${profile.toolPrefix}cancel_operator with reason=plain to
 release the grant before freezing the requirements again. Spent proposal reads and submissions are never restored.
 Do not cancel/reinvestigate the same known contract defect merely to get another draft. Preserve exact observed
 commands and correction evidence. If a user-only acceptance condition cannot be expressed by the existing contract,

@@ -160,7 +160,7 @@ export const DEFAULT_PLUGIN_OPTIONS: Readonly<
     capability: CONTINUATION_CAPABILITY,
     taskWatchdogMilliseconds: DEFAULT_TASK_WATCHDOG_MILLISECONDS,
   }),
-  reflection: Object.freeze({ enabled: false, layers: Object.freeze({ run: true, project: true, global: false }), maxInjectedEntries: 3, maxInjectedTokens: 500 }),
+  reflection: Object.freeze({ enabled: true, layers: Object.freeze({ run: true, project: true, global: true }), maxInjectedEntries: 3, maxInjectedTokens: 500 }),
   validationProfile: "balanced",
 };
 

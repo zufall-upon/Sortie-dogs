@@ -433,6 +433,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       "sortie_prepare_luna_fabric",
       "sortie_prepare_parallel_dispatch",
       "sortie_propose_experience_route",
+      "sortie_reflection",
       "sortie_release_write_gate",
       "sortie_select_failure_diagnosis",
       "sortie_submit_integration_remediation",

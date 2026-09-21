@@ -44,7 +44,7 @@ const PREVIEW_ROUTES: readonly { readonly model: string; readonly variant: strin
 
 export function processRemediationReplacementPacket(code: string, packet: unknown, cancelTool: string, prepareTool: string) {
   return { status: "operator-process-remediation-replacement-required", code, packet,
-    next_action: `Call ${cancelTool} without a reason, then call ${prepareTool} with the exact same ordered acceptance, ` +
+    next_action: `Call ${cancelTool} with reason=plain, then call ${prepareTool} with the exact same ordered acceptance, ` +
       "the same unit and write scope, and the remaining cumulative budget. Do not call resume_operator again, " +
       "claim evidence, reset spend, or widen scope." };
 }
@@ -498,7 +498,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         const proposal = await proposals.read(context.sessionID);
         const proposalNextAction = proposal?.phase === "investigating"
           ? proposal.proposal_call_id !== null
-            ? "proposal Task is already admitted; do not redispatch it or call operator_next. Continue submission repairs only in the same active claimed child. If that child terminated without submission, report the terminal proposal failure; remaining read or submission capacity does not authorize a new Task, budget reset, or replacement child. Only an explicit root decision to retry may call cancel_operator with no reason to release this grant, which discards the spent proposal accounting and never reuses the terminated child"
+            ? "proposal Task is already admitted; do not redispatch it or call operator_next. Continue submission repairs only in the same active claimed child. If that child terminated without submission, report the terminal proposal failure; remaining read or submission capacity does not authorize a new Task, budget reset, or replacement child. Only an explicit root decision to retry may call cancel_operator with reason=plain to release this grant, which discards the spent proposal accounting and never reuses the terminated child"
             : proposal.submission_count >= proposal.intent.proposal_budget.max_submissions
             ? "proposal submission budget exhausted; do not call operator_next; report the bounded proposal failure"
             : "proposal is not submitted; do not call operator_next; complete or repair the bounded proposal submission"
@@ -514,10 +514,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
               next_action: proposalNextAction }
               : { status: "absent", profile: profile.id });
       } };
-    tools[cancel] = { description: "Revoke this root's operator grant and stop only its owned children before releasing core state. Before approval it instead releases the bounded proposal grant, including one whose admitted child already terminated, so the root can begin a new investigation; it never reuses that child or restores spent proposal budget. reason is a closed set: omit it for a plain cancellation, including replanning, contract revision, and any pre-approval proposal release, and never send free text such as a written justification. Use reason=acceptance-remediation only for decision=operator-acceptance-remediation-required. At awaiting-acceptance, reason=review-blocking authorizes a same-goal review-remediation replacement only within the exact acceptance, committed head, approved write union, and retained remaining budget.",
-      args: { reason: optionalStringSchema as never }, execute: async (args, context) => {
+    tools[cancel] = { description: "Revoke this root's operator grant and stop only its owned children before releasing core state. Before approval it instead releases the bounded proposal grant, including one whose admitted child already terminated, so the root can begin a new investigation; it never reuses that child or restores spent proposal budget. reason is a required closed set: use reason=plain for a plain cancellation, including replanning, contract revision, and any pre-approval proposal release, and never send free text such as a written justification. Use reason=acceptance-remediation only for decision=operator-acceptance-remediation-required. At awaiting-acceptance, reason=review-blocking authorizes a same-goal review-remediation replacement only within the exact acceptance, committed head, approved write union, and retained remaining budget.",
+      args: { reason: { type: "string", enum: ["plain", "review-blocking", "acceptance-remediation"] } as never }, execute: async (args, context) => {
         await requireRoot(context.sessionID);
-        const requestedReason = (args as { reason?: unknown }).reason;
+        const rawReason = (args as { reason?: unknown }).reason;
+        const requestedReason = rawReason === "plain" || rawReason === undefined ? undefined : rawReason;
         if (requestedReason !== undefined && requestedReason !== "review-blocking" && requestedReason !== "acceptance-remediation") throw new Error("operator-cancel-reason-invalid");
         const pending = await operators.read(context.sessionID);
         if (!pending) {

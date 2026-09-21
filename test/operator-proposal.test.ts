@@ -1515,7 +1515,7 @@ test("an admitted proposal child that terminates without submission is released 
   const stuck = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
   assert.equal(stuck.proposal.task_admitted, true);
   assert.equal(Object.hasOwn(stuck, "task"), false);
-  assert.match(stuck.next_action, /cancel_operator with no reason to release this grant/u);
+  assert.match(stuck.next_action, /cancel_operator with reason=plain to release this grant/u);
   const registry = new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE);
   const admitted = await registry.required("root");
   await assert.rejects(registry.admit("root", "replacement-call", registry.task(admitted)), /operator-proposal-dispatch-not-authorized/,
@@ -1525,9 +1525,9 @@ test("an admitted proposal child that terminates without submission is released 
     { intent_json: JSON.stringify({ ...intent(), authoritative_refs: ["user:u2"] }) }, { sessionID: "root" }),
     /operator-proposal-active-intent-immutable/, "the frozen intent stays immutable while the grant is held");
   await assert.rejects(hooks.tool!.sortie_v010_cancel_operator.execute({ reason: "review-blocking" }, { sessionID: "root" }),
-    /operator-cancel-reason-invalid/, "a pre-approval release takes no reason");
+    /operator-cancel-reason-invalid/, "a pre-approval release accepts only reason=plain");
 
-  const cancelled = JSON.parse(await hooks.tool!.sortie_v010_cancel_operator.execute({}, { sessionID: "root" }));
+  const cancelled = JSON.parse(await hooks.tool!.sortie_v010_cancel_operator.execute({ reason: "plain" }, { sessionID: "root" }));
   assert.equal(cancelled.status, "cancelled");
   assert.equal(cancelled.scope, "proposal");
   assert.equal(cancelled.released_proposal.reads, 1);

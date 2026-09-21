@@ -184,7 +184,7 @@ test("model routing configuration is strict and merges roles by layer", () => {
   const reflectionDefaults = resolvePluginConfiguration();
   assert.equal(reflectionDefaults.kind, "configured");
   if (reflectionDefaults.kind === "configured") {
-    assert.deepEqual(reflectionDefaults.reflection, { enabled: false, layers: { run: true, project: true, global: false }, maxInjectedEntries: 3, maxInjectedTokens: 500 });
+    assert.deepEqual(reflectionDefaults.reflection, { enabled: true, layers: { run: true, project: true, global: true }, maxInjectedEntries: 3, maxInjectedTokens: 500 });
   }
   assert.equal(resolvePluginConfiguration({ reflection: { enabled: "yes" } }).kind, "invalid");
   assert.equal(resolvePluginConfiguration({ reflection: { maxInjectedEntries: 4 } }).kind, "invalid");
@@ -1784,7 +1784,7 @@ function assertValidationPolicy(system: readonly string[], profile = "balanced")
   assert.equal(JSON.parse(policies[0]!.slice(validationPolicyPrefix.length)).profile, profile);
 }
 
-test("reflection policy injection is disabled by default, complete when empty or seeded, and exactly once", async () => {
+test("reflection policy injection is enabled by default, explicitly disableable, complete, and exactly once", async () => {
   await withProject("reflection-policy-injection", async (directory) => {
     const oldXdg = process.env.XDG_CONFIG_HOME;
     const oldConfig = process.env.SORTIE_DOGS_CONFIG;
@@ -1796,7 +1796,7 @@ test("reflection policy injection is disabled by default, complete when empty or
       delete process.env.SORTIE_DOGS_CONFIG;
       delete process.env.SORTIE_REFLECTION;
 
-      const disabled = await SortieDogsPlugin({ directory, client });
+      const disabled = await SortieDogsPlugin({ directory, client }, { reflection: { enabled: false } });
       await disabled["chat.message"]!(
         { sessionID: "reflection-disabled", agent: "dog-coordinator" },
         { message: { model: {} }, parts: [{ type: "text", text: "root" }] },
@@ -1806,10 +1806,7 @@ test("reflection policy injection is disabled by default, complete when empty or
       assertValidationPolicy(disabledSystem.system);
       assert.deepEqual(withoutValidationPolicy(disabledSystem.system), ["base"]);
 
-      const enabled = await SortieDogsPlugin(
-        { directory, client },
-        { reflection: { enabled: true, maxInjectedEntries: 2, maxInjectedTokens: 500 } },
-      );
+      const enabled = await SortieDogsPlugin({ directory, client });
       const rootSession = "reflection-policy-root";
       await enabled["chat.message"]!(
         { sessionID: rootSession, agent: "dog-coordinator" },
@@ -1910,7 +1907,7 @@ test("global Sortie config enables reflection without plugin tuple options", asy
   });
 });
 
-test("invalid global Sortie config fails reflection closed without removing core tools", async () => {
+test("invalid global Sortie config keeps default reflection and core tools", async () => {
   await withProject("reflection-invalid-global", async (directory) => {
     const oldXdg = process.env.XDG_CONFIG_HOME;
     const xdg = await mkdtemp(join(testEnvironment, "reflection-invalid-global-xdg-"));
@@ -1923,7 +1920,7 @@ test("invalid global Sortie config fails reflection closed without removing core
       await writeFile(join(xdg, "opencode", "sortie-dogs.json"), "{bad");
       console.warn = (...args: unknown[]) => warnings.push(args);
       const hooks = await SortieDogsPlugin({ directory });
-      assert.equal(hooks.tool?.sortie_reflection, undefined);
+      assert.ok(hooks.tool?.sortie_reflection);
       assert.deepEqual(Object.keys(hooks.tool ?? {}).sort(), [
         "sortie_accept_luna_fabric_candidate",
         "sortie_accept_parallel_integration",
@@ -1945,6 +1942,7 @@ test("invalid global Sortie config fails reflection closed without removing core
         "sortie_prepare_luna_fabric",
         "sortie_prepare_parallel_dispatch",
         "sortie_propose_experience_route",
+        "sortie_reflection",
         "sortie_release_write_gate",
         "sortie_select_failure_diagnosis",
         "sortie_submit_integration_remediation",
@@ -1956,7 +1954,7 @@ test("invalid global Sortie config fails reflection closed without removing core
 
       await writeFile(join(xdg, "opencode", "sortie-dogs.json"), JSON.stringify({ unknown: true }));
       const schemaHooks = await SortieDogsPlugin({ directory });
-      assert.equal(schemaHooks.tool?.sortie_reflection, undefined);
+      assert.ok(schemaHooks.tool?.sortie_reflection);
       assert.equal(warnings.length, 2);
       await activate(schemaHooks, "invalid-schema-global");
       assert.equal((await bindWriteGate(schemaHooks, directory, "invalid-schema-global")).status, "bound");
@@ -2147,7 +2145,7 @@ test("reflection remains byte and storage passive when disabled", async () => {
     const oldXdg = process.env.XDG_CONFIG_HOME;
     try {
       const xdg = await mkdtemp(join(testEnvironment, "reflection-disabled-xdg-")); process.env.XDG_CONFIG_HOME = xdg;
-      const hooks = await SortieDogsPlugin({ directory });
+      const hooks = await SortieDogsPlugin({ directory }, { reflection: { enabled: false } });
       assert.equal(hooks.tool?.sortie_reflection, undefined);
       assert.ok(hooks["experimental.chat.system.transform"]);
       await hooks["chat.message"]!({ sessionID: "disabled", agent: "dog-coordinator" }, { message: { model: {} }, parts: [{ type: "text", text: "unchanged" }] });

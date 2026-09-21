@@ -34,7 +34,7 @@ async function fixture(run: (projectRoot: string, configRoot: string) => Promise
   delete process.env.SORTIE_REFLECTION_SYNC;
   await mkdir(join(projectRoot, ".opencode"), { recursive: true });
   await mkdir(join(projectRoot, ".git"), { recursive: true });
-  await writeFile(join(projectRoot, ".opencode/sortie-dogs-v010.json"), JSON.stringify({ reflection: { enabled: true } }));
+  await writeFile(join(projectRoot, ".opencode/sortie-dogs-v010.json"), JSON.stringify({}));
   try {
     await run(projectRoot, join(configRoot, "opencode"));
   } finally {
@@ -201,8 +201,7 @@ test("v0.10 global and run layers remain isolated from stable storage", async ()
   const stableGlobal = await readFile(join(stableRoot, "global.json"));
   const stableRun = await readFile(join(stableRoot, "runs/root.json"));
 
-  const hooks = await SortieDogsV010Plugin({ directory: projectRoot, client: client() },
-    { reflection: { enabled: true, layers: { global: true } } });
+  const hooks = await SortieDogsV010Plugin({ directory: projectRoot, client: client() });
   await activate(hooks, "root");
   const reflect = hooks.tool!.sortie_v010_reflection.execute;
   await reflect({ action: "record", layer: "global", scope: "preview-global", trigger: "preview", cause: "preview",
