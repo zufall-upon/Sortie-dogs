@@ -11,6 +11,7 @@ import {
   resolveGlobalConfigRoot,
 } from "../src/core/initialize.ts";
 import { runtimeAssets } from "../src/runtime-assets.ts";
+import { V010_RUNTIME_ASSET_VERSION } from "../src/asset-version.ts";
 
 const TEST_ROOT = join(process.cwd(), "_testenv");
 const ENTRY = join(process.cwd(), "src", "cli", "main.ts");
@@ -440,7 +441,7 @@ test("beta CLI defaults to namespaced preview assets", async () => {
   try {
     const result = await runCli(["init", project]);
     assert.equal(result.exit, 0, result.stderr);
-    assert.equal(await readFile(join(project, ".opencode/sortie-dogs-v010.version"), "utf8"), "0.10.0-v0912-language4-cost-rpt10-compaction-ref2-proposal1-review-remediation1-surface4-proposal-recovery2-quality1-terminal2-route1-path1-permission2-prerequisite1-v2-bridge1-intent1-reflection1-cancel1\n");
+    assert.equal(await readFile(join(project, ".opencode/sortie-dogs-v010.version"), "utf8"), `${V010_RUNTIME_ASSET_VERSION}\n`);
     const primary = await readFile(join(project, ".opencode/agent/dog-operator.md"), "utf8");
     assert.match(primary, /prepare_operator/);
     assert.match(primary, /^model: openai\/gpt-5\.6-luna-fast$/m);
