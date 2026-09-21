@@ -536,6 +536,7 @@ export function createInstancePrompt(instance) {
     "Use the repository's existing development workflow and leave the fix as an uncommitted working-tree diff.",
     "The current working directory is the repository root; when supplying a path yourself, use a relative path and never guess or reconstruct the repository's absolute path.",
     "For initial repository discovery, omit the path argument from glob and grep, and read the repository root as '.'; only reuse absolute paths returned by tools.",
+    "For shell commands, omit the workdir argument and use the current repository directory; never construct an absolute workdir.",
     "Do not commit, push, access Git remotes or history beyond the checked-out base commit, browse the web, or access benchmark solution metadata.",
     "Do not use issue or pull-request pages, mirrors, hints, gold patches, test patches, or hidden evaluation tests.",
     `Repository: ${instance.repo}`,

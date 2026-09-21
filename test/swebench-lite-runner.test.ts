@@ -248,6 +248,8 @@ test("live plan keeps instance sessions independent and prompt input public", ()
     /when supplying a path yourself, use a relative path and never guess or reconstruct the repository's absolute path/u);
   assert.match(result.instances[0]!.prompt,
     /omit the path argument from glob and grep, and read the repository root as '\.'; only reuse absolute paths returned by tools/u);
+  assert.match(result.instances[0]!.prompt,
+    /For shell commands, omit the workdir argument and use the current repository directory; never construct an absolute workdir/u);
   assert.match(result.instances[0]!.prompt, /leave the fix as an uncommitted working-tree diff/u);
   assert.match(result.instances[0]!.prompt, /Do not commit, push, access Git remotes or history beyond the checked-out base commit/u);
   assert.match(result.instances[0]!.prompt, /Do not use issue or pull-request pages, mirrors, hints, gold patches, test patches, or hidden evaluation tests/u);
