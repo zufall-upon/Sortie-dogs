@@ -244,6 +244,11 @@ test("live plan keeps instance sessions independent and prompt input public", ()
   assert.equal(result.execution.watchdog_interval_seconds, 120);
   assert.equal(result.execution.cost_limit_usd, 50);
   assert.match(result.instances[0]!.prompt, /Public issue statement:/);
+  assert.match(result.instances[0]!.prompt,
+    /when supplying a path yourself, use a relative path and never guess or reconstruct the repository's absolute path/u);
+  assert.match(result.instances[0]!.prompt, /leave the fix as an uncommitted working-tree diff/u);
+  assert.match(result.instances[0]!.prompt, /Do not commit, push, access Git remotes or history beyond the checked-out base commit/u);
+  assert.match(result.instances[0]!.prompt, /Do not use issue or pull-request pages, mirrors, hints, gold patches, test patches, or hidden evaluation tests/u);
   assert.match(result.instances[0]!.prompt, /example\/project/);
   assert.equal(Object.hasOwn(result.instances[0]!, "patch"), false);
 });
