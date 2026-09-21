@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
+import { promisify } from "node:util";
 import test from "node:test";
-import { benchmarkEnvironment, benchmarkInlineConfig, benchmarkPermissionPolicy, cloneInstance, createDryRunPlan, createInferenceManifest, createInstancePrompt, createLiveRunPlan, formatPrediction, parseArguments, runDryRun, runLive, runOpenCode } from "../scripts/swebench-lite-runner.mjs";
+import { benchmarkEnvironment, benchmarkInlineConfig, benchmarkPermissionPolicy, capturePatch, cloneInstance, createDryRunPlan, createInferenceManifest, createInstancePrompt, createLiveRunPlan, formatPrediction, parseArguments, runDryRun, runLive, runOpenCode } from "../scripts/swebench-lite-runner.mjs";
 import { runCandidatePreflight } from "../scripts/swebench-candidate-preflight.mjs";
 import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -63,6 +65,7 @@ const createTestLiveRunPlan = (value: ReturnType<typeof manifest>, options: Reco
   createLiveRunPlan(value, options, testPublicRowHashes(value));
 const runTestLive = (value: ReturnType<typeof manifest>, options: Record<string, unknown>, dependencies: Record<string, unknown>) =>
   runLive(value, options, { ...dependencies, publicRowHashes: testPublicRowHashes(value) });
+const execFileAsync = promisify(execFile);
 
 test("dry-run manifest keeps only public issue inputs in stable order", () => {
   const result = createTestInferenceManifest(manifest());
@@ -325,6 +328,29 @@ test("base checkout rejects target-controlled OpenCode configuration", async () 
   }
 });
 
+test("captured patches exclude runtime artifacts and retain product changes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "swebench-patch-filter-"));
+  try {
+    await execFileAsync("git", ["init", "--quiet"], { cwd: root });
+    await execFileAsync("git", ["config", "user.email", "test@example.invalid"], { cwd: root });
+    await execFileAsync("git", ["config", "user.name", "test"], { cwd: root });
+    await writeFile(join(root, "product.txt"), "base\n");
+    await execFileAsync("git", ["add", "product.txt"], { cwd: root });
+    await execFileAsync("git", ["commit", "--quiet", "-m", "base"], { cwd: root });
+    await writeFile(join(root, "product.txt"), "fixed\n");
+    await mkdir(join(root, ".sortie-dogs-v010", "contracts"), { recursive: true });
+    await writeFile(join(root, ".sortie-dogs-v010", "contracts", "state.json"), "internal\n");
+
+    const patch = await capturePatch(root);
+
+    assert.match(patch, /diff --git a\/product\.txt b\/product\.txt/u);
+    assert.match(patch, /-base\n\+fixed/u);
+    assert.doesNotMatch(patch, /\.sortie-dogs-v010/u);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("live run writes one prediction per instance and removes dedicated workspaces", async () => {
   const root = await mkdtemp(join(tmpdir(), "swebench-live-"));
   const runRoot = join(root, "run");
@@ -375,6 +401,8 @@ test("live run writes one prediction per instance and removes dedicated workspac
   assert.equal(gitEnvironments.length, 4);
   assert.ok(gitEnvironments.every(environment => environment === isolatedEnvironment));
   assert.ok(gitCommands.filter(args => args.includes("diff")).every(args => args.includes("HEAD")));
+  assert.ok(gitCommands.filter(args => args.includes("add") || args.includes("diff"))
+    .every(args => args.includes(":(exclude).sortie-dogs-v010")));
   assert.equal((await readFile(output, "utf8")).trim().split("\n").length, 2);
     const replayManifest = JSON.parse(await readFile(result.replay.manifest.path, "utf8"));
     assert.equal(replayManifest.schema_version, 1);
