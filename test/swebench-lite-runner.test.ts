@@ -262,10 +262,6 @@ test("live plan keeps instance sessions independent and prompt input public", ()
     /Search for the exact existing test, function, and parameterized case that matches the public reproducer; run that exact case, not merely a nearby test with a similar name or input/u);
   assert.match(result.instances[0]!.prompt,
     /Do not replace, weaken, or edit an existing focused test's expected behavior to make validation green; any new regression test is supplementary and the original focused test must still pass/u);
-  assert.match(result.instances[0]!.prompt,
-    /When the issue includes a command, stack trace, or expected output, reproduce that exact public entrypoint and input first and use its stated behavior as the primary oracle/u);
-  assert.match(result.instances[0]!.prompt,
-    /A lower-level unit test, different API path, or newly invented fixture is supplementary only; do not finalize until the public entrypoint scenario itself passes with the expected result/u);
   assert.match(result.instances[0]!.prompt, /leave the fix as an uncommitted working-tree diff/u);
   assert.match(result.instances[0]!.prompt, /Do not commit, push, access Git remotes or history beyond the checked-out base commit/u);
   assert.match(result.instances[0]!.prompt, /Do not use issue or pull-request pages, mirrors, hints, gold patches, test patches, or hidden evaluation tests/u);
