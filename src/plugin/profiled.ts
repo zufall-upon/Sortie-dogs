@@ -17,7 +17,7 @@ import { normalizeRelativePath } from "../core/path.js";
 
 const SERIAL_CAPABILITIES = new Set([
   "sortie_bind_write_gate", "sortie_release_write_gate", "sortie_check_contract",
-  "sortie_compact_and_continue", "sortie_enable_backlog_drain",
+  "sortie_compact_and_continue", "sortie_enable_backlog_drain", "sortie_reflection",
 ]);
 const PREVIEW_WORKER_ROUTE = Object.freeze({ model: "openai/gpt-5.6-luna-fast", variant: "max" });
 const PREVIEW_SCOUT_ROUTE = Object.freeze({ model: "openai/gpt-5.6-luna-fast", variant: "xhigh" });

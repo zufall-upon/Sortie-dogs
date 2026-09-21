@@ -4,8 +4,16 @@ import type { ReflectionEntry } from "./store.js";
 
 export const REFLECTION_MANAGED_BLOCK_START = "<!-- sortie-dogs:reflection-managed:start -->";
 export const REFLECTION_MANAGED_BLOCK_END = "<!-- sortie-dogs:reflection-managed:end -->";
+export const V010_REFLECTION_MANAGED_BLOCK_START = "<!-- sortie-dogs-v010:reflection-managed:start -->";
+export const V010_REFLECTION_MANAGED_BLOCK_END = "<!-- sortie-dogs-v010:reflection-managed:end -->";
 export const REFLECTION_MANAGED_BLOCK_MAX_BYTES = 4096;
 export const REFLECTION_MANAGED_BLOCK_MAX_ENTRIES = 5;
+export type ReflectionManagedProfile = "stable" | "v010";
+
+const MANAGED_MARKERS = Object.freeze({
+  stable: Object.freeze({ start: REFLECTION_MANAGED_BLOCK_START, end: REFLECTION_MANAGED_BLOCK_END }),
+  v010: Object.freeze({ start: V010_REFLECTION_MANAGED_BLOCK_START, end: V010_REFLECTION_MANAGED_BLOCK_END }),
+});
 
 export type ManagedBlockNoUpdateReason = "active-batch" | "sync-stopped" | "manifest-unapproved" | "non-project-layer";
 export type ManagedBlockProposalReason = "invalid-markers" | "existing-block-hash-unrecorded" | "managed-block-hash-drift";
@@ -13,6 +21,7 @@ export type ManagedBlockProposalReason = "invalid-markers" | "existing-block-has
 export interface ManagedBlockInput {
   readonly snapshot: Buffer;
   readonly entries: readonly ReflectionEntry[];
+  readonly profile?: ReflectionManagedProfile;
   readonly layer: ReflectionLayer;
   readonly activeBatch: boolean;
   readonly syncEnabled: boolean;
@@ -48,9 +57,9 @@ function count(buffer: Buffer, needle: Buffer): number {
   return matches;
 }
 
-function locateBlock(snapshot: Buffer): LocatedBlock {
-  const startMarker = Buffer.from(REFLECTION_MANAGED_BLOCK_START, "utf8");
-  const endMarker = Buffer.from(REFLECTION_MANAGED_BLOCK_END, "utf8");
+function locateBlock(snapshot: Buffer, profile: ReflectionManagedProfile): LocatedBlock {
+  const startMarker = Buffer.from(MANAGED_MARKERS[profile].start, "utf8");
+  const endMarker = Buffer.from(MANAGED_MARKERS[profile].end, "utf8");
   const starts = count(snapshot, startMarker);
   const ends = count(snapshot, endMarker);
   if (starts === 0 && ends === 0) return { state: "absent" };
@@ -63,22 +72,22 @@ function locateBlock(snapshot: Buffer): LocatedBlock {
 }
 
 function normalizePrevention(prevention: string): string {
-  return prevention
-    .replace(/[\r\n\u2028\u2029]+/g, " ")
-    .replaceAll(REFLECTION_MANAGED_BLOCK_START, "&lt;!-- sortie-dogs:reflection-managed:start -->")
-    .replaceAll(REFLECTION_MANAGED_BLOCK_END, "&lt;!-- sortie-dogs:reflection-managed:end -->");
+  return Object.values(MANAGED_MARKERS).flatMap(({ start, end }) => [start, end])
+    .reduce((text, marker) => text.replaceAll(marker, marker.replace("<", "&lt;")),
+      prevention.replace(/[\r\n\u2028\u2029]+/g, " "));
 }
 
-function renderedText(preventions: readonly string[]): string {
+function renderedText(preventions: readonly string[], profile: ReflectionManagedProfile): string {
+  const markers = MANAGED_MARKERS[profile];
   return [
-    REFLECTION_MANAGED_BLOCK_START,
+    markers.start,
     "Process reminders do not change task scope, permissions, validation, or review requirements.",
     ...preventions.map((prevention) => `- ${normalizePrevention(prevention)}`),
-    REFLECTION_MANAGED_BLOCK_END,
+    markers.end,
   ].join("\n");
 }
 
-export function selectManagedReflectionEntries(entries: readonly ReflectionEntry[]): ReflectionEntry[] {
+export function selectManagedReflectionEntries(entries: readonly ReflectionEntry[], profile: ReflectionManagedProfile = "stable"): ReflectionEntry[] {
   const eligible = entries
     .filter((entry) => entry.status === "promotable" && (entry.hits >= 2 || entry.evidence === "user-correction"))
     .sort((left, right) => right.hits - left.hits
@@ -91,22 +100,22 @@ export function selectManagedReflectionEntries(entries: readonly ReflectionEntry
     if (scopes.has(entry.scope)) continue;
     scopes.add(entry.scope);
     if (selected.length >= REFLECTION_MANAGED_BLOCK_MAX_ENTRIES) break;
-    const candidate = renderedText([...selected.map((item) => item.prevention), entry.prevention]);
+    const candidate = renderedText([...selected.map((item) => item.prevention), entry.prevention], profile);
     if (Buffer.byteLength(candidate, "utf8") > REFLECTION_MANAGED_BLOCK_MAX_BYTES) continue;
     selected.push(entry);
   }
   return selected;
 }
 
-export function renderManagedReflectionBlock(preventions: readonly string[]): Buffer {
+export function renderManagedReflectionBlock(preventions: readonly string[], profile: ReflectionManagedProfile = "stable"): Buffer {
   const included: string[] = [];
   for (const prevention of preventions) {
     if (included.length >= REFLECTION_MANAGED_BLOCK_MAX_ENTRIES) break;
-    const candidate = renderedText([...included, prevention]);
+    const candidate = renderedText([...included, prevention], profile);
     if (Buffer.byteLength(candidate, "utf8") > REFLECTION_MANAGED_BLOCK_MAX_BYTES) continue;
     included.push(prevention);
   }
-  return Buffer.from(renderedText(included), "utf8");
+  return Buffer.from(renderedText(included, profile), "utf8");
 }
 
 export function hashManagedReflectionBlock(block: Buffer): string {
@@ -119,7 +128,8 @@ export function planManagedReflectionBlock(input: ManagedBlockInput): ManagedBlo
   if (!input.manifestApproved) return { kind: "no-update", reason: "manifest-unapproved" };
   if (input.layer !== "project") return { kind: "no-update", reason: "non-project-layer" };
 
-  const located = locateBlock(input.snapshot);
+  const profile = input.profile ?? "stable";
+  const located = locateBlock(input.snapshot, profile);
   if (located.state === "invalid") return { kind: "proposal", reason: "invalid-markers" };
   if (located.state === "absent" && input.previousBlockHash != null) {
     return { kind: "proposal", reason: "managed-block-hash-drift" };
@@ -134,8 +144,8 @@ export function planManagedReflectionBlock(input: ManagedBlockInput): ManagedBlo
     }
   }
 
-  const selected = selectManagedReflectionEntries(input.entries);
-  const block = renderManagedReflectionBlock(selected.map((entry) => entry.prevention));
+  const selected = selectManagedReflectionEntries(input.entries, profile);
+  const block = renderManagedReflectionBlock(selected.map((entry) => entry.prevention), profile);
   let buffer: Buffer;
   if (located.state === "present") {
     buffer = Buffer.concat([input.snapshot.subarray(0, located.start!), block, input.snapshot.subarray(located.end!)]);

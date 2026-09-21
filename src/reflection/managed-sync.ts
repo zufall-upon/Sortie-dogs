@@ -1,17 +1,21 @@
 import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { planManagedReflectionBlock } from "./managed-block.js";
+import { planManagedReflectionBlock, type ReflectionManagedProfile } from "./managed-block.js";
 import type { ReflectionEntry } from "./store.js";
 import { createProjectPaths } from "../plugin/gate.js";
 
-const CONTROL = ".sortie-dogs/reflection-maintenance";
+const STABLE_CONTROL = ".sortie-dogs/reflection-maintenance";
+const V010_CONTROL = ".sortie-dogs-v010/reflection-maintenance";
 const MAX_FILE_BYTES = 256 * 1024;
 const HASH = /^sha256:[a-f0-9]{64}$/u;
-const manifest = {
-  version: "0.1.0", task_id: "reflection-terminal-maintenance",
-  read: ["AGENTS.md", CONTROL], write: ["AGENTS.md", CONTROL], validation: [],
-};
+function maintenanceContract(profile: ReflectionManagedProfile) {
+  const control = profile === "v010" ? V010_CONTROL : STABLE_CONTROL;
+  return { control, manifest: {
+    version: "0.1.0", task_id: "reflection-terminal-maintenance",
+    read: ["AGENTS.md", control], write: ["AGENTS.md", control], validation: [],
+  } };
+}
 type Receipt = {
   blockHash: string | null;
   pending?: { before: string; after: string; blockHash: string };
@@ -46,11 +50,14 @@ export async function syncProjectReflectionBlock(input: {
   projectRoot: string;
   entries: readonly ReflectionEntry[];
   activeBatch: boolean;
+  profile?: ReflectionManagedProfile;
   syncEnabled?: boolean;
 }): Promise<ReflectionSyncResult> {
   if (input.activeBatch) return { kind: "deferred", reason: "active-batch" };
   if (input.syncEnabled === false) return { kind: "deferred", reason: "sync-stopped" };
-  const directory = join(input.projectRoot, CONTROL);
+  const profile = input.profile ?? "stable";
+  const { control, manifest } = maintenanceContract(profile);
+  const directory = join(input.projectRoot, control);
   const agents = join(input.projectRoot, "AGENTS.md");
   const receiptPath = join(directory, "state.json");
   const lockPath = join(directory, "sync.lock");
@@ -98,6 +105,7 @@ export async function syncProjectReflectionBlock(input: {
     }
     const result = planManagedReflectionBlock({ snapshot,
       entries: input.entries.filter((entry) => !(settings.excludedScopes ?? []).includes(entry.scope)),
+      profile,
       layer: "project", activeBatch: false, syncEnabled: true, manifestApproved: true,
       previousBlockHash: receipt.blockHash });
     if (result.kind === "proposal") return await propose(result.reason);

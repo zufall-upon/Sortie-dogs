@@ -6,7 +6,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { syncProjectReflectionBlock } from "../dist/reflection/managed-sync.js";
 import { REFLECTION_MANAGED_BLOCK_MAX_BYTES, REFLECTION_MANAGED_BLOCK_START, REFLECTION_MANAGED_BLOCK_END,
-  renderManagedReflectionBlock } from "../dist/reflection/managed-block.js";
+  V010_REFLECTION_MANAGED_BLOCK_START, V010_REFLECTION_MANAGED_BLOCK_END, renderManagedReflectionBlock } from "../dist/reflection/managed-block.js";
 import { SortieDogsPlugin } from "../dist/plugin/index.js";
 import type { ReflectionEntry } from "../dist/reflection/store.js";
 
@@ -54,7 +54,9 @@ test("active batches and opt-out never modify instructions; explicit scope exclu
   await writeFile(agents, original);
   const input = { projectRoot, entries: [entry()], activeBatch: true };
   assert.deepEqual(await syncProjectReflectionBlock(input), { kind: "deferred", reason: "active-batch" });
+  assert.deepEqual(await syncProjectReflectionBlock({ ...input, profile: "v010" }), { kind: "deferred", reason: "active-batch" });
   assert.ok((await readFile(agents)).equals(original));
+  await assert.rejects(readFile(join(projectRoot, ".sortie-dogs-v010/reflection-maintenance/operation-manifest.json")), { code: "ENOENT" });
   assert.deepEqual(await syncProjectReflectionBlock({ ...input, activeBatch: false, syncEnabled: false }),
     { kind: "deferred", reason: "sync-stopped" });
   assert.equal((await syncProjectReflectionBlock({ ...input, activeBatch: false })).kind, "updated");
@@ -115,6 +117,33 @@ test("maintenance refuses a control directory redirected outside its approved pr
   const result = await syncProjectReflectionBlock({ projectRoot, entries: [entry()], activeBatch: false });
   assert.equal(result.kind, "proposal");
   assert.deepEqual(await readdir(outside), []);
+});
+
+test("stable and v0.10 managed blocks coexist with isolated controls and escaped cross-profile markers", async () => {
+  const projectRoot = await fixture("profile-isolation");
+  const agents = join(projectRoot, "AGENTS.md");
+  const stableEntry = { ...entry("stable-profile"),
+    prevention: `Keep stable text away from ${V010_REFLECTION_MANAGED_BLOCK_START} and ${V010_REFLECTION_MANAGED_BLOCK_END}.` };
+  const previewEntry = { ...entry("v010-profile"),
+    prevention: `Keep preview text away from ${REFLECTION_MANAGED_BLOCK_START} and ${REFLECTION_MANAGED_BLOCK_END}.` };
+
+  assert.equal((await syncProjectReflectionBlock({ projectRoot, entries: [stableEntry], activeBatch: false })).kind, "updated");
+  assert.equal((await syncProjectReflectionBlock({ projectRoot, entries: [previewEntry], activeBatch: false, profile: "v010" })).kind, "updated");
+  const first = await readFile(agents, "utf8");
+  assert.equal(first.split(REFLECTION_MANAGED_BLOCK_START).length - 1, 1);
+  assert.equal(first.split(REFLECTION_MANAGED_BLOCK_END).length - 1, 1);
+  assert.equal(first.split(V010_REFLECTION_MANAGED_BLOCK_START).length - 1, 1);
+  assert.equal(first.split(V010_REFLECTION_MANAGED_BLOCK_END).length - 1, 1);
+  assert.ok(first.includes("&lt;!-- sortie-dogs-v010:reflection-managed:start -->"));
+  assert.ok(first.includes("&lt;!-- sortie-dogs:reflection-managed:start -->"));
+
+  assert.equal((await syncProjectReflectionBlock({ projectRoot, entries: [stableEntry], activeBatch: false })).kind, "unchanged");
+  assert.equal((await syncProjectReflectionBlock({ projectRoot, entries: [previewEntry], activeBatch: false, profile: "v010" })).kind, "unchanged");
+  assert.equal(await readFile(agents, "utf8"), first);
+  const stableManifest = JSON.parse(await readFile(join(projectRoot, ".sortie-dogs/reflection-maintenance/operation-manifest.json"), "utf8"));
+  const previewManifest = JSON.parse(await readFile(join(projectRoot, ".sortie-dogs-v010/reflection-maintenance/operation-manifest.json"), "utf8"));
+  assert.deepEqual(stableManifest.write, ["AGENTS.md", ".sortie-dogs/reflection-maintenance"]);
+  assert.deepEqual(previewManifest.write, ["AGENTS.md", ".sortie-dogs-v010/reflection-maintenance"]);
 });
 
 test("coordinator terminal checkpoint auto-syncs project reflections without a sync tool or an ON action", async () => {

@@ -386,10 +386,14 @@ units are not exposed as pending references.
 
 ## Initial scope
 
-This preview implements the serial path. Luna fabric, parallel integration and
-reflection writes are not exposed in the preview profile; they remain available
-in the separately installed stable runtime. Extending those paths requires their
-own profile-aware ownership and recovery work.
+This preview implements the serial path. Luna fabric and parallel integration are
+not exposed in the preview profile; they remain available in the separately
+installed stable runtime. Reflection is opt-in and profile-isolated: only the
+proved root `dog-operator` can use `sortie_v010_reflection`, persisted entries live
+under `sortie-dogs-v010/reflection`, and successful terminal receipts synchronize
+project reminders through the v0.10-specific managed marker and
+`.sortie-dogs-v010/reflection-maintenance`. The stable store, marker and maintenance
+state remain separate and unchanged.
 
 ## Independent releases
 

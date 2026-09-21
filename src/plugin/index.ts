@@ -2775,10 +2775,11 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       transformConfiguration(readEnvironmentConfig(runtimeProfile.configEnvironment)),
       options,
     );
-    if (runtimeProfile.id === "stable" && probed.kind === "configured" && reflectionEnabled(probed.reflection)) {
+    if (probed.kind === "configured" && reflectionEnabled(probed.reflection)) {
       reflectionVersion = await nearestPackageVersion();
       reflectionConfiguration = probed.reflection;
-      reflectionStore = new ReflectionStore(join(configRoot(), "sortie-dogs", "reflection"), project.root, {
+      const reflectionProfileDirectory = runtimeProfile.id === "stable" ? "sortie-dogs" : "sortie-dogs-v010";
+      reflectionStore = new ReflectionStore(join(configRoot(), reflectionProfileDirectory, "reflection"), project.root, {
         warn: (code) => {
           const log = (input.client as Record<string, unknown> | undefined)?.app;
           if (!isRecord(log) || typeof log.log !== "function") return;
@@ -5961,7 +5962,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         if (isRecord(error) && error.code === "ENOENT") return undefined;
         throw error;
       });
-      const coordinator = parallelCoordinator ?? (gitEntry === undefined ? undefined : await getParallelCoordinator());
+      const coordinator = parallelCoordinator ?? (gitEntry === undefined || !runtimeProfile.parallel
+        ? undefined
+        : await getParallelCoordinator());
       const snapshot = await coordinator?.snapshot(sessionID);
       const activeBatch = childLifecycles.size > 0 || (snapshot !== undefined && !snapshot.archived) ||
         (coordinatorTaskCalls.get(sessionID)?.size ?? 0) > 0 ||
@@ -5972,6 +5975,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       if (activeBatch) return;
       const entries = (await reflectionStore!.list("project", sessionID, reflectionVersion!)).entries;
       const result = await syncProjectReflectionBlock({ projectRoot: project!.root, entries, activeBatch: false,
+        profile: runtimeProfile.id,
         syncEnabled: process.env.SORTIE_REFLECTION_SYNC !== "0" });
       if (result.kind === "proposal") reflectionWarning(`reflection_sync_${result.reason}`);
     } catch { reflectionWarning("reflection_sync_failed"); }
@@ -6355,7 +6359,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         });
       }
       await completeContinuationText(textInput.sessionID, textOutput.text, false);
-      if (runOutcome === "DONE" && isCoordinatorSession(textInput.sessionID)) {
+      if (runOutcome === "DONE" && isCoordinatorSession(textInput.sessionID) &&
+        (runtimeProfile.id === "stable" || terminal?.receipt?.status === "succeeded")) {
         await syncTerminalProjectReflections(textInput.sessionID);
       }
     },
