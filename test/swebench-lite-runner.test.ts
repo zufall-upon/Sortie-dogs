@@ -252,6 +252,12 @@ test("live plan keeps instance sessions independent and prompt input public", ()
     /For shell commands, omit the workdir argument and use the current repository directory; never construct or copy an absolute workdir/u);
   assert.match(result.instances[0]!.prompt,
     /Keep every glob, grep, read, and shell path relative even after coordinator or worker handoffs; only the host may use absolute workspace paths/u);
+  assert.match(result.instances[0]!.prompt,
+    /Before editing, reproduce the public issue with its smallest concrete example and locate the existing focused regression test or tests that express the expected behavior/u);
+  assert.match(result.instances[0]!.prompt,
+    /After editing, rerun that exact reproduction plus the focused regression test and at least one adjacent relevant test; do not finalize a patch that only passes syntax checks or a self-invented test while the issue's focused test still fails/u);
+  assert.match(result.instances[0]!.prompt,
+    /Read the complete focused test failure and adjust the implementation until the public scenario and focused regression pass; keep the final diff limited to the fix and necessary regression coverage/u);
   assert.match(result.instances[0]!.prompt, /leave the fix as an uncommitted working-tree diff/u);
   assert.match(result.instances[0]!.prompt, /Do not commit, push, access Git remotes or history beyond the checked-out base commit/u);
   assert.match(result.instances[0]!.prompt, /Do not use issue or pull-request pages, mirrors, hints, gold patches, test patches, or hidden evaluation tests/u);
