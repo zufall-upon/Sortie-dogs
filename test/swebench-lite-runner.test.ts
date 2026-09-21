@@ -303,10 +303,14 @@ test("benchmark permissions deny browsing and remote shell access while retainin
   }
   const inline = benchmarkInlineConfig("file:///candidate/plugin.js", ["dog-operator", "dog-worker"]);
   assert.deepEqual(inline.plugin, ["file:///candidate/plugin.js"]);
+  assert.equal(Object.hasOwn(inline.permission, "external_directory"), false);
+  assert.equal(Object.hasOwn(inline.agent["dog-operator"]!.permission, "external_directory"), false);
   assert.equal(inline.agent["dog-operator"]!.permission.bash["*https://*"], "deny");
   assert.equal(inline.agent["dog-worker"]!.tools.webfetch, false);
-  assert.deepEqual(benchmarkInlineConfig("file:///candidate/plugin.js", ["dog-operator"], "/tmp/opencode/swebench-run")
-    .agent["dog-operator"]!.permission.external_directory,
+  const scopedInline = benchmarkInlineConfig("file:///candidate/plugin.js", ["dog-operator"], "/tmp/opencode/swebench-run");
+  assert.deepEqual(scopedInline.permission.external_directory,
+    { "/tmp/opencode/swebench-run/*": "allow" });
+  assert.deepEqual(scopedInline.agent["dog-operator"]!.permission.external_directory,
   { "/tmp/opencode/swebench-run/*": "allow" });
 });
 
