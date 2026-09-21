@@ -55,6 +55,19 @@ async function previewHooks(root: string, rootSessionID = "root") {
     messages: async () => ({ data: [] }),
   } } } as never);
 }
+
+test("non-profile agents receive an actionable isolation error and retain native-tool guidance", async () => fixture(async root => {
+  await promisify(execFile)("git", ["init", "--quiet"], { cwd: root });
+  const hooks = await SortieDogsV010Plugin({ directory: root, client: { session: {
+    get: async () => ({ data: { agent: "build" } }),
+    messages: async () => ({ data: [] }),
+  } } } as never);
+  await assert.rejects(
+    hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "build-root" }),
+    /runtime-profile-session-inactive: non-profile agents retain native read, edit, patch, shell, and task tools; continue directly without Sortie profile tools/u,
+  );
+}));
+
 async function previewProposal(root: string, submissions = 1) {
   await mkdir(join(root, "src"), { recursive: true });
   await writeFile(join(root, "src", "input.ts"), "export {};\n");

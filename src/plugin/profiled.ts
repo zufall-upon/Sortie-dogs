@@ -76,6 +76,7 @@ export function previewModelCatalog(
 }
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 const payload = (value: unknown): unknown => record(value) && "data" in value ? value.data : value;
+const RUNTIME_PROFILE_SESSION_INACTIVE = "runtime-profile-session-inactive: non-profile agents retain native read, edit, patch, shell, and task tools; continue directly without Sortie profile tools";
 const fallbackOptionalSchema = (schema: unknown): unknown => record(schema) && schema.type === "string" && typeof schema.optional !== "function"
   ? { ...schema, "x-sortie-optional": true }
   : schema;
@@ -282,7 +283,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     });
     const tools: Record<string, Tool> = {};
     async function requireRoot(id: string): Promise<void> {
-      if (await rootFor(id) !== id || !await control?.isRoot(id)) throw new Error("profile-coordinator-root-required");
+      const root = await rootFor(id);
+      if (!root) throw new Error(RUNTIME_PROFILE_SESSION_INACTIVE);
+      if (root !== id || !await control?.isRoot(id)) throw new Error("profile-coordinator-root-required");
     }
     async function restorePriorAcceptance(root: string, state: import("../core/operator-runtime.js").OperatorState): Promise<void> {
       const succeeded = [...state.units].reverse().find(unit => unit.status === "succeeded");
@@ -331,7 +334,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       tools[profileTool(profile, name)] = { ...definition, args,
         execute: async (args, context) => {
           const root = await rootFor(context.sessionID);
-          if (!root) throw new Error("runtime-profile-session-inactive");
+          if (!root) throw new Error(RUNTIME_PROFILE_SESSION_INACTIVE);
           if ((await identity(context.sessionID)).role === "dog-operator") throw new Error("operator-capability-denied");
           return definition.execute(args, { ...context, ...(context.agent === undefined ? {} : { agent: mapAgent(context.agent, false) }) });
         },
@@ -933,11 +936,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       "tool.execute.before": async (request, output) => {
         const who = await identity(request.sessionID);
         if (!who.role) {
-          if (request.tool.startsWith(profile.toolPrefix)) throw new Error("runtime-profile-session-inactive");
+          if (request.tool.startsWith(profile.toolPrefix)) throw new Error(RUNTIME_PROFILE_SESSION_INACTIVE);
           return;
         }
         const root = await rootFor(request.sessionID);
-        if (!root) throw new Error("runtime-profile-session-inactive");
+        if (!root) throw new Error(RUNTIME_PROFILE_SESSION_INACTIVE);
         if (request.tool.startsWith("sortie_") && !request.tool.startsWith(profile.toolPrefix)) throw new Error("runtime-profile-tool-mismatch");
         if (who.role === "dog-worker") {
           const state = await operators.read(root);
