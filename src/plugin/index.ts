@@ -7903,6 +7903,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     },
     registerGoalDeclaration: async (root, prompt) => {
       if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) throw new Error("operator-coordinator-required");
+      // In one-shot CLI turns OpenCode may persist the user message only after chat.message returns.
+      // Proposal preparation can reach registration first, so recover that exact pending real turn here
+      // instead of freezing a prepared contract that can never consume its user revision authority.
+      await recoverPendingRealGoalTurn(root);
       const registered = await bindGoalDeclaration(root, prompt);
       if (registered?.goal_id === null || registered === undefined) throw new Error("operator-goal-registration-unavailable");
     },
@@ -7915,6 +7919,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     },
     relinkRegisteredGoal: async (root, request) => {
       if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) throw new Error("operator-coordinator-required");
+      await recoverPendingRealGoalTurn(root);
       await recoverCompletedGoalReservations(root);
       const ledger = await goalLedger(root), snapshot = await ledger.readGoal(), state = snapshot.state;
       if (state.phase !== "active" || state.receipt !== null) throw new Error("operator-resume-goal-not-active");

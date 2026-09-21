@@ -1,6 +1,7 @@
 import { V010_RUNTIME_ASSET_VERSION } from "../asset-version.js";
 import { OperatorContractError, OperatorRuntime } from "../core/operator-runtime.js";
-import { DEFAULT_OPERATOR_PROPOSAL_BUDGET, OPERATOR_APPROVAL_CONTRACT, OPERATOR_PROPOSAL_BUDGET_CAPS, OperatorProposalRuntime } from "../core/operator-proposal.js";
+import { DEFAULT_OPERATOR_PROPOSAL_BUDGET, OPERATOR_APPROVAL_CONTRACT, OPERATOR_PROPOSAL_BUDGET_CAPS,
+  OperatorProposalBudgetError, OperatorProposalRuntime } from "../core/operator-proposal.js";
 import { CANONICAL_AGENT_ROLES, canonicalAgent, profileAgent, profileTool, V010_RUNTIME_PROFILE,
   type CanonicalAgentRole, type RuntimeProfile } from "../core/runtime-profile.js";
 import { SortieDogsPlugin as canonicalPlugin, type OpenCodeHooks, type OpenCodePlugin, type OpenCodePluginInput } from "./index.js";
@@ -695,7 +696,12 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     tools[beginProposal] = { description: `Root-only: freeze original ordered requirements and grant one bounded read-only proposal investigation to dogs-coordinator. The result contains one exact short Task reference; pass task.subagent_type, task.description, and task.prompt byte-for-byte without appending or paraphrasing. The native parent retains that reference; the host expands it only inside the directly claimed proposal child. ${OPERATOR_INTENT_CONTRACT}`,
       args: { intent_json: intentSchema }, execute: async (args, context) => {
         await requireRoot(context.sessionID);
-        let state = await proposals.begin(context.sessionID, JSON.parse(args.intent_json));
+        let state;
+        try { state = await proposals.begin(context.sessionID, JSON.parse(args.intent_json)); }
+        catch (error) {
+          if (error instanceof OperatorProposalBudgetError) return JSON.stringify(error.diagnostic);
+          throw error;
+        }
         state = await proposals.bindGoal(context.sessionID, await control!.proposalGoalBinding(context.sessionID));
         return JSON.stringify({ ...proposals.packet(state) as object, task: proposals.referenceTask(state),
           dispatch_instruction: "Pass this short Task reference verbatim; do not append or paraphrase it." });

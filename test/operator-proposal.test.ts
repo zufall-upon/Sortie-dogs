@@ -194,6 +194,58 @@ test("omitted proposal budgets use host defaults while explicit grants, caps, an
   }
 }));
 
+test("prepare recovers a CLI user turn persisted after chat.message before registering the goal revision", async () => fixture(async root => {
+  await promisify(execFile)("git", ["init", "--quiet"], { cwd: root });
+  let persisted = false;
+  const user = { info: { id: "late-user", role: "user", agent: "dog-operator" },
+    parts: [{ type: "text", text: "Implement the approved result." }] };
+  const hooks = await SortieDogsV010Plugin({ directory: root, client: { session: {
+    get: async () => ({ data: { agent: "dog-operator" } }),
+    messages: async () => ({ data: persisted ? [user] : [] }),
+  } } } as never);
+  await hooks["chat.message"]!({ sessionID: "root", agent: "dog-operator" } as never, {
+    message: { agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-5.6-sol" } },
+    parts: user.parts,
+  });
+  persisted = true;
+  const result = JSON.parse(await hooks.tool!.sortie_v010_prepare_operator.execute(
+    { plan_json: JSON.stringify(plan()) }, { sessionID: "root" }));
+  assert.equal(result.fast_path, true);
+  assert.ok(result.task, "the recovered current user turn authorizes registration before dispatch");
+}));
+
+test("cumulative proposal spend fails before a new Task and reports the minimum explicit budget revision", async () => fixture(async root => {
+  const runtime = new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE);
+  const first = await runtime.begin("root", intent());
+  const task = runtime.task(first);
+  await runtime.admit("root", "first-call", task);
+  await runtime.bind("root", "first-child", task.prompt);
+  await runtime.accountRead("root", "first-child");
+  await runtime.accountRead("root", "first-child");
+  await runtime.discardPreApproval("root");
+
+  const revised = { ...intent(), original_request: { text: "Revised scope", source_ref: "user:u2" } };
+  await assert.rejects(runtime.begin("root", revised), (error: unknown) => {
+    assert.equal((error as { diagnostic?: { status?: string } }).diagnostic?.status, "proposal-budget-exhausted");
+    assert.deepEqual((error as { diagnostic: { required_minimum_budget: unknown } }).diagnostic.required_minimum_budget,
+      { max_reads: 3, max_submissions: 1 });
+    return true;
+  });
+  assert.equal(await runtime.read("root"), undefined, "an exhausted revision must not publish a dispatchable intent");
+
+  const expanded = await runtime.begin("root", { ...revised, proposal_budget: { max_reads: 3, max_submissions: 2 } });
+  assert.equal(expanded.read_count, 2, "cumulative spend remains monotonic");
+  assert.deepEqual(expanded.read_paths, [], "evidence from the prior intent is never inherited");
+  const expandedTask = runtime.task(expanded);
+  const key = createHash("sha256").update("root").digest("hex");
+  const file = join(root, V010_RUNTIME_PROFILE.stateDirectory, "operator-proposals", `${key}.json`);
+  const persisted = JSON.parse(await readFile(file, "utf8"));
+  persisted.read_count = 3;
+  await writeFile(file, JSON.stringify(persisted));
+  await assert.rejects(new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE).admit("root", "expanded-call", expandedTask),
+    (error: unknown) => (error as { diagnostic?: { code?: string } }).diagnostic?.code === "operator-proposal-read-budget-exhausted");
+}));
+
 test("proposal admission save failure settles its durable reservation without a published call grant", async () => fixture(async root => {
   const { hooks, started, ledgerPath } = await previewProposal(root);
   const key = createHash("sha256").update("root").digest("hex");

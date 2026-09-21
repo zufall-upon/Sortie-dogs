@@ -147,6 +147,22 @@ interface OperatorProposalSpend {
   submissions: number;
 }
 
+export interface OperatorProposalBudgetDiagnostic {
+  readonly status: "proposal-budget-exhausted";
+  readonly code: "operator-proposal-read-budget-exhausted" | "operator-proposal-submission-budget-exhausted";
+  readonly reads: number;
+  readonly max_reads: number;
+  readonly remaining_reads: number;
+  readonly submissions: number;
+  readonly max_submissions: number;
+  readonly remaining_submissions: number;
+  readonly required_minimum_budget: { readonly max_reads: number; readonly max_submissions: number };
+}
+
+export class OperatorProposalBudgetError extends Error {
+  constructor(readonly diagnostic: OperatorProposalBudgetDiagnostic) { super(diagnostic.code); }
+}
+
 function parseIntent(value: unknown): OperatorIntent {
   const proposalBudget = record(value) && Object.hasOwn(value, "proposal_budget")
     ? value.proposal_budget
@@ -359,6 +375,17 @@ export class OperatorProposalRuntime {
     finally { await rm(temporary, { force: true }).catch(() => undefined); }
     this.states.set(state.root_session_id, structuredClone(state));
   }
+  private assertBudgetAvailable(state: OperatorProposalState): void {
+    const remainingReads = state.intent.proposal_budget.max_reads - state.read_count;
+    const remainingSubmissions = state.intent.proposal_budget.max_submissions - state.submission_count;
+    if (remainingReads > 0 && remainingSubmissions > 0) return;
+    throw new OperatorProposalBudgetError({ status: "proposal-budget-exhausted",
+      code: remainingReads <= 0 ? "operator-proposal-read-budget-exhausted" : "operator-proposal-submission-budget-exhausted",
+      reads: state.read_count, max_reads: state.intent.proposal_budget.max_reads, remaining_reads: Math.max(0, remainingReads),
+      submissions: state.submission_count, max_submissions: state.intent.proposal_budget.max_submissions,
+      remaining_submissions: Math.max(0, remainingSubmissions),
+      required_minimum_budget: { max_reads: state.read_count + 1, max_submissions: state.submission_count + 1 } });
+  }
   task(state: OperatorProposalState): OperatorTask {
     return { subagent_type: this.profile.agentNames["dog-operator"], description: "承認前の調査と実行契約案作成",
       prompt: [`SORTIE_OPERATOR_PROPOSAL ${JSON.stringify({ root: state.root_session_id, intent_id: state.intent_id, intent_hash: state.intent_hash })}`,
@@ -423,7 +450,7 @@ export class OperatorProposalRuntime {
   private async beginUnlocked(root: string, raw: unknown): Promise<OperatorProposalState> {
     const intent = parseIntent(raw), intentHash = hash(JSON.stringify(intent)), previous = await this.readUnlocked(root);
     if (previous) {
-      if (previous.intent_hash === intentHash) return previous;
+      if (previous.intent_hash === intentHash) { this.assertBudgetAvailable(previous); return previous; }
       if (previous.phase !== "approved") throw new Error("operator-proposal-active-intent-immutable");
       throw new Error("operator-proposal-new-intent-requires-explicit-root-revision");
     }
@@ -432,6 +459,7 @@ export class OperatorProposalRuntime {
       intent_id: `intent-${intentHash.slice(0, 24)}`, intent_hash: intentHash, intent, created_at: new Date().toISOString(), phase: "investigating",
       goal_binding: null, proposal_call_id: null, proposal_session_id: null, read_count: spend.reads, read_paths: [], submission_count: spend.submissions, proposal_id: null,
       proposal_revision: null, proposal_hash: null, proposal: null, approval_rationale: null };
+    this.assertBudgetAvailable(state);
     await this.save(state); return state;
   }
   async bindGoal(root: string, binding: OperatorProposalGoalBinding): Promise<OperatorProposalState> {
@@ -455,6 +483,7 @@ export class OperatorProposalRuntime {
   private async admitUnlocked(root: string, callID: string, args: unknown, reserveBudget?: () => Promise<void>): Promise<OperatorTask> {
     const state = await this.requiredUnlocked(root);
     if (state.phase !== "investigating" || state.proposal_call_id !== null) throw new Error("operator-proposal-dispatch-not-authorized");
+    this.assertBudgetAvailable(state);
     const canonical = this.resolveTask(state, args);
     // Reserve only after the grant check, while competing admissions remain queued.
     await reserveBudget?.();
