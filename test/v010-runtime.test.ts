@@ -13,7 +13,7 @@ import { runtimeAssets as stableAssets } from "../dist/runtime-assets.js";
 import { runtimeAssets as previewAssets, COMMUNICATION_LANGUAGE_POLICY, PREVIEW_PRESENTATION_POLICY,
   PREVIEW_TERMINAL_REPORT_POLICY } from "../dist/runtime-assets-v010.js";
 import { RUNTIME_ASSET_VERSION, V010_RUNTIME_ASSET_VERSION } from "../dist/asset-version.js";
-import { SortieDogsV010Plugin } from "../dist/plugin/profiled.js";
+import { processRemediationReplacementPacket, SortieDogsV010Plugin } from "../dist/plugin/profiled.js";
 import { fixtureOpenCodeConfig } from "../scripts/release-cli.mjs";
 import { boundedToolErrors } from "../scripts/operator-smoke.mjs";
 import { expandGoalDeclaration } from "../dist/core/goal-declaration-format.js";
@@ -197,6 +197,22 @@ function representativeLongPlan() {
     units: commands.map((validation, index) => ({ id: `unit-${index + 1}`, title: `Representative unit ${index + 1}`, objective,
       read: [`verify-${index}.mjs`], write: [`result-${index}.txt`], validation: [validation], acceptance_indices: [index] })) };
 }
+
+test("unrecoverable non-Git process defects return a bounded replacement route instead of throwing", () => {
+  const packet = processRemediationReplacementPacket("operator-process-remediation-not-ready",
+    { run_id: "operator-run", status: "awaiting-decision" },
+    "sortie_v010_cancel_operator", "sortie_v010_prepare_operator");
+  assert.equal(packet.status, "operator-process-remediation-replacement-required");
+  assert.equal(packet.code, "operator-process-remediation-not-ready");
+  assert.deepEqual(packet.packet, { run_id: "operator-run", status: "awaiting-decision" });
+  assert.match(packet.next_action, /cancel_operator[\s\S]+prepare_operator/u);
+  assert.match(packet.next_action, /exact same ordered acceptance/u);
+  assert.match(packet.next_action, /same unit and write scope/u);
+  assert.match(packet.next_action, /remaining cumulative budget/u);
+  assert.match(packet.next_action, /Do not call resume_operator again/u);
+  assert.match(packet.next_action, /reset spend/u);
+  assert.match(packet.next_action, /widen scope/u);
+});
 
 test("preview assets coexist with stable assets and markers", async () => fixture(async root => {
   await initializeProject(root);

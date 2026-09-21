@@ -36,6 +36,13 @@ const PREVIEW_ROUTES: readonly { readonly model: string; readonly variant: strin
   PREVIEW_REVIEW_ROUTE,
 ]);
 
+export function processRemediationReplacementPacket(code: string, packet: unknown, cancelTool: string, prepareTool: string) {
+  return { status: "operator-process-remediation-replacement-required", code, packet,
+    next_action: `Call ${cancelTool} without a reason, then call ${prepareTool} with the exact same ordered acceptance, ` +
+      "the same unit and write scope, and the remaining cumulative budget. Do not call resume_operator again, " +
+      "claim evidence, reset spend, or widen scope." };
+}
+
 /**
  * Declare every preview route in the catalog, adding the variant to a listed model and the whole model
  * when the built-in catalog never listed it. Augmenting only pre-existing entries silently drops a
@@ -633,8 +640,19 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           } catch (error) {
             if (!(error instanceof Error) || error.message.split(":", 1)[0] !== "operator-recovery-proof-unavailable-or-stale") throw error;
             if (!operators.canRetryRepairValidation(state)) {
-              const remediation = await operators.requireAcceptanceRemediation(context.sessionID, state.runID);
-              return JSON.stringify(await operatorPacket(remediation));
+              try {
+                const remediation = await operators.requireAcceptanceRemediation(context.sessionID, state.runID);
+                return JSON.stringify(await operatorPacket(remediation));
+              } catch (remediationError) {
+                if (!(remediationError instanceof Error) || remediationError.message !== "operator-process-remediation-not-ready") {
+                  throw remediationError;
+                }
+                // A process defect without an authorized Git lifecycle has no committed remediation
+                // baseline. Preserve the failed run and return an explicit replacement route instead
+                // of turning this local routing limitation into a terminal tool exception.
+                return JSON.stringify(processRemediationReplacementPacket(remediationError.message,
+                  operators.packet(state), cancel, prepare));
+              }
             }
             const retried = await operators.resumeRepairValidation(context.sessionID, state.runID,
               source => control!.authorizeOperatorContractRepairValidationRetry(context.sessionID,
