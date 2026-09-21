@@ -255,6 +255,8 @@ test("live plan keeps instance sessions independent and prompt input public", ()
   assert.match(result.instances[0]!.prompt,
     /Before editing, reproduce the public issue with its smallest concrete example and locate the existing focused regression test or tests that express the expected behavior/u);
   assert.match(result.instances[0]!.prompt,
+    /Before editing, extract every stated symptom, bullet, constraint, and expected behavior from the public issue into a checklist and verify each item against the final implementation and focused tests/u);
+  assert.match(result.instances[0]!.prompt,
     /After editing, rerun that exact reproduction plus the focused regression test and at least one adjacent relevant test; do not finalize a patch that only passes syntax checks or a self-invented test while the issue's focused test still fails/u);
   assert.match(result.instances[0]!.prompt,
     /Read the complete focused test failure and adjust the implementation until the public scenario and focused regression pass; keep the final diff limited to the fix and necessary regression coverage/u);
