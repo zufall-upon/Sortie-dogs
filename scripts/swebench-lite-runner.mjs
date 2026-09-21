@@ -545,6 +545,8 @@ export function createInstancePrompt(instance) {
     "Read the complete focused test failure and adjust the implementation until the public scenario and focused regression pass; keep the final diff limited to the fix and necessary regression coverage.",
     "Search for the exact existing test, function, and parameterized case that matches the public reproducer; run that exact case, not merely a nearby test with a similar name or input.",
     "Do not replace, weaken, or edit an existing focused test's expected behavior to make validation green; any new regression test is supplementary and the original focused test must still pass.",
+    "When the issue includes a command, stack trace, or expected output, reproduce that exact public entrypoint and input first and use its stated behavior as the primary oracle.",
+    "A lower-level unit test, different API path, or newly invented fixture is supplementary only; do not finalize until the public entrypoint scenario itself passes with the expected result.",
     "Do not commit, push, access Git remotes or history beyond the checked-out base commit, browse the web, or access benchmark solution metadata.",
     "Do not use issue or pull-request pages, mirrors, hints, gold patches, test patches, or hidden evaluation tests.",
     `Repository: ${instance.repo}`,
