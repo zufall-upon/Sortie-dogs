@@ -258,10 +258,6 @@ test("live plan keeps instance sessions independent and prompt input public", ()
     /After editing, rerun that exact reproduction plus the focused regression test and at least one adjacent relevant test; do not finalize a patch that only passes syntax checks or a self-invented test while the issue's focused test still fails/u);
   assert.match(result.instances[0]!.prompt,
     /Read the complete focused test failure and adjust the implementation until the public scenario and focused regression pass; keep the final diff limited to the fix and necessary regression coverage/u);
-  assert.match(result.instances[0]!.prompt,
-    /Search for the exact existing test, function, and parameterized case that matches the public reproducer; run that exact case, not merely a nearby test with a similar name or input/u);
-  assert.match(result.instances[0]!.prompt,
-    /Do not replace, weaken, or edit an existing focused test's expected behavior to make validation green; any new regression test is supplementary and the original focused test must still pass/u);
   assert.match(result.instances[0]!.prompt, /leave the fix as an uncommitted working-tree diff/u);
   assert.match(result.instances[0]!.prompt, /Do not commit, push, access Git remotes or history beyond the checked-out base commit/u);
   assert.match(result.instances[0]!.prompt, /Do not use issue or pull-request pages, mirrors, hints, gold patches, test patches, or hidden evaluation tests/u);
