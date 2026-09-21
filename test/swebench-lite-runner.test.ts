@@ -780,7 +780,7 @@ test("initial watchdog write failure terminates the process and returns replayab
     }
   });
 
-test("watchdog stops an idle live process after two intervals", { skip: process.platform === "win32" }, async () => {
+test("watchdog observes an idle live process until the hard timeout", { skip: process.platform === "win32" }, async () => {
   const root = await mkdtemp(join(tmpdir(), "swebench-watchdog-"));
   const bin = join(root, "bin");
   const watchdogPath = join(root, "watchdog.jsonl");
@@ -788,22 +788,53 @@ test("watchdog stops an idle live process after two intervals", { skip: process.
   const executable = join(bin, "opencode");
   await writeFile(executable, "#!/bin/sh\nsleep 30\n");
   await chmod(executable, 0o755);
+  await writeFile(join(root, ".bashrc"), `export PATH=${bin}:$PATH\n`);
   try {
     const result = await runOpenCode({
       workspace: root,
       instanceId: "idle",
       agent: "dog-operator",
       prompt: "idle",
-      environment: { PATH: `${bin}:${process.env.PATH ?? ""}` },
-      timeoutSeconds: 30,
+      environment: { HOME: root, PATH: `${bin}:${process.env.PATH ?? ""}` },
+      timeoutSeconds: 3,
       watchdogSeconds: 1,
       watchdogPath,
       startedAt: Date.now(),
     }, { readUsage: () => ({ usd: 0, requests: 0, unpriced: [] }) });
-    assert.equal(result.reason, "watchdog-stale");
+    assert.equal(result.reason, "timeout");
     assert.ok(result.watchdogEvents >= 2);
     assert.match(await readFile(watchdogPath, "utf8"), /"event":"heartbeat"/u);
+    assert.ok(result.lastActivityAgeMs >= 2000);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("cost polling stops an idle live process independently of watchdog activity",
+  { skip: process.platform === "win32" }, async () => {
+    const root = await mkdtemp(join(tmpdir(), "swebench-cost-limit-"));
+    const bin = join(root, "bin");
+    await mkdir(bin, { recursive: true });
+    const executable = join(bin, "opencode");
+    await writeFile(executable, "#!/bin/sh\nsleep 30\n");
+    await chmod(executable, 0o755);
+    await writeFile(join(root, ".bashrc"), `export PATH=${bin}:$PATH\n`);
+    try {
+      let reads = 0;
+      const result = await runOpenCode({
+        workspace: root,
+        instanceId: "cost-limit",
+        agent: "dog-operator",
+        prompt: "idle",
+        environment: { HOME: root, PATH: `${bin}:${process.env.PATH ?? ""}` },
+        timeoutSeconds: 30,
+        watchdogSeconds: 5,
+        startedAt: Date.now(),
+        costLimitUsd: 0.5,
+      }, { readUsage: () => ({ usd: reads++ > 0 ? 0.5 : 0, requests: reads, unpriced: [] }) });
+      assert.equal(result.reason, "cost-limit");
+      assert.equal(result.cleanupEstablished, true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
