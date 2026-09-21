@@ -151,8 +151,16 @@ test("V2 server plugin registers tools and translates public hooks without chang
   const before = fixture.toolHooks.get("execute.before")!;
   const subagent = { tool: "subagent", sessionID: "root", agent: "dog-coordinator-v010", id: "call", input: { agent: "dog-worker-v010", prompt: "work" } };
   await before(subagent);
-  assert.equal(((beforeInput as { output: { args: Record<string, unknown> } }).output.args).subagent_type, "dog-worker-v010");
+  assert.deepEqual((beforeInput as { output: { args: Record<string, unknown> } }).output.args,
+    { subagent_type: "dog-worker-v010", prompt: "work" });
   assert.deepEqual(subagent.input, { agent: "dog-worker-v010", prompt: "work" });
+
+  const resumed = { tool: "subagent", sessionID: "root", agent: "dog-coordinator-v010", id: "resume-call",
+    input: { agent: "dog-worker-v010", prompt: "continue", sessionID: "child-session" } };
+  await before(resumed);
+  assert.deepEqual((beforeInput as { output: { args: Record<string, unknown> } }).output.args,
+    { subagent_type: "dog-worker-v010", prompt: "continue", task_id: "child-session" });
+  assert.deepEqual(resumed.input, { agent: "dog-worker-v010", prompt: "continue", sessionID: "child-session" });
 
   const after = fixture.toolHooks.get("execute.after")!;
   const completed = { tool: "shell", sessionID: "root", id: "shell-call", status: "completed", result: { content: "original" } };
@@ -178,6 +186,37 @@ test("V2 server plugin registers tools and translates public hooks without chang
   cleanup?.();
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(fixture.aborted(), true);
+});
+
+test("V2 child prompt adapter removes only the native subagent envelope before strict Sortie claiming", async () => {
+  const fixture = contextFixture();
+  fixture.context.session.get = async ({ sessionID }) => ({ id: sessionID, parentID: "root", agent: "dogs-coordinator",
+    model: { providerID: "openai", id: "test-model" } });
+  const observed: string[] = [];
+  const plugin = createSortieDogsV2Plugin(async () => ({
+    "chat.message": async (_input, output) => {
+      const part = output.parts[0] as { text: string };
+      observed.push(part.text);
+      if (part.text === "SORTIE_OPERATOR_PROPOSAL_TASK_REF fixture") part.text = "canonical proposal task";
+    },
+  }));
+  const cleanup = await plugin.setup(fixture.context);
+  try {
+    const promptHook = fixture.sessionHooks.get("prompt")!;
+    const claimed = { sessionID: "child", messageID: "user-1",
+      prompt: { text: "You are a subagent spawned by another session.\nSORTIE_OPERATOR_PROPOSAL_TASK_REF fixture" } };
+    await promptHook(claimed);
+    assert.equal(observed[0], "SORTIE_OPERATOR_PROPOSAL_TASK_REF fixture");
+    assert.equal(claimed.prompt.text, "canonical proposal task");
+
+    const ordinary = { sessionID: "child", messageID: "user-2",
+      prompt: { text: "You are a subagent spawned by another session.\nordinary task" } };
+    await promptHook(ordinary);
+    assert.equal(observed[1], "ordinary task");
+    assert.equal(ordinary.prompt.text, "You are a subagent spawned by another session.\nordinary task");
+  } finally {
+    cleanup?.();
+  }
 });
 
 test("V2 event failures warn per event and keep lifecycle translation active", async () => {

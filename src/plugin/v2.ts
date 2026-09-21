@@ -184,6 +184,8 @@ function legacyToolInput(name: unknown, input: unknown): JsonObject {
   if (name === "subagent") {
     if (typeof value.agent === "string") value.subagent_type = value.agent;
     if (typeof value.sessionID === "string") value.task_id = value.sessionID;
+    delete value.agent;
+    delete value.sessionID;
   }
   if (name === "read" && typeof value.path === "string" && value.filePath === undefined) value.filePath = value.path;
   return value;
@@ -217,6 +219,8 @@ function assistantText(message: unknown): string | undefined {
   const text = [...array(message.content)].reverse().find(part => record(part) && part.type === "text" && typeof part.text === "string" && part.text.trim().length > 0);
   return record(text) && typeof text.text === "string" ? text.text.trim() : undefined;
 }
+
+const V2_SUBAGENT_PROMPT_PREFIX = "You are a subagent spawned by another session.\n";
 
 function reportPanel(rendered: string): string | undefined {
   const summary = rendered.indexOf(RETURN_REPORT_MARKER);
@@ -289,12 +293,16 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks)
     const info = await context.session.get({ sessionID: String(event.sessionID ?? "") });
     if (!record(info) || !record(event.prompt)) return;
     const model = modelReference(info.model) ?? { providerID: "unknown", modelID: "unknown" };
+    const nativeText = String(event.prompt.text ?? "");
+    const legacyText = typeof info.parentID === "string" && nativeText.startsWith(V2_SUBAGENT_PROMPT_PREFIX)
+      ? nativeText.slice(V2_SUBAGENT_PROMPT_PREFIX.length)
+      : nativeText;
     const output = { message: { id: String(event.messageID ?? ""), agent: string(info.agent), model },
-      parts: [{ type: "text", text: String(event.prompt.text ?? "") }] };
+      parts: [{ type: "text", text: legacyText }] };
     await hooks["chat.message"]!({ sessionID: String(event.sessionID), messageID: String(event.messageID ?? ""),
       ...(typeof info.agent === "string" ? { agent: info.agent } : {}), model }, output);
     const text = output.parts.find(part => record(part) && part.type === "text" && typeof part.text === "string");
-    if (record(text) && typeof text.text === "string") event.prompt.text = text.text;
+    if (record(text) && typeof text.text === "string" && text.text !== legacyText) event.prompt.text = text.text;
     if (typeof output.message.agent === "string" && output.message.agent !== info.agent) {
       await context.session.switchAgent({ sessionID: event.sessionID, agent: output.message.agent });
     }

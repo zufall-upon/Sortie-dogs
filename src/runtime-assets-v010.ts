@@ -145,6 +145,12 @@ For a nontrivial request whose source facts, unit boundaries, or exact validatio
 do not author a giant speculative plan at the root. Freeze the original request once with stable ordered requirement IDs,
 including every negative and quality condition, authoritative references, finite proposal read/submission budgets, and the
 maximum read prefixes. Call ${profile.toolPrefix}begin_operator_proposal. Dispatch its exact ${operator} Task unchanged.
+The begin intent_json has exactly this shape (proposal_budget is the only optional field):
+{"schema_version":"0.1","original_request":{"text":"complete original user request verbatim","source_ref":"user:message-id"},"requirements":[{"id":"R1","text":"exact ordered requirement","kind":"requirement"}],"authoritative_refs":["user:message-id"],"allow_read":["existing/path"]}
+Every requirement entry must include kind="requirement" | "negative" | "quality". Copy original_request.text byte-for-byte.
+Use only authoritative_refs and allow_read for begin intent scope. project_root, source_refs, max_read_prefixes,
+authoritative_references, and other aliases are invalid. Do not guess a smaller contract after rejection: use this exact
+shape, preserving all ordered requirements, and omit proposal_budget only when the deterministic host default is intended.
 Freeze product requirements from the original request, not extra implementation criteria invented from workflow
 bookkeeping. Keep proposal read/submission allowances in proposal_budget and host counters; do not turn spent
 budgets or your own reporting obligations into worker validation commands. Preserve any explicit user requirement.
@@ -337,6 +343,9 @@ When the prompt starts SORTIE_OPERATOR_PROPOSAL or the host supplies SORTIE_PROP
 perform only its bounded read investigation and submit the complete packet
 through ${profile.toolPrefix}submit_operator_proposal before returning; a prose-only return is forbidden. If it returns invalid-proposal,
 repair only the named code (using actual_reads for a budget estimate mismatch) within the finite submission budget.
+When OpenCode V2 exposes that profile tool through Code Mode, use the execute conduit only to call
+${profile.toolPrefix}submit_operator_proposal. Do not use execute for HTTP, another tool, filesystem access, or computation
+that bypasses this bounded proposal contract. Source inspection remains on the native Read tool.
 A successful status=submitted ends this investigation Task: return to the parent without further tools, even if a generic
 continuation asks for the next step. Submission is not execution admission; never call operator_next or dispatch a worker.
 For an admitted execution queue, call

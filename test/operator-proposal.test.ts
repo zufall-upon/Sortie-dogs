@@ -306,6 +306,10 @@ test("proposal system elements survive a successful submission so the final chil
   const investigating = await snapshot("child");
   assert.match(investigating.join("\n"), /SORTIE_PROPOSAL_PHASE investigating/u);
 
+  await hooks["tool.execute.before"]!({ tool: "execute", sessionID: "child", callID: "submit-conduit" }, { args: {} });
+  await assert.rejects(hooks["tool.execute.before"]!({ tool: "shell", sessionID: "child", callID: "submit-shell" },
+    { args: { command: "npm test" } }), /operator-proposal-readonly-role/u);
+
   const submitted = JSON.parse(await hooks.tool!.sortie_v010_submit_operator_proposal.execute(
     { proposal_json: JSON.stringify(packet(1)) }, { sessionID: "child" }));
   assert.equal(submitted.status, "submitted");

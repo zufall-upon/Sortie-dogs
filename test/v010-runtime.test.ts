@@ -253,6 +253,9 @@ test("preview assets coexist with stable assets and markers", async () => fixtur
   assert.match(primary, /^  "sortie_v010_\*": allow$/m);
   assert.match(primary, /^  compact_and_continue: false$/m);
   assert.match(primary, /^  "sortie_v010_\*": true$/m);
+  assert.match(primary, /The begin intent_json has exactly this shape/);
+  for (const field of ["original_request", "requirements", "authoritative_refs", "allow_read"]) assert.match(primary, new RegExp(`"${field}"`, "u"));
+  assert.match(primary, /project_root, source_refs, max_read_prefixes,[\s\S]+other aliases are invalid/u);
   assert.match(primary, /Before approving a proposal, inventory the executable of every declared validation command/u);
   assert.match(primary, /declare every dependency manifest, lockfile,[\s\S]+project-local output/u);
   assert.match(previewAssets.find(asset => asset.name === "sortie-v010")!.content, /^agent: dog-operator$/m);
@@ -315,6 +318,8 @@ test("preview tools are denied globally and allowed only by profile agents", asy
   });
 
   const operations = previewAssets.find(asset => asset.name === "dogs-coordinator")!.content;
+  assert.match(operations, /use the execute conduit only to call\nsortie_v010_submit_operator_proposal/u);
+  assert.match(operations, /Do not use execute for HTTP, another tool, filesystem access/u);
   assert.match(operations, /^  sortie_v010_operator_next: allow$/m);
   assert.match(operations, /^  sortie_v010_submit_operator_proposal: allow$/m);
   for (const name of ["dog-worker-v010", "dog-luna-worker-v010"]) {

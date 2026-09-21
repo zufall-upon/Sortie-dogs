@@ -967,6 +967,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         const proposal = who.role === "dog-operator" ? await proposals.read(root) : undefined;
         const proposalChild = proposal?.phase === "investigating" && proposal.proposal_session_id === request.sessionID;
         if (proposalChild) {
+          // OpenCode V2 exposes server plugin tools to Code Mode through its `execute`
+          // conduit. The nested submit tool still performs the session/grant checks below;
+          // denying the conduit makes an otherwise read-only proposal impossible to submit.
+          if (request.tool === "execute") return;
           if (request.tool !== "read") throw new Error("operator-proposal-readonly-role");
           if (typeof args.filePath !== "string") throw new Error("operator-proposal-read-path-required");
           const requested = await realpath(resolve(input.directory, args.filePath)).catch(() => { throw new Error("operator-proposal-read-path-unavailable"); });
