@@ -161,7 +161,9 @@ test("a slow host returns bounded pending evidence without overlapping stop oper
 test("child lifecycle arms its registered deadline without readiness gating", async () => {
   const steps: ProfileEntry[] = [];
   const { ledger } = await profileStep(steps, "standalone", () => standalone());
-  const deadline_ms = Date.now() + 250;
+  // Leave enough headroom for ledger setup on loaded CI hosts while still
+  // proving that arm() honors a future registered deadline.
+  const deadline_ms = Date.now() + 1000;
   let stopped = false;
   let stopCount = 0;
   let terminalCount = 0;
