@@ -27,12 +27,12 @@ npm install --save-dev sortie-dogs
 npx sortie-dogs init .
 ```
 
-Beta package默认使用v0.10 profile。保留现有值，在`.opencode/opencode.json`中添加plugin和
+Beta package默认使用v0.10 profile。保留现有值，在`.opencode/opencode.json`中添加OpenCode V2 plugin和
 两层subagent设置：
 
 ```json
 {
-  "plugin": ["sortie-dogs"],
+  "plugins": ["sortie-dogs"],
   "subagent_depth": 2
 }
 ```
@@ -46,7 +46,7 @@ Beta package默认使用v0.10 profile。保留现有值，在`.opencode/opencode
 直接选择`dog-operator`也会启动相同workflow。v0.10中只有`dog-operator`拥有面向用户的authority。
 `dogs-coordinator`和所有`*-v010` role都是内部child，不应作为任务入口选择。
 
-`init`安装runtime asset；`plugin`条目加载runtime enforcement和model routing，两者都需要。
+`init`安装runtime asset；`plugins`条目加载runtime enforcement和model routing，两者都需要。
 plugin module按process加载，因此升级后仅新建session不够，必须重启整个OpenCode host。
 
 ## v0.10.x方向

@@ -19,6 +19,12 @@ const SERIAL_CAPABILITIES = new Set([
   "sortie_bind_write_gate", "sortie_release_write_gate", "sortie_check_contract",
   "sortie_compact_and_continue", "sortie_enable_backlog_drain", "sortie_reflection",
 ]);
+const SERIAL_OPTIONAL_ARGUMENTS = new Map<string, ReadonlySet<string>>([
+  ["sortie_check_contract", new Set(["task_prompt"])],
+  ["sortie_reflection", new Set([
+    "scope", "trigger", "cause", "prevention", "evidence", "evidenceRef", "id", "promotedRef", "confirmation",
+  ])],
+]);
 const PREVIEW_WORKER_ROUTE = Object.freeze({ model: "openai/gpt-5.6-luna-fast", variant: "max" });
 const PREVIEW_SCOUT_ROUTE = Object.freeze({ model: "openai/gpt-5.6-luna-fast", variant: "xhigh" });
 /**
@@ -70,6 +76,9 @@ export function previewModelCatalog(
 }
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 const payload = (value: unknown): unknown => record(value) && "data" in value ? value.data : value;
+const fallbackOptionalSchema = (schema: unknown): unknown => record(schema) && schema.type === "string" && typeof schema.optional !== "function"
+  ? { ...schema, "x-sortie-optional": true }
+  : schema;
 const OPERATOR_INTENT_CONTRACT = 'intent_json must encode exactly this JSON object (proposal_budget optional; all other fields required, no aliases or extra keys): '
   + '{"schema_version":"0.1","original_request":{"text":"the complete original user request, verbatim","source_ref":"user:message-id"},'
   + '"requirements":[{"id":"R1","text":"an exact ordered requirement","kind":"requirement"}],'
@@ -313,7 +322,13 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     }
     for (const [name, definition] of Object.entries(core.tool ?? {})) {
       if (!SERIAL_CAPABILITIES.has(name)) continue;
-      tools[profileTool(profile, name)] = { ...definition,
+      const optionalArguments = SERIAL_OPTIONAL_ARGUMENTS.get(name);
+      const args = optionalArguments === undefined ? definition.args : Object.fromEntries(
+        Object.entries(definition.args).map(([argument, schema]) => [
+          argument, optionalArguments.has(argument) ? fallbackOptionalSchema(schema) : schema,
+        ]),
+      );
+      tools[profileTool(profile, name)] = { ...definition, args,
         execute: async (args, context) => {
           const root = await rootFor(context.sessionID);
           if (!root) throw new Error("runtime-profile-session-inactive");
@@ -358,7 +373,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       : { ...(record(stringSchema) ? stringSchema : { type: "string" }), description: planContract };
     const optionalStringSchema = record(stringSchema) && typeof stringSchema.optional === "function"
       ? (stringSchema.optional as () => unknown).call(stringSchema)
-      : stringSchema;
+      : fallbackOptionalSchema(stringSchema);
     const prepare = profileTool(profile, "sortie_prepare_operator");
     const repair = profileTool(profile, "sortie_repair_operator_plan");
     const next = profileTool(profile, "sortie_operator_next");

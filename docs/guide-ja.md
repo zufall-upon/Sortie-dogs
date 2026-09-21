@@ -31,11 +31,11 @@ npx sortie-dogs init .
 ```
 
 Beta packageの既定profileはv0.10。既存値を保持しながら、
-`.opencode/opencode.json`へpluginと2階層subagent設定を追加する。
+`.opencode/opencode.json`へOpenCode V2 pluginと2階層subagent設定を追加する。
 
 ```json
 {
-  "plugin": ["sortie-dogs"],
+  "plugins": ["sortie-dogs"],
   "subagent_depth": 2
 }
 ```
@@ -50,7 +50,7 @@ OpenCodeを完全再起動して開始する。
 持つのは`dog-operator`だけ。`dogs-coordinator`と`*-v010` roleは内部childであり、
 task開始agentとして選択しない。
 
-`init`はruntime assetを設置し、`plugin` entryはruntime enforcementとmodel routingを
+`init`はruntime assetを設置し、`plugins` entryはruntime enforcementとmodel routingを
 読み込む。両方必要。plugin moduleはprocess単位のため、更新後は新sessionだけでなく
 OpenCode host全体を再起動する。
 

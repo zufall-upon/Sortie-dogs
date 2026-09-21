@@ -292,7 +292,8 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
           pluginType: typeof SortieDogsPlugin,
           pluginEntryExports: Object.keys(pluginEntry),
           serverEntryExports: Object.keys(serverEntry),
-          serverMatchesPlugin: serverEntry.SortieDogsPlugin === previewEntry.SortieDogsPlugin,
+          serverPluginID: serverEntry.default?.id,
+          serverSetupType: typeof serverEntry.default?.setup,
           previewEntryExports: Object.keys(previewEntry),
           previewTools: Object.keys(previewHooks.tool ?? {}),
           previewAssets: previewAssets.runtimeAssets.map(({name, version, installPath}) => ({name, version, installPath})),
@@ -353,7 +354,8 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       pluginType: string;
       pluginEntryExports: readonly string[];
       serverEntryExports: readonly string[];
-      serverMatchesPlugin: boolean;
+      serverPluginID: string;
+      serverSetupType: string;
       previewEntryExports: string[];
       previewTools: string[];
       previewAssets: Array<{ name: string; version: string; installPath: string }>;
@@ -382,8 +384,10 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       ["SortieDogsPlugin"],
       "the OpenCode entry must export the plugin factory alone",
     );
-    assert.deepEqual(loaded.serverEntryExports, ["SortieDogsPlugin"]);
-    assert.equal(loaded.serverMatchesPlugin, true, "OpenCode package resolution must reach the plugin factory");
+    assert.ok(loaded.serverEntryExports.includes("default"));
+    assert.equal(loaded.serverEntryExports.includes("SortieDogsPlugin"), false);
+    assert.equal(loaded.serverPluginID, "sortie-dogs.v010");
+    assert.equal(loaded.serverSetupType, "function", "OpenCode V2 package resolution must reach the plugin definition");
     assert.deepEqual(loaded.previewEntryExports, ["SortieDogsPlugin"]);
     assert.ok(loaded.previewTools.includes("sortie_v010_prepare_operator"));
     assert.ok(loaded.previewTools.every(name => name.startsWith("sortie_v010_")));

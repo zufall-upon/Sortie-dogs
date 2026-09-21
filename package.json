@@ -46,8 +46,8 @@
       "import": "./dist/plugin/legacy.js"
     },
     "./server": {
-      "types": "./dist/plugin/opencode.d.ts",
-      "import": "./dist/plugin/opencode.js"
+      "types": "./dist/plugin/v2.d.ts",
+      "import": "./dist/plugin/v2.js"
     },
     "./assets": {
       "types": "./dist/runtime-assets-v010.d.ts",
