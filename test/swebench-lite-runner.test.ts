@@ -247,9 +247,11 @@ test("live plan keeps instance sessions independent and prompt input public", ()
   assert.match(result.instances[0]!.prompt,
     /when supplying a path yourself, use a relative path and never guess or reconstruct the repository's absolute path/u);
   assert.match(result.instances[0]!.prompt,
-    /omit the path argument from glob and grep, and read the repository root as '\.'; only reuse absolute paths returned by tools/u);
+    /omit the path argument from glob and grep, and read the repository root as '\.'; keep later tool inputs relative and never copy absolute paths returned by tools/u);
   assert.match(result.instances[0]!.prompt,
-    /For shell commands, omit the workdir argument and use the current repository directory; never construct an absolute workdir/u);
+    /For shell commands, omit the workdir argument and use the current repository directory; never construct or copy an absolute workdir/u);
+  assert.match(result.instances[0]!.prompt,
+    /Keep every glob, grep, read, and shell path relative even after coordinator or worker handoffs; only the host may use absolute workspace paths/u);
   assert.match(result.instances[0]!.prompt, /leave the fix as an uncommitted working-tree diff/u);
   assert.match(result.instances[0]!.prompt, /Do not commit, push, access Git remotes or history beyond the checked-out base commit/u);
   assert.match(result.instances[0]!.prompt, /Do not use issue or pull-request pages, mirrors, hints, gold patches, test patches, or hidden evaluation tests/u);
@@ -287,6 +289,9 @@ test("benchmark permissions deny browsing and remote shell access while retainin
   assert.equal(policy.webfetch, "deny");
   assert.equal(policy.websearch, "deny");
   assert.equal(policy.bash["*"], "allow");
+  assert.equal(Object.hasOwn(policy, "external_directory"), false);
+  assert.deepEqual(benchmarkPermissionPolicy("/tmp/opencode/swebench-run").external_directory,
+    { "/tmp/opencode/swebench-run/*": "allow" });
   for (const pattern of ["*curl *", "*wget *", "*gh *", "*git fetch *", "*git push *", "*https://*"]) {
     assert.equal(policy.bash[pattern], "deny");
   }
@@ -294,6 +299,9 @@ test("benchmark permissions deny browsing and remote shell access while retainin
   assert.deepEqual(inline.plugin, ["file:///candidate/plugin.js"]);
   assert.equal(inline.agent["dog-operator"]!.permission.bash["*https://*"], "deny");
   assert.equal(inline.agent["dog-worker"]!.tools.webfetch, false);
+  assert.deepEqual(benchmarkInlineConfig("file:///candidate/plugin.js", ["dog-operator"], "/tmp/opencode/swebench-run")
+    .agent["dog-operator"]!.permission.external_directory,
+  { "/tmp/opencode/swebench-run/*": "allow" });
 });
 
 test("base checkout fetches one commit directly and retains no remote", async () => {
