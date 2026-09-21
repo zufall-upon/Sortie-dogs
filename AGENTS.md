@@ -17,6 +17,8 @@ SWE-Benchはリリース必須gateではなく、必要時に別途実施する�
 - Windows修正がruntime挙動へ影響した場合は23件を再ベンチ。評価candidateは実行途中で更新しない。緊急修正中もUbuntu campaignは停止不要。
 - ベンチ生成物、生ログ、datasetはGitへ入れず、要約と再現条件だけ記録。同じファイル、特に`src/plugin/index.ts`、`gate.ts`、runtime asset周辺の長期並行変更を避ける。
 - 流れ: Ubuntuで失敗19件を分類 → 改善1件を短命branchで検証 → `main`統合 → 最新`main`でpackage再生成・23件評価 → Windowsへ同じpackageをglobal applyして実運用確認。
+- 改善中は23件一括より単件反復を優先。旧失敗1件を推論・公式採点・原因分析し、必要なら1テーマ修正後に同じ1件を再確認して次へ進む。
+- campaign累計予算を固定し、単件ごとに上限を割り当てて残額を継承。実行中のcandidate、package hash、条件は変更しない。
 
 ## GitHub カンバン
 
