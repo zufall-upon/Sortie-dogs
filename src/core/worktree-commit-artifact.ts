@@ -527,7 +527,10 @@ async function linuxSystemctl(): Promise<string> {
 async function linuxEnvironmentExecutable(): Promise<string> {
   for (const candidate of ["/usr/bin/env", "/bin/env"]) {
     const canonical = await realpath(candidate).catch(() => undefined);
-    if (canonical === undefined || !canonical.startsWith("/usr/bin/") && !canonical.startsWith("/bin/")) continue;
+    // Some Linux images resolve `/usr/bin/env` through a root-owned package
+    // path under `/usr/lib`; retain the ownership/executable checks below.
+    if (canonical === undefined || !canonical.startsWith("/usr/bin/") && !canonical.startsWith("/bin/") &&
+      !canonical.startsWith("/usr/lib/")) continue;
     const info = await lstat(canonical).catch(() => undefined);
     if (info !== undefined && info.isFile() && !info.isSymbolicLink() && info.uid === 0 && (info.mode & 0o111) !== 0) return canonical;
   }
