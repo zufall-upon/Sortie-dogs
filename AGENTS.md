@@ -9,6 +9,18 @@ SWE-Benchはリリース必須gateではなく、必要時に別途実施する�
 5. global apply、tag、GitHub Releaseを実施する。
 6. `npm publish`はユーザーが手動実行する。
 
+## Release後のWindows反映
+
+Ubuntu側でrelease済み版を反映する場合、次だけ一括実行する。
+
+1. `git pull --ff-only origin main`
+2. `.tgz`生成
+3. global install
+4. `node .\dist\cli\main.js init --global`
+5. installed version、runtime marker、assets照合
+
+OpenCode完全再起動は手動。`preflight`、`npm test`、`npm run test:full`、tag、GitHub Release、`npm publish`は再実施しない。
+
 ## Ubuntuベンチ改善lane
 
 - 正本は`main`のみ。Ubuntuは`bench/swebench-dev23`系の短命branchで分析、改善、長時間ベンチを担当。Windowsは`fix/<issue>`系branchで実運用バグを修正し、unit test後に早期統合。
