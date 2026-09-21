@@ -987,7 +987,6 @@ export async function runOpenCode(options, dependencies = {}) {
         previousUsage = { usd: nextUsage.usd, requests: nextUsage.requests };
         usage = nextUsage;
         await recordWatchdog("heartbeat");
-        if (Date.now() - lastActivity >= watchdogSeconds * 2 * 1000) await stop("watchdog-stale");
       } catch {
         await recordWatchdog("usage-read-failed").catch(() => undefined);
         await stop("watchdog-usage-failed");
