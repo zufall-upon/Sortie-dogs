@@ -145,7 +145,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     ], { cwd: packedProject });
     assert.equal(
       await readFile(join(packedProject, ".opencode", "sortie-dogs-v010.version"), "utf8"),
-      "0.10.0-v0912-language4-cost-rpt10-compaction-ref2-proposal1-review-remediation1-surface4-proposal-recovery2-quality1-terminal2-route1-path1-permission2-prerequisite1-v2-bridge1-intent1\n",
+      "0.10.0-v0912-language4-cost-rpt10-compaction-ref2-proposal1-review-remediation1-surface4-proposal-recovery2-quality1-terminal2-route1-path1-permission2-prerequisite1-v2-bridge1-intent1-reflection1-cancel1\n",
     );
     const packedPrimary = await readFile(join(packedProject, ".opencode", "agent", "dog-operator.md"), "utf8");
     assert.match(packedPrimary, /^mode: primary$/m);
@@ -392,7 +392,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.ok(loaded.previewTools.includes("sortie_v010_prepare_operator"));
     assert.ok(loaded.previewTools.every(name => name.startsWith("sortie_v010_")));
     assert.equal(loaded.previewAssets.length, 8);
-    assert.ok(loaded.previewAssets.every(asset => asset.version === "0.10.0-v0912-language4-cost-rpt10-compaction-ref2-proposal1-review-remediation1-surface4-proposal-recovery2-quality1-terminal2-route1-path1-permission2-prerequisite1-v2-bridge1-intent1"));
+    assert.ok(loaded.previewAssets.every(asset => asset.version === "0.10.0-v0912-language4-cost-rpt10-compaction-ref2-proposal1-review-remediation1-surface4-proposal-recovery2-quality1-terminal2-route1-path1-permission2-prerequisite1-v2-bridge1-intent1-reflection1-cancel1"));
     assert.deepEqual(loaded.previewAssets.map(({ name, installPath }) => ({ name, installPath })), [
       { name: "dog-operator", installPath: "agent/dog-operator.md" },
       { name: "dog-worker-v010", installPath: "agent/dog-worker-v010.md" },

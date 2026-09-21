@@ -23,7 +23,7 @@ const candidate = {
   package_tgz: "sortie-dogs-0.10.6.tgz",
   sha256: "a".repeat(64),
   version: "0.10.6",
-  runtime_marker: "0.10.0-v0912-language4-cost-rpt10-compaction-ref2-proposal1-review-remediation1-surface4-proposal-recovery2-quality1-terminal2-route1-path1-permission2-prerequisite1-v2-bridge1-intent1",
+  runtime_marker: "0.10.0-v0912-language4-cost-rpt10-compaction-ref2-proposal1-review-remediation1-surface4-proposal-recovery2-quality1-terminal2-route1-path1-permission2-prerequisite1-v2-bridge1-intent1-reflection1-cancel1",
   profile: "v010",
   agent: "dog-operator",
 };
