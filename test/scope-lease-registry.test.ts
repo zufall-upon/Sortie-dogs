@@ -139,6 +139,7 @@ test("an expired handle cannot heartbeat or release a replacement", async () => 
       leases: Array<{ heartbeatAt: number; expiresAt: number }>;
     };
     state.revision += 1;
+    state.leases[0]!.createdAt = Date.now() - 3;
     state.leases[0]!.heartbeatAt = Date.now() - 2;
     state.leases[0]!.expiresAt = Date.now() - 1;
     await writeFile(statePath, JSON.stringify(state));

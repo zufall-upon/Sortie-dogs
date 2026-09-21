@@ -2162,7 +2162,7 @@ test("preview plugin exports only its own serial capabilities and ignores ordina
   const before = structuredClone(output);
   await hooks["chat.message"]?.({ sessionID: "ordinary", agent: "build", messageID: "user" }, output);
   assert.deepEqual(output, before);
-  await assert.rejects(hooks.tool!.sortie_v010_prepare_operator.execute({ plan_json: JSON.stringify(plan()) }, { sessionID: "ordinary" }), /root-required/);
+  await assert.rejects(hooks.tool!.sortie_v010_prepare_operator.execute({ plan_json: JSON.stringify(plan()) }, { sessionID: "ordinary" }), /runtime-profile-session-inactive: non-profile agents retain native read, edit, patch, shell, and task tools; continue directly without Sortie profile tools/u);
   assert.notEqual(profileAgent(V010_RUNTIME_PROFILE, "dog-coordinator"), profileAgent(STABLE_RUNTIME_PROFILE, "dog-coordinator"));
   assert.equal(profileTool(V010_RUNTIME_PROFILE, "sortie_check_contract"), "sortie_v010_check_contract");
 }));
@@ -2175,7 +2175,7 @@ test("explicit completion requires root identity, matching run and completed uni
   });
   const prepared = JSON.parse(await hooks.tool!.sortie_v010_prepare_operator.execute({ plan_json: JSON.stringify(plan()) }, { sessionID: "root" }));
   const identity = { run_id: prepared.run_id, acceptance_fingerprint: prepared.acceptance_fingerprint };
-  await assert.rejects(hooks.tool!.sortie_v010_complete_operator.execute(identity, { sessionID: "foreign" }), /root-required/);
+  await assert.rejects(hooks.tool!.sortie_v010_complete_operator.execute(identity, { sessionID: "foreign" }), /runtime-profile-session-inactive: non-profile agents retain native read, edit, patch, shell, and task tools; continue directly without Sortie profile tools/u);
   await assert.rejects(hooks.tool!.sortie_v010_complete_operator.execute({ ...identity, run_id: "wrong" }, { sessionID: "root" }), /identity-mismatch/);
   const early = JSON.parse(await hooks.tool!.sortie_v010_complete_operator.execute(identity, { sessionID: "root" }));
   assert.equal(early.status, "not-ready");
