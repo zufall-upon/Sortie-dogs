@@ -265,6 +265,22 @@ test("live plan keeps instance sessions independent and prompt input public", ()
   assert.equal(Object.hasOwn(result.instances[0]!, "patch"), false);
 });
 
+test("benchmark prompt preserves public-only safety boundaries individually", () => {
+  const result = createTestLiveRunPlan(manifest(), {
+    agent: "dog-operator",
+    modelNameOrPath: "sortie-dogs",
+    timeoutSeconds: 1800,
+    watchdogSeconds: 120,
+    costLimitUsd: 50,
+  });
+  const prompt = result.instances[0]!.prompt;
+  assert.match(prompt, /browse the web/u);
+  assert.match(prompt, /Git remotes/u);
+  assert.match(prompt, /history beyond the checked-out base commit/u);
+  assert.match(prompt, /public SWE-bench issue/u);
+  assert.match(prompt, /uncommitted working-tree diff/u);
+});
+
 test("live argument parsing requires an explicit mode and bounded execution options", () => {
   assert.deepEqual(parseArguments(["--live", "--manifest", "manifest.json", "--run-root", "run", "--output", "predictions.jsonl", "--cost-limit-usd", "50"]), {
     live: true,
