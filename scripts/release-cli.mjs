@@ -117,7 +117,7 @@ context_digest:
   acceptance:
     - ${criterion}
   role: implementation
-  validation: { level: full, command: node child/validate.mjs, diagnostics: [] }
+  validation: { level: targeted, command: node child/validate.mjs, diagnostics: [] }
   known_facts: ["The manifest and content oracle are fixed."]
   known_paths: ["child/result.txt","child/validate.mjs"]
   relevant_constraints: ["Read handoff before binding in a subsequent tool round.","Patch child/result.txt from the workspace root; do not commit."]
@@ -142,7 +142,7 @@ goal_source_binding: current-protected
 goal_candidate_binding: current-protected
 goal_validation_command: node child/validate.mjs
 goal_fixture: release-smoke
-goal_proof_scope: requested-full
+goal_proof_scope: document-deliverable
 goal_expected_outcome: pass`;
   const events = await cli(`Resume this same goal. Check the supplied contract, then dispatch one ${workerAgent} with this full ready-to-send context_digest and goal declaration. This is the direct one-worker fast path; no operator plan is needed. The Task prompt must contain exactly one acceptance header, one validation header, one source_manifest header and one project_root header. Preserve the structured declaration below verbatim and append only prose instructions. Worker must Read the absolute handoff path, wait for Read completion, then bind in a separate tool round. Use apply_patch on exactly child/result.txt to replace seed with recovered. Native tool CWD is ${project}; project_root for bind is ${join(project, 'child')}. Run exactly node child/validate.mjs from ${project}. No alternate editing tool or path, no commit. If admission or validation fails, stop and report it. Complete terminally only after canonical PASS.\n${declaration}`, sessionID);
   const records = JSON.parse(await readFile(ledgerPath, 'utf8')).goal_events;
