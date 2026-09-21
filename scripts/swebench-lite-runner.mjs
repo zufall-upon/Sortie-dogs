@@ -628,10 +628,11 @@ export async function cloneInstance(instance, workspace, git = runGit) {
   }
 }
 
-async function capturePatch(workspace, git = runGit) {
-  const intent = await git(["-C", workspace, "add", "-N", "--", "."], process.cwd());
+export async function capturePatch(workspace, git = runGit) {
+  const patchPaths = [".", ":(exclude).sortie-dogs-v010"];
+  const intent = await git(["-C", workspace, "add", "-N", "--", ...patchPaths], process.cwd());
   ensure(intent.exit === 0, "patch-index-failed");
-  const diff = await git(["-C", workspace, "diff", "--binary", "--no-ext-diff", "--no-color", "HEAD", "--", "."], process.cwd());
+  const diff = await git(["-C", workspace, "diff", "--binary", "--no-ext-diff", "--no-color", "HEAD", "--", ...patchPaths], process.cwd());
   ensure(!diff.outputOverflow, "replay-artifact-capacity-exceeded:patch");
   ensure(diff.exit === 0, "patch-diff-failed");
   return diff.stdout;
