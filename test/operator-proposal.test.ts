@@ -132,8 +132,17 @@ test("begin tool exposes concrete normalized path limits and rejects malformed i
     { ...intent(), authoritative_references: ["user:u1"] },
     ...["", ".", "./src", "src/", "src//result.ts", "src/../test", "../src", "/src", "//server/share", "C:/src"]
       .map(path => ({ ...intent(), allow_read: [path] }))]) {
-    await assert.rejects(begin.execute({ intent_json: JSON.stringify(value) }, { sessionID: "root" }),
-      /operator-intent-invalid|operator-intent-requirement-invalid/);
+    if ("allow_read" in value && Array.isArray(value.allow_read) && value.allow_read.length === 1 &&
+        value.allow_read[0] !== "src") {
+      const denied = JSON.parse(await begin.execute({ intent_json: JSON.stringify(value) }, { sessionID: "root" }));
+      assert.equal(denied.status, "invalid-intent");
+      assert.equal(denied.diagnostics[0].pointer, "/allow_read/0");
+      assert.equal(denied.diagnostics[0].code, "operator-intent-read-path-invalid");
+      assert.equal(Object.hasOwn(denied, "task"), false);
+    } else {
+      await assert.rejects(begin.execute({ intent_json: JSON.stringify(value) }, { sessionID: "root" }),
+        /operator-intent-invalid|operator-intent-requirement-invalid/);
+    }
     assert.equal(await new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE).read("root"), undefined);
     assert.equal(await new OperatorRuntime(root, V010_RUNTIME_PROFILE).read("root"), undefined);
     assert.deepEqual((await ledger.readGoal()).records, before.records);
@@ -1633,4 +1642,21 @@ test("proposal cancellation releases its grant beside a cancelled historical ope
   assert.equal(retained.runID, historical.runID);
   assert.deepEqual(retained.acceptance, historical.acceptance);
   assert.equal(retained.phase, "cancelled");
+}));
+
+test("invalid proposal read paths identify repair fields without admitting or spending", async () => fixture(async root => {
+  const runtime = new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE);
+  for (const path of ["docs/", "M:\\external", "../outside"]) {
+    await assert.rejects(runtime.begin("invalid-path-root", { ...intent(), allow_read: [path] }), error => {
+      assert.ok(error instanceof OperatorContractError);
+      assert.equal(error.diagnostics[0]!.pointer, "/allow_read/0");
+      assert.equal(error.diagnostics[0]!.code, "operator-intent-read-path-invalid");
+      if (path === "docs/") assert.equal(error.diagnostics[0]!.expected, "docs");
+      return true;
+    });
+    assert.equal(await runtime.read("invalid-path-root"), undefined);
+  }
+  const valid = await runtime.begin("invalid-path-root", intent());
+  assert.equal(valid.read_count, 0);
+  assert.equal(valid.submission_count, 0);
 }));

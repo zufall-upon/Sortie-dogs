@@ -705,6 +705,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         try { state = await proposals.begin(context.sessionID, JSON.parse(args.intent_json)); }
         catch (error) {
           if (error instanceof OperatorProposalBudgetError) return JSON.stringify(error.diagnostic);
+          if (error instanceof OperatorContractError) return JSON.stringify({ status: "invalid-intent",
+            diagnostics: error.diagnostics, next_action: "Repair only the diagnosed fields and retry begin_operator_proposal; preserve original_request and every ordered requirement. No proposal was admitted and no budget was spent." });
           throw error;
         }
         state = await proposals.bindGoal(context.sessionID, await control!.proposalGoalBinding(context.sessionID));

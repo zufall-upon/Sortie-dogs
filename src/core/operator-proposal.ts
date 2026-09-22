@@ -164,6 +164,20 @@ export class OperatorProposalBudgetError extends Error {
 }
 
 function parseIntent(value: unknown): OperatorIntent {
+  if (record(value) && Array.isArray(value.allow_read)) {
+    const diagnostics: OperatorContractDiagnostic[] = [];
+    value.allow_read.forEach((path, index) => {
+      if (normalizedRelativePath(path)) return;
+      let expected = "existing repository-relative file or directory; external absolute paths are not proposal read scopes";
+      if (typeof path === "string") {
+        try { expected = normalizeRelativePath(path); } catch { /* Never authorize an external or traversal path. */ }
+      }
+      diagnostics.push({ document: "proposal", pointer: `/allow_read/${index}`, code: "operator-intent-read-path-invalid",
+        rule: "normalized-relative-path", repair_kind: "repair-field", repair_paths: [`/allow_read/${index}`],
+        expected, actual_type: jsonType(path) });
+    });
+    if (diagnostics.length) throw new OperatorContractError(diagnostics);
+  }
   const proposalBudget = record(value) && Object.hasOwn(value, "proposal_budget")
     ? value.proposal_budget
     : DEFAULT_OPERATOR_PROPOSAL_BUDGET;
