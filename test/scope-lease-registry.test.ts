@@ -3,7 +3,7 @@ import { fork, type ChildProcess } from "node:child_process";
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import { ScopeLeaseError, ScopeLeaseRegistry } from "../dist/core/scope-lease-registry.js";
 
@@ -12,7 +12,14 @@ const childFixture = fileURLToPath(new URL("./fixtures/scope-lease-child.mjs", i
 
 type ChildResult = { status: "held" | "denied" | "released"; code?: string };
 
-function startChild(root: string, owner: string, path: string, ttl = 300): {
+function useElapsedClock(context: TestContext): void {
+  // WSL wall-clock corrections can exceed a deliberately short TTL in one timer interval.
+  // Keep real timer callbacks and durable expiry checks, using stable elapsed time for this test.
+  const wall = Date.now(), monotonic = performance.now();
+  context.mock.method(Date, "now", () => Math.floor(wall + performance.now() - monotonic));
+}
+
+function startChild(root: string, owner: string, path: string, ttl = 30_000): {
   child: ChildProcess;
   first: Promise<ChildResult>;
 } {
@@ -78,12 +85,17 @@ test("Windows child processes serialize conflicts and concurrently hold disjoint
   }
 });
 
-test("automatic heartbeat, explicit heartbeat, fencing, and release are transaction safe", async () => {
+test("automatic heartbeat, explicit heartbeat, fencing, and release are transaction safe", async (context) => {
+  useElapsedClock(context);
   const root = await mkdtemp(join(tmpdir(), "sortie-lease-heartbeat-"));
+  let lease: Awaited<ReturnType<ScopeLeaseRegistry["acquire"]>> | undefined;
+  let replacement: typeof lease;
   try {
     const registry = new ScopeLeaseRegistry(root, { ttlMs: 3_000 });
-    const lease = await registry.acquire({ ownerId: "opaque-owner", scope: scope([], ["src/a.ts"]) });
+    lease = await registry.acquire({ ownerId: "opaque-owner", scope: scope([], ["src/a.ts"]) });
     await new Promise((resolve) => setTimeout(resolve, 1_100));
+    const renewed = JSON.parse(await readFile(join(root, "scope-leases.json"), "utf8"));
+    assert.ok(renewed.leases[0].heartbeatAt > renewed.leases[0].createdAt, "the timer must durably renew the lease");
     await lease.assertHeld();
     await lease.heartbeat();
     await assert.rejects(
@@ -91,19 +103,22 @@ test("automatic heartbeat, explicit heartbeat, fencing, and release are transact
       (error: unknown) => error instanceof ScopeLeaseError && error.code === "scope-conflict",
     );
     await lease.abandon();
-    const replacement = await registry.acquire({ scope: scope([], ["src/a.ts"]) });
+    replacement = await registry.acquire({ scope: scope([], ["src/a.ts"]) });
     await assert.rejects(
-      () => lease.release(),
+      () => lease!.release(),
       (error: unknown) => error instanceof ScopeLeaseError && error.code === "not-held",
     );
     await replacement.assertHeld();
     await replacement.release();
   } finally {
+    lease?.close();
+    replacement?.close();
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("local close is idempotent, stops heartbeat, and leaves TTL reclamation durable", async () => {
+test("local close is idempotent, stops heartbeat, and leaves TTL reclamation durable", async (context) => {
+  useElapsedClock(context);
   const root = await mkdtemp(join(tmpdir(), "sortie-lease-close-"));
   try {
     const registry = new ScopeLeaseRegistry(root, { ttlMs: 60 });
@@ -128,7 +143,8 @@ test("local close is idempotent, stops heartbeat, and leaves TTL reclamation dur
   }
 });
 
-test("an expired handle cannot heartbeat or release a replacement", async () => {
+test("an expired handle cannot heartbeat or release a replacement", async (context) => {
+  useElapsedClock(context);
   const root = await mkdtemp(join(tmpdir(), "sortie-lease-expired-"));
   try {
     const registry = new ScopeLeaseRegistry(root, { ttlMs: 900 });

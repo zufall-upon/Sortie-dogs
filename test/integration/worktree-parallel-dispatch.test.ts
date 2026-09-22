@@ -700,7 +700,10 @@ test("failed fabric target promotion releases its review claim for cancellation"
   }
 });
 
-test("fabric operation authority heartbeats throughout validation", async () => {
+test("fabric operation authority heartbeats throughout validation", async (context) => {
+  // Measure renewal across several short TTLs, independently of WSL wall-clock corrections.
+  const wall = Date.now(), monotonic = performance.now();
+  context.mock.method(Date, "now", () => Math.floor(wall + performance.now() - monotonic));
   const value = await fixture("fabric-validation-heartbeat");
   let registry: ScopeLeaseRegistry | undefined;
   let originalAcquire: ScopeLeaseRegistry["acquire"] | undefined;
