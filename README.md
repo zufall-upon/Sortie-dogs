@@ -28,8 +28,6 @@ implementation, validation, review, and model routing.
 Guides: [日本語](docs/guide-ja.md) · [简体中文](docs/guide-zh-CN.md) ·
 [Testing](docs/testing.md) · [CLI testing](docs/cli-testing.md)
 
-Release: [v0.10.6](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.10.6)
-
 > **Beta:** v0.10.x is under active stabilization. Runtime behavior,
 > configuration, and generated assets may still change before 1.0.
 
@@ -85,78 +83,23 @@ The v0.10 profile is serial by design. The stable profile's Luna fabric and
 parallel integration path are not exposed in this profile. More agents are not a
 goal; preserving quality while reducing unnecessary expensive work is.
 
-### SWE-bench policy from v0.10.6
+### SWE-bench evaluation
 
-Starting with v0.10.6, development proceeds alongside recurring SWE-bench
-measurement. This is a measurement policy, not a claim that an unrun suite passed.
+A frozen Sortie-dogs v0.10.14 build was evaluated on 23 fixed tasks.
 
-- Freeze the task input, package/source snapshot, model routes, budgets, tools,
-  and stop endpoint before comparing runs.
-- Freeze the candidate only after all writers stop, then grade a separate copy
-  with one pinned official verifier execution.
-- Record benchmark completion, official task correctness, and harness terminal
-  state independently. A Sortie `DONE` or review `PASS` is not an official
-  verifier reward.
-- Record agent-to-freeze and verifier time separately, plus root and descendant
-  tokens, model steps, children, cache behavior, estimated cost, and coverage.
-- Keep infrastructure failure distinct from scored failure. Small or unmatched
-  samples remain case studies, not leaderboard or general success-rate claims.
+- Official verifier PASS: 6 / 23
+- Scored FAIL: 17 / 23
+- Infrastructure blocked: 0 / 23
+- Total estimated model cost: $15.75
+- Median agent runtime: 15.2 min
 
-The pre-v0.10.6 local benchmark condition is closed historical evidence. New
-development decisions use SWE-bench measurements collected under the frozen
-contract in [Coding benchmark completion and correctness](docs/benchmark-completion-contract.md).
+The same Sortie-dogs candidate, model routes, budgets, tools, and verification
+procedure were held fixed for all tasks. This is one frozen evaluation, not a
+general success-rate claim.
 
-### v0.10.14 SWE-bench Lite dev23 baseline
+Full methodology and per-task results: [benchmark details](docs/benchmark-v0.10.14-dev23.md)
 
-The first complete v0.10.14 baseline was run against all 23 `dev` instances and
-graded with the pinned official harness. It is a fixed candidate baseline, not a
-leaderboard or general success-rate claim.
-
-- Candidate: `sortie-dogs@0.10.14`, package SHA-256
-  `f2caf67268a5f69b67a252a0d84bfc5ad09db82684aa8c1e0f5c49f8d2986993`.
-- Dataset: `princeton-nlp/SWE-bench_Lite`, revision
-  `6ec7bb89b9342f664a54a6e0a6ea6501d3437cc2`, split `dev`.
-- Conditions: pass@1, `attempts_per_instance=1`, `retry_count=0`, per-instance
-  inference limit `$1.50`, four independent inference slots, and official
-  scoring with `max_workers=1`.
-- Official score: **6/23 (26.1%)**. All 23 rows received an official result.
-- Resolved instances: `marshmallow-code__marshmallow-1343`,
-  `marshmallow-code__marshmallow-1359`, `pydicom__pydicom-1256`,
-  `pydicom__pydicom-1694`, `pylint-dev__astroid-1333`, and
-  `sqlfluff__sqlfluff-1733`.
-- Inference spend: `$15.7542788` under the separate `$50` v0.10.14 campaign.
-- Environment deviations retained in the result: five `pvlib` rows hit the
-  NumPy 2.0 removal of `np.Inf`, and `pyvista__pyvista-4315` lacked
-  `libGL.so.1`. These rows remain in the denominator and were not silently
-  removed.
-- Four non-successful inference terminals (`timeout` or `patch-index-failed`)
-  produced empty patches and are counted as unresolved official results.
-
-This baseline is the comparison point for any later v0.10.15 candidate. A
-later candidate must use its own package digest and preserve the same dataset,
-official scoring boundary, and declared budget conditions before its score is
-compared with this value.
-
-## Historical local case study
-
-These are completion-filtered local references on one frozen DeepSWE task,
-`datacurve/anko-typed-variable-bindings`, collected from 2026-09-14 through
-2026-09-18. They are not matched pairs or a leaderboard result.
-
-- Bare OpenCode: Verified PASS `0/3`, F2P `3/27`, median agent wall `24.5 min`,
-  median completed-run API-equivalent cost `$3.53`.
-- Sortie v0.9.12: Verified PASS `0/3`, F2P `23/27`, median wall `25.7 min`,
-  median completed-run cost `$2.85`; two additional interrupted attempts cost
-  an estimated `$6.20`.
-- Sortie v0.10.3 one-shot: Verified PASS `0/1`, F2P `7/9`, wall `22.7 min`,
-  estimated cost `$3.79`.
-- Sortie v0.10.5 one-shot: Verified PASS `1/1`, F2P `9/9`, P2P `94/94`, wall
-  `43.8 min`, estimated cost `$2.58`.
-
-The v0.10.5 result is one verified success, not a success rate. Historical rate
-schedules and endpoints differ, and the host-reported zero cost is not treated as
-a bill. See [definitions, frozen inputs, and limitations](docs/benchmark-reference.md)
-and [machine-readable values](docs/benchmarks/provisional-reference.json).
+Historical qualification references remain in [benchmark reference](docs/benchmark-reference.md).
 
 ## How v0.10.6 works
 
