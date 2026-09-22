@@ -28,8 +28,6 @@ implementation, validation, review, and model routing.
 Guides: [日本語](docs/guide-ja.md) · [简体中文](docs/guide-zh-CN.md) ·
 [Testing](docs/testing.md) · [CLI testing](docs/cli-testing.md)
 
-Release: [v0.10.6](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.10.6)
-
 > **Beta:** v0.10.x is under active stabilization. Runtime behavior,
 > configuration, and generated assets may still change before 1.0.
 
