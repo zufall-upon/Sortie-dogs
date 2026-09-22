@@ -106,6 +106,37 @@ The pre-v0.10.6 local benchmark condition is closed historical evidence. New
 development decisions use SWE-bench measurements collected under the frozen
 contract in [Coding benchmark completion and correctness](docs/benchmark-completion-contract.md).
 
+### v0.10.14 SWE-bench Lite dev23 baseline
+
+The first complete v0.10.14 baseline was run against all 23 `dev` instances and
+graded with the pinned official harness. It is a fixed candidate baseline, not a
+leaderboard or general success-rate claim.
+
+- Candidate: `sortie-dogs@0.10.14`, package SHA-256
+  `f2caf67268a5f69b67a252a0d84bfc5ad09db82684aa8c1e0f5c49f8d2986993`.
+- Dataset: `princeton-nlp/SWE-bench_Lite`, revision
+  `6ec7bb89b9342f664a54a6e0a6ea6501d3437cc2`, split `dev`.
+- Conditions: pass@1, `attempts_per_instance=1`, `retry_count=0`, per-instance
+  inference limit `$1.50`, four independent inference slots, and official
+  scoring with `max_workers=1`.
+- Official score: **6/23 (26.1%)**. All 23 rows received an official result.
+- Resolved instances: `marshmallow-code__marshmallow-1343`,
+  `marshmallow-code__marshmallow-1359`, `pydicom__pydicom-1256`,
+  `pydicom__pydicom-1694`, `pylint-dev__astroid-1333`, and
+  `sqlfluff__sqlfluff-1733`.
+- Inference spend: `$15.7542788` under the separate `$50` v0.10.14 campaign.
+- Environment deviations retained in the result: five `pvlib` rows hit the
+  NumPy 2.0 removal of `np.Inf`, and `pyvista__pyvista-4315` lacked
+  `libGL.so.1`. These rows remain in the denominator and were not silently
+  removed.
+- Four non-successful inference terminals (`timeout` or `patch-index-failed`)
+  produced empty patches and are counted as unresolved official results.
+
+This baseline is the comparison point for any later v0.10.15 candidate. A
+later candidate must use its own package digest and preserve the same dataset,
+official scoring boundary, and declared budget conditions before its score is
+compared with this value.
+
 ## Historical local case study
 
 These are completion-filtered local references on one frozen DeepSWE task,
