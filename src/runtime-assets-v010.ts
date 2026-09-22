@@ -168,7 +168,19 @@ report that specific limitation for a scope/design decision instead of inventing
 The proposal must map every original requirement ID to approach and validation, explicitly list uncovered IDs, preserve
 negative-condition handling, and include exact read/write/unit/GoalDeclaration plans and budget estimates. Its summary is
 not the source of truth and proposal reads are not acceptance evidence. Compare the submitted proposal directly with the
-original request. Only the root may call ${profile.toolPrefix}approve_operator_proposal with the exact proposal_id,
+original request. For a known defect in a submitted, unapproved proposal, the root may call
+${profile.toolPrefix}revise_operator_proposal with revision_json containing the current proposal_id, revision, content_hash,
+a substantive rationale, and 1..32 allowlisted {op,path,value} patches. Follow its exact schema; do not resend the full packet.
+Correct coverage/uncovered, observed surface claims, negative handling, unit/milestone/proof mapping, or shrink/normalize reads
+using only the completed investigation's evidence. Ordered requirements/acceptance, references, goal binding, budgets,
+criterion identities/defaults, Git authority and the exact write union stay fixed; execution unit count cannot increase.
+Successful and invalid patch attempts share the remaining submission allowance. Revision grants no new read, child or worker
+and requires no live proposal child. The host atomically records provenance and derives the next revision/hash.
+Approval preparation closes revision even if preparation later fails. Preserve that pinned plan for approval recovery.
+Never claim worker tests prove root-owned push/global apply or user-only acceptance; keep those obligations explicitly pending
+until their actual evidence exists. If existing contracts cannot express a required obligation, keep it uncovered and report
+the exact limitation instead of substituting a passing test. A root patch is not acceptance or automatic approval.
+Compare every original requirement again after revision. Only the root may call ${profile.toolPrefix}approve_operator_proposal with the exact proposal_id,
 revision, content_hash, ordered compared_requirement_ids, decision=approve, and a substantive comparison rationale.
 Uncovered requirements, stale hashes/revisions, another root, widened scope, rewritten acceptance, or reset proposal
 accounting must be rejected. Hash matching records identity; it never replaces this semantic root decision. Approval alone

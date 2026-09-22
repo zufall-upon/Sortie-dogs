@@ -36,6 +36,54 @@ claim general release readiness or a measured cost advantage.
 
 ### Deterministic preparation, repair and completion
 
+#### Submitted proposal revision
+
+`sortie_v010_revise_operator_proposal` is a root-only, read-free correction route
+for an unapproved `submitted` proposal, including after its investigation child
+has ended or the host has restarted. It accepts `revision_json` with exactly:
+
+```json
+{
+  "proposal_id": "current ID from operator_status",
+  "revision": 1,
+  "content_hash": "current hash from operator_status",
+  "rationale": "Explain the observed contract defect and its correction.",
+  "patches": [{"op":"replace","path":"/plan/units/0/objective","value":"Corrected milestone objective"}]
+}
+```
+
+- 1–32 nonoverlapping patches. `replace` permits `/coverage`, `/existing_surface`,
+  `/uncovered`, `/negative_handling`, `/read_scope`, `/plan/units`,
+  `/plan/acceptance_proof`, and `/plan/units/<index>/{title,objective,read,validation,acceptance_indices}`.
+  `add`/`replace` also permits an existing criterion's `validation_command` or
+  `goal_validation_command` at `/plan/goal_declaration/criteria/<index>/...`.
+- Complete existing packet/plan validation runs again. Read authority may only
+  shrink; separators and redundant dot segments normalize without traversal.
+  The exact write union, ordered acceptance, source/authoritative references,
+  intent/goal binding, criterion identities/defaults, Git lifecycle and budget
+  ceilings remain fixed. Unit count cannot increase. Host derives budget estimates.
+- Every authorized attempt, including invalid JSON/patches, uses one remaining
+  submission. Stale identities and foreign actors cannot spend the current grant.
+  Reads and execution spend are retained; an exhausted read allowance alone does
+  not block this read-free operation. Exhausted submissions do block it.
+- One atomic state replacement publishes body, monotonic revision, host hash,
+  counters and root-patch provenance (actor, rationale, timestamp, prior/new
+  identity, patch digest and field paths). Rejection changes only its attempt
+  count. An exclusive file lock and fresh disk reads prevent lost updates across
+  runtime instances/processes; persistent contention fails closed with
+  `operator-proposal-state-busy` rather than deleting another writer's lock.
+- Revision creates no child or execution grant. Root must compare all requirements
+  again and explicitly approve the new identity. Approval preparation durably pins
+  that identity before any execution controls are created; a subsequent preparation
+  failure must recover that same plan, not revise an already prepared contract.
+- Correct root/worker responsibility in coverage without treating a worker test
+  as proof of root-owned push/global application or a user-only decision. Those
+  obligations remain pending until actual evidence exists. If the current contract
+  cannot represent an obligation or the prior investigation lacks a fact, retain
+  `uncovered` and report that limitation. Revision does not weaken acceptance.
+
+#### Execution plan and acceptance
+
 - Preparation validates all handoffs and manifests before creating any controls.
   Handoff and manifest command limits use the same 1,000-character constant;
   the full objective remains in `task.objective`, while `state.next` uses its title.
