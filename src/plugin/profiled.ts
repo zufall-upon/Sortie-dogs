@@ -1,6 +1,6 @@
 import { V010_RUNTIME_ASSET_VERSION } from "../asset-version.js";
 import { OperatorContractError, OperatorRuntime } from "../core/operator-runtime.js";
-import { DEFAULT_OPERATOR_PROPOSAL_BUDGET, OPERATOR_APPROVAL_CONTRACT, OPERATOR_PROPOSAL_BUDGET_CAPS,
+import { DEFAULT_OPERATOR_PROPOSAL_BUDGET, OPERATOR_APPROVAL_CONTRACT, OPERATOR_PROPOSAL_BUDGET_CAPS, OPERATOR_PROPOSAL_REVISION_CONTRACT,
   OperatorProposalBudgetError, OperatorProposalRuntime } from "../core/operator-proposal.js";
 import { CANONICAL_AGENT_ROLES, canonicalAgent, profileAgent, profileTool, V010_RUNTIME_PROFILE,
   type CanonicalAgentRole, type RuntimeProfile } from "../core/runtime-profile.js";
@@ -371,6 +371,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     const approvalSchema = record(stringSchema) && typeof stringSchema.describe === "function"
       ? stringSchema.describe(OPERATOR_APPROVAL_CONTRACT)
       : { ...(record(stringSchema) ? stringSchema : { type: "string" }), description: OPERATOR_APPROVAL_CONTRACT };
+    const revisionSchema = record(stringSchema) && typeof stringSchema.describe === "function"
+      ? stringSchema.describe(OPERATOR_PROPOSAL_REVISION_CONTRACT)
+      : { ...(record(stringSchema) ? stringSchema : { type: "string" }), description: OPERATOR_PROPOSAL_REVISION_CONTRACT };
     const planContract = "plan_json must encode the exact operator plan object: schema_version, acceptance, acceptance_proof, source_refs, " +
       "goal_declaration, units, and optional git_lifecycle only. git_lifecycle exact shape is " +
       '{branch_create:{branch:string,start_ref:string},commit:{message:string},post_commit_validation:string[],remediation_reserve?:string[],remediation_scope_expansion?:string[]}. Its presence is root authorization for only a clean, non-overwriting ' +
@@ -396,6 +399,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     const beginProposal = profileTool(profile, "sortie_begin_operator_proposal");
     const submitProposal = profileTool(profile, "sortie_submit_operator_proposal");
     const approveProposal = profileTool(profile, "sortie_approve_operator_proposal");
+    const reviseProposal = profileTool(profile, "sortie_revise_operator_proposal");
     async function stop(root: string, reason: string, retireRoot = true): Promise<void> {
       if (retireRoot) retired.add(root);
       if (retireRoot) await control?.stopAutomaticRecovery(root);
@@ -512,7 +516,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             ? "proposal submission budget exhausted; do not call operator_next; report the bounded proposal failure"
             : "proposal is not submitted; do not call operator_next; complete or repair the bounded proposal submission"
           : proposal?.phase === "submitted"
-            ? "compare and approve the exact proposal; do not call operator_next before approval prepares a run. Approval authorizes implementation, not product acceptance. Preserve every required live measurement, consultation and user approval as pending acceptance obligations; canonical commands do not substitute for them. Use the host budget counters, not plan.goal_declaration.goal_budget_units, for remaining capacity; approval validates the retained goal binding and execution budget. A bounded diagnostic run may use cancel_operator after admission without inventing a plan validation command for cancellation."
+            ? `compare every original requirement with the exact proposal. For a known semantic defect, use ${reviseProposal} with its current identity and bounded field patches, then compare again; do not redispatch the ended child or cancel/reinvestigate the same defect. Approval preparation pins the plan and closes revision. Do not call operator_next before approval prepares a run. Approval authorizes implementation, not product acceptance. Preserve every required live measurement, consultation, root-owned push/global apply and user approval as pending acceptance obligations; canonical commands do not substitute for them. Use the host budget counters, not plan.goal_declaration.goal_budget_units, for remaining capacity; approval validates the retained goal binding and execution budget. A bounded diagnostic run may use cancel_operator after admission without inventing a plan validation command for cancellation.`
             : "approved proposal has no operator run; do not call operator_next; reconcile the approval or preparation failure";
         return JSON.stringify(state ? { ...await operatorPacket(state), ...(draft ? { pending_draft: draft } : {}),
           ...(proposal ? { proposal: proposalIdentity(proposal) } : {}) }
@@ -751,6 +755,24 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             ...(contract ? { diagnostics: error.diagnostics, diagnostics_truncated: error.diagnostics_truncated } : {}) });
         }
       } };
+    tools[reviseProposal] = { description: "Root-only: revise an unapproved submitted proposal using a hash-pinned field patch and the remaining submission allowance. " + OPERATOR_PROPOSAL_REVISION_CONTRACT,
+      args: { revision_json: revisionSchema }, execute: async (args, context) => {
+        await requireRoot(context.sessionID);
+        return serializeDispatchTransition(context.sessionID, async () => {
+          try {
+            const revised = await proposals.reviseJSON(context.sessionID, context.sessionID, args.revision_json);
+            return JSON.stringify({ ...proposals.packet(revised) as object,
+              next_action: "Compare all original ordered requirements again. Explicitly approve only this new identity if every obligation is genuinely covered; no execution or approval was granted by revision." });
+          } catch (error) {
+            const contract = error instanceof OperatorContractError;
+            if (!contract && (!(error instanceof Error) || !error.message.startsWith("operator-proposal-"))) throw error;
+            const state = await proposals.read(context.sessionID);
+            return JSON.stringify({ status: "invalid-revision", code: error.message,
+              ...(state ? { proposal: proposalIdentity(state) } : {}),
+              ...(contract ? { diagnostics: error.diagnostics, diagnostics_truncated: error.diagnostics_truncated } : {}) });
+          }
+        });
+      } };
     tools[approveProposal] = { description: "Root-only: record semantic comparison of the exact proposal revision/hash, then connect its immutable plan to the existing execution lane. " + OPERATOR_APPROVAL_CONTRACT,
       args: { approval_json: approvalSchema }, execute: async (args, context) => {
         await requireRoot(context.sessionID);
@@ -774,6 +796,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           const proposal = approved.proposal!;
           if (approved.goal_binding === null) throw new Error("operator-proposal-goal-binding-missing");
           await control!.assertProposalExecutionBudget(context.sessionID, approved.goal_binding, proposal.plan.units.length);
+          await proposals.pinApproval(context.sessionID, approval);
           const prepared = await operators.propose(context.sessionID, proposal.plan);
           if (prepared.status !== "prepared") throw new Error("operator-proposal-approved-plan-invalid");
           await registerPreparedGoal(context.sessionID, prepared.state);
@@ -782,7 +805,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         });
       } };
     const ownTools = new Set([prepare, repair, next, status, cancel, complete, resume, resolveContractRepair,
-      beginProposal, submitProposal, approveProposal]);
+      beginProposal, submitProposal, approveProposal, reviseProposal]);
     const protocolMap = CANONICAL_AGENT_ROLES.map(role => `${role}=${profileAgent(profile, role)}`).join(", ");
     function rememberRendered(key: string, text: string): void {
       renderedParts.set(key, goalFingerprint(text));

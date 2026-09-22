@@ -338,11 +338,15 @@ test("actual v0.10 tools preserve required, optional, and described schemas thro
     const prepare = tools.find(tool => tool.name === "sortie_v010_prepare_operator")!;
     const cancel = tools.find(tool => tool.name === "sortie_v010_cancel_operator")!;
     const begin = tools.find(tool => tool.name === "sortie_v010_begin_operator_proposal")!;
+    const revise = tools.find(tool => tool.name === "sortie_v010_revise_operator_proposal")!;
     const check = tools.find(tool => tool.name === "sortie_v010_check_contract")!;
     assert.deepEqual(prepare.input.required, ["plan_json"]);
     assert.match(prepare.input.properties.plan_json!.description!, /plan_json must encode the exact operator plan object/u);
     assert.deepEqual(cancel.input.required, ["reason"]);
     assert.deepEqual(begin.input.required, ["intent_json"]);
+    assert.deepEqual(revise.input.required, ["revision_json"]);
+    assert.match(revise.input.properties.revision_json!.description!, /proposal_id:string,revision:positive integer,content_hash:string/);
+    assert.match(revise.input.properties.revision_json!.description!, /No reads or execution units are granted or restored/);
     assert.match(begin.input.properties.intent_json!.description!, /intent_json must encode exactly this JSON object/u);
     assert.deepEqual(check.input.required, ["handoff_path"]);
   } finally {

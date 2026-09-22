@@ -42,17 +42,232 @@ function packet(reads = 0, uncovered: unknown[] = []) { return { schema_version:
   uncovered, negative_handling: [{ requirement_id: "N1", handling: "Keep test/check.mjs read-only." }], read_scope: ["src", "test"], write_scope: ["src/result.ts"],
     budget_estimate: { proposal_reads: reads, execution_units: 1 }, plan: plan() }; }
 const proposalRefPrefix = "SORTIE_OPERATOR_PROPOSAL_TASK_REF ";
+const proposalIdentity = (state: any) => ({ proposal_id: state.proposal_id,
+  revision: state.proposal_revision, content_hash: state.proposal_hash });
+const revisionRequest = (state: any, patches = [{ op: "replace", path: "/plan/units/0/objective",
+  value: "Implement the observed result; keep root delivery obligations pending until separately evidenced." }]) =>
+  ({ ...proposalIdentity(state), rationale: "Correct the reviewed contract using the existing investigation.", patches });
+const approvalRequest = (state: any) => ({ ...proposalIdentity(state), compared_requirement_ids: requirements.map(item => item.id),
+  decision: "approve", rationale: "Compared every ordered requirement and its actual proof." });
+async function revisableProposal(root: string, submissions = 8, value = packet(1)) {
+  const runtime = new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE);
+  const state = await runtime.begin("root", { ...intent(), proposal_budget: { max_reads: 1, max_submissions: submissions } });
+  const task = runtime.referenceTask(state);
+  await runtime.bindGoal("root", { goal_id: "retained-goal", revision: 1, scope_epoch: 1,
+    acceptance_fingerprint: `sha256:${"a".repeat(64)}` });
+  await runtime.admit("root", "proposal-call", task);
+  await runtime.bind("root", "ended-child", task.prompt);
+  await runtime.accountRead("root", "ended-child", "src/input.ts");
+  return { runtime, submitted: await runtime.submit("root", "ended-child", value) };
+}
+
+test("root revision repairs a submitted semantic defect after cold restart without reviving its child", async () => fixture(async root => {
+  const broken = packet(1, [{ requirement_id: "R1", reason: "Incorrectly assigned root review to worker." }]);
+  const { submitted } = await revisableProposal(root, 4, broken);
+  const cold = new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE);
+  await assert.rejects(cold.approve("root", approvalRequest(submitted)), /not-approvable/);
+  const request = revisionRequest(submitted, [
+    { op: "replace", path: "/coverage", value: packet(1).coverage },
+    { op: "replace", path: "/existing_surface", value: packet(1).existing_surface },
+    { op: "replace", path: "/uncovered", value: [] },
+    { op: "replace", path: "/read_scope", value: ["./src/input.ts", "test/"] },
+    { op: "replace", path: "/plan/units/0/read", value: ["src\\input.ts", "test"] },
+    { op: "replace", path: "/plan/units/0/objective", value: "Implement observed input; root independently reviews delivery." },
+  ] as any);
+  const revised = await cold.reviseJSON("root", "root", JSON.stringify(request));
+  assert.equal(revised.phase, "submitted");
+  assert.equal(revised.proposal_revision, 2);
+  assert.notEqual(revised.proposal_hash, submitted.proposal_hash);
+  assert.equal(revised.proposal_hash, createHash("sha256").update(JSON.stringify(revised.proposal)).digest("hex"));
+  assert.equal(revised.submission_count, 2);
+  assert.equal(revised.read_count, 1, "exhausted read allowance does not prevent a read-free revision");
+  for (const field of ["intent", "intent_hash", "goal_binding", "read_paths", "proposal_session_id", "proposal_call_id"] as const) {
+    assert.deepEqual(revised[field], submitted[field]);
+  }
+  assert.deepEqual(revised.proposal!.plan.acceptance, submitted.proposal!.plan.acceptance);
+  assert.deepEqual(revised.proposal!.plan.source_refs, submitted.proposal!.plan.source_refs);
+  assert.deepEqual(revised.proposal!.write_scope, submitted.proposal!.write_scope);
+  assert.equal(revised.approval_rationale, null);
+  assert.equal(revised.root_revisions!.length, 1);
+  assert.deepEqual(revised.root_revisions![0]!.from, proposalIdentity(submitted));
+  assert.deepEqual(revised.root_revisions![0]!.to, proposalIdentity(revised));
+  assert.equal(revised.root_revisions![0]!.actor, "root");
+  assert.equal(revised.root_revisions![0]!.patch_hash, createHash("sha256").update(JSON.stringify(request.patches)).digest("hex"));
+  assert.equal(await new OperatorRuntime(root, V010_RUNTIME_PROFILE).read("root"), undefined);
+  await assert.rejects(cold.admit("root", "redispatch", cold.referenceTask(revised)), /dispatch-not-authorized/);
+  await assert.rejects(cold.accountRead("root", "ended-child"), /read-grant-invalid/);
+  await assert.rejects(cold.approve("root", approvalRequest(submitted)), /identity-mismatch/);
+  const reopened = new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE);
+  assert.deepEqual(await reopened.required("root"), revised);
+  assert.equal((await reopened.approve("root", approvalRequest(revised))).phase, "approved");
+  await assert.rejects(reopened.reviseJSON("root", "root", JSON.stringify(revisionRequest(revised))), /not-revisable/);
+}));
+
+test("root revision rejects immutable fields, scope expansion and invalid proof atomically with finite accounting", async () => fixture(async root => {
+  const { runtime, submitted } = await revisableProposal(root, 24);
+  const bad = [
+    { path: "/plan/acceptance", value: ["easier result"] },
+    { path: "/intent", value: intent() },
+    { path: "/plan/source_refs", value: ["new-source"] },
+    { path: "/budget_estimate", value: { proposal_reads: 0, execution_units: 0 } },
+    { path: "/plan/goal_declaration/goal_budget_units", value: 99 },
+    { path: "/plan/goal_declaration/defaults/proof_scope", value: "fixture" },
+    { path: "/plan/git_lifecycle", value: {} },
+    { path: "/write_scope", value: ["src"] },
+    { path: "/read_scope", value: ["src", "test", "private"] },
+    { path: "/plan/units", value: [{ ...plan().units[0], write: ["src"] }] },
+    { path: "/plan/units/0/read", value: ["private"] },
+    { path: "/plan/units/0/validation", value: ["npm run test:dispatch"] },
+    { path: "/existing_surface", value: packet(1).existing_surface.map(item => ({ ...item, path: "src/unread.ts" })) },
+    { path: "/__proto__/polluted", value: true },
+  ];
+  let count = 1;
+  for (const patch of bad) {
+    await assert.rejects(runtime.reviseJSON("root", "root", JSON.stringify(revisionRequest(submitted,
+      [{ op: "replace", ...patch }] as any))));
+    const current = await new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE).required("root");
+    assert.equal(current.submission_count, ++count);
+    assert.deepEqual(current.proposal, submitted.proposal);
+    assert.deepEqual(proposalIdentity(current), proposalIdentity(submitted));
+    assert.equal(current.root_revisions?.length ?? 0, 0);
+  }
+  assert.equal(({} as any).polluted, undefined);
+  for (const [actor, request] of [
+    ["foreign", revisionRequest(submitted)],
+    ["root", { ...revisionRequest(submitted), revision: 2 }],
+    ["root", { ...revisionRequest(submitted), content_hash: "0".repeat(64) }],
+  ] as const) await assert.rejects(runtime.reviseJSON("root", actor, JSON.stringify(request)), /root-required|identity-mismatch/);
+  assert.equal((await runtime.required("root")).submission_count, count, "foreign and stale calls cannot spend the live grant");
+}));
+
+test("revision attempts share the child submission allowance across malformed JSON, exhaustion and cancellation", async () => fixture(async root => {
+  const { runtime, submitted } = await revisableProposal(root, 3);
+  await assert.rejects(runtime.reviseJSON("root", "root", "{"), /revision-json-invalid/);
+  const revised = await runtime.reviseJSON("root", "root", JSON.stringify(revisionRequest(submitted)));
+  assert.equal(revised.submission_count, 3);
+  await assert.rejects(runtime.reviseJSON("root", "root", JSON.stringify(revisionRequest(revised))), /submission-budget-exhausted/);
+  await runtime.discardPreApproval("root");
+  await assert.rejects(new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE).begin("root", intent()), /budget-exhausted/);
+}));
+
+test("concurrent cold runtimes cannot overwrite a revision or revise after approval preparation begins", async () => fixture(async root => {
+  const { runtime, submitted } = await revisableProposal(root);
+  const second = new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE);
+  await second.required("root"); // Warm caches must not defeat the disk identity check.
+  const request = JSON.stringify(revisionRequest(submitted));
+  const results = await Promise.allSettled([runtime.reviseJSON("root", "root", request), second.reviseJSON("root", "root", request)]);
+  assert.equal(results.filter(result => result.status === "fulfilled").length, 1);
+  const current = await runtime.required("root");
+  assert.equal(current.proposal_revision, 2);
+  assert.equal(current.submission_count, 2);
+  await second.pinApproval("root", approvalRequest(current));
+  await assert.rejects(runtime.reviseJSON("root", "root", JSON.stringify(revisionRequest(current))), /not-revisable/);
+  assert.equal((await runtime.approve("root", approvalRequest(current))).phase, "approved");
+}));
+
+test("independent processes serialize the same hash-pinned revision and preserve one durable winner", async () => fixture(async root => {
+  const { submitted } = await revisableProposal(root);
+  const source = `import {OperatorProposalRuntime} from ${JSON.stringify(new URL("../dist/core/operator-proposal.js", import.meta.url).href)};
+    import {V010_RUNTIME_PROFILE} from ${JSON.stringify(new URL("../dist/core/runtime-profile.js", import.meta.url).href)};
+    const runtime = new OperatorProposalRuntime(process.argv[1], V010_RUNTIME_PROFILE);
+    try { const state = await runtime.reviseJSON("root", "root", process.argv[2]); console.log(state.proposal_revision); }
+    catch (error) { console.log(error.message); }`;
+  const args = ["--input-type=module", "-e", source, root, JSON.stringify(revisionRequest(submitted))];
+  const results = await Promise.all([promisify(execFile)(process.execPath, args), promisify(execFile)(process.execPath, args)]);
+  assert.deepEqual(results.map(result => result.stdout.trim()).sort(), ["2", "operator-proposal-revision-identity-mismatch"]);
+  const state = await new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE).required("root");
+  assert.equal(state.submission_count, 2);
+  assert.equal(state.root_revisions!.length, 1);
+}));
+
+test("root revision moves acceptance proof to the actual final milestone without changing write authority", async () => fixture(async root => {
+  const broken = packet(1);
+  broken.plan.goal_declaration.goal_budget_units = 3;
+  broken.plan.goal_declaration.criteria.push({ criterion_id: "native", validation_command: "node test/native.mjs" });
+  broken.plan.acceptance_proof[2] = ["native"];
+  broken.plan.units[0]!.acceptance_indices = [0, 1];
+  broken.plan.units.push({ ...structuredClone(broken.plan.units[0]!), id: "native", title: "Native evidence",
+    write: ["src/native.ts"], validation: ["node test/native.mjs"], acceptance_indices: [2] });
+  broken.write_scope.push("src/native.ts");
+  broken.budget_estimate.execution_units = 2;
+  const { runtime, submitted } = await revisableProposal(root, 4, broken);
+  const revised = await runtime.reviseJSON("root", "root", JSON.stringify(revisionRequest(submitted, [
+    { op: "replace", path: "/plan/acceptance_proof", value: [["native"], ["proof"], ["native"]] },
+    { op: "replace", path: "/plan/units/0/acceptance_indices", value: [1] },
+    { op: "replace", path: "/plan/units/1/acceptance_indices", value: [0, 2] },
+  ] as any)));
+  assert.deepEqual(revised.proposal!.plan.acceptance_proof[0], ["native"]);
+  assert.deepEqual(revised.proposal!.plan.units[1]!.acceptance_indices, [0, 2]);
+  assert.deepEqual(revised.proposal!.write_scope, submitted.proposal!.write_scope);
+  assert.equal(revised.proposal!.plan.goal_declaration.goal_budget_units, 3);
+}));
+
+test("failed revision storage leaves the prior identity, budget and provenance available for cold recovery", async t => fixture(async root => {
+  const { runtime, submitted } = await revisableProposal(root);
+  const file = join(root, V010_RUNTIME_PROFILE.stateDirectory, "operator-proposals", `${createHash("sha256").update("root").digest("hex")}.json`);
+  const save = (runtime as any).save;
+  const mocked = t.mock.method(runtime as any, "save", async function (state: unknown) {
+    await rename(file, `${file}.backup`);
+    await mkdir(file);
+    try { return await save.call(runtime, state); }
+    finally { await rm(file, { recursive: true }); await rename(`${file}.backup`, file); }
+  });
+  await assert.rejects(runtime.reviseJSON("root", "root", JSON.stringify(revisionRequest(submitted))));
+  mocked.mock.restore();
+  const cold = new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE);
+  assert.deepEqual(await cold.required("root"), submitted);
+  assert.equal((await cold.reviseJSON("root", "root", JSON.stringify(revisionRequest(submitted)))).proposal_revision, 2);
+}));
+
+test("root tool revises after child settlement, preserves goal spend, and requires fresh explicit approval", async () => fixture(async root => {
+  const { hooks, started, ledgerPath } = await previewProposal(root, 3);
+  const tool = hooks.tool!.sortie_v010_revise_operator_proposal;
+  assert.deepEqual(Object.keys(tool.args), ["revision_json"]);
+  await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "proposal" }, { args: started.task });
+  await hooks["chat.message"]!({ sessionID: "child", messageID: "child-user", agent: "dogs-coordinator" }, {
+    message: { agent: "dogs-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+    parts: [{ type: "text", text: started.task.prompt }],
+  });
+  await hooks["tool.execute.before"]!({ tool: "read", sessionID: "child", callID: "read" }, { args: { filePath: "src/input.ts" } });
+  await hooks.tool!.sortie_v010_submit_operator_proposal.execute({ proposal_json: JSON.stringify(packet(1)) }, { sessionID: "child" });
+  await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "proposal" }, { output: "Submitted." });
+  const runtime = new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE);
+  const before = await runtime.required("root");
+  const budget = await (await RunFlightLedger.openGoal(ledgerPath)).readGoal();
+  const args = { revision_json: JSON.stringify(revisionRequest(before)) };
+  for (const sessionID of ["child", "foreign"]) await assert.rejects(tool.execute(args, { sessionID }), /inactive|root-required/);
+  const cold = await previewHooks(root, "root", [{ info: { id: "user-1", role: "user", agent: "dog-operator" },
+    parts: [{ type: "text", text: "Implement the approved result.\ngoal_budget_units: 2" }] }]);
+  const result = JSON.parse(await cold.tool!.sortie_v010_revise_operator_proposal.execute(args, { sessionID: "root" }));
+  assert.equal(result.status, "submitted");
+  assert.equal(result.revision, 2);
+  assert.equal(Object.hasOwn(result, "task"), false);
+  assert.equal(Object.hasOwn(result, "execution"), false);
+  assert.equal(result.root_revisions[0].actor, "root");
+  assert.deepEqual((await (await RunFlightLedger.openGoal(ledgerPath)).readGoal()).records, budget.records);
+  assert.equal(await new OperatorRuntime(root, V010_RUNTIME_PROFILE).read("root"), undefined);
+  const stale = JSON.parse(await cold.tool!.sortie_v010_revise_operator_proposal.execute(args, { sessionID: "root" }));
+  assert.equal(stale.status, "invalid-revision");
+  assert.equal(stale.code, "operator-proposal-revision-identity-mismatch");
+  const revised = await runtime.required("root");
+  const approved = JSON.parse(await cold.tool!.sortie_v010_approve_operator_proposal.execute(
+    { approval_json: JSON.stringify(approvalRequest(revised)) }, { sessionID: "root" }));
+  assert.equal(approved.status, "approved");
+  assert.ok(approved.execution.task);
+  assert.equal((await (await RunFlightLedger.openGoal(ledgerPath)).readGoal()).state.consumed_units, 1);
+}));
+
 function changedReference(prompt: string, patch: Record<string, unknown>): string {
   assert.ok(prompt.startsWith(proposalRefPrefix));
   return proposalRefPrefix + JSON.stringify({ ...JSON.parse(prompt.slice(proposalRefPrefix.length)), ...patch });
 }
 
-async function previewHooks(root: string, rootSessionID = "root") {
+async function previewHooks(root: string, rootSessionID = "root", rootMessages: unknown[] = []) {
   await promisify(execFile)("git", ["init", "--quiet"], { cwd: root });
   return SortieDogsV010Plugin({ directory: root, client: { session: {
     get: async ({ path }: { path: { id: string } }) => ({ data: path.id === rootSessionID
       ? { agent: "dog-operator" } : { agent: "dogs-coordinator", parentID: rootSessionID } }),
-    messages: async () => ({ data: [] }),
+    messages: async () => ({ data: rootMessages }),
   } } } as never);
 }
 
@@ -255,17 +470,26 @@ test("cumulative proposal spend fails before a new Task and reports the minimum 
     (error: unknown) => (error as { diagnostic?: { code?: string } }).diagnostic?.code === "operator-proposal-read-budget-exhausted");
 }));
 
-test("proposal admission save failure settles its durable reservation without a published call grant", async () => fixture(async root => {
+test("proposal admission save failure settles its durable reservation without a published call grant", async t => fixture(async root => {
   const { hooks, started, ledgerPath } = await previewProposal(root);
   const key = createHash("sha256").update("root").digest("hex");
   const file = join(root, V010_RUNTIME_PROFILE.stateDirectory, "operator-proposals", `${key}.json`);
   const backup = `${file}.backup`;
-  await rename(file, backup);
-  await mkdir(file); // A real rename failure after the independent goal ledger successfully reserves.
+  const admit = OperatorProposalRuntime.prototype.admit;
+  const mocked = t.mock.method(OperatorProposalRuntime.prototype, "admit", async function (this: OperatorProposalRuntime,
+    owner: string, call: string, args: unknown, reserve?: () => Promise<void>) {
+    return admit.call(this, owner, call, args, async () => {
+      await reserve?.();
+      // Inject after the fresh durable grant read and the independent goal reservation.
+      await rename(file, backup);
+      await mkdir(file);
+    });
+  });
   try {
     await assert.rejects(hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "failed-save" },
       { args: started.task }), error => ["EISDIR", "EPERM", "EACCES"].includes((error as NodeJS.ErrnoException).code ?? ""));
   } finally {
+    mocked.mock.restore();
     await rm(file, { recursive: true });
     await rename(backup, file);
   }
@@ -1272,7 +1496,8 @@ test("proposal tool returns bounded typed proof diagnostics and accepts correcte
   assert.deepEqual(submitted.proposal.plan.acceptance_proof.slice(0, 2), [["shared-first"], ["shared-first"]]);
   assert.equal(await new OperatorRuntime(root, V010_RUNTIME_PROFILE).read("root"), undefined, "submission still creates no execution run");
   const submittedStatus = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
-  assert.match(submittedStatus.next_action, /approve the exact proposal/);
+  assert.match(submittedStatus.next_action, /compare every original requirement/);
+  assert.match(submittedStatus.next_action, /revise_operator_proposal/);
 }));
 
 test("string revision gets a field diagnostic, preserves default spend, and the corrected number submits without coercion", async () => fixture(async root => {

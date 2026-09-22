@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { RuntimeProfile } from "./runtime-profile.js";
 import { normalizeRelativePath } from "./path.js";
@@ -12,6 +12,18 @@ const ORIGINAL_REQUEST_MAX_CHARACTERS = 128 * 1024;
 const ORIGINAL_REQUEST_MAX_BYTES = 128 * 1024;
 export const DEFAULT_OPERATOR_PROPOSAL_BUDGET = Object.freeze({ max_reads: 45, max_submissions: 9 });
 export const OPERATOR_PROPOSAL_BUDGET_CAPS = Object.freeze({ max_reads: 192, max_submissions: 24 });
+export const OPERATOR_PROPOSAL_REVISION_CONTRACT = "revision_json must encode exactly {proposal_id:string,revision:positive integer,content_hash:string,rationale:nonblank single-line string,patches:array}. " +
+  "Pin the current submitted identity from operator_status. patches contains 1..32 {op,path,value} objects. " +
+  "replace is allowed only at /coverage, /existing_surface, /uncovered, /negative_handling, /read_scope, /plan/units, /plan/acceptance_proof, " +
+  "/plan/units/<index>/{title,objective,read,validation,acceptance_indices}; add or replace is also allowed at " +
+  "/plan/goal_declaration/criteria/<index>/{validation_command,goal_validation_command}. No duplicate or overlapping paths. " +
+  "Read spellings may normalize separators and dot segments without traversal; read authority can only shrink. " +
+  "The exact write union, ordered acceptance, source_refs, intent, authoritative_refs, goal binding, goal defaults, criterion identities, git_lifecycle and budgets are immutable. " +
+  "Unit count cannot increase. The host derives the next revision, hash and budget_estimate, validates the complete packet, and records root-patch provenance atomically. " +
+  "Each authorized attempt, including malformed input or rejected patches, consumes one remaining submission; foreign/stale calls do not spend the live grant. No reads or execution units are granted or restored. " +
+  "Approval preparation or approval closes this revision lane. Revision never restarts a child, prepares a run, or approves anything. " +
+  "Compare every original requirement again before explicit approval with the new identity. Use only already observed evidence. " +
+  "Keep root-owned push/global apply and user-only acceptance pending until separately evidenced; worker tests never prove those obligations. Unrepresentable or unobserved requirements stay uncovered.";
 const OPERATOR_APPROVAL_IDENTITY_FIELDS = ["proposal_id", "revision", "content_hash", "compared_requirement_ids", "decision"] as const;
 const OPERATOR_APPROVAL_RATIONALE_FIELDS = ["rationale", "comparison_rationale"] as const;
 export const OPERATOR_APPROVAL_CONTRACT = "approval_json must encode one JSON object using exactly one six-field shape. " +
@@ -139,6 +151,20 @@ export interface OperatorProposalState {
   proposal_hash: string | null;
   proposal: OperatorProposalPacket | null;
   approval_rationale: string | null;
+  /** Preparation may publish execution controls before approval commits; never revise that pinned plan. */
+  approval_started?: boolean;
+  root_revisions?: OperatorProposalRevision[];
+}
+
+interface OperatorProposalIdentity { readonly proposal_id: string; readonly revision: number; readonly content_hash: string }
+export interface OperatorProposalRevision {
+  readonly actor: string;
+  readonly at: string;
+  readonly rationale: string;
+  readonly from: OperatorProposalIdentity;
+  readonly to: OperatorProposalIdentity;
+  readonly patch_hash: string;
+  readonly paths: readonly string[];
 }
 
 interface OperatorProposalSpend {
@@ -324,14 +350,28 @@ function parsePacket(value: unknown, state: OperatorProposalState): OperatorProp
 
 /** Durable pre-execution lane. It grants investigation and submission, never source mutation or execution. */
 export class OperatorProposalRuntime {
-  private readonly states = new Map<string, OperatorProposalState>();
   private readonly pending = new Map<string, Promise<void>>();
   private async serial<T>(root: string, action: () => Promise<T>): Promise<T> {
-    const result = (this.pending.get(root) ?? Promise.resolve()).then(action);
+    const result = (this.pending.get(root) ?? Promise.resolve()).then(() => this.locked(root, action));
     const tail = result.then(() => undefined, () => undefined);
     this.pending.set(root, tail);
     try { return await result; }
     finally { if (this.pending.get(root) === tail) this.pending.delete(root); }
+  }
+  private async locked<T>(root: string, action: () => Promise<T>): Promise<T> {
+    await mkdir(join(this.projectRoot, this.profile.stateDirectory, "operator-proposals"), { recursive: true });
+    const lock = `${this.file(root)}.lock`;
+    let handle;
+    for (let attempt = 0; attempt < 100; attempt++) {
+      try { handle = await open(lock, "wx", 0o600); break; }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+    }
+    if (!handle) throw new Error("operator-proposal-state-busy");
+    try { return await action(); }
+    finally { await handle.close(); await rm(lock, { force: true }); }
   }
   readonly projectRoot: string;
   constructor(projectRoot: string, readonly profile: RuntimeProfile) { this.projectRoot = resolve(projectRoot); }
@@ -382,7 +422,6 @@ export class OperatorProposalRuntime {
     return this.serial(root, () => this.readUnlocked(root));
   }
   private async readUnlocked(root: string): Promise<OperatorProposalState | undefined> {
-    const cached = this.states.get(root); if (cached) return structuredClone(cached);
     let source: string; try { source = await readFile(this.file(root), "utf8"); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
     const state = JSON.parse(source) as OperatorProposalState;
     if (state.schema_version !== "0.1" || state.profile !== this.profile.id || state.root_session_id !== root || hash(JSON.stringify(state.intent)) !== state.intent_hash) throw new Error("operator-proposal-state-invalid");
@@ -402,14 +441,13 @@ export class OperatorProposalRuntime {
     } else {
       throw new Error("operator-proposal-state-invalid");
     }
-    this.states.set(root, state); return structuredClone(state);
+    return state;
   }
   private async save(state: OperatorProposalState): Promise<void> {
     const directory = join(this.projectRoot, this.profile.stateDirectory, "operator-proposals"); await mkdir(directory, { recursive: true });
     const temporary = `${this.file(state.root_session_id)}.${randomUUID()}.tmp`;
     try { await writeFile(temporary, JSON.stringify(state), { flag: "wx", mode: 0o600 }); await rename(temporary, this.file(state.root_session_id)); }
     finally { await rm(temporary, { force: true }).catch(() => undefined); }
-    this.states.set(state.root_session_id, structuredClone(state));
   }
   private assertBudgetAvailable(state: OperatorProposalState): void {
     const remainingReads = state.intent.proposal_budget.max_reads - state.read_count;
@@ -589,6 +627,109 @@ export class OperatorProposalRuntime {
     state.proposal_id = proposalID(state.intent_id, packet.revision, state.proposal_hash); state.phase = "submitted";
     await this.save(state); return state;
   }
+  /** A read-free root correction of an ended child's submitted packet, never a new investigation grant. */
+  async reviseJSON(root: string, actor: string, source: string): Promise<OperatorProposalState> {
+    return this.serial(root, async () => {
+      if (root !== actor) throw new Error("operator-proposal-revision-root-required");
+      const state = await this.requiredUnlocked(root);
+      if (state.phase !== "submitted" || !state.proposal || state.approval_started) throw new Error("operator-proposal-not-revisable");
+      if (state.submission_count >= state.intent.proposal_budget.max_submissions) throw new Error("operator-proposal-submission-budget-exhausted");
+      let request: Record<string, unknown>, candidate: OperatorProposalPacket;
+      try {
+        if (Buffer.byteLength(source) > 128 * 1024) proposalError("/", "operator-proposal-revision-too-large", "maxBytes");
+        let raw: unknown;
+        try { raw = JSON.parse(source); }
+        catch { proposalError("/", "operator-proposal-revision-json-invalid", "json"); }
+        if (!record(raw) || !exactSet(raw, ["proposal_id", "revision", "content_hash", "rationale", "patches"]) ||
+            !text(raw.proposal_id) || !Number.isSafeInteger(raw.revision) || !text(raw.content_hash) ||
+            !text(raw.rationale) || raw.rationale.length > 2000 || !Array.isArray(raw.patches) ||
+            raw.patches.length < 1 || raw.patches.length > 32) {
+          return proposalError("/", "operator-proposal-revision-invalid", "exact-identity-rationale-bounded-patches");
+        }
+        request = raw;
+        if (raw.proposal_id !== state.proposal_id || raw.revision !== state.proposal_revision || raw.content_hash !== state.proposal_hash) {
+          throw new Error("operator-proposal-revision-identity-mismatch");
+        }
+        candidate = this.patchedPacket(state, raw.patches);
+      } catch (error) {
+        if (error instanceof Error && error.message === "operator-proposal-revision-identity-mismatch") throw error;
+        // Rejections retain the old body/identity; only the same finite attempt counter advances.
+        state.submission_count++; await this.save(state); throw error;
+      }
+      const from = { proposal_id: state.proposal_id!, revision: state.proposal_revision!, content_hash: state.proposal_hash! };
+      state.submission_count++;
+      state.proposal = candidate; state.proposal_revision = candidate.revision;
+      state.proposal_hash = hash(JSON.stringify(candidate));
+      state.proposal_id = proposalID(state.intent_id, candidate.revision, state.proposal_hash);
+      (state.root_revisions ??= []).push({ actor, at: new Date().toISOString(), rationale: request.rationale as string,
+        from, to: { proposal_id: state.proposal_id, revision: candidate.revision, content_hash: state.proposal_hash },
+        patch_hash: hash(JSON.stringify(request.patches)), paths: (request.patches as { path: string }[]).map(patch => patch.path) });
+      await this.save(state); return state;
+    });
+  }
+  private patchedPacket(state: OperatorProposalState, patches: unknown[]): OperatorProposalPacket {
+    const before = state.proposal!;
+    const draft = structuredClone(before) as unknown as Record<string, any>;
+    const paths: string[] = [];
+    for (const [index, patch] of patches.entries()) {
+      const pointer = `/patches/${index}`;
+      if (!record(patch) || !exactSet(patch, ["op", "path", "value"]) || typeof patch.path !== "string") {
+        proposalError(pointer, "operator-proposal-revision-patch-invalid", "exact-op-path-value");
+      }
+      const entry = patch as { op: unknown; path: string; value: unknown };
+      const command = /^\/plan\/goal_declaration\/criteria\/(0|[1-9][0-9]*)\/(validation_command|goal_validation_command)$/u.test(entry.path);
+      const replace = /^\/(coverage|existing_surface|uncovered|negative_handling|read_scope|plan\/(units|acceptance_proof))$/u.test(entry.path) ||
+        /^\/plan\/units\/(0|[1-9][0-9]*)\/(title|objective|read|validation|acceptance_indices)$/u.test(entry.path);
+      if (!(command && (entry.op === "add" || entry.op === "replace") || replace && entry.op === "replace") ||
+          paths.some(path => path === entry.path || path.startsWith(`${entry.path}/`) || entry.path.startsWith(`${path}/`))) {
+        proposalError(`${pointer}/path`, "operator-proposal-revision-path-denied", "nonoverlapping-allowlisted-field");
+      }
+      paths.push(entry.path);
+      const tokens = entry.path.slice(1).split("/");
+      let owner: any = draft;
+      for (const token of tokens.slice(0, -1)) {
+        if (owner === null || typeof owner !== "object" || !Object.hasOwn(owner, token)) {
+          proposalError(`${pointer}/path`, "operator-proposal-revision-path-missing", "existing-parent");
+        }
+        owner = owner[token];
+      }
+      const key = tokens.at(-1)!;
+      if (owner === null || typeof owner !== "object" || (entry.op === "replace" && !Object.hasOwn(owner, key)) ||
+          (entry.op === "add" && Object.hasOwn(owner, key))) {
+        proposalError(`${pointer}/path`, "operator-proposal-revision-path-missing", "replace-existing-or-add-absent-field");
+      }
+      owner[key] = structuredClone(entry.value);
+    }
+    const normalizeReads = (value: unknown): unknown => Array.isArray(value) ? value.map(path => {
+      if (typeof path !== "string") return path;
+      try { return normalizeRelativePath(path); }
+      catch { return proposalError("/read_scope", "operator-proposal-revision-read-invalid", "safe-relative-spelling"); }
+    }) : value;
+    draft.read_scope = normalizeReads(draft.read_scope);
+    if (Array.isArray(draft.plan.units)) for (const unit of draft.plan.units) if (record(unit)) unit.read = normalizeReads(unit.read);
+    draft.revision = before.revision + 1;
+    draft.budget_estimate = { proposal_reads: state.read_count, execution_units: draft.plan.units?.length };
+    const candidate = parsePacket(draft, state);
+    const within = (path: string, scopes: readonly string[]): boolean => scopes.some(scope => path === scope || path.startsWith(`${scope}/`));
+    if (candidate.read_scope.some(path => !within(path, before.read_scope)) ||
+        candidate.plan.units.flatMap(unit => unit.read).some(path => !within(path, before.plan.units.flatMap(unit => unit.read)))) {
+      proposalError("/read_scope", "operator-proposal-revision-read-expanded", "read-authority-only-shrinks");
+    }
+    if (candidate.plan.units.length > before.plan.units.length) {
+      proposalError("/plan/units", "operator-proposal-revision-units-expanded", "execution-unit-count-cannot-increase");
+    }
+    if (JSON.stringify({ ...candidate, revision: before.revision }) === JSON.stringify(before)) {
+      proposalError("/patches", "operator-proposal-revision-no-change", "substantive-correction-required");
+    }
+    return candidate;
+  }
+  /** Close revision before any prepare/register side effect, including when that later step fails. */
+  async pinApproval(root: string, raw: unknown): Promise<void> {
+    return this.serial(root, async () => {
+      const state = await this.approveUnlocked(root, raw, false);
+      state.approval_started = true; await this.save(state);
+    });
+  }
   async approve(root: string, raw: unknown, commit = true): Promise<OperatorProposalState> {
     return this.serial(root, () => this.approveUnlocked(root, raw, commit));
   }
@@ -616,7 +757,6 @@ export class OperatorProposalRuntime {
         reads: state.read_count, submissions: state.submission_count,
         ...(state.goal_binding === null ? {} : { retry: { intent_hash: state.intent_hash, goal_binding: state.goal_binding } }) });
       await rm(this.file(root), { force: true });
-      this.states.delete(root);
       return state;
     });
   }
@@ -635,5 +775,6 @@ export class OperatorProposalRuntime {
     remaining_reads: state.intent.proposal_budget.max_reads - state.read_count, submissions: state.submission_count,
     remaining_submissions: state.intent.proposal_budget.max_submissions - state.submission_count,
     task_admitted: state.proposal_call_id !== null, uncovered: state.proposal?.uncovered ?? [], proposal: state.proposal,
-    approval_rationale: state.approval_rationale }; }
+    approval_rationale: state.approval_rationale, root_revisions: state.root_revisions ?? [],
+    revision_available: state.phase === "submitted" && !state.approval_started && state.submission_count < state.intent.proposal_budget.max_submissions }; }
 }
