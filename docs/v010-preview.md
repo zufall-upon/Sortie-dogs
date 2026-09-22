@@ -52,6 +52,14 @@ claim general release readiness or a measured cost advantage.
   can also be added/replaced, but only with an exact command already declared by
   a unit assigned to that criterion in the pre-repair snapshot. The operation
   cannot introduce a new command by first mutating a unit in the same patch batch.
+  A diagnosed `operator-scope-invalid` read element can also be replaced at its
+  exact `/units/<index>/read/<index>` pointer. The replacement must be normalized
+  and repository-relative, naming the same resource: an absolute input requires
+  an existing relative alias with identical `realpath`. Relative spelling repairs
+  may normalize separators or redundant `.` segments without redirecting the path.
+  Read expansion, whole-array replacement, missing absolute targets, and write
+  repairs remain forbidden. Each repair revalidates the plan and returns the next
+  draft ID if another defect remains.
 - `sortie_v010_complete_operator` accepts `run_id` and the ordered acceptance
   fingerprint. The root remains responsible for requested scope and required
   review. The host then resolves the separate immutable goal identity and applies

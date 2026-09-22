@@ -187,6 +187,10 @@ ${profile.toolPrefix}operator_status to recover the existing draft_id after an i
 Call ${profile.toolPrefix}repair_operator_plan with that draft_id and patches_json (field operations)
 to repair only /units/<index>/validation, acceptance_indices, title, or objective. This tool cannot change acceptance,
 unit count or write scope. Do not regenerate the full plan or collapse units to work around a mapping error.
+A diagnosed operator-scope-invalid at /units/<index>/read/<index> also permits replace with a normalized relative
+spelling of the same resource. An absolute input requires an existing relative alias with identical realpath.
+Repair each diagnosed entry using the newly returned draft_id; never widen or redirect reads, replace the whole
+read array, create an alias through this repair tool, or repair write scope.
 An empty patches_json array revalidates the saved draft without resending the full plan; prefer this after a runtime repair.
 The repair tool also permits add/replace of /goal_declaration/criteria/<index>/goal_validation_command (or validation_command)
 only when the exact command is already declared in the validation list of a unit assigned to that criterion.

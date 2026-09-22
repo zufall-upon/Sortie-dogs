@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import { acceptanceContinuityFingerprint, inspectAcceptanceContinuity, normalizeAcceptanceCriteria,
   ACCEPTANCE_CONTINUITY_EXTENSION, MAX_ACCEPTANCE_CONTINUITY_BYTES, MAX_ACCEPTANCE_CRITERIA } from "./acceptance-continuity.js";
 import { expandGoalDeclaration, goalDeclarationDefaults, hasGoalCommandAliasConflict } from "./goal-declaration-format.js";
-import { normalizeRelativePath } from "./path.js";
+import { normalizeManifestPath, normalizeRelativePath } from "./path.js";
 import { CONTRACT_TEXT_LIMITS, validateHandoffSchema, validateOperationManifestSchema } from "./validate-schema.js";
 import { validateManifest } from "./validate-manifest.js";
 import { profileAgent, RUNTIME_PROFILES, type RuntimeProfile } from "./runtime-profile.js";
@@ -699,6 +699,18 @@ export class OperatorRuntime {
         if (!record(patch) || !exactKeys(patch, ["op", "path", "value"]) || !["replace", "add"].includes(String(patch.op)) || typeof patch.path !== "string" || !Object.hasOwn(patch, "value")) {
           throw new Error("operator-repair-invalid");
         }
+        const readMatch = /^\/units\/(0|[1-9]\d*)\/read\/(0|[1-9]\d*)$/.exec(patch.path);
+        if (readMatch) {
+          const unitIndex = Number(readMatch[1]), pathIndex = Number(readMatch[2]);
+          const diagnosed = Array.isArray(draft.diagnostics) && draft.diagnostics.some((item: OperatorContractDiagnostic) =>
+            item.document === "plan" && item.pointer === patch.path && item.code === "operator-scope-invalid");
+          if (patch.op !== "replace" || !diagnosed ||
+              !await this.sameReadTarget(original.units[unitIndex]?.read?.[pathIndex], patch.value)) {
+            throw new Error("operator-repair-path-forbidden");
+          }
+          draft.plan.units[unitIndex].read[pathIndex] = patch.value;
+          continue;
+        }
         if (patch.path === "/git_lifecycle/post_commit_validation") {
           const finalValidation = original.units.at(-1)?.validation;
           if (patch.op !== "replace" || !strings(patch.value, true) || !Array.isArray(finalValidation) ||
@@ -741,6 +753,18 @@ export class OperatorRuntime {
       }
       return this.proposeOnce(root, draft.plan);
     });
+  }
+  /** A diagnosed spelling repair may not add, widen, or redirect a read grant. */
+  private async sameReadTarget(before: unknown, after: unknown): Promise<boolean> {
+    if (!text(before) || !text(after)) return false;
+    try {
+      if (normalizeRelativePath(after) !== after) return false;
+      const original = normalizeManifestPath(before);
+      if (original.kind === "relative") return original.path === after;
+      if (!isAbsolute(original.path)) return false;
+      const [left, right] = await Promise.all([realpath(original.path), realpath(resolve(this.projectRoot, after))]);
+      return process.platform === "win32" ? left.toLowerCase() === right.toLowerCase() : left === right;
+    } catch { return false; }
   }
   private async prepareOnce(root: string, raw: unknown, scopeApprovalTurnID?: string): Promise<OperatorState> {
     const previous = await this.read(root);

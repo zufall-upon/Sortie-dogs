@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, lstat, mkdtemp, mkdir, readFile, readdir, writeFile, rm } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, mkdir, readFile, readdir, writeFile, rm, symlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
@@ -1766,6 +1766,63 @@ test("generated contract validation and storage failure leave no partial control
     return true;
   });
   assert.equal(await readFile(controls, "utf8"), "existing control sentinel\n");
+}));
+
+test("draft read path repair accepts only the diagnosed same-resource relative alias", async () => fixture(async area => {
+  const root = join(area, "project"), external = join(area, "assets");
+  await mkdir(root); await mkdir(external);
+  await writeFile(join(external, "hero.vox"), "source asset\n");
+  await writeFile(join(external, "other.vox"), "different asset\n");
+  await symlink(external, join(root, "asset-input"), process.platform === "win32" ? "junction" : "dir");
+  const runtime = new OperatorRuntime(root, V010_RUNTIME_PROFILE);
+  const request = plan();
+  request.units[0]!.read.push(join(external, "hero.vox"));
+  const invalid = await runtime.propose("root", request);
+  assert.equal(invalid.status, "invalid-plan");
+  if (invalid.status !== "invalid-plan") throw Error("Expected invalid draft");
+  assert.equal(invalid.diagnostics[0]!.pointer, "/units/0/read/1");
+  for (const [path, value] of [
+    ["/units/0/read/1", "asset-input"],
+    ["/units/0/read/1", "asset-input/other.vox"],
+    ["/units/0/read/1", "missing-alias/hero.vox"],
+    ["/units/0/read/1", "./asset-input/hero.vox"],
+    ["/units/0/read/1", "../assets/hero.vox"],
+    ["/units/0/read/0", "asset-input/hero.vox"],
+    ["/units/0/write/0", "asset-input/hero.vox"],
+  ]) await assert.rejects(runtime.repair("root", invalid.draft_id, [{ op: "replace", path, value }]), /operator-repair-path-forbidden/);
+  await assert.rejects(runtime.repair("root", invalid.draft_id,
+    [{ op: "add", path: "/units/0/read/1", value: "asset-input/hero.vox" }]), /operator-repair-path-forbidden/);
+  await assert.rejects(runtime.repair("root", invalid.draft_id,
+    [{ op: "replace", path: "/units/0/read", value: ["asset-input/hero.vox"] }]), /operator-repair-path-forbidden/);
+  assert.equal(await runtime.read("root"), undefined, "no execution is admitted during failed repair");
+  assert.equal((await runtime.draftStatus("root") as { draft_id: string }).draft_id, invalid.draft_id,
+    "rejected repairs must not alter the saved draft");
+  const accepted = await new OperatorRuntime(root, V010_RUNTIME_PROFILE).repair("root", invalid.draft_id,
+    [{ op: "replace", path: "/units/0/read/1", value: "asset-input/hero.vox" }]);
+  assert.equal(accepted.status, "prepared");
+  if (accepted.status !== "prepared") throw Error("Expected repaired plan");
+  assert.deepEqual(accepted.state.acceptance, request.acceptance);
+  assert.deepEqual(accepted.state.units[0]!.unit, { ...request.units[0], read: ["check-first.mjs", "asset-input/hero.vox"] });
+  assert.equal(accepted.state.dispatched, 0);
+  assert.equal(await runtime.draftStatus("root"), undefined);
+  await assert.rejects(runtime.repair("root", invalid.draft_id, []), /ENOENT/);
+}));
+
+test("draft read spelling repairs revalidate each saved revision without widening future inputs", async () => fixture(async root => {
+  const runtime = new OperatorRuntime(root, V010_RUNTIME_PROFILE);
+  const request = plan();
+  request.units[0]!.read = ["./future-input.txt", "src/"];
+  const first = await runtime.propose("root", request);
+  if (first.status !== "invalid-plan") throw Error("Expected draft");
+  await assert.rejects(runtime.repair("root", first.draft_id, [{ op: "replace", path: "/units/0/read/0", value: "another-input.txt" }]),
+    /operator-repair-path-forbidden/);
+  const second = await runtime.repair("root", first.draft_id, [{ op: "replace", path: "/units/0/read/0", value: "future-input.txt" }]);
+  if (second.status !== "invalid-plan") throw Error("Expected remaining diagnostic");
+  assert.notEqual(second.draft_id, first.draft_id);
+  assert.equal(second.diagnostics[0]!.pointer, "/units/0/read/1");
+  await assert.rejects(runtime.repair("root", first.draft_id, []), /operator-draft-stale/);
+  const prepared = await runtime.repair("root", second.draft_id, [{ op: "replace", path: "/units/0/read/1", value: "src" }]);
+  assert.equal(prepared.status, "prepared");
 }));
 
 test("invalid draft repairs only named unit fields without changing acceptance or scope", async () => fixture(async root => {

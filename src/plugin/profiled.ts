@@ -447,7 +447,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         await registerPreparedGoal(context.sessionID, state);
         return preparedTask(state);
       } };
-    tools[repair] = { description: "Repair a root-owned draft with named fields, git_lifecycle branch/start/message fields, or an already-declared criterion command. Empty patches revalidate the saved draft without resending it. Acceptance, unit count and write scope remain fixed.",
+    tools[repair] = { description: "Repair a root-owned draft with named fields, git_lifecycle branch/start/message fields, or an already-declared criterion command. A diagnosed /units/i/read/j scope error may be replaced with a normalized repository-relative spelling of the same resource only: absolute inputs require an existing relative alias whose realpath is identical; read expansion, redirection, whole-array replacement and write-scope repair are forbidden. Empty patches revalidate the saved draft without resending it. Acceptance, unit count and write scope remain fixed.",
       args: { draft_id: stringSchema, patches_json: stringSchema }, execute: async (args, context) => {
         await requireRoot(context.sessionID);
         let patches: unknown;
