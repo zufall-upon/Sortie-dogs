@@ -228,6 +228,7 @@ export class WorktreeLifecycle {
   private readonly inFlight = new Set<string>();
   private writeQueue = Promise.resolve();
   private transactionQueue = Promise.resolve();
+  private preparationQueue = Promise.resolve();
   private transactionLease: ScopeLease | undefined;
   private readonly directParentAttestations = new Map<string, true>();
 
@@ -922,7 +923,16 @@ export class WorktreeLifecycle {
     return entry;
   }
 
-  private async createAndLock(record: InventoryRecord): Promise<PreparedWorktree> {
+  private createAndLock(record: InventoryRecord): Promise<PreparedWorktree> {
+    // Git scans sibling administrative directories while adding and attesting worktrees. A peer's
+    // not-yet-written commondir can make Git fail after branch creation. Publish one complete entry
+    // at a time under the inventory lease; setup hooks and later worker execution remain concurrent.
+    const prepared = this.preparationQueue.then(() => this.createAndLockOnce(record));
+    this.preparationQueue = prepared.then(() => undefined, () => undefined);
+    return prepared;
+  }
+
+  private async createAndLockOnce(record: InventoryRecord): Promise<PreparedWorktree> {
     await this.assertRootIdentity();
     if (!this.isDirectManagedRecord(record) || await lstat(record.path).catch(() => undefined) !== undefined ||
       await this.branchExists(record.branch)) throw new Error("identity");

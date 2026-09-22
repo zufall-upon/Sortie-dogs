@@ -116,6 +116,48 @@ test("pinCleanBase rejects tracked and untracked dirt while ignored files are al
   }
 });
 
+test("worktree preparation waits for sibling administrative files to be complete", async () => {
+  const value = await fixture("administrative-contention");
+  const incomplete = join(value.repository, ".git", "worktrees", "inflight");
+  try {
+    const pin = await value.lifecycle.pinCleanBase();
+    const lifecycle = value.lifecycle as unknown as { git(args: readonly string[], cwd?: string): Promise<string> };
+    const originalGit = lifecycle.git.bind(value.lifecycle);
+    let first = true;
+    let metadataWrite = Promise.resolve();
+    lifecycle.git = async (args, cwd) => {
+      if (args[0] === "worktree" && args[1] === "add") {
+        if (first) {
+          first = false;
+          // Git creates commondir before writing its contents. Another add must not read it yet.
+          metadataWrite = mkdir(incomplete, { recursive: true }).then(async () => {
+            await Promise.all([
+              writeFile(join(incomplete, "HEAD"), `${pin.sha}\n`),
+              writeFile(join(incomplete, "gitdir"), `${join(value.repository, ".git")}\n`),
+              writeFile(join(incomplete, "commondir"), ""),
+            ]);
+          });
+          await metadataWrite;
+          await new Promise(resolvePromise => setTimeout(resolvePromise, 120));
+          await rm(incomplete, { recursive: true });
+        } else {
+          await metadataWrite;
+        }
+      }
+      return originalGit(args, cwd);
+    };
+    const created = await value.lifecycle.createMany({ pin, tasks: tasks(pin, ["first", "second"]) });
+    assert.equal(created.length, 2);
+    assert.deepEqual(created.map(entry => entry.phase), ["ready", "ready"]);
+    for (const entry of created) {
+      assert.equal((await git(entry.path, "rev-parse", "HEAD")).trim(), pin.sha);
+      assert.equal((await git(value.repository, "rev-parse", entry.branch)).trim(), pin.sha);
+    }
+  } finally {
+    await cleanupFixture(value);
+  }
+});
+
 test("five worktrees share one exact base, isolate edits, hash reserved IDs, and clean ignored dependencies", async () => {
   const value = await fixture("parallel");
   try {
@@ -871,8 +913,8 @@ const exclusiveTestNames = new Set([
 ]);
 
 nodeTest("worktree lifecycle registered tests", { concurrency: 4 }, async (context) => {
-  assert.equal(registeredTests.length, 27);
-  assert.equal(new Set(registeredTests.map(({ name }) => name)).size, 27);
+  assert.equal(registeredTests.length, 28);
+  assert.equal(new Set(registeredTests.map(({ name }) => name)).size, 28);
   await mkdir(fixtureRoot, { recursive: true });
   const initialFixtureRoots = new Set(
     (await readdir(fixtureRoot)).filter((name) => name.startsWith("sortie-worktree-")),
@@ -880,7 +922,7 @@ nodeTest("worktree lifecycle registered tests", { concurrency: 4 }, async (conte
 
   const safeTests = registeredTests.filter(({ name }) => !exclusiveTestNames.has(name));
   const exclusiveTests = registeredTests.filter(({ name }) => exclusiveTestNames.has(name));
-  assert.equal(safeTests.length, 25);
+  assert.equal(safeTests.length, 26);
   assert.equal(exclusiveTests.length, 2);
 
   let activeSafe = 0;
