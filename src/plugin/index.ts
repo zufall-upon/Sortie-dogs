@@ -3,7 +3,7 @@ import { lstat, mkdir, open, readFile, readdir, realpath, rm, stat, writeFile } 
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import { RUNTIME_ASSET_VERSION } from "../asset-version.js";
-import { GOAL_DECLARATION_FORMAT, GOAL_DELIVERY_INTENTS, GOAL_DELIVERY_MODES, expandGoalDeclaration } from "../core/goal-declaration-format.js";
+import { GOAL_DECLARATION_FORMAT, GOAL_DELIVERY_INTENTS, GOAL_DELIVERY_MODES, GOAL_CRITERION_ENUMS, expandGoalDeclaration } from "../core/goal-declaration-format.js";
 import {
   ACCEPTANCE_CONTINUITY_AUTHORITY,
   ACCEPTANCE_CONTINUITY_EXTENSION,
@@ -2176,10 +2176,13 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     } } };
   }
 
-  async function terminalGoal(sessionID: string, stopReason: GoalStopReason, status: "succeeded" | "stopped"): Promise<GoalTerminalReceipt | undefined> {
+  async function terminalGoal(sessionID: string, stopReason: GoalStopReason, status: "succeeded" | "stopped",
+    explicitAcceptance = false): Promise<GoalTerminalReceipt | undefined> {
     const ledger = await goalLedger(sessionID);
     const state = (await ledger.readGoal()).state;
     if (state.goal_id === null || state.receipt !== null || state.outstanding_reservations.length > 0 || state.acceptance_fingerprint === null) return state.receipt ?? undefined;
+    if (status === "succeeded" && !explicitAcceptance &&
+        await input.runtimeBridge?.requiresExplicitAcceptance?.(sessionID) === true) return undefined;
     const records = (await ledger.readGoal()).records;
     const settledEvidence = records.flatMap(({ event }) => event.kind === "unit.settled" || event.kind === "unit.evidence-reconciled" ? event.evidence : []);
     if (status === "succeeded" && (state.acceptance_contract === null ||
@@ -2263,7 +2266,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     }
     if (receipt === undefined && delivery === "failed") {
       receipt = await terminalGoal(sessionID, "stopped", "stopped").catch(() => undefined);
-    } else if (receipt === undefined && proved) {
+    } else if (receipt === undefined && proved &&
+        await input.runtimeBridge?.requiresExplicitAcceptance?.(sessionID) !== true) {
       receipt = await terminalGoal(sessionID, "completed", "succeeded").catch(() => undefined);
     } else if (receipt === undefined && outcome === "INTERRUPTED") {
       receipt = await terminalGoal(sessionID, "stopped", "stopped").catch(() => undefined);
@@ -2349,19 +2353,19 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       const expectedOutcome = values.goal_expected_outcome;
       const sourceBinding = handoffValue(entries, ["goal_source_binding"]);
       const candidateBinding = handoffValue(entries, ["goal_candidate_binding"]);
-      if (buildBoundary !== undefined && buildBoundary !== "included" && buildBoundary !== "excluded" && buildBoundary !== "not-applicable") {
+      if (buildBoundary !== undefined && !GOAL_CRITERION_ENUMS.build_boundary.some(value => value === buildBoundary)) {
         defects.push(contractDefect("contract", pointer("goal_build_boundary"), "goal_build_boundary_invalid"));
       }
-      if (proofScope !== undefined && proofScope !== "requested-full" && proofScope !== "document-deliverable" && proofScope !== "expected-negative") {
+      if (proofScope !== undefined && !GOAL_CRITERION_ENUMS.proof_scope.some(value => value === proofScope)) {
         defects.push(contractDefect("contract", pointer("goal_proof_scope"), "goal_proof_scope_invalid"));
       }
-      if (expectedOutcome !== undefined && expectedOutcome !== "pass" && expectedOutcome !== "fail") {
+      if (expectedOutcome !== undefined && !GOAL_CRITERION_ENUMS.expected_outcome.some(value => value === expectedOutcome)) {
         defects.push(contractDefect("contract", pointer("goal_expected_outcome"), "goal_expected_outcome_invalid"));
       }
-      if (sourceBinding !== undefined && sourceBinding !== "declared" && sourceBinding !== "current-protected") {
+      if (sourceBinding !== undefined && !GOAL_CRITERION_ENUMS.source_binding.some(value => value === sourceBinding)) {
         defects.push(contractDefect("contract", pointer("goal_source_binding"), "goal_source_binding_invalid"));
       }
-      if (candidateBinding !== undefined && candidateBinding !== "declared" && candidateBinding !== "current-protected") {
+      if (candidateBinding !== undefined && !GOAL_CRITERION_ENUMS.candidate_binding.some(value => value === candidateBinding)) {
         defects.push(contractDefect("contract", pointer("goal_candidate_binding"), "goal_candidate_binding_invalid"));
       }
       const declaredValidation = handoffValue(entries, ["validation"]);
@@ -8031,7 +8035,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       if (goal.receipt?.status === "stopped" || goal.phase === "stopped") throw new Error("operator-goal-stopped");
       // Same proof/freshness/reservation gate used by terminal text, requested
       // explicitly by the root instead of inferred from a model's wording.
-      const receipt = goal.receipt ?? await terminalGoal(sessionID, "completed", "succeeded");
+      const receipt = goal.receipt ?? await terminalGoal(sessionID, "completed", "succeeded", true);
       if (receipt?.status !== "succeeded") return { status: "awaiting-evidence" };
       // Acceptance must return its receipt to the active tool call. Revoking
       // continuation timers is not a user-requested session cancellation.

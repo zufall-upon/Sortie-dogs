@@ -23,6 +23,7 @@ export interface RuntimeBridge {
   readonly defaultModelCatalog?: import("./model-routing.js").ModelCatalog;
   transformConfiguration?(value: unknown): unknown;
   continuationCheckpoint?(rootSessionID: string): Promise<string | undefined>;
+  requiresExplicitAcceptance?(rootSessionID: string): Promise<boolean>;
   ownsCanonicalValidation?(rootSessionID: string, unitID: string, childSessionID: string,
     command: string): Promise<boolean>;
   onSerialSettlement?(settlement: SerialDispatchSettlement): Promise<void>;

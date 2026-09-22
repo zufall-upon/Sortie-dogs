@@ -1046,7 +1046,31 @@ test("root discards one exact diagnosed transient and resumes only remaining val
   assert.equal(goal.state.consumed_units, 1, "validation-only continuation must not reserve a second implementation unit");
   assert.equal(goal.state.validation_budget.consumed, 1);
   await assert.rejects(hooks.tool!.sortie_v010_resolve_operator_contract_repair.execute(request, { sessionID: "root" }), /identity-mismatch/);
-  const complete = JSON.parse(await hooks.tool!.sortie_v010_complete_operator.execute({ run_id: prepared.run_id,
+  const premature = { text: "DONE — all worker validators passed" };
+  await hooks["experimental.text.complete"]!({ sessionID: "root", messageID: "premature-acceptance" }, premature);
+  assert.match(premature.text, /IN_PROGRESS/);
+  assert.equal((await (await RunFlightLedger.openGoal(ledgerPath)).readGoal()).state.receipt, null,
+    "native validation does not authorize implicit operator acceptance from prose");
+  assert.equal(JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" })).status, "awaiting-acceptance");
+  await hooks["experimental.text.complete"]!({ sessionID: "root", messageID: "acceptance-checkpoint" }, {
+    text: "status: INTERRUPTED — acceptance checkpoint\nTRUE_INTERRUPTION: user: finish acceptance after host restart",
+  });
+  const paused = (await (await RunFlightLedger.openGoal(ledgerPath)).readGoal()).state;
+  assert.equal(paused.receipt?.status, "stopped", "an explicit pause must never become an implicit succeeded receipt");
+  const cold = await SortieDogsV010Plugin({ directory: root, client: { session: {
+    get: async ({ path }: { path: { id: string } }) => ({ data: path.id === "root"
+      ? { agent: "dog-operator" } : { agent: "dog-worker-v010", parentID: "root" } }),
+    messages: async ({ path }: { path: { id: string } }) => ({ data: hostMessages[path.id] ?? [] }),
+  } } } as never);
+  await cold["chat.message"]!({ sessionID: "root", messageID: "accept-after-restart", agent: "dog-operator" }, {
+    message: { agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-5.6-sol" } },
+    parts: [{ type: "text", text: "Complete the same awaiting operator with the existing native proof." }],
+  });
+  const continued = (await (await RunFlightLedger.openGoal(ledgerPath)).readGoal()).state;
+  assert.equal(continued.goal_id, goal.state.goal_id);
+  assert.equal(continued.consumed_units, goal.state.consumed_units);
+  assert.equal(continued.acceptance_fingerprint, goal.state.acceptance_fingerprint);
+  const complete = JSON.parse(await cold.tool!.sortie_v010_complete_operator.execute({ run_id: prepared.run_id,
     acceptance_fingerprint: prepared.acceptance_fingerprint }, { sessionID: "root" }));
   assert.equal(complete.status, "succeeded");
   assert.equal(await git(root, ["status", "--porcelain=v1"]), "");
@@ -3483,6 +3507,50 @@ test("cold resume relinks legacy registered runs only from the latest same-goal 
   assert.equal(wrongAfter.runID, wrong.runID);
   assert.equal(wrongAfter.dispatched, 1);
   assert.equal((await wrongLedger.readGoal()).state.acceptance_fingerprint, goalFingerprint(["unrelated goal"]));
+}));
+
+test("invalid goal enums and missing fields stay repairable before immutable run registration", async () => fixture(async root => {
+  const value = plan();
+  value.goal_declaration.delivery_mode = "prototype-first";
+  delete (value.goal_declaration.defaults as Record<string, unknown>).expected_outcome;
+  const runtime = new OperatorRuntime(root, V010_RUNTIME_PROFILE);
+  const rejected = await runtime.propose("root", value);
+  assert.equal(rejected.status, "invalid-plan");
+  if (rejected.status !== "invalid-plan") throw new Error("invalid declaration was frozen");
+  assert.deepEqual(rejected.diagnostics.map(item => ({ pointer: item.pointer, expected: item.expected })), [
+    { pointer: "/goal_declaration/delivery_mode", expected: "planning-only | mvp-first | repair-first | controlled-change" },
+    { pointer: "/goal_declaration/defaults/expected_outcome", expected: "pass | fail" },
+  ]);
+  assert.equal(await runtime.read("root"), undefined, "invalid goal fields must not create an immutable run");
+  const cold = new OperatorRuntime(root, V010_RUNTIME_PROFILE);
+  for (const [path, replacement] of [["/goal_declaration/goal_budget_units", 999],
+    ["/goal_declaration/defaults/proof_scope", "document-deliverable"], ["/goal_declaration/defaults", {}]] as const) {
+    await assert.rejects(cold.repair("root", rejected.draft_id, [{ op: "replace", path, value: replacement }]), /operator-repair-path-forbidden/);
+  }
+  const partial = await cold.repair("root", rejected.draft_id, [
+    { op: "replace", path: "/goal_declaration/delivery_mode", value: "mvp-first" },
+  ]);
+  assert.equal(partial.status, "invalid-plan");
+  if (partial.status !== "invalid-plan") throw new Error("missing expected outcome was accepted");
+  assert.equal(partial.diagnostics.length, 1);
+  const fixed = await new OperatorRuntime(root, V010_RUNTIME_PROFILE).repair("root", partial.draft_id, [
+    { op: "add", path: "/goal_declaration/defaults/expected_outcome", value: "pass" },
+  ]);
+  assert.equal(fixed.status, "prepared");
+  if (fixed.status !== "prepared") throw new Error("repaired declaration was refused");
+  assert.deepEqual(fixed.state.acceptance, value.acceptance);
+  assert.deepEqual(fixed.state.units.map(item => item.unit), value.units);
+  assert.equal(fixed.state.dispatched, 0);
+  const hooks = await SortieDogsV010Plugin({ directory: root });
+  await hooks["chat.message"]!({ sessionID: "root", messageID: "register-fixed", agent: "dog-operator" }, {
+    message: { agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-5.6-sol" } },
+    parts: [{ type: "text", text: "Register the repaired approved plan." }],
+  });
+  const corrected = structuredClone(value);
+  corrected.goal_declaration.delivery_mode = "mvp-first";
+  corrected.goal_declaration.defaults.expected_outcome = "pass";
+  const registered = JSON.parse(await hooks.tool!.sortie_v010_prepare_operator.execute({ plan_json: JSON.stringify(corrected) }, { sessionID: "root" }));
+  assert.equal(registered.run_id, fixed.state.runID, "the repaired declaration must pass the real core goal gate");
 }));
 
 test("a real turn resumes a stopped goal while its durable operator contract remains unfinished", async () => fixture(async root => {

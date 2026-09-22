@@ -261,7 +261,7 @@ export function createV2ReturnReportPublisher(context: OpenCodeV2Context, hooks:
         if (panel === undefined) return;
         const identity = reportIdentity(session, source.id, panel);
         if (history.some(message => reportMetadata(message)?.identity === identity)) return;
-        await context.session.synthetic({ sessionID: session, id: `sortie-report-${identity}`, text: panel,
+        await context.session.synthetic({ sessionID: session, id: `msg_sortie_report_${identity}`, text: panel,
           description: "Sortie Dogs return report", delivery: "queue", resume: false,
           metadata: { [V2_RETURN_REPORT_METADATA_KEY]: { schema_version: "0.1", identity, source_message_id: source.id } } });
         return;

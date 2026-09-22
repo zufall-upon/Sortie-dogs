@@ -5,7 +5,7 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { acceptanceContinuityFingerprint, inspectAcceptanceContinuity, normalizeAcceptanceCriteria,
   ACCEPTANCE_CONTINUITY_EXTENSION, MAX_ACCEPTANCE_CONTINUITY_BYTES, MAX_ACCEPTANCE_CRITERIA } from "./acceptance-continuity.js";
-import { expandGoalDeclaration, goalDeclarationDefaults, hasGoalCommandAliasConflict } from "./goal-declaration-format.js";
+import { expandGoalDeclaration, goalDeclarationDefaults, goalDeclarationFieldDiagnostics, hasGoalCommandAliasConflict } from "./goal-declaration-format.js";
 import { normalizeManifestPath, normalizeRelativePath } from "./path.js";
 import { CONTRACT_TEXT_LIMITS, validateHandoffSchema, validateOperationManifestSchema } from "./validate-schema.js";
 import { validateManifest } from "./validate-manifest.js";
@@ -400,6 +400,11 @@ export function parseOperatorPlan(value: unknown): OperatorPlan {
         "canonical-declared-goal-validations-must-be-exclusive-contiguous-final-unit-suffix", "repair-proof-mapping");
     }
   }
+  const declarationDefects = goalDeclarationFieldDiagnostics(value.goal_declaration);
+  if (declarationDefects.length) throw new OperatorContractError(declarationDefects.map(defect => ({
+    document: "plan", pointer: defect.pointer, code: "operator-goal-field-invalid", rule: "declared-goal-field",
+    repair_kind: "repair-field", repair_paths: [defect.pointer], expected: defect.expected,
+  })));
   expandGoalDeclaration(value.goal_declaration);
   return { ...value, acceptance: normalizeAcceptanceCriteria(value.acceptance) } as unknown as OperatorPlan;
 }
@@ -698,6 +703,20 @@ export class OperatorRuntime {
       for (const patch of patches) {
         if (!record(patch) || !exactKeys(patch, ["op", "path", "value"]) || !["replace", "add"].includes(String(patch.op)) || typeof patch.path !== "string" || !Object.hasOwn(patch, "value")) {
           throw new Error("operator-repair-invalid");
+        }
+        const goalFieldPath = /^\/goal_declaration\/(delivery_intent|delivery_mode|usable_path_established|controlled_change|goal_acceptance_fingerprint)$/.test(patch.path) ||
+          /^\/goal_declaration\/(?:defaults\/|criteria\/(?:0|[1-9]\d*)\/)?(?:goal_)?(?:target|entrypoint|workload|source|candidate|fixture|oracle_coverage|build_boundary|proof_scope|expected_outcome|source_binding|candidate_binding)$/.test(patch.path);
+        if (goalFieldPath && Array.isArray(draft.diagnostics) && draft.diagnostics.some(
+          (item: OperatorContractDiagnostic) => item.document === "plan" && item.pointer === patch.path && item.code === "operator-goal-field-invalid")) {
+          // Only the exact invalid or missing field is editable; acceptance, valid declaration fields,
+          // budgets and scope never become mutable just because another field was diagnosed.
+          const keys = patch.path.slice(1).split("/");
+          let owner = draft.plan;
+          for (const key of keys.slice(0, -1)) owner = owner?.[key];
+          const key = keys.at(-1)!;
+          if (!record(owner) || (patch.op === "replace" && !Object.hasOwn(owner, key))) throw new Error("operator-repair-path-forbidden");
+          owner[key] = patch.value;
+          continue;
         }
         const readMatch = /^\/units\/(0|[1-9]\d*)\/read\/(0|[1-9]\d*)$/.exec(patch.path);
         if (readMatch) {

@@ -66,6 +66,7 @@ function contextFixture() {
       prompt: async () => ({}),
       synthetic: async input => {
         if (failSynthetic) { failSynthetic = false; throw new Error("synthetic unavailable"); }
+        assert.match(String(input.id), /^msg_/, "V2 session.synthetic rejects IDs outside the native message namespace");
         const message = { id: input.id, type: "synthetic", text: input.text, metadata: input.metadata, time: { created: 3 } };
         history.push(message); synthetic.push(input); return message;
       },
@@ -121,6 +122,7 @@ test("V2 return report uses one durable non-resuming synthetic card across repla
   assert.equal(fixture.synthetic.length, 1);
   assert.equal(fixture.synthetic[0]!.resume, false);
   assert.equal(fixture.synthetic[0]!.delivery, "queue");
+  assert.match(String(fixture.synthetic[0]!.id), /^msg_sortie_report_[a-f0-9]{64}$/u);
   assert.match(String(fixture.synthetic[0]!.text), /^<details>\r?\n<summary><strong>🐾 SORTIE DOGS — 帰還報告/u);
   const metadata = fixture.synthetic[0]!.metadata as Record<string, Record<string, unknown>>;
   assert.match(String(metadata[V2_RETURN_REPORT_METADATA_KEY]!.identity), /^[a-f0-9]{64}$/u);
