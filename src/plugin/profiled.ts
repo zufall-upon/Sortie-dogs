@@ -525,10 +525,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         const requestedReason = rawReason === "plain" || rawReason === undefined ? undefined : rawReason;
         if (requestedReason !== undefined && requestedReason !== "review-blocking" && requestedReason !== "acceptance-remediation") throw new Error("operator-cancel-reason-invalid");
         const pending = await operators.read(context.sessionID);
-        if (!pending) {
+        const pendingProposal = await proposals.read(context.sessionID);
+        if (!pending || (["cancelled", "completed"].includes(pending.phase) && pendingProposal?.phase !== "approved" && pendingProposal !== undefined)) {
           // A pre-approval proposal owns no execution lane. Its admitted child can never be rebound, so without
           // this release the root can neither resume, redispatch, nor start any replacement investigation.
-          const proposal = await proposals.read(context.sessionID);
+          const proposal = pendingProposal;
           if (!proposal || proposal.phase === "approved") throw new Error("operator-run-missing");
           if (requestedReason !== undefined) throw new Error("operator-cancel-reason-invalid");
           await stop(context.sessionID, "explicit-cancellation", false);

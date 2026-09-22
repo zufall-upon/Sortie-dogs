@@ -8,6 +8,12 @@ const testRoot = resolve(projectRoot, "test");
 const suiteDeadlineMs = 1_790_000;
 const startMarker = "SORTIE_FULL_TEST_RUNNER_STARTED";
 const phase2Concurrency = 2;
+const activeControllers = new Set<AbortController>();
+let shuttingDown = false;
+function abortActive(): void {
+  shuttingDown = true;
+  for (const controller of activeControllers) controller.abort();
+}
 const timingHistoryPath = join(projectRoot, "_testenv", "full-test-timings.json");
 const s01Paths = new Set([
   "test/integration/worktree-parallel-dispatch.test.ts",
@@ -82,6 +88,7 @@ async function partitionTests(): Promise<Partition> {
   const all = entries
     .filter((entry) => entry.isFile() && entry.name.endsWith(".test.ts"))
     .map((entry) => normalized(relative(projectRoot, resolve(entry.parentPath, entry.name))))
+    .filter((path) => !path.startsWith("test/windows/"))
     .sort();
   const distMutating = all.filter((path) => distMutatingPaths.has(path));
   const processExclusive = all.filter((path) => processExclusivePaths.has(path));
@@ -120,7 +127,7 @@ function validPartition({ all, distMutating, processExclusive, integration, s01,
     && all.every((path) => classified.includes(path));
 }
 
-async function stopOwnedTree(pid: number): Promise<boolean> {
+export async function stopOwnedTree(pid: number): Promise<boolean> {
   if (process.platform !== "win32") {
     try { process.kill(-pid, "SIGKILL"); } catch { /* already closed */ }
     return true;
@@ -141,6 +148,7 @@ async function runPhase(
   signal?: AbortSignal,
 ): Promise<ChildResult> {
   if (deadlineMs <= 0) return { exit: 124, stopped: true };
+  if (shuttingDown || signal?.aborted) return { exit: 1, stopped: true };
   const args = ["--experimental-strip-types", "--import", "./test/setup.ts", "--test", "--test-reporter=tap"];
   if (concurrency !== undefined) args.push(`--test-concurrency=${concurrency}`);
   args.push(path);
@@ -302,6 +310,7 @@ async function runConcurrentBatch(
 
 async function runScheduledTests(partition: Partition, remaining: () => number, record: ExecutionRecord, startedAt: number, durations: Readonly<Record<string, number>>): Promise<ChildResult> {
   const controller = new AbortController();
+  activeControllers.add(controller);
   const distMutating = await runBatch(partition.distMutating, 1, "dist-mutating", remaining, record, startedAt, controller);
   if (distMutating.exit !== 0 || !distMutating.stopped) return distMutating;
   const integration = [...partition.s01, ...partition.integrationRemaining];
@@ -313,6 +322,7 @@ async function runScheduledTests(partition: Partition, remaining: () => number, 
 
 async function runAllTests(partition: Partition, remaining: () => number, record: ExecutionRecord, startedAt: number, durations: Readonly<Record<string, number>> = {}): Promise<ChildResult> {
   const processController = new AbortController();
+  activeControllers.add(processController);
   const processExclusive = await runBatch(partition.processExclusive, 1, "process-exclusive", remaining, record, startedAt, processController);
   if (processExclusive.exit !== 0 || !processExclusive.stopped) return processExclusive;
   return await runScheduledTests(partition, remaining, record, startedAt, durations);
@@ -335,6 +345,11 @@ async function selfTest(): Promise<number> {
   const fixture = join(root, "timeout.test.ts");
   await writeFile(fixture, "import { test } from 'node:test';\ntest('timeout cleanup fixture', async () => await new Promise(() => {}));\n");
   const timeout = await runPhase(fixture, undefined, 20, "self-test");
+  const abortController = new AbortController();
+  const abortedPhase = runPhase(fixture, undefined, 10_000, "self-test-abort", abortController.signal);
+  abortController.abort();
+  const aborted = await abortedPhase;
+  const abortCleanup = aborted.exit !== 0 && aborted.stopped;
   const successFixture = join(root, "success.test.ts");
   const failureFixture = join(root, "failure.test.ts");
   const unstartedFixture = join(root, "unstarted.test.ts");
@@ -383,7 +398,7 @@ async function selfTest(): Promise<number> {
     && laneRecord.transitions.filter(({ status, phase }) => status === "started" && phase === "nonintegration").length === 2
     && laneRecord.transitions.findIndex(({ status, phase }) => status === "completed" && phase === "nonintegration")
       > laneRecord.transitions.findLastIndex(({ status, phase }) => status === "started" && phase === "nonintegration");
-  const passed = partitionValid && integrationPhaseValid && disjoint && concurrencyValid && schedulerPartitionValid && batchLanesValid && cleanup && failedPathValid && parallelOverlap && exclusiveLaneOrder;
+  const passed = partitionValid && integrationPhaseValid && disjoint && concurrencyValid && schedulerPartitionValid && batchLanesValid && cleanup && abortCleanup && failedPathValid && parallelOverlap && exclusiveLaneOrder;
   console.log(JSON.stringify({ self_test: passed, files: partition.all.length, dist_mutating: partition.distMutating.length, dist_mutating_paths: partition.distMutating, process_exclusive: partition.processExclusive.length, process_exclusive_paths: partition.processExclusive, integration: partition.integration.length, s01: partition.s01.length, integration_remaining: partition.integrationRemaining.length, heavy: partition.heavy.length, light: partition.light.length, remaining_all: partition.remainingAll.length, partition: partitionValid, duplicate_files: partition.all.length - new Set([...partition.distMutating, ...partition.processExclusive, ...partition.integration, ...partition.heavy, ...partition.light]).size, dist_mutating_disjoint: partition.distMutating.every((path) => !partition.processExclusive.includes(path) && !partition.integration.includes(path) && !partition.heavy.includes(path) && !partition.light.includes(path)), process_exclusive_disjoint: partition.processExclusive.every((path) => !partition.distMutating.includes(path) && !partition.integration.includes(path) && !partition.heavy.includes(path) && !partition.light.includes(path)), integration_phase: integrationPhaseValid, integration_remaining_first: partition.integrationRemaining.every((path, index) => partition.remainingAll[index] === path), heavy_light_disjoint: disjoint, scheduler_partition: schedulerPartitionValid, scheduler_batch_lanes: batchLanesValid, scheduler_max_lanes: phase2Concurrency, scheduler_nonintegration_concurrency: phase2Concurrency, scheduler_serial_lanes: ["process-exclusive", "dist-mutating", "integration"], scheduler_parallel_lanes: ["nonintegration"], parallel_overlap: parallelOverlap, total_deadline_ms: suiteDeadlineMs, phase_deadlines: "absolute-remaining", remaining_concurrency: phase2Concurrency, concurrency: concurrencyValid, timeout_exit: timeout.exit, stopped: timeout.stopped, cleanup, failed_path: failureFixture, failed_path_identified: failedPathValid, unstarted_path: unstartedFixture, unstarted_preserved: !fixtureRecord.started.includes(unstartedFixture), raw_log_saved: false }));
   console.log(JSON.stringify({ self_test: passed, dist_mutating_paths: partition.distMutating, process_exclusive_paths: partition.processExclusive, dist_mutating_disjoint: distMutatingDisjoint, process_exclusive_disjoint: processExclusiveDisjoint, integration_phase: integrationPhaseValid, scheduler_batch_lanes: batchLanesValid, scheduler_serial_lanes: ["process-exclusive", "dist-mutating", "integration"], scheduler_parallel_lanes: ["nonintegration"], scheduler_nonintegration_concurrency: phase2Concurrency, scheduler_max_lanes: phase2Concurrency, parallel_overlap: parallelOverlap, exclusive_lane_order: exclusiveLaneOrder }));
   return passed ? 0 : 1;
@@ -411,5 +426,7 @@ async function execute(): Promise<number> {
 }
 
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  process.on("SIGTERM", abortActive);
+  process.on("SIGINT", abortActive);
   process.exitCode = process.argv.includes("--self-test") ? await selfTest() : await execute();
 }

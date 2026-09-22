@@ -1620,3 +1620,17 @@ test("cancellation keeps an approved proposal bound to its execution lane", asyn
   assert.equal(await registry.discardPreApproval("approved-root"), undefined);
   assert.equal((await new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE).required("approved-root")).phase, "approved");
 }));
+
+test("proposal cancellation releases its grant beside a cancelled historical operator", async () => fixture(async root => {
+  const { hooks } = await previewProposal(root, 3);
+  const runtime = new OperatorRuntime(root, V010_RUNTIME_PROFILE);
+  const historical = await runtime.prepare("root", plan());
+  await runtime.interrupted("root", "explicit-cancellation");
+  const cancelled = JSON.parse(await hooks.tool!.sortie_v010_cancel_operator.execute({ reason: "plain" }, { sessionID: "root" }));
+  assert.equal(cancelled.scope, "proposal");
+  assert.equal(await new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE).read("root"), undefined);
+  const retained = await runtime.required("root");
+  assert.equal(retained.runID, historical.runID);
+  assert.deepEqual(retained.acceptance, historical.acceptance);
+  assert.equal(retained.phase, "cancelled");
+}));

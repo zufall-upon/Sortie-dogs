@@ -1,3 +1,11 @@
+# Windows テスト
+
+- `npm test` / `npm run test:full`: 現在の作業ファイルを WSL Ubuntu の Linux filesystem に snapshot し、依存準備・build・共通テストを実施。Windows 側の build は不要。
+- `npm ci` 後、`npm run test:windows`: Windows 専用の junction・case・process cleanup・PowerShell controller を検証。
+- Windows での全体検証は `npm run test:full` と `npm run test:windows` の両方を順次通す。
+- WSL は `bash -lc` で Node >=22.6、npm、git が使えること。別 distro は `SORTIE_WSL_DISTRO` 指定。
+- ログ・source SHA-256・exit は `_testenv/wsl-*/`。取消は Ctrl+C。controller は setup 込み2400秒、runner は1790秒。Ubuntu の build/release 手順は従来どおり。
+
 # Release gate
 
 SWE-Benchはリリース必須gateではなく、必要時に別途実施する。

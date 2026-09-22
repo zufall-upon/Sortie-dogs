@@ -3,7 +3,7 @@ param(
   [ValidateSet('Launch','Controller')][string]$Mode = 'Launch',
   [string]$RunId,
   [string]$Repository = (Split-Path -Parent $PSScriptRoot),
-  [ValidateRange(1791,86400)][int]$OuterDeadlineSeconds = 1800
+  [ValidateRange(2100,86400)][int]$OuterDeadlineSeconds = 2400
 )
 
 Set-StrictMode -Version Latest
@@ -168,6 +168,14 @@ function Read-RedirectOutput([string]$redirectPath, [ref]$offset, [ref]$pending,
 function Assert-ManifestArtifact([string]$actual, [string]$expected) {
   if ([IO.Path]::GetFullPath($actual) -ne [IO.Path]::GetFullPath($expected)) { throw 'manifest artifact path rejected' }
 }
+function Stop-TestOwner($process, [string]$cancelPath) {
+  # Let the router close its WSL ownership pipe and await bounded Linux cleanup first.
+  [IO.File]::WriteAllText($cancelPath, 'cancel')
+  if ($process.WaitForExit(10000)) { return $true }
+  & taskkill.exe /PID $process.Id /T /F | Out-Null
+  $process.WaitForExit(3000) | Out-Null
+  return $false
+}
 
 if ($Mode -eq 'Launch') {
   if ([Environment]::OSVersion.Platform -ne 'Win32NT') { throw 'Windows only' }
@@ -259,17 +267,21 @@ try {
   [IO.File]::WriteAllText($manifest.stderr_path, '', [Text.UTF8Encoding]::new($false))
   [IO.File]::WriteAllText($manifest.stdout_redirect_path, '', [Text.UTF8Encoding]::new($false))
   [IO.File]::WriteAllText($manifest.stderr_redirect_path, '', [Text.UTF8Encoding]::new($false))
-  $process = Start-Process -FilePath ([IO.Path]::GetFullPath([string]$manifest.npm_path)) -ArgumentList @($manifest.npm_arguments) -WorkingDirectory $repository -NoNewWindow -PassThru -RedirectStandardOutput $manifest.stdout_redirect_path -RedirectStandardError $manifest.stderr_redirect_path
+  $previousCancelPath = $env:SORTIE_TEST_CANCEL_FILE
+  $env:SORTIE_TEST_CANCEL_FILE = Join-Path $dir 'cancel.request'
+  try {
+    $process = Start-Process -FilePath ([IO.Path]::GetFullPath([string]$manifest.npm_path)) -ArgumentList @($manifest.npm_arguments) -WorkingDirectory $repository -NoNewWindow -PassThru -RedirectStandardOutput $manifest.stdout_redirect_path -RedirectStandardError $manifest.stderr_redirect_path
+  } finally { $env:SORTIE_TEST_CANCEL_FILE = $previousCancelPath }
   $processStarted = $true
   $state.child_pid = $process.Id
   Update-State $state 'running' @{ phase='npm' }
   $nextStateWrite = [DateTime]::UtcNow
   while (-not $process.HasExited) {
     if ([DateTime]::UtcNow -ge $deadline) {
-      & taskkill.exe /PID $process.Id /T /F | Out-Null
+      $cleanupEstablished = Stop-TestOwner $process (Join-Path $dir 'cancel.request')
       Start-Sleep -Milliseconds 500
       $process.Refresh()
-      if (-not $process.HasExited) { $cleanupEstablished = $false; $terminalPhase = 'cleanup-failed'; throw 'timeout cleanup could not be established' }
+      if (-not $process.HasExited -or -not $cleanupEstablished) { $cleanupEstablished = $false; $terminalPhase = 'cleanup-failed'; throw 'timeout cleanup could not be established' }
       $terminalStatus = 'timed-out'; $terminalPhase = 'timeout'; break
     }
     Start-Sleep -Milliseconds 250
@@ -300,7 +312,7 @@ try {
   }
 } catch {
   if ($processStarted -and -not $process.HasExited) {
-    & taskkill.exe /PID $process.Id /T /F | Out-Null
+    $cleanupEstablished = Stop-TestOwner $process (Join-Path $dir 'cancel.request')
     Start-Sleep -Milliseconds 500
     $process.Refresh()
     if (-not $process.HasExited) { $cleanupEstablished = $false; $terminalPhase = 'cleanup-failed' }
