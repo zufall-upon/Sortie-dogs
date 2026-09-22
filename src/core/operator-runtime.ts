@@ -109,6 +109,7 @@ export interface OperatorRepairValidationRetrySource {
 const OPERATOR_TASK_REFERENCE = "SORTIE_OPERATOR_TASK_REF";
 const OPERATOR_DELEGATE_TASK_REFERENCE = "SORTIE_OPERATOR_DELEGATE_REF";
 const REPAIR_VALIDATION_STALE_PROOF_DECISION = "operator-contract-repair-validation-incomplete:operator-recovery-proof-unavailable-or-stale";
+const PROCESS_REPLACEMENT_DECISION = "operator-process-remediation-replacement-required";
 const ACCEPTANCE_REMEDIATION_DECISION = "operator-acceptance-remediation-required";
 const REVIEW_REMEDIATION_DECISION = "operator-review-remediation-required";
 export type OperatorProposal = { status: "prepared"; state: OperatorState } | {
@@ -1418,6 +1419,17 @@ export class OperatorRuntime {
   operatorReturned(root: string): Promise<OperatorState> {
     return this.serial(root, () => this.operatorReturnedOnce(root));
   }
+  processReplacementRequired(root: string, runID: string): Promise<OperatorState> {
+    return this.serial(root, async () => {
+      const state = await this.required(root);
+      if (state.runID !== runID || state.phase !== "awaiting-decision" || state.decision !== "process-defect") {
+        throw new Error("operator-process-remediation-replacement-not-ready");
+      }
+      state.decision = PROCESS_REPLACEMENT_DECISION;
+      await this.save(state);
+      return state;
+    });
+  }
   private async operatorReturnedOnce(root: string): Promise<OperatorState> {
     const state = await this.required(root);
     if (state.phase === "running") {
@@ -1621,8 +1633,9 @@ export class OperatorRuntime {
     const repairValidationRetryAvailable = this.canRetryRepairValidation(state);
     const acceptanceRemediation = state.decision === ACCEPTANCE_REMEDIATION_DECISION;
     const reviewRemediation = state.decision === REVIEW_REMEDIATION_DECISION;
+    const processReplacement = state.decision === PROCESS_REPLACEMENT_DECISION;
     const hostReconciliationRequired = state.phase === "awaiting-decision" && state.contractRepair === null &&
-      !repairValidationRetryAvailable && !acceptanceRemediation && !reviewRemediation;
+      !repairValidationRetryAvailable && !acceptanceRemediation && !reviewRemediation && !processReplacement;
     const failedAcceptanceUnit = acceptanceRemediation
       ? state.units.find(unit => unit.status === "failed" && ["acceptance", "process-defect"].includes(unit.resultClass ?? "")) : undefined;
     const failedEvidence = (failedAcceptanceUnit as (UnitState & { failure?: SerialDispatchSettlement["failure"] }) | undefined)?.failure;
@@ -1694,6 +1707,9 @@ export class OperatorRuntime {
       } : {}),
       ...(hostReconciliationRequired ? {
         next_action: `call ${this.profile.toolPrefix}resume_operator once with this run_id and acceptance_fingerprint; if it returns a Task, dispatch that exact Task in this turn`,
+      } : {}),
+      ...(processReplacement ? {
+        next_action: `this immutable run is not resumable: call ${this.profile.toolPrefix}cancel_operator with reason=plain, then call ${this.profile.toolPrefix}prepare_operator for a replacement run under the same goal; copy this packet's acceptance array verbatim, retain consumed cumulative budget, and repair only the read, write, preparation, and validation contract required by that acceptance; do not call resume_operator again or claim evidence`,
       } : {}),
       ...(acceptanceRemediation || reviewRemediation ? { next_action: remediationNextAction } : {}),
       ...(state.repairResidualPaths.length === 0 ? {} : { repair_residual_paths: state.repairResidualPaths }),

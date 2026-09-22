@@ -204,15 +204,37 @@ test("unrecoverable non-Git process defects return a bounded replacement route i
     "sortie_v010_cancel_operator", "sortie_v010_prepare_operator");
   assert.equal(packet.status, "operator-process-remediation-replacement-required");
   assert.equal(packet.code, "operator-process-remediation-not-ready");
-  assert.deepEqual(packet.packet, { run_id: "operator-run", status: "awaiting-decision" });
+  assert.equal(packet.same_run_resumable, false);
+  assert.equal(packet.replacement_preserves_goal, true);
+  assert.equal(packet.cumulative_spend_resets, false);
+  assert.deepEqual(packet.packet, { run_id: "operator-run", status: "awaiting-decision",
+    resume_requires_host_reconciliation: false,
+    next_action: "This immutable run is not resumable. Call sortie_v010_cancel_operator with reason=plain, then call sortie_v010_prepare_operator for a replacement run under the same goal." });
   assert.match(packet.next_action, /cancel_operator[\s\S]+prepare_operator/u);
-  assert.match(packet.next_action, /exact same ordered acceptance/u);
-  assert.match(packet.next_action, /same unit and write scope/u);
-  assert.match(packet.next_action, /remaining cumulative budget/u);
+  assert.match(packet.next_action, /acceptance array byte-for-byte/u);
+  assert.match(packet.next_action, /read, write, preparation, and validation contract/u);
+  assert.match(packet.next_action, /retain cumulative spend/u);
   assert.match(packet.next_action, /Do not call resume_operator again/u);
-  assert.match(packet.next_action, /reset spend/u);
-  assert.match(packet.next_action, /widen scope/u);
+  assert.match(packet.next_action, /new goal/u);
 });
+
+test("an unrecoverable process defect becomes a durable non-resumable replacement decision", async () => fixture(async root => {
+  const runtime = new OperatorRuntime(root, V010_RUNTIME_PROFILE);
+  const prepared = await runtime.prepare("root", plan());
+  await runtime.admitOperator("root", "delegate-call", runtime.operatorTask(prepared));
+  await runtime.bindOperator("root", "delegate", runtime.operatorTask(prepared).prompt);
+  const next = await runtime.next("root", "delegate") as { task: object };
+  await runtime.admitWorker("root", "delegate", "worker-call", next.task);
+  await runtime.settled({ rootSessionID: "root", callID: "worker-call", unitID: prepared.units[0]!.unit.id,
+    disposition: "failed", resultClass: "process-defect", evidence: [] });
+  const replacement = await runtime.processReplacementRequired("root", prepared.runID);
+  assert.equal(replacement.decision, "operator-process-remediation-replacement-required");
+  const packet = runtime.packet(replacement) as { resume_requires_host_reconciliation: boolean; next_action: string };
+  assert.equal(packet.resume_requires_host_reconciliation, false);
+  assert.match(packet.next_action, /immutable run is not resumable/u);
+  assert.match(packet.next_action, /cancel_operator[\s\S]+prepare_operator/u);
+  await assert.rejects(runtime.processReplacementRequired("root", prepared.runID), /replacement-not-ready/);
+}));
 
 test("preview assets coexist with stable assets and markers", async () => fixture(async root => {
   await initializeProject(root);

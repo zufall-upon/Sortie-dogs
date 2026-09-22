@@ -44,10 +44,13 @@ const PREVIEW_ROUTES: readonly { readonly model: string; readonly variant: strin
 ]);
 
 export function processRemediationReplacementPacket(code: string, packet: unknown, cancelTool: string, prepareTool: string) {
-  return { status: "operator-process-remediation-replacement-required", code, packet,
-    next_action: `Call ${cancelTool} with reason=plain, then call ${prepareTool} with the exact same ordered acceptance, ` +
-      "the same unit and write scope, and the remaining cumulative budget. Do not call resume_operator again, " +
-      "claim evidence, reset spend, or widen scope." };
+  const durable = record(packet) ? { ...packet, resume_requires_host_reconciliation: false,
+    next_action: `This immutable run is not resumable. Call ${cancelTool} with reason=plain, then call ${prepareTool} for a replacement run under the same goal.` } : packet;
+  return { status: "operator-process-remediation-replacement-required", code, same_run_resumable: false,
+    replacement_preserves_goal: true, cumulative_spend_resets: false, packet: durable,
+    next_action: `Call ${cancelTool} with reason=plain, then call ${prepareTool} for a replacement run under the same goal. ` +
+      "Copy the packet acceptance array byte-for-byte and retain cumulative spend. Repair only the read, write, preparation, and validation contract required by that acceptance. " +
+      "Do not call resume_operator again, claim evidence, or treat the replacement as a new goal." };
 }
 
 /**
@@ -670,8 +673,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
                 // A process defect without an authorized Git lifecycle has no committed remediation
                 // baseline. Preserve the failed run and return an explicit replacement route instead
                 // of turning this local routing limitation into a terminal tool exception.
+                const replacement = await operators.processReplacementRequired(context.sessionID, state.runID);
                 return JSON.stringify(processRemediationReplacementPacket(remediationError.message,
-                  operators.packet(state), cancel, prepare));
+                  operators.packet(replacement), cancel, prepare));
               }
             }
             const retried = await operators.resumeRepairValidation(context.sessionID, state.runID,
