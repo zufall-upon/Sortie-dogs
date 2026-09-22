@@ -102,10 +102,12 @@ export function benchmarkEnvironment(source = process.env) {
     typeof source[key] === "string" && source[key].length > 0 ? [[key, source[key]]] : []));
 }
 
-export function benchmarkPermissionPolicy() {
+export function benchmarkPermissionPolicy(externalDirectory) {
   return {
     webfetch: "deny",
     websearch: "deny",
+    ...(typeof externalDirectory === "string" && externalDirectory.length > 0
+      ? { external_directory: { [`${resolve(externalDirectory)}/*`]: "allow" } } : {}),
     bash: {
       "*": "allow",
       "*curl *": "deny",
@@ -129,8 +131,8 @@ export function benchmarkPermissionPolicy() {
   };
 }
 
-export function benchmarkInlineConfig(plugin, agentNames) {
-  const permission = benchmarkPermissionPolicy();
+export function benchmarkInlineConfig(plugin, agentNames, externalDirectory) {
+  const permission = benchmarkPermissionPolicy(externalDirectory);
   return {
     plugin: [plugin],
     permission,
@@ -535,8 +537,12 @@ export function createInstancePrompt(instance) {
     "Solve this public SWE-bench issue in the checked-out repository.",
     "Use the repository's existing development workflow and leave the fix as an uncommitted working-tree diff.",
     "The current working directory is the repository root; when supplying a path yourself, use a relative path and never guess or reconstruct the repository's absolute path.",
-    "For initial repository discovery, omit the path argument from glob and grep, and read the repository root as '.'; only reuse absolute paths returned by tools.",
-    "For shell commands, omit the workdir argument and use the current repository directory; never construct an absolute workdir.",
+    "For initial repository discovery, omit the path argument from glob and grep, and read the repository root as '.'; keep later tool inputs relative and never copy absolute paths returned by tools.",
+    "For shell commands, omit the workdir argument and use the current repository directory; never construct or copy an absolute workdir.",
+    "Keep every glob, grep, read, and shell path relative even after coordinator or worker handoffs; only the host may use absolute workspace paths.",
+    "Before editing, reproduce the public issue with its smallest concrete example and locate the existing focused regression test or tests that express the expected behavior.",
+    "After editing, rerun that exact reproduction plus the focused regression test and at least one adjacent relevant test; do not finalize a patch that only passes syntax checks or a self-invented test while the issue's focused test still fails.",
+    "Read the complete focused test failure and adjust the implementation until the public scenario and focused regression pass; keep the final diff limited to the fix and necessary regression coverage.",
     "Do not commit, push, access Git remotes or history beyond the checked-out base commit, browse the web, or access benchmark solution metadata.",
     "Do not use issue or pull-request pages, mirrors, hints, gold patches, test patches, or hidden evaluation tests.",
     `Repository: ${instance.repo}`,
@@ -711,7 +717,7 @@ export async function prepareCandidateRuntime(candidate, packagePath, runRoot, d
     $schema: "https://opencode.ai/config.json",
     subagent_depth: 2,
     plugin: [plugin],
-    permission: benchmarkPermissionPolicy(),
+    permission: benchmarkPermissionPolicy(runRoot),
   }, null, 2)}\n`, { flag: "wx" });
   await writeFile(join(xdgRoot, "opencode", "opencode.json"), "{}\n", { flag: "wx" });
   await execute(process.execPath, [join(installed, "dist", "cli", "main.js"), "init", "--global", "--profile", candidate.profile],
@@ -730,7 +736,7 @@ export async function prepareCandidateRuntime(candidate, packagePath, runRoot, d
       agentNames.push(asset.installPath.slice("agent/".length, -".md".length));
     }
   }
-  environment.OPENCODE_CONFIG_CONTENT = JSON.stringify(benchmarkInlineConfig(plugin, agentNames));
+  environment.OPENCODE_CONFIG_CONTENT = JSON.stringify(benchmarkInlineConfig(plugin, agentNames, runRoot));
   await execute("opencode", ["debug", "config"], { cwd: candidateRoot, env: environment });
   for (const name of agentNames) {
     const result = await execute("opencode", ["debug", "agent", name], { cwd: candidateRoot, env: environment });

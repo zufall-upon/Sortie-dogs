@@ -247,14 +247,38 @@ test("live plan keeps instance sessions independent and prompt input public", ()
   assert.match(result.instances[0]!.prompt,
     /when supplying a path yourself, use a relative path and never guess or reconstruct the repository's absolute path/u);
   assert.match(result.instances[0]!.prompt,
-    /omit the path argument from glob and grep, and read the repository root as '\.'; only reuse absolute paths returned by tools/u);
+    /omit the path argument from glob and grep, and read the repository root as '\.'; keep later tool inputs relative and never copy absolute paths returned by tools/u);
   assert.match(result.instances[0]!.prompt,
-    /For shell commands, omit the workdir argument and use the current repository directory; never construct an absolute workdir/u);
+    /For shell commands, omit the workdir argument and use the current repository directory; never construct or copy an absolute workdir/u);
+  assert.match(result.instances[0]!.prompt,
+    /Keep every glob, grep, read, and shell path relative even after coordinator or worker handoffs; only the host may use absolute workspace paths/u);
+  assert.match(result.instances[0]!.prompt,
+    /Before editing, reproduce the public issue with its smallest concrete example and locate the existing focused regression test or tests that express the expected behavior/u);
+  assert.match(result.instances[0]!.prompt,
+    /After editing, rerun that exact reproduction plus the focused regression test and at least one adjacent relevant test; do not finalize a patch that only passes syntax checks or a self-invented test while the issue's focused test still fails/u);
+  assert.match(result.instances[0]!.prompt,
+    /Read the complete focused test failure and adjust the implementation until the public scenario and focused regression pass; keep the final diff limited to the fix and necessary regression coverage/u);
   assert.match(result.instances[0]!.prompt, /leave the fix as an uncommitted working-tree diff/u);
   assert.match(result.instances[0]!.prompt, /Do not commit, push, access Git remotes or history beyond the checked-out base commit/u);
   assert.match(result.instances[0]!.prompt, /Do not use issue or pull-request pages, mirrors, hints, gold patches, test patches, or hidden evaluation tests/u);
   assert.match(result.instances[0]!.prompt, /example\/project/);
   assert.equal(Object.hasOwn(result.instances[0]!, "patch"), false);
+});
+
+test("benchmark prompt preserves public-only safety boundaries individually", () => {
+  const result = createTestLiveRunPlan(manifest(), {
+    agent: "dog-operator",
+    modelNameOrPath: "sortie-dogs",
+    timeoutSeconds: 1800,
+    watchdogSeconds: 120,
+    costLimitUsd: 50,
+  });
+  const prompt = result.instances[0]!.prompt;
+  assert.match(prompt, /browse the web/u);
+  assert.match(prompt, /Git remotes/u);
+  assert.match(prompt, /history beyond the checked-out base commit/u);
+  assert.match(prompt, /public SWE-bench issue/u);
+  assert.match(prompt, /uncommitted working-tree diff/u);
 });
 
 test("live argument parsing requires an explicit mode and bounded execution options", () => {
@@ -287,13 +311,23 @@ test("benchmark permissions deny browsing and remote shell access while retainin
   assert.equal(policy.webfetch, "deny");
   assert.equal(policy.websearch, "deny");
   assert.equal(policy.bash["*"], "allow");
+  assert.equal(Object.hasOwn(policy, "external_directory"), false);
+  assert.deepEqual(benchmarkPermissionPolicy("/tmp/opencode/swebench-run").external_directory,
+    { "/tmp/opencode/swebench-run/*": "allow" });
   for (const pattern of ["*curl *", "*wget *", "*gh *", "*git fetch *", "*git push *", "*https://*"]) {
     assert.equal(policy.bash[pattern], "deny");
   }
   const inline = benchmarkInlineConfig("file:///candidate/plugin.js", ["dog-operator", "dog-worker"]);
   assert.deepEqual(inline.plugin, ["file:///candidate/plugin.js"]);
+  assert.equal(Object.hasOwn(inline.permission, "external_directory"), false);
+  assert.equal(Object.hasOwn(inline.agent["dog-operator"]!.permission, "external_directory"), false);
   assert.equal(inline.agent["dog-operator"]!.permission.bash["*https://*"], "deny");
   assert.equal(inline.agent["dog-worker"]!.tools.webfetch, false);
+  const scopedInline = benchmarkInlineConfig("file:///candidate/plugin.js", ["dog-operator"], "/tmp/opencode/swebench-run");
+  assert.deepEqual(scopedInline.permission.external_directory,
+    { "/tmp/opencode/swebench-run/*": "allow" });
+  assert.deepEqual(scopedInline.agent["dog-operator"]!.permission.external_directory,
+  { "/tmp/opencode/swebench-run/*": "allow" });
 });
 
 test("base checkout fetches one commit directly and retains no remote", async () => {
