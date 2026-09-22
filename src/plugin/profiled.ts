@@ -989,6 +989,16 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           await proposals.accountRead(root, request.sessionID, normalizeRelativePath(relative(input.directory, resolve(input.directory, args.filePath))));
           return;
         }
+        if (who.role === "dog-operator" && request.tool === "execute") {
+          const state = await operators.required(root);
+          // OpenCode V2 exposes the delegate's operator_next capability through Code Mode's
+          // execute conduit. Nested Sortie tools still enforce their own root/delegate identity;
+          // denying the conduit prevents a valid multi-unit delegate from creating any worker.
+          if (state.phase !== "running" || state.operatorSessionID !== request.sessionID) {
+            throw new Error("operator-execute-owner-mismatch");
+          }
+          return;
+        }
         if (who.role === "dog-operator" && request.tool === "read") {
           if (typeof args.filePath !== "string") throw new Error("operator-read-path-required");
           const path = resolve(input.directory, args.filePath);

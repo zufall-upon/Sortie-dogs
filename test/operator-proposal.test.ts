@@ -810,6 +810,14 @@ test("approved multi-unit execution returns one delegate reference that expands 
   await hooks["chat.message"]!({ sessionID: "delegate-child", messageID: "delegate-user", agent: "dogs-coordinator" }, childMessage);
   assert.match(childMessage.parts[0]!.text, /^operator_run_id: /m);
   assert.doesNotMatch(childMessage.parts[0]!.text, /^SORTIE_OPERATOR_DELEGATE_REF /);
+  await hooks["tool.execute.before"]!({ tool: "execute", sessionID: "delegate-child", callID: "operator-next-conduit" },
+    { args: { code: "return await tools.sortie_v010_operator_next()" } });
+  const delegated = JSON.parse(await hooks.tool!.sortie_v010_operator_next.execute({}, { sessionID: "delegate-child" }));
+  assert.match(delegated.task.prompt, /^SORTIE_OPERATOR_TASK_REF /,
+    "the admitted delegate must reach operator_next through the V2 Code Mode conduit");
+  await assert.rejects(hooks["tool.execute.before"]!({ tool: "execute", sessionID: "proposal-child", callID: "foreign-conduit" },
+    { args: { code: "return await tools.sortie_v010_operator_next()" } }),
+  /operator-grant-invalid|operator-readonly-control-role|operator-execute-owner-mismatch/);
 }));
 
 test("approval tool diagnoses an extra field, preserves strict identity, and approves the corrected six-field shape", async () => fixture(async root => {
