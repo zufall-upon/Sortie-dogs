@@ -60,3 +60,18 @@ The continuity candidate exposed a separate report transport problem, so its suc
 The follow-up correction returns the host-generated panel in the successful `complete_operator` result for verbatim inclusion in the existing final response, and does not enqueue synthetic input. Accounting traverses native paginated history/children and translates model IDs, task ownership, mutation evidence and tool times. Existing queued synthetic history remains marked synthetic during cold recovery.
 
 A read-only native API replay of the accepted proposal receipt recovered **671,908 tokens** across the root and five actual child sessions, preserving the goal, all four consumed units and the receipt. This contrasted with the old root-only **424,004-token** report. Historical telemetry emitted by the defective candidate remains historical; replay does not rewrite its immutable acceptance or spend.
+
+## Return-report display and final gates: PASS
+
+- Final code/package candidate: `f53d2199b96ce1d89323af1064cb117cd08985c5`, including the reporting correction in `83f6429` and the current upstream documentation.
+- Package SHA-256: `6dc6e52f3e1cb5c8a81065e5aaaa086868f93ebb92c321c21fd4173e4c21725c`.
+- Isolated install matched all **178 distributed files**. Runtime marker ends in `cold-turn1-return-report-v2-2`.
+- Native API replay invoked the real plugin's acceptance tool against an already accepted receipt and real session history. Goal, acceptance, budget, spend and receipt stayed unchanged; the replay issued no native synthetic or model-execution request.
+- A separate read-only native CLI turn displayed that exact returned panel. This display fixture did not run implementation or re-accept the old goal. The native stored assistant text matched the panel SHA-256 `e62797fcbc57df05101dbd731de452fe475c167840f4215f4d13da0bced7e47c`.
+- Native database checks found **one terminal response, one report card, zero inbox items, zero child sessions**, and only one `read` tool. No proposal/implementation units were added.
+- The actual OpenCode web UI rendered one expandable report. Reopening it in a fresh browser retained one card, its goal ID, model breakdown and **671,908-token** total. No page errors occurred. This exercised the web UI served by OpenCode `2.0.12`; the fixture CLI was `2.0.11`.
+- Regression coverage includes receipt-only panel return, no queued report input across event replay/plugin restart, paginated child/message history, model/tool/time translation, and incomplete-history handling.
+- `npm run test:full`: **69 test files**, exit 0. Source SHA-256 `cf4bdeb4551698019c9435181ab61c2e1fcab0552468c1e5d122c819c2604875`; local logs `_testenv/wsl-1790078397903-40224/`.
+- The subsequent `npm run test:windows`: **6 tests passed**, zero failed/skipped.
+
+Display evidence is under `history-cli-f53d219-v1` in the approved OpenCode temporary directory: `report-display-audit.json`, `report-display-native.json`, and `return-report-display-reopened-panel-ui.{png,html,txt}`. The evidence establishes receipt-tool generation and native final-answer display independently; it is not a new end-to-end implementation campaign on the final reporting candidate.
