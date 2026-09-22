@@ -255,6 +255,14 @@ test("live plan keeps instance sessions independent and prompt input public", ()
   assert.match(result.instances[0]!.prompt,
     /Before editing, reproduce the public issue with its smallest concrete example and locate the existing focused regression test or tests that express the expected behavior/u);
   assert.match(result.instances[0]!.prompt,
+    /Time-box dependency setup to a brief, repository-documented attempt; do not repeatedly create environments or install unrelated packages/u);
+  assert.match(result.instances[0]!.prompt,
+    /If a dependency remains unavailable, inspect the source and implement the smallest plausible fix, then run every focused check that the available environment permits/u);
+  assert.match(result.instances[0]!.prompt,
+    /Do not invent an expected output from the issue alone; inspect existing public code, nearby visitor methods, node string or name conventions, and public tests before choosing a regression assertion/u);
+  assert.match(result.instances[0]!.prompt,
+    /When public tests do not state the expected representation, derive it from the repository's established analogous representation and keep the assertion aligned with that convention/u);
+  assert.match(result.instances[0]!.prompt,
     /After editing, rerun that exact reproduction plus the focused regression test and at least one adjacent relevant test; do not finalize a patch that only passes syntax checks or a self-invented test while the issue's focused test still fails/u);
   assert.match(result.instances[0]!.prompt,
     /Read the complete focused test failure and adjust the implementation until the public scenario and focused regression pass; keep the final diff limited to the fix and necessary regression coverage/u);
