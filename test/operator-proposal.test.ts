@@ -1363,8 +1363,8 @@ test("an admitted proposal child that terminates unsubmitted has terminal no-red
   assert.equal(status.proposal.remaining_submissions, 9);
   assert.equal(Object.hasOwn(status, "task"), false);
   assert.equal(Object.hasOwn(status, "dispatch_instruction"), false);
-  assert.match(status.next_action, /If that child terminated without submission, report the terminal proposal failure/u);
-  assert.match(status.next_action, /does not authorize a new Task, budget reset, or replacement child/u);
+  assert.match(status.next_action, /If that child terminated or was interrupted without submission, an explicit root decision to retry/u);
+  assert.match(status.next_action, /Never reuse the terminated child, reset spend, or replace the goal or ordered requirements/u);
   const ledgerPath = join(root, ".git/sortie-dogs/run-flight-v010",
     `${createHash("sha256").update("v010\0root").digest("hex")}.json`);
   const settled = await (await RunFlightLedger.openGoal(ledgerPath)).readGoal();
@@ -1585,8 +1585,13 @@ test("an admitted proposal child that terminates without submission is released 
   assert.equal(stuck.proposal.task_admitted, true);
   assert.equal(Object.hasOwn(stuck, "task"), false);
   assert.match(stuck.next_action, /cancel_operator with reason=plain to release this grant/u);
+  assert.match(stuck.next_action, /durably preserves cumulative reads\/submissions and goal spend/u);
+  assert.doesNotMatch(stuck.next_action, /discards the spent proposal accounting/u);
   const registry = new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE);
   const admitted = await registry.required("root");
+  const goalKey = createHash("sha256").update("v010\0root").digest("hex");
+  const goalLedger = await RunFlightLedger.openGoal(join(root, ".git/sortie-dogs/run-flight-v010", `${goalKey}.json`));
+  const goalBeforeRetry = (await goalLedger.readGoal()).state;
   await assert.rejects(registry.admit("root", "replacement-call", registry.task(admitted)), /operator-proposal-dispatch-not-authorized/,
     "the terminated child must never be redispatched or replaced");
   await assert.rejects(registry.bind("root", "replacement-child", registry.task(admitted).prompt), /operator-proposal-grant-invalid/);
@@ -1602,18 +1607,44 @@ test("an admitted proposal child that terminates without submission is released 
   assert.equal(cancelled.released_proposal.reads, 1);
   assert.equal(cancelled.released_proposal.submissions, 0);
   assert.match(cancelled.next_action, /spent reads\/submissions are not restored/u);
+  assert.deepEqual(cancelled.retry_intent, admitted.intent);
+  assert.deepEqual(cancelled.retained_goal_binding, admitted.goal_binding);
   assert.equal(await new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE).read("root"), undefined);
   await assert.rejects(hooks.tool!.sortie_v010_cancel_operator.execute({}, { sessionID: "root" }), /operator-run-missing/,
     "a released root without any grant stays absent");
 
   const retried = JSON.parse(await hooks.tool!.sortie_v010_begin_operator_proposal.execute(
-    { intent_json: JSON.stringify({ ...intent(), authoritative_refs: ["user:u2"] }) }, { sessionID: "root" }));
+    { intent_json: JSON.stringify(cancelled.retry_intent) }, { sessionID: "root" }));
   assert.equal(retried.status, "investigating");
   assert.equal(retried.reads, 1);
   assert.equal(retried.remaining_reads, 1);
-  assert.notEqual(retried.intent_id, stuck.proposal.intent_id);
+  assert.equal(retried.intent_id, stuck.proposal.intent_id);
+  const coldRetry = await new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE).required("root");
+  assert.deepEqual(coldRetry.intent, admitted.intent);
+  assert.deepEqual(coldRetry.goal_binding, admitted.goal_binding);
+  assert.equal(coldRetry.read_count, admitted.read_count);
+  assert.equal(coldRetry.submission_count, admitted.submission_count);
+  const goalAfterRetry = (await goalLedger.readGoal()).state;
+  for (const key of ["goal_id", "acceptance_fingerprint", "consumed_units", "consumed_time_ms", "consumed_cost_usd"] as const) {
+    assert.deepEqual(goalAfterRetry[key], goalBeforeRetry[key], `${key} must survive same-intent retry`);
+  }
+  assert.deepEqual(coldRetry.prior_spend, { reads: 1, submissions: 0 });
+  const retryRegistry = new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE);
+  const retryPrompt = retryRegistry.task(coldRetry).prompt;
+  assert.match(retryPrompt, /prior_proposal_spend: \{"reads":1,"submissions":0\}/u);
+  assert.match(retryPrompt, /remaining_at_start: \{"reads":1,"submissions":3\}/u);
   await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "retry-proposal" }, { args: retried.task });
   assert.equal((await new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE).required("root")).proposal_call_id, "retry-proposal");
+  const coldAdmitted = await new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE).required("root");
+  const coldRegistry = new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE);
+  await coldRegistry.bind("root", "retry-child", retryPrompt);
+  await coldRegistry.accountRead("root", "retry-child", "src/input.ts");
+  assert.equal(coldRegistry.task(await coldRegistry.required("root")).prompt, retryPrompt,
+    "live spend must not change the admitted prompt or short reference");
+  assert.equal(coldAdmitted.goal_binding?.goal_id, admitted.goal_binding?.goal_id);
+  const submitted = await coldRegistry.submit("root", "retry-child", packet(2));
+  assert.equal(submitted.read_count, 2);
+  assert.equal(submitted.submission_count, 1);
 }));
 
 test("cancellation keeps an approved proposal bound to its execution lane", async () => fixture(async root => {

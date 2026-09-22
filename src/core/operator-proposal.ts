@@ -125,6 +125,8 @@ export interface OperatorProposalState {
   readonly intent: OperatorIntent;
   goal_binding: OperatorProposalGoalBinding | null;
   readonly created_at: string;
+  /** Frozen carry-in spend; unlike live counters it must not change the admitted Task identity. */
+  readonly prior_spend?: { readonly reads: number; readonly submissions: number };
   phase: "investigating" | "submitted" | "approved";
   proposal_call_id: string | null;
   proposal_session_id: string | null;
@@ -407,6 +409,9 @@ export class OperatorProposalRuntime {
         `original_request: ${state.intent.original_request.text}`, "ordered_requirements:", ...state.intent.requirements.map(item => `- ${item.id} [${item.kind}]: ${item.text}`),
         `authoritative_refs: ${JSON.stringify(state.intent.authoritative_refs)}`, `allow_read: ${JSON.stringify(state.intent.allow_read)}`,
         `proposal_budget: ${JSON.stringify(state.intent.proposal_budget)}`,
+        ...(state.prior_spend ? [`prior_proposal_spend: ${JSON.stringify(state.prior_spend)}; remaining_at_start: ${JSON.stringify({
+          reads: state.intent.proposal_budget.max_reads - state.prior_spend.reads,
+          submissions: state.intent.proposal_budget.max_submissions - state.prior_spend.submissions })}. These are cumulative limits, not fresh grants. budget_estimate.proposal_reads must include prior_proposal_spend.reads plus reads charged in this investigation. Prior read paths are not evidence for this new child.`] : []),
         "proposal packet fields: schema_version, revision, coverage[{requirement_id,approach,validation}], existing_surface[{requirement_id,path,form}], uncovered[{requirement_id,reason}], negative_handling[{requirement_id,handling}], read_scope, write_scope, budget_estimate{proposal_reads,execution_units}, plan{schema_version,acceptance_proof,source_refs,goal_declaration,units, optional git_lifecycle}. revisionは正のJSON整数。例: \"revision\":1。文字列\"revision\":\"1\"は禁止し、hostは型変換しない。plan.acceptanceは生成・提出せず省略し、hostがdurable intent.requirementsのtextを同順・完全一致でmaterializeする。legacy互換として明示する場合だけ同じ全文・順序を完全一致で使い、null・部分集合・並べ替え・空白/大小文字変更は禁止。acceptance_ids等の代替field禁止。",
         "schema_versionはpacketとplanの両方で必ず文字列\"0.1\"。coverageはnegative/qualityを含む全ordered requirement IDを各1回含める（未対応だけuncoveredへ移す）。全declared criterion IDをacceptance_proofから参照し、各unitのacceptance_indicesはnonempty、全acceptance indexとexact validation commandを既存parser規則どおり完全coverageする。",
         "plan.acceptance_proofは各acceptanceに対応するcriterion IDの配列を並べた二重配列。複数acceptanceを同じexact commandが証明する場合はcriterion IDを共有可で、acceptanceごとの固有criterion作成は不要。goal_declarationはobject。delivery_intent=\"implementation\", delivery_mode=\"mvp-first\", usable_path_established=false, controlled_change=false, goal_budget_unitsは正整数。criteria各要素はcriterion_idとvalidation_commandを持つ。",
@@ -472,6 +477,7 @@ export class OperatorProposalRuntime {
     const state: OperatorProposalState = { schema_version: "0.1", profile: this.profile.id, root_session_id: root,
       intent_id: `intent-${intentHash.slice(0, 24)}`, intent_hash: intentHash, intent, created_at: new Date().toISOString(), phase: "investigating",
       goal_binding: null, proposal_call_id: null, proposal_session_id: null, read_count: spend.reads, read_paths: [], submission_count: spend.submissions, proposal_id: null,
+      ...(spend.reads > 0 || spend.submissions > 0 ? { prior_spend: { reads: spend.reads, submissions: spend.submissions } } : {}),
       proposal_revision: null, proposal_hash: null, proposal: null, approval_rationale: null };
     this.assertBudgetAvailable(state);
     await this.save(state); return state;

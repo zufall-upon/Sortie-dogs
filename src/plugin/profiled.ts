@@ -502,7 +502,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         const proposal = await proposals.read(context.sessionID);
         const proposalNextAction = proposal?.phase === "investigating"
           ? proposal.proposal_call_id !== null
-            ? "proposal Task is already admitted; do not redispatch it or call operator_next. Continue submission repairs only in the same active claimed child. If that child terminated without submission, report the terminal proposal failure; remaining read or submission capacity does not authorize a new Task, budget reset, or replacement child. Only an explicit root decision to retry may call cancel_operator with reason=plain to release this grant, which discards the spent proposal accounting and never reuses the terminated child"
+            ? "proposal Task is already admitted; do not redispatch it or call operator_next. Continue submission repairs only in the same active claimed child. If that child terminated or was interrupted without submission, an explicit root decision to retry may call cancel_operator with reason=plain to release this grant. Cancellation stops owned children and durably preserves cumulative reads/submissions and goal spend. Pass the returned retry_intent unchanged to begin_operator_proposal, then dispatch only its new exact Task within the remaining budget. Never reuse the terminated child, reset spend, or replace the goal or ordered requirements. Exhaustion requires an explicit cumulative budget revision, not a reset."
             : proposal.submission_count >= proposal.intent.proposal_budget.max_submissions
             ? "proposal submission budget exhausted; do not call operator_next; report the bounded proposal failure"
             : "proposal is not submitted; do not call operator_next; complete or repair the bounded proposal submission"
@@ -537,8 +537,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           operatorTurnLifecycle.set(context.sessionID, "cancelled");
           return JSON.stringify({ profile: profile.id, status: "cancelled", scope: "proposal",
             released_proposal: discarded ? proposals.packet(discarded) : null,
+            retry_intent: discarded?.intent ?? null,
+            retained_goal_binding: discarded?.goal_binding ?? null,
             next_action: "the bounded proposal grant is released and its spent reads/submissions are not restored; " +
-              "begin a new proposal investigation only on an explicit root decision to retry, and never reuse the cancelled child" });
+              "cumulative proposal and goal spend are preserved. On an explicit root decision to retry, pass retry_intent unchanged to begin_operator_proposal, " +
+              "preserve the same goal and ordered requirements, and dispatch only the new exact Task within the remaining budget. Never reuse the cancelled child or reset any budget" });
         }
         const current = pending;
         if (requestedReason === "acceptance-remediation" && current.decision !== "operator-acceptance-remediation-required") throw new Error("operator-cancel-reason-invalid");
