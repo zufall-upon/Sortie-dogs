@@ -2016,12 +2016,15 @@ test("cancelled repair plans retain acceptance and the parent fingerprint", asyn
   assert.equal(acceptedRepair.parentRunID, acceptedBefore.runID);
   assert.deepEqual(acceptedRepair.priorAcceptedUnits, [{ taskID: `${acceptedBefore.runID}-1`,
     handoffPath: acceptedBefore.units[0]!.handoffPath, handoffHash: acceptedBefore.units[0]!.hashes[0] }]);
+  const acceptedHandoff = JSON.parse(await readFile(acceptedRepair.units[0]!.handoffPath, "utf8"));
+  assert.equal(acceptedHandoff.ext["sortie-dogs/acceptance-continuity"].parent_fingerprint, acceptedBefore.acceptanceFingerprint);
   await runtime.interrupted("repair-root", "repair-needed");
   await assert.rejects(runtime.prepare("repair-root", { ...original, acceptance: ["Narrower repair", original.acceptance[1]] }), /carry-forward-required/);
   assert.equal((await runtime.required("repair-root")).runID, before.runID);
   const next = await runtime.prepare("repair-root", original);
   const h = JSON.parse(await readFile(next.units[0]!.handoffPath, "utf8"));
-  assert.equal(h.ext["sortie-dogs/acceptance-continuity"].parent_fingerprint, before.acceptanceFingerprint);
+  assert.equal(h.ext["sortie-dogs/acceptance-continuity"].parent_fingerprint, "none",
+    "a failed predecessor with no accepted unit cannot become an acceptance parent");
   assert.deepEqual(h.ext["sortie-dogs/acceptance-continuity"].criteria, original.acceptance);
   await runtime.interrupted("repair-root", "append-required");
   const appended = { ...original, acceptance: [...original.acceptance, "Additional accepted condition"],
@@ -2029,7 +2032,7 @@ test("cancelled repair plans retain acceptance and the parent fingerprint", asyn
     units: original.units.map((unit, index) => index === 1 ? { ...unit, acceptance_indices: [...unit.acceptance_indices, 2] } : unit) };
   const latest = await runtime.prepare("repair-root", appended);
   const h2 = JSON.parse(await readFile(latest.units[0]!.handoffPath, "utf8"));
-  assert.equal(h2.ext["sortie-dogs/acceptance-continuity"].parent_fingerprint, next.acceptanceFingerprint);
+  assert.equal(h2.ext["sortie-dogs/acceptance-continuity"].parent_fingerprint, "none");
   assert.deepEqual(h2.ext["sortie-dogs/acceptance-continuity"].criteria, appended.acceptance);
 }));
 
@@ -2040,6 +2043,10 @@ test("rejected dispatches fail only a still-running unit and preserve an existin
   await runtime.admitOperator("root", "operator-call", operator);
   await runtime.bindOperator("root", "operator-child", operator.prompt);
   const next = await runtime.next("root", "operator-child") as { task: object };
+  const nativeV2 = { ...(next.task as Record<string, unknown>), agent: (next.task as Record<string, unknown>).subagent_type };
+  delete nativeV2.subagent_type;
+  assert.equal(runtime.matchesRecordedWorkerTask(state, state.units[0]!.unit.id, nativeV2), true,
+    "V2 records native subagent calls with agent instead of subagent_type");
   await runtime.admitWorker("root", "operator-child", "worker-call", next.task);
   await runtime.rejectDispatch("root", "worker-call");
   const rejected = await runtime.required("root");
@@ -3340,12 +3347,14 @@ test("cold resume relinks legacy registered runs only from the latest same-goal 
   await runtime.admitWorker(rootSession, rootSession, "legacy-failed-call", first.task);
   await runtime.rejectedAdmission(rootSession, "legacy-failed-call");
   const failedTask = (await runtime.required(rootSession)).units[0]!.task;
+  const failedV2Input = { ...failedTask, agent: failedTask.subagent_type } as Record<string, unknown>;
+  delete failedV2Input.subagent_type;
   const now = Date.now();
   const latestParts = [{ type: "text", text: "Resume the exact registered run and controls." }];
   const rootMessages = [{ info: { id: "latest-user", role: "user", agent: "dog-operator", sessionID: rootSession }, parts: latestParts },
     { info: { id: "failed-assistant", role: "assistant", agent: "dog-operator", sessionID: rootSession,
         finish: "stop", time: { created: now, completed: now + 1 } },
-      parts: [{ type: "tool", tool: "task", callID: "legacy-failed-call", state: { status: "error", input: failedTask,
+      parts: [{ type: "tool", tool: "subagent", callID: "legacy-failed-call", state: { status: "error", input: failedV2Input,
         error: "anonymous pre-admission failure" } }] }];
   const coldSingle = await SortieDogsV010Plugin({ directory: root, client: { session: {
     get: async () => ({ data: { id: rootSession, agent: "dog-operator" } }),

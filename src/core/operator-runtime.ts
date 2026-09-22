@@ -853,7 +853,7 @@ export class OperatorRuntime {
           [ACCEPTANCE_CONTINUITY_EXTENSION]: { schema_version: "0.1", authority: "dispatch", task_id: taskID,
             criteria: plan.acceptance, fingerprint: acceptanceFingerprint,
             parent_fingerprint: index === 0
-              ? remediationTaskID !== undefined && priorAcceptedUnits.length === 0 ? "none" : parent?.acceptanceFingerprint ?? "none"
+              ? priorAcceptedUnits.length === 0 ? "none" : parent?.acceptanceFingerprint ?? "none"
               : acceptanceFingerprint },
           "sortie-dogs/unit-coverage": { schema_version: "0.1", task_id: taskID,
             acceptance_fingerprint: acceptanceFingerprint, indices: unit.acceptance_indices },
@@ -1063,7 +1063,10 @@ export class OperatorRuntime {
   }
   matchesRecordedWorkerTask(state: OperatorState, unitID: string, args: unknown): boolean {
     const unit = state.units.find(item => item.unit.id === unitID);
-    return unit !== undefined && this.matchesWorkerTask(state, unit, args);
+    const normalized = record(args) && typeof args.agent === "string" && args.subagent_type === undefined
+      ? { ...args, subagent_type: args.agent }
+      : args;
+    return unit !== undefined && this.matchesWorkerTask(state, unit, normalized);
   }
   admitOperator(root: string, callID: string, args: unknown): Promise<OperatorTask> {
     return this.serial(root, () => this.admitOperatorOnce(root, callID, args));

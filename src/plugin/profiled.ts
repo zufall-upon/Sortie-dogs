@@ -646,8 +646,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           if (unit.resultClass === "process-defect" && unit.childSessionID === null && unit.callID && state.decision === "dispatch-admission-rejected") {
             const history = await messages(state.units.length > 1 ? delegate! : context.sessionID);
             const matching = history.flatMap(message => Array.isArray(message.parts) ? message.parts : []).filter(part => record(part) &&
-              part.type === "tool" && part.tool === "task" && part.callID === unit.callID && record(part.state) && part.state.status === "error" &&
-               record(part.state.input) && operators.matchesRecordedWorkerTask(state, unit.unit.id, part.state.input) &&
+              part.type === "tool" && ["task", "subagent"].includes(String(part.tool)) && part.callID === unit.callID && record(part.state) && part.state.status === "error" &&
+                record(part.state.input) && operators.matchesRecordedWorkerTask(state, unit.unit.id, part.state.input) &&
               taskChildSessionID({ metadata: part.state.metadata, output: typeof part.state.output === "string" ? part.state.output : "" }) === undefined);
             if (matching.length !== 1 || !await control!.hasNoGoalReservation(context.sessionID, taskID, unit.callID)) throw new Error("operator-resume-unstarted-proof-missing");
             unstarted.add(unit.unit.id);
