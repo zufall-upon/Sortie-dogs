@@ -1583,12 +1583,16 @@ test("an admitted proposal child that terminates without submission is released 
 
   const stuck = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
   assert.equal(stuck.proposal.task_admitted, true);
+  assert.equal(stuck.budget.consumed_units, 1);
+  assert.equal(stuck.budget.reserved_units, 0);
+  assert.equal(stuck.budget.remaining_units, stuck.budget.max_units - 1);
   assert.equal(Object.hasOwn(stuck, "task"), false);
   assert.match(stuck.next_action, /cancel_operator with reason=plain to release this grant/u);
   assert.match(stuck.next_action, /durably preserves cumulative reads\/submissions and goal spend/u);
   assert.doesNotMatch(stuck.next_action, /discards the spent proposal accounting/u);
   const registry = new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE);
   const admitted = await registry.required("root");
+  assert.deepEqual(stuck.goal_binding, admitted.goal_binding);
   const goalKey = createHash("sha256").update("v010\0root").digest("hex");
   const goalLedger = await RunFlightLedger.openGoal(join(root, ".git/sortie-dogs/run-flight-v010", `${goalKey}.json`));
   const goalBeforeRetry = (await goalLedger.readGoal()).state;

@@ -409,6 +409,7 @@ export class OperatorProposalRuntime {
         `original_request: ${state.intent.original_request.text}`, "ordered_requirements:", ...state.intent.requirements.map(item => `- ${item.id} [${item.kind}]: ${item.text}`),
         `authoritative_refs: ${JSON.stringify(state.intent.authoritative_refs)}`, `allow_read: ${JSON.stringify(state.intent.allow_read)}`,
         `proposal_budget: ${JSON.stringify(state.intent.proposal_budget)}`,
+        "要件に相談や利用者判断が含まれる場合、workerから追加Taskを呼ぶ計画にしない。rootが派遣前に必要な相談を行い、確認済みの素材許諾・選択・画像参照・決定をunit.objectiveと許可された入力へ明記する。子はroot会話を自動継承しない。未確定の判断だけを未確定として保持し、確認済み事項を再質問させない。実機測定や利用者Goの未達をfixtureで代替しない。",
         ...(state.prior_spend ? [`prior_proposal_spend: ${JSON.stringify(state.prior_spend)}; remaining_at_start: ${JSON.stringify({
           reads: state.intent.proposal_budget.max_reads - state.prior_spend.reads,
           submissions: state.intent.proposal_budget.max_submissions - state.prior_spend.submissions })}. These are cumulative limits, not fresh grants. budget_estimate.proposal_reads must include prior_proposal_spend.reads plus reads charged in this investigation. Prior read paths are not evidence for this new child.`] : []),

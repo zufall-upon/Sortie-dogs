@@ -182,6 +182,10 @@ function legacyToolName(name: unknown): string {
 function legacyToolInput(name: unknown, input: unknown): JsonObject {
   const value = record(input) ? { ...input } : {};
   if (name === "subagent") {
+    if (value.background === true && typeof value.prompt === "string" && value.prompt.startsWith("SORTIE_OPERATOR_")) {
+      throw new Error("operator-background-dispatch-not-supported: retry the same exact Task with background omitted or false; no admission or budget reservation occurred. Operator dispatch requires foreground completion for lifecycle accounting.");
+    }
+    if (value.background === false) delete value.background;
     if (typeof value.agent === "string") value.subagent_type = value.agent;
     if (typeof value.sessionID === "string") value.task_id = value.sessionID;
     delete value.agent;

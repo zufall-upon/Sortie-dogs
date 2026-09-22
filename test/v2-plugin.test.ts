@@ -82,6 +82,27 @@ function contextFixture() {
     failNextSynthetic: () => { failSynthetic = true; }, failNextContext: () => { failContext = true; }, aborted: () => aborted };
 }
 
+test("V2 operator dispatch rejects background before admission and accepts explicit foreground", async () => {
+  const fixture = contextFixture();
+  const seen: Record<string, unknown>[] = [];
+  const dispose = await createSortieDogsV2Plugin(async () => ({
+    "tool.execute.before": async (_request, output) => { seen.push(output.args); },
+  })).setup(fixture.context);
+  try {
+    for (const prompt of ["SORTIE_OPERATOR_DELEGATE_REF {}", "SORTIE_OPERATOR_TASK_REF {}", "SORTIE_OPERATOR_PROPOSAL_TASK_REF {}"]) {
+      const input = { agent: "dogs-coordinator", description: "exact", prompt, background: true };
+      await assert.rejects(async () => fixture.toolHooks.get("execute.before")!({ tool: "subagent", input, sessionID: "root", id: "call" }),
+        /operator-background-dispatch-not-supported: retry the same exact Task with background omitted or false/);
+      assert.equal(seen.length, 0, "rejected transport must not reach admission or reserve budget");
+    }
+    const event = { tool: "subagent", input: { agent: "dogs-coordinator", description: "exact",
+      prompt: "SORTIE_OPERATOR_DELEGATE_REF {}", background: false }, sessionID: "root", id: "call" };
+    await fixture.toolHooks.get("execute.before")!(event);
+    assert.deepEqual(seen, [{ subagent_type: "dogs-coordinator", description: "exact", prompt: "SORTIE_OPERATOR_DELEGATE_REF {}" }]);
+    assert.deepEqual(event.input, { agent: "dogs-coordinator", description: "exact", prompt: "SORTIE_OPERATOR_DELEGATE_REF {}" });
+  } finally { if (typeof dispose === "function") dispose(); }
+});
+
 test("V2 return report uses one durable non-resuming synthetic card across replay and restart", async () => {
   const fixture = contextFixture();
   fixture.history.push(

@@ -417,6 +417,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       if (state.phase !== "prepared" || state.dispatched > 0) return JSON.stringify(operators.packet(state));
       control!.enableUnits(state.rootSessionID, state.units.length);
       return JSON.stringify({ profile: profile.id, run_id: state.runID, acceptance_fingerprint: state.acceptanceFingerprint,
+        dispatch_instruction: "Dispatch this exact Task in the foreground. Omit background or set it to false; background=true is not supported by the operator lifecycle. Required consultations belong to the root before dispatch; confirmed user decisions must already be in the approved unit objective and inputs, not appended to this Task reference.",
         fast_path: state.units.length === 1, task: state.units.length === 1 ? operators.nextWorkerTask(state) : operators.dispatchTask(state) });
     }
     tools[prepare] = { description: `Freeze an approved serial operator plan. Invalid plans return bounded diagnostics and a draft_id for field-only repair; no worker is started. After operator-acceptance-remediation-required, cancel first and prepare only the same exact acceptance, a write scope within the prior approved union, and a Git lifecycle starting at the failed committed head; consumed goal budget is retained. Coordinator only. ${planContract}`,
@@ -507,12 +508,13 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             ? "proposal submission budget exhausted; do not call operator_next; report the bounded proposal failure"
             : "proposal is not submitted; do not call operator_next; complete or repair the bounded proposal submission"
           : proposal?.phase === "submitted"
-            ? "compare and approve the exact proposal; do not call operator_next before approval prepares a run"
+            ? "compare and approve the exact proposal; do not call operator_next before approval prepares a run. Approval authorizes implementation, not product acceptance. Preserve every required live measurement, consultation and user approval as pending acceptance obligations; canonical commands do not substitute for them. Use the host budget counters, not plan.goal_declaration.goal_budget_units, for remaining capacity; approval validates the retained goal binding and execution budget. A bounded diagnostic run may use cancel_operator after admission without inventing a plan validation command for cancellation."
             : "approved proposal has no operator run; do not call operator_next; reconcile the approval or preparation failure";
         return JSON.stringify(state ? { ...await operatorPacket(state), ...(draft ? { pending_draft: draft } : {}),
           ...(proposal ? { proposal: proposalIdentity(proposal) } : {}) }
           : draft ? { ...draft as object, ...(proposal ? { proposal: proposals.packet(proposal) } : {}) }
             : proposal ? { profile: profile.id, proposal: proposals.packet(proposal),
+              goal_binding: proposal.goal_binding, budget: await control!.currentBudget(context.sessionID),
               ...(proposal.phase === "investigating" && proposal.proposal_call_id === null ? { task: proposals.referenceTask(proposal),
                 dispatch_instruction: "Pass this short Task reference verbatim; the host expands it only inside the directly claimed proposal child." } : {}),
               next_action: proposalNextAction }
