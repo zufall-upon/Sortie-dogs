@@ -29,7 +29,7 @@ async function inspect(file) {
   }
   if (digest(await readFile(localArtifact(receipt.tarball))) !== receipt.sha256 || pkg.version !== receipt.version) throw Error('Package identity mismatch.');
   const config = JSON.parse(await readFile(join(project, '.opencode/opencode.json'), 'utf8'));
-  if (config.default_agent !== 'dog-operator' || config.model !== 'openai/gpt-5.6-sol' || config.subagent_depth !== 2) throw Error('Unexpected dogfooding defaults.');
+  if (config.default_agent !== 'dog-operator' || config.model !== 'openai/gpt-5.6-sol' || config.experimental?.subagent_depth !== 2) throw Error('Unexpected dogfooding defaults.');
   const primary = runtimeAssets.find(asset => asset.name === 'dog-operator');
   if (!primary || !/^variant: low$/m.test(primary.content)) throw Error('Primary variant is not low.');
   return { ...receipt, project };

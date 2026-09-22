@@ -50,7 +50,7 @@ two-level subagent depth to `.opencode/opencode.json`, preserving existing value
 ```json
 {
   "plugins": ["sortie-dogs"],
-  "subagent_depth": 2
+  "experimental": { "subagent_depth": 2 }
 }
 ```
 
@@ -302,7 +302,7 @@ npm install --global sortie-dogs
 sortie-dogs init --global --profile v010
 ```
 
-Then add `sortie-dogs` and `subagent_depth: 2` to the global OpenCode config.
+Then add `sortie-dogs` and `experimental.subagent_depth: 2` to the global OpenCode config.
 Global initialization installs assets only; it does not silently change the
 default agent or merge user settings.
 

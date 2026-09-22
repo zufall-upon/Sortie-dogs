@@ -33,7 +33,7 @@ Beta package默认使用v0.10 profile。保留现有值，在`.opencode/opencode
 ```json
 {
   "plugins": ["sortie-dogs"],
-  "subagent_depth": 2
+  "experimental": { "subagent_depth": 2 }
 }
 ```
 
@@ -221,7 +221,7 @@ npm install --global sortie-dogs
 sortie-dogs init --global --profile v010
 ```
 
-随后在global OpenCode config中添加`sortie-dogs`和`subagent_depth: 2`。Global init只安装asset，
+随后在global OpenCode config中添加`sortie-dogs`和`experimental.subagent_depth: 2`。Global init只安装asset，
 不会静默更改default agent或合并user setting。
 
 ## 更新与删除

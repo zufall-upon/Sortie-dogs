@@ -715,7 +715,7 @@ export async function prepareCandidateRuntime(candidate, packagePath, runRoot, d
   const plugin = pathToFileURL(join(installed, "dist", "plugin", "opencode.js")).href;
   await writeFile(join(configRoot, "opencode.json"), `${JSON.stringify({
     $schema: "https://opencode.ai/config.json",
-    subagent_depth: 2,
+    experimental: { subagent_depth: 2 },
     plugin: [plugin],
     permission: benchmarkPermissionPolicy(runRoot),
   }, null, 2)}\n`, { flag: "wx" });

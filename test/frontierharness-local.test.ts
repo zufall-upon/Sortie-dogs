@@ -128,8 +128,8 @@ test("v010 profile is closed, qualification-only, and pins its runtime surface",
   assert.equal(context.profile.agent, "dog-operator");
   assert.equal(context.profile.runtimeModule, "runtime-assets-v010.js");
   assert.equal(context.profile.markerExport, "V010_RUNTIME_ASSET_VERSION");
-  assert.equal(isolatedConfig("v010").subagent_depth, 2);
-  assert.equal("subagent_depth" in isolatedConfig("stable"), false);
+  assert.equal(isolatedConfig("v010").experimental?.subagent_depth, 2);
+  assert.equal("experimental" in isolatedConfig("stable"), false);
   const terra = structuredClone(value);
   terra.opencode.model = "openai/gpt-5.6-terra";
   terra.opencode.variant = "xhigh";

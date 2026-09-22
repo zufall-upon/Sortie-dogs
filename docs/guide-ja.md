@@ -36,7 +36,7 @@ Beta packageの既定profileはv0.10。既存値を保持しながら、
 ```json
 {
   "plugins": ["sortie-dogs"],
-  "subagent_depth": 2
+  "experimental": { "subagent_depth": 2 }
 }
 ```
 
@@ -232,7 +232,7 @@ npm install --global sortie-dogs
 sortie-dogs init --global --profile v010
 ```
 
-global OpenCode configへ`sortie-dogs`と`subagent_depth: 2`を追加する。Global initはassetだけを
+global OpenCode configへ`sortie-dogs`と`experimental.subagent_depth: 2`を追加する。Global initはassetだけを
 設置し、default agentやuser settingを暗黙変更しない。
 
 ## 更新と削除

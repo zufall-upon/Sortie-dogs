@@ -241,15 +241,15 @@ fixture revisions. Run heavy measurements in separate time windows or hosts.
 Use a dedicated preview config and process rather than adding preview depth to a
 normal shared host. For example, point `OPENCODE_CONFIG` and
 `OPENCODE_CONFIG_DIR` at an isolated directory under `_testenv/`, configure the
-packed preview plugin there, set `subagent_depth: 2`, restart OpenCode, and select
+packed preview plugin there, set `experimental.subagent_depth: 2`, restart OpenCode, and select
 `dog-operator`. Do not overwrite normal global assets or deploy this configuration
 into the v0.9 worktree or stable benchmark environment.
 
-OpenCode's published configuration schema defines top-level `subagent_depth` as
-a non-negative integer and defaults it to `1`, which prevents a subagent from
+OpenCode V2 defines `experimental.subagent_depth` as a non-negative integer and
+defaults it to `1`, which prevents a subagent from
 launching another subagent. The preview's `dog-operator` -> `dogs-coordinator` ->
 worker path
-therefore requires `subagent_depth: 2`. The packaged smoke runner writes that
+therefore requires `experimental.subagent_depth: 2`. The packaged smoke runner writes that
 setting only into its isolated v0.10 fixture configuration. It does not modify a
 normal global configuration or stable fixture. Because OpenCode merges config
 for the whole host process, enabling depth 2 in a shared host also permits that

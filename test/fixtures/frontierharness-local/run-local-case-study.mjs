@@ -593,7 +593,7 @@ export async function assertBareIsolation({ projectRoot, configRoots, resolvedCo
 }
 
 export function isolatedConfig(profileName = "stable") {
-  return { $schema: "https://opencode.ai/config.json", ...(profileName === "v010" ? { subagent_depth: 2 } : {}),
+  return { $schema: "https://opencode.ai/config.json", ...(profileName === "v010" ? { experimental: { subagent_depth: 2 } } : {}),
     mcp: {}, plugin: [] };
 }
 
@@ -726,9 +726,9 @@ export async function inspectRunArmPreAgent(context, arm, workspace, roots, opti
     typeof inspected.config.plugin[0] === "string" && forbiddenText(inspected.config.plugin[0])))
     throw new HarnessFailure("sortie-plugin-config",
       "Sortie resolved config is not the exact project-local plugin.", inspected.nativeEvidence);
-  if (context.manifest.profile === "v010" && inspected.config.subagent_depth !== 2)
+  if (context.manifest.profile === "v010" && inspected.config.experimental?.subagent_depth !== 2)
     throw new HarnessFailure("sortie-subagent-depth",
-      "The v0.10 resolved config must pin subagent_depth to two.", inspected.nativeEvidence);
+      "The v0.10 resolved config must pin experimental.subagent_depth to two.", inspected.nativeEvidence);
   return inspected;
 }
 
@@ -761,9 +761,9 @@ export async function installSortie(context, workspace, roots, candidate = null)
   const plugin = `file://${await toWslPath(context.manifest, join(installed, "dist", "plugin", "opencode.js"))}`;
   if (candidate === null) {
     await atomicJson(join(control, "opencode.json"), { $schema: "https://opencode.ai/config.json", plugin: [plugin],
-      ...(context.manifest.profile === "v010" ? { subagent_depth: 2 } : {}) });
+      ...(context.manifest.profile === "v010" ? { experimental: { subagent_depth: 2 } } : {}) });
     const neutral = { $schema: "https://opencode.ai/config.json", mcp: {},
-      ...(context.manifest.profile === "v010" ? { subagent_depth: 2 } : {}) };
+      ...(context.manifest.profile === "v010" ? { experimental: { subagent_depth: 2 } } : {}) };
     await atomicJson(join(roots.opencode, "opencode.json"), neutral);
     await atomicJson(join(roots.xdg, "opencode", "opencode.json"), neutral);
   }

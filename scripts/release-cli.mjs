@@ -8,7 +8,7 @@ import { releaseProfile } from './release-profiles.mjs';
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const assert = (condition, message) => { if (!condition) throw Error(message); };
 export const fixtureOpenCodeConfig = (entry, runtime) => ({ $schema: 'https://opencode.ai/config.json',
-  ...(runtime.id === 'v010' ? { subagent_depth: 2 } : {}), plugin: [pathToFileURL(entry).href] });
+  ...(runtime.id === 'v010' ? { experimental: { subagent_depth: 2 } } : {}), plugin: [pathToFileURL(entry).href] });
 export async function command(executable, args, cwd, env, timeoutMs = 600_000) {
   const result = await runProcess(executable, args, { cwd, env: { ...process.env, ...env, PWD: cwd }, timeoutMs });
   if (executable === 'wsl.exe') {

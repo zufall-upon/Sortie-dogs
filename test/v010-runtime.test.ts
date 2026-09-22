@@ -537,8 +537,8 @@ test("preview reinitialization preserves and reports an edited old role asset", 
 }));
 
 test("only the isolated preview fixture enables two-level native subagents", () => {
-  assert.equal(fixtureOpenCodeConfig("/tmp/preview.js", V010_RUNTIME_PROFILE).subagent_depth, 2);
-  assert.equal("subagent_depth" in fixtureOpenCodeConfig("/tmp/stable.js", STABLE_RUNTIME_PROFILE), false);
+  assert.equal(fixtureOpenCodeConfig("/tmp/preview.js", V010_RUNTIME_PROFILE).experimental?.subagent_depth, 2);
+  assert.equal("experimental" in fixtureOpenCodeConfig("/tmp/stable.js", STABLE_RUNTIME_PROFILE), false);
 });
 
 test("operator smoke retains only bounded typed tool errors", () => {
@@ -2129,7 +2129,7 @@ test("preview reconciles native post-admission Task errors without treating pre-
   assert.equal(before.goal_events.filter(({ event }: { event: { kind: string } }) => event.kind === "dispatch.reserved").length, 1);
   await hooks.event!({ event: { type: "message.part.updated", properties: { part: { type: "tool", tool: "task",
     sessionID: "operator", callID: "worker-call", state: { status: "error",
-      error: "Subagent depth limit reached (1). Increase subagent_depth to allow nested subagents." } } } } });
+      error: "Subagent depth limit reached (1). Increase experimental.subagent_depth to allow nested subagents." } } } } });
 
   const status = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
   assert.equal(status.status, "awaiting-decision");
