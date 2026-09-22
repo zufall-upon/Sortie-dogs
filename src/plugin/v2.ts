@@ -1,10 +1,5 @@
-import { createHash } from "node:crypto";
-
 import type { OpenCodeHooks, OpenCodePlugin } from "./index.js";
 import { SortieDogsV010Plugin } from "./profiled.js";
-
-const RETURN_REPORT_MARKER = "<summary><strong>🐾 SORTIE DOGS — 帰還報告";
-export const V2_RETURN_REPORT_METADATA_KEY = "sortie-dogs/return-report";
 
 type JsonObject = Record<string, unknown>;
 type Registration = { dispose(): Promise<void> | void };
@@ -28,6 +23,7 @@ export interface OpenCodeV2Context {
     hook(name: "execute.before" | "execute.after", callback: (event: JsonObject) => Promise<void> | void): Promise<Registration>;
   };
   readonly session: {
+    list?(input: JsonObject): Promise<unknown>;
     get(input: { sessionID: string }): Promise<unknown>;
     context(input: { sessionID: string }): Promise<unknown>;
     prompt(input: JsonObject): Promise<unknown>;
@@ -37,6 +33,7 @@ export interface OpenCodeV2Context {
     switchModel(input: JsonObject): Promise<unknown>;
     hook(name: "prompt" | "context" | "compaction", callback: (event: JsonObject) => Promise<void> | void): Promise<Registration>;
   };
+  readonly message?: { list(input: JsonObject): Promise<unknown> };
   readonly permission: {
     hook(name: "evaluate", callback: (event: JsonObject) => Promise<void> | void): Promise<Registration>;
   };
@@ -91,8 +88,16 @@ function legacyPart(value: unknown, session: string, message: string): JsonObjec
   if (value.type !== "tool") return { ...value, sessionID: session, messageID: message };
   const state = record(value.state) ? value.state : {};
   const output = toolContentText(state.content);
-  return { ...value, tool: string(value.name) ?? string(value.tool), callID: string(value.id), sessionID: session, messageID: message,
-    state: { ...state, ...(output === undefined ? {} : { output }) } };
+  const name = string(value.name) ?? string(value.tool);
+  const tool = name === "subagent" ? "task" : name === "shell" ? "bash" : name === "patch" ? "apply_patch" : name;
+  const time = record(value.time) ? value.time : undefined;
+  const metadata = record(state.metadata) ? { ...state.metadata } : undefined;
+  if (metadata && Array.isArray(metadata.files)) metadata.files = metadata.files.map(file => record(file) && typeof file.patch === "string"
+    ? { ...file, diff: file.patch } : file);
+  return { ...value, tool, callID: string(value.id), sessionID: session, messageID: message,
+    state: { ...state, input: legacyToolInput(name, state.input), ...(metadata ? { metadata } : {}),
+      ...(time ? { time: { start: time.ran ?? time.created, end: time.completed } } : {}),
+      ...(output === undefined ? {} : { output }) } };
 }
 
 function legacyMessage(value: unknown, session: string, agent?: string): JsonObject | undefined {
@@ -103,13 +108,15 @@ function legacyMessage(value: unknown, session: string, agent?: string): JsonObj
       parts: [{ id: `${id}-text`, sessionID: session, messageID: id, type: "text", text: String(value.text ?? "") }] };
   }
   if (value.type !== "assistant") {
-    if (value.type === "synthetic") return { info: { id, sessionID: session, role: "system", time: value.time },
+    if (value.type === "synthetic") return { info: { id, sessionID: session, role: "user", agent, time: value.time },
       parts: [{ id: `${id}-text`, sessionID: session, messageID: id, type: "text", text: String(value.text ?? ""), synthetic: true }] };
     return undefined;
   }
   const model = modelReference(value.model);
   return { info: { id, sessionID: session, role: "assistant", agent: string(value.agent) ?? agent,
-    ...(model === undefined ? {} : { model }), finish: value.finish, time: value.time, tokens: value.tokens, cost: value.cost },
+    ...(model === undefined ? {} : { model, providerID: model.providerID, modelID: model.modelID }),
+    ...(record(value.providerState) && typeof value.providerState.serviceTier === "string" ? { serviceTier: value.providerState.serviceTier } : {}),
+    ...(value.error === undefined ? {} : { error: value.error }), finish: value.finish, time: value.time, tokens: value.tokens, cost: value.cost },
   parts: array(value.content).flatMap(part => {
     const converted = legacyPart(part, session, id);
     return converted === undefined ? [] : [converted];
@@ -119,13 +126,29 @@ function legacyMessage(value: unknown, session: string, agent?: string): JsonObj
 async function legacyMessages(context: OpenCodeV2Context, id: string): Promise<JsonObject[]> {
   const [info, history] = await Promise.all([
     context.session.get({ sessionID: id }).catch(() => undefined),
-    context.session.context({ sessionID: id }).catch(() => []),
+    context.message ? nativePages(cursor => context.message!.list({ sessionID: id, limit: 100, ...(cursor ? { cursor } : { order: "asc" }) }))
+      : context.session.context({ sessionID: id }),
   ]);
   const agent = record(info) ? string(info.agent) : undefined;
   return array(history).flatMap(value => {
     const converted = legacyMessage(value, id, agent);
     return converted === undefined ? [] : [converted];
   });
+}
+
+async function nativePages(fetch: (cursor?: string) => Promise<unknown>): Promise<unknown[]> {
+  const items: unknown[] = [], seen = new Set<string>();
+  let cursor: string | undefined;
+  for (let page = 0; page < 100; page += 1) {
+    const result = await fetch(cursor);
+    if (!record(result) || !Array.isArray(result.data) || !record(result.cursor)) throw new Error("v2-history-page-invalid");
+    items.push(...result.data);
+    const next = string(result.cursor.next);
+    if (!next) return items;
+    if (seen.has(next)) throw new Error("v2-history-cursor-repeated");
+    seen.add(next); cursor = next;
+  }
+  throw new Error("v2-history-page-limit");
 }
 
 function legacyClient(context: OpenCodeV2Context): JsonObject {
@@ -144,7 +167,12 @@ function legacyClient(context: OpenCodeV2Context): JsonObject {
       return { data: id === undefined || wanted === undefined ? undefined
         : (await legacyMessages(context, id)).find(message => record(message.info) && message.info.id === wanted) };
     },
-    children: async () => ({ data: [] }),
+    ...(context.session.list ? { children: async (request: unknown) => {
+      const id = sessionID(request);
+      if (id === undefined) throw new Error("v2-history-parent-missing");
+      return { data: await nativePages(cursor => context.session.list!({ parentID: id, limit: 100,
+        ...(cursor ? { cursor } : { order: "asc" }) })) };
+    } } : {}),
     abort: async (request: unknown) => {
       const id = sessionID(request);
       return id === undefined ? undefined : await context.session.interrupt({ sessionID: id, resume: false });
@@ -226,25 +254,8 @@ function assistantText(message: unknown): string | undefined {
 
 const V2_SUBAGENT_PROMPT_PREFIX = "You are a subagent spawned by another session.\n";
 
-function reportPanel(rendered: string): string | undefined {
-  const summary = rendered.indexOf(RETURN_REPORT_MARKER);
-  if (summary < 0) return undefined;
-  const details = rendered.lastIndexOf("<details", summary);
-  return rendered.slice(details < 0 ? summary : details).trim();
-}
-
-function reportIdentity(session: string, sourceMessageID: string, panel: string): string {
-  return createHash("sha256").update(`${session}\0${sourceMessageID}\0${panel}`).digest("hex");
-}
-
-function reportMetadata(message: unknown): JsonObject | undefined {
-  if (!record(message) || message.type !== "synthetic" || !record(message.metadata)) return undefined;
-  const value = message.metadata[V2_RETURN_REPORT_METADATA_KEY];
-  return record(value) ? value : undefined;
-}
-
-/** V2 has no public assistant-part update API; publish one durable, non-resuming synthetic report card instead. */
-export function createV2ReturnReportPublisher(context: OpenCodeV2Context, hooks: OpenCodeHooks): (session: string) => Promise<void> {
+/** Observe terminal text for accounting only. Synthetic input is queued work, even with resume=false. */
+export function createV2ReturnReportFinalizer(context: OpenCodeV2Context, hooks: OpenCodeHooks): (session: string) => Promise<void> {
   const active = new Map<string, Promise<void>>();
   return async session => {
     const previous = active.get(session) ?? Promise.resolve();
@@ -257,13 +268,6 @@ export function createV2ReturnReportPublisher(context: OpenCodeV2Context, hooks:
         const base = assistantText(source)!;
         const output = { text: base };
         await hooks["experimental.text.complete"]?.({ sessionID: session, messageID: source.id }, output);
-        const panel = reportPanel(output.text);
-        if (panel === undefined) return;
-        const identity = reportIdentity(session, source.id, panel);
-        if (history.some(message => reportMetadata(message)?.identity === identity)) return;
-        await context.session.synthetic({ sessionID: session, id: `msg_sortie_report_${identity}`, text: panel,
-          description: "Sortie Dogs return report", delivery: "queue", resume: false,
-          metadata: { [V2_RETURN_REPORT_METADATA_KEY]: { schema_version: "0.1", identity, source_message_id: source.id } } });
         return;
       }
     }).finally(() => { if (active.get(session) === operation) active.delete(session); });
@@ -338,9 +342,10 @@ export function createSortieDogsV2Plugin(legacyFactory: OpenCodePlugin = SortieD
   return {
     id: "sortie-dogs.v010",
     async setup(context) {
-      const hooks = await legacyFactory({ directory: context.location.directory, client: legacyClient(context) as never }, context.options ?? {});
+      const hooks = await legacyFactory({ directory: context.location.directory, client: legacyClient(context) as never,
+        returnReportTransport: "tool-result" }, context.options ?? {});
       await registerV2Hooks(context, hooks);
-      const publish = createV2ReturnReportPublisher(context, hooks);
+      const finalize = createV2ReturnReportFinalizer(context, hooks);
       const controller = new AbortController();
       void (async () => {
         for await (const event of context.event.subscribe({ signal: controller.signal })) {
@@ -352,7 +357,7 @@ export function createSortieDogsV2Plugin(legacyFactory: OpenCodePlugin = SortieD
               continue;
             }
             if (id === undefined) continue;
-            if (event.type === "session.execution.succeeded") await publish(id);
+            if (event.type === "session.execution.succeeded") await finalize(id);
             if (event.type === "session.created" || event.type === "session.deleted" || event.type === "session.idle") {
               const info = event.type === "session.created" ? await context.session.get({ sessionID: id }).catch(() => ({ id })) : { id };
               await hooks.event?.({ event: { type: String(event.type), properties: { sessionID: id, info } } });

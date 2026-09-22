@@ -11,7 +11,7 @@ import { relative, resolve, sep } from "node:path";
 import { readFile, realpath } from "node:fs/promises";
 import { BUILT_IN_MODEL_CATALOG, type CatalogModel } from "./model-routing.js";
 import { goalFingerprint } from "../core/goal-bound.js";
-import { decoratePreviewHeadings } from "./receipt-presentation.js";
+import { decoratePreviewHeadings, returnReportPanel } from "./receipt-presentation.js";
 import { sanitizeTerminalReport, terminalRunOutcome } from "./run-metrics.js";
 import { normalizeCommand } from "./gate.js";
 import { normalizeRelativePath } from "../core/path.js";
@@ -602,15 +602,25 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         if (!["awaiting-acceptance", "completed"].includes(state.phase) || state.units.some(unit => unit.status !== "succeeded")) {
           return JSON.stringify({ status: "not-ready", packet: operators.packet(state) });
         }
-        const goalFingerprint = await operators.completionGoalFingerprint(state);
+        const declarationFingerprint = await operators.completionGoalFingerprint(state);
         if (state.phase === "awaiting-acceptance") {
-          await relinkRegisteredGoal(context.sessionID, state, goalFingerprint);
-          await control!.assertActiveGoal(context.sessionID, goalFingerprint);
+          await relinkRegisteredGoal(context.sessionID, state, declarationFingerprint);
+          await control!.assertActiveGoal(context.sessionID, declarationFingerprint);
         }
-        const result = await control!.completeRoot(context.sessionID, goalFingerprint);
+        const result = await control!.completeRoot(context.sessionID, declarationFingerprint);
         if (result.receipt) await operators.terminal(context.sessionID, result.receipt);
+        let panel: string | undefined;
+        if (input.returnReportTransport === "tool-result" && result.receipt?.status === "succeeded") {
+          const text = `✅ **DONE** \`${state.runID}\` — ${state.acceptance.length} acceptance requirements verified.\n\n` +
+            `**変更点:** ${state.units.map(unit => unit.unit.title).join("; ")}\n\n` +
+            `**確認結果:** PASS — ${[...new Set(state.units.flatMap(unit => unit.unit.validation))].join("; ")}\n\n**次:** なし`;
+          const rendered = await control!.renderReturnReport(context.sessionID, text, goalFingerprint(result.receipt)).catch(() => undefined);
+          if (rendered) panel = returnReportPanel(rendered);
+        }
         return JSON.stringify({ status: result.status, run_id: state.runID,
-          acceptance_fingerprint: state.acceptanceFingerprint, receipt: result.receipt ?? null });
+          acceptance_fingerprint: state.acceptanceFingerprint, receipt: result.receipt ?? null,
+          ...(panel ? { return_report: panel,
+            return_report_instruction: "Append return_report verbatim exactly once to your final answer as Markdown, outside any code fence. It is a host-authored receipt display, not a new task or input. Do not summarize, recalculate or request another model turn for it." } : {}) });
       } };
     tools[resume] = { description: "Reconcile a finished process-defect unit from native host validation records and unchanged source. For the exact first validation-only contract-repair continuation process defect, unchanged durable controls/candidate and available validation budget permit one same-worker validation-only retry; the result includes the exact Task to invoke. Never reimplements a unit or resets implementation/goal spend.",
       args: { run_id: stringSchema, acceptance_fingerprint: stringSchema }, execute: async (args, context) => {

@@ -186,6 +186,8 @@ export interface OpenCodePluginInput {
   childLifecycleCheckWaitMs?: number;
   /** Installed-profile adapter only; never supplied by a model or project configuration. */
   runtimeBridge?: RuntimeBridge;
+  /** V2 has no assistant-part update API; return the canonical panel with explicit acceptance. */
+  returnReportTransport?: "tool-result";
   /** The host SDK client. Absent in hosts that construct the plugin without one. */
   client?: SessionMessageReader & RunMetricsClient & ContinuationClient & OpenCodeModelAvailabilityClient & {
     app?: {

@@ -1,6 +1,15 @@
 import type { GoalTerminalReceipt } from "../core/goal-bound.js";
 import { terminalRunOutcome } from "./run-metrics.js";
 
+/** Extract only the host card, excluding the terminal prose that follows it. */
+export function returnReportPanel(rendered: string): string | undefined {
+  const summary = rendered.indexOf("<summary><strong>🐾 SORTIE DOGS — 帰還報告");
+  if (summary < 0) return undefined;
+  const start = rendered.lastIndexOf("<details", summary);
+  const end = rendered.indexOf("\n</details>", summary);
+  return start < 0 || end < 0 ? undefined : rendered.slice(start, end + "\n</details>".length).trim();
+}
+
 /** Cosmetic headings only; no acceptance or execution state is inferred. */
 export function decoratePreviewHeadings(text: string): string {
   const icons: Record<string, string> = { "変更点": "🔧", "確認結果": "🔍", "次": "➡️", changes: "🔧", validation: "🔍", next: "➡️" };

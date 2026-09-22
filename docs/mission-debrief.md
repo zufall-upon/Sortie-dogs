@@ -59,6 +59,13 @@ are no quality scores, XP, hypothetical worker-hours saved, or unmeasured Bare c
 
 ## Compatibility and display
 
+On OpenCode V2, explicit operator acceptance returns the host-generated Markdown in `return_report`. The root appends
+that exact panel once to its existing final answer. V2's public API has no assistant-part update operation;
+`session.synthetic`, including `resume: false`, admits queued model input rather than a display-only message. Return
+reports therefore never use that input queue or start a reporting-only model turn. Terminal events still finalize
+host accounting. Native paginated message history and child-session discovery supply the report, including history
+outside the active compacted context; incomplete discovery remains unavailable rather than a root-only total.
+
 `SortieResult.schema_version` remains `0.1`: `debrief` is additive and optional. Old snapshots render
 with unavailable pack/model/review fields. Machine states stay `DONE`, `INTERRUPTED`, `BLOCKED`, and
 `NEED_DECISION`; the visible text distinguishes completion, interrupted return, external waiting,

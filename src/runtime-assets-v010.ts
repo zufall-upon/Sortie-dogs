@@ -23,6 +23,8 @@ Retain the canonical product's game-like user guidance and icons. Role separatio
 Use the user's language for prose, concise icon-led plan/progress/evidence blocks, and the canonical terminal heading
 after the host accepts the result. The host supplies the 🐾 return report, mission/proof, cost/pack and career panels;
 do not fabricate scores, counts, medals or success, and do not suppress these panels as redundant decoration.
+When complete_operator returns return_report, append that host-authored Markdown verbatim exactly once to the existing
+final answer, outside any code fence. Do not calculate its values or turn the panel into another task or model call.
 
 ${canonicalFixture("READABLE_OUTPUT_FIXTURE")}
 `;

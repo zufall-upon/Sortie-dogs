@@ -1057,7 +1057,7 @@ test("root discards one exact diagnosed transient and resumes only remaining val
   });
   const paused = (await (await RunFlightLedger.openGoal(ledgerPath)).readGoal()).state;
   assert.equal(paused.receipt?.status, "stopped", "an explicit pause must never become an implicit succeeded receipt");
-  const cold = await SortieDogsV010Plugin({ directory: root, client: { session: {
+  const cold = await SortieDogsV010Plugin({ directory: root, returnReportTransport: "tool-result", client: { session: {
     get: async ({ path }: { path: { id: string } }) => ({ data: path.id === "root"
       ? { agent: "dog-operator" } : { agent: "dog-worker-v010", parentID: "root" } }),
     messages: async ({ path }: { path: { id: string } }) => ({ data: hostMessages[path.id] ?? [] }),
@@ -1073,6 +1073,9 @@ test("root discards one exact diagnosed transient and resumes only remaining val
   const complete = JSON.parse(await cold.tool!.sortie_v010_complete_operator.execute({ run_id: prepared.run_id,
     acceptance_fingerprint: prepared.acceptance_fingerprint }, { sessionID: "root" }));
   assert.equal(complete.status, "succeeded");
+  assert.match(complete.return_report, /^<details>\n<summary><strong>🐾 SORTIE DOGS — 帰還報告｜🟢 完了/u);
+  assert.ok(complete.return_report.endsWith("</details>"), "the report must not include duplicated terminal prose");
+  assert.match(complete.return_report_instruction, /verbatim exactly once/);
   assert.equal(await git(root, ["status", "--porcelain=v1"]), "");
 }));
 
