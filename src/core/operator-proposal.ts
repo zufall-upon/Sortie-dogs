@@ -147,6 +147,7 @@ interface OperatorProposalSpend {
   readonly root_session_id: string;
   reads: number;
   submissions: number;
+  readonly retry?: { readonly intent_hash: string; readonly goal_binding: OperatorProposalGoalBinding };
 }
 
 export interface OperatorProposalBudgetDiagnostic {
@@ -350,6 +351,13 @@ export class OperatorProposalRuntime {
         !Number.isSafeInteger(spend.reads) || spend.reads < 0 || !Number.isSafeInteger(spend.submissions) || spend.submissions < 0) {
       throw new Error("operator-proposal-spend-invalid");
     }
+    if (spend.retry !== undefined && (!record(spend.retry) || !/^[a-f0-9]{64}$/u.test(spend.retry.intent_hash) ||
+        !record(spend.retry.goal_binding) || !text(spend.retry.goal_binding.goal_id) ||
+        !Number.isSafeInteger(spend.retry.goal_binding.revision) || spend.retry.goal_binding.revision < 1 ||
+        !Number.isSafeInteger(spend.retry.goal_binding.scope_epoch) || spend.retry.goal_binding.scope_epoch < 1 ||
+        !/^sha256:[a-f0-9]{64}$/u.test(spend.retry.goal_binding.acceptance_fingerprint))) {
+      throw new Error("operator-proposal-spend-invalid");
+    }
     return spend;
   }
   private async saveSpend(spend: OperatorProposalSpend): Promise<void> {
@@ -357,6 +365,18 @@ export class OperatorProposalRuntime {
     const temporary = `${this.spendFile(spend.root_session_id)}.${randomUUID()}.tmp`;
     try { await writeFile(temporary, JSON.stringify(spend), { flag: "wx", mode: 0o600 }); await rename(temporary, this.spendFile(spend.root_session_id)); }
     finally { await rm(temporary, { force: true }).catch(() => undefined); }
+  }
+  /** A released investigation still belongs to its accepted order across a host restart. No grant is revived. */
+  async continuationCheckpoint(root: string): Promise<string | undefined> {
+    return this.serial(root, async () => {
+      const state = await this.readUnlocked(root);
+      if (state?.phase === "approved") return undefined;
+      const retry = state?.goal_binding ? { intent_hash: state.intent_hash, goal_binding: state.goal_binding }
+        : state ? undefined : (await this.readSpend(root)).retry;
+      return retry === undefined ? undefined : JSON.stringify({ authority: "durable-proposal-continuity",
+        root_session_id: root, ...retry, status: state?.phase ?? "cancelled",
+        next_action: "Preserve the accepted goal and cumulative spend. Read operator_status; a cancelled proposal requires an explicit root retry decision and a new exact proposal Task, never revival of its old child." });
+    });
   }
   async read(root: string): Promise<OperatorProposalState | undefined> {
     return this.serial(root, () => this.readUnlocked(root));
@@ -477,7 +497,8 @@ export class OperatorProposalRuntime {
     const spend = await this.readSpend(root);
     const state: OperatorProposalState = { schema_version: "0.1", profile: this.profile.id, root_session_id: root,
       intent_id: `intent-${intentHash.slice(0, 24)}`, intent_hash: intentHash, intent, created_at: new Date().toISOString(), phase: "investigating",
-      goal_binding: null, proposal_call_id: null, proposal_session_id: null, read_count: spend.reads, read_paths: [], submission_count: spend.submissions, proposal_id: null,
+      goal_binding: spend.retry?.intent_hash === intentHash ? structuredClone(spend.retry.goal_binding) : null,
+      proposal_call_id: null, proposal_session_id: null, read_count: spend.reads, read_paths: [], submission_count: spend.submissions, proposal_id: null,
       ...(spend.reads > 0 || spend.submissions > 0 ? { prior_spend: { reads: spend.reads, submissions: spend.submissions } } : {}),
       proposal_revision: null, proposal_hash: null, proposal: null, approval_rationale: null };
     this.assertBudgetAvailable(state);
@@ -592,7 +613,8 @@ export class OperatorProposalRuntime {
       const state = await this.readUnlocked(root);
       if (!state || state.phase === "approved") return undefined;
       await this.saveSpend({ schema_version: "0.1", profile: this.profile.id, root_session_id: root,
-        reads: state.read_count, submissions: state.submission_count });
+        reads: state.read_count, submissions: state.submission_count,
+        ...(state.goal_binding === null ? {} : { retry: { intent_hash: state.intent_hash, goal_binding: state.goal_binding } }) });
       await rm(this.file(root), { force: true });
       this.states.delete(root);
       return state;

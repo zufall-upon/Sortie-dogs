@@ -3,6 +3,13 @@ import { goalFingerprint } from "./goal-bound.ts";
 /** Shared planner guidance and admission enums; no inferred acceptance or dispatch authority. */
 export const GOAL_DELIVERY_INTENTS = ["design", "registration", "implementation", "repair", "controlled-change"] as const;
 export const GOAL_DELIVERY_MODES = ["planning-only", "mvp-first", "repair-first", "controlled-change"] as const;
+export const GOAL_CRITERION_ENUMS = {
+  build_boundary: ["included", "excluded", "not-applicable"],
+  proof_scope: ["requested-full", "document-deliverable", "expected-negative"],
+  expected_outcome: ["pass", "fail"],
+  source_binding: ["declared", "current-protected"],
+  candidate_binding: ["declared", "current-protected"],
+} as const;
 
 const CRITERION_FIELDS = ["criterion_id", "target", "entrypoint", "workload", "oracle_coverage", "build_boundary", "source",
   "candidate", "source_binding", "candidate_binding", "fixture", "proof_scope", "expected_outcome", "validation_command"] as const;
@@ -24,6 +31,66 @@ export function goalDeclarationDefaults(object: Record<string, unknown>): Record
   const defaults = object.defaults !== null && typeof object.defaults === "object" && !Array.isArray(object.defaults)
     ? object.defaults as Record<string, unknown> : {};
   return { ...normalizedCriterionFields(object), ...normalizedCriterionFields(defaults) };
+}
+
+export interface GoalDeclarationFieldDiagnostic {
+  readonly pointer: string;
+  readonly expected: string;
+}
+
+/** Validate structured planner fields before immutable controls exist; expansion itself remains lossless. */
+export function goalDeclarationFieldDiagnostics(object: Record<string, unknown>): readonly GoalDeclarationFieldDiagnostic[] {
+  const defects = new Map<string, GoalDeclarationFieldDiagnostic>();
+  const add = (pointer: string, expected: string): void => { defects.set(pointer, { pointer, expected }); };
+  const scalar = (value: unknown): string | undefined => typeof value === "string" ? value.trim()
+    : typeof value === "boolean" || typeof value === "number" ? String(value) : undefined;
+  const singleLine = (value: unknown): boolean => {
+    const text = scalar(value);
+    return text !== undefined && text.length > 0 && !/[\r\n]/u.test(String(value));
+  };
+  for (const [field, allowed, required] of [
+    ["delivery_intent", GOAL_DELIVERY_INTENTS, true], ["delivery_mode", GOAL_DELIVERY_MODES, false],
+    ["usable_path_established", ["true", "false"], true], ["controlled_change", ["true", "false"], true],
+  ] as const) {
+    if ((required || object[field] !== undefined) && (!singleLine(object[field]) || !allowed.some(item => item === scalar(object[field])))) {
+      add(`/goal_declaration/${field}`, allowed.join(" | "));
+    }
+  }
+  if (object.goal_acceptance_fingerprint !== undefined &&
+      !/^sha256:[a-f0-9]{64}$/u.test(String(object.goal_acceptance_fingerprint))) {
+    add("/goal_declaration/goal_acceptance_fingerprint", "sha256: followed by 64 lowercase hexadecimal characters");
+  }
+  const defaults = object.defaults !== null && typeof object.defaults === "object" && !Array.isArray(object.defaults)
+    ? object.defaults as Record<string, unknown> : undefined;
+  const criteria = Array.isArray(object.criteria) ? object.criteria : [];
+  for (const [index, raw] of criteria.entries()) {
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const criterion = raw as Record<string, unknown>;
+    const fieldValue = (field: string): { value: unknown; pointer: string } => {
+      for (const [owner, prefix] of [[criterion, `/goal_declaration/criteria/${index}`],
+        [defaults, "/goal_declaration/defaults"], [object, "/goal_declaration"]] as const) {
+        if (!owner) continue;
+        for (const key of [`goal_${field}`, field]) if (owner[key] !== undefined && owner[key] !== null) {
+          return { value: owner[key], pointer: `${prefix}/${key}` };
+        }
+      }
+      return { value: undefined, pointer: `/goal_declaration/${defaults ? "defaults/" : ""}${field}` };
+    };
+    for (const field of ["target", "entrypoint", "workload", "source", "candidate", "fixture"]) {
+      const { value, pointer } = fieldValue(field);
+      if (!singleLine(value)) add(pointer, "nonblank single-line scalar");
+    }
+    for (const [field, allowed] of Object.entries(GOAL_CRITERION_ENUMS)) {
+      const { value, pointer } = fieldValue(field);
+      if (value === undefined && (field === "source_binding" || field === "candidate_binding")) continue;
+      if (!singleLine(value) || !allowed.some(item => item === scalar(value))) add(pointer, allowed.join(" | "));
+    }
+    const oracle = fieldValue("oracle_coverage");
+    if (!Array.isArray(oracle.value) || oracle.value.length === 0 ||
+        !oracle.value.every(item => typeof item === "string" && item.length > 0 && item.length <= 512) ||
+        new Set(oracle.value).size !== oracle.value.length) add(oracle.pointer, "nonempty unique string array; each string has 1..512 characters");
+  }
+  return [...defects.values()];
 }
 
 export const GOAL_DECLARATION_FORMAT = `Declare a goal once, then reference it with goal_declaration_path in the Task prompt.

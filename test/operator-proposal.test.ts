@@ -1651,6 +1651,52 @@ test("an admitted proposal child that terminates without submission is released 
   assert.equal(submitted.submission_count, 1);
 }));
 
+test("a cancelled proposal survives a terminal reply and cold real turn without resetting its goal or spend", async () => fixture(async root => {
+  const { hooks, started, ledgerPath } = await previewProposal(root, 3);
+  await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "first-attempt" }, { args: started.task });
+  await hooks["chat.message"]!({ sessionID: "first-child", messageID: "first-child-user", agent: "dogs-coordinator" }, {
+    message: { agent: "dogs-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+    parts: [{ type: "text", text: started.task.prompt }],
+  });
+  await hooks["tool.execute.before"]!({ tool: "read", sessionID: "first-child", callID: "first-read" },
+    { args: { filePath: "src/input.ts" } });
+  await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "first-attempt" }, { output: "" });
+  const ledger = await RunFlightLedger.openGoal(ledgerPath);
+  const before = (await ledger.readGoal()).state;
+  const cancelled = JSON.parse(await hooks.tool!.sortie_v010_cancel_operator.execute({ reason: "plain" }, { sessionID: "root" }));
+  await hooks["experimental.text.complete"]!({ sessionID: "root", messageID: "paused-reply" }, {
+    text: "status: INTERRUPTED — proposal checkpoint\nTRUE_INTERRUPTION: user: pause before retry",
+  });
+  assert.equal((await ledger.readGoal()).state.phase, "stopped");
+
+  const cold = await previewHooks(root);
+  await cold["chat.message"]!({ sessionID: "root", messageID: "retry-user", agent: "dog-operator" }, {
+    message: { agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-5.6-sol" } },
+    parts: [{ type: "text", text: "Resume the same cancelled proposal with its returned intent and cumulative budget." }],
+  });
+  const continued = (await ledger.readGoal()).state;
+  for (const key of ["goal_id", "acceptance_fingerprint", "consumed_units", "consumed_time_ms", "consumed_cost_usd", "budget"] as const) {
+    assert.deepEqual(continued[key], before[key], `${key} must survive a real CLI restart boundary`);
+  }
+  assert.equal(continued.phase, "active");
+  const retried = JSON.parse(await cold.tool!.sortie_v010_begin_operator_proposal.execute(
+    { intent_json: JSON.stringify(cancelled.retry_intent) }, { sessionID: "root" }));
+  assert.equal(retried.reads, 1);
+  const retained = await new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE).required("root");
+  assert.deepEqual(retained.goal_binding, cancelled.retained_goal_binding);
+  assert.deepEqual(retained.intent.requirements, requirements);
+  await cold["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "second-attempt" }, { args: retried.task });
+  await cold["chat.message"]!({ sessionID: "second-child", messageID: "second-child-user", agent: "dogs-coordinator" }, {
+    message: { agent: "dogs-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+    parts: [{ type: "text", text: retried.task.prompt }],
+  });
+  await cold["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "second-attempt" }, { output: "" });
+  const after = (await ledger.readGoal()).state;
+  assert.equal(after.goal_id, before.goal_id);
+  assert.equal(after.consumed_units, 2, "both distinct proposal attempts consume the same cumulative unit budget");
+  assert.equal(after.outstanding_reservations.length, 0);
+}));
+
 test("cancellation keeps an approved proposal bound to its execution lane", async () => fixture(async root => {
   const registry = new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE);
   const started = await registry.begin("approved-root", intent()); const task = registry.task(started);

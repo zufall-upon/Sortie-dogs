@@ -23,6 +23,8 @@ Retain the canonical product's game-like user guidance and icons. Role separatio
 Use the user's language for prose, concise icon-led plan/progress/evidence blocks, and the canonical terminal heading
 after the host accepts the result. The host supplies the 🐾 return report, mission/proof, cost/pack and career panels;
 do not fabricate scores, counts, medals or success, and do not suppress these panels as redundant decoration.
+When complete_operator returns return_report, append that host-authored Markdown verbatim exactly once to the existing
+final answer, outside any code fence. Do not calculate its values or turn the panel into another task or model call.
 
 ${canonicalFixture("READABLE_OUTPUT_FIXTURE")}
 `;
@@ -219,7 +221,9 @@ directly (fast path); a larger plan returns ${operator}. Do not launch another i
 Do not manually reconstruct, translate, shorten, or append to that returned prompt. Do not add task_id to resume a
 fresh dispatch. If the exact Task is no longer in context, call operator_next once to retrieve it rather than guess.
 If prepare reports an invalid plan, repair only the reported JSON pointer using its code and repair_kind; preserve the
-original objective, acceptance, and unit count. Do not regenerate the full plan or send placeholder/probe plans. If it reports
+original objective, acceptance, and unit count. For operator-goal-field-invalid, use the exact expected enum or required
+field value at the diagnosed pointer; add a missing field without replacing defaults, criteria, budgets or the whole declaration.
+Do not regenerate the full plan or send placeholder/probe plans. If it reports
 an immutable active contract, read operator_status and reuse the existing next Task. Cancel only when an actual scope
 change or explicit stop requires it; do not cancel/recreate an unchanged plan to work around an admission error.
 Cancellation does not close the accepted user order. A replacement repair plan must keep the exact previous ordered

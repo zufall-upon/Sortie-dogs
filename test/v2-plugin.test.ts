@@ -3,12 +3,12 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import V2Plugin, {
-  V2_RETURN_REPORT_METADATA_KEY,
   createSortieDogsV2Plugin,
-  createV2ReturnReportPublisher,
+  createV2ReturnReportFinalizer,
   type OpenCodeV2Context,
 } from "../dist/plugin/v2.js";
 import type { OpenCodeHooks, OpenCodePlugin } from "../dist/plugin/index.js";
+import { collectRunMetrics } from "../dist/plugin/run-metrics.js";
 
 function contextFixture() {
   const history: Record<string, unknown>[] = [{
@@ -66,6 +66,7 @@ function contextFixture() {
       prompt: async () => ({}),
       synthetic: async input => {
         if (failSynthetic) { failSynthetic = false; throw new Error("synthetic unavailable"); }
+        assert.match(String(input.id), /^msg_/, "V2 session.synthetic rejects IDs outside the native message namespace");
         const message = { id: input.id, type: "synthetic", text: input.text, metadata: input.metadata, time: { created: 3 } };
         history.push(message); synthetic.push(input); return message;
       },
@@ -103,7 +104,7 @@ test("V2 operator dispatch rejects background before admission and accepts expli
   } finally { if (typeof dispose === "function") dispose(); }
 });
 
-test("V2 return report uses one durable non-resuming synthetic card across replay and restart", async () => {
+test("V2 terminal reporting never enqueues model input across replay and restart", async () => {
   const fixture = contextFixture();
   fixture.history.push(
     { id: "assistant-empty", type: "assistant", agent: "dog-coordinator-v010", finish: "stop",
@@ -116,26 +117,70 @@ test("V2 return report uses one durable non-resuming synthetic card across repla
       output.text += "\n\n<details>\n<summary><strong>🐾 SORTIE DOGS — 帰還報告</strong></summary>\n\nproof\n\n</details>";
     },
   };
-  const publish = createV2ReturnReportPublisher(fixture.context, hooks);
-  await Promise.all([publish("root"), publish("root")]);
-  assert.equal(fixture.synthetic.length, 1);
-  assert.equal(fixture.synthetic[0]!.resume, false);
-  assert.equal(fixture.synthetic[0]!.delivery, "queue");
-  assert.match(String(fixture.synthetic[0]!.text), /^<details>\r?\n<summary><strong>🐾 SORTIE DOGS — 帰還報告/u);
-  const metadata = fixture.synthetic[0]!.metadata as Record<string, Record<string, unknown>>;
-  assert.match(String(metadata[V2_RETURN_REPORT_METADATA_KEY]!.identity), /^[a-f0-9]{64}$/u);
-  assert.equal(metadata[V2_RETURN_REPORT_METADATA_KEY]!.source_message_id, "assistant-final");
-
-  await createV2ReturnReportPublisher(fixture.context, hooks)("root");
-  assert.equal(fixture.synthetic.length, 1, "persisted metadata deduplicates after plugin restart");
+  const finalize = createV2ReturnReportFinalizer(fixture.context, hooks);
+  await Promise.all([finalize("root"), finalize("root")]);
+  await createV2ReturnReportFinalizer(fixture.context, hooks)("root");
+  assert.deepEqual(fixture.synthetic, [], "resume=false still creates durable input consumed by the next real turn");
 });
 
 test("V2 return report publishes nothing without a host-rendered succeeded receipt", async () => {
   const fixture = contextFixture();
-  await createV2ReturnReportPublisher(fixture.context, {
+  await createV2ReturnReportFinalizer(fixture.context, {
     "experimental.text.complete": async () => {},
   })("root");
   assert.deepEqual(fixture.synthetic, []);
+});
+
+test("V2 report accounting traverses native pages and retains child model, tool and timing evidence", async () => {
+  const fixture = contextFixture();
+  const tokens = { input: 10, output: 2, reasoning: 1, cache: { read: 5, write: 0 } };
+  const tool = (name: string, input: unknown, metadata: unknown) => ({ type: "tool", id: `call-${name}`, name,
+    time: { created: 2, ran: 3, completed: 4 }, state: { status: "completed", input, metadata,
+      content: [{ type: "text", text: "native output" }] } });
+  const message = (id: string, agent: string, content: unknown[]) => ({ id, type: "assistant", agent, finish: "stop",
+    time: { created: 1, completed: 5 }, model: { providerID: "openai", id: "gpt-5.6-sol" }, tokens, cost: 0, content });
+  const native = {
+    root: [message("root-message", "dog-coordinator", [tool("subagent", { agent: "dog-worker", prompt: "work" }, { sessionID: "child-1" })]),
+      { id: "old-report-input", type: "synthetic", text: "old queued report", time: { created: 6 } }],
+    "child-1": [message("child-1-message", "dog-worker", [tool("patch", { patchText: "diff" }, { files: [{ patch: "+new\n-old" }] })])],
+    "child-2": [message("child-2-message", "dog-worker", [tool("shell", { command: "node check.mjs" }, { exit: 0 })])],
+  };
+  const pages: string[] = [];
+  fixture.context.session.context = async () => []; // active context can have been compacted away
+  fixture.context.session.list = async input => {
+    if (input.cursor) assert.equal(input.order, undefined, "native API rejects cursor combined with order");
+    pages.push(`${input.parentID}:${input.cursor ?? "first"}`);
+    return input.parentID !== "root" ? { data: [], cursor: {} }
+      : input.cursor ? { data: [{ id: "child-2", parentID: "root" }], cursor: {} }
+        : { data: [{ id: "child-1", parentID: "root" }], cursor: { next: "children-2" } };
+  };
+  const context: OpenCodeV2Context = { ...fixture.context, message: { list: async input => ({
+    data: native[input.sessionID as keyof typeof native], cursor: {},
+  }) } };
+  let client: Parameters<typeof collectRunMetrics>[0];
+  const cleanup = await createSortieDogsV2Plugin(async input => {
+    assert.equal(input.returnReportTransport, "tool-result");
+    client = input.client;
+    return {};
+  }).setup(context);
+  try {
+    const history = await client!.session!.messages!({ path: { id: "root" } }) as { data: Array<{ info: { role: string }; parts: Array<{ synthetic?: boolean }> }> };
+    assert.equal(history.data.at(-1)?.info.role, "user");
+    assert.equal(history.data.at(-1)?.parts[0]?.synthetic, true, "legacy root recovery must skip queued inputs without treating them as real goal turns");
+    const metrics = await collectRunMetrics(client, "root");
+    assert.equal(metrics?.sessions, 3);
+    assert.equal(metrics?.tokens, 54);
+    assert.deepEqual(pages, ["root:first", "root:children-2", "child-1:first", "child-2:first"]);
+    assert.equal(metrics?.debrief?.sessions[0]?.models["openai/gpt-5.6-sol"], 18);
+    assert.deepEqual(metrics?.debrief?.sessions[0]?.tasks, ["child-1"]);
+    assert.deepEqual(metrics?.debrief?.sessions[1]?.mutations, [{ start: 3, end: 4 }]);
+    assert.equal(metrics?.debrief?.sessions[2]?.checks[0]?.passed, true);
+    assert.equal(metrics?.debrief?.complete, true);
+    fixture.context.session.list = async () => { throw new Error("history unavailable"); };
+    const incomplete = await collectRunMetrics(client, "root");
+    assert.equal(incomplete?.tokens, undefined, "a missing hierarchy must never report a root-only total as complete");
+    assert.equal(incomplete?.debrief?.complete, false);
+  } finally { cleanup?.(); }
 });
 
 test("V2 server plugin registers tools and translates public hooks without changing the V1 entry", async () => {
@@ -256,14 +301,14 @@ test("V2 event failures warn per event and keep lifecycle translation active", a
   try {
     fixture.failNextContext();
     await fixture.emit({ type: "session.execution.succeeded", data: { sessionID: "root" } });
-    fixture.failNextSynthetic();
+    fixture.failNextContext();
     await fixture.emit({ type: "session.execution.succeeded", data: { sessionID: "root" } });
     await fixture.emit({ type: "session.idle", data: { sessionID: "root" } });
     await fixture.emit({ type: "session.compaction.ended", data: { sessionID: "root" } });
     await fixture.emit({ type: "filesystem.changed", data: { file: "changed.txt", event: "change" } });
     assert.equal(fixture.synthetic.length, 0);
     assert.ok(warnings.some(values => values[0] === "[sortie-dogs-v010] V2 event handling failed" && values[1] === "context unavailable"));
-    assert.ok(warnings.some(values => values[0] === "[sortie-dogs-v010] V2 event handling failed" && values[1] === "synthetic unavailable"));
+    assert.equal(warnings.filter(values => values[0] === "[sortie-dogs-v010] V2 event handling failed").length, 2);
     assert.deepEqual(observed, ["session.idle:root", "session.compacted:root", "file.edited:changed.txt"]);
   } finally {
     console.warn = originalWarn;

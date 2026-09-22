@@ -11,7 +11,7 @@ import { relative, resolve, sep } from "node:path";
 import { readFile, realpath } from "node:fs/promises";
 import { BUILT_IN_MODEL_CATALOG, type CatalogModel } from "./model-routing.js";
 import { goalFingerprint } from "../core/goal-bound.js";
-import { decoratePreviewHeadings } from "./receipt-presentation.js";
+import { decoratePreviewHeadings, returnReportPanel } from "./receipt-presentation.js";
 import { sanitizeTerminalReport, terminalRunOutcome } from "./run-metrics.js";
 import { normalizeCommand } from "./gate.js";
 import { normalizeRelativePath } from "../core/path.js";
@@ -249,7 +249,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     });
     const runtimeBridge: RuntimeBridge = {
       profile, assetVersion,
-      continuationCheckpoint: root => operators.continuationCheckpoint(root),
+      continuationCheckpoint: async root => await operators.continuationCheckpoint(root) ?? await proposals.continuationCheckpoint(root),
+      requiresExplicitAcceptance: async root => {
+        const state = await operators.read(root);
+        return state !== undefined && state.phase !== "completed" && operatorTurnLifecycle.get(root) !== "historical";
+      },
       ownsCanonicalValidation: async (root, taskID, child, command) => {
         const state = await operators.read(root);
         if (state === undefined || state.phase === "cancelled" || state.phase === "completed") return false;
@@ -447,7 +451,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         await registerPreparedGoal(context.sessionID, state);
         return preparedTask(state);
       } };
-    tools[repair] = { description: "Repair a root-owned draft with named fields, git_lifecycle branch/start/message fields, or an already-declared criterion command. A diagnosed /units/i/read/j scope error may be replaced with a normalized repository-relative spelling of the same resource only: absolute inputs require an existing relative alias whose realpath is identical; read expansion, redirection, whole-array replacement and write-scope repair are forbidden. Empty patches revalidate the saved draft without resending it. Acceptance, unit count and write scope remain fixed.",
+    tools[repair] = { description: "Repair a root-owned draft with named fields, git_lifecycle branch/start/message fields, or an already-declared criterion command. A diagnosed operator-goal-field-invalid may repair only its exact invalid or missing goal declaration field using the reported expected values; valid fields, budgets and whole declaration replacement remain forbidden. A diagnosed /units/i/read/j scope error may be replaced with a normalized repository-relative spelling of the same resource only: absolute inputs require an existing relative alias whose realpath is identical; read expansion, redirection, whole-array replacement and write-scope repair are forbidden. Empty patches revalidate the saved draft without resending it. Acceptance, unit count and write scope remain fixed.",
       args: { draft_id: stringSchema, patches_json: stringSchema }, execute: async (args, context) => {
         await requireRoot(context.sessionID);
         let patches: unknown;
@@ -598,15 +602,25 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         if (!["awaiting-acceptance", "completed"].includes(state.phase) || state.units.some(unit => unit.status !== "succeeded")) {
           return JSON.stringify({ status: "not-ready", packet: operators.packet(state) });
         }
-        const goalFingerprint = await operators.completionGoalFingerprint(state);
+        const declarationFingerprint = await operators.completionGoalFingerprint(state);
         if (state.phase === "awaiting-acceptance") {
-          await relinkRegisteredGoal(context.sessionID, state, goalFingerprint);
-          await control!.assertActiveGoal(context.sessionID, goalFingerprint);
+          await relinkRegisteredGoal(context.sessionID, state, declarationFingerprint);
+          await control!.assertActiveGoal(context.sessionID, declarationFingerprint);
         }
-        const result = await control!.completeRoot(context.sessionID, goalFingerprint);
+        const result = await control!.completeRoot(context.sessionID, declarationFingerprint);
         if (result.receipt) await operators.terminal(context.sessionID, result.receipt);
+        let panel: string | undefined;
+        if (input.returnReportTransport === "tool-result" && result.receipt?.status === "succeeded") {
+          const text = `✅ **DONE** \`${state.runID}\` — ${state.acceptance.length} acceptance requirements verified.\n\n` +
+            `**変更点:** ${state.units.map(unit => unit.unit.title).join("; ")}\n\n` +
+            `**確認結果:** PASS — ${[...new Set(state.units.flatMap(unit => unit.unit.validation))].join("; ")}\n\n**次:** なし`;
+          const rendered = await control!.renderReturnReport(context.sessionID, text, goalFingerprint(result.receipt)).catch(() => undefined);
+          if (rendered) panel = returnReportPanel(rendered);
+        }
         return JSON.stringify({ status: result.status, run_id: state.runID,
-          acceptance_fingerprint: state.acceptanceFingerprint, receipt: result.receipt ?? null });
+          acceptance_fingerprint: state.acceptanceFingerprint, receipt: result.receipt ?? null,
+          ...(panel ? { return_report: panel,
+            return_report_instruction: "Append return_report verbatim exactly once to your final answer as Markdown, outside any code fence. It is a host-authored receipt display, not a new task or input. Do not summarize, recalculate or request another model turn for it." } : {}) });
       } };
     tools[resume] = { description: "Reconcile a finished process-defect unit from native host validation records and unchanged source. For the exact first validation-only contract-repair continuation process defect, unchanged durable controls/candidate and available validation budget permit one same-worker validation-only retry; the result includes the exact Task to invoke. Never reimplements a unit or resets implementation/goal spend.",
       args: { run_id: stringSchema, acceptance_fingerprint: stringSchema }, execute: async (args, context) => {
@@ -873,8 +887,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             output.parts.some(part => record(part) && part.type === "text" && typeof part.text === "string" && part.text.trim().length > 0);
           if (realTurn) {
             const state = await operators.read(chat.sessionID);
-            if ((state !== undefined && (state.phase === "cancelled" || state.phase === "completed")) ||
-                operatorTurnLifecycle.get(chat.sessionID) === "cancelled") {
+            if (((state !== undefined && (state.phase === "cancelled" || state.phase === "completed")) ||
+                operatorTurnLifecycle.get(chat.sessionID) === "cancelled") &&
+                await runtimeBridge.continuationCheckpoint!(chat.sessionID) === undefined) {
               operatorTurnLifecycle.set(chat.sessionID, "historical");
               const messageID = typeof chat.messageID === "string" && chat.messageID.length > 0
                 ? chat.messageID
