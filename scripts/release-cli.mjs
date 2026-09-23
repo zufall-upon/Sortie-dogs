@@ -18,6 +18,9 @@ export const pluginPackageForOpenCodeVersion = version => Number.parseInt(versio
 export const runLocationArgsForOpenCodeVersion = (version, project) =>
   Number.parseInt(version.split('.')[0], 10) >= 2 ? ['--standalone'] : ['--dir', project];
 export const RELEASE_SMOKE_RUN_TIMEOUT_SECONDS = 900;
+export const RELEASE_SMOKE_TERMINAL_TIMEOUT_SECONDS = 180;
+export const RELEASE_SMOKE_TERMINAL_PROMPT =
+  'Use the existing succeeded recovery unit and complete this same goal terminally now. Do not dispatch or edit again.';
 export const v2PluginWrapperSource = runtime => `import { createSortieDogsV2Plugin } from "sortie-dogs/server";\n` +
   `import { SortieDogsPlugin } from "${runtime.id === 'stable' ? 'sortie-dogs/plugin/stable' : 'sortie-dogs/plugin'}";\n` +
   `export default createSortieDogsV2Plugin(SortieDogsPlugin);\n`;
@@ -120,11 +123,11 @@ export async function inside(tgz, directory, profileId = 'stable') {
     ext: { 'sortie-dogs/write-gate': { project_root: join(project, 'child'), operation_manifest: `${runtime.stateDirectory}/contracts/recovery.operation-manifest.json` },
       'sortie-dogs/acceptance-continuity': { schema_version: '0.1', authority: 'dispatch', task_id: 'recovery', criteria: [criterion], fingerprint, parent_fingerprint: 'none' } } }, null, 2));
   const jsonEvents = text => text.split(/\r?\n/).flatMap(line => { try { return [JSON.parse(line)]; } catch { return []; } });
-  async function cli(prompt, sessionID) {
+  async function cli(prompt, sessionID, timeoutSeconds = RELEASE_SMOKE_RUN_TIMEOUT_SECONDS) {
     // timeout runs in WSL: Windows killing wsl.exe alone does not establish guest process cleanup.
-    return jsonEvents(await command('timeout', ['--signal=TERM', '--kill-after=10s', `${RELEASE_SMOKE_RUN_TIMEOUT_SECONDS}s`, 'opencode', 'run',
+    return jsonEvents(await command('timeout', ['--signal=TERM', '--kill-after=10s', `${timeoutSeconds}s`, 'opencode', 'run',
       ...runLocationArgsForOpenCodeVersion(cliVersion, project), '--format', 'json', '--print-logs', '--agent', coordinatorAgent,
-      ...(sessionID ? ['--session', sessionID] : []), prompt], project, env, (RELEASE_SMOKE_RUN_TIMEOUT_SECONDS + 40) * 1_000));
+      ...(sessionID ? ['--session', sessionID] : []), prompt], project, env, (timeoutSeconds + 40) * 1_000));
   }
   const checkpoint = await cli('Open a goal for this release fixture. Do not call tools. Reply exactly RELEASE_CHECKPOINT without terminal status.');
   const sessionID = checkpoint.find(event => event.sessionID)?.sessionID;
@@ -167,10 +170,16 @@ goal_validation_command: node child/validate.mjs
 goal_fixture: release-smoke
 goal_proof_scope: document-deliverable
 goal_expected_outcome: pass`;
-  const events = await cli(`Resume this same goal. Check the supplied contract, then dispatch one ${workerAgent} with this full ready-to-send context_digest and goal declaration. This is the direct one-worker fast path; no operator plan is needed. The Task prompt must contain exactly one acceptance header, one validation header, one source_manifest header and one project_root header. Preserve the structured declaration below verbatim and append only prose instructions. Worker must Read the absolute handoff path, wait for Read completion, then bind in a separate tool round. Use apply_patch on exactly child/result.txt to replace seed with recovered. Native tool CWD is ${project}; project_root for bind is ${join(project, 'child')}. Run exactly node child/validate.mjs from ${project}. No alternate editing tool or path, no commit. If admission or validation fails, stop and report it. Complete terminally only after canonical PASS.\n${declaration}`, sessionID);
-  const records = JSON.parse(await readFile(ledgerPath, 'utf8')).goal_events;
-  const state = reduceGoalFlight(records);
-  const workerStarted = releaseSmokeWorkerStarted(events, records, 'recovery');
+  let events = await cli(`Resume this same goal. Check the supplied contract, then dispatch one ${workerAgent} with this full ready-to-send context_digest and goal declaration. This is the direct one-worker fast path; no operator plan is needed. The Task prompt must contain exactly one acceptance header, one validation header, one source_manifest header and one project_root header. Preserve the structured declaration below verbatim and append only prose instructions. Worker must Read the absolute handoff path, wait for Read completion, then bind in a separate tool round. Use apply_patch on exactly child/result.txt to replace seed with recovered. Native tool CWD is ${project}; project_root for bind is ${join(project, 'child')}. Run exactly node child/validate.mjs from ${project}. No alternate editing tool or path, no commit. If admission or validation fails, stop and report it. Complete terminally only after canonical PASS.\n${declaration}`, sessionID);
+  let records = JSON.parse(await readFile(ledgerPath, 'utf8')).goal_events;
+  let state = reduceGoalFlight(records);
+  let workerStarted = releaseSmokeWorkerStarted(events, records, 'recovery');
+  if (workerStarted && state.phase !== 'terminal') {
+    events = [...events, ...await cli(RELEASE_SMOKE_TERMINAL_PROMPT, sessionID, RELEASE_SMOKE_TERMINAL_TIMEOUT_SECONDS)];
+    records = JSON.parse(await readFile(ledgerPath, 'utf8')).goal_events;
+    state = reduceGoalFlight(records);
+    workerStarted = releaseSmokeWorkerStarted(events, records, 'recovery');
+  }
   process.stderr.write(JSON.stringify({ phase: 'outcome', sessionID, phaseState: state.phase, stopReason: state.stop_reason,
     tools: events.filter(event => event.type === 'tool_use').map(event => ({ tool: event.part?.tool,
       status: event.part?.state?.status, error: event.part?.state?.error?.split('\n')[0] })) }) + '\n');
