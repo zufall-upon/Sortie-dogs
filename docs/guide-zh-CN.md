@@ -93,6 +93,8 @@ provider 返回的 tier 单独展示；估算不是账单，也不包含尚未�
 
 v0.10 可通过 `init --profile v010` 和 `sortie-dogs/server/v010` 继续使用。
 同一安装只注册一个运行时；v0.10 和 v0.11 共用窗口与执行角色文件名。
+v0.10 兼容运行时优先使用 catalog 已声明的 `anthropic/claude-opus-5-5` 进行咨询，
+否则回退到 `openai/gpt-6-sol#xhigh`。历史限制与设计方向见 [v0.10 回顾](v010-retrospective.md)。
 
 ## 实机验证
 

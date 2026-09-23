@@ -96,6 +96,8 @@ dependency更新後に`init .`、global利用なら`init --global`を実行し�
 
 v0.10専用JSONや旧planを新しい仕事へ自動変換しません。
 互換profileの利用方法、実機検証の再現コマンドは[README](../README.md)を参照してください。
+v0.10互換runtimeの相談先はcatalog宣言済み`anthropic/claude-opus-5-5`を優先し、
+なければ`openai/gpt-6-sol#xhigh`です。v0.10の制約と経緯は[振り返り](v010-retrospective.md)に記録しています。
 
 ## 実機検証
 

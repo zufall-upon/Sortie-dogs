@@ -23,6 +23,10 @@ test("calculates verified aliases per request and charges reasoning output once"
     uncachedInputTokens: 1_000_000, cacheReadTokens: 1_000_000, cacheWriteTokens: 1_000_000,
     outputTokens: 500_000, reasoningTokens: 0 });
   assert.deepEqual(anthropic, { status: "priced", usd: 24.25, longContext: false, priceKey: "anthropic/claude-opus-5" });
+  const opus55 = estimateModelUsageCost({ providerID: "anthropic", modelID: "claude-opus-5-5",
+    uncachedInputTokens: 1_000_000, cacheReadTokens: 1_000_000, cacheWriteTokens: 1_000_000,
+    outputTokens: 500_000, reasoningTokens: 0 });
+  assert.deepEqual(opus55, { status: "priced", usd: 19.2, longContext: false, priceKey: "anthropic/claude-opus-5-5" });
 });
 
 test("prices the released GPT-6 Sol and Luna definitions from their official schedules", () => {
