@@ -580,11 +580,13 @@ test("release smoke accepts plain and branded OpenCode version output", () => {
   assert.equal(pluginPackageForOpenCodeVersion("2.0.14"), "@opencode/plugin");
   assert.deepEqual(runLocationArgsForOpenCodeVersion("1.18.32", "/project"), ["--dir", "/project"]);
   assert.deepEqual(runLocationArgsForOpenCodeVersion("2.0.14", "/project"), ["--standalone"]);
+  assert.deepEqual(runLocationArgsForOpenCodeVersion("2.0.14", "/project", "http://127.0.0.1:4096"),
+    ["--server", "http://127.0.0.1:4096"]);
   assert.match(v2PluginWrapperSource(STABLE_RUNTIME_PROFILE), /sortie-dogs\/plugin\/stable/);
   assert.match(v2PluginWrapperSource(V010_RUNTIME_PROFILE), /from "sortie-dogs\/plugin"/);
   assert.equal(RELEASE_SMOKE_RUN_TIMEOUT_SECONDS, 900);
   assert.equal(RELEASE_SMOKE_TERMINAL_TIMEOUT_SECONDS, 180);
-  assert.match(RELEASE_SMOKE_TERMINAL_PROMPT, /Do not dispatch or edit again/);
+  assert.match(RELEASE_SMOKE_TERMINAL_PROMPT, /status: DONE/);
   assert.equal(releaseSmokeWorkerStarted([], [{ event: {
     kind: "unit.settled", unit_id: "recovery", disposition: "succeeded",
   } }], "recovery"), true);
