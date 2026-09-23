@@ -374,6 +374,13 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     const revisionSchema = record(stringSchema) && typeof stringSchema.describe === "function"
       ? stringSchema.describe(OPERATOR_PROPOSAL_REVISION_CONTRACT)
       : { ...(record(stringSchema) ? stringSchema : { type: "string" }), description: OPERATOR_PROPOSAL_REVISION_CONTRACT };
+    const approvedRevisionContract = "revision_json must encode exactly {proposal_id:string,revision:positive integer,content_hash:string,operator_run_id:string,rationale:nonblank single-line string,intent:object}. " +
+      "The intent has the exact begin_operator_proposal intent_json shape and a cumulative proposal_budget with room above all retained reads/submissions. " +
+      "Pin the approved proposal identity and the cancelled/completed run ID from operator_status. Only a root acting for a newly authorized active goal may revise; active/prepared runs, stale identity or unchanged goal binding are denied. " +
+      "Old acceptance, terminal status and proposal accounting remain durable. This returns an investigation Task, not implementation or acceptance.";
+    const approvedRevisionSchema = record(stringSchema) && typeof stringSchema.describe === "function"
+      ? stringSchema.describe(approvedRevisionContract)
+      : { ...(record(stringSchema) ? stringSchema : { type: "string" }), description: approvedRevisionContract };
     const planContract = "plan_json must encode the exact operator plan object: schema_version, acceptance, acceptance_proof, source_refs, " +
       "goal_declaration, units, and optional git_lifecycle only. git_lifecycle exact shape is " +
       '{branch_create:{branch:string,start_ref:string},commit:{message:string},post_commit_validation:string[],remediation_reserve?:string[],remediation_scope_expansion?:string[]}. Its presence is root authorization for only a clean, non-overwriting ' +
@@ -400,6 +407,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     const submitProposal = profileTool(profile, "sortie_submit_operator_proposal");
     const approveProposal = profileTool(profile, "sortie_approve_operator_proposal");
     const reviseProposal = profileTool(profile, "sortie_revise_operator_proposal");
+    const reviseApprovedIntent = profileTool(profile, "sortie_revise_approved_operator_intent");
     async function stop(root: string, reason: string, retireRoot = true): Promise<void> {
       if (retireRoot) retired.add(root);
       if (retireRoot) await control?.stopAutomaticRecovery(root);
@@ -517,7 +525,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             : "proposal is not submitted; do not call operator_next; complete or repair the bounded proposal submission"
           : proposal?.phase === "submitted"
             ? `compare every original requirement with the exact proposal. For a known semantic defect, use ${reviseProposal} with its current identity and bounded field patches, then compare again; do not redispatch the ended child or cancel/reinvestigate the same defect. Approval preparation pins the plan and closes revision. Do not call operator_next before approval prepares a run. Approval authorizes implementation, not product acceptance. Preserve every required live measurement, consultation, root-owned push/global apply and user approval as pending acceptance obligations; canonical commands do not substitute for them. Use the host budget counters, not plan.goal_declaration.goal_budget_units, for remaining capacity; approval validates the retained goal binding and execution budget. A bounded diagnostic run may use cancel_operator after admission without inventing a plan validation command for cancellation.`
-            : "approved proposal has no operator run; do not call operator_next; reconcile the approval or preparation failure";
+            : `approved proposal is bound to its execution lane. Continue that run while active. After a terminal cancelled/completed run, a genuinely new user-authorized goal may use ${reviseApprovedIntent} with the old proposal identity and run ID; retain all spend and the prior contract archive. Do not call begin_operator_proposal with a changed intent or redispatch the old child.`;
         return JSON.stringify(state ? { ...await operatorPacket(state), ...(draft ? { pending_draft: draft } : {}),
           ...(proposal ? { proposal: proposalIdentity(proposal) } : {}) }
           : draft ? { ...draft as object, ...(proposal ? { proposal: proposals.packet(proposal) } : {}) }
@@ -736,6 +744,27 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         return JSON.stringify({ ...proposals.packet(state) as object, task: proposals.referenceTask(state),
           dispatch_instruction: "Pass this short Task reference verbatim; do not append or paraphrase it." });
       } };
+    tools[reviseApprovedIntent] = { description: `Root-only: after a terminal cancelled/completed run, explicitly replace its approved proposal with a new user-authorized intent. Supply revision_json with exactly {proposal_id,revision,content_hash,operator_run_id,rationale,intent}; pin the approved identity and terminal run from operator_status. The intent has the exact ${beginProposal} intent_json shape and a cumulative proposal_budget strictly above retained reads/submissions. A current active goal with a changed binding and no outstanding reservations is required. The prior approved contract, ordered acceptance, terminal disposition and cumulative proposal spend are archived; the old run is never accepted, revived or overwritten. Active/prepared runs and stale identities are rejected. This grants one new investigation Task, not approval or execution.`,
+      args: { revision_json: approvedRevisionSchema }, execute: async (args, context) => {
+        await requireRoot(context.sessionID);
+        return serializeDispatchTransition(context.sessionID, async () => {
+          let request: unknown;
+          try { request = JSON.parse(args.revision_json); }
+          catch { return JSON.stringify({ status: "invalid-approved-revision", code: "operator-proposal-approved-revision-json-invalid" }); }
+          try {
+            const binding = await control!.proposalGoalBinding(context.sessionID);
+            await control!.assertActiveGoal(context.sessionID, binding.acceptance_fingerprint);
+            const revised = await proposals.reviseApproved(context.sessionID, context.sessionID, request,
+              () => new OperatorRuntime(input.directory, profile).read(context.sessionID), binding);
+            return JSON.stringify({ ...proposals.packet(revised) as object, task: proposals.referenceTask(revised),
+              dispatch_instruction: "Dispatch this new exact Task reference once; do not reuse the prior approved contract or its child." });
+          } catch (error) {
+            if (error instanceof OperatorProposalBudgetError) return JSON.stringify(error.diagnostic);
+            if (!(error instanceof Error) || !error.message.startsWith("operator-proposal-")) throw error;
+            return JSON.stringify({ status: "invalid-approved-revision", code: error.message });
+          }
+        });
+      } };
     tools[submitProposal] = { description: "Proposal-child-only: submit a requirement-mapped contract proposal without editing source or starting workers. " + proposalContract + " Omit plan.acceptance; the host derives its exact ordered text from durable intent.requirements. A legacy explicit plan.acceptance is accepted only when byte-exact in content and order; null, subsets, reorder, normalization, and acceptance_ids aliases are rejected.",
       args: { proposal_json: proposalSchema }, execute: async (args, context) => {
         const root = await rootFor(context.sessionID); if (!root) throw new Error("operator-proposal-session-inactive");
@@ -805,7 +834,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         });
       } };
     const ownTools = new Set([prepare, repair, next, status, cancel, complete, resume, resolveContractRepair,
-      beginProposal, submitProposal, approveProposal, reviseProposal]);
+      beginProposal, submitProposal, approveProposal, reviseProposal, reviseApprovedIntent]);
     const protocolMap = CANONICAL_AGENT_ROLES.map(role => `${role}=${profileAgent(profile, role)}`).join(", ");
     function rememberRendered(key: string, text: string): void {
       renderedParts.set(key, goalFingerprint(text));

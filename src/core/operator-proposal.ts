@@ -3,7 +3,7 @@ import { mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { RuntimeProfile } from "./runtime-profile.js";
 import { normalizeRelativePath } from "./path.js";
-import { OperatorContractError, parseOperatorPlan, type OperatorContractDiagnostic, type OperatorPlan, type OperatorTask } from "./operator-runtime.js";
+import { OperatorContractError, parseOperatorPlan, type OperatorContractDiagnostic, type OperatorPlan, type OperatorState, type OperatorTask } from "./operator-runtime.js";
 
 const hash = (value: string): string => createHash("sha256").update(value).digest("hex");
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -154,6 +154,9 @@ export interface OperatorProposalState {
   /** Preparation may publish execution controls before approval commits; never revise that pinned plan. */
   approval_started?: boolean;
   root_revisions?: OperatorProposalRevision[];
+  /** Immutable archive identities of earlier approved contracts on this root. */
+  approved_history?: readonly { readonly archive_hash: string; readonly intent_id: string; readonly proposal_id: string;
+    readonly run_id: string; readonly disposition: "completed" | "incomplete" }[];
 }
 
 interface OperatorProposalIdentity { readonly proposal_id: string; readonly revision: number; readonly content_hash: string }
@@ -174,6 +177,7 @@ interface OperatorProposalSpend {
   reads: number;
   submissions: number;
   readonly retry?: { readonly intent_hash: string; readonly goal_binding: OperatorProposalGoalBinding };
+  readonly approved_history?: OperatorProposalState["approved_history"];
 }
 
 export interface OperatorProposalBudgetDiagnostic {
@@ -376,6 +380,10 @@ export class OperatorProposalRuntime {
   readonly projectRoot: string;
   constructor(projectRoot: string, readonly profile: RuntimeProfile) { this.projectRoot = resolve(projectRoot); }
   private file(root: string): string { return join(this.projectRoot, this.profile.stateDirectory, "operator-proposals", `${hash(root)}.json`); }
+  private approvedArchiveFile(root: string, intentID: string, proposalHash: string, runID: string): string {
+    return join(this.projectRoot, this.profile.stateDirectory, "operator-proposals",
+      `${hash(root)}.${intentID}.${proposalHash}.${hash(runID).slice(0, 16)}.approved.json`);
+  }
   private spendFile(root: string): string { return join(this.projectRoot, this.profile.stateDirectory, "operator-proposals", `${hash(root)}.spend.json`); }
   private async readSpend(root: string): Promise<OperatorProposalSpend> {
     let source: string;
@@ -396,6 +404,12 @@ export class OperatorProposalRuntime {
         !Number.isSafeInteger(spend.retry.goal_binding.revision) || spend.retry.goal_binding.revision < 1 ||
         !Number.isSafeInteger(spend.retry.goal_binding.scope_epoch) || spend.retry.goal_binding.scope_epoch < 1 ||
         !/^sha256:[a-f0-9]{64}$/u.test(spend.retry.goal_binding.acceptance_fingerprint))) {
+      throw new Error("operator-proposal-spend-invalid");
+    }
+    if (spend.approved_history !== undefined && (!Array.isArray(spend.approved_history) ||
+        spend.approved_history.some(item => !record(item) || !/^[a-f0-9]{64}$/u.test(String(item.archive_hash)) ||
+          !identifier(item.intent_id) || !identifier(item.proposal_id) || !text(item.run_id) ||
+          !["completed", "incomplete"].includes(String(item.disposition))))) {
       throw new Error("operator-proposal-spend-invalid");
     }
     return spend;
@@ -538,9 +552,73 @@ export class OperatorProposalRuntime {
       goal_binding: spend.retry?.intent_hash === intentHash ? structuredClone(spend.retry.goal_binding) : null,
       proposal_call_id: null, proposal_session_id: null, read_count: spend.reads, read_paths: [], submission_count: spend.submissions, proposal_id: null,
       ...(spend.reads > 0 || spend.submissions > 0 ? { prior_spend: { reads: spend.reads, submissions: spend.submissions } } : {}),
-      proposal_revision: null, proposal_hash: null, proposal: null, approval_rationale: null };
+      proposal_revision: null, proposal_hash: null, proposal: null, approval_rationale: null,
+      ...(spend.approved_history ? { approved_history: structuredClone(spend.approved_history) } : {}) };
     this.assertBudgetAvailable(state);
     await this.save(state); return state;
+  }
+  /** Explicit root-only transition after an approved contract's execution lane has ended. */
+  async reviseApproved(root: string, actor: string, raw: unknown,
+    readRun: () => Promise<OperatorState | undefined>, currentGoal: OperatorProposalGoalBinding): Promise<OperatorProposalState> {
+    if (actor !== root) throw new Error("operator-proposal-approved-revision-root-required");
+    return this.serial(root, async () => {
+      if (!record(raw) || !exactSet(raw, ["proposal_id", "revision", "content_hash", "operator_run_id", "rationale", "intent"]) ||
+          typeof raw.proposal_id !== "string" || !Number.isSafeInteger(raw.revision) || typeof raw.content_hash !== "string" ||
+          typeof raw.operator_run_id !== "string" || !text(raw.rationale)) {
+        throw new Error("operator-proposal-approved-revision-invalid");
+      }
+      const previous = await this.requiredUnlocked(root);
+      if (previous.phase !== "approved" || !previous.proposal || !previous.goal_binding) {
+        throw new Error("operator-proposal-approved-revision-not-approved");
+      }
+      if (raw.proposal_id !== previous.proposal_id || raw.revision !== previous.proposal_revision ||
+          raw.content_hash !== previous.proposal_hash) throw new Error("operator-proposal-approved-revision-identity-mismatch");
+      const run = await readRun();
+      if (!run || !["cancelled", "completed"].includes(run.phase) || run.rootSessionID !== root ||
+          run.runID !== raw.operator_run_id || run.planHash !== hash(JSON.stringify(previous.proposal.plan)) ||
+          JSON.stringify(run.acceptance) !== JSON.stringify(previous.proposal.plan.acceptance)) {
+        throw new Error("operator-proposal-approved-revision-terminal-run-required");
+      }
+      if (!text(currentGoal.goal_id) || !Number.isSafeInteger(currentGoal.revision) || currentGoal.revision < 1 ||
+          !Number.isSafeInteger(currentGoal.scope_epoch) || currentGoal.scope_epoch < 1 ||
+          !/^sha256:[a-f0-9]{64}$/u.test(currentGoal.acceptance_fingerprint)) {
+        throw new Error("operator-proposal-goal-binding-invalid");
+      }
+      if (JSON.stringify(currentGoal) === JSON.stringify(previous.goal_binding)) {
+        throw new Error("operator-proposal-approved-revision-goal-revision-required");
+      }
+      const intent = parseIntent(raw.intent), intentHash = hash(JSON.stringify(intent));
+      if (intentHash === previous.intent_hash) throw new Error("operator-proposal-approved-revision-intent-unchanged");
+      const remainingReads = intent.proposal_budget.max_reads - previous.read_count;
+      const remainingSubmissions = intent.proposal_budget.max_submissions - previous.submission_count;
+      if (remainingReads <= 0 || remainingSubmissions <= 0) {
+        throw new OperatorProposalBudgetError({ status: "proposal-budget-exhausted",
+          code: remainingReads <= 0 ? "operator-proposal-read-budget-exhausted" : "operator-proposal-submission-budget-exhausted",
+          reads: previous.read_count, max_reads: intent.proposal_budget.max_reads, remaining_reads: Math.max(0, remainingReads),
+          submissions: previous.submission_count, max_submissions: intent.proposal_budget.max_submissions,
+          remaining_submissions: Math.max(0, remainingSubmissions),
+          required_minimum_budget: { max_reads: previous.read_count + 1, max_submissions: previous.submission_count + 1 } });
+      }
+      const archive = JSON.stringify({ approved_proposal: previous, terminal_run: {
+        run_id: run.runID, plan_hash: run.planHash, acceptance: run.acceptance, acceptance_fingerprint: run.acceptanceFingerprint,
+        phase: run.phase, decision: run.decision, receipt: run.receipt, generation: run.generation } });
+      const archivePath = this.approvedArchiveFile(root, previous.intent_id, previous.proposal_hash!, run.runID);
+      try { await writeFile(archivePath, archive, { flag: "wx", mode: 0o600 }); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST" || hash(await readFile(archivePath, "utf8")) !== hash(archive)) throw error;
+      }
+      const state: OperatorProposalState = { schema_version: "0.1", profile: this.profile.id, root_session_id: root,
+        intent_id: `intent-${intentHash.slice(0, 24)}`, intent_hash: intentHash, intent, created_at: new Date().toISOString(),
+        phase: "investigating", goal_binding: structuredClone(currentGoal),
+        prior_spend: { reads: previous.read_count, submissions: previous.submission_count },
+        proposal_call_id: null, proposal_session_id: null, read_count: previous.read_count, read_paths: [],
+        submission_count: previous.submission_count, proposal_id: null, proposal_revision: null, proposal_hash: null,
+        proposal: null, approval_rationale: null,
+        approved_history: [...(previous.approved_history ?? []), { archive_hash: hash(archive), intent_id: previous.intent_id,
+          proposal_id: previous.proposal_id!, run_id: run.runID, disposition: run.phase === "completed" ? "completed" : "incomplete" }] };
+      await this.save(state);
+      return state;
+    });
   }
   async bindGoal(root: string, binding: OperatorProposalGoalBinding): Promise<OperatorProposalState> {
     return this.serial(root, () => this.bindGoalUnlocked(root, binding));
@@ -755,6 +833,7 @@ export class OperatorProposalRuntime {
       if (!state || state.phase === "approved") return undefined;
       await this.saveSpend({ schema_version: "0.1", profile: this.profile.id, root_session_id: root,
         reads: state.read_count, submissions: state.submission_count,
+        ...(state.approved_history ? { approved_history: state.approved_history } : {}),
         ...(state.goal_binding === null ? {} : { retry: { intent_hash: state.intent_hash, goal_binding: state.goal_binding } }) });
       await rm(this.file(root), { force: true });
       return state;
@@ -775,6 +854,6 @@ export class OperatorProposalRuntime {
     remaining_reads: state.intent.proposal_budget.max_reads - state.read_count, submissions: state.submission_count,
     remaining_submissions: state.intent.proposal_budget.max_submissions - state.submission_count,
     task_admitted: state.proposal_call_id !== null, uncovered: state.proposal?.uncovered ?? [], proposal: state.proposal,
-    approval_rationale: state.approval_rationale, root_revisions: state.root_revisions ?? [],
+    approval_rationale: state.approval_rationale, root_revisions: state.root_revisions ?? [], approved_history: state.approved_history ?? [],
     revision_available: state.phase === "submitted" && !state.approval_started && state.submission_count < state.intent.proposal_budget.max_submissions }; }
 }

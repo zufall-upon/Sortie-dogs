@@ -1936,6 +1936,116 @@ test("cancellation keeps an approved proposal bound to its execution lane", asyn
   assert.equal((await new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE).required("approved-root")).phase, "approved");
 }));
 
+test("terminal approved run requires a pinned root revision and retains its contract and proposal spend", async () => fixture(async root => {
+  const session = "approved-root";
+  const proposals = new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE);
+  const begun = await proposals.begin(session, { ...intent(), proposal_budget: { max_reads: 3, max_submissions: 3 } });
+  const task = proposals.referenceTask(begun);
+  await proposals.bindGoal(session, { goal_id: "old-goal", revision: 1, scope_epoch: 1,
+    acceptance_fingerprint: `sha256:${"a".repeat(64)}` });
+  await proposals.admit(session, "old-call", task);
+  await proposals.bind(session, "old-child", task.prompt);
+  await proposals.accountRead(session, "old-child", "src/input.ts");
+  const submitted = await proposals.submit(session, "old-child", packet(1));
+  await proposals.approve(session, approvalRequest(submitted));
+  const operators = new OperatorRuntime(root, V010_RUNTIME_PROFILE);
+  const prepared = await operators.prepare(session, submitted.proposal!.plan);
+  const revisedIntent = { ...intent(), original_request: { text: "Recover after agent change", source_ref: "user:u2" },
+    proposal_budget: { max_reads: 3, max_submissions: 3 } };
+  await assert.rejects(proposals.begin(session, revisedIntent), /new-intent-requires-explicit-root-revision/);
+  const binding = { goal_id: "new-goal", revision: 1, scope_epoch: 1,
+    acceptance_fingerprint: `sha256:${"b".repeat(64)}` };
+  const request = { ...proposalIdentity(submitted), operator_run_id: prepared.runID,
+    rationale: "The user requested a new contract after the old run was cancelled.", intent: revisedIntent };
+  const coldRun = () => new OperatorRuntime(root, V010_RUNTIME_PROFILE).read(session);
+  await assert.rejects(proposals.reviseApproved(session, session, request, coldRun, binding), /terminal-run-required/);
+  await operators.interrupted(session, "agent-changed");
+  for (const invalid of [
+    { actor: "foreign", request, binding, error: /root-required/ },
+    { actor: session, request: { ...request, content_hash: "0".repeat(64) }, binding, error: /identity-mismatch/ },
+    { actor: session, request: { ...request, operator_run_id: "wrong-run" }, binding, error: /terminal-run-required/ },
+    { actor: session, request, binding: submitted.goal_binding!, error: /goal-revision-required/ },
+    { actor: session, request: { ...request, intent: { ...revisedIntent, proposal_budget: { max_reads: 1, max_submissions: 1 } } },
+      binding, error: /budget-exhausted/ },
+  ]) await assert.rejects(proposals.reviseApproved(session, invalid.actor, invalid.request, coldRun, invalid.binding), invalid.error);
+  assert.deepEqual(proposalIdentity(await proposals.required(session)), proposalIdentity(submitted));
+  const revised = await new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE)
+    .reviseApproved(session, session, request, coldRun, binding);
+  assert.equal(revised.phase, "investigating");
+  assert.deepEqual(revised.goal_binding, binding);
+  assert.deepEqual(revised.prior_spend, { reads: 1, submissions: 1 });
+  assert.equal(revised.read_count, 1);
+  assert.equal(revised.submission_count, 1);
+  assert.deepEqual(revised.read_paths, []);
+  assert.equal(revised.approved_history?.[0]?.disposition, "incomplete");
+  const archivePath = join(root, V010_RUNTIME_PROFILE.stateDirectory, "operator-proposals",
+    `${createHash("sha256").update(session).digest("hex")}.${submitted.intent_id}.${submitted.proposal_hash}.${createHash("sha256").update(prepared.runID).digest("hex").slice(0, 16)}.approved.json`);
+  const archive = JSON.parse(await readFile(archivePath, "utf8"));
+  assert.deepEqual(archive.approved_proposal.intent.requirements, requirements);
+  assert.deepEqual(archive.approved_proposal.proposal.plan.acceptance, requirements.map(item => item.text));
+  assert.equal(archive.terminal_run.run_id, prepared.runID);
+  assert.equal(archive.terminal_run.phase, "cancelled");
+  assert.deepEqual((await operators.required(session)).acceptance, requirements.map(item => item.text));
+  assert.equal((await operators.required(session)).phase, "cancelled");
+  await assert.rejects(proposals.reviseApproved(session, session, request, coldRun, binding), /not-approved/);
+  const cold = new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE);
+  assert.deepEqual(await cold.required(session), revised);
+  assert.equal((await cold.begin(session, revisedIntent)).intent_id, revised.intent_id);
+  await cold.discardPreApproval(session);
+  const retried = await new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE).begin(session, revisedIntent);
+  assert.deepEqual(retried.approved_history, revised.approved_history);
+  assert.deepEqual(retried.prior_spend, { reads: 1, submissions: 1 });
+  assert.deepEqual(JSON.parse(await readFile(archivePath, "utf8")), archive);
+}));
+
+test("root tool cold-revises a cancelled approved operator without redispatching the old proposal", async () => fixture(async root => {
+  const { hooks, started, ledgerPath } = await previewProposal(root, 3);
+  await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "old-proposal" }, { args: started.task });
+  await hooks["chat.message"]!({ sessionID: "old-child", messageID: "old-child-user", agent: "dogs-coordinator" }, {
+    message: { agent: "dogs-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+    parts: [{ type: "text", text: started.task.prompt }],
+  });
+  await hooks["tool.execute.before"]!({ tool: "read", sessionID: "old-child", callID: "read" }, { args: { filePath: "src/input.ts" } });
+  await hooks.tool!.sortie_v010_submit_operator_proposal.execute({ proposal_json: JSON.stringify(packet(1)) }, { sessionID: "old-child" });
+  await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "old-proposal" }, { output: "Submitted." });
+  const submitted = await new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE).required("root");
+  const approved = JSON.parse(await hooks.tool!.sortie_v010_approve_operator_proposal.execute(
+    { approval_json: JSON.stringify(approvalRequest(submitted)) }, { sessionID: "root" }));
+  assert.equal(approved.status, "approved");
+  const oldRun = await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root");
+  const ledger = await RunFlightLedger.openGoal(ledgerPath);
+  const oldBudget = (await ledger.readGoal()).state;
+  await hooks.tool!.sortie_v010_cancel_operator.execute({ reason: "plain" }, { sessionID: "root" });
+  await hooks["experimental.text.complete"]!({ sessionID: "root", messageID: "old-terminal" }, {
+    text: "status: INTERRUPTED — prior goal cancelled\nTRUE_INTERRUPTION: user: new scope requested",
+  });
+  const cold = await previewHooks(root);
+  await cold["chat.message"]!({ sessionID: "root", messageID: "new-user", agent: "dog-operator" }, {
+    message: { agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-5.6-sol" } },
+    parts: [{ type: "text", text: "Implement a new authorized result.\ngoal_budget_units: 4" }],
+  });
+  const newIntent = { ...intent(), original_request: { text: "Implement a new authorized result.", source_ref: "user:new-user" },
+    proposal_budget: { max_reads: 3, max_submissions: 3 } };
+  const tool = cold.tool!.sortie_v010_revise_approved_operator_intent;
+  assert.deepEqual(Object.keys(tool.args), ["revision_json"]);
+  const request = { ...proposalIdentity(submitted), operator_run_id: oldRun.runID,
+    rationale: "Explicitly replace the cancelled prior contract for a new user request.", intent: newIntent };
+  const result = JSON.parse(await tool.execute({ revision_json: JSON.stringify(request) }, { sessionID: "root" }));
+  assert.equal(result.status, "investigating");
+  assert.equal(result.reads, 1);
+  assert.equal(result.submissions, 1);
+  assert.ok(result.task.prompt.startsWith(proposalRefPrefix));
+  assert.equal(result.approved_history[0].run_id, oldRun.runID);
+  assert.equal(result.approved_history[0].disposition, "incomplete");
+  const next = (await ledger.readGoal()).state;
+  assert.equal(next.consumed_units, oldBudget.consumed_units);
+  assert.equal(next.budget?.max_units, oldBudget.budget?.max_units);
+  assert.equal((await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root")).runID, oldRun.runID);
+  assert.equal((await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root")).phase, "cancelled");
+  assert.equal(JSON.parse(await tool.execute({ revision_json: JSON.stringify(request) }, { sessionID: "root" })).code,
+    "operator-proposal-approved-revision-not-approved");
+}));
+
 test("proposal cancellation releases its grant beside a cancelled historical operator", async () => fixture(async root => {
   const { hooks } = await previewProposal(root, 3);
   const runtime = new OperatorRuntime(root, V010_RUNTIME_PROFILE);
