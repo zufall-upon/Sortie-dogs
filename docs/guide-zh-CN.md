@@ -190,7 +190,7 @@ worker拥有static/targeted/related check，root拥有canonical/full-suite。can
 - `dog-worker-v010`：`openai/gpt-6-luna` / `max`
 - `dog-scout-v010`：`openai/gpt-6-luna` / `xhigh`
 - `dog-reviewer-v010`：`openai/gpt-6-sol` / `xhigh`
-- `dog-advisor-v010`：优先使用catalog中已声明的`anthropic/claude-opus-5`，否则使用`openai/gpt-6-sol` / `xhigh`
+- `dog-advisor-v010`：优先使用catalog中已声明的`anthropic/claude-opus-5-5`，否则使用`openai/gpt-6-sol` / `xhigh`
 
 在OpenCode中显式选择的model/variant对该session保持最高优先级。child default仅在native设置缺失时补全，
 也可由有效profile routing覆盖。review不会静默继承implementation model。

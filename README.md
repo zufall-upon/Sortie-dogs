@@ -242,7 +242,7 @@ reuse the same evidence instead of spending the validation budget again.
 - `dog-worker-v010`: `openai/gpt-6-luna` / `max`
 - `dog-scout-v010`: `openai/gpt-6-luna` / `xhigh`
 - `dog-reviewer-v010`: `openai/gpt-6-sol` / `xhigh`
-- `dog-advisor-v010`: preferred declared `anthropic/claude-opus-5`, otherwise
+- `dog-advisor-v010`: preferred declared `anthropic/claude-opus-5-5`, otherwise
   `openai/gpt-6-sol` / `xhigh`
 
 An explicit model and variant selected in OpenCode remains authoritative for that

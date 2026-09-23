@@ -49,6 +49,7 @@ const OPENAI: Readonly<Record<string, Prices>> = {
   "gpt-5.6-luna-fast": { input: 0.4, cacheRead: 0.04, cacheWrite: 0.5, output: 2.4 },
 };
 const ANTHROPIC: Readonly<Record<string, Prices>> = {
+  "claude-opus-5-5": { input: 4, cacheRead: 0.2, cacheWrite: 5, output: 20 },
   "claude-opus-5": { input: 5, cacheRead: 0.5, cacheWrite: 6.25, output: 25 },
 };
 
