@@ -33,7 +33,7 @@ node --experimental-strip-types --import ./test/setup.ts --test "test/full-test-
 
 ### 実行対象の選び方
 
-- `npm test`: plugin、continuation、fast-laneの通常検証です。全testではありません。
+- `npm test`: plugin、continuation、fast-lane、v0.11 work-loopの通常検証です。全testではありません。
 - `npm run test:dispatch`: execution plan、dispatch、acceptance、ledger、evidenceの対象testを実行します。
 - `npm run test:integration`: worktree dispatchの重いintegration層を実行します。
 - `node --experimental-strip-types --import ./test/setup.ts --test "test/<file>.test.ts"`:

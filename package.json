@@ -1,6 +1,6 @@
 {
   "name": "sortie-dogs",
-  "version": "0.10.23",
+  "version": "0.11.0",
   "description": "Bounded agent harness and validated orchestration loop plugin for OpenCode",
   "keywords": [
     "opencode",
@@ -50,8 +50,16 @@
       "import": "./dist/plugin/v2.js"
     },
     "./assets": {
+      "types": "./dist/runtime-assets-v011.d.ts",
+      "import": "./dist/runtime-assets-v011.js"
+    },
+    "./assets/v010": {
       "types": "./dist/runtime-assets-v010.d.ts",
       "import": "./dist/runtime-assets-v010.js"
+    },
+    "./server/v010": {
+      "types": "./dist/plugin/v2-legacy.d.ts",
+      "import": "./dist/plugin/v2-legacy.js"
     }
   },
   "bin": {

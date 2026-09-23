@@ -1,8 +1,41 @@
 # Release batch
 
-The release tooling is repository-maintainer tooling, not part of the distributed plugin. It runs on
-Windows with PowerShell 7, Node 22, Git, the approved npm/gh executables, and a configured WSL OpenCode
-CLI. npm authentication and publication remain manual.
+Release validation and publication are owned by the Ubuntu lane. Windows applies
+the released package and performs Windows-specific operational checks. Release
+tooling is repository-maintainer tooling, separate from the distributed plugin.
+
+## Ubuntu release from an already-versioned main commit
+
+When the implementation PR already contains the intended unpublished version, use
+the repository release gates directly. The historical `prepare` batch below is for
+advancing a package version and creating its release commit.
+
+1. Merge the reviewed PRs into `main`, fast-forward the release checkout and ensure
+   its clean HEAD matches `origin/main`. Verify the version, npm version availability,
+   and absence of the intended remote/local tag and GitHub Release.
+2. Freeze that commit, build and generate one `.tgz` under `_testenv/releases/<version>/`.
+   Record its commit, SHA-256 and SHA-1. Use that exact archive for subsequent checks
+   and publication.
+3. Run candidate preflight, then `npm run test:full`. Retain the complete file-scheduling
+   receipt. Execute any agreed benchmark samples against the frozen package and
+   declared environment, scoring their frozen predictions separately.
+4. Run `node scripts/release-cli.mjs <candidate.tgz> <evidence-directory> v011`.
+   Check the installed-package qualification receipt, actual exits and artifact identity.
+5. Apply the archive to the global OpenCode package directory and npm-global CLI,
+   run its `init --global --profile v011`, and compare installed code, runtime marker,
+   managed assets, retained consultation files and user settings.
+6. Create/push an annotated tag for the frozen commit, create the GitHub Release with
+   that archive, and publish that same archive to npm using the existing authentication.
+   Verify tag target, GitHub asset SHA-256, npm artifact SHA-1 and the intended dist-tag.
+
+The release notes record final qualification and benchmark conditions. OpenCode's
+complete restart remains a manual post-application step.
+
+## Historical version-advancing batch
+
+The batch supports PowerShell 7, Node 22, Git, npm/gh and a configured WSL OpenCode
+CLI on Windows; its JavaScript entrypoints also run on Ubuntu. It prints manual npm
+publication commands after preparation.
 
 ## Prepare a manifest
 
@@ -62,6 +95,26 @@ unchanged by CLI, global installation, GitHub Release, and manual npm publicatio
 fingerprint or digest invalidates the candidate. No tag/Release is deleted or replaced automatically.
 
 ## CLI smoke
+
+For **v0.11**, set `releaseProfile: "v011"` in the release manifest. This selects
+the default V2 user-proxy assets and the SOL6 / Luna6 Fast installed-package
+qualification, rather than the historical stable-profile smoke:
+
+```sh
+node scripts/release-cli.mjs <candidate.tgz> <evidence-directory> v011
+```
+
+The v0.11 driver checks the native `gpt-6-luna-fast` catalog definition and outgoing
+HTTP/WebSocket Fast tier, initial failing oracle, native compaction, correction,
+root-only acceptance, protected source and a second request in the same root.
+OpenCode 2.0.14 exposes compaction through its public HTTP API but not its plugin
+SessionDomain; the qualification controller queues that native operation after the
+first failing check. It never substitutes a synthetic continuation message.
+Keep raw histories and generated fixtures under ignored `_testenv/`; publish only
+the summary and frozen reproduction conditions. SWE-bench remains an optional
+separate evaluation.
+
+The following paragraphs describe the historical stable-profile smoke.
 
 `scripts/release-cli.mjs` creates a new `_testenv` fixture for each explicit attempt. It installs the
 tarball using WSL npm, checks the relative `file:` dependency and non-link lock entry, and verifies

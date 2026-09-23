@@ -41,9 +41,9 @@ const USAGE = `Usage: sortie-dogs lint <handoff.json> [<handoff.json> ...]
   [--changed-paths-from <file|->]
   [--changed-path <path> ...]
   [--format text|json] [--quiet] [--strict]`;
-const INIT_USAGE = `Usage: sortie-dogs init [project-root] [--profile stable|v010]
-       sortie-dogs init --global [--profile stable|v010]
-This beta package defaults to the v010 profile.`;
+const INIT_USAGE = `Usage: sortie-dogs init [project-root] [--profile stable|v010|v011]
+       sortie-dogs init --global [--profile stable|v010|v011]
+This package defaults to the V2-native v011 user-proxy profile.`;
 
 type OutputFormat = "text" | "json";
 
@@ -259,10 +259,10 @@ export async function run(argv: readonly string[]): Promise<number> {
     }
     const initArgs = [...argv.slice(1)];
     const profileIndex = initArgs.indexOf("--profile");
-    const profile = profileIndex < 0 ? "v010" : initArgs[profileIndex + 1];
+    const profile = profileIndex < 0 ? "v011" : initArgs[profileIndex + 1];
     if (profileIndex >= 0) initArgs.splice(profileIndex, 2);
     const global = initArgs[0] === "--global";
-    if ((profile !== "stable" && profile !== "v010") || initArgs.length > 1 || (initArgs[0]?.startsWith("-") === true && !global)) {
+    if ((profile !== "stable" && profile !== "v010" && profile !== "v011") || initArgs.length > 1 || (initArgs[0]?.startsWith("-") === true && !global)) {
       process.stderr.write(`${INIT_USAGE}\n`);
       return 2;
     }

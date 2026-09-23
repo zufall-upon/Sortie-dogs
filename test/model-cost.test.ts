@@ -35,6 +35,9 @@ test("prices the released GPT-6 Sol and Luna definitions from their official sch
 });
 
 test("prices the Luna fast route so a routed worker never audits as unpriced", () => {
+  const current = estimate("gpt-6-luna-fast");
+  assert.deepEqual(current, { status: "priced", usd: 0.0395, longContext: false, priceKey: "openai/gpt-6-luna-fast" });
+  assert.deepEqual(estimate("gpt-6-luna-fast", { serviceTier: "priority" }), current, "do not double-apply the Fast multiplier");
   const luna = estimate("gpt-5.6-luna");
   const fast = estimate("gpt-5.6-luna-fast");
   assert.deepEqual(luna, { status: "priced", usd: 0.0425, longContext: false, priceKey: "openai/gpt-5.6-luna" });
