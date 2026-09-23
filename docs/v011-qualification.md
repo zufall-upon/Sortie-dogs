@@ -96,7 +96,7 @@ previously pinned official dataset SHA-256
 The official controller exited 0 and left no running containers. The source
 patch was frozen before scoring and was not repaired using hidden-test feedback.
 
-**Release, PR integration and global application remain pending:** the user's
+**At this stage, release, PR integration and global application were held:** the user's
 condition for proceeding was not met. This result demonstrates native execution
 completion, but not sufficient correctness for accepting this candidate as a release.
 Evidence is retained under `_testenv/v011-dev23-single/` (inference `smoke-2`,
@@ -159,9 +159,9 @@ Frozen patch SHA-256 values, in the table's order:
 - `a7ccaa9e1d31be593b7a49916655d26f83cb9297486d7e2eb6632a41727b399a`
 - `3245dc3b0502dc1f6e3d02bdf53caa37f505796a876abbf409f24af923530427`
 
-The revised release condition is **not met**: one selected case remains unresolved.
+At this stage, the revised release condition was **not met**: one selected case remained unresolved.
 No candidate code or generated patch was changed using official-test feedback.
-Release, PR integration and global application remain pending. Evidence is retained in
+Release, PR integration and global application were held. Evidence is retained in
 `_testenv/v011-dev23-sample3/`, including the predeclared selection, native histories,
 original scoring, and the separately recorded `scoring-envfix/` diagnostic. These are
 three selected cases, not a rerun or success-rate estimate for all 23.
@@ -243,8 +243,42 @@ native ledger was rewritten. Evidence is in `_testenv/v011-acceptance-historical
 
 The prompt-only v3 change also passed **55/55** work-loop, initialization and runtime-asset
 tests. Raw native/official evidence is retained under `_testenv/v011-astroid-boundary/`.
-The other two preselected samples are being rechecked against this same candidate before
-the previously requested release decision.
+
+### Matching-candidate regression: all three selected cases pass
+
+The other two preselected cases were rerun on that exact v3 package, each with one
+inference attempt and the same 30-minute/$1.50 limits. Both completed native acceptance
+and separate official scoring successfully:
+
+| Instance | Native elapsed | Local verification | Official result | Estimated cost |
+| --- | ---: | --- | --- | ---: |
+| `marshmallow-code__marshmallow-1359` | 242,414 ms | 912 tests passed | PASS: target 1/1, regression 76/76 | $0.147360 |
+| `pvlib__pvlib-python-1854` | 442,716 ms | 282 relevant-module tests passed | PASS with predeclared NumPy 1.26.4: target 1/1, regression 281/281 | $0.353125 |
+
+PVlib's first full-module check failed due to pandas 3 incompatibility. The implementer
+installed a compatible dependency and reran the identical command successfully before
+acceptance; the old failed receipt remains in the history. The operator also requested
+a same-child clarification of pre-edit reproduction. This exercised the corrected
+verification-obligation behavior in an actual repository.
+
+The scoring setup was declared before inference. Only PVlib's environment adds the
+already-diagnosed NumPy 1.26.4 preinstall; official test patches, assertions, images and
+grader remain fixed. Neither generated prediction was edited after inference.
+Frozen patch SHA-256 values:
+
+- Marshmallow: `cf03628d0391f468f4bcbc7f8aac861ebe79994e02fdb07e2099747edd3a58de`
+- PVlib: `96572f42f7a307562579472957b9d9f3ddd6f85ce861d2641e2b312da487c760`
+
+Together with the Astroid remediation above, the **same candidate passes all three
+selected cases, with zero unmet outcomes, timeouts or empty patches**. This satisfies
+the user's selected-sample condition for proceeding to integration and final release
+qualification. It remains a targeted remediation/regression set, not a fresh 23-case
+success-rate measurement. Raw regression evidence is under
+`_testenv/v011-boundary-regression/`. Estimated campaign budget remaining is $16.879999
+of $50, excluding transient title generation and release smoke usage.
+
+Final integrated-main commit/package identity, full verification and publication
+receipts are recorded with the corresponding GitHub Release.
 
 ## Reproduction
 

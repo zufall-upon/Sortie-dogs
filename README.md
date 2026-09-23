@@ -6,14 +6,12 @@ Sortie-dogs v0.11 is a native OpenCode V2 plugin. Use OpenCode normally, then se
 Sortie to delegate investigation, implementation, testing and corrections while
 keeping the complete original request.
 
-**Development status:** v0.11.0 is a local candidate, not a published release.
-Native execution and the common suite pass. Three additional dev23 samples
-completed without timeout: two passed official checks (one after a scoring-environment
-correction), while one initially remained unresolved. Targeted remediation now passes
-that Astroid case too; matching-candidate regression checks and release are pending. See the
-[qualification record](docs/v011-qualification.md), including the earlier failed case.
-The installation commands below describe the v0.11 package once released; current
-candidate testing uses its frozen local tarball.
+**v0.11 qualification:** native execution and the common suite pass. After fixing
+validation and failure-coverage defects, all three selected dev23 cases passed on
+the same candidate, with no unmet outcomes or timeouts. PVlib used a predeclared
+NumPy-compatible scoring environment. The [qualification record](docs/v011-qualification.md)
+retains the earlier failures and exact conditions. Published package hashes and
+final-main verification are recorded in the [releases](https://github.com/zufall-upon/Sortie-dogs/releases).
 
 [![GitHub Release](https://img.shields.io/github/v/release/zufall-upon/Sortie-dogs)](https://github.com/zufall-upon/Sortie-dogs/releases/latest)
 [![npm](https://img.shields.io/npm/v/sortie-dogs?label=npm)](https://www.npmjs.com/package/sortie-dogs)
