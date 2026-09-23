@@ -1,5 +1,6 @@
 import { mkdir, writeFile, readFile, lstat, readdir } from 'node:fs/promises';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
+import { spawn } from 'node:child_process';
 import { join, resolve, relative } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { runProcess, shellQuote } from './release-process.mjs';
@@ -15,12 +16,15 @@ export const fixtureOpenCodeConfig = (entry, runtime, openCodeVersion = '1.0.0')
 export const parseOpenCodeVersion = output => output.trim().match(/(?:^|\bv)(\d+\.\d+\.\d+)(?:\b|$)/)?.[1];
 export const pluginPackageForOpenCodeVersion = version => Number.parseInt(version.split('.')[0], 10) >= 2
   ? '@opencode/plugin' : '@opencode-ai/plugin';
-export const runLocationArgsForOpenCodeVersion = (version, project) =>
-  Number.parseInt(version.split('.')[0], 10) >= 2 ? ['--standalone'] : ['--dir', project];
+export const runLocationArgsForOpenCodeVersion = (version, project, serverURL) =>
+  Number.parseInt(version.split('.')[0], 10) >= 2
+    ? serverURL === undefined ? ['--standalone'] : ['--server', serverURL]
+    : ['--dir', project];
 export const RELEASE_SMOKE_RUN_TIMEOUT_SECONDS = 900;
 export const RELEASE_SMOKE_TERMINAL_TIMEOUT_SECONDS = 180;
 export const RELEASE_SMOKE_TERMINAL_PROMPT =
-  'Use the existing succeeded recovery unit and complete this same goal terminally now. Do not dispatch or edit again.';
+  'The recovery unit is already settled as succeeded with canonical PASS. Do not call tools, dispatch, validate, or edit. ' +
+  'Reply with `status: DONE` as the first conclusion line and report this same goal complete.';
 export const v2PluginWrapperSource = runtime => `import { createSortieDogsV2Plugin } from "sortie-dogs/server";\n` +
   `import { SortieDogsPlugin } from "${runtime.id === 'stable' ? 'sortie-dogs/plugin/stable' : 'sortie-dogs/plugin'}";\n` +
   `export default createSortieDogsV2Plugin(SortieDogsPlugin);\n`;
@@ -43,6 +47,59 @@ export async function command(executable, args, cwd, env, timeoutMs = 600_000) {
     throw error;
   }
   return result.stdout;
+}
+
+async function stopProcessGroup(child) {
+  if (child.exitCode !== null || child.signalCode !== null || !child.pid) return;
+  const signal = name => { try { process.kill(-child.pid, name); } catch { /* exited */ } };
+  signal('SIGTERM');
+  await new Promise(resolve => {
+    const timer = setTimeout(() => {
+      signal('SIGKILL');
+      const killTimer = setTimeout(resolve, 2_000);
+      child.once('close', () => { clearTimeout(killTimer); resolve(); });
+    }, 5_000);
+    child.once('close', () => { clearTimeout(timer); resolve(); });
+  });
+}
+
+async function startV2ReleaseServer(cwd, env) {
+  const password = randomBytes(24).toString('hex');
+  const serverEnv = { ...process.env, ...env, PWD: cwd, OPENCODE_SERVER_PASSWORD: password };
+  const child = spawn('opencode', ['serve', '--hostname', '127.0.0.1', '--port', '0'], {
+    cwd, env: serverEnv, shell: false, windowsHide: true, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  child.stderr.resume();
+  try {
+    const url = await new Promise((resolveReady, rejectReady) => {
+      let output = '';
+      const cleanup = () => {
+        clearTimeout(timer);
+        child.stdout.removeListener('data', onData);
+        child.removeListener('error', onError);
+        child.removeListener('close', onClose);
+      };
+      const fail = error => { cleanup(); rejectReady(error); };
+      const onError = error => fail(error);
+      const onClose = code => fail(Error(`OpenCode V2 release server exited before readiness (${code})`));
+      const onData = data => {
+        output = (output + data.toString()).slice(-8_192);
+        const match = /server listening on (http:\/\/127\.0\.0\.1:[1-9][0-9]*)/u.exec(output);
+        if (match === null) return;
+        cleanup();
+        child.stdout.resume();
+        resolveReady(match[1]);
+      };
+      const timer = setTimeout(() => fail(Error('OpenCode V2 release server readiness timeout')), 30_000);
+      child.stdout.on('data', onData);
+      child.once('error', onError);
+      child.once('close', onClose);
+    });
+    return { url, env: serverEnv, stop: () => stopProcessGroup(child) };
+  } catch (error) {
+    await stopProcessGroup(child);
+    throw error;
+  }
 }
 
 export async function installedFixture(tgz, directory, profileId = 'stable') {
@@ -123,12 +180,16 @@ export async function inside(tgz, directory, profileId = 'stable') {
     ext: { 'sortie-dogs/write-gate': { project_root: join(project, 'child'), operation_manifest: `${runtime.stateDirectory}/contracts/recovery.operation-manifest.json` },
       'sortie-dogs/acceptance-continuity': { schema_version: '0.1', authority: 'dispatch', task_id: 'recovery', criteria: [criterion], fingerprint, parent_fingerprint: 'none' } } }, null, 2));
   const jsonEvents = text => text.split(/\r?\n/).flatMap(line => { try { return [JSON.parse(line)]; } catch { return []; } });
+  const v2Server = Number.parseInt(cliVersion.split('.')[0], 10) >= 2
+    ? await startV2ReleaseServer(project, env) : undefined;
+  const cliEnv = v2Server?.env ?? env;
   async function cli(prompt, sessionID, timeoutSeconds = RELEASE_SMOKE_RUN_TIMEOUT_SECONDS) {
     // timeout runs in WSL: Windows killing wsl.exe alone does not establish guest process cleanup.
     return jsonEvents(await command('timeout', ['--signal=TERM', '--kill-after=10s', `${timeoutSeconds}s`, 'opencode', 'run',
-      ...runLocationArgsForOpenCodeVersion(cliVersion, project), '--format', 'json', '--print-logs', '--agent', coordinatorAgent,
-      ...(sessionID ? ['--session', sessionID] : []), prompt], project, env, (timeoutSeconds + 40) * 1_000));
+      ...runLocationArgsForOpenCodeVersion(cliVersion, project, v2Server?.url), '--format', 'json', '--print-logs', '--agent', coordinatorAgent,
+      ...(sessionID ? ['--session', sessionID] : []), prompt], project, cliEnv, (timeoutSeconds + 40) * 1_000));
   }
+  const executeSmoke = async () => {
   const checkpoint = await cli('Open a goal for this release fixture. Do not call tools. Reply exactly RELEASE_CHECKPOINT without terminal status.');
   const sessionID = checkpoint.find(event => event.sessionID)?.sessionID;
   assert(sessionID?.startsWith('ses_'), 'No initial CLI session');
@@ -174,10 +235,20 @@ goal_expected_outcome: pass`;
   let records = JSON.parse(await readFile(ledgerPath, 'utf8')).goal_events;
   let state = reduceGoalFlight(records);
   let workerStarted = releaseSmokeWorkerStarted(events, records, 'recovery');
+  const waitForTerminal = async timeoutMs => {
+    const deadline = Date.now() + timeoutMs;
+    while (state.phase !== 'terminal' && Date.now() < deadline) {
+      await new Promise(resolveDelay => setTimeout(resolveDelay, 100));
+      records = JSON.parse(await readFile(ledgerPath, 'utf8')).goal_events;
+      state = reduceGoalFlight(records);
+    }
+  };
+  if (workerStarted && state.phase !== 'terminal') await waitForTerminal(1_000);
   if (workerStarted && state.phase !== 'terminal') {
     events = [...events, ...await cli(RELEASE_SMOKE_TERMINAL_PROMPT, sessionID, RELEASE_SMOKE_TERMINAL_TIMEOUT_SECONDS)];
     records = JSON.parse(await readFile(ledgerPath, 'utf8')).goal_events;
     state = reduceGoalFlight(records);
+    await waitForTerminal(5_000);
     workerStarted = releaseSmokeWorkerStarted(events, records, 'recovery');
   }
   process.stderr.write(JSON.stringify({ phase: 'outcome', sessionID, phaseState: state.phase, stopReason: state.stop_reason,
@@ -192,6 +263,9 @@ goal_expected_outcome: pass`;
   return { schema: 1, version: pkg.version, profile: release.runtimeProfile, sha256: hash(await readFile(tgz)), runtimeMarker: RUNTIME_ASSET_VERSION,
     cliVersion, sessionID, beforeSession: sessionID, sameGoal: true, workerStarted,
     canonicalExit: 0, terminal: 'succeeded', artifactMatch: true };
+  };
+  try { return await executeSmoke(); }
+  finally { await v2Server?.stop(); }
 }
 
 async function main() {
