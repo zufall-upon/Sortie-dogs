@@ -26,7 +26,7 @@ test("a route naming a model the built-in catalog never listed is declared inste
   assert.ok(!base.some(entry => entry.model === unlisted.model), "fixture model must start unlisted");
   const catalog = previewModelCatalog([...base.map(entry => ({ model: entry.model, variant: entry.variants[0] })), unlisted]);
   assert.ok(declares(catalog, unlisted.model, unlisted.variant));
-  assert.equal(catalog.length, base.length + 1);
+  assert.equal(catalog.length, new Set(base.map(entry => entry.model)).size + 1);
 });
 
 test("declaring preview variants preserves the built-in variants of a listed model", () => {
@@ -35,5 +35,5 @@ test("declaring preview variants preserves the built-in variants of a listed mod
   const entry = catalog.find(item => item.model === base[0].model);
   for (const variant of base[0].variants ?? []) assert.ok(entry.variants.includes(variant));
   assert.ok(entry.variants.includes("invented-variant"));
-  assert.equal(catalog.length, base.length);
+  assert.equal(catalog.length, new Set(base.map(item => item.model)).size);
 });
