@@ -221,7 +221,7 @@ function candidateIdentity(value) {
     agent: text(value.agent, "candidate.agent"),
   };
   ensure(/^[a-f0-9]{64}$/u.test(candidate.sha256), "invalid-candidate-sha256");
-  ensure(candidate.profile === "v010", "invalid-candidate-profile");
+  ensure(["v010", "v011"].includes(candidate.profile), "invalid-candidate-profile");
   ensure(candidate.agent === DEFAULT_AGENT, "invalid-candidate-agent");
   return Object.freeze(candidate);
 }
@@ -665,6 +665,7 @@ async function requiredCommand(executable, args, options) {
 }
 
 export async function prepareCandidateRuntime(candidate, packagePath, runRoot, dependencies = {}) {
+  if (candidate.profile === "v011") return (await import("./user-proxy-bench.mjs")).prepareUserProxyCandidate(candidate, packagePath, runRoot);
   ensure(process.platform !== "win32", "live-mode-requires-wsl-login-shell");
   const execute = dependencies.execute ?? requiredCommand;
   const packageBytes = await readFile(packagePath);
@@ -1043,6 +1044,7 @@ function costEnforcementStopReason(execution) {
 
 export async function runLive(value, options, dependencies = {}) {
   const plan = createLiveRunPlan(value, options, dependencies.publicRowHashes);
+  ensure(plan.candidate.profile !== "v011", "v011-use-scripts/user-proxy-bench.mjs-for-native-inference");
   ensure(typeof options.runRoot === "string" && options.runRoot.length > 0, "live-run-root-required");
   ensure(typeof options.output === "string" && options.output.length > 0, "live-output-required");
   const runRoot = resolve(options.runRoot);

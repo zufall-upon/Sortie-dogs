@@ -63,6 +63,26 @@ fingerprint or digest invalidates the candidate. No tag/Release is deleted or re
 
 ## CLI smoke
 
+For **v0.11**, set `releaseProfile: "v011"` in the release manifest. This selects
+the default V2 user-proxy assets and the SOL6 / Luna6 Fast installed-package
+qualification, rather than the historical stable-profile smoke:
+
+```sh
+node scripts/release-cli.mjs <candidate.tgz> <evidence-directory> v011
+```
+
+The v0.11 driver checks the native `gpt-6-luna-fast` catalog definition and outgoing
+HTTP/WebSocket Fast tier, initial failing oracle, native compaction, correction,
+root-only acceptance, protected source and a second request in the same root.
+OpenCode 2.0.14 exposes compaction through its public HTTP API but not its plugin
+SessionDomain; the qualification controller queues that native operation after the
+first failing check. It never substitutes a synthetic continuation message.
+Keep raw histories and generated fixtures under ignored `_testenv/`; publish only
+the summary and frozen reproduction conditions. SWE-bench remains an optional
+separate evaluation.
+
+The following paragraphs describe the historical stable-profile smoke.
+
 `scripts/release-cli.mjs` creates a new `_testenv` fixture for each explicit attempt. It installs the
 tarball using WSL npm, checks the relative `file:` dependency and non-link lock entry, and verifies
 runtime assets. It creates a Git seed, obtains a CLI checkpoint, then resumes the same session/goal.

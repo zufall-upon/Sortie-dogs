@@ -7,6 +7,7 @@ export const MODEL_COST_PRICING_SNAPSHOT = {
     "https://developers.openai.com/api/docs/models/gpt-6-astra",
     "https://developers.openai.com/api/docs/models/gpt-6-sol",
     "https://developers.openai.com/api/docs/models/gpt-6-luna",
+    "https://developers.openai.com/api/docs/guides/priority-processing.md",
     "https://developers.openai.com/api/docs/models/gpt-5.6-sol",
     "https://developers.openai.com/api/docs/models/gpt-5.6-terra",
     "https://developers.openai.com/api/docs/models/gpt-5.6-luna",
@@ -16,7 +17,8 @@ export const MODEL_COST_PRICING_SNAPSHOT = {
     "OpenAI Standard pricing; requests above 272,000 total input/cache tokens use 2x input/cache and 1.5x output pricing.",
     "Anthropic Standard pricing with the 5-minute cache-write rate; Fast, Batch, Flex, regional, tool, and subscription charges are excluded.",
     "variant and serviceTier are separate; model variants do not alter the selected Standard token price.",
-    "GPT-6 Sol and GPT-6 Luna use their official Standard schedules; Fast mode is a service tier priced separately and does not create a second model ID.",
+    "GPT-6 Sol and GPT-6 Luna use their official Standard schedules; the OpenCode gpt-6-luna-fast selector sends API model gpt-6-luna with priority service tier.",
+    "GPT-6 Sol/Luna Fast (service_tier fast or priority) is priced at 2x the applicable Standard rates, including cache and long-context multipliers.",
     "gpt-5.6-luna-fast is retained only as a compatibility price for historical host catalog entries; it has no published model page and is exactly twice the GPT-5.6 Luna Standard schedule.",
   ],
 } as const;
@@ -60,11 +62,14 @@ export function estimateModelUsageCost(usage: ModelCostUsage): ModelCostEstimate
   const counts = [usage.uncachedInputTokens, usage.cacheReadTokens, usage.cacheWriteTokens,
     usage.outputTokens, usage.reasoningTokens];
   if (!counts.every(tokenCount)) return { status: "unpriced", reason: "missing-usage" };
-  if (usage.serviceTier !== undefined && !["standard", "default"].includes(usage.serviceTier.toLowerCase())) {
+  const alias = usage.providerID?.toLowerCase() === "openai" && usage.modelID === "gpt-6-luna-fast";
+  const fast = alias || (["fast", "priority"].includes(usage.serviceTier?.toLowerCase() ?? "") &&
+    usage.providerID?.toLowerCase() === "openai" && ["gpt-6-sol", "gpt-6-luna"].includes(usage.modelID ?? ""));
+  if (usage.serviceTier !== undefined && !(fast ? ["standard", "default", "fast", "priority"] : ["standard", "default"]).includes(usage.serviceTier.toLowerCase())) {
     return { status: "unpriced", reason: "unsupported-service-tier" };
   }
   const provider = usage.providerID?.toLowerCase();
-  const model = usage.modelID;
+  const model = alias ? "gpt-6-luna" : usage.modelID;
   const base = provider === "openai" && model !== undefined && Object.hasOwn(OPENAI, model) ? OPENAI[model]
     : provider === "anthropic" && model !== undefined && Object.hasOwn(ANTHROPIC, model) ? ANTHROPIC[model] : undefined;
   if (base === undefined) return { status: "unpriced", reason: "unknown-model" };
@@ -72,8 +77,8 @@ export function estimateModelUsageCost(usage: ModelCostUsage): ModelCostEstimate
   const longContext = provider === "openai" && requestInput > 272_000;
   const inputMultiplier = longContext ? 2 : 1;
   const outputMultiplier = longContext ? 1.5 : 1;
-  const usd = (counts[0]! * base.input * inputMultiplier + counts[1]! * base.cacheRead * inputMultiplier +
+  const usd = (fast ? 2 : 1) * (counts[0]! * base.input * inputMultiplier + counts[1]! * base.cacheRead * inputMultiplier +
     counts[2]! * base.cacheWrite * inputMultiplier + (counts[3]! + counts[4]!) * base.output * outputMultiplier) / 1_000_000;
   if (!Number.isFinite(usd)) return { status: "unpriced", reason: "missing-usage" };
-  return { status: "priced", usd, longContext, priceKey: `${provider}/${model}` };
+  return { status: "priced", usd, longContext, priceKey: `${provider}/${usage.modelID}${fast && !alias ? "#fast" : ""}` };
 }
