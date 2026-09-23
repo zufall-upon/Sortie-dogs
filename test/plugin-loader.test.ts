@@ -500,7 +500,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.equal(RUNTIME_ASSET_VERSION, "0.3.89-completion-proof-v1");
     const coordinatorFrontmatter = /^---\r?\n([\s\S]*?)\r?\n---/u.exec(coordinator.content)?.[1];
     assert.ok(coordinatorFrontmatter);
-    assert.match(coordinatorFrontmatter, /^model: openai\/gpt-5\.6-terra$/m);
+    assert.match(coordinatorFrontmatter, /^model: openai\/gpt-6-sol$/m);
     assert.match(coordinatorFrontmatter, /^variant: high$/m);
     assert.equal(/^---\r?\n[\s\S]*?\r?\n---/u.exec(worker.content)?.[0].includes("model:"), false);
     assert.equal(worker.content.includes(DEDICATED_WORKER_MODEL), false);

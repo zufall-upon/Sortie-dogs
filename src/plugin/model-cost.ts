@@ -1,10 +1,11 @@
 export const MODEL_COST_PRICING_SNAPSHOT = {
-  checkedAt: "2026-09-14",
+  checkedAt: "2026-09-23",
   currency: "USD",
   unit: "1M tokens",
   sources: [
     "https://developers.openai.com/api/docs/pricing",
     "https://developers.openai.com/api/docs/models/gpt-6-astra",
+    "https://developers.openai.com/api/docs/models/gpt-6-sol",
     "https://developers.openai.com/api/docs/models/gpt-5.6-sol",
     "https://developers.openai.com/api/docs/models/gpt-5.6-terra",
     "https://developers.openai.com/api/docs/models/gpt-5.6-luna",
@@ -37,6 +38,7 @@ type Prices = { input: number; cacheRead: number; cacheWrite: number; output: nu
 
 const OPENAI: Readonly<Record<string, Prices>> = {
   "gpt-6-astra": { input: 10, cacheRead: 1, cacheWrite: 12.5, output: 50 },
+  "gpt-6-sol": { input: 2, cacheRead: 0.2, cacheWrite: 2.5, output: 10 },
   "gpt-5.6-sol": { input: 4, cacheRead: 0.4, cacheWrite: 5, output: 20 },
   "gpt-5.6": { input: 4, cacheRead: 0.4, cacheWrite: 5, output: 20 },
   "gpt-5.6-terra": { input: 2, cacheRead: 0.2, cacheWrite: 2.5, output: 12 },

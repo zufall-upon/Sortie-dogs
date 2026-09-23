@@ -21,8 +21,8 @@ export const LUNA_FABRIC_WORKER_MODEL = "openai/gpt-5.6-luna";
 export const LUNA_FABRIC_WORKER_VARIANT = "max";
 export const LUNA_FABRIC_WORKER_ROLE = "dog-luna-worker";
 
-/** The coordinator uses Terra High so routing and progress decisions do not bottleneck the workflow. */
-export const DEFAULT_COORDINATOR_MODEL = "openai/gpt-5.6-terra";
+/** The coordinator uses Sol 6 High so routing and progress decisions do not bottleneck the workflow. */
+export const DEFAULT_COORDINATOR_MODEL = "openai/gpt-6-sol";
 export const DEFAULT_COORDINATOR_VARIANT = "high";
 
 /** Compatibility names retained for the pre-v0.8 explicit Sol target. */
@@ -102,7 +102,7 @@ const fixedModelRoleSet = new Set<string>(Object.keys(FIXED_MODEL_ROUTING));
 
 export const RECOMMENDED_LUNA_MODEL = LUNA_FABRIC_WORKER_MODEL;
 
-/** Coordinator state and routing use Terra High; bounded evidence retrieval uses Luna High. */
+/** Coordinator state and routing use Sol 6 High; bounded evidence retrieval uses Luna High. */
 export const DEFAULT_COORDINATOR_ROUTING: ModelRoutingConfig = Object.freeze({
   "dog-coordinator": Object.freeze({
     preferred: Object.freeze({

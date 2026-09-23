@@ -33,10 +33,10 @@ const PREVIEW_SCOUT_ROUTE = Object.freeze({ model: "openai/gpt-5.6-luna-fast", v
  * structurally valid but under-scoped contracts: a write union narrower than the remediation the
  * review it also schedules demands, which strands an otherwise complete run on NEED_DECISION.
  */
-const PREVIEW_OPERATIONS_ROUTE = Object.freeze({ model: "openai/gpt-5.6-terra", variant: "xhigh" });
+const PREVIEW_OPERATIONS_ROUTE = Object.freeze({ model: "openai/gpt-6-sol", variant: "xhigh" });
 const PREVIEW_PRIMARY_ROUTE = Object.freeze({ model: "openai/gpt-5.6-luna-fast", variant: "max" });
 /** Review must be able to reject the worker's output, so it never shares the worker's model family. */
-const PREVIEW_REVIEW_ROUTE = Object.freeze({ model: "openai/gpt-5.6-terra", variant: "xhigh" });
+const PREVIEW_REVIEW_ROUTE = Object.freeze({ model: "openai/gpt-6-sol", variant: "xhigh" });
 /** Every preview route the profile can bind a role to. Catalog declaration reads this one list. */
 const PREVIEW_ROUTES: readonly { readonly model: string; readonly variant: string }[] = Object.freeze([
   PREVIEW_PRIMARY_ROUTE, PREVIEW_WORKER_ROUTE, PREVIEW_SCOUT_ROUTE, PREVIEW_OPERATIONS_ROUTE,

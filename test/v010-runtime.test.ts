@@ -309,8 +309,8 @@ test("operations defaults do not overwrite an explicit native model variant", as
   });
   const defaults = { agent: { "dogs-coordinator": { mode: "subagent" } } };
   await hooks.config(defaults);
-  assert.deepEqual(defaults.agent["dogs-coordinator"], { mode: "subagent", model: "openai/gpt-5.6-terra", variant: "xhigh" });
-  const chosen = { agent: { "dogs-coordinator": { mode: "subagent", model: "openai/gpt-5.6-terra", variant: "max" } } };
+  assert.deepEqual(defaults.agent["dogs-coordinator"], { mode: "subagent", model: "openai/gpt-6-sol", variant: "xhigh" });
+  const chosen = { agent: { "dogs-coordinator": { mode: "subagent", model: "openai/gpt-6-sol", variant: "max" } } };
   await hooks.config(chosen);
   assert.equal(chosen.agent["dogs-coordinator"].variant, "max");
   const asset = previewAssets.find(item => item.name === "dogs-coordinator")!.content;
@@ -577,13 +577,13 @@ test("operator smoke retains only bounded typed tool errors", () => {
 
 test("preview host adapter pins the native worker route and forwards terminal text through goal verification", async () => fixture(async root => {
   const client = { config: { providers: async () => ({ data: { providers: [{ id: "openai", models: {
-    "gpt-6-astra": { id: "gpt-6-astra" }, "gpt-5.6-terra": { id: "gpt-5.6-terra" },
+    "gpt-6-astra": { id: "gpt-6-astra" }, "gpt-6-sol": { id: "gpt-6-sol" },
     "gpt-5.6-sol": { id: "gpt-5.6-sol" }, "gpt-5.6-luna": { id: "gpt-5.6-luna" },
     "gpt-5.6-luna-fast": { id: "gpt-5.6-luna-fast" },
   } }] } }) } };
   const hooks = await SortieDogsV010Plugin({ directory: root, client } as never, { modelCatalog: { global: [
     { model: "openai/gpt-6-astra", variants: ["high"] },
-    { model: "openai/gpt-5.6-terra", variants: ["high", "xhigh"] },
+    { model: "openai/gpt-6-sol", variants: ["high", "xhigh"] },
     { model: "openai/gpt-5.6-sol", variants: ["low", "medium"] },
     { model: "openai/gpt-5.6-luna", variants: ["max", "high", "xhigh"] },
     { model: "openai/gpt-5.6-luna-fast", variants: ["max", "xhigh"] },
@@ -2163,7 +2163,7 @@ test("preview reconciles native post-admission Task errors without treating pre-
     nestedWorker: { agent: profileAgent(V010_RUNTIME_PROFILE, "dog-worker"), parentID: "foreignWorker" },
   };
   const client = { config: { providers: async () => ({ data: { providers: [{ id: "openai", models: {
-    "gpt-6-astra": { id: "gpt-6-astra" }, "gpt-5.6-terra": { id: "gpt-5.6-terra" },
+    "gpt-6-astra": { id: "gpt-6-astra" }, "gpt-6-sol": { id: "gpt-6-sol" },
     "gpt-5.6-sol": { id: "gpt-5.6-sol" },
   } }] } }) }, session: {
     get: async ({ path }: { path: { id: string } }) => ({ data: identities[path.id] }),
@@ -2171,7 +2171,7 @@ test("preview reconciles native post-admission Task errors without treating pre-
   } };
   const hooks = await SortieDogsV010Plugin({ directory: root, client } as never, { modelCatalog: { global: [
     { model: "openai/gpt-6-astra", variants: ["high"] },
-    { model: "openai/gpt-5.6-terra", variants: ["high", "xhigh"] },
+    { model: "openai/gpt-6-sol", variants: ["high", "xhigh"] },
     { model: "openai/gpt-5.6-sol", variants: ["low", "medium"] },
   ] } });
   await hooks["chat.message"]!({ sessionID: "root", messageID: "root-user", agent: "dog-operator",
@@ -2193,7 +2193,7 @@ test("preview reconciles native post-admission Task errors without treating pre-
   await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "operator-call" }, admittedDelegate);
   assert.equal(admittedDelegate.args.prompt, prepared.task.prompt, "root Task history must retain the delegate reference");
   const operatorMessage = {
-    message: { id: "operator-user", agent: "dogs-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+    message: { id: "operator-user", agent: "dogs-coordinator", model: { providerID: "openai", modelID: "gpt-6-sol" } },
     parts: [{ type: "text", text: prepared.task.prompt }],
   };
   await hooks["chat.message"]!({ sessionID: "operator", messageID: "operator-user", agent: "dogs-coordinator" }, operatorMessage);

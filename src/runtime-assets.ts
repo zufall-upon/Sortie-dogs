@@ -264,7 +264,7 @@ export const runtimeAssets = [
     content: `---
 description: Canonical MkII coordinator packaged by Sortie-dogs
 mode: primary
-model: openai/gpt-5.6-terra
+model: openai/gpt-6-sol
 variant: high
 permission:
   question: allow
@@ -666,7 +666,7 @@ uses the run's shared time/cost limits. Use the existing compiled plan and Luna 
 Call sortie_prepare_failure_swarm. Dispatch only its returned ready descriptors with
 dog-luna-worker and one failure_swarm_descriptor JSON line. The plugin binds source scope,
 read-only authority, distinct causes, cumulative budget, and the shared cancellable lifecycle.
-No diagnosis child may write or select a remedy. After findings finish, the coordinator (Terra by
+No diagnosis child may write or select a remedy. After findings finish, the coordinator (Sol 6 by
 default, or the user's explicitly selected coordinator) calls sortie_select_failure_diagnosis
 with swarm_id and one selection_json containing diagnosis_id, capsule_id, recovery_kind,
 proposal, and budget_request. Preserve its immutable scope/acceptance/validation contract and

@@ -186,10 +186,10 @@ worker拥有static/targeted/related check，root拥有canonical/full-suite。can
 ### v0.10默认route
 
 - `dog-operator`：`openai/gpt-5.6-luna-fast` / `max`
-- `dogs-coordinator`：`openai/gpt-5.6-terra` / `xhigh`
+- `dogs-coordinator`：`openai/gpt-6-sol` / `xhigh`
 - `dog-worker-v010`：`openai/gpt-5.6-luna-fast` / `max`
 - `dog-scout-v010`：`openai/gpt-5.6-luna-fast` / `xhigh`
-- `dog-reviewer-v010`：`openai/gpt-5.6-terra` / `xhigh`
+- `dog-reviewer-v010`：`openai/gpt-6-sol` / `xhigh`
 - `dog-advisor-v010`：优先使用catalog中已声明的`anthropic/claude-opus-5`，否则使用`openai/gpt-5.6-sol` / `xhigh`
 
 在OpenCode中显式选择的model/variant对该session保持最高优先级。child default仅在native设置缺失时补全，

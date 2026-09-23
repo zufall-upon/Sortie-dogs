@@ -11,7 +11,7 @@ test("every shipped preview route is declared, so no role resolves against an ab
   const routes = [
     { model: "openai/gpt-5.6-luna-fast", variant: "max" },
     { model: "openai/gpt-5.6-luna-fast", variant: "xhigh" },
-    { model: "openai/gpt-5.6-terra", variant: "xhigh" },
+    { model: "openai/gpt-6-sol", variant: "xhigh" },
   ];
   for (const route of routes) {
     assert.ok(declares(catalog, route.model, route.variant),
