@@ -22,8 +22,12 @@ export async function userProxySmoke(tgz, directory) {
   await writeFile(join(control, 'plugins/sortie-dogs/index.js'), `import plugin from 'sortie-dogs';
 import {readFile,appendFile} from 'node:fs/promises';
 export default {...plugin,async setup(ctx){
-  const cleanup=await plugin.setup(ctx);const compacted=new Set();
-  const record=async value=>appendFile(new URL('../../request-routing.jsonl',import.meta.url),JSON.stringify(value)+'\\n');
+   const cleanup=await plugin.setup(ctx);const compacted=new Set();
+   const record=async value=>appendFile(new URL('../../request-routing.jsonl',import.meta.url),JSON.stringify(value)+'\\n');
+   await ctx.tool.transform(editor=>editor.update('subagent',tool=>{const execute=tool.execute;tool.execute=(input,execution)=>execute(input,{...execution,progress:async update=>{
+     if(update.sortie_progress)await record({kind:'work-progress',root:execution.sessionID,child:update.sessionID,progress:update.sortie_progress});
+     await execution.progress(update);
+   }});}));
   const {data:models}=await ctx.model.list();
   const fast=models.find(model=>model.providerID==='openai'&&model.id==='gpt-6-luna-fast');
   if(!fast||fast.modelID!=='gpt-6-luna'||!['priority','fast'].includes(fast.body?.service_tier))throw Error('Native Luna6 Fast catalog entry missing or invalid');
@@ -117,7 +121,8 @@ test('do not mutate the caller',()=>{const input=Object.freeze([' x ','x']);asse
     assert(first.result.checks.some(check => check.exit !== 0) && first.result.checks.some(check => check.exit === 0), 'Missing real failure-to-correction evidence');
     await command('node', ['--test', 'test/tags.test.mjs'], project, env);
     assert(first.children.length === 1, 'Expected one cheap implementation child');
-    const routing = events(await readFile(join(control, 'request-routing.jsonl'), 'utf8'));
+     const routing = events(await readFile(join(control, 'request-routing.jsonl'), 'utf8'));
+     assert(routing.some(item => item.kind === 'work-progress' && item.child === first.children[0].id), 'Parent native call did not receive live child progress');
     assert(routing.some(item => item.kind === 'compaction-admitted') && routing.some(item => item.kind === 'compaction'), 'Native child compaction not observed');
     const lunaRequests = routing.filter(item => item.model === 'gpt-6-luna');
     assert(lunaRequests.length && lunaRequests.every(item => item.tier === 'priority' || item.tier === 'fast'), 'A Luna6 request omitted Fast service tier');

@@ -6,6 +6,7 @@ type JsonObject = Record<string, unknown>;
 type Registration = { dispose(): Promise<void> | void };
 
 interface V2ToolEditor {
+  update?(id: string, update: (tool: { execute(input: unknown, context: JsonObject): Promise<JsonObject> }) => void): void;
   add(tool: {
     name: string;
     description: string;

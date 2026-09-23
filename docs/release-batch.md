@@ -114,6 +114,17 @@ Keep raw histories and generated fixtures under ignored `_testenv/`; publish onl
 the summary and frozen reproduction conditions. SWE-bench remains an optional
 separate evaluation.
 
+For v0.11 native interruption changes, also run:
+
+```sh
+node scripts/user-proxy-recovery-smoke.mjs <candidate.tgz> <recovery-evidence-directory>
+```
+
+This fixture holds one real native read, interrupts its root, restarts the private
+OpenCode server, and resumes the same root and child. It retains before/after
+histories and checks operator acceptance, the unchanged oracle and attempt budget.
+The ordinary v0.11 qualification also checks live progress on the native parent call.
+
 The following paragraphs describe the historical stable-profile smoke.
 
 `scripts/release-cli.mjs` creates a new `_testenv` fixture for each explicit attempt. It installs the

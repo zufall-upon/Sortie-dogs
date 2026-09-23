@@ -91,6 +91,22 @@ execution plan, exact-file manifest, or model-authored proof mapping.
 Technical scope and useful verification commands are discovered while working.
 Project `AGENTS.md`, user instructions and native OpenCode permissions remain authoritative.
 
+### Execution progress and bounded discovery
+
+The native child call publishes host-observed progress every five seconds: elapsed
+time, current inspection/command, last exit, command starts and edits. The same
+information is available through `sortie_v011_work_status`. Activity is never
+treated as completed work or an inferred benchmark score. Long jobs should reuse
+their existing controller and ledger, rather than rebuilding one before launch.
+
+By default, 12 inspection calls or three minutes without an executable step stop
+the child with a **blocked** reason. A running native shell/check keeps its own
+timeout. Resuming a discovery stall requires concrete next-step guidance; the same
+child, user instructions, failed checks and attempt budget are retained. Plugin
+options `maxDiscoveryCalls`, `maxPlanningMs` and `progressIntervalMs` configure these
+bounds. Interrupted outgoing tool calls receive an explicitly unverified error
+result when native history omitted one; stored history and check evidence are preserved.
+
 ### Roles and models
 
 | Role | Model | Responsibility |
