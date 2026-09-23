@@ -44,6 +44,64 @@ skips, missing files or duplicate scheduling. Core tests cover same-child semant
 revision, cold restart, interrupted dispatch recovery, cancellation, source/request
 staleness, attachments, native permission denial and migration preservation.
 
+## Single selected dev23 case: release condition not met
+
+On 2026-09-23, **only `pydicom__pydicom-1139`** was selected from the pinned
+23-case dev set. The earlier v0.10.23 attempt on that case had ended with an
+empty patch after approximately 10.7 minutes.
+
+Frozen v0.11 conditions:
+
+- Runtime source: `dcc70566067a817649e35f829c55da9024f9121d`.
+- Candidate `sortie-dogs-0.11.0.tgz` SHA-256:
+  `2ddf56bf88210e4efc35cfa53e497c3fbb602d62457bd43cd3097d800d8e55e8`.
+- Native driver: `30d793b7073668ae9214f77f31d52ed0c357f830`;
+  script SHA-256 `b5ba9cf85fc664d1dcc14215d4806c093a28cd0b641e1946dfffe890f22b8570`.
+- OpenCode 2.0.14; SOL6 operator, Luna6 Fast implementer and auxiliary agents.
+- One model-bearing inference attempt, 30-minute/$1.50 request-boundary limits.
+  A preceding instrumentation failure stopped before any provider request and
+  produced no patch; it remains recorded separately.
+- Native root: `ses_f320e7cc1ffeY1Ew5SgwmvnH7a`; elapsed **241,775 ms**.
+- Operator accepted one child invocation after a current check passed the public
+  reproduction, 16 focused/adjacent tests and diff whitespace validation.
+- Completed root/child context usage: approximately **$0.1536**, including their
+  final responses; transient title generation is excluded. This is an estimate.
+- Frozen patch SHA-256:
+  `a221b546eaecf76954bf7dd331c4aa90c0e100d78638c2d7797f11d124a50df9` (920 bytes).
+
+### Official result: FAIL
+
+The separate official SWE-bench 5.0.2 Docker run applied the patch successfully,
+completed its one submitted instance, and returned **`resolved: false`**:
+
+| Check group | Passed | Failed |
+| --- | ---: | ---: |
+| FAIL_TO_PASS | 2 | 1 |
+| PASS_TO_PASS | 36 | 2 |
+
+The unresolved target is `TestPersonName::test_next`: the patch added character
+iteration and membership, but direct `next(PersonName)` raised `TypeError`.
+No official test or gold patch was supplied to the inference agents.
+
+The two PASS_TO_PASS failures were `TestBadValueRead` tests whose legacy
+`setup()` did not populate `self.tag` under the scorer's pytest 8.3.5. Both also
+failed on an untouched base-commit copy in the native pytest 9.1.1 environment.
+The five broader charset failures reported during inference reproduced exactly
+on that untouched base when run separately (5 failed / 49 passed). These baseline
+observations do not turn the missing target behavior or the official FAIL into PASS.
+
+Scoring used Python 3.8.20 in the existing official image, one worker, and the
+previously pinned official dataset SHA-256
+`3a545a8d8b5af93f80cc1af8e36df7838fc4b81bea7387571465ab367e4d6b6d`.
+The official controller exited 0 and left no running containers. The source
+patch was frozen before scoring and was not repaired using hidden-test feedback.
+
+**Release, PR integration and global application remain pending:** the user's
+condition for proceeding was not met. This result demonstrates native execution
+completion, but not sufficient correctness for accepting this candidate as a release.
+Evidence is retained under `_testenv/v011-dev23-single/` (inference `smoke-2`,
+official scoring and untouched-base diagnostic logs).
+
 ## Reproduction
 
 ```sh

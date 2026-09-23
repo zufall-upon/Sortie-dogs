@@ -6,6 +6,12 @@ Sortie-dogs v0.11 is a native OpenCode V2 plugin. Use OpenCode normally, then se
 Sortie to delegate investigation, implementation, testing and corrections while
 keeping the complete original request.
 
+**Development status:** v0.11.0 is a local candidate, not a published release.
+Native execution and the common suite pass, but the selected official dev23 case
+failed (2/3 target checks); release is pending. See the [qualification record](docs/v011-qualification.md).
+The installation commands below describe the v0.11 package once released; current
+candidate testing uses its frozen local tarball.
+
 [![GitHub Release](https://img.shields.io/github/v/release/zufall-upon/Sortie-dogs)](https://github.com/zufall-upon/Sortie-dogs/releases/latest)
 [![npm](https://img.shields.io/npm/v/sortie-dogs?label=npm)](https://www.npmjs.com/package/sortie-dogs)
 [![Tests](https://github.com/zufall-upon/Sortie-dogs/actions/workflows/test.yml/badge.svg)](https://github.com/zufall-upon/Sortie-dogs/actions/workflows/test.yml)
