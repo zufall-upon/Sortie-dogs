@@ -15,6 +15,8 @@ export const fixtureOpenCodeConfig = (entry, runtime, openCodeVersion = '1.0.0')
 export const parseOpenCodeVersion = output => output.trim().match(/(?:^|\bv)(\d+\.\d+\.\d+)(?:\b|$)/)?.[1];
 export const pluginPackageForOpenCodeVersion = version => Number.parseInt(version.split('.')[0], 10) >= 2
   ? '@opencode/plugin' : '@opencode-ai/plugin';
+export const runLocationArgsForOpenCodeVersion = (version, project) =>
+  Number.parseInt(version.split('.')[0], 10) >= 2 ? ['--standalone'] : ['--dir', project];
 export async function command(executable, args, cwd, env, timeoutMs = 600_000) {
   const result = await runProcess(executable, args, { cwd, env: { ...process.env, ...env, PWD: cwd }, timeoutMs });
   if (executable === 'wsl.exe') {
@@ -108,7 +110,8 @@ export async function inside(tgz, directory, profileId = 'stable') {
   async function cli(prompt, sessionID) {
     // timeout runs in WSL: Windows killing wsl.exe alone does not establish guest process cleanup.
     return jsonEvents(await command('timeout', ['--signal=TERM', '--kill-after=10s', '540s', 'opencode', 'run',
-      '--dir', project, '--format', 'json', '--print-logs', '--agent', coordinatorAgent, ...(sessionID ? ['--session', sessionID] : []), prompt], project, env, 580_000));
+      ...runLocationArgsForOpenCodeVersion(cliVersion, project), '--format', 'json', '--print-logs', '--agent', coordinatorAgent,
+      ...(sessionID ? ['--session', sessionID] : []), prompt], project, env, 580_000));
   }
   const checkpoint = await cli('Open a goal for this release fixture. Do not call tools. Reply exactly RELEASE_CHECKPOINT without terminal status.');
   const sessionID = checkpoint.find(event => event.sessionID)?.sessionID;
