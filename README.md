@@ -1,7 +1,15 @@
 # Sortie-dogs
 
-**A goal-preserving, adaptive execution harness for OpenCode that optimizes cost,
-time, and proof without taking your setup over.**
+> **Status (2026-09-23): v0.10.x failed as a general-use release line.**
+> The intended combination of reliable end-to-end execution and lower total model
+> cost has not been demonstrated. Later releases still have unresolved live-session
+> recovery and acceptance failures; passing unit tests or isolated CLI fixtures
+> do not close those gaps. Do not install the unpinned `latest` version for new work.
+> For limited legacy use, pin **v0.10.14** as a temporary fallback, not a certified
+> stable or universally working version.
+
+**Design goal: a goal-preserving, adaptive execution harness for OpenCode that
+optimizes cost, time, and proof without taking your setup over.**
 
 Use OpenCode normally. Invoke Sortie only when you want scoped investigation,
 implementation, validation, review, and model routing.
@@ -28,26 +36,50 @@ implementation, validation, review, and model routing.
 Guides: [日本語](docs/guide-ja.md) · [简体中文](docs/guide-zh-CN.md) ·
 [Testing](docs/testing.md) · [CLI testing](docs/cli-testing.md)
 
-> **Beta:** v0.10.x is under active stabilization. Runtime behavior,
-> configuration, and generated assets may still change before 1.0.
+## Recommended version and v0.11.x
+
+v0.10.14 is published on [npm](https://www.npmjs.com/package/sortie-dogs/v/0.10.14)
+and as a [GitHub Release](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.10.14)
+(release tarball SHA-256: `f2caf67268a5f69b67a252a0d84bfc5ad09db82684aa8c1e0f5c49f8d2986993`).
+It has a [frozen 23-task evaluation](docs/benchmark-v0.10.14-dev23.md).
+That evaluation passed 6/23 official checks. Later v0.10.x releases have
+successful targeted tests, but no evidence establishes v0.10.14 as the last
+fully working version or proves that it meets the product's cost objective.
+Use it only as the explicitly pinned fallback while v0.11.x is developed.
+
+v0.11.x is in development to restore the original division of labor: a capable,
+lightweight user-facing agent; inexpensive subordinate models doing bounded
+investigation and routine execution; and an operator focused on independently
+checking whether a plan and its result contradict the user's instructions.
+The host should assemble and validate repetitive contract structure instead of
+making agents author and recheck large plans. The original goal, native evidence,
+quality gates, user-only decisions, and cumulative budgets must remain intact.
+The target is measured end-to-end quality at lower **total** cost, including
+delegation, rework, and review. No v0.11.x release is available yet.
 
 ## Quick start
 
 Requirements: Node.js 22.6 or newer, npm, and OpenCode.
 
-Run these commands in the target project:
+For a new or idle target project, install the pinned fallback:
 
 ```sh
-npm install --save-dev sortie-dogs
+npm install --save-dev --save-exact sortie-dogs@0.10.14
 npx sortie-dogs init .
 ```
 
-The beta package defaults to the v0.10 profile. Add the OpenCode V2 plugin and the required
-two-level subagent depth to `.opencode/opencode.json`, preserving existing values:
+The v0.10.14 package defaults to the v0.10 profile. Load its OpenCode V2 entry
+from `.opencode/plugins/sortie-dogs.ts`:
+
+```ts
+export { default } from "sortie-dogs/server";
+```
+
+Set the required two-level subagent depth in `.opencode/opencode.json`,
+preserving existing values:
 
 ```json
 {
-  "plugins": ["sortie-dogs"],
   "experimental": { "subagent_depth": 2 }
 }
 ```
@@ -62,11 +94,11 @@ Selecting `dog-operator` directly starts the same workflow. `dog-operator` is th
 only user-facing v0.10 authority. `dogs-coordinator` and every `*-v010` role are
 internal children and must not be selected as task entry points.
 
-`init` installs runtime assets; the `plugins` entry loads runtime enforcement and
+`init` installs runtime assets; the V2 plugin entry loads runtime enforcement and
 model routing. Both are required. A new session alone does not reload an updated
 plugin process, so restart OpenCode after installation or upgrade.
 
-## v0.10.x direction
+## What v0.10.x attempted
 
 v0.10.x separates strategic authority from bounded operations:
 
@@ -80,8 +112,10 @@ v0.10.x separates strategic authority from bounded operations:
   evidence gap, strategy trigger, or risk decision.
 
 The v0.10 profile is serial by design. The stable profile's Luna fabric and
-parallel integration path are not exposed in this profile. More agents are not a
-goal; preserving quality while reducing unnecessary expensive work is.
+parallel integration path are not exposed in this profile. In practice, the
+proposal workflow made an agent author a large execution contract and the
+user-facing agent review it, increasing coordination and repair work. This did
+not establish the intended low-cost division of labor described above.
 
 ### SWE-bench evaluation
 
@@ -101,7 +135,7 @@ Full methodology and per-task results: [benchmark details](docs/benchmark-v0.10.
 
 Historical qualification references remain in [benchmark reference](docs/benchmark-reference.md).
 
-## How v0.10.6 works
+## Historical v0.10.x workflow
 
 1. **Freeze intent**: `dog-operator` preserves the complete request as ordered
    requirements, negative constraints, quality thresholds, references, and finite
@@ -237,6 +271,13 @@ reuse the same evidence instead of spending the validation budget again.
 
 ### Default v0.10 routes
 
+The routes below describe this repository's current v0.10.23 source, **not**
+the recommended pinned v0.10.14 package. In v0.10.14, `dog-operator`,
+`dog-worker-v010`, and `dog-scout-v010` default to
+`openai/gpt-5.6-luna-fast`; `dogs-coordinator` and `dog-reviewer-v010` default
+to `openai/gpt-5.6-terra`. The pinned version does not ship the newer Sol 6 /
+Luna 6 routes; custom model selections require explicit configuration.
+
 - `dog-operator`: `openai/gpt-6-luna` / `max`
 - `dogs-coordinator`: `openai/gpt-6-sol` / `xhigh`
 - `dog-worker-v010`: `openai/gpt-6-luna` / `max`
@@ -269,16 +310,21 @@ register stable and v0.10 from the same package installation path in one host.
 
 ## Global availability
 
-Project-local installation is recommended. To expose v0.10 assets globally:
+Project-local installation is recommended. To expose the pinned fallback's
+v0.10 assets globally:
 
 ```sh
-npm install --global sortie-dogs
+npm install --global sortie-dogs@0.10.14
 sortie-dogs init --global --profile v010
 ```
 
-Then add `sortie-dogs` and `experimental.subagent_depth: 2` to the global OpenCode config.
-Global initialization installs assets only; it does not silently change the
-default agent or merge user settings.
+Global initialization installs assets only; it does not load the V2 plugin or
+change the default agent. Install the same pinned package where OpenCode's
+global plugin wrapper can resolve it (for example,
+`npm install --prefix "$HOME/.config/opencode" --save-exact sortie-dogs@0.10.14`),
+put the same `export { default } from "sortie-dogs/server";` wrapper in
+`~/.config/opencode/plugins/sortie-dogs.ts`, and set
+`experimental.subagent_depth: 2` in the global OpenCode config.
 
 ## Updates and removal
 
