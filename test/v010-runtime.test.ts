@@ -15,7 +15,7 @@ import { runtimeAssets as previewAssets, COMMUNICATION_LANGUAGE_POLICY, PREVIEW_
 import { RUNTIME_ASSET_VERSION, V010_RUNTIME_ASSET_VERSION } from "../dist/asset-version.js";
 import { processRemediationReplacementPacket, SortieDogsV010Plugin } from "../dist/plugin/profiled.js";
 import { fixtureOpenCodeConfig, parseOpenCodeVersion, pluginPackageForOpenCodeVersion,
-  RELEASE_SMOKE_RUN_TIMEOUT_SECONDS, runLocationArgsForOpenCodeVersion,
+  RELEASE_SMOKE_RUN_TIMEOUT_SECONDS, releaseSmokeWorkerStarted, runLocationArgsForOpenCodeVersion,
   v2PluginWrapperSource } from "../scripts/release-cli.mjs";
 import { boundedToolErrors } from "../scripts/operator-smoke.mjs";
 import { expandGoalDeclaration } from "../dist/core/goal-declaration-format.js";
@@ -582,6 +582,12 @@ test("release smoke accepts plain and branded OpenCode version output", () => {
   assert.match(v2PluginWrapperSource(STABLE_RUNTIME_PROFILE), /sortie-dogs\/plugin\/stable/);
   assert.match(v2PluginWrapperSource(V010_RUNTIME_PROFILE), /from "sortie-dogs\/plugin"/);
   assert.equal(RELEASE_SMOKE_RUN_TIMEOUT_SECONDS, 900);
+  assert.equal(releaseSmokeWorkerStarted([], [{ event: {
+    kind: "unit.settled", unit_id: "recovery", disposition: "succeeded",
+  } }], "recovery"), true);
+  assert.equal(releaseSmokeWorkerStarted([], [{ event: {
+    kind: "unit.settled", unit_id: "other", disposition: "succeeded",
+  } }], "recovery"), false);
 });
 
 test("operator smoke retains only bounded typed tool errors", () => {
