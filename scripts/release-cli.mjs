@@ -7,8 +7,11 @@ import { releaseProfile } from './release-profiles.mjs';
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const assert = (condition, message) => { if (!condition) throw Error(message); };
-export const fixtureOpenCodeConfig = (entry, runtime) => ({ $schema: 'https://opencode.ai/config.json',
-  ...(runtime.id === 'v010' ? { experimental: { subagent_depth: 2 } } : {}), plugin: [pathToFileURL(entry).href] });
+export const fixtureOpenCodeConfig = (entry, runtime, openCodeVersion = '1.0.0') => ({
+  $schema: 'https://opencode.ai/config.json',
+  ...(runtime.id === 'v010' ? { experimental: { subagent_depth: 2 } } : {}),
+  [Number.parseInt(openCodeVersion.split('.')[0], 10) >= 2 ? 'plugins' : 'plugin']: [pathToFileURL(entry).href],
+});
 export const parseOpenCodeVersion = output => output.trim().match(/(?:^|\bv)(\d+\.\d+\.\d+)(?:\b|$)/)?.[1];
 export const pluginPackageForOpenCodeVersion = version => Number.parseInt(version.split('.')[0], 10) >= 2
   ? '@opencode/plugin' : '@opencode-ai/plugin';
@@ -73,7 +76,7 @@ export async function installedFixture(tgz, directory, profileId = 'stable') {
   const legacy = join(installed, 'dist/plugin/legacy.js');
   const entry = release.runtimeProfile === 'stable' && await lstat(legacy).then(info => info.isFile()).catch(() => false)
     ? legacy : join(installed, 'dist/plugin/opencode.js');
-  await writeFile(join(control, 'opencode.json'), JSON.stringify(fixtureOpenCodeConfig(entry, runtime), null, 2));
+  await writeFile(join(control, 'opencode.json'), JSON.stringify(fixtureOpenCodeConfig(entry, runtime, cliVersion), null, 2));
   await command('node', [join(installed, 'dist/cli/main.js'), 'init', project,
     ...(profiles ? ['--profile', release.runtimeProfile] : [])], project, env);
   for (const asset of runtimeAssets) assert((await readFile(join(control, asset.installPath), 'utf8')) === asset.content, 'CLI asset mismatch');

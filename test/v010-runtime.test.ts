@@ -564,6 +564,9 @@ test("preview reinitialization preserves and reports an edited old role asset", 
 test("only the isolated preview fixture enables two-level native subagents", () => {
   assert.equal(fixtureOpenCodeConfig("/tmp/preview.js", V010_RUNTIME_PROFILE).experimental?.subagent_depth, 2);
   assert.equal("experimental" in fixtureOpenCodeConfig("/tmp/stable.js", STABLE_RUNTIME_PROFILE), false);
+  assert.deepEqual(fixtureOpenCodeConfig("/tmp/stable.js", STABLE_RUNTIME_PROFILE, "2.0.14").plugins,
+    ["file:///tmp/stable.js"]);
+  assert.equal("plugin" in fixtureOpenCodeConfig("/tmp/stable.js", STABLE_RUNTIME_PROFILE, "2.0.14"), false);
 });
 
 test("release smoke accepts plain and branded OpenCode version output", () => {
