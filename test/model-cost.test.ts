@@ -7,7 +7,7 @@ const estimate = (modelID: string, overrides: Partial<Parameters<typeof estimate
     cacheReadTokens: 100_000, cacheWriteTokens: 10_000, outputTokens: 10_000, reasoningTokens: 5_000, ...overrides });
 
 test("snapshot identifies the checked official sources and Standard assumptions", () => {
-  assert.equal(MODEL_COST_PRICING_SNAPSHOT.checkedAt, "2026-09-14");
+  assert.equal(MODEL_COST_PRICING_SNAPSHOT.checkedAt, "2026-09-23");
   assert.ok(MODEL_COST_PRICING_SNAPSHOT.sources.some(source => source.includes("developers.openai.com")));
   assert.ok(MODEL_COST_PRICING_SNAPSHOT.sources.some(source => source.includes("platform.claude.com")));
   assert.match(MODEL_COST_PRICING_SNAPSHOT.assumptions.join(" "), /Standard[\s\S]*5-minute/u);
@@ -18,6 +18,7 @@ test("calculates verified aliases per request and charges reasoning output once"
   const alias = estimate("gpt-5.6");
   assert.deepEqual(sol, { status: "priced", usd: 0.79, longContext: false, priceKey: "openai/gpt-5.6-sol" });
   assert.deepEqual(alias, { status: "priced", usd: 0.79, longContext: false, priceKey: "openai/gpt-5.6" });
+  assert.deepEqual(estimate("gpt-6-sol"), { status: "priced", usd: 0.395, longContext: false, priceKey: "openai/gpt-6-sol" });
   const anthropic = estimateModelUsageCost({ providerID: "anthropic", modelID: "claude-opus-5",
     uncachedInputTokens: 1_000_000, cacheReadTokens: 1_000_000, cacheWriteTokens: 1_000_000,
     outputTokens: 500_000, reasoningTokens: 0 });

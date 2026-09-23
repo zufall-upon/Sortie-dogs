@@ -2427,7 +2427,7 @@ test("chat message hook applies explicit catalog routing and fails closed with o
       { id: "openai", models: {
         "gpt-5.6-luna": { id: "gpt-5.6-luna" },
         "gpt-5.6-sol": { id: "gpt-5.6-sol" },
-        "gpt-5.6-terra": { id: "gpt-5.6-terra" },
+        "gpt-6-sol": { id: "gpt-6-sol" },
       } },
     ] } }) } };
     const hooks = await SortieDogsPlugin({ directory, client }, {
@@ -2479,7 +2479,7 @@ test("chat message hook applies explicit catalog routing and fails closed with o
     await chat({ sessionID: "routing", agent: "dog-coordinator" }, coordinator);
     assert.deepEqual(coordinator.message.model, {
       providerID: "openai",
-      modelID: "gpt-5.6-terra",
+      modelID: "gpt-6-sol",
       variant: DEFAULT_COORDINATOR_VARIANT,
     });
     for (const role of RECOMMENDED_CONSULTATION_ROLES) {
@@ -2804,7 +2804,7 @@ test("every packaged role follows default routing independently of write-gate ac
       models: {
         "gpt-5.6-luna": { id: "gpt-5.6-luna" },
         "gpt-5.6-sol": { id: "gpt-5.6-sol" },
-        "gpt-5.6-terra": { id: "gpt-5.6-terra" },
+        "gpt-6-sol": { id: "gpt-6-sol" },
       },
     }] } }) } };
     const hooks = await SortieDogsPlugin({ directory, client });
@@ -2813,7 +2813,7 @@ test("every packaged role follows default routing independently of write-gate ac
     const expected: Record<string, { providerID: string; modelID: string; variant?: string }> = {
       "dog-coordinator": {
         providerID: "openai",
-        modelID: "gpt-5.6-terra",
+        modelID: "gpt-6-sol",
         variant: DEFAULT_COORDINATOR_VARIANT,
       },
       "dog-scout": { providerID: "openai", modelID: "gpt-5.6-luna", variant: RECOMMENDED_SCOUT_VARIANT },
