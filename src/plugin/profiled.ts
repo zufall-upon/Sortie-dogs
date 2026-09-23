@@ -65,9 +65,16 @@ export function previewModelCatalog(
 ): readonly CatalogModel[] {
   const variantsOf = (model: string): string[] =>
     [...new Set(routes.filter(route => route.model === model).map(route => route.variant))];
-  const listed = new Set(base.map(entry => entry.model));
+  const mergedBase = new Map<string, CatalogModel>();
+  for (const entry of base) {
+    const prior = mergedBase.get(entry.model);
+    mergedBase.set(entry.model, prior === undefined
+      ? entry
+      : { model: entry.model, variants: [...new Set([...(prior.variants ?? []), ...(entry.variants ?? [])])] });
+  }
+  const listed = new Set(mergedBase.keys());
   return [
-    ...base.map(entry => {
+    ...[...mergedBase.values()].map(entry => {
       const variants = variantsOf(entry.model);
       return variants.length === 0
         ? entry
