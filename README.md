@@ -76,8 +76,16 @@ is an internal implementation child. The default V2 package export and
    current check evidence against every original requirement, including negative
    constraints. Relevant successful tests support this judgment; they do not replace it.
 5. **Correct or accept.** A revision returns feedback to the **same child session**.
-   Only the operator can accept. Acceptance rejects missing, failed, superseded or
-   stale selected checks and an outdated operator view of the request/source.
+    Only the operator can accept. Acceptance rejects missing, failed, superseded or
+    stale selected checks and an outdated operator view of the request/source/evidence.
+
+Every formal `check` remains a verification obligation: editing source or selecting an
+unrelated success cannot hide a failed check. Rerun it successfully on the final source.
+For a corrected/combined command, the operator can record an equivalent passing
+`check_replacements` link with a coverage explanation. `work_status(check_ids=[...])`
+exposes stored output for inspection. Exploratory diagnostics use ordinary shell tools.
+Unavailable required tests produce **blocked**, not succeeded, completion; `start_work`
+resumes that same job and child when the blocker can be resolved.
 
 The default workflow requires no proposal investigation, immutable whole-task
 execution plan, exact-file manifest, or model-authored proof mapping.

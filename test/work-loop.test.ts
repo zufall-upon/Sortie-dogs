@@ -64,6 +64,63 @@ test("v0.11 refuses missing, failed, superseded and stale validation evidence", 
   assert.equal((await loop.current("root"))!.phase, "review");
 }));
 
+test("v0.11 cannot hide an unexecuted behavior check behind a passing syntax check", () => fixture(async directory => {
+  const store = storage(), loop = new WorkLoop(directory, store); await start(loop);
+  const failed = await loop.check("root", "child", "node check.mjs", 10000);
+  assert.notEqual(failed.exit, 0);
+  await writeFile(join(directory, "notes.txt"), "A source edit must not erase a failed verification obligation.\n");
+  const syntax = await loop.check("root", "child", "node --check check.mjs", 10000);
+  await loop.settled("root", "call-1", true, "Syntax passes, behavioral test remains unresolved.");
+  const restored = new WorkLoop(directory, store);
+  await restored.inspect("root", "root");
+  await assert.rejects(restored.review("root", "accept", "Accept only the passing syntax check.", [syntax.id]), /unresolved-checks/);
+  assert.equal((await restored.current("root"))!.phase, "review");
+}));
+
+test("v0.11 review evidence becomes stale when another check runs without source edits", () => fixture(async directory => {
+  const loop = new WorkLoop(directory, storage()); await start(loop); await completeFiles(directory);
+  const pass = await loop.check("root", "child", "node check.mjs", 10000);
+  await loop.settled("root", "call-1", true, "Done");
+  await loop.inspect("root", "root");
+  await loop.check("root", "root", "node --check check.mjs", 10000);
+  await assert.rejects(loop.review("root", "accept", "Use the old evidence view.", [pass.id]), /review-view-stale/);
+}));
+
+test("v0.11 blocked verification resumes the same child and clears only after a current behavioral pass", () => fixture(async directory => {
+  const store = storage(), loop = new WorkLoop(directory, store); const original = await start(loop);
+  await loop.check("root", "child", "node check.mjs", 10000);
+  await loop.settled("root", "call-1", true, "Cannot verify both files.");
+  const blocked = await loop.review("root", "blocked", "Both-file oracle still fails; work is incomplete.", []);
+  assert.equal(blocked.phase, "blocked"); assert.equal(blocked.acceptedSource, null);
+  const restored = new WorkLoop(directory, store);
+  const resumed = await restored.start("root", "Resolve the remaining behavior.");
+  assert.equal(resumed.id, original.id); assert.equal(restored.task(resumed).sessionID, "child");
+  assert.equal(resumed.attempts, 1);
+  await restored.admit("root", "call-2", restored.task(resumed));
+  assert.match(await restored.claim("root", "child", restored.task(resumed).prompt), /Both-file oracle still fails/);
+  await completeFiles(directory);
+  const pass = await restored.check("root", "child", "node check.mjs", 10000);
+  await restored.settled("root", "call-2", true, "Both files verified.");
+  await restored.inspect("root", "root");
+  assert.equal((await restored.review("root", "accept", "The original behavioral oracle now passes for both files.", [pass.id])).phase, "completed");
+}));
+
+test("v0.11 corrected check commands need an explicit equivalent passing replacement", () => fixture(async directory => {
+  const loop = new WorkLoop(directory, storage()); await start(loop); await completeFiles(directory);
+  const wrong = await loop.check("root", "child", "node missing-check.mjs", 10000);
+  const pass = await loop.check("root", "child", "node check.mjs", 10000);
+  await loop.settled("root", "call-1", true, "The original command named a nonexistent file; the repository's check passed.");
+  await loop.inspect("root", "root");
+  await assert.rejects(loop.review("root", "accept", "Ignore the bad command.", [pass.id]), /unresolved-checks/);
+  const replacement = { check: wrong.id, replacement: pass.id, reason: "Corrected the nonexistent test path to the unchanged repository oracle that checks both requested files." };
+  for (const invalid of [{ ...replacement, replacement: "invented" }, { ...replacement, reason: "" }, { ...replacement, check: pass.id }]) {
+    await assert.rejects(loop.review("root", "accept", "Both-file verification.", [pass.id], [invalid]), /replacement-invalid/);
+  }
+  const accepted = await loop.review("root", "accept", "The actual repository oracle verifies both files; inspected the corrected command and its output.", [pass.id], [replacement]);
+  assert.equal(accepted.phase, "completed"); assert.deepEqual(accepted.checkReplacements, [replacement]);
+  assert.notEqual(accepted.checks.find(check => check.id === wrong.id)!.exit, 0);
+}));
+
 test("v0.11 semantic rejection resumes the same cheap child and survives a cold restart", () => fixture(async directory => {
   const store = storage(), first = new WorkLoop(directory, store); await start(first);
   await writeFile(join(directory, "a.txt"), "done\n");
@@ -306,13 +363,26 @@ test("v0.11 migration leaves customized reviewer/advisor files and user config i
   assert.equal((await initializeProject(directory, "v011")).status, "unchanged");
 }));
 
-test("v0.11 validation uses native shell denial and records no invented successful exit", () => fixture(async directory => {
+test("v0.11 native shell denial remains a failed receipt and cannot disappear from acceptance", () => fixture(async directory => {
   const fixture = nativeFixture(directory), cleanup = await createUserProxyPlugin().setup(fixture.context);
   try {
     await fixture.hooks.get("session:prompt")({ sessionID: "root", messageID: "user-1", prompt: { text: "Complete both files" } });
-    await fixture.call("start_work");
+    const ready = await fixture.call("start_work");
+    await fixture.hooks.get("tool:execute.before")({ sessionID: "root", id: "call", tool: "subagent", input: ready.task });
+    await fixture.hooks.get("session:prompt")({ sessionID: "child", prompt: { text: ready.task.prompt } });
     fixture.context.tool.list = async () => [{ id: "shell", execute: async () => { throw new Error("native shell permission denied"); } }];
-    await assert.rejects(fixture.call("check", { command: "node check.mjs" }), /native shell permission denied/);
-    assert.deepEqual((await fixture.call("work_status")).checks, []);
+    const failed = await fixture.call("check", { command: "node check.mjs" }, "child");
+    assert.equal(failed.exit, null);
+    assert.match(failed.output, /native shell permission denied/);
+    await fixture.hooks.get("tool:execute.after")({ sessionID: "root", id: "call", tool: "subagent", status: "completed", result: { content: "Verification blocked" } });
+    const status = await fixture.call("work_status", { check_ids: [failed.id] });
+    assert.deepEqual(status.unresolved_checks, [failed.id]);
+    assert.match(status.check_results[0].output, /native shell permission denied/);
+    await assert.rejects(fixture.call("review_work", { decision: "accept", assessment: "No modifications, accept anyway.", checks: [] }), /unresolved-checks/);
+    const blocked = await fixture.call("review_work", { decision: "blocked", assessment: "The required oracle is denied by native shell permissions.", checks: [] });
+    assert.equal(blocked.phase, "blocked"); assert.equal(blocked.receipt.status, "blocked");
+    assert.deepEqual(blocked.unresolved_checks, [failed.id]);
+    const resumed = await fixture.call("start_work", { instructions: "Resume once the native permission is available." });
+    assert.equal(resumed.work_id, ready.work_id); assert.equal(resumed.task.sessionID, "child");
   } finally { cleanup(); }
 }));

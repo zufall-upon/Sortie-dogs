@@ -1,4 +1,4 @@
-import { WorkLoop, WORK_LIMITS, isRecord, workChanged, type WorkState, type WorkStore } from "../core/work-loop.js";
+import { WorkLoop, WORK_LIMITS, isRecord, workChanged, workCheckCurrent, workUnresolvedChecks, type WorkState, type WorkStore } from "../core/work-loop.js";
 import { estimateModelUsageCost } from "./model-cost.js";
 import type { OpenCodeV2Context } from "./v2.js";
 import { resolve } from "node:path";
@@ -106,22 +106,27 @@ export function createUserProxyPlugin() {
         }
         return { rows, note: "Estimated pricing of completed requests including native compaction, using requested Fast (2x) rates for Luna. Provider-reported tiers are shown separately; this is not billing or confirmation of Fast delivery. The in-flight acceptance/final response is not included." };
       }
-      async function packet(work: WorkState, actor: string = work.root) {
+      async function packet(work: WorkState, actor: string = work.root, checkIDs: string[] = []) {
         const inspected = await loop.inspect(work.root, actor);
         work = inspected.work ?? work;
         const source = inspected.source;
+        if (checkIDs.some(id => !work.checks.some(check => check.id === id))) throw new Error("work-check-not-found");
+        const unresolved = workUnresolvedChecks(work, source.fingerprint);
         return { work_id: work.id, phase: work.phase, attempts: work.attempts, max_attempts: loop.maxAttempts,
           original_requests: work.requests.map(request => ({ ...request, ...(request.files ? { files: request.files.map(file => ({ ...file,
             uri: file.uri.startsWith("data:") ? "[native attachment retained]" : file.uri })) } : {}) })),
           instructions: work.instructions, feedback: work.feedback,
           changed_paths: workChanged(work.baseline, source), source_fingerprint: source.fingerprint,
           checks: work.checks.map(check => ({ id: check.id, command: check.command, exit: check.exit,
-            current: check.before === source.fingerprint && check.after === source.fingerprint,
+            current: workCheckCurrent(work, check, source.fingerprint),
             timed_out: check.timedOut, interrupted: check.interrupted })), worker_report: work.report,
+          unresolved_checks: unresolved.map(check => check.id),
+          check_results: work.checks.filter(check => checkIDs.includes(check.id)).map(check => ({ ...check })),
+          check_replacements: work.checkReplacements ?? [],
           ...(work.phase === "completed" ? { accepted_source_current: work.acceptedSource === source.fingerprint } : {}),
           ...(work.phase === "ready" ? { task: loop.task(work), next: "Call the native subagent tool with this task unchanged, in the foreground." }
             : { next: work.phase === "review" ? "Compare all original requests with actual changes and check evidence, then call review_work. Revise on any omission."
-              : work.phase === "interrupted" ? "Call start_work to continue this same job and child; attempts and original instructions are retained."
+              : work.phase === "interrupted" || work.phase === "blocked" ? "This job is incomplete. Report the blocker/interruption honestly; when it can be resolved, start_work resumes this same job and child with its original instructions and attempts."
                 : work.phase === "running" ? "The native child call is outstanding. Let it return; use cancel_work for an explicit stop."
                   : work.phase === "completed" ? "Report the accepted result to the user." : "Work was explicitly cancelled." }) };
       }
@@ -154,12 +159,12 @@ export function createUserProxyPlugin() {
             await reconcile(id);
             return packet(await loop.start(id, args.instructions ?? ""));
           });
-        add("work_status", "Read current original instructions, native execution state, changed files and real validation receipts. It does not accept work.",
-          objectSchema({}), async (_args, execution) => {
+        add("work_status", "Read original instructions, changed files, and all verification obligations, including unresolved failures. Supply check_ids to inspect their stored output before judging test coverage. It does not accept work.",
+          objectSchema({ check_ids: { type: "array", items: stringSchema, maxItems: 8 } }), async (args, execution) => {
             const actor = String(execution.sessionID), id = await root(actor);
-            const work = await reconcile(id); return work ? packet(work, actor) : { phase: "idle" };
+            const work = await reconcile(id); return work ? packet(work, actor, args.check_ids ?? []) : { phase: "idle" };
           });
-        add("check", "Run one meaningful final verification command in the workspace and record its actual exit and source identity. Discover commands while working; fix failures and rerun after edits. No prewritten plan or manifest is required.",
+        add("check", "Run required verification and retain its real result as an obligation until it passes on final source. Use shell for exploratory diagnostics. Repair setup/collection failures and rerun this check; compilation is not a replacement for behavior tests. No prewritten plan or manifest is required.",
           objectSchema({ command: { type: "string", minLength: 1, maxLength: 8000 }, timeout_ms: { type: "integer", minimum: 100, maximum: 1200000 } }, ["command"]),
           async (args, execution) => {
             const actor = String(execution.sessionID), id = await root(actor);
@@ -170,10 +175,10 @@ export function createUserProxyPlugin() {
             if (parent?.aborted || lifetime.signal.aborted) controller.abort();
             const active = controllers.get(id) ?? new Set(); controllers.set(id, active); active.add(controller);
             try {
-              const nativeShell = (await context.tool.list?.())?.find(tool => tool.id === "shell");
-              if (!nativeShell) throw new Error("Native OpenCode shell tool is unavailable.");
               return await loop.check(id, actor, args.command, args.timeout_ms ?? 120000, controller.signal,
                 async (directory, command, timeout, signal) => {
+                  const nativeShell = (await context.tool.list?.())?.find(tool => tool.id === "shell");
+                  if (!nativeShell) throw new Error("Native OpenCode shell tool is unavailable.");
                   // Invoke the actual V2 executor, including its shell permissions, external-directory checks,
                   // process ownership, cancellation and platform-selected shell. Never run a second hidden shell.
                   const native = await nativeShell.execute({ command, workdir: directory, timeout, background: false }, { ...execution, signal });
@@ -185,15 +190,18 @@ export function createUserProxyPlugin() {
             }
             finally { active.delete(controller); parent?.removeEventListener("abort", abort); if (!active.size) controllers.delete(id); }
           });
-        add("review_work", "Operator only: compare ALL original user instructions, negative constraints and quality requirements with actual changes. Accept with the relevant current successful check IDs and a substantive assessment, or revise with concrete missing requirements. Revision returns the SAME cheap child for corrections.",
-          objectSchema({ decision: { type: "string", enum: ["accept", "revise"] }, assessment: { type: "string", minLength: 1, maxLength: 8000 },
-            checks: { type: "array", items: stringSchema, maxItems: WORK_LIMITS.checks } }, ["decision", "assessment", "checks"]),
+        add("review_work", "Operator only: inspect real source and check output against ALL user requirements. Accept only verified completion; revise ordinary defects through the SAME child, or report blocked for genuinely unavailable required verification. Every recorded check must pass on final source. If a command was corrected/combined, check_replacements links an obsolete receipt to a selected equivalent passing check and explains preserved coverage; it never waives unavailable tests or replaces behavior tests with syntax checks.",
+          objectSchema({ decision: { type: "string", enum: ["accept", "revise", "blocked"] }, assessment: { type: "string", minLength: 1, maxLength: 8000 },
+            checks: { type: "array", items: stringSchema, maxItems: WORK_LIMITS.checks },
+            check_replacements: { type: "array", maxItems: WORK_LIMITS.checks, items: objectSchema({ check: stringSchema, replacement: stringSchema,
+              reason: { type: "string", minLength: 1, maxLength: 2000 } }, ["check", "replacement", "reason"]) } }, ["decision", "assessment", "checks"]),
           async (args, execution) => {
             const id = String(execution.sessionID); await requireRoot(id); await reconcile(id);
-            const work = await loop.review(id, args.decision, args.assessment, args.checks);
+            const work = await loop.review(id, args.decision, args.assessment, args.checks, args.check_replacements ?? []);
             return { ...await packet(work), ...(work.phase === "completed" ? { receipt: { status: "succeeded", work_id: work.id,
               requests: work.requests.map(item => item.id), source_fingerprint: work.acceptedSource, check_ids: work.acceptedChecks,
-              assessment: work.assessment }, cost: await costs(work).catch(() => ({ available: false })) } : {}) };
+              assessment: work.assessment, check_replacements: work.checkReplacements ?? [] }, cost: await costs(work).catch(() => ({ available: false })) }
+              : work.phase === "blocked" ? { receipt: { status: "blocked", work_id: work.id, assessment: work.assessment } } : {}) };
           });
         add("cancel_work", "Operator: explicitly stop this owned job and its child. Native interruption is awaited; files and existing evidence remain available.",
           objectSchema({}), async (_args, execution) => {

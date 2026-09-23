@@ -9,7 +9,7 @@ const exec = promisify(execFile);
 const hash = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
 export const WORK_REFERENCE = "SORTIE_V011_WORK_REF ";
 export const WORK_LIMITS = { attempts: 6, requests: 64, requestBytes: 128 * 1024, checks: 128, outputBytes: 16 * 1024 } as const;
-export type WorkPhase = "ready" | "running" | "review" | "interrupted" | "completed" | "cancelled";
+export type WorkPhase = "ready" | "running" | "review" | "blocked" | "interrupted" | "completed" | "cancelled";
 export interface WorkRequest {
   id: string; text: string; at?: number;
   files?: Array<{ uri: string; name?: string; description?: string }>;
@@ -20,6 +20,7 @@ export interface WorkCheck {
   id: string; command: string; exit: number | null; timedOut: boolean; interrupted: boolean;
   before: string; after: string; output: string; at: number;
 }
+export interface WorkCheckReplacement { check: string; replacement: string; reason: string }
 export interface WorkState {
   version: 1; id: string; root: string; phase: WorkPhase; requests: WorkRequest[];
   instructions: string; feedback: string[]; attempts: number; generation: number;
@@ -27,7 +28,8 @@ export interface WorkState {
   startedAt: number; updatedAt: number; report: string; assessment: string | null;
   acceptedChecks: string[]; acceptedSource: string | null;
   deliveredRequests?: number;
-  reviewView?: { source: string; intent: string };
+  reviewView?: { source: string; intent: string; evidence?: string };
+  checkReplacements?: WorkCheckReplacement[];
 }
 export interface WorkStore { get(key: string): Promise<unknown>; set(key: string, value: unknown): Promise<void> }
 interface RootState { requests: WorkRequest[]; work: WorkState | null }
@@ -77,6 +79,22 @@ export async function workSource(directory: string): Promise<SourceSnapshot> {
 export function workChanged(baseline: SourceSnapshot, current: SourceSnapshot): string[] {
   return [...new Set([...Object.keys(baseline.files), ...Object.keys(current.files)])]
     .filter(path => baseline.files[path] !== current.files[path]).sort();
+}
+
+export function workCheckCurrent(work: WorkState, check: WorkCheck, source: string): boolean {
+  return check.before === source && check.after === source &&
+    work.checks.filter(item => item.command === check.command).at(-1)?.id === check.id;
+}
+const checkPassed = (work: WorkState, check: WorkCheck, source: string) =>
+  check.exit === 0 && !check.interrupted && !check.timedOut && workCheckCurrent(work, check, source);
+
+/** Formal checks remain obligations across source edits and restarts, not just selectable success receipts. */
+export function workUnresolvedChecks(work: WorkState, source: string, replacements = work.checkReplacements ?? []): WorkCheck[] {
+  const latest = new Map(work.checks.map(check => [check.command, check]));
+  return [...latest.values()].filter(check => !checkPassed(work, check, source) && !replacements.some(item => {
+    const replacement = work.checks.find(candidate => candidate.id === item.replacement);
+    return item.check === check.id && replacement && checkPassed(work, replacement, source);
+  }));
 }
 
 /** A real validation executor. It never derives exit status from model-authored text. */
@@ -148,7 +166,8 @@ export class WorkLoop {
     return this.update(root, async state => {
       const source = await workSource(this.directory);
       if (actor === root && state.work?.phase === "review") {
-        state.work.reviewView = { source: source.fingerprint, intent: hash(JSON.stringify(state.work.requests)) };
+        state.work.reviewView = { source: source.fingerprint, intent: hash(JSON.stringify(state.work.requests)),
+          evidence: hash(JSON.stringify(state.work.checks)) };
       }
       return { work: state.work, source };
     });
@@ -172,7 +191,7 @@ export class WorkLoop {
     if (instructions.length > 8000) throw new Error("work-instructions-too-large");
     return this.update(root, async state => {
       if (state.work && !["completed", "cancelled"].includes(state.work.phase)) {
-        if (state.work.phase === "interrupted") {
+        if (["interrupted", "blocked"].includes(state.work.phase)) {
           if (state.work.attempts >= this.maxAttempts) throw new Error("work-attempt-budget-exhausted");
           state.work.phase = "ready"; state.work.generation++; state.work.callID = null;
           if (instructions.trim()) state.work.feedback.push(instructions);
@@ -215,7 +234,7 @@ export class WorkLoop {
         "## Original user instructions (all remain authoritative)", ...work.requests.map(item => item.text),
         "## Operator notes", work.instructions, ...work.feedback,
         "Use native read/glob/grep/patch/shell tools freely within the user's instructions and project AGENTS.md. Discover dependencies and affected files as you work.",
-        "Run final meaningful checks with sortie_v011_check. Fix failures inside this invocation and rerun affected checks after the final edit.",
+        "Run final meaningful checks with sortie_v011_check. Each remains an obligation until it passes on final source; use shell for exploration. Fix ordinary setup and test failures in this invocation. Verify the actual affected behavior and adjacent valid/invalid cases, not just syntax or one literal reproducer.",
         "Return a concise account of changes, check IDs, requirements covered and anything genuinely unresolved. Never accept your own work or ask the user to fix a protocol field."].join("\n\n");
     });
   }
@@ -233,7 +252,12 @@ export class WorkLoop {
     if (!work || !["running", "review", ...(actor === root ? ["ready"] : [])].includes(work.phase) || (actor !== root && actor !== work.child)) throw new Error("work-check-not-owned");
     if (work.checks.length >= WORK_LIMITS.checks) throw new Error("work-check-limit");
     const before = await workSource(this.directory);
-    const result = await execute(this.directory, command, timeout, signal);
+    // Permission denials, missing executors and launch errors are failed verification evidence too.
+    // Keep a null exit: no process ran successfully, and no invented exit code can support acceptance.
+    const result = await execute(this.directory, command, timeout, signal).catch((error: unknown) => ({
+      exit: null, timedOut: false, interrupted: signal?.aborted === true,
+      output: `Verification could not execute: ${error instanceof Error ? error.message : String(error)}`.slice(-WORK_LIMITS.outputBytes),
+    }));
     const after = await workSource(this.directory);
     const check = { id: randomUUID(), command, ...result, before: before.fingerprint, after: after.fingerprint, at: Date.now() };
     await this.update(root, async state => {
@@ -259,7 +283,8 @@ export class WorkLoop {
       }
     });
   }
-  async review(root: string, decision: "accept" | "revise", assessment: string, checks: string[]): Promise<WorkState> {
+  async review(root: string, decision: "accept" | "revise" | "blocked", assessment: string, checks: string[],
+    replacements: WorkCheckReplacement[] = []): Promise<WorkState> {
     if (!assessment.trim() || assessment.length > 8000) throw new Error("work-review-assessment-required");
     return this.update(root, async state => {
       const work = state.work;
@@ -268,17 +293,31 @@ export class WorkLoop {
       if (decision === "revise") {
         if (work.attempts >= this.maxAttempts) throw new Error("work-attempt-budget-exhausted");
         work.feedback.push(assessment); work.phase = "ready"; work.generation++; work.callID = null;
+      } else if (decision === "blocked") {
+        work.phase = "blocked"; work.assessment = assessment;
+        work.feedback.push(`Unresolved blocker: ${assessment}`);
       } else {
         const source = await workSource(this.directory);
-        if (work.reviewView?.source !== source.fingerprint || work.reviewView.intent !== hash(JSON.stringify(work.requests))) {
-          throw new Error("work-review-view-stale: read work_status and inspect the current changes before accepting");
+        if (work.reviewView?.source !== source.fingerprint || work.reviewView.intent !== hash(JSON.stringify(work.requests)) ||
+            work.reviewView.evidence !== hash(JSON.stringify(work.checks))) {
+          throw new Error("work-review-view-stale: read work_status and inspect the current changes and check results before accepting");
         }
         if (workChanged(work.baseline, source).length && !checks.length) throw new Error("work-current-validation-required");
         for (const id of checks) {
           const check = work.checks.find(item => item.id === id);
-          if (!check || check.exit !== 0 || check.interrupted || check.timedOut || check.before !== source.fingerprint || check.after !== source.fingerprint ||
-              work.checks.filter(item => item.command === check.command).at(-1)?.id !== id) throw new Error("work-validation-missing-failed-or-stale");
+          if (!check || !checkPassed(work, check, source.fingerprint)) throw new Error("work-validation-missing-failed-or-stale");
         }
+        const pending = workUnresolvedChecks(work, source.fingerprint, []);
+        const replaced = new Set<string>();
+        for (const item of replacements) {
+          if (!pending.some(check => check.id === item.check) || replaced.has(item.check) ||
+              !checks.includes(item.replacement) || work.checks.findIndex(check => check.id === item.replacement) <= work.checks.findIndex(check => check.id === item.check) ||
+              !item.reason?.trim() || item.reason.length > 2000) throw new Error("work-check-replacement-invalid");
+          replaced.add(item.check);
+        }
+        const unresolved = workUnresolvedChecks(work, source.fingerprint, replacements);
+        if (unresolved.length) throw new Error(`work-validation-unresolved-checks: ${unresolved.map(check => check.id).join(", ")}. Rerun these checks successfully, justify an equivalent passing replacement, or report blocked; unrelated successes do not resolve them.`);
+        work.checkReplacements = structuredClone(replacements);
         work.phase = "completed"; work.assessment = assessment; work.acceptedChecks = checks; work.acceptedSource = source.fingerprint;
       }
       work.updatedAt = Date.now();

@@ -32,13 +32,25 @@ export async function userProxyBench(tgz, sourceManifest, instanceID, directory,
   assert(instance, 'Case is not in the pinned dev23 set');
   const driverHash = hash(await readFile(import.meta.filename));
   const packageHash = hash(await readFile(tgz));
+  assert(packageHash === input.candidate.sha256, 'Candidate differs from the declared inference manifest');
   const candidateSource = JSON.parse(await readFile(`${tgz}.json`, 'utf8'));
   assert(candidateSource.sha256 === packageHash && /^[a-f0-9]{40}$/.test(candidateSource.commit), 'Candidate commit/hash receipt mismatch');
   const fixture = await installedFixture(tgz, directory, 'v011');
+  assert(fixture.pkg.version === input.candidate.version && fixture.runtimeMarker === input.candidate.runtime_marker,
+    'Candidate version/runtime differs from the declared inference manifest');
   const { project, control, env, run, cliVersion } = fixture;
   assert(Number(cliVersion.split('.')[0]) >= 2, 'Native OpenCode V2 is required');
   const workspace = join(project, 'repository');
   await cloneInstance(instance, workspace);
+  const prompt = createInstancePrompt(instance);
+  const python = await command('python', ['-c', `import importlib.metadata as m,json,sys
+packages={}
+for name in ['pip','pytest','setuptools']:
+ try: packages[name]=m.version(name)
+ except m.PackageNotFoundError: packages[name]=None
+print(json.dumps({'version':sys.version,'executable':sys.executable,'packages':packages}))`], workspace, env)
+    .then(value => JSON.parse(value)).catch(() => ({ available: false }));
+  const constraints = process.env.PIP_CONSTRAINT;
   const configPath = join(control, 'opencode.json');
   const config = JSON.parse(await readFile(configPath, 'utf8'));
   config.model = 'openai/gpt-6-sol#xhigh';
@@ -96,7 +108,8 @@ export default {...plugin,async setup(ctx){
     candidate: { version: fixture.pkg.version, sha256: packageHash, runtime_marker: fixture.runtimeMarker, profile: 'v011',
       source_commit: candidateSource.commit },
     driver_commit: (await command('git', ['rev-parse', 'HEAD'], resolve(import.meta.dirname, '..'), env)).trim(),
-    source_manifest_sha256: hash(await readFile(sourceManifest)), driver_sha256: driverHash,
+    source_manifest_sha256: hash(await readFile(sourceManifest)), driver_sha256: driverHash, prompt_sha256: hash(prompt),
+    python_environment: python, pip_constraint: constraints ? { path: constraints, sha256: hash(await readFile(constraints)) } : null,
     cliVersion, cost_limit_usd: costLimit, timeout_seconds: 1800, attempts: 1,
     models: { operator: 'openai/gpt-6-sol#xhigh', implementer: 'openai/gpt-6-luna-fast#max', auxiliary: 'openai/gpt-6-luna-fast#high' },
     scoring: 'external official Docker harness after all inference writers stop and patch is frozen' };
@@ -113,7 +126,7 @@ export default {...plugin,async setup(ctx){
     let output;
     try {
       output = await command('timeout', ['--signal=TERM', '--kill-after=10s', '1800s', 'opencode', 'run', '--server', server.url,
-        '--format', 'json', '--agent', 'dog-operator', '--model', 'openai/gpt-6-sol#xhigh', createInstancePrompt(instance)], workspace, server.env, 1840000);
+        '--format', 'json', '--agent', 'dog-operator', '--model', 'openai/gpt-6-sol#xhigh', prompt], workspace, server.env, 1840000);
     } catch (error) { output = error.processResult?.stdout ?? ''; errorMessage = error.message; }
     await writeFile(join(run, 'inference.jsonl'), output);
     root = events(output).find(event => event.sessionID)?.sessionID;
@@ -126,6 +139,7 @@ export default {...plugin,async setup(ctx){
     receipt = review ? JSON.parse(content(review.state.content)) : null;
     assert(!errorMessage, errorMessage);
     assert(receipt?.receipt?.status === 'succeeded', 'Operator did not accept the benchmark task');
+    assert(!receipt.unresolved_checks?.length, 'Operator accepted unresolved verification obligations');
     assert(receipt.checks.some(check => check.current && check.exit === 0), 'No current successful native check');
     const routing = events(await readFile(join(control, 'benchmark-routing.jsonl'), 'utf8'));
     const luna = routing.filter(item => item.transport && item.model === 'gpt-6-luna-fast');
@@ -139,7 +153,8 @@ export default {...plugin,async setup(ctx){
   await writeFile(join(run, 'candidate.patch'), patch, { flag: 'wx' });
   const prediction = { instance_id: instanceID, model_name_or_path: `sortie-dogs-v${fixture.pkg.version}-native`, model_patch: patch };
   await writeFile(join(run, 'predictions.jsonl'), JSON.stringify(prediction) + '\n', { flag: 'wx' });
-  const report = { ...frozen, root, elapsed_ms: Date.now() - started, terminal: errorMessage ? 'failed' : 'succeeded', error: errorMessage,
+  const report = { ...frozen, root, elapsed_ms: Date.now() - started,
+    terminal: receipt?.receipt?.status === 'blocked' ? 'blocked' : errorMessage ? 'failed' : 'succeeded', error: errorMessage,
     receipt, patch_sha256: hash(patch), patch_bytes: Buffer.byteLength(patch),
     routing: events(await readFile(join(control, 'benchmark-routing.jsonl'), 'utf8').catch(() => '')) };
   await writeFile(join(run, 'native-history.json'), JSON.stringify(family, null, 2));

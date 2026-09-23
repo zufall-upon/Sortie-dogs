@@ -166,7 +166,41 @@ Release, PR integration and global application remain pending. Evidence is retai
 original scoring, and the separately recorded `scoring-envfix/` diagnostic. These are
 three selected cases, not a rerun or success-rate estimate for all 23.
 
+## Acceptance-defect remediation
+
+Investigation after the sampled failure reproduced three runtime defects against the
+old candidate: acceptance could select a syntax-only success while a behavioral check
+remained unresolved (even after an unrelated source edit and a cold restart); an operator
+view did not become stale when check evidence changed without source edits; and a native
+shell permission/launch error left no failed verification receipt. All three regression
+tests failed before the fix and passed afterward.
+
+Runtime marker **`0.11.0-user-proxy-native-v2-validation`** retains every formal check as
+an obligation until it passes on final source. A corrected/combined command needs an
+operator-recorded equivalent successful replacement, preserving the original failure.
+The operator can read stored check output directly. Missing required verification has a
+durable **blocked** state that resumes the same child, rather than a succeeded receipt.
+The evidence view now includes check history, and execution errors retain a null exit.
+
+The implementer and operator instructions now require checking neighboring valid/invalid
+behavior through the actual changed library/API and diagnosing ordinary dependency setup
+errors. No repository-specific exception list, benchmark answer, or hidden test is added
+to runtime instructions. The benchmark prompt explicitly permits registry installation of
+declared dependencies, and its environment receipt records actual Python/package versions
+and pip constraints. The incompatible cross-repository setuptools pin is not reused.
+
+Focused work-loop, native plugin, initialization and benchmark-runner tests passed
+**89/89** after the runtime fix. The strengthened lifecycle also tests blocked/resumed
+work and evidence-backed replacement of an incorrectly named check command.
+
 ## Reproduction
+
+For Python inference, prepare a repository-compatible interpreter and record its
+versions before starting. Do not globally pin setuptools across unrelated repositories:
+their isolated build requirements may intentionally require a different version.
+The native driver now records Python/package versions, any inherited pip constraint
+file digest, and the exact prompt digest. Registry installation of declared dependencies
+is allowed; solution/source retrieval restrictions do not imply offline dependency setup.
 
 ```sh
 node scripts/user-proxy-smoke.mjs <frozen-candidate.tgz> <unused-evidence-directory>
