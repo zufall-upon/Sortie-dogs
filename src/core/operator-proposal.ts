@@ -589,6 +589,10 @@ export class OperatorProposalRuntime {
       }
       const intent = parseIntent(raw.intent), intentHash = hash(JSON.stringify(intent));
       if (intentHash === previous.intent_hash) throw new Error("operator-proposal-approved-revision-intent-unchanged");
+      if (currentGoal.goal_id === previous.goal_binding.goal_id &&
+          JSON.stringify(intent.requirements.slice(0, previous.intent.requirements.length)) !== JSON.stringify(previous.intent.requirements)) {
+        throw new Error("operator-proposal-approved-revision-acceptance-continuity-required");
+      }
       const remainingReads = intent.proposal_budget.max_reads - previous.read_count;
       const remainingSubmissions = intent.proposal_budget.max_submissions - previous.submission_count;
       if (remainingReads <= 0 || remainingSubmissions <= 0) {

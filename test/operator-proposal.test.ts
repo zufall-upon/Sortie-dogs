@@ -1965,6 +1965,9 @@ test("terminal approved run requires a pinned root revision and retains its cont
     { actor: session, request: { ...request, content_hash: "0".repeat(64) }, binding, error: /identity-mismatch/ },
     { actor: session, request: { ...request, operator_run_id: "wrong-run" }, binding, error: /terminal-run-required/ },
     { actor: session, request, binding: submitted.goal_binding!, error: /goal-revision-required/ },
+    { actor: session, request: { ...request, intent: { ...revisedIntent, requirements: requirements.slice(1) } },
+      binding: { ...submitted.goal_binding!, revision: 2, scope_epoch: 2,
+      acceptance_fingerprint: `sha256:${"c".repeat(64)}` }, error: /acceptance-continuity-required/ },
     { actor: session, request: { ...request, intent: { ...revisedIntent, proposal_budget: { max_reads: 1, max_submissions: 1 } } },
       binding, error: /budget-exhausted/ },
   ]) await assert.rejects(proposals.reviseApproved(session, invalid.actor, invalid.request, coldRun, invalid.binding), invalid.error);

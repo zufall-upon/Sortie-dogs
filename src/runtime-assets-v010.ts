@@ -158,7 +158,9 @@ goal is active, use ${profile.toolPrefix}revise_approved_operator_intent with re
 proposal_id, revision, content_hash, terminal operator_run_id, a single-line rationale, and the complete new intent object.
 Pin the identity from operator_status. The host refuses active/prepared runs, stale identities, unchanged goal bindings,
 and budgets without room above cumulative proposal spend. It archives the old approved intent, ordered acceptance and
-terminal result before granting one new investigation Task; no child, unit, acceptance or budget is revived or reset.
+terminal result before granting one new investigation Task. Within the same goal, retain the old ordered requirements
+byte-for-byte as a prefix of the new intent; a separate user-authorized goal may have a different order. No child, unit,
+acceptance or budget is revived or reset.
 Freeze product requirements from the original request, not extra implementation criteria invented from workflow
 bookkeeping. Keep proposal read/submission allowances in proposal_budget and host counters; do not turn spent
 budgets or your own reporting obligations into worker validation commands. Preserve any explicit user requirement.

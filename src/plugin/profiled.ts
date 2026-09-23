@@ -376,7 +376,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       : { ...(record(stringSchema) ? stringSchema : { type: "string" }), description: OPERATOR_PROPOSAL_REVISION_CONTRACT };
     const approvedRevisionContract = "revision_json must encode exactly {proposal_id:string,revision:positive integer,content_hash:string,operator_run_id:string,rationale:nonblank single-line string,intent:object}. " +
       "The intent has the exact begin_operator_proposal intent_json shape and a cumulative proposal_budget with room above all retained reads/submissions. " +
-      "Pin the approved proposal identity and the cancelled/completed run ID from operator_status. Only a root acting for a newly authorized active goal may revise; active/prepared runs, stale identity or unchanged goal binding are denied. " +
+      "Pin the approved proposal identity and the cancelled/completed run ID from operator_status. For the same goal, the new requirements must begin with every old ordered requirement byte-for-byte. Only a root acting for a newly authorized active goal may revise; active/prepared runs, stale identity or unchanged goal binding are denied. " +
       "Old acceptance, terminal status and proposal accounting remain durable. This returns an investigation Task, not implementation or acceptance.";
     const approvedRevisionSchema = record(stringSchema) && typeof stringSchema.describe === "function"
       ? stringSchema.describe(approvedRevisionContract)
