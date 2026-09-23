@@ -3637,11 +3637,14 @@ test("cold completion reconciles a terminal proposal reservation before relinkin
   assert.equal((await runtime.required(sessionID)).phase, "awaiting-acceptance");
 
   const proposalCallID = "stale-proposal-call", proposalUnitID = "proposal:stale-intent";
+  const proposalReference = `SORTIE_OPERATOR_PROPOSAL_TASK_REF ${JSON.stringify({
+    k: "proposal", r: sessionID, p: "v010", i: "stale-intent", s: "investigating", h: "a".repeat(64),
+  })}`;
   const now = Date.now();
   const terminalProposal = { info: { id: "proposal-finished", role: "assistant", agent: "dog-operator",
     sessionID, finish: "stop", time: { created: now, completed: now + 1 } }, parts: [{ type: "tool", tool: "task",
       callID: proposalCallID, state: { status: "completed", input: { subagent_type: "dogs-coordinator",
-        prompt: "Investigate the approved goal before execution." }, time: { start: now, end: now + 1 }, output: "Submitted." } }] };
+        prompt: proposalReference }, time: { start: now, end: now + 1 }, output: "Submitted." } }] };
   const laterMessages = Array.from({ length: 1001 }, (_value, index) => ({ info: { id: `later-${index}`, role: "assistant",
     agent: "dog-operator", sessionID, finish: "stop", time: { created: now + index + 2, completed: now + index + 3 } },
     parts: [{ type: "text", text: "continuing" }] }));

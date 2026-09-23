@@ -50,6 +50,9 @@ export interface RuntimeBridge {
       executionUnits: number): Promise<void>;
     hasNoGoalReservation(rootSessionID: string, unitID: string, callID: string): Promise<boolean>;
     assertActiveGoal(rootSessionID: string, goalFingerprint: string): Promise<void>;
+    reconcileAbortedOperatorOrphan(rootSessionID: string): Promise<{ readonly status: "settled" | "no-orphan" | "unproven";
+      readonly reservation_id?: string; readonly unit_id?: string; readonly reason?: string }>;
+    proveApprovedRunAncestry(rootSessionID: string, oldGoalID: string, parentRunID: string): Promise<boolean>;
     retainOperatorContractRepairWorker(rootSessionID: string, taskID: string, childSessionID: string): Promise<void>;
     assertOperatorContractRepairValidationAvailable(rootSessionID: string, taskID: string, childSessionID: string): Promise<void>;
     remediationScopeExpansionAuthority(rootSessionID: string): Promise<string | undefined>;

@@ -2036,12 +2036,45 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
             if (!isRecord(part) || part.type !== "tool" || part.tool !== "task" || typeof part.callID !== "string" ||
               !isRecord(part.state) || !["completed", "error"].includes(String(part.state.status)) ||
               !isRecord(part.state.input) || typeof part.state.input.prompt !== "string") continue;
-            const proposal = reservation.unit_id.startsWith("proposal:");
             const role = String(part.state.input.subagent_type);
-            if (proposal ? role !== "dog-operator" : !["dog-worker", "dog-luna-worker"].includes(role)) continue;
-            const unitID = proposal
-              ? reservation.unit_id
-              : handoffValue(handoffEntries(part.state.input.prompt), ["task_id"]) ?? part.callID;
+            const prompt = part.state.input.prompt;
+            const proposal = reservation.unit_id.startsWith("proposal:");
+            let unitID: string | undefined;
+            // The profiled client maps the external V2 `dogs-coordinator` to this canonical role.
+            if (role === "dog-operator" &&
+                (prompt.startsWith("SORTIE_OPERATOR_DELEGATE_REF ") ||
+                 prompt.startsWith("SORTIE_OPERATOR_PROPOSAL_TASK_REF "))) {
+              // Native V2 stores the short Task handle, not the expanded child prompt. The
+              // handle's owner and unit must agree with the durable reservation and call ID.
+              const prefix = prompt.startsWith("SORTIE_OPERATOR_DELEGATE_REF ")
+                ? "SORTIE_OPERATOR_DELEGATE_REF " : "SORTIE_OPERATOR_PROPOSAL_TASK_REF ";
+              let ref: unknown;
+              try { ref = JSON.parse(prompt.slice(prefix.length)); } catch { continue; }
+              if (!isRecord(ref) || ref.r !== root || !/^[a-f0-9]{64}$/u.test(String(ref.h)) ||
+                  (prefix.startsWith("SORTIE_OPERATOR_DELEGATE") && !/^[a-f0-9]{64}$/u.test(String(ref.p)))) continue;
+              if (prefix.startsWith("SORTIE_OPERATOR_DELEGATE")) {
+                if (ref.k !== "delegate" || typeof ref.n !== "string" ||
+                    !Number.isSafeInteger(ref.g) || (ref.g as number) < 1 ||
+                    !reservation.unit_id.startsWith(`${ref.n}-`) ||
+                    !/^[1-9][0-9]*$/u.test(reservation.unit_id.slice(ref.n.length + 1))) continue;
+                unitID = reservation.unit_id;
+              } else {
+                if (ref.k !== "proposal" || typeof ref.i !== "string" ||
+                    reservation.unit_id !== `proposal:${ref.i}`) continue;
+                unitID = reservation.unit_id;
+              }
+            } else if (["dog-worker", "dog-luna-worker"].includes(role)) {
+              if (prompt.startsWith("SORTIE_OPERATOR_TASK_REF ")) {
+                let ref: unknown;
+                try { ref = JSON.parse(prompt.slice("SORTIE_OPERATOR_TASK_REF ".length)); } catch { continue; }
+                if (!isRecord(ref) || ref.r !== root || !/^[a-f0-9]{64}$/u.test(String(ref.h)) ||
+                    !/^[a-f0-9]{64}$/u.test(String(ref.p)) || typeof ref.t !== "string") continue;
+                unitID = ref.t;
+              } else {
+                unitID = handoffValue(handoffEntries(prompt), ["task_id"]) ?? part.callID;
+              }
+            }
+            if (unitID === undefined || (proposal && role !== "dog-operator")) continue;
             if (unitID !== reservation.unit_id || goalFingerprint({ goal_id: state.goal_id, unit_id: unitID,
               call_id: part.callID }) !== reservation.reservation_id) continue;
             const time = isRecord(part.state.time) ? part.state.time : undefined;
@@ -4443,14 +4476,15 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     await coordinator.reconcile(sessionID, new Set(), active.run_id);
   }
 
-  async function serializeChatTransition(sessionID: string, operation: () => Promise<void>): Promise<void> {
+  async function serializeChatTransition<T>(sessionID: string, operation: () => Promise<T>): Promise<T> {
     const previous = chatTransitions.get(sessionID) ?? Promise.resolve();
     const current = previous.catch(() => undefined).then(operation);
-    chatTransitions.set(sessionID, current);
+    const tail = current.then(() => undefined, () => undefined);
+    chatTransitions.set(sessionID, tail);
     try {
-      await current;
+      return await current;
     } finally {
-      if (chatTransitions.get(sessionID) === current) chatTransitions.delete(sessionID);
+      if (chatTransitions.get(sessionID) === tail) chatTransitions.delete(sessionID);
     }
   }
 
@@ -7693,10 +7727,116 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     },
     assertActiveGoal: async (root, fingerprint) => {
       if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) throw new Error("operator-coordinator-required");
+      await recoverCompletedGoalReservations(root);
       const goal = await currentGoal(root);
       if (!goal || goal.phase !== "active" || goal.receipt !== null || goal.acceptance_fingerprint !== fingerprint || goal.outstanding_reservations.length) {
         throw new Error("operator-resume-goal-identity-mismatch");
       }
+    },
+    reconcileAbortedOperatorOrphan: root => serializeChatTransition(root, async () => {
+      if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) throw new Error("operator-coordinator-required");
+      const ledger = await goalLedger(root), initial = (await ledger.readGoal()).state;
+      if (initial.phase !== "active" || initial.goal_id === null || initial.receipt !== null) {
+        return { status: "unproven", reason: "active-goal-required" };
+      }
+      if (initial.outstanding_reservations.length === 0) return { status: "no-orphan" };
+      if (initial.outstanding_reservations.length !== 1) return { status: "unproven", reason: "multiple-reservations" };
+      const reservation = initial.outstanding_reservations[0]!;
+      const unitID = reservation.unit_id, runID = unitID.replace(/-[1-9][0-9]*$/u, "");
+      if (reservation.session_id !== root || runID === unitID || !/^operator-[a-f0-9-]+$/u.test(runID) ||
+          input.client?.session?.children === undefined || input.client.session.messages === undefined ||
+          input.client.session.abort === undefined) {
+        return { status: "unproven", reservation_id: reservation.reservation_id, reason: "owned-native-lineage-unavailable" };
+      }
+      const sessionAPI = input.client.session;
+      const messages = async (id: string): Promise<Record<string, unknown>[]> => {
+        const response = await sessionAPI.messages!({ path: { id }, query: { directory: input.directory } });
+        return isRecord(response) && Array.isArray(response.data) ? response.data.filter(isRecord) : [];
+      };
+      const children = async (id: string): Promise<Record<string, unknown>[]> => {
+        const response = await sessionAPI.children!({ path: { id }, query: { directory: input.directory } });
+        return isRecord(response) && Array.isArray(response.data) ? response.data.filter(isRecord) : [];
+      };
+      const nativeTaskParts = (history: readonly Record<string, unknown>[]) => history.flatMap(message =>
+        isRecord(message.info) && message.info.role === "assistant" && Array.isArray(message.parts)
+          ? message.parts.filter(part => isRecord(part) && part.type === "tool" && part.tool === "task") as Record<string, unknown>[] : []);
+      const refFrom = (part: Record<string, unknown>, prefix: string): Record<string, unknown> | undefined => {
+        const state = isRecord(part.state) ? part.state : undefined;
+        const toolInput = isRecord(state?.input) ? state.input : undefined;
+        if (typeof toolInput?.prompt !== "string" || !toolInput.prompt.startsWith(prefix)) return undefined;
+        try { const ref = JSON.parse(toolInput.prompt.slice(prefix.length)); return isRecord(ref) ? ref : undefined; }
+        catch { return undefined; }
+      };
+      const rootParts = nativeTaskParts(await messages(root));
+      const parentTasks = rootParts.filter(part => {
+        const state = isRecord(part.state) ? part.state : undefined;
+        const ref = refFrom(part, "SORTIE_OPERATOR_DELEGATE_REF ");
+        return state?.status === "error" && isRecord(state.error) && state.error.type === "aborted" &&
+          ref?.k === "delegate" && ref.r === root && ref.n === runID &&
+          /^[a-f0-9]{64}$/u.test(String(ref.p)) && /^[a-f0-9]{64}$/u.test(String(ref.h)) &&
+          Number.isSafeInteger(ref.g) && (ref.g as number) > 0 &&
+          isRecord(state.time) && typeof state.time.end === "number";
+      });
+      if (parentTasks.length !== 1) return { status: "unproven", reservation_id: reservation.reservation_id, reason: "terminal-parent-unproven" };
+      const parentEnd = (parentTasks[0]!.state as { time: { end: number } }).time.end;
+      const parentRef = refFrom(parentTasks[0]!, "SORTIE_OPERATOR_DELEGATE_REF ")!;
+      const candidates: Array<{ delegate: string; worker: string; callID: string }> = [];
+      for (const delegate of await children(root)) {
+        if (typeof delegate.id !== "string" || delegate.parentID !== root || delegate.agent !== "dog-operator") continue;
+        const parts = nativeTaskParts(await messages(delegate.id));
+        for (const part of parts) {
+          const ref = refFrom(part, "SORTIE_OPERATOR_TASK_REF ");
+          if (ref?.r !== root || ref.n !== runID || ref.t !== unitID || typeof part.callID !== "string" ||
+              ref.p !== parentRef.p || ref.g !== parentRef.g || !/^[a-f0-9]{64}$/u.test(String(ref.h)) ||
+              goalFingerprint({ goal_id: initial.goal_id, unit_id: unitID, call_id: part.callID }) !== reservation.reservation_id ||
+              !isRecord(part.state) || part.state.status !== "running") continue;
+          for (const worker of await children(delegate.id)) {
+            if (typeof worker.id !== "string" || worker.parentID !== delegate.id ||
+                !["dog-worker", "dog-luna-worker"].includes(String(worker.agent))) continue;
+            const history = await messages(worker.id);
+            const claimed = history.some(message => isRecord(message.info) && message.info.role === "user" &&
+              Array.isArray(message.parts) && message.parts.some(textPart => isRecord(textPart) &&
+                textPart.type === "text" && typeof textPart.text === "string" &&
+                handoffValue(handoffEntries(textPart.text), ["task_id"]) === unitID));
+            const lastActivity = Math.max(0, ...history.flatMap(message => isRecord(message.info) && isRecord(message.info.time) &&
+              typeof message.info.time.created === "number" ? [message.info.time.created] : []));
+            if (claimed && lastActivity > 0 && lastActivity <= parentEnd) {
+              candidates.push({ delegate: delegate.id, worker: worker.id, callID: part.callID });
+            }
+          }
+        }
+      }
+      if (candidates.length !== 1) return { status: "unproven", reservation_id: reservation.reservation_id, reason: "stale-child-lineage-unproven" };
+      const candidate = candidates[0]!;
+      for (const id of [candidate.worker, candidate.delegate]) {
+        const acknowledgement = await sessionAPI.abort!({ path: { id }, query: { directory: input.directory } });
+        const response = isRecord(acknowledgement) && isRecord(acknowledgement.data) ? acknowledgement.data : acknowledgement;
+        if (!isRecord(response) || typeof response.interrupted !== "boolean") {
+          return { status: "unproven", reservation_id: reservation.reservation_id, reason: "native-interrupt-unconfirmed" };
+        }
+      }
+      const current = (await ledger.readGoal()).state;
+      if (current.phase !== "active" || current.receipt !== null ||
+          current.goal_id !== initial.goal_id || current.revision !== initial.revision ||
+          current.scope_epoch !== initial.scope_epoch || current.acceptance_fingerprint !== initial.acceptance_fingerprint ||
+          current.outstanding_reservations.length !== 1 ||
+          current.outstanding_reservations[0]!.reservation_id !== reservation.reservation_id) {
+        return { status: "unproven", reservation_id: reservation.reservation_id, reason: "goal-changed-during-interrupt" };
+      }
+      await ledger.appendGoal({ kind: "unit.settled", at: new Date().toISOString(), reservation_id: reservation.reservation_id,
+        receipt_id: goalFingerprint({ orphan_interrupted: candidate, reservation_id: reservation.reservation_id }),
+        goal_id: initial.goal_id, unit_id: unitID, disposition: "cancelled", result_class: "interrupted",
+        progress_fingerprint: null, evidence: [], elapsed_ms: null, cost_usd: null });
+      return { status: "settled", reservation_id: reservation.reservation_id, unit_id: unitID };
+    }),
+    proveApprovedRunAncestry: async (root, oldGoalID, parentRunID) => {
+      if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) throw new Error("operator-coordinator-required");
+      const { records } = await (await goalLedger(root)).readGoal();
+      if (!records.some(({ event }) => event.kind === "goal.accepted" && event.goal_id === oldGoalID)) return false;
+      return records.some(({ event }) => event.kind === "dispatch.reserved" && event.goal_id === oldGoalID &&
+        event.session_id === root && event.unit_id.startsWith(`${parentRunID}-`) &&
+        records.some(({ event: settled }) => settled.kind === "unit.settled" && settled.goal_id === oldGoalID &&
+          settled.unit_id === event.unit_id && settled.reservation_id === event.reservation_id));
     },
     retainOperatorContractRepairWorker: async (root, taskID, childSessionID) => {
       if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) throw new Error("operator-coordinator-required");
