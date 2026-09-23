@@ -193,6 +193,27 @@ Focused work-loop, native plugin, initialization and benchmark-runner tests pass
 **89/89** after the runtime fix. The strengthened lifecycle also tests blocked/resumed
 work and evidence-backed replacement of an incorrectly named check command.
 
+The frozen v2-validation candidate at `8a0e27da3db0c9bff1db92494ea350136f0dd694`,
+tarball SHA-256 `36b912118a72874dd47f23dcb39cd7808f831f7d22362360ab810770157f0214`,
+passed the full **1,160/1,160** suite across 70 files and the native two-task qualification
+(root `ses_f31e50232ffe50js2xrk6aFeAm`, 202,499 ms). Failure → native compaction → correction
+→ acceptance and the following task all remained functional under the stricter check rules.
+
+Its new Astroid inference completed in 179,441 ms (root `ses_f31e52082fferX9YFoY71xkVPA`).
+Dependency installation and real library-level verification now worked: all five formal
+checks were current and successful, including 17 tests in the focused file. Nevertheless,
+the unchanged official scorer still returned FAIL on the additional invalid-format failure.
+The worker and operator checked multiple variants of the same reported error mechanism,
+but did not examine the other ordinary failures at the guarded operation. Thus fixing the
+receipt defects alone did not establish semantic coverage. This failed experiment is retained
+under `_testenv/v011-astroid-remediation/`; it is not counted as a solved case.
+
+The subsequent **v3-failure-boundary** instructions specifically require identifying distinct
+ordinary failure mechanisms at a changed fallback/exception boundary, verifying representative
+classes through the actual API, and explaining intentional propagation. The operator must
+challenge that coverage rather than count variations of one example. This is a general review
+rule; it contains no benchmark instance ID, concrete hidden input, or prescribed exception list.
+
 ## Reproduction
 
 For Python inference, prepare a repository-compatible interpreter and record its

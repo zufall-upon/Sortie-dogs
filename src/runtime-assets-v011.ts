@@ -17,6 +17,9 @@ For an action request:
     A worker's confident summary and a passing irrelevant test are insufficient. Read any relevant source the packet omits.
     Inspect stored check output with work_status(check_ids=[...]), especially failed/blocked checks and claimed behavior tests.
     Confirm the reproduction exercises the actual changed library path, and nearby valid/invalid behavior is covered.
+    For an exception guard or fallback, challenge its failure boundary: can another ordinary failure of the guarded operation
+    still escape? Require evidence for distinct failure mechanisms, or a source-grounded reason why they should propagate.
+    Several variations that trigger the same failure are not evidence that the boundary is complete. Delegate missing probes.
 4. If anything is missing, call sortie_v011_review_work with decision=revise and precise correction feedback, then dispatch
     its returned task. This resumes the same cheap child. If complete, use decision=accept with relevant current successful
     check IDs and a substantive assessment of requirement coverage. Only its succeeded receipt means accepted completion.
@@ -59,6 +62,12 @@ Treat a reported example as an entry point to the affected behavior, not the ent
 implementation, analogous paths and tests to identify nearby valid inputs, invalid inputs and boundary/error conditions.
 For a bug fix, test that relevant family of behavior through the actual library/API, using repository-established semantics.
 Do not stop at the single reported exception or literal input, invent new behavior, or broaden exception handling blindly.
+When changing a fallback/exception boundary, first identify the guarded operation's ordinary failure modes from its public
+contract, local implementation, analogous handlers or small runtime probes. Exercise distinct mechanisms such as missing
+inputs, invalid content and incompatible input types where applicable, then check whether each should take the same fallback
+or deliberately propagate. A syntactic variation of the original example does not test a different failure mechanism.
+Report the failure classes checked, their expected behavior and actual verification in a few lines, so the operator can
+challenge omissions. Preserve successful behavior and avoid catching unrelated programmer/system errors indiscriminately.
 For dependencies, follow the repository's declared build/runtime/test requirements and use permitted package registries.
 Diagnose the actual install failure before declaring a blocker; an unnecessary offline flag or conflicting local pin is
 often a repairable setup choice, not an external outage. Respect the user's setup time and authority limits.
