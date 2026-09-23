@@ -10,6 +10,8 @@ const assert = (condition, message) => { if (!condition) throw Error(message); }
 export const fixtureOpenCodeConfig = (entry, runtime) => ({ $schema: 'https://opencode.ai/config.json',
   ...(runtime.id === 'v010' ? { experimental: { subagent_depth: 2 } } : {}), plugin: [pathToFileURL(entry).href] });
 export const parseOpenCodeVersion = output => output.trim().match(/(?:^|\bv)(\d+\.\d+\.\d+)(?:\b|$)/)?.[1];
+export const pluginPackageForOpenCodeVersion = version => Number.parseInt(version.split('.')[0], 10) >= 2
+  ? '@opencode/plugin' : '@opencode-ai/plugin';
 export async function command(executable, args, cwd, env, timeoutMs = 600_000) {
   const result = await runProcess(executable, args, { cwd, env: { ...process.env, ...env, PWD: cwd }, timeoutMs });
   if (executable === 'wsl.exe') {
@@ -45,8 +47,9 @@ export async function installedFixture(tgz, directory, profileId = 'stable') {
   const cliVersion = parseOpenCodeVersion(await command('opencode', ['--version'], project, env));
   assert(cliVersion, 'Cannot identify CLI version');
   const dependency = `file:${relative(control, tgz).replaceAll('\\', '/')}`;
+  const pluginPackage = pluginPackageForOpenCodeVersion(cliVersion);
   await writeFile(join(control, 'package.json'), JSON.stringify({ private: true, type: 'module',
-    dependencies: { 'sortie-dogs': dependency, '@opencode-ai/plugin': cliVersion } }, null, 2));
+    dependencies: { 'sortie-dogs': dependency, [pluginPackage]: cliVersion } }, null, 2));
   await command('npm', ['install', '--force'], control, env);
   const installed = join(control, 'node_modules/sortie-dogs');
   assert(!(await lstat(installed)).isSymbolicLink(), 'Fixture package is a link');
