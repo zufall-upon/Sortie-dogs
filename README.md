@@ -237,10 +237,10 @@ reuse the same evidence instead of spending the validation budget again.
 
 ### Default v0.10 routes
 
-- `dog-operator`: `openai/gpt-6-luna` / `max`
+- `dog-operator`: `openai/gpt-6-luna-fast` / `max`
 - `dogs-coordinator`: `openai/gpt-6-sol` / `xhigh`
-- `dog-worker-v010`: `openai/gpt-6-luna` / `max`
-- `dog-scout-v010`: `openai/gpt-6-luna` / `xhigh`
+- `dog-worker-v010`: `openai/gpt-6-luna-fast` / `max`
+- `dog-scout-v010`: `openai/gpt-6-luna-fast` / `xhigh`
 - `dog-reviewer-v010`: `openai/gpt-6-sol` / `xhigh`
 - `dog-advisor-v010`: preferred declared `anthropic/claude-opus-5`, otherwise
   `openai/gpt-6-sol` / `xhigh`

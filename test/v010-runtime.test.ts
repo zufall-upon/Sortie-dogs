@@ -273,7 +273,7 @@ test("preview assets coexist with stable assets and markers", async () => fixtur
   const reviewer = previewAssets.find(asset => asset.name === "dog-reviewer-v010")!.content;
   assert.match(reviewer, /Reject a matrix that lists independent syntax or dispatch dimensions but traces them only in isolation/u);
   assert.match(reviewer, /proving only the first target is a concrete asymmetry finding/u);
-  assert.match(primary, /^model: openai\/gpt-6-luna$/m);
+  assert.match(primary, /^model: openai\/gpt-6-luna-fast$/m);
   assert.match(primary, /^variant: max$/m);
   assert.match(primary, /^  "sortie_v010_\*": allow$/m);
   assert.match(primary, /^  compact_and_continue: false$/m);
@@ -437,11 +437,11 @@ test("operator control packet preserves Japanese user prose as language context"
 
 test("preview default primary route resolves without an injected catalog", async () => fixture(async root => {
   const hooks = await SortieDogsV010Plugin({ directory: root, client: { config: { providers: async () => ({ data: {
-    providers: [{ id: "openai", models: { "gpt-6-luna": { id: "gpt-6-luna" } } }],
+    providers: [{ id: "openai", models: { "gpt-6-luna-fast": { id: "gpt-6-luna-fast" } } }],
   } }) } } } as never);
-  const output = { message: { agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-6-luna", variant: undefined as string | undefined } }, parts: [] };
+  const output = { message: { agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-6-luna-fast", variant: undefined as string | undefined } }, parts: [] };
   await hooks["chat.message"]!({ sessionID: "default", agent: "dog-operator", messageID: "user" }, output);
-  assert.equal(output.message.model.modelID, "gpt-6-luna");
+  assert.equal(output.message.model.modelID, "gpt-6-luna-fast");
   assert.equal(output.message.model.variant, "max");
 }));
 
@@ -527,7 +527,7 @@ function oldRoleAsset(name: "dog-operator" | "dogs-coordinator"): string {
       "Use sortie_v010_cancel_operator to stop an active grant before changing its scope.")
     .replace(/Every advisor Task must include exactly one standalone line:[\s\S]*?just to repair this header\.\n\n/u, "")
     .replace(/^description: .*$/m, oldDescription)
-     .replace(/^model: openai\/gpt-6-luna$/m, "model: openai/gpt-6-astra")
+    .replace(/^model: openai\/gpt-6-luna-fast$/m, "model: openai/gpt-6-astra")
     .replace(/^variant: max$/m, "variant: high")
     .replaceAll(V010_RUNTIME_ASSET_VERSION, "0.10.0-beta.1")
     .replaceAll("dogs-coordinator", "__OLD_OPERATIONS__")
@@ -610,12 +610,12 @@ test("operator smoke retains only bounded typed tool errors", () => {
 test("preview host adapter pins the native worker route and forwards terminal text through goal verification", async () => fixture(async root => {
   const client = { config: { providers: async () => ({ data: { providers: [{ id: "openai", models: {
     "gpt-6-astra": { id: "gpt-6-astra" }, "gpt-6-sol": { id: "gpt-6-sol" },
-    "gpt-6-luna": { id: "gpt-6-luna" },
+    "gpt-6-luna-fast": { id: "gpt-6-luna-fast" },
   } }] } }) } };
   const hooks = await SortieDogsV010Plugin({ directory: root, client } as never, { modelCatalog: { global: [
     { model: "openai/gpt-6-astra", variants: ["high"] },
     { model: "openai/gpt-6-sol", variants: ["low", "medium", "high", "xhigh"] },
-    { model: "openai/gpt-6-luna", variants: ["max", "high", "xhigh"] },
+    { model: "openai/gpt-6-luna-fast", variants: ["max", "high", "xhigh"] },
   ] } });
   const config = { agent: {
     "dog-operator": { mode: "primary", model: "user/selected", variant: "custom" },
@@ -623,7 +623,7 @@ test("preview host adapter pins the native worker route and forwards terminal te
   } };
   await (hooks as typeof hooks & { config(value: Record<string, unknown>): Promise<void> }).config(config);
   assert.deepEqual(config.agent["dog-worker-v010"], {
-    mode: "subagent", model: "openai/gpt-6-luna", variant: "max",
+    mode: "subagent", model: "openai/gpt-6-luna-fast", variant: "max",
   });
   assert.deepEqual(config.agent["dog-operator"], { mode: "primary", model: "user/selected", variant: "custom" });
   const explicit = { agent: { "dog-worker-v010": { mode: "subagent", model: "openai/gpt-6-astra", variant: "low" } } };

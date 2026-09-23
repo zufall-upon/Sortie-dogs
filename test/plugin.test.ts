@@ -387,7 +387,7 @@ test("model resolver falls back in order and returns structured unresolved failu
 test("recommended coordinator and Luna routes cover exact installed roles and remain overridable", () => {
   const defaults = resolvePluginConfigurationSources(undefined, undefined, {
     modelCatalog: { global: [
-      { model: "openai/gpt-6-luna", variants: ["xhigh"] },
+      { model: "openai/gpt-6-luna-fast", variants: ["xhigh"] },
       { model: "provider/custom" },
     ] },
   });
@@ -2421,7 +2421,7 @@ test("chat message hook applies explicit catalog routing and fails closed with o
     const client = { config: { providers: async () => ({ data: { providers: [
       { id: "provider", models: { "local-primary": { id: "local-primary" } } },
       { id: "openai", models: {
-        "gpt-6-luna": { id: "gpt-6-luna" },
+        "gpt-6-luna-fast": { id: "gpt-6-luna-fast" },
         "gpt-6-sol": { id: "gpt-6-sol" },
       } },
     ] } }) } };
@@ -2434,7 +2434,7 @@ test("chat message hook applies explicit catalog routing and fails closed with o
         },
       },
       modelCatalog: { global: [
-        { model: "openai/gpt-6-luna", variants: ["xhigh"] },
+        { model: "openai/gpt-6-luna-fast", variants: ["xhigh"] },
         { model: "provider/local-primary", variants: ["thinking"] },
         { model: "provider/global-primary", variants: ["thinking"] },
         { model: "provider/variant", variants: ["valid"] },
@@ -2464,7 +2464,7 @@ test("chat message hook applies explicit catalog routing and fails closed with o
     await chat({ sessionID: "routing", agent: "dog-scout" }, recommended);
     assert.deepEqual(recommended.message.model, {
       providerID: "openai",
-      modelID: "gpt-6-luna",
+      modelID: "gpt-6-luna-fast",
       variant: RECOMMENDED_SCOUT_VARIANT,
     });
     const coordinator = {
@@ -2797,7 +2797,7 @@ test("every packaged role follows default routing independently of write-gate ac
     const client = { config: { providers: async () => ({ data: { providers: [{
       id: "openai",
       models: {
-        "gpt-6-luna": { id: "gpt-6-luna" },
+        "gpt-6-luna-fast": { id: "gpt-6-luna-fast" },
         "gpt-6-sol": { id: "gpt-6-sol" },
       },
     }] } }) } };
@@ -2810,7 +2810,7 @@ test("every packaged role follows default routing independently of write-gate ac
         modelID: "gpt-6-sol",
         variant: DEFAULT_COORDINATOR_VARIANT,
       },
-      "dog-scout": { providerID: "openai", modelID: "gpt-6-luna", variant: RECOMMENDED_SCOUT_VARIANT },
+      "dog-scout": { providerID: "openai", modelID: "gpt-6-luna-fast", variant: RECOMMENDED_SCOUT_VARIANT },
       "dog-worker": { providerID: "openai", modelID: "gpt-6-sol", variant: DEDICATED_WORKER_VARIANT },
       "dog-reviewer": { providerID: "openai", modelID: "gpt-6-sol", variant: CONSULTATION_FALLBACK_VARIANT },
       "dog-advisor": { providerID: "openai", modelID: "gpt-6-sol", variant: CONSULTATION_FALLBACK_VARIANT },

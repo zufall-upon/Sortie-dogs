@@ -9,8 +9,8 @@ const declares = (catalog, model, variant) =>
 test("every shipped preview route is declared, so no role resolves against an absent catalog entry", () => {
   const catalog = previewModelCatalog();
   const routes = [
-    { model: "openai/gpt-6-luna", variant: "max" },
-    { model: "openai/gpt-6-luna", variant: "xhigh" },
+    { model: "openai/gpt-6-luna-fast", variant: "max" },
+    { model: "openai/gpt-6-luna-fast", variant: "xhigh" },
     { model: "openai/gpt-6-sol", variant: "xhigh" },
   ];
   for (const route of routes) {
@@ -18,6 +18,7 @@ test("every shipped preview route is declared, so no role resolves against an ab
       `preview route ${route.model}/${route.variant} is undeclared`);
   }
   assert.equal(new Set(catalog.map(entry => entry.model)).size, catalog.length);
+  assert.ok(!catalog.some(entry => ["openai/gpt-5.6-terra", "openai/gpt-5.6-luna", "openai/gpt-6-luna"].includes(entry.model)));
 });
 
 test("a route naming a model the built-in catalog never listed is declared instead of dropped", () => {

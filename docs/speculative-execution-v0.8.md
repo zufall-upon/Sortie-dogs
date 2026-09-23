@@ -55,7 +55,7 @@ The v0.8 product decision is:
 - `dog-luna-worker` is available only through an admitted Luna fabric descriptor.
 - `dog-worker` and the existing dedicated implementation roles default to `openai/gpt-6-sol`
   `medium`; `dedicatedWorkerModel` may relocate only this serial route.
-- `dog-luna-worker` is a separate fixed `openai/gpt-6-luna` `max` route; direct `modelRouting`
+- `dog-luna-worker` is a separate fixed `openai/gpt-6-luna-fast` `max` route; direct `modelRouting`
   cannot replace either fixed route.
 - Role identity and the durable dispatch record identify the selected route without session inference.
 - A serial override naming the Luna fabric model is invalid rather than silently collapsing the stable

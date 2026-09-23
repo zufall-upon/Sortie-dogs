@@ -26,15 +26,15 @@ const SERIAL_OPTIONAL_ARGUMENTS = new Map<string, ReadonlySet<string>>([
     "scope", "trigger", "cause", "prevention", "evidence", "evidenceRef", "id", "promotedRef", "confirmation",
   ])],
 ]);
-const PREVIEW_WORKER_ROUTE = Object.freeze({ model: "openai/gpt-6-luna", variant: "max" });
-const PREVIEW_SCOUT_ROUTE = Object.freeze({ model: "openai/gpt-6-luna", variant: "xhigh" });
+const PREVIEW_WORKER_ROUTE = Object.freeze({ model: "openai/gpt-6-luna-fast", variant: "max" });
+const PREVIEW_SCOUT_ROUTE = Object.freeze({ model: "openai/gpt-6-luna-fast", variant: "xhigh" });
 /**
  * Contract authorship, not throughput. Qualification observed a cheaper operations model emit
  * structurally valid but under-scoped contracts: a write union narrower than the remediation the
  * review it also schedules demands, which strands an otherwise complete run on NEED_DECISION.
  */
 const PREVIEW_OPERATIONS_ROUTE = Object.freeze({ model: "openai/gpt-6-sol", variant: "xhigh" });
-const PREVIEW_PRIMARY_ROUTE = Object.freeze({ model: "openai/gpt-6-luna", variant: "max" });
+const PREVIEW_PRIMARY_ROUTE = Object.freeze({ model: "openai/gpt-6-luna-fast", variant: "max" });
 /** Review must be able to reject the worker's output, so it never shares the worker's model family. */
 const PREVIEW_REVIEW_ROUTE = Object.freeze({ model: "openai/gpt-6-sol", variant: "xhigh" });
 /** Every preview route the profile can bind a role to. Catalog declaration reads this one list. */

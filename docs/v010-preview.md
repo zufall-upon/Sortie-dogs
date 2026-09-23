@@ -228,15 +228,15 @@ not merge or reverse their internal responsibilities.
 ## Preview topology
 
 - `dog-coordinator`: the stable installation.
-- `dog-operator`: the v0.10 primary (Sol/low), with user conversation,
+- `dog-operator`: the v0.10 primary (Luna 6 Fast/max), with user conversation,
   specification interpretation, architecture, immutable acceptance, review and
   final decision authority.
-- `dogs-coordinator`: the hidden v0.10 operations delegate (Terra/xhigh), limited
+- `dogs-coordinator`: the hidden v0.10 operations delegate (Sol 6/xhigh), limited
   to bounded approved dispatch, progress and evidence collection.
 
-The preview defaults `dog-operator` to `openai/gpt-6-luna` with variant `max`
-and `dogs-coordinator` to Terra/xhigh. Preview workers use Luna/max and scouts use
-Luna/xhigh. Explicit host agent/model/variant choices, including Astra, remain
+The preview defaults `dog-operator` to `openai/gpt-6-luna-fast` with variant `max`
+and `dogs-coordinator` to Sol 6/xhigh. Preview workers use Luna 6 Fast/max and scouts use
+Luna 6 Fast/xhigh. Explicit host agent/model/variant choices, including Astra, remain
 authoritative; consultation and all other roles retain their independent routes.
 Only `dog-operator` is a preview primary choice; every preview child agent,
 including `dogs-coordinator`, is hidden.
