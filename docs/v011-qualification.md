@@ -52,6 +52,10 @@ node scripts/user-proxy-smoke.mjs <frozen-candidate.tgz> <unused-evidence-direct
 
 For one case selected from the pinned public 23-row dev manifest:
 
+Keep a sibling `<frozen-candidate.tgz>.json` containing the full source `commit`
+and tarball `sha256`. The driver verifies this receipt and separately records its
+own commit and script hash.
+
 ```sh
 node scripts/user-proxy-bench.mjs \
   <frozen-candidate.tgz> <public-manifest-dev-23.json> \

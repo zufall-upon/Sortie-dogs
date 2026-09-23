@@ -32,6 +32,8 @@ export async function userProxyBench(tgz, sourceManifest, instanceID, directory,
   assert(instance, 'Case is not in the pinned dev23 set');
   const driverHash = hash(await readFile(import.meta.filename));
   const packageHash = hash(await readFile(tgz));
+  const candidateSource = JSON.parse(await readFile(`${tgz}.json`, 'utf8'));
+  assert(candidateSource.sha256 === packageHash && /^[a-f0-9]{40}$/.test(candidateSource.commit), 'Candidate commit/hash receipt mismatch');
   const fixture = await installedFixture(tgz, directory, 'v011');
   const { project, control, env, run, cliVersion } = fixture;
   assert(Number(cliVersion.split('.')[0]) >= 2, 'Native OpenCode V2 is required');
@@ -53,7 +55,7 @@ export async function userProxyBench(tgz, sourceManifest, instanceID, directory,
 import {appendFile} from 'node:fs/promises';
 import {estimateModelUsageCost} from '../../node_modules/sortie-dogs/dist/plugin/model-cost.js';
 export default {...plugin,async setup(ctx){
-  const cleanup=await plugin.setup(ctx),seen=new Set();
+  const cleanup=await plugin.setup(ctx),seen=new Set(),billed=new Map();
   const record=value=>appendFile(new URL('../../benchmark-routing.jsonl',import.meta.url),JSON.stringify(value)+'\\n');
   const {data:models}=await ctx.model.list();
   const fast=models.find(model=>model.providerID==='openai'&&model.id==='gpt-6-luna-fast');
@@ -61,21 +63,19 @@ export default {...plugin,async setup(ctx){
   await record({kind:'catalog',model:fast.id,api_model:fast.modelID,tier:fast.body.service_tier});
   async function usage(){
     let usd=0,requests=0;const unpriced=[];
-    for(const sessionID of seen){let cursor;
-      for(let page=0;page<100;page++){
-        const result=await ctx.message.list({sessionID,limit:100,...(cursor?{cursor}:{order:'asc'})});
-        for(const m of result.data){
+    for(const sessionID of seen){
+        for(const m of await ctx.session.context({sessionID})){
           if(!['assistant','compaction'].includes(m.type)||!m.time?.completed)continue;
           const t=m.tokens??{},model=m.model??{};
           const price=estimateModelUsageCost({providerID:model.providerID,modelID:model.id,uncachedInputTokens:t.input,
             cacheReadTokens:t.cache?.read,cacheWriteTokens:t.cache?.write,outputTokens:t.output,reasoningTokens:t.reasoning,
             serviceTier:model.id==='gpt-6-luna-fast'?'priority':m.providerState?.serviceTier??'standard'});
-          requests++;if(price.status==='priced')usd+=price.usd;else unpriced.push(model);
+          billed.set(m.id,{price,model});
         }
-        cursor=result.cursor?.next;if(!cursor)break;
-        if(page===99)throw Error('Benchmark usage history limit');
-      }
-    }return{usd,requests,unpriced};
+    }
+    // Retain completed messages observed before native compaction drops them from the active context.
+    for(const {price,model} of billed.values()){requests++;if(price.status==='priced')usd+=price.usd;else unpriced.push(model);}
+    return{usd,requests,unpriced};
   }
   for(const kind of ['context','compaction','title','generate'])await ctx.session.hook(kind,async event=>{
     seen.add(event.sessionID);const cost=await usage();await record({kind:'usage',...cost});
@@ -94,7 +94,8 @@ export default {...plugin,async setup(ctx){
 }};\n`);
   const frozen = { schema: 1, dataset: input.dataset, instance,
     candidate: { version: fixture.pkg.version, sha256: packageHash, runtime_marker: fixture.runtimeMarker, profile: 'v011',
-      source_commit: (await command('git', ['rev-parse', 'HEAD'], resolve(import.meta.dirname, '..'), env)).trim() },
+      source_commit: candidateSource.commit },
+    driver_commit: (await command('git', ['rev-parse', 'HEAD'], resolve(import.meta.dirname, '..'), env)).trim(),
     source_manifest_sha256: hash(await readFile(sourceManifest)), driver_sha256: driverHash,
     cliVersion, cost_limit_usd: costLimit, timeout_seconds: 1800, attempts: 1,
     models: { operator: 'openai/gpt-6-sol#xhigh', implementer: 'openai/gpt-6-luna-fast#max', auxiliary: 'openai/gpt-6-luna-fast#high' },
