@@ -21,6 +21,9 @@ export const RELEASE_SMOKE_RUN_TIMEOUT_SECONDS = 900;
 export const v2PluginWrapperSource = runtime => `import { createSortieDogsV2Plugin } from "sortie-dogs/server";\n` +
   `import { SortieDogsPlugin } from "${runtime.id === 'stable' ? 'sortie-dogs/plugin/stable' : 'sortie-dogs/plugin'}";\n` +
   `export default createSortieDogsV2Plugin(SortieDogsPlugin);\n`;
+export const releaseSmokeWorkerStarted = (events, records, unitID) =>
+  events.some(event => event.type === 'tool_use' && event.part?.tool === 'task' && event.part.state?.status === 'completed') ||
+  records.some(({ event }) => event.kind === 'unit.settled' && event.unit_id === unitID && event.disposition === 'succeeded');
 export async function command(executable, args, cwd, env, timeoutMs = 600_000) {
   const result = await runProcess(executable, args, { cwd, env: { ...process.env, ...env, PWD: cwd }, timeoutMs });
   if (executable === 'wsl.exe') {
@@ -167,7 +170,7 @@ goal_expected_outcome: pass`;
   const events = await cli(`Resume this same goal. Check the supplied contract, then dispatch one ${workerAgent} with this full ready-to-send context_digest and goal declaration. This is the direct one-worker fast path; no operator plan is needed. The Task prompt must contain exactly one acceptance header, one validation header, one source_manifest header and one project_root header. Preserve the structured declaration below verbatim and append only prose instructions. Worker must Read the absolute handoff path, wait for Read completion, then bind in a separate tool round. Use apply_patch on exactly child/result.txt to replace seed with recovered. Native tool CWD is ${project}; project_root for bind is ${join(project, 'child')}. Run exactly node child/validate.mjs from ${project}. No alternate editing tool or path, no commit. If admission or validation fails, stop and report it. Complete terminally only after canonical PASS.\n${declaration}`, sessionID);
   const records = JSON.parse(await readFile(ledgerPath, 'utf8')).goal_events;
   const state = reduceGoalFlight(records);
-  const workerStarted = events.some(event => event.type === 'tool_use' && event.part?.tool === 'task' && event.part.state?.status === 'completed');
+  const workerStarted = releaseSmokeWorkerStarted(events, records, 'recovery');
   process.stderr.write(JSON.stringify({ phase: 'outcome', sessionID, phaseState: state.phase, stopReason: state.stop_reason,
     tools: events.filter(event => event.type === 'tool_use').map(event => ({ tool: event.part?.tool,
       status: event.part?.state?.status, error: event.part?.state?.error?.split('\n')[0] })) }) + '\n');
