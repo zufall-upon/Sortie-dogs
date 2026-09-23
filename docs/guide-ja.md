@@ -200,7 +200,7 @@ environmentのevidenceは再利用し、validation budgetを重複消費しな�
 - `dog-worker-v010`: `openai/gpt-6-luna` / `max`
 - `dog-scout-v010`: `openai/gpt-6-luna` / `xhigh`
 - `dog-reviewer-v010`: `openai/gpt-6-sol` / `xhigh`
-- `dog-advisor-v010`: catalog宣言済み`anthropic/claude-opus-5`を優先、なければ`openai/gpt-6-sol` / `xhigh`
+- `dog-advisor-v010`: catalog宣言済み`anthropic/claude-opus-5-5`を優先、なければ`openai/gpt-6-sol` / `xhigh`
 
 OpenCodeで明示選択したmodel/variantはそのsessionで最優先。child defaultはnative設定がない時だけ補完し、
 有効なprofile routingで上書き可能。reviewがimplementation modelを暗黙継承することはない。
