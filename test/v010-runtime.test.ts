@@ -14,7 +14,7 @@ import { runtimeAssets as previewAssets, COMMUNICATION_LANGUAGE_POLICY, PREVIEW_
   PREVIEW_TERMINAL_REPORT_POLICY } from "../dist/runtime-assets-v010.js";
 import { RUNTIME_ASSET_VERSION, V010_RUNTIME_ASSET_VERSION } from "../dist/asset-version.js";
 import { processRemediationReplacementPacket, SortieDogsV010Plugin } from "../dist/plugin/profiled.js";
-import { fixtureOpenCodeConfig } from "../scripts/release-cli.mjs";
+import { fixtureOpenCodeConfig, parseOpenCodeVersion } from "../scripts/release-cli.mjs";
 import { boundedToolErrors } from "../scripts/operator-smoke.mjs";
 import { expandGoalDeclaration } from "../dist/core/goal-declaration-format.js";
 import { SortieDogsPlugin as CorePlugin } from "../dist/plugin/index.js";
@@ -564,6 +564,12 @@ test("preview reinitialization preserves and reports an edited old role asset", 
 test("only the isolated preview fixture enables two-level native subagents", () => {
   assert.equal(fixtureOpenCodeConfig("/tmp/preview.js", V010_RUNTIME_PROFILE).experimental?.subagent_depth, 2);
   assert.equal("experimental" in fixtureOpenCodeConfig("/tmp/stable.js", STABLE_RUNTIME_PROFILE), false);
+});
+
+test("release smoke accepts plain and branded OpenCode version output", () => {
+  assert.equal(parseOpenCodeVersion("2.0.11\n"), "2.0.11");
+  assert.equal(parseOpenCodeVersion("opencode v2.0.14\n"), "2.0.14");
+  assert.equal(parseOpenCodeVersion("unknown"), undefined);
 });
 
 test("operator smoke retains only bounded typed tool errors", () => {

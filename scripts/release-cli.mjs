@@ -9,6 +9,7 @@ const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const assert = (condition, message) => { if (!condition) throw Error(message); };
 export const fixtureOpenCodeConfig = (entry, runtime) => ({ $schema: 'https://opencode.ai/config.json',
   ...(runtime.id === 'v010' ? { experimental: { subagent_depth: 2 } } : {}), plugin: [pathToFileURL(entry).href] });
+export const parseOpenCodeVersion = output => output.trim().match(/(?:^|\bv)(\d+\.\d+\.\d+)(?:\b|$)/)?.[1];
 export async function command(executable, args, cwd, env, timeoutMs = 600_000) {
   const result = await runProcess(executable, args, { cwd, env: { ...process.env, ...env, PWD: cwd }, timeoutMs });
   if (executable === 'wsl.exe') {
@@ -41,8 +42,8 @@ export async function installedFixture(tgz, directory, profileId = 'stable') {
   await mkdir(join(xdg, 'opencode'), { recursive: true });
   await writeFile(join(xdg, 'opencode/opencode.json'), '{}\n');
   const env = { XDG_CONFIG_HOME: xdg, OPENCODE_CONFIG_DIR: join(xdg, 'opencode'), OPENCODE_CONFIG: join(xdg, 'opencode/opencode.json') };
-  const cliVersion = (await command('opencode', ['--version'], project, env)).trim();
-  assert(/^\d+\.\d+\.\d+/.test(cliVersion), 'Cannot identify CLI version');
+  const cliVersion = parseOpenCodeVersion(await command('opencode', ['--version'], project, env));
+  assert(cliVersion, 'Cannot identify CLI version');
   const dependency = `file:${relative(control, tgz).replaceAll('\\', '/')}`;
   await writeFile(join(control, 'package.json'), JSON.stringify({ private: true, type: 'module',
     dependencies: { 'sortie-dogs': dependency, '@opencode-ai/plugin': cliVersion } }, null, 2));
