@@ -7,8 +7,10 @@ Sortie to delegate investigation, implementation, testing and corrections while
 keeping the complete original request.
 
 **Development status:** v0.11.0 is a local candidate, not a published release.
-Native execution and the common suite pass, but the selected official dev23 case
-failed (2/3 target checks); release is pending. See the [qualification record](docs/v011-qualification.md).
+Native execution and the common suite pass. Three additional dev23 samples
+completed without timeout: two passed official checks (one after a scoring-environment
+correction), while one remained unresolved. Release is pending. See the
+[qualification record](docs/v011-qualification.md), including the earlier failed case.
 The installation commands below describe the v0.11 package once released; current
 candidate testing uses its frozen local tarball.
 

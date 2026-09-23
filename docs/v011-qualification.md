@@ -102,6 +102,70 @@ completion, but not sufficient correctness for accepting this candidate as a rel
 Evidence is retained under `_testenv/v011-dev23-single/` (inference `smoke-2`,
 official scoring and untouched-base diagnostic logs).
 
+## Three further dev23 samples: two passing, one unresolved
+
+The user subsequently requested a few other cases and authorized release if the
+selected cases had no unmet outcomes or timeouts. Before starting inference, the
+three cases below were fixed from different repositories in the same public dev23
+set. They used the **same `dcc7056` runtime and `2ddf56bf…e55e8` package** identified
+above; the driver ran from `fa5ba11d4f4f121247910c2dfcbe0fadb316a0f9` with its unchanged
+`b5ba9cf8…22b8570` script hash.
+
+Conditions: OpenCode 2.0.14, SOL6 operator, Luna6 Fast implementation and auxiliary
+requests, one inference attempt per case, three independent inference slots,
+30 minutes and $1.50 per case. Each native environment started with Python 3.11.16,
+pytest 7.4.4 and setuptools 80.9.0; repository dependencies remained the implementer's
+responsibility. Official Docker scoring used SWE-bench 5.0.2, the same pinned official
+dataset as above, and one scoring worker. All inference writers stopped before scoring.
+
+| Instance | Native elapsed | Native result | Official result | Estimated cost |
+| --- | ---: | --- | --- | ---: |
+| `marshmallow-code__marshmallow-1359` | 216,584 ms | Accepted; 912 local tests passed | PASS: target 1/1, regression 76/76 | $0.132142 |
+| `pvlib__pvlib-python-1854` | 194,714 ms | Accepted; reproduction and 3 focused/adjacent tests passed | Initial environment failure; PASS after NumPy correction: target 1/1, regression 281/281 | $0.113706 |
+| `pylint-dev__astroid-1866` | 297,870 ms | Accepted with an explicit local dependency blocker, after one same-child revision | FAIL: one missing target behavior; pytest 15 passed / 1 failed | $0.209245 |
+
+**Timeouts: 0. Empty patches: 0. Inference retries: 0.** All observed model requests
+used SOL6 or Luna6 Fast. Luna selected `gpt-6-luna-fast` and sent API model `gpt-6-luna`
+with `priority`; provider-reported tiers remain a separate measurement. Total completed
+root/child context cost was approximately **$0.455092**, including final responses but
+excluding transient title generation. The campaign ledger carries prior estimated spend
+of $31.821748, leaving approximately $17.723159 of its $50 budget.
+
+### Failure analysis and scoring-environment correction
+
+- **Marshmallow:** `DateTime` now reads options from its root schema when nested in
+  `List` or `Tuple`. The new regression covers schema-level formatting and round-tripping.
+- **PVlib:** the single `Array` input is normalized to a one-item tuple. The initial
+  scorer applied the model patch successfully, but test collection stopped because the
+  official image's NumPy 2 removed `np.Inf`. Its report consequently marked patch
+  application false despite the successful application in the container log. A separate
+  diagnostic run added only `pip install numpy==1.26.4` before the existing install step.
+  The model prediction, official test patch, assertions, image and grader were unchanged;
+  all 282 required checks passed. The initial unadjusted result is retained as a failure,
+  and the corrected result is explicitly environment-qualified.
+- **Astroid:** the public `TypeError` scenario passes in the official environment, but
+  the related invalid hexadecimal-format case raises an uncaught `ValueError`. The patch
+  handles only `TypeError`, so this is a genuine missing behavior. Raw pytest output is
+  15 passed / 1 failed; the grader groups parametrized IDs and reports target 0/1 and
+  regression 10/10. During native work, this experiment's setuptools 80.9.0 constraint
+  conflicted with the repository's `setuptools~=62.6` requirement, leaving `wrapt` and
+  `lazy_object_proxy` unavailable. The operator noticed the unverified tests, resumed the
+  same child for a bounded environment check, and disclosed the blocker on acceptance.
+  That local setup issue does not explain away the official `ValueError` failure.
+
+Frozen patch SHA-256 values, in the table's order:
+
+- `d38f9663252f45f61537e377868e7d5dbc907fc9ffcdf59f478337f999cad535`
+- `a7ccaa9e1d31be593b7a49916655d26f83cb9297486d7e2eb6632a41727b399a`
+- `3245dc3b0502dc1f6e3d02bdf53caa37f505796a876abbf409f24af923530427`
+
+The revised release condition is **not met**: one selected case remains unresolved.
+No candidate code or generated patch was changed using official-test feedback.
+Release, PR integration and global application remain pending. Evidence is retained in
+`_testenv/v011-dev23-sample3/`, including the predeclared selection, native histories,
+original scoring, and the separately recorded `scoring-envfix/` diagnostic. These are
+three selected cases, not a rerun or success-rate estimate for all 23.
+
 ## Reproduction
 
 ```sh
