@@ -15,7 +15,8 @@ import { runtimeAssets as previewAssets, COMMUNICATION_LANGUAGE_POLICY, PREVIEW_
 import { RUNTIME_ASSET_VERSION, V010_RUNTIME_ASSET_VERSION } from "../dist/asset-version.js";
 import { processRemediationReplacementPacket, SortieDogsV010Plugin } from "../dist/plugin/profiled.js";
 import { fixtureOpenCodeConfig, parseOpenCodeVersion, pluginPackageForOpenCodeVersion,
-  runLocationArgsForOpenCodeVersion, v2PluginWrapperSource } from "../scripts/release-cli.mjs";
+  RELEASE_SMOKE_RUN_TIMEOUT_SECONDS, runLocationArgsForOpenCodeVersion,
+  v2PluginWrapperSource } from "../scripts/release-cli.mjs";
 import { boundedToolErrors } from "../scripts/operator-smoke.mjs";
 import { expandGoalDeclaration } from "../dist/core/goal-declaration-format.js";
 import { SortieDogsPlugin as CorePlugin } from "../dist/plugin/index.js";
@@ -580,6 +581,7 @@ test("release smoke accepts plain and branded OpenCode version output", () => {
   assert.deepEqual(runLocationArgsForOpenCodeVersion("2.0.14", "/project"), ["--standalone"]);
   assert.match(v2PluginWrapperSource(STABLE_RUNTIME_PROFILE), /sortie-dogs\/plugin\/stable/);
   assert.match(v2PluginWrapperSource(V010_RUNTIME_PROFILE), /from "sortie-dogs\/plugin"/);
+  assert.equal(RELEASE_SMOKE_RUN_TIMEOUT_SECONDS, 900);
 });
 
 test("operator smoke retains only bounded typed tool errors", () => {
