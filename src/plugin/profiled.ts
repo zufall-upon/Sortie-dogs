@@ -381,9 +381,27 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     const revisionSchema = record(stringSchema) && typeof stringSchema.describe === "function"
       ? stringSchema.describe(OPERATOR_PROPOSAL_REVISION_CONTRACT)
       : { ...(record(stringSchema) ? stringSchema : { type: "string" }), description: OPERATOR_PROPOSAL_REVISION_CONTRACT };
+    const budgetRevisionContract = "Root-only: increase the cumulative read/submission limits of this exact unapproved submitted proposal. " +
+      "revision_json must encode exactly {proposal_id,revision,content_hash,rationale,proposal_budget:{max_reads,max_submissions}}. " +
+      "Pin the submitted identity from operator_status and supply user-authorized cumulative limits, strictly above retained spend and no lower than old limits. " +
+      "The current goal binding must still match. This changes neither proposal identity, ordered requirements, plan, goal, read evidence nor spent counters; " +
+      "it grants no new investigation Task, approval, execution or acceptance. Recompare the proposal before separately revising or approving it.";
+    const budgetRevisionSchema = record(stringSchema) && typeof stringSchema.describe === "function"
+      ? stringSchema.describe(budgetRevisionContract)
+      : { ...(record(stringSchema) ? stringSchema : { type: "string" }), description: budgetRevisionContract };
+    const scopeReopenContract = "Root-only: after observing a newly missing implementation write path, reopen this exact unapproved submitted proposal " +
+      "for a bounded new investigation without cancellation or budget reset. revision_json must encode exactly " +
+      "{proposal_id,revision,content_hash,rationale,missing_write_paths:string[]}. Pin its current identity; every path must be an exact " +
+      "normalized repository-relative path absent from the submitted write scope and within the frozen intent.allow_read. " +
+      "The submitted contract is archived, ordered requirements, goal binding, intent, original source refs and cumulative spend are retained; " +
+      "old child and read paths grant no authority to the new child. This consumes a new goal dispatch unit only when its returned Task is admitted. " +
+      "Do not use this to retry a known field defect correctable by revise_operator_proposal or to claim any old acceptance.";
+    const scopeReopenSchema = record(stringSchema) && typeof stringSchema.describe === "function"
+      ? stringSchema.describe(scopeReopenContract)
+      : { ...(record(stringSchema) ? stringSchema : { type: "string" }), description: scopeReopenContract };
     const approvedRevisionContract = "revision_json must encode exactly {proposal_id:string,revision:positive integer,content_hash:string,operator_run_id:string,rationale:nonblank single-line string,intent:object}. " +
       "The intent has the exact begin_operator_proposal intent_json shape and a cumulative proposal_budget with room above all retained reads/submissions. " +
-      "Pin the approved proposal identity and the cancelled/completed run ID from operator_status. For the same goal, the new requirements must begin with every old ordered requirement byte-for-byte. Only a root acting for a newly authorized active goal may revise; active/prepared runs, stale identity or unchanged goal binding are denied. " +
+      "Pin the approved proposal identity and the cancelled/completed run ID from operator_status. The new requirements must begin with every old ordered requirement byte-for-byte even if the active goal ID has changed. Only a root acting for a newly authorized active goal may revise; active/prepared runs, stale identity or unchanged goal binding are denied. " +
       "Old acceptance, terminal status and proposal accounting remain durable. This returns an investigation Task, not implementation or acceptance.";
     const approvedRevisionSchema = record(stringSchema) && typeof stringSchema.describe === "function"
       ? stringSchema.describe(approvedRevisionContract)
@@ -414,6 +432,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     const submitProposal = profileTool(profile, "sortie_submit_operator_proposal");
     const approveProposal = profileTool(profile, "sortie_approve_operator_proposal");
     const reviseProposal = profileTool(profile, "sortie_revise_operator_proposal");
+    const extendProposalBudget = profileTool(profile, "sortie_extend_operator_proposal_budget");
+    const reopenProposalScope = profileTool(profile, "sortie_reopen_operator_proposal_scope");
+    const reconcileOrphan = profileTool(profile, "sortie_reconcile_orphaned_operator_dispatch");
     const reviseApprovedIntent = profileTool(profile, "sortie_revise_approved_operator_intent");
     async function stop(root: string, reason: string, retireRoot = true): Promise<void> {
       if (retireRoot) retired.add(root);
@@ -528,13 +549,16 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           ? proposal.proposal_call_id !== null
             ? "proposal Task is already admitted; do not redispatch it or call operator_next. Continue submission repairs only in the same active claimed child. If that child terminated or was interrupted without submission, an explicit root decision to retry may call cancel_operator with reason=plain to release this grant. Cancellation stops owned children and durably preserves cumulative reads/submissions and goal spend. Pass the returned retry_intent unchanged to begin_operator_proposal, then dispatch only its new exact Task within the remaining budget. Never reuse the terminated child, reset spend, or replace the goal or ordered requirements. Exhaustion requires an explicit cumulative budget revision, not a reset."
             : proposal.submission_count >= proposal.intent.proposal_budget.max_submissions
-            ? "proposal submission budget exhausted; do not call operator_next; report the bounded proposal failure"
+             ? `proposal submission budget exhausted; do not call operator_next. For the exact same unapproved submitted proposal and active goal, an explicitly user-authorized cumulative increase can use ${extendProposalBudget}; retain all previous spend and compare the unchanged proposal again. Otherwise report the bounded failure.`
             : "proposal is not submitted; do not call operator_next; complete or repair the bounded proposal submission"
           : proposal?.phase === "submitted"
-            ? `compare every original requirement with the exact proposal. For a known semantic defect, use ${reviseProposal} with its current identity and bounded field patches, then compare again; do not redispatch the ended child or cancel/reinvestigate the same defect. Approval preparation pins the plan and closes revision. Do not call operator_next before approval prepares a run. Approval authorizes implementation, not product acceptance. Preserve every required live measurement, consultation, root-owned push/global apply and user approval as pending acceptance obligations; canonical commands do not substitute for them. Use the host budget counters, not plan.goal_declaration.goal_budget_units, for remaining capacity; approval validates the retained goal binding and execution budget. A bounded diagnostic run may use cancel_operator after admission without inventing a plan validation command for cancellation.`
-            : "approved proposal has no operator run; do not call operator_next; reconcile the approval or preparation failure";
-        return JSON.stringify(state ? { ...await operatorPacket(state), ...(draft ? { pending_draft: draft } : {}),
-          ...(proposal ? { proposal: proposalIdentity(proposal) } : {}) }
+             ? `compare every original requirement with the exact proposal. For a known semantic defect, use ${reviseProposal} with its current identity and bounded field patches, then compare again; do not redispatch the ended child or cancel/reinvestigate the same defect. If exhausted, an explicitly user-authorized cumulative increase on this same submitted identity uses ${extendProposalBudget}. An observed missing implementation write path inside the frozen allow_read needs separate root-authorized ${reopenProposalScope}; this archives the old submission and returns a new read-only Task while retaining all spend. Approval preparation pins the plan and closes revision. Do not call operator_next before approval prepares a run. Approval authorizes implementation, not product acceptance. Preserve every required live measurement, consultation, root-owned push/global apply and user approval as pending acceptance obligations; canonical commands do not substitute for them. Use the host budget counters, not plan.goal_declaration.goal_budget_units, for remaining capacity; approval validates the retained goal binding and execution budget. A bounded diagnostic run may use cancel_operator after admission without inventing a plan validation command for cancellation.`
+             : state?.phase === "cancelled"
+               ? `approved proposal remains pinned to a cancelled run. Do not call operator_next or reuse its Task. If the currently active goal differs, use ${reconcileOrphan} for one proven aborted native child reservation, then ${reviseApprovedIntent} with the exact cancelled run and retained ordered acceptance for a newly authorized investigation.`
+               : "approved proposal has no operator run; do not call operator_next; reconcile the approval or preparation failure";
+         return JSON.stringify(state ? { ...await operatorPacket(state), ...(draft ? { pending_draft: draft } : {}),
+           ...(proposal ? { proposal: proposalIdentity(proposal), proposal_next_action: proposalNextAction } : {}),
+           ...(state.phase === "cancelled" ? { orphan_recovery_action: `If the active goal has one reservation from an aborted owned V2 Task, use ${reconcileOrphan} only after native lineage and interrupt proof. If a terminal replacement run is still bound to a previous approved goal, use ${reviseApprovedIntent} with its exact identity, preserved ordered requirements and cumulative spend; it starts fresh investigation, not acceptance.` } : {}) }
           : draft ? { ...draft as object, ...(proposal ? { proposal: proposals.packet(proposal) } : {}) }
             : proposal ? { profile: profile.id, proposal: proposals.packet(proposal),
               goal_binding: proposal.goal_binding, budget: await control!.currentBudget(context.sessionID),
@@ -762,7 +786,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             const binding = await control!.proposalGoalBinding(context.sessionID);
             await control!.assertActiveGoal(context.sessionID, binding.acceptance_fingerprint);
             const revised = await proposals.reviseApproved(context.sessionID, context.sessionID, request,
-              () => new OperatorRuntime(input.directory, profile).read(context.sessionID), binding);
+              () => new OperatorRuntime(input.directory, profile).read(context.sessionID), binding,
+              (oldGoalID, parentRunID) => control!.proveApprovedRunAncestry(context.sessionID, oldGoalID, parentRunID));
             return JSON.stringify({ ...proposals.packet(revised) as object, task: proposals.referenceTask(revised),
               dispatch_instruction: "Dispatch this new exact Task reference once; do not reuse the prior approved contract or its child." });
           } catch (error) {
@@ -809,6 +834,51 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           }
         });
       } };
+    tools[extendProposalBudget] = { description: budgetRevisionContract,
+      args: { revision_json: budgetRevisionSchema }, execute: async (args, context) => {
+        await requireRoot(context.sessionID);
+        return serializeDispatchTransition(context.sessionID, async () => {
+          try {
+            const binding = await control!.proposalGoalBinding(context.sessionID);
+            const revised = await proposals.extendSubmittedBudget(context.sessionID, context.sessionID,
+              JSON.parse(args.revision_json), binding);
+            return JSON.stringify({ ...proposals.packet(revised) as object,
+              next_action: "Compare all original ordered requirements against this unchanged proposal. Revise diagnosed fields within the remaining submission budget or explicitly approve; no worker was started." });
+          } catch (error) {
+            if (error instanceof SyntaxError) return JSON.stringify({ status: "invalid-budget-revision", code: "operator-proposal-budget-revision-json-invalid" });
+            if (!(error instanceof Error) || !error.message.startsWith("operator-proposal-")) throw error;
+            return JSON.stringify({ status: "invalid-budget-revision", code: error.message });
+          }
+        });
+      } };
+    tools[reopenProposalScope] = { description: scopeReopenContract,
+      args: { revision_json: scopeReopenSchema }, execute: async (args, context) => {
+        await requireRoot(context.sessionID);
+        return serializeDispatchTransition(context.sessionID, async () => {
+          try {
+            const binding = await control!.proposalGoalBinding(context.sessionID);
+            await control!.assertActiveGoal(context.sessionID, binding.acceptance_fingerprint);
+            const reopened = await proposals.reopenSubmittedScope(context.sessionID, context.sessionID,
+              JSON.parse(args.revision_json), binding);
+            return JSON.stringify({ ...proposals.packet(reopened) as object, task: proposals.referenceTask(reopened),
+              dispatch_instruction: "Dispatch this new exact read-only Task once; investigate the newly missing surfaces and submit a complete plan. Never reuse the archived child or its read paths." });
+          } catch (error) {
+            if (error instanceof OperatorProposalBudgetError) return JSON.stringify(error.diagnostic);
+            if (error instanceof SyntaxError) return JSON.stringify({ status: "invalid-scope-reopen", code: "operator-proposal-scope-reopen-json-invalid" });
+            if (!(error instanceof Error) || !error.message.startsWith("operator-proposal-")) throw error;
+            return JSON.stringify({ status: "invalid-scope-reopen", code: error.message });
+          }
+        });
+      } };
+    tools[reconcileOrphan] = { description: "Root-only: after explicitly cancelling the operator, reconcile one orphaned goal reservation from an aborted native delegate and its still-running historical child Task. The host requires exact goal/call/Task identity, owned parent-child lineage, native timestamps, and acknowledged interruption of both owned sessions. It records interrupted lifecycle spend with no validation evidence or acceptance. If any proof is absent it returns unproven without settling the reservation; never use worker prose as proof.",
+      args: {}, execute: async (_args, context) => {
+        await requireRoot(context.sessionID);
+        return serializeDispatchTransition(context.sessionID, async () => {
+          const run = await operators.read(context.sessionID);
+          if (run?.phase !== "cancelled") return JSON.stringify({ status: "unproven", reason: "cancelled-operator-required" });
+          return JSON.stringify(await control!.reconcileAbortedOperatorOrphan(context.sessionID));
+        });
+      } };
     tools[approveProposal] = { description: "Root-only: record semantic comparison of the exact proposal revision/hash, then connect its immutable plan to the existing execution lane. " + OPERATOR_APPROVAL_CONTRACT,
       args: { approval_json: approvalSchema }, execute: async (args, context) => {
         await requireRoot(context.sessionID);
@@ -841,7 +911,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         });
       } };
     const ownTools = new Set([prepare, repair, next, status, cancel, complete, resume, resolveContractRepair,
-      beginProposal, submitProposal, approveProposal, reviseProposal, reviseApprovedIntent]);
+      beginProposal, submitProposal, approveProposal, reviseProposal, extendProposalBudget, reopenProposalScope,
+      reconcileOrphan, reviseApprovedIntent]);
     const protocolMap = CANONICAL_AGENT_ROLES.map(role => `${role}=${profileAgent(profile, role)}`).join(", ");
     function rememberRendered(key: string, text: string): void {
       renderedParts.set(key, goalFingerprint(text));

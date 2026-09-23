@@ -12,6 +12,7 @@ import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
 import { SortieDogsPlugin } from "../dist/plugin/index.js";
 import { SortieDogsV010Plugin } from "../dist/plugin/profiled.js";
 import { RunFlightLedger } from "../dist/core/run-flight-ledger.js";
+import { goalFingerprint } from "../dist/core/goal-bound.js";
 import { V010_RUNTIME_ASSET_VERSION } from "../dist/asset-version.js";
 import type { RuntimeBridge } from "../dist/plugin/runtime-bridge.js";
 
@@ -101,6 +102,78 @@ test("root revision repairs a submitted semantic defect after cold restart witho
   assert.deepEqual(await reopened.required("root"), revised);
   assert.equal((await reopened.approve("root", approvalRequest(revised))).phase, "approved");
   await assert.rejects(reopened.reviseJSON("root", "root", JSON.stringify(revisionRequest(revised))), /not-revisable/);
+ }));
+
+test("user-authorized cumulative increase retains an exhausted submitted proposal across restart", async () => fixture(async root => {
+  const runtime = new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE);
+  const initial = await runtime.begin("root", { ...intent(), proposal_budget: { max_reads: 180, max_submissions: 16 } });
+  const binding = { goal_id: "retained-goal", revision: 1, scope_epoch: 1, acceptance_fingerprint: `sha256:${"a".repeat(64)}` };
+  await runtime.bindGoal("root", binding);
+  const task = runtime.referenceTask(initial);
+  await runtime.admit("root", "proposal-call", task);
+  await runtime.bind("root", "child", task.prompt);
+  for (let i = 0; i < 180; i++) await runtime.accountRead("root", "child", "src/input.ts");
+  const submitted = await runtime.submit("root", "child", packet(180));
+  for (let i = 1; i < 16; i++) {
+    await assert.rejects(runtime.reviseJSON("root", "root", JSON.stringify(revisionRequest(submitted,
+      [{ op: "replace", path: "/intent", value: intent() }] as any))));
+  }
+  const cold = new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE);
+  const before = await cold.required("root");
+  assert.equal(before.read_count, 180);
+  assert.equal(before.submission_count, 16);
+  const request = { ...proposalIdentity(before), rationale: "User approved the cumulative 228/22 ceiling for the same goal.",
+    proposal_budget: { max_reads: 228, max_submissions: 22 } };
+  await assert.rejects(cold.extendSubmittedBudget("root", "foreign", request, binding), /root-required/);
+  for (const invalid of [
+    { ...request, content_hash: "stale" },
+    { ...request, proposal_budget: { max_reads: 180, max_submissions: 22 } },
+    { ...request, proposal_budget: { max_reads: 229, max_submissions: 22 } },
+  ]) await assert.rejects(cold.extendSubmittedBudget("root", "root", invalid, binding));
+  await assert.rejects(cold.extendSubmittedBudget("root", "root", request,
+    { ...binding, goal_id: "another-goal" }), /goal-mismatch/);
+  assert.deepEqual(await cold.required("root"), before, "rejected revisions do not alter spend or identity");
+  const revised = await cold.extendSubmittedBudget("root", "root", request, binding);
+  assert.deepEqual(proposalIdentity(revised), proposalIdentity(before));
+  assert.deepEqual(revised.proposal, before.proposal);
+  assert.deepEqual(revised.goal_binding, before.goal_binding);
+  assert.deepEqual(revised.intent.requirements, before.intent.requirements);
+  assert.deepEqual(revised.read_paths, before.read_paths);
+  assert.equal(revised.read_count, 180);
+  assert.equal(revised.submission_count, 16);
+  assert.deepEqual(revised.budget_revisions?.[0]?.from, { max_reads: 180, max_submissions: 16 });
+  assert.deepEqual(revised.budget_revisions?.[0]?.to, { max_reads: 228, max_submissions: 22 });
+  assert.deepEqual(await new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE).required("root"), revised);
+  await assert.rejects(cold.extendSubmittedBudget("root", "root", request, binding), /range-invalid/);
+  const corrected = await cold.reviseJSON("root", "root", JSON.stringify(revisionRequest(revised)));
+  assert.equal(corrected.submission_count, 17,
+    "the old submitted packet can be corrected using only the new remaining allowance");
+  const missing = ["src/core/operator-proposal.ts", "src/plugin/profiled.ts", "src/plugin/index.ts"];
+  const scope = { ...proposalIdentity(corrected), rationale: "The current user's CLI failure requires these newly observed host paths.",
+    missing_write_paths: missing };
+  for (const invalid of [
+    { ...scope, content_hash: "stale" },
+    { ...scope, missing_write_paths: ["src/result.ts"] },
+    { ...scope, missing_write_paths: ["private/unread.ts"] },
+  ]) await assert.rejects(cold.reopenSubmittedScope("root", "root", invalid, binding));
+  await assert.rejects(cold.reopenSubmittedScope("root", "root", scope,
+    { ...binding, revision: 2 }), /goal-mismatch/);
+  assert.deepEqual(await cold.required("root"), corrected);
+  const reopened = await cold.reopenSubmittedScope("root", "root", scope, binding);
+  assert.equal(reopened.phase, "investigating");
+  assert.deepEqual(reopened.intent.requirements, corrected.intent.requirements);
+  assert.deepEqual(reopened.goal_binding, binding);
+  assert.deepEqual(reopened.prior_spend, { reads: 180, submissions: 17 });
+  assert.deepEqual(reopened.read_paths, [], "a new child must observe its own source surfaces");
+  assert.equal(reopened.proposal_session_id, null);
+  assert.equal(reopened.proposal_id, null);
+  assert.deepEqual(reopened.submitted_history?.[0]?.missing_write_paths, missing);
+  const archive = JSON.parse(await readFile(join(root, V010_RUNTIME_PROFILE.stateDirectory, "operator-proposals",
+    `${createHash("sha256").update("root").digest("hex")}.${corrected.intent_id}.${corrected.proposal_hash}.submitted.json`), "utf8"));
+  assert.deepEqual(archive.submitted_proposal, corrected);
+  assert.deepEqual(await new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE).required("root"), reopened);
+  await assert.rejects(cold.reopenSubmittedScope("root", "root", scope, binding), /not-submitted/);
+  await assert.rejects(cold.accountRead("root", "child"), /read-grant-invalid/);
 }));
 
 test("root revision rejects immutable fields, scope expansion and invalid proof atomically with finite accounting", async () => fixture(async root => {
@@ -257,6 +330,141 @@ test("root tool revises after child settlement, preserves goal spend, and requir
   assert.equal((await (await RunFlightLedger.openGoal(ledgerPath)).readGoal()).state.consumed_units, 1);
 }));
 
+test("root budget tool funds the same submitted proposal without allocating a fresh Task", async () => fixture(async root => {
+  const { hooks, started, ledgerPath } = await previewProposal(root, 2);
+  const tool = hooks.tool!.sortie_v010_extend_operator_proposal_budget;
+  assert.deepEqual(Object.keys(tool.args), ["revision_json"]);
+  await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "proposal" }, { args: started.task });
+  await hooks["chat.message"]!({ sessionID: "child", messageID: "child-user", agent: "dogs-coordinator" }, {
+    message: { agent: "dogs-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-sol" } },
+    parts: [{ type: "text", text: started.task.prompt }],
+  });
+  await hooks["tool.execute.before"]!({ tool: "read", sessionID: "child", callID: "read" }, { args: { filePath: "src/input.ts" } });
+  await hooks.tool!.sortie_v010_submit_operator_proposal.execute({ proposal_json: JSON.stringify(packet(1)) }, { sessionID: "child" });
+  await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "proposal" }, { output: "Submitted." });
+  const before = await new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE).required("root");
+  const ledger = (await (await RunFlightLedger.openGoal(ledgerPath)).readGoal()).records;
+  const args = { revision_json: JSON.stringify({ ...proposalIdentity(before), rationale: "Explicit cumulative approval 228/22",
+    proposal_budget: { max_reads: 228, max_submissions: 22 } }) };
+  await assert.rejects(tool.execute(args, { sessionID: "child" }), /inactive|root-required/);
+  const cold = await previewHooks(root, "root", [{ info: { id: "user-1", role: "user", agent: "dog-operator" },
+    parts: [{ type: "text", text: "Implement the approved result.\ngoal_budget_units: 2" }] }]);
+  const result = JSON.parse(await cold.tool!.sortie_v010_extend_operator_proposal_budget.execute(args, { sessionID: "root" }));
+  assert.equal(result.status, "submitted");
+  assert.equal(result.proposal_id, before.proposal_id);
+  assert.equal(result.reads, before.read_count);
+  assert.equal(result.submissions, before.submission_count);
+  assert.equal(result.remaining_reads, 227);
+  assert.equal(result.remaining_submissions, 21);
+  assert.equal(Object.hasOwn(result, "task"), false);
+  assert.deepEqual((await (await RunFlightLedger.openGoal(ledgerPath)).readGoal()).records, ledger);
+  const saved = await new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE).required("root");
+  assert.deepEqual(saved.proposal, before.proposal);
+  assert.deepEqual(saved.goal_binding, before.goal_binding);
+  assert.deepEqual(saved.intent.requirements, before.intent.requirements);
+  const reopenTool = cold.tool!.sortie_v010_reopen_operator_proposal_scope;
+  assert.deepEqual(Object.keys(reopenTool.args), ["revision_json"]);
+  const reopened = JSON.parse(await reopenTool.execute({ revision_json: JSON.stringify({
+    ...proposalIdentity(saved), rationale: "A newly required host implementation path is absent from the old plan.",
+    missing_write_paths: ["src/plugin/profiled.ts"],
+  }) }, { sessionID: "root" }));
+  assert.equal(reopened.status, "investigating");
+  assert.ok(reopened.task.prompt.startsWith(proposalRefPrefix));
+  assert.equal(reopened.reads, before.read_count);
+  assert.equal(reopened.submissions, before.submission_count);
+  assert.equal(reopened.submitted_history[0].proposal_id, before.proposal_id);
+  assert.deepEqual((await (await RunFlightLedger.openGoal(ledgerPath)).readGoal()).records, ledger,
+    "a new investigation Task is not a goal unit until admitted");
+}));
+
+test("V2 short operator delegate terminal error reconciles only its bound goal reservation", async () => fixture(async root => {
+  const { ledgerPath } = await previewProposal(root, 3);
+  const ledger = await RunFlightLedger.openGoal(ledgerPath);
+  const goal = (await ledger.readGoal()).state;
+  const session = "root", run = "operator-2367feb0-3e02-408a-8485-222295a933f1";
+  const unit = `${run}-1`, callID = "call_xnt6F970w0QjcHVHihh7eu2D";
+  const reservation = goalFingerprint({ goal_id: goal.goal_id, unit_id: unit, call_id: callID });
+  await ledger.appendGoal({ kind: "dispatch.reserved", at: new Date().toISOString(), goal_id: goal.goal_id!,
+    unit_id: unit, session_id: session, ticket_id: null, reservation_id: reservation });
+  const ref = { k: "delegate", r: session, n: run, p: "a".repeat(64), h: "b".repeat(64), g: 5 };
+  const message = (reference: typeof ref) => [{ info: { role: "assistant", sessionID: session }, parts: [{
+    type: "tool", tool: "task", callID, state: { status: "error", time: { start: 1000, end: 1010 },
+      input: { subagent_type: "dogs-coordinator", prompt: `SORTIE_OPERATOR_DELEGATE_REF ${JSON.stringify(reference)}` } },
+  }] }];
+  const turn = (hooks: Awaited<ReturnType<typeof previewHooks>>, id: string) => hooks["chat.message"]!({
+    sessionID: session, messageID: id, agent: "dog-operator",
+    model: { providerID: "openai", modelID: "gpt-5.6-sol" },
+  }, { message: { agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-5.6-sol" } },
+    parts: [{ type: "text", text: "Implement the approved result.\ngoal_budget_units: 2" }] });
+  await turn(await previewHooks(root, session, message({ ...ref, r: "another-root" })), "wrong-reference");
+  assert.equal((await ledger.readGoal()).state.outstanding_reservations.length, 1);
+  await turn(await previewHooks(root, session, message(ref)), "terminal-reference");
+  const settled = await ledger.readGoal();
+  assert.equal(settled.state.outstanding_reservations.length, 0);
+  assert.equal(settled.state.consumed_units, 1);
+  assert.deepEqual(settled.state.satisfied_criteria, [], "terminal transport proves lifecycle only");
+  assert.equal(settled.records.find(item => item.event.kind === "unit.settled")?.event.kind, "unit.settled");
+  await turn(await previewHooks(root, session, message(ref)), "replayed-reference");
+  assert.equal((await ledger.readGoal()).records.filter(item => item.event.kind === "unit.settled").length, 1);
+}));
+
+test("root reconciles an aborted V2 delegate's orphaned running worker only after native lineage and interrupt", async () => fixture(async root => {
+  const { ledgerPath } = await previewProposal(root, 3);
+  const operator = new OperatorRuntime(root, V010_RUNTIME_PROFILE);
+  const prepared = await operator.prepare("root", plan());
+  await operator.interrupted("root", "cancelled");
+  const runID = prepared.runID, unitID = `${runID}-1`, callID = "worker-call", ledger = await RunFlightLedger.openGoal(ledgerPath);
+  const goal = (await ledger.readGoal()).state;
+  const reservationID = goalFingerprint({ goal_id: goal.goal_id, unit_id: unitID, call_id: callID });
+  await ledger.appendGoal({ kind: "dispatch.reserved", at: new Date().toISOString(), goal_id: goal.goal_id!,
+    unit_id: unitID, session_id: "root", ticket_id: null, reservation_id: reservationID });
+  const binding = { r: "root", n: runID, p: "a".repeat(64), g: 5 };
+  const rootPart = { type: "tool", tool: "task", callID: "delegate-call", state: { status: "error", error: { type: "aborted" },
+    time: { start: 1000, end: 4000 }, input: { subagent_type: "dog-operator", prompt:
+      `SORTIE_OPERATOR_DELEGATE_REF ${JSON.stringify({ k: "delegate", ...binding, h: "b".repeat(64) })}` } } };
+  const workerPart = { type: "tool", tool: "task", callID, state: { status: "running",
+    input: { subagent_type: "dog-worker", prompt:
+      `SORTIE_OPERATOR_TASK_REF ${JSON.stringify({ ...binding, u: "implementation", t: unitID, h: "c".repeat(64) })}` } } };
+  const sessions: Record<string, { id: string; agent: string; parentID?: string }> = {
+    root: { id: "root", agent: "dog-operator" }, delegate: { id: "delegate", agent: "dogs-coordinator", parentID: "root" },
+    worker: { id: "worker", agent: "dog-worker-v010", parentID: "delegate" },
+  };
+  let childID = unitID, interruptResponse: unknown = { interrupted: false };
+  const interrupts: string[] = [];
+  const hooks = await SortieDogsV010Plugin({ directory: root, client: { session: {
+    get: async ({ path }: { path: { id: string } }) => ({ data: sessions[path.id] }),
+    children: async ({ path }: { path: { id: string } }) => ({ data: Object.values(sessions).filter(value => value.parentID === path.id) }),
+    messages: async ({ path }: { path: { id: string } }) => ({ data: path.id === "root"
+      ? [{ info: { role: "assistant", sessionID: "root" }, parts: [rootPart] }]
+      : path.id === "delegate" ? [{ info: { role: "assistant", sessionID: "delegate" }, parts: [workerPart] }]
+        : [{ info: { role: "user", sessionID: "worker", time: { created: 2500 } },
+          parts: [{ type: "text", text: `role: implementation\ntask_id: ${childID}` }] },
+        { info: { role: "assistant", sessionID: "worker", time: { created: 3000 } }, parts: [] }] }),
+    abort: async ({ path }: { path: { id: string } }) => { interrupts.push(path.id); return interruptResponse; },
+  } } } as never);
+  await hooks["chat.message"]!({ sessionID: "root", agent: "dog-operator", messageID: "orphan-recovery" }, {
+    message: { agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-6-sol" } },
+    parts: [{ type: "text", text: "Continue the same accepted goal." }],
+  });
+  const tool = hooks.tool!.sortie_v010_reconcile_orphaned_operator_dispatch;
+  assert.deepEqual(Object.keys(tool.args), []);
+  childID = "another-unit";
+  assert.equal(JSON.parse(await tool.execute({}, { sessionID: "root" })).reason, "stale-child-lineage-unproven");
+  childID = unitID;
+  interruptResponse = {};
+  assert.equal(JSON.parse(await tool.execute({}, { sessionID: "root" })).reason, "native-interrupt-unconfirmed");
+  assert.equal((await ledger.readGoal()).state.outstanding_reservations.length, 1);
+  interruptResponse = { interrupted: false };
+  const settled = JSON.parse(await tool.execute({}, { sessionID: "root" }));
+  assert.equal(settled.status, "settled");
+  assert.deepEqual(interrupts, ["worker", "worker", "delegate"]);
+  assert.equal((await ledger.readGoal()).state.outstanding_reservations.length, 0);
+  assert.equal((await ledger.readGoal()).state.consumed_units, 1);
+  assert.deepEqual((await ledger.readGoal()).state.satisfied_criteria, []);
+  assert.equal(JSON.parse(await tool.execute({}, { sessionID: "root" })).status, "no-orphan");
+  assert.equal((await ledger.readGoal()).records.filter(({ event }) => event.kind === "unit.settled").length, 1);
+}));
+
 function changedReference(prompt: string, patch: Record<string, unknown>): string {
   assert.ok(prompt.startsWith(proposalRefPrefix));
   return proposalRefPrefix + JSON.stringify({ ...JSON.parse(prompt.slice(proposalRefPrefix.length)), ...patch });
@@ -306,7 +514,7 @@ test("begin tool exposes concrete normalized path limits and rejects malformed i
   for (const description of [begin.description, arg.description]) {
     for (const field of ['"schema_version":"0.1"', '"original_request"', '"source_ref"', '"requirements"',
       '"id"', '"text"', '"kind"', '"requirement" | "negative" | "quality"', '"authoritative_refs"',
-      '"allow_read"', 'proposal_budget optional', '"max_reads"', '"max_submissions"', 'integer 1..192', 'integer 1..24',
+       '"allow_read"', 'proposal_budget optional', '"max_reads"', '"max_submissions"', 'integer 1..228', 'integer 1..24',
       'deterministic default {"max_reads":45,"max_submissions":9}', 'explicit smaller budgets are preserved',
       'normalized, concrete repository-relative FILE or DIRECTORY prefixes', 'must already equal normalizeRelativePath(entry)',
       'existing exact path observed in authoritative evidence or prior discovery', 'do not invent a top-level basename from a nested path',
@@ -405,13 +613,13 @@ test("omitted proposal budgets use host defaults while explicit grants, caps, an
     { max_reads: 2, max_submissions: 1 }, "existing explicit durable grants must not be replaced by defaults");
 
   const atCaps = await runtime.begin("at-caps", { ...intent(), proposal_budget: { ...OPERATOR_PROPOSAL_BUDGET_CAPS } });
-  assert.deepEqual(atCaps.intent.proposal_budget, { max_reads: 192, max_submissions: 24 });
+  assert.deepEqual(atCaps.intent.proposal_budget, { max_reads: 228, max_submissions: 24 });
   for (const [name, proposal_budget] of [
     ["zero-read", { max_reads: 0, max_submissions: 1 }],
     ["negative-submission", { max_reads: 1, max_submissions: -1 }],
     ["fractional-read", { max_reads: 1.5, max_submissions: 1 }],
     ["fractional-submission", { max_reads: 1, max_submissions: 1.5 }],
-    ["over-read-cap", { max_reads: 193, max_submissions: 1 }],
+    ["over-read-cap", { max_reads: 229, max_submissions: 1 }],
     ["over-submission-cap", { max_reads: 1, max_submissions: 25 }],
   ] as const) {
     await assert.rejects(runtime.begin(name, { ...intent(), proposal_budget }), /operator-intent-invalid/);
@@ -1966,6 +2174,8 @@ test("terminal approved run requires a pinned root revision and retains its cont
     { actor: session, request: { ...request, operator_run_id: "wrong-run" }, binding, error: /terminal-run-required/ },
     { actor: session, request, binding: submitted.goal_binding!, error: /goal-revision-required/ },
     { actor: session, request: { ...request, intent: { ...revisedIntent, requirements: requirements.slice(1) } },
+      binding, error: /acceptance-continuity-required/ },
+    { actor: session, request: { ...request, intent: { ...revisedIntent, requirements: requirements.slice(1) } },
       binding: { ...submitted.goal_binding!, revision: 2, scope_epoch: 2,
       acceptance_fingerprint: `sha256:${"c".repeat(64)}` }, error: /acceptance-continuity-required/ },
     { actor: session, request: { ...request, intent: { ...revisedIntent, proposal_budget: { max_reads: 1, max_submissions: 1 } } },
@@ -1999,6 +2209,45 @@ test("terminal approved run requires a pinned root revision and retains its cont
   assert.deepEqual(retried.approved_history, revised.approved_history);
   assert.deepEqual(retried.prior_spend, { reads: 1, submissions: 1 });
   assert.deepEqual(JSON.parse(await readFile(archivePath, "utf8")), archive);
+}));
+
+test("a cancelled replacement run needs native old-goal ancestry before revising an approved proposal", async () => fixture(async root => {
+  const session = "root", proposals = new OperatorProposalRuntime(root, V010_RUNTIME_PROFILE);
+  const begun = await proposals.begin(session, { ...intent(), proposal_budget: { max_reads: 4, max_submissions: 3 } });
+  const oldGoal = { goal_id: "old-goal", revision: 1, scope_epoch: 1, acceptance_fingerprint: `sha256:${"a".repeat(64)}` };
+  await proposals.bindGoal(session, oldGoal);
+  const task = proposals.referenceTask(begun);
+  await proposals.admit(session, "proposal-call", task);
+  await proposals.bind(session, "proposal-child", task.prompt);
+  await proposals.accountRead(session, "proposal-child", "src/input.ts");
+  const submitted = await proposals.submit(session, "proposal-child", packet(1));
+  await proposals.approve(session, approvalRequest(submitted));
+  const operators = new OperatorRuntime(root, V010_RUNTIME_PROFILE);
+  const original = await operators.prepare(session, submitted.proposal!.plan);
+  await operators.interrupted(session, "cancelled");
+  const run = { ...(await operators.required(session)), runID: "operator-descendant", parentRunID: original.runID,
+    planHash: "b".repeat(64) };
+  const nextGoal = { ...oldGoal, goal_id: "new-goal", revision: 2, scope_epoch: 2,
+    acceptance_fingerprint: `sha256:${"c".repeat(64)}` };
+  const request = { ...proposalIdentity(submitted), operator_run_id: run.runID,
+    rationale: "Retain the full original acceptance on the newly accepted goal.",
+    intent: { ...intent(), proposal_budget: { max_reads: 8, max_submissions: 4 } } };
+  const readRun = async () => run;
+  await assert.rejects(proposals.reviseApproved(session, session, request, readRun, nextGoal), /terminal-run-required/);
+  await assert.rejects(proposals.reviseApproved(session, session, request, readRun, nextGoal, async () => false), /terminal-run-required/);
+  assert.equal((await proposals.required(session)).phase, "approved");
+  const observations: string[][] = [];
+  const reopened = await proposals.reviseApproved(session, session, request, readRun, nextGoal, async (goalID, runID) => {
+    observations.push([goalID, runID]);
+    return goalID === oldGoal.goal_id && runID === original.runID;
+  });
+  assert.deepEqual(observations, [[oldGoal.goal_id, original.runID]]);
+  assert.equal(reopened.phase, "investigating");
+  assert.deepEqual(reopened.goal_binding, nextGoal);
+  assert.deepEqual(reopened.intent.requirements, requirements);
+  assert.deepEqual(reopened.prior_spend, { reads: 1, submissions: 1 });
+  assert.equal(reopened.approved_history?.[0]?.run_id, run.runID);
+  assert.equal((await operators.required(session)).runID, original.runID, "the predecessor execution remains terminal");
 }));
 
 test("root tool cold-revises a cancelled approved operator without redispatching the old proposal", async () => fixture(async root => {

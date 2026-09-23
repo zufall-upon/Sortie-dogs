@@ -11,7 +11,7 @@ const text = (value: unknown): value is string => typeof value === "string" && v
 const ORIGINAL_REQUEST_MAX_CHARACTERS = 128 * 1024;
 const ORIGINAL_REQUEST_MAX_BYTES = 128 * 1024;
 export const DEFAULT_OPERATOR_PROPOSAL_BUDGET = Object.freeze({ max_reads: 45, max_submissions: 9 });
-export const OPERATOR_PROPOSAL_BUDGET_CAPS = Object.freeze({ max_reads: 192, max_submissions: 24 });
+export const OPERATOR_PROPOSAL_BUDGET_CAPS = Object.freeze({ max_reads: 228, max_submissions: 24 });
 export const OPERATOR_PROPOSAL_REVISION_CONTRACT = "revision_json must encode exactly {proposal_id:string,revision:positive integer,content_hash:string,rationale:nonblank single-line string,patches:array}. " +
   "Pin the current submitted identity from operator_status. patches contains 1..32 {op,path,value} objects. " +
   "replace is allowed only at /coverage, /existing_surface, /uncovered, /negative_handling, /read_scope, /plan/units, /plan/acceptance_proof, " +
@@ -154,6 +154,13 @@ export interface OperatorProposalState {
   /** Preparation may publish execution controls before approval commits; never revise that pinned plan. */
   approval_started?: boolean;
   root_revisions?: OperatorProposalRevision[];
+  /** Root-authorized cumulative increases; the submitted plan and its identity do not change. */
+  budget_revisions?: readonly { readonly at: string; readonly rationale: string;
+    readonly from: OperatorIntent["proposal_budget"]; readonly to: OperatorIntent["proposal_budget"];
+    readonly proposal_id: string; readonly content_hash: string; readonly goal_binding: OperatorProposalGoalBinding }[];
+  /** Submitted contracts displaced by a newly evidenced scope gap, never erased or approved. */
+  submitted_history?: readonly { readonly archive_hash: string; readonly proposal_id: string;
+    readonly revision: number; readonly content_hash: string; readonly missing_write_paths: readonly string[] }[];
   /** Immutable archive identities of earlier approved contracts on this root. */
   approved_history?: readonly { readonly archive_hash: string; readonly intent_id: string; readonly proposal_id: string;
     readonly run_id: string; readonly disposition: "completed" | "incomplete" }[];
@@ -557,9 +564,100 @@ export class OperatorProposalRuntime {
     this.assertBudgetAvailable(state);
     await this.save(state); return state;
   }
+  private submittedArchiveFile(root: string, intentID: string, proposalHash: string): string {
+    return join(this.projectRoot, this.profile.stateDirectory, "operator-proposals",
+      `${hash(root)}.${intentID}.${proposalHash}.submitted.json`);
+  }
+  /** Increase a submitted proposal's cumulative allowance without replacing its goal, plan or investigation. */
+  async extendSubmittedBudget(root: string, actor: string, raw: unknown,
+    currentGoal: OperatorProposalGoalBinding): Promise<OperatorProposalState> {
+    if (actor !== root) throw new Error("operator-proposal-budget-revision-root-required");
+    return this.serial(root, async () => {
+      const state = await this.requiredUnlocked(root);
+      if (state.phase !== "submitted" || !state.proposal || !state.goal_binding || state.approval_started) {
+        throw new Error("operator-proposal-budget-revision-not-submitted");
+      }
+      if (!record(raw) || !exactSet(raw, ["proposal_id", "revision", "content_hash", "rationale", "proposal_budget"]) ||
+          !text(raw.proposal_id) || !Number.isSafeInteger(raw.revision) || !text(raw.content_hash) ||
+          !text(raw.rationale) || raw.rationale.length > 2000 || !record(raw.proposal_budget) ||
+          !exactSet(raw.proposal_budget, ["max_reads", "max_submissions"])) {
+        throw new Error("operator-proposal-budget-revision-invalid");
+      }
+      if (raw.proposal_id !== state.proposal_id || raw.revision !== state.proposal_revision ||
+          raw.content_hash !== state.proposal_hash) throw new Error("operator-proposal-budget-revision-identity-mismatch");
+      if (JSON.stringify(currentGoal) !== JSON.stringify(state.goal_binding)) {
+        throw new Error("operator-proposal-budget-revision-goal-mismatch");
+      }
+      const before = state.intent.proposal_budget;
+      const budget = raw.proposal_budget;
+      const reads = budget.max_reads as number, submissions = budget.max_submissions as number;
+      if (!Number.isSafeInteger(reads) || !Number.isSafeInteger(submissions) ||
+          reads > OPERATOR_PROPOSAL_BUDGET_CAPS.max_reads || submissions > OPERATOR_PROPOSAL_BUDGET_CAPS.max_submissions ||
+          reads < before.max_reads || submissions < before.max_submissions ||
+          (reads === before.max_reads && submissions === before.max_submissions) ||
+          reads <= state.read_count || submissions <= state.submission_count) {
+        throw new Error("operator-proposal-budget-revision-range-invalid");
+      }
+      const next = { max_reads: reads, max_submissions: submissions };
+      const intent = { ...state.intent, proposal_budget: next };
+      // The intent hash protects the stored budget; the original intent ID and submitted proposal identity stay pinned.
+      const revised = { ...state, intent, intent_hash: hash(JSON.stringify(intent)),
+        budget_revisions: [...(state.budget_revisions ?? []), { at: new Date().toISOString(), rationale: raw.rationale,
+          from: { ...before }, to: next, proposal_id: state.proposal_id!, content_hash: state.proposal_hash!,
+          goal_binding: structuredClone(state.goal_binding) }] } as OperatorProposalState;
+      await this.save(revised);
+      return revised;
+    });
+  }
+  /** Reopen only a newly diagnosed scope gap in a submitted plan, preserving its exact archived identity. */
+  async reopenSubmittedScope(root: string, actor: string, raw: unknown,
+    currentGoal: OperatorProposalGoalBinding): Promise<OperatorProposalState> {
+    if (actor !== root) throw new Error("operator-proposal-scope-reopen-root-required");
+    return this.serial(root, async () => {
+      const state = await this.requiredUnlocked(root);
+      if (state.phase !== "submitted" || !state.proposal || !state.goal_binding || state.approval_started) {
+        throw new Error("operator-proposal-scope-reopen-not-submitted");
+      }
+      if (!record(raw) || !exactSet(raw, ["proposal_id", "revision", "content_hash", "rationale", "missing_write_paths"]) ||
+          !text(raw.proposal_id) || !Number.isSafeInteger(raw.revision) || !text(raw.content_hash) ||
+          !text(raw.rationale) || raw.rationale.length > 2000 || !Array.isArray(raw.missing_write_paths) ||
+          raw.missing_write_paths.length < 1 || raw.missing_write_paths.length > 16 ||
+          !raw.missing_write_paths.every(normalizedRelativePath) ||
+          new Set(raw.missing_write_paths).size !== raw.missing_write_paths.length) {
+        throw new Error("operator-proposal-scope-reopen-invalid");
+      }
+      if (raw.proposal_id !== state.proposal_id || raw.revision !== state.proposal_revision ||
+          raw.content_hash !== state.proposal_hash) throw new Error("operator-proposal-scope-reopen-identity-mismatch");
+      if (JSON.stringify(currentGoal) !== JSON.stringify(state.goal_binding)) {
+        throw new Error("operator-proposal-scope-reopen-goal-mismatch");
+      }
+      this.assertBudgetAvailable(state);
+      const oldWrites = state.proposal.write_scope;
+      const missing = raw.missing_write_paths as string[];
+      if (missing.some(path => oldWrites.some(scope => path === scope || path.startsWith(`${scope}/`)) ||
+          !state.intent.allow_read.some(scope => path === scope || path.startsWith(`${scope}/`)))) {
+        throw new Error("operator-proposal-scope-reopen-path-invalid");
+      }
+      const archive = JSON.stringify({ submitted_proposal: state, missing_write_paths: missing, rationale: raw.rationale });
+      const archivePath = this.submittedArchiveFile(root, state.intent_id, state.proposal_hash!);
+      try { await writeFile(archivePath, archive, { flag: "wx", mode: 0o600 }); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST" || hash(await readFile(archivePath, "utf8")) !== hash(archive)) throw error;
+      }
+      const reopened: OperatorProposalState = { ...state, phase: "investigating", created_at: new Date().toISOString(),
+        prior_spend: { reads: state.read_count, submissions: state.submission_count },
+        proposal_call_id: null, proposal_session_id: null, read_paths: [], proposal_id: null, proposal_revision: null,
+        proposal_hash: null, proposal: null, approval_rationale: null,
+        submitted_history: [...(state.submitted_history ?? []), { archive_hash: hash(archive), proposal_id: state.proposal_id!,
+          revision: state.proposal_revision!, content_hash: state.proposal_hash!, missing_write_paths: missing }] };
+      await this.save(reopened);
+      return reopened;
+    });
+  }
   /** Explicit root-only transition after an approved contract's execution lane has ended. */
   async reviseApproved(root: string, actor: string, raw: unknown,
-    readRun: () => Promise<OperatorState | undefined>, currentGoal: OperatorProposalGoalBinding): Promise<OperatorProposalState> {
+    readRun: () => Promise<OperatorState | undefined>, currentGoal: OperatorProposalGoalBinding,
+    proveApprovedRunAncestry?: (oldGoalID: string, parentRunID: string) => Promise<boolean>): Promise<OperatorProposalState> {
     if (actor !== root) throw new Error("operator-proposal-approved-revision-root-required");
     return this.serial(root, async () => {
       if (!record(raw) || !exactSet(raw, ["proposal_id", "revision", "content_hash", "operator_run_id", "rationale", "intent"]) ||
@@ -575,8 +673,13 @@ export class OperatorProposalRuntime {
           raw.content_hash !== previous.proposal_hash) throw new Error("operator-proposal-approved-revision-identity-mismatch");
       const run = await readRun();
       if (!run || !["cancelled", "completed"].includes(run.phase) || run.rootSessionID !== root ||
-          run.runID !== raw.operator_run_id || run.planHash !== hash(JSON.stringify(previous.proposal.plan)) ||
+          run.runID !== raw.operator_run_id ||
           JSON.stringify(run.acceptance) !== JSON.stringify(previous.proposal.plan.acceptance)) {
+        throw new Error("operator-proposal-approved-revision-terminal-run-required");
+      }
+      const originalPlan = run.planHash === hash(JSON.stringify(previous.proposal.plan));
+      if (!originalPlan && (!run.parentRunID || !proveApprovedRunAncestry ||
+          !await proveApprovedRunAncestry(previous.goal_binding.goal_id, run.parentRunID))) {
         throw new Error("operator-proposal-approved-revision-terminal-run-required");
       }
       if (!text(currentGoal.goal_id) || !Number.isSafeInteger(currentGoal.revision) || currentGoal.revision < 1 ||
@@ -589,8 +692,7 @@ export class OperatorProposalRuntime {
       }
       const intent = parseIntent(raw.intent), intentHash = hash(JSON.stringify(intent));
       if (intentHash === previous.intent_hash) throw new Error("operator-proposal-approved-revision-intent-unchanged");
-      if (currentGoal.goal_id === previous.goal_binding.goal_id &&
-          JSON.stringify(intent.requirements.slice(0, previous.intent.requirements.length)) !== JSON.stringify(previous.intent.requirements)) {
+      if (JSON.stringify(intent.requirements.slice(0, previous.intent.requirements.length)) !== JSON.stringify(previous.intent.requirements)) {
         throw new Error("operator-proposal-approved-revision-acceptance-continuity-required");
       }
       const remainingReads = intent.proposal_budget.max_reads - previous.read_count;
@@ -605,7 +707,8 @@ export class OperatorProposalRuntime {
       }
       const archive = JSON.stringify({ approved_proposal: previous, terminal_run: {
         run_id: run.runID, plan_hash: run.planHash, acceptance: run.acceptance, acceptance_fingerprint: run.acceptanceFingerprint,
-        phase: run.phase, decision: run.decision, receipt: run.receipt, generation: run.generation } });
+        phase: run.phase, decision: run.decision, receipt: run.receipt, generation: run.generation,
+        parent_run_id: originalPlan ? null : run.parentRunID } });
       const archivePath = this.approvedArchiveFile(root, previous.intent_id, previous.proposal_hash!, run.runID);
       try { await writeFile(archivePath, archive, { flag: "wx", mode: 0o600 }); }
       catch (error) {
@@ -855,9 +958,12 @@ export class OperatorProposalRuntime {
   private async requiredUnlocked(root: string): Promise<OperatorProposalState> { const state = await this.readUnlocked(root); if (!state) throw new Error("operator-proposal-missing"); return state; }
   packet(state: OperatorProposalState): unknown { return { status: state.phase, intent_id: state.intent_id, intent_hash: state.intent_hash,
     proposal_id: state.proposal_id, revision: state.proposal_revision, content_hash: state.proposal_hash, reads: state.read_count,
-    remaining_reads: state.intent.proposal_budget.max_reads - state.read_count, submissions: state.submission_count,
+    max_reads: state.intent.proposal_budget.max_reads, remaining_reads: state.intent.proposal_budget.max_reads - state.read_count,
+    submissions: state.submission_count, max_submissions: state.intent.proposal_budget.max_submissions,
     remaining_submissions: state.intent.proposal_budget.max_submissions - state.submission_count,
     task_admitted: state.proposal_call_id !== null, uncovered: state.proposal?.uncovered ?? [], proposal: state.proposal,
-    approval_rationale: state.approval_rationale, root_revisions: state.root_revisions ?? [], approved_history: state.approved_history ?? [],
+    approval_rationale: state.approval_rationale, root_revisions: state.root_revisions ?? [],
+    budget_revisions: state.budget_revisions ?? [], submitted_history: state.submitted_history ?? [],
+    approved_history: state.approved_history ?? [],
     revision_available: state.phase === "submitted" && !state.approval_started && state.submission_count < state.intent.proposal_budget.max_submissions }; }
 }
