@@ -167,7 +167,7 @@ hostが実際に提供するmodelとnamed variantだけを宣言する。Sortie�
 - `modelRouting`: external profile role別preferred targetとordered fallback
 - `modelCatalog`: 利用可能な`project` / `global` model・variant宣言
 - `freeTierFallbackModels`: global last-resort model ID。既定`opencode/deepseek-v4-flash-free`、`[]`で無効
-- `dedicatedWorkerModel`: canonical stable serial target。既定`openai/gpt-5.6-sol` / `medium`。v0.10 profileは下記explicit role routeも持つため、このstable設定からv0.10 worker routeを推定しない
+- `dedicatedWorkerModel`: canonical stable serial target。既定`openai/gpt-6-sol` / `medium`。v0.10 profileは下記explicit role routeも持つため、このstable設定からv0.10 worker routeを推定しない
 - `consultation.strategy`: 固定advisor identity、任意`required`、正整数`maxCallsPerCandidate`。既定はnot required、1 call
 - `consultation.sourceReview`: risk-based review。`maxCallsPerCandidate`既定`1`、`maxArtifactBytes`既定・最大`30720`。review必須時だけunavailableをblock扱い
 - `continuation.enabled`: 既定`true`
@@ -195,12 +195,12 @@ environmentのevidenceは再利用し、validation budgetを重複消費しな�
 
 ### v0.10既定route
 
-- `dog-operator`: `openai/gpt-5.6-luna-fast` / `max`
+- `dog-operator`: `openai/gpt-6-luna` / `max`
 - `dogs-coordinator`: `openai/gpt-6-sol` / `xhigh`
-- `dog-worker-v010`: `openai/gpt-5.6-luna-fast` / `max`
-- `dog-scout-v010`: `openai/gpt-5.6-luna-fast` / `xhigh`
+- `dog-worker-v010`: `openai/gpt-6-luna` / `max`
+- `dog-scout-v010`: `openai/gpt-6-luna` / `xhigh`
 - `dog-reviewer-v010`: `openai/gpt-6-sol` / `xhigh`
-- `dog-advisor-v010`: catalog宣言済み`anthropic/claude-opus-5`を優先、なければ`openai/gpt-5.6-sol` / `xhigh`
+- `dog-advisor-v010`: catalog宣言済み`anthropic/claude-opus-5`を優先、なければ`openai/gpt-6-sol` / `xhigh`
 
 OpenCodeで明示選択したmodel/variantはそのsessionで最優先。child defaultはnative設定がない時だけ補完し、
 有効なprofile routingで上書き可能。reviewがimplementation modelを暗黙継承することはない。

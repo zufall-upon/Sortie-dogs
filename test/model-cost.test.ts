@@ -25,12 +25,17 @@ test("calculates verified aliases per request and charges reasoning output once"
   assert.deepEqual(anthropic, { status: "priced", usd: 24.25, longContext: false, priceKey: "anthropic/claude-opus-5" });
 });
 
+test("prices the released GPT-6 Sol and Luna definitions from their official schedules", () => {
+  assert.deepEqual(estimate("gpt-6-sol"), { status: "priced", usd: 0.395, longContext: false, priceKey: "openai/gpt-6-sol" });
+  assert.deepEqual(estimate("gpt-6-luna"), { status: "priced", usd: 0.01975, longContext: false, priceKey: "openai/gpt-6-luna" });
+});
+
 test("prices the Luna fast route so a routed worker never audits as unpriced", () => {
   const luna = estimate("gpt-5.6-luna");
   const fast = estimate("gpt-5.6-luna-fast");
   assert.deepEqual(luna, { status: "priced", usd: 0.0425, longContext: false, priceKey: "openai/gpt-5.6-luna" });
   assert.deepEqual(fast, { status: "priced", usd: 0.085, longContext: false, priceKey: "openai/gpt-5.6-luna-fast" });
-  assert.match(MODEL_COST_PRICING_SNAPSHOT.assumptions.join(" "), /gpt-5\.6-luna-fast[\s\S]*twice the Luna Standard schedule/u);
+  assert.match(MODEL_COST_PRICING_SNAPSHOT.assumptions.join(" "), /gpt-5\.6-luna-fast[\s\S]*twice the GPT-5\.6 Luna Standard schedule/u);
 });
 
 test("applies the OpenAI long-context band to each request instead of aggregate usage", () => {

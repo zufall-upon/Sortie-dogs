@@ -53,16 +53,16 @@ The v0.8 product decision is:
 
 - `dog-worker` is the stable Sol serial implementation role.
 - `dog-luna-worker` is available only through an admitted Luna fabric descriptor.
-- `dog-worker` and the existing dedicated implementation roles default to `openai/gpt-5.6-sol`
+- `dog-worker` and the existing dedicated implementation roles default to `openai/gpt-6-sol`
   `medium`; `dedicatedWorkerModel` may relocate only this serial route.
-- `dog-luna-worker` is a separate fixed `openai/gpt-5.6-luna` `max` route; direct `modelRouting`
+- `dog-luna-worker` is a separate fixed `openai/gpt-6-luna` `max` route; direct `modelRouting`
   cannot replace either fixed route.
 - Role identity and the durable dispatch record identify the selected route without session inference.
 - A serial override naming the Luna fabric model is invalid rather than silently collapsing the stable
   and fabric roles into an unauditable route.
 
 The shipped 0.7.0 source currently defaults the dedicated `dog-worker` target to
-`openai/gpt-5.6-luna` `max`; Sol is available through `dedicatedWorkerModel` and as the stronger
+`openai/gpt-6-luna` `max`; Sol is available through `dedicatedWorkerModel` and as the stronger
 escalation target. v0.8 must specify its new precedence explicitly while preserving the historical
 0.7.0 record.
 

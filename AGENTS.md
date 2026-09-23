@@ -15,7 +15,6 @@ SWE-Benchはリリース必須gateではなく、必要時に別途実施する�
 3. candidate preflightを通す。
 4. `npm run test:full`を通す。
 5. global apply、tag、GitHub Releaseを実施する。
-6. `npm publish`はユーザーが手動実行する。
 
 ## Release後のWindows反映
 

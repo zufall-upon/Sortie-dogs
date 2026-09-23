@@ -234,8 +234,8 @@ not merge or reverse their internal responsibilities.
 - `dogs-coordinator`: the hidden v0.10 operations delegate (Terra/xhigh), limited
   to bounded approved dispatch, progress and evidence collection.
 
-The preview defaults `dog-operator` to `openai/gpt-5.6-sol` with variant `low`
-and `dogs-coordinator` to Terra/xhigh. Preview workers use Sol/low and scouts use
+The preview defaults `dog-operator` to `openai/gpt-6-luna` with variant `max`
+and `dogs-coordinator` to Terra/xhigh. Preview workers use Luna/max and scouts use
 Luna/xhigh. Explicit host agent/model/variant choices, including Astra, remain
 authoritative; consultation and all other roles retain their independent routes.
 Only `dog-operator` is a preview primary choice; every preview child agent,

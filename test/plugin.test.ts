@@ -387,7 +387,7 @@ test("model resolver falls back in order and returns structured unresolved failu
 test("recommended coordinator and Luna routes cover exact installed roles and remain overridable", () => {
   const defaults = resolvePluginConfigurationSources(undefined, undefined, {
     modelCatalog: { global: [
-      { model: "openai/gpt-5.6-luna", variants: ["xhigh"] },
+      { model: "openai/gpt-6-luna", variants: ["xhigh"] },
       { model: "provider/custom" },
     ] },
   });
@@ -397,11 +397,7 @@ test("recommended coordinator and Luna routes cover exact installed roles and re
   assert.deepEqual(defaults.modelCatalog.global, [
     {
       model: DEFAULT_COORDINATOR_MODEL,
-      variants: [DEFAULT_COORDINATOR_VARIANT],
-    },
-    {
-      model: DEDICATED_WORKER_MODEL,
-      variants: [DEDICATED_WORKER_VARIANT, CONSULTATION_FALLBACK_VARIANT]
+      variants: [DEFAULT_COORDINATOR_VARIANT, DEDICATED_WORKER_VARIANT, CONSULTATION_FALLBACK_VARIANT]
         .filter((variant, index, all) => all.indexOf(variant) === index),
     },
     {
@@ -2425,8 +2421,7 @@ test("chat message hook applies explicit catalog routing and fails closed with o
     const client = { config: { providers: async () => ({ data: { providers: [
       { id: "provider", models: { "local-primary": { id: "local-primary" } } },
       { id: "openai", models: {
-        "gpt-5.6-luna": { id: "gpt-5.6-luna" },
-        "gpt-5.6-sol": { id: "gpt-5.6-sol" },
+        "gpt-6-luna": { id: "gpt-6-luna" },
         "gpt-6-sol": { id: "gpt-6-sol" },
       } },
     ] } }) } };
@@ -2439,7 +2434,7 @@ test("chat message hook applies explicit catalog routing and fails closed with o
         },
       },
       modelCatalog: { global: [
-        { model: "openai/gpt-5.6-luna", variants: ["xhigh"] },
+        { model: "openai/gpt-6-luna", variants: ["xhigh"] },
         { model: "provider/local-primary", variants: ["thinking"] },
         { model: "provider/global-primary", variants: ["thinking"] },
         { model: "provider/variant", variants: ["valid"] },
@@ -2469,7 +2464,7 @@ test("chat message hook applies explicit catalog routing and fails closed with o
     await chat({ sessionID: "routing", agent: "dog-scout" }, recommended);
     assert.deepEqual(recommended.message.model, {
       providerID: "openai",
-      modelID: "gpt-5.6-luna",
+      modelID: "gpt-6-luna",
       variant: RECOMMENDED_SCOUT_VARIANT,
     });
     const coordinator = {
@@ -2484,13 +2479,13 @@ test("chat message hook applies explicit catalog routing and fails closed with o
     });
     for (const role of RECOMMENDED_CONSULTATION_ROLES) {
       const consultation = {
-        message: { agent: role, model: { providerID: "openai", modelID: "gpt-5.6-luna", variant: "xhigh" } },
+        message: { agent: role, model: { providerID: "openai", modelID: "gpt-6-luna", variant: "xhigh" } },
         parts: [],
       };
       await chat({ sessionID: `routing-${role}`, agent: role }, consultation);
       assert.deepEqual(consultation.message.model, {
         providerID: "openai",
-        modelID: "gpt-5.6-sol",
+        modelID: "gpt-6-sol",
         variant: "xhigh",
       }, `${role} never keeps the caller model`);
     }
@@ -2550,19 +2545,19 @@ test("consultation routing uses Sol xhigh before free tier when Opus is absent f
         // The legacy configured-provider catalog can contain models hidden from the current picker.
         config: { providers: async () => ({ data: { providers: [
           { id: "anthropic", models: { "claude-opus-5": { id: "claude-opus-5" } } },
-          { id: "openai", models: { "gpt-5.6-sol": { id: "gpt-5.6-sol" } } },
+          { id: "openai", models: { "gpt-6-sol": { id: "gpt-6-sol" } } },
         ] } }) },
         provider: { list: async () => ({ data: {
           all: [
             { id: "anthropic", models: { "claude-opus-5": { id: "claude-opus-5" } } },
-            { id: "openai", models: { "gpt-5.6-sol": { id: "gpt-5.6-sol" } } },
+            { id: "openai", models: { "gpt-6-sol": { id: "gpt-6-sol" } } },
             { id: "opencode", models: { "deepseek-v4-flash-free": { id: "deepseek-v4-flash-free" } } },
           ],
           connected: ["openai", "opencode"],
         } }) },
       },
     }, {
-      dedicatedWorkerModel: { model: "openai/gpt-5.6-sol" },
+      dedicatedWorkerModel: { model: "openai/gpt-6-sol" },
       modelCatalog: { global: [{ model: RECOMMENDED_CONSULTATION_MODEL }] },
     });
     const chat = hooks["chat.message"];
@@ -2575,7 +2570,7 @@ test("consultation routing uses Sol xhigh before free tier when Opus is absent f
       await chat({ sessionID: `consultation-host-fallback-${role}`, agent: role }, output);
       assert.deepEqual(output.message.model, {
         providerID: "openai",
-        modelID: "gpt-5.6-sol",
+        modelID: "gpt-6-sol",
         variant: CONSULTATION_FALLBACK_VARIANT,
       });
     }
@@ -2802,8 +2797,7 @@ test("every packaged role follows default routing independently of write-gate ac
     const client = { config: { providers: async () => ({ data: { providers: [{
       id: "openai",
       models: {
-        "gpt-5.6-luna": { id: "gpt-5.6-luna" },
-        "gpt-5.6-sol": { id: "gpt-5.6-sol" },
+        "gpt-6-luna": { id: "gpt-6-luna" },
         "gpt-6-sol": { id: "gpt-6-sol" },
       },
     }] } }) } };
@@ -2816,15 +2810,15 @@ test("every packaged role follows default routing independently of write-gate ac
         modelID: "gpt-6-sol",
         variant: DEFAULT_COORDINATOR_VARIANT,
       },
-      "dog-scout": { providerID: "openai", modelID: "gpt-5.6-luna", variant: RECOMMENDED_SCOUT_VARIANT },
-      "dog-worker": { providerID: "openai", modelID: "gpt-5.6-sol", variant: DEDICATED_WORKER_VARIANT },
-      "dog-reviewer": { providerID: "openai", modelID: "gpt-5.6-sol", variant: CONSULTATION_FALLBACK_VARIANT },
-      "dog-advisor": { providerID: "openai", modelID: "gpt-5.6-sol", variant: CONSULTATION_FALLBACK_VARIANT },
+      "dog-scout": { providerID: "openai", modelID: "gpt-6-luna", variant: RECOMMENDED_SCOUT_VARIANT },
+      "dog-worker": { providerID: "openai", modelID: "gpt-6-sol", variant: DEDICATED_WORKER_VARIANT },
+      "dog-reviewer": { providerID: "openai", modelID: "gpt-6-sol", variant: CONSULTATION_FALLBACK_VARIANT },
+      "dog-advisor": { providerID: "openai", modelID: "gpt-6-sol", variant: CONSULTATION_FALLBACK_VARIANT },
     };
     for (const [role, target] of Object.entries(expected)) {
       // A consultation or evidence session carries no /sortie trigger and no worker handoff.
       const output = {
-        message: { agent: role, model: { providerID: "openai", modelID: "gpt-5.6-luna", variant: "xhigh" } },
+        message: { agent: role, model: { providerID: "openai", modelID: "gpt-6-luna", variant: "xhigh" } },
         parts: [{ type: "text", text: "Answer one bounded question." }],
       };
       await chat({ sessionID: `inactive-${role}`, agent: role }, output);
@@ -6763,7 +6757,7 @@ test("proven silent consultation agents get isolated parent-scoped fallback retr
     const client = {
       config: { providers: async () => ({ data: { providers: [
         { id: "anthropic", models: { "claude-opus-5": { id: "claude-opus-5" } } },
-        { id: "openai", models: { "gpt-5.6-sol": { id: "gpt-5.6-sol" } } },
+         { id: "openai", models: { "gpt-6-sol": { id: "gpt-6-sol" } } },
       ] } }) },
       session: {
         get: async ({ path }: { path: { id: string } }) => ({ data: identities[path.id] }),
@@ -6775,7 +6769,7 @@ test("proven silent consultation agents get isolated parent-scoped fallback retr
     const hooks = await SortieDogsPlugin({ directory, client }, {
       modelCatalog: { global: [
         { model: RECOMMENDED_CONSULTATION_MODEL },
-        { model: "openai/gpt-5.6-sol", variants: [CONSULTATION_FALLBACK_VARIANT] },
+         { model: "openai/gpt-6-sol", variants: [CONSULTATION_FALLBACK_VARIANT] },
       ] },
     });
     const chat = hooks["chat.message"]!;
@@ -6807,7 +6801,7 @@ test("proven silent consultation agents get isolated parent-scoped fallback retr
       await chat({ sessionID: retryChild, agent: role, parentID: "parent" } as never, retryDispatch);
       assert.deepEqual(retryDispatch.message.model, {
         providerID: "openai",
-        modelID: "gpt-5.6-sol",
+         modelID: "gpt-6-sol",
         variant: CONSULTATION_FALLBACK_VARIANT,
       });
       const secondSilent = emptyTask(retryChild, "parent");
