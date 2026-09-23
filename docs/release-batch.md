@@ -1,8 +1,41 @@
 # Release batch
 
-The release tooling is repository-maintainer tooling, not part of the distributed plugin. It runs on
-Windows with PowerShell 7, Node 22, Git, the approved npm/gh executables, and a configured WSL OpenCode
-CLI. npm authentication and publication remain manual.
+Release validation and publication are owned by the Ubuntu lane. Windows applies
+the released package and performs Windows-specific operational checks. Release
+tooling is repository-maintainer tooling, separate from the distributed plugin.
+
+## Ubuntu release from an already-versioned main commit
+
+When the implementation PR already contains the intended unpublished version, use
+the repository release gates directly. The historical `prepare` batch below is for
+advancing a package version and creating its release commit.
+
+1. Merge the reviewed PRs into `main`, fast-forward the release checkout and ensure
+   its clean HEAD matches `origin/main`. Verify the version, npm version availability,
+   and absence of the intended remote/local tag and GitHub Release.
+2. Freeze that commit, build and generate one `.tgz` under `_testenv/releases/<version>/`.
+   Record its commit, SHA-256 and SHA-1. Use that exact archive for subsequent checks
+   and publication.
+3. Run candidate preflight, then `npm run test:full`. Retain the complete file-scheduling
+   receipt. Execute any agreed benchmark samples against the frozen package and
+   declared environment, scoring their frozen predictions separately.
+4. Run `node scripts/release-cli.mjs <candidate.tgz> <evidence-directory> v011`.
+   Check the installed-package qualification receipt, actual exits and artifact identity.
+5. Apply the archive to the global OpenCode package directory and npm-global CLI,
+   run its `init --global --profile v011`, and compare installed code, runtime marker,
+   managed assets, retained consultation files and user settings.
+6. Create/push an annotated tag for the frozen commit, create the GitHub Release with
+   that archive, and publish that same archive to npm using the existing authentication.
+   Verify tag target, GitHub asset SHA-256, npm artifact SHA-1 and the intended dist-tag.
+
+The release notes record final qualification and benchmark conditions. OpenCode's
+complete restart remains a manual post-application step.
+
+## Historical version-advancing batch
+
+The batch supports PowerShell 7, Node 22, Git, npm/gh and a configured WSL OpenCode
+CLI on Windows; its JavaScript entrypoints also run on Ubuntu. It prints manual npm
+publication commands after preparation.
 
 ## Prepare a manifest
 

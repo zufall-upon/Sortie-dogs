@@ -214,6 +214,38 @@ classes through the actual API, and explaining intentional propagation. The oper
 challenge that coverage rather than count variations of one example. This is a general review
 rule; it contains no benchmark instance ID, concrete hidden input, or prescribed exception list.
 
+### Targeted Astroid remediation: PASS
+
+The frozen v3 candidate at `7412c7cf28ecf662241aca21237d1cd5a36bf94b`, tarball SHA-256
+`858359f3d4fa34a6022599f725330f073826220d54d8c71093ee97dd7ff42e2f`, completed the Astroid
+case in **421,768 ms** (root `ses_f31de4140ffe7yf7UM50fQg1eX`, two invocations of the
+same child). The operator returned it once to verify pre-edit reproduction and the
+actual function-call inference path before accepting.
+
+The implementer independently probed missing arguments, invalid content, incompatible
+types, missing attributes and invalid indexing. Its final patch retained the established
+`Uninferable` fallback for those ordinary formatting failures and preserved successful
+formatting. Both formal checks passed on final source; the focused local test file had
+**20 passing tests**. No unresolved checks or timeouts remained.
+
+The **unmodified official** dataset, image, test patch and grader returned **PASS**:
+target 1/1 and regression 10/10 grouped checks. No scoring-environment correction was
+needed for Astroid. Frozen model patch SHA-256:
+`ecc727ad91ca9e8fd0310a7238278954bef551e41fceddcedba0d5175d4a6feb` (1,954 bytes).
+Estimated completed root/child context cost was **$0.218191**, excluding transient
+title generation. This is targeted remediation after known failures, not a fresh
+pass-at-one success-rate claim. The earlier failed attempts remain recorded.
+
+An in-memory replay of the original sample's actual four check receipts and unchanged
+source also confirmed that the new host rejects its formerly accepted syntax-only
+assessment, identifying the two unresolved behavioral checks. No historical source or
+native ledger was rewritten. Evidence is in `_testenv/v011-acceptance-historical-replay.json`.
+
+The prompt-only v3 change also passed **55/55** work-loop, initialization and runtime-asset
+tests. Raw native/official evidence is retained under `_testenv/v011-astroid-boundary/`.
+The other two preselected samples are being rechecked against this same candidate before
+the previously requested release decision.
+
 ## Reproduction
 
 For Python inference, prepare a repository-compatible interpreter and record its

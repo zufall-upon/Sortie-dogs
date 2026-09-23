@@ -9,7 +9,8 @@ keeping the complete original request.
 **Development status:** v0.11.0 is a local candidate, not a published release.
 Native execution and the common suite pass. Three additional dev23 samples
 completed without timeout: two passed official checks (one after a scoring-environment
-correction), while one remained unresolved. Release is pending. See the
+correction), while one initially remained unresolved. Targeted remediation now passes
+that Astroid case too; matching-candidate regression checks and release are pending. See the
 [qualification record](docs/v011-qualification.md), including the earlier failed case.
 The installation commands below describe the v0.11 package once released; current
 candidate testing uses its frozen local tarball.
@@ -199,6 +200,7 @@ SWE-bench is a separate optional evaluation. The earlier **v0.10.14** 23-task ru
 scored 6 PASS / 17 FAIL at $15.75 estimated cost and 15.2 minutes median runtime;
 those are historical results, not v0.11 scores.
 [Historical methodology](docs/benchmark-v0.10.14-dev23.md).
+[v0.10 limitations and v0.11 direction](docs/v010-retrospective.md).
 
 For global assets, use `npm install --global sortie-dogs` and
 `sortie-dogs init --global`, then register the package in the global OpenCode config.
