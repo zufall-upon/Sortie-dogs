@@ -6,6 +6,7 @@ export const MODEL_COST_PRICING_SNAPSHOT = {
     "https://developers.openai.com/api/docs/pricing",
     "https://developers.openai.com/api/docs/models/gpt-6-astra",
     "https://developers.openai.com/api/docs/models/gpt-6-sol",
+    "https://developers.openai.com/api/docs/models/gpt-6-luna",
     "https://developers.openai.com/api/docs/models/gpt-5.6-sol",
     "https://developers.openai.com/api/docs/models/gpt-5.6-terra",
     "https://developers.openai.com/api/docs/models/gpt-5.6-luna",
@@ -15,7 +16,8 @@ export const MODEL_COST_PRICING_SNAPSHOT = {
     "OpenAI Standard pricing; requests above 272,000 total input/cache tokens use 2x input/cache and 1.5x output pricing.",
     "Anthropic Standard pricing with the 5-minute cache-write rate; Fast, Batch, Flex, regional, tool, and subscription charges are excluded.",
     "variant and serviceTier are separate; model variants do not alter the selected Standard token price.",
-    "gpt-5.6-luna-fast has no published model page; its rates are the resolved host model catalog entry for openai/gpt-5.6-luna-fast, exactly twice the Luna Standard schedule. That entry declares no separate long-context band, so the shared OpenAI band above is applied rather than a second assumed schedule.",
+    "GPT-6 Sol and GPT-6 Luna use their official Standard schedules; Fast mode is a service tier priced separately and does not create a second model ID.",
+    "gpt-5.6-luna-fast is retained only as a compatibility price for historical host catalog entries; it has no published model page and is exactly twice the GPT-5.6 Luna Standard schedule.",
   ],
 } as const;
 
@@ -39,6 +41,7 @@ type Prices = { input: number; cacheRead: number; cacheWrite: number; output: nu
 const OPENAI: Readonly<Record<string, Prices>> = {
   "gpt-6-astra": { input: 10, cacheRead: 1, cacheWrite: 12.5, output: 50 },
   "gpt-6-sol": { input: 2, cacheRead: 0.2, cacheWrite: 2.5, output: 10 },
+  "gpt-6-luna": { input: 0.1, cacheRead: 0.01, cacheWrite: 0.125, output: 0.5 },
   "gpt-5.6-sol": { input: 4, cacheRead: 0.4, cacheWrite: 5, output: 20 },
   "gpt-5.6": { input: 4, cacheRead: 0.4, cacheWrite: 5, output: 20 },
   "gpt-5.6-terra": { input: 2, cacheRead: 0.2, cacheWrite: 2.5, output: 12 },

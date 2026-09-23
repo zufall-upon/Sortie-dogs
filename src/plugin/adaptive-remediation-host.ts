@@ -25,7 +25,7 @@ export interface AdaptiveReviewProvider {
     readonly parent_head: string; readonly risk_class: AdaptiveRemediationRequest["risk_class"] }): Promise<{ readonly status: "pass" | "remediation-required" | "fail"; readonly fingerprint: string }>;
 }
 
-export const DEFAULT_ADAPTIVE_REMEDIATION_MODEL = "openai/gpt-5.6-sol";
+export const DEFAULT_ADAPTIVE_REMEDIATION_MODEL = "openai/gpt-6-sol";
 
 export interface AdaptiveRemediationSessionClient extends OpenCodeModelAvailabilityClient {
   session: {

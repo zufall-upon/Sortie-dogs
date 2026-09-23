@@ -13,11 +13,11 @@ export interface RoleModelRoute {
 export type ModelRoutingConfig = Readonly<Record<string, RoleModelRoute>>;
 
 /** The stable serial implementation route stays on Sol when Luna fan-out is unsafe or unavailable. */
-export const DEDICATED_WORKER_MODEL = "openai/gpt-5.6-sol";
+export const DEDICATED_WORKER_MODEL = "openai/gpt-6-sol";
 export const DEDICATED_WORKER_VARIANT = "medium";
 
 /** Luna executes only units admitted to the fabric; it is not the serial worker's fallback target. */
-export const LUNA_FABRIC_WORKER_MODEL = "openai/gpt-5.6-luna";
+export const LUNA_FABRIC_WORKER_MODEL = "openai/gpt-6-luna";
 export const LUNA_FABRIC_WORKER_VARIANT = "max";
 export const LUNA_FABRIC_WORKER_ROLE = "dog-luna-worker";
 

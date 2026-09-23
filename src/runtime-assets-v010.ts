@@ -89,7 +89,7 @@ permission rejection shows a different project root, do not repeat that path; re
 const coordinatorContent = `---
 description: Sortie-dogs ${V010_RUNTIME_ASSET_VERSION} primary dog-operator — strategic authority with a bounded operations delegate.
 mode: primary
-model: openai/gpt-5.6-luna-fast
+model: openai/gpt-6-luna
 variant: max
 permission:
   question: allow

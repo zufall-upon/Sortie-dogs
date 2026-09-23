@@ -158,7 +158,7 @@ exact-path commit，不授予arbitrary Git、force push、release或publish auth
 - `modelRouting`：按external profile role设置preferred target与ordered fallback
 - `modelCatalog`：声明可用的`project` / `global` model与variant
 - `freeTierFallbackModels`：global last-resort model ID；默认`opencode/deepseek-v4-flash-free`，`[]`禁用
-- `dedicatedWorkerModel`：canonical stable serial target，默认`openai/gpt-5.6-sol` / `medium`。v0.10 profile另有下列explicit role route，不能从此stable设置推断v0.10 worker route
+- `dedicatedWorkerModel`：canonical stable serial target，默认`openai/gpt-6-sol` / `medium`。v0.10 profile另有下列explicit role route，不能从此stable设置推断v0.10 worker route
 - `consultation.strategy`：固定advisor identity、可选`required`及正整数`maxCallsPerCandidate`；默认not required、1次call
 - `consultation.sourceReview`：risk-based review；`maxCallsPerCandidate`默认`1`，`maxArtifactBytes`默认且最大`30720`；仅review必需时因unavailable而阻塞
 - `continuation.enabled`：默认`true`
@@ -185,12 +185,12 @@ worker拥有static/targeted/related check，root拥有canonical/full-suite。can
 
 ### v0.10默认route
 
-- `dog-operator`：`openai/gpt-5.6-luna-fast` / `max`
+- `dog-operator`：`openai/gpt-6-luna` / `max`
 - `dogs-coordinator`：`openai/gpt-6-sol` / `xhigh`
-- `dog-worker-v010`：`openai/gpt-5.6-luna-fast` / `max`
-- `dog-scout-v010`：`openai/gpt-5.6-luna-fast` / `xhigh`
+- `dog-worker-v010`：`openai/gpt-6-luna` / `max`
+- `dog-scout-v010`：`openai/gpt-6-luna` / `xhigh`
 - `dog-reviewer-v010`：`openai/gpt-6-sol` / `xhigh`
-- `dog-advisor-v010`：优先使用catalog中已声明的`anthropic/claude-opus-5`，否则使用`openai/gpt-5.6-sol` / `xhigh`
+- `dog-advisor-v010`：优先使用catalog中已声明的`anthropic/claude-opus-5`，否则使用`openai/gpt-6-sol` / `xhigh`
 
 在OpenCode中显式选择的model/variant对该session保持最高优先级。child default仅在native设置缺失时补全，
 也可由有效profile routing覆盖。review不会静默继承implementation model。
