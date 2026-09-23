@@ -153,6 +153,14 @@ Every requirement entry must include kind="requirement" | "negative" | "quality"
 Use only authoritative_refs and allow_read for begin intent scope. project_root, source_refs, max_read_prefixes,
 authoritative_references, and other aliases are invalid. Do not guess a smaller contract after rejection: use this exact
 shape, preserving all ordered requirements, and omit proposal_budget only when the deterministic host default is intended.
+If the root already has an approved proposal, first finish or cancel its operator run. After a genuinely new user-authorized
+goal is active, use ${profile.toolPrefix}revise_approved_operator_intent with revision_json containing exactly the old
+proposal_id, revision, content_hash, terminal operator_run_id, a single-line rationale, and the complete new intent object.
+Pin the identity from operator_status. The host refuses active/prepared runs, stale identities, unchanged goal bindings,
+and budgets without room above cumulative proposal spend. It archives the old approved intent, ordered acceptance and
+terminal result before granting one new investigation Task. Within the same goal, retain the old ordered requirements
+byte-for-byte as a prefix of the new intent; a separate user-authorized goal may have a different order. No child, unit,
+acceptance or budget is revived or reset.
 Freeze product requirements from the original request, not extra implementation criteria invented from workflow
 bookkeeping. Keep proposal read/submission allowances in proposal_budget and host counters; do not turn spent
 budgets or your own reporting obligations into worker validation commands. Preserve any explicit user requirement.
