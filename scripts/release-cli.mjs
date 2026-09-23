@@ -17,6 +17,9 @@ export const pluginPackageForOpenCodeVersion = version => Number.parseInt(versio
   ? '@opencode/plugin' : '@opencode-ai/plugin';
 export const runLocationArgsForOpenCodeVersion = (version, project) =>
   Number.parseInt(version.split('.')[0], 10) >= 2 ? ['--standalone'] : ['--dir', project];
+export const v2PluginWrapperSource = runtime => `import { createSortieDogsV2Plugin } from "sortie-dogs/server";\n` +
+  `import { SortieDogsPlugin } from "${runtime.id === 'stable' ? 'sortie-dogs/plugin/stable' : 'sortie-dogs/plugin'}";\n` +
+  `export default createSortieDogsV2Plugin(SortieDogsPlugin);\n`;
 export async function command(executable, args, cwd, env, timeoutMs = 600_000) {
   const result = await runProcess(executable, args, { cwd, env: { ...process.env, ...env, PWD: cwd }, timeoutMs });
   if (executable === 'wsl.exe') {
@@ -78,7 +81,13 @@ export async function installedFixture(tgz, directory, profileId = 'stable') {
   const legacy = join(installed, 'dist/plugin/legacy.js');
   const entry = release.runtimeProfile === 'stable' && await lstat(legacy).then(info => info.isFile()).catch(() => false)
     ? legacy : join(installed, 'dist/plugin/opencode.js');
-  await writeFile(join(control, 'opencode.json'), JSON.stringify(fixtureOpenCodeConfig(entry, runtime, cliVersion), null, 2));
+  let pluginTarget = entry;
+  if (Number.parseInt(cliVersion.split('.')[0], 10) >= 2) {
+    pluginTarget = join(control, 'plugins', 'sortie-dogs');
+    await mkdir(pluginTarget, { recursive: true });
+    await writeFile(join(pluginTarget, 'index.js'), v2PluginWrapperSource(runtime));
+  }
+  await writeFile(join(control, 'opencode.json'), JSON.stringify(fixtureOpenCodeConfig(pluginTarget, runtime, cliVersion), null, 2));
   await command('node', [join(installed, 'dist/cli/main.js'), 'init', project,
     ...(profiles ? ['--profile', release.runtimeProfile] : [])], project, env);
   for (const asset of runtimeAssets) assert((await readFile(join(control, asset.installPath), 'utf8')) === asset.content, 'CLI asset mismatch');
