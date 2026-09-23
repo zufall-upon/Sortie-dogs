@@ -17,6 +17,7 @@ export const pluginPackageForOpenCodeVersion = version => Number.parseInt(versio
   ? '@opencode/plugin' : '@opencode-ai/plugin';
 export const runLocationArgsForOpenCodeVersion = (version, project) =>
   Number.parseInt(version.split('.')[0], 10) >= 2 ? ['--standalone'] : ['--dir', project];
+export const RELEASE_SMOKE_RUN_TIMEOUT_SECONDS = 900;
 export const v2PluginWrapperSource = runtime => `import { createSortieDogsV2Plugin } from "sortie-dogs/server";\n` +
   `import { SortieDogsPlugin } from "${runtime.id === 'stable' ? 'sortie-dogs/plugin/stable' : 'sortie-dogs/plugin'}";\n` +
   `export default createSortieDogsV2Plugin(SortieDogsPlugin);\n`;
@@ -118,9 +119,9 @@ export async function inside(tgz, directory, profileId = 'stable') {
   const jsonEvents = text => text.split(/\r?\n/).flatMap(line => { try { return [JSON.parse(line)]; } catch { return []; } });
   async function cli(prompt, sessionID) {
     // timeout runs in WSL: Windows killing wsl.exe alone does not establish guest process cleanup.
-    return jsonEvents(await command('timeout', ['--signal=TERM', '--kill-after=10s', '540s', 'opencode', 'run',
+    return jsonEvents(await command('timeout', ['--signal=TERM', '--kill-after=10s', `${RELEASE_SMOKE_RUN_TIMEOUT_SECONDS}s`, 'opencode', 'run',
       ...runLocationArgsForOpenCodeVersion(cliVersion, project), '--format', 'json', '--print-logs', '--agent', coordinatorAgent,
-      ...(sessionID ? ['--session', sessionID] : []), prompt], project, env, 580_000));
+      ...(sessionID ? ['--session', sessionID] : []), prompt], project, env, (RELEASE_SMOKE_RUN_TIMEOUT_SECONDS + 40) * 1_000));
   }
   const checkpoint = await cli('Open a goal for this release fixture. Do not call tools. Reply exactly RELEASE_CHECKPOINT without terminal status.');
   const sessionID = checkpoint.find(event => event.sessionID)?.sessionID;
