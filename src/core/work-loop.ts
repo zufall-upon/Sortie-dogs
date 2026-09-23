@@ -4,6 +4,7 @@ import { lstat, readdir, readlink } from "node:fs/promises";
 import { createReadStream } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { isWorkAction, newWorkProgress, type WorkActivity, type WorkProgress } from "./work-progress.js";
 
 const exec = promisify(execFile);
 const hash = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
@@ -30,6 +31,7 @@ export interface WorkState {
   deliveredRequests?: number;
   reviewView?: { source: string; intent: string; evidence?: string };
   checkReplacements?: WorkCheckReplacement[];
+  progress?: WorkProgress;
 }
 export interface WorkStore { get(key: string): Promise<unknown>; set(key: string, value: unknown): Promise<void> }
 interface RootState { requests: WorkRequest[]; work: WorkState | null }
@@ -192,6 +194,7 @@ export class WorkLoop {
     return this.update(root, async state => {
       if (state.work && !["completed", "cancelled"].includes(state.work.phase)) {
         if (["interrupted", "blocked"].includes(state.work.phase)) {
+          if (state.work.progress?.stopped && !instructions.trim()) throw new Error("work-progress-blocked: provide a concrete next executable step before resuming; do not repeat the same exploratory dispatch");
           if (state.work.attempts >= this.maxAttempts) throw new Error("work-attempt-budget-exhausted");
           state.work.phase = "ready"; state.work.generation++; state.work.callID = null;
           if (instructions.trim()) state.work.feedback.push(instructions);
@@ -221,6 +224,7 @@ export class WorkLoop {
       if (work.phase !== "ready") throw new Error("work-dispatch-not-ready");
       if (work.attempts >= this.maxAttempts) throw new Error("work-attempt-budget-exhausted");
       work.phase = "running"; work.callID = callID; work.attempts++; work.updatedAt = Date.now();
+      work.progress = newWorkProgress(work.updatedAt);
     });
   }
   async claim(root: string, child: string, prompt: string): Promise<string> {
@@ -234,6 +238,7 @@ export class WorkLoop {
         "## Original user instructions (all remain authoritative)", ...work.requests.map(item => item.text),
         "## Operator notes", work.instructions, ...work.feedback,
         "Use native read/glob/grep/patch/shell tools freely within the user's instructions and project AGENTS.md. Discover dependencies and affected files as you work.",
+        "Act early: use supplied runner/artifact/manifest paths and existing documented commands. Do not recreate a controller or repeat broad preflight for an execution request. After at most 12 inspection tools or 3 minutes without an executable step, the host yields this job to the operator. Long commands retain their native timeout. Start the smallest relevant reproduction/command, or report a concrete blocker. Tool activity does not prove task completion.",
         "Run final meaningful checks with sortie_v011_check. Each remains an obligation until it passes on final source; use shell for exploration. Fix ordinary setup and test failures in this invocation. Verify the actual affected behavior and adjacent valid/invalid cases, not just syntax or one literal reproducer.",
         "Return a concise account of changes, check IDs, requirements covered and anything genuinely unresolved. Never accept your own work or ask the user to fix a protocol field."].join("\n\n");
     });
@@ -242,6 +247,39 @@ export class WorkLoop {
     const work = await this.current(root);
     if (!work || work.phase !== "running" || work.child !== child) throw new Error("work-worker-inactive");
     return work;
+  }
+  async activity(root: string, child: string, activity: WorkActivity, result?: { status: string; exit: number | null }): Promise<void> {
+    await this.update(root, async state => {
+      const work = state.work;
+      if (!work || work.phase !== "running" || work.child !== child) return;
+      const progress = work.progress ??= newWorkProgress();
+      if (result) {
+        const active = progress.active.find(item => item.id === activity.id);
+        if (!active) return;
+        progress.active = progress.active.filter(item => item.id !== activity.id);
+        progress.last = { ...active, ...result };
+        if (isWorkAction(activity.tool)) progress.lastActionAt = Date.now();
+        if (result.status === "completed" && activity.tool === "patch") progress.edits++;
+      } else if (!progress.active.some(item => item.id === activity.id)) {
+        if (progress.active.length >= 128) throw new Error("work-active-tool-limit");
+        progress.active.push(activity); progress.tools++;
+        if (isWorkAction(activity.tool)) {
+          progress.inspections = 0; progress.lastActionAt = Date.now();
+          if (activity.tool !== "patch") progress.commands++;
+        } else progress.inspections++;
+      }
+    });
+  }
+  async stall(root: string, callID: string, reason: string): Promise<boolean> {
+    return this.update(root, async state => {
+      const work = state.work;
+      if (!work || work.phase !== "running" || work.callID !== callID) return false;
+      const progress = work.progress ??= newWorkProgress();
+      progress.stopped = { at: Date.now(), reason };
+      work.phase = "blocked"; work.assessment = reason; work.updatedAt = Date.now();
+      work.feedback.push(`Host stopped unproductive discovery: ${reason}. Resume only with a concrete executable next step; preserve existing processes and results.`);
+      return true;
+    });
   }
   async check(root: string, actor: string, command: string, timeout: number, signal?: AbortSignal,
     execute: typeof runWorkCheck = runWorkCheck): Promise<WorkCheck> {

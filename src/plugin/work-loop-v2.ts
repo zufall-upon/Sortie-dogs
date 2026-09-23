@@ -2,6 +2,7 @@ import { WorkLoop, WORK_LIMITS, isRecord, workChanged, workCheckCurrent, workUnr
 import { estimateModelUsageCost } from "./model-cost.js";
 import type { OpenCodeV2Context } from "./v2.js";
 import { resolve } from "node:path";
+import { WORK_PROGRESS_LIMITS, progressLimit, progressView, repairWorkToolHistory } from "../core/work-progress.js";
 
 type ObjectValue = Record<string, any>;
 export const V011_ROUTES = Object.freeze({
@@ -27,7 +28,16 @@ export function createUserProxyPlugin() {
       const configured = context.options?.maxAttempts ?? WORK_LIMITS.attempts;
       if (!Number.isInteger(configured) || Number(configured) < 1 || Number(configured) > 32) throw new Error("work-max-attempts-invalid");
       const loop = new WorkLoop(context.location.directory, context.storage, Number(configured));
+      const option = (key: string, fallback: number, min: number, max: number) => {
+        const value = context.options?.[key] ?? fallback;
+        if (!Number.isInteger(value) || Number(value) < min || Number(value) > max) throw new Error(`work-${key}-invalid`);
+        return Number(value);
+      };
+      const planningMs = option("maxPlanningMs", WORK_PROGRESS_LIMITS.idleMs, 50, 3_600_000);
+      const discoveryCalls = option("maxDiscoveryCalls", WORK_PROGRESS_LIMITS.inspections, 1, 128);
+      const progressInterval = option("progressIntervalMs", WORK_PROGRESS_LIMITS.intervalMs, 10, 60_000);
       const controllers = new Map<string, Set<AbortController>>();
+      const monitors = new Set<ReturnType<typeof setInterval>>();
       const stopping = new Map<string, Promise<void>>();
       const lifetime = new AbortController();
       const info = async (id: string): Promise<ObjectValue> => {
@@ -123,6 +133,8 @@ export function createUserProxyPlugin() {
           unresolved_checks: unresolved.map(check => check.id),
           check_results: work.checks.filter(check => checkIDs.includes(check.id)).map(check => ({ ...check })),
           check_replacements: work.checkReplacements ?? [],
+          child_session_id: work.child,
+          progress: work.progress ? progressView(work.progress) : null,
           ...(work.phase === "completed" ? { accepted_source_current: work.acceptedSource === source.fingerprint } : {}),
           ...(work.phase === "ready" ? { task: loop.task(work), next: "Call the native subagent tool with this task unchanged, in the foreground." }
             : { next: work.phase === "review" ? "Compare all original requests with actual changes and check evidence, then call review_work. Revise on any omission."
@@ -137,7 +149,7 @@ export function createUserProxyPlugin() {
           await loop.interrupt(id, cancelled);
           for (const controller of controllers.get(id) ?? []) controller.abort();
           if (work?.child && !["completed", "cancelled"].includes(work.phase)) {
-            await context.session.interrupt({ sessionID: work.child, resume: false });
+            await context.session.interrupt({ sessionID: work.child, continue: false });
           }
         })();
         stopping.set(id, operation);
@@ -149,6 +161,49 @@ export function createUserProxyPlugin() {
         editor.update(worker, agent => { agent.model = { ...V011_ROUTES.worker }; });
       });
       await context.tool.transform(editor => {
+        // Keep the real native child card and executor. Publish host observations on that outstanding card,
+        // without synthetic prompts, a second model loop, or a hidden shell implementation.
+        editor.update?.("subagent", tool => {
+          const execute = tool.execute;
+          tool.execute = async (input, execution) => {
+            if (!isRecord(input) || input.agent !== worker) return execute(input, execution);
+            const id = String(execution.sessionID), session = await info(id);
+            if (session.agent !== primary || session.parentID) return execute(input, execution);
+            const work = await loop.current(id);
+            if (!work || work.phase !== "running" || work.callID !== execution.id) throw new Error("work-dispatch-not-admitted");
+            const report = typeof execution.progress === "function" ? execution.progress as (value: ObjectValue) => Promise<void> : async () => {};
+            let metadata: ObjectValue = {}, ended = false, pending: Promise<void> | undefined;
+            const publish = async () => {
+              const current = await loop.current(id);
+              if (!current || current.id !== work.id || current.callID !== work.callID || !current.progress) return;
+              const progress = progressView(current.progress);
+              await report({ ...metadata, ...(current.child ? { sessionID: current.child } : {}),
+                description: `${progress.phase} · ${Math.floor(progress.elapsed_ms / 1000)}s · ${progress.summary}`,
+                sortie_progress: progress });
+              const reason = current.phase === "running" ? progressLimit(current.progress, Date.now(), planningMs, discoveryCalls) : null;
+              if (reason && await loop.stall(id, work.callID!, reason)) {
+                // Mark blocked first, so the native interrupted event cannot turn this into a resumable blind retry.
+                if (current.child) await context.session.interrupt({ sessionID: current.child, continue: false });
+                await report({ ...metadata, ...(current.child ? { sessionID: current.child } : {}),
+                  description: `BLOCKED · ${reason}`, sortie_progress: progressView((await loop.current(id))!.progress!) });
+              }
+            };
+            const tick = () => {
+              if (ended || pending || lifetime.signal.aborted) return;
+              pending = publish().catch(error => { console.warn("[sortie-dogs-v011] progress", error instanceof Error ? error.message : "unknown"); })
+                .finally(() => { pending = undefined; });
+            };
+            const timer = setInterval(tick, progressInterval); monitors.add(timer);
+            try {
+              await publish();
+              const result = await execute(input, { ...execution, progress: async (update: ObjectValue) => {
+                metadata = { ...metadata, ...update }; await publish();
+              } });
+              return { ...result, metadata: { ...metadata, ...(isRecord(result.metadata) ? result.metadata : {}),
+                sortie_progress: (await loop.current(id))?.progress ? progressView((await loop.current(id))!.progress!) : null } };
+            } finally { ended = true; clearInterval(timer); monitors.delete(timer); await pending; }
+          };
+        });
         const add = (name: string, description: string, input: ObjectValue,
           execute: (args: ObjectValue, execution: ObjectValue) => Promise<unknown>) => editor.add({ name: `sortie_v011_${name}`, description, input, options: { codemode: false },
           execute: async (args, execution) => ({ content: JSON.stringify(await execute(isRecord(args) ? args : {}, execution)) }) });
@@ -248,14 +303,24 @@ export function createUserProxyPlugin() {
         if (session.agent === worker) {
           await loop.assertWorker(owner, id);
           if (event.tool === "subagent") throw new Error("work-worker-does-not-delegate");
+          const input = isRecord(event.input) ? event.input : {};
+          await loop.activity(owner, id, { id: String(event.id), tool: String(event.tool), startedAt: Date.now(),
+            detail: String(input.command ?? input.path ?? input.pattern ?? event.tool).replace(/\s+/gu, " ").slice(0, 240) });
         } else if (event.tool === "subagent" && isRecord(event.input)) {
           if (event.input.agent === worker) await loop.admit(owner, String(event.id), event.input);
           else if (!["dog-reviewer-v010", "dog-advisor-v010"].includes(event.input.agent)) throw new Error("work-operator-delegate-not-allowed");
         }
       });
       await context.tool.hook("execute.after", async event => {
-        if (event.tool !== "subagent") return;
         const id = String(event.sessionID), session = await info(id);
+        if (session.agent === worker) {
+          const result = isRecord(event.result) ? event.result : {};
+          const output = isRecord(result.output) ? result.output : result.metadata;
+          await loop.activity(await root(id), id, { id: String(event.id), tool: String(event.tool), detail: "", startedAt: 0 },
+            { status: output?.status === "running" ? "background-started" : String(event.status), exit: Number.isInteger(output?.exit) ? output.exit : null });
+          return;
+        }
+        if (event.tool !== "subagent") return;
         if (session.agent !== primary || session.parentID) return;
         const result = isRecord(event.result) ? event.result : {};
         await loop.settled(id, String(event.id), event.status === "completed", text(result.content) || text(event.error));
@@ -267,6 +332,7 @@ export function createUserProxyPlugin() {
           throw new Error("Sortie v0.11 requires SOL6 or Luna6. Set the selected session and auxiliary compaction/title agents to these models; reviewer/advisor settings are independent.");
         }
         const owner = await root(String(event.sessionID)), work = await loop.current(owner);
+        if (Array.isArray(event.messages)) event.messages = repairWorkToolHistory(event.messages).messages;
         if (([V011_ROUTES.worker.id, "gpt-6-luna"].includes(event.model?.id) || (!event.model && session.agent === worker)) && isRecord(event.options)) {
           // OpenAI documents priority as the backwards-compatible spelling of Fast mode.
           event.options.serviceTier = "priority";
@@ -275,11 +341,16 @@ export function createUserProxyPlugin() {
           `SORTIE v0.11 durable work ${work.id}; phase=${work.phase}. User intent survives compaction. ` +
           (session.agent === primary ? "Your role is the user's proxy: delegate routine work, compare results with every original instruction, and accept only with review_work. " : "You own all routine investigation, edits, testing and corrections. ") +
           "Use work_status after compaction for current evidence. Do not reconstruct a proposal or an execution manifest." });
+        if (session.agent === worker && work?.progress && Array.isArray(event.system)) {
+          event.system.push({ type: "text", text: `Execution pacing: ${work.progress.inspections}/${discoveryCalls} inspection calls since the last executable step; planning limit ${planningMs / 1000}s. ` +
+            "Reuse supplied paths and documented commands. Run the relevant reproduction or existing controller early. For long work, use the native shell/controller and its existing ledger; do not repeatedly poll or invent a replacement runner. If blocked, return the exact blocker promptly." });
+        }
         if (session.agent === worker && work && Array.isArray(event.system) && work.requests.length > (work.deliveredRequests ?? 0)) {
           event.system.push({ type: "text", text: "Additional original user instructions received during execution:\n" +
             work.requests.slice(work.deliveredRequests ?? 0).map(request => request.text).join("\n\n") });
         }
         if (session.agent === worker && isRecord(event.tools)) {
+          delete event.tools.subagent;
           for (const name of Object.keys(event.tools)) if (name.startsWith("sortie_v011_") && !["sortie_v011_check", "sortie_v011_work_status", "sortie_v011_compact"].includes(name)) delete event.tools[name];
         }
       };
@@ -324,7 +395,8 @@ export function createUserProxyPlugin() {
           } catch (error) { console.warn("[sortie-dogs-v011] interruption reconciliation", error instanceof Error ? error.message : "unknown"); }
         }
       })().catch(error => { if (!lifetime.signal.aborted) console.warn("[sortie-dogs-v011] event stream", error); });
-      return () => { lifetime.abort(); for (const active of controllers.values()) for (const controller of active) controller.abort(); };
+      return () => { lifetime.abort(); for (const timer of monitors) clearInterval(timer); monitors.clear();
+        for (const active of controllers.values()) for (const controller of active) controller.abort(); };
     },
   };
 }

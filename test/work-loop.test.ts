@@ -7,6 +7,7 @@ import { createUserProxyPlugin, V011_ROUTES, type NativeWorkContext } from "../d
 import { initializeProject } from "../dist/core/initialize.js";
 import { runtimeAssets } from "../dist/runtime-assets-v011.js";
 import { estimateModelUsageCost } from "../dist/plugin/model-cost.js";
+import { newWorkProgress, progressLimit, repairWorkToolHistory } from "../dist/core/work-progress.js";
 
 function storage(): WorkStore {
   const values = new Map<string, unknown>();
@@ -206,7 +207,8 @@ function nativeFixture(directory: string, store = storage()) {
         const result = await runWorkCheck(directory, args.command, args.timeout, context.signal);
         return { output: { exit: result.exit, timeout: result.timedOut, status: "completed" }, content: result.output };
       } }],
-      transform: async (callback: any) => { callback({ add: (tool: any) => tools.set(tool.name, tool) }); return { dispose() {} }; },
+      transform: async (callback: any) => { callback({ add: (tool: any) => tools.set(tool.name, tool),
+        update: (id: string, update: any) => { if (tools.has(id)) update(tools.get(id)); } }); return { dispose() {} }; },
       hook: async (name: string, callback: any) => { hooks.set(`tool:${name}`, callback); return { dispose() {} }; } },
     session: { get: async ({ sessionID }: any) => sessions.get(sessionID), context: async ({ sessionID }: any) => histories.get(sessionID) ?? [],
       hook: async (name: string, callback: any) => { hooks.set(`session:${name}`, callback); return { dispose() {} }; },
@@ -257,6 +259,95 @@ test("v0.11 native hooks execute the whole flow, Fast settings, compaction and r
     assert.equal(accepted.receipt.status, "succeeded");
     await fixture.hooks.get("tool:execute.before")({ sessionID: "ordinary", tool: "patch", input: {} });
     await assert.rejects(fixture.call("start_work", {}, "ordinary"), /profile-session-inactive/);
+  } finally { cleanup(); }
+}));
+
+test("v0.11 discovery limits count real inspections and exempt running executable work", () => {
+  const progress = newWorkProgress(1000);
+  progress.inspections = 11;
+  assert.equal(progressLimit(progress, 2000, 180000, 12), null);
+  progress.inspections++;
+  assert.match(progressLimit(progress, 2000, 180000, 12)!, /discovery-limit/);
+  progress.inspections = 0;
+  progress.active.push({ id: "read", tool: "read", detail: "README", startedAt: 179000 });
+  assert.match(progressLimit(progress, 181000, 180000, 12)!, /planning-timeout/);
+  progress.active.push({ id: "check", tool: "sortie_v011_check", detail: "npm test", startedAt: 1001 });
+  assert.equal(progressLimit(progress, 999000, 180000, 12), null);
+});
+
+test("v0.11 repairs interrupted outgoing tool history without altering native evidence or valid results", () => {
+  const call = (id: string) => ({ type: "tool-call", id, name: "shell", input: { command: "run-once" } });
+  const valid = { role: "tool", content: [{ type: "tool-result", id: "a", name: "shell", result: { type: "text", value: "exit 7" } }] };
+  const messages = [{ role: "assistant", content: [call("a"), { ...call("b"), namespace: "functions" }] }, valid,
+    { role: "user", content: [{ type: "text", text: "Continue and preserve existing jobs." }] },
+    { role: "assistant", content: [call("c")] }];
+  const original = structuredClone(messages), repaired = repairWorkToolHistory(messages);
+  assert.deepEqual(repaired.repaired, ["b", "c"]);
+  assert.deepEqual(messages, original);
+  assert.equal(repaired.messages[1], valid);
+  assert.equal(repaired.messages[2].content[0].result.type, "error");
+  assert.equal(repaired.messages[2].content[0].namespace, "functions");
+  assert.match(repaired.messages.at(-1)!.content[0].result.value, /unverified.*do not duplicate/);
+  assert.equal(repairWorkToolHistory(repaired.messages).messages, repaired.messages);
+  const hosted = [{ role: "assistant", content: [{ ...call("hosted"), providerExecuted: true }] }];
+  assert.equal(repairWorkToolHistory(hosted).messages, hosted);
+});
+
+test("v0.11 native child card receives live observations and a planning stall returns blocked without a blind retry", () => fixture(async directory => {
+  const f = nativeFixture(directory);
+  Object.assign(f.context.options!, { maxPlanningMs: 70, progressIntervalMs: 10 });
+  const updates: any[] = [];
+  let finish!: () => void;
+  const interrupted = new Promise<void>(resolve => { finish = resolve; });
+  f.context.session.interrupt = async ({ sessionID }: any) => { f.interrupts.push(sessionID); finish(); };
+  f.tools.set("subagent", { execute: async (_input: any, execution: any) => {
+    await f.hooks.get("session:prompt")({ sessionID: "child", prompt: { text: _input.prompt } });
+    await execution.progress({ sessionID: "child", native: "retained" });
+    await interrupted;
+    return { content: "Native child interrupted", metadata: { sessionID: "child" } };
+  } });
+  const cleanup = await createUserProxyPlugin().setup(f.context);
+  try {
+    await f.hooks.get("session:prompt")({ sessionID: "root", messageID: "user", prompt: { text: "Run the existing controller and retain results." } });
+    const ready = await f.call("start_work");
+    await f.hooks.get("tool:execute.before")({ sessionID: "root", id: "dispatch", tool: "subagent", input: ready.task });
+    const result = await f.tools.get("subagent").execute(ready.task, { sessionID: "root", id: "dispatch", progress: async (value: any) => updates.push(value) });
+    await f.hooks.get("tool:execute.after")({ sessionID: "root", id: "dispatch", tool: "subagent", status: "completed", result });
+    assert.deepEqual(f.interrupts, ["child"]);
+    assert(updates.some(value => value.sessionID === "child" && value.native === "retained" && value.sortie_progress.phase === "thinking"));
+    assert(updates.some(value => value.description.startsWith("BLOCKED")));
+    const status = await f.call("work_status");
+    assert.equal(status.phase, "blocked"); assert.equal(status.attempts, 1);
+    assert.equal(status.progress.commands, 0);
+    await assert.rejects(f.call("start_work"), /work-progress-blocked/);
+    const resumed = await f.call("start_work", { instructions: "Run node existing-controller.mjs with the frozen manifest now." });
+    assert.equal(resumed.task.sessionID, "child"); assert.equal(resumed.work_id, ready.work_id); assert.equal(resumed.attempts, 1);
+  } finally { cleanup(); }
+}));
+
+test("v0.11 live native commands outlast planning limits, report exits and do not leave a watchdog after completion", () => fixture(async directory => {
+  const f = nativeFixture(directory), updates: any[] = [];
+  Object.assign(f.context.options!, { maxPlanningMs: 50, progressIntervalMs: 10 });
+  f.tools.set("subagent", { execute: async (input: any) => {
+    await f.hooks.get("session:prompt")({ sessionID: "child", prompt: { text: input.prompt } });
+    await f.hooks.get("tool:execute.before")({ sessionID: "child", id: "command", tool: "shell", input: { command: "node long-command.mjs" } });
+    const result = await runWorkCheck(directory, `node -e "setTimeout(()=>process.exit(7),160)"`, 10000);
+    await f.hooks.get("tool:execute.after")({ sessionID: "child", id: "command", tool: "shell", status: "completed", result: { output: { exit: result.exit } } });
+    return { content: "Command failed with exit 7", metadata: { sessionID: "child" } };
+  } });
+  const cleanup = await createUserProxyPlugin().setup(f.context);
+  try {
+    await f.hooks.get("session:prompt")({ sessionID: "root", messageID: "user", prompt: { text: "Run the documented command." } });
+    const ready = await f.call("start_work");
+    await f.hooks.get("tool:execute.before")({ sessionID: "root", id: "dispatch", tool: "subagent", input: ready.task });
+    const result = await f.tools.get("subagent").execute(ready.task, { sessionID: "root", id: "dispatch", progress: async (value: any) => updates.push(value) });
+    await f.hooks.get("tool:execute.after")({ sessionID: "root", id: "dispatch", tool: "subagent", status: "completed", result });
+    assert(updates.some(value => value.sortie_progress.phase === "executing" && value.description.includes("long-command")));
+    assert.equal(result.metadata.sortie_progress.last.exit, 7);
+    assert.equal((await f.call("work_status")).phase, "review");
+    const count = updates.length;
+    await new Promise(resolve => setTimeout(resolve, 80));
+    assert.equal(updates.length, count); assert.deepEqual(f.interrupts, []);
   } finally { cleanup(); }
 }));
 
