@@ -26,6 +26,7 @@ export interface RuntimeBridge {
   requiresExplicitAcceptance?(rootSessionID: string): Promise<boolean>;
   ownsCanonicalValidation?(rootSessionID: string, unitID: string, childSessionID: string,
     command: string): Promise<boolean>;
+  allowsInvestigativeShell?(sessionID: string): Promise<boolean>;
   onSerialSettlement?(settlement: SerialDispatchSettlement): Promise<void>;
   onRootTerminal?(rootSessionID: string, receipt: GoalTerminalReceipt): Promise<void>;
   connected?(control: {
@@ -38,7 +39,7 @@ export interface RuntimeBridge {
       currentTaskIDs: readonly string[] }): Promise<void>;
     restoreAcceptanceRemediationBaseline(rootSessionID: string, request: { failedTaskID: string;
       criteria: readonly string[]; fingerprint: string; currentTaskIDs: readonly string[] }): Promise<void>;
-    registerGoalDeclaration(rootSessionID: string, prompt: string): Promise<void>;
+    registerGoalDeclaration(rootSessionID: string, prompt: string, missionRevision?: boolean): Promise<void>;
     relinkRegisteredGoal(rootSessionID: string, request: { prompt: string; expectedFingerprint: string;
       registeredAt: string }): Promise<void>;
     proposalGoalBinding(rootSessionID: string): Promise<OperatorProposalGoalBinding>;

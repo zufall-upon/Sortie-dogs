@@ -1,13 +1,10 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
 import test from "node:test";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
-import { runSupervisedUserProxy } from "../scripts/user-proxy-supervisor-runner.mjs";
-import { createCompletedSnapshot } from "../scripts/swebench-lite-grader.mjs";
 import {
   acquireRunLock,
   createSupervisorState,
@@ -62,7 +59,7 @@ function fakeDependencies(runs: string[], configuration: { limits?: number[]; st
       await writeFile(paths.output, `${JSON.stringify({ instance_id: entry.instance_id, model_name_or_path: "fake", model_patch: "" })}\n`);
       const usage = configuration.usage?.[entry.instance_id] ?? 0;
       await writeAtomicJson(paths.metadata, {
-        execution: { spent_usd: usage },
+        execution: { spent_usd: usage, usage_complete: true },
         results: [{ instance_id: entry.instance_id, status: configuration.statuses?.[entry.instance_id] ?? "failed", exit_code: 1, usage: { usd: usage } }],
       });
       return { identity: { pid: 99999999, starttime: null } };
@@ -70,87 +67,6 @@ function fakeDependencies(runs: string[], configuration: { limits?: number[]; st
     waitForChild: async () => ({ exit: 0, signal: null }),
   };
 }
-
-test("supervisor pins inputs and budget on replay, and holds unknown cost instead of recycling it", async () => {
-  const root = await mkdtemp(join(tmpdir(), "supervisor-pinned-"));
-  try {
-    const value = { ...manifestValue, instances: [...manifestValue.instances, { ...manifestValue.instances[0], instance_id: "third" }] };
-    const options = { manifestPath: join(root, "manifest.json"), runRoot: root, output: join(root, "predictions.jsonl"),
-      workers: 2, costLimitUsd: 1, perInstanceUsd: 0.5, watchdog: false };
-    const runs: string[] = [], limits: number[] = [];
-    const dependencies = fakeDependencies(runs, { limits });
-    const original = dependencies.spawnRunner;
-    dependencies.spawnRunner = async (...args: Parameters<typeof original>) => {
-      const result = await original(...args);
-      await writeAtomicJson(args[2].metadata, { execution: { spent_usd: null, usage_complete: false }, results: [{ instance_id: args[1].instance_id, status: "interrupted" }] });
-      return result;
-    };
-    const state = await runSupervisor(value, options, dependencies);
-    assert.deepEqual(limits, [0.5, 0.5]); assert.equal(state.spent_usd, 0); assert.equal(state.held_unknown_usd, 1);
-    assert.equal(state.instances[2].status, "not-run-cost-limit");
-    const before = await readFile(join(root, "supervisor-state.json"), "utf8");
-    await assert.rejects(runSupervisor({ ...value, candidate: { ...value.candidate, sha256: "b".repeat(64) } }, options, dependencies), /input-changed/);
-    await assert.rejects(runSupervisor(value, { ...options, costLimitUsd: 2 }, dependencies), /limits-changed/);
-    assert.equal(await readFile(join(root, "supervisor-state.json"), "utf8"), before);
-    await runSupervisor(value, options, dependencies);
-    assert.equal(runs.length, 2, "Completed and interrupted attempts are not relaunched");
-  } finally { await rm(root, { recursive: true, force: true }); }
-});
-
-test("existing supervisor reaches the v0.11 adapter with pinned full input and preserves each prediction", async () => {
-  const root = await mkdtemp(join(tmpdir(), "supervisor-v011-adapter-"));
-  try {
-    const manifestPath = join(root, "manifest.json"), seen: string[] = [];
-    await writeFile(manifestPath, JSON.stringify(liteDev23Manifest));
-    const state = await runSupervisor(liteDev23Manifest, { manifestPath, runRoot: root, output: join(root, "predictions.jsonl"),
-      costLimitUsd: 34.5, perInstanceUsd: 1.5, workers: 4, watchdog: false }, {
-      allowWindows: true,
-      spawnRunner: async (_state: unknown, entry: any, paths: any, options: any) => {
-        await runSupervisedUserProxy({ manifest: paths.manifest, runRoot: paths.root, output: paths.output, metadata: paths.metadata, costLimitUsd: options.costLimitUsd },
-          async (_tgz: string, source: string, instance: string, run: string, limit: number) => {
-            assert.equal(source, manifestPath); assert.equal(instance, entry.instance_id); assert.equal(limit, 1.5);
-            seen.push(instance); await mkdir(run, { recursive: true });
-            await writeFile(join(run, "predictions.jsonl"), JSON.stringify({ instance_id: instance, model_name_or_path: "test-native-boundary", model_patch: "retained patch" }) + "\n");
-            return { run, terminal: "succeeded", patch_sha256: createHash("sha256").update("retained patch").digest("hex"), patch_bytes: 14,
-              receipt: { receipt: { status: "succeeded" } }, routing: [{ kind: "usage", usd: 0.1 }] };
-          });
-        return { identity: { pid: 99999999, starttime: null } };
-      }, waitForChild: async () => ({ exit: 0, signal: null }),
-    });
-    assert.equal(seen.length, 23); assert.equal(new Set(seen).size, 23);
-    assert(state.instances.every((entry: any) => entry.result.native_receipt.status === "succeeded"));
-    const predictions = (await readFile(join(root, "predictions.jsonl"), "utf8")).trim().split("\n").map(JSON.parse);
-    assert.deepEqual(predictions.map((p: any) => p.instance_id), liteDev23Manifest.instances.map(i => i.instance_id));
-    assert(predictions.every((p: any) => p.model_patch === "retained patch"));
-    const scoring = await createCompletedSnapshot(state);
-    assert.equal(scoring.instances.length, 23); // The real grader must accept the adapter's immutable patch identity.
-    assert(scoring.instances.every((entry: any) => entry.patch_sha256 === createHash("sha256").update("retained patch").digest("hex")));
-    assert(state.held_unknown_usd > 0, "Post-request usage remains unverified, not free");
-  } finally { await rm(root, { recursive: true, force: true }); }
-});
-
-test("v0.11 setup failure retains a scoreable empty prediction and unknown cost without stopping other grading", async () => {
-  const root = await mkdtemp(join(tmpdir(), "supervisor-v011-setup-failed-"));
-  try {
-    const manifest = { ...liteDev23Manifest, instances: liteDev23Manifest.instances.slice(0, 1) };
-    const manifestPath = join(root, "manifest.json");
-    await writeFile(manifestPath, JSON.stringify(manifest));
-    const state = await runSupervisor(manifest, { manifestPath, runRoot: root, output: join(root, "predictions.jsonl"),
-      costLimitUsd: 1.5, perInstanceUsd: 1.5, workers: 1, watchdog: false }, {
-      allowWindows: true,
-      spawnRunner: async (_state: unknown, _entry: any, paths: any, options: any) => {
-        await assert.rejects(runSupervisedUserProxy({ manifest: paths.manifest, runRoot: paths.root, output: paths.output,
-          metadata: paths.metadata, costLimitUsd: options.costLimitUsd }, async () => { throw Error("Native setup unavailable"); }), /Native setup unavailable/);
-        return { identity: { pid: 99999999, starttime: null } };
-      }, waitForChild: async () => ({ exit: 1, signal: null }),
-    });
-    assert.equal(state.instances[0].status, "failed");
-    assert.equal(state.instances[0].result.usage.usd, null); assert.equal(state.held_unknown_usd, 1.5);
-    const scoring = await createCompletedSnapshot(state);
-    assert.equal(scoring.instances.length, 1); assert.equal(scoring.instances[0].prediction.model_patch, "");
-    assert.equal(scoring.instances[0].patch_sha256, createHash("sha256").update("").digest("hex"));
-  } finally { await rm(root, { recursive: true, force: true }); }
-});
 
 test("supervisor atomically claims each instance and writes ordered aggregate output", async () => {
   const root = await mkdtemp(join(tmpdir(), "swebench-supervisor-"));
@@ -180,6 +96,34 @@ test("supervisor atomically claims each instance and writes ordered aggregate ou
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("replay pins candidate and limits and retains an unpriced reservation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "swebench-supervisor-budget-"));
+  try {
+    const value = { ...manifestValue, instances: [...manifestValue.instances, {
+      ...manifestValue.instances[0], instance_id: "example__project-3" }] };
+    const options = { manifestPath: join(root, "manifest.json"), runRoot: root,
+      output: join(root, "predictions.jsonl"), workers: 2, costLimitUsd: 1, perInstanceUsd: 0.5, watchdog: false };
+    const runs: string[] = [], limits: number[] = [];
+    const dependencies = fakeDependencies(runs, { limits });
+    dependencies.spawnRunner = async (_state: unknown, entry: { instance_id: string }, paths: { metadata: string }, opts: { costLimitUsd: number }) => {
+      runs.push(entry.instance_id); limits.push(opts.costLimitUsd);
+      await writeAtomicJson(paths.metadata, { execution: { spent_usd: 0, usage_complete: false },
+        results: [{ instance_id: entry.instance_id, status: "failed", usage: { usd: 0 } }] });
+      return { identity: { pid: 99999999, starttime: null } };
+    };
+    const state = await runSupervisor(value, options, dependencies);
+    assert.deepEqual(limits, [0.5, 0.5]);
+    assert.equal(state.held_unknown_usd, 1);
+    assert.equal(state.instances[2].status, "not-run-cost-limit");
+    const saved = await readFile(join(root, "supervisor-state.json"), "utf8");
+    await assert.rejects(runSupervisor({ ...value, candidate: { ...value.candidate, sha256: "b".repeat(64) } }, options, dependencies), /supervisor-input-changed/);
+    await assert.rejects(runSupervisor(value, { ...options, costLimitUsd: 2 }, dependencies), /supervisor-limits-changed/);
+    assert.equal(await readFile(join(root, "supervisor-state.json"), "utf8"), saved);
+    await runSupervisor(value, options, dependencies);
+    assert.equal(runs.length, 2);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("fixed Lite dev23 runs pass@1 with four active runners and one queued state writer", async () => {
@@ -212,7 +156,7 @@ test("fixed Lite dev23 runs pass@1 with four active runners and one queued state
         await mkdir(dirname(paths.output), { recursive: true });
         await writeFile(paths.output, `${JSON.stringify({ instance_id: entry.instance_id, model_name_or_path: "fixed-candidate", model_patch: "" })}\n`);
         await writeAtomicJson(paths.metadata, {
-          execution: { spent_usd: 0 },
+          execution: { spent_usd: 0, usage_complete: true },
           results: [{ instance_id: entry.instance_id, status: "failed", exit_code: 1, usage: { usd: 0 } }],
         });
         return { identity: { pid: 99999999, starttime: null } };
@@ -280,7 +224,7 @@ test("workers bound active runners, preserve claim/output order, and reserve cos
         await mkdir(dirname(paths.output), { recursive: true });
         await writeFile(paths.output, `${JSON.stringify({ instance_id: entry.instance_id, model_name_or_path: "fake", model_patch: "" })}\n`);
         await writeAtomicJson(paths.metadata, {
-          execution: { spent_usd: 0.25 },
+          execution: { spent_usd: 0.25, usage_complete: true },
           results: [{ instance_id: entry.instance_id, status: "failed", exit_code: 1, usage: { usd: 0.25 } }],
         });
         return { identity: { pid: 99999999, starttime: null } };
@@ -296,8 +240,8 @@ test("workers bound active runners, preserve claim/output order, and reserve cos
     assert.deepEqual(runs, [
       "example__project-1", "example__project-2", "example__project-3", "example__project-4",
     ]);
-    assert.deepEqual(limits.slice(0, 2), [2, 2]);
-    assert(limits.slice(2).every(limit => limit > 0 && limit <= 2));
+    assert.deepEqual(limits.slice(0, 2), [1, 1]);
+    assert(limits.slice(2).every(limit => limit > 0 && limit <= 4));
     assert.deepEqual(result.instances.map(entry => entry.attempt), [1, 1, 1, 1]);
     assert.equal(result.reserved_usd, 0);
     const lines = (await readFile(join(root, "predictions.jsonl"), "utf8"))
@@ -338,6 +282,33 @@ test("supervisor resume marks an interrupted attempt and never reruns it", async
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("resuming a partly priced child charges once and retains the unknown remainder", async () => {
+  const root = await mkdtemp(join(tmpdir(), "swebench-supervisor-partial-"));
+  const runs: string[] = [];
+  try {
+    const options = { manifestPath: join(root, "manifest.json"), runRoot: root,
+      output: join(root, "predictions.jsonl"), costLimitUsd: 1, watchdog: false };
+    const state = await createSupervisorState(manifestValue, options);
+    const metadata = join(root, "child-metadata.json");
+    state.instances[0]!.status = "running";
+    state.instances[0]!.attempt = 1;
+    state.instances[0]!.cost_reservation_usd = 1;
+    state.instances[0]!.child_metadata = metadata;
+    state.reserved_usd = 1;
+    await writeAtomicJson(metadata, { execution: { spent_usd: 0.3, usage_complete: false },
+      results: [{ instance_id: state.instances[0]!.instance_id, status: "failed", usage: { usd: 0.3 } }] });
+    await writeAtomicJson(join(root, "supervisor-state.json"), state);
+    const resumed = await runSupervisor(manifestValue, options, fakeDependencies(runs));
+    assert.deepEqual(runs, []);
+    assert.equal(resumed.spent_usd, 0.3);
+    assert.equal(resumed.held_unknown_usd, 0.7);
+    assert.equal(resumed.instances[1]!.status, "not-run-cost-limit");
+    const again = await runSupervisor(manifestValue, options, fakeDependencies(runs));
+    assert.equal(again.spent_usd, 0.3);
+    assert.equal(again.held_unknown_usd, 0.7);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("supervisor lock rejects a second owner and releases cleanly", async () => {
@@ -385,7 +356,7 @@ test("supervisor passes the remaining global cost budget to each child", async (
       costLimitUsd: 3,
       watchdog: false,
     }, fakeDependencies([], { limits, usage: { "example__project-1": 1, "example__project-2": 1 } }));
-    assert.deepEqual(limits, [3, 2]);
+    assert.deepEqual(limits, [1.5, 2]);
     assert.equal(result.spent_usd, 2);
   } finally {
     await rm(root, { recursive: true, force: true });

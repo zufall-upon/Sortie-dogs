@@ -11,7 +11,7 @@ import { V010_RUNTIME_PROFILE, STABLE_RUNTIME_PROFILE, canonicalAgent, profileAg
 import { initializeProject } from "../dist/core/initialize.js";
 import { runtimeAssets as stableAssets } from "../dist/runtime-assets.js";
 import { runtimeAssets as previewAssets, COMMUNICATION_LANGUAGE_POLICY, PREVIEW_PRESENTATION_POLICY,
-  PREVIEW_TERMINAL_REPORT_POLICY } from "../dist/runtime-assets-v010.js";
+  PREVIEW_TERMINAL_REPORT_POLICY, legacyCoordinatorContent, legacyOperatorContent } from "../dist/runtime-assets-v010.js";
 import { RUNTIME_ASSET_VERSION, V010_RUNTIME_ASSET_VERSION } from "../dist/asset-version.js";
 import { processRemediationReplacementPacket, SortieDogsV010Plugin } from "../dist/plugin/profiled.js";
 import { fixtureOpenCodeConfig, parseOpenCodeVersion, pluginPackageForOpenCodeVersion,
@@ -266,23 +266,25 @@ test("preview assets coexist with stable assets and markers", async () => fixtur
   }
   for (const name of ["dog-worker-v010", "dog-luna-worker-v010"]) {
     const asset = previewAssets.find(item => item.name === name)!.content;
+    assert.match(asset, /^model: openai\/gpt-6-luna-fast#max$/m);
     assert.match(asset, /^permission:\r?\n  bash: allow\r?\n  sortie_v010_bind_write_gate: allow\r?\n  sortie_v010_release_write_gate: allow$/mu);
     assert.match(asset, /Treat independently selected syntax or dispatch dimensions as combinations/u);
     assert.match(asset, /multi-target route prove the rule and result for every target/u);
   }
   const reviewer = previewAssets.find(asset => asset.name === "dog-reviewer-v010")!.content;
+  assert.match(reviewer, /^model: openai\/gpt-6-sol#xhigh$/m);
+  assert.match(previewAssets.find(asset => asset.name === "dog-scout-v010")!.content, /^model: openai\/gpt-6-luna-fast#max$/m);
+  assert.match(previewAssets.find(asset => asset.name === "dogs-coordinator")!.content, /^model: openai\/gpt-6-sol#xhigh$/m);
   assert.match(reviewer, /Reject a matrix that lists independent syntax or dispatch dimensions but traces them only in isolation/u);
   assert.match(reviewer, /proving only the first target is a concrete asymmetry finding/u);
-  assert.match(primary, /^model: openai\/gpt-6-luna$/m);
-  assert.match(primary, /^variant: max$/m);
+  assert.match(primary, /^model: openai\/gpt-6-sol$/m);
+  assert.match(primary, /^variant: xhigh$/m);
   assert.match(primary, /^  "sortie_v010_\*": allow$/m);
-  assert.match(primary, /^  compact_and_continue: false$/m);
-  assert.match(primary, /^  "sortie_v010_\*": true$/m);
-  assert.match(primary, /The begin intent_json has exactly this shape/);
-  for (const field of ["original_request", "requirements", "authoritative_refs", "allow_read"]) assert.match(primary, new RegExp(`"${field}"`, "u"));
-  assert.match(primary, /project_root, source_refs, max_read_prefixes,[\s\S]+other aliases are invalid/u);
-  assert.match(primary, /Before approving a proposal, inventory the executable of every declared validation command/u);
-  assert.match(primary, /declare every dependency manifest, lockfile,[\s\S]+project-local output/u);
+  assert.match(primary, /^  sortie_v010_start_mission: true$/m);
+  assert.match(primary, /^  sortie_v010_complete_mission: true$/m);
+  assert.doesNotMatch(primary, /^  sortie_v010_begin_operator_proposal: true$/m);
+  assert.match(primary, /host saves the original\n   user message verbatim/u);
+  assert.match(primary, /Simple|simple, low-risk, single-unit/u);
   assert.match(previewAssets.find(asset => asset.name === "sortie-v010")!.content, /^agent: dog-operator$/m);
   assert.equal((await initializeProject(root, "v010")).status, "unchanged");
 }));
@@ -291,6 +293,12 @@ test("language follow-up marker upgrades the installed language1 preview", async
   await initializeProject(root, "v010");
   await writeFile(join(root, ".opencode/sortie-dogs-v010.version"), "0.10.0-beta.1-v0912-language1\n");
   assert.equal((await initializeProject(root, "v010")).version, V010_RUNTIME_ASSET_VERSION);
+}));
+
+test("v0.12 restore does not accept a v0.11 runtime marker", async () => fixture(async root => {
+  await initializeProject(root, "v010");
+  await writeFile(join(root, ".opencode/sortie-dogs-v010.version"), "0.11.4\n");
+  await assert.rejects(initializeProject(root, "v010"), /cannot be updated/u);
 }));
 
 test("preview role names are a bijection over separate logical authority identities", () => {
@@ -313,6 +321,11 @@ test("operations defaults do not overwrite an explicit native model variant", as
   const defaults = { agent: { "dogs-coordinator": { mode: "subagent" } } };
   await hooks.config(defaults);
   assert.deepEqual(defaults.agent["dogs-coordinator"], { mode: "subagent", model: "openai/gpt-6-sol", variant: "xhigh" });
+  const otherRoles = { agent: { "dog-scout-v010": { mode: "subagent" }, "dog-luna-worker-v010": { mode: "subagent" } } };
+  await hooks.config(otherRoles);
+  for (const name of ["dog-scout-v010", "dog-luna-worker-v010"] as const) assert.deepEqual(otherRoles.agent[name], {
+    mode: "subagent", model: "openai/gpt-6-luna-fast", variant: "max",
+  });
   const chosen = { agent: { "dogs-coordinator": { mode: "subagent", model: "openai/gpt-6-sol", variant: "max" } } };
   await hooks.config(chosen);
   assert.deepEqual(chosen.agent["dogs-coordinator"], { mode: "subagent", model: "openai/gpt-6-sol", variant: "max" });
@@ -320,7 +333,7 @@ test("operations defaults do not overwrite an explicit native model variant", as
   await hooks.config(custom);
   assert.deepEqual(custom.agent["dogs-coordinator"], { mode: "subagent", model: "openai/gpt-5.6-terra" });
   const asset = previewAssets.find(item => item.name === "dogs-coordinator")!.content;
-  assert.doesNotMatch(asset, /^model:|^variant:/m, "markdown must not overwrite the user's native JSON setting");
+  assert.match(asset, /^model: openai\/gpt-6-sol#xhigh$/m);
 }));
 
 test("preview tools are denied globally and allowed only by profile agents", async () => fixture(async root => {
@@ -346,10 +359,11 @@ test("preview tools are denied globally and allowed only by profile agents", asy
   });
 
   const operations = previewAssets.find(asset => asset.name === "dogs-coordinator")!.content;
-  assert.match(operations, /use the execute conduit only to call\nsortie_v010_submit_operator_proposal/u);
-  assert.match(operations, /Do not use execute for HTTP, another tool, filesystem access/u);
-  assert.match(operations, /^  sortie_v010_operator_next: allow$/m);
-  assert.match(operations, /^  sortie_v010_submit_operator_proposal: allow$/m);
+  assert.match(operations, /^  edit: deny$/m);
+  assert.match(operations, /^  bash: allow$/m);
+  assert.match(operations, /^  sortie_v010_operator_next: true$/m);
+  assert.match(operations, /^  sortie_v010_plan_units: true$/m);
+  assert.doesNotMatch(operations, /submit_operator_proposal/u);
   for (const name of ["dog-worker-v010", "dog-luna-worker-v010"]) {
     const worker = previewAssets.find(asset => asset.name === name)!.content;
     assert.match(worker, /^  sortie_v010_bind_write_gate: allow$/m);
@@ -370,7 +384,7 @@ test("every preview role carries the same user-language contract without transla
 
 test("preview keeps canonical game-style guidance and does not decorate unproved text as success", () => {
   const primary = previewAssets.find(asset => asset.name === "dog-operator")!.content;
-  assert.ok(primary.includes(PREVIEW_PRESENTATION_POLICY));
+  assert.ok(primary.includes(PREVIEW_PRESENTATION_POLICY.replaceAll("complete_operator", "complete_mission")));
   for (const icon of ["🎯", "📊", "🔍", "➡️", "🐾"]) assert.ok(primary.includes(icon));
   const unfinished = "## 確認結果\n検証は未完。";
   assert.equal(receiptBoundTerminalText(unfinished, undefined), unfinished);
@@ -381,7 +395,7 @@ test("preview keeps canonical game-style guidance and does not decorate unproved
 
 test("preview primary closes every task turn with one machine terminal checkpoint", () => {
   const primary = previewAssets.find(asset => asset.name === "dog-operator")!.content;
-  assert.ok(primary.includes(PREVIEW_TERMINAL_REPORT_POLICY));
+  assert.ok(primary.includes(PREVIEW_TERMINAL_REPORT_POLICY.replaceAll("complete_operator", "complete_mission")));
   const stable = stableAssets.find(asset => asset.name === "dog-coordinator")!.content;
   for (const marker of ["TERMINAL_STATUS_SEMANTICS_FIXTURE", "TERMINAL_OUTPUT_TEMPLATE"]) {
     const start = stable.indexOf(`${marker}\n`);
@@ -390,7 +404,7 @@ test("preview primary closes every task turn with one machine terminal checkpoin
   }
   assert.match(primary, /first non-empty line must be one\nmachine checkpoint: exactly one of DONE, INTERRUPTED, BLOCKED, or NEED_DECISION/);
   assert.match(primary, /Never close a task turn with bare prose/);
-  assert.match(primary, /DONE requires a succeeded sortie_v010_complete_operator receipt/);
+  assert.match(primary, /DONE requires a succeeded sortie_v010_complete_mission receipt/);
   assert.match(primary, /TRUE_INTERRUPTION: user: <condition>/);
   assert.match(primary, /TRUE_INTERRUPTION: internal: <condition>/);
   assert.match(primary, /an active contract returns sortie_v010_operator_status and the existing next Task/);
@@ -401,25 +415,20 @@ test("preview primary closes every task turn with one machine terminal checkpoin
 
 test("preview primary continues approved sequential scope and uses interactive questions", () => {
   const primary = previewAssets.find(asset => asset.name === "dog-operator")!.content;
-  assert.match(primary, /accepted finite scope without asking for confirmation after each unit/);
-  assert.match(primary, /use the built-in question tool in the same turn/);
-  assert.match(primary, /Never end with a prose-only\nquestion/);
-  assert.match(primary, /Respect required user Visual Go/);
-  assert.match(primary, /After the answer, resume the same work/);
-  assert.match(primary, /question is unavailable/);
-  assert.match(primary, /decision=operator-acceptance-remediation-required/);
-  assert.match(primary, /cancel the current run, then\nprepare one approved replacement plan for the same goal and byte-exact ordered acceptance/);
-  assert.match(primary, /failed committed run with no accepted predecessor/);
-  assert.match(primary, /awaiting-acceptance[\s\S]+blocking findings[\s\S]+remediation is autonomous root authority/);
-  // The refused-scope path must stay documented: it is the only way a blocked candidate survives.
-  assert.match(primary, /blocked_write_paths[\s\S]+remediation_scope_expansion/);
-  assert.match(primary, /reason=review-blocking/);
-  assert.match(primary, /do not complete, ask the user for approval/);
-  assert.match(primary, /Ask the user when acceptance or budget must\nincrease\./);
-  assert.match(primary, /worker's success or canonical validation PASS never auto-accepts/);
-  assert.match(primary, /Do not refresh the same inventory after every child return/);
-  assert.match(primary, /missing_evidence_code: <one of manifest \| validation \| owner-risk>/);
-  assert.match(primary, /at most four known_paths/);
+  const coordinator = previewAssets.find(asset => asset.name === "dogs-coordinator")!.content;
+  assert.match(primary, /Do not investigate or approve each unit at the root/);
+  assert.match(primary, /Ask through question only for a user-only choice/);
+  assert.match(primary, /Resume the same work after\nthe answer/);
+  assert.match(primary, /Ordinary defects return to Coordinator/);
+  assert.match(primary, /cumulative budget increase/);
+  assert.match(primary, /Only its succeeded receipt authorizes DONE/);
+  assert.match(coordinator, /write-scope addition within the original request/);
+  assert.match(coordinator, /without Operator approval/);
+  assert.match(coordinator, /preserves every requirement, failed-check history and cumulative budget/);
+  assert.match(coordinator, /missing_evidence_code:/);
+  assert.match(coordinator, /at most four known_paths/);
+  assert.match(coordinator, /High-risk changes require/);
+  assert.match(coordinator, /Unit progress is displayed automatically without\nwaking Operator/);
 });
 
 test("operator control packet preserves Japanese user prose as language context", async () => fixture(async root => {
@@ -437,12 +446,12 @@ test("operator control packet preserves Japanese user prose as language context"
 
 test("preview default primary route resolves without an injected catalog", async () => fixture(async root => {
   const hooks = await SortieDogsV010Plugin({ directory: root, client: { config: { providers: async () => ({ data: {
-    providers: [{ id: "openai", models: { "gpt-6-luna": { id: "gpt-6-luna" } } }],
+    providers: [{ id: "openai", models: { "gpt-6-sol": { id: "gpt-6-sol" } } }],
   } }) } } } as never);
-  const output = { message: { agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-6-luna", variant: undefined as string | undefined } }, parts: [] };
+  const output = { message: { agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-6-sol", variant: undefined as string | undefined } }, parts: [] };
   await hooks["chat.message"]!({ sessionID: "default", agent: "dog-operator", messageID: "user" }, output);
-  assert.equal(output.message.model.modelID, "gpt-6-luna");
-  assert.equal(output.message.model.variant, "max");
+  assert.equal(output.message.model.modelID, "gpt-6-sol");
+  assert.equal(output.message.model.variant, "xhigh");
 }));
 
 test("preview preserves the user's Astra Low selection across subsequent turns", async () => fixture(async root => {
@@ -489,12 +498,15 @@ test("rename migration rejects unowned new-name targets before modifying any fil
 }));
 
 function oldRoleAsset(name: "dog-operator" | "dogs-coordinator"): string {
-  let content = previewAssets.find(asset => asset.name === name)!.content;
-  if (name === "dogs-coordinator") content = content.replace("hidden: true\n", "hidden: true\nmodel: openai/gpt-5.6-terra\nvariant: high\n");
+  let content = (name === "dog-operator" ? legacyCoordinatorContent : legacyOperatorContent) + COMMUNICATION_LANGUAGE_POLICY;
+  if (name === "dogs-coordinator") content = content.replace("model: openai/gpt-6-sol#xhigh\n", "")
+    .replace("hidden: true\n", "hidden: true\nmodel: openai/gpt-5.6-terra\nvariant: high\n");
   const oldDescription = name === "dog-operator"
     ? "description: Sortie-dogs v0.10 preview — strategic coordinator with an optional bounded operator."
     : "description: Sortie-dogs v0.10 bounded operations delegate; no source or acceptance authority.";
   return content
+    .replace(/^model: openai\/gpt-6-sol$/m, "model: openai/gpt-6-luna")
+    .replace(/^variant: xhigh$/m, "variant: max")
     .replace(/For a nontrivial request whose source facts,[\s\S]*?whose complete contract is already known\.\n\n/u, "")
     .replace(/^  sortie_v010_submit_operator_proposal: true\n/m, "")
     .replace(/When the prompt starts SORTIE_OPERATOR_PROPOSAL[\s\S]*?For an admitted execution queue, call\n/u, "Call ")
@@ -610,12 +622,12 @@ test("operator smoke retains only bounded typed tool errors", () => {
 test("preview host adapter pins the native worker route and forwards terminal text through goal verification", async () => fixture(async root => {
   const client = { config: { providers: async () => ({ data: { providers: [{ id: "openai", models: {
     "gpt-6-astra": { id: "gpt-6-astra" }, "gpt-6-sol": { id: "gpt-6-sol" },
-    "gpt-6-luna": { id: "gpt-6-luna" },
+    "gpt-6-luna-fast": { id: "gpt-6-luna-fast" },
   } }] } }) } };
   const hooks = await SortieDogsV010Plugin({ directory: root, client } as never, { modelCatalog: { global: [
     { model: "openai/gpt-6-astra", variants: ["high"] },
     { model: "openai/gpt-6-sol", variants: ["low", "medium", "high", "xhigh"] },
-    { model: "openai/gpt-6-luna", variants: ["max", "high", "xhigh"] },
+    { model: "openai/gpt-6-luna-fast", variants: ["max", "high", "xhigh"] },
   ] } });
   const config = { agent: {
     "dog-operator": { mode: "primary", model: "user/selected", variant: "custom" },
@@ -623,7 +635,7 @@ test("preview host adapter pins the native worker route and forwards terminal te
   } };
   await (hooks as typeof hooks & { config(value: Record<string, unknown>): Promise<void> }).config(config);
   assert.deepEqual(config.agent["dog-worker-v010"], {
-    mode: "subagent", model: "openai/gpt-6-luna", variant: "max",
+    mode: "subagent", model: "openai/gpt-6-luna-fast", variant: "max",
   });
   assert.deepEqual(config.agent["dog-operator"], { mode: "primary", model: "user/selected", variant: "custom" });
   const explicit = { agent: { "dog-worker-v010": { mode: "subagent", model: "openai/gpt-6-astra", variant: "low" } } };
@@ -643,6 +655,18 @@ test("preview host adapter pins the native worker route and forwards terminal te
   const premature = { text: "DONE — accepted without evidence" };
   await hooks["experimental.text.complete"]!({ sessionID: "root", messageID: "root-assistant" }, premature);
   assert.equal(premature.text, "status: IN_PROGRESS — accepted criteria remain unproved; same-session recovery required");
+}));
+
+test("preview worker routing keeps Luna Fast max when the V2 host never calls the config hook", async () => fixture(async root => {
+  const client = { config: { providers: async () => ({ data: { providers: [{ id: "openai", models: {
+    "gpt-6-sol": { id: "gpt-6-sol" }, "gpt-6-luna-fast": { id: "gpt-6-luna-fast" },
+  } }] } }) } };
+  const hooks = await SortieDogsV010Plugin({ directory: root, client } as never);
+  for (const agent of ["dog-worker-v010", "dog-scout-v010"]) {
+    const message = { message: { agent, model: { providerID: "openai", modelID: "gpt-6-luna-fast", variant: "max" } }, parts: [] };
+    await hooks["chat.message"]!({ sessionID: `${agent}-child`, messageID: `${agent}-user`, agent }, message);
+    assert.deepEqual(message.message.model, { providerID: "openai", modelID: "gpt-6-luna-fast", variant: "max" }, agent);
+  }
 }));
 
 test("a cancelled historical operator run does not leak its contract into a later ordinary turn", async () => fixture(async root => {

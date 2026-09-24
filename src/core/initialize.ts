@@ -149,13 +149,15 @@ function compareVersions(left: Version, right: Version): number {
 
 type VersionTransition = "same" | "compatible-update" | "incompatible";
 
-function classifyVersionTransition(installedValue: string, currentValue: string): VersionTransition {
+function classifyVersionTransition(installedValue: string, currentValue: string, v010Restore = false): VersionTransition {
   const installed = parseVersion(installedValue);
   const current = parseVersion(currentValue);
   if (installed === undefined || current === undefined) return "incompatible";
   const order = compareVersions(installed, current);
   if (order === 0) return "same";
   if (order > 0) return "incompatible";
+  if (v010Restore && installed.major === 0 && installed.minor === 11 &&
+    current.major === 0 && current.minor === 12) return "incompatible";
 
   // SemVer-compatible update line: stable releases share a major; 0.x releases also share a minor.
   const sameLine = installed.major === current.major &&
@@ -164,7 +166,11 @@ function classifyVersionTransition(installedValue: string, currentValue: string)
   // cross-minor migration; skipped lines still fail closed instead of bypassing migration steps.
   const adjacentPreOneLine = installed.major === 0 && current.major === 0 &&
     current.minor === installed.minor + 1;
-  return sameLine || adjacentPreOneLine ? "compatible-update" : "incompatible";
+  // v0.11 used a different runtime. This explicit v010 asset migration restores
+  // the 0.10 line directly into 0.12 without selecting any v0.11 execution path.
+  const restoredPreview = v010Restore && installed.major === 0 && installed.minor === 10 &&
+    current.major === 0 && current.minor === 12;
+  return sameLine || adjacentPreOneLine || restoredPreview ? "compatible-update" : "incompatible";
 }
 
 async function metadata(path: string): Promise<Awaited<ReturnType<typeof lstat>> | undefined> {
@@ -382,8 +388,6 @@ interface InitializationLayout {
   readonly controlIgnore?: boolean;
   readonly legacyAssets?: readonly LegacyRuntimeAsset[];
   readonly renamedTargets?: readonly string[];
-  readonly previousMarkerPath?: string;
-  readonly preserveExistingPaths?: readonly string[];
 }
 
 const PROJECT_LAYOUT: InitializationLayout = {
@@ -443,12 +447,9 @@ async function initializeRoot(
     return present ? await readFile(resolve(root, entry.relativePath)) : undefined;
   }));
   const markerIndex = entries.length - 1;
-  const migrating = existing[markerIndex] === undefined && layout.previousMarkerPath !== undefined &&
-    await assertSafeExistingPath(root, layout.previousMarkerPath, true);
-  const markerText = existing[markerIndex] ?? (migrating ? await readFile(resolve(root, layout.previousMarkerPath!)) : undefined);
+  const markerText = existing[markerIndex];
   const matches = (entry: InstallEntry, index: number): boolean =>
-    existing[index] !== undefined && (existing[index]!.equals(Buffer.from(entry.content)) ||
-      (layout.preserveExistingPaths ?? []).some(path => entry.relativePath === safeAssetPath(path, layout.assetPrefix)));
+    existing[index]?.equals(Buffer.from(entry.content)) ?? false;
   const assetsMatch = assetEntries.every(matches);
   if (markerText !== undefined && parseMarker(markerText.toString("utf8")) === version && assetsMatch) {
     if (layout.controlIgnore ?? !layout.preserveAllLegacy) await ensureProjectLunaControlIgnore(root);
@@ -466,7 +467,7 @@ async function initializeRoot(
     }
   } else {
     const installedVersion = parseMarker(markerText.toString("utf8"));
-    if (classifyVersionTransition(installedVersion, version) === "incompatible") {
+    if (classifyVersionTransition(installedVersion, version, layout.markerPath.endsWith("sortie-dogs-v010.version")) === "incompatible") {
       throw new ProjectInitializationError(
         "incompatible-version",
         `Installed Sortie-dogs ${installedVersion} cannot be updated to ${version}.`,
@@ -499,17 +500,6 @@ async function initializeRoot(
   const removedFiles: Array<{ relativePath: string; content: Buffer }> = [];
   const createdDirectories: string[] = [];
   try {
-    if (migrating) {
-      for (const [index, entry] of assetEntries.entries()) {
-        if (!existing[index] || matches(entry, index)) continue;
-        const backup = safeAssetPath(`sortie-dogs-v011-backup/${installAssets[index].installPath}.bak`, layout.assetPrefix);
-        await ensureDirectory(root, dirname(backup).replaceAll("\\", "/"), createdDirectories);
-        if (await assertSafeExistingPath(root, backup, true)) {
-          if (!(await readFile(resolve(root, backup))).equals(existing[index]!)) throw new ProjectInitializationError("conflict", "Existing v0.11 migration backup differs.");
-        } else await createFile(resolve(root, backup), existing[index]!.toString("utf8"), createdFiles);
-        preservedLegacyPaths.push(backup);
-      }
-    }
     if (layout.controlIgnore ?? !layout.preserveAllLegacy) {
       await ensureProjectLunaControlIgnore(root, createdFiles, modifiedFiles, createdDirectories);
     }
@@ -585,14 +575,6 @@ async function profileInstallation(id: RuntimeProfileId, global: boolean): Promi
   const profile = RUNTIME_PROFILES[id];
   if (!profile) throw new ProjectInitializationError("invalid-project", "Unknown runtime profile.");
   if (id === "stable") return { layout: global ? GLOBAL_LAYOUT : PROJECT_LAYOUT, assets: runtimeAssets };
-  if (id === "v011") {
-    const module: typeof import("../runtime-assets-v011.js") = await import(`../runtime-assets-v011.${import.meta.url.endsWith(".ts") ? "ts" : "js"}`);
-    return { layout: { ...(global ? GLOBAL_LAYOUT : PROJECT_LAYOUT),
-      markerPath: global ? profile.markerFile : `${OPEN_CODE_DIRECTORY}/${profile.markerFile}`,
-      previousMarkerPath: global ? "sortie-dogs-v010.version" : `${OPEN_CODE_DIRECTORY}/sortie-dogs-v010.version`,
-      preserveExistingPaths: ["agent/dog-reviewer-v010.md", "agent/dog-advisor-v010.md"],
-      preserveAllLegacy: false, controlIgnore: false, legacyAssets: [] }, assets: module.runtimeAssets };
-  }
   const module: typeof import("../runtime-assets-v010.js") = await import(`../runtime-assets-v010.${import.meta.url.endsWith(".ts") ? "ts" : "js"}`);
   return { layout: { ...(global ? GLOBAL_LAYOUT : PROJECT_LAYOUT),
     markerPath: global ? profile.markerFile : `${OPEN_CODE_DIRECTORY}/${profile.markerFile}`,

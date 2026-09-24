@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { estimateModelUsageCost } from "../dist/plugin/model-cost.js";
+import { startV2ReleaseServer, v2PluginWrapperSource } from "./release-cli.mjs";
 
 const execFileAsync = promisify(execFile);
 const MAX_COMMAND_OUTPUT = 8 * 1024 * 1024;
@@ -103,44 +104,49 @@ export function benchmarkEnvironment(source = process.env) {
 }
 
 export function benchmarkPermissionPolicy(externalDirectory) {
-  return {
-    webfetch: "deny",
-    websearch: "deny",
-    ...(typeof externalDirectory === "string" && externalDirectory.length > 0
-      ? { external_directory: { [`${resolve(externalDirectory)}/*`]: "allow" } } : {}),
-    bash: {
-      "*": "allow",
-      "*curl *": "deny",
-      "*wget *": "deny",
-      "*gh *": "deny",
-      "*ssh *": "deny",
-      "*scp *": "deny",
-      "*rsync *": "deny",
-      "*git clone *": "deny",
-      "*git fetch *": "deny",
-      "*git pull *": "deny",
-      "*git push *": "deny",
-      "*git ls-remote *": "deny",
-      "*git remote add *": "deny",
-      "*git remote set-url *": "deny",
-      "*git archive *--remote*": "deny",
-      "*http://*": "deny",
-      "*https://*": "deny",
-      "*git+*": "deny",
-    },
-  };
+  const rules = [
+    { action: "webfetch", resource: "*", effect: "deny" },
+    { action: "websearch", resource: "*", effect: "deny" },
+    { action: "shell", resource: "*", effect: "allow" },
+    ...["*curl *", "*wget *", "*gh *", "*ssh *", "*scp *", "*rsync *",
+      "*git clone *", "*git fetch *", "*git pull *", "*git push *", "*git ls-remote *",
+      "*git remote add *", "*git remote set-url *", "*git archive *--remote*",
+      "*http://*", "*https://*", "*git+*"].map(resource => ({ action: "shell", resource, effect: "deny" })),
+  ];
+  if (typeof externalDirectory === "string" && externalDirectory.length > 0) {
+    rules.push({ action: "external_directory", resource: `${resolve(externalDirectory)}/*`, effect: "allow" });
+  }
+  return rules;
 }
 
 export function benchmarkInlineConfig(plugin, agentNames, externalDirectory) {
-  const permission = benchmarkPermissionPolicy(externalDirectory);
+  const permissions = benchmarkPermissionPolicy(externalDirectory);
   return {
-    plugin: [plugin],
-    permission,
-    agent: Object.fromEntries(agentNames.map(name => [name, {
-      permission,
-      tools: { webfetch: false, websearch: false },
+    plugins: [plugin],
+    permissions,
+    agents: Object.fromEntries(agentNames.map(name => [name, {
+      permissions,
     }])),
   };
+}
+
+export function verifyCandidateAgent(name, resolvedAgent) {
+  ensure(resolvedAgent?.id === name, `candidate-agent-not-loaded:${name}`);
+  const rules = Array.isArray(resolvedAgent.permissions) ? resolvedAgent.permissions : [];
+  const denied = (action, resource) => {
+    const matching = rules.filter(rule => (rule.action === action || rule.action === "*") &&
+      (rule.resource === resource || rule.resource === "*"));
+    return matching.at(-1)?.effect === "deny";
+  };
+  ensure(denied("webfetch", "*") && denied("websearch", "*"),
+    `candidate-agent-web-permission-invalid:${name}`);
+  ensure(denied("shell", "*https://*"), `candidate-agent-network-permission-invalid:${name}`);
+  const sol = name === "dog-operator" || name === "dogs-coordinator" ||
+    name === "dog-reviewer-v010" || name === "dog-advisor-v010";
+  const target = sol ? ["gpt-6-sol", "xhigh"] : ["gpt-6-luna-fast", "max"];
+  const selected = resolvedAgent.model;
+  ensure(selected?.providerID === "openai" && (selected.id ?? selected.model) === target[0] &&
+    selected.variant === target[1], `candidate-agent-model-mismatch:${name}`);
 }
 
 const text = (value, field, allowEmpty = false) => {
@@ -221,7 +227,7 @@ function candidateIdentity(value) {
     agent: text(value.agent, "candidate.agent"),
   };
   ensure(/^[a-f0-9]{64}$/u.test(candidate.sha256), "invalid-candidate-sha256");
-  ensure(["v010", "v011"].includes(candidate.profile), "invalid-candidate-profile");
+  ensure(candidate.profile === "v010", "invalid-candidate-profile");
   ensure(candidate.agent === DEFAULT_AGENT, "invalid-candidate-agent");
   return Object.freeze(candidate);
 }
@@ -609,6 +615,7 @@ async function runGit(args, cwd, environment) {
       cwd,
       env: environment,
       maxBuffer: MAX_COMMAND_OUTPUT,
+      timeout: 120_000,
       encoding: "utf8",
     });
     return { exit: 0, stdout: result.stdout, stderr: result.stderr };
@@ -657,17 +664,20 @@ async function requiredCommand(executable, args, options) {
   try {
     return await execFileAsync(executable, args, {
       ...options,
+      env: { ...options.env, PWD: options.cwd },
       maxBuffer: MAX_COMMAND_OUTPUT,
       encoding: "utf8",
       windowsHide: true,
     });
   } catch (error) {
-    throw new Error(`candidate-command-failed:${executable}:${typeof error?.code === "number" ? error.code : 1}`);
+    let failure;
+    try { failure = JSON.parse(String(error?.stdout ?? ""))._tag; } catch { /* no typed CLI error */ }
+    const stage = executable === "opencode" ? args.slice(0, 3).join(":") : executable;
+    throw new Error(`candidate-command-failed:${stage}:${typeof error?.code === "number" ? error.code : error?.code ?? 1}${typeof failure === "string" ? `:${failure}` : ""}`);
   }
 }
 
 export async function prepareCandidateRuntime(candidate, packagePath, runRoot, dependencies = {}) {
-  if (candidate.profile === "v011") return (await import("./user-proxy-bench.mjs")).prepareUserProxyCandidate(candidate, packagePath, runRoot);
   ensure(process.platform !== "win32", "live-mode-requires-wsl-login-shell");
   const execute = dependencies.execute ?? requiredCommand;
   const packageBytes = await readFile(packagePath);
@@ -675,7 +685,9 @@ export async function prepareCandidateRuntime(candidate, packagePath, runRoot, d
   const candidateRoot = join(runRoot, "candidate-runtime");
   try {
   const configRoot = join(candidateRoot, "opencode");
-  const xdgRoot = join(candidateRoot, "xdg");
+  // V2 resolves global agents from XDG_CONFIG_HOME/opencode, including when an
+  // older init command is given OPENCODE_CONFIG_DIR for the same directory.
+  const xdgRoot = candidateRoot;
   const dataRoot = join(candidateRoot, "data");
   const cacheRoot = join(candidateRoot, "cache");
   const homeRoot = join(candidateRoot, "home");
@@ -705,12 +717,12 @@ export async function prepareCandidateRuntime(candidate, packagePath, runRoot, d
     GIT_ASKPASS: "/bin/false",
   };
   const versionResult = await execute("opencode", ["--version"], { cwd: candidateRoot, env: environment });
-  const opencodeVersion = String(versionResult.stdout).trim();
-  ensure(/^\d+\.\d+\.\d+/u.test(opencodeVersion), "candidate-opencode-version-unavailable");
+  const opencodeVersion = /(?:^|\s)v?(\d+\.\d+\.\d+)/u.exec(String(versionResult.stdout).trim())?.[1];
+  ensure(opencodeVersion !== undefined && Number(opencodeVersion.split(".")[0]) >= 2, "candidate-opencode-v2-required");
   const dependency = `file:${packagePath}`;
   await writeFile(join(configRoot, "package.json"), `${JSON.stringify({ private: true, type: "module", dependencies: {
     "sortie-dogs": dependency,
-    "@opencode-ai/plugin": opencodeVersion,
+    "@opencode/plugin": opencodeVersion,
   } }, null, 2)}\n`, { flag: "wx" });
   await execute("npm", ["install", "--force"], { cwd: configRoot, env: environment });
   const installed = join(configRoot, "node_modules", "sortie-dogs");
@@ -719,14 +731,15 @@ export async function prepareCandidateRuntime(candidate, packagePath, runRoot, d
   ensure(installedPackage.version === candidate.version, "candidate-package-version-mismatch");
   const versions = await import(`${pathToFileURL(join(installed, "dist", "asset-version.js")).href}?candidate=${candidate.sha256}`);
   ensure(versions.V010_RUNTIME_ASSET_VERSION === candidate.runtime_marker, "candidate-runtime-marker-mismatch");
-  const plugin = pathToFileURL(join(installed, "dist", "plugin", "opencode.js")).href;
+  const plugin = join(configRoot, "plugins", "sortie-dogs");
+  await mkdir(plugin, { recursive: true });
+  await writeFile(join(plugin, "index.js"), v2PluginWrapperSource({ id: "v010" }), { flag: "wx" });
   await writeFile(join(configRoot, "opencode.json"), `${JSON.stringify({
     $schema: "https://opencode.ai/config.json",
     experimental: { subagent_depth: 2 },
-    plugin: [plugin],
-    permission: benchmarkPermissionPolicy(runRoot),
+    plugins: [plugin],
+    permissions: benchmarkPermissionPolicy(runRoot),
   }, null, 2)}\n`, { flag: "wx" });
-  await writeFile(join(xdgRoot, "opencode", "opencode.json"), "{}\n", { flag: "wx" });
   await execute(process.execPath, [join(installed, "dist", "cli", "main.js"), "init", "--global", "--profile", candidate.profile],
     { cwd: candidateRoot, env: environment });
   const module = await import(`${pathToFileURL(join(installed, "dist", "runtime-assets-v010.js")).href}?candidate=${candidate.sha256}`);
@@ -744,22 +757,7 @@ export async function prepareCandidateRuntime(candidate, packagePath, runRoot, d
     }
   }
   environment.OPENCODE_CONFIG_CONTENT = JSON.stringify(benchmarkInlineConfig(plugin, agentNames, runRoot));
-  await execute("opencode", ["debug", "config"], { cwd: candidateRoot, env: environment });
-  for (const name of agentNames) {
-    const result = await execute("opencode", ["debug", "agent", name], { cwd: candidateRoot, env: environment });
-    let resolvedAgent;
-    try { resolvedAgent = JSON.parse(String(result.stdout)); }
-    catch { throw new Error(`candidate-agent-config-invalid:${name}`); }
-    ensure(resolvedAgent.tools?.webfetch === false && resolvedAgent.tools?.websearch !== true,
-      `candidate-agent-web-tools-enabled:${name}`);
-    const permissions = Array.isArray(resolvedAgent.permission) ? resolvedAgent.permission : [];
-    ensure(permissions.some(rule => rule.permission === "webfetch" && rule.action === "deny"),
-      `candidate-agent-web-permission-invalid:${name}`);
-    ensure(permissions.some(rule => rule.permission === "websearch" && rule.action === "deny"),
-      `candidate-agent-web-permission-invalid:${name}`);
-    ensure(permissions.some(rule => rule.permission === "bash" && rule.action === "deny" && rule.pattern === "*https://*"),
-      `candidate-agent-network-permission-invalid:${name}`);
-  }
+  await (dependencies.probeAgents ?? probeCandidateV2Agents)(candidateRoot, environment, candidate.agent, agentNames);
   return {
     environment,
     runtimeRoot: candidateRoot,
@@ -779,6 +777,34 @@ export async function prepareCandidateRuntime(candidate, packagePath, runRoot, d
     await rm(candidateRoot, { recursive: true, force: true });
     throw error;
   }
+}
+
+async function probeCandidateV2Agents(root, environment, primary, agentNames) {
+  const server = await startV2ReleaseServer(root, environment);
+  try {
+    const headers = { "content-type": "application/json",
+      authorization: `Basic ${Buffer.from(`opencode:${server.env.OPENCODE_SERVER_PASSWORD}`).toString("base64")}` };
+    const request = async (path, method = "GET", body) => {
+      const response = await fetch(`${server.url}${path}`, { method, headers,
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(25_000) });
+      ensure(response.ok, `candidate-v2-api-failed:${method}:${path.split("/").slice(0, 3).join("/")}:${response.status}`);
+      return response.status === 204 ? undefined : response.json();
+    };
+    // Switching an empty session resolves the native agent registry without a model request.
+    const session = await request("/api/session", "POST", { title: "Candidate configuration check (no inference)" });
+    ensure(typeof session?.data?.id === "string", "candidate-preflight-session-unavailable");
+    await request(`/api/session/${encodeURIComponent(session.data.id)}/agent`, "POST", { agent: primary });
+    let plugins;
+    const deadline = Date.now() + 10_000;
+    do {
+      plugins = await request("/api/plugin");
+      if (plugins.data?.some(plugin => plugin.id === "sortie-dogs.v010")) break;
+      await new Promise(resolveWait => setTimeout(resolveWait, 100));
+    } while (Date.now() < deadline);
+    ensure(plugins.data?.some(plugin => plugin.id === "sortie-dogs.v010"), "candidate-plugin-not-loaded");
+    const agents = await request("/api/agent");
+    for (const name of agentNames) verifyCandidateAgent(name, agents.data?.find(agent => agent.id === name));
+  } finally { await server.stop(); }
 }
 
 async function killProcessGroup(pid, force = false) {
@@ -825,28 +851,36 @@ function usageDatabasePath() {
 
 export function readDirectoryUsage(directory, databasePath = usageDatabasePath()) {
   const result = { usd: 0, requests: 0, unpriced: [] };
-  if (!existsSync(databasePath)) return result;
+  if (!existsSync(databasePath)) throw new Error("usage-database-unavailable");
   const database = new DatabaseSync(databasePath, { readOnly: true });
   const unpriced = new Set();
   try {
-    const sessions = database.prepare("SELECT id FROM session WHERE directory = ?").all(directory);
-    const messages = database.prepare("SELECT data FROM message WHERE session_id = ?");
+    const v2 = database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'session_v2'").get() !== undefined;
+    const sessions = database.prepare(`SELECT id FROM ${v2 ? "session_v2" : "session"} WHERE directory = ?`).all(directory);
+    const messages = database.prepare(`SELECT ${v2 ? "type, " : ""}data FROM ${v2 ? "session_message" : "message"} WHERE session_id = ?`);
     for (const session of sessions) {
       for (const row of messages.all(session.id)) {
         let message;
-        try { message = JSON.parse(row.data); } catch { continue; }
-        if (message?.role !== "assistant" || message?.tokens === undefined) continue;
+        try { message = JSON.parse(row.data); } catch {
+          unpriced.add("missing-usage");
+          continue;
+        }
+        if (v2 ? !["assistant", "compaction"].includes(row.type) : message?.role !== "assistant") continue;
+        if (!message?.tokens) {
+          unpriced.add("missing-usage");
+          continue;
+        }
         result.requests += 1;
         const tokens = message.tokens;
         const estimate = estimateModelUsageCost({
-          providerID: message.providerID,
-          modelID: message.modelID,
+          providerID: v2 ? message.model?.providerID : message.providerID,
+          modelID: v2 ? message.model?.id : message.modelID,
           uncachedInputTokens: tokens.input,
           cacheReadTokens: tokens.cache?.read,
           cacheWriteTokens: tokens.cache?.write,
           outputTokens: tokens.output,
           reasoningTokens: tokens.reasoning,
-          serviceTier: message.serviceTier,
+          serviceTier: v2 ? message.providerState?.serviceTier : message.serviceTier,
         });
         if (estimate.status === "priced") result.usd += estimate.usd;
         else unpriced.add(estimate.reason);
@@ -866,10 +900,11 @@ export async function runOpenCode(options, dependencies = {}) {
   const startedAt = options.startedAt ?? Date.now();
   const command = [
     "exec", "opencode", "run",
-    "--dir", shellQuote(options.workspace),
+    "--standalone",
     "--format", "json",
     "--print-logs",
     "--agent", shellQuote(options.agent),
+    "--model", "openai/gpt-6-sol#xhigh",
     shellQuote(options.prompt),
   ].join(" ");
   const child = spawn("bash", ["-ic", command], {
@@ -1015,9 +1050,11 @@ export async function runOpenCode(options, dependencies = {}) {
   await recordWatchdog("exited").catch(() => undefined);
   const finalReason = !cleanupEstablished ? "cleanup-failed"
     : usage.unpriced.length > 0 ? "pricing-coverage-missing"
+      : usage.requests === 0 && result.reason === "completed" ? "usage-unverified"
       : options.costLimitUsd !== undefined && usage.usd >= options.costLimitUsd ? "cost-limit" : result.reason;
   return { ...result, exit: finalReason === "completed" ? result.exit : result.exit === 0 ? 1 : result.exit,
-    reason: finalReason, usage, cleanupEstablished, watchdogEvents, lastActivityAgeMs: Date.now() - lastActivity };
+    reason: finalReason, usage, usageComplete: usage.unpriced.length === 0 && usage.requests > 0,
+    cleanupEstablished, watchdogEvents, lastActivityAgeMs: Date.now() - lastActivity };
 }
 
 function emptyLiveResult(instance, status) {
@@ -1038,7 +1075,7 @@ function emptyLiveResult(instance, status) {
 
 function costEnforcementStopReason(execution) {
   const reason = execution?.reason;
-  if (["pricing-coverage-missing", "usage-monitor-failed", "watchdog-usage-failed", "usage-read-failed"].includes(reason)) {
+  if (["pricing-coverage-missing", "usage-unverified", "usage-monitor-failed", "watchdog-usage-failed", "usage-read-failed"].includes(reason)) {
     return reason;
   }
   return undefined;
@@ -1046,7 +1083,6 @@ function costEnforcementStopReason(execution) {
 
 export async function runLive(value, options, dependencies = {}) {
   const plan = createLiveRunPlan(value, options, dependencies.publicRowHashes);
-  ensure(plan.candidate.profile !== "v011", "v011-use-scripts/user-proxy-bench.mjs-for-native-inference");
   ensure(typeof options.runRoot === "string" && options.runRoot.length > 0, "live-run-root-required");
   ensure(typeof options.output === "string" && options.output.length > 0, "live-output-required");
   const runRoot = resolve(options.runRoot);
@@ -1182,6 +1218,7 @@ export async function runLive(value, options, dependencies = {}) {
       }
     }
     const usage = execution?.usage ?? { usd: 0, requests: 0, unpriced: [] };
+    const usageComplete = execution?.usageComplete === true;
     spentUsd += usage.usd;
     const cleanupError = await remove(workspace, { recursive: true, force: true }).then(() => null, error => error);
     if (cleanupError) {
@@ -1231,6 +1268,7 @@ export async function runLive(value, options, dependencies = {}) {
       patch_sha256: status === "succeeded" ? digest(patch) : null,
       elapsed_ms: Date.now() - started,
       usage,
+      usage_complete: usageComplete,
       watchdog_events: execution?.watchdogEvents ?? 0,
       watchdog_idle_ms: execution?.lastActivityAgeMs ?? 0,
       replay_artifact: storedArtifact,
@@ -1264,6 +1302,7 @@ export async function runLive(value, options, dependencies = {}) {
       live_process_started: results.some(result => result.exit_code !== null),
       provider_requests_started: results.some(result => (result.usage?.requests ?? 0) > 0),
       spent_usd: spentUsd,
+      usage_complete: results.every(result => result.usage_complete === true),
     },
     replay: {
       root: replayRoot,

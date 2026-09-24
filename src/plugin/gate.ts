@@ -64,7 +64,7 @@ export interface ProjectPaths {
 }
 
 export interface WriteGate {
-  check(input: ToolExecuteBeforeInput, output: ToolExecuteBeforeOutput): Promise<void>;
+  check(input: ToolExecuteBeforeInput, output: ToolExecuteBeforeOutput, options?: { investigativeShell?: boolean }): Promise<void>;
   checkPath(path: string): Promise<void>;
   toRelativePath(path: string): Promise<string>;
 }
@@ -1174,13 +1174,19 @@ export async function createWriteGate(project: ProjectPaths, value: unknown, too
   return {
     checkPath,
     toRelativePath: project.toRelativePath,
-    async check(_input, output): Promise<void> {
+    async check(_input, output, options): Promise<void> {
       const command = isRecord(output.args) && typeof output.args.command === "string"
         ? normalizeCommand(output.args.command)
         : undefined;
       if (command !== undefined && declaredValidation.has(command)) return;
       const extracted = extractWritePaths(_input.tool, output.args);
       if (!extracted.applies) return;
+      // Mission workers may investigate with repository-specific executables without registering
+      // every diagnostic as a formal check. Known write destinations/Git mutations still use the
+      // same scope gate; this option never makes diagnostic output acceptance evidence.
+      if (options?.investigativeShell && ["bash", "shell"].includes(_input.tool) &&
+          extracted.issue?.cause === "executable-not-allowlisted" && extracted.paths.length === 0 &&
+          !extracted.gitMutation && !extracted.remoteMutation) return;
       if (extracted.ambiguous || (extracted.paths.length === 0 && !extracted.gitCommit)) {
         if (extracted.issue !== undefined) {
           throw new WriteDeniedError("unclassified-command", issuePath(extracted.issue));

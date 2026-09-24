@@ -41,6 +41,10 @@ function contextFixture() {
     app: { version: "2.0.11" },
     location: { directory: process.cwd(), project: { id: "fixture" } },
     options: {},
+    agent: { transform: async () => ({ dispose() {} }), get: async ({ agentID }) => ({ model: {
+      providerID: "openai", id: agentID === "dog-worker-v010" ? "gpt-6-luna-fast" : "gpt-6-sol",
+      variant: agentID === "dog-worker-v010" ? "max" : "xhigh",
+    } }) },
     event: { subscribe: async function* ({ signal } = {}) {
       while (!signal?.aborted) {
         const item = queued.shift() ?? await new Promise<typeof queued[number] | undefined>(resolve => {
@@ -86,9 +90,13 @@ function contextFixture() {
 test("V2 operator dispatch rejects background before admission and accepts explicit foreground", async () => {
   const fixture = contextFixture();
   const seen: Record<string, unknown>[] = [];
+  const context: OpenCodeV2Context = { ...fixture.context, agent: {
+    transform: async () => ({ dispose() {} }),
+    get: async () => ({ model: { providerID: "openai", id: "gpt-6-sol", variant: "xhigh" } }),
+  } };
   const dispose = await createSortieDogsV2Plugin(async () => ({
     "tool.execute.before": async (_request, output) => { seen.push(output.args); },
-  })).setup(fixture.context);
+  })).setup(context);
   try {
     for (const prompt of ["SORTIE_OPERATOR_DELEGATE_REF {}", "SORTIE_OPERATOR_TASK_REF {}", "SORTIE_OPERATOR_PROPOSAL_TASK_REF {}"]) {
       const input = { agent: "dogs-coordinator", description: "exact", prompt, background: true };
@@ -100,7 +108,82 @@ test("V2 operator dispatch rejects background before admission and accepts expli
       prompt: "SORTIE_OPERATOR_DELEGATE_REF {}", background: false }, sessionID: "root", id: "call" };
     await fixture.toolHooks.get("execute.before")!(event);
     assert.deepEqual(seen, [{ subagent_type: "dogs-coordinator", description: "exact", prompt: "SORTIE_OPERATOR_DELEGATE_REF {}" }]);
-    assert.deepEqual(event.input, { agent: "dogs-coordinator", description: "exact", prompt: "SORTIE_OPERATOR_DELEGATE_REF {}" });
+    assert.deepEqual(event.input, { agent: "dogs-coordinator", description: "exact", prompt: "SORTIE_OPERATOR_DELEGATE_REF {}",
+      model: "openai/gpt-6-sol#xhigh" });
+  } finally { if (typeof dispose === "function") dispose(); }
+});
+
+test("V2 role defaults preserve explicit agent models and keep review separate from workers", async () => {
+  const fixture = contextFixture();
+  const models = new Map<string, { providerID: string; id: string; variant?: string } | undefined>([
+    ["dog-operator", undefined], ["dogs-coordinator", undefined],
+    ["dog-worker-v010", undefined], ["dog-reviewer-v010", undefined],
+    ["dog-scout-v010", { providerID: "anthropic", id: "custom", variant: "high" }],
+  ]);
+  const context: OpenCodeV2Context = { ...fixture.context, agent: { transform: async callback => {
+    callback({ update: (id, update) => {
+      if (!models.has(id)) return;
+      const agent = { model: models.get(id) };
+      update(agent);
+      models.set(id, agent.model);
+    } });
+    return { dispose() {} };
+  } } };
+  const dispose = await createSortieDogsV2Plugin(async () => ({})).setup(context);
+  try {
+    assert.deepEqual(models.get("dog-operator"), { providerID: "openai", id: "gpt-6-sol", variant: "xhigh" });
+    assert.deepEqual(models.get("dogs-coordinator"), { providerID: "openai", id: "gpt-6-sol", variant: "xhigh" });
+    assert.deepEqual(models.get("dog-worker-v010"), { providerID: "openai", id: "gpt-6-luna-fast", variant: "max" });
+    assert.deepEqual(models.get("dog-reviewer-v010"), { providerID: "openai", id: "gpt-6-sol", variant: "xhigh" });
+    assert.deepEqual(models.get("dog-scout-v010"), { providerID: "anthropic", id: "custom", variant: "high" });
+  } finally { if (typeof dispose === "function") dispose(); }
+});
+
+test("V2 subagent dispatch passes the resolved role model without replacing an explicit selection", async () => {
+  const fixture = contextFixture();
+  const context: OpenCodeV2Context = { ...fixture.context, agent: {
+    transform: async () => ({ dispose() {} }),
+    get: async ({ agentID }) => ({ data: { model: agentID === "dog-worker-v010"
+      ? { providerID: "openai", id: "gpt-6-luna-fast", variant: "max" }
+      : { providerID: "openai", id: "gpt-6-sol", variant: "xhigh" } } }),
+  } };
+  const dispose = await createSortieDogsV2Plugin(async () => ({
+    "tool.execute.before": async () => {},
+  })).setup(context);
+  try {
+    const worker = { tool: "subagent", input: { agent: "dog-worker-v010", prompt: "approved" }, sessionID: "root", id: "call-1" };
+    await fixture.toolHooks.get("execute.before")!(worker);
+    assert.equal(worker.input.model, "openai/gpt-6-luna-fast#max");
+    const reviewer = { tool: "subagent", input: { agent: "dog-reviewer-v010", prompt: "review",
+      model: "anthropic/custom#high" }, sessionID: "root", id: "call-2" };
+    await fixture.toolHooks.get("execute.before")!(reviewer);
+    assert.equal(reviewer.input.model, "anthropic/custom#high");
+  } finally { if (typeof dispose === "function") dispose(); }
+});
+
+test("V2 native subagent executor receives the worker model before it creates a child", async () => {
+  const fixture = contextFixture();
+  const received: unknown[] = [];
+  const native = { execute: async (input: unknown) => { received.push(input); return { content: "ok" }; } };
+  const context: OpenCodeV2Context = { ...fixture.context, tool: {
+    ...fixture.context.tool,
+    transform: async callback => {
+      callback({ add() {}, update: (_id, update) => { update(native); } });
+      return { dispose() {} };
+    },
+  } };
+  const dispose = await createSortieDogsV2Plugin(async () => ({ "tool.execute.before": async () => {} })).setup(context);
+  try {
+    await fixture.toolHooks.get("execute.before")!({ tool: "subagent", sessionID: "root", id: "call-1",
+      input: { agent: "dog-worker-v010", prompt: "approved" } });
+    await native.execute({ agent: "dog-worker-v010", prompt: "approved", model: "openai/gpt-6-sol#medium" }, { sessionID: "root" });
+    await fixture.toolHooks.get("execute.before")!({ tool: "subagent", sessionID: "root", id: "call-2",
+      input: { agent: "dog-worker-v010", prompt: "custom", model: "anthropic/custom#high" } });
+    await native.execute({ agent: "dog-worker-v010", prompt: "custom", model: "anthropic/custom#high" }, { sessionID: "root" });
+    assert.deepEqual(received, [
+      { agent: "dog-worker-v010", prompt: "approved", model: "openai/gpt-6-luna-fast#max" },
+      { agent: "dog-worker-v010", prompt: "custom", model: "anthropic/custom#high" },
+    ]);
   } finally { if (typeof dispose === "function") dispose(); }
 });
 
@@ -219,14 +302,15 @@ test("V2 server plugin registers tools and translates public hooks without chang
   await before(subagent);
   assert.deepEqual((beforeInput as { output: { args: Record<string, unknown> } }).output.args,
     { subagent_type: "dog-worker-v010", prompt: "work" });
-  assert.deepEqual(subagent.input, { agent: "dog-worker-v010", prompt: "work" });
+  assert.deepEqual(subagent.input, { agent: "dog-worker-v010", prompt: "work", model: "openai/gpt-6-luna-fast#max" });
 
   const resumed = { tool: "subagent", sessionID: "root", agent: "dog-coordinator-v010", id: "resume-call",
     input: { agent: "dog-worker-v010", prompt: "continue", sessionID: "child-session" } };
   await before(resumed);
   assert.deepEqual((beforeInput as { output: { args: Record<string, unknown> } }).output.args,
     { subagent_type: "dog-worker-v010", prompt: "continue", task_id: "child-session" });
-  assert.deepEqual(resumed.input, { agent: "dog-worker-v010", prompt: "continue", sessionID: "child-session" });
+  assert.deepEqual(resumed.input, { agent: "dog-worker-v010", prompt: "continue", sessionID: "child-session",
+    model: "openai/gpt-6-luna-fast#max" });
 
   const after = fixture.toolHooks.get("execute.after")!;
   const completed = { tool: "shell", sessionID: "root", id: "shell-call", status: "completed", result: { content: "original" } };
@@ -285,6 +369,26 @@ test("V2 child prompt adapter removes only the native subagent envelope before s
   }
 });
 
+test("V2 child prompt uses its role model before the first request but preserves an explicit Task model", async () => {
+  const fixture = contextFixture();
+  fixture.context.session.get = async ({ sessionID }) => ({ id: sessionID, parentID: "root", agent: "dog-worker-v010",
+    model: { providerID: "openai", id: "gpt-6-sol", variant: "medium" } });
+  const plugin = createSortieDogsV2Plugin(async () => ({ "chat.message": async () => {},
+    "tool.execute.before": async () => {} }));
+  const cleanup = await plugin.setup(fixture.context);
+  try {
+    await fixture.sessionHooks.get("prompt")!({ sessionID: "child-one", messageID: "user-1",
+      prompt: { text: "You are a subagent spawned by another session.\nfirst task" } });
+    assert.deepEqual(fixture.modelSwitches, [{ sessionID: "child-one",
+      model: { providerID: "openai", id: "gpt-6-luna-fast", variant: "max" } }]);
+    await fixture.toolHooks.get("execute.before")!({ tool: "subagent", sessionID: "root", id: "call-2",
+      input: { agent: "dog-worker-v010", prompt: "explicit task", model: "anthropic/custom#high" } });
+    await fixture.sessionHooks.get("prompt")!({ sessionID: "child-two", messageID: "user-2",
+      prompt: { text: "You are a subagent spawned by another session.\nexplicit task" } });
+    assert.equal(fixture.modelSwitches.length, 1, "explicit subagent model must remain selected by the host");
+  } finally { cleanup?.(); }
+});
+
 test("V2 event failures warn per event and keep lifecycle translation active", async () => {
   const fixture = contextFixture();
   const observed: string[] = [];
@@ -317,7 +421,7 @@ test("V2 event failures warn per event and keep lifecycle translation active", a
 });
 
 test("package server export resolves to the V2 default definition", async () => {
-  assert.equal(V2Plugin.id, "sortie-dogs.v011");
+  assert.equal(V2Plugin.id, "sortie-dogs.v010");
   assert.equal(typeof V2Plugin.setup, "function");
   const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
   assert.deepEqual(packageJson.exports["./server"], { types: "./dist/plugin/v2.d.ts", import: "./dist/plugin/v2.js" });
@@ -332,7 +436,7 @@ test("V1 preview and stable package entries remain callable", async () => {
 
 test("actual v0.10 tools preserve required, optional, and described schemas through V2", async () => {
   const fixture = contextFixture();
-  const cleanup = await createSortieDogsV2Plugin().setup(fixture.context);
+  const cleanup = await V2Plugin.setup(fixture.context);
   try {
     const tools = fixture.tools as Array<{ name: string; input: { required: string[]; properties: Record<string, { description?: string }> } }>;
     const prepare = tools.find(tool => tool.name === "sortie_v010_prepare_operator")!;

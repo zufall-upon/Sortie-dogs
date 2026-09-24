@@ -7,7 +7,7 @@ export const MODEL_COST_PRICING_SNAPSHOT = {
     "https://developers.openai.com/api/docs/models/gpt-6-astra",
     "https://developers.openai.com/api/docs/models/gpt-6-sol",
     "https://developers.openai.com/api/docs/models/gpt-6-luna",
-    "https://developers.openai.com/api/docs/guides/priority-processing.md",
+    "https://developers.openai.com/api/docs/guides/fast-mode",
     "https://developers.openai.com/api/docs/models/gpt-5.6-sol",
     "https://developers.openai.com/api/docs/models/gpt-5.6-terra",
     "https://developers.openai.com/api/docs/models/gpt-5.6-luna",
@@ -15,7 +15,7 @@ export const MODEL_COST_PRICING_SNAPSHOT = {
   ],
   assumptions: [
     "OpenAI Standard pricing; requests above 272,000 total input/cache tokens use 2x input/cache and 1.5x output pricing.",
-    "Anthropic Standard pricing with the 5-minute cache-write rate; Fast, Batch, Flex, regional, tool, and subscription charges are excluded.",
+    "Anthropic Standard pricing with the 5-minute cache-write rate; Batch, Flex, regional, tool, and subscription charges are excluded.",
     "variant and serviceTier are separate; model variants do not alter the selected Standard token price.",
     "GPT-6 Sol and GPT-6 Luna use their official Standard schedules; the OpenCode gpt-6-luna-fast selector sends API model gpt-6-luna with priority service tier.",
     "GPT-6 Sol/Luna Fast (service_tier fast or priority) is priced at 2x the applicable Standard rates, including cache and long-context multipliers.",

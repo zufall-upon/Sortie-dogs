@@ -16,7 +16,7 @@ const ensure = (condition, message) => {
   if (!condition) throw new Error(message);
 };
 const now = () => new Date().toISOString();
-const fingerprint = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+const fingerprint = value => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const sleep = milliseconds => new Promise(resolvePromise => setTimeout(resolvePromise, milliseconds));
 
 function workerCount(value) {
@@ -219,17 +219,17 @@ async function markInterrupted(state) {
     if (metadata?.results?.[0]) {
       entry.status = metadata.results[0].status ?? "completed";
       entry.result = metadata.results[0];
-      const usage = Number(metadata.execution?.spent_usd ?? entry.result?.usage?.usd ?? 0);
-      if (entry.usage_recorded !== true && Number.isFinite(usage) && usage > 0) {
+      const usage = recordedUsage(metadata, entry.result);
+      if (entry.usage_recorded !== true && usage !== null && usage > 0) {
         state.spent_usd = (Number.isFinite(state.spent_usd) ? state.spent_usd : 0) + usage;
       }
-      entry.usage_usd = Number.isFinite(usage) && usage > 0 ? usage : 0;
+      entry.usage_usd = usage;
       entry.usage_recorded = true;
     } else {
       entry.status = "interrupted";
       entry.reason = "supervisor-restarted";
     }
-    if (entry.usage_recorded !== true || metadata?.execution?.usage_complete === false) {
+    if (metadata?.execution?.usage_complete !== true || entry.usage_usd == null) {
       const hold = Math.max(0, (entry.cost_reservation_usd ?? 0) - (entry.usage_usd ?? 0));
       state.held_unknown_usd = (state.held_unknown_usd ?? 0) + hold;
       entry.held_unknown_usd = hold;
@@ -241,6 +241,11 @@ async function markInterrupted(state) {
   state.reserved_usd = 0;
   state.next_index = state.instances.findIndex(entry => entry.status === "pending");
   if (state.next_index < 0) state.next_index = state.instances.length;
+}
+
+function recordedUsage(metadata, result) {
+  const value = metadata?.execution?.spent_usd ?? result?.usage?.usd;
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
 }
 
 function childPaths(state, entry) {
@@ -325,11 +330,11 @@ export async function finalizeOutput(state) {
 export async function stopSupervisor(statePath) {
   ensure(typeof statePath === "string", "supervisor-state-required");
   let state = await readJson(statePath);
-  const owner = await readJson(join(state.run_root, 'supervisor.lock')).catch(() => null);
+  const owner = await readJson(join(state.run_root, "supervisor.lock")).catch(() => null);
   if (await processAlive(owner) && !TERMINAL_STATES.has(state.status)) {
     ensure(owner.pid === state.heartbeat?.supervisor?.pid && owner.starttime === state.heartbeat?.supervisor?.starttime, "supervisor-owner-mismatch");
-    ensure(state.heartbeat.supervisor.pid !== process.pid, "cannot-stop-own-supervisor");
-    await killProcessGroup(state.heartbeat.supervisor);
+    ensure(owner.pid !== process.pid, "cannot-stop-own-supervisor");
+    await killProcessGroup(owner);
     state = await readJson(statePath);
   }
   const lock = await acquireRunLock(state.run_root);
@@ -420,8 +425,10 @@ export async function runSupervisor(value, options, dependencies = {}) {
     const reservationFor = () => {
       const pending = state.instances.filter(entry => entry.status === "pending").length;
       const slots = Math.max(1, Math.min(workers - active.size, pending));
-      const available = options.costLimitUsd - state.spent_usd - state.reserved_usd - state.held_unknown_usd;
-      return available > 0 ? Math.min(options.perInstanceUsd ?? Infinity, available / slots) : 0;
+       const available = options.costLimitUsd - state.spent_usd - state.reserved_usd - state.held_unknown_usd;
+       // Without an explicit cap, distribute the remaining budget across the entire queue;
+       // unused funds from a settled instance flow back into later reservations.
+       return available > 0 ? Math.min(options.perInstanceUsd ?? available / pending, available / slots) : 0;
     };
     const markCostLimited = async index => {
       const entry = state.instances[index];
@@ -497,16 +504,17 @@ export async function runSupervisor(value, options, dependencies = {}) {
         entry.status = exit.exit === 0 ? "completed" : "failed";
         entry.result = { instance_id: entry.instance_id, status: entry.status, exit_code: exit.exit, signal: exit.signal };
       }
-      const recorded = metadata?.execution?.spent_usd ?? entry.result?.usage?.usd;
-      const usage = typeof recorded === "number" && Number.isFinite(recorded) && recorded >= 0 ? recorded : null;
-      if (entry.usage_recorded !== true && Number.isFinite(usage) && usage > 0) state.spent_usd += usage;
+      const usage = recordedUsage(metadata, entry.result);
+      if (entry.usage_recorded !== true && usage !== null && usage > 0) state.spent_usd += usage;
       entry.usage_usd = usage;
-      if (usage === null || metadata?.execution?.usage_complete === false) {
+       if (metadata?.execution?.usage_complete !== true || usage === null) {
         const hold = Math.max(0, (entry.cost_reservation_usd ?? 0) - (usage ?? 0));
-        state.held_unknown_usd += hold; entry.held_unknown_usd = hold;
+        state.held_unknown_usd += hold;
+        entry.held_unknown_usd = hold;
       }
       entry.usage_recorded = true;
-      state.reserved_usd = Math.max(0, state.reserved_usd - (entry.cost_reservation_usd ?? 0));
+       state.reserved_usd = Math.max(0, state.reserved_usd - (entry.cost_reservation_usd ?? 0));
+       if (state.reserved_usd < 1e-10) state.reserved_usd = 0;
       entry.finished_at = now();
       entry.runner = null;
       await writes.enqueue();
@@ -654,7 +662,7 @@ function parseArguments(argv) {
     if (argument.startsWith("--")) {
       const key = argument.slice(2).replaceAll("-", "_");
       const name = { run_root: "runRoot", cost_limit_usd: "costLimitUsd", workers: "workers", heartbeat_seconds: "heartbeatSeconds",
-         stale_seconds: "staleSeconds", report_seconds: "reportSeconds", state_path: "statePath", runner_script: "runnerScript", per_instance_usd: "perInstanceUsd" }[key] ?? key;
+        stale_seconds: "staleSeconds", report_seconds: "reportSeconds", state_path: "statePath", runner_script: "runnerScript", per_instance_usd: "perInstanceUsd" }[key] ?? key;
       const value = argv[++index];
       values[name] = ["costLimitUsd", "perInstanceUsd", "workers", "heartbeatSeconds", "staleSeconds", "reportSeconds"].includes(name) ? Number(value) : value;
     }

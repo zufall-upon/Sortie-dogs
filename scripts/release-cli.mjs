@@ -25,7 +25,7 @@ export const RELEASE_SMOKE_TERMINAL_TIMEOUT_SECONDS = 180;
 export const RELEASE_SMOKE_TERMINAL_PROMPT =
   'The recovery unit is already settled as succeeded with canonical PASS. Do not call tools, dispatch, validate, or edit. ' +
   'Reply with `status: DONE` as the first conclusion line and report this same goal complete.';
-export const v2PluginWrapperSource = runtime => runtime.id === 'v011' ? 'export { default } from "sortie-dogs/server";\n' : `import { createSortieDogsV2Plugin } from "sortie-dogs/server";\n` +
+export const v2PluginWrapperSource = runtime => `import { createSortieDogsV2Plugin } from "sortie-dogs/server";\n` +
   `import { SortieDogsPlugin } from "${runtime.id === 'stable' ? 'sortie-dogs/plugin/stable' : 'sortie-dogs/plugin'}";\n` +
   `export default createSortieDogsV2Plugin(SortieDogsPlugin);\n`;
 export const releaseSmokeWorkerStarted = (events, records, unitID) =>
@@ -102,7 +102,7 @@ export async function startV2ReleaseServer(cwd, env) {
   }
 }
 
-export async function installedFixture(tgz, directory, profileId = 'stable') {
+export async function installedFixture(tgz, directory, profileId = 'stable', { nested = true } = {}) {
   const release = releaseProfile(profileId);
   // A failed attempt remains available; retries use a fresh fixture, never overwrite its ledger.
   await mkdir(directory, { recursive: true });
@@ -139,7 +139,7 @@ export async function installedFixture(tgz, directory, profileId = 'stable') {
   const coordinatorAgent = profiles?.profileAgent(runtime, 'dog-coordinator') ?? `dog-coordinator${runtime.agentSuffix}`;
   const operatorAgent = profiles?.profileAgent(runtime, 'dog-operator') ?? `dog-operator${runtime.agentSuffix}`;
   const workerAgent = profiles?.profileAgent(runtime, 'dog-worker') ?? `dog-worker${runtime.agentSuffix}`;
-  await mkdir(join(project, 'child', runtime.stateDirectory, 'contracts'), { recursive: true });
+  if (nested) await mkdir(join(project, 'child', runtime.stateDirectory, 'contracts'), { recursive: true });
   const { acceptanceContinuityFingerprint } = await import(pathToFileURL(join(installed, 'dist/core/acceptance-continuity.js')).href);
   const { reduceGoalFlight } = await import(pathToFileURL(join(installed, 'dist/core/goal-bound.js')).href);
   const legacy = join(installed, 'dist/plugin/legacy.js');
@@ -159,8 +159,25 @@ export async function installedFixture(tgz, directory, profileId = 'stable') {
     cliVersion, runtimeMarker: RUNTIME_ASSET_VERSION, acceptanceContinuityFingerprint, reduceGoalFlight };
 }
 
-export async function inside(tgz, directory, profileId = 'stable') {
-  if (profileId === 'v011') return (await import('./user-proxy-smoke.mjs')).userProxySmoke(tgz, directory);
+export async function inside(tgz, directory, profileId = 'stable', { capUSD = 1, budgetFile } = {}) {
+  if (profileId === 'v012') {
+    const { probe } = await import('./mission-cli-probe.mjs');
+    const result = await probe(tgz, directory, { mode: 'complete', timeoutSeconds: 300, capUSD, budgetFile });
+    assert(result.errors.length === 0 && result.code === 0 && !result.stopped, 'Mission CLI did not finish without procedural errors');
+    const worker = result.models.find(item => item.agent === 'dog-worker-v010');
+    assert(worker?.model?.id === 'gpt-6-luna-fast' && worker.model.variant === 'max' && worker.started_ms <= 60_000,
+      'Mission Worker must start on Luna Fast/max within 60 seconds');
+    const runtime = { stateDirectory: '.sortie-dogs-v010' };
+    const mission = JSON.parse(await readFile(join(result.project, runtime.stateDirectory, 'missions', `${hash(result.root)}.json`), 'utf8'));
+    const run = JSON.parse(await readFile(join(result.project, runtime.stateDirectory, 'operators', `${hash(result.root)}.json`), 'utf8'));
+    assert(mission.phase === 'completed' && run.receipt?.status === 'succeeded', 'Mission has no explicit succeeded receipt');
+    assert(run.units.every(unit => unit.evidence.some(item => item.execution.exit_code === 0 && item.execution.outcome === 'pass')),
+      'Mission has no observed successful unit validation');
+    await command('node', ['check.mjs'], result.project, {});
+    return { schema: 1, version: '0.12.0', profile: 'v010', sha256: result.candidate_sha256, sessionID: result.root,
+      workerStarted: true, workerStartedMs: worker.started_ms, workerModel: worker.model, canonicalExit: 0,
+      terminal: 'succeeded', artifactMatch: true, priced_usd: result.priced_usd, unpriced_requests: result.unpriced_requests };
+  }
   const { project, env, pkg, runtime, release, coordinatorAgent, workerAgent, cliVersion,
     runtimeMarker: RUNTIME_ASSET_VERSION, acceptanceContinuityFingerprint, reduceGoalFlight } = await installedFixture(tgz, directory, profileId);
   await writeFile(join(project, 'AGENTS.md'), '# Release fixture\nNative file paths resolve from this workspace. Use the supplied nested manifest. Do not edit contracts, tests, or package files. Workers must not commit.\n');
@@ -188,6 +205,7 @@ export async function inside(tgz, directory, profileId = 'stable') {
     // timeout runs in WSL: Windows killing wsl.exe alone does not establish guest process cleanup.
     return jsonEvents(await command('timeout', ['--signal=TERM', '--kill-after=10s', `${timeoutSeconds}s`, 'opencode', 'run',
       ...runLocationArgsForOpenCodeVersion(cliVersion, project, v2Server?.url), '--format', 'json', '--print-logs', '--agent', coordinatorAgent,
+      ...(Number.parseInt(cliVersion.split('.')[0], 10) >= 2 ? ['--model', 'openai/gpt-6-sol#xhigh'] : []),
       ...(sessionID ? ['--session', sessionID] : []), prompt], project, cliEnv, (timeoutSeconds + 40) * 1_000));
   }
   const executeSmoke = async () => {
@@ -215,7 +233,7 @@ operation_manifest: ${runtime.stateDirectory}/contracts/recovery.operation-manif
 goal_acceptance_fingerprint: ${fingerprint}
 goal_budget_units: 8
 delivery_intent: implementation
-delivery_mode: repair-first
+ delivery_mode: mvp-first
 usable_path_established: false
 controlled_change: false
 goal_criterion_id: recovered-result
@@ -230,9 +248,9 @@ goal_source_binding: current-protected
 goal_candidate_binding: current-protected
 goal_validation_command: node child/validate.mjs
 goal_fixture: release-smoke
-goal_proof_scope: document-deliverable
+ goal_proof_scope: requested-full
 goal_expected_outcome: pass`;
-  let events = await cli(`Resume this same goal. Check the supplied contract, then dispatch one ${workerAgent} with this full ready-to-send context_digest and goal declaration. This is the direct one-worker fast path; no operator plan is needed. The Task prompt must contain exactly one acceptance header, one validation header, one source_manifest header and one project_root header. Preserve the structured declaration below verbatim and append only prose instructions. Worker must Read the absolute handoff path, wait for Read completion, then bind in a separate tool round. Use apply_patch on exactly child/result.txt to replace seed with recovered. Native tool CWD is ${project}; project_root for bind is ${join(project, 'child')}. Run exactly node child/validate.mjs from ${project}. No alternate editing tool or path, no commit. If admission or validation fails, stop and report it. Complete terminally only after canonical PASS.\n${declaration}`, sessionID);
+   let events = await cli(`Resume this same goal. User requirement: replace only child/result.txt seed with recovered and run node child/validate.mjs, accepting only canonical PASS. Follow the v0.10 Operator protocol, including begin_operator_proposal with bounded read/submission scope; dispatch its exact dogs-coordinator proposal Task; compare and approve the submitted proposal; then launch the operator run. This is one implementation unit, so the host may return a direct ${workerAgent} fast-path Task after approval: dispatch only that exact returned Task, never invent a worker Task or bypass approval. Keep the following goal declaration and context_digest verbatim in the accepted plan. The Task prompt must contain exactly one acceptance header, one validation header, one source_manifest header and one project_root header. Worker must Read the absolute handoff path, wait for Read completion, then bind in a separate tool round. Use apply_patch on exactly child/result.txt to replace seed with recovered. Native tool CWD is ${project}; project_root for bind is ${join(project, 'child')}. Run exactly node child/validate.mjs from ${project}. No alternate editing tool or path, no commit. If admission or validation fails, stop and report it. Complete terminally only after canonical PASS.\n${declaration}`, sessionID);
   let records = JSON.parse(await readFile(ledgerPath, 'utf8')).goal_events;
   let state = reduceGoalFlight(records);
   let workerStarted = releaseSmokeWorkerStarted(events, records, 'recovery');

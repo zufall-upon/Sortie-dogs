@@ -4,6 +4,7 @@ import { V010_RUNTIME_PROFILE as profile, profileAgent, renderProfileInstruction
 import { GOAL_DECLARATION_FORMAT } from "./core/goal-declaration-format.ts";
 import { STRATEGY_TRIGGERS, SOURCE_REVIEW_PHASES, SOURCE_REVIEW_RISK_TAGS } from "./core/consultation.ts";
 import { SCOUT_EVIDENCE_CODES } from "./core/scout-contract.ts";
+import { missionOperatorContent, missionCoordinatorContent, missionWorkerContent } from "./runtime-mission-assets.ts";
 
 const coordinator = profileAgent(profile, "dog-coordinator");
 const operator = profileAgent(profile, "dog-operator");
@@ -86,11 +87,11 @@ or reconstruct a generated path segment. For Read, copy the exact current projec
 repository-relative path. For Glob and Grep, prefer the repository-relative path accepted by the tool. If a
 permission rejection shows a different project root, do not repeat that path; retry once with the exact root.
 `;
-const coordinatorContent = `---
+export const legacyCoordinatorContent = `---
 description: Sortie-dogs ${V010_RUNTIME_ASSET_VERSION} primary dog-operator — strategic authority with a bounded operations delegate.
 mode: primary
-model: openai/gpt-6-luna
-variant: max
+model: openai/gpt-6-sol
+variant: xhigh
 permission:
   question: allow
   "${profile.toolPrefix}*": allow
@@ -346,10 +347,11 @@ runtime's ownership; do not restart it from a stale summary. The initial preview
 ${PREVIEW_PRESENTATION_POLICY}${PREVIEW_TERMINAL_REPORT_POLICY}
 `;
 
-const operatorContent = `---
+export const legacyOperatorContent = `---
 description: Sortie-dogs ${V010_RUNTIME_ASSET_VERSION} hidden dogs-coordinator operations delegate; no source or acceptance authority.
 mode: subagent
 hidden: true
+model: openai/gpt-6-sol#xhigh
 permission:
   edit: deny
   bash: deny
@@ -444,10 +446,18 @@ target; proving only the first target is a concrete asymmetry finding.
 export const runtimeAssets: readonly RuntimeAsset[] = Object.freeze([
   ...canonicalAssets.map((asset): RuntimeAsset => {
     const name = asset.name === "sortie" ? profile.commandName : profileAgent(profile, asset.name as Parameters<typeof profileAgent>[1]);
-    let content = asset.name === "dog-coordinator" ? coordinatorContent
+    let content = asset.name === "dog-coordinator" ? missionOperatorContent(profile, V010_RUNTIME_ASSET_VERSION) +
+        PREVIEW_PRESENTATION_POLICY.replaceAll("complete_operator", "complete_mission") + PREVIEW_TERMINAL_REPORT_POLICY.replaceAll("complete_operator", "complete_mission")
+      : asset.name === "dog-worker" ? missionWorkerContent(profile)
       : renderProfileInstructions(profile, asset.content).replaceAll(RUNTIME_ASSET_VERSION, V010_RUNTIME_ASSET_VERSION);
     if (asset.name !== "dog-coordinator" && asset.installPath.startsWith("agent/")) {
       content = content.replace("mode: subagent\n", "mode: subagent\nhidden: true\n");
+    }
+    if (["dog-worker", "dog-luna-worker", "dog-scout"].includes(asset.name)) {
+      content = content.replace("mode: subagent\n", "mode: subagent\nmodel: openai/gpt-6-luna-fast#max\n");
+    }
+    if (["dog-reviewer", "dog-advisor"].includes(asset.name)) {
+      content = content.replace("mode: subagent\n", "mode: subagent\nmodel: openai/gpt-6-sol#xhigh\n");
     }
     if (asset.name === "dog-worker" || asset.name === "dog-luna-worker") {
       content = content.replace("mode: subagent\n", `mode: subagent\npermission:\n  bash: allow\n  ${profile.toolPrefix}bind_write_gate: allow\n  ${profile.toolPrefix}release_write_gate: allow\ntools:\n  "sortie_*": false\n  ${profile.toolPrefix}bind_write_gate: true\n  ${profile.toolPrefix}release_write_gate: true\n`);
@@ -460,5 +470,5 @@ export const runtimeAssets: readonly RuntimeAsset[] = Object.freeze([
     }
     return { name, version: V010_RUNTIME_ASSET_VERSION, installPath: `${asset.installPath.split("/")[0]}/${name}.md`, content: content + COMMUNICATION_LANGUAGE_POLICY };
   }),
-  { name: operator, version: V010_RUNTIME_ASSET_VERSION, installPath: `agent/${operator}.md`, content: operatorContent + COMMUNICATION_LANGUAGE_POLICY } satisfies RuntimeAsset,
+  { name: operator, version: V010_RUNTIME_ASSET_VERSION, installPath: `agent/${operator}.md`, content: missionCoordinatorContent(profile, V010_RUNTIME_ASSET_VERSION) + COMMUNICATION_LANGUAGE_POLICY } satisfies RuntimeAsset,
 ]);
