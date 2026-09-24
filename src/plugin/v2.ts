@@ -204,8 +204,22 @@ function legacyClient(context: OpenCodeV2Context): JsonObject {
 }
 
 function plainSchema(value: unknown): JsonObject {
-  if (!record(value)) return { type: "string" };
-  return Object.fromEntries(Object.entries(value).filter(([key, item]) => key !== "x-sortie-optional" && typeof item !== "function"));
+  const source = record(value) ? value : { type: "string" };
+  const schema: JsonObject = Object.fromEntries(Object.entries(source).filter(([key, item]) =>
+    key !== "x-sortie-optional" && item !== null && item !== undefined && typeof item !== "function"));
+  // The native V2 provider serializes absent size limits as null for custom tools. Its
+  // function-schema validator rejects those limits before even a non-Sortie agent can work.
+  if (schema.type === "string") {
+    schema.minLength ??= 0;
+    schema.maxLength ??= 65535;
+  } else if (schema.type === "array") {
+    schema.minItems ??= 0;
+    schema.maxItems ??= 4096;
+    schema.items = plainSchema(schema.items);
+  } else if (schema.type === "object" && record(schema.properties)) {
+    schema.properties = Object.fromEntries(Object.entries(schema.properties).map(([key, item]) => [key, plainSchema(item)]));
+  }
+  return schema;
 }
 
 function toolSchema(args: Record<string, unknown>): JsonObject {
@@ -427,10 +441,11 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks)
         "dog-luna-worker-v010": ["bind_write_gate", "release_write_gate"],
         "dog-reviewer-v010": [], "dog-scout-v010": [], "dog-advisor-v010": [],
       };
-      const allowed = visible[String(event.agent)];
-      if (allowed) for (const key of Object.keys(event.tools)) {
-        if (key.startsWith("sortie_v010_") && !allowed.includes(key.slice("sortie_v010_".length))) delete event.tools[key];
-      }
+       const allowed = visible[String(event.agent)];
+       for (const key of Object.keys(event.tools)) {
+         if (!key.startsWith("sortie_")) continue;
+         if (!allowed || !key.startsWith("sortie_v010_") || !allowed.includes(key.slice("sortie_v010_".length))) delete event.tools[key];
+       }
     }
   });
   if (hooks["experimental.session.compacting"]) await context.session.hook("compaction", async event => {

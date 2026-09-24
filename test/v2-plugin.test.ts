@@ -453,6 +453,27 @@ test("actual v0.10 tools preserve required, optional, and described schemas thro
     assert.match(revise.input.properties.revision_json!.description!, /No reads or execution units are granted or restored/);
     assert.match(begin.input.properties.intent_json!.description!, /intent_json must encode exactly this JSON object/u);
     assert.deepEqual(check.input.required, ["handoff_path"]);
+    const expand = tools.find(tool => tool.name === "sortie_v010_expand_unit")!;
+    const shape = expand.input.properties.paths as { minItems: number; maxItems: number; items: { minLength: number; maxLength: number } };
+    assert.deepEqual([shape.minItems, shape.maxItems, shape.items.minLength, shape.items.maxLength], [0, 4096, 0, 65535]);
+    for (const tool of tools) {
+      const numeric = (value: unknown): void => {
+        if (!value || typeof value !== "object") return;
+        for (const [key, entry] of Object.entries(value)) {
+          if (["minLength", "maxLength", "minItems", "maxItems"].includes(key)) assert.ok(Number.isInteger(entry), `${tool.name}.${key} must be an integer`);
+          numeric(entry);
+        }
+      };
+      numeric(tool.input);
+    }
+    const modelTools = Object.fromEntries(tools.map(tool => [tool.name, tool]));
+    modelTools.read = { name: "read" };
+    await fixture.sessionHooks.get("context")!({ sessionID: "ordinary-build", agent: "build", system: [], tools: modelTools });
+    assert.deepEqual(Object.keys(modelTools), ["read"], "non-Sortie agents cannot receive registered Sortie tool schemas");
+    const missionTools = Object.fromEntries(tools.map(tool => [tool.name, tool]));
+    await fixture.sessionHooks.get("context")!({ sessionID: "mission-root", agent: "dog-operator", system: [], tools: missionTools });
+    assert.ok(missionTools.sortie_v010_expand_unit);
+    assert.equal(missionTools.sortie_v010_approve_operator_proposal, undefined);
   } finally {
     cleanup?.();
   }
