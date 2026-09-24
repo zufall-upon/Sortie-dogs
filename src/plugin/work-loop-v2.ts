@@ -54,6 +54,7 @@ export function createUserProxyPlugin() {
       const controllerRoots = new Set<string>(); let observingControllers = false;
       const nativeCommands = new Map<string, { root: string; id: string; file: string }>();
       const childTurns = new Map<string, number>();
+      const inFlightRequests = new Set<string>(), localYields = new Set<string>();
       const launchPermissions = new Map<string, ObjectValue[]>();
       await context.permission.hook("evaluate", async event => {
         // Observe the native permission decision without changing it. Keeping the
@@ -77,6 +78,11 @@ export function createUserProxyPlugin() {
       };
       const requireRoot = async (id: string) => {
         if (await root(id) !== id) throw new Error("work-operator-only");
+      };
+      const observePrimaryRequest = async (event: ObjectValue) => {
+        if (event.kind && event.kind !== "primary") return;
+        const id = String(event.sessionID), session = await info(id);
+        if ([primary, worker].includes(session.agent)) inFlightRequests.add(id);
       };
       async function history(id: string): Promise<ObjectValue[]> {
         if (!context.message) return (await context.session.context({ sessionID: id }) as unknown[]).filter(isRecord);
@@ -301,6 +307,7 @@ export function createUserProxyPlugin() {
             // fixed in-flight grace as the child, not a fresh 30s pretool cutoff.
             const limit = !work || ["completed", "cancelled"].includes(work.phase) ? operatorMs : planningMs;
             if (Date.now() - since < limit + Math.min(10000, limit / 4)) { deferred = true; return; }
+            if (inFlightRequests.has(id)) { deferred = true; return; }
             if (native.time?.idle >= since || work?.userStopped || work?.phase === "running" || work?.phase === "waiting" || work?.progress?.active.length || work?.phase === "cancelled") return;
             const progress = await loop.progress(id);
             if (!progress) return;
@@ -351,14 +358,16 @@ export function createUserProxyPlugin() {
                 description: `🐾 ${progress.phase} · ${Math.floor(progress.elapsed_ms / 1000)}s · ${progress.summary}`,
                 sortie_progress: progress });
               const reason = current.phase === "running" ? progressLimit(current.progress, Date.now(), planningMs, discoveryCalls) : null;
-              // Prefer the next native request boundary: cutting a recently submitted
-              // response discards useful reasoning and can lose provider usage. This is
-              // one fixed grace beyond the cumulative deadline, never a reset by activity.
+              // The provider owns an in-flight response's timeout. The review clock
+              // must not discard its reasoning every minute. Review at the next
+              // request boundary; retain the timer only for a stalled native handoff.
               const turn = current.child ? childTurns.get(current.child) : undefined;
               const deadline = Math.max(current.progress.nextInterventionAt ?? 0,
                 (current.progress.reviewedAt ?? current.progress.startedAt) + planningMs);
               const grace = Math.min(10_000, planningMs / 4);
-              if (reason && (turn === undefined || Date.now() >= deadline + grace || Date.now() - turn >= planningMs) && await loop.stall(id, work.callID!, reason)) {
+              if (reason && !inFlightRequests.has(current.child ?? "") && !current.progress.active.length &&
+                  Date.now() - current.progress.lastActionAt >= planningMs &&
+                  (turn === undefined || Date.now() >= deadline + grace || Date.now() - turn >= planningMs) && await loop.stall(id, work.callID!, reason)) {
                 // Yield is internal; the real foreground return wakes the operator after child settlement.
                 if (current.child) await context.session.interrupt({ sessionID: current.child, resume: false });
                 await report({ ...metadata, ...(current.child ? { sessionID: current.child } : {}),
@@ -377,8 +386,20 @@ export function createUserProxyPlugin() {
                 metadata = { ...metadata, ...update }; await publish();
               } });
               return { ...result, metadata: { ...metadata, ...(isRecord(result.metadata) ? result.metadata : {}),
-                sortie_progress: (await loop.current(id))?.progress ? progressView((await loop.current(id))!.progress!) : null } };
-             } finally { ended = true; clearInterval(timer); monitors.delete(timer); const current = await loop.current(id); if (current?.child) childTurns.delete(current.child); await pending; }
+                 sortie_progress: (await loop.current(id))?.progress ? progressView((await loop.current(id))!.progress!) : null } };
+            } catch (error) {
+              const current = await loop.current(id);
+              if (!localYields.has(work.callID!) || current?.phase !== "yielded" || current.callID !== work.callID ||
+                  current.userStopped || stoppedByUser.has(id) || (execution.signal as AbortSignal | undefined)?.aborted) throw error;
+              // Only our unsent-request checkpoint is a normal control return.
+              // Native failures, user cancellation and failed checks stay failures.
+              return { content: [{ type: "text", text: JSON.stringify({ status: "checkpoint", work_id: current.id,
+                reason: current.progress?.stopped?.reason, accepted: false,
+                next: "Inspect work_status and the actual results, then continue the same child with a concrete correction or review completed scope. This checkpoint is not task completion." }) }],
+                metadata: { ...metadata, status: "completed", sessionID: current.child, sortie_checkpoint: true,
+                  description: "🐾 進捗確認 — 同じ作業を継続", sortie_progress: current.progress ? progressView(current.progress) : null } };
+            } finally { ended = true; clearInterval(timer); monitors.delete(timer); localYields.delete(work.callID!);
+              const current = await loop.current(id); if (current?.child) { childTurns.delete(current.child); inFlightRequests.delete(current.child); } await pending; }
           };
         });
         const add = (name: string, description: string, input: ObjectValue,
@@ -540,6 +561,7 @@ export function createUserProxyPlugin() {
           return;
         }
         const owner = await root(id);
+        inFlightRequests.delete(id);
         if (id === owner) thinking.delete(id);
         if (session.agent === worker) {
           childTurns.delete(id);
@@ -584,12 +606,14 @@ export function createUserProxyPlugin() {
           throw new Error("Sortie v0.11 requires SOL6 or Luna6. Set the selected session and auxiliary compaction/title agents to these models; reviewer/advisor settings are independent.");
         }
         const owner = await root(String(event.sessionID)), work = await loop.current(owner);
+        if (event.kind !== "auxiliary") inFlightRequests.delete(String(event.sessionID));
         if (session.agent === worker && event.kind !== "auxiliary" && work?.phase === "running" && work.callID && work.progress) {
           const reason = progressLimit(work.progress, Date.now(), planningMs, discoveryCalls);
           if (reason && await loop.stall(owner, work.callID, reason)) {
             // No provider request has been sent for this step. The native failed
             // return wakes the operator; it reconciles and continues the SAME child.
             childTurns.delete(String(event.sessionID));
+            localYields.add(work.callID);
             throw new Error(`work-pacing-yield-before-request: ${reason}`);
           }
           childTurns.set(String(event.sessionID), Date.now());
@@ -680,6 +704,7 @@ export function createUserProxyPlugin() {
         for (const work of works) await retainUsage(work, await costs(work));
       };
       await context.session.hook("http.request", async event => {
+        if (event.request instanceof Request && event.request.method === "POST") await observePrimaryRequest(event);
         const entry = event.request instanceof Request && event.request.method === "POST" ? await beginAuxiliary(event) : undefined;
         if (entry && event.request instanceof Request) auxiliaryRequests.set(event.request, entry);
         if (!await fastRequest(event) || !(event.request instanceof Request) || event.request.method !== "POST") return;
@@ -696,7 +721,9 @@ export function createUserProxyPlugin() {
           .catch(error => console.warn("[sortie-dogs-v011] auxiliary usage", error));
       });
       await context.session.hook("experimental.ws.send", async event => {
-        if (typeof event.frame === "string" && JSON.parse(event.frame).type === "response.create") await beginAuxiliary(event);
+        if (typeof event.frame === "string" && JSON.parse(event.frame).type === "response.create") {
+          await observePrimaryRequest(event); await beginAuxiliary(event);
+        }
         if (!await fastRequest(event) || typeof event.frame !== "string") return;
         const frame = JSON.parse(event.frame);
         if (frame.type !== "response.create") return;
@@ -751,6 +778,7 @@ export function createUserProxyPlugin() {
           const id = isRecord(event.data) ? event.data.sessionID : undefined;
           if (typeof id !== "string") continue;
           if (["session.execution.succeeded", "session.idle"].includes(String(event.type))) {
+            inFlightRequests.delete(id);
             thinking.delete(id);
             try {
               const session = await info(id);
@@ -762,6 +790,7 @@ export function createUserProxyPlugin() {
             continue;
           }
           if (!["session.execution.interrupted", "session.execution.failed"].includes(String(event.type))) continue;
+          inFlightRequests.delete(id);
           if (internalStops.delete(id)) continue;
           try {
             const session = await info(id);

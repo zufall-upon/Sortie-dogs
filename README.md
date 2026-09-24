@@ -69,6 +69,21 @@ is an internal implementation child. The default V2 package export and
 
 ## How v0.11 works
 
+### Feedback and supervision
+
+Send corrections in the same conversation. The original request and subsequent
+instructions are retained across interruptions and compaction and are delivered
+to the same implementation child. The operator inspects real results before
+continuing or accepting the work. Native controller ledgers can keep long jobs
+running and return control to that operator when they finish.
+
+Progress checkpoints wait for a native response boundary; an in-flight provider
+response keeps its native timeout. A checkpoint does not mean the user's task is
+complete. Required checks, attempts and known/unknown costs remain cumulative.
+Feedback retention is per job: the v0.11 loop does not automatically apply the
+v0.10 reflection policy to future jobs. Reproducible product feedback is recorded
+in [the v0.11.2 dogfooding incident](docs/feedback/v0112-redispatch-loop.md).
+
 1. **Keep the original request.** The host retains the user's words, attachments,
    selected skills and subsequent instructions in durable plugin storage.
 2. **Delegate practical work.** The operator adds short guidance and dispatches
