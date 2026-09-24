@@ -8,16 +8,16 @@ import { installedFixture, startV2ReleaseServer, command } from './release-cli.m
 import { estimateModelUsageCost } from '../dist/plugin/model-cost.js';
 
 const database = () => new DatabaseSync(join(homedir(), '.local/share/opencode/opencode.db'), { readOnly: true });
-export function observeMissionCLI(project, since = 0) {
+export function observeMissionCLI(project, since = 0, rootAgent = 'dog-operator') {
   const db = database();
   try {
     const sessions = db.prepare('select id, parent_id, agent, time_created from session_v2 where directory = ? and time_created >= ? order by time_created').all(project, since);
-    const roots = sessions.filter(session => !session.parent_id && session.agent === 'dog-operator');
+    const roots = sessions.filter(session => !session.parent_id && session.agent === rootAgent);
     const root = roots.at(-1);
     const descendants = new Set(root ? [root.id] : []);
     for (const session of sessions) if (descendants.has(session.parent_id)) descendants.add(session.id);
     let usd = 0, unpriced = 0;
-    const errors = [], models = [], tools = [];
+    const errors = [], models = [], tools = [], responses = [];
     for (const session of sessions.filter(item => descendants.has(item.id))) {
       let first;
       for (const message of db.prepare('select id, type, data from session_message where session_id = ? order by seq').all(session.id)) {
@@ -25,6 +25,9 @@ export function observeMissionCLI(project, since = 0) {
         const data = JSON.parse(message.data), tokens = data.tokens;
         first ??= { sessionID: session.id, parentID: session.parent_id, agent: session.agent, model: data.model,
           started_ms: data.time?.created - root.time_created };
+        if (data.finish === 'stop' && (data.content ?? []).some(part => part.type === 'text' && part.text?.trim())) {
+          responses.push({ sessionID: session.id, agent: session.agent, finished_ms: data.time?.completed - root.time_created });
+        }
         const price = estimateModelUsageCost({ providerID: data.model?.providerID, modelID: data.model?.id,
           uncachedInputTokens: tokens?.input, cacheReadTokens: tokens?.cache?.read, cacheWriteTokens: tokens?.cache?.write,
           outputTokens: tokens?.output, reasoningTokens: tokens?.reasoning });
@@ -38,7 +41,7 @@ export function observeMissionCLI(project, since = 0) {
       }
       if (first) models.push(first);
     }
-    return { root: root?.id, models, tools, errors, priced_usd: usd, unpriced_requests: unpriced };
+    return { root: root?.id, models, tools, responses, errors, priced_usd: usd, unpriced_requests: unpriced };
   } finally { db.close(); }
 }
 
@@ -83,8 +86,10 @@ export async function probe(tgz, output, { mode = 'start', prompt, instance, tim
   });
   const server = await startV2ReleaseServer(project, env);
   const since = Date.now();
-  const request = prompt ?? 'result.txt の seed を recovered に置換して。末尾改行は維持。検証は node check.mjs。check.mjs と設定は変更しない。単純な1ユニット作業として実装して。';
-  const child = spawn('opencode', ['run', '--server', server.url, '--format', 'json', '--agent', 'dog-operator', '--model', 'openai/gpt-6-sol#xhigh', request], {
+  const buildStart = mode === 'build-start';
+  const rootAgent = buildStart ? 'build' : 'dog-operator';
+  const request = prompt ?? (buildStart ? 'Reply with just: ready' : 'result.txt の seed を recovered に置換して。末尾改行は維持。検証は node check.mjs。check.mjs と設定は変更しない。単純な1ユニット作業として実装して。');
+  const child = spawn('opencode', ['run', '--server', server.url, '--format', 'json', '--agent', rootAgent, '--model', 'openai/gpt-6-sol#xhigh', request], {
     cwd: project, env: { ...server.env, PWD: project }, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
   });
   let stdout = '', stderr = '', stopped = false, stopping, cutoff;
@@ -92,22 +97,23 @@ export async function probe(tgz, output, { mode = 'start', prompt, instance, tim
   child.stderr.on('data', bytes => { stderr += bytes; });
   const stop = reason => {
     if (stopped) return;
-    cutoff = observeMissionCLI(project, since);
+    cutoff = observeMissionCLI(project, since, rootAgent);
     stopped = reason;
     stopping = server.stop();
     try { process.kill(-child.pid, 'SIGTERM'); } catch { /* already exited */ }
   };
   const timer = setInterval(() => {
-    const observed = observeMissionCLI(project, since);
+    const observed = observeMissionCLI(project, since, rootAgent);
     if (observed.priced_usd >= capUSD) stop('budget');
     else if (observed.errors.length) stop('tool-error');
     else if (mode === 'start' && observed.models.some(item => item.agent === 'dog-worker-v010')) stop('worker-started');
+    else if (buildStart && observed.responses.some(item => item.agent === 'build')) stop('build-responded');
     else if (Date.now() - since > timeoutSeconds * 1000) stop('timeout');
   }, 250);
   let code;
   try { code = await new Promise((done, reject) => { child.once('error', reject); child.once('close', done); }); }
   finally { clearInterval(timer); await stopping; await server.stop(); }
-  const observed = observeMissionCLI(project, since);
+  const observed = observeMissionCLI(project, since, rootAgent);
   const state = async area => {
     if (!observed.root) return null;
     try { return JSON.parse(await readFile(join(project, fixture.runtime.stateDirectory, area,
@@ -122,7 +128,10 @@ export async function probe(tgz, output, { mode = 'start', prompt, instance, tim
     review: mission?.review ? { verdict: mission.review.verdict, child: mission.review.child ?? null } : null,
     candidate_sha256: createHash('sha256').update(await readFile(tgz)).digest('hex') };
   const worker = result.models.find(item => item.agent === 'dog-worker-v010');
-  result.accepted = !result.errors.length && worker?.model?.id === 'gpt-6-luna-fast' && worker.model.variant === 'max' &&
+  result.accepted = buildStart ? !result.errors.length && (stopped === 'build-responded' || (!stopped && code === 0)) &&
+    result.responses.some(item => item.agent === 'build') &&
+    result.models.some(item => item.agent === 'build' && item.model?.id === 'gpt-6-sol') :
+    !result.errors.length && worker?.model?.id === 'gpt-6-luna-fast' && worker.model.variant === 'max' &&
     worker.started_ms <= (instance ? 180_000 : 60_000) && (mode === 'start' ? stopped === 'worker-started'
       : !stopped && code === 0 && result.mission_phase === 'completed' && result.receipt_status === 'succeeded');
   await writeFile(join(run, 'cli.stdout.jsonl'), stdout);

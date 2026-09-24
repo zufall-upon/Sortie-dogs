@@ -28,7 +28,7 @@ implementation, validation, review, and model routing.
 Guides: [日本語](docs/guide-ja.md) · [简体中文](docs/guide-zh-CN.md) ·
 [Testing](docs/testing.md) · [CLI testing](docs/cli-testing.md)
 
-> **Beta:** v0.12.0 builds on the v0.10.23 execution engine. Runtime behavior,
+> **Beta:** v0.12.1 builds on the v0.10.23 execution engine. Runtime behavior,
 > configuration, and generated assets may still change before 1.0.
 
 ## Quick start
