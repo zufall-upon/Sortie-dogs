@@ -452,6 +452,9 @@ export class WorkLoop {
         if (!active) return;
         progress.active = progress.active.filter(item => item.id !== activity.id);
         progress.last = { ...active, ...result };
+        // Activity is visible liveness, not reviewed progress or accepted work.
+        // Keep the original request and review clocks unchanged.
+        progress.lastActionAt = Date.now();
         if (result.status === "completed" && activity.tool === "patch") progress.edits++;
         if (result.status === "completed" && result.exit !== null && activity.tool === "shell") this.evidence(work,
           { id: active.id, kind: "command", at: Date.now(), detail: `${active.detail} (exit ${result.exit})` });

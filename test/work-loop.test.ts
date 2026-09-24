@@ -909,6 +909,78 @@ test("v0.11 live native commands outlast planning limits, report exits and do no
   } finally { cleanup(); }
 }));
 
+test("v0.11 supervision lets an in-flight provider response finish its edits and required check", () => fixture(async directory => {
+  const f = nativeFixture(directory), store = f.context.storage;
+  Object.assign(f.context.options!, { maxPlanningMs: 50, progressIntervalMs: 10 });
+  let interrupted = false, check: any;
+  f.context.session.interrupt = async ({ sessionID }: any) => { f.interrupts.push(sessionID); interrupted = true; };
+  f.tools.set("subagent", { execute: async (input: any) => {
+    await f.hooks.get("session:prompt")({ sessionID: "child", prompt: { text: input.prompt } });
+    await f.hooks.get("session:context")({ sessionID: "child", system: [], options: {}, tools: {} });
+    await f.hooks.get("session:http.request")({ sessionID: "child", kind: "primary", model: V011_ROUTES.worker,
+      request: new Request("https://example.invalid/responses", { method: "POST", body: "{}" }) });
+    // The native provider owns its timeout. A pacing deadline must not discard a
+    // still-generating response and repeatedly ask the same child to think again.
+    await new Promise(resolve => setTimeout(resolve, 180));
+    if (interrupted) return { content: "Provider response discarded by watchdog", metadata: { sessionID: "child" } };
+    await f.hooks.get("tool:execute.before")({ sessionID: "child", id: "edit", tool: "patch", input: {} });
+    await completeFiles(directory);
+    await f.hooks.get("tool:execute.after")({ sessionID: "child", id: "edit", tool: "patch", status: "completed", result: {} });
+    await f.hooks.get("tool:execute.before")({ sessionID: "child", id: "check", tool: "sortie_v011_check", input: { command: "node check.mjs" } });
+    check = await f.call("check", { command: "node check.mjs" }, "child");
+    await f.hooks.get("tool:execute.after")({ sessionID: "child", id: "check", tool: "sortie_v011_check", status: "completed", result: {} });
+    return { content: "Both requested files and actual behavior verified", metadata: { sessionID: "child" } };
+  } });
+  const cleanup = await createUserProxyPlugin().setup(f.context);
+  try {
+    await f.hooks.get("session:prompt")({ sessionID: "root", messageID: "user", prompt: { text: "Complete both files and verify their behavior." } });
+    const ready = await f.call("start_work");
+    await f.hooks.get("tool:execute.before")({ sessionID: "root", id: "dispatch", tool: "subagent", input: ready.task });
+    const result = await f.tools.get("subagent").execute(ready.task, { sessionID: "root", id: "dispatch" });
+    await f.hooks.get("tool:execute.after")({ sessionID: "root", id: "dispatch", tool: "subagent", status: "completed", result });
+    assert.deepEqual(f.interrupts, []);
+    assert.equal(check.exit, 0);
+    const status = await f.call("work_status");
+    assert.equal(status.attempts, 1);
+    assert.equal((await new WorkLoop(directory, store).current("root"))!.progress!.startedAt, ready.progress.startedAt);
+    const accepted = await f.call("review_work", { decision: "accept", assessment: "Both files match the request and the unchanged behavior check passed", checks: [check.id] });
+    assert.equal(accepted.receipt.status, "succeeded");
+  } finally { cleanup(); }
+}));
+
+test("v0.11 a pacing checkpoint returns control without presenting native failure or accepting the task", () => fixture(async directory => {
+  const f = nativeFixture(directory);
+  Object.assign(f.context.options!, { maxPlanningMs: 50, progressIntervalMs: 10 });
+  f.tools.set("subagent", { execute: async (input: any) => {
+    await f.hooks.get("session:prompt")({ sessionID: "child", prompt: { text: input.prompt } });
+    await f.hooks.get("session:context")({ sessionID: "child", system: [], options: {}, tools: {} });
+    await f.hooks.get("session:experimental.ws.send")({ sessionID: "child", kind: "primary", model: V011_ROUTES.worker,
+      frame: JSON.stringify({ type: "response.create", model: "gpt-6-luna" }) });
+    await new Promise(resolve => setTimeout(resolve, 100));
+    await f.hooks.get("session:context")({ sessionID: "child", system: [], options: {}, tools: {} });
+    throw Error("Checkpoint should have returned before another model request");
+  } });
+  const cleanup = await createUserProxyPlugin().setup(f.context);
+  try {
+    await f.hooks.get("session:prompt")({ sessionID: "root", messageID: "user", prompt: { text: "Complete both files; preserve the failing checks." } });
+    const ready = await f.call("start_work");
+    await f.hooks.get("tool:execute.before")({ sessionID: "root", id: "dispatch", tool: "subagent", input: ready.task });
+    const result = await f.tools.get("subagent").execute(ready.task, { sessionID: "root", id: "dispatch" });
+    await f.hooks.get("tool:execute.after")({ sessionID: "root", id: "dispatch", tool: "subagent", status: "completed", result });
+    assert.equal(result.metadata.sortie_checkpoint, true);
+    assert.equal(result.output.sessionID, "child");
+    assert.equal(result.output.status, "completed");
+    assert.equal(JSON.parse(result.output.output).status, "checkpoint");
+    assert.equal(JSON.parse(result.output.output).accepted, false);
+    assert.deepEqual(f.interrupts, []);
+    const status = await f.call("work_status");
+    assert.equal(status.phase, "yielded"); assert.equal(status.attempts, 1);
+    assert.equal(status.child_session_id, "child"); assert.equal(status.receipt, undefined);
+    const resumed = await f.call("start_work", { instructions: "Run the existing failing reproduction and finish both files." });
+    assert.equal(resumed.task.sessionID, "child");
+  } finally { cleanup(); }
+}));
+
 test("v0.11 recovers missed native child completion after a cold plugin restart", () => fixture(async directory => {
   const store = storage(), first = nativeFixture(directory, store);
   const cleanup = await createUserProxyPlugin().setup(first.context);

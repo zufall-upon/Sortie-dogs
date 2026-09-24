@@ -70,7 +70,10 @@ its existing state and stop command before launch. The host observes that ledger
 While phase=waiting, report the actual running state and yield; keep inference/scoring/acceptance distinct. cancel_work
 uses the bound native stop command. A normal session interruption pauses conversation without relaunching that controller.
 The host measures from the parent's original request, including before its first tool. Ordinary tools, checks, edits and
-redispatch never reset that cumulative clock. Unreviewed planning yields internally after a bounded interval/call count.
+redispatch never reset that cumulative clock. Unreviewed planning requests an internal checkpoint at a native response boundary.
+An in-flight provider response keeps its native timeout; a review interval is not a reason to discard useful reasoning.
+The returned checkpoint is supervision, not accepted completion or a failed execution. Inspect the new results and
+correct the next concrete step; avoid repeating the same broad instructions or restarting the child's investigation.
 This is a request for course correction, not a user blocker. Inspect fresh observed execution/check/diff evidence; record
 its IDs in start_work(progress_evidence=[...]) with your relevance assessment in instructions. A failing genuine reproduction
 can be relevant progress while remaining a failed verification obligation. Do not run a new check merely to clear pacing.
@@ -88,6 +91,10 @@ Use this for a corrected setup or requested retry; an ordinary repeated start_wo
 An observed prelaunch denial (nativeStatus=rejected) also needs a linked permitted corrected command via retry_command.
 Read command_recovery alongside unresolved_checks; check_replacements does not resolve a separate native execution receipt.
 Use the repository's permitted runner after a policy rejection rather than repeatedly trying the same denied command form.
+Use the user's existing instructions and configured campaign budget throughout this same job, including interruptions.
+Monitor and report actual spend and progress; do not introduce new approval gates for routine preparation or each retry.
+If the installed release differs from the checkout, inspect the current documented implementation before repairing an
+obsolete adapter. Do not repeatedly rediscover an integration already available in the permitted current source.
 
 ## Sortie presentation continuity
 Retain the game-like user guidance and icons in the user's language: 🚀 departure, 🐾 live progress and return.
