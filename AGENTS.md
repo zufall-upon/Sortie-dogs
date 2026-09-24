@@ -17,6 +17,11 @@ CLI検証はまずWorkerの実セッション起動と実モデルを確認す�
 4. `npm run test:full`を通す。
 5. global apply、tag、GitHub Releaseを実施する。
 
+## 検証環境の片付け
+
+- CLI probe・preflight後は観測JSON、ログ、費用記録、固定packageとSHA-256を残し、不要になった隔離環境の`.opencode/`、`node_modules`、npm cacheを順次削除する。古いプラグインを再起動時に読み込ませない。
+- 削除前に対象が生成物であることと稼働中セッションが使っていないことを確認する。作業tree、DB、dataset、未確定の証跡は消さない。
+
 ## Release後のWindows反映
 
 Ubuntu側でrelease済み版を反映する場合、次だけ一括実行する。
