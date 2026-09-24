@@ -584,6 +584,42 @@ test("only the isolated preview fixture enables two-level native subagents", () 
   assert.equal("plugin" in fixtureOpenCodeConfig("/tmp/stable.js", STABLE_RUNTIME_PROFILE, "2.0.14"), false);
 });
 
+test("cold plugin reconnects only a terminal native Coordinator Task to the same mission", async () => fixture(async root => {
+  const identities: Record<string, { agent: string; parentID?: string }> = {
+    root: { agent: "dog-operator" }, coordinator: { agent: "dogs-coordinator", parentID: "root" },
+  };
+  const hostMessages: Record<string, Record<string, unknown>[]> = { root: [] };
+  const create = () => SortieDogsV010Plugin({ directory: root, client: { session: {
+    get: async ({ path }: { path: { id: string } }) => ({ data: identities[path.id] }),
+    messages: async ({ path }: { path: { id: string } }) => ({ data: hostMessages[path.id] ?? [] }),
+  } } } as never);
+  const first = await create();
+  await first["chat.message"]!({ sessionID: "root", messageID: "user-1", agent: "dog-operator" }, {
+    message: { id: "user-1", agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-6-luna-fast" } },
+    parts: [{ type: "text", text: "Fix the requested issue, keeping requirements." }],
+  });
+  const started = JSON.parse(await first.tool!.sortie_v010_start_mission.execute({ requirements: ["Fix issue", "Keep requirements"] }, { sessionID: "root" }));
+  await first["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "first-task" }, { args: structuredClone(started.task) });
+  await first["chat.message"]!({ sessionID: "coordinator", messageID: "child-1", agent: "dogs-coordinator" }, {
+    message: { id: "child-1", agent: "dogs-coordinator", model: { providerID: "openai", modelID: "gpt-6-sol" } },
+    parts: [{ type: "text", text: started.task.prompt }],
+  });
+  const cold = await create();
+  const pending = JSON.parse(await cold.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
+  assert.equal(pending.coordinator_session_id, "coordinator");
+  assert.equal(pending.task, undefined, "an unproven active Task cannot be redispatched");
+  hostMessages.root!.push({ info: { role: "assistant" }, parts: [{ type: "tool", tool: "task", callID: "first-task",
+    state: { status: "error", input: started.task, error: "Subagent depth limit reached (1)." } }] });
+  const recovered = JSON.parse(await cold.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
+  assert.equal(recovered.mission_id, started.mission_id);
+  assert.deepEqual(recovered.requirements, started.requirements);
+  assert.equal(recovered.task.task_id, "coordinator");
+  await cold["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "second-task" },
+    { args: structuredClone(recovered.task) });
+  const resumed = JSON.parse(await cold.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
+  assert.equal(resumed.task, undefined, "a second active Task cannot be redispatched");
+}));
+
 test("release smoke accepts plain and branded OpenCode version output", () => {
   assert.equal(parseOpenCodeVersion("2.0.11\n"), "2.0.11");
   assert.equal(parseOpenCodeVersion("opencode v2.0.14\n"), "2.0.14");
