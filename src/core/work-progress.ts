@@ -1,28 +1,40 @@
 /** Host observations, not model-authored completion claims. */
 export interface WorkActivity {
-  id: string; tool: string; detail: string; startedAt: number;
+  id: string; tool: string; detail: string; startedAt: number; actor?: string;
+}
+export interface WorkEvidence {
+  id: string; kind: "command" | "check" | "diff"; at: number; tools: number; detail: string;
+}
+export interface WorkIntervention {
+  id: string; at: number; reason: string; resumedAt?: number; resolvedAt?: number; evidence?: string[];
 }
 export interface WorkProgress {
   startedAt: number; lastActionAt: number; inspections: number; tools: number;
   commands: number; edits: number; active: WorkActivity[];
   last?: WorkActivity & { status: string; exit: number | null };
   stopped?: { at: number; reason: string };
+  reviewedAt?: number; reviewedTools?: number; nextInterventionAt?: number;
+  operatorNudgedAt?: number;
+  evidence?: WorkEvidence[]; interventions?: WorkIntervention[];
 }
-export const WORK_PROGRESS_LIMITS = { idleMs: 180_000, inspections: 12, intervalMs: 5_000 } as const;
+export const WORK_PROGRESS_LIMITS = { idleMs: 60_000, operatorMs: 30_000, inspections: 12, intervalMs: 1_000 } as const;
 export const isWorkAction = (tool: string) => ["shell", "patch", "sortie_v011_check"].includes(tool);
 export function newWorkProgress(now = Date.now()): WorkProgress {
-  return { startedAt: now, lastActionAt: now, inspections: 0, tools: 0, commands: 0, edits: 0, active: [] };
+  return { startedAt: now, lastActionAt: now, inspections: 0, tools: 0, commands: 0, edits: 0, active: [],
+    reviewedAt: now, reviewedTools: 0, evidence: [], interventions: [] };
 }
 export function progressLimit(progress: WorkProgress, now: number, idleMs: number, inspections: number): string | null {
-  // A running command/test has its native deadline; it is not model planning time.
+  // Process protection is not progress certification. Its own finite deadline still applies.
   if (progress.active.some(item => isWorkAction(item.tool))) return null;
-  if (progress.inspections >= inspections) return `discovery-limit: ${progress.inspections} inspection calls without an executable step`;
-  if (now - progress.lastActionAt >= idleMs) return `planning-timeout: no executable step for ${Math.floor((now - progress.lastActionAt) / 1000)}s`;
+  if (now < (progress.nextInterventionAt ?? 0)) return null;
+  const calls = progress.tools - (progress.reviewedTools ?? 0);
+  if (calls >= inspections) return `discovery-limit: ${calls} calls without operator-confirmed relevant evidence`;
+  if (now - (progress.reviewedAt ?? progress.startedAt) >= idleMs) return `planning-timeout: no operator-confirmed result for ${Math.floor((now - (progress.reviewedAt ?? progress.startedAt)) / 1000)}s`;
   return null;
 }
 export function progressView(progress: WorkProgress, now = Date.now()) {
   const active = progress.active.at(-1);
-  const phase = progress.stopped ? "blocked" : active ? isWorkAction(active.tool) ? "executing" : "inspecting" : "thinking";
+  const phase = progress.stopped ? "correcting" : active ? isWorkAction(active.tool) ? "executing" : "inspecting" : "thinking";
   return { ...progress, phase, elapsed_ms: Math.max(0, now - progress.startedAt),
     idle_ms: Math.max(0, now - progress.lastActionAt),
     summary: progress.stopped?.reason ?? (active ? `${active.tool}: ${active.detail}` :

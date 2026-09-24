@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { closeSync, openSync } from "node:fs";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import { mkdir, open, readFile, rename, rm, writeFile, appendFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -16,6 +16,7 @@ const ensure = (condition, message) => {
   if (!condition) throw new Error(message);
 };
 const now = () => new Date().toISOString();
+const fingerprint = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const sleep = milliseconds => new Promise(resolvePromise => setTimeout(resolvePromise, milliseconds));
 
 function workerCount(value) {
@@ -95,6 +96,7 @@ export async function processAlive(identity) {
 
 async function killProcessGroup(identity) {
   if (!record(identity) || !Number.isInteger(identity.pid)) return true;
+  if (!await processAlive(identity)) return true;
   if (process.platform === "win32") {
     const killer = spawn("taskkill.exe", ["/PID", String(identity.pid), "/T", "/F"], {
       stdio: "ignore", windowsHide: true,
@@ -172,9 +174,13 @@ export async function createSupervisorState(value, options) {
     run_root: resolve(options.runRoot),
     watchdog: { pid: null, report: join(resolve(options.runRoot), "watchdog-report.jsonl") },
     workers,
+    input_sha256: fingerprint(value),
+    limits: { cost_limit_usd: options.costLimitUsd ?? null, per_instance_usd: options.perInstanceUsd ?? null, workers,
+      runner_script: options.runnerScript ? resolve(options.runnerScript) : null },
     policy: { attempts_per_instance: 1, retry_count: 0 },
     spent_usd: 0,
     reserved_usd: 0,
+    held_unknown_usd: 0,
     next_index: 0,
     instances: value.instances.map(instanceEntry),
   };
@@ -223,6 +229,11 @@ async function markInterrupted(state) {
       entry.status = "interrupted";
       entry.reason = "supervisor-restarted";
     }
+    if (entry.usage_recorded !== true || metadata?.execution?.usage_complete === false) {
+      const hold = Math.max(0, (entry.cost_reservation_usd ?? 0) - (entry.usage_usd ?? 0));
+      state.held_unknown_usd = (state.held_unknown_usd ?? 0) + hold;
+      entry.held_unknown_usd = hold;
+    }
     entry.finished_at = now();
     entry.runner = null;
     entry.cost_reservation_usd = entry.cost_reservation_usd ?? null;
@@ -252,6 +263,7 @@ async function makeChildManifest(value, state, entry, paths) {
       package_tgz: resolve(dirname(state.manifest), value.candidate.package_tgz),
     },
     instances: [value.instances[entry.index]],
+    supervisor: { manifest: state.manifest, input_sha256: state.input_sha256 },
   };
   await writeAtomicJson(paths.manifest, child);
 }
@@ -312,7 +324,14 @@ export async function finalizeOutput(state) {
 
 export async function stopSupervisor(statePath) {
   ensure(typeof statePath === "string", "supervisor-state-required");
-  const state = await readJson(statePath);
+  let state = await readJson(statePath);
+  const owner = await readJson(join(state.run_root, 'supervisor.lock')).catch(() => null);
+  if (await processAlive(owner) && !TERMINAL_STATES.has(state.status)) {
+    ensure(owner.pid === state.heartbeat?.supervisor?.pid && owner.starttime === state.heartbeat?.supervisor?.starttime, "supervisor-owner-mismatch");
+    ensure(state.heartbeat.supervisor.pid !== process.pid, "cannot-stop-own-supervisor");
+    await killProcessGroup(state.heartbeat.supervisor);
+    state = await readJson(statePath);
+  }
   const lock = await acquireRunLock(state.run_root);
   const writes = stateWriteQueue(state, statePath);
   try {
@@ -343,6 +362,7 @@ export async function runSupervisor(value, options, dependencies = {}) {
   let heartbeatTimer;
   let heartbeatInFlight = false;
   let writes;
+  let admitted = false;
   const active = new Map();
   try {
     state = await readJson(statePath).catch(async error => {
@@ -354,6 +374,15 @@ export async function runSupervisor(value, options, dependencies = {}) {
     ensure(state.schema_version === SCHEMA_VERSION, "invalid-supervisor-state");
     ensure(Array.isArray(state.instances), "invalid-supervisor-state");
     const workers = workerCount(options.workers ?? state.workers);
+    ensure(state.input_sha256 === undefined || state.input_sha256 === fingerprint(value), "supervisor-input-changed");
+    const limits = state.limits;
+    ensure(!limits || ((limits.cost_limit_usd === null || limits.cost_limit_usd === options.costLimitUsd) &&
+      limits.per_instance_usd === (options.perInstanceUsd ?? null) && limits.workers === workers &&
+      limits.runner_script === (options.runnerScript ? resolve(options.runnerScript) : null)), "supervisor-limits-changed");
+    ensure(options.perInstanceUsd === undefined || (Number.isFinite(options.perInstanceUsd) && options.perInstanceUsd > 0), "supervisor-instance-limit-invalid");
+    admitted = true;
+    state.input_sha256 ??= fingerprint(value);
+    state.held_unknown_usd ??= 0;
     state.workers = workers;
     state.policy ??= { attempts_per_instance: 1, retry_count: 0 };
     state.policy.attempts_per_instance = 1;
@@ -391,8 +420,8 @@ export async function runSupervisor(value, options, dependencies = {}) {
     const reservationFor = () => {
       const pending = state.instances.filter(entry => entry.status === "pending").length;
       const slots = Math.max(1, Math.min(workers - active.size, pending));
-      const available = options.costLimitUsd - state.spent_usd - state.reserved_usd;
-      return available > 0 ? available / slots : 0;
+      const available = options.costLimitUsd - state.spent_usd - state.reserved_usd - state.held_unknown_usd;
+      return available > 0 ? Math.min(options.perInstanceUsd ?? Infinity, available / slots) : 0;
     };
     const markCostLimited = async index => {
       const entry = state.instances[index];
@@ -468,9 +497,14 @@ export async function runSupervisor(value, options, dependencies = {}) {
         entry.status = exit.exit === 0 ? "completed" : "failed";
         entry.result = { instance_id: entry.instance_id, status: entry.status, exit_code: exit.exit, signal: exit.signal };
       }
-      const usage = Number(metadata?.execution?.spent_usd ?? entry.result?.usage?.usd ?? 0);
+      const recorded = metadata?.execution?.spent_usd ?? entry.result?.usage?.usd;
+      const usage = typeof recorded === "number" && Number.isFinite(recorded) && recorded >= 0 ? recorded : null;
       if (entry.usage_recorded !== true && Number.isFinite(usage) && usage > 0) state.spent_usd += usage;
-      entry.usage_usd = Number.isFinite(usage) && usage > 0 ? usage : 0;
+      entry.usage_usd = usage;
+      if (usage === null || metadata?.execution?.usage_complete === false) {
+        const hold = Math.max(0, (entry.cost_reservation_usd ?? 0) - (usage ?? 0));
+        state.held_unknown_usd += hold; entry.held_unknown_usd = hold;
+      }
       entry.usage_recorded = true;
       state.reserved_usd = Math.max(0, state.reserved_usd - (entry.cost_reservation_usd ?? 0));
       entry.finished_at = now();
@@ -495,7 +529,7 @@ export async function runSupervisor(value, options, dependencies = {}) {
       if (active.size === 0) {
         const index = firstPending();
         if (index < 0) break;
-        if (options.costLimitUsd - state.spent_usd - state.reserved_usd <= 0) {
+        if (options.costLimitUsd - state.spent_usd - state.reserved_usd - state.held_unknown_usd <= 0) {
           await markCostLimited(index);
           continue;
         }
@@ -511,7 +545,7 @@ export async function runSupervisor(value, options, dependencies = {}) {
     await writes.enqueue();
     return state;
   } catch (error) {
-    if (state) {
+    if (state && admitted) {
       await markInterrupted(state).catch(() => undefined);
       state.status = "failed";
       state.failure = String(error?.message ?? error);
@@ -542,6 +576,7 @@ export async function startDetachedSupervisor(options) {
     "--run-root", runRoot, "--output", resolve(options.output), "--cost-limit-usd", String(options.costLimitUsd),
     "--workers", String(workers)];
   if (options.runnerScript) args.push("--runner-script", resolve(options.runnerScript));
+  if (options.perInstanceUsd) args.push("--per-instance-usd", String(options.perInstanceUsd));
   const child = spawn(process.execPath, args, {
     cwd: process.cwd(),
     env: { ...process.env, ...(options.environment ?? {}) },
@@ -619,9 +654,9 @@ function parseArguments(argv) {
     if (argument.startsWith("--")) {
       const key = argument.slice(2).replaceAll("-", "_");
       const name = { run_root: "runRoot", cost_limit_usd: "costLimitUsd", workers: "workers", heartbeat_seconds: "heartbeatSeconds",
-        stale_seconds: "staleSeconds", report_seconds: "reportSeconds", state_path: "statePath", runner_script: "runnerScript" }[key] ?? key;
+         stale_seconds: "staleSeconds", report_seconds: "reportSeconds", state_path: "statePath", runner_script: "runnerScript", per_instance_usd: "perInstanceUsd" }[key] ?? key;
       const value = argv[++index];
-      values[name] = ["costLimitUsd", "workers", "heartbeatSeconds", "staleSeconds", "reportSeconds"].includes(name) ? Number(value) : value;
+      values[name] = ["costLimitUsd", "perInstanceUsd", "workers", "heartbeatSeconds", "staleSeconds", "reportSeconds"].includes(name) ? Number(value) : value;
     }
     else throw new Error(`unknown-option:${argument}`);
   }

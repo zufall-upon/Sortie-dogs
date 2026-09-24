@@ -36,7 +36,7 @@ export interface OpenCodeV2Context {
     interrupt(input: JsonObject): Promise<unknown>;
     switchAgent(input: JsonObject): Promise<unknown>;
     switchModel(input: JsonObject): Promise<unknown>;
-    hook(name: "prompt" | "context" | "compaction" | "title" | "generate" | "http.request" | "experimental.ws.send", callback: (event: JsonObject) => Promise<void> | void): Promise<Registration>;
+    hook(name: "prompt" | "context" | "compaction" | "title" | "generate" | "http.request" | "http.response" | "experimental.ws.send" | "experimental.ws.receive", callback: (event: JsonObject) => Promise<void> | void): Promise<Registration>;
   };
   readonly message?: { list(input: JsonObject): Promise<unknown> };
   readonly permission: {
