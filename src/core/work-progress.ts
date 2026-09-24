@@ -16,8 +16,10 @@ export interface WorkProgress {
   reviewedAt?: number; reviewedTools?: number; nextInterventionAt?: number;
   operatorNudgedAt?: number;
   evidence?: WorkEvidence[]; interventions?: WorkIntervention[];
+  firstActionAt?: number; lastWorkActionAt?: number; nudges?: { at: number; reason: string }[];
 }
-export const WORK_PROGRESS_LIMITS = { idleMs: 60_000, operatorMs: 30_000, inspections: 12, intervalMs: 1_000 } as const;
+/** Pacing only nudges. It never interrupts a model response or returns the child to the operator. */
+export const WORK_PROGRESS_LIMITS = { idleMs: 60_000, operatorMs: 30_000, inspections: 12, intervalMs: 1_000, nudgesPerWindow: 2 } as const;
 export const isWorkAction = (tool: string) => ["shell", "patch", "sortie_v011_check"].includes(tool);
 export function newWorkProgress(now = Date.now()): WorkProgress {
   return { startedAt: now, lastActionAt: now, inspections: 0, tools: 0, commands: 0, edits: 0, active: [],
@@ -28,14 +30,19 @@ export function progressLimit(progress: WorkProgress, now: number, idleMs: numbe
   if (progress.active.some(item => isWorkAction(item.tool))) return null;
   if (now < (progress.nextInterventionAt ?? 0)) return null;
   const calls = progress.tools - (progress.reviewedTools ?? 0);
-  if (calls >= inspections) return `discovery-limit: ${calls} calls without operator-confirmed relevant evidence`;
-  if (now - (progress.reviewedAt ?? progress.startedAt) >= idleMs) return `planning-timeout: no operator-confirmed result for ${Math.floor((now - (progress.reviewedAt ?? progress.startedAt)) / 1000)}s`;
+  if (calls >= inspections) return `discovery-limit: ${calls} calls without an edit or executed command`;
+  if (now - (progress.reviewedAt ?? progress.startedAt) >= idleMs) return `planning-timeout: no edit or executed command for ${Math.floor((now - (progress.reviewedAt ?? progress.startedAt)) / 1000)}s`;
   return null;
+}
+/** Reasoning-free measurements of the pain this pacing targets. */
+export function pacingMetrics(progress: WorkProgress) {
+  return { first_action_ms: progress.firstActionAt === undefined ? null : Math.max(0, progress.firstActionAt - progress.startedAt),
+    nudges: progress.nudges?.length ?? 0 };
 }
 export function progressView(progress: WorkProgress, now = Date.now()) {
   const active = progress.active.at(-1);
   const phase = progress.stopped ? "correcting" : active ? isWorkAction(active.tool) ? "executing" : "inspecting" : "thinking";
-  return { ...progress, phase, elapsed_ms: Math.max(0, now - progress.startedAt),
+  return { ...progress, phase, ...pacingMetrics(progress), elapsed_ms: Math.max(0, now - progress.startedAt),
     idle_ms: Math.max(0, now - progress.lastActionAt),
     summary: progress.stopped?.reason ?? (active ? `${active.tool}: ${active.detail}` :
       progress.last ? `Last ${progress.last.tool}: ${progress.last.status}${progress.last.exit === null ? "" : ` (exit ${progress.last.exit})`}; awaiting next action` : "Waiting for first executable step"),

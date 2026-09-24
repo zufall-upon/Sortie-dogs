@@ -50,11 +50,9 @@ export function createUserProxyPlugin() {
       const stopping = new Map<string, Promise<void>>();
       const lifetime = new AbortController();
       const thinking = new Map<string, number>(), nudging = new Set<string>(), stoppedByUser = new Set<string>();
-      const internalStops = new Set<string>();
       const controllerRoots = new Set<string>(); let observingControllers = false;
       const nativeCommands = new Map<string, { root: string; id: string; file: string }>();
-      const childTurns = new Map<string, number>();
-      const inFlightRequests = new Set<string>(), localYields = new Set<string>();
+      const inFlightRequests = new Set<string>();
       const launchPermissions = new Map<string, ObjectValue[]>();
       await context.permission.hook("evaluate", async event => {
         // Observe the native permission decision without changing it. Keeping the
@@ -314,17 +312,12 @@ export function createUserProxyPlugin() {
             const attempt = await loop.operatorNudge(id);
             if (attempt > loop.maxAttempts) return;
             const noticeID = `msg_${createHash("sha256").update(`${id}/${progress.startedAt}/${attempt}`).digest("hex").slice(0, 24)}`;
-            try {
-              await context.session.synthetic({ sessionID: id, id: noticeID, resume: false, delivery: "steer",
-                description: "🐾 Sortie: execution pacing correction",
-                metadata: { "sortie-dogs/pacing": true, receivedAt: progress.startedAt, attempt },
-                text: "Host pacing intervention: the current operator response has not reached its next action. Preserve the original user request. For an action request use start_work now with any known command, or dispatch its existing task. At review, inspect the actual result and decide. Answer a question directly. This is host control, not a new user request. Do not repeat reconnaissance or ask the user to hurry routine work." });
-              if (!stoppedByUser.has(id) && !lifetime.signal.aborted) {
-                internalStops.add(id);
-                const interrupted = await context.session.interrupt({ sessionID: id, resume: true });
-                if (isRecord(interrupted) && interrupted.interrupted === false) internalStops.delete(id);
-              }
-            } catch (error) { internalStops.delete(id); throw error; }
+            // Steer at the next step boundary. Interrupting here restarted the operator's
+            // reasoning from scratch, which lengthened exactly the delay it targeted.
+            await context.session.synthetic({ sessionID: id, id: noticeID, resume: false, delivery: "steer",
+              description: "🐾 Sortie: execution pacing note",
+              metadata: { "sortie-dogs/pacing": true, receivedAt: progress.startedAt, attempt },
+              text: "Host pacing note: preserve the original user request. For an action request call start_work now with any known command, or dispatch its existing task. At review, inspect the actual result and decide. Answer a question directly. This is host control, not a new user request. Do not repeat reconnaissance." });
           })().catch(error => console.warn("[sortie-dogs-v011] operator pacing", error)).finally(() => {
             if (!deferred && thinking.get(id) === since) thinking.delete(id);
             nudging.delete(id);
@@ -353,26 +346,12 @@ export function createUserProxyPlugin() {
             const publish = async () => {
               const current = await loop.current(id);
               if (!current || current.id !== work.id || current.callID !== work.callID || !current.progress) return;
+              // Display only. The child's reasoning and context are never discarded by a
+              // host clock; pacing is a note at its next request boundary.
               const progress = progressView(current.progress);
               await report({ ...metadata, ...(current.child ? { sessionID: current.child } : {}),
-                description: `🐾 ${progress.phase} · ${Math.floor(progress.elapsed_ms / 1000)}s · ${progress.summary}`,
+                description: `🐾 ${progress.phase} · ${Math.floor(progress.elapsed_ms / 1000)}s · ${progress.summary}${progress.nudges ? ` · 促し${progress.nudges}` : ""}`,
                 sortie_progress: progress });
-              const reason = current.phase === "running" ? progressLimit(current.progress, Date.now(), planningMs, discoveryCalls) : null;
-              // The provider owns an in-flight response's timeout. The review clock
-              // must not discard its reasoning every minute. Review at the next
-              // request boundary; retain the timer only for a stalled native handoff.
-              const turn = current.child ? childTurns.get(current.child) : undefined;
-              const deadline = Math.max(current.progress.nextInterventionAt ?? 0,
-                (current.progress.reviewedAt ?? current.progress.startedAt) + planningMs);
-              const grace = Math.min(10_000, planningMs / 4);
-              if (reason && !inFlightRequests.has(current.child ?? "") && !current.progress.active.length &&
-                  Date.now() - current.progress.lastActionAt >= planningMs &&
-                  (turn === undefined || Date.now() >= deadline + grace || Date.now() - turn >= planningMs) && await loop.stall(id, work.callID!, reason)) {
-                // Yield is internal; the real foreground return wakes the operator after child settlement.
-                if (current.child) await context.session.interrupt({ sessionID: current.child, resume: false });
-                await report({ ...metadata, ...(current.child ? { sessionID: current.child } : {}),
-                  description: `🐾 軌道修正 · ${reason}`, sortie_progress: progressView((await loop.current(id))!.progress!) });
-              }
             };
             const tick = () => {
               if (ended || pending || lifetime.signal.aborted) return;
@@ -387,21 +366,8 @@ export function createUserProxyPlugin() {
               } });
               return { ...result, metadata: { ...metadata, ...(isRecord(result.metadata) ? result.metadata : {}),
                  sortie_progress: (await loop.current(id))?.progress ? progressView((await loop.current(id))!.progress!) : null } };
-            } catch (error) {
-              const current = await loop.current(id);
-              if (!localYields.has(work.callID!) || current?.phase !== "yielded" || !current.child || current.callID !== work.callID ||
-                  current.userStopped || stoppedByUser.has(id) || (execution.signal as AbortSignal | undefined)?.aborted) throw error;
-              // Only our unsent-request checkpoint is a normal control return.
-              // Native failures, user cancellation and failed checks stay failures.
-              const checkpoint = JSON.stringify({ status: "checkpoint", work_id: current.id,
-                reason: current.progress?.stopped?.reason, accepted: false,
-                next: "Inspect work_status and the actual results, then continue the same child with a concrete correction or review completed scope. This checkpoint is not task completion." });
-              return { output: { sessionID: current.child, status: "completed", output: checkpoint },
-                content: [{ type: "text", text: checkpoint }],
-                metadata: { ...metadata, status: "completed", sessionID: current.child, sortie_checkpoint: true,
-                  description: "🐾 進捗確認 — 同じ作業を継続", sortie_progress: current.progress ? progressView(current.progress) : null } };
-            } finally { ended = true; clearInterval(timer); monitors.delete(timer); localYields.delete(work.callID!);
-              const current = await loop.current(id); if (current?.child) { childTurns.delete(current.child); inFlightRequests.delete(current.child); } await pending; }
+            } finally { ended = true; clearInterval(timer); monitors.delete(timer);
+              const current = await loop.current(id); if (current?.child) inFlightRequests.delete(current.child); await pending; }
           };
         });
         const add = (name: string, description: string, input: ObjectValue,
@@ -566,7 +532,6 @@ export function createUserProxyPlugin() {
         inFlightRequests.delete(id);
         if (id === owner) thinking.delete(id);
         if (session.agent === worker) {
-          childTurns.delete(id);
           await loop.assertWorker(owner, id);
           if (event.tool === "subagent") throw new Error("work-worker-does-not-delegate");
           const input = isRecord(event.input) ? event.input : {};
@@ -609,16 +574,14 @@ export function createUserProxyPlugin() {
         }
         const owner = await root(String(event.sessionID)), work = await loop.current(owner);
         if (event.kind !== "auxiliary") inFlightRequests.delete(String(event.sessionID));
+        let pacingNote: string | undefined;
         if (session.agent === worker && event.kind !== "auxiliary" && work?.phase === "running" && work.callID && work.progress) {
           const reason = progressLimit(work.progress, Date.now(), planningMs, discoveryCalls);
-          if (reason && await loop.stall(owner, work.callID, reason)) {
-            // No provider request has been sent for this step. The native failed
-            // return wakes the operator; it reconciles and continues the SAME child.
-            childTurns.delete(String(event.sessionID));
-            localYields.add(work.callID);
-            throw new Error(`work-pacing-yield-before-request: ${reason}`);
-          }
-          childTurns.set(String(event.sessionID), Date.now());
+          // Never interrupt or return the child: that discarded its context and made the
+          // operator redispatch the same investigation. Nudge within this same request.
+          if (reason && await loop.nudge(owner, work.callID, reason, WORK_PROGRESS_LIMITS.nudgesPerWindow)) pacingNote =
+            `Host pacing note (${reason}). This is not an error and nothing was interrupted. Stop surveying: make your next tool call ` +
+            "an edit (patch) or run the target reproduction/test (shell or sortie_v011_check). If a real blocker prevents that, report it now.";
         }
         if (session.agent === primary && event.kind !== "auxiliary" && !stoppedByUser.has(owner)) {
           const progress = await loop.progress(owner);
@@ -632,11 +595,13 @@ export function createUserProxyPlugin() {
         }
         if (Array.isArray(event.system) && work) event.system.push({ type: "text", text:
           `SORTIE v0.11 durable work ${work.id}; phase=${work.phase}. User intent survives compaction. ` +
-          (session.agent === primary ? "Your role is the user's proxy: delegate routine work, compare results with every original instruction, and accept only with review_work. " : "You own all routine investigation, edits, testing and corrections. ") +
+          (session.agent === primary ? "Your role is the user's proxy: delegate routine work, compare results with every original instruction, and accept only with review_work. " +
+            "Dispatch a ready task immediately and let the child run to completion; do not investigate in parallel or re-read raw tool-output files. " : "You own all routine investigation, edits, testing and corrections. ") +
           "Use work_status after compaction for current evidence. Do not reconstruct a proposal or an execution manifest." });
         if (session.agent === worker && work?.progress && Array.isArray(event.system)) {
-          event.system.push({ type: "text", text: `Execution pacing: ${work.progress.tools} cumulative parent/child calls; received ${Math.floor((Date.now() - work.startedAt) / 1000)}s ago. Unreviewed planning limit ${planningMs / 1000}s. ` +
-            "Reuse supplied paths and documented commands. Run the relevant reproduction or existing controller early. For long work, use the native shell/controller and its existing ledger; do not repeatedly poll or invent a replacement runner. If blocked, return the exact blocker promptly." });
+          event.system.push({ type: "text", text: "Execution pacing: act first. Reuse supplied paths and documented commands; run the relevant reproduction or existing controller early and interleave short inspection with edits. " +
+            "For long work, use the native shell/controller and its existing ledger; do not repeatedly poll or invent a replacement runner. If blocked, return the exact blocker promptly." });
+          if (pacingNote) event.system.push({ type: "text", text: pacingNote });
         }
         if (session.agent === worker && work && Array.isArray(event.system) && work.requests.length > (work.deliveredRequests ?? 0)) {
           event.system.push({ type: "text", text: "Additional original user instructions received during execution:\n" +
@@ -793,7 +758,6 @@ export function createUserProxyPlugin() {
           }
           if (!["session.execution.interrupted", "session.execution.failed"].includes(String(event.type))) continue;
           inFlightRequests.delete(id);
-          if (internalStops.delete(id)) continue;
           try {
             const session = await info(id);
             if (session.agent === primary && !session.parentID) await stop(id, false);
