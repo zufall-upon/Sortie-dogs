@@ -51,6 +51,12 @@ The auxiliary settings select Luna6 Fast for summaries and titles. Keep any
 additional settings on those agents. Sortie permits SOL6 and Luna6 for its
 execution requests; reviewer/advisor model selections are independent.
 
+The package exposes a native `./tui` entry for the live work overview. If you use
+a local V2 wrapper, place `export { default } from "sortie-dogs/server";` in
+`.opencode/plugins/sortie-dogs/index.js` and register that directory. `init` installs
+its companion `tui.tsx` alongside it. For a global installation, use the same
+`plugins/sortie-dogs/` layout under the OpenCode global config directory.
+
 Restart the OpenCode host after installing or updating the plugin, then run:
 
 ```text
