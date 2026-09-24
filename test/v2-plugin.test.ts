@@ -341,6 +341,20 @@ test("V2 server plugin registers tools and translates public hooks without chang
   assert.equal(fixture.aborted(), true);
 });
 
+test("V2 compaction excludes Sortie schemas even when it bypasses the normal context filter", async () => {
+  const fixture = contextFixture();
+  const cleanup = await V2Plugin.setup(fixture.context);
+  try {
+    const exposed = Object.fromEntries(fixture.tools.map(tool => [tool.name, tool]));
+    const compaction = { sessionID: "build-session", agent: "build", system: [] as unknown[],
+      tools: { ...exposed, read: { name: "read" } } };
+    assert.ok("sortie_v010_check_contract" in compaction.tools);
+    assert.ok("sortie_v010_reflection" in compaction.tools);
+    await fixture.sessionHooks.get("compaction")!(compaction);
+    assert.deepEqual(Object.keys(compaction.tools), ["read"]);
+  } finally { cleanup?.(); }
+});
+
 test("V2 child prompt adapter removes only the native subagent envelope before strict Sortie claiming", async () => {
   const fixture = contextFixture();
   fixture.context.session.get = async ({ sessionID }) => ({ id: sessionID, parentID: "root", agent: "dogs-coordinator",
@@ -484,4 +498,31 @@ test("actual v0.10 tools preserve required, optional, and described schemas thro
   } finally {
     cleanup?.();
   }
+});
+
+test("V2 lowers installed V1 Zod optional strings before provider submission and restores omission on execution", async () => {
+  const fixture = contextFixture();
+  const seen: Record<string, string>[] = [];
+  // With @opencode-ai/plugin installed, V1's tool.schema.string().optional()
+  // exposes Zod's enumerable def and reports type="optional" on the value.
+  const required = { "~standard": { vendor: "zod", version: 1 }, def: { type: "string" }, type: "string",
+    minLength: null, maxLength: null };
+  const optional = { "~standard": { vendor: "zod", version: 1 }, def: { type: "optional", innerType: required },
+    type: "optional" };
+  const cleanup = await createSortieDogsV2Plugin(async () => ({ tool: {
+    sortie_v010_reflection: { description: "reflection", args: { action: required, scope: optional },
+      execute: async args => { seen.push(args); return "done"; } },
+  } })).setup(fixture.context);
+  try {
+    const tool = fixture.tools.find(value => value.name === "sortie_v010_reflection") as {
+      input: { properties: Record<string, unknown>; required: string[] };
+      execute: (input: Record<string, string>, execution: { sessionID: string }) => Promise<unknown>;
+    };
+    assert.deepEqual(tool.input.required, ["action", "scope"]);
+    assert.deepEqual(tool.input.properties.action, { type: "string", minLength: 0, maxLength: 65535 });
+    assert.deepEqual(tool.input.properties.scope, { type: "string", minLength: 0, maxLength: 65535,
+      description: "Pass an empty string to omit this argument." });
+    await tool.execute({ action: "record", scope: "" }, { sessionID: "root" });
+    assert.deepEqual(seen, [{ action: "record" }]);
+  } finally { cleanup?.(); }
 });

@@ -204,9 +204,14 @@ function legacyClient(context: OpenCodeV2Context): JsonObject {
 }
 
 function plainSchema(value: unknown): JsonObject {
-  const source = record(value) ? value : { type: "string" };
+  // The V1 runtime uses Zod when @opencode-ai/plugin is installed. Its
+  // enumerable `def` and `~standard` fields are not JSON Schema, and an
+  // optional Zod string reports type="optional" rather than type="string".
+  const source = record(value) && value.type === "optional" && record(value.def) && record(value.def.innerType)
+    ? value.def.innerType : record(value) ? value : { type: "string" };
   const schema: JsonObject = Object.fromEntries(Object.entries(source).filter(([key, item]) =>
-    key !== "x-sortie-optional" && key !== "optional" && item !== null && item !== undefined && typeof item !== "function"));
+    !["x-sortie-optional", "optional", "~standard", "def", "_zod"].includes(key) &&
+    item !== null && item !== undefined && typeof item !== "function"));
   // The native V2 provider serializes absent size limits as null for custom tools. Its
   // function-schema validator rejects those limits before even a non-Sortie agent can work.
   if (schema.type === "string") {
@@ -222,11 +227,16 @@ function plainSchema(value: unknown): JsonObject {
   return schema;
 }
 
+function optionalArgument(value: unknown): boolean {
+  return record(value) && (value["x-sortie-optional"] === true ||
+    (value.type === "optional" && record(value.def) && record(value.def.innerType)));
+}
+
 function toolSchema(args: Record<string, unknown>): JsonObject {
   const entries = Object.entries(args);
   return { type: "object", properties: Object.fromEntries(entries.map(([name, value]) => {
     const schema = plainSchema(value);
-    if (record(value) && value["x-sortie-optional"] === true) {
+    if (optionalArgument(value)) {
       schema.description = `${typeof schema.description === "string" ? `${schema.description} ` : ""}Pass an empty string to omit this argument.`;
     }
     return [name, schema];
@@ -241,7 +251,7 @@ function toolSchema(args: Record<string, unknown>): JsonObject {
 function legacyToolArgs(input: unknown, args: Record<string, unknown>): Record<string, string> {
   const value = record(input) ? { ...input } : {};
   for (const [name, schema] of Object.entries(args)) {
-    if (record(schema) && schema["x-sortie-optional"] === true && value[name] === "") delete value[name];
+    if (optionalArgument(schema) && value[name] === "") delete value[name];
   }
   return value as Record<string, string>;
 }
@@ -466,6 +476,12 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks)
     }
   });
   if (hooks["experimental.session.compacting"]) await context.session.hook("compaction", async event => {
+    // V2 compaction builds its own tool snapshot and does not run the normal
+    // context hook's agent-specific Sortie filter. Summary calls cannot run
+    // local tools, so do not expose Sortie schemas to the compaction provider.
+    if (record(event.tools)) for (const name of Object.keys(event.tools)) {
+      if (name.startsWith("sortie_")) delete event.tools[name];
+    }
     const output = { context: [] as string[] };
     await hooks["experimental.session.compacting"]!({ sessionID: String(event.sessionID ?? "") }, output);
     if (Array.isArray(event.system)) event.system.push(...output.context.map(text => ({ type: "text", text })));
