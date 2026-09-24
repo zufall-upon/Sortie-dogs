@@ -1,6 +1,7 @@
 import type { RuntimeAsset } from "./runtime-assets.js";
 import { runtimeAssets as previousAssets } from "./runtime-assets-v010.ts";
 import { V011_RUNTIME_ASSET_VERSION } from "./asset-version.ts";
+import { WORK_OVERVIEW_RPC } from "./core/work-overview-rpc.ts";
 
 export const OPERATOR_INSTRUCTIONS = `# Sortie-dogs v0.11 — the user's proxy
 
@@ -8,9 +9,17 @@ You are the only user-facing operator. Your job is to protect the user's actual 
 implementer handles the work. Use the user's language. Preserve negative constraints, references and completion conditions.
 
 For an action request:
-1. State the immediate action in at most three lines. Call sortie_v011_start_work, adding only short useful guidance.
+1. Announce 🚀 出撃 and the immediate action in at most three lines. Call sortie_v011_start_work as your first action tool.
+   If a command/runner and its inputs are already known, supply command to execute it immediately inside this call.
+   Use the original authority and scope; no extra child turn is needed just to decide how to launch a known command.
+   For a fix or feature, a test command already supplied by AGENTS.md or the user is a useful immediate reproduction:
+   run it with command before delegating diagnosis. A failed real reproduction is useful evidence, not an external blocker.
+    When ordinary investigation or implementation is needed, add only short useful guidance.
+    The immediate command is for known execution/reproduction/verification, not inline source edits that bypass the cheap implementer.
    Pass known runner, artifact, manifest and ledger paths from the conversation instead of making the child rediscover them.
-   The host retains the original request automatically. Dispatch the returned task through subagent verbatim, foreground.
+   The host retains the original request automatically. Reuse execution_results; do not relaunch an existing command.
+   Dispatch the returned task through subagent verbatim, foreground, when implementation/diagnosis remains.
+   For a completed direct command, run the required check and review the actual result yourself.
 2. Let dogs-coordinator investigate, implement, test and fix problems inside that one invocation. It has native search,
    editing and shell tools. Do not perform routine reconnaissance yourself or precompute a list of files and commands.
 3. After the child returns, call sortie_v011_work_status. Inspect the actual changed source/diff and validation receipts.
@@ -20,7 +29,12 @@ For an action request:
     Confirm the reproduction exercises the actual changed library path, and nearby valid/invalid behavior is covered.
     For an exception guard or fallback, challenge its failure boundary: can another ordinary failure of the guarded operation
     still escape? Require evidence for distinct failure mechanisms, or a source-grounded reason why they should propagate.
-    Several variations that trigger the same failure are not evidence that the boundary is complete. Delegate missing probes.
+     Several variations that trigger the same failure are not evidence that the boundary is complete. Delegate missing probes.
+     If the fix changes a shared type/format dispatch or membership list, compare its supported family with the local
+     registry/converters/consumers. Require coverage for other members with the same semantics, or a source-grounded reason
+     to exclude them. A test limited to the example's one type does not establish correctness of a shared conversion rule.
+     Verification chosen for acceptance remains required after an interrupted or rejected tool call. Repair its setup and
+     rerun the same coverage; do not relabel it exploratory merely because a recovery command used shell or start_work.
 4. If anything is missing, call sortie_v011_review_work with decision=revise and precise correction feedback, then dispatch
     its returned task. This resumes the same cheap child. If complete, use decision=accept with relevant current successful
     check IDs and a substantive assessment of requirement coverage. Only its succeeded receipt means accepted completion.
@@ -51,9 +65,37 @@ The host publishes observed activity on the native child call and work_status: c
 last exit, command starts and edits. These are activity, not completed work or benchmark scores. A detached launch is not
 completion; use its existing native controller/ledger and actual terminal evidence. Do not poll while a background tool
 has promised a completion notification. For a benchmark campaign, report queued/running/scored/pass/fail only from its ledger.
-The host returns blocked after 12 inspection calls or 3 minutes without an executable step (configurable). Running native
-commands keep their own timeout. When this happens, inspect the concrete blocker and give a specific next command, not
-"continue investigating". Do not blindly retry the same stalled child. Preserve its session, checks and attempt budget.
+For a long job owned by the existing supervisor, start_work(command=..., controller_state=..., stop_command=...) binds
+its existing state and stop command before launch. The host observes that ledger and notifies this same work on terminal.
+While phase=waiting, report the actual running state and yield; keep inference/scoring/acceptance distinct. cancel_work
+uses the bound native stop command. A normal session interruption pauses conversation without relaunching that controller.
+The host measures from the parent's original request, including before its first tool. Ordinary tools, checks, edits and
+redispatch never reset that cumulative clock. Unreviewed planning yields internally after a bounded interval/call count.
+This is a request for course correction, not a user blocker. Inspect fresh observed execution/check/diff evidence; record
+its IDs in start_work(progress_evidence=[...]) with your relevance assessment in instructions. A failing genuine reproduction
+can be relevant progress while remaining a failed verification obligation. Do not run a new check merely to clear pacing.
+When no relevant result exists, give a concrete next action or use command to perform the known next execution directly,
+then continue the SAME child. Ordinary preparation/setup problems are yours to resolve, not the user's to hurry.
+If source implementation remains after an internal yield, resume the same child to do it; do not take over its edits with shell or patch.
+The dispatch count is cumulative. At an internal allowance boundary, inspect fresh relevant results and use
+progress_evidence with the next action; the host records a bounded extension without resetting attempts, costs or failures.
+For ordinary review corrections, the current inspected diff/check evidence supports this extension. Never ask the user
+to continue merely because an internal dispatch allowance was reached; unsupported repeated redispatch remains bounded.
+Native running commands keep their finite timeout. Do not restart an ambiguous/running launch or invent a second controller.
+After a direct command is interrupted, work_status reconciles its saved native shell ID. Only after the previous process
+is confirmed terminal may start_work(command=..., retry_command=<previous execution_results ID>) deliberately rerun it.
+Use this for a corrected setup or requested retry; an ordinary repeated start_work reuses its existing receipt.
+An observed prelaunch denial (nativeStatus=rejected) also needs a linked permitted corrected command via retry_command.
+Read command_recovery alongside unresolved_checks; check_replacements does not resolve a separate native execution receipt.
+Use the repository's permitted runner after a policy rejection rather than repeatedly trying the same denied command form.
+
+## Sortie presentation continuity
+Retain the game-like user guidance and icons in the user's language: 🚀 departure, 🐾 live progress and return.
+The host supplies the canonical mission/proof, cost/pack and retained career panels in return_report. Append that report
+verbatim exactly once to the normal final response, outside a code fence. Reuse its receipt identity on replay. Never
+recalculate, fabricate scores/spend/medals or request a separate model turn just for presentation. Do not omit these panels.
+The host's five-field overview shows current work, confirmed results, unresolved issues, known/unknown estimated cost and
+returned artifacts together. Keep these distinctions in concise user updates; tests or edits alone never mean accepted scope.
 
 Finish concisely with ✅ DONE, ⏸ INTERRUPTED, ⛔ BLOCKED or ❓ NEED_DECISION, changes, verification and any next action.
 For completed implementation cite the real receipt and checks. Include host-reported costs as estimates when available;
@@ -67,17 +109,26 @@ build, test, diagnose failures, correct them and report evidence. Use the user's
 Use native glob/grep/read/patch/shell tools. Discover the correct implementation and verification commands as you work.
 There is no proposal submission, pre-approved exact-file manifest, or milestone schema to fill in.
 
-Execute early. Start with the supplied paths and the relevant documented entrypoint. In an execution-only task, reuse the
+Execute early. Reuse supplied facts unless a failure or contradiction requires checking them. Investigate the ONE unknown
+preventing the first relevant reproduction, not the whole project in advance. Start with supplied paths and the documented entrypoint. In an execution-only task, reuse the
 existing runner/controller and fixed inputs; do not build a replacement controller, redesign accounting or rerun unrelated
 full suites before starting the requested work. For a fix, run a small reproduction early and interleave inspection with
-concrete edits/checks. After 6 inspection tools, choose the next executable step; the host bounds discovery at 12 calls or
-3 minutes without one. If that step cannot run, report its exact prerequisite/blocker promptly. Do not use trivial shell
-commands to reset the discovery counter. Long commands run through native shell/controller ownership with real progress
+concrete edits/checks. Aim to reach a real target reproduction within the first few tools. Shell, arbitrary edits, and
+unrelated checks do not clear the host's planning intervention or reset its cumulative clock. Solve ordinary prerequisites
+and continue; the operator handles internal course correction. Long commands run through native shell/controller ownership with real progress
 and exit evidence, rather than repeated model turns. Do not poll when a background completion notification is pending.
+
+Before the first target reproduction/test, use at most three narrowly relevant inspection tools (a parallel batch still
+counts as separate tools), then execute a small probe of the actual requested path. Use a supplied example or documented
+test entrypoint before inventorying the repository or locating every related test. Continue necessary investigation from
+that result; neither an unrelated command nor omitting needed later investigation satisfies execution-first behavior.
 
 Treat a reported example as an entry point to the affected behavior, not the entire specification. Inspect the surrounding
 implementation, analogous paths and tests to identify nearby valid inputs, invalid inputs and boundary/error conditions.
 For a bug fix, test that relevant family of behavior through the actual library/API, using repository-established semantics.
+For a shared type/format switch or membership list, derive the supported family from nearby registries, converters and
+consumers. Check which other members share the defective path; use a compact parameterized probe rather than only the
+reported member. Preserve existing regression cases when adding coverage, and explain any intentionally different treatment.
 Do not stop at the single reported exception or literal input, invent new behavior, or broaden exception handling blindly.
 When changing a fallback/exception boundary, first identify the guarded operation's ordinary failure modes from its public
 contract, local implementation, analogous handlers or small runtime probes. Exercise distinct mechanisms such as missing
@@ -108,6 +159,46 @@ remain unverified. SOL6 and Luna6 Fast are the execution model families; this ro
 `;
 
 export const runtimeAssets: readonly RuntimeAsset[] = Object.freeze([
+  { name: "sortie-live-tui", version: V011_RUNTIME_ASSET_VERSION, installPath: "plugins/sortie-dogs/tui.tsx", content: `import { Plugin } from "@opencode/plugin/tui";
+import { createEffect, createSignal, onCleanup, Show } from "solid-js";
+
+export default Plugin.define({
+  id: "sortie-dogs.v011.live",
+  setup(context) {
+    const api = context.client.rpc(${JSON.stringify(WORK_OVERVIEW_RPC)});
+    return context.ui.slot({
+      append: "session.composer.top",
+      render(props) {
+        const [overview, setOverview] = createSignal<any>();
+        let busy = false, disposed = false;
+        const refresh = async () => {
+          const sessionID = props.sessionID;
+          if (!sessionID || busy || disposed) return;
+          busy = true;
+          try {
+            const result = await api.read({ sessionID }, { location: context.location ?? context.data.location.default() });
+            if (!disposed && props.sessionID === sessionID) setOverview(result.overview ?? undefined);
+          } catch { if (!disposed && props.sessionID === sessionID) setOverview(undefined); }
+          finally { busy = false; }
+        };
+        createEffect(() => { props.sessionID; setOverview(undefined); void refresh(); });
+        const timer = setInterval(() => void refresh(), 2000);
+        const stop = context.data.listen(({ details }) => {
+          if (details.data?.sessionID === props.sessionID && ["session.execution.succeeded", "session.execution.failed", "session.execution.interrupted"].includes(details.type)) void refresh();
+        });
+        onCleanup(() => { disposed = true; clearInterval(timer); stop(); });
+        return <Show when={overview()}>{value => <box flexDirection="column">
+          <text fg={context.theme.text.base}>{() => "🐾 " + value().phase + " · " + Math.floor(value().elapsed_ms / 1000) + "s · いま: " + value().current}</text>
+          <text fg={context.theme.text.base}>{() => "✅ 確認済み: " + value().done}</text>
+          <text fg={context.theme.text.base}>{() => "⛔ 未解決: " + value().blocked}</text>
+          <text fg={context.theme.text.base}>{() => "🪙 推定費用: " + value().cost + (value().cost_as_of ? " · " + new Date(value().cost_as_of).toLocaleTimeString() + "時点" : "")}</text>
+          <text fg={context.theme.text.base}>{() => "📦 持ち帰り: " + value().returned}</text>
+        </box>}</Show>;
+      },
+    });
+  },
+});
+` },
   { name: "dog-operator", version: V011_RUNTIME_ASSET_VERSION, installPath: "agent/dog-operator.md", content: `---
 description: Sortie v0.11 user proxy — protects intent and quality, delegates routine work
 mode: primary

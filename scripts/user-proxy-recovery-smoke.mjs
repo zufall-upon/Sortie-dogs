@@ -9,7 +9,8 @@ const content = value => typeof value === 'string' ? value : (value ?? []).map(p
 const json = path => readFile(path, 'utf8').then(JSON.parse);
 
 /** A real interrupted native tool, server restart and same-child resume. No user-session database edits. */
-export async function userProxyRecoverySmoke(tgz, directory) {
+export async function userProxyRecoverySmoke(tgz, directory, boundary = 'read') {
+  assert(['read', 'check'].includes(boundary), 'Unknown recovery boundary');
   const fixture = await installedFixture(tgz, directory, 'v011');
   const { project, control, env, run } = fixture;
   const config = await json(join(control, 'opencode.json'));
@@ -17,7 +18,7 @@ export async function userProxyRecoverySmoke(tgz, directory) {
   await writeFile(join(control, 'opencode.json'), JSON.stringify(config));
   await writeFile(join(project, '.gitignore'), '.opencode/\n');
   await writeFile(join(project, 'result.txt'), 'pending\n');
-  await writeFile(join(project, 'check.mjs'), "import {readFileSync} from 'node:fs';import assert from 'node:assert/strict';assert.equal(readFileSync('result.txt','utf8'),'done\\n');console.log('PASS');\n");
+  await writeFile(join(project, 'check.mjs'), "import {readFileSync} from 'node:fs';import assert from 'node:assert/strict';" + (boundary === 'check' ? 'await new Promise(resolve=>setTimeout(resolve,8000));' : '') + "assert.equal(readFileSync('result.txt','utf8'),'done\\n');console.log('PASS');\n");
   await writeFile(join(project, 'AGENTS.md'), '# Recovery fixture\nRead result.txt before changing it. Only result.txt may change. Do not edit tests, AGENTS.md or .opencode. Run node check.mjs using sortie_v011_check after editing. Do not commit or install dependencies.\n');
   await writeFile(join(control, 'plugins/sortie-dogs/index.js'), `import plugin from 'sortie-dogs';
 import {existsSync} from 'node:fs';import {writeFile,appendFile} from 'node:fs/promises';
@@ -28,7 +29,17 @@ export default {...plugin,async setup(ctx){
   const cleanup=await plugin.setup(ctx);
   await ctx.session.hook('context',async e=>record({kind:'after-context',sessionID:e.sessionID,missing:audit(e)}));
   const marker=new URL('../../held-read.json',import.meta.url);let holding=false;
-  await ctx.tool.transform(editor=>editor.update('read',tool=>{const execute=tool.execute;tool.execute=async(input,execution)=>{
+  const boundary=${JSON.stringify(boundary)},formalCalls=new Set();
+  if(boundary==='check')await ctx.tool.transform(editor=>editor.update('sortie_v011_check',tool=>{const execute=tool.execute;tool.execute=async(input,execution)=>{
+    formalCalls.add(execution.id);try{return await execute(input,execution);}finally{formalCalls.delete(execution.id);}
+  };}));
+  await ctx.tool.transform(editor=>editor.update(boundary==='check'?'shell':'read',tool=>{const execute=tool.execute;tool.execute=async(input,execution)=>{
+    if(boundary==='check')return execute(input,{...execution,progress:async value=>{
+      await execution.progress?.(value);const session=await ctx.session.get({sessionID:execution.sessionID});
+      if(session.agent==='dogs-coordinator'&&formalCalls.has(execution.id)&&input.command?.includes('node check.mjs')&&value.shellID&&!existsSync(marker)){
+        await writeFile(marker,JSON.stringify({root:session.parentID,child:session.id,callID:execution.id,shellID:value.shellID,boundary}));
+      }
+    }});
     const result=await execute(input,execution),session=await ctx.session.get({sessionID:execution.sessionID});
     if(session.agent!=='dogs-coordinator'||holding||existsSync(marker))return result;
     holding=true;await writeFile(marker,JSON.stringify({root:session.parentID,child:session.id,callID:execution.id}));
@@ -76,6 +87,7 @@ export default {...plugin,async setup(ctx){
     const children = [...new Set(tools.filter(p => p.name === 'subagent').flatMap(p => p.state?.metadata?.sessionID ?? []))];
     assert(children.length === 1 && children[0] === identity.child, 'Recovery replaced the original child');
     assert(result.attempts >= 2, 'Recovery reset the attempt budget');
+    if (boundary === 'check') assert(result.checks.some(check => check.interrupted) && result.checks.some(check => check.current && check.exit === 0), 'Interrupted required check was lost or never rerun successfully');
     await command('node', ['check.mjs'], project, env);
     for (const [path, expected] of Object.entries(protectedHashes)) assert(hash(await readFile(join(project, path))) === expected, 'Protected fixture changed: ' + path);
   } catch (error) { errorMessage = error.message; }
@@ -83,14 +95,15 @@ export default {...plugin,async setup(ctx){
     await server.stop();
     await rm(join(control, 'native-server.json'), { force: true });
     await writeFile(join(run, 'final-history.json'), JSON.stringify(finalHistory ?? null, null, 2));
-    const report = { schema: 1, version: fixture.pkg.version, sha256: hash(await readFile(tgz)), runtimeMarker: fixture.runtimeMarker,
+    const report = { schema: 1, boundary, version: fixture.pkg.version, sha256: hash(await readFile(tgz)), runtimeMarker: fixture.runtimeMarker,
       driver_sha256: hash(await readFile(import.meta.filename)), identity, elapsed_ms: Date.now() - started,
       terminal: errorMessage ? 'failed' : 'succeeded', error: errorMessage ?? null, same_child: !errorMessage, server_restarted: Boolean(firstHistory),
       observation: (await readFile(join(control, 'recovery-observation.jsonl'), 'utf8').catch(() => '')).trim().split('\n').filter(Boolean).map(JSON.parse) };
     await writeFile(join(run, 'recovery.json'), JSON.stringify(report, null, 2));
+    await rm(join(control, 'node_modules'), { recursive: true, force: true });
   }
   return json(join(run, 'recovery.json'));
 }
 if (process.argv[1] && resolve(process.argv[1]) === resolve(import.meta.filename)) {
-  userProxyRecoverySmoke(resolve(process.argv[2]), resolve(process.argv[3])).then(report => { console.log(JSON.stringify(report, null, 2)); if (report.terminal !== 'succeeded') process.exitCode = 1; }).catch(error => { console.error(error); process.exitCode = 1; });
+  userProxyRecoverySmoke(resolve(process.argv[2]), resolve(process.argv[3]), process.argv[4]).then(report => { console.log(JSON.stringify(report, null, 2)); if (report.terminal !== 'succeeded') process.exitCode = 1; }).catch(error => { console.error(error); process.exitCode = 1; });
 }

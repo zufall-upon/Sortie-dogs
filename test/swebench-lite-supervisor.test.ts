@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
+import { runSupervisedUserProxy } from "../scripts/user-proxy-supervisor-runner.mjs";
+import { createCompletedSnapshot } from "../scripts/swebench-lite-grader.mjs";
 import {
   acquireRunLock,
   createSupervisorState,
@@ -67,6 +70,87 @@ function fakeDependencies(runs: string[], configuration: { limits?: number[]; st
     waitForChild: async () => ({ exit: 0, signal: null }),
   };
 }
+
+test("supervisor pins inputs and budget on replay, and holds unknown cost instead of recycling it", async () => {
+  const root = await mkdtemp(join(tmpdir(), "supervisor-pinned-"));
+  try {
+    const value = { ...manifestValue, instances: [...manifestValue.instances, { ...manifestValue.instances[0], instance_id: "third" }] };
+    const options = { manifestPath: join(root, "manifest.json"), runRoot: root, output: join(root, "predictions.jsonl"),
+      workers: 2, costLimitUsd: 1, perInstanceUsd: 0.5, watchdog: false };
+    const runs: string[] = [], limits: number[] = [];
+    const dependencies = fakeDependencies(runs, { limits });
+    const original = dependencies.spawnRunner;
+    dependencies.spawnRunner = async (...args: Parameters<typeof original>) => {
+      const result = await original(...args);
+      await writeAtomicJson(args[2].metadata, { execution: { spent_usd: null, usage_complete: false }, results: [{ instance_id: args[1].instance_id, status: "interrupted" }] });
+      return result;
+    };
+    const state = await runSupervisor(value, options, dependencies);
+    assert.deepEqual(limits, [0.5, 0.5]); assert.equal(state.spent_usd, 0); assert.equal(state.held_unknown_usd, 1);
+    assert.equal(state.instances[2].status, "not-run-cost-limit");
+    const before = await readFile(join(root, "supervisor-state.json"), "utf8");
+    await assert.rejects(runSupervisor({ ...value, candidate: { ...value.candidate, sha256: "b".repeat(64) } }, options, dependencies), /input-changed/);
+    await assert.rejects(runSupervisor(value, { ...options, costLimitUsd: 2 }, dependencies), /limits-changed/);
+    assert.equal(await readFile(join(root, "supervisor-state.json"), "utf8"), before);
+    await runSupervisor(value, options, dependencies);
+    assert.equal(runs.length, 2, "Completed and interrupted attempts are not relaunched");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("existing supervisor reaches the v0.11 adapter with pinned full input and preserves each prediction", async () => {
+  const root = await mkdtemp(join(tmpdir(), "supervisor-v011-adapter-"));
+  try {
+    const manifestPath = join(root, "manifest.json"), seen: string[] = [];
+    await writeFile(manifestPath, JSON.stringify(liteDev23Manifest));
+    const state = await runSupervisor(liteDev23Manifest, { manifestPath, runRoot: root, output: join(root, "predictions.jsonl"),
+      costLimitUsd: 34.5, perInstanceUsd: 1.5, workers: 4, watchdog: false }, {
+      allowWindows: true,
+      spawnRunner: async (_state: unknown, entry: any, paths: any, options: any) => {
+        await runSupervisedUserProxy({ manifest: paths.manifest, runRoot: paths.root, output: paths.output, metadata: paths.metadata, costLimitUsd: options.costLimitUsd },
+          async (_tgz: string, source: string, instance: string, run: string, limit: number) => {
+            assert.equal(source, manifestPath); assert.equal(instance, entry.instance_id); assert.equal(limit, 1.5);
+            seen.push(instance); await mkdir(run, { recursive: true });
+            await writeFile(join(run, "predictions.jsonl"), JSON.stringify({ instance_id: instance, model_name_or_path: "test-native-boundary", model_patch: "retained patch" }) + "\n");
+            return { run, terminal: "succeeded", patch_sha256: createHash("sha256").update("retained patch").digest("hex"), patch_bytes: 14,
+              receipt: { receipt: { status: "succeeded" } }, routing: [{ kind: "usage", usd: 0.1 }] };
+          });
+        return { identity: { pid: 99999999, starttime: null } };
+      }, waitForChild: async () => ({ exit: 0, signal: null }),
+    });
+    assert.equal(seen.length, 23); assert.equal(new Set(seen).size, 23);
+    assert(state.instances.every((entry: any) => entry.result.native_receipt.status === "succeeded"));
+    const predictions = (await readFile(join(root, "predictions.jsonl"), "utf8")).trim().split("\n").map(JSON.parse);
+    assert.deepEqual(predictions.map((p: any) => p.instance_id), liteDev23Manifest.instances.map(i => i.instance_id));
+    assert(predictions.every((p: any) => p.model_patch === "retained patch"));
+    const scoring = await createCompletedSnapshot(state);
+    assert.equal(scoring.instances.length, 23); // The real grader must accept the adapter's immutable patch identity.
+    assert(scoring.instances.every((entry: any) => entry.patch_sha256 === createHash("sha256").update("retained patch").digest("hex")));
+    assert(state.held_unknown_usd > 0, "Post-request usage remains unverified, not free");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("v0.11 setup failure retains a scoreable empty prediction and unknown cost without stopping other grading", async () => {
+  const root = await mkdtemp(join(tmpdir(), "supervisor-v011-setup-failed-"));
+  try {
+    const manifest = { ...liteDev23Manifest, instances: liteDev23Manifest.instances.slice(0, 1) };
+    const manifestPath = join(root, "manifest.json");
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    const state = await runSupervisor(manifest, { manifestPath, runRoot: root, output: join(root, "predictions.jsonl"),
+      costLimitUsd: 1.5, perInstanceUsd: 1.5, workers: 1, watchdog: false }, {
+      allowWindows: true,
+      spawnRunner: async (_state: unknown, _entry: any, paths: any, options: any) => {
+        await assert.rejects(runSupervisedUserProxy({ manifest: paths.manifest, runRoot: paths.root, output: paths.output,
+          metadata: paths.metadata, costLimitUsd: options.costLimitUsd }, async () => { throw Error("Native setup unavailable"); }), /Native setup unavailable/);
+        return { identity: { pid: 99999999, starttime: null } };
+      }, waitForChild: async () => ({ exit: 1, signal: null }),
+    });
+    assert.equal(state.instances[0].status, "failed");
+    assert.equal(state.instances[0].result.usage.usd, null); assert.equal(state.held_unknown_usd, 1.5);
+    const scoring = await createCompletedSnapshot(state);
+    assert.equal(scoring.instances.length, 1); assert.equal(scoring.instances[0].prediction.model_patch, "");
+    assert.equal(scoring.instances[0].patch_sha256, createHash("sha256").update("").digest("hex"));
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
 
 test("supervisor atomically claims each instance and writes ordered aggregate output", async () => {
   const root = await mkdtemp(join(tmpdir(), "swebench-supervisor-"));

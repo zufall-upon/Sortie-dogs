@@ -27,9 +27,9 @@ export async function prepareUserProxyCandidate(candidate, tgz, directory) {
 export async function userProxyBench(tgz, sourceManifest, instanceID, directory, costLimit = 1.5) {
   assert(Number.isFinite(costLimit) && costLimit > 0, 'A positive per-case budget is required');
   const input = createInferenceManifest(JSON.parse(await readFile(sourceManifest, 'utf8')));
-  assert(input.dataset.split === 'dev' && input.instances.length === 23, 'Expected the pinned public dev23 manifest');
+  assert(input.dataset.split === 'dev' && input.instances.length > 0, 'Expected a pinned public dev manifest or selected subset');
   const instance = input.instances.find(item => item.instance_id === instanceID);
-  assert(instance, 'Case is not in the pinned dev23 set');
+  assert(instance, 'Case is not in the pinned public manifest');
   const driverHash = hash(await readFile(import.meta.filename));
   const packageHash = hash(await readFile(tgz));
   assert(packageHash === input.candidate.sha256, 'Candidate differs from the declared inference manifest');
@@ -66,18 +66,37 @@ print(json.dumps({'version':sys.version,'executable':sys.executable,'packages':p
   await writeFile(join(control, 'plugins/sortie-dogs/index.js'), `import plugin from 'sortie-dogs';
 import {appendFile} from 'node:fs/promises';
 import {estimateModelUsageCost} from '../../node_modules/sortie-dogs/dist/plugin/model-cost.js';
+import {WorkLoop} from '../../node_modules/sortie-dogs/dist/core/work-loop.js';
 export default {...plugin,async setup(ctx){
-  const cleanup=await plugin.setup(ctx),seen=new Set(),billed=new Map();
+  const cleanup=await plugin.setup(ctx),seen=new Set(),billed=new Map(),submissions=[],observedSince=Date.now();
+  const meter=new WorkLoop(ctx.location.directory,ctx.storage);
   const record=value=>appendFile(new URL('../../benchmark-routing.jsonl',import.meta.url),JSON.stringify(value)+'\\n');
   const {data:models}=await ctx.model.list();
   const fast=models.find(model=>model.providerID==='openai'&&model.id==='gpt-6-luna-fast');
   if(!fast||fast.modelID!=='gpt-6-luna'||!['priority','fast'].includes(fast.body?.service_tier))throw Error('Native Fast catalog missing');
   await record({kind:'catalog',model:fast.id,api_model:fast.modelID,tier:fast.body.service_tier});
+  async function submission(event){
+    if(!['primary','compaction'].includes(event.kind))return;
+    const row={kind:'submission',sessionID:event.sessionID,request_kind:event.kind,at:Date.now(),model:event.model.id};
+    submissions.push(row);await record(row);
+  }
   async function usage(){
-    let usd=0,requests=0;const unpriced=[];
+    let usd=0,requests=0,reserved=0;const unpriced=[],unsent=[];
     for(const sessionID of seen){
+        if(typeof meter.auxiliaryReceipts==='function')for(const entry of await meter.auxiliaryReceipts(sessionID,observedSince)){
+          const [providerID,...id]=entry.receipt.model.split('/');
+          billed.set('auxiliary:'+entry.id,{price:entry.receipt.usd===null?{status:'unpriced'}:{status:'priced',usd:entry.receipt.usd},model:{providerID,id:id.join('/')}});
+        }
         for(const m of await ctx.session.context({sessionID})){
           if(!['assistant','compaction'].includes(m.type)||!m.time?.completed)continue;
+          // Native pacing can interrupt a local step before any provider transmission.
+          // Only complete transport observation can establish that it was never sent.
+          // A sent/uncorrelated request without usage remains unknown, never free.
+          const kind=m.type==='compaction'?'compaction':'primary';
+          if(!m.tokens&&m.error&&Number.isFinite(m.time.created)&&m.time.created>=observedSince&&
+              !submissions.some(s=>s.sessionID===sessionID&&s.request_kind===kind&&s.at>=m.time.created&&s.at<=m.time.completed)){
+            billed.set(m.id,{local:true,model:m.model});continue;
+          }
           const t=m.tokens??{},model=m.model??{};
           const price=estimateModelUsageCost({providerID:model.providerID,modelID:model.id,uncachedInputTokens:t.input,
             cacheReadTokens:t.cache?.read,cacheWriteTokens:t.cache?.write,outputTokens:t.output,reasoningTokens:t.reasoning,
@@ -86,20 +105,33 @@ export default {...plugin,async setup(ctx){
         }
     }
     // Retain completed messages observed before native compaction drops them from the active context.
-    for(const {price,model} of billed.values()){requests++;if(price.status==='priced')usd+=price.usd;else unpriced.push(model);}
-    return{usd,requests,unpriced};
+    for(const [id,{price,model,local}] of billed){
+      if(local){unsent.push(id);continue;}requests++;
+      if(price.status==='priced')usd+=price.usd;
+      else {
+        const catalog=models.find(item=>item.id===model.id&&item.providerID===model.providerID),limit=catalog?.limit;
+        const bound=Number.isFinite(limit?.context)&&Number.isFinite(limit?.output)?estimateModelUsageCost({providerID:model.providerID,modelID:model.id,
+          uncachedInputTokens:limit.context,outputTokens:limit.output,reasoningTokens:0,cacheReadTokens:0,cacheWriteTokens:0,
+          serviceTier:model.id==='gpt-6-luna-fast'?'priority':'standard'}):null;
+        const reservation=bound?.status==='priced'?bound.usd:${JSON.stringify(costLimit)};
+        reserved+=reservation;unpriced.push({...model,messageID:id,reserved_upper_bound_usd:reservation});
+      }
+    }
+    return{usd,requests,unpriced,reserved_unknown_usd:reserved,committed_usd:usd+reserved,unsent_local_interruptions:unsent};
   }
   for(const kind of ['context','compaction','title','generate'])await ctx.session.hook(kind,async event=>{
     seen.add(event.sessionID);const cost=await usage();await record({kind:'usage',...cost});
-    if(cost.unpriced.length||cost.usd>=${JSON.stringify(costLimit)})throw Error('Benchmark request-boundary cost limit');
+    if(cost.committed_usd>=${JSON.stringify(costLimit)})throw Error('Benchmark request-boundary cost limit including conservative unknown-usage reservations');
     if(event.tools)for(const name of Object.keys(event.tools))if(/browser|webfetch|websearch/.test(name))delete event.tools[name];
   });
   await ctx.session.hook('http.request',async event=>{
     if(event.request.method!=='POST')return;const body=await event.request.clone().json().catch(()=>({}));
+    if(body.model)await submission(event);
     if(body.model)await record({kind:event.kind,sessionID:event.sessionID,model:event.model.id,api_model:body.model,tier:body.service_tier??null,transport:'http'});
   });
   await ctx.session.hook('experimental.ws.send',async event=>{
     const frame=JSON.parse(event.frame);if(frame.type!=='response.create')return;const body=frame.response??frame;
+    await submission(event);
     await record({kind:event.kind,sessionID:event.sessionID,model:event.model.id,api_model:body.model,tier:body.service_tier??null,transport:'ws'});
   });
   return cleanup;
@@ -159,7 +191,11 @@ export default {...plugin,async setup(ctx){
     routing: events(await readFile(join(control, 'benchmark-routing.jsonl'), 'utf8').catch(() => '')) };
   await writeFile(join(run, 'native-history.json'), JSON.stringify(family, null, 2));
   await writeFile(join(run, 'inference-result.json'), JSON.stringify(report, null, 2));
-  if (errorMessage) throw Error(`${errorMessage}; evidence: ${join(run, 'inference-result.json')}`);
+  if (errorMessage) {
+    const error = Error(`${errorMessage}; evidence: ${join(run, 'inference-result.json')}`);
+    error.report = { ...report, run };
+    throw error;
+  }
   return { ...report, run };
 }
 
