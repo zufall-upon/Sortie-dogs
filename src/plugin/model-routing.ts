@@ -136,7 +136,7 @@ export const RECOMMENDED_LUNA_ROUTING: ModelRoutingConfig = Object.freeze(Object
  * strongest reasoning model a host declares; it stays out of the built-in catalog so an undeclared
  * host falls back to the shipped high-effort Sol target instead of an unavailable route.
  */
-export const RECOMMENDED_CONSULTATION_MODEL = "anthropic/claude-opus-5-5";
+export const RECOMMENDED_CONSULTATION_MODEL = "anthropic/claude-opus-5";
 export const RECOMMENDED_CONSULTATION_ROLES = Object.freeze(
   Object.values(CONSULTATION_ROLE_POLICY) as readonly string[],
 );

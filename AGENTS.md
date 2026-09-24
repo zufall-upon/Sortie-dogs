@@ -8,8 +8,6 @@
 
 # Release gate
 
-リリース作業（検証・tag・GitHub Release・npm公開）はUbuntu側が担当。Windows側は修正PRとリリース済み版の反映・実運用確認のみ。
-
 SWE-Benchはリリース必須gateではなく、必要時に別途実施する。
 
 1. release対象commitを固定する。

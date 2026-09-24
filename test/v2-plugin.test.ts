@@ -317,7 +317,7 @@ test("V2 event failures warn per event and keep lifecycle translation active", a
 });
 
 test("package server export resolves to the V2 default definition", async () => {
-  assert.equal(V2Plugin.id, "sortie-dogs.v011");
+  assert.equal(V2Plugin.id, "sortie-dogs.v010");
   assert.equal(typeof V2Plugin.setup, "function");
   const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
   assert.deepEqual(packageJson.exports["./server"], { types: "./dist/plugin/v2.d.ts", import: "./dist/plugin/v2.js" });
@@ -332,7 +332,7 @@ test("V1 preview and stable package entries remain callable", async () => {
 
 test("actual v0.10 tools preserve required, optional, and described schemas through V2", async () => {
   const fixture = contextFixture();
-  const cleanup = await createSortieDogsV2Plugin().setup(fixture.context);
+  const cleanup = await V2Plugin.setup(fixture.context);
   try {
     const tools = fixture.tools as Array<{ name: string; input: { required: string[]; properties: Record<string, { description?: string }> } }>;
     const prepare = tools.find(tool => tool.name === "sortie_v010_prepare_operator")!;

@@ -25,7 +25,7 @@ export const RELEASE_SMOKE_TERMINAL_TIMEOUT_SECONDS = 180;
 export const RELEASE_SMOKE_TERMINAL_PROMPT =
   'The recovery unit is already settled as succeeded with canonical PASS. Do not call tools, dispatch, validate, or edit. ' +
   'Reply with `status: DONE` as the first conclusion line and report this same goal complete.';
-export const v2PluginWrapperSource = runtime => runtime.id === 'v011' ? 'export { default } from "sortie-dogs/server";\n' : `import { createSortieDogsV2Plugin } from "sortie-dogs/server";\n` +
+export const v2PluginWrapperSource = runtime => `import { createSortieDogsV2Plugin } from "sortie-dogs/server";\n` +
   `import { SortieDogsPlugin } from "${runtime.id === 'stable' ? 'sortie-dogs/plugin/stable' : 'sortie-dogs/plugin'}";\n` +
   `export default createSortieDogsV2Plugin(SortieDogsPlugin);\n`;
 export const releaseSmokeWorkerStarted = (events, records, unitID) =>
@@ -63,7 +63,7 @@ async function stopProcessGroup(child) {
   });
 }
 
-export async function startV2ReleaseServer(cwd, env) {
+async function startV2ReleaseServer(cwd, env) {
   const password = randomBytes(24).toString('hex');
   const serverEnv = { ...process.env, ...env, PWD: cwd, OPENCODE_SERVER_PASSWORD: password };
   const child = spawn('opencode', ['serve', '--hostname', '127.0.0.1', '--port', '0'], {
@@ -160,7 +160,6 @@ export async function installedFixture(tgz, directory, profileId = 'stable') {
 }
 
 export async function inside(tgz, directory, profileId = 'stable') {
-  if (profileId === 'v011') return (await import('./user-proxy-smoke.mjs')).userProxySmoke(tgz, directory);
   const { project, env, pkg, runtime, release, coordinatorAgent, workerAgent, cliVersion,
     runtimeMarker: RUNTIME_ASSET_VERSION, acceptanceContinuityFingerprint, reduceGoalFlight } = await installedFixture(tgz, directory, profileId);
   await writeFile(join(project, 'AGENTS.md'), '# Release fixture\nNative file paths resolve from this workspace. Use the supplied nested manifest. Do not edit contracts, tests, or package files. Workers must not commit.\n');

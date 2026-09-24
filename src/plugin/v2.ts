@@ -1,17 +1,14 @@
 import type { OpenCodeHooks, OpenCodePlugin } from "./index.js";
 import { SortieDogsV010Plugin } from "./profiled.js";
-import { createUserProxyPlugin } from "./work-loop-v2.js";
 
 type JsonObject = Record<string, unknown>;
 type Registration = { dispose(): Promise<void> | void };
 
 interface V2ToolEditor {
-  update?(id: string, update: (tool: { execute(input: unknown, context: JsonObject): Promise<JsonObject> }) => void): void;
   add(tool: {
     name: string;
     description: string;
     input: JsonObject;
-    options?: { codemode?: boolean; permission?: string };
     execute(input: unknown, context: JsonObject): Promise<JsonObject>;
   }): void;
 }
@@ -22,12 +19,10 @@ export interface OpenCodeV2Context {
   readonly options?: Readonly<Record<string, unknown>>;
   readonly event: { subscribe(options?: { signal?: AbortSignal }): AsyncIterable<JsonObject> };
   readonly tool: {
-    list?(): Promise<Array<{ id: string; execute(input: unknown, context: JsonObject): Promise<JsonObject> }>>;
     transform(callback: (editor: V2ToolEditor) => void): Promise<Registration>;
     hook(name: "execute.before" | "execute.after", callback: (event: JsonObject) => Promise<void> | void): Promise<Registration>;
   };
   readonly session: {
-    compact?(input: JsonObject): Promise<unknown>;
     list?(input: JsonObject): Promise<unknown>;
     get(input: { sessionID: string }): Promise<unknown>;
     context(input: { sessionID: string }): Promise<unknown>;
@@ -36,7 +31,7 @@ export interface OpenCodeV2Context {
     interrupt(input: JsonObject): Promise<unknown>;
     switchAgent(input: JsonObject): Promise<unknown>;
     switchModel(input: JsonObject): Promise<unknown>;
-    hook(name: "prompt" | "context" | "compaction" | "title" | "generate" | "http.request" | "http.response" | "experimental.ws.send" | "experimental.ws.receive", callback: (event: JsonObject) => Promise<void> | void): Promise<Registration>;
+    hook(name: "prompt" | "context" | "compaction", callback: (event: JsonObject) => Promise<void> | void): Promise<Registration>;
   };
   readonly message?: { list(input: JsonObject): Promise<unknown> };
   readonly permission: {
@@ -381,4 +376,4 @@ export function createSortieDogsV2Plugin(legacyFactory: OpenCodePlugin = SortieD
 }
 
 export const SortieDogsV2Plugin = createSortieDogsV2Plugin();
-export default createUserProxyPlugin();
+export default SortieDogsV2Plugin;

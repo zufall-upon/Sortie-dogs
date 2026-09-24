@@ -221,7 +221,7 @@ function candidateIdentity(value) {
     agent: text(value.agent, "candidate.agent"),
   };
   ensure(/^[a-f0-9]{64}$/u.test(candidate.sha256), "invalid-candidate-sha256");
-  ensure(["v010", "v011"].includes(candidate.profile), "invalid-candidate-profile");
+  ensure(candidate.profile === "v010", "invalid-candidate-profile");
   ensure(candidate.agent === DEFAULT_AGENT, "invalid-candidate-agent");
   return Object.freeze(candidate);
 }
@@ -542,9 +542,7 @@ export function createInstancePrompt(instance) {
     "Keep every glob, grep, read, and shell path relative even after coordinator or worker handoffs; only the host may use absolute workspace paths.",
     "Before editing, reproduce the public issue with its smallest concrete example and locate the existing focused regression test or tests that express the expected behavior.",
     "Time-box dependency setup to a brief, repository-documented attempt; do not repeatedly create environments or install unrelated packages.",
-    "Installing repository-declared build/runtime/test dependencies from package registries is allowed. Follow the repository's compatible versions; do not impose an offline install or a conflicting latest-package pin merely because web/solution retrieval is forbidden.",
     "If a dependency remains unavailable, inspect the source and implement the smallest plausible fix, then run every focused check that the available environment permits.",
-    "If required behavioral verification still cannot execute, retain the patch and report a blocked/incomplete outcome, not succeeded completion based on compilation or an unrelated reproduction.",
     "Do not invent an expected output from the issue alone; inspect existing public code, nearby visitor methods, node string or name conventions, and public tests before choosing a regression assertion.",
     "When public tests do not state the expected representation, derive it from the repository's established analogous representation and keep the assertion aligned with that convention.",
     "After editing, rerun that exact reproduction plus the focused regression test and at least one adjacent relevant test; do not finalize a patch that only passes syntax checks or a self-invented test while the issue's focused test still fails.",
@@ -667,7 +665,6 @@ async function requiredCommand(executable, args, options) {
 }
 
 export async function prepareCandidateRuntime(candidate, packagePath, runRoot, dependencies = {}) {
-  if (candidate.profile === "v011") return (await import("./user-proxy-bench.mjs")).prepareUserProxyCandidate(candidate, packagePath, runRoot);
   ensure(process.platform !== "win32", "live-mode-requires-wsl-login-shell");
   const execute = dependencies.execute ?? requiredCommand;
   const packageBytes = await readFile(packagePath);
@@ -1046,7 +1043,6 @@ function costEnforcementStopReason(execution) {
 
 export async function runLive(value, options, dependencies = {}) {
   const plan = createLiveRunPlan(value, options, dependencies.publicRowHashes);
-  ensure(plan.candidate.profile !== "v011", "v011-use-scripts/user-proxy-bench.mjs-for-native-inference");
   ensure(typeof options.runRoot === "string" && options.runRoot.length > 0, "live-run-root-required");
   ensure(typeof options.output === "string" && options.output.length > 0, "live-output-required");
   const runRoot = resolve(options.runRoot);

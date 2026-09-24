@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
-import { chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -10,7 +10,6 @@ import {
   OFFICIAL_SCORING_SPLIT,
   createCompletedSnapshot,
   createOfficialHarnessRequest,
-  runOfficialHarness,
   runIncrementalGrader,
 } from "../scripts/swebench-lite-grader.mjs";
 
@@ -98,66 +97,6 @@ test("official harness request is fixed to dev and one worker", async () => {
     assert.throws(() => createOfficialHarnessRequest(snapshot, { split: "test" }), /grader-split-required/);
     assert.throws(() => createOfficialHarnessRequest(snapshot, { max_workers: 2 }), /grader-max-workers-required/);
     assert.equal(JSON.stringify(request).includes("test_patch"), false);
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("official harness receives the generated prediction path and runs from its scoring root", async () => {
-  const root = await mkdtemp(join(tmpdir(), "swebench-grader-launch-"));
-  try {
-    const predictionPath = join(root, "scoring-predictions.jsonl");
-    const runner = join(root, "fake-official-harness");
-    await writeFile(predictionPath, "{}\n");
-    await writeFile(runner, "#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({ argv: process.argv.slice(2), cwd: process.cwd() }));\n");
-    await chmod(runner, 0o755);
-    const result = await runOfficialHarness({ split: "dev", max_workers: 1 }, {
-      executable: runner,
-      predictionPath,
-      runRoot: root,
-    });
-    assert.equal(result.exit_code, 0);
-    assert.equal(result.cwd, root);
-    assert.deepEqual(result.argv.slice(-2), ["--predictions_path", predictionPath]);
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("incremental grading passes its generated prediction file to the real launcher path", async () => {
-  const root = await mkdtemp(join(tmpdir(), "swebench-grader-default-launch-"));
-  try {
-    const state = stateFor(root);
-    const statePath = await writeStateFixture(root, state);
-    const runner = join(root, "fake-official-harness");
-    const capturePath = join(root, "invocation.json");
-    const source = [
-      "#!/usr/bin/env node",
-      'import { readFileSync, writeFileSync } from "node:fs";',
-      'const args = process.argv.slice(2);',
-      'const predictionPath = args[args.indexOf("--predictions_path") + 1];',
-      'const predictions = readFileSync(predictionPath, "utf8").trim().split(/\\r?\\n/u).map(JSON.parse);',
-      `writeFileSync(${JSON.stringify(capturePath)}, JSON.stringify({ cwd: process.cwd(), predictionPath, predictions }));`,
-      'process.stdout.write(JSON.stringify({ results: predictions.map(item => ({ instance_id: item.instance_id, status: "scored", resolved: false, patch_successfully_applied: false, infra_failure: false })) }));',
-      "",
-    ].join("\n");
-    await writeFile(runner, source);
-    await chmod(runner, 0o755);
-
-    const result = await runIncrementalGrader({
-      supervisorStatePath: statePath,
-      runRoot: root,
-      manifest,
-      harnessExecutable: runner,
-    });
-    assert.equal(result.started, true);
-    assert.equal(result.results.length, 1);
-    const invocation = JSON.parse(await readFile(capturePath, "utf8"));
-    assert.equal(invocation.cwd, root);
-    assert.equal(invocation.predictionPath, join(root, "scoring-predictions.jsonl"));
-    assert.deepEqual(invocation.predictions.map((item: { instance_id: string }) => item.instance_id), ["example__project-1"]);
-    const liveRows = (await readFile(join(root, "live-results.jsonl"), "utf8")).trim().split("\n").map(line => JSON.parse(line));
-    assert.equal(liveRows[0]!.result.infra_failure, false);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

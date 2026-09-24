@@ -254,7 +254,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
           import('sortie-dogs'),
           import('./node_modules/sortie-dogs/dist/core/consultation.js'),
           import('sortie-dogs/plugin'),
-          import('sortie-dogs/assets/v010'),
+          import('sortie-dogs/assets'),
         ]);
         const previewHooks = await previewEntry.SortieDogsPlugin({ directory: process.cwd() });
         const { SortieDogsPlugin } = pluginEntry;
@@ -386,7 +386,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     );
     assert.ok(loaded.serverEntryExports.includes("default"));
     assert.equal(loaded.serverEntryExports.includes("SortieDogsPlugin"), false);
-    assert.equal(loaded.serverPluginID, "sortie-dogs.v011");
+    assert.equal(loaded.serverPluginID, "sortie-dogs.v010");
     assert.equal(loaded.serverSetupType, "function", "OpenCode V2 package resolution must reach the plugin definition");
     assert.deepEqual(loaded.previewEntryExports, ["SortieDogsPlugin"]);
     assert.ok(loaded.previewTools.includes("sortie_v010_prepare_operator"));

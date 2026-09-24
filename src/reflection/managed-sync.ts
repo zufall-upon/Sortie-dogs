@@ -10,7 +10,7 @@ const V010_CONTROL = ".sortie-dogs-v010/reflection-maintenance";
 const MAX_FILE_BYTES = 256 * 1024;
 const HASH = /^sha256:[a-f0-9]{64}$/u;
 function maintenanceContract(profile: ReflectionManagedProfile) {
-  const control = profile === "stable" ? STABLE_CONTROL : profile === "v010" ? V010_CONTROL : ".sortie-dogs-v011/reflection-maintenance";
+  const control = profile === "v010" ? V010_CONTROL : STABLE_CONTROL;
   return { control, manifest: {
     version: "0.1.0", task_id: "reflection-terminal-maintenance",
     read: ["AGENTS.md", control], write: ["AGENTS.md", control], validation: [],

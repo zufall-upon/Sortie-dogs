@@ -507,21 +507,15 @@ export function runOfficialHarness(request, options = {}) {
   ensure(request.split === OFFICIAL_SCORING_SPLIT && request.max_workers === OFFICIAL_SCORING_MAX_WORKERS,
     "official-harness-contract-invalid");
   const executable = options.executable ?? options.harnessExecutable ?? "python";
-  const predictionPath = options.predictionPath ?? options.predictionsPath ?? "scoring-predictions.jsonl";
   const args = options.args ?? [
     "-m", "swebench.harness",
     "--dataset_name", request.dataset?.id ?? "princeton-nlp/SWE-bench_Lite",
     "--split", OFFICIAL_SCORING_SPLIT,
     "--max_workers", String(OFFICIAL_SCORING_MAX_WORKERS),
-    "--predictions_path", predictionPath,
+    "--predictions_path", options.predictionsPath ?? "scoring-predictions.jsonl",
   ];
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(executable, args, {
-      cwd: options.cwd ?? options.runRoot,
-      env: options.env,
-      shell: false,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    const child = spawn(executable, args, { cwd: options.cwd, env: options.env, shell: false, stdio: ["ignore", "pipe", "pipe"] });
     let stdoutBytes = 0;
     let stderrBytes = 0;
     const stdout = [];

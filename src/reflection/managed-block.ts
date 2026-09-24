@@ -8,12 +8,11 @@ export const V010_REFLECTION_MANAGED_BLOCK_START = "<!-- sortie-dogs-v010:reflec
 export const V010_REFLECTION_MANAGED_BLOCK_END = "<!-- sortie-dogs-v010:reflection-managed:end -->";
 export const REFLECTION_MANAGED_BLOCK_MAX_BYTES = 4096;
 export const REFLECTION_MANAGED_BLOCK_MAX_ENTRIES = 5;
-export type ReflectionManagedProfile = "stable" | "v010" | "v011";
+export type ReflectionManagedProfile = "stable" | "v010";
 
 const MANAGED_MARKERS = Object.freeze({
   stable: Object.freeze({ start: REFLECTION_MANAGED_BLOCK_START, end: REFLECTION_MANAGED_BLOCK_END }),
   v010: Object.freeze({ start: V010_REFLECTION_MANAGED_BLOCK_START, end: V010_REFLECTION_MANAGED_BLOCK_END }),
-  v011: Object.freeze({ start: "<!-- sortie-dogs-v011:reflection-managed:start -->", end: "<!-- sortie-dogs-v011:reflection-managed:end -->" }),
 });
 
 export type ManagedBlockNoUpdateReason = "active-batch" | "sync-stopped" | "manifest-unapproved" | "non-project-layer";

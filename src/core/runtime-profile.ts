@@ -1,6 +1,6 @@
 /** Runtime identity is independent of the model route and the release's npm dist-tag. */
 export interface RuntimeProfile {
-  readonly id: "stable" | "v010" | "v011";
+  readonly id: "stable" | "v010";
   readonly agentSuffix: string;
   readonly toolPrefix: string;
   readonly stateDirectory: string;
@@ -41,15 +41,7 @@ export const V010_RUNTIME_PROFILE: RuntimeProfile = Object.freeze({
   }),
 });
 
-export const V011_RUNTIME_PROFILE: RuntimeProfile = Object.freeze({
-  id: "v011", agentSuffix: "-v011", toolPrefix: "sortie_v011_", stateDirectory: ".sortie-dogs-v011", flightDirectory: "run-flight-v011",
-  configFile: "sortie-dogs-v011.json", configEnvironment: "SORTIE_DOGS_V011_CONFIG",
-  markerFile: "sortie-dogs-v011.version", commandName: "sortie-v011", parallel: false,
-  agentNames: Object.freeze({ ...suffixedAgentNames("-v011"), "dog-operator": "dog-operator", "dog-coordinator": "dog-operator", "dog-worker": "dogs-coordinator",
-    "dog-reviewer": "dog-reviewer-v010", "dog-advisor": "dog-advisor-v010" }),
-});
-
-export const RUNTIME_PROFILES = Object.freeze({ stable: STABLE_RUNTIME_PROFILE, v010: V010_RUNTIME_PROFILE, v011: V011_RUNTIME_PROFILE });
+export const RUNTIME_PROFILES = Object.freeze({ stable: STABLE_RUNTIME_PROFILE, v010: V010_RUNTIME_PROFILE });
 export type RuntimeProfileId = keyof typeof RUNTIME_PROFILES;
 
 export function profileAgent(profile: RuntimeProfile, role: CanonicalAgentRole): string {

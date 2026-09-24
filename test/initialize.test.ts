@@ -393,7 +393,7 @@ test("CLI init supports an explicit project root, repeated init, and help", asyn
   try {
     assert.deepEqual(await runCli(["init", "--help"]), {
       exit: 0,
-      stdout: "Usage: sortie-dogs init [project-root] [--profile stable|v010|v011]\n       sortie-dogs init --global [--profile stable|v010|v011]\nThis package defaults to the V2-native v011 user-proxy profile.\n",
+      stdout: "Usage: sortie-dogs init [project-root] [--profile stable|v010]\n       sortie-dogs init --global [--profile stable|v010]\nThis beta package defaults to the v010 profile.\n",
       stderr: "",
     });
     assert.deepEqual(await runCli(["init", project, "--profile", "stable"]), {
@@ -436,10 +436,10 @@ test("global root resolver honors OpenCode and XDG precedence", async () => {
   }
 });
 
-test("CLI explicitly retains the v0.10 compatibility profile", async () => {
+test("beta CLI defaults to namespaced preview assets", async () => {
   const project = await fixtureDirectory();
   try {
-    const result = await runCli(["init", project, "--profile", "v010"]);
+    const result = await runCli(["init", project]);
     assert.equal(result.exit, 0, result.stderr);
     assert.equal(await readFile(join(project, ".opencode/sortie-dogs-v010.version"), "utf8"), `${V010_RUNTIME_ASSET_VERSION}\n`);
     const primary = await readFile(join(project, ".opencode/agent/dog-operator.md"), "utf8");
@@ -450,18 +450,6 @@ test("CLI explicitly retains the v0.10 compatibility profile", async () => {
     await assert.rejects(readFile(join(project, ".opencode/agent/dog-coordinator-v010.md")), { code: "ENOENT" });
     await assert.rejects(readFile(join(project, ".opencode/agent/dog-operator-v010.md")), { code: "ENOENT" });
     await assert.rejects(readFile(join(project, ".opencode/agent/dog-coordinator.md")), { code: "ENOENT" });
-  } finally { await clean(project); }
-});
-
-test("CLI default installs the V2 user proxy with SOL6 and the actual Luna6 Fast selector", async () => {
-  const project = await fixtureDirectory();
-  try {
-    const result = await runCli(["init", project]);
-    assert.equal(result.exit, 0, result.stderr);
-    assert.match(await readFile(join(project, ".opencode/sortie-dogs-v011.version"), "utf8"), /^0\.11\./);
-    assert.match(await readFile(join(project, ".opencode/agent/dog-operator.md"), "utf8"), /^model: openai\/gpt-6-sol#xhigh$/m);
-    assert.match(await readFile(join(project, ".opencode/agent/dogs-coordinator.md"), "utf8"), /^model: openai\/gpt-6-luna-fast#max$/m);
-    assert.equal((await runCli(["init", project])).exit, 0);
   } finally { await clean(project); }
 });
 
@@ -573,7 +561,7 @@ test("CLI global init reports its target, legacy preservation, and invalid combi
       const result = await runCli(args, env);
       assert.equal(result.exit, 2);
       assert.equal(result.stdout, "");
-      assert.equal(result.stderr, "Usage: sortie-dogs init [project-root] [--profile stable|v010|v011]\n       sortie-dogs init --global [--profile stable|v010|v011]\nThis package defaults to the V2-native v011 user-proxy profile.\n");
+      assert.equal(result.stderr, "Usage: sortie-dogs init [project-root] [--profile stable|v010]\n       sortie-dogs init --global [--profile stable|v010]\nThis beta package defaults to the v010 profile.\n");
     }
   } finally {
     await clean(fixture);

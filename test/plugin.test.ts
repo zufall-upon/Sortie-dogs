@@ -2536,7 +2536,7 @@ test("model routing rewrites only targets present in the cached host provider li
   });
 });
 
-test("consultation routing uses Sol xhigh before free tier when preferred Opus 5.5 is absent", async () => {
+test("consultation routing uses Sol xhigh before free tier when Opus is absent from the host", async () => {
   await withProject("model-routing-consultation-host-fallback", async (directory) => {
     await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
     const hooks = await SortieDogsPlugin({
@@ -6756,7 +6756,7 @@ test("proven silent consultation agents get isolated parent-scoped fallback retr
     };
     const client = {
       config: { providers: async () => ({ data: { providers: [
-        { id: "anthropic", models: { "claude-opus-5-5": { id: "claude-opus-5-5" } } },
+        { id: "anthropic", models: { "claude-opus-5": { id: "claude-opus-5" } } },
          { id: "openai", models: { "gpt-6-sol": { id: "gpt-6-sol" } } },
       ] } }) },
       session: {
@@ -6787,7 +6787,7 @@ test("proven silent consultation agents get isolated parent-scoped fallback retr
         parts: [],
       };
       await chat({ sessionID: firstChild, agent: role, parentID: "parent" } as never, firstDispatch);
-      assert.deepEqual(firstDispatch.message.model, { providerID: "anthropic", modelID: "claude-opus-5-5" });
+      assert.deepEqual(firstDispatch.message.model, { providerID: "anthropic", modelID: "claude-opus-5" });
 
       const firstSilent = emptyTask(firstChild, "parent");
       await after({ tool: "task", sessionID: "parent" }, firstSilent);

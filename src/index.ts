@@ -1,5 +1,4 @@
 export { lintHandoff } from "./core/validate-semantics.js";
-export { default } from "./plugin/v2.js";
 export { validateWorktreeParallelContract } from "./core/validate-worktree-parallel.js";
 export {
   LUNA_FABRIC_CONTRACT_VERSION,
