@@ -1,5 +1,6 @@
 import type { OpenCodeHooks, OpenCodePlugin } from "./index.js";
 import { SortieDogsV010Plugin } from "./profiled.js";
+import { bindMissionProgress } from "./mission-progress.js";
 
 type JsonObject = Record<string, unknown>;
 type Registration = { dispose(): Promise<void> | void };
@@ -9,6 +10,7 @@ interface V2ToolEditor {
     name: string;
     description: string;
     input: JsonObject;
+    options?: { codemode: boolean };
     execute(input: unknown, context: JsonObject): Promise<JsonObject>;
   }): void;
   update?(id: string, update: (tool: { execute(input: unknown, context: JsonObject): Promise<JsonObject> }) => void): void;
@@ -289,6 +291,7 @@ export function createV2ReturnReportFinalizer(context: OpenCodeV2Context, hooks:
 async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks): Promise<void> {
   const explicitlySelectedChildren = new Set<string>();
   const classifiedSubagentModels = new Map<string, boolean>();
+  const selectedChildModels = new Set<string>();
   // The V1 config hook is not invoked by OpenCode V2. Apply only missing role
   // defaults in its native registry; a user's configured agent model wins.
   await context.agent?.transform(editor => {
@@ -322,11 +325,21 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks)
           if (!model) throw new Error(`sortie-v010-subagent-model-unavailable:${value.agent}`);
           value.model = `${model.providerID}/${model.id}${model.variant ? `#${model.variant}` : ""}`;
         }
-        return execute(value, execution);
+        if (value.agent !== "dogs-coordinator" || typeof execution.progress !== "function") return execute(value, execution);
+        const report = execution.progress as (value: JsonObject) => Promise<void>;
+        let metadata: JsonObject = {};
+        const unbind = bindMissionProgress(String(execution.sessionID), async progress => {
+          metadata = { ...metadata, ...progress };
+          await report(metadata);
+        });
+        try { return await execute(value, { ...execution, progress: async (update: JsonObject) => {
+          metadata = { ...metadata, ...update };
+          await report(metadata);
+        } }); } finally { unbind(); }
       };
     });
     for (const [name, definition] of Object.entries(hooks.tool ?? {})) {
-      editor.add({ name, description: definition.description, input: toolSchema(definition.args),
+      editor.add({ name, description: definition.description, input: toolSchema(definition.args), options: { codemode: false },
         execute: async (input, execution) => ({ content: await definition.execute(record(input) ? input as Record<string, string> : {}, {
           sessionID: String(execution.sessionID ?? ""), ...(typeof execution.agent === "string" ? { agent: execution.agent } : {}) }) }) });
     }
@@ -372,7 +385,7 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks)
     if (typeof info.parentID === "string" && typeof info.agent === "string" && context.agent?.get) {
       const key = `${info.parentID}\0${legacyText}`;
       const explicit = explicitlySelectedChildren.delete(key);
-      if (!explicit && ["dogs-coordinator", "dog-advisor-v010", "dog-reviewer-v010", "dog-scout-v010",
+      if (!explicit && !selectedChildModels.has(String(event.sessionID)) && ["dogs-coordinator", "dog-advisor-v010", "dog-reviewer-v010", "dog-scout-v010",
         "dog-luna-worker-v010", "dog-worker-v010"].includes(info.agent)) {
         const configured = await context.agent.get({ agentID: info.agent });
         const selected = configured.data?.model ?? configured.model;
@@ -382,11 +395,15 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks)
           model = { providerID: selected.providerID, modelID: selected.id, ...(selected.variant ? { variant: selected.variant } : {}) };
         }
       }
+      selectedChildModels.add(String(event.sessionID));
     }
     const output = { message: { id: String(event.messageID ?? ""), agent: string(info.agent), model },
       parts: [{ type: "text", text: legacyText }] };
     await hooks["chat.message"]!({ sessionID: String(event.sessionID), messageID: String(event.messageID ?? ""),
       ...(typeof info.agent === "string" ? { agent: info.agent } : {}), model }, output);
+    // Native explicit selections and configured role models already won above. Legacy fixed serial
+    // routing must not undo them at prompt admission (including same-child resumes).
+    if (typeof info.parentID === "string" && selectedChildModels.has(String(event.sessionID))) output.message.model = model;
     const text = output.parts.find(part => record(part) && part.type === "text" && typeof part.text === "string");
     if (record(text) && typeof text.text === "string" && text.text !== legacyText) event.prompt.text = text.text;
     if (typeof output.message.agent === "string" && output.message.agent !== info.agent) {
@@ -402,6 +419,19 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks)
     const output = { system: [] as string[] };
     await hooks["experimental.chat.system.transform"]!({ sessionID: String(event.sessionID ?? "") }, output);
     if (Array.isArray(event.system)) event.system.push(...output.system.map(text => ({ type: "text", text })));
+    if (record(event.tools)) {
+      const visible: Record<string, string[]> = {
+        "dog-operator": ["start_mission", "plan_units", "operator_next", "operator_status", "expand_unit", "review_mission", "complete_mission", "cancel_operator", "reflection"],
+        "dogs-coordinator": ["plan_units", "operator_next", "operator_status", "expand_unit", "review_mission", "submit_mission"],
+        "dog-worker-v010": ["bind_write_gate", "release_write_gate"],
+        "dog-luna-worker-v010": ["bind_write_gate", "release_write_gate"],
+        "dog-reviewer-v010": [], "dog-scout-v010": [], "dog-advisor-v010": [],
+      };
+      const allowed = visible[String(event.agent)];
+      if (allowed) for (const key of Object.keys(event.tools)) {
+        if (key.startsWith("sortie_v010_") && !allowed.includes(key.slice("sortie_v010_".length))) delete event.tools[key];
+      }
+    }
   });
   if (hooks["experimental.session.compacting"]) await context.session.hook("compaction", async event => {
     const output = { context: [] as string[] };

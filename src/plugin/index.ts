@@ -7444,7 +7444,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           const relativeWrite = extracted.paths.find((path) => !isAbsolute(path));
           if (relativeWrite !== undefined) throw new WriteDeniedError("parallel-relative-path", relativeWrite);
         }
-        await gate.check(toolInput, output);
+        await gate.check(toolInput, output, { investigativeShell: ["bash", "shell"].includes(toolInput.tool) &&
+          await input.runtimeBridge?.allowsInvestigativeShell?.(toolInput.sessionID) === true });
       } catch (error) {
         activeState?.inFlightCalls.delete(toolInput.callID);
         if (error instanceof WriteDeniedError) goalValidationDefects.add(toolInput.sessionID);
@@ -8050,12 +8051,18 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       return { max_units: state.budget.max_units, consumed_units: state.consumed_units,
         reserved_units: reserved, remaining_units: Math.max(0, state.budget.max_units - state.consumed_units - reserved) };
     },
-    registerGoalDeclaration: async (root, prompt) => {
+    registerGoalDeclaration: async (root, prompt, missionRevision) => {
       if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) throw new Error("operator-coordinator-required");
       // In one-shot CLI turns OpenCode may persist the user message only after chat.message returns.
       // Proposal preparation can reach registration first, so recover that exact pending real turn here
       // instead of freezing a prepared contract that can never consume its user revision authority.
       await recoverPendingRealGoalTurn(root);
+      if (missionRevision) {
+        // Profile-verified unchanged mission requirements permit the Coordinator to revise proof
+        // commands, not acceptance or budgets. Counters/reservations stay in the same goal ledger.
+        const state = await currentGoal(root);
+        if (state.latest_user_message_id !== null) goalDeclarationAuthority.set(root, state.latest_user_message_id);
+      }
       const registered = await bindGoalDeclaration(root, prompt);
       if (registered?.goal_id === null || registered === undefined) throw new Error("operator-goal-registration-unavailable");
     },

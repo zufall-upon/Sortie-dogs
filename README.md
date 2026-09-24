@@ -28,7 +28,7 @@ implementation, validation, review, and model routing.
 Guides: [日本語](docs/guide-ja.md) · [简体中文](docs/guide-zh-CN.md) ·
 [Testing](docs/testing.md) · [CLI testing](docs/cli-testing.md)
 
-> **Beta:** v0.10.x is under active stabilization. Runtime behavior,
+> **Beta:** v0.12.0 builds on the v0.10.23 execution engine. Runtime behavior,
 > configuration, and generated assets may still change before 1.0.
 
 ## Quick start
@@ -42,7 +42,7 @@ npm install --save-dev sortie-dogs
 npx sortie-dogs init .
 ```
 
-The beta package defaults to the v0.10 profile. Add the OpenCode V2 plugin and the required
+The package retains the `v010` profile/namespace for compatibility. Add the OpenCode V2 plugin and the required
 two-level subagent depth to `.opencode/opencode.json`, preserving existing values:
 
 ```json
@@ -66,18 +66,20 @@ internal children and must not be selected as task entry points.
 model routing. Both are required. A new session alone does not reload an updated
 plugin process, so restart OpenCode after installation or upgrade.
 
-## v0.10.x direction
+## v0.12.0 workflow
 
-v0.10.x separates strategic authority from bounded operations:
+v0.12.0 keeps Operator → Coordinator → Worker, with independent review:
 
-- `dog-operator` preserves the original request, acceptance criteria, scope,
-  review decision, and final acceptance.
-- Hidden `dogs-coordinator` investigates or advances an approved serial queue,
-  but cannot edit source, change acceptance, review, or publish.
-- `dog-worker-v010` implements one host-generated unit inside exact read, write,
-  and validation boundaries.
-- Scout, advisor, and reviewer roles are optional and bounded by an explicit
-  evidence gap, strategy trigger, or risk decision.
+- `dog-operator` states a few requirements/negative constraints and owns user decisions and final acceptance.
+  The host saves the original user message verbatim.
+- Hidden `dogs-coordinator` owns investigation, unit declarations, Worker/Scout/Advisor/Reviewer dispatch,
+  in-request write-scope extensions, and corrections. It can read/search and run confirmation shell commands;
+  source editing tools belong to Worker.
+- `dog-worker-v010` implements a host-generated unit within its file/directory write scopes.
+  Investigation commands need no pre-registration; formal checks retain real host-recorded results.
+- High-risk changes require an independent Reviewer. Low-risk skips are explicit and recorded.
+- Simple low-risk single-unit work retains Operator → Worker Fast-lane dispatch.
+- Unit progress appears on the running Task without stopping Coordinator or prompting Operator.
 
 The v0.10 profile is serial by design. The stable profile's Luna fabric and
 parallel integration path are not exposed in this profile. More agents are not a
@@ -101,37 +103,22 @@ Full methodology and per-task results: [benchmark details](docs/benchmark-v0.10.
 
 Historical qualification references remain in [benchmark reference](docs/benchmark-reference.md).
 
-## How v0.10.6 works
+## Mission tools
 
-1. **Freeze intent**: `dog-operator` preserves the complete request as ordered
-   requirements, negative constraints, quality thresholds, references, and finite
-   proposal/execution budgets.
-2. **Investigate only when needed**: a nontrivial task can send one bounded,
-   read-only proposal investigation to `dogs-coordinator`. It cannot edit, run
-   shell commands, dispatch workers, or widen its approved read prefixes.
-3. **Approve an exact plan**: the root compares the proposal with the original
-   request and approves its exact revision and hash. Uncovered requirements or
-   widened scope fail closed. A simple task with a complete known contract can
-   use the direct worker fast path.
-4. **Generate controls**: the host creates and schema-validates the handoff,
-   operation manifest, acceptance ledger, and short task reference. Models do not
-   hand-authorize their own write scope.
-5. **Execute serial units**: one unit goes directly to `dog-worker-v010`; a
-   multi-unit plan is advanced serially by hidden `dogs-coordinator`. A worker
-   binds once and can modify only declared paths and run only declared validation.
-6. **Collect host evidence**: validation identity binds source snapshot,
-   candidate, command, environment, scope, and owner. Claims in prose do not
-   become proof.
-7. **Review by risk**: high-risk candidates receive independent SourceReview;
-   low-risk review may be explicitly skipped. The reviewer is tool-free and does
-   not implement fixes.
-8. **Remediate without weakening the goal**: acceptance failures and blocking
-   review findings create a same-goal replacement from the committed candidate,
-   retaining acceptance and cumulative budget. Scope growth still requires a
-   later explicit user decision.
-9. **Accept explicitly**: only the root's successful completion operation closes
-   the run. Terminal states remain `DONE`, `INTERRUPTED`, `BLOCKED`, and
-   `NEED_DECISION`; the host-generated return report uses observed evidence.
+1. `start_mission`: Operator supplies concise requirements; the host saves original messages and returns a Coordinator task.
+2. `plan_units`: Coordinator supplies title, objective, file/directory scopes and formal checks. The host generates
+   IDs, handoff, manifest, proof mapping and the ready Worker task. No proposal approval round trip.
+3. `operator_next`: advance serial units. `expand_unit` or a reasoned `plan_units` correction extends/replaces
+   settled execution within the original requirements and retained cumulative budget.
+4. `review_mission`: generate the independent review packet from source, requirements and observed checks;
+   dispatch its Reviewer task for high-risk changes or record a low-risk skip.
+5. `submit_mission`: Coordinator returns a completion candidate, user-only decision, or proven external/scope/budget blocker.
+6. `complete_mission`: Operator compares the original request, source and evidence, then explicitly accepts.
+   Only a succeeded receipt authorizes DONE and the measured 🐾 return report.
+
+All tool names use the `sortie_v010_` prefix. Prior proposal/plan-repair tools remain in the compatibility
+implementation but are hidden from the normal v0.12 model tool list. An in-request path extension is a
+Coordinator decision; changing the original requirements or increasing budget returns to Operator/user.
 
 Durable profile state and hash-bound task references support restart and
 compaction recovery without reconstructing criteria from summary prose. Stale,
@@ -235,15 +222,14 @@ or explicit risk. Workers own static, targeted, and related checks; the root own
 canonical and full-suite checks. An unchanged candidate, command, and environment
 reuse the same evidence instead of spending the validation budget again.
 
-### Default v0.10 routes
+### Default v0.12 routes
 
-- `dog-operator`: `openai/gpt-6-luna` / `max`
+- `dog-operator`: `openai/gpt-6-sol` / `xhigh`
 - `dogs-coordinator`: `openai/gpt-6-sol` / `xhigh`
-- `dog-worker-v010`: `openai/gpt-6-luna` / `max`
-- `dog-scout-v010`: `openai/gpt-6-luna` / `xhigh`
+- `dog-worker-v010`: `openai/gpt-6-luna-fast` / `max`
+- `dog-scout-v010`: `openai/gpt-6-luna-fast` / `max`
 - `dog-reviewer-v010`: `openai/gpt-6-sol` / `xhigh`
-- `dog-advisor-v010`: preferred declared `anthropic/claude-opus-5`, otherwise
-  `openai/gpt-6-sol` / `xhigh`
+- `dog-advisor-v010`: `openai/gpt-6-sol` / `xhigh`
 
 An explicit model and variant selected in OpenCode remains authoritative for that
 session. Child role defaults fill absent native settings and may be overridden by

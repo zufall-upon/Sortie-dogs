@@ -102,7 +102,7 @@ export async function startV2ReleaseServer(cwd, env) {
   }
 }
 
-export async function installedFixture(tgz, directory, profileId = 'stable') {
+export async function installedFixture(tgz, directory, profileId = 'stable', { nested = true } = {}) {
   const release = releaseProfile(profileId);
   // A failed attempt remains available; retries use a fresh fixture, never overwrite its ledger.
   await mkdir(directory, { recursive: true });
@@ -139,7 +139,7 @@ export async function installedFixture(tgz, directory, profileId = 'stable') {
   const coordinatorAgent = profiles?.profileAgent(runtime, 'dog-coordinator') ?? `dog-coordinator${runtime.agentSuffix}`;
   const operatorAgent = profiles?.profileAgent(runtime, 'dog-operator') ?? `dog-operator${runtime.agentSuffix}`;
   const workerAgent = profiles?.profileAgent(runtime, 'dog-worker') ?? `dog-worker${runtime.agentSuffix}`;
-  await mkdir(join(project, 'child', runtime.stateDirectory, 'contracts'), { recursive: true });
+  if (nested) await mkdir(join(project, 'child', runtime.stateDirectory, 'contracts'), { recursive: true });
   const { acceptanceContinuityFingerprint } = await import(pathToFileURL(join(installed, 'dist/core/acceptance-continuity.js')).href);
   const { reduceGoalFlight } = await import(pathToFileURL(join(installed, 'dist/core/goal-bound.js')).href);
   const legacy = join(installed, 'dist/plugin/legacy.js');
@@ -159,7 +159,25 @@ export async function installedFixture(tgz, directory, profileId = 'stable') {
     cliVersion, runtimeMarker: RUNTIME_ASSET_VERSION, acceptanceContinuityFingerprint, reduceGoalFlight };
 }
 
-export async function inside(tgz, directory, profileId = 'stable') {
+export async function inside(tgz, directory, profileId = 'stable', { capUSD = 1, budgetFile } = {}) {
+  if (profileId === 'v012') {
+    const { probe } = await import('./mission-cli-probe.mjs');
+    const result = await probe(tgz, directory, { mode: 'complete', timeoutSeconds: 300, capUSD, budgetFile });
+    assert(result.errors.length === 0 && result.code === 0 && !result.stopped, 'Mission CLI did not finish without procedural errors');
+    const worker = result.models.find(item => item.agent === 'dog-worker-v010');
+    assert(worker?.model?.id === 'gpt-6-luna-fast' && worker.model.variant === 'max' && worker.started_ms <= 60_000,
+      'Mission Worker must start on Luna Fast/max within 60 seconds');
+    const runtime = { stateDirectory: '.sortie-dogs-v010' };
+    const mission = JSON.parse(await readFile(join(result.project, runtime.stateDirectory, 'missions', `${hash(result.root)}.json`), 'utf8'));
+    const run = JSON.parse(await readFile(join(result.project, runtime.stateDirectory, 'operators', `${hash(result.root)}.json`), 'utf8'));
+    assert(mission.phase === 'completed' && run.receipt?.status === 'succeeded', 'Mission has no explicit succeeded receipt');
+    assert(run.units.every(unit => unit.evidence.some(item => item.execution.exit_code === 0 && item.execution.outcome === 'pass')),
+      'Mission has no observed successful unit validation');
+    await command('node', ['check.mjs'], result.project, {});
+    return { schema: 1, version: '0.12.0', profile: 'v010', sha256: result.candidate_sha256, sessionID: result.root,
+      workerStarted: true, workerStartedMs: worker.started_ms, workerModel: worker.model, canonicalExit: 0,
+      terminal: 'succeeded', artifactMatch: true, priced_usd: result.priced_usd, unpriced_requests: result.unpriced_requests };
+  }
   const { project, env, pkg, runtime, release, coordinatorAgent, workerAgent, cliVersion,
     runtimeMarker: RUNTIME_ASSET_VERSION, acceptanceContinuityFingerprint, reduceGoalFlight } = await installedFixture(tgz, directory, profileId);
   await writeFile(join(project, 'AGENTS.md'), '# Release fixture\nNative file paths resolve from this workspace. Use the supplied nested manifest. Do not edit contracts, tests, or package files. Workers must not commit.\n');

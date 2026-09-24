@@ -785,7 +785,24 @@ export class OperatorRuntime {
       return process.platform === "win32" ? left.toLowerCase() === right.toLowerCase() : left === right;
     } catch { return false; }
   }
-  private async prepareOnce(root: string, raw: unknown, scopeApprovalTurnID?: string): Promise<OperatorState> {
+  /** Mission authority is supplied only by the owning profile, never by a model-authored plan. */
+  prepareMission(root: string, raw: unknown, dispatcher?: { sessionID: string; callID: string }): Promise<OperatorState> {
+    return this.serial(root, () => this.prepareOnce(root, raw, undefined, { dispatcher }));
+  }
+  retireMissionRun(root: string): Promise<void> {
+    return this.serial(root, async () => {
+      const state = await this.required(root);
+      if (state.units.some(unit => unit.status === "running") || state.gitLifecycle !== null) throw new Error("mission-replan-worker-still-active");
+      if (["cancelled", "completed"].includes(state.phase)) return;
+      // Keep the old run and proof for inspection. Replanning does not erase failed checks or spend.
+      await writeFile(`${this.file(root)}.${state.runID}.archive`, JSON.stringify(state), { flag: "wx", mode: 0o600 });
+      state.phase = "cancelled";
+      state.decision = "mission-replan";
+      await this.save(state);
+    });
+  }
+  private async prepareOnce(root: string, raw: unknown, scopeApprovalTurnID?: string,
+    mission?: { dispatcher?: { sessionID: string; callID: string } }): Promise<OperatorState> {
     const previous = await this.read(root);
     let immutableReplacement = previous?.phase === "cancelled" &&
       [ACCEPTANCE_REMEDIATION_DECISION, REVIEW_REMEDIATION_DECISION].includes(previous.decision ?? "") && record(raw)
@@ -946,7 +963,8 @@ export class OperatorRuntime {
         `source_manifest: ${unit.write.join(", ")}`, `operation_manifest: ${manifestRelative}`, `handoff_path: ${handoffPath}`,
         `goal_declaration_path: ${declarationPath}`, "acceptance:", ...plan.acceptance.map(value => `  - ${value}`),
         "validation:", ...unit.validation.map(value => `  - ${value}`),
-        "Execute validation in its declared order. Earlier entries may be approved generator, build, formatter, or exact cleanup commands required before canonical criterion tests. Every persistent or transient generator output must be declared in unit.write. Cleanup may remove only declared unit.write outputs and must be an explicit ordered command after generation and before post-commit or canonical validation; never add an ignore rule or remove an undeclared path. If any necessary command, input, output, or cleanup is missing, do not run an undeclared command or variant and do not use resume evidence tooling to invent permission; return a contract-repair decision.",
+        mission ? "Read-only investigation commands are unrestricted. Use shell to reproduce and diagnose without asking for command registration. Keep all writes, including generated/transient outputs and cleanup, inside unit.write. Run formal validation exactly as listed, in order and in separate calls, so the host records its real result. If a write scope or formal check must change, return the precise change to your Coordinator; it can extend/redeclare immediately within the original requirements. Diagnostic success is not formal acceptance evidence."
+          : "Execute validation in its declared order. Earlier entries may be approved generator, build, formatter, or exact cleanup commands required before canonical criterion tests. Every persistent or transient generator output must be declared in unit.write. Cleanup may remove only declared unit.write outputs and must be an explicit ordered command after generation and before post-commit or canonical validation; never add an ignore rule or remove an undeclared path. If any necessary command, input, output, or cleanup is missing, do not run an undeclared command or variant and do not use resume evidence tooling to invent permission; return a contract-repair decision.",
         "Preserve existing public API success and error return semantics unless acceptance explicitly changes them, and cover those compatibility boundaries in the declared validation.",
         "Do not spawn nested subagents for consultation. Required consultations belong to the root before dispatch; use the confirmed decisions and evidence declared in the unit objective and inputs. If required consultation results or user decisions are missing, return the exact contract gap to the parent instead of attempting a deeper Task, inventing consent, or asking the user to repeat an already recorded decision.",
         ...(plan.git_lifecycle !== undefined && index === plan.units.length - 1 ? [
@@ -973,7 +991,8 @@ export class OperatorRuntime {
       } : null,
       gitLifecycle,
       generation: (previous?.generation ?? 0) + 1, sequence: previous?.sequence ?? 0, phase: "prepared", repairGeneration: 0,
-      operatorCallID: null, operatorSessionID: null, dispatched: 0, units, decision: null, receipt: null, contractRepair: null,
+      operatorCallID: mission?.dispatcher?.callID ?? null, operatorSessionID: mission?.dispatcher?.sessionID ?? null,
+      dispatched: 0, units, decision: null, receipt: null, contractRepair: null,
       repairResidualPaths: [], pendingScopeExpansion: [] };
     const created: string[] = [];
     try {
@@ -1070,7 +1089,7 @@ export class OperatorRuntime {
     return this.serial(root, async () => {
       const state = await this.required(root);
       if (state.phase !== "running") throw new Error("operator-worker-claim-revoked");
-      const expectedParent = state.units.length === 1 ? root : state.operatorSessionID;
+      const expectedParent = state.operatorSessionID ?? (state.units.length === 1 ? root : null);
       if (expectedParent === null || parent !== expectedParent) throw new Error("operator-worker-parent-mismatch");
       const unit = state.units.find(item => item.status === "running" && item.callID !== null);
       const expected = unit?.repairValidation === null ? unit?.task : unit === undefined ? undefined : this.repairWorkerTask(state, unit);
@@ -1161,7 +1180,7 @@ export class OperatorRuntime {
         ? { run_id: state.runID, acceptance_fingerprint: state.acceptanceFingerprint, task: this.dispatchTask(state) }
         : this.packet(state);
     }
-    if (actor !== state.operatorSessionID && !(actor === root && state.units.length === 1)) throw new Error("operator-owner-mismatch");
+    if (actor !== state.operatorSessionID && !(actor === root && state.units.length === 1 && state.operatorSessionID === null)) throw new Error("operator-owner-mismatch");
     if (!["prepared", "running"].includes(state.phase)) return this.packet(state);
     const current = state.units.find(unit => unit.status !== "succeeded");
     if (!current) {
@@ -1183,7 +1202,7 @@ export class OperatorRuntime {
   }
   private async admitWorkerOnce(root: string, actor: string, callID: string, args: unknown): Promise<OperatorTask> {
     const state = await this.required(root);
-    if (actor !== state.operatorSessionID && !(actor === root && state.units.length === 1)) throw new Error("operator-owner-mismatch");
+    if (actor !== state.operatorSessionID && !(actor === root && state.units.length === 1 && state.operatorSessionID === null)) throw new Error("operator-owner-mismatch");
     if (!["prepared", "running"].includes(state.phase)) throw new Error("operator-grant-revoked");
     const unit = state.units.find(item => item.status !== "succeeded");
     if (!unit || unit.status !== "pending" || !this.matchesWorkerTask(state, unit, args)) {

@@ -443,7 +443,7 @@ test("beta CLI defaults to namespaced preview assets", async () => {
     assert.equal(result.exit, 0, result.stderr);
     assert.equal(await readFile(join(project, ".opencode/sortie-dogs-v010.version"), "utf8"), `${V010_RUNTIME_ASSET_VERSION}\n`);
     const primary = await readFile(join(project, ".opencode/agent/dog-operator.md"), "utf8");
-    assert.match(primary, /prepare_operator/);
+    assert.match(primary, /sortie_v010_start_mission/);
     assert.match(primary, /^model: openai\/gpt-6-sol$/m);
     assert.match(primary, /^variant: xhigh$/m);
     assert.match(await readFile(join(project, ".opencode/agent/dogs-coordinator.md"), "utf8"), /^hidden: true$/m);

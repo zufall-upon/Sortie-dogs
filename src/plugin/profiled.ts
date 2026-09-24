@@ -13,8 +13,13 @@ import { BUILT_IN_MODEL_CATALOG, type CatalogModel } from "./model-routing.js";
 import { goalFingerprint } from "../core/goal-bound.js";
 import { decoratePreviewHeadings, returnReportPanel } from "./receipt-presentation.js";
 import { sanitizeTerminalReport, terminalRunOutcome } from "./run-metrics.js";
-import { normalizeCommand } from "./gate.js";
+import { extractWritePaths, normalizeCommand } from "./gate.js";
 import { normalizeRelativePath } from "../core/path.js";
+import { OperatorMissionRuntime, missionPacket, missionPlan, missionReviewTask, missionReviewTraces, type OperatorMission } from "../core/operator-mission.js";
+import { publishMissionProgress } from "./mission-progress.js";
+import { missionReviewSource } from "./mission-review.js";
+import { SOURCE_REVIEW_RISK_TAGS } from "../core/consultation.js";
+import { createHash } from "node:crypto";
 
 const SERIAL_CAPABILITIES = new Set([
   "sortie_bind_write_gate", "sortie_release_write_gate", "sortie_check_contract",
@@ -121,9 +126,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
   return async (input, options) => {
     const operators = new OperatorRuntime(input.directory, profile);
     const proposals = new OperatorProposalRuntime(input.directory, profile);
+    const missions = new OperatorMissionRuntime(input.directory, profile);
     const selected = new Map<string, string>();
     const operatorParents = new Map<string, string>();
-    const taskOwners = new Map<string, { root: string; actor: string; operator: boolean; proposal?: boolean }>();
+    const taskOwners = new Map<string, { root: string; actor: string; operator: boolean; proposal?: boolean; mission?: boolean; consultation?: string }>();
     const operatorTurnLifecycle = new Map<string, "historical" | "cancelled">();
     const historicalTurnMessages = new Map<string, string>();
     const dispatchTransitions = new Map<string, Promise<unknown>>();
@@ -175,6 +181,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         if (state?.units.some(unit => unit.childSessionID === id) && ["cancelled", "completed"].includes(state.phase)) return undefined;
       }
       if (who.role === "dog-operator") {
+        const mission = await missions.read(parentRoot);
+        if (mission?.coordinator === id && !["cancelled", "completed"].includes(mission.phase)) {
+          operatorParents.set(id, parentRoot);
+          return parentRoot;
+        }
         const proposal = await proposals.read(parentRoot);
         if (proposal && proposal.phase === "investigating") {
           if (proposal.proposal_session_id !== id) return undefined;
@@ -256,8 +267,14 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     });
     const runtimeBridge: RuntimeBridge = {
       profile, assetVersion,
-      continuationCheckpoint: async root => await operators.continuationCheckpoint(root) ?? await proposals.continuationCheckpoint(root),
+      continuationCheckpoint: async root => {
+        const mission = await missions.read(root);
+        if (mission && !["completed", "cancelled"].includes(mission.phase)) return JSON.stringify(missionPacket(mission, await operators.read(root)));
+        return await operators.continuationCheckpoint(root) ?? await proposals.continuationCheckpoint(root);
+      },
       requiresExplicitAcceptance: async root => {
+        const mission = await missions.read(root);
+        if (mission && !["completed", "cancelled"].includes(mission.phase)) return true;
         const state = await operators.read(root);
         return state !== undefined && state.phase !== "completed" && operatorTurnLifecycle.get(root) !== "historical";
       },
@@ -268,6 +285,13 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         const active = unit?.status === "running" || (unit?.status === "failed" && unit.repairValidation !== null);
         return active && unit.childSessionID === child &&
           unit.unit.validation.some(candidate => normalizeCommand(candidate) === command);
+      },
+      allowsInvestigativeShell: async child => {
+        const root = await rootFor(child);
+        if (!root) return false;
+        const mission = await missions.read(root), run = await operators.read(root);
+        return mission?.runID === run?.runID && run !== undefined && run.phase === "running" &&
+          run.units.some(unit => unit.status === "running" && unit.childSessionID === child);
       },
       defaultModelCatalog: { global: previewModelCatalog() },
       transformConfiguration: value => {
@@ -288,7 +312,18 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         "dog-worker": { preferred: PREVIEW_WORKER_ROUTE },
       },
       connected: value => { control = value; },
-      onSerialSettlement: result => operators.settled(result),
+      onSerialSettlement: async result => {
+        await operators.settled(result);
+        const mission = await missions.read(result.rootSessionID);
+        if (!mission || ["cancelled", "completed"].includes(mission.phase)) return;
+        const run = await operators.required(result.rootSessionID);
+        const unit = run.units.find(unit => unit.callID === result.callID);
+        if (!unit) return;
+        const progress = { unit: `${run.runID}/${unit.unit.id}`, title: unit.unit.title, status: unit.status, at: new Date().toISOString() };
+        await missions.update(result.rootSessionID, state => { state.progress.push(progress); });
+        await publishMissionProgress(result.rootSessionID, { description: `🐾 ${unit.status === "succeeded" ? "✅" : "🔧"} ${unit.unit.title}`,
+          sortie_progress: progress });
+      },
       onRootTerminal: (root, receipt) => operators.terminal(root, receipt),
     };
     const core = await canonicalPlugin({ ...input, worktree: input.directory, client, runtimeBridge }, {
@@ -304,6 +339,13 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const root = await rootFor(id);
       if (!root) throw new Error(RUNTIME_PROFILE_SESSION_INACTIVE);
       if (root !== id || !await control?.isRoot(id)) throw new Error("profile-coordinator-root-required");
+    }
+    async function missionAuthority(id: string): Promise<{ root: string; mission: OperatorMission }> {
+      const root = await rootFor(id);
+      if (!root) throw new Error(RUNTIME_PROFILE_SESSION_INACTIVE);
+      const mission = await missions.required(root);
+      if (["cancelled", "completed"].includes(mission.phase) || (id !== root && mission.coordinator !== id)) throw new Error("mission-controller-required");
+      return { root, mission };
     }
     async function restorePriorAcceptance(root: string, state: import("../core/operator-runtime.js").OperatorState): Promise<void> {
       const succeeded = [...state.units].reverse().find(unit => unit.status === "succeeded");
@@ -322,6 +364,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         return;
       }
       if (state.parentRunID === null) return;
+      if ((await missions.read(root))?.runID !== undefined) return;
       // Compatibility recovery for a replacement run prepared by an older runtime: the
       // replacement's controls are hash-pinned, while the same-root goal ledger proves the
       // accepted predecessor. No historical contract directory is searched.
@@ -451,7 +494,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           if (!(error instanceof Error) || error.message !== "operator-proposal-budget-settlement-conflict") throw error;
         }
       }
-      const children = await operators.interrupted(root, reason);
+      const mission = await missions.read(root);
+      if (mission && mission.phase !== "completed") await missions.update(root, state => { state.phase = "cancelled"; state.dispatchOpen = false; });
+      const children = [...new Set([...(await operators.interrupted(root, reason)), ...(mission?.coordinator ? [mission.coordinator] : [])])];
       for (const child of children) {
         retired.add(child);
         const result = await session("abort", { path: { id: child }, query: { directory: input.directory } });
@@ -509,6 +554,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         const root = await rootFor(context.sessionID);
         if (!root) throw new Error("operator-grant-invalid");
         const result = await operators.next(root, context.sessionID);
+        const mission = await missions.read(root);
+        if (mission && !["cancelled", "completed"].includes(mission.phase)) {
+          if (record(result) && record(result.task)) return JSON.stringify(result);
+          return JSON.stringify({ ...missionPacket(mission, await operators.required(root)), budget: await control!.currentBudget(root) });
+        }
         if (context.sessionID === root && record(result) && record(result.task)) {
           const state = await operators.required(root);
           if (state.units.length > 1) control!.enableUnits(root, state.units.filter(unit => unit.status === "pending").length);
@@ -544,6 +594,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     }
     tools[status] = { description: "Read the durable root-owned operator outcome and host budget counters (max_units, consumed_units, reserved_units, remaining_units) without claiming acceptance or retrying work. An investigating proposal returns its exact short Task reference only before a Task has been admitted; an existing admission never yields a redispatch Task.",
       args: {}, execute: async (_args, context) => {
+        const root = await rootFor(context.sessionID);
+        const mission = root ? await missions.read(root) : undefined;
+        if (mission && (context.sessionID === root || context.sessionID === mission.coordinator)) {
+          return JSON.stringify({ ...missionPacket(mission, await operators.read(root!)), budget: await control!.currentBudget(root!) });
+        }
         await requireRoot(context.sessionID);
         const state = await operators.read(context.sessionID);
         const draft = await operators.draftStatus(context.sessionID);
@@ -573,6 +628,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     tools[cancel] = { description: "Revoke this root's operator grant and stop only its owned children before releasing core state. Before approval it instead releases the bounded proposal grant, including one whose admitted child already terminated, so the root can begin a new investigation; it never reuses that child or restores spent proposal budget. reason is a required closed set: use reason=plain for a plain cancellation, including replanning, contract revision, and any pre-approval proposal release, and never send free text such as a written justification. Use reason=acceptance-remediation only for decision=operator-acceptance-remediation-required. At awaiting-acceptance, reason=review-blocking authorizes a same-goal review-remediation replacement only within the exact acceptance, committed head, approved write union, and retained remaining budget.",
       args: { reason: { type: "string", enum: ["plain", "review-blocking", "acceptance-remediation"] } as never }, execute: async (args, context) => {
         await requireRoot(context.sessionID);
+        const mission = await missions.read(context.sessionID);
+        if (mission && !["completed", "cancelled"].includes(mission.phase)) {
+          await stop(context.sessionID, "explicit-cancellation", false);
+          return JSON.stringify(missionPacket(await missions.required(context.sessionID), await operators.read(context.sessionID)));
+        }
         const rawReason = (args as { reason?: unknown }).reason;
         const requestedReason = rawReason === "plain" || rawReason === undefined ? undefined : rawReason;
         if (requestedReason !== undefined && requestedReason !== "review-blocking" && requestedReason !== "acceptance-remediation") throw new Error("operator-cancel-reason-invalid");
@@ -644,6 +704,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       args: { run_id: stringSchema, acceptance_fingerprint: stringSchema }, execute: async (args, context) => {
         await requireRoot(context.sessionID);
         const state = await operators.required(context.sessionID);
+        const mission = await missions.read(context.sessionID);
+        if (mission && !["completed", "cancelled"].includes(mission.phase)) await assertMissionReview(context.sessionID, mission);
         if (args.run_id !== state.runID || args.acceptance_fingerprint !== state.acceptanceFingerprint) throw new Error("operator-completion-identity-mismatch");
         if (!["awaiting-acceptance", "completed"].includes(state.phase) || state.units.some(unit => unit.status !== "succeeded")) {
           return JSON.stringify({ status: "not-ready", packet: operators.packet(state) });
@@ -913,7 +975,117 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           return JSON.stringify({ ...proposalIdentity(committed), execution: JSON.parse(preparedTask(prepared.state)) });
         });
       } };
-    const ownTools = new Set([prepare, repair, next, status, cancel, complete, resume, resolveContractRepair,
+    const startMission = `${profile.toolPrefix}start_mission`, planUnits = `${profile.toolPrefix}plan_units`,
+      reviewMission = `${profile.toolPrefix}review_mission`, submitMission = `${profile.toolPrefix}submit_mission`,
+      completeMission = `${profile.toolPrefix}complete_mission`, expandUnit = `${profile.toolPrefix}expand_unit`;
+    const stringList = { type: "array", items: { type: "string" } };
+    tools[startMission] = { description: "Operator: save a few one-line requirements/negative constraints. The original user message, IDs and ownership are captured automatically. Dispatch the returned Coordinator task immediately, or use plan_units for a simple single-unit Fast-lane task.",
+      args: { requirements: { ...stringList, minItems: 1, maxItems: 64 } as never }, execute: async (args, context) => {
+        await requireRoot(context.sessionID);
+        const mission = await missions.start(context.sessionID, (args as Record<string, unknown>).requirements);
+        return JSON.stringify({ mission_id: mission.id, requirements: mission.requirements, task: missions.task(mission),
+          next_action: "Nontrivial: dispatch task now. Simple single-unit work with known scope/check: call plan_units directly. Do not create a proposal or ask for plan approval." });
+      } };
+    async function declareMissionUnits(root: string, actor: string, mission: OperatorMission, raw: unknown, reason?: string) {
+      const plan = missionPlan(mission, raw);
+      if (actor === root && (mission.coordinator !== null || plan.units.length !== 1)) throw new Error("mission-coordinator-required: dispatch the returned Coordinator task");
+      const previous = await operators.read(root);
+      const same = previous?.planHash === createHash("sha256").update(JSON.stringify(plan)).digest("hex");
+      if (previous && !["completed", "cancelled"].includes(previous.phase) && !same) {
+        if (!reason?.trim()) throw new Error("mission-replan-reason-required: name the observed correction or write-scope extension");
+        await operators.retireMissionRun(root);
+      }
+      const budget = await control!.currentBudget(root);
+      if (budget && budget.remaining_units < plan.units.length && !same) throw new Error("mission-budget-exhausted: report the required cumulative extension to Operator");
+      const state = await operators.prepareMission(root, plan, actor === root ? undefined
+        : { sessionID: actor, callID: mission.callID! });
+      await restorePriorAcceptance(root, state);
+      await control!.registerGoalDeclaration(root, state.units[0]!.task.prompt, true);
+      control!.enableUnits(root, state.units.filter(unit => unit.status === "pending").length);
+      await missions.update(root, item => {
+        if (item.runID !== state.runID) item.plans++;
+        item.runID = state.runID; item.phase = "running"; item.submission = null;
+      });
+      return JSON.stringify(await operators.next(root, actor));
+    }
+    tools[planUnits] = { description: "Coordinator (or single-unit Fast-lane Operator): declare useful units, then dispatch the returned Worker immediately. Host generates IDs, handoff, manifest and proof mapping. Keep every original requirement covered. Final validation command in each unit proves that unit; read-only diagnostic commands need no registration. Recalling with reason replaces settled work within unchanged requirements and cumulative budget; include required scope extensions here.",
+      args: { units: { type: "array", minItems: 1, maxItems: 32, items: { type: "object", additionalProperties: false,
+        properties: { title: { type: "string" }, objective: { type: "string" }, read: stringList, write: stringList,
+          validation: stringList, requirement_ids: stringList }, required: ["title", "objective", "write", "validation"] } } as never,
+        reason: { type: "string", "x-sortie-optional": true } as never }, execute: async (args, context) => {
+        const { root, mission } = await missionAuthority(context.sessionID);
+        return serializeDispatchTransition(root, () => declareMissionUnits(root, context.sessionID, mission,
+          (args as Record<string, unknown>).units, args.reason));
+      } };
+    tools[expandUnit] = { description: "Coordinator: extend the stopped unit's write scope immediately within the original request. Keeps original requirements and cumulative budget; generates a replacement Worker contract. No Operator approval or handwritten manifest repair is needed. Use only after the Worker has returned.",
+      args: { unit_id: stringSchema, paths: stringList as never, reason: stringSchema }, execute: async (args, context) => {
+        const { root, mission } = await missionAuthority(context.sessionID);
+        return serializeDispatchTransition(root, async () => {
+          const run = await operators.required(root);
+          if (run.units.some(unit => unit.status === "running")) throw new Error("mission-expansion-wait-for-worker-return");
+          const paths = (args as Record<string, unknown>).paths;
+          if (!Array.isArray(paths) || !paths.every(path => typeof path === "string") || !run.units.some(unit => unit.unit.id === args.unit_id)) throw new Error("mission-expansion-unit-or-paths-invalid");
+          const units = run.units.map(({ unit }) => ({ ...unit, requirement_ids: unit.acceptance_indices.map(i => mission.requirements[i]!.id),
+            write: unit.id === args.unit_id ? [...new Set([...unit.write, ...paths])] : unit.write }));
+          return declareMissionUnits(root, context.sessionID, mission, units, args.reason);
+        });
+      } };
+    tools[reviewMission] = { description: "Coordinator: prepare the independent Reviewer task from current source, requirements and observed checks. Supply risk_tags (empty only for genuinely low risk) and concise criterion-level changed-code/test traces. Host supplies diff, IDs, manifest, mappings and evidence; keep candidate lineage across corrections. A low-risk skip is recorded, never inferred from a missing review.",
+      args: { risk_tags: { type: "array", items: { type: "string", enum: SOURCE_REVIEW_RISK_TAGS } } as never,
+        traces: stringList as never }, execute: async (args, context) => {
+        const { root, mission } = await missionAuthority(context.sessionID);
+        const run = await operators.required(root);
+        if (run.phase !== "awaiting-acceptance") throw new Error("mission-review-awaits-unit-validation");
+        const risk = (args as Record<string, unknown>).risk_tags;
+        const traces = missionReviewTraces(mission, (args as Record<string, unknown>).traces);
+        if (!Array.isArray(risk) || !risk.every(tag => SOURCE_REVIEW_RISK_TAGS.includes(tag as never))) {
+          throw new Error("mission-review-input: use recognized risk tags");
+        }
+        const source = await missionReviewSource(input.directory, run);
+        const phase = mission.review?.child ? "verification" : "initial";
+        const task = risk.length === 0 ? null : { subagent_type: profileAgent(profile, "dog-reviewer"),
+          description: `🔎 ${run.units[0]!.unit.title}`, prompt: [
+            `candidate_id: ${mission.id}`, `review_phase: ${phase}`, "canonical_validation_exit: 0", `risk_tags: [${risk.join(", ")}]`,
+            "Review this candidate independently. Use the language of the requirements/traces. Invoke no tools. First line: exactly PASS or FINDINGS.",
+            `acceptance: ${JSON.stringify(run.acceptance)}`, `changedLogicSummary: ${JSON.stringify(traces)}`,
+            ...run.acceptance.map((_, i) => `acceptance[${i}] -> changedLogicSummary[${i}]`),
+            `manifest: ${JSON.stringify(run.units.map(unit => unit.unit))}`, `sourceFingerprint: ${source.fingerprint}`,
+            `validation: ${JSON.stringify(run.units.map(unit => ({ command: unit.unit.validation, evidence: unit.evidence })))}`,
+            "Changed source excerpts:", source.excerpt,
+          ].join("\n") };
+        const reviewed = await missions.update(root, item => { item.review = { runID: run.runID, risk: risk as string[], source: source.fingerprint,
+          task, verdict: task ? "pending" : "skipped-low-risk", ...(mission.review?.child ? { child: mission.review.child } : {}) }; });
+        return JSON.stringify(task ? { status: "review-required", task: missionReviewTask(reviewed) } : { status: "skipped-low-risk" });
+      } };
+    async function assertMissionReview(root: string, mission: OperatorMission) {
+      const run = await operators.required(root), review = mission.review;
+      if (!review || review.runID !== run.runID || !["PASS", "skipped-low-risk"].includes(review.verdict) ||
+          review.source !== (await missionReviewSource(input.directory, run)).fingerprint) throw new Error("mission-review-required-or-stale");
+    }
+    tools[submitMission] = { description: "Coordinator: return only a completion candidate, a user-only decision, or a proven external/scope/budget blocker. Continue ordinary investigation, scope extensions and corrections yourself. Unit progress is published automatically without waking Operator.",
+      args: { status: { type: "string", enum: ["ready", "needs-decision", "blocked"] } as never, summary: stringSchema }, execute: async (args, context) => {
+        const { root, mission } = await missionAuthority(context.sessionID);
+        if (args.status === "ready") {
+          const run = await operators.required(root);
+          if (run.phase !== "awaiting-acceptance") throw new Error("mission-units-incomplete");
+          await assertMissionReview(root, mission);
+        }
+        const updated = await missions.update(root, state => { state.phase = "submitted";
+          state.submission = { status: args.status as "ready" | "needs-decision" | "blocked", summary: args.summary }; });
+        return JSON.stringify({ ...missionPacket(updated, await operators.read(root)), next_action: "Return this result to Operator now. Completion still requires its final comparison and complete_mission receipt." });
+      } };
+    tools[completeMission] = { description: "Operator only: after comparing the original request, source, actual checks and required independent review, explicitly accept the whole mission. Returns the measured 🐾 report on success; never treat Worker start or one passing check as completion.",
+      args: {}, execute: async (_args, context) => {
+        await requireRoot(context.sessionID);
+        const mission = await missions.required(context.sessionID);
+        await assertMissionReview(context.sessionID, mission);
+        const run = await operators.required(context.sessionID);
+        const result = await tools[complete]!.execute({ run_id: run.runID, acceptance_fingerprint: run.acceptanceFingerprint }, context);
+        if (JSON.parse(result).status === "succeeded") await missions.update(context.sessionID, state => { state.phase = "completed"; });
+        return result;
+      } };
+    const ownTools = new Set([startMission, planUnits, expandUnit, reviewMission, submitMission, completeMission,
+      prepare, repair, next, status, cancel, complete, resume, resolveContractRepair,
       beginProposal, submitProposal, approveProposal, reviseProposal, extendProposalBudget, reopenProposalScope,
       reconcileOrphan, reviseApprovedIntent]);
     const protocolMap = CANONICAL_AGENT_ROLES.map(role => `${role}=${profileAgent(profile, role)}`).join(", ");
@@ -1027,6 +1199,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           const realTurn = !output.parts.some(part => record(part) && part.synthetic === true) &&
             output.parts.some(part => record(part) && part.type === "text" && typeof part.text === "string" && part.text.trim().length > 0);
           if (realTurn) {
+            await missions.capture(chat.sessionID, { id: chat.messageID ?? String(output.message.id ?? "latest-user"),
+              text: output.parts.filter(record).filter(part => part.type === "text" && typeof part.text === "string").map(part => part.text).join("\n") });
             const state = await operators.read(chat.sessionID);
             if (((state !== undefined && (state.phase === "cancelled" || state.phase === "completed")) ||
                 operatorTurnLifecycle.get(chat.sessionID) === "cancelled") &&
@@ -1056,8 +1230,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           const root = who.parent === undefined ? undefined : await rootFor(who.parent);
           if (!root || root !== who.parent) throw new Error("operator-grant-invalid");
           const prompt = textPart.text;
+          const mission = await missions.read(root);
           const proposal = await proposals.read(root);
-          if ((proposal?.phase === "investigating" && proposal.proposal_call_id !== null) || proposals.isProposalPrompt(prompt)) {
+          if (mission && !["completed", "cancelled"].includes(mission.phase)) {
+            textPart.text = await missions.claim(root, chat.sessionID, prompt);
+          } else if ((proposal?.phase === "investigating" && proposal.proposal_call_id !== null) || proposals.isProposalPrompt(prompt)) {
             textPart.text = await proposals.claimAdmittedPrompt(root, who.parent, chat.sessionID, prompt);
           } else {
             textPart.text = await operators.claimAdmittedOperatorPrompt(root, who.parent, chat.sessionID, prompt);
@@ -1139,6 +1316,39 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           }
         }
         if (ownTools.has(request.tool)) return;
+        const mission = await missions.read(root);
+        const missionCoordinator = who.role === "dog-operator" && mission?.coordinator === request.sessionID &&
+          !["cancelled", "completed"].includes(mission.phase);
+        if (missionCoordinator && request.tool !== "task") {
+          if (["read", "glob", "grep", "list", "execute", "todowrite", "todoread", "webfetch", "websearch", "skill"].includes(request.tool)) return;
+          if (["bash", "shell"].includes(request.tool)) {
+            const writes = extractWritePaths(request.tool, args);
+            if (writes.paths.length || writes.gitMutation || writes.remoteMutation) throw new Error("mission-coordinator-shell-readonly: delegate source changes to Worker");
+            return;
+          }
+          throw new Error("mission-coordinator-no-edit-tool");
+        }
+        if (request.tool === "task" && args.subagent_type === profileAgent(profile, "dog-operator") &&
+            mission && !["completed", "cancelled"].includes(mission.phase)) {
+          await requireRoot(request.sessionID);
+          await missions.admit(root, request.callID, args);
+          taskOwners.set(request.callID, { root, actor: request.sessionID, operator: false, mission: true });
+          return;
+        }
+        const consultRole = typeof args.subagent_type === "string" ? canonicalAgent(profile, args.subagent_type) : undefined;
+        if (missionCoordinator && request.tool === "task" && ["dog-scout", "dog-reviewer", "dog-advisor"].includes(consultRole ?? "")) {
+          if (consultRole === "dog-reviewer") {
+            if (!mission.review?.task || args.prompt !== missionReviewTask(mission).prompt || args.task_id) {
+              throw new Error("mission-review-task-required: dispatch review_mission's generated task");
+            }
+            args.prompt = mission.review.task.prompt;
+          }
+          const mapped = translate(output, false) as typeof output;
+          await core["tool.execute.before"]?.({ ...request, sessionID: root, agent: "dog-coordinator" }, mapped);
+          Object.assign(output, translate(mapped, true));
+          taskOwners.set(request.callID, { root, actor: request.sessionID, operator: false, consultation: consultRole });
+          return;
+        }
         const proposal = who.role === "dog-operator" ? await proposals.read(root) : undefined;
         const proposalChild = proposal?.phase === "investigating" && proposal.proposal_session_id === request.sessionID;
         if (proposalChild) {
@@ -1213,7 +1423,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         if (who.role === "dog-operator" && request.tool === "task" && !delegated) throw new Error("operator-worker-task-required");
         let expandedWorker: import("../core/operator-runtime.js").OperatorTask | undefined;
         if (delegated) {
-          await proposals.assertExecutionApproved(root, state!.planHash);
+          if (!mission || mission.runID !== state!.runID) await proposals.assertExecutionApproved(root, state!.planHash);
           await restorePriorAcceptance(root, state!);
           expandedWorker = await operators.admitWorker(root, request.sessionID, request.callID, args);
           taskOwners.set(request.callID, { root, actor: request.sessionID, operator: false });
@@ -1276,6 +1486,34 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         const id = request.sessionID;
         if (!id) return;
         const ownership = request.callID === undefined ? undefined : taskOwners.get(request.callID);
+        const returnedOutput = output.output;
+        if (ownership?.mission) {
+          const mission = await missions.update(ownership.root, state => { state.dispatchOpen = false; });
+          output.output = JSON.stringify({ ...missionPacket(mission, await operators.read(ownership.root)),
+            coordinator_report: output.output, budget: await control!.currentBudget(ownership.root) });
+          taskOwners.delete(request.callID!);
+          return;
+        }
+        if (ownership?.consultation) {
+          const raw = output.output;
+          await core["tool.execute.after"]?.({ ...request, sessionID: ownership.root }, output);
+          if (ownership.consultation === "dog-reviewer") {
+            const child = taskChildSessionID(output);
+            const who = child ? await identity(child) : undefined;
+            const history = child ? await messages(child) : [];
+            const last = [...history].reverse().find(message => (record(message.info) ? message.info.role : message.role) === "assistant");
+            const text = Array.isArray(last?.parts) ? last.parts.filter(record).filter(part => part.type === "text").map(part => part.text).join("\n") : String(raw);
+            await missions.update(ownership.root, mission => {
+              if (mission.review) {
+                mission.review.result = text.slice(0, 16_000);
+                mission.review.verdict = /^\s*PASS(?:\s|$)/u.test(text) && who?.role === "dog-reviewer" && who.parent === ownership.actor ? "PASS" : "findings";
+                mission.review.child = child;
+              }
+            });
+          }
+          taskOwners.delete(request.callID!);
+          return;
+        }
         if (ownership?.proposal) {
           const proposal = await proposals.required(ownership.root);
           await control!.settleProposalBudget(ownership.root, proposal.intent_id, request.callID!,
@@ -1342,13 +1580,23 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
                 (unit.resultClass === "process-defect" || unit.resultClass === "acceptance"))) {
             await control!.finishOperatorContractRepairValidation(ownership.root, child);
           }
-          output.output = JSON.stringify(await operatorPacket(await operators.required(ownership.root)));
+          const mission = await missions.read(ownership.root);
+          output.output = JSON.stringify(mission ? { ...missionPacket(mission, await operators.required(ownership.root)), worker_report: returnedOutput }
+            : await operatorPacket(await operators.required(ownership.root)));
           taskOwners.delete(request.callID!);
         }
       },
       "permission.ask": async (request, output) => {
-        if (!request.sessionID || !await rootFor(request.sessionID)) return;
-        if ((await identity(request.sessionID)).role === "dog-operator" && request.permission === "edit") { output.status = "deny"; return; }
+        if (!request.sessionID) return;
+        const root = await rootFor(request.sessionID);
+        if (!root) return;
+        if ((await identity(request.sessionID)).role === "dog-operator") {
+          if (["edit", "write", "patch", "apply_patch"].includes(request.permission)) { output.status = "deny"; return; }
+          const mission = await missions.read(root);
+          if (mission?.coordinator === request.sessionID && ["read", "glob", "grep", "list", "bash", "shell"].includes(request.permission)) {
+            output.status = "allow"; return;
+          }
+        }
         await core["permission.ask"]?.(request, output);
       },
       "experimental.chat.system.transform": async (request, output) => {
@@ -1408,6 +1656,12 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         const root = await rootFor(request.sessionID);
         if (!root) return;
         if ((await identity(request.sessionID)).role === "dog-operator") {
+          const mission = await missions.read(root);
+          if (mission?.coordinator === request.sessionID) {
+            (output.context ??= []).push(`Mission continuation: ${JSON.stringify(missionPacket(mission, await operators.read(root)))}. ` +
+              `Continue in this same Coordinator. Use ${status} or ${next}; retain original requirements and cumulative budget. No proposal/approval phase.`);
+            return;
+          }
           const proposal = await proposals.read(root);
           if (proposal?.phase === "investigating" && proposal.proposal_session_id === request.sessionID) {
             (output.context ??= []).push(`Proposal continuation: ${JSON.stringify({
@@ -1431,6 +1685,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         const root = await rootFor(request.sessionID);
         if (!root) return;
         if ((await identity(request.sessionID)).role === "dog-operator") {
+          if ((await missions.read(root))?.coordinator === request.sessionID) return;
           const proposal = await proposals.read(root);
           if (proposal?.phase === "investigating" && proposal.proposal_session_id === request.sessionID) return;
           output.enabled = false;
@@ -1463,6 +1718,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           typeof part.callID === "string" && record(part.state) && part.state.status === "error") {
           const ownership = taskOwners.get(part.callID);
           if (ownership !== undefined && ownership.actor === id) {
+            if (ownership.mission) {
+              await missions.update(ownership.root, state => { state.dispatchOpen = false; });
+              taskOwners.delete(part.callID); return;
+            }
+            if (ownership.consultation) { taskOwners.delete(part.callID); return; }
             const settled = ownership.proposal
               ? (await control!.settleProposalBudget(ownership.root, (await proposals.required(ownership.root)).intent_id,
                 part.callID, "failed"), true)
