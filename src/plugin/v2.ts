@@ -206,7 +206,7 @@ function legacyClient(context: OpenCodeV2Context): JsonObject {
 function plainSchema(value: unknown): JsonObject {
   const source = record(value) ? value : { type: "string" };
   const schema: JsonObject = Object.fromEntries(Object.entries(source).filter(([key, item]) =>
-    key !== "x-sortie-optional" && item !== null && item !== undefined && typeof item !== "function"));
+    key !== "x-sortie-optional" && key !== "optional" && item !== null && item !== undefined && typeof item !== "function"));
   // The native V2 provider serializes absent size limits as null for custom tools. Its
   // function-schema validator rejects those limits before even a non-Sortie agent can work.
   if (schema.type === "string") {
@@ -224,9 +224,26 @@ function plainSchema(value: unknown): JsonObject {
 
 function toolSchema(args: Record<string, unknown>): JsonObject {
   const entries = Object.entries(args);
-  return { type: "object", properties: Object.fromEntries(entries.map(([name, schema]) => [name, plainSchema(schema)])),
-    required: entries.filter(([, schema]) => !record(schema) || schema["x-sortie-optional"] !== true).map(([name]) => name),
+  return { type: "object", properties: Object.fromEntries(entries.map(([name, value]) => {
+    const schema = plainSchema(value);
+    if (record(value) && value["x-sortie-optional"] === true) {
+      schema.description = `${typeof schema.description === "string" ? `${schema.description} ` : ""}Pass an empty string to omit this argument.`;
+    }
+    return [name, schema];
+  })),
+    // V2's model-schema lowering emits an unsupported `optional` annotation for
+    // non-required custom-tool properties on some provider routes (including Luna).
+    // Keep the wire shape strict and translate the sentinel back before V1 execution.
+    required: entries.map(([name]) => name),
     additionalProperties: false };
+}
+
+function legacyToolArgs(input: unknown, args: Record<string, unknown>): Record<string, string> {
+  const value = record(input) ? { ...input } : {};
+  for (const [name, schema] of Object.entries(args)) {
+    if (record(schema) && schema["x-sortie-optional"] === true && value[name] === "") delete value[name];
+  }
+  return value as Record<string, string>;
 }
 
 function legacyToolName(name: unknown): string {
@@ -354,7 +371,7 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks)
     });
     for (const [name, definition] of Object.entries(hooks.tool ?? {})) {
       editor.add({ name, description: definition.description, input: toolSchema(definition.args), options: { codemode: false },
-        execute: async (input, execution) => ({ content: await definition.execute(record(input) ? input as Record<string, string> : {}, {
+        execute: async (input, execution) => ({ content: await definition.execute(legacyToolArgs(input, definition.args), {
           sessionID: String(execution.sessionID ?? ""), ...(typeof execution.agent === "string" ? { agent: execution.agent } : {}) }) }) });
     }
   });
