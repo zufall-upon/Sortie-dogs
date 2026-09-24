@@ -293,9 +293,12 @@ test("V2 server plugin registers tools and translates public hooks without chang
   const cleanup = await plugin.setup(fixture.context);
   assert.equal(plugin.id, "sortie-dogs.v010");
   assert.equal(fixture.tools.length, 1);
-  const registered = fixture.tools[0] as { input: { required: string[] }; execute(input: unknown, context: unknown): Promise<{ content: string }> };
-  assert.deepEqual(registered.input.required, ["required"]);
+  const registered = fixture.tools[0] as { input: { required: string[]; properties: Record<string, { description?: string }> }; execute(input: unknown, context: unknown): Promise<{ content: string }> };
+  assert.deepEqual(registered.input.required, ["required", "optional"]);
+  assert.match(registered.input.properties.optional!.description!, /empty string to omit/u);
   assert.equal((await registered.execute({ required: "yes" }, { sessionID: "root", agent: "dog-coordinator-v010" })).content, '{"required":"yes"}');
+  assert.equal((await registered.execute({ required: "yes", optional: "" }, { sessionID: "root", agent: "dog-coordinator-v010" })).content, '{"required":"yes"}');
+  assert.equal((await registered.execute({ required: "yes", optional: "detail" }, { sessionID: "root", agent: "dog-coordinator-v010" })).content, '{"required":"yes","optional":"detail"}');
 
   const before = fixture.toolHooks.get("execute.before")!;
   const subagent = { tool: "subagent", sessionID: "root", agent: "dog-coordinator-v010", id: "call", input: { agent: "dog-worker-v010", prompt: "work" } };
@@ -452,10 +455,14 @@ test("actual v0.10 tools preserve required, optional, and described schemas thro
     assert.match(revise.input.properties.revision_json!.description!, /proposal_id:string,revision:positive integer,content_hash:string/);
     assert.match(revise.input.properties.revision_json!.description!, /No reads or execution units are granted or restored/);
     assert.match(begin.input.properties.intent_json!.description!, /intent_json must encode exactly this JSON object/u);
-    assert.deepEqual(check.input.required, ["handoff_path"]);
+    assert.deepEqual(check.input.required, ["handoff_path", "task_prompt"]);
     const expand = tools.find(tool => tool.name === "sortie_v010_expand_unit")!;
     const shape = expand.input.properties.paths as { minItems: number; maxItems: number; items: { minLength: number; maxLength: number } };
     assert.deepEqual([shape.minItems, shape.maxItems, shape.items.minLength, shape.items.maxLength], [0, 4096, 0, 65535]);
+    const reflection = tools.find(tool => tool.name === "sortie_v010_reflection")!;
+    assert.deepEqual(reflection.input.required, Object.keys(reflection.input.properties));
+    assert.match(reflection.input.properties.scope!.description!, /empty string to omit/u);
+    for (const tool of tools) assert.deepEqual(tool.input.required, Object.keys(tool.input.properties), `${tool.name} cannot expose optional top-level properties`);
     for (const tool of tools) {
       const numeric = (value: unknown): void => {
         if (!value || typeof value !== "object") return;

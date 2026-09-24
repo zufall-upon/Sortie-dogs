@@ -2,8 +2,8 @@ import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { dirname, join, resolve } from 'node:path';
+import { lstat, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { installedFixture, startV2ReleaseServer, command } from './release-cli.mjs';
 import { estimateModelUsageCost } from '../dist/plugin/model-cost.js';
 
@@ -87,9 +87,12 @@ export async function probe(tgz, output, { mode = 'start', prompt, instance, tim
   const server = await startV2ReleaseServer(project, env);
   const since = Date.now();
   const buildStart = mode === 'build-start';
+  const operatorResponse = mode === 'operator-response';
   const rootAgent = buildStart ? 'build' : 'dog-operator';
-  const request = prompt ?? (buildStart ? 'Reply with just: ready' : 'result.txt の seed を recovered に置換して。末尾改行は維持。検証は node check.mjs。check.mjs と設定は変更しない。単純な1ユニット作業として実装して。');
-  const child = spawn('opencode', ['run', '--server', server.url, '--format', 'json', '--agent', rootAgent, '--model', 'openai/gpt-6-sol#xhigh', request], {
+  const request = prompt ?? (buildStart ? 'Reply with just: ready' : operatorResponse
+    ? '作業は不要です。ツールを呼ばず、READYとだけ返してください。' : 'result.txt の seed を recovered に置換して。末尾改行は維持。検証は node check.mjs。check.mjs と設定は変更しない。単純な1ユニット作業として実装して。');
+  const rootModel = operatorResponse ? 'openai/gpt-6-luna-fast#max' : 'openai/gpt-6-sol#xhigh';
+  const child = spawn('opencode', ['run', '--server', server.url, '--format', 'json', '--agent', rootAgent, '--model', rootModel, request], {
     cwd: project, env: { ...server.env, PWD: project }, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
   });
   let stdout = '', stderr = '', stopped = false, stopping, cutoff;
@@ -108,6 +111,7 @@ export async function probe(tgz, output, { mode = 'start', prompt, instance, tim
     else if (observed.errors.length) stop('tool-error');
     else if (mode === 'start' && observed.models.some(item => item.agent === 'dog-worker-v010')) stop('worker-started');
     else if (buildStart && observed.responses.some(item => item.agent === 'build')) stop('build-responded');
+    else if (operatorResponse && observed.responses.some(item => item.agent === 'dog-operator')) stop('operator-responded');
     else if (Date.now() - since > timeoutSeconds * 1000) stop('timeout');
   }, 250);
   let code;
@@ -128,7 +132,11 @@ export async function probe(tgz, output, { mode = 'start', prompt, instance, tim
     review: mission?.review ? { verdict: mission.review.verdict, child: mission.review.child ?? null } : null,
     candidate_sha256: createHash('sha256').update(await readFile(tgz)).digest('hex') };
   const worker = result.models.find(item => item.agent === 'dog-worker-v010');
-  result.accepted = buildStart ? !result.errors.length && (stopped === 'build-responded' || (!stopped && code === 0)) &&
+  const schemaRejected = /invalid_function_parameters|Invalid schema for function/u.test(stdout + stderr);
+  result.accepted = operatorResponse ? !schemaRejected && !result.errors.length &&
+    (stopped === 'operator-responded' || (!stopped && code === 0)) && result.responses.some(item => item.agent === 'dog-operator') &&
+    result.models.some(item => item.agent === 'dog-operator' && item.model?.id === 'gpt-6-luna-fast' && item.model.variant === 'max') :
+    buildStart ? !result.errors.length && (stopped === 'build-responded' || (!stopped && code === 0)) &&
     result.responses.some(item => item.agent === 'build') &&
     result.models.some(item => item.agent === 'build' && item.model?.id === 'gpt-6-sol') :
     !result.errors.length && worker?.model?.id === 'gpt-6-luna-fast' && worker.model.variant === 'max' &&
@@ -150,5 +158,14 @@ if (process.argv[1] && resolve(process.argv[1]) === resolve(import.meta.filename
   const result = await probe(resolve(process.argv[2]), resolve(process.argv[3]), { mode: process.argv[4] ?? 'start',
     timeoutSeconds: Number(process.argv[5] ?? 180), ...(process.argv[6] ? { prompt: await readFile(process.argv[6], 'utf8') } : {}) });
   console.log(JSON.stringify(result, null, 2));
+  // CLI-only start probes have already persisted their observation and logs.
+  // Drop the large isolated installation so old tool schemas cannot be loaded
+  // when the shared OpenCode server later revisits this fixture's session.
+  if (result.accepted && ['start', 'build-start', 'operator-response'].includes(result.mode)) {
+    const control = join(result.project, '.opencode');
+    const observation = JSON.parse(await readFile(join(dirname(result.project), 'observation.json'), 'utf8'));
+    if (observation.project === result.project && observation.candidate_sha256 === result.candidate_sha256 &&
+        (await lstat(control)).isDirectory()) await rm(control, { recursive: true });
+  }
   if (!result.accepted) process.exitCode = 1;
 }

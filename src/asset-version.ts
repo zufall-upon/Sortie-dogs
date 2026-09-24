@@ -3,6 +3,6 @@
  * installed project marker without importing every asset body.
  */
 export const RUNTIME_ASSET_VERSION = "0.3.89-completion-proof-v1";
-export const V010_RUNTIME_ASSET_VERSION = "0.12.1-v2-tool-portability-v1";
+export const V010_RUNTIME_ASSET_VERSION = "0.12.2-v2-required-tool-schema-v1";
 
 export type RuntimeAssetVersion = typeof RUNTIME_ASSET_VERSION | typeof V010_RUNTIME_ASSET_VERSION;
