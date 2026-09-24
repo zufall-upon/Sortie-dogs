@@ -341,6 +341,20 @@ test("V2 server plugin registers tools and translates public hooks without chang
   assert.equal(fixture.aborted(), true);
 });
 
+test("V2 compaction excludes Sortie schemas even when it bypasses the normal context filter", async () => {
+  const fixture = contextFixture();
+  const cleanup = await V2Plugin.setup(fixture.context);
+  try {
+    const exposed = Object.fromEntries(fixture.tools.map(tool => [tool.name, tool]));
+    const compaction = { sessionID: "build-session", agent: "build", system: [] as unknown[],
+      tools: { ...exposed, read: { name: "read" } } };
+    assert.ok("sortie_v010_check_contract" in compaction.tools);
+    assert.ok("sortie_v010_reflection" in compaction.tools);
+    await fixture.sessionHooks.get("compaction")!(compaction);
+    assert.deepEqual(Object.keys(compaction.tools), ["read"]);
+  } finally { cleanup?.(); }
+});
+
 test("V2 child prompt adapter removes only the native subagent envelope before strict Sortie claiming", async () => {
   const fixture = contextFixture();
   fixture.context.session.get = async ({ sessionID }) => ({ id: sessionID, parentID: "root", agent: "dogs-coordinator",
