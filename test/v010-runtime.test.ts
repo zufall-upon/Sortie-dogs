@@ -663,6 +663,18 @@ test("preview host adapter pins the native worker route and forwards terminal te
   assert.equal(premature.text, "status: IN_PROGRESS — accepted criteria remain unproved; same-session recovery required");
 }));
 
+test("preview worker routing keeps Luna Fast max when the V2 host never calls the config hook", async () => fixture(async root => {
+  const client = { config: { providers: async () => ({ data: { providers: [{ id: "openai", models: {
+    "gpt-6-sol": { id: "gpt-6-sol" }, "gpt-6-luna-fast": { id: "gpt-6-luna-fast" },
+  } }] } }) } };
+  const hooks = await SortieDogsV010Plugin({ directory: root, client } as never);
+  for (const agent of ["dog-worker-v010", "dog-scout-v010"]) {
+    const message = { message: { agent, model: { providerID: "openai", modelID: "gpt-6-luna-fast", variant: "max" } }, parts: [] };
+    await hooks["chat.message"]!({ sessionID: `${agent}-child`, messageID: `${agent}-user`, agent }, message);
+    assert.deepEqual(message.message.model, { providerID: "openai", modelID: "gpt-6-luna-fast", variant: "max" }, agent);
+  }
+}));
+
 test("a cancelled historical operator run does not leak its contract into a later ordinary turn", async () => fixture(async root => {
   const sessionID = "historical-cancelled-root";
   const turn = (text: string) => ({

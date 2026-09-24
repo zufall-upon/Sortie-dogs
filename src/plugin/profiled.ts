@@ -294,6 +294,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     const core = await canonicalPlugin({ ...input, worktree: input.directory, client, runtimeBridge }, {
       operationManifestPath: `${profile.stateDirectory}/contracts/operation-manifest.json`,
       handoffPaths: [`${profile.stateDirectory}/contracts/handoff.json`],
+      // The canonical fixed serial route is Sol/medium. OpenCode V2 never calls the config
+      // hook, so the preview worker default must be the dedicated route itself.
+      dedicatedWorkerModel: PREVIEW_WORKER_ROUTE,
       ...options,
     });
     const tools: Record<string, Tool> = {};
