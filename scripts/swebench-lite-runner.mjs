@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { estimateModelUsageCost } from "../dist/plugin/model-cost.js";
+import { startV2ReleaseServer, v2PluginWrapperSource } from "./release-cli.mjs";
 
 const execFileAsync = promisify(execFile);
 const MAX_COMMAND_OUTPUT = 8 * 1024 * 1024;
@@ -103,44 +104,49 @@ export function benchmarkEnvironment(source = process.env) {
 }
 
 export function benchmarkPermissionPolicy(externalDirectory) {
-  return {
-    webfetch: "deny",
-    websearch: "deny",
-    ...(typeof externalDirectory === "string" && externalDirectory.length > 0
-      ? { external_directory: { [`${resolve(externalDirectory)}/*`]: "allow" } } : {}),
-    bash: {
-      "*": "allow",
-      "*curl *": "deny",
-      "*wget *": "deny",
-      "*gh *": "deny",
-      "*ssh *": "deny",
-      "*scp *": "deny",
-      "*rsync *": "deny",
-      "*git clone *": "deny",
-      "*git fetch *": "deny",
-      "*git pull *": "deny",
-      "*git push *": "deny",
-      "*git ls-remote *": "deny",
-      "*git remote add *": "deny",
-      "*git remote set-url *": "deny",
-      "*git archive *--remote*": "deny",
-      "*http://*": "deny",
-      "*https://*": "deny",
-      "*git+*": "deny",
-    },
-  };
+  const rules = [
+    { action: "webfetch", resource: "*", effect: "deny" },
+    { action: "websearch", resource: "*", effect: "deny" },
+    { action: "shell", resource: "*", effect: "allow" },
+    ...["*curl *", "*wget *", "*gh *", "*ssh *", "*scp *", "*rsync *",
+      "*git clone *", "*git fetch *", "*git pull *", "*git push *", "*git ls-remote *",
+      "*git remote add *", "*git remote set-url *", "*git archive *--remote*",
+      "*http://*", "*https://*", "*git+*"].map(resource => ({ action: "shell", resource, effect: "deny" })),
+  ];
+  if (typeof externalDirectory === "string" && externalDirectory.length > 0) {
+    rules.push({ action: "external_directory", resource: `${resolve(externalDirectory)}/*`, effect: "allow" });
+  }
+  return rules;
 }
 
 export function benchmarkInlineConfig(plugin, agentNames, externalDirectory) {
-  const permission = benchmarkPermissionPolicy(externalDirectory);
+  const permissions = benchmarkPermissionPolicy(externalDirectory);
   return {
     plugins: [plugin],
-    permission,
-    agent: Object.fromEntries(agentNames.map(name => [name, {
-      permission,
-      tools: { webfetch: false, websearch: false },
+    permissions,
+    agents: Object.fromEntries(agentNames.map(name => [name, {
+      permissions,
     }])),
   };
+}
+
+export function verifyCandidateAgent(name, resolvedAgent) {
+  ensure(resolvedAgent?.id === name, `candidate-agent-not-loaded:${name}`);
+  const rules = Array.isArray(resolvedAgent.permissions) ? resolvedAgent.permissions : [];
+  const denied = (action, resource) => {
+    const matching = rules.filter(rule => (rule.action === action || rule.action === "*") &&
+      (rule.resource === resource || rule.resource === "*"));
+    return matching.at(-1)?.effect === "deny";
+  };
+  ensure(denied("webfetch", "*") && denied("websearch", "*"),
+    `candidate-agent-web-permission-invalid:${name}`);
+  ensure(denied("shell", "*https://*"), `candidate-agent-network-permission-invalid:${name}`);
+  const sol = name === "dog-operator" || name === "dogs-coordinator" ||
+    name === "dog-reviewer-v010" || name === "dog-advisor-v010";
+  const target = sol ? ["gpt-6-sol", "xhigh"] : ["gpt-6-luna-fast", "max"];
+  const selected = resolvedAgent.model;
+  ensure(selected?.providerID === "openai" && (selected.id ?? selected.model) === target[0] &&
+    selected.variant === target[1], `candidate-agent-model-mismatch:${name}`);
 }
 
 const text = (value, field, allowEmpty = false) => {
@@ -658,6 +664,7 @@ async function requiredCommand(executable, args, options) {
   try {
     return await execFileAsync(executable, args, {
       ...options,
+      env: { ...options.env, PWD: options.cwd },
       maxBuffer: MAX_COMMAND_OUTPUT,
       encoding: "utf8",
       windowsHide: true,
@@ -724,12 +731,14 @@ export async function prepareCandidateRuntime(candidate, packagePath, runRoot, d
   ensure(installedPackage.version === candidate.version, "candidate-package-version-mismatch");
   const versions = await import(`${pathToFileURL(join(installed, "dist", "asset-version.js")).href}?candidate=${candidate.sha256}`);
   ensure(versions.V010_RUNTIME_ASSET_VERSION === candidate.runtime_marker, "candidate-runtime-marker-mismatch");
-  const plugin = pathToFileURL(join(installed, "dist", "plugin", "v2.js")).href;
+  const plugin = join(configRoot, "plugins", "sortie-dogs");
+  await mkdir(plugin, { recursive: true });
+  await writeFile(join(plugin, "index.js"), v2PluginWrapperSource({ id: "v010" }), { flag: "wx" });
   await writeFile(join(configRoot, "opencode.json"), `${JSON.stringify({
     $schema: "https://opencode.ai/config.json",
     experimental: { subagent_depth: 2 },
     plugins: [plugin],
-    permission: benchmarkPermissionPolicy(runRoot),
+    permissions: benchmarkPermissionPolicy(runRoot),
   }, null, 2)}\n`, { flag: "wx" });
   await execute(process.execPath, [join(installed, "dist", "cli", "main.js"), "init", "--global", "--profile", candidate.profile],
     { cwd: candidateRoot, env: environment });
@@ -748,26 +757,7 @@ export async function prepareCandidateRuntime(candidate, packagePath, runRoot, d
     }
   }
   environment.OPENCODE_CONFIG_CONTENT = JSON.stringify(benchmarkInlineConfig(plugin, agentNames, runRoot));
-  for (const name of agentNames) {
-    const result = await execute("opencode", ["api", "get", `/api/agent/${encodeURIComponent(name)}`, "--standalone"],
-      { cwd: candidateRoot, env: environment });
-    let resolvedAgent;
-    try { resolvedAgent = JSON.parse(String(result.stdout))?.data; }
-    catch { throw new Error(`candidate-agent-config-invalid:${name}`); }
-    const permissions = Array.isArray(resolvedAgent.permissions) ? resolvedAgent.permissions : [];
-    ensure(permissions.some(rule => rule.action === "webfetch" && rule.effect === "deny"),
-      `candidate-agent-web-permission-invalid:${name}`);
-    ensure(permissions.some(rule => rule.action === "websearch" && rule.effect === "deny"),
-      `candidate-agent-web-permission-invalid:${name}`);
-    ensure(permissions.some(rule => rule.action === "shell" && rule.effect === "deny" && rule.resource === "*https://*"),
-      `candidate-agent-network-permission-invalid:${name}`);
-    const target = name === "dog-operator" || name === "dogs-coordinator" ||
-      name === "dog-reviewer-v010" || name === "dog-advisor-v010"
-      ? ["gpt-6-sol", "xhigh"] : ["gpt-6-luna-fast", "max"];
-    const selected = resolvedAgent.model;
-    ensure(selected?.providerID === "openai" && (selected.id ?? selected.model) === target[0] &&
-      selected.variant === target[1], `candidate-agent-model-mismatch:${name}`);
-  }
+  await (dependencies.probeAgents ?? probeCandidateV2Agents)(candidateRoot, environment, candidate.agent, agentNames);
   return {
     environment,
     runtimeRoot: candidateRoot,
@@ -787,6 +777,34 @@ export async function prepareCandidateRuntime(candidate, packagePath, runRoot, d
     await rm(candidateRoot, { recursive: true, force: true });
     throw error;
   }
+}
+
+async function probeCandidateV2Agents(root, environment, primary, agentNames) {
+  const server = await startV2ReleaseServer(root, environment);
+  try {
+    const headers = { "content-type": "application/json",
+      authorization: `Basic ${Buffer.from(`opencode:${server.env.OPENCODE_SERVER_PASSWORD}`).toString("base64")}` };
+    const request = async (path, method = "GET", body) => {
+      const response = await fetch(`${server.url}${path}`, { method, headers,
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(25_000) });
+      ensure(response.ok, `candidate-v2-api-failed:${method}:${path.split("/").slice(0, 3).join("/")}:${response.status}`);
+      return response.status === 204 ? undefined : response.json();
+    };
+    // Switching an empty session resolves the native agent registry without a model request.
+    const session = await request("/api/session", "POST", { title: "Candidate configuration check (no inference)" });
+    ensure(typeof session?.data?.id === "string", "candidate-preflight-session-unavailable");
+    await request(`/api/session/${encodeURIComponent(session.data.id)}/agent`, "POST", { agent: primary });
+    let plugins;
+    const deadline = Date.now() + 10_000;
+    do {
+      plugins = await request("/api/plugin");
+      if (plugins.data?.some(plugin => plugin.id === "sortie-dogs.v010")) break;
+      await new Promise(resolveWait => setTimeout(resolveWait, 100));
+    } while (Date.now() < deadline);
+    ensure(plugins.data?.some(plugin => plugin.id === "sortie-dogs.v010"), "candidate-plugin-not-loaded");
+    const agents = await request("/api/agent");
+    for (const name of agentNames) verifyCandidateAgent(name, agents.data?.find(agent => agent.id === name));
+  } finally { await server.stop(); }
 }
 
 async function killProcessGroup(pid, force = false) {
@@ -882,10 +900,11 @@ export async function runOpenCode(options, dependencies = {}) {
   const startedAt = options.startedAt ?? Date.now();
   const command = [
     "exec", "opencode", "run",
-    "--dir", shellQuote(options.workspace),
+    "--standalone",
     "--format", "json",
     "--print-logs",
     "--agent", shellQuote(options.agent),
+    "--model", "openai/gpt-6-sol#xhigh",
     shellQuote(options.prompt),
   ].join(" ");
   const child = spawn("bash", ["-ic", command], {

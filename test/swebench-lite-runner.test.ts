@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { promisify } from "node:util";
 import test from "node:test";
-import { benchmarkEnvironment, benchmarkInlineConfig, benchmarkPermissionPolicy, capturePatch, cloneInstance, createDryRunPlan, createInferenceManifest, createInstancePrompt, createLiveRunPlan, runOpenCode, readDirectoryUsage, formatPrediction, parseArguments, runDryRun, runLive } from "../scripts/swebench-lite-runner.mjs";
+import { benchmarkEnvironment, benchmarkInlineConfig, benchmarkPermissionPolicy, capturePatch, cloneInstance, createDryRunPlan, createInferenceManifest, createInstancePrompt, createLiveRunPlan, runOpenCode, readDirectoryUsage, formatPrediction, parseArguments, runDryRun, runLive, verifyCandidateAgent } from "../scripts/swebench-lite-runner.mjs";
 import { runCandidatePreflight } from "../scripts/swebench-candidate-preflight.mjs";
 import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -359,26 +359,38 @@ test("benchmark child environment omits host credentials and retains only execut
 
 test("benchmark permissions deny browsing and remote shell access while retaining local commands", () => {
   const policy = benchmarkPermissionPolicy();
-  assert.equal(policy.webfetch, "deny");
-  assert.equal(policy.websearch, "deny");
-  assert.equal(policy.bash["*"], "allow");
-  assert.equal(Object.hasOwn(policy, "external_directory"), false);
-  assert.deepEqual(benchmarkPermissionPolicy("/tmp/opencode/swebench-run").external_directory,
-    { "/tmp/opencode/swebench-run/*": "allow" });
+  const has = (rules: typeof policy, action: string, resource: string, effect: string) =>
+    rules.some(rule => rule.action === action && rule.resource === resource && rule.effect === effect);
+  assert.ok(has(policy, "webfetch", "*", "deny"));
+  assert.ok(has(policy, "websearch", "*", "deny"));
+  assert.ok(has(policy, "shell", "*", "allow"));
+  assert.equal(policy.some(rule => rule.action === "external_directory"), false);
+  assert.ok(has(benchmarkPermissionPolicy("/tmp/opencode/swebench-run"), "external_directory",
+    "/tmp/opencode/swebench-run/*", "allow"));
   for (const pattern of ["*curl *", "*wget *", "*gh *", "*git fetch *", "*git push *", "*https://*"]) {
-    assert.equal(policy.bash[pattern], "deny");
+    assert.ok(has(policy, "shell", pattern, "deny"));
   }
   const inline = benchmarkInlineConfig("file:///candidate/plugin.js", ["dog-operator", "dog-worker"]);
   assert.deepEqual(inline.plugins, ["file:///candidate/plugin.js"]);
-  assert.equal(Object.hasOwn(inline.permission, "external_directory"), false);
-  assert.equal(Object.hasOwn(inline.agent["dog-operator"]!.permission, "external_directory"), false);
-  assert.equal(inline.agent["dog-operator"]!.permission.bash["*https://*"], "deny");
-  assert.equal(inline.agent["dog-worker"]!.tools.webfetch, false);
+  assert.ok(has(inline.permissions, "shell", "*https://*", "deny"));
+  assert.ok(has(inline.agents["dog-operator"]!.permissions, "webfetch", "*", "deny"));
+  assert.ok(has(inline.agents["dog-worker"]!.permissions, "websearch", "*", "deny"));
   const scopedInline = benchmarkInlineConfig("file:///candidate/plugin.js", ["dog-operator"], "/tmp/opencode/swebench-run");
-  assert.deepEqual(scopedInline.permission.external_directory,
-    { "/tmp/opencode/swebench-run/*": "allow" });
-  assert.deepEqual(scopedInline.agent["dog-operator"]!.permission.external_directory,
-  { "/tmp/opencode/swebench-run/*": "allow" });
+  assert.ok(has(scopedInline.permissions, "external_directory", "/tmp/opencode/swebench-run/*", "allow"));
+  assert.ok(has(scopedInline.agents["dog-operator"]!.permissions,
+    "external_directory", "/tmp/opencode/swebench-run/*", "allow"));
+});
+
+test("candidate agent verification rejects missing models and later allow rules", () => {
+  const base = {
+    id: "dog-worker-v010", model: { providerID: "openai", id: "gpt-6-luna-fast", variant: "max" },
+    permissions: benchmarkPermissionPolicy(),
+  };
+  verifyCandidateAgent(base.id, base);
+  assert.throws(() => verifyCandidateAgent(base.id, { ...base, model: undefined }), /candidate-agent-model-mismatch/);
+  assert.throws(() => verifyCandidateAgent(base.id, { ...base, permissions: [
+    ...base.permissions, { action: "shell", resource: "*", effect: "allow" },
+  ] }), /candidate-agent-network-permission-invalid/);
 });
 
 test("base checkout fetches one commit directly and retains no remote", async () => {

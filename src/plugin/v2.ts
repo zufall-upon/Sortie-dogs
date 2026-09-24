@@ -11,12 +11,22 @@ interface V2ToolEditor {
     input: JsonObject;
     execute(input: unknown, context: JsonObject): Promise<JsonObject>;
   }): void;
+  update?(id: string, update: (tool: { execute(input: unknown, context: JsonObject): Promise<JsonObject> }) => void): void;
+}
+
+interface V2AgentEditor {
+  update(id: string, update: (agent: { model?: { providerID: string; id: string; variant?: string } }) => void): void;
 }
 
 export interface OpenCodeV2Context {
   readonly app?: { readonly version?: string };
   readonly location: { readonly directory: string; readonly project?: { readonly id?: string } };
   readonly options?: Readonly<Record<string, unknown>>;
+  readonly agent?: {
+    transform(callback: (editor: V2AgentEditor) => void): Promise<Registration>;
+    get?(input: { agentID: string }): Promise<{ model?: { providerID: string; id: string; variant?: string };
+      data?: { model?: { providerID: string; id: string; variant?: string } } }>;
+  };
   readonly event: { subscribe(options?: { signal?: AbortSignal }): AsyncIterable<JsonObject> };
   readonly tool: {
     transform(callback: (editor: V2ToolEditor) => void): Promise<Registration>;
@@ -277,7 +287,44 @@ export function createV2ReturnReportFinalizer(context: OpenCodeV2Context, hooks:
 }
 
 async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks): Promise<void> {
+  const explicitlySelectedChildren = new Set<string>();
+  const classifiedSubagentModels = new Map<string, boolean>();
+  // The V1 config hook is not invoked by OpenCode V2. Apply only missing role
+  // defaults in its native registry; a user's configured agent model wins.
+  await context.agent?.transform(editor => {
+    for (const [name, id, variant] of [
+      ["dog-operator", "gpt-6-sol", "xhigh"],
+      ["dogs-coordinator", "gpt-6-sol", "xhigh"],
+      ["dog-advisor-v010", "gpt-6-sol", "xhigh"],
+      ["dog-reviewer-v010", "gpt-6-sol", "xhigh"],
+      ["dog-scout-v010", "gpt-6-luna-fast", "max"],
+      ["dog-luna-worker-v010", "gpt-6-luna-fast", "max"],
+      ["dog-worker-v010", "gpt-6-luna-fast", "max"],
+    ]) editor.update(name, agent => { agent.model ??= { providerID: "openai", id, variant }; });
+  });
   await context.tool.transform(editor => {
+    // Mutating execute.before's draft does not reliably affect V2's native
+    // subagent model selection. Wrap the executable tool before child creation.
+    editor.update?.("subagent", tool => {
+      const execute = tool.execute;
+      tool.execute = async (input, execution) => {
+        const value = record(input) ? { ...input } : {};
+        const key = typeof execution?.sessionID === "string" && typeof value.prompt === "string"
+          ? `${execution.sessionID}\0${value.prompt}` : undefined;
+        const explicit = key === undefined ? value.model !== undefined
+          : classifiedSubagentModels.get(key) ?? value.model !== undefined;
+        if (key !== undefined) classifiedSubagentModels.delete(key);
+        if (typeof value.agent === "string" && !explicit && context.agent?.get &&
+          ["dogs-coordinator", "dog-advisor-v010", "dog-reviewer-v010", "dog-scout-v010",
+            "dog-luna-worker-v010", "dog-worker-v010"].includes(value.agent)) {
+          const resolved = await context.agent.get({ agentID: value.agent });
+          const model = resolved.data?.model ?? resolved.model;
+          if (!model) throw new Error(`sortie-v010-subagent-model-unavailable:${value.agent}`);
+          value.model = `${model.providerID}/${model.id}${model.variant ? `#${model.variant}` : ""}`;
+        }
+        return execute(value, execution);
+      };
+    });
     for (const [name, definition] of Object.entries(hooks.tool ?? {})) {
       editor.add({ name, description: definition.description, input: toolSchema(definition.args),
         execute: async (input, execution) => ({ content: await definition.execute(record(input) ? input as Record<string, string> : {}, {
@@ -285,10 +332,27 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks)
     }
   });
   if (hooks["tool.execute.before"]) await context.tool.hook("execute.before", async event => {
+    if (event.tool === "subagent" && record(event.input) && typeof event.input.prompt === "string") {
+      const key = `${event.sessionID}\0${event.input.prompt}`;
+      const explicit = typeof event.input.model === "string";
+      classifiedSubagentModels.set(key, explicit);
+      if (explicit) explicitlySelectedChildren.add(key);
+    }
     const mapped = { args: legacyToolInput(event.tool, event.input) };
     await hooks["tool.execute.before"]!({ tool: legacyToolName(event.tool), sessionID: String(event.sessionID ?? ""),
       callID: String(event.id ?? ""), ...(typeof event.agent === "string" ? { agent: event.agent } : {}) }, mapped);
     event.input = v2ToolInput(event.tool, record(mapped.args) ? mapped.args : {});
+    if (event.tool === "subagent" && record(event.input) && typeof event.input.agent === "string" &&
+      event.input.model === undefined) {
+      const role = event.input.agent;
+      if (["dogs-coordinator", "dog-advisor-v010", "dog-reviewer-v010", "dog-scout-v010",
+        "dog-luna-worker-v010", "dog-worker-v010"].includes(role)) {
+        const configured = await context.agent?.get?.({ agentID: role });
+        const model = configured?.data?.model ?? configured?.model;
+        if (!model) throw new Error(`sortie-v010-subagent-model-unavailable:${role}`);
+        event.input.model = `${model.providerID}/${model.id}${model.variant ? `#${model.variant}` : ""}`;
+      }
+    }
   });
   if (hooks["tool.execute.after"]) await context.tool.hook("execute.after", async event => {
     const result = record(event.result) ? event.result : {};
@@ -300,11 +364,25 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks)
   if (hooks["chat.message"]) await context.session.hook("prompt", async event => {
     const info = await context.session.get({ sessionID: String(event.sessionID ?? "") });
     if (!record(info) || !record(event.prompt)) return;
-    const model = modelReference(info.model) ?? { providerID: "unknown", modelID: "unknown" };
     const nativeText = String(event.prompt.text ?? "");
     const legacyText = typeof info.parentID === "string" && nativeText.startsWith(V2_SUBAGENT_PROMPT_PREFIX)
       ? nativeText.slice(V2_SUBAGENT_PROMPT_PREFIX.length)
       : nativeText;
+    let model = modelReference(info.model) ?? { providerID: "unknown", modelID: "unknown" };
+    if (typeof info.parentID === "string" && typeof info.agent === "string" && context.agent?.get) {
+      const key = `${info.parentID}\0${legacyText}`;
+      const explicit = explicitlySelectedChildren.delete(key);
+      if (!explicit && ["dogs-coordinator", "dog-advisor-v010", "dog-reviewer-v010", "dog-scout-v010",
+        "dog-luna-worker-v010", "dog-worker-v010"].includes(info.agent)) {
+        const configured = await context.agent.get({ agentID: info.agent });
+        const selected = configured.data?.model ?? configured.model;
+        if (!selected) throw new Error(`sortie-v010-subagent-model-unavailable:${info.agent}`);
+        if (model.providerID !== selected.providerID || model.modelID !== selected.id || model.variant !== selected.variant) {
+          await context.session.switchModel({ sessionID: String(event.sessionID), model: selected });
+          model = { providerID: selected.providerID, modelID: selected.id, ...(selected.variant ? { variant: selected.variant } : {}) };
+        }
+      }
+    }
     const output = { message: { id: String(event.messageID ?? ""), agent: string(info.agent), model },
       parts: [{ type: "text", text: legacyText }] };
     await hooks["chat.message"]!({ sessionID: String(event.sessionID), messageID: String(event.messageID ?? ""),

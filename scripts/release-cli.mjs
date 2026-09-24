@@ -63,7 +63,7 @@ async function stopProcessGroup(child) {
   });
 }
 
-async function startV2ReleaseServer(cwd, env) {
+export async function startV2ReleaseServer(cwd, env) {
   const password = randomBytes(24).toString('hex');
   const serverEnv = { ...process.env, ...env, PWD: cwd, OPENCODE_SERVER_PASSWORD: password };
   const child = spawn('opencode', ['serve', '--hostname', '127.0.0.1', '--port', '0'], {
@@ -187,6 +187,7 @@ export async function inside(tgz, directory, profileId = 'stable') {
     // timeout runs in WSL: Windows killing wsl.exe alone does not establish guest process cleanup.
     return jsonEvents(await command('timeout', ['--signal=TERM', '--kill-after=10s', `${timeoutSeconds}s`, 'opencode', 'run',
       ...runLocationArgsForOpenCodeVersion(cliVersion, project, v2Server?.url), '--format', 'json', '--print-logs', '--agent', coordinatorAgent,
+      ...(Number.parseInt(cliVersion.split('.')[0], 10) >= 2 ? ['--model', 'openai/gpt-6-sol#xhigh'] : []),
       ...(sessionID ? ['--session', sessionID] : []), prompt], project, cliEnv, (timeoutSeconds + 40) * 1_000));
   }
   const executeSmoke = async () => {
@@ -214,7 +215,7 @@ operation_manifest: ${runtime.stateDirectory}/contracts/recovery.operation-manif
 goal_acceptance_fingerprint: ${fingerprint}
 goal_budget_units: 8
 delivery_intent: implementation
-delivery_mode: repair-first
+ delivery_mode: mvp-first
 usable_path_established: false
 controlled_change: false
 goal_criterion_id: recovered-result
@@ -229,9 +230,9 @@ goal_source_binding: current-protected
 goal_candidate_binding: current-protected
 goal_validation_command: node child/validate.mjs
 goal_fixture: release-smoke
-goal_proof_scope: document-deliverable
+ goal_proof_scope: requested-full
 goal_expected_outcome: pass`;
-  let events = await cli(`Resume this same goal. Check the supplied contract, then dispatch one ${workerAgent} with this full ready-to-send context_digest and goal declaration. This is the direct one-worker fast path; no operator plan is needed. The Task prompt must contain exactly one acceptance header, one validation header, one source_manifest header and one project_root header. Preserve the structured declaration below verbatim and append only prose instructions. Worker must Read the absolute handoff path, wait for Read completion, then bind in a separate tool round. Use apply_patch on exactly child/result.txt to replace seed with recovered. Native tool CWD is ${project}; project_root for bind is ${join(project, 'child')}. Run exactly node child/validate.mjs from ${project}. No alternate editing tool or path, no commit. If admission or validation fails, stop and report it. Complete terminally only after canonical PASS.\n${declaration}`, sessionID);
+   let events = await cli(`Resume this same goal. User requirement: replace only child/result.txt seed with recovered and run node child/validate.mjs, accepting only canonical PASS. Follow the v0.10 Operator protocol, including begin_operator_proposal with bounded read/submission scope; dispatch its exact dogs-coordinator proposal Task; compare and approve the submitted proposal; then launch the operator run. This is one implementation unit, so the host may return a direct ${workerAgent} fast-path Task after approval: dispatch only that exact returned Task, never invent a worker Task or bypass approval. Keep the following goal declaration and context_digest verbatim in the accepted plan. The Task prompt must contain exactly one acceptance header, one validation header, one source_manifest header and one project_root header. Worker must Read the absolute handoff path, wait for Read completion, then bind in a separate tool round. Use apply_patch on exactly child/result.txt to replace seed with recovered. Native tool CWD is ${project}; project_root for bind is ${join(project, 'child')}. Run exactly node child/validate.mjs from ${project}. No alternate editing tool or path, no commit. If admission or validation fails, stop and report it. Complete terminally only after canonical PASS.\n${declaration}`, sessionID);
   let records = JSON.parse(await readFile(ledgerPath, 'utf8')).goal_events;
   let state = reduceGoalFlight(records);
   let workerStarted = releaseSmokeWorkerStarted(events, records, 'recovery');
