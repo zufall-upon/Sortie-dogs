@@ -968,6 +968,10 @@ test("v0.11 a pacing checkpoint returns control without presenting native failur
     const result = await f.tools.get("subagent").execute(ready.task, { sessionID: "root", id: "dispatch" });
     await f.hooks.get("tool:execute.after")({ sessionID: "root", id: "dispatch", tool: "subagent", status: "completed", result });
     assert.equal(result.metadata.sortie_checkpoint, true);
+    assert.equal(result.output.sessionID, "child");
+    assert.equal(result.output.status, "completed");
+    assert.equal(JSON.parse(result.output.output).status, "checkpoint");
+    assert.equal(JSON.parse(result.output.output).accepted, false);
     assert.deepEqual(f.interrupts, []);
     const status = await f.call("work_status");
     assert.equal(status.phase, "yielded"); assert.equal(status.attempts, 1);

@@ -389,13 +389,15 @@ export function createUserProxyPlugin() {
                  sortie_progress: (await loop.current(id))?.progress ? progressView((await loop.current(id))!.progress!) : null } };
             } catch (error) {
               const current = await loop.current(id);
-              if (!localYields.has(work.callID!) || current?.phase !== "yielded" || current.callID !== work.callID ||
+              if (!localYields.has(work.callID!) || current?.phase !== "yielded" || !current.child || current.callID !== work.callID ||
                   current.userStopped || stoppedByUser.has(id) || (execution.signal as AbortSignal | undefined)?.aborted) throw error;
               // Only our unsent-request checkpoint is a normal control return.
               // Native failures, user cancellation and failed checks stay failures.
-              return { content: [{ type: "text", text: JSON.stringify({ status: "checkpoint", work_id: current.id,
+              const checkpoint = JSON.stringify({ status: "checkpoint", work_id: current.id,
                 reason: current.progress?.stopped?.reason, accepted: false,
-                next: "Inspect work_status and the actual results, then continue the same child with a concrete correction or review completed scope. This checkpoint is not task completion." }) }],
+                next: "Inspect work_status and the actual results, then continue the same child with a concrete correction or review completed scope. This checkpoint is not task completion." });
+              return { output: { sessionID: current.child, status: "completed", output: checkpoint },
+                content: [{ type: "text", text: checkpoint }],
                 metadata: { ...metadata, status: "completed", sessionID: current.child, sortie_checkpoint: true,
                   description: "🐾 進捗確認 — 同じ作業を継続", sortie_progress: current.progress ? progressView(current.progress) : null } };
             } finally { ended = true; clearInterval(timer); monitors.delete(timer); localYields.delete(work.callID!);
