@@ -80,6 +80,25 @@ test("mission rejects foreign Coordinator claims and duplicate dispatches", asyn
   await assert.rejects(missions.claim("root", "foreign-child", task.prompt), /claim-invalid/);
 }));
 
+test("cold mission reopens only the terminal native dispatch and retains its Coordinator", async () => fixture(async directory => {
+  const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+  await missions.capture("root", { id: "u1", text: "Fix result" });
+  const started = await missions.start("root", ["Fix result"]);
+  await missions.admit("root", "first-call", missions.task(started));
+  await missions.claim("root", "coordinator", missions.task(started).prompt);
+  const cold = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+  await assert.rejects(cold.admit("root", "second-call", cold.task(await cold.required("root"))), /not-authorized/u);
+  await assert.rejects(cold.reconcileFinishedDispatch("root", started.id, "wrong-call"), /reconciliation-stale/u);
+  const resumed = await cold.reconcileFinishedDispatch("root", started.id, "first-call");
+  assert.equal(resumed.coordinator, "coordinator");
+  assert.equal(resumed.dispatchOpen, false);
+  await assert.rejects(cold.reconcileFinishedDispatch("root", started.id, "first-call"), /reconciliation-stale/u);
+  const task = cold.task(resumed);
+  assert.equal(task.task_id, "coordinator");
+  await cold.admit("root", "second-call", task);
+  assert.equal((await cold.required("root")).dispatchOpen, true);
+}));
+
 test("generated proof retains negative constraints and rejects dropped requirements or control writes", async () => fixture(async directory => {
   const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
   await missions.capture("root", { id: "u1", text: "Fix result; do not change tests" });

@@ -27,7 +27,7 @@ npm install --save-dev sortie-dogs
 npx sortie-dogs init .
 ```
 
-Beta package默认使用v0.10 profile。保留现有值，在`.opencode/opencode.json`中添加OpenCode V2 plugin和
+默认使用v010 profile。`init`保留现有值，自动在`.opencode/opencode.json(c)`中添加OpenCode V2 plugin和
 两层subagent设置：
 
 ```json
@@ -46,7 +46,7 @@ Beta package默认使用v0.10 profile。保留现有值，在`.opencode/opencode
 直接选择`dog-operator`也会启动相同workflow。v0.10中只有`dog-operator`拥有面向用户的authority。
 `dogs-coordinator`和所有`*-v010` role都是内部child，不应作为任务入口选择。
 
-`init`安装runtime asset；`plugins`条目加载runtime enforcement和model routing，两者都需要。
+`init`安装runtime asset并合并OpenCode设置；`plugins`条目加载runtime enforcement和model routing，两者都需要。
 plugin module按process加载，因此升级后仅新建session不够，必须重启整个OpenCode host。
 
 ## v0.10.x方向
@@ -221,8 +221,8 @@ npm install --global sortie-dogs
 sortie-dogs init --global --profile v010
 ```
 
-随后在global OpenCode config中添加`sortie-dogs`和`experimental.subagent_depth: 2`。Global init只安装asset，
-不会静默更改default agent或合并user setting。
+Global init自动在global OpenCode config中添加`sortie-dogs`和`experimental.subagent_depth: 2`，
+保留default agent和无关的user setting。
 
 ## 更新与删除
 

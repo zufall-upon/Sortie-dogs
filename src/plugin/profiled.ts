@@ -347,6 +347,33 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       if (["cancelled", "completed"].includes(mission.phase) || (id !== root && mission.coordinator !== id)) throw new Error("mission-controller-required");
       return { root, mission };
     }
+    async function reconcileMissionDispatch(root: string): Promise<OperatorMission | undefined> {
+      const mission = await missions.read(root);
+      if (!mission?.dispatchOpen || !mission.callID || ["cancelled", "completed"].includes(mission.phase) ||
+          taskOwners.has(mission.callID)) return mission;
+      const history = await messages(root);
+      const finished = history.flatMap(message => Array.isArray(message.parts) ? message.parts : []).filter(part =>
+        record(part) && part.type === "tool" && part.tool === "task" && part.callID === mission.callID &&
+        record(part.state) && ["completed", "error"].includes(String(part.state.status)) &&
+        record(part.state.input) && part.state.input.subagent_type === profileAgent(profile, "dog-operator") &&
+        (part.state.input.task_id === undefined || part.state.input.task_id === mission.coordinator) &&
+        (mission.coordinator !== null || (part.state.input.prompt === missions.task(mission).prompt &&
+          part.state.input.task_id === undefined)));
+      if (finished.length !== 1) return mission;
+      if (mission.coordinator !== null) {
+        const who = await identity(mission.coordinator);
+        if (who.parent !== root || who.role !== "dog-operator") return mission;
+      }
+      return missions.reconcileFinishedDispatch(root, mission.id, mission.callID);
+    }
+    function missionDispatchPacket(mission: OperatorMission, run?: import("../core/operator-runtime.js").OperatorState) {
+      const packet = missionPacket(mission, run);
+      if (!mission.dispatchOpen && ["open", "running"].includes(mission.phase)) {
+        return { ...packet, task: missions.task(mission),
+          next_action: "The previous Coordinator Task is finished. Dispatch this exact Task to continue the same mission and Coordinator session; keep the original requirements and cumulative budget." };
+      }
+      return packet;
+    }
     async function restorePriorAcceptance(root: string, state: import("../core/operator-runtime.js").OperatorState): Promise<void> {
       const succeeded = [...state.units].reverse().find(unit => unit.status === "succeeded");
       const current = succeeded === undefined ? undefined : {
@@ -553,11 +580,16 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       args: {}, execute: async (_args, context) => {
         const root = await rootFor(context.sessionID);
         if (!root) throw new Error("operator-grant-invalid");
+        const activeMission = await reconcileMissionDispatch(root);
+        if (activeMission && context.sessionID === root && !activeMission.dispatchOpen &&
+            ["open", "running"].includes(activeMission.phase)) {
+          return JSON.stringify({ ...missionDispatchPacket(activeMission, await operators.read(root)), budget: await control!.currentBudget(root) });
+        }
         const result = await operators.next(root, context.sessionID);
         const mission = await missions.read(root);
         if (mission && !["cancelled", "completed"].includes(mission.phase)) {
           if (record(result) && record(result.task)) return JSON.stringify(result);
-          return JSON.stringify({ ...missionPacket(mission, await operators.required(root)), budget: await control!.currentBudget(root) });
+          return JSON.stringify({ ...missionDispatchPacket(mission, await operators.required(root)), budget: await control!.currentBudget(root) });
         }
         if (context.sessionID === root && record(result) && record(result.task)) {
           const state = await operators.required(root);
@@ -595,9 +627,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     tools[status] = { description: "Read the durable root-owned operator outcome and host budget counters (max_units, consumed_units, reserved_units, remaining_units) without claiming acceptance or retrying work. An investigating proposal returns its exact short Task reference only before a Task has been admitted; an existing admission never yields a redispatch Task.",
       args: {}, execute: async (_args, context) => {
         const root = await rootFor(context.sessionID);
-        const mission = root ? await missions.read(root) : undefined;
+        const mission = root && context.sessionID === root ? await reconcileMissionDispatch(root) : root ? await missions.read(root) : undefined;
         if (mission && (context.sessionID === root || context.sessionID === mission.coordinator)) {
-          return JSON.stringify({ ...missionPacket(mission, await operators.read(root!)), budget: await control!.currentBudget(root!) });
+          return JSON.stringify({ ...missionDispatchPacket(mission, await operators.read(root!)), budget: await control!.currentBudget(root!) });
         }
         await requireRoot(context.sessionID);
         const state = await operators.read(context.sessionID);
@@ -982,9 +1014,12 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     tools[startMission] = { description: "Operator: save a few one-line requirements/negative constraints. The original user message, IDs and ownership are captured automatically. Dispatch the returned Coordinator task immediately, or use plan_units for a simple single-unit Fast-lane task.",
       args: { requirements: { ...stringList, minItems: 1, maxItems: 64 } as never }, execute: async (args, context) => {
         await requireRoot(context.sessionID);
+        await reconcileMissionDispatch(context.sessionID);
         const mission = await missions.start(context.sessionID, (args as Record<string, unknown>).requirements);
-        return JSON.stringify({ mission_id: mission.id, requirements: mission.requirements, task: missions.task(mission),
-          next_action: "Nontrivial: dispatch task now. Simple single-unit work with known scope/check: call plan_units directly. Do not create a proposal or ask for plan approval." });
+        return JSON.stringify(mission.dispatchOpen
+          ? missionDispatchPacket(mission, await operators.read(context.sessionID))
+          : { mission_id: mission.id, requirements: mission.requirements, task: missions.task(mission),
+            next_action: "Nontrivial: dispatch task now. Simple single-unit work with known scope/check: call plan_units directly. Do not create a proposal or ask for plan approval." });
       } };
     async function declareMissionUnits(root: string, actor: string, mission: OperatorMission, raw: unknown, reason?: string) {
       const plan = missionPlan(mission, raw);
@@ -1329,8 +1364,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           throw new Error("mission-coordinator-no-edit-tool");
         }
         if (request.tool === "task" && args.subagent_type === profileAgent(profile, "dog-operator") &&
-            mission && !["completed", "cancelled"].includes(mission.phase)) {
+             mission && !["completed", "cancelled"].includes(mission.phase)) {
           await requireRoot(request.sessionID);
+          await reconcileMissionDispatch(root);
           await missions.admit(root, request.callID, args);
           taskOwners.set(request.callID, { root, actor: request.sessionID, operator: false, mission: true });
           return;

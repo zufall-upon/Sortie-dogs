@@ -131,6 +131,14 @@ export class OperatorMissionRuntime {
       state.phase = "running"; state.callID = callID; state.dispatchOpen = true; state.submission = null;
     });
   }
+  /** Reopen only the exact dispatch whose native Task has a terminal record after a server restart. */
+  reconcileFinishedDispatch(root: string, missionID: string, callID: string): Promise<OperatorMission> {
+    return this.update(root, state => {
+      if (state.id !== missionID || state.callID !== callID || !state.dispatchOpen ||
+          ["cancelled", "completed"].includes(state.phase)) throw new Error("mission-dispatch-reconciliation-stale");
+      state.dispatchOpen = false;
+    });
+  }
   async claim(root: string, child: string, prompt: string): Promise<string> {
     const state = await this.update(root, state => {
       if (state.phase !== "running" || !state.dispatchOpen || !state.callID ||

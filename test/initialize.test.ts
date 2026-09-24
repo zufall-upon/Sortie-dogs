@@ -12,6 +12,7 @@ import {
 } from "../src/core/initialize.ts";
 import { runtimeAssets } from "../src/runtime-assets.ts";
 import { V010_RUNTIME_ASSET_VERSION } from "../src/asset-version.ts";
+import { parse } from "jsonc-parser";
 
 const TEST_ROOT = join(process.cwd(), "_testenv");
 const ENTRY = join(process.cwd(), "src", "cli", "main.ts");
@@ -89,6 +90,52 @@ test("second init is a no-op without rewrites", async () => {
   } finally {
     await clean(project);
   }
+});
+
+test("v010 init configures plugin and depth without replacing JSONC settings or rewriting a second time", async () => {
+  const project = await fixtureDirectory();
+  try {
+    const config = join(project, ".opencode", "opencode.jsonc");
+    await mkdir(join(project, ".opencode"));
+    await writeFile(config, '{\n  // user preference\n  "model": "openai/example",\n  "plugins": ["other-plugin"],\n  "experimental": { "own": true, "subagent_depth": 1 },\n}\n');
+    await initializeProject(project, "v010");
+    const content = await readFile(config, "utf8");
+    assert.match(content, /\/\/ user preference/u);
+    assert.deepEqual(parse(content), { model: "openai/example", plugins: ["other-plugin", "sortie-dogs"],
+      experimental: { own: true, subagent_depth: 2 } });
+    const before = await stat(config);
+    assert.equal((await initializeProject(project, "v010")).status, "unchanged");
+    assert.equal((await stat(config)).mtimeMs, before.mtimeMs);
+    assert.equal(await readFile(config, "utf8"), content);
+  } finally { await clean(project); }
+});
+
+test("v010 init creates project or global config, preserving higher configured depth", async () => {
+  const project = await fixtureDirectory();
+  try {
+    await initializeProject(project, "v010");
+    assert.deepEqual(JSON.parse(await readFile(join(project, ".opencode", "opencode.json"), "utf8")),
+      { plugins: ["sortie-dogs"], experimental: { subagent_depth: 2 } });
+    const global = join(project, "global");
+    await mkdir(global);
+    await writeFile(join(global, "opencode.json"), JSON.stringify({ plugins: ["sortie-dogs"],
+      experimental: { subagent_depth: 3 }, default_agent: "build" }));
+    await initializeGlobal(global, "v010");
+    assert.deepEqual(JSON.parse(await readFile(join(global, "opencode.json"), "utf8")),
+      { plugins: ["sortie-dogs"], experimental: { subagent_depth: 3 }, default_agent: "build" });
+  } finally { await clean(project); }
+});
+
+test("v010 rejects malformed OpenCode configuration before installing assets", async () => {
+  const project = await fixtureDirectory();
+  try {
+    await mkdir(join(project, ".opencode"));
+    const config = join(project, ".opencode", "opencode.json");
+    await writeFile(config, '{ "plugins": [');
+    await assert.rejects(initializeProject(project, "v010"), /valid JSON\/JSONC object/u);
+    assert.equal(await readFile(config, "utf8"), '{ "plugins": [');
+    await assert.rejects(stat(join(project, ".opencode", "sortie-dogs-v010.version")), { code: "ENOENT" });
+  } finally { await clean(project); }
 });
 
 test("conflicts fail closed and leave existing content untouched", async () => {

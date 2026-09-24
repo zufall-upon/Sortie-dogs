@@ -42,8 +42,8 @@ npm install --save-dev sortie-dogs
 npx sortie-dogs init .
 ```
 
-The package retains the `v010` profile/namespace for compatibility. Add the OpenCode V2 plugin and the required
-two-level subagent depth to `.opencode/opencode.json`, preserving existing values:
+The package retains the `v010` profile/namespace for compatibility. `init` adds the OpenCode V2 plugin and the required
+two-level subagent depth to `.opencode/opencode.json(c)`, preserving existing settings:
 
 ```json
 {
@@ -62,8 +62,8 @@ Selecting `dog-operator` directly starts the same workflow. `dog-operator` is th
 only user-facing v0.10 authority. `dogs-coordinator` and every `*-v010` role are
 internal children and must not be selected as task entry points.
 
-`init` installs runtime assets; the `plugins` entry loads runtime enforcement and
-model routing. Both are required. A new session alone does not reload an updated
+`init` installs runtime assets and merges the required OpenCode settings; the `plugins` entry loads runtime enforcement and
+model routing. A new session alone does not reload an updated
 plugin process, so restart OpenCode after installation or upgrade.
 
 ## v0.12.0 workflow
@@ -262,9 +262,8 @@ npm install --global sortie-dogs
 sortie-dogs init --global --profile v010
 ```
 
-Then add `sortie-dogs` and `experimental.subagent_depth: 2` to the global OpenCode config.
-Global initialization installs assets only; it does not silently change the
-default agent or merge user settings.
+Global initialization also merges `sortie-dogs` and `experimental.subagent_depth: 2` into the
+global OpenCode config, preserving unrelated settings and the default agent.
 
 ## Updates and removal
 

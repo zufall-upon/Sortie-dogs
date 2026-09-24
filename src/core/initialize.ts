@@ -3,6 +3,7 @@ import { constants } from "node:fs";
 import { lstat, mkdir, open, readFile, realpath, rm, rmdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { applyEdits, modify, parse, type ParseError } from "jsonc-parser";
 import { RUNTIME_PROFILES, type RuntimeProfileId } from "./runtime-profile.ts";
 import type { RuntimeAsset } from "../runtime-assets.js";
 
@@ -388,6 +389,7 @@ interface InitializationLayout {
   readonly controlIgnore?: boolean;
   readonly legacyAssets?: readonly LegacyRuntimeAsset[];
   readonly renamedTargets?: readonly string[];
+  readonly configureV010?: boolean;
 }
 
 const PROJECT_LAYOUT: InitializationLayout = {
@@ -410,6 +412,43 @@ function layoutLegacyPath(asset: LegacyRuntimeAsset, layout: InitializationLayou
     : asset.relativePath;
 }
 
+async function v010Config(root: string, global: boolean): Promise<{ entry: InstallEntry; previous?: Buffer } | undefined> {
+  const prefix = global ? "" : `${OPEN_CODE_DIRECTORY}/`;
+  const json = `${prefix}opencode.json`, jsonc = `${prefix}opencode.jsonc`;
+  const presentJSON = await assertSafeExistingPath(root, json, true);
+  const presentJSONC = await assertSafeExistingPath(root, jsonc, true);
+  if (presentJSON && presentJSONC) throw new ProjectInitializationError("conflict", "Both OpenCode JSON and JSONC configs exist; choose one before initialization.");
+  const relativePath = presentJSONC ? jsonc : json;
+  const previous = presentJSONC || presentJSON ? await readFile(resolve(root, relativePath)) : undefined;
+  let content = previous?.toString("utf8") ?? "{}\n";
+  const errors: ParseError[] = [];
+  const config = parse(content, errors, { allowTrailingComma: true });
+  if (errors.length || config === null || typeof config !== "object" || Array.isArray(config)) {
+    throw new ProjectInitializationError("conflict", `OpenCode config ${relativePath} must be a valid JSON/JSONC object.`);
+  }
+  const current = config as Record<string, unknown>;
+  const plugins = current.plugins;
+  if (plugins !== undefined && (!Array.isArray(plugins) || !plugins.every(item => typeof item === "string" ||
+      (item !== null && typeof item === "object" && !Array.isArray(item) && typeof item.package === "string")))) {
+    throw new ProjectInitializationError("conflict", `OpenCode config ${relativePath} has an invalid plugins list.`);
+  }
+  if (current.experimental !== undefined && (current.experimental === null || typeof current.experimental !== "object" ||
+      Array.isArray(current.experimental))) throw new ProjectInitializationError("conflict", `OpenCode config ${relativePath} has invalid experimental settings.`);
+  const depth = (current.experimental as Record<string, unknown> | undefined)?.subagent_depth;
+  if (depth !== undefined && (!Number.isSafeInteger(depth) || (depth as number) < 0)) {
+    throw new ProjectInitializationError("conflict", `OpenCode config ${relativePath} has an invalid subagent depth.`);
+  }
+  const options = { formattingOptions: { insertSpaces: true, tabSize: 2 } };
+  const update = (path: (string | number)[], value: unknown) => { content = applyEdits(content, modify(content, path, value, options)); };
+  if (!(plugins as unknown[] | undefined)?.some(item => item === "sortie-dogs" ||
+      (item !== null && typeof item === "object" && (item as Record<string, unknown>).package === "sortie-dogs"))) {
+    update(["plugins"], [...(plugins as unknown[] | undefined ?? []), "sortie-dogs"]);
+  }
+  if (depth === undefined || (depth as number) < 2) update(["experimental", "subagent_depth"], 2);
+  if (previous?.toString("utf8") === content) return undefined;
+  return { entry: { relativePath, content }, previous };
+}
+
 async function initializeRoot(
   requestedRoot: string,
   layout: InitializationLayout,
@@ -421,6 +460,7 @@ async function initializeRoot(
   if (rootInfo === undefined || !rootInfo.isDirectory() || rootInfo.isSymbolicLink()) {
     throw new ProjectInitializationError("invalid-project", layout.invalidRootMessage);
   }
+  const configUpdate = layout.configureV010 ? await v010Config(root, layout.assetPrefix === "") : undefined;
 
   const version = assetVersion(installAssets);
   const assetEntries: InstallEntry[] = installAssets.map(({ installPath, content }) => ({
@@ -451,7 +491,7 @@ async function initializeRoot(
   const matches = (entry: InstallEntry, index: number): boolean =>
     existing[index]?.equals(Buffer.from(entry.content)) ?? false;
   const assetsMatch = assetEntries.every(matches);
-  if (markerText !== undefined && parseMarker(markerText.toString("utf8")) === version && assetsMatch) {
+  if (markerText !== undefined && parseMarker(markerText.toString("utf8")) === version && assetsMatch && !configUpdate) {
     if (layout.controlIgnore ?? !layout.preserveAllLegacy) await ensureProjectLunaControlIgnore(root);
     return {
       status: "unchanged",
@@ -518,6 +558,15 @@ async function initializeRoot(
         });
       }
     }
+    if (configUpdate) {
+      const { entry, previous } = configUpdate;
+      const parent = dirname(entry.relativePath).replaceAll("\\", "/");
+      if (parent !== ".") await ensureDirectory(root, parent, createdDirectories);
+      if (previous === undefined) await createFile(resolve(root, entry.relativePath), entry.content, createdFiles);
+      else await overwriteFileSafely(root, entry.relativePath, entry.content, () => {
+        modifiedFiles.push({ relativePath: entry.relativePath, content: previous });
+      });
+    }
     for (const { asset } of removableLegacyFiles) {
       const state = await readableOwnedLegacyFile(root, asset);
       if (!Buffer.isBuffer(state)) {
@@ -545,7 +594,7 @@ async function initializeRoot(
   return {
     status: "installed",
     version,
-    installedPaths: entries.map(({ relativePath }) => relativePath),
+    installedPaths: [...entries.map(({ relativePath }) => relativePath), ...(configUpdate ? [configUpdate.entry.relativePath] : [])],
     preservedLegacyPaths,
   };
 }
@@ -569,7 +618,7 @@ export async function resolveGlobalConfigRoot(
   return resolve(home, ".config", "opencode");
 }
 
-/** Installs the packaged runtime into one existing project without changing user settings. */
+/** Installs the packaged runtime into one existing project, preserving unrelated user settings. */
 async function profileInstallation(id: RuntimeProfileId, global: boolean): Promise<{ layout: InitializationLayout; assets: readonly RuntimeAsset[] }> {
   if (!Object.hasOwn(RUNTIME_PROFILES, id)) throw new ProjectInitializationError("invalid-project", "Unknown runtime profile.");
   const profile = RUNTIME_PROFILES[id];
@@ -579,7 +628,7 @@ async function profileInstallation(id: RuntimeProfileId, global: boolean): Promi
   return { layout: { ...(global ? GLOBAL_LAYOUT : PROJECT_LAYOUT),
     markerPath: global ? profile.markerFile : `${OPEN_CODE_DIRECTORY}/${profile.markerFile}`,
     preserveAllLegacy: false, controlIgnore: false, legacyAssets: V010_ROLE_NAME_LEGACY_ASSETS,
-    renamedTargets: ["agent/dog-operator.md", "agent/dogs-coordinator.md"] }, assets: module.runtimeAssets };
+    renamedTargets: ["agent/dog-operator.md", "agent/dogs-coordinator.md"], configureV010: true }, assets: module.runtimeAssets };
 }
 
 export async function initializeProject(projectRoot: string = process.cwd(), profile: RuntimeProfileId = "stable"): Promise<InitializeProjectResult> {
