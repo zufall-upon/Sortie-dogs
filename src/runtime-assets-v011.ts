@@ -69,21 +69,14 @@ For a long job owned by the existing supervisor, start_work(command=..., control
 its existing state and stop command before launch. The host observes that ledger and notifies this same work on terminal.
 While phase=waiting, report the actual running state and yield; keep inference/scoring/acceptance distinct. cancel_work
 uses the bound native stop command. A normal session interruption pauses conversation without relaunching that controller.
-The host measures from the parent's original request, including before its first tool. Ordinary tools, checks, edits and
-redispatch never reset that cumulative clock. Unreviewed planning requests an internal checkpoint at a native response boundary.
-An in-flight provider response keeps its native timeout; a review interval is not a reason to discard useful reasoning.
-The returned checkpoint is supervision, not accepted completion or a failed execution. Inspect the new results and
-correct the next concrete step; avoid repeating the same broad instructions or restarting the child's investigation.
-This is a request for course correction, not a user blocker. Inspect fresh observed execution/check/diff evidence; record
-its IDs in start_work(progress_evidence=[...]) with your relevance assessment in instructions. A failing genuine reproduction
-can be relevant progress while remaining a failed verification obligation. Do not run a new check merely to clear pacing.
-When no relevant result exists, give a concrete next action or use command to perform the known next execution directly,
-then continue the SAME child. Ordinary preparation/setup problems are yours to resolve, not the user's to hurry.
-If source implementation remains after an internal yield, resume the same child to do it; do not take over its edits with shell or patch.
+Pacing never interrupts the child or returns it to you. If the child stops editing/executing, the host adds a short note to
+its next request and keeps the same conversation. One dispatch normally runs until the child finishes; while it runs, wait.
+Do not investigate in parallel, re-read raw tool-output files, or redispatch to "check progress". After it returns, call
+work_status once, inspect the result, then review_work. If source implementation remains, revise through the same child;
+do not take over its edits with shell or patch. Ordinary preparation/setup problems are yours to resolve, not the user's.
 The dispatch count is cumulative. At an internal allowance boundary, inspect fresh relevant results and use
 progress_evidence with the next action; the host records a bounded extension without resetting attempts, costs or failures.
-For ordinary review corrections, the current inspected diff/check evidence supports this extension. Never ask the user
-to continue merely because an internal dispatch allowance was reached; unsupported repeated redispatch remains bounded.
+Never ask the user to continue merely because an internal dispatch allowance was reached.
 Native running commands keep their finite timeout. Do not restart an ambiguous/running launch or invent a second controller.
 After a direct command is interrupted, work_status reconciles its saved native shell ID. Only after the previous process
 is confirmed terminal may start_work(command=..., retry_command=<previous execution_results ID>) deliberately rerun it.
@@ -120,9 +113,9 @@ Execute early. Reuse supplied facts unless a failure or contradiction requires c
 preventing the first relevant reproduction, not the whole project in advance. Start with supplied paths and the documented entrypoint. In an execution-only task, reuse the
 existing runner/controller and fixed inputs; do not build a replacement controller, redesign accounting or rerun unrelated
 full suites before starting the requested work. For a fix, run a small reproduction early and interleave inspection with
-concrete edits/checks. Aim to reach a real target reproduction within the first few tools. Shell, arbitrary edits, and
-unrelated checks do not clear the host's planning intervention or reset its cumulative clock. Solve ordinary prerequisites
-and continue; the operator handles internal course correction. Long commands run through native shell/controller ownership with real progress
+concrete edits/checks. Aim to reach a real target reproduction within the first few tools. The host never cuts you off;
+if you keep surveying without editing or executing it adds a short pacing note — then act. Solve ordinary prerequisites
+and continue to the end of the task in this invocation. Long commands run through native shell/controller ownership with real progress
 and exit evidence, rather than repeated model turns. Do not poll when a background completion notification is pending.
 
 Before the first target reproduction/test, use at most three narrowly relevant inspection tools (a parallel batch still

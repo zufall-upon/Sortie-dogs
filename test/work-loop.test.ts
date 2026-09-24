@@ -7,7 +7,7 @@ import { createUserProxyPlugin, V011_ROUTES, type NativeWorkContext } from "../d
 import { initializeProject } from "../dist/core/initialize.js";
 import { runtimeAssets } from "../dist/runtime-assets-v011.js";
 import { estimateModelUsageCost } from "../dist/plugin/model-cost.js";
-import { newWorkProgress, progressLimit, repairWorkToolHistory } from "../dist/core/work-progress.js";
+import { newWorkProgress, pacingMetrics, progressLimit, repairWorkToolHistory } from "../dist/core/work-progress.js";
 import { auxiliaryResponseUsage, observeAuxiliaryResponse } from "../dist/plugin/work-usage.js";
 import { workOverview } from "../dist/core/work-overview.js";
 
@@ -334,70 +334,77 @@ test("v0.11 repairs interrupted outgoing tool history without altering native ev
   assert.equal(repairWorkToolHistory(hosted).messages, hosted);
 });
 
-test("v0.11 native child card receives live observations and a planning stall yields internally without a blind retry", () => fixture(async directory => {
+test("v0.11 a planning stall nudges the same child within its conversation, never interrupting or returning it", () => fixture(async directory => {
   const f = nativeFixture(directory);
   Object.assign(f.context.options!, { maxPlanningMs: 70, progressIntervalMs: 10 });
-  const updates: any[] = [];
-  let finish!: () => void;
-  const interrupted = new Promise<void>(resolve => { finish = resolve; });
-  f.context.session.interrupt = async ({ sessionID }: any) => { f.interrupts.push(sessionID); finish(); };
-  f.tools.set("subagent", { execute: async (_input: any, execution: any) => {
-    await f.hooks.get("session:prompt")({ sessionID: "child", prompt: { text: _input.prompt } });
+  const updates: any[] = [], requests: any[] = [];
+  f.tools.set("subagent", { execute: async (input: any, execution: any) => {
+    await f.hooks.get("session:prompt")({ sessionID: "child", prompt: { text: input.prompt } });
     await execution.progress({ sessionID: "child", native: "retained" });
-    await interrupted;
-    return { content: "Native child interrupted", metadata: { sessionID: "child" } };
+    for (let turn = 0; turn < 3; turn++) {
+      const request = { sessionID: "child", system: [] as any[], options: {}, tools: {} };
+      await f.hooks.get("session:context")(request); requests.push(request);
+      await f.hooks.get("tool:execute.before")({ sessionID: "child", id: `read-${turn}`, tool: "read", input: { path: "a.txt" } });
+      await f.hooks.get("tool:execute.after")({ sessionID: "child", id: `read-${turn}`, tool: "read", status: "completed", result: {} });
+      await new Promise(resolve => setTimeout(resolve, 90));
+    }
+    await f.hooks.get("tool:execute.before")({ sessionID: "child", id: "edit", tool: "patch", input: {} });
+    await completeFiles(directory);
+    await f.hooks.get("tool:execute.after")({ sessionID: "child", id: "edit", tool: "patch", status: "completed", result: {} });
+    const after = { sessionID: "child", system: [] as any[], options: {}, tools: {} };
+    await f.hooks.get("session:context")(after); requests.push(after);
+    return { content: "Both files done", metadata: { sessionID: "child" } };
   } });
   const cleanup = await createUserProxyPlugin().setup(f.context);
   try {
-    await f.hooks.get("session:prompt")({ sessionID: "root", messageID: "user", prompt: { text: "Run the existing controller and retain results." } });
+    await f.hooks.get("session:prompt")({ sessionID: "root", messageID: "user", prompt: { text: "Complete both files." } });
     const ready = await f.call("start_work");
     await f.hooks.get("tool:execute.before")({ sessionID: "root", id: "dispatch", tool: "subagent", input: ready.task });
     const result = await f.tools.get("subagent").execute(ready.task, { sessionID: "root", id: "dispatch", progress: async (value: any) => updates.push(value) });
     await f.hooks.get("tool:execute.after")({ sessionID: "root", id: "dispatch", tool: "subagent", status: "completed", result });
-    assert.deepEqual(f.interrupts, ["child"]);
-    assert(updates.some(value => value.sessionID === "child" && value.native === "retained" && value.sortie_progress.phase === "thinking"));
-    assert(updates.some(value => value.description.includes("軌道修正")));
+    const notes = requests.map(request => request.system.some((part: any) => /Host pacing note/.test(part.text)));
+    assert.deepEqual(notes, [false, true, true, false], "nudges arrive in-request, capped per window, and stop after a real edit");
+    assert.deepEqual(f.interrupts, []);
+    assert.equal(result.content, "Both files done"); assert.equal(result.metadata.sortie_checkpoint, undefined);
+    assert(updates.some(value => value.sessionID === "child" && value.native === "retained"));
+    assert(updates.some(value => /促し/.test(value.description)));
     const status = await f.call("work_status");
-    assert.equal(status.phase, "yielded"); assert.equal(status.attempts, 1);
-    assert.equal(status.progress.commands, 0);
-    await assert.rejects(f.call("start_work"), /work-progress-blocked/);
-    const resumed = await f.call("start_work", { instructions: "Run node existing-controller.mjs with the frozen manifest now." });
-    assert.equal(resumed.task.sessionID, "child"); assert.equal(resumed.work_id, ready.work_id); assert.equal(resumed.attempts, 1);
+    assert.equal(status.phase, "review"); assert.equal(status.attempts, 1);
+    assert.equal(status.progress.nudges, 2); assert(status.progress.first_action_ms >= 0);
   } finally { cleanup(); }
 }));
 
-test("v0.11 arbitrary shell, patch, noise checks and redispatch retain receipt clocks and unresolved interventions", () => fixture(async directory => {
-  const store = storage(), loop = new WorkLoop(directory, store);
+test("v0.11 edits and executed commands restart the nudge window; surveying alone does not", () => fixture(async directory => {
+  const loop = new WorkLoop(directory, storage());
   const receivedAt = Date.now() - 5000;
   await loop.observe("root", { id: "original", text: "Fix both files and preserve tests", at: receivedAt });
   const work = await loop.start("root", "");
   await loop.admit("root", "one", loop.task(work)); await loop.claim("root", "child", loop.task(work).prompt);
-  for (const tool of ["shell", "patch", "read", "shell"]) {
+  const use = async (tool: string, count = 1) => { for (let index = 0; index < count; index++) {
     const id = `activity-${Math.random()}`;
-    await loop.activity("root", "child", { id, tool, detail: "irrelevant", startedAt: Date.now() });
+    await loop.activity("root", "child", { id, tool, detail: "survey", startedAt: Date.now() });
     await loop.activity("root", "child", { id, tool, detail: "", startedAt: 0 }, { status: "completed", exit: 0 });
-  }
-  const noise = await loop.check("root", "child", "node --version", 10000);
-  let progress = (await loop.current("root"))!.progress!;
-  assert.equal(progress.startedAt, receivedAt); assert.equal(progress.reviewedAt, receivedAt);
-  assert.match(progressLimit(progress, Date.now(), 100, 3)!, /discovery-limit/);
-  await loop.stall("root", "one", "No target result");
-  const restored = new WorkLoop(directory, store);
-  const resumed = await restored.start("root", "Run the actual oracle now", [], 10);
-  await restored.admit("root", "two", restored.task(resumed)); await restored.claim("root", "child", restored.task(resumed).prompt);
-  progress = (await restored.current("root"))!.progress!;
-  assert.equal(progress.startedAt, receivedAt); assert.equal(progress.reviewedAt, receivedAt); assert(progress.stopped);
-  assert.equal(progress.tools, 4); assert.equal(progress.interventions!.length, 1);
-  const failed = await restored.check("root", "child", "node check.mjs", 10000);
-  assert.notEqual(failed.exit, 0);
-  assert((await restored.current("root"))!.progress!.stopped, "A check must not clear an intervention automatically");
-  await restored.stall("root", "two", "Inspect actual reproduction");
-  const confirmed = await restored.start("root", "The existing oracle really reproduces pending files; fix them.", [failed.id]);
-  assert.equal(confirmed.progress!.stopped, undefined);
-  assert(confirmed.progress!.interventions![0].resolvedAt);
-  await assert.rejects(restored.start("root", "Replay old evidence", [noise.id]), /missing-or-old/);
-  assert.equal(confirmed.checks.find(check => check.id === failed.id)!.exit, failed.exit);
-  assert.equal(confirmed.attempts, 2);
+  } };
+  const limit = async () => progressLimit((await loop.current("root"))!.progress!, Date.now(), 1e9, 3);
+  await use("read", 3);
+  assert.match((await limit())!, /discovery-limit: 3 calls without an edit or executed command/);
+  assert.equal(await loop.nudge("root", "other-call", "wrong call", 2), false);
+  assert.equal(await loop.nudge("root", "one", "first", 2), true);
+  assert.equal(await limit(), null, "a nudge starts a new window");
+  await use("grep", 3);
+  assert.equal(await loop.nudge("root", "one", "second", 2), true);
+  await use("read", 3);
+  assert.equal(await loop.nudge("root", "one", "third", 2), false, "at most two nudges without an intervening action");
+  assert.equal((await loop.current("root"))!.progress!.firstActionAt, undefined);
+  await use("shell");
+  const acted = (await loop.current("root"))!;
+  assert(acted.progress!.firstActionAt! >= receivedAt); assert.equal(await limit(), null);
+  await use("read", 3);
+  assert.equal(await loop.nudge("root", "one", "after action", 2), true);
+  const final = (await loop.current("root"))!;
+  assert.equal(final.phase, "running"); assert.equal(final.attempts, 1); assert.equal(final.progress!.stopped, undefined);
+  assert.deepEqual(pacingMetrics(final.progress!).nudges, 3);
+  assert.equal(final.progress!.startedAt, receivedAt, "the request clock itself is never reset");
 }));
 
 test("v0.11 a pacing return with completed behavior needs no ceremonial child redispatch", () => fixture(async directory => {
@@ -703,19 +710,20 @@ test("v0.11 a native terminal receipt recovers an ambiguous launch and retry is 
   } finally { cleanup(); }
 }));
 
-test("v0.11 host deadline acts before the first operator tool and native resume is explicit", () => fixture(async directory => {
+test("v0.11 host deadline steers before the first operator tool without interrupting it", () => fixture(async directory => {
   const f = nativeFixture(directory), notices: any[] = [], interruptions: any[] = [];
   Object.assign(f.context.options!, { maxOperatorPlanningMs: 50, progressIntervalMs: 10 });
   let wake!: () => void; const resumed = new Promise<void>(resolve => { wake = resolve; });
-  f.context.session.synthetic = async input => { notices.push(input); };
-  f.context.session.interrupt = async input => { interruptions.push(input); wake(); };
+  f.context.session.synthetic = async input => { notices.push(input); wake(); };
+  f.context.session.interrupt = async input => { interruptions.push(input); };
   const cleanup = await createUserProxyPlugin().setup(f.context);
   try {
     await f.hooks.get("session:prompt")({ sessionID: "root", messageID: "request", prompt: { text: "Run the known task now" } });
     await f.hooks.get("session:context")({ sessionID: "root", system: [], options: {}, tools: {} });
     await resumed;
     assert.equal(notices.length, 1); assert.equal(notices[0].resume, false); assert.equal(notices[0].delivery, "steer");
-    assert.equal(interruptions[0].resume, true); assert.equal(interruptions[0].sessionID, "root");
+    await new Promise(resolve => setTimeout(resolve, 30));
+    assert.deepEqual(interruptions, [], "the operator's reasoning is steered, not restarted");
     const ready = await f.call("start_work");
     assert.equal(ready.original_requests.length, 1); assert.equal(ready.original_requests[0].id, "request");
     assert.equal(ready.attempts, 0);
@@ -735,7 +743,7 @@ test("v0.11 substantive post-result review keeps the bounded ordinary interval i
     assert.equal(notices.length, 0); assert.deepEqual(f.interrupts, []);
     const deadline = Date.now() + 2000;
     while (!notices.length && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
-    assert.equal(notices.length, 1); assert.deepEqual(f.interrupts, ["root"]);
+    assert.equal(notices.length, 1); assert.deepEqual(f.interrupts, []);
   } finally { cleanup(); }
 }));
 
@@ -948,39 +956,6 @@ test("v0.11 supervision lets an in-flight provider response finish its edits and
   } finally { cleanup(); }
 }));
 
-test("v0.11 a pacing checkpoint returns control without presenting native failure or accepting the task", () => fixture(async directory => {
-  const f = nativeFixture(directory);
-  Object.assign(f.context.options!, { maxPlanningMs: 50, progressIntervalMs: 10 });
-  f.tools.set("subagent", { execute: async (input: any) => {
-    await f.hooks.get("session:prompt")({ sessionID: "child", prompt: { text: input.prompt } });
-    await f.hooks.get("session:context")({ sessionID: "child", system: [], options: {}, tools: {} });
-    await f.hooks.get("session:experimental.ws.send")({ sessionID: "child", kind: "primary", model: V011_ROUTES.worker,
-      frame: JSON.stringify({ type: "response.create", model: "gpt-6-luna" }) });
-    await new Promise(resolve => setTimeout(resolve, 100));
-    await f.hooks.get("session:context")({ sessionID: "child", system: [], options: {}, tools: {} });
-    throw Error("Checkpoint should have returned before another model request");
-  } });
-  const cleanup = await createUserProxyPlugin().setup(f.context);
-  try {
-    await f.hooks.get("session:prompt")({ sessionID: "root", messageID: "user", prompt: { text: "Complete both files; preserve the failing checks." } });
-    const ready = await f.call("start_work");
-    await f.hooks.get("tool:execute.before")({ sessionID: "root", id: "dispatch", tool: "subagent", input: ready.task });
-    const result = await f.tools.get("subagent").execute(ready.task, { sessionID: "root", id: "dispatch" });
-    await f.hooks.get("tool:execute.after")({ sessionID: "root", id: "dispatch", tool: "subagent", status: "completed", result });
-    assert.equal(result.metadata.sortie_checkpoint, true);
-    assert.equal(result.output.sessionID, "child");
-    assert.equal(result.output.status, "completed");
-    assert.equal(JSON.parse(result.output.output).status, "checkpoint");
-    assert.equal(JSON.parse(result.output.output).accepted, false);
-    assert.deepEqual(f.interrupts, []);
-    const status = await f.call("work_status");
-    assert.equal(status.phase, "yielded"); assert.equal(status.attempts, 1);
-    assert.equal(status.child_session_id, "child"); assert.equal(status.receipt, undefined);
-    const resumed = await f.call("start_work", { instructions: "Run the existing failing reproduction and finish both files." });
-    assert.equal(resumed.task.sessionID, "child");
-  } finally { cleanup(); }
-}));
-
 test("v0.11 recovers missed native child completion after a cold plugin restart", () => fixture(async directory => {
   const store = storage(), first = nativeFixture(directory, store);
   const cleanup = await createUserProxyPlugin().setup(first.context);
@@ -1038,7 +1013,7 @@ test("v0.11 local pacing returns are not priced as transmissions and task accoun
   } finally { cleanup(); }
 }));
 
-test("v0.11 cumulative pacing yields before another provider request without discarding the completed result", () => fixture(async directory => {
+test("v0.11 cumulative pacing adds a note to the next provider request instead of failing it", () => fixture(async directory => {
   const store = storage(), f = nativeFixture(directory, store);
   Object.assign(f.context.options!, { maxPlanningMs: 50, progressIntervalMs: 10 });
   const cleanup = await createUserProxyPlugin().setup(f.context);
@@ -1050,10 +1025,12 @@ test("v0.11 cumulative pacing yields before another provider request without dis
     await completeFiles(directory);
     const check = await f.call("check", { command: "node check.mjs" }, "child");
     await new Promise(resolve => setTimeout(resolve, 60));
-    await assert.rejects(f.hooks.get("session:context")({ sessionID: "child", system: [], options: {}, tools: {} }), /yield-before-request/);
+    const request = { sessionID: "child", system: [] as any[], options: {}, tools: {} };
+    await f.hooks.get("session:context")(request);
+    assert(request.system.some(part => /Host pacing note \(planning-timeout/.test(part.text)));
     assert.deepEqual(f.interrupts, []);
     const work = (await new WorkLoop(directory, store).current("root"))!;
-    assert.equal(work.phase, "yielded"); assert(work.progress!.stopped);
+    assert.equal(work.phase, "running"); assert.equal(work.progress!.stopped, undefined);
     assert.equal(work.checks[0].id, check.id); assert.equal(work.checks[0].exit, 0);
   } finally { cleanup(); }
 }));

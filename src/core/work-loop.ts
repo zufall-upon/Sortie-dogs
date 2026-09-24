@@ -427,7 +427,7 @@ export class WorkLoop {
         "## Original user instructions (all remain authoritative)", ...work.requests.map(item => item.text),
         "## Operator notes", work.instructions, ...work.feedback,
         "Use native read/glob/grep/patch/shell tools freely within the user's instructions and project AGENTS.md. Discover dependencies and affected files as you work.",
-        "Act early: reuse supplied paths and existing documented commands. Investigate only the next unknown that prevents a target reproduction, then act on the result. Do not recreate a controller or repeat known preflight. Shell, patch and checks do not reset the host's receipt-time clock. A planning stall returns internally for same-child correction, not user intervention. Running commands retain native deadlines; activity does not prove completion.",
+        "Act early: reuse supplied paths and existing documented commands. Investigate only the next unknown that prevents a target reproduction, then act on the result. Do not recreate a controller or repeat known preflight. Keep going until the whole task is finished in this invocation; the host never cuts you off for pacing, it only adds a short note if you stop editing or executing. Running commands retain native deadlines; activity does not prove completion.",
         ...(work.commands?.length ? ["## Already executed by the host — reuse these results, never blindly relaunch", JSON.stringify(work.commands)] : []),
         "Run final meaningful checks with sortie_v011_check. Each remains an obligation until it passes on final source; use shell for exploration. Fix ordinary setup and test failures in this invocation. Verify the actual affected behavior and adjacent valid/invalid cases, not just syntax or one literal reproducer.",
         "Return a concise account of changes, check IDs, requirements covered and anything genuinely unresolved. Never accept your own work or ask the user to fix a protocol field."].join("\n\n");
@@ -455,6 +455,9 @@ export class WorkLoop {
         // Activity is visible liveness, not reviewed progress or accepted work.
         // Keep the original request and review clocks unchanged.
         progress.lastActionAt = Date.now();
+        // A finished edit or executed command restarts the nudge window. This is
+        // pacing only; it still certifies neither progress nor completion.
+        if (isWorkAction(active.tool)) { progress.reviewedAt = progress.lastWorkActionAt = Date.now(); progress.reviewedTools = progress.tools; }
         if (result.status === "completed" && activity.tool === "patch") progress.edits++;
         if (result.status === "completed" && result.exit !== null && activity.tool === "shell") this.evidence(work,
           { id: active.id, kind: "command", at: Date.now(), detail: `${active.detail} (exit ${result.exit})` });
@@ -462,11 +465,27 @@ export class WorkLoop {
         if (progress.active.length >= 128) throw new Error("work-active-tool-limit");
         progress.active.push({ ...activity, actor: child }); progress.tools++;
         if (isWorkAction(activity.tool)) {
+          progress.firstActionAt ??= Date.now();
           if (activity.tool !== "patch") progress.commands++;
         } else progress.inspections++;
       }
     });
   }
+  /** Record a non-interrupting pacing nudge for the running child. The phase, child and conversation are unchanged. */
+  async nudge(root: string, callID: string, reason: string, limit: number): Promise<boolean> {
+    return this.update(root, async state => {
+      const work = state.work;
+      if (!work || work.phase !== "running" || work.callID !== callID) return false;
+      const progress = work.progress ??= newWorkProgress(work.startedAt);
+      const nudges = progress.nudges ??= [];
+      if (nudges.filter(item => item.at > (progress.lastWorkActionAt ?? 0)).length >= limit) return false;
+      nudges.push({ at: Date.now(), reason });
+      if (nudges.length > 64) nudges.shift();
+      progress.reviewedAt = Date.now(); progress.reviewedTools = progress.tools;
+      return true;
+    });
+  }
+  /** Legacy v0.11.0-v0.11.3 hard yield. Retained for persisted states; the v0.11.4 plugin no longer calls it. */
   async stall(root: string, callID: string, reason: string): Promise<boolean> {
     return this.update(root, async state => {
       const work = state.work;
