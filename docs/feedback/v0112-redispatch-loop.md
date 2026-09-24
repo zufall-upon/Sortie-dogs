@@ -41,8 +41,33 @@ as separate clocks. Activity never certifies relevance or accepted completion.
 
 Two regressions first failed against v0.11.2, reproducing the discarded response
 and failed control return, then passed with the correction. The work-loop suite
-also passed. Installed real-task verification and its exact coverage are recorded
-in the release evidence; component tests alone do not close this incident.
+also passed.
+
+## Installed real-task verification
+
+The qualified candidate at `77c13dc4a0237f48391c9835a347f9ef51f021af` has
+SHA-256 `c2d37de400f327de67dd8c27c011d242e153aee41ab0f51d3056521fcf6ec9c1`.
+Using OpenCode 2.0.14 and the default SOL6/Luna6 Fast routes, a Japanese
+natural-language request exercised the released repository's actual V2 candidate
+preflight with the stale campaign profile observed in the incident.
+
+- The first installed trial reached preparation acceptance but failed qualification:
+  checkpoint returns lacked the native subagent's structured output. The corrected
+  return preserves `sessionID`, native control status and explicit `accepted: false`.
+- The corrected trial completed in 208,081 ms, including independent preflight
+  re-execution. Two dispatches used the same child, with two internal checkpoints,
+  zero failed native child calls and no user approval question.
+- Only `candidate.json` changed. The actual preflight verified the published
+  v0.11.2 archive, version, v011 profile, runtime marker and hash. All 23 benchmark
+  inputs were retained, and the operator inspected the passing formal check.
+- The request covered preparation only. The trial did not execute 23 inferences,
+  produce a new score, resume the reported session, or establish overnight-loop
+  reliability. It used current released source, not the reported older checkout.
+
+Reproduction driver: `_testenv/v0112-dogfood-stall/native-preparation.mjs` with
+the candidate archive as its argument. Passing evidence:
+`real-preparation/smoke-3/qualification.json` under the same directory. The setup
+failure, rejected first candidate and original histories remain retained there.
 
 ## Feedback contract
 
