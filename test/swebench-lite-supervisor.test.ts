@@ -59,7 +59,7 @@ function fakeDependencies(runs: string[], configuration: { limits?: number[]; st
       await writeFile(paths.output, `${JSON.stringify({ instance_id: entry.instance_id, model_name_or_path: "fake", model_patch: "" })}\n`);
       const usage = configuration.usage?.[entry.instance_id] ?? 0;
       await writeAtomicJson(paths.metadata, {
-        execution: { spent_usd: usage },
+        execution: { spent_usd: usage, usage_complete: true },
         results: [{ instance_id: entry.instance_id, status: configuration.statuses?.[entry.instance_id] ?? "failed", exit_code: 1, usage: { usd: usage } }],
       });
       return { identity: { pid: 99999999, starttime: null } };
@@ -98,6 +98,34 @@ test("supervisor atomically claims each instance and writes ordered aggregate ou
   }
 });
 
+test("replay pins candidate and limits and retains an unpriced reservation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "swebench-supervisor-budget-"));
+  try {
+    const value = { ...manifestValue, instances: [...manifestValue.instances, {
+      ...manifestValue.instances[0], instance_id: "example__project-3" }] };
+    const options = { manifestPath: join(root, "manifest.json"), runRoot: root,
+      output: join(root, "predictions.jsonl"), workers: 2, costLimitUsd: 1, perInstanceUsd: 0.5, watchdog: false };
+    const runs: string[] = [], limits: number[] = [];
+    const dependencies = fakeDependencies(runs, { limits });
+    dependencies.spawnRunner = async (_state: unknown, entry: { instance_id: string }, paths: { metadata: string }, opts: { costLimitUsd: number }) => {
+      runs.push(entry.instance_id); limits.push(opts.costLimitUsd);
+      await writeAtomicJson(paths.metadata, { execution: { spent_usd: 0, usage_complete: false },
+        results: [{ instance_id: entry.instance_id, status: "failed", usage: { usd: 0 } }] });
+      return { identity: { pid: 99999999, starttime: null } };
+    };
+    const state = await runSupervisor(value, options, dependencies);
+    assert.deepEqual(limits, [0.5, 0.5]);
+    assert.equal(state.held_unknown_usd, 1);
+    assert.equal(state.instances[2].status, "not-run-cost-limit");
+    const saved = await readFile(join(root, "supervisor-state.json"), "utf8");
+    await assert.rejects(runSupervisor({ ...value, candidate: { ...value.candidate, sha256: "b".repeat(64) } }, options, dependencies), /supervisor-input-changed/);
+    await assert.rejects(runSupervisor(value, { ...options, costLimitUsd: 2 }, dependencies), /supervisor-limits-changed/);
+    assert.equal(await readFile(join(root, "supervisor-state.json"), "utf8"), saved);
+    await runSupervisor(value, options, dependencies);
+    assert.equal(runs.length, 2);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("fixed Lite dev23 runs pass@1 with four active runners and one queued state writer", async () => {
   const root = await mkdtemp(join(tmpdir(), "swebench-supervisor-dev23-"));
   const runs: string[] = [];
@@ -128,7 +156,7 @@ test("fixed Lite dev23 runs pass@1 with four active runners and one queued state
         await mkdir(dirname(paths.output), { recursive: true });
         await writeFile(paths.output, `${JSON.stringify({ instance_id: entry.instance_id, model_name_or_path: "fixed-candidate", model_patch: "" })}\n`);
         await writeAtomicJson(paths.metadata, {
-          execution: { spent_usd: 0 },
+          execution: { spent_usd: 0, usage_complete: true },
           results: [{ instance_id: entry.instance_id, status: "failed", exit_code: 1, usage: { usd: 0 } }],
         });
         return { identity: { pid: 99999999, starttime: null } };
@@ -196,7 +224,7 @@ test("workers bound active runners, preserve claim/output order, and reserve cos
         await mkdir(dirname(paths.output), { recursive: true });
         await writeFile(paths.output, `${JSON.stringify({ instance_id: entry.instance_id, model_name_or_path: "fake", model_patch: "" })}\n`);
         await writeAtomicJson(paths.metadata, {
-          execution: { spent_usd: 0.25 },
+          execution: { spent_usd: 0.25, usage_complete: true },
           results: [{ instance_id: entry.instance_id, status: "failed", exit_code: 1, usage: { usd: 0.25 } }],
         });
         return { identity: { pid: 99999999, starttime: null } };
@@ -212,8 +240,8 @@ test("workers bound active runners, preserve claim/output order, and reserve cos
     assert.deepEqual(runs, [
       "example__project-1", "example__project-2", "example__project-3", "example__project-4",
     ]);
-    assert.deepEqual(limits.slice(0, 2), [2, 2]);
-    assert(limits.slice(2).every(limit => limit > 0 && limit <= 2));
+    assert.deepEqual(limits.slice(0, 2), [1, 1]);
+    assert(limits.slice(2).every(limit => limit > 0 && limit <= 4));
     assert.deepEqual(result.instances.map(entry => entry.attempt), [1, 1, 1, 1]);
     assert.equal(result.reserved_usd, 0);
     const lines = (await readFile(join(root, "predictions.jsonl"), "utf8"))
@@ -254,6 +282,33 @@ test("supervisor resume marks an interrupted attempt and never reruns it", async
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("resuming a partly priced child charges once and retains the unknown remainder", async () => {
+  const root = await mkdtemp(join(tmpdir(), "swebench-supervisor-partial-"));
+  const runs: string[] = [];
+  try {
+    const options = { manifestPath: join(root, "manifest.json"), runRoot: root,
+      output: join(root, "predictions.jsonl"), costLimitUsd: 1, watchdog: false };
+    const state = await createSupervisorState(manifestValue, options);
+    const metadata = join(root, "child-metadata.json");
+    state.instances[0]!.status = "running";
+    state.instances[0]!.attempt = 1;
+    state.instances[0]!.cost_reservation_usd = 1;
+    state.instances[0]!.child_metadata = metadata;
+    state.reserved_usd = 1;
+    await writeAtomicJson(metadata, { execution: { spent_usd: 0.3, usage_complete: false },
+      results: [{ instance_id: state.instances[0]!.instance_id, status: "failed", usage: { usd: 0.3 } }] });
+    await writeAtomicJson(join(root, "supervisor-state.json"), state);
+    const resumed = await runSupervisor(manifestValue, options, fakeDependencies(runs));
+    assert.deepEqual(runs, []);
+    assert.equal(resumed.spent_usd, 0.3);
+    assert.equal(resumed.held_unknown_usd, 0.7);
+    assert.equal(resumed.instances[1]!.status, "not-run-cost-limit");
+    const again = await runSupervisor(manifestValue, options, fakeDependencies(runs));
+    assert.equal(again.spent_usd, 0.3);
+    assert.equal(again.held_unknown_usd, 0.7);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("supervisor lock rejects a second owner and releases cleanly", async () => {
@@ -301,7 +356,7 @@ test("supervisor passes the remaining global cost budget to each child", async (
       costLimitUsd: 3,
       watchdog: false,
     }, fakeDependencies([], { limits, usage: { "example__project-1": 1, "example__project-2": 1 } }));
-    assert.deepEqual(limits, [3, 2]);
+    assert.deepEqual(limits, [1.5, 2]);
     assert.equal(result.spent_usd, 2);
   } finally {
     await rm(root, { recursive: true, force: true });

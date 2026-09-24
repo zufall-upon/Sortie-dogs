@@ -134,7 +134,7 @@ export function benchmarkPermissionPolicy(externalDirectory) {
 export function benchmarkInlineConfig(plugin, agentNames, externalDirectory) {
   const permission = benchmarkPermissionPolicy(externalDirectory);
   return {
-    plugin: [plugin],
+    plugins: [plugin],
     permission,
     agent: Object.fromEntries(agentNames.map(name => [name, {
       permission,
@@ -542,7 +542,9 @@ export function createInstancePrompt(instance) {
     "Keep every glob, grep, read, and shell path relative even after coordinator or worker handoffs; only the host may use absolute workspace paths.",
     "Before editing, reproduce the public issue with its smallest concrete example and locate the existing focused regression test or tests that express the expected behavior.",
     "Time-box dependency setup to a brief, repository-documented attempt; do not repeatedly create environments or install unrelated packages.",
+    "Installing repository-declared build/runtime/test dependencies from package registries is allowed. Follow the repository's compatible versions; do not impose an offline install or a conflicting latest-package pin merely because web/solution retrieval is forbidden.",
     "If a dependency remains unavailable, inspect the source and implement the smallest plausible fix, then run every focused check that the available environment permits.",
+    "If required behavioral verification still cannot execute, retain the patch and report a blocked/incomplete outcome, not succeeded completion based on compilation or an unrelated reproduction.",
     "Do not invent an expected output from the issue alone; inspect existing public code, nearby visitor methods, node string or name conventions, and public tests before choosing a regression assertion.",
     "When public tests do not state the expected representation, derive it from the repository's established analogous representation and keep the assertion aligned with that convention.",
     "After editing, rerun that exact reproduction plus the focused regression test and at least one adjacent relevant test; do not finalize a patch that only passes syntax checks or a self-invented test while the issue's focused test still fails.",
@@ -607,6 +609,7 @@ async function runGit(args, cwd, environment) {
       cwd,
       env: environment,
       maxBuffer: MAX_COMMAND_OUTPUT,
+      timeout: 120_000,
       encoding: "utf8",
     });
     return { exit: 0, stdout: result.stdout, stderr: result.stderr };
@@ -660,7 +663,10 @@ async function requiredCommand(executable, args, options) {
       windowsHide: true,
     });
   } catch (error) {
-    throw new Error(`candidate-command-failed:${executable}:${typeof error?.code === "number" ? error.code : 1}`);
+    let failure;
+    try { failure = JSON.parse(String(error?.stdout ?? ""))._tag; } catch { /* no typed CLI error */ }
+    const stage = executable === "opencode" ? args.slice(0, 3).join(":") : executable;
+    throw new Error(`candidate-command-failed:${stage}:${typeof error?.code === "number" ? error.code : error?.code ?? 1}${typeof failure === "string" ? `:${failure}` : ""}`);
   }
 }
 
@@ -672,7 +678,9 @@ export async function prepareCandidateRuntime(candidate, packagePath, runRoot, d
   const candidateRoot = join(runRoot, "candidate-runtime");
   try {
   const configRoot = join(candidateRoot, "opencode");
-  const xdgRoot = join(candidateRoot, "xdg");
+  // V2 resolves global agents from XDG_CONFIG_HOME/opencode, including when an
+  // older init command is given OPENCODE_CONFIG_DIR for the same directory.
+  const xdgRoot = candidateRoot;
   const dataRoot = join(candidateRoot, "data");
   const cacheRoot = join(candidateRoot, "cache");
   const homeRoot = join(candidateRoot, "home");
@@ -702,12 +710,12 @@ export async function prepareCandidateRuntime(candidate, packagePath, runRoot, d
     GIT_ASKPASS: "/bin/false",
   };
   const versionResult = await execute("opencode", ["--version"], { cwd: candidateRoot, env: environment });
-  const opencodeVersion = String(versionResult.stdout).trim();
-  ensure(/^\d+\.\d+\.\d+/u.test(opencodeVersion), "candidate-opencode-version-unavailable");
+  const opencodeVersion = /(?:^|\s)v?(\d+\.\d+\.\d+)/u.exec(String(versionResult.stdout).trim())?.[1];
+  ensure(opencodeVersion !== undefined && Number(opencodeVersion.split(".")[0]) >= 2, "candidate-opencode-v2-required");
   const dependency = `file:${packagePath}`;
   await writeFile(join(configRoot, "package.json"), `${JSON.stringify({ private: true, type: "module", dependencies: {
     "sortie-dogs": dependency,
-    "@opencode-ai/plugin": opencodeVersion,
+    "@opencode/plugin": opencodeVersion,
   } }, null, 2)}\n`, { flag: "wx" });
   await execute("npm", ["install", "--force"], { cwd: configRoot, env: environment });
   const installed = join(configRoot, "node_modules", "sortie-dogs");
@@ -716,14 +724,13 @@ export async function prepareCandidateRuntime(candidate, packagePath, runRoot, d
   ensure(installedPackage.version === candidate.version, "candidate-package-version-mismatch");
   const versions = await import(`${pathToFileURL(join(installed, "dist", "asset-version.js")).href}?candidate=${candidate.sha256}`);
   ensure(versions.V010_RUNTIME_ASSET_VERSION === candidate.runtime_marker, "candidate-runtime-marker-mismatch");
-  const plugin = pathToFileURL(join(installed, "dist", "plugin", "opencode.js")).href;
+  const plugin = pathToFileURL(join(installed, "dist", "plugin", "v2.js")).href;
   await writeFile(join(configRoot, "opencode.json"), `${JSON.stringify({
     $schema: "https://opencode.ai/config.json",
     experimental: { subagent_depth: 2 },
-    plugin: [plugin],
+    plugins: [plugin],
     permission: benchmarkPermissionPolicy(runRoot),
   }, null, 2)}\n`, { flag: "wx" });
-  await writeFile(join(xdgRoot, "opencode", "opencode.json"), "{}\n", { flag: "wx" });
   await execute(process.execPath, [join(installed, "dist", "cli", "main.js"), "init", "--global", "--profile", candidate.profile],
     { cwd: candidateRoot, env: environment });
   const module = await import(`${pathToFileURL(join(installed, "dist", "runtime-assets-v010.js")).href}?candidate=${candidate.sha256}`);
@@ -741,21 +748,25 @@ export async function prepareCandidateRuntime(candidate, packagePath, runRoot, d
     }
   }
   environment.OPENCODE_CONFIG_CONTENT = JSON.stringify(benchmarkInlineConfig(plugin, agentNames, runRoot));
-  await execute("opencode", ["debug", "config"], { cwd: candidateRoot, env: environment });
   for (const name of agentNames) {
-    const result = await execute("opencode", ["debug", "agent", name], { cwd: candidateRoot, env: environment });
+    const result = await execute("opencode", ["api", "get", `/api/agent/${encodeURIComponent(name)}`, "--standalone"],
+      { cwd: candidateRoot, env: environment });
     let resolvedAgent;
-    try { resolvedAgent = JSON.parse(String(result.stdout)); }
+    try { resolvedAgent = JSON.parse(String(result.stdout))?.data; }
     catch { throw new Error(`candidate-agent-config-invalid:${name}`); }
-    ensure(resolvedAgent.tools?.webfetch === false && resolvedAgent.tools?.websearch !== true,
-      `candidate-agent-web-tools-enabled:${name}`);
-    const permissions = Array.isArray(resolvedAgent.permission) ? resolvedAgent.permission : [];
-    ensure(permissions.some(rule => rule.permission === "webfetch" && rule.action === "deny"),
+    const permissions = Array.isArray(resolvedAgent.permissions) ? resolvedAgent.permissions : [];
+    ensure(permissions.some(rule => rule.action === "webfetch" && rule.effect === "deny"),
       `candidate-agent-web-permission-invalid:${name}`);
-    ensure(permissions.some(rule => rule.permission === "websearch" && rule.action === "deny"),
+    ensure(permissions.some(rule => rule.action === "websearch" && rule.effect === "deny"),
       `candidate-agent-web-permission-invalid:${name}`);
-    ensure(permissions.some(rule => rule.permission === "bash" && rule.action === "deny" && rule.pattern === "*https://*"),
+    ensure(permissions.some(rule => rule.action === "shell" && rule.effect === "deny" && rule.resource === "*https://*"),
       `candidate-agent-network-permission-invalid:${name}`);
+    const target = name === "dog-operator" || name === "dogs-coordinator" ||
+      name === "dog-reviewer-v010" || name === "dog-advisor-v010"
+      ? ["gpt-6-sol", "xhigh"] : ["gpt-6-luna-fast", "max"];
+    const selected = resolvedAgent.model;
+    ensure(selected?.providerID === "openai" && (selected.id ?? selected.model) === target[0] &&
+      selected.variant === target[1], `candidate-agent-model-mismatch:${name}`);
   }
   return {
     environment,
@@ -822,28 +833,36 @@ function usageDatabasePath() {
 
 export function readDirectoryUsage(directory, databasePath = usageDatabasePath()) {
   const result = { usd: 0, requests: 0, unpriced: [] };
-  if (!existsSync(databasePath)) return result;
+  if (!existsSync(databasePath)) throw new Error("usage-database-unavailable");
   const database = new DatabaseSync(databasePath, { readOnly: true });
   const unpriced = new Set();
   try {
-    const sessions = database.prepare("SELECT id FROM session WHERE directory = ?").all(directory);
-    const messages = database.prepare("SELECT data FROM message WHERE session_id = ?");
+    const v2 = database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'session_v2'").get() !== undefined;
+    const sessions = database.prepare(`SELECT id FROM ${v2 ? "session_v2" : "session"} WHERE directory = ?`).all(directory);
+    const messages = database.prepare(`SELECT ${v2 ? "type, " : ""}data FROM ${v2 ? "session_message" : "message"} WHERE session_id = ?`);
     for (const session of sessions) {
       for (const row of messages.all(session.id)) {
         let message;
-        try { message = JSON.parse(row.data); } catch { continue; }
-        if (message?.role !== "assistant" || message?.tokens === undefined) continue;
+        try { message = JSON.parse(row.data); } catch {
+          unpriced.add("missing-usage");
+          continue;
+        }
+        if (v2 ? !["assistant", "compaction"].includes(row.type) : message?.role !== "assistant") continue;
+        if (!message?.tokens) {
+          unpriced.add("missing-usage");
+          continue;
+        }
         result.requests += 1;
         const tokens = message.tokens;
         const estimate = estimateModelUsageCost({
-          providerID: message.providerID,
-          modelID: message.modelID,
+          providerID: v2 ? message.model?.providerID : message.providerID,
+          modelID: v2 ? message.model?.id : message.modelID,
           uncachedInputTokens: tokens.input,
           cacheReadTokens: tokens.cache?.read,
           cacheWriteTokens: tokens.cache?.write,
           outputTokens: tokens.output,
           reasoningTokens: tokens.reasoning,
-          serviceTier: message.serviceTier,
+          serviceTier: v2 ? message.providerState?.serviceTier : message.serviceTier,
         });
         if (estimate.status === "priced") result.usd += estimate.usd;
         else unpriced.add(estimate.reason);
@@ -1012,9 +1031,11 @@ export async function runOpenCode(options, dependencies = {}) {
   await recordWatchdog("exited").catch(() => undefined);
   const finalReason = !cleanupEstablished ? "cleanup-failed"
     : usage.unpriced.length > 0 ? "pricing-coverage-missing"
+      : usage.requests === 0 && result.reason === "completed" ? "usage-unverified"
       : options.costLimitUsd !== undefined && usage.usd >= options.costLimitUsd ? "cost-limit" : result.reason;
   return { ...result, exit: finalReason === "completed" ? result.exit : result.exit === 0 ? 1 : result.exit,
-    reason: finalReason, usage, cleanupEstablished, watchdogEvents, lastActivityAgeMs: Date.now() - lastActivity };
+    reason: finalReason, usage, usageComplete: usage.unpriced.length === 0 && usage.requests > 0,
+    cleanupEstablished, watchdogEvents, lastActivityAgeMs: Date.now() - lastActivity };
 }
 
 function emptyLiveResult(instance, status) {
@@ -1035,7 +1056,7 @@ function emptyLiveResult(instance, status) {
 
 function costEnforcementStopReason(execution) {
   const reason = execution?.reason;
-  if (["pricing-coverage-missing", "usage-monitor-failed", "watchdog-usage-failed", "usage-read-failed"].includes(reason)) {
+  if (["pricing-coverage-missing", "usage-unverified", "usage-monitor-failed", "watchdog-usage-failed", "usage-read-failed"].includes(reason)) {
     return reason;
   }
   return undefined;
@@ -1178,6 +1199,7 @@ export async function runLive(value, options, dependencies = {}) {
       }
     }
     const usage = execution?.usage ?? { usd: 0, requests: 0, unpriced: [] };
+    const usageComplete = execution?.usageComplete === true;
     spentUsd += usage.usd;
     const cleanupError = await remove(workspace, { recursive: true, force: true }).then(() => null, error => error);
     if (cleanupError) {
@@ -1227,6 +1249,7 @@ export async function runLive(value, options, dependencies = {}) {
       patch_sha256: status === "succeeded" ? digest(patch) : null,
       elapsed_ms: Date.now() - started,
       usage,
+      usage_complete: usageComplete,
       watchdog_events: execution?.watchdogEvents ?? 0,
       watchdog_idle_ms: execution?.lastActivityAgeMs ?? 0,
       replay_artifact: storedArtifact,
@@ -1260,6 +1283,7 @@ export async function runLive(value, options, dependencies = {}) {
       live_process_started: results.some(result => result.exit_code !== null),
       provider_requests_started: results.some(result => (result.usage?.requests ?? 0) > 0),
       spent_usd: spentUsd,
+      usage_complete: results.every(result => result.usage_complete === true),
     },
     replay: {
       root: replayRoot,

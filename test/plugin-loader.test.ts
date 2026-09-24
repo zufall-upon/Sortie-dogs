@@ -149,8 +149,8 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     );
     const packedPrimary = await readFile(join(packedProject, ".opencode", "agent", "dog-operator.md"), "utf8");
     assert.match(packedPrimary, /^mode: primary$/m);
-    assert.match(packedPrimary, /^model: openai\/gpt-6-luna$/m);
-    assert.match(packedPrimary, /^variant: max$/m);
+    assert.match(packedPrimary, /^model: openai\/gpt-6-sol$/m);
+    assert.match(packedPrimary, /^variant: xhigh$/m);
     assert.match(await readFile(join(packedProject, ".opencode", "agent", "dogs-coordinator.md"), "utf8"), /^hidden: true$/m);
     await assert.rejects(readFile(join(packedProject, ".opencode", "agent", "dog-coordinator-v010.md")), { code: "ENOENT" });
 

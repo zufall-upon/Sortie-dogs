@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
 import { promisify } from "node:util";
 import test from "node:test";
-import { benchmarkEnvironment, benchmarkInlineConfig, benchmarkPermissionPolicy, capturePatch, cloneInstance, createDryRunPlan, createInferenceManifest, createInstancePrompt, createLiveRunPlan, formatPrediction, parseArguments, runDryRun, runLive, runOpenCode } from "../scripts/swebench-lite-runner.mjs";
+import { benchmarkEnvironment, benchmarkInlineConfig, benchmarkPermissionPolicy, capturePatch, cloneInstance, createDryRunPlan, createInferenceManifest, createInstancePrompt, createLiveRunPlan, runOpenCode, readDirectoryUsage, formatPrediction, parseArguments, runDryRun, runLive } from "../scripts/swebench-lite-runner.mjs";
 import { runCandidatePreflight } from "../scripts/swebench-candidate-preflight.mjs";
 import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -17,6 +18,48 @@ const instance = (instance_id: string, extra: Record<string, unknown> = {}) => (
   version: "1.0",
   environment_setup_commit: "fedcba9876543210fedcba9876543210fedcba98",
   ...extra,
+});
+
+test("V2 usage reader charges owned sessions including Luna Fast and retains missing usage", async () => {
+  const root = await mkdtemp(join(tmpdir(), "swebench-v2-usage-"));
+  const path = join(root, "opencode.db"), workspace = join(root, "workspace");
+  try {
+    assert.throws(() => readDirectoryUsage(workspace, path), /usage-database-unavailable/);
+    const db = new DatabaseSync(path);
+    try {
+      db.exec("CREATE TABLE session_v2 (id TEXT, directory TEXT); CREATE TABLE session_message (session_id TEXT, type TEXT, data TEXT)");
+      db.prepare("INSERT INTO session_v2 VALUES (?, ?)").run("root", workspace);
+      db.prepare("INSERT INTO session_v2 VALUES (?, ?)").run("child", workspace);
+      db.prepare("INSERT INTO session_v2 VALUES (?, ?)").run("other", join(root, "other"));
+      const write = db.prepare("INSERT INTO session_message VALUES (?, ?, ?)");
+      const message = { model: { providerID: "openai", id: "gpt-6-luna-fast" },
+        tokens: { input: 1000, output: 500, reasoning: 0, cache: { read: 0, write: 0 } }, time: { completed: 1 } };
+      write.run("root", "assistant", JSON.stringify(message));
+      write.run("child", "assistant", JSON.stringify(message));
+      write.run("other", "assistant", JSON.stringify(message));
+      assert.deepEqual(readDirectoryUsage(workspace, path), { usd: 0.0014, requests: 2, unpriced: [] });
+      write.run("child", "assistant", JSON.stringify({ time: { completed: 2 }, error: { message: "after transport" } }));
+      assert.deepEqual(readDirectoryUsage(workspace, path), { usd: 0.0014, requests: 2, unpriced: ["missing-usage"] });
+    } finally { db.close(); }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a successful CLI exit without durable usage remains unverified", { skip: process.platform === "win32" }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "swebench-unverified-"));
+  const bin = join(root, "bin");
+  try {
+    await mkdir(bin, { recursive: true });
+    const executable = join(bin, "opencode");
+    await writeFile(executable, "#!/bin/sh\nexit 0\n");
+    await chmod(executable, 0o755);
+    await writeFile(join(root, ".bashrc"), `export PATH=${bin}:$PATH\n`);
+    const result = await runOpenCode({ workspace: root, instanceId: "no-usage", agent: "dog-operator", prompt: "probe",
+      environment: { HOME: root, PATH: `${bin}:${process.env.PATH ?? ""}` }, timeoutSeconds: 5,
+      watchdogSeconds: 5, startedAt: Date.now() }, { readUsage: () => ({ usd: 0, requests: 0, unpriced: [] }) });
+    assert.equal(result.reason, "usage-unverified");
+    assert.equal(result.usageComplete, false);
+    assert.equal(result.exit, 1);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 const candidate = {
@@ -326,7 +369,7 @@ test("benchmark permissions deny browsing and remote shell access while retainin
     assert.equal(policy.bash[pattern], "deny");
   }
   const inline = benchmarkInlineConfig("file:///candidate/plugin.js", ["dog-operator", "dog-worker"]);
-  assert.deepEqual(inline.plugin, ["file:///candidate/plugin.js"]);
+  assert.deepEqual(inline.plugins, ["file:///candidate/plugin.js"]);
   assert.equal(Object.hasOwn(inline.permission, "external_directory"), false);
   assert.equal(Object.hasOwn(inline.agent["dog-operator"]!.permission, "external_directory"), false);
   assert.equal(inline.agent["dog-operator"]!.permission.bash["*https://*"], "deny");

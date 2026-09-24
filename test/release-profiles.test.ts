@@ -19,6 +19,12 @@ test("release profiles fix branch, channel, Latest behavior and isolated target"
   assert.throws(() => releaseProfile("invented"), /Unknown/);
   assert.equal(beta.markerFile, V010_RUNTIME_PROFILE.markerFile);
   assert.equal(releaseProfile().markerFile, STABLE_RUNTIME_PROFILE.markerFile);
+  const restored = releaseProfile("v012");
+  validateReleaseProfile(restored, "0.12.0", "main", root, resolve(root, "../global"));
+  assert.equal(restored.runtimeProfile, "v010");
+  assert.equal(restored.markerFile, V010_RUNTIME_PROFILE.markerFile);
+  assert.deepEqual(githubReleaseFlags(restored), ["--target", "main"]);
+  assert.throws(() => validateReleaseProfile(restored, "0.11.4", "main", root, isolated), /profile/);
 });
 
 test("release version ordering handles beta increments and independent stable promotion", () => {

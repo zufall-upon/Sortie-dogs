@@ -266,15 +266,19 @@ test("preview assets coexist with stable assets and markers", async () => fixtur
   }
   for (const name of ["dog-worker-v010", "dog-luna-worker-v010"]) {
     const asset = previewAssets.find(item => item.name === name)!.content;
+    assert.match(asset, /^model: openai\/gpt-6-luna-fast#max$/m);
     assert.match(asset, /^permission:\r?\n  bash: allow\r?\n  sortie_v010_bind_write_gate: allow\r?\n  sortie_v010_release_write_gate: allow$/mu);
     assert.match(asset, /Treat independently selected syntax or dispatch dimensions as combinations/u);
     assert.match(asset, /multi-target route prove the rule and result for every target/u);
   }
   const reviewer = previewAssets.find(asset => asset.name === "dog-reviewer-v010")!.content;
+  assert.match(reviewer, /^model: openai\/gpt-6-sol#xhigh$/m);
+  assert.match(previewAssets.find(asset => asset.name === "dog-scout-v010")!.content, /^model: openai\/gpt-6-luna-fast#max$/m);
+  assert.match(previewAssets.find(asset => asset.name === "dogs-coordinator")!.content, /^model: openai\/gpt-6-sol#xhigh$/m);
   assert.match(reviewer, /Reject a matrix that lists independent syntax or dispatch dimensions but traces them only in isolation/u);
   assert.match(reviewer, /proving only the first target is a concrete asymmetry finding/u);
-  assert.match(primary, /^model: openai\/gpt-6-luna$/m);
-  assert.match(primary, /^variant: max$/m);
+  assert.match(primary, /^model: openai\/gpt-6-sol$/m);
+  assert.match(primary, /^variant: xhigh$/m);
   assert.match(primary, /^  "sortie_v010_\*": allow$/m);
   assert.match(primary, /^  compact_and_continue: false$/m);
   assert.match(primary, /^  "sortie_v010_\*": true$/m);
@@ -291,6 +295,12 @@ test("language follow-up marker upgrades the installed language1 preview", async
   await initializeProject(root, "v010");
   await writeFile(join(root, ".opencode/sortie-dogs-v010.version"), "0.10.0-beta.1-v0912-language1\n");
   assert.equal((await initializeProject(root, "v010")).version, V010_RUNTIME_ASSET_VERSION);
+}));
+
+test("v0.12 restore does not accept a v0.11 runtime marker", async () => fixture(async root => {
+  await initializeProject(root, "v010");
+  await writeFile(join(root, ".opencode/sortie-dogs-v010.version"), "0.11.4\n");
+  await assert.rejects(initializeProject(root, "v010"), /cannot be updated/u);
 }));
 
 test("preview role names are a bijection over separate logical authority identities", () => {
@@ -313,6 +323,11 @@ test("operations defaults do not overwrite an explicit native model variant", as
   const defaults = { agent: { "dogs-coordinator": { mode: "subagent" } } };
   await hooks.config(defaults);
   assert.deepEqual(defaults.agent["dogs-coordinator"], { mode: "subagent", model: "openai/gpt-6-sol", variant: "xhigh" });
+  const otherRoles = { agent: { "dog-scout-v010": { mode: "subagent" }, "dog-luna-worker-v010": { mode: "subagent" } } };
+  await hooks.config(otherRoles);
+  for (const name of ["dog-scout-v010", "dog-luna-worker-v010"] as const) assert.deepEqual(otherRoles.agent[name], {
+    mode: "subagent", model: "openai/gpt-6-luna-fast", variant: "max",
+  });
   const chosen = { agent: { "dogs-coordinator": { mode: "subagent", model: "openai/gpt-6-sol", variant: "max" } } };
   await hooks.config(chosen);
   assert.deepEqual(chosen.agent["dogs-coordinator"], { mode: "subagent", model: "openai/gpt-6-sol", variant: "max" });
@@ -320,7 +335,7 @@ test("operations defaults do not overwrite an explicit native model variant", as
   await hooks.config(custom);
   assert.deepEqual(custom.agent["dogs-coordinator"], { mode: "subagent", model: "openai/gpt-5.6-terra" });
   const asset = previewAssets.find(item => item.name === "dogs-coordinator")!.content;
-  assert.doesNotMatch(asset, /^model:|^variant:/m, "markdown must not overwrite the user's native JSON setting");
+  assert.match(asset, /^model: openai\/gpt-6-sol#xhigh$/m);
 }));
 
 test("preview tools are denied globally and allowed only by profile agents", async () => fixture(async root => {
@@ -437,12 +452,12 @@ test("operator control packet preserves Japanese user prose as language context"
 
 test("preview default primary route resolves without an injected catalog", async () => fixture(async root => {
   const hooks = await SortieDogsV010Plugin({ directory: root, client: { config: { providers: async () => ({ data: {
-    providers: [{ id: "openai", models: { "gpt-6-luna": { id: "gpt-6-luna" } } }],
+    providers: [{ id: "openai", models: { "gpt-6-sol": { id: "gpt-6-sol" } } }],
   } }) } } } as never);
-  const output = { message: { agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-6-luna", variant: undefined as string | undefined } }, parts: [] };
+  const output = { message: { agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-6-sol", variant: undefined as string | undefined } }, parts: [] };
   await hooks["chat.message"]!({ sessionID: "default", agent: "dog-operator", messageID: "user" }, output);
-  assert.equal(output.message.model.modelID, "gpt-6-luna");
-  assert.equal(output.message.model.variant, "max");
+  assert.equal(output.message.model.modelID, "gpt-6-sol");
+  assert.equal(output.message.model.variant, "xhigh");
 }));
 
 test("preview preserves the user's Astra Low selection across subsequent turns", async () => fixture(async root => {
@@ -490,11 +505,14 @@ test("rename migration rejects unowned new-name targets before modifying any fil
 
 function oldRoleAsset(name: "dog-operator" | "dogs-coordinator"): string {
   let content = previewAssets.find(asset => asset.name === name)!.content;
-  if (name === "dogs-coordinator") content = content.replace("hidden: true\n", "hidden: true\nmodel: openai/gpt-5.6-terra\nvariant: high\n");
+  if (name === "dogs-coordinator") content = content.replace("model: openai/gpt-6-sol#xhigh\n", "")
+    .replace("hidden: true\n", "hidden: true\nmodel: openai/gpt-5.6-terra\nvariant: high\n");
   const oldDescription = name === "dog-operator"
     ? "description: Sortie-dogs v0.10 preview — strategic coordinator with an optional bounded operator."
     : "description: Sortie-dogs v0.10 bounded operations delegate; no source or acceptance authority.";
   return content
+    .replace(/^model: openai\/gpt-6-sol$/m, "model: openai/gpt-6-luna")
+    .replace(/^variant: xhigh$/m, "variant: max")
     .replace(/For a nontrivial request whose source facts,[\s\S]*?whose complete contract is already known\.\n\n/u, "")
     .replace(/^  sortie_v010_submit_operator_proposal: true\n/m, "")
     .replace(/When the prompt starts SORTIE_OPERATOR_PROPOSAL[\s\S]*?For an admitted execution queue, call\n/u, "Call ")
@@ -610,12 +628,12 @@ test("operator smoke retains only bounded typed tool errors", () => {
 test("preview host adapter pins the native worker route and forwards terminal text through goal verification", async () => fixture(async root => {
   const client = { config: { providers: async () => ({ data: { providers: [{ id: "openai", models: {
     "gpt-6-astra": { id: "gpt-6-astra" }, "gpt-6-sol": { id: "gpt-6-sol" },
-    "gpt-6-luna": { id: "gpt-6-luna" },
+    "gpt-6-luna-fast": { id: "gpt-6-luna-fast" },
   } }] } }) } };
   const hooks = await SortieDogsV010Plugin({ directory: root, client } as never, { modelCatalog: { global: [
     { model: "openai/gpt-6-astra", variants: ["high"] },
     { model: "openai/gpt-6-sol", variants: ["low", "medium", "high", "xhigh"] },
-    { model: "openai/gpt-6-luna", variants: ["max", "high", "xhigh"] },
+    { model: "openai/gpt-6-luna-fast", variants: ["max", "high", "xhigh"] },
   ] } });
   const config = { agent: {
     "dog-operator": { mode: "primary", model: "user/selected", variant: "custom" },
@@ -623,7 +641,7 @@ test("preview host adapter pins the native worker route and forwards terminal te
   } };
   await (hooks as typeof hooks & { config(value: Record<string, unknown>): Promise<void> }).config(config);
   assert.deepEqual(config.agent["dog-worker-v010"], {
-    mode: "subagent", model: "openai/gpt-6-luna", variant: "max",
+    mode: "subagent", model: "openai/gpt-6-luna-fast", variant: "max",
   });
   assert.deepEqual(config.agent["dog-operator"], { mode: "primary", model: "user/selected", variant: "custom" });
   const explicit = { agent: { "dog-worker-v010": { mode: "subagent", model: "openai/gpt-6-astra", variant: "low" } } };

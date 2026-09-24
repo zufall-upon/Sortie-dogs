@@ -149,13 +149,15 @@ function compareVersions(left: Version, right: Version): number {
 
 type VersionTransition = "same" | "compatible-update" | "incompatible";
 
-function classifyVersionTransition(installedValue: string, currentValue: string): VersionTransition {
+function classifyVersionTransition(installedValue: string, currentValue: string, v010Restore = false): VersionTransition {
   const installed = parseVersion(installedValue);
   const current = parseVersion(currentValue);
   if (installed === undefined || current === undefined) return "incompatible";
   const order = compareVersions(installed, current);
   if (order === 0) return "same";
   if (order > 0) return "incompatible";
+  if (v010Restore && installed.major === 0 && installed.minor === 11 &&
+    current.major === 0 && current.minor === 12) return "incompatible";
 
   // SemVer-compatible update line: stable releases share a major; 0.x releases also share a minor.
   const sameLine = installed.major === current.major &&
@@ -164,7 +166,11 @@ function classifyVersionTransition(installedValue: string, currentValue: string)
   // cross-minor migration; skipped lines still fail closed instead of bypassing migration steps.
   const adjacentPreOneLine = installed.major === 0 && current.major === 0 &&
     current.minor === installed.minor + 1;
-  return sameLine || adjacentPreOneLine ? "compatible-update" : "incompatible";
+  // v0.11 used a different runtime. This explicit v010 asset migration restores
+  // the 0.10 line directly into 0.12 without selecting any v0.11 execution path.
+  const restoredPreview = v010Restore && installed.major === 0 && installed.minor === 10 &&
+    current.major === 0 && current.minor === 12;
+  return sameLine || adjacentPreOneLine || restoredPreview ? "compatible-update" : "incompatible";
 }
 
 async function metadata(path: string): Promise<Awaited<ReturnType<typeof lstat>> | undefined> {
@@ -461,7 +467,7 @@ async function initializeRoot(
     }
   } else {
     const installedVersion = parseMarker(markerText.toString("utf8"));
-    if (classifyVersionTransition(installedVersion, version) === "incompatible") {
+    if (classifyVersionTransition(installedVersion, version, layout.markerPath.endsWith("sortie-dogs-v010.version")) === "incompatible") {
       throw new ProjectInitializationError(
         "incompatible-version",
         `Installed Sortie-dogs ${installedVersion} cannot be updated to ${version}.`,

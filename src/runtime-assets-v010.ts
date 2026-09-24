@@ -89,8 +89,8 @@ permission rejection shows a different project root, do not repeat that path; re
 const coordinatorContent = `---
 description: Sortie-dogs ${V010_RUNTIME_ASSET_VERSION} primary dog-operator — strategic authority with a bounded operations delegate.
 mode: primary
-model: openai/gpt-6-luna
-variant: max
+model: openai/gpt-6-sol
+variant: xhigh
 permission:
   question: allow
   "${profile.toolPrefix}*": allow
@@ -350,6 +350,7 @@ const operatorContent = `---
 description: Sortie-dogs ${V010_RUNTIME_ASSET_VERSION} hidden dogs-coordinator operations delegate; no source or acceptance authority.
 mode: subagent
 hidden: true
+model: openai/gpt-6-sol#xhigh
 permission:
   edit: deny
   bash: deny
@@ -448,6 +449,12 @@ export const runtimeAssets: readonly RuntimeAsset[] = Object.freeze([
       : renderProfileInstructions(profile, asset.content).replaceAll(RUNTIME_ASSET_VERSION, V010_RUNTIME_ASSET_VERSION);
     if (asset.name !== "dog-coordinator" && asset.installPath.startsWith("agent/")) {
       content = content.replace("mode: subagent\n", "mode: subagent\nhidden: true\n");
+    }
+    if (["dog-worker", "dog-luna-worker", "dog-scout"].includes(asset.name)) {
+      content = content.replace("mode: subagent\n", "mode: subagent\nmodel: openai/gpt-6-luna-fast#max\n");
+    }
+    if (["dog-reviewer", "dog-advisor"].includes(asset.name)) {
+      content = content.replace("mode: subagent\n", "mode: subagent\nmodel: openai/gpt-6-sol#xhigh\n");
     }
     if (asset.name === "dog-worker" || asset.name === "dog-luna-worker") {
       content = content.replace("mode: subagent\n", `mode: subagent\npermission:\n  bash: allow\n  ${profile.toolPrefix}bind_write_gate: allow\n  ${profile.toolPrefix}release_write_gate: allow\ntools:\n  "sortie_*": false\n  ${profile.toolPrefix}bind_write_gate: true\n  ${profile.toolPrefix}release_write_gate: true\n`);

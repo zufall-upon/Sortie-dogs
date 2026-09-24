@@ -1633,6 +1633,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   const profileDefaults = input.runtimeBridge?.defaultModelRouting;
   const globalConfig = profileDefaults === undefined ? declaredGlobalConfig : {
     ...(input.runtimeBridge?.defaultModelCatalog === undefined ? {} : { modelCatalog: input.runtimeBridge.defaultModelCatalog }),
+    // A named profile route must fail closed if the host cannot serve it; never
+    // silently dispatch its coordinator or worker to an unrelated free model.
+    freeTierFallbackModels: [],
     ...(isRecord(declaredGlobalConfig) ? declaredGlobalConfig : {}),
     modelRouting: { ...profileDefaults,
       ...(isRecord(declaredGlobalConfig) && isRecord(declaredGlobalConfig.modelRouting) ? declaredGlobalConfig.modelRouting : {}) },
