@@ -789,8 +789,9 @@ export class OperatorRuntime {
     } catch { return false; }
   }
   /** Mission authority is supplied only by the owning profile, never by a model-authored plan. */
-  prepareMission(root: string, raw: unknown, dispatcher?: { sessionID: string; callID: string }, supersededRunID?: string): Promise<OperatorState> {
-    return this.serial(root, () => this.prepareOnce(root, raw, undefined, { dispatcher, supersededRunID }));
+  prepareMission(root: string, raw: unknown, dispatcher?: { sessionID: string; callID: string }, supersededRunID?: string,
+    terminalChildren: readonly string[] = []): Promise<OperatorState> {
+    return this.serial(root, () => this.prepareOnce(root, raw, undefined, { dispatcher, supersededRunID, terminalChildren }));
   }
   retireMissionRun(root: string): Promise<void> {
     return this.serial(root, async () => {
@@ -805,7 +806,8 @@ export class OperatorRuntime {
     });
   }
   private async prepareOnce(root: string, raw: unknown, scopeApprovalTurnID?: string,
-    mission?: { dispatcher?: { sessionID: string; callID: string }; supersededRunID?: string }): Promise<OperatorState> {
+    mission?: { dispatcher?: { sessionID: string; callID: string }; supersededRunID?: string;
+      terminalChildren?: readonly string[] }): Promise<OperatorState> {
     const previous = await this.read(root);
     let immutableReplacement = previous?.phase === "cancelled" &&
       [ACCEPTANCE_REMEDIATION_DECISION, REVIEW_REMEDIATION_DECISION].includes(previous.decision ?? "") && record(raw)
@@ -832,9 +834,16 @@ export class OperatorRuntime {
     const superseding = mission?.supersededRunID !== undefined && previous?.runID === mission.supersededRunID &&
       previous.phase === "cancelled";
     if (mission?.supersededRunID !== undefined && !superseding) throw new Error("mission-superseded-run-mismatch");
+    const terminalChildren = mission?.terminalChildren ?? [];
+    const cancelledChildren = previous?.units.flatMap(unit => unit.status === "cancelled" && unit.childSessionID !== null
+      ? [unit.childSessionID] : []) ?? [];
     if (superseding && previous && (previous.decision !== "explicit-cancellation" || previous.gitLifecycle !== null ||
         previous.repairResidualPaths.length > 0 || previous.priorAcceptedUnits.length > 0 ||
-        previous.units.some(unit => unit.childSessionID !== null || unit.status === "succeeded"))) {
+        terminalChildren.length !== cancelledChildren.length || new Set(terminalChildren).size !== terminalChildren.length ||
+        cancelledChildren.some(id => !terminalChildren.includes(id)) || previous.units.some(unit =>
+          !["pending", "cancelled"].includes(unit.status) || unit.evidence.length > 0 || unit.resultClass !== null ||
+          unit.repairValidation !== null || (unit.status === "pending" && (unit.callID !== null || unit.childSessionID !== null)) ||
+          (unit.status === "cancelled" && (unit.childSessionID === null || unit.callID === null))))) {
       throw new Error("mission-superseded-run-has-work: reconcile prior workers and evidence before changing acceptance");
     }
     if (plan.git_lifecycle !== undefined) {
