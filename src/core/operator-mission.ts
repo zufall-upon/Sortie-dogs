@@ -72,7 +72,7 @@ export class OperatorMissionRuntime {
   private async loadMission(root: string): Promise<OperatorMission | undefined> {
     const state = await this.load<OperatorMission>(this.file(root));
     if (!state || state.supersededRunID !== undefined || state.runID !== null ||
-        !["open", "running", "submitted"].includes(state.phase) || state.requests.length === 0) return state;
+        !["open", "running", "submitted", "cancelled"].includes(state.phase) || state.requests.length === 0) return state;
     const directory = join(this.projectRoot, this.profile.stateDirectory, "missions");
     let entries: string[];
     try { entries = await readdir(directory); }
@@ -82,11 +82,17 @@ export class OperatorMissionRuntime {
     const matches: OperatorMission[] = [];
     for (const name of candidates) {
       const previous = await this.load<OperatorMission>(join(directory, name));
-      if (previous?.root === root && previous.phase === "cancelled" && previous.runID !== null &&
-          previous.requests[0]?.id !== state.requests[0]!.id &&
+      if (previous?.root === root && previous.phase === "cancelled" &&
+          (previous.runID !== null || previous.supersededRunID !== undefined) &&
+          (previous.runID === null || previous.requests[0]?.id !== state.requests[0]!.id) &&
           previous.requests.some(request => request.id === state.requests[0]!.id)) matches.push(previous);
     }
-    if (matches.length === 1) state.supersededRunID = matches[0]!.runID!;
+    if (matches.length === 1) {
+      const predecessor = matches[0]!.runID ?? matches[0]!.supersededRunID;
+      if (predecessor && (matches[0]!.runID !== null || await this.archivedRun(root, predecessor))) {
+        state.supersededRunID = predecessor;
+      }
+    }
     return state;
   }
   /** Find exactly one archived cancelled mission that owned this run; ambiguity never grants recovery. */
@@ -160,8 +166,10 @@ export class OperatorMissionRuntime {
       const state: OperatorMission = { version: "0.12", id: `mission-${randomUUID()}`, root, requests: [request],
         requirements: requirements.map((text, index) => ({ id: `R${index + 1}`, text })), phase: "open",
         coordinator: null, callID: null, dispatchOpen: false, runID: null, plans: 0, progress: [], submission: null,
-        ...(previous?.phase === "cancelled" && previous.runID !== null && request.id !== previous.requests[0]?.id
-          ? { supersededRunID: previous.runID } : {}) };
+        ...(previous?.phase === "cancelled" &&
+          (previous.runID === null || request.id !== previous.requests[0]?.id) &&
+          (previous.runID ?? previous.supersededRunID)
+          ? { supersededRunID: (previous.runID ?? previous.supersededRunID)! } : {}) };
       await this.save(this.file(root), state);
       return state;
     });
@@ -173,6 +181,21 @@ export class OperatorMissionRuntime {
       change(state);
       await this.save(this.file(root), state);
       return state;
+    });
+  }
+  /** Keep a cancelled same-turn run's host-accepted criteria ahead of new mission text. */
+  carryForward(root: string, missionID: string, acceptance: readonly string[]): Promise<OperatorMission> {
+    return this.update(root, state => {
+      if (state.id !== missionID || state.supersededRunID !== undefined || state.runID !== null ||
+          !["open", "running"].includes(state.phase) || (state.dispatchOpen && state.coordinator === null) ||
+          acceptance.length === 0 || acceptance.some(text => typeof text !== "string" || !text.trim())) {
+        throw new Error("mission-acceptance-carry-forward-unavailable");
+      }
+      const existing = state.requirements.map(item => item.text);
+      if (acceptance.every((text, index) => existing[index] === text)) return;
+      const additions = existing.filter(text => !acceptance.includes(text));
+      if (acceptance.length + additions.length > 64) throw new Error("mission-requirements-limit: carried acceptance and additions exceed 64");
+      state.requirements = [...acceptance, ...additions].map((text, index) => ({ id: `R${index + 1}`, text }));
     });
   }
   task(state: OperatorMission): OperatorTask {

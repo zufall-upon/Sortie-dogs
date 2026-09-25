@@ -113,6 +113,28 @@ test("V2 operator dispatch rejects background before admission and accepts expli
   } finally { if (typeof dispose === "function") dispose(); }
 });
 
+test("V2 legacy history retains each turn's agent after switching from Sortie to Build", async () => {
+  const fixture = contextFixture();
+  fixture.history.splice(0, fixture.history.length,
+    { id: "old-user", type: "user", text: "Old mission", metadata: { agent: "dog-operator" }, time: { created: 1 } },
+    { id: "new-user", type: "user", text: "Independent Build task", metadata: { agent: "build" }, time: { created: 2 } });
+  const observed: string[] = [];
+  const context: OpenCodeV2Context = { ...fixture.context, session: { ...fixture.context.session,
+    get: async () => ({ id: "root", agent: "build" }),
+  } };
+  const dispose = await createSortieDogsV2Plugin(async input => ({
+    "experimental.chat.system.transform": async () => {
+      const messages = await (input.client!.session as { messages(request: unknown): Promise<{ data: { info: { agent: string } }[] }> })
+        .messages({ path: { id: "root" } });
+      observed.push(...messages.data.map(message => message.info.agent));
+    },
+  })).setup(context);
+  try {
+    await fixture.sessionHooks.get("context")!({ sessionID: "root", agent: "build", system: [] });
+    assert.deepEqual(observed, ["dog-operator", "build"]);
+  } finally { if (typeof dispose === "function") dispose(); }
+});
+
 test("V2 role defaults preserve explicit agent models and keep review separate from workers", async () => {
   const fixture = contextFixture();
   const models = new Map<string, { providerID: string; id: string; variant?: string } | undefined>([

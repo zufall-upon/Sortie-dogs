@@ -7,6 +7,7 @@ import test from "node:test";
 import { promisify } from "node:util";
 import { OperatorContractError, OperatorRuntime, operatorGitPathAuthorized, parseOperatorPlan, type OperatorTask } from "../dist/core/operator-runtime.js";
 import { OperatorProposalRuntime } from "../dist/core/operator-proposal.js";
+import { OperatorMissionRuntime, missionPlan } from "../dist/core/operator-mission.js";
 import { V010_RUNTIME_PROFILE, STABLE_RUNTIME_PROFILE, canonicalAgent, profileAgent, profileTool } from "../dist/core/runtime-profile.js";
 import { initializeProject } from "../dist/core/initialize.js";
 import { runtimeAssets as stableAssets } from "../dist/runtime-assets.js";
@@ -625,6 +626,89 @@ test("cold plugin reconnects only a terminal native Coordinator Task to the same
     { args: structuredClone(recovered.task) });
   const resumed = JSON.parse(await cold.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
   assert.equal(resumed.task, undefined, "a second active Task cannot be redispatched");
+}));
+
+test("start_mission carries a cancelled same-turn contract from the host before dispatch", async () => fixture(async root => {
+  const identities: Record<string, { agent: string; parentID?: string }> = {
+    root: { agent: "dog-operator" }, coordinator: { agent: "dogs-coordinator", parentID: "root" },
+  };
+  const hooks = await SortieDogsV010Plugin({ directory: root, client: { session: {
+    get: async ({ path }: { path: { id: string } }) => ({ data: identities[path.id] }), messages: async () => ({ data: [] }),
+  } } } as never);
+  await hooks["chat.message"]!({ sessionID: "root", messageID: "user-1", agent: "dog-operator" }, {
+    message: { id: "user-1", agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-6-sol" } },
+    parts: [{ type: "text", text: "Continue MK2-04 without changing the original acceptance" }],
+  });
+  const missions = new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE);
+  const operators = new OperatorRuntime(root, V010_RUNTIME_PROFILE);
+  const old = await missions.start("root", ["Old acceptance", "No user Go proxy"]);
+  const prior = await operators.prepareMission("root", missionPlan(old, [{ title: "Check", objective: "Check original result",
+    read: [], write: ["src"], validation: ["go test ./..."] }]), { sessionID: "old-coordinator", callID: "old-task" });
+  await operators.interrupted("root", "explicit-cancellation");
+  await missions.update("root", state => { state.phase = "cancelled"; state.runID = prior.runID; });
+  const started = JSON.parse(await hooks.tool!.sortie_v010_start_mission.execute({ requirements: ["Continue MK2-04"] },
+    { sessionID: "root" }));
+  assert.deepEqual(started.requirements.map((item: { text: string }) => item.text),
+    ["Old acceptance", "No user Go proxy", "Continue MK2-04"]);
+  assert.deepEqual((await missions.required("root")).requirements, started.requirements);
+  assert.equal(started.task.subagent_type, "dogs-coordinator");
+  assert.equal((await missions.required("root")).supersededRunID, undefined);
+  assert.equal((await operators.required("root")).phase, "cancelled");
+  await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "new-task" },
+    { args: structuredClone(started.task) });
+  await hooks["chat.message"]!({ sessionID: "coordinator", messageID: "coordinator-1", agent: "dogs-coordinator" }, {
+    message: { id: "coordinator-1", agent: "dogs-coordinator", model: { providerID: "openai", modelID: "gpt-6-sol" } },
+    parts: [{ type: "text", text: started.task.prompt }],
+  });
+  const prepared = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ units: [{
+    title: "Recheck MK2-04", objective: "Keep the full original acceptance and validate the work",
+    read: [], write: ["src"], validation: ["go test ./..."],
+  }] }, { sessionID: "coordinator" }));
+  assert.ok(prepared.task, JSON.stringify(prepared));
+  const run = await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root");
+  assert.equal(run.parentRunID, prior.runID);
+  assert.equal(run.operatorSessionID, "coordinator");
+  assert.deepEqual(run.acceptance, started.requirements.map((item: { text: string }) => item.text));
+}));
+
+test("plan_units repairs an already-dispatched mission with cancelled-run acceptance after plugin reload", async () => fixture(async root => {
+  const identities: Record<string, { agent: string; parentID?: string }> = {
+    root: { agent: "dog-operator" }, coordinator: { agent: "dogs-coordinator", parentID: "root" },
+  };
+  const create = () => SortieDogsV010Plugin({ directory: root, client: { session: {
+    get: async ({ path }: { path: { id: string } }) => ({ data: identities[path.id] }),
+    messages: async () => ({ data: [] }),
+  } } } as never);
+  const first = await create();
+  await first["chat.message"]!({ sessionID: "root", messageID: "user-1", agent: "dog-operator" }, {
+    message: { id: "user-1", agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-6-sol" } },
+    parts: [{ type: "text", text: "Finish MK2-04 using the existing acceptance" }],
+  });
+  const missions = new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE);
+  const operators = new OperatorRuntime(root, V010_RUNTIME_PROFILE);
+  const old = await missions.start("root", ["Preserve the old acceptance", "Avoid user Go proxy"]);
+  const previous = await operators.prepareMission("root", missionPlan(old, [{ title: "First unit", objective: "Implement",
+    read: [], write: ["src"], validation: ["go test ./..."] }]));
+  await operators.interrupted("root", "explicit-cancellation");
+  await missions.update("root", state => { state.phase = "cancelled"; state.runID = previous.runID; });
+  // An older plugin persisted and dispatched this new mission without carrying old acceptance.
+  const blocked = await missions.start("root", ["Finish MK2-04"]);
+  const task = missions.task(blocked);
+  await missions.admit("root", "coordinator-call", task);
+  await missions.claim("root", "coordinator", task.prompt);
+  const reloaded = await create();
+  const next = JSON.parse(await reloaded.tool!.sortie_v010_plan_units.execute({ units: [{
+    title: "Finish MK2-04", objective: "Preserve old criteria and validate the result", read: [],
+    write: ["src"], validation: ["go test ./..."],
+  }] }, { sessionID: "coordinator" }));
+  assert.ok(next.task, JSON.stringify(next));
+  const restored = await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root");
+  assert.deepEqual(restored.requirements.map(item => item.text),
+    ["Preserve the old acceptance", "Avoid user Go proxy", "Finish MK2-04"]);
+  const run = await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root");
+  assert.equal(run.parentRunID, previous.runID);
+  assert.equal(run.operatorSessionID, "coordinator");
+  assert.deepEqual(run.acceptance, restored.requirements.map(item => item.text));
 }));
 
 test("nested mission Worker records validation evidence with an in-scope npm-style symlink", async () => fixture(async root => {
@@ -2523,6 +2607,36 @@ test("preview plugin exports only its own serial capabilities and ignores ordina
   await assert.rejects(hooks.tool!.sortie_v010_prepare_operator.execute({ plan_json: JSON.stringify(plan()) }, { sessionID: "ordinary" }), /runtime-profile-session-inactive: non-profile agents retain native read, edit, patch, shell, and task tools; continue directly without Sortie profile tools/u);
   assert.notEqual(profileAgent(V010_RUNTIME_PROFILE, "dog-coordinator"), profileAgent(STABLE_RUNTIME_PROFILE, "dog-coordinator"));
   assert.equal(profileTool(V010_RUNTIME_PROFILE, "sortie_check_contract"), "sortie_v010_check_contract");
+}));
+
+test("Build after a cancelled Sortie turn treats the old interruption as historical, not its own tool gate", async () => fixture(async root => {
+  const hooks = await SortieDogsV010Plugin({ directory: root });
+  await hooks["chat.message"]!({ sessionID: "root", agent: "dog-operator", messageID: "old-user" }, {
+    message: { id: "old-user", agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-6-sol" } },
+    parts: [{ type: "text", text: "Complete the original request" }],
+  });
+  const missions = new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE);
+  const old = await missions.start("root", ["Old acceptance"]);
+  const operators = new OperatorRuntime(root, V010_RUNTIME_PROFILE);
+  await operators.prepareMission("root", missionPlan(old, [{ title: "Old work", objective: "Implement",
+    read: [], write: ["src"], validation: ["node check.mjs"] }]));
+  await hooks["chat.message"]!({ sessionID: "root", agent: "build", messageID: "new-user" }, {
+    message: { id: "new-user", agent: "build", model: { providerID: "openai", modelID: "gpt-6-sol" } },
+    parts: [{ type: "text", text: "Investigate this independently with Build" }],
+  });
+  assert.equal((await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root")).phase, "cancelled");
+  const output: { system: string[] } = { system: [] };
+  await hooks["experimental.chat.system.transform"]!({ sessionID: "root" }, output);
+  assert.match(output.system.join("\n"), /SORTIE_PROFILE_INACTIVE:[\s\S]*not a restriction[\s\S]*native tools/u);
+  assert.doesNotMatch(output.system.join("\n"), /SORTIE_RUNTIME_PROFILE/u);
+  const native = { args: { command: "node check.mjs" } };
+  await hooks["tool.execute.before"]!({ sessionID: "root", tool: "bash", callID: "build-call" }, native);
+  assert.deepEqual(native.args, { command: "node check.mjs" });
+  await assert.rejects(hooks.tool!.sortie_v010_plan_units.execute({ units: [] }, { sessionID: "root" }),
+    /runtime-profile-session-inactive/u);
+  const ordinary: { system: string[] } = { system: [] };
+  await hooks["experimental.chat.system.transform"]!({ sessionID: "unrelated" }, ordinary);
+  assert.deepEqual(ordinary.system, []);
 }));
 
 test("explicit completion requires root identity, matching run and completed units", async () => fixture(async root => {

@@ -406,6 +406,19 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       }
       return packet;
     }
+    async function retainCancelledMissionAcceptance(root: string, mission: OperatorMission,
+      prior?: import("../core/operator-runtime.js").OperatorState): Promise<OperatorMission> {
+      const previous = prior ?? await operators.read(root);
+      if (previous?.phase !== "cancelled" || mission.supersededRunID !== undefined || mission.runID !== null) return mission;
+      // A different original user request needs the explicit, host-proven supersession path.
+      // Only the same source can retain a cancelled run's acceptance as a prefix.
+      if (previous.sourceRefs[0] !== `user:${mission.requests[0]?.id}` ||
+          !previous.sourceRefs.every(ref => mission.requests.some(request => ref === `user:${request.id}`))) {
+        throw new Error("mission-cancelled-source-unproven");
+      }
+      return previous.acceptance.every((text, index) => mission.requirements[index]?.text === text)
+        ? mission : missions.carryForward(root, mission.id, previous.acceptance);
+    }
     async function restorePriorAcceptance(root: string, state: import("../core/operator-runtime.js").OperatorState): Promise<void> {
       const succeeded = [...state.units].reverse().find(unit => unit.status === "succeeded");
       const current = succeeded === undefined ? undefined : {
@@ -1043,20 +1056,24 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       reviewMission = `${profile.toolPrefix}review_mission`, submitMission = `${profile.toolPrefix}submit_mission`,
       completeMission = `${profile.toolPrefix}complete_mission`, expandUnit = `${profile.toolPrefix}expand_unit`;
     const stringList = { type: "array", items: { type: "string" } };
-    tools[startMission] = { description: "Operator: save a few one-line requirements/negative constraints. The original user message, IDs and ownership are captured automatically. Dispatch the returned Coordinator task immediately, or use plan_units for a simple single-unit Fast-lane task.",
+    tools[startMission] = { description: "Operator: save a few one-line requirements/negative constraints. The original user message, IDs and ownership are captured automatically. A cancelled same-turn run's accepted criteria are restored from host state in their exact order before dispatch. Dispatch the returned Coordinator task immediately, or use plan_units for a simple single-unit Fast-lane task.",
       args: { requirements: { ...stringList, minItems: 1, maxItems: 64 } as never }, execute: async (args, context) => {
         await requireRoot(context.sessionID);
-        await reconcileMissionDispatch(context.sessionID);
-        const mission = await missions.start(context.sessionID, (args as Record<string, unknown>).requirements);
-        return JSON.stringify(mission.dispatchOpen
-          ? missionDispatchPacket(mission, await operators.read(context.sessionID))
-          : { mission_id: mission.id, requirements: mission.requirements, task: missions.task(mission),
-            next_action: "Nontrivial: dispatch task now. Simple single-unit work with known scope/check: call plan_units directly. Do not create a proposal or ask for plan approval." });
+        return serializeDispatchTransition(context.sessionID, async () => {
+          await reconcileMissionDispatch(context.sessionID);
+          const mission = await retainCancelledMissionAcceptance(context.sessionID,
+            await missions.start(context.sessionID, (args as Record<string, unknown>).requirements));
+          return JSON.stringify(mission.dispatchOpen
+            ? missionDispatchPacket(mission, await operators.read(context.sessionID))
+            : { mission_id: mission.id, requirements: mission.requirements, task: missions.task(mission),
+              next_action: "Nontrivial: dispatch task now. Simple single-unit work with known scope/check: call plan_units directly. Do not create a proposal or ask for plan approval." });
+        });
       } };
     async function declareMissionUnits(root: string, actor: string, mission: OperatorMission, raw: unknown, reason?: string) {
+      const previous = await operators.read(root);
+      mission = await retainCancelledMissionAcceptance(root, mission, previous);
       const plan = missionPlan(mission, raw);
       if (actor === root && (mission.coordinator !== null || plan.units.length !== 1)) throw new Error("mission-coordinator-required: dispatch the returned Coordinator task");
-      const previous = await operators.read(root);
       const same = previous?.planHash === createHash("sha256").update(JSON.stringify(plan)).digest("hex");
       if (previous && !["completed", "cancelled"].includes(previous.phase) && !same) {
         if (!reason?.trim()) throw new Error("mission-replan-reason-required: name the observed correction or write-scope extension");
@@ -1066,8 +1083,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       if (budget && budget.remaining_units < plan.units.length && !same) throw new Error("mission-budget-exhausted: report the required cumulative extension to Operator");
       // Cancellation marks the durable units before interrupting their native sessions. A cancelled
       // status alone therefore cannot prove the old Worker stopped or its reservation settled.
-      const terminalChildren = mission.supersededRunID !== undefined && previous?.runID === mission.supersededRunID &&
-        previous.phase === "cancelled"
+      const cancelledPredecessor = previous?.phase === "cancelled" &&
+        (mission.supersededRunID === previous.runID ||
+          (mission.supersededRunID === undefined && previous.decision === "explicit-cancellation" &&
+            previous.units.some(unit => unit.status === "cancelled" && unit.childSessionID !== null)));
+      const terminalChildren = cancelledPredecessor
         ? await terminalCancelledMissionChildren(profile, root, previous, budget, {
           get: async id => payload(await session("get", { path: { id }, query: { directory: input.directory } })),
           children: async id => payload(await session("children", { path: { id }, query: { directory: input.directory } })),
@@ -1689,7 +1709,20 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       },
       "experimental.chat.system.transform": async (request, output) => {
         const root = await rootFor(request.sessionID) ?? await proposalPromptRoot(request.sessionID);
-        if (!root) return;
+        if (!root) {
+          const who = await identity(request.sessionID);
+          if (who.parent === undefined && who.role === undefined &&
+              (await missions.read(request.sessionID))?.phase === "cancelled") {
+            // OpenCode retains the same conversation when the user switches agents. A prior
+            // INTERRUPTED report describes only its Sortie run; it cannot revoke Build's
+            // native tools or turn a new independent request into a cancelled mission.
+            (output.system ??= []).push("SORTIE_PROFILE_INACTIVE: This is a non-Sortie agent. " +
+              "Any earlier INTERRUPTED mission or cancelled operator run in this session is historical state of the Sortie profile, " +
+              "not a restriction on this agent's current user request. Use the current agent's native tools for independent work. " +
+              "Do not revive, overwrite or claim completion of that historical Sortie run.");
+          }
+          return;
+        }
         await core["experimental.chat.system.transform"]?.(request, output);
         (output.system ??= []).push(`SORTIE_RUNTIME_PROFILE ${profile.id}; marker ${assetVersion}. ` +
           `Shared MkII protocol role names are logical: ${protocolMap}. Use only ${profile.toolPrefix} tools for this profile. ` +

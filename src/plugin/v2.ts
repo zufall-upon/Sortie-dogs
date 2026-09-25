@@ -115,12 +115,13 @@ function legacyPart(value: unknown, session: string, message: string): JsonObjec
 function legacyMessage(value: unknown, session: string, agent?: string): JsonObject | undefined {
   if (!record(value) || typeof value.id !== "string" || typeof value.type !== "string") return undefined;
   const id = value.id;
+  const originalAgent = record(value.metadata) ? string(value.metadata.agent) ?? agent : agent;
   if (value.type === "user") {
-    return { info: { id, sessionID: session, role: "user", agent, time: value.time },
+    return { info: { id, sessionID: session, role: "user", agent: originalAgent, time: value.time },
       parts: [{ id: `${id}-text`, sessionID: session, messageID: id, type: "text", text: String(value.text ?? "") }] };
   }
   if (value.type !== "assistant") {
-    if (value.type === "synthetic") return { info: { id, sessionID: session, role: "user", agent, time: value.time },
+    if (value.type === "synthetic") return { info: { id, sessionID: session, role: "user", agent: originalAgent, time: value.time },
       parts: [{ id: `${id}-text`, sessionID: session, messageID: id, type: "text", text: String(value.text ?? ""), synthetic: true }] };
     return undefined;
   }
