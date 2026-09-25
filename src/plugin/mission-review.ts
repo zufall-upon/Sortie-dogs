@@ -4,11 +4,13 @@ import { lstat, readFile, readlink } from "node:fs/promises";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
 import type { OperatorState } from "../core/operator-runtime.js";
+import { TOOL_ENVIRONMENT } from "../runtime-mission-assets.js";
 
 const exec = promisify(execFile);
 /** Pin all scoped tracked/untracked source bytes, including deletions; display a bounded excerpt only. */
 export async function missionReviewSource(directory: string, run: OperatorState): Promise<{ fingerprint: string; excerpt: string }> {
-  const scopes = [...new Set(run.units.flatMap(unit => unit.unit.write))];
+  // The shared dependency environment is local tooling, never reviewed or pinned source.
+  const scopes = [...new Set(run.units.flatMap(unit => unit.unit.write)), `:(exclude)${TOOL_ENVIRONMENT}`];
   const git = async (args: string[]) => (await exec("git", args, { cwd: directory, maxBuffer: 8 * 1024 * 1024 })).stdout;
   const names = await git(["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ...scopes]);
   const untracked = new Set((await git(["ls-files", "-z", "--others", "--exclude-standard", "--", ...scopes])).split("\0").filter(Boolean));

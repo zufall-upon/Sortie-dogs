@@ -35,7 +35,26 @@ export interface OperatorMission {
   progress: { unit: string; title: string; status: string; at: string }[];
   submission: { status: "ready" | "needs-decision" | "blocked"; summary: string } | null;
   review?: { runID: string; risk: string[]; source: string; task: OperatorTask | null;
-    verdict: "pending" | "PASS" | "findings" | "skipped-low-risk"; result?: string; child?: string };
+    verdict: "pending" | "PASS" | "findings" | "evidence-gaps" | "skipped-low-risk"; result?: string; child?: string;
+    /** Reviews on this mission that found only missing evidence; bounded by MISSION_EVIDENCE_GAP_REVIEW_LIMIT. */
+    evidenceGapReviews?: number };
+}
+
+/**
+ * Evidence-only findings do not establish a defect. Each extra round costs a full Reviewer pass and often a
+ * Worker unit, so after this many evidence-only reviews the candidate may be submitted with the gaps listed.
+ */
+export const MISSION_EVIDENCE_GAP_REVIEW_LIMIT = 2;
+
+/** Classify an independent Reviewer's first line. Anything else is a finding. */
+export function missionReviewVerdict(text: string): "PASS" | "evidence-gaps" | "findings" {
+  return /^\s*PASS(?:\s|$)/u.test(text) ? "PASS" : /^\s*EVIDENCE_GAPS(?:\s|$)/u.test(text) ? "evidence-gaps" : "findings";
+}
+
+/** Whether the recorded review permits submission and acceptance of the current candidate. */
+export function missionReviewAccepted(review: NonNullable<OperatorMission["review"]>): boolean {
+  return review.verdict === "PASS" || review.verdict === "skipped-low-risk" ||
+    (review.verdict === "evidence-gaps" && (review.evidenceGapReviews ?? 0) >= MISSION_EVIDENCE_GAP_REVIEW_LIMIT);
 }
 
 /** Durable user intent and dispatch ownership. Execution/evidence still belong to the v0.10 engine. */
@@ -260,12 +279,15 @@ export function missionPacket(mission: OperatorMission, run?: OperatorState): Re
     submission: mission.submission, progress: mission.progress,
     review: mission.review ? { risk_tags: mission.review.risk, verdict: mission.review.verdict,
       source_fingerprint: mission.review.source, reviewer_session_id: mission.review.child ?? null,
-      result: mission.review.result ?? null } : null,
+      result: mission.review.result ?? null, evidence_gap_reviews: mission.review.evidenceGapReviews ?? 0,
+      evidence_gap_review_limit: MISSION_EVIDENCE_GAP_REVIEW_LIMIT, accepted: missionReviewAccepted(mission.review) } : null,
     ...(run ? { run_id: run.runID, status: run.phase, decision: run.decision,
       units: run.units.map(unit => ({ id: unit.unit.id, title: unit.unit.title, status: unit.status,
         child_session_id: unit.childSessionID, result_class: unit.resultClass, evidence: unit.evidence })) } : {}),
     next_action: run?.phase === "awaiting-decision" ? "Coordinator: correct the cause and call plan_units with the remaining work and all requirements; budget is cumulative."
-      : run?.phase === "awaiting-acceptance" ? "Coordinator: obtain required independent review, then submit_mission. Operator: compare all requirements with source/evidence before complete_mission."
+      : run?.phase === "awaiting-acceptance" ? (mission.review?.verdict === "evidence-gaps" && !missionReviewAccepted(mission.review)
+        ? "Coordinator: the Reviewer found only missing evidence. Supply it through review_mission traces (or at most one evidence-only unit) and re-review once; do not re-implement. At the evidence-gap limit, submit_mission ready with the gaps listed."
+        : "Coordinator: obtain required independent review, then submit_mission. Operator: compare all requirements with source/evidence before complete_mission.")
       : "Coordinator: continue the next useful unit within original requirements. Return only a completion candidate, user-only decision, or scope/budget extension." };
 }
 

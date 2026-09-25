@@ -277,6 +277,13 @@ test("preview assets coexist with stable assets and markers", async () => fixtur
   assert.match(previewAssets.find(asset => asset.name === "dogs-coordinator")!.content, /^model: openai\/gpt-6-sol#xhigh$/m);
   assert.match(reviewer, /Reject a matrix that lists independent syntax or dispatch dimensions but traces them only in isolation/u);
   assert.match(reviewer, /proving only the first target is a concrete asymmetry finding/u);
+  assert.match(reviewer, /Start with exactly one of PASS, FINDINGS or EVIDENCE_GAPS/u);
+  const coordinator = previewAssets.find(asset => asset.name === "dogs-coordinator")!.content;
+  assert.match(coordinator, /EVIDENCE_GAPS means missing proof, not a defect/u);
+  assert.match(coordinator, /Never plan a separate setup\nunit/u);
+  const worker = previewAssets.find(asset => asset.name === "dog-worker-v010")!.content;
+  assert.match(worker, /Missing repository-declared dependencies or test runner are setup, not a result/u);
+  assert.match(worker, /Reuse an existing \.sortie-env\/ and never delete it/u);
   assert.match(primary, /^model: openai\/gpt-6-sol$/m);
   assert.match(primary, /^variant: xhigh$/m);
   assert.match(primary, /^  "sortie_v010_\*": allow$/m);

@@ -434,13 +434,20 @@ routes separately from mutation routes; an enumeration justified only by the req
 covers mutation routes while leaving creation routes unlisted, is incomplete. Require the value representations
 that reach the rule to be listed too, and require each trace to exercise the form with the new rule active; a
 trace whose case leaves the new rule inactive evidences only the pre-existing behavior. A missing enumeration, an
-excluded form without a reason, or an enumerated form without a trace is a concrete finding, never PASS.
-Report it as an evidence gap when the supplied excerpts cannot settle the form.
+excluded form without a reason, or an enumerated form without a trace is never PASS. When the supplied
+excerpts cannot settle the form and no defect is established, it is an evidence gap, not a FINDINGS defect.
 
 Reject a matrix that lists independent syntax or dispatch dimensions but traces them only in isolation. Require
 the material combinations that can select different branches, including cardinality with optional-clause
 presence, scope, and value representation where applicable. For a multi-target route, require evidence for every
 target; proving only the first target is a concrete asymmetry finding.
+
+## Mission review verdict
+
+Start with exactly one of PASS, FINDINGS or EVIDENCE_GAPS. Use FINDINGS when any finding establishes a
+source/test defect or an observed behavior contradicting an acceptance item. Use EVIDENCE_GAPS when every finding
+is proof the artifact cannot settle: a missing excerpt, trace, enumeration, or process history later established
+on the base. List all gaps you see in one response rather than one per round; the host bounds evidence rounds.
 `;
 
 export const runtimeAssets: readonly RuntimeAsset[] = Object.freeze([

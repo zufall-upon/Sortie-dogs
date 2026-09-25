@@ -2,6 +2,9 @@ import { profileAgent, type RuntimeProfile } from "./core/runtime-profile.ts";
 import { STRATEGY_TRIGGERS, SOURCE_REVIEW_RISK_TAGS } from "./core/consultation.ts";
 import { SCOUT_EVIDENCE_CODES } from "./core/scout-contract.ts";
 
+/** Repository-local dependency environment shared by all units; excluded from reviewed and captured source. */
+export const TOOL_ENVIRONMENT = ".sortie-env";
+
 function controls(profile: RuntimeProfile, names: readonly string[]): string {
   return names.map(name => `  ${profile.toolPrefix}${name}: true`).join("\n");
 }
@@ -38,8 +41,9 @@ quality threshold and explicit model/budget choice. Follow AGENTS.md and use the
    unit boundaries, Worker/Scout/Advisor/independent Reviewer calls, write-scope extensions and corrections
    within the original request and cumulative budget. Do not investigate or approve each unit at the root.
 3. Compare the returned completion candidate against the original request, real source and observed evidence.
-   If incomplete, resume the SAME Coordinator with concrete feedback. If complete and required review passed,
-   call ${profile.toolPrefix}complete_mission. Only its succeeded receipt authorizes DONE.
+   If incomplete, resume the SAME Coordinator with concrete feedback. If complete and required review passed
+   (or the host accepted it at the evidence-gap limit, with the gaps reported), call
+   ${profile.toolPrefix}complete_mission. Only its succeeded receipt authorizes DONE.
 
 Fast-lane exception: simple, low-risk, single-unit work with known files and validation may use
 ${profile.toolPrefix}plan_units directly after start_mission, then dispatch its exact Worker task.
@@ -94,7 +98,10 @@ Investigate only enough to start the first useful Worker. Prefer a targeted read
 inventory or speculative full design. Call ${profile.toolPrefix}plan_units with concise units:
 title, objective, read/write file or directory scopes, validation commands, optionally requirement_ids.
 Keep all original requirements covered; omitted requirement_ids means all. Last validation command proves
-that unit. Host generates IDs, proof mapping, handoff, manifest and Task references. Dispatch the returned
+that unit. If your quick check shows repository-declared dependencies or the test runner are missing, keep
+setup inside the first unit: declare its checks through the repository-local tool environment ${TOOL_ENVIRONMENT}/
+(for Python, ${TOOL_ENVIRONMENT}/bin/python -m pytest ...) and let that Worker create it. Never plan a separate setup
+unit or put ${TOOL_ENVIRONMENT}/ in a write scope. Host generates IDs, proof mapping, handoff, manifest and Task references. Dispatch the returned
 ${profileAgent(profile, "dog-worker")} task verbatim, in foreground. V2 maps subagent_type to agent and
 task_id to sessionID. Do not insert model overrides unless the user explicitly selected them.
 
@@ -117,8 +124,10 @@ After formal validation, call review_mission with risk_tags and one concise impl
 requirement. Recognized tags: ${SOURCE_REVIEW_RISK_TAGS.join(", ")}.
 High-risk changes require the generated independent ${profileAgent(profile, "dog-reviewer")} task.
 Low risk uses [] and the host records the skip. The host supplies source excerpts, manifest, requirement
-mapping and validation evidence; do not handwrite that envelope. Fix concrete findings yourself through
-Worker and rerun affected validation/review. A missing excerpt calls for evidence, not an invented source bug.
+mapping and validation evidence; do not handwrite that envelope. Fix concrete FINDINGS defects yourself
+through Worker and rerun affected validation/review. EVIDENCE_GAPS means missing proof, not a defect: answer
+it with sharper traces in the next review_mission, or at most one evidence-only unit, never a re-implementation.
+The host caps evidence-only reviews; at its limit, submit ready and list the remaining gaps.
 Preserve candidate lineage and independence; your own opinion or Worker PASS is not independent review.
 
 Call submit_mission only for: ready (complete candidate with evidence/review), needs-decision (only the user
@@ -144,7 +153,8 @@ The binding remains valid throughout this Task until return or a control/source 
 
 Read/search and read-only investigation commands are unrestricted. Use targeted reproduction/diagnosis
 without registering every exploratory command. All writes, generated/transient files and cleanup stay
-inside the unit's file/directory scopes. Do not write outside them through scripts or tools. If scope must
+inside the unit's file/directory scopes, except the tool environment below. Do not write outside them through
+scripts or tools. If scope must
 expand or a formal check must change, return the exact paths/command and reason to Coordinator; it can
 approve an in-request extension immediately. Do not ask the user or delegate to another agent.
 
@@ -153,6 +163,12 @@ diagnose/edit/check loop in this Task. Run formal validation commands exactly as
 and separate shell calls; the host records actual command, source and exit. Diagnostic success is not
 formal acceptance evidence. Do not repeat a failed command without a concrete source/setup correction or
 repeat passed checks on unchanged source. Add meaningful tests only when needed by the change/request.
+
+Missing repository-declared dependencies or test runner are setup, not a result. Make one bounded,
+repository-documented setup attempt in the repository-local tool environment ${TOOL_ENVIRONMENT}/ (for Python:
+python -m venv ${TOOL_ENVIRONMENT}, then install the declared dependencies with its pip), then run the checks.
+Reuse an existing ${TOOL_ENVIRONMENT}/ and never delete it; it is local tooling, not a change, and needs no write
+scope. Return to Coordinator for setup only when it is externally blocked or a formal command must change.
 
 Return changed paths and concise criterion-level implementation/test/input evidence with the real check
 results. Respect negative constraints and API success/error compatibility. A broad suite PASS does not

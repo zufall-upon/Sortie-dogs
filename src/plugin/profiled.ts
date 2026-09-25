@@ -15,7 +15,8 @@ import { decoratePreviewHeadings, returnReportPanel } from "./receipt-presentati
 import { sanitizeTerminalReport, terminalRunOutcome } from "./run-metrics.js";
 import { extractWritePaths, normalizeCommand } from "./gate.js";
 import { normalizeRelativePath } from "../core/path.js";
-import { OperatorMissionRuntime, missionPacket, missionPlan, missionReviewTask, missionReviewTraces, type OperatorMission } from "../core/operator-mission.js";
+import { MISSION_EVIDENCE_GAP_REVIEW_LIMIT, OperatorMissionRuntime, missionPacket, missionPlan, missionReviewAccepted, missionReviewTask,
+  missionReviewTraces, missionReviewVerdict, type OperatorMission } from "../core/operator-mission.js";
 import { publishMissionProgress } from "./mission-progress.js";
 import { missionReviewSource } from "./mission-review.js";
 import { SOURCE_REVIEW_RISK_TAGS } from "../core/consultation.js";
@@ -1084,7 +1085,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         const task = risk.length === 0 ? null : { subagent_type: profileAgent(profile, "dog-reviewer"),
           description: `🔎 ${run.units[0]!.unit.title}`, prompt: [
             `candidate_id: ${mission.id}`, `review_phase: ${phase}`, "canonical_validation_exit: 0", `risk_tags: [${risk.join(", ")}]`,
-            "Review this candidate independently. Use the language of the requirements/traces. Invoke no tools. First line: exactly PASS or FINDINGS.",
+            "Review this candidate independently. Use the language of the requirements/traces. Invoke no tools. First line: exactly PASS, FINDINGS or EVIDENCE_GAPS.",
+            "Use EVIDENCE_GAPS only when no finding establishes a source/test defect and every finding is proof the supplied artifact cannot settle, including process history later established on the base. Any concrete defect uses FINDINGS.",
             `acceptance: ${JSON.stringify(run.acceptance)}`, `changedLogicSummary: ${JSON.stringify(traces)}`,
             ...run.acceptance.map((_, i) => `acceptance[${i}] -> changedLogicSummary[${i}]`),
             `manifest: ${JSON.stringify(run.units.map(unit => unit.unit))}`, `sourceFingerprint: ${source.fingerprint}`,
@@ -1092,12 +1094,13 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             "Changed source excerpts:", source.excerpt,
           ].join("\n") };
         const reviewed = await missions.update(root, item => { item.review = { runID: run.runID, risk: risk as string[], source: source.fingerprint,
-          task, verdict: task ? "pending" : "skipped-low-risk", ...(mission.review?.child ? { child: mission.review.child } : {}) }; });
+          task, verdict: task ? "pending" : "skipped-low-risk", ...(mission.review?.child ? { child: mission.review.child } : {}),
+          ...(mission.review?.evidenceGapReviews ? { evidenceGapReviews: mission.review.evidenceGapReviews } : {}) }; });
         return JSON.stringify(task ? { status: "review-required", task: missionReviewTask(reviewed) } : { status: "skipped-low-risk" });
       } };
     async function assertMissionReview(root: string, mission: OperatorMission) {
       const run = await operators.required(root), review = mission.review;
-      if (!review || review.runID !== run.runID || !["PASS", "skipped-low-risk"].includes(review.verdict) ||
+      if (!review || review.runID !== run.runID || !missionReviewAccepted(review) ||
           review.source !== (await missionReviewSource(input.directory, run)).fingerprint) throw new Error("mission-review-required-or-stale");
     }
     tools[submitMission] = { description: "Coordinator: return only a completion candidate, a user-only decision, or a proven external/scope/budget blocker. Continue ordinary investigation, scope extensions and corrections yourself. Unit progress is published automatically without waking Operator.",
@@ -1542,13 +1545,22 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             const history = child ? await messages(child) : [];
             const last = [...history].reverse().find(message => (record(message.info) ? message.info.role : message.role) === "assistant");
             const text = Array.isArray(last?.parts) ? last.parts.filter(record).filter(part => part.type === "text").map(part => part.text).join("\n") : String(raw);
-            await missions.update(ownership.root, mission => {
+            const independent = who?.role === "dog-reviewer" && who.parent === ownership.actor;
+            const reviewed = await missions.update(ownership.root, mission => {
               if (mission.review) {
                 mission.review.result = text.slice(0, 16_000);
-                mission.review.verdict = /^\s*PASS(?:\s|$)/u.test(text) && who?.role === "dog-reviewer" && who.parent === ownership.actor ? "PASS" : "findings";
+                const verdict = missionReviewVerdict(text);
+                mission.review.verdict = independent ? verdict : "findings";
+                if (mission.review.verdict === "evidence-gaps") mission.review.evidenceGapReviews = (mission.review.evidenceGapReviews ?? 0) + 1;
                 mission.review.child = child;
               }
             });
+            if (reviewed.review?.verdict === "evidence-gaps" && typeof output.output === "string") {
+              const count = reviewed.review.evidenceGapReviews ?? 0;
+              output.output += missionReviewAccepted(reviewed.review)
+                ? `\n\nHOST: evidence-gap review ${count}/${MISSION_EVIDENCE_GAP_REVIEW_LIMIT} reached the limit. No defect was found; submit_mission ready is permitted. List the remaining evidence gaps in the summary.`
+                : `\n\nHOST: evidence-gap review ${count}/${MISSION_EVIDENCE_GAP_REVIEW_LIMIT}. No defect was found; supply the requested evidence through review_mission traces (or at most one evidence-only unit) and re-review. Do not re-implement.`;
+            }
           }
           taskOwners.delete(request.callID!);
           return;

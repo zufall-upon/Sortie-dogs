@@ -283,6 +283,14 @@ export async function run(argv: readonly string[]): Promise<number> {
       if (initialized.preservedLegacyPaths.length > 0) {
         process.stdout.write(`Preserved legacy runtime files: ${initialized.preservedLegacyPaths.join(", ")}.\n`);
       }
+      const override = profile === "v010"
+        ? await initializer.coordinatorModelOverride(global ? target! : resolve(initArgs[0] ?? process.cwd()), global).catch(() => undefined)
+        : undefined;
+      if (override) {
+        process.stderr.write(`Warning: ${override.path} routes dogs-coordinator to ${override.model}. ` +
+          `Sortie-dogs expects ${initializer.V010_COORDINATOR_MODEL}; a gpt-6-luna-fast Coordinator was measured to repeat plans and reviews until timeout. ` +
+          "Remove the override unless it is intentional.\n");
+      }
       return 0;
     } catch (error) {
       process.stderr.write(error instanceof initializer.ProjectInitializationError
