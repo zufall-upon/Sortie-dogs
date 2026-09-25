@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, mkdir, open, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, readdir, readlink, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import { RUNTIME_ASSET_VERSION } from "../asset-version.js";
@@ -550,6 +550,7 @@ async function durableScopeRoot(projectRoot: string): Promise<string | undefined
 
 async function protectedScopeDigest(projectRoot: string, paths: readonly string[], manifestHash: string): Promise<string | undefined> {
   const entries: Array<readonly [string, string, string?]> = [];
+  const canonicalRoot = await realpath(projectRoot);
   const visit = async (absolute: string): Promise<boolean> => {
     const scoped = relative(projectRoot, absolute).replaceAll("\\", "/");
     if (scoped === ".." || scoped.startsWith("../") || isAbsolute(scoped)) return false;
@@ -558,7 +559,20 @@ async function protectedScopeDigest(projectRoot: string, paths: readonly string[
       throw error;
     });
     if (metadata === undefined) { entries.push([scoped, "missing"]); return true; }
-    if (metadata.isSymbolicLink()) return false;
+    if (metadata.isSymbolicLink()) {
+      // Package managers place executable links under node_modules/.bin. Record
+      // both the link and its target bytes, but never follow a link out of the
+      // project or recurse through a linked directory (which may form a cycle).
+      const target = await realpath(absolute).catch(() => undefined);
+      if (target === undefined) return false;
+      const relativeTarget = relative(canonicalRoot, target);
+      if (relativeTarget === ".." || relativeTarget.startsWith("../") || isAbsolute(relativeTarget) ||
+        !(await stat(target)).isFile()) return false;
+      const link = await readlink(absolute);
+      const contents = await readFile(target);
+      entries.push([scoped, `symlink:${link}`, createHash("sha256").update(contents).digest("hex")]);
+      return true;
+    }
     if (metadata.isDirectory()) {
       entries.push([scoped, "directory"]);
       const children = await readdir(absolute);
