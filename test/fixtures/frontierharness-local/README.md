@@ -206,11 +206,14 @@ Model-free WSL stop check: `node test/fixtures/frontierharness-local/run-stop-rp
   V2 instead queries only agent and plugin registration from a private, authenticated API server
   and stops it before inference. The config body is parsed in memory and never retained. The
   official instruction is one final argv item.
-  No prompt or raw agent output is persisted. For v0.10, only completed `dog-worker-v010` Tasks with a
+  V1 does not persist prompts or raw agent output; the v0.12.7 diagnostic deliberately retains the
+  private CLI event stream, stderr, and run-local V2 database under `_testenv/` for diagnosis. None
+  of these raw contents enters the sanitized summary or Git. For v0.10, only completed `dog-worker-v010` Tasks with a
   native child session identity and bounded ancestry (maximum eight parents) to the root count as implementation children;
   `dog-operator`, proposal/execution `dogs-coordinator` delegates, failed Tasks, and IDs written in text do not.
-  Identity evidence is limited to the exact fixture directory and bounded session/task rows; raw messages and
-  database contents are neither emitted nor saved. CLI-stream token coverage remains separate from host identity coverage.
+  Identity summaries are limited to the exact fixture directory and bounded session/task rows;
+  raw messages and database contents are not emitted in reports. CLI-stream token coverage remains
+  separate from host identity coverage.
   While an arm is running, the harness writes a sanitized heartbeat to stderr every 120 seconds with
   elapsed time, PID, activity/progress ages, workspace-change count, and captured byte counts.
 - `verify-arm`: makes a separate fresh base clone without applying either patch in the Node runner,
