@@ -258,7 +258,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
         ]);
         const previewHooks = await previewEntry.SortieDogsPlugin({ directory: process.cwd() });
         const { SortieDogsPlugin } = pluginEntry;
-        // OpenCode calls every runtime export of a plugin module as a plugin factory.
+         // OpenCode V1 calls every runtime export of this stable entry as a plugin factory.
         const openCodeLoad = [];
         let packedTools = [];
         let packedHookKeys = [];
@@ -294,7 +294,9 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
           serverEntryExports: Object.keys(serverEntry),
           serverPluginID: serverEntry.default?.id,
           serverSetupType: typeof serverEntry.default?.setup,
-          previewEntryExports: Object.keys(previewEntry),
+           previewEntryExports: Object.keys(previewEntry),
+           previewPluginID: previewEntry.default?.id,
+           previewSetupType: typeof previewEntry.default?.setup,
           previewTools: Object.keys(previewHooks.tool ?? {}),
           previewAssets: previewAssets.runtimeAssets.map(({name, version, installPath}) => ({name, version, installPath})),
           openCodeLoad,
@@ -357,6 +359,8 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       serverPluginID: string;
       serverSetupType: string;
       previewEntryExports: string[];
+      previewPluginID: string;
+      previewSetupType: string;
       previewTools: string[];
       previewAssets: Array<{ name: string; version: string; installPath: string }>;
       openCodeLoad: readonly string[];
@@ -388,7 +392,9 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.equal(loaded.serverEntryExports.includes("SortieDogsPlugin"), false);
     assert.equal(loaded.serverPluginID, "sortie-dogs.v010");
     assert.equal(loaded.serverSetupType, "function", "OpenCode V2 package resolution must reach the plugin definition");
-    assert.deepEqual(loaded.previewEntryExports, ["SortieDogsPlugin"]);
+    assert.deepEqual(loaded.previewEntryExports, ["SortieDogsPlugin", "default"]);
+    assert.equal(loaded.previewPluginID, "sortie-dogs.v010");
+    assert.equal(loaded.previewSetupType, "function");
     assert.ok(loaded.previewTools.includes("sortie_v010_prepare_operator"));
     assert.ok(loaded.previewTools.every(name => name.startsWith("sortie_v010_")));
     assert.equal(loaded.previewAssets.length, 8);
