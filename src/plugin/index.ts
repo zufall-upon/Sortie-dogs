@@ -2035,9 +2035,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       async function terminalCancelledMissionTask(unitID: string, reservationID: string, goalID: string): Promise<string | undefined> {
         const runID = unitID.replace(/-[1-9][0-9]*$/u, "");
         if (runID === unitID || !/^operator-[a-f0-9-]+$/u.test(runID) ||
-            input.client?.session?.children === undefined) return undefined;
+            input.client?.session?.get === undefined) return undefined;
         const sessionAPI = input.client.session;
-        const childrenMethod = sessionAPI.children!;
+        const childrenMethod = sessionAPI.children;
+        const getMethod = sessionAPI.get!;
         const mission = await new OperatorMissionRuntime(input.directory, runtimeProfile).archivedRun(root, runID);
         if (!mission || !rootHistory.some(message => isRecord(message) && isRecord(message.info) &&
             message.info.sessionID === root && message.info.role === "assistant" && Array.isArray(message.parts) &&
@@ -2049,14 +2050,21 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
                   return isRecord(ref) && ref.r === root && ref.m === mission.id; }
                 catch { return false; }
               })()))) return undefined;
-        const childrenResponse = await childrenMethod.call(sessionAPI, { path: { id: root }, query: { directory: input.directory } });
-        const children = isRecord(childrenResponse) && Array.isArray(childrenResponse.data) ? childrenResponse.data : [];
-        if (!children.some(child => isRecord(child) && child.id === mission.coordinator &&
-            child.parentID === root && child.agent === "dogs-coordinator")) return undefined;
+        const coordinatorResponse = await getMethod.call(sessionAPI, { path: { id: mission.coordinator! }, query: { directory: input.directory } });
+        const coordinatorInfo = isRecord(coordinatorResponse) ? coordinatorResponse.data : undefined;
+        if (!isRecord(coordinatorInfo) || coordinatorInfo.id !== mission.coordinator ||
+            coordinatorInfo.parentID !== root || coordinatorInfo.agent !== "dogs-coordinator" ||
+            coordinatorInfo.outcome !== "succeeded") return undefined;
+        if (childrenMethod !== undefined) {
+          const childrenResponse = await childrenMethod.call(sessionAPI, { path: { id: root }, query: { directory: input.directory } });
+          const children = isRecord(childrenResponse) && Array.isArray(childrenResponse.data) ? childrenResponse.data : [];
+          if (!children.some(child => isRecord(child) && child.id === mission.coordinator &&
+              child.parentID === root && child.agent === "dogs-coordinator")) return undefined;
+        }
         const coordinator = mission.coordinator!;
         const historyResponse = await messages.call(sessionAPI, { path: { id: coordinator }, query: { directory: input.directory } });
         const history = isRecord(historyResponse) && Array.isArray(historyResponse.data) ? historyResponse.data : [];
-        const candidates: string[] = [];
+        const candidates: Array<{ callID: string; depthRefused: boolean }> = [];
         for (const message of history) {
           if (!isRecord(message) || !isRecord(message.info) || message.info.role !== "assistant" ||
               message.info.sessionID !== coordinator || !Array.isArray(message.parts)) continue;
@@ -2070,15 +2078,19 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
               if (isRecord(ref) && ref.r === root && ref.n === runID && ref.t === unitID &&
                   /^[a-f0-9]{64}$/u.test(String(ref.p)) && /^[a-f0-9]{64}$/u.test(String(ref.h)) &&
                   goalFingerprint({ goal_id: goalID, unit_id: unitID, call_id: part.callID }) === reservationID) {
-                candidates.push(part.callID);
+                const error = isRecord(part.state.error) ? part.state.error : undefined;
+                candidates.push({ callID: part.callID, depthRefused: error?.type === "tool.execution" &&
+                  error.message === 'Subagent depth limit reached (1). Increase "experimental.subagent_depth" to allow nested subagents.' });
               }
             } catch { /* malformed native reference cannot prove this reservation */ }
           }
         }
         if (candidates.length !== 1) return undefined;
-        const descendantsResponse = await childrenMethod.call(sessionAPI, { path: { id: coordinator }, query: { directory: input.directory } });
-        if (!isRecord(descendantsResponse) || !Array.isArray(descendantsResponse.data) || descendantsResponse.data.length !== 0) return undefined;
-        return candidates[0];
+        if (childrenMethod !== undefined) {
+          const descendantsResponse = await childrenMethod.call(sessionAPI, { path: { id: coordinator }, query: { directory: input.directory } });
+          if (!isRecord(descendantsResponse) || !Array.isArray(descendantsResponse.data) || descendantsResponse.data.length !== 0) return undefined;
+        } else if (mission.submission?.status !== "blocked" || !candidates[0]!.depthRefused) return undefined;
+        return candidates[0]!.callID;
       }
       for (const reservation of pending) {
         const matches: Array<{ callID: string; status: string; elapsed: number | null }> = [];
