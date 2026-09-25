@@ -28,6 +28,8 @@ export interface RuntimeBridge {
     command: string): Promise<boolean>;
   allowsInvestigativeShell?(sessionID: string): Promise<boolean>;
   onSerialSettlement?(settlement: SerialDispatchSettlement): Promise<void>;
+  recordHostParentRewrite?(rootSessionID: string, taskID: string, callID: string,
+    originalHash: string, parentFingerprint: string): Promise<void>;
   onRootTerminal?(rootSessionID: string, receipt: GoalTerminalReceipt): Promise<void>;
   connected?(control: {
     enableUnits(rootSessionID: string, maximum: number): void;

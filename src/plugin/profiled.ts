@@ -312,6 +312,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         "dog-worker": { preferred: PREVIEW_WORKER_ROUTE },
       },
       connected: value => { control = value; },
+      recordHostParentRewrite: (root, taskID, callID, originalHash, parentFingerprint) =>
+        operators.recordHostParentRewrite(root, taskID, callID, originalHash, parentFingerprint),
       onSerialSettlement: async result => {
         await operators.settled(result);
         const mission = await missions.read(result.rootSessionID);

@@ -2263,6 +2263,32 @@ test("admitted unit keeps its plan-pinned controls verifiable after a host paren
   await assert.rejects(runtime.completionGoalFingerprint(await runtime.required("root")), /operator-contract-changed/);
 }));
 
+test("host records an appended parent rewrite without losing the original control hash", async () => fixture(async root => {
+  const runtime = new OperatorRuntime(root, V010_RUNTIME_PROFILE);
+  const one = plan(); one.units = one.units.slice(0, 1);
+  one.goal_declaration.criteria = one.goal_declaration.criteria.slice(0, 1);
+  one.acceptance_proof = [["first"], ["first"]];
+  const state = await runtime.prepare("root", one);
+  const next = await runtime.next("root", "root") as { task: object };
+  await runtime.admitWorker("root", "root", "worker", next.task);
+  const handoffPath = state.units[0]!.handoffPath;
+  const original = await readFile(handoffPath, "utf8");
+  const parent = acceptanceContinuityFingerprint(one.acceptance.slice(0, 1));
+  const linked = JSON.parse(original);
+  linked.ext["sortie-dogs/acceptance-continuity"].parent_fingerprint = parent;
+  await writeFile(handoffPath, `${JSON.stringify(linked, null, 2)}\n`);
+  await runtime.recordHostParentRewrite("root", `${state.runID}-1`, "worker",
+    createHash("sha256").update(original).digest("hex"), parent);
+  const updated = await runtime.required("root");
+  assert.equal(updated.units[0]!.hostParentRewrite?.originalHash, state.units[0]!.hashes[0]);
+  assert.equal(updated.units[0]!.hostParentRewrite?.parentFingerprint, parent);
+  assert.notEqual(updated.units[0]!.hashes[0], state.units[0]!.hashes[0]);
+  assert.match(await runtime.completionGoalFingerprint(updated), /^sha256:[a-f0-9]{64}$/);
+  linked.ext["sortie-dogs/acceptance-continuity"].parent_fingerprint = state.acceptanceFingerprint;
+  await writeFile(handoffPath, `${JSON.stringify(linked, null, 2)}\n`);
+  await assert.rejects(runtime.completionGoalFingerprint(await runtime.required("root")), /operator-contract-changed/);
+}));
+
 test("cancelled repair plans retain acceptance and the parent fingerprint", async () => fixture(async root => {
   const runtime = new OperatorRuntime(root, V010_RUNTIME_PROFILE);
   const original = plan();

@@ -122,7 +122,9 @@ interface UnitState {
   readonly task: OperatorTask;
   readonly handoffPath: string;
   readonly manifestPath: string;
-  readonly hashes: readonly string[];
+  hashes: readonly string[];
+  /** Original plan hash and parent authorized by the host dispatch rewrite. */
+  hostParentRewrite?: { readonly originalHash: string; readonly parentFingerprint: string };
   status: "pending" | "running" | "succeeded" | "failed" | "cancelled";
   callID: string | null;
   childSessionID: string | null;
@@ -479,8 +481,12 @@ export class OperatorRuntime {
            (typeof state.pendingScopeExpansionApprovalTurnID !== "string" || state.pendingScopeExpansionApprovalTurnID.length === 0 ||
              /[\r\n]/u.test(state.pendingScopeExpansionApprovalTurnID))) ||
          !this.validContractRepairState(state.contractRepair, state.units) || !state.units.every(unit =>
-          Number.isSafeInteger(unit.repairValidationAttempts) && unit.repairValidationAttempts >= 0 && unit.repairValidationAttempts <= 2 &&
-          this.validRepairValidationState(unit.repairValidation))) {
+           Number.isSafeInteger(unit.repairValidationAttempts) && unit.repairValidationAttempts >= 0 && unit.repairValidationAttempts <= 2 &&
+           (unit.hostParentRewrite === undefined || (record(unit.hostParentRewrite) &&
+             typeof unit.hostParentRewrite.originalHash === "string" && /^[a-f0-9]{64}$/u.test(unit.hostParentRewrite.originalHash) &&
+             typeof unit.hostParentRewrite.parentFingerprint === "string" &&
+             /^sha256:[a-f0-9]{64}$/u.test(unit.hostParentRewrite.parentFingerprint))) &&
+           this.validRepairValidationState(unit.repairValidation))) {
       throw new Error("operator-state-invalid");
     }
     this.states.set(root, state);
@@ -1715,6 +1721,25 @@ export class OperatorRuntime {
     }
     for (const unit of current.units) await this.verifyControls(unit);
   }
+  recordHostParentRewrite(root: string, taskID: string, callID: string,
+    originalHash: string, parentFingerprint: string): Promise<void> {
+    return this.serial(root, async () => {
+      const state = await this.read(root);
+      const unit = state?.units.find(item => /^task_id: (.+)$/m.exec(item.task.prompt)?.[1] === taskID);
+      if (unit === undefined) return; // A non-operator serial dispatch uses the same host hook.
+      if (state?.phase !== "running" || unit.status !== "running" || unit.callID !== callID ||
+          unit.hashes[0] !== originalHash || unit.hostParentRewrite !== undefined) {
+        throw new Error("operator-parent-rewrite-not-authorized");
+      }
+      const source = await readFile(unit.handoffPath);
+      if (hostRewrittenAcceptanceContinuity(source, originalHash, parentFingerprint) === undefined) {
+        throw new Error("operator-parent-rewrite-control-changed");
+      }
+      unit.hostParentRewrite = { originalHash, parentFingerprint };
+      unit.hashes = [createHash("sha256").update(source).digest("hex"), ...unit.hashes.slice(1)];
+      await this.save(state);
+    });
+  }
   packet(state: OperatorState): unknown {
     const proved = new Set(state.units.flatMap(unit => unit.evidence.flatMap(item => item.measurement.criterion_ids)));
     const current = state.units.find(unit => unit.status !== "succeeded");
@@ -1845,9 +1870,12 @@ export class OperatorRuntime {
     const declaration = /^goal_declaration_path: (.+)$/m.exec(unit.task.prompt)?.[1];
     if (!declaration || !isAbsolute(declaration)) throw new Error("operator-declaration-path-invalid");
     const contents = await Promise.all([unit.handoffPath, unit.manifestPath, declaration].map(file => readFile(file, "utf8")));
-    if (contents.slice(1).some((value, index) => hash(value) !== unit.hashes[index + 1]) ||
+    if ((unit.hostParentRewrite !== undefined && hostRewrittenAcceptanceContinuity(Buffer.from(contents[0]!),
+      unit.hostParentRewrite.originalHash, unit.hostParentRewrite.parentFingerprint) === undefined) ||
+      contents.slice(1).some((value, index) => hash(value) !== unit.hashes[index + 1]) ||
       (hash(contents[0]!) !== unit.hashes[0] &&
-        (unit.status === "pending" || hostRewrittenAcceptanceContinuity(Buffer.from(contents[0]!), unit.hashes[0]!) === undefined))) {
+        ((unit.status === "pending" && unit.repairValidation === null) ||
+          hostRewrittenAcceptanceContinuity(Buffer.from(contents[0]!), unit.hashes[0]!) === undefined))) {
       throw new Error("operator-contract-changed");
     }
   }

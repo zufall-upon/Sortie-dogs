@@ -7314,7 +7314,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
                 // Persist it so the worker's Read and later recovery see the same contract.
                 if (reservedParallelDescriptor === undefined && ledger.parent_fingerprint === "none" &&
                   (exactCarryForward || strictAppend)) {
-                  const handoff = JSON.parse(await readFile(handoffPaths[0]!, "utf8"));
+                  const originalSource = await readFile(handoffPaths[0]!, "utf8");
+                  const handoff = JSON.parse(originalSource);
                   const validated = validateHandoffSchema(handoff);
                   const current = validated.ok ? inspectAcceptanceContinuity(validated.value).ledger : undefined;
                   if (current === undefined || JSON.stringify(current) !== JSON.stringify(ledger)) {
@@ -7326,6 +7327,13 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
                   ledger = { ...ledger, parent_fingerprint: previous.fingerprint };
                   handoff.ext[ACCEPTANCE_CONTINUITY_EXTENSION] = ledger;
                   await writeFile(handoffPaths[0]!, `${JSON.stringify(handoff, null, 2)}\n`);
+                  try {
+                    await input.runtimeBridge?.recordHostParentRewrite?.(toolInput.sessionID, ledger.task_id,
+                      toolInput.callID, createHash("sha256").update(originalSource).digest("hex"), previous.fingerprint);
+                  } catch (error) {
+                    await writeFile(handoffPaths[0]!, originalSource);
+                    throw error;
+                  }
                   await inspect(handoffPaths[0]!, undefined, { report: true });
                 }
                 if (ledger.parent_fingerprint !== previous.fingerprint || (!exactCarryForward && !strictAppend)) {
@@ -8066,7 +8074,11 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           event.goal_id === snapshot.state.goal_id || evidence.acceptance_fingerprint === accepted.ledger!.fingerprint));
       if (!proved) throw new Error("operator-continuity-accepted-unit-missing");
       if (current !== undefined) {
-        if (current.fingerprint !== accepted.ledger.fingerprint) throw new Error("operator-continuity-newer-state");
+        const appended = current.task_id !== accepted.ledger.task_id &&
+          accepted.ledger.parent_fingerprint === current.fingerprint &&
+          accepted.ledger.criteria.length > current.criteria.length &&
+          current.criteria.every((criterion, index) => accepted.ledger!.criteria[index] === criterion);
+        if (current.fingerprint !== accepted.ledger.fingerprint && !appended) throw new Error("operator-continuity-newer-state");
         if (current.task_id === accepted.ledger.task_id && current.parent_fingerprint === accepted.ledger.parent_fingerprint) return;
         if (current.task_id === accepted.ledger.task_id &&
           !(current.parent_fingerprint === "none" && !hashMatches)) throw new Error("operator-continuity-newer-state");
