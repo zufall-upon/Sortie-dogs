@@ -168,6 +168,7 @@
         "properties": {
           "package": { "type": "object", "properties": { "version": { "const": "0.12.7" } } },
           "opencode": { "type": "object", "required": ["host_database"], "properties": {
+            "version": { "const": "2.0.16" },
             "model": { "const": "openai/gpt-6-sol" }, "variant": { "enum": ["high", "xhigh"] }
           } }
         }

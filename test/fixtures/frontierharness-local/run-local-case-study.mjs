@@ -85,6 +85,16 @@ const RUNNER_PROFILES = Object.freeze({
       { model: "openai/gpt-6-sol", variant: "xhigh" }],
   }),
 });
+const V0127_V2_VERSION = "2.0.16";
+const V0127_V2_BINARY_SHA256 = "0910f9e7c5b50eb460c9ae53b4348b781cb44220a18ff2bcce514c2427582848";
+const V0127_HOST_AGENT_ROUTES = Object.freeze({
+  "agent/dogs-coordinator.md": { model: "openai/gpt-6-sol", variant: "xhigh" },
+  "agent/dog-worker-v010.md": { model: "openai/gpt-6-luna-fast", variant: "max" },
+  "agent/dog-luna-worker-v010.md": { model: "openai/gpt-6-luna-fast", variant: "max" },
+  "agent/dog-scout-v010.md": { model: "openai/gpt-6-luna-fast", variant: "max" },
+  "agent/dog-reviewer-v010.md": { model: "openai/gpt-6-sol", variant: "xhigh" },
+  "agent/dog-advisor-v010.md": { model: "openai/gpt-6-sol", variant: "xhigh" },
+});
 
 class HarnessFailure extends Error {
   constructor(gate, message, nativeEvidence = null) {
@@ -201,6 +211,8 @@ export function validateManifest(value, manifestPath, repositoryRoot = process.c
   exactKeys(value.package, ["sha256", "version", "runtime_marker", "required_assets"], "package-keys");
   invariant(profile !== "v0127" || value.package.version === "0.12.7", "v0127-version",
     "The v0127 matched profile requires the published v0.12.7 package.");
+  invariant(profile !== "v0127" || value.opencode?.version === V0127_V2_VERSION, "v0127-host-version",
+    "The v0127 profile requires the pinned OpenCode V2 host.");
   for (const asset of value.package.required_assets) requireSafeRelative(asset, "package-assets");
   invariant(resolvedProfile.requiredAssets.every((asset) => value.package.required_assets.includes(asset)),
     "package-assets", "The package required_assets omit a profile-required runtime asset.");
@@ -618,12 +630,14 @@ export async function assertBareIsolation({ projectRoot, configRoots, resolvedCo
   }
   invariant(!forbiddenText(JSON.stringify(resolvedConfig)), "bare-config-contamination",
     "Bare resolved configuration contains Sortie configuration.");
-  const plugins = Array.isArray(resolvedConfig?.plugin) ? resolvedConfig.plugin : [];
+  const plugins = Array.isArray(resolvedConfig?.plugins) ? resolvedConfig.plugins :
+    Array.isArray(resolvedConfig?.plugin) ? resolvedConfig.plugin : [];
   invariant(plugins.length === 0, "bare-plugin-contamination", "Bare resolved configuration contains a plugin.");
   return { plugin_count: 0, filesystem: "clean", resolved_config: "clean" };
 }
 
 export function isolatedConfig(profileName = "stable") {
+  if (profileName === "v0127") return { $schema: "https://opencode.ai/config.json", plugins: [] };
   return { $schema: "https://opencode.ai/config.json", ...(["v010", "v0127"].includes(profileName) ? { experimental: { subagent_depth: 2 } } : {}),
     mcp: {}, plugin: [] };
 }
@@ -639,26 +653,27 @@ export async function createConfigRoots(runtimeRoot, arm, profileName = "stable"
   await atomicJson(join(opencode, "opencode.json"), isolatedConfig(profileName));
   await atomicJson(join(loader, "opencode.json"), isolatedConfig(profileName));
   await atomicJson(join(loader, "package.json"), { private: true,
-    dependencies: { "@opencode-ai/plugin": opencodeVersion } });
+    dependencies: { [profileName === "v0127" ? "@opencode/plugin" : "@opencode-ai/plugin"]: opencodeVersion } });
   return { opencode, xdg, loader };
 }
 
-export async function verifyConfigLoaderDependency(loaderRoot, expectedVersion) {
+export async function verifyConfigLoaderDependency(loaderRoot, expectedVersion, profileName = "stable") {
   invariant(string(expectedVersion), "config-loader-version", "The expected OpenCode loader version is invalid.");
+  const packageName = profileName === "v0127" ? "@opencode/plugin" : "@opencode-ai/plugin";
   const declared = JSON.parse(await readFile(join(loaderRoot, "package.json"), "utf8"));
   const lock = JSON.parse(await readFile(join(loaderRoot, "package-lock.json"), "utf8"));
   const lockRoot = lock?.packages?.[""];
-  const lockEntry = lock?.packages?.["node_modules/@opencode-ai/plugin"];
-  const installedRoot = join(loaderRoot, "node_modules", "@opencode-ai", "plugin");
+  const lockEntry = lock?.packages?.[`node_modules/${packageName}`];
+  const installedRoot = join(loaderRoot, "node_modules", ...packageName.split("/"));
   const installedInfo = await lstat(installedRoot);
   const installed = JSON.parse(await readFile(join(installedRoot, "package.json"), "utf8"));
-  invariant(declared?.dependencies?.["@opencode-ai/plugin"] === expectedVersion &&
-    lockRoot?.dependencies?.["@opencode-ai/plugin"] === expectedVersion &&
+  invariant(declared?.dependencies?.[packageName] === expectedVersion &&
+    lockRoot?.dependencies?.[packageName] === expectedVersion &&
     lockEntry?.version === expectedVersion && lockEntry.link === undefined &&
-    installed?.name === "@opencode-ai/plugin" && installed.version === expectedVersion &&
+    installed?.name === packageName && installed.version === expectedVersion &&
     !installedInfo.isSymbolicLink(), "config-loader-identity",
   "The isolated OpenCode loader dependency differs from the manifest pin or is linked.");
-  return { package: "@opencode-ai/plugin", version: installed.version,
+  return { package: packageName, version: installed.version,
     installed_copy_symlink: false, package_lock_link: false };
 }
 
@@ -672,7 +687,7 @@ async function installConfigLoaderDependency(context, arm, roots) {
     [...npm.args, "install", "--force"], {}, groupFileWsl);
   const result = await checkedOwnedWslSpec(context.manifest, spec, groupFile,
     { timeoutMs: 300_000 }, "config-loader-install");
-  return { ...await verifyConfigLoaderDependency(loaderRoot, context.manifest.opencode.version),
+  return { ...await verifyConfigLoaderDependency(loaderRoot, context.manifest.opencode.version, context.manifest.profile),
     install: nativeCommandEvidence(result) };
 }
 
@@ -729,13 +744,29 @@ export async function inspectResolvedConfig(context, arm, workspace, roots, opti
   const cwd = await toWslPath(context.manifest, workspace);
   const environment = {
     ...pinnedGoEnvironment(context.manifest),
-    OPENCODE_CONFIG_DIR: await toWslPath(context.manifest, roots.opencode),
+    ...(context.manifest.profile === "v0127" ? { OPENCODE_DB: context.manifest.opencode.host_database } :
+      { OPENCODE_CONFIG_DIR: await toWslPath(context.manifest, roots.opencode) }),
     XDG_CONFIG_HOME: await toWslPath(context.manifest, roots.xdg),
     OPENCODE_EXE: context.manifest.opencode.executable,
   };
   const python = context.manifest.tools.python;
   const groupFile = join(context.runtimeRoot, `${arm}-resolved-config-process-group.pid`);
   const groupFileWsl = await toWslPath(context.manifest, groupFile);
+  if (context.manifest.profile === "v0127") {
+    const probe = await toWslPath(context.manifest,
+      join(context.repositoryRoot, "test", "fixtures", "frontierharness-local", "probe-v2-host.mjs"));
+    const spec = ownedWslSpec(context.manifest, cwd, context.manifest.tools.node.executable,
+      [...context.manifest.tools.node.args, probe, context.manifest.opencode.executable, cwd], environment, groupFileWsl);
+    const result = await checkedOwnedWslSpec(context.manifest, spec, groupFile,
+      { timeoutMs: options.timeoutMs ?? 90_000 }, "v2-host-registration");
+    const nativeEvidence = nativeCommandEvidence(result);
+    let config;
+    try { config = JSON.parse(result.stdout.toString("utf8")); }
+    catch { throw new HarnessFailure("v2-host-json", "V2 registration probe returned invalid JSON.", nativeEvidence); }
+    const isolation = arm === "bare" ? await assertBareIsolation({ projectRoot: workspace,
+      configRoots: [roots.opencode, roots.xdg], resolvedConfig: config }) : null;
+    return { config, environment, isolation, nativeEvidence };
+  }
   const spec = ownedWslSpec(context.manifest, cwd, python.executable,
     [...python.args, ...anonymousMemoryCaptureArgs(context.manifest.opencode.executable, resolvedConfigCommandArgs())],
     environment, groupFileWsl);
@@ -757,38 +788,46 @@ export function hasPinnedSubagentDepth(config) {
   return depths.length > 0 && depths.every(value => value === 2);
 }
 
-export function v1PluginWrapperSource() {
-  return 'import { SortieDogsPlugin } from "sortie-dogs/plugin";\n' +
-    'export default { id: "sortie-dogs.v010", server: SortieDogsPlugin };\n';
+export function v2PluginWrapperSource() {
+  return 'import { createSortieDogsV2Plugin } from "sortie-dogs/server";\n' +
+    'import { SortieDogsPlugin } from "sortie-dogs/plugin";\n' +
+    'export default createSortieDogsV2Plugin(SortieDogsPlugin);\n';
 }
 
-export function registeredOperatorTools(agent) {
-  const required = ["sortie_v010_start_mission", "sortie_v010_plan_units", "sortie_v010_complete_mission"];
-  return required.every(name => agent?.name === "dog-operator" && Object.hasOwn(agent.tools ?? {}, name));
+export function registeredHostAgentRoutes(config) {
+  return [...Object.entries(V0127_HOST_AGENT_ROUTES),
+    ["agent/dog-operator.md", { model: "openai/gpt-6-sol", variant: "xhigh" }]].every(([path, route]) => {
+    const name = path.slice("agent/".length, -".md".length);
+    const agent = config?.agents?.find(item => item.id === name);
+    return agent?.model?.providerID === route.model.split("/")[0] &&
+      agent?.model?.id === route.model.split("/")[1] && agent.model.variant === route.variant;
+  });
 }
 
-async function inspectRegisteredOperatorTools(context, workspace, roots, environment) {
-  const cwd = await toWslPath(context.manifest, workspace);
-  const python = context.manifest.tools.python;
-  const groupFile = join(context.runtimeRoot, "sortie-operator-tools-process-group.pid");
-  const groupFileWsl = await toWslPath(context.manifest, groupFile);
-  const spec = ownedWslSpec(context.manifest, cwd, python.executable,
-    [...python.args, ...anonymousMemoryCaptureArgs(context.manifest.opencode.executable,
-      ["debug", "agent", "dog-operator"])], environment, groupFileWsl);
-  const result = await checkedOwnedWslSpec(context.manifest, spec, groupFile,
-    { timeoutMs: 120_000 }, "operator-tool-inspection");
-  let agent;
-  try { agent = JSON.parse(completeJson(result.stdout.toString("utf8"))); }
-  catch { throw new HarnessFailure("operator-tool-json", "Operator tool inspection returned invalid JSON.",
-    nativeCommandEvidence(result)); }
-  if (!registeredOperatorTools(agent)) throw new HarnessFailure("sortie-tool-registration",
-    "The OpenCode host did not register the pinned Sortie mission tools.", nativeCommandEvidence(result));
-  return { required_tools_registered: true, tool_count: Object.keys(agent.tools).length,
-    tool_names_sha256: sha256Bytes(Object.keys(agent.tools).sort().join("\0")) };
+export function registeredV2Plugin(config, arm) {
+  const plugins = config?.plugins;
+  return Array.isArray(plugins) && (arm === "bare" ? plugins.length === 0 :
+    plugins.length === 1 && plugins[0]?.id === "sortie-dogs.v010" &&
+      plugins[0]?.state === "active" && plugins[0]?.server === true);
+}
+
+export function requireIsolatedV2Database(runtimeRootWsl, database) {
+  invariant(safeWslPath(runtimeRootWsl) && database === `${runtimeRootWsl}/opencode.db`,
+    "v0127-database-isolation", "The V2 database must reside inside the new run root, not the host profile.");
 }
 
 export async function inspectRunArmPreAgent(context, arm, workspace, roots, options = {}) {
   const inspected = await inspectResolvedConfig(context, arm, workspace, roots, options);
+  if (context.manifest.profile === "v0127") {
+    if (!registeredV2Plugin(inspected.config, arm)) throw new HarnessFailure("sortie-plugin-registration",
+      "The private V2 server did not register the expected project-local Sortie plugin.", inspected.nativeEvidence);
+    if (arm === "sortie" && !registeredHostAgentRoutes(inspected.config))
+      throw new HarnessFailure("sortie-agent-model-routes",
+        "V2 did not resolve the published child agent model and variant routes.", inspected.nativeEvidence);
+    inspected.toolRegistration = arm === "sortie" ? { plugin_active: true, required_tools_registered: null,
+      coverage: "V2 plugin setup, not per-agent tool snapshot" } : null;
+    return inspected;
+  }
   if (arm === "sortie" && !(Array.isArray(inspected.config.plugin) && inspected.config.plugin.length === 1 &&
     typeof inspected.config.plugin[0] === "string" && forbiddenText(inspected.config.plugin[0])))
     throw new HarnessFailure("sortie-plugin-config",
@@ -797,8 +836,6 @@ export async function inspectRunArmPreAgent(context, arm, workspace, roots, opti
     !hasPinnedSubagentDepth(inspected.config))
     throw new HarnessFailure("sortie-subagent-depth",
       "The resolved Sortie config must pin subagent_depth to two.", inspected.nativeEvidence);
-  if (arm === "sortie" && context.manifest.profile === "v0127")
-    inspected.toolRegistration = await inspectRegisteredOperatorTools(context, workspace, roots, inspected.environment);
   return inspected;
 }
 
@@ -830,18 +867,19 @@ export async function installSortie(context, workspace, roots, candidate = null)
       "init", workspaceWsl, ...context.profile.initArgs], {}, { timeoutMs: 120_000 }, "sortie-init");
   let entry = join(installed, "dist", "plugin", "opencode.js");
   if (context.manifest.profile === "v0127") {
-    entry = join(control, "plugins", "sortie-dogs-compat.mjs");
+    entry = join(control, "plugins", "sortie-dogs", "index.js");
     if (candidate === null) {
       await mkdir(dirname(entry), { recursive: true });
-      await writeFile(entry, v1PluginWrapperSource(), { flag: "wx", mode: 0o600 });
+      await writeFile(entry, v2PluginWrapperSource(), { flag: "wx", mode: 0o600 });
     }
   }
-  const plugin = `file://${await toWslPath(context.manifest, entry)}`;
+  const plugin = context.manifest.profile === "v0127" ? null : `file://${await toWslPath(context.manifest, entry)}`;
   if (candidate === null) {
-    await atomicJson(join(control, "opencode.json"), { $schema: "https://opencode.ai/config.json", plugin: [plugin],
-       ...(["v010", "v0127"].includes(context.manifest.profile) ? { experimental: { subagent_depth: 2 } } : {}) });
-    const neutral = { $schema: "https://opencode.ai/config.json", mcp: {},
-       ...(["v010", "v0127"].includes(context.manifest.profile) ? { experimental: { subagent_depth: 2 } } : {}) };
+    await atomicJson(join(control, "opencode.json"), context.manifest.profile === "v0127"
+      ? isolatedConfig("v0127") : { $schema: "https://opencode.ai/config.json", plugin: [plugin],
+        ...(["v010", "v0127"].includes(context.manifest.profile) ? { experimental: { subagent_depth: 2 } } : {}) });
+    const neutral = context.manifest.profile === "v0127" ? isolatedConfig("v0127") : { $schema: "https://opencode.ai/config.json", mcp: {},
+        ...(["v010", "v0127"].includes(context.manifest.profile) ? { experimental: { subagent_depth: 2 } } : {}) };
     await atomicJson(join(roots.opencode, "opencode.json"), neutral);
     await atomicJson(join(roots.xdg, "opencode", "opencode.json"), neutral);
   }
@@ -1077,9 +1115,22 @@ export function debugResumeArgs(manifest, cwd, rootSessionId) {
   invariant(["v010", "v0127"].includes(manifest?.profile) && manifest?.qualification_only === true && safeWslPath(cwd) &&
     /^ses_[A-Za-z0-9_-]+$/u.test(rootSessionId ?? ""), "debug-resume-identity",
   "Debug resume requires a Sortie qualification profile, safe workspace, and exact root session identity.");
+  if (manifest.profile === "v0127") return ["run", "--standalone", "--format", "json",
+    "--model", `${manifest.opencode.model}#${manifest.opencode.variant}`, "--agent", "dog-operator",
+    "--session", rootSessionId, DEBUG_CONTINUATION_PROMPT];
   return ["run", "--dir", cwd, "--format", "json", "--model", manifest.opencode.model,
     "--variant", manifest.opencode.variant, "--agent", "dog-operator", "--session", rootSessionId,
     DEBUG_CONTINUATION_PROMPT];
+}
+
+export function runArmArgs(manifest, cwd, agent, instruction) {
+  invariant(safeWslPath(cwd) && string(agent) && string(instruction), "run-arm-args",
+    "An arm needs a safe workspace, agent, and official instruction.");
+  return manifest.profile === "v0127"
+    ? ["run", "--standalone", "--format", "json", "--model",
+      `${manifest.opencode.model}#${manifest.opencode.variant}`, "--agent", agent, instruction]
+    : ["run", "--dir", cwd, "--format", "json", "--model", manifest.opencode.model,
+      "--variant", manifest.opencode.variant, "--agent", agent, instruction];
 }
 
 export function classifyNativeImplementationChildren(evidence, rootSessionId, workspace) {
@@ -1126,6 +1177,26 @@ try:
   value=json.loads(data); state=value.get('state') or {}; metadata=state.get('metadata') or {}; child=metadata.get('sessionId') or metadata.get('sessionID'); agent=(state.get('input') or {}).get('subagent_type')
   if isinstance(child,str): tasks.append({'caller':caller,'child':child,'agent':agent,'status':'completed'})
  print(json.dumps({'sessions':sessions,'tasks':tasks},separators=(',',':')))
+ finally: con.close()`;
+
+const V2_NATIVE_CHILD_QUERY = String.raw`import json,sqlite3,sys,urllib.parse
+db,directory=sys.argv[1:3]
+uri='file:'+urllib.parse.quote(db,safe='/')+'?mode=ro'
+con=sqlite3.connect(uri,uri=True)
+try:
+ sessions=[{'id':r[0],'parent':r[1],'directory':r[2]} for r in con.execute('SELECT id,parent_id,directory FROM session_v2 WHERE directory=? ORDER BY time_created DESC LIMIT 256',(directory,))]
+ ids={r['id'] for r in sessions}
+ tasks=[]
+ for caller,data in con.execute("SELECT m.session_id,m.data FROM session_message m JOIN session_v2 s ON s.id=m.session_id WHERE s.directory=? AND m.type='assistant' ORDER BY m.time_created DESC LIMIT 512",(directory,)):
+  if caller not in ids: continue
+  value=json.loads(data)
+  for part in value.get('content') or []:
+   if part.get('type')!='tool' or part.get('name') not in ('task','subagent'): continue
+   state=part.get('state') or {}
+   if state.get('status')!='completed': continue
+   metadata=state.get('metadata') or {}; child=metadata.get('sessionId') or metadata.get('sessionID'); input=state.get('input') or {}; agent=input.get('agent') or input.get('subagent_type')
+   if isinstance(child,str): tasks.append({'caller':caller,'child':child,'agent':agent,'status':'completed'})
+ print(json.dumps({'sessions':sessions,'tasks':tasks[:512]},separators=(',',':')))
 finally: con.close()`;
 
 export async function nativeImplementationChildren(context, rootSessionId, workspace) {
@@ -1133,7 +1204,8 @@ export async function nativeImplementationChildren(context, rootSessionId, works
     "native-child-config", "v0.10 native child evidence requires a declared WSL host database.");
   const workspaceWsl = await toWslPath(context.manifest, workspace);
   const result = await runWsl(context.manifest, "/", context.manifest.tools.python.executable,
-    [...context.manifest.tools.python.args, "-c", NATIVE_CHILD_QUERY, context.manifest.opencode.host_database,
+    [...context.manifest.tools.python.args, "-c", context.manifest.profile === "v0127" ? V2_NATIVE_CHILD_QUERY : NATIVE_CHILD_QUERY,
+      context.manifest.opencode.host_database,
       workspaceWsl], {}, { timeoutMs: 30_000 }, "native-child-query");
   let evidence;
   try { evidence = JSON.parse(result.stdout.toString("utf8")); }
@@ -1252,6 +1324,10 @@ async function preflight(context) {
   invariant(!(await stat(context.runtimeRoot).catch(() => null)), "runtime-exists",
     "runtime_root already exists; use a new run directory or explicit cleanup.");
   const pinned = await verifyPinnedFiles(context);
+  if (context.manifest.profile === "v0127") {
+    requireIsolatedV2Database(await toWslPath(context.manifest, context.runtimeRoot),
+      context.manifest.opencode.host_database);
+  }
   const officialTestScript = await readFile(join(context.officialRoot, "tests", "test.sh"));
   invariant(!officialTestScript.includes(13), "official-line-endings", "Official test.sh must retain LF line endings.");
   const syntaxProbePath = `${context.runtimeRoot}.test-script-probe-${process.pid}.sh`;
@@ -1299,6 +1375,14 @@ async function preflight(context) {
     { timeoutMs: 120_000 }, "preflight-opencode");
   invariant(openCode.stdout.toString("utf8").includes(context.manifest.opencode.version), "opencode-version",
     "WSL OpenCode version differs from the manifest.");
+  if (context.manifest.profile === "v0127") {
+    const binaryHash = (await runWsl(context.manifest, "/", "/usr/bin/sha256sum",
+      [context.manifest.opencode.executable], {}, { timeoutMs: 30_000 }, "v0127-cli-hash"))
+      .stdout.toString("utf8").split(/\s/u)[0];
+    invariant(binaryHash === V0127_V2_BINARY_SHA256, "v0127-cli-hash",
+      "The OpenCode V2 executable differs from the pinned isolated binary.");
+    versions.opencode_binary_sha256 = binaryHash;
+  }
   await runWsl(context.manifest, "/", "/usr/bin/test", ["-f", context.manifest.opencode.auth_file], {},
     { timeoutMs: 30_000 }, "auth-presence");
   await runWsl(context.manifest, "/", "/usr/bin/test", ["-x", "/usr/bin/setsid"], {},
@@ -1521,8 +1605,7 @@ async function runArm(context, arm, debug = false) {
     if (preRunStatus.stdout.length !== 0) throw new HarnessFailure("pre-run-dirty",
       "Arm workspace is dirty before the timed run.", nativeCommandEvidence(preRunStatus));
     cwd = await toWslPath(context.manifest, workspace);
-    args = ["run", "--dir", cwd, "--format", "json", "--model", context.manifest.opencode.model,
-      "--variant", context.manifest.opencode.variant, "--agent", arm === "sortie" ? context.profile.agent : "build", instruction];
+    args = runArmArgs(context.manifest, cwd, arm === "sortie" ? context.profile.agent : "build", instruction);
     groupFile = join(context.runtimeRoot, `${arm}-process-group.pid`);
     const groupFileWsl = await toWslPath(context.manifest, groupFile);
     stopGroup = () => stopWslGroup(context.manifest, groupFile);
@@ -1615,7 +1698,7 @@ async function runArm(context, arm, debug = false) {
       (gate.reason === "delivery-not-complete" && state.debug.executions[0].recovery.route === "awaiting-acceptance-review" ||
        gate.reason === "agent-event-error" && (state.debug.executions[0].recovery.route === "acceptance-remediation" ||
          state.debug.executions[0].errors.some(item => item.kind !== "refusal") &&
-         state.debug.executions[0].errors.every(item => item.kind === "refusal" || item.tool === "task")))
+          state.debug.executions[0].errors.every(item => item.kind === "refusal" || ["task", "subagent"].includes(item.tool))))
       ? "recoverable" : "paused";
   if (gate.status === "fail" && (context.manifest.profile !== "v0127" ||
     result.cleanupConfirmation !== "confirmed" || cancellation)) state.stopped = { arm, reason: gate.reason,
@@ -1633,7 +1716,8 @@ async function resumeArm(context, arm) {
   const state = await readState(context.runtimeRoot);
   invariant(arm === "sortie" && ["v010", "v0127"].includes(context.manifest.profile) && context.manifest.qualification_only === true &&
     state.debug?.mode === "state-preserving" && ["recoverable", "paused"].includes(state.debug.status) &&
-    state.stopped?.arm === arm && ["agent-event-error", "debug-unknown-agent-event-error",
+    (state.stopped?.arm === arm || (context.manifest.profile === "v0127" && state.stopped === undefined)) &&
+    ["agent-event-error", "debug-unknown-agent-event-error",
       "debug-public-recovery-unproven", "delivery-not-complete"].includes(state.arms?.[arm]?.run?.expected_operation?.reason),
   "debug-resume-state", "No state-preserving debug arm is available to resume.");
   invariant(state.arms[arm].active_pid === null &&
@@ -1677,7 +1761,8 @@ async function resumeArm(context, arm) {
   const errors = debugEventEvidence(result.stdout);
   const recovery = debugRecoveryPacket(result.stdout, rootSessionId);
   if (metadata.root_session_id !== rootSessionId) result.operationFailure = "debug-root-session-mismatch";
-  if (errors.some(item => item.kind !== "refusal" && item.tool !== "task") && recovery?.route !== "acceptance-remediation") {
+  if (errors.some(item => item.kind !== "refusal" && !["task", "subagent"].includes(item.tool)) &&
+    recovery?.route !== "acceptance-remediation") {
     result.operationFailure = "debug-unknown-agent-event-error";
   }
   if (metadata.root_session_id === rootSessionId) {
@@ -1723,7 +1808,8 @@ async function resumeArm(context, arm) {
     state.debug.status = recovery !== null &&
       (gate.reason === "delivery-not-complete" && recovery.route === "awaiting-acceptance-review" ||
        gate.reason === "agent-event-error" &&
-        (recovery.route === "acceptance-remediation" || errors.length > 0 && errors.every(item => item.tool === "task"))) &&
+         (recovery.route === "acceptance-remediation" || errors.length > 0 &&
+           errors.every(item => ["task", "subagent"].includes(item.tool)))) &&
       state.debug.executions.length < state.debug.max_cycles &&
       Date.now() < Date.parse(state.debug.deadline_at) ? "recoverable" : "paused";
   }
@@ -1788,7 +1874,7 @@ async function inspectArm(context, arm) {
   const roots = { opencode: join(context.runtimeRoot, "configs", arm, "opencode"),
     xdg: join(context.runtimeRoot, "configs", arm, "xdg") };
   const inspected = await inspectResolvedConfig(context, arm, workspace, roots);
-  const plugins = inspected.config.plugin;
+  const plugins = context.manifest.profile === "v0127" ? inspected.config.plugins : inspected.config.plugin;
   return { plugin_is_array: Array.isArray(plugins), plugin_count: Array.isArray(plugins) ? plugins.length : null,
     plugin_fingerprints: Array.isArray(plugins) ? plugins.map((value) => sha256Bytes(JSON.stringify(value))) : [],
     config_has_sortie: forbiddenText(JSON.stringify(inspected.config)) };
