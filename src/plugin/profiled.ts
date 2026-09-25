@@ -1033,13 +1033,14 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const budget = await control!.currentBudget(root);
       if (budget && budget.remaining_units < plan.units.length && !same) throw new Error("mission-budget-exhausted: report the required cumulative extension to Operator");
       const state = await operators.prepareMission(root, plan, actor === root ? undefined
-        : { sessionID: actor, callID: mission.callID! });
+        : { sessionID: actor, callID: mission.callID! }, mission.supersededRunID);
       await restorePriorAcceptance(root, state);
       await control!.registerGoalDeclaration(root, state.units[0]!.task.prompt, true);
       control!.enableUnits(root, state.units.filter(unit => unit.status === "pending").length);
       await missions.update(root, item => {
         if (item.runID !== state.runID) item.plans++;
         item.runID = state.runID; item.phase = "running"; item.submission = null;
+        delete item.supersededRunID;
       });
       return JSON.stringify(await operators.next(root, actor));
     }

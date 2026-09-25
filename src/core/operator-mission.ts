@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { normalizeRelativePath } from "./path.js";
 import { parseOperatorPlan, type OperatorPlan, type OperatorState, type OperatorTask } from "./operator-runtime.js";
@@ -29,6 +29,8 @@ export interface OperatorMission {
   callID: string | null;
   dispatchOpen: boolean;
   runID: string | null;
+  /** A cancelled run replaced by a later real user turn; never reuse its acceptance or evidence. */
+  supersededRunID?: string;
   plans: number;
   progress: { unit: string; title: string; status: string; at: string }[];
   submission: { status: "ready" | "needs-decision" | "blocked"; summary: string } | null;
@@ -47,6 +49,43 @@ export class OperatorMissionRuntime {
     try { return JSON.parse(await readFile(file, "utf8")) as T; }
     catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
   }
+  /** Recover the predecessor link for missions started before this fix, using one exact archived mission. */
+  private async loadMission(root: string): Promise<OperatorMission | undefined> {
+    const state = await this.load<OperatorMission>(this.file(root));
+    if (!state || state.supersededRunID !== undefined || state.runID !== null ||
+        !["open", "running", "submitted"].includes(state.phase) || state.requests.length === 0) return state;
+    const directory = join(this.projectRoot, this.profile.stateDirectory, "missions");
+    let entries: string[];
+    try { entries = await readdir(directory); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return state; throw error; }
+    const prefix = `${digest(root)}.mission-`;
+    const candidates = entries.filter(name => name.startsWith(prefix) && /^mission-[a-f0-9-]+\.json$/u.test(name.slice(digest(root).length + 1)));
+    const matches: OperatorMission[] = [];
+    for (const name of candidates) {
+      const previous = await this.load<OperatorMission>(join(directory, name));
+      if (previous?.root === root && previous.phase === "cancelled" && previous.runID !== null &&
+          previous.requests[0]?.id !== state.requests[0]!.id &&
+          previous.requests.some(request => request.id === state.requests[0]!.id)) matches.push(previous);
+    }
+    if (matches.length === 1) state.supersededRunID = matches[0]!.runID!;
+    return state;
+  }
+  /** Find exactly one archived cancelled mission that owned this run; ambiguity never grants recovery. */
+  async archivedRun(root: string, runID: string): Promise<OperatorMission | undefined> {
+    const directory = join(this.projectRoot, this.profile.stateDirectory, "missions");
+    let entries: string[];
+    try { entries = await readdir(directory); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+    const prefix = `${digest(root)}.mission-`;
+    const matches: OperatorMission[] = [];
+    for (const name of entries.filter(name => name.startsWith(prefix) &&
+      /^mission-[a-f0-9-]+\.json$/u.test(name.slice(digest(root).length + 1)))) {
+      const state = await this.load<OperatorMission>(join(directory, name));
+      if (state?.root === root && state.phase === "cancelled" && state.runID === runID &&
+          state.coordinator !== null && state.callID !== null) matches.push(state);
+    }
+    return matches.length === 1 ? matches[0] : undefined;
+  }
   private async save(file: string, value: unknown): Promise<void> {
     const temporary = `${file}.${randomUUID()}.tmp`;
     await mkdir(join(this.projectRoot, this.profile.stateDirectory, "missions"), { recursive: true });
@@ -60,7 +99,7 @@ export class OperatorMissionRuntime {
   }
   async read(root: string): Promise<OperatorMission | undefined> {
     await this.writes.get(root);
-    const state = await this.load<OperatorMission>(this.file(root));
+    const state = await this.loadMission(root);
     if (state && (state.version !== "0.12" || state.root !== root)) throw new Error("mission-state-invalid");
     return state;
   }
@@ -74,7 +113,7 @@ export class OperatorMissionRuntime {
     await this.serial(root, async () => {
       // Captured before prompt rewriting, including exact whitespace. Never ask a model to recopy it.
       await this.save(this.file(root, ".request"), request);
-      const state = await this.load<OperatorMission>(this.file(root));
+      const state = await this.loadMission(root);
       if (state && !["completed", "cancelled"].includes(state.phase) && !state.requests.some(item => item.id === request.id)) {
         state.requests.push(request);
         await this.save(this.file(root), state);
@@ -89,7 +128,7 @@ export class OperatorMissionRuntime {
       }
       const request = await this.load<MissionRequest>(this.file(root, ".request"));
       if (!request) throw new Error("mission-original-request-unavailable");
-      const previous = await this.load<OperatorMission>(this.file(root));
+      const previous = await this.loadMission(root);
       if (previous && !["completed", "cancelled"].includes(previous.phase)) {
         if (previous.requirements.some((item, index) => requirements[index] !== item.text)) {
           throw new Error("mission-requirements-preserved: keep the existing ordered requirements and append user additions");
@@ -101,14 +140,16 @@ export class OperatorMissionRuntime {
       if (previous) await this.save(this.file(root, `.${previous.id}`), previous);
       const state: OperatorMission = { version: "0.12", id: `mission-${randomUUID()}`, root, requests: [request],
         requirements: requirements.map((text, index) => ({ id: `R${index + 1}`, text })), phase: "open",
-        coordinator: null, callID: null, dispatchOpen: false, runID: null, plans: 0, progress: [], submission: null };
+        coordinator: null, callID: null, dispatchOpen: false, runID: null, plans: 0, progress: [], submission: null,
+        ...(previous?.phase === "cancelled" && previous.runID !== null && request.id !== previous.requests[0]?.id
+          ? { supersededRunID: previous.runID } : {}) };
       await this.save(this.file(root), state);
       return state;
     });
   }
   update(root: string, change: (state: OperatorMission) => void): Promise<OperatorMission> {
     return this.serial(root, async () => {
-      const state = await this.load<OperatorMission>(this.file(root));
+      const state = await this.loadMission(root);
       if (!state) throw new Error("mission-missing");
       change(state);
       await this.save(this.file(root), state);

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { OperatorMissionRuntime, missionPlan, missionReviewTask, missionReviewTraces } from "../dist/core/operator-mission.js";
@@ -129,4 +130,63 @@ test("mission replan archives failed execution, keeps original acceptance and bi
   assert.notEqual(replacement.runID, state.runID);
   const manifest = JSON.parse(await readFile(replacement.units[0]!.manifestPath, "utf8"));
   assert.deepEqual(manifest.write, ["src", "test"]);
+}));
+
+test("a later user turn can replace a cancelled mission without inheriting its old acceptance", async () => fixture(async directory => {
+  const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+  const operators = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
+  await missions.capture("root", { id: "u1", text: "Run v0.12.3" });
+  const oldMission = await missions.start("root", ["Run v0.12.3", "Keep cumulative budget"]);
+  const oldRun = await operators.prepareMission("root", missionPlan(oldMission, [{ ...unit, requirement_ids: ["R1", "R2"] }]));
+  await operators.interrupted("root", "explicit-cancellation");
+  await missions.update("root", state => { state.phase = "cancelled"; state.runID = oldRun.runID; });
+
+  // A cancellation in the original user turn is not permission to discard that turn's acceptance.
+  const sameTurn = await missions.start("root", ["Run v0.12.4", "Keep cumulative budget"]);
+  assert.equal(sameTurn.supersededRunID, undefined);
+  await assert.rejects(operators.prepareMission("root", missionPlan(sameTurn, [{ ...unit, requirement_ids: ["R1", "R2"] }])),
+    /operator-acceptance-carry-forward-required/);
+  await missions.capture("root", { id: "u2", text: "Use v0.12.4 and start a new mission" });
+  await missions.update("root", state => { state.phase = "cancelled"; state.runID = oldRun.runID; });
+  const replacement = await missions.start("root", ["Run v0.12.4", "Keep cumulative budget"]);
+  assert.equal(replacement.supersededRunID, oldRun.runID);
+  const missionFile = join(directory, ".sortie-dogs-v010", "missions", `${createHash("sha256").update("root").digest("hex")}.json`);
+  // The already-blocked desktop mission was persisted by the older release without this link.
+  await writeFile(missionFile, JSON.stringify({ ...replacement, supersededRunID: undefined }));
+  const cold = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+  assert.equal((await cold.required("root")).supersededRunID, oldRun.runID);
+  assert.equal((await cold.start("root", replacement.requirements.map(item => item.text))).supersededRunID, oldRun.runID);
+  const plan = missionPlan(replacement, [{ ...unit, requirement_ids: ["R1", "R2"] }]);
+  await assert.rejects(operators.prepareMission("root", plan, undefined, "operator-stale"), /mission-superseded-run-mismatch/);
+  const next = await operators.prepareMission("root", plan, undefined, replacement.supersededRunID);
+  assert.deepEqual(next.acceptance, ["Run v0.12.4", "Keep cumulative budget"]);
+  assert.equal(next.parentRunID, null);
+  assert.deepEqual(next.priorAcceptedUnits, []);
+  assert.equal(next.supersededRunID, oldRun.runID);
+  assert.notEqual(next.runID, oldRun.runID);
+  assert.equal((await operators.prepareMission("root", plan, undefined, replacement.supersededRunID)).runID, next.runID);
+  const archive = JSON.parse(await readFile(join(directory, ".sortie-dogs-v010", "operators",
+    `${createHash("sha256").update("root").digest("hex")}.json.${oldRun.runID}.archive`), "utf8"));
+  assert.equal(archive.runID, oldRun.runID);
+  assert.equal(archive.phase, "cancelled");
+  assert.deepEqual(archive.acceptance, ["Run v0.12.3", "Keep cumulative budget"]);
+}));
+
+test("a new mission cannot discard an old run that reached a worker", async () => fixture(async directory => {
+  const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+  const operators = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
+  await missions.capture("root", { id: "u1", text: "Old goal" });
+  const oldMission = await missions.start("root", ["Old goal"]);
+  const oldRun = await operators.prepareMission("root", missionPlan(oldMission, [unit]));
+  const task = operators.nextWorkerTask(oldRun);
+  await operators.admitWorker("root", "root", "worker-call", task);
+  await operators.claimAdmittedWorkerPrompt("root", "root", "worker", task.prompt);
+  await missions.capture("root", { id: "u2", text: "Replace old goal" });
+  await operators.interrupted("root", "explicit-cancellation");
+  await missions.update("root", state => { state.phase = "cancelled"; state.runID = oldRun.runID; });
+  const newMission = await missions.start("root", ["New goal"]);
+  assert.equal(newMission.supersededRunID, oldRun.runID);
+  await assert.rejects(operators.prepareMission("root", missionPlan(newMission, [unit]), undefined, newMission.supersededRunID),
+    /mission-superseded-run-has-work/);
+  assert.equal((await operators.required("root")).runID, oldRun.runID);
 }));
