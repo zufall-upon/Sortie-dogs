@@ -2244,6 +2244,25 @@ test("single unit keeps the direct fast path and incomplete operator return is n
   assert.equal((runtime.packet(ended) as { final_acceptance: string }).final_acceptance, "coordinator-required");
 }));
 
+test("admitted unit keeps its plan-pinned controls verifiable after a host parent rewrite", async () => fixture(async root => {
+  const runtime = new OperatorRuntime(root, V010_RUNTIME_PROFILE);
+  const one = plan(); one.units = one.units.slice(0, 1);
+  one.goal_declaration.criteria = one.goal_declaration.criteria.slice(0, 1);
+  one.acceptance_proof = [["first"], ["first"]];
+  const state = await runtime.prepare("root", one);
+  const next = await runtime.next("root", "root") as { task: object };
+  await runtime.admitWorker("root", "root", "worker", next.task);
+  const handoffPath = state.units[0]!.handoffPath;
+  const original = await readFile(handoffPath, "utf8");
+  const linked = JSON.parse(original);
+  linked.ext["sortie-dogs/acceptance-continuity"].parent_fingerprint = state.acceptanceFingerprint;
+  await writeFile(handoffPath, `${JSON.stringify(linked, null, 2)}\n`);
+  assert.match(await runtime.completionGoalFingerprint(await runtime.required("root")), /^sha256:[a-f0-9]{64}$/);
+  linked.task.title = "changed by another actor";
+  await writeFile(handoffPath, `${JSON.stringify(linked, null, 2)}\n`);
+  await assert.rejects(runtime.completionGoalFingerprint(await runtime.required("root")), /operator-contract-changed/);
+}));
+
 test("cancelled repair plans retain acceptance and the parent fingerprint", async () => fixture(async root => {
   const runtime = new OperatorRuntime(root, V010_RUNTIME_PROFILE);
   const original = plan();
@@ -3298,6 +3317,9 @@ test("recorded native validation can be reconciled without rerun only for the sa
   for (const changed of [
     { ...linkedHandoff, task: { ...linkedHandoff.task, title: "unapproved title" } },
     { ...linkedHandoff, ext: { "sortie-dogs/acceptance-continuity": {
+      ...continuity, parent_fingerprint: acceptanceContinuityFingerprint([criteriaText[0]!]),
+    } } },
+    { ...linkedHandoff, ext: { "sortie-dogs/acceptance-continuity": {
       ...continuity, parent_fingerprint: acceptanceContinuityFingerprint(["unrelated parent"]),
     } } },
   ]) {
@@ -3312,6 +3334,7 @@ test("recorded native validation can be reconciled without rerun only for the sa
   const system = { system: [] as string[] };
   await hooks["experimental.chat.system.transform"]!({ sessionID: "root" }, system);
   assert.ok(system.system.some(text => text.includes('"latest_accepted_task_id":"unit"') && text.includes(continuity.fingerprint)));
+  assert.ok(system.system.some(text => text.includes(`"latest_accepted_parent_fingerprint":"${continuity.fingerprint}"`)));
   await ledger.appendGoal({ kind: "dispatch.reserved", at, goal_id: initial.goal_id!, reservation_id: "parent-dispatch",
     unit_id: "parent-unit", session_id: "root", ticket_id: null });
   await ledger.appendGoal({ kind: "unit.settled", at, goal_id: initial.goal_id!, reservation_id: "parent-dispatch", receipt_id: "parent",

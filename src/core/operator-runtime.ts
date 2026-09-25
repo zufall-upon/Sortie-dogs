@@ -5,6 +5,7 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { acceptanceContinuityFingerprint, inspectAcceptanceContinuity, normalizeAcceptanceCriteria,
   ACCEPTANCE_CONTINUITY_EXTENSION, MAX_ACCEPTANCE_CONTINUITY_BYTES, MAX_ACCEPTANCE_CRITERIA } from "./acceptance-continuity.js";
+import { hostRewrittenAcceptanceContinuity } from "./host-rewritten-acceptance-continuity.js";
 import { expandGoalDeclaration, goalDeclarationDefaults, goalDeclarationFieldDiagnostics, hasGoalCommandAliasConflict } from "./goal-declaration-format.js";
 import { normalizeManifestPath, normalizeRelativePath } from "./path.js";
 import { CONTRACT_TEXT_LIMITS, validateHandoffSchema, validateOperationManifestSchema } from "./validate-schema.js";
@@ -1844,7 +1845,11 @@ export class OperatorRuntime {
     const declaration = /^goal_declaration_path: (.+)$/m.exec(unit.task.prompt)?.[1];
     if (!declaration || !isAbsolute(declaration)) throw new Error("operator-declaration-path-invalid");
     const contents = await Promise.all([unit.handoffPath, unit.manifestPath, declaration].map(file => readFile(file, "utf8")));
-    if (contents.some((value, index) => hash(value) !== unit.hashes[index])) throw new Error("operator-contract-changed");
+    if (contents.slice(1).some((value, index) => hash(value) !== unit.hashes[index + 1]) ||
+      (hash(contents[0]!) !== unit.hashes[0] &&
+        (unit.status === "pending" || hostRewrittenAcceptanceContinuity(Buffer.from(contents[0]!), unit.hashes[0]!) === undefined))) {
+      throw new Error("operator-contract-changed");
+    }
   }
   private gitPaths(output: string): string[] {
     return output.split("\0").filter(Boolean).map(path => normalizeRelativePath(path.replaceAll("\\", "/")));

@@ -13,6 +13,7 @@ import {
   normalizeAcceptanceCriteria,
   type AcceptanceContinuityLedger,
 } from "../core/acceptance-continuity.js";
+import { hostRewrittenAcceptanceContinuity } from "../core/host-rewritten-acceptance-continuity.js";
 import { resolveGlobalConfigRoot } from "../core/initialize.js";
 import { OperatorMissionRuntime } from "../core/operator-mission.js";
 import { admitLunaFabric } from "../core/luna-fabric-contract.js";
@@ -43,7 +44,6 @@ import {
 import { IntegrationQueueError, WorktreeIntegrationQueue } from "../core/worktree-integration-queue.js";
 import { WorktreeLifecycleError } from "../core/worktree-lifecycle.js";
 import type {
-  Handoff,
   IntegrationQueueSnapshot,
   ManifestDiagnostic,
   OperationManifest,
@@ -5905,26 +5905,6 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     return undefined;
   }
 
-  function hostRewrittenAcceptedHandoffMatches(
-    source: Buffer,
-    handoff: Handoff,
-    ledger: AcceptanceContinuityLedger,
-    originalHash: string,
-  ): boolean {
-    if (ledger.parent_fingerprint === "none" ||
-      (ledger.parent_fingerprint !== ledger.fingerprint && acceptanceParentPrefix(ledger) === undefined) ||
-      !source.equals(Buffer.from(`${JSON.stringify(handoff, null, 2)}\n`, "utf8"))) return false;
-    // The dispatch hook only replaces an omitted serial parent and writes this exact pretty
-    // representation. Reconstruct the original compact, hash-pinned control instead of
-    // accepting a changed hash (which would also authorize edits to unrelated fields).
-    const prior = { ...handoff, ext: { ...handoff.ext,
-      [ACCEPTANCE_CONTINUITY_EXTENSION]: {
-        ...(handoff.ext![ACCEPTANCE_CONTINUITY_EXTENSION] as Record<string, unknown>), parent_fingerprint: "none",
-      },
-    } };
-    return createHash("sha256").update(JSON.stringify(prior)).digest("hex") === originalHash;
-  }
-
   async function recoverAcceptanceParent(
     sessionID: string,
     ledger: AcceptanceContinuityLedger,
@@ -8070,18 +8050,14 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       if (snapshot.state.phase !== "active" || snapshot.state.receipt !== null) throw new Error("operator-continuity-goal-not-active");
       const source = await readFile(request.handoffPath);
       const hashMatches = createHash("sha256").update(source).digest("hex") === request.handoffHash;
-      let rewritten: unknown;
+      const current = rootAcceptanceContinuity.get(root);
       if (!hashMatches) {
-        try { rewritten = JSON.parse(source.toString("utf8")); }
-        catch { throw new Error("operator-continuity-control-changed"); }
-        const inspected = validateHandoffSchema(rewritten);
-        const ledger = inspected.ok ? inspectAcceptanceContinuity(inspected.value).ledger : undefined;
-        if (!inspected.ok || ledger === undefined ||
-          !hostRewrittenAcceptedHandoffMatches(source, inspected.value, ledger, request.handoffHash)) {
+        const expectedParent = current?.task_id === request.taskID ? undefined : current?.fingerprint;
+        if (hostRewrittenAcceptanceContinuity(source, request.handoffHash, expectedParent) === undefined) {
           throw new Error("operator-continuity-control-changed");
         }
       }
-      const handoff = validateHandoffSchema(hashMatches ? JSON.parse(source.toString("utf8")) : rewritten);
+      const handoff = validateHandoffSchema(JSON.parse(source.toString("utf8")));
       if (!handoff.ok || handoff.value.id !== request.taskID) throw new Error("operator-continuity-handoff-invalid");
       const accepted = inspectAcceptanceContinuity(handoff.value);
       if (!accepted.ledger || accepted.ledger.task_id !== request.taskID) throw new Error("operator-continuity-ledger-invalid");
@@ -8089,10 +8065,11 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         event.unit_id === request.taskID && event.evidence.some(evidence =>
           event.goal_id === snapshot.state.goal_id || evidence.acceptance_fingerprint === accepted.ledger!.fingerprint));
       if (!proved) throw new Error("operator-continuity-accepted-unit-missing");
-      const current = rootAcceptanceContinuity.get(root);
       if (current !== undefined) {
         if (current.fingerprint !== accepted.ledger.fingerprint) throw new Error("operator-continuity-newer-state");
-        if (current.task_id === accepted.ledger.task_id) return;
+        if (current.task_id === accepted.ledger.task_id && current.parent_fingerprint === accepted.ledger.parent_fingerprint) return;
+        if (current.task_id === accepted.ledger.task_id &&
+          !(current.parent_fingerprint === "none" && !hashMatches)) throw new Error("operator-continuity-newer-state");
       }
       rootAcceptanceContinuity.set(root, accepted.ledger);
     },
