@@ -2052,7 +2052,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         const childrenResponse = await childrenMethod.call(sessionAPI, { path: { id: root }, query: { directory: input.directory } });
         const children = isRecord(childrenResponse) && Array.isArray(childrenResponse.data) ? childrenResponse.data : [];
         if (!children.some(child => isRecord(child) && child.id === mission.coordinator &&
-            child.parentID === root && child.agent === "dog-operator")) return undefined;
+            child.parentID === root && child.agent === "dogs-coordinator")) return undefined;
         const coordinator = mission.coordinator!;
         const historyResponse = await messages.call(sessionAPI, { path: { id: coordinator }, query: { directory: input.directory } });
         const history = isRecord(historyResponse) && Array.isArray(historyResponse.data) ? historyResponse.data : [];
