@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { appendFile, lstat, mkdir, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { appendFile, chmod, lstat, mkdir, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -758,6 +758,11 @@ export async function prepareCandidateRuntime(candidate, packagePath, runRoot, d
   }
   environment.OPENCODE_CONFIG_CONTENT = JSON.stringify(benchmarkInlineConfig(plugin, agentNames, runRoot));
   await (dependencies.probeAgents ?? probeCandidateV2Agents)(candidateRoot, environment, candidate.agent, agentNames);
+  // V2 OAuth connections live in its SQLite credential store. The legacy auth.json
+  // alone cannot route the model in an isolated server. Copy only the selected
+  // provider's credential into the throwaway runtime, never the host session DB.
+  await seedIsolatedV2Credential(join(hostDataRoot, "opencode", "opencode.db"),
+    join(dataRoot, "opencode", "opencode.db"), join(dataRoot, "opencode"));
   return {
     environment,
     runtimeRoot: candidateRoot,
@@ -777,6 +782,22 @@ export async function prepareCandidateRuntime(candidate, packagePath, runRoot, d
     await rm(candidateRoot, { recursive: true, force: true });
     throw error;
   }
+}
+
+export async function seedIsolatedV2Credential(sourcePath, targetPath, targetDirectory) {
+  const source = new DatabaseSync(sourcePath, { readOnly: true });
+  try {
+    const credential = source.prepare("SELECT id, integration_id, label, value, connector_id, method_id, active, time_created, time_updated FROM credential WHERE integration_id = ? ORDER BY time_updated DESC LIMIT 1").get("openai");
+    ensure(credential !== undefined && JSON.parse(credential.value).type === "oauth", "candidate-openai-credential-unavailable");
+    await chmod(targetDirectory, 0o700);
+    await chmod(targetPath, 0o600);
+    const target = new DatabaseSync(targetPath);
+    try {
+      target.prepare("INSERT INTO credential (id, integration_id, label, value, connector_id, method_id, active, time_created, time_updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
+        credential.id, credential.integration_id, credential.label, credential.value, credential.connector_id,
+        credential.method_id, credential.active, credential.time_created, credential.time_updated);
+    } finally { target.close(); }
+  } finally { source.close(); }
 }
 
 async function probeCandidateV2Agents(root, environment, primary, agentNames) {
@@ -867,7 +888,10 @@ export function readDirectoryUsage(directory, databasePath = usageDatabasePath()
         }
         if (v2 ? !["assistant", "compaction"].includes(row.type) : message?.role !== "assistant") continue;
         if (!message?.tokens) {
-          unpriced.add("missing-usage");
+          // V2 persists the assistant before a model request finishes. Keep the
+          // reservation while it is in flight; only a terminal missing usage
+          // record is a pricing failure.
+          unpriced.add(v2 && !message.time?.completed && !message.error ? "pending-usage" : "missing-usage");
           continue;
         }
         result.requests += 1;
@@ -1018,7 +1042,7 @@ export async function runOpenCode(options, dependencies = {}) {
         pollInFlight = true;
         try {
           usage = readUsage(options.workspace, options.databasePath);
-          if (usage.unpriced.length > 0) await stop("pricing-coverage-missing");
+          if (usage.unpriced.some(reason => reason !== "pending-usage")) await stop("pricing-coverage-missing");
           else if (usage.usd >= options.costLimitUsd) await stop("cost-limit");
         } catch {
           await stop("usage-monitor-failed");
