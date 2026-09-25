@@ -26,7 +26,7 @@ import { RunFlightLedger } from "../dist/core/run-flight-ledger.js";
 import { goalFingerprint } from "../dist/core/goal-bound.js";
 import type { RuntimeBridge } from "../dist/plugin/runtime-bridge.js";
 import { decoratePreviewHeadings, receiptBoundTerminalText } from "../dist/plugin/receipt-presentation.js";
-import { inspectAcceptanceContinuity, MAX_ACCEPTANCE_CONTINUITY_BYTES,
+import { acceptanceContinuityFingerprint, inspectAcceptanceContinuity, MAX_ACCEPTANCE_CONTINUITY_BYTES,
   MAX_ACCEPTANCE_CRITERIA } from "../dist/core/acceptance-continuity.js";
 
 async function fixture(run: (root: string) => Promise<void>) {
@@ -3289,6 +3289,26 @@ test("recorded native validation can be reconciled without rerun only for the sa
     currentTaskIDs: ["replacement"] });
   await assert.rejects(control!.restoreAcceptedUnit("root", { taskID: "unit", handoffPath, handoffHash: "incorrect" }), /control-changed/);
   await control!.restoreAcceptedUnit("root", { taskID: "unit", handoffPath, handoffHash: hash(handoffSource) });
+  const linkedHandoff = { ...JSON.parse(handoffSource), ext: {
+    "sortie-dogs/acceptance-continuity": { ...continuity, parent_fingerprint: continuity.fingerprint },
+  } };
+  const linkedSource = `${JSON.stringify(linkedHandoff, null, 2)}\n`;
+  await writeFile(handoffPath, linkedSource);
+  await control!.restoreAcceptedUnit("root", { taskID: "unit", handoffPath, handoffHash: hash(handoffSource) });
+  for (const changed of [
+    { ...linkedHandoff, task: { ...linkedHandoff.task, title: "unapproved title" } },
+    { ...linkedHandoff, ext: { "sortie-dogs/acceptance-continuity": {
+      ...continuity, parent_fingerprint: acceptanceContinuityFingerprint(["unrelated parent"]),
+    } } },
+  ]) {
+    await writeFile(handoffPath, `${JSON.stringify(changed, null, 2)}\n`);
+    await assert.rejects(control!.restoreAcceptedUnit("root", { taskID: "unit", handoffPath,
+      handoffHash: hash(handoffSource) }), /control-changed/);
+  }
+  await writeFile(handoffPath, JSON.stringify(linkedHandoff));
+  await assert.rejects(control!.restoreAcceptedUnit("root", { taskID: "unit", handoffPath,
+    handoffHash: hash(handoffSource) }), /control-changed/);
+  await writeFile(handoffPath, linkedSource);
   const system = { system: [] as string[] };
   await hooks["experimental.chat.system.transform"]!({ sessionID: "root" }, system);
   assert.ok(system.system.some(text => text.includes('"latest_accepted_task_id":"unit"') && text.includes(continuity.fingerprint)));
