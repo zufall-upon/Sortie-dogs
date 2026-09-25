@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
+  coordinatorModelOverride,
   initializeGlobal,
   initializeProject,
   ProjectInitializationError,
@@ -123,6 +124,23 @@ test("v010 init creates project or global config, preserving higher configured d
     await initializeGlobal(global, "v010");
     assert.deepEqual(JSON.parse(await readFile(join(global, "opencode.json"), "utf8")),
       { plugins: ["sortie-dogs"], experimental: { subagent_depth: 3 }, default_agent: "build" });
+  } finally { await clean(project); }
+});
+
+test("v010 init reports a Coordinator model override without editing it", async () => {
+  const project = await fixtureDirectory();
+  try {
+    const global = join(project, "global");
+    await mkdir(global);
+    assert.equal(await coordinatorModelOverride(global, true), undefined);
+    const source = '{\n  // chosen by the user\n  "agents": { "dogs-coordinator": { "model": "openai/gpt-6-luna-fast#max" } },\n}\n';
+    await writeFile(join(global, "opencode.jsonc"), source);
+    assert.deepEqual(await coordinatorModelOverride(global, true),
+      { path: join(global, "opencode.jsonc"), model: "openai/gpt-6-luna-fast#max" });
+    await initializeGlobal(global, "v010");
+    assert.equal(parse(await readFile(join(global, "opencode.jsonc"), "utf8")).agents["dogs-coordinator"].model, "openai/gpt-6-luna-fast#max");
+    await writeFile(join(global, "opencode.jsonc"), '{ "agents": { "dogs-coordinator": { "model": "openai/gpt-6-sol#xhigh" } } }');
+    assert.equal(await coordinatorModelOverride(global, true), undefined);
   } finally { await clean(project); }
 });
 

@@ -3,7 +3,8 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import test from "node:test";
-import { OperatorMissionRuntime, missionPlan, missionReviewTask, missionReviewTraces } from "../dist/core/operator-mission.js";
+import { MISSION_EVIDENCE_GAP_REVIEW_LIMIT, OperatorMissionRuntime, missionPacket, missionPlan, missionReviewAccepted, missionReviewTask,
+  missionReviewTraces, missionReviewVerdict } from "../dist/core/operator-mission.js";
 import { OperatorRuntime } from "../dist/core/operator-runtime.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
 
@@ -32,6 +33,27 @@ test("mission review accepts grouped requirement traces while preserving coverag
   assert.doesNotMatch(task.prompt, /original evidence/);
   mission.review.task!.prompt += "changed";
   assert.notEqual(missionReviewTask(mission).prompt, task.prompt);
+}));
+
+test("evidence-only reviews are bounded while defects and first gaps still block submission", async () => fixture(async directory => {
+  assert.equal(missionReviewVerdict("PASS"), "PASS");
+  assert.equal(missionReviewVerdict("EVIDENCE_GAPS\nThe multi-value route has no trace."), "evidence-gaps");
+  assert.equal(missionReviewVerdict("FINDINGS\nzero dhi remains positive"), "findings");
+  assert.equal(missionReviewVerdict("I think EVIDENCE_GAPS"), "findings");
+  const review = { runID: "run", risk: ["public-logic"], source: "source", task: null };
+  assert.equal(missionReviewAccepted({ ...review, verdict: "evidence-gaps", evidenceGapReviews: 1 }), false);
+  assert.equal(missionReviewAccepted({ ...review, verdict: "evidence-gaps", evidenceGapReviews: MISSION_EVIDENCE_GAP_REVIEW_LIMIT }), true);
+  assert.equal(missionReviewAccepted({ ...review, verdict: "findings", evidenceGapReviews: 5 }), false);
+  assert.equal(missionReviewAccepted({ ...review, verdict: "pending", evidenceGapReviews: 5 }), false);
+  const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+  const operators = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
+  await missions.capture("root", { id: "u1", text: "Fix result" });
+  const mission = await missions.start("root", ["Fix result"]);
+  const run = await operators.prepareMission("root", missionPlan(mission, [unit]));
+  const gap = { ...mission, review: { ...review, verdict: "evidence-gaps" as const, evidenceGapReviews: 1 } };
+  const packet = missionPacket(gap, { ...run, phase: "awaiting-acceptance" }) as { next_action: string; review: Record<string, unknown> };
+  assert.match(packet.next_action, /do not re-implement/u);
+  assert.deepEqual([packet.review.evidence_gap_reviews, packet.review.accepted], [1, false]);
 }));
 
 test("mission captures exact original messages, generates IDs, and preserves requirements across restart", async () => fixture(async directory => {

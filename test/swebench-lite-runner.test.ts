@@ -575,12 +575,15 @@ test("captured patches exclude runtime artifacts and retain product changes", as
     await writeFile(join(root, "product.txt"), "fixed\n");
     await mkdir(join(root, ".sortie-dogs-v010", "contracts"), { recursive: true });
     await writeFile(join(root, ".sortie-dogs-v010", "contracts", "state.json"), "internal\n");
+    await mkdir(join(root, ".sortie-env", "bin"), { recursive: true });
+    await writeFile(join(root, ".sortie-env", "bin", "python"), "tool environment\n");
 
     const patch = await capturePatch(root);
 
     assert.match(patch, /diff --git a\/product\.txt b\/product\.txt/u);
     assert.match(patch, /-base\n\+fixed/u);
     assert.doesNotMatch(patch, /\.sortie-dogs-v010/u);
+    assert.doesNotMatch(patch, /\.sortie-env/u);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

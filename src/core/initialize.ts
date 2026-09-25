@@ -599,6 +599,29 @@ async function initializeRoot(
   };
 }
 
+export const V010_COORDINATOR_MODEL = "openai/gpt-6-sol#xhigh";
+
+/**
+ * Report a user config that routes the v0.10 Coordinator away from its packaged model. Measured Luna
+ * Coordinators repeated plans and review dispatches until timeout, so init surfaces it without editing it.
+ */
+export async function coordinatorModelOverride(root: string, global: boolean): Promise<{ path: string; model: string } | undefined> {
+  const prefix = global ? "" : `${OPEN_CODE_DIRECTORY}/`;
+  for (const relativePath of [`${prefix}opencode.jsonc`, `${prefix}opencode.json`]) {
+    let content: string;
+    try { content = await readFile(resolve(root, relativePath), "utf8"); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") continue; throw error; }
+    const config = parse(content, [], { allowTrailingComma: true }) as Record<string, unknown> | null;
+    for (const key of ["agents", "agent"]) {
+      const agents = config?.[key];
+      const coordinator = agents !== null && typeof agents === "object" ? (agents as Record<string, unknown>)["dogs-coordinator"] : undefined;
+      const model = coordinator !== null && typeof coordinator === "object" ? (coordinator as Record<string, unknown>).model : undefined;
+      if (typeof model === "string" && model !== V010_COORDINATOR_MODEL) return { path: resolve(root, relativePath), model };
+    }
+  }
+  return undefined;
+}
+
 /** Resolves the OpenCode global configuration directory without platform-specific paths. */
 export async function resolveGlobalConfigRoot(
   env: NodeJS.ProcessEnv = process.env,
