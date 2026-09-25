@@ -1,16 +1,16 @@
 /**
- * Dedicated import entry point for OpenCode plugin wrappers.
+ * OpenCode V2's package loader resolves the `./plugin` export. Expose its
+ * default definition here as well as the named V1 factory used by wrappers.
  *
- * OpenCode configuration lists the package name in the `plugin` array:
- * `"plugin": ["sortie-dogs"]`. Files such as `.opencode/plugins/*.ts` use
+ * OpenCode configuration lists the package name in the `plugins` array:
+ * `"plugins": ["sortie-dogs"]`. V1 wrappers can still use
  * `import { SortieDogsPlugin } from "sortie-dogs/plugin"`.
  *
- * OpenCode treats every runtime export of a loaded plugin module as a plugin factory and calls
- * each one with the plugin input. A non-factory runtime export therefore fails the whole module
- * load and silently disables the plugin. This entry exposes the factory and nothing else; every
- * other runtime symbol stays on the package root.
+ * OpenCode V2 requires a default definition with an id and setup or effect function.
+ * Keep other runtime symbols on the package root rather than this shared entry.
  */
 export { SortieDogsV010Plugin as SortieDogsPlugin } from "./profiled.js";
+export { default } from "./v2.js";
 export type {
   OpenCodeEvent,
   OpenCodeHooks,
