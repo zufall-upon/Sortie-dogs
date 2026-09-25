@@ -76,6 +76,14 @@ const RUNNER_PROFILES = Object.freeze({
       { model: "openai/gpt-5.6-terra", variant: "xhigh" },
       { model: "openai/gpt-5.6-luna-fast", variant: "max" }],
   }),
+  v0127: Object.freeze({
+    agent: "dog-operator", initArgs: ["--profile", "v010"], runtimeModule: "runtime-assets-v010.js",
+    markerExport: "V010_RUNTIME_ASSET_VERSION", implementationAgents: ["dog-worker-v010"],
+    requiredAssets: ["agent/dog-operator.md", "agent/dogs-coordinator.md", "agent/dog-worker-v010.md",
+      "command/sortie-v010.md"],
+    operatorRoutes: [{ model: "openai/gpt-6-sol", variant: "high" },
+      { model: "openai/gpt-6-sol", variant: "xhigh" }],
+  }),
 });
 
 class HarnessFailure extends Error {
@@ -138,7 +146,7 @@ function exactKeys(value, keys, gate) {
 }
 
 export function resolveRunnerProfile(name = "stable") {
-  invariant(Object.hasOwn(RUNNER_PROFILES, name), "profile", "Runner profile must be stable or v010.");
+  invariant(Object.hasOwn(RUNNER_PROFILES, name), "profile", "Runner profile must be stable, v010, or v0127.");
   return RUNNER_PROFILES[name];
 }
 
@@ -191,6 +199,8 @@ export function validateManifest(value, manifestPath, repositoryRoot = process.c
     Array.isArray(value.package.required_assets) && value.package.required_assets.length > 0,
   "package-identity", "Package hash, version, marker, and assets are required.");
   exactKeys(value.package, ["sha256", "version", "runtime_marker", "required_assets"], "package-keys");
+  invariant(profile !== "v0127" || value.package.version === "0.12.7", "v0127-version",
+    "The v0127 matched profile requires the published v0.12.7 package.");
   for (const asset of value.package.required_assets) requireSafeRelative(asset, "package-assets");
   invariant(resolvedProfile.requiredAssets.every((asset) => value.package.required_assets.includes(asset)),
     "package-assets", "The package required_assets omit a profile-required runtime asset.");
@@ -201,11 +211,11 @@ export function validateManifest(value, manifestPath, repositoryRoot = process.c
     value.opencode?.model === route.model && value.opencode?.variant === route.variant);
   invariant(record(value.opencode) && string(value.opencode.wsl_executable) && string(value.opencode.executable) &&
     string(value.opencode.version) && string(value.opencode.auth_file) &&
-    (profile !== "v010" || safeWslPath(value.opencode.host_database)) &&
+    (!["v010", "v0127"].includes(profile) || safeWslPath(value.opencode.host_database)) &&
     approvedOperatorRoute,
   "opencode", "Pinned WSL OpenCode, auth presence path, and an approved profile operator route are required.");
   exactKeys(value.opencode, ["wsl_executable", "executable", "version", "auth_file", "model", "variant",
-    ...(profile === "v010" ? ["host_database"] : [])],
+    ...(["v010", "v0127"].includes(profile) ? ["host_database"] : [])],
     "opencode-keys");
   invariant(record(value.tools), "tools", "Tool commands are required.");
   exactKeys(value.tools, TOOL_NAMES, "tool-keys");
@@ -243,8 +253,13 @@ export function validateManifest(value, manifestPath, repositoryRoot = process.c
     value.protocol.retry_count === 0 && value.protocol.attempts_per_arm === 1 &&
     value.protocol.arm_order?.join(",") === "bare,sortie", "protocol",
   "Protocol must be Bare then Sortie with fixed watchdogs, one attempt, and retry zero.");
+  invariant(value.protocol.total_wall_seconds === undefined || (profile === "v0127" &&
+    Number.isSafeInteger(value.protocol.total_wall_seconds) && value.protocol.total_wall_seconds > 0 &&
+    value.protocol.total_wall_seconds <= DEFAULT_WALL_SECONDS), "total-wall-limit",
+  "Only the v0127 profile may shorten the shared wall clock.");
   exactKeys(value.protocol, ["wall_seconds", "startup_seconds", "activity_seconds", "progress_seconds",
-    "retry_count", "attempts_per_arm", "arm_order"], "protocol-keys");
+    "retry_count", "attempts_per_arm", "arm_order",
+    ...(value.protocol.total_wall_seconds === undefined ? [] : ["total_wall_seconds"])], "protocol-keys");
   return { manifest: value, profile: resolvedProfile, manifestPath: resolve(manifestPath), repositoryRoot: resolve(repositoryRoot),
     runtimeRoot, officialRoot, packagePath };
 }
@@ -534,6 +549,22 @@ async function readState(runtimeRoot) {
   catch { return { schema_version: 1, arms: {} }; }
 }
 
+export function pairRemainingMs(state, now = Date.now()) {
+  if (!state.protocol?.pair_deadline_at) return DEFAULT_WALL_SECONDS * 1000;
+  const remaining = Date.parse(state.protocol.pair_deadline_at) - now;
+  invariant(Number.isFinite(remaining), "pair-deadline", "The matched pair deadline is invalid.");
+  return Math.max(0, Math.min((state.protocol.pair_wall_seconds ?? DEFAULT_WALL_SECONDS) * 1000, remaining));
+}
+
+async function requirePairTime(context, state, arm) {
+  const remaining = pairRemainingMs(state);
+  if (remaining > 0) return remaining;
+  state.stopped = { arm, reason: "pair-deadline-exhausted", at: new Date().toISOString() };
+  await saveState(context.runtimeRoot, state);
+  await summarize(context);
+  throw new HarnessFailure("pair-deadline", "The shared wall deadline expired; no further arm starts.");
+}
+
 async function saveState(runtimeRoot, state) {
   await atomicJson(join(runtimeRoot, STATE_FILE), state);
 }
@@ -593,7 +624,7 @@ export async function assertBareIsolation({ projectRoot, configRoots, resolvedCo
 }
 
 export function isolatedConfig(profileName = "stable") {
-  return { $schema: "https://opencode.ai/config.json", ...(profileName === "v010" ? { experimental: { subagent_depth: 2 } } : {}),
+  return { $schema: "https://opencode.ai/config.json", ...(["v010", "v0127"].includes(profileName) ? { experimental: { subagent_depth: 2 } } : {}),
     mcp: {}, plugin: [] };
 }
 
@@ -720,15 +751,54 @@ export async function inspectResolvedConfig(context, arm, workspace, roots, opti
   return { config, environment, isolation, nativeEvidence };
 }
 
+export function hasPinnedSubagentDepth(config) {
+  const depths = [config.subagent_depth, config.experimental?.subagent_depth]
+    .filter(value => value !== undefined);
+  return depths.length > 0 && depths.every(value => value === 2);
+}
+
+export function v1PluginWrapperSource() {
+  return 'import { SortieDogsPlugin } from "sortie-dogs/plugin";\n' +
+    'export default { id: "sortie-dogs.v010", server: SortieDogsPlugin };\n';
+}
+
+export function registeredOperatorTools(agent) {
+  const required = ["sortie_v010_start_mission", "sortie_v010_plan_units", "sortie_v010_complete_mission"];
+  return required.every(name => agent?.name === "dog-operator" && Object.hasOwn(agent.tools ?? {}, name));
+}
+
+async function inspectRegisteredOperatorTools(context, workspace, roots, environment) {
+  const cwd = await toWslPath(context.manifest, workspace);
+  const python = context.manifest.tools.python;
+  const groupFile = join(context.runtimeRoot, "sortie-operator-tools-process-group.pid");
+  const groupFileWsl = await toWslPath(context.manifest, groupFile);
+  const spec = ownedWslSpec(context.manifest, cwd, python.executable,
+    [...python.args, ...anonymousMemoryCaptureArgs(context.manifest.opencode.executable,
+      ["debug", "agent", "dog-operator"])], environment, groupFileWsl);
+  const result = await checkedOwnedWslSpec(context.manifest, spec, groupFile,
+    { timeoutMs: 120_000 }, "operator-tool-inspection");
+  let agent;
+  try { agent = JSON.parse(completeJson(result.stdout.toString("utf8"))); }
+  catch { throw new HarnessFailure("operator-tool-json", "Operator tool inspection returned invalid JSON.",
+    nativeCommandEvidence(result)); }
+  if (!registeredOperatorTools(agent)) throw new HarnessFailure("sortie-tool-registration",
+    "The OpenCode host did not register the pinned Sortie mission tools.", nativeCommandEvidence(result));
+  return { required_tools_registered: true, tool_count: Object.keys(agent.tools).length,
+    tool_names_sha256: sha256Bytes(Object.keys(agent.tools).sort().join("\0")) };
+}
+
 export async function inspectRunArmPreAgent(context, arm, workspace, roots, options = {}) {
   const inspected = await inspectResolvedConfig(context, arm, workspace, roots, options);
   if (arm === "sortie" && !(Array.isArray(inspected.config.plugin) && inspected.config.plugin.length === 1 &&
     typeof inspected.config.plugin[0] === "string" && forbiddenText(inspected.config.plugin[0])))
     throw new HarnessFailure("sortie-plugin-config",
       "Sortie resolved config is not the exact project-local plugin.", inspected.nativeEvidence);
-  if (context.manifest.profile === "v010" && inspected.config.experimental?.subagent_depth !== 2)
+  if (arm === "sortie" && ["v010", "v0127"].includes(context.manifest.profile) &&
+    !hasPinnedSubagentDepth(inspected.config))
     throw new HarnessFailure("sortie-subagent-depth",
-      "The v0.10 resolved config must pin experimental.subagent_depth to two.", inspected.nativeEvidence);
+      "The resolved Sortie config must pin subagent_depth to two.", inspected.nativeEvidence);
+  if (arm === "sortie" && context.manifest.profile === "v0127")
+    inspected.toolRegistration = await inspectRegisteredOperatorTools(context, workspace, roots, inspected.environment);
   return inspected;
 }
 
@@ -758,12 +828,20 @@ export async function installSortie(context, workspace, roots, candidate = null)
   await runWsl(context.manifest, workspaceWsl, context.manifest.tools.node.executable,
     [...context.manifest.tools.node.args, await toWslPath(context.manifest, join(installed, "dist", "cli", "main.js")),
       "init", workspaceWsl, ...context.profile.initArgs], {}, { timeoutMs: 120_000 }, "sortie-init");
-  const plugin = `file://${await toWslPath(context.manifest, join(installed, "dist", "plugin", "opencode.js"))}`;
+  let entry = join(installed, "dist", "plugin", "opencode.js");
+  if (context.manifest.profile === "v0127") {
+    entry = join(control, "plugins", "sortie-dogs-compat.mjs");
+    if (candidate === null) {
+      await mkdir(dirname(entry), { recursive: true });
+      await writeFile(entry, v1PluginWrapperSource(), { flag: "wx", mode: 0o600 });
+    }
+  }
+  const plugin = `file://${await toWslPath(context.manifest, entry)}`;
   if (candidate === null) {
     await atomicJson(join(control, "opencode.json"), { $schema: "https://opencode.ai/config.json", plugin: [plugin],
-      ...(context.manifest.profile === "v010" ? { experimental: { subagent_depth: 2 } } : {}) });
+       ...(["v010", "v0127"].includes(context.manifest.profile) ? { experimental: { subagent_depth: 2 } } : {}) });
     const neutral = { $schema: "https://opencode.ai/config.json", mcp: {},
-      ...(context.manifest.profile === "v010" ? { experimental: { subagent_depth: 2 } } : {}) };
+       ...(["v010", "v0127"].includes(context.manifest.profile) ? { experimental: { subagent_depth: 2 } } : {}) };
     await atomicJson(join(roots.opencode, "opencode.json"), neutral);
     await atomicJson(join(roots.xdg, "opencode", "opencode.json"), neutral);
   }
@@ -996,9 +1074,9 @@ export function debugRecoveryFailure(recovery, gate) {
 }
 
 export function debugResumeArgs(manifest, cwd, rootSessionId) {
-  invariant(manifest?.profile === "v010" && manifest?.qualification_only === true && safeWslPath(cwd) &&
+  invariant(["v010", "v0127"].includes(manifest?.profile) && manifest?.qualification_only === true && safeWslPath(cwd) &&
     /^ses_[A-Za-z0-9_-]+$/u.test(rootSessionId ?? ""), "debug-resume-identity",
-  "Debug resume requires the v0.10 qualification profile, safe workspace, and exact root session identity.");
+  "Debug resume requires a Sortie qualification profile, safe workspace, and exact root session identity.");
   return ["run", "--dir", cwd, "--format", "json", "--model", manifest.opencode.model,
     "--variant", manifest.opencode.variant, "--agent", "dog-operator", "--session", rootSessionId,
     DEBUG_CONTINUATION_PROMPT];
@@ -1051,7 +1129,7 @@ try:
 finally: con.close()`;
 
 export async function nativeImplementationChildren(context, rootSessionId, workspace) {
-  invariant(context.manifest.profile === "v010" && safeWslPath(context.manifest.opencode.host_database),
+  invariant(["v010", "v0127"].includes(context.manifest.profile) && safeWslPath(context.manifest.opencode.host_database),
     "native-child-config", "v0.10 native child evidence requires a declared WSL host database.");
   const workspaceWsl = await toWslPath(context.manifest, workspace);
   const result = await runWsl(context.manifest, "/", context.manifest.tools.python.executable,
@@ -1064,6 +1142,11 @@ export async function nativeImplementationChildren(context, rootSessionId, works
 }
 
 async function collectPatch(context, arm, workspace) {
+  const untracked = (await runTool(context.manifest.tools.git,
+    ["ls-files", "--others", "--exclude-standard", "-z"], { cwd: workspace }, "model-untracked"))
+    .stdout.toString("utf8").split("\0").filter(Boolean);
+  if (untracked.length) await runTool(context.manifest.tools.git,
+    ["add", "-N", "--", ...untracked], { cwd: workspace }, "model-intent-to-add");
   const patchResult = await runTool(context.manifest.tools.git,
     ["diff", "--binary", ANKO_BASE], { cwd: workspace }, "model-patch");
   const evidence = join(context.runtimeRoot, "evidence", arm);
@@ -1113,10 +1196,11 @@ function rewardEvidence(resultJson, selectors) {
   return { reward: Number.isFinite(reward) ? reward : null, counts };
 }
 
-export function computeSummary(arms) {
+export function computeSummary(arms, operationProven = true) {
   const bare = arms?.bare;
   const sortie = arms?.sortie;
-  const reason = bare?.reward !== 1 || sortie?.reward !== 1 ? "reward_not_one" :
+  const reason = !operationProven ? "normal-operation-unproven" :
+    bare?.reward !== 1 || sortie?.reward !== 1 ? "reward_not_one" :
     !(typeof bare?.duration_ms === "number" && bare.duration_ms > 0 &&
       typeof sortie?.duration_ms === "number" && sortie.duration_ms > 0) ? "metric_missing" : null;
   if (reason !== null) return { comparison_eligible: false, speed_ratio: null, cost_ratio: null, refusal: reason };
@@ -1225,7 +1309,10 @@ async function preflight(context) {
     wall_seconds: DEFAULT_WALL_SECONDS, startup_seconds: DEFAULT_STARTUP_SECONDS,
     activity_seconds: DEFAULT_ACTIVITY_SECONDS, progress_seconds: DEFAULT_PROGRESS_SECONDS,
     retries: 0, arm_order: context.manifest.qualification_only ? ["sortie"] : ARMS,
-    qualification_only: context.manifest.qualification_only === true },
+    qualification_only: context.manifest.qualification_only === true,
+    ...(context.manifest.profile === "v0127"
+      ? { pair_wall_seconds: context.manifest.protocol.total_wall_seconds ?? DEFAULT_WALL_SECONDS,
+        pair_deadline_at: new Date(Date.now() + (context.manifest.protocol.total_wall_seconds ?? DEFAULT_WALL_SECONDS) * 1000).toISOString() } : {}) },
   preflight: { status: "pass", official_sha256: pinned.official_sha256,
     package_sha256: pinned.package_sha256, deepswe_commit: deepSweHead,
     versions, opencode_version: context.manifest.opencode.version }, arms: {} };
@@ -1402,11 +1489,13 @@ export async function recordPreAgentFailure(context, state, arm, gate, nativeEvi
 async function runArm(context, arm, debug = false) {
   const state = await readState(context.runtimeRoot);
   assertRunArmAllowed(state, arm, context.manifest.qualification_only === true);
-  invariant(!debug || (arm === "sortie" && context.manifest.profile === "v010" &&
-    context.manifest.qualification_only === true), "debug-mode", "Debug mode is limited to the v0.10 Sortie qualification arm.");
+  if (context.manifest.profile === "v0127") await requirePairTime(context, state, arm);
+  invariant(!debug || (arm === "sortie" && ["v010", "v0127"].includes(context.manifest.profile) &&
+    context.manifest.qualification_only === true), "debug-mode", "Debug mode requires a Sortie qualification arm.");
   if (debug) state.debug = { schema_version: 1, mode: "state-preserving", quality_gate: false,
     methodology_comparable: false, max_cycles: DEBUG_MAX_CYCLES, started_at: new Date().toISOString(),
-    deadline_at: new Date(Date.now() + context.manifest.protocol.wall_seconds * 1000).toISOString(),
+    deadline_at: context.manifest.profile === "v0127" ? state.protocol.pair_deadline_at
+      : new Date(Date.now() + context.manifest.protocol.wall_seconds * 1000).toISOString(),
     status: "running", executions: [] };
   state.arms[arm] = { attempted: true, started_at: new Date().toISOString(), active_pid: null };
   await saveState(context.runtimeRoot, state);
@@ -1422,6 +1511,7 @@ async function runArm(context, arm, debug = false) {
   let groupFile;
   let stopGroup;
   let spec;
+  let wallMs;
   try {
     if (arm === "sortie") packageEvidence = await installSortie(context, workspace, roots);
     inspected = await inspectRunArmPreAgent(context, arm, workspace, roots);
@@ -1438,6 +1528,10 @@ async function runArm(context, arm, debug = false) {
     stopGroup = () => stopWslGroup(context.manifest, groupFile);
     spec = ownedWslSpec(context.manifest, cwd, context.manifest.opencode.executable, args,
       inspected.environment, groupFileWsl);
+    wallMs = context.manifest.profile === "v0127"
+      ? Math.min(pairRemainingMs(state), arm === "bare" ? 45 * 60 * 1000 : DEFAULT_WALL_SECONDS * 1000)
+      : DEFAULT_WALL_SECONDS * 1000;
+    invariant(wallMs > 0, "pair-deadline", "The shared deadline expired before agent launch.");
   } catch (error) {
     const gate = error instanceof HarnessFailure ? error.gate : "pre-agent-internal";
     const nativeEvidence = error instanceof HarnessFailure ? error.nativeEvidence : null;
@@ -1446,7 +1540,7 @@ async function runArm(context, arm, debug = false) {
     throw error;
   }
   const started = Date.now();
-  const result = await execute(spec.executable, spec.args, { timeoutMs: DEFAULT_WALL_SECONDS * 1000,
+  const result = await execute(spec.executable, spec.args, { timeoutMs: wallMs,
     cwd: spec.cwd,
     heartbeat: `run-arm:${arm}`,
     eventGate: expectedOperationEvent,
@@ -1454,10 +1548,10 @@ async function runArm(context, arm, debug = false) {
     initialProgressValue: sha256Bytes(preRunStatus.stdout),
     progressProbe: async () => sha256Bytes((await runTool(context.manifest.tools.git,
       ["status", "--porcelain=v1"], { cwd: workspace }, "watchdog-progress")).stdout),
-    watchdog: { wall_ms: context.manifest.protocol.wall_seconds * 1000,
-      startup_ms: context.manifest.protocol.startup_seconds * 1000,
-      activity_ms: context.manifest.protocol.activity_seconds * 1000,
-      progress_ms: context.manifest.protocol.progress_seconds * 1000 },
+    watchdog: { wall_ms: wallMs,
+      startup_ms: Math.min(context.manifest.protocol.startup_seconds * 1000, wallMs),
+      activity_ms: Math.min(context.manifest.protocol.activity_seconds * 1000, wallMs),
+      progress_ms: Math.min(context.manifest.protocol.progress_seconds * 1000, wallMs) },
     onSpawn: async (pid) => { state.arms[arm].active_pid = pid ?? null; await saveState(context.runtimeRoot, state); } });
   try {
     result.processGroup = await stopGroup();
@@ -1471,12 +1565,18 @@ async function runArm(context, arm, debug = false) {
   const cancellation = await cancellationRequest(context, arm, "run-arm");
   if (cancellation) result.operationFailure = "cancelled";
   state.arms[arm].active_pid = null;
+  if (context.manifest.profile === "v0127") {
+    const evidence = join(context.runtimeRoot, "evidence", arm);
+    await mkdir(evidence, { recursive: true });
+    await writeFile(join(evidence, "opencode-events.jsonl"), result.stdout, { mode: 0o600, flag: "wx" });
+    await writeFile(join(evidence, "opencode-stderr.log"), result.stderr, { mode: 0o600, flag: "wx" });
+  }
   const patch = await collectPatch(context, arm, workspace).catch(() => {
     result.operationFailure ??= "patch-capture-unavailable";
     return { patch_sha256: null, patch_bytes: null, changed_paths: null, uncommitted_present: null, status_sha256: null };
   });
   const metadata = eventMetadata(result.stdout, context.manifest.profile ?? "stable");
-  if (context.manifest.profile === "v010" && metadata.root_session_id !== null) {
+  if (["v010", "v0127"].includes(context.manifest.profile) && metadata.root_session_id !== null) {
     try { metadata.implementation_children = await nativeImplementationChildren(context, metadata.root_session_id, workspace); }
     catch { result.operationFailure ??= "native-child-evidence-unavailable"; metadata.implementation_children = []; }
   }
@@ -1492,6 +1592,7 @@ async function runArm(context, arm, debug = false) {
     token_metric_references: metadata.token_metric_references, cost: metadata.cost, stdout_sha256: metadata.stdout_sha256,
     stderr_sha256: sha256Bytes(result.stderr), model: context.manifest.opencode.model,
     variant: context.manifest.opencode.variant, package: packageEvidence,
+    tool_registration: inspected.toolRegistration ?? null,
     isolation: inspected.isolation, resolved_config_sha256: sha256Bytes(JSON.stringify(inspected.config)),
     patch_sha256: patch.patch_sha256,
     patch_bytes: patch.patch_bytes, changed_paths: patch.changed_paths, uncommitted_present: patch.uncommitted_present,
@@ -1516,7 +1617,8 @@ async function runArm(context, arm, debug = false) {
          state.debug.executions[0].errors.some(item => item.kind !== "refusal") &&
          state.debug.executions[0].errors.every(item => item.kind === "refusal" || item.tool === "task")))
       ? "recoverable" : "paused";
-  if (gate.status === "fail") state.stopped = { arm, reason: gate.reason,
+  if (gate.status === "fail" && (context.manifest.profile !== "v0127" ||
+    result.cleanupConfirmation !== "confirmed" || cancellation)) state.stopped = { arm, reason: gate.reason,
     ...(cancellation ? { gate: cancellation.signal } : {}), at: new Date().toISOString() };
   await saveState(context.runtimeRoot, state);
   if (state.stopped) {
@@ -1529,7 +1631,7 @@ async function runArm(context, arm, debug = false) {
 
 async function resumeArm(context, arm) {
   const state = await readState(context.runtimeRoot);
-  invariant(arm === "sortie" && context.manifest.profile === "v010" && context.manifest.qualification_only === true &&
+  invariant(arm === "sortie" && ["v010", "v0127"].includes(context.manifest.profile) && context.manifest.qualification_only === true &&
     state.debug?.mode === "state-preserving" && ["recoverable", "paused"].includes(state.debug.status) &&
     state.stopped?.arm === arm && ["agent-event-error", "debug-unknown-agent-event-error",
       "debug-public-recovery-unproven", "delivery-not-complete"].includes(state.arms?.[arm]?.run?.expected_operation?.reason),
@@ -1538,7 +1640,8 @@ async function resumeArm(context, arm) {
     (state.arms[arm].verification?.active_pid === undefined || state.arms[arm].verification.active_pid === null),
   "debug-resume-active-process", "Debug continuation is refused while an arm or verifier process is active.");
   invariant(state.debug.executions.length < state.debug.max_cycles, "debug-cycle-cap", "Debug continuation cycle cap reached.");
-  const remainingMs = Date.parse(state.debug.deadline_at) - Date.now();
+  const remainingMs = Math.min(Date.parse(state.debug.deadline_at) - Date.now(),
+    context.manifest.profile === "v0127" ? pairRemainingMs(state) : DEFAULT_WALL_SECONDS * 1000);
   invariant(Number.isFinite(remainingMs) && remainingMs > 0, "debug-wall-cap", "Debug continuation wall cap reached.");
   const workspace = join(context.runtimeRoot, "workspaces", arm);
   invariant((await stat(workspace).catch(() => null))?.isDirectory(), "debug-resume-workspace",
@@ -1724,6 +1827,7 @@ export function createLocalVerifierConfig(source, logsPath) {
 async function verifyArm(context, arm) {
   const state = await readState(context.runtimeRoot);
   assertVerifyAllowed(state, arm, context.manifest.qualification_only === true);
+  if (context.manifest.profile === "v0127") await requirePairTime(context, state, arm);
   state.arms[arm].verification = { attempted: true, started_at: new Date().toISOString(), active_pid: null };
   await saveState(context.runtimeRoot, state);
   const verifier = join(context.runtimeRoot, "verifiers", arm);
@@ -1784,7 +1888,9 @@ async function verifyArm(context, arm) {
   const stopGroup = () => stopWslGroup(context.manifest, groupFile);
   const spec = ownedWslSpec(context.manifest, verifierWsl, bash.executable, [...bash.args, scriptWsl], environment,
     groupFileWsl);
-  const result = await execute(spec.executable, spec.args, { timeoutMs: DEFAULT_WALL_SECONDS * 1000,
+  const wallMs = context.manifest.profile === "v0127"
+    ? await requirePairTime(context, state, arm) : DEFAULT_WALL_SECONDS * 1000;
+  const result = await execute(spec.executable, spec.args, { timeoutMs: wallMs,
     cwd: spec.cwd,
     heartbeat: `verify-arm:${arm}`,
     stopTree: stopGroup,
@@ -1800,7 +1906,7 @@ async function verifyArm(context, arm) {
   let resultJson = {};
   try { resultJson = JSON.parse(await readFile(rewardPath, "utf8")); } catch {}
   const reward = rewardEvidence(resultJson, context.manifest.verifier.result);
-  await rm(logs, { recursive: true, force: true });
+  if (context.manifest.profile !== "v0127") await rm(logs, { recursive: true, force: true });
   state.arms[arm].verification = { ...state.arms[arm].verification, status: "complete", exit: result.code,
     signal: result.signal, timed_out: result.timedOut, duration_ms: Date.now() - started,
     operation_failure: result.operationFailure ?? null, process_scope: "wsl",
@@ -1840,6 +1946,7 @@ export async function summarize(context) {
     recoverable_refusals: state.arms[arm].run.recoverable_refusals ?? 0,
     refusal_codes: state.arms[arm].run.refusal_codes ?? [],
     exit: state.arms[arm].run.exit, status: state.arms[arm].run.status,
+    expected_operation: state.arms[arm].run.expected_operation,
     duration_ms: state.arms[arm].run.duration_ms, root_session_id: state.arms[arm].run.root_session_id,
     model: state.arms[arm].run.model, variant: state.arms[arm].run.variant,
     package: state.arms[arm].run.package, isolation: state.arms[arm].run.isolation,
@@ -1863,7 +1970,8 @@ export async function summarize(context) {
     qualification_only: context.manifest.qualification_only === true, arms: armSummary,
     comparison: context.manifest.qualification_only
       ? { comparison_eligible: false, speed_ratio: null, cost_ratio: null, refusal: "qualification-only" }
-      : computeSummary(comparisonInput) }, reportSecrets(context.manifest));
+      : computeSummary(comparisonInput, reportArms.every(arm =>
+         state.arms[arm].run.expected_operation?.status === "pass")) }, reportSecrets(context.manifest));
   await atomicJson(join(context.runtimeRoot, REPORT_FILE), report);
   return report;
 }

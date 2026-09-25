@@ -23,10 +23,21 @@ process uses an executable plus argument array; manifest values are never interp
 
 The template is the standalone v0.10 qualification profile: `profile:"v010"` and
 `qualification_only:true`. Existing manifests with no `profile` remain the stable v1 profile and retain
-the paired Bare-then-Sortie behavior. Profiles are closed to `stable|v010`; v0.10 without
+the paired Bare-then-Sortie behavior. Profiles are closed to `stable|v010|v0127`; v0.10 without
 `qualification_only:true` is rejected before preflight so it cannot launch Bare.
 Its `opencode.host_database` pins the known WSL host metadata database. The runner opens it through
 the pinned Python `sqlite3` client with SQLite `mode=ro`; authentication files remain unopened.
+
+The `v0127` profile pins the published v0.12.7 tarball and its SHA-256, runtime marker, GPT-6 Sol
+operator route, and the same official task bytes. It accepts a Bare-then-Sortie pair or an explicit
+`qualification_only:true` Sortie diagnostic. Set `protocol.total_wall_seconds` to shorten the shared
+deadline (for example, `3600` for a 60-minute diagnostic); omitted means 5400 seconds. A diagnostic
+uses `run-arm --arm sortie --debug`, not the v0.10 qualification wrapper. It is not a release gate.
+The package is unchanged: the isolated OpenCode 1.18.29 fixture writes a project-local adapter with
+`default { id: "sortie-dogs.v010", server: SortieDogsPlugin }`, importing the named factory from
+`sortie-dogs/plugin`. The pinned host requires this entry shape and rejects the package's V2 default
+`setup` entry. Before starting inference, `debug agent dog-operator` must expose the three pinned
+mission tools; a resolved config containing one plugin string alone does not prove it loaded.
 
 Each tool declares `environment`, exact `executable`, invariant `args`, one-shot `probe_args`, and the
 probe's expected exit. `host` is reserved for Git workspace operations; WSL package/verifier tools use
@@ -113,6 +124,8 @@ Inspect each `run-arm` result before continuing. When the benchmark objective as
 stop immediately if a required-source-change task produces `patch_bytes: 0`, Sortie dispatches no
 implementation child, a successful terminal claim has incomplete delivery, or required parent/child session
 identity is absent. Do not start the next arm or either verifier and do not calculate a performance comparison.
+The `v0127` diagnostic/matched profile may retain and independently grade a failed one-shot candidate;
+its summary includes `expected_operation` and refuses comparison ratios if normal operation is unproven.
 Preserve sanitized state for diagnosis and terminate any recorded process tree. After fixing the product, use a
 new runtime root and rerun the complete matched pair only after a focused reproduction passes.
 
