@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 import Ajv2020 from "ajv/dist/2020.js";
 
 import {
@@ -21,14 +22,19 @@ import {
   debugRecoveryPacket,
   debugResumeArgs,
   eventMetadata,
+  hasPinnedSubagentDepth,
   isolatedConfig,
   deliveryResult,
   expectedOperation,
   expectedOperationEvent,
   execute,
   nativeCommandEvidence,
+  pairRemainingMs,
   pinnedWorkspaceRefCommands,
   recordPreAgentFailure,
+  registeredHostAgentRoutes,
+  registeredV2Plugin,
+  requireIsolatedV2Database,
   resolvedConfigCommandArgs,
   summarize,
   cleanup,
@@ -36,7 +42,9 @@ import {
   createPathOnlyWrapper,
   sanitizeForReport,
   resolveRunnerProfile,
+  runArmArgs,
   validateManifest,
+  v2PluginWrapperSource,
   verifyPinnedFiles,
   verifyConfigLoaderDependency,
   watchdogReason,
@@ -153,6 +161,99 @@ test("v010 profile is closed, qualification-only, and pins its runtime surface",
   assert.equal(validate(value), false);
 });
 
+test("v0127 matched profile pins the published package, GPT-6 route, and one shared deadline", async () => {
+  const root = join(tmpdir(), "schema-v0127");
+  const schema = JSON.parse(await readFile(new URL("./fixtures/frontierharness-local/manifest.schema.json", import.meta.url), "utf8"));
+  const validate = new Ajv2020().compile(schema);
+  const value = manifest(root) as any;
+  value.profile = "v0127";
+  value.package.version = "0.12.7";
+  value.package.required_assets = ["agent/dog-operator.md", "agent/dogs-coordinator.md",
+    "agent/dog-worker-v010.md", "command/sortie-v010.md"];
+  value.opencode.host_database = "/home/fixture/.local/share/opencode/opencode.db";
+  value.opencode.version = "2.0.16";
+  value.opencode.model = "openai/gpt-6-sol";
+  assert.equal(validate(value), true, JSON.stringify(validate.errors));
+  assert.equal(validateManifest(value, join(root, "manifest.json"), root).profile.agent, "dog-operator");
+  assert.deepEqual(isolatedConfig("v0127"), { $schema: "https://opencode.ai/config.json", plugins: [] });
+  assert.equal(hasPinnedSubagentDepth({ subagent_depth: 2, experimental: {} }), true);
+  assert.equal(hasPinnedSubagentDepth({ experimental: { subagent_depth: 2 } }), true);
+  assert.equal(hasPinnedSubagentDepth({ subagent_depth: 1, experimental: { subagent_depth: 2 } }), false);
+  assert.equal(hasPinnedSubagentDepth({ experimental: {} }), false);
+  assert.equal(pairRemainingMs({ protocol: { pair_deadline_at: new Date(100_000).toISOString() } }, 0), 100_000);
+  assert.equal(pairRemainingMs({ protocol: { pair_deadline_at: new Date(100_000).toISOString() } }, 100_000), 0);
+  value.protocol.total_wall_seconds = 3600;
+  assert.equal(validate(value), true, JSON.stringify(validate.errors));
+  assert.doesNotThrow(() => validateManifest(value, join(root, "bounded-manifest.json"), root));
+  assert.equal(pairRemainingMs({ protocol: { pair_deadline_at: new Date(10_000_000).toISOString(),
+    pair_wall_seconds: 3600 } }, 0), 3_600_000);
+  const invalidLimit = structuredClone(value);
+  invalidLimit.protocol.total_wall_seconds = 5401;
+  assert.equal(validate(invalidLimit), false);
+  assert.throws(() => validateManifest(invalidLimit, join(root, "unbounded-manifest.json"), root),
+    (error: Error & { gate?: string }) => error.gate === "total-wall-limit");
+  const legacyHost = structuredClone(value);
+  legacyHost.opencode.version = "1.18.29";
+  assert.equal(validate(legacyHost), false);
+  assert.throws(() => validateManifest(legacyHost, join(root, "v1-manifest.json"), root),
+    (error: Error & { gate?: string }) => error.gate === "v0127-host-version");
+  value.opencode.variant = "xhigh";
+  assert.equal(validate(value), true, JSON.stringify(validate.errors));
+  assert.doesNotThrow(() => validateManifest(value, join(root, "xhigh-manifest.json"), root));
+  value.opencode.variant = "max";
+  assert.equal(validate(value), false);
+  assert.throws(() => validateManifest(value, join(root, "manifest.json"), root));
+  value.opencode.variant = "high";
+  value.package.version = "0.12.6";
+  assert.equal(validate(value), false);
+  assert.throws(() => validateManifest(value, join(root, "manifest.json"), root),
+    (error: Error & { gate?: string }) => error.gate === "v0127-version");
+});
+
+test("v0127 V2 host preserves published #variant routes and requires active plugin registration", async () => {
+  assert.match(v2PluginWrapperSource(), /createSortieDogsV2Plugin\(SortieDogsPlugin\)/u);
+  assert.doesNotMatch(v2PluginWrapperSource(), /server: SortieDogsPlugin/u);
+  const agents = [
+    ["dog-operator", "gpt-6-sol", "xhigh"],
+    ["dogs-coordinator", "gpt-6-sol", "xhigh"],
+    ["dog-worker-v010", "gpt-6-luna-fast", "max"],
+    ["dog-luna-worker-v010", "gpt-6-luna-fast", "max"],
+    ["dog-scout-v010", "gpt-6-luna-fast", "max"],
+    ["dog-reviewer-v010", "gpt-6-sol", "xhigh"],
+    ["dog-advisor-v010", "gpt-6-sol", "xhigh"],
+  ].map(([id, model, variant]) => ({ id, model: { providerID: "openai", id: model, variant } }));
+  assert.equal(registeredHostAgentRoutes({ agents }), true);
+  assert.equal(registeredHostAgentRoutes({ agents: agents.slice(1) }), false);
+  assert.equal(registeredHostAgentRoutes({ agents: agents.map((agent, index) =>
+    index === 0 ? { ...agent, model: { ...agent.model, variant: "high" } } : agent) }), false);
+  assert.equal(registeredV2Plugin({ plugins: [{ id: "sortie-dogs.v010", state: "active", server: true }] }, "sortie"), true);
+  assert.equal(registeredV2Plugin({ plugins: [] }, "sortie"), false);
+  assert.equal(registeredV2Plugin({ plugins: [{ id: "sortie-dogs.v010", state: "error", server: true }] }, "sortie"), false);
+  assert.equal(registeredV2Plugin({ plugins: [] }, "bare"), true);
+  assert.equal(registeredV2Plugin({ plugins: [{ id: "sortie-dogs.v010" }] }, "bare"), false);
+  assert.doesNotThrow(() => requireIsolatedV2Database("/mnt/m/run", "/mnt/m/run/opencode.db"));
+  assert.throws(() => requireIsolatedV2Database("/mnt/m/run", "/home/host/opencode.db"),
+    (error: Error & { gate?: string }) => error.gate === "v0127-database-isolation");
+  const root = await mkdtemp(join(tmpdir(), "sortie-v2-adapter-"));
+  try {
+    const control = join(root, ".opencode");
+    const packageRoot = join(control, "node_modules", "sortie-dogs");
+    const entry = join(control, "plugins", "sortie-dogs", "index.js");
+    await mkdir(join(control, "plugins", "sortie-dogs"), { recursive: true });
+    await mkdir(packageRoot, { recursive: true });
+    await writeFile(join(control, "package.json"), JSON.stringify({ type: "module" }));
+    await writeFile(join(packageRoot, "package.json"), JSON.stringify({ name: "sortie-dogs", type: "module",
+      exports: { "./plugin": "./plugin.mjs", "./server": "./server.mjs" } }));
+    await writeFile(join(packageRoot, "plugin.mjs"), "export function SortieDogsPlugin() {}\n");
+    await writeFile(join(packageRoot, "server.mjs"),
+      'export function createSortieDogsV2Plugin(factory) { return { id: "sortie-dogs.v010", setup: factory }; }\n');
+    await writeFile(entry, v2PluginWrapperSource());
+    const module = await import(pathToFileURL(entry).href);
+    assert.equal(module.default.id, "sortie-dogs.v010");
+    assert.equal(typeof module.default.setup, "function");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("rejects approved pin and byte hash mismatches", async () => {
   const root = await mkdtemp(join(tmpdir(), "frontier-pins-"));
   try {
@@ -238,6 +339,9 @@ test("refuses ratios unless both rewards are one and all metrics exist", () => {
   assert.deepEqual(computeSummary({ bare: { reward: 1, duration_ms: 20, cost: 4 },
     sortie: { reward: 1, duration_ms: 10, cost: 2 } }),
   { comparison_eligible: true, speed_ratio: 2, cost_ratio: 2, refusal: null });
+  assert.deepEqual(computeSummary({ bare: { reward: 1, duration_ms: 20, cost: 4 },
+    sortie: { reward: 1, duration_ms: 10, cost: 2 } }, false),
+  { comparison_eligible: false, speed_ratio: null, cost_ratio: null, refusal: "normal-operation-unproven" });
 });
 
 test("empty delivery and transport errors cannot be successful results", () => {
@@ -265,7 +369,7 @@ test("expected-operation failure blocks both remaining arms and verifiers", () =
     state: { status: "error", error: "File not found: /project/ast/type.go" } } }), null);
   assert.equal(expectedOperationEvent({ part: { type: "tool", tool: "read",
     state: { status: "error", error: "Offset 495 is out of range for this file (458 lines)" } } }), null);
-  for (const tool of ["read", "glob", "grep", "task", "bash"]) {
+  for (const tool of ["read", "glob", "grep", "task", "subagent", "bash"]) {
     assert.equal(expectedOperationEvent({ part: { type: "tool", tool,
       state: { status: "error", error: "Permission denied" } } }), "agent-event-error");
   }
@@ -326,6 +430,19 @@ test("debug continuation pins the same session and accepts only bounded public r
   assert.match(args.at(-1)!, /awaiting-acceptance[\s\S]+independent review/u);
   assert.match(args.at(-1)!, /reason=review-blocking[\s\S]+without user approval/u);
   assert.doesNotMatch(args.at(-1)!, /discard y\.output|typed variable binding|modify parser|edit source/u);
+  const v0127 = structuredClone(value);
+  v0127.profile = "v0127";
+  v0127.opencode.model = "openai/gpt-6-sol";
+  v0127.opencode.variant = "xhigh";
+  assert.deepEqual(debugResumeArgs(v0127, "/tmp/debug-workspace", "ses_exact_root")
+    .slice(0, 4), ["run", "--standalone", "--format", "json"]);
+  assert.deepEqual(debugResumeArgs(v0127, "/tmp/debug-workspace", "ses_exact_root")
+    .slice(4, 6), ["--model", "openai/gpt-6-sol#xhigh"]);
+  assert.deepEqual(runArmArgs(v0127, "/tmp/debug-workspace", "dog-operator", "official task"),
+    ["run", "--standalone", "--format", "json", "--model", "openai/gpt-6-sol#xhigh",
+      "--agent", "dog-operator", "official task"]);
+  assert.deepEqual(runArmArgs(value, "/tmp/debug-workspace", "dog-operator", "official task").slice(0, 4),
+    ["run", "--dir", "/tmp/debug-workspace", "--format"]);
 
   const packet = { status: "awaiting-decision", decision: "operator-contract-repair-required",
     contract_repair: { mode: "discard-transient", repair_fingerprint: `sha256:${"a".repeat(64)}`,
@@ -418,6 +535,17 @@ test("isolated config roots pin and verify a non-linked OpenCode loader package"
         package: "@opencode-ai/plugin", version, installed_copy_symlink: false, package_lock_link: false,
       });
     }
+    const v2 = await createConfigRoots(root, "v2", "v0127", "2.0.16");
+    assert.deepEqual(JSON.parse(await readFile(join(v2.loader, "package.json"), "utf8")).dependencies,
+      { "@opencode/plugin": "2.0.16" });
+    const v2Package = join(v2.loader, "node_modules", "@opencode", "plugin");
+    await mkdir(v2Package, { recursive: true });
+    await writeFile(join(v2Package, "package.json"), JSON.stringify({ name: "@opencode/plugin", version: "2.0.16" }));
+    await writeFile(join(v2.loader, "package-lock.json"), JSON.stringify({ lockfileVersion: 3, packages: {
+      "": { dependencies: { "@opencode/plugin": "2.0.16" } },
+      "node_modules/@opencode/plugin": { version: "2.0.16" },
+    } }));
+    assert.equal((await verifyConfigLoaderDependency(v2.loader, "2.0.16", "v0127")).package, "@opencode/plugin");
     const linkedLock = JSON.parse(await readFile(join(roots[1].loader, "package-lock.json"), "utf8"));
     linkedLock.packages["node_modules/@opencode-ai/plugin"].link = true;
     await writeFile(join(roots[1].loader, "package-lock.json"), JSON.stringify(linkedLock));

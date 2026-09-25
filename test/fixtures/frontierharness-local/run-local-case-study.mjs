@@ -76,6 +76,24 @@ const RUNNER_PROFILES = Object.freeze({
       { model: "openai/gpt-5.6-terra", variant: "xhigh" },
       { model: "openai/gpt-5.6-luna-fast", variant: "max" }],
   }),
+  v0127: Object.freeze({
+    agent: "dog-operator", initArgs: ["--profile", "v010"], runtimeModule: "runtime-assets-v010.js",
+    markerExport: "V010_RUNTIME_ASSET_VERSION", implementationAgents: ["dog-worker-v010"],
+    requiredAssets: ["agent/dog-operator.md", "agent/dogs-coordinator.md", "agent/dog-worker-v010.md",
+      "command/sortie-v010.md"],
+    operatorRoutes: [{ model: "openai/gpt-6-sol", variant: "high" },
+      { model: "openai/gpt-6-sol", variant: "xhigh" }],
+  }),
+});
+const V0127_V2_VERSION = "2.0.16";
+const V0127_V2_BINARY_SHA256 = "0910f9e7c5b50eb460c9ae53b4348b781cb44220a18ff2bcce514c2427582848";
+const V0127_HOST_AGENT_ROUTES = Object.freeze({
+  "agent/dogs-coordinator.md": { model: "openai/gpt-6-sol", variant: "xhigh" },
+  "agent/dog-worker-v010.md": { model: "openai/gpt-6-luna-fast", variant: "max" },
+  "agent/dog-luna-worker-v010.md": { model: "openai/gpt-6-luna-fast", variant: "max" },
+  "agent/dog-scout-v010.md": { model: "openai/gpt-6-luna-fast", variant: "max" },
+  "agent/dog-reviewer-v010.md": { model: "openai/gpt-6-sol", variant: "xhigh" },
+  "agent/dog-advisor-v010.md": { model: "openai/gpt-6-sol", variant: "xhigh" },
 });
 
 class HarnessFailure extends Error {
@@ -138,7 +156,7 @@ function exactKeys(value, keys, gate) {
 }
 
 export function resolveRunnerProfile(name = "stable") {
-  invariant(Object.hasOwn(RUNNER_PROFILES, name), "profile", "Runner profile must be stable or v010.");
+  invariant(Object.hasOwn(RUNNER_PROFILES, name), "profile", "Runner profile must be stable, v010, or v0127.");
   return RUNNER_PROFILES[name];
 }
 
@@ -191,6 +209,10 @@ export function validateManifest(value, manifestPath, repositoryRoot = process.c
     Array.isArray(value.package.required_assets) && value.package.required_assets.length > 0,
   "package-identity", "Package hash, version, marker, and assets are required.");
   exactKeys(value.package, ["sha256", "version", "runtime_marker", "required_assets"], "package-keys");
+  invariant(profile !== "v0127" || value.package.version === "0.12.7", "v0127-version",
+    "The v0127 matched profile requires the published v0.12.7 package.");
+  invariant(profile !== "v0127" || value.opencode?.version === V0127_V2_VERSION, "v0127-host-version",
+    "The v0127 profile requires the pinned OpenCode V2 host.");
   for (const asset of value.package.required_assets) requireSafeRelative(asset, "package-assets");
   invariant(resolvedProfile.requiredAssets.every((asset) => value.package.required_assets.includes(asset)),
     "package-assets", "The package required_assets omit a profile-required runtime asset.");
@@ -201,11 +223,11 @@ export function validateManifest(value, manifestPath, repositoryRoot = process.c
     value.opencode?.model === route.model && value.opencode?.variant === route.variant);
   invariant(record(value.opencode) && string(value.opencode.wsl_executable) && string(value.opencode.executable) &&
     string(value.opencode.version) && string(value.opencode.auth_file) &&
-    (profile !== "v010" || safeWslPath(value.opencode.host_database)) &&
+    (!["v010", "v0127"].includes(profile) || safeWslPath(value.opencode.host_database)) &&
     approvedOperatorRoute,
   "opencode", "Pinned WSL OpenCode, auth presence path, and an approved profile operator route are required.");
   exactKeys(value.opencode, ["wsl_executable", "executable", "version", "auth_file", "model", "variant",
-    ...(profile === "v010" ? ["host_database"] : [])],
+    ...(["v010", "v0127"].includes(profile) ? ["host_database"] : [])],
     "opencode-keys");
   invariant(record(value.tools), "tools", "Tool commands are required.");
   exactKeys(value.tools, TOOL_NAMES, "tool-keys");
@@ -243,8 +265,13 @@ export function validateManifest(value, manifestPath, repositoryRoot = process.c
     value.protocol.retry_count === 0 && value.protocol.attempts_per_arm === 1 &&
     value.protocol.arm_order?.join(",") === "bare,sortie", "protocol",
   "Protocol must be Bare then Sortie with fixed watchdogs, one attempt, and retry zero.");
+  invariant(value.protocol.total_wall_seconds === undefined || (profile === "v0127" &&
+    Number.isSafeInteger(value.protocol.total_wall_seconds) && value.protocol.total_wall_seconds > 0 &&
+    value.protocol.total_wall_seconds <= DEFAULT_WALL_SECONDS), "total-wall-limit",
+  "Only the v0127 profile may shorten the shared wall clock.");
   exactKeys(value.protocol, ["wall_seconds", "startup_seconds", "activity_seconds", "progress_seconds",
-    "retry_count", "attempts_per_arm", "arm_order"], "protocol-keys");
+    "retry_count", "attempts_per_arm", "arm_order",
+    ...(value.protocol.total_wall_seconds === undefined ? [] : ["total_wall_seconds"])], "protocol-keys");
   return { manifest: value, profile: resolvedProfile, manifestPath: resolve(manifestPath), repositoryRoot: resolve(repositoryRoot),
     runtimeRoot, officialRoot, packagePath };
 }
@@ -534,6 +561,22 @@ async function readState(runtimeRoot) {
   catch { return { schema_version: 1, arms: {} }; }
 }
 
+export function pairRemainingMs(state, now = Date.now()) {
+  if (!state.protocol?.pair_deadline_at) return DEFAULT_WALL_SECONDS * 1000;
+  const remaining = Date.parse(state.protocol.pair_deadline_at) - now;
+  invariant(Number.isFinite(remaining), "pair-deadline", "The matched pair deadline is invalid.");
+  return Math.max(0, Math.min((state.protocol.pair_wall_seconds ?? DEFAULT_WALL_SECONDS) * 1000, remaining));
+}
+
+async function requirePairTime(context, state, arm) {
+  const remaining = pairRemainingMs(state);
+  if (remaining > 0) return remaining;
+  state.stopped = { arm, reason: "pair-deadline-exhausted", at: new Date().toISOString() };
+  await saveState(context.runtimeRoot, state);
+  await summarize(context);
+  throw new HarnessFailure("pair-deadline", "The shared wall deadline expired; no further arm starts.");
+}
+
 async function saveState(runtimeRoot, state) {
   await atomicJson(join(runtimeRoot, STATE_FILE), state);
 }
@@ -587,13 +630,15 @@ export async function assertBareIsolation({ projectRoot, configRoots, resolvedCo
   }
   invariant(!forbiddenText(JSON.stringify(resolvedConfig)), "bare-config-contamination",
     "Bare resolved configuration contains Sortie configuration.");
-  const plugins = Array.isArray(resolvedConfig?.plugin) ? resolvedConfig.plugin : [];
+  const plugins = Array.isArray(resolvedConfig?.plugins) ? resolvedConfig.plugins :
+    Array.isArray(resolvedConfig?.plugin) ? resolvedConfig.plugin : [];
   invariant(plugins.length === 0, "bare-plugin-contamination", "Bare resolved configuration contains a plugin.");
   return { plugin_count: 0, filesystem: "clean", resolved_config: "clean" };
 }
 
 export function isolatedConfig(profileName = "stable") {
-  return { $schema: "https://opencode.ai/config.json", ...(profileName === "v010" ? { experimental: { subagent_depth: 2 } } : {}),
+  if (profileName === "v0127") return { $schema: "https://opencode.ai/config.json", plugins: [] };
+  return { $schema: "https://opencode.ai/config.json", ...(["v010", "v0127"].includes(profileName) ? { experimental: { subagent_depth: 2 } } : {}),
     mcp: {}, plugin: [] };
 }
 
@@ -608,26 +653,27 @@ export async function createConfigRoots(runtimeRoot, arm, profileName = "stable"
   await atomicJson(join(opencode, "opencode.json"), isolatedConfig(profileName));
   await atomicJson(join(loader, "opencode.json"), isolatedConfig(profileName));
   await atomicJson(join(loader, "package.json"), { private: true,
-    dependencies: { "@opencode-ai/plugin": opencodeVersion } });
+    dependencies: { [profileName === "v0127" ? "@opencode/plugin" : "@opencode-ai/plugin"]: opencodeVersion } });
   return { opencode, xdg, loader };
 }
 
-export async function verifyConfigLoaderDependency(loaderRoot, expectedVersion) {
+export async function verifyConfigLoaderDependency(loaderRoot, expectedVersion, profileName = "stable") {
   invariant(string(expectedVersion), "config-loader-version", "The expected OpenCode loader version is invalid.");
+  const packageName = profileName === "v0127" ? "@opencode/plugin" : "@opencode-ai/plugin";
   const declared = JSON.parse(await readFile(join(loaderRoot, "package.json"), "utf8"));
   const lock = JSON.parse(await readFile(join(loaderRoot, "package-lock.json"), "utf8"));
   const lockRoot = lock?.packages?.[""];
-  const lockEntry = lock?.packages?.["node_modules/@opencode-ai/plugin"];
-  const installedRoot = join(loaderRoot, "node_modules", "@opencode-ai", "plugin");
+  const lockEntry = lock?.packages?.[`node_modules/${packageName}`];
+  const installedRoot = join(loaderRoot, "node_modules", ...packageName.split("/"));
   const installedInfo = await lstat(installedRoot);
   const installed = JSON.parse(await readFile(join(installedRoot, "package.json"), "utf8"));
-  invariant(declared?.dependencies?.["@opencode-ai/plugin"] === expectedVersion &&
-    lockRoot?.dependencies?.["@opencode-ai/plugin"] === expectedVersion &&
+  invariant(declared?.dependencies?.[packageName] === expectedVersion &&
+    lockRoot?.dependencies?.[packageName] === expectedVersion &&
     lockEntry?.version === expectedVersion && lockEntry.link === undefined &&
-    installed?.name === "@opencode-ai/plugin" && installed.version === expectedVersion &&
+    installed?.name === packageName && installed.version === expectedVersion &&
     !installedInfo.isSymbolicLink(), "config-loader-identity",
   "The isolated OpenCode loader dependency differs from the manifest pin or is linked.");
-  return { package: "@opencode-ai/plugin", version: installed.version,
+  return { package: packageName, version: installed.version,
     installed_copy_symlink: false, package_lock_link: false };
 }
 
@@ -641,7 +687,7 @@ async function installConfigLoaderDependency(context, arm, roots) {
     [...npm.args, "install", "--force"], {}, groupFileWsl);
   const result = await checkedOwnedWslSpec(context.manifest, spec, groupFile,
     { timeoutMs: 300_000 }, "config-loader-install");
-  return { ...await verifyConfigLoaderDependency(loaderRoot, context.manifest.opencode.version),
+  return { ...await verifyConfigLoaderDependency(loaderRoot, context.manifest.opencode.version, context.manifest.profile),
     install: nativeCommandEvidence(result) };
 }
 
@@ -698,13 +744,29 @@ export async function inspectResolvedConfig(context, arm, workspace, roots, opti
   const cwd = await toWslPath(context.manifest, workspace);
   const environment = {
     ...pinnedGoEnvironment(context.manifest),
-    OPENCODE_CONFIG_DIR: await toWslPath(context.manifest, roots.opencode),
+    ...(context.manifest.profile === "v0127" ? { OPENCODE_DB: context.manifest.opencode.host_database } :
+      { OPENCODE_CONFIG_DIR: await toWslPath(context.manifest, roots.opencode) }),
     XDG_CONFIG_HOME: await toWslPath(context.manifest, roots.xdg),
     OPENCODE_EXE: context.manifest.opencode.executable,
   };
   const python = context.manifest.tools.python;
   const groupFile = join(context.runtimeRoot, `${arm}-resolved-config-process-group.pid`);
   const groupFileWsl = await toWslPath(context.manifest, groupFile);
+  if (context.manifest.profile === "v0127") {
+    const probe = await toWslPath(context.manifest,
+      join(context.repositoryRoot, "test", "fixtures", "frontierharness-local", "probe-v2-host.mjs"));
+    const spec = ownedWslSpec(context.manifest, cwd, context.manifest.tools.node.executable,
+      [...context.manifest.tools.node.args, probe, context.manifest.opencode.executable, cwd], environment, groupFileWsl);
+    const result = await checkedOwnedWslSpec(context.manifest, spec, groupFile,
+      { timeoutMs: options.timeoutMs ?? 90_000 }, "v2-host-registration");
+    const nativeEvidence = nativeCommandEvidence(result);
+    let config;
+    try { config = JSON.parse(result.stdout.toString("utf8")); }
+    catch { throw new HarnessFailure("v2-host-json", "V2 registration probe returned invalid JSON.", nativeEvidence); }
+    const isolation = arm === "bare" ? await assertBareIsolation({ projectRoot: workspace,
+      configRoots: [roots.opencode, roots.xdg], resolvedConfig: config }) : null;
+    return { config, environment, isolation, nativeEvidence };
+  }
   const spec = ownedWslSpec(context.manifest, cwd, python.executable,
     [...python.args, ...anonymousMemoryCaptureArgs(context.manifest.opencode.executable, resolvedConfigCommandArgs())],
     environment, groupFileWsl);
@@ -720,15 +782,60 @@ export async function inspectResolvedConfig(context, arm, workspace, roots, opti
   return { config, environment, isolation, nativeEvidence };
 }
 
+export function hasPinnedSubagentDepth(config) {
+  const depths = [config.subagent_depth, config.experimental?.subagent_depth]
+    .filter(value => value !== undefined);
+  return depths.length > 0 && depths.every(value => value === 2);
+}
+
+export function v2PluginWrapperSource() {
+  return 'import { createSortieDogsV2Plugin } from "sortie-dogs/server";\n' +
+    'import { SortieDogsPlugin } from "sortie-dogs/plugin";\n' +
+    'export default createSortieDogsV2Plugin(SortieDogsPlugin);\n';
+}
+
+export function registeredHostAgentRoutes(config) {
+  return [...Object.entries(V0127_HOST_AGENT_ROUTES),
+    ["agent/dog-operator.md", { model: "openai/gpt-6-sol", variant: "xhigh" }]].every(([path, route]) => {
+    const name = path.slice("agent/".length, -".md".length);
+    const agent = config?.agents?.find(item => item.id === name);
+    return agent?.model?.providerID === route.model.split("/")[0] &&
+      agent?.model?.id === route.model.split("/")[1] && agent.model.variant === route.variant;
+  });
+}
+
+export function registeredV2Plugin(config, arm) {
+  const plugins = config?.plugins;
+  return Array.isArray(plugins) && (arm === "bare" ? plugins.length === 0 :
+    plugins.length === 1 && plugins[0]?.id === "sortie-dogs.v010" &&
+      plugins[0]?.state === "active" && plugins[0]?.server === true);
+}
+
+export function requireIsolatedV2Database(runtimeRootWsl, database) {
+  invariant(safeWslPath(runtimeRootWsl) && database === `${runtimeRootWsl}/opencode.db`,
+    "v0127-database-isolation", "The V2 database must reside inside the new run root, not the host profile.");
+}
+
 export async function inspectRunArmPreAgent(context, arm, workspace, roots, options = {}) {
   const inspected = await inspectResolvedConfig(context, arm, workspace, roots, options);
+  if (context.manifest.profile === "v0127") {
+    if (!registeredV2Plugin(inspected.config, arm)) throw new HarnessFailure("sortie-plugin-registration",
+      "The private V2 server did not register the expected project-local Sortie plugin.", inspected.nativeEvidence);
+    if (arm === "sortie" && !registeredHostAgentRoutes(inspected.config))
+      throw new HarnessFailure("sortie-agent-model-routes",
+        "V2 did not resolve the published child agent model and variant routes.", inspected.nativeEvidence);
+    inspected.toolRegistration = arm === "sortie" ? { plugin_active: true, required_tools_registered: null,
+      coverage: "V2 plugin setup, not per-agent tool snapshot" } : null;
+    return inspected;
+  }
   if (arm === "sortie" && !(Array.isArray(inspected.config.plugin) && inspected.config.plugin.length === 1 &&
     typeof inspected.config.plugin[0] === "string" && forbiddenText(inspected.config.plugin[0])))
     throw new HarnessFailure("sortie-plugin-config",
       "Sortie resolved config is not the exact project-local plugin.", inspected.nativeEvidence);
-  if (context.manifest.profile === "v010" && inspected.config.experimental?.subagent_depth !== 2)
+  if (arm === "sortie" && ["v010", "v0127"].includes(context.manifest.profile) &&
+    !hasPinnedSubagentDepth(inspected.config))
     throw new HarnessFailure("sortie-subagent-depth",
-      "The v0.10 resolved config must pin experimental.subagent_depth to two.", inspected.nativeEvidence);
+      "The resolved Sortie config must pin subagent_depth to two.", inspected.nativeEvidence);
   return inspected;
 }
 
@@ -758,12 +865,21 @@ export async function installSortie(context, workspace, roots, candidate = null)
   await runWsl(context.manifest, workspaceWsl, context.manifest.tools.node.executable,
     [...context.manifest.tools.node.args, await toWslPath(context.manifest, join(installed, "dist", "cli", "main.js")),
       "init", workspaceWsl, ...context.profile.initArgs], {}, { timeoutMs: 120_000 }, "sortie-init");
-  const plugin = `file://${await toWslPath(context.manifest, join(installed, "dist", "plugin", "opencode.js"))}`;
+  let entry = join(installed, "dist", "plugin", "opencode.js");
+  if (context.manifest.profile === "v0127") {
+    entry = join(control, "plugins", "sortie-dogs", "index.js");
+    if (candidate === null) {
+      await mkdir(dirname(entry), { recursive: true });
+      await writeFile(entry, v2PluginWrapperSource(), { flag: "wx", mode: 0o600 });
+    }
+  }
+  const plugin = context.manifest.profile === "v0127" ? null : `file://${await toWslPath(context.manifest, entry)}`;
   if (candidate === null) {
-    await atomicJson(join(control, "opencode.json"), { $schema: "https://opencode.ai/config.json", plugin: [plugin],
-      ...(context.manifest.profile === "v010" ? { experimental: { subagent_depth: 2 } } : {}) });
-    const neutral = { $schema: "https://opencode.ai/config.json", mcp: {},
-      ...(context.manifest.profile === "v010" ? { experimental: { subagent_depth: 2 } } : {}) };
+    await atomicJson(join(control, "opencode.json"), context.manifest.profile === "v0127"
+      ? isolatedConfig("v0127") : { $schema: "https://opencode.ai/config.json", plugin: [plugin],
+        ...(["v010", "v0127"].includes(context.manifest.profile) ? { experimental: { subagent_depth: 2 } } : {}) });
+    const neutral = context.manifest.profile === "v0127" ? isolatedConfig("v0127") : { $schema: "https://opencode.ai/config.json", mcp: {},
+        ...(["v010", "v0127"].includes(context.manifest.profile) ? { experimental: { subagent_depth: 2 } } : {}) };
     await atomicJson(join(roots.opencode, "opencode.json"), neutral);
     await atomicJson(join(roots.xdg, "opencode", "opencode.json"), neutral);
   }
@@ -996,12 +1112,25 @@ export function debugRecoveryFailure(recovery, gate) {
 }
 
 export function debugResumeArgs(manifest, cwd, rootSessionId) {
-  invariant(manifest?.profile === "v010" && manifest?.qualification_only === true && safeWslPath(cwd) &&
+  invariant(["v010", "v0127"].includes(manifest?.profile) && manifest?.qualification_only === true && safeWslPath(cwd) &&
     /^ses_[A-Za-z0-9_-]+$/u.test(rootSessionId ?? ""), "debug-resume-identity",
-  "Debug resume requires the v0.10 qualification profile, safe workspace, and exact root session identity.");
+  "Debug resume requires a Sortie qualification profile, safe workspace, and exact root session identity.");
+  if (manifest.profile === "v0127") return ["run", "--standalone", "--format", "json",
+    "--model", `${manifest.opencode.model}#${manifest.opencode.variant}`, "--agent", "dog-operator",
+    "--session", rootSessionId, DEBUG_CONTINUATION_PROMPT];
   return ["run", "--dir", cwd, "--format", "json", "--model", manifest.opencode.model,
     "--variant", manifest.opencode.variant, "--agent", "dog-operator", "--session", rootSessionId,
     DEBUG_CONTINUATION_PROMPT];
+}
+
+export function runArmArgs(manifest, cwd, agent, instruction) {
+  invariant(safeWslPath(cwd) && string(agent) && string(instruction), "run-arm-args",
+    "An arm needs a safe workspace, agent, and official instruction.");
+  return manifest.profile === "v0127"
+    ? ["run", "--standalone", "--format", "json", "--model",
+      `${manifest.opencode.model}#${manifest.opencode.variant}`, "--agent", agent, instruction]
+    : ["run", "--dir", cwd, "--format", "json", "--model", manifest.opencode.model,
+      "--variant", manifest.opencode.variant, "--agent", agent, instruction];
 }
 
 export function classifyNativeImplementationChildren(evidence, rootSessionId, workspace) {
@@ -1048,14 +1177,35 @@ try:
   value=json.loads(data); state=value.get('state') or {}; metadata=state.get('metadata') or {}; child=metadata.get('sessionId') or metadata.get('sessionID'); agent=(state.get('input') or {}).get('subagent_type')
   if isinstance(child,str): tasks.append({'caller':caller,'child':child,'agent':agent,'status':'completed'})
  print(json.dumps({'sessions':sessions,'tasks':tasks},separators=(',',':')))
+ finally: con.close()`;
+
+const V2_NATIVE_CHILD_QUERY = String.raw`import json,sqlite3,sys,urllib.parse
+db,directory=sys.argv[1:3]
+uri='file:'+urllib.parse.quote(db,safe='/')+'?mode=ro'
+con=sqlite3.connect(uri,uri=True)
+try:
+ sessions=[{'id':r[0],'parent':r[1],'directory':r[2]} for r in con.execute('SELECT id,parent_id,directory FROM session_v2 WHERE directory=? ORDER BY time_created DESC LIMIT 256',(directory,))]
+ ids={r['id'] for r in sessions}
+ tasks=[]
+ for caller,data in con.execute("SELECT m.session_id,m.data FROM session_message m JOIN session_v2 s ON s.id=m.session_id WHERE s.directory=? AND m.type='assistant' ORDER BY m.time_created DESC LIMIT 512",(directory,)):
+  if caller not in ids: continue
+  value=json.loads(data)
+  for part in value.get('content') or []:
+   if part.get('type')!='tool' or part.get('name') not in ('task','subagent'): continue
+   state=part.get('state') or {}
+   if state.get('status')!='completed': continue
+   metadata=state.get('metadata') or {}; child=metadata.get('sessionId') or metadata.get('sessionID'); input=state.get('input') or {}; agent=input.get('agent') or input.get('subagent_type')
+   if isinstance(child,str): tasks.append({'caller':caller,'child':child,'agent':agent,'status':'completed'})
+ print(json.dumps({'sessions':sessions,'tasks':tasks[:512]},separators=(',',':')))
 finally: con.close()`;
 
 export async function nativeImplementationChildren(context, rootSessionId, workspace) {
-  invariant(context.manifest.profile === "v010" && safeWslPath(context.manifest.opencode.host_database),
+  invariant(["v010", "v0127"].includes(context.manifest.profile) && safeWslPath(context.manifest.opencode.host_database),
     "native-child-config", "v0.10 native child evidence requires a declared WSL host database.");
   const workspaceWsl = await toWslPath(context.manifest, workspace);
   const result = await runWsl(context.manifest, "/", context.manifest.tools.python.executable,
-    [...context.manifest.tools.python.args, "-c", NATIVE_CHILD_QUERY, context.manifest.opencode.host_database,
+    [...context.manifest.tools.python.args, "-c", context.manifest.profile === "v0127" ? V2_NATIVE_CHILD_QUERY : NATIVE_CHILD_QUERY,
+      context.manifest.opencode.host_database,
       workspaceWsl], {}, { timeoutMs: 30_000 }, "native-child-query");
   let evidence;
   try { evidence = JSON.parse(result.stdout.toString("utf8")); }
@@ -1064,6 +1214,11 @@ export async function nativeImplementationChildren(context, rootSessionId, works
 }
 
 async function collectPatch(context, arm, workspace) {
+  const untracked = (await runTool(context.manifest.tools.git,
+    ["ls-files", "--others", "--exclude-standard", "-z"], { cwd: workspace }, "model-untracked"))
+    .stdout.toString("utf8").split("\0").filter(Boolean);
+  if (untracked.length) await runTool(context.manifest.tools.git,
+    ["add", "-N", "--", ...untracked], { cwd: workspace }, "model-intent-to-add");
   const patchResult = await runTool(context.manifest.tools.git,
     ["diff", "--binary", ANKO_BASE], { cwd: workspace }, "model-patch");
   const evidence = join(context.runtimeRoot, "evidence", arm);
@@ -1113,10 +1268,11 @@ function rewardEvidence(resultJson, selectors) {
   return { reward: Number.isFinite(reward) ? reward : null, counts };
 }
 
-export function computeSummary(arms) {
+export function computeSummary(arms, operationProven = true) {
   const bare = arms?.bare;
   const sortie = arms?.sortie;
-  const reason = bare?.reward !== 1 || sortie?.reward !== 1 ? "reward_not_one" :
+  const reason = !operationProven ? "normal-operation-unproven" :
+    bare?.reward !== 1 || sortie?.reward !== 1 ? "reward_not_one" :
     !(typeof bare?.duration_ms === "number" && bare.duration_ms > 0 &&
       typeof sortie?.duration_ms === "number" && sortie.duration_ms > 0) ? "metric_missing" : null;
   if (reason !== null) return { comparison_eligible: false, speed_ratio: null, cost_ratio: null, refusal: reason };
@@ -1168,6 +1324,10 @@ async function preflight(context) {
   invariant(!(await stat(context.runtimeRoot).catch(() => null)), "runtime-exists",
     "runtime_root already exists; use a new run directory or explicit cleanup.");
   const pinned = await verifyPinnedFiles(context);
+  if (context.manifest.profile === "v0127") {
+    requireIsolatedV2Database(await toWslPath(context.manifest, context.runtimeRoot),
+      context.manifest.opencode.host_database);
+  }
   const officialTestScript = await readFile(join(context.officialRoot, "tests", "test.sh"));
   invariant(!officialTestScript.includes(13), "official-line-endings", "Official test.sh must retain LF line endings.");
   const syntaxProbePath = `${context.runtimeRoot}.test-script-probe-${process.pid}.sh`;
@@ -1215,6 +1375,14 @@ async function preflight(context) {
     { timeoutMs: 120_000 }, "preflight-opencode");
   invariant(openCode.stdout.toString("utf8").includes(context.manifest.opencode.version), "opencode-version",
     "WSL OpenCode version differs from the manifest.");
+  if (context.manifest.profile === "v0127") {
+    const binaryHash = (await runWsl(context.manifest, "/", "/usr/bin/sha256sum",
+      [context.manifest.opencode.executable], {}, { timeoutMs: 30_000 }, "v0127-cli-hash"))
+      .stdout.toString("utf8").split(/\s/u)[0];
+    invariant(binaryHash === V0127_V2_BINARY_SHA256, "v0127-cli-hash",
+      "The OpenCode V2 executable differs from the pinned isolated binary.");
+    versions.opencode_binary_sha256 = binaryHash;
+  }
   await runWsl(context.manifest, "/", "/usr/bin/test", ["-f", context.manifest.opencode.auth_file], {},
     { timeoutMs: 30_000 }, "auth-presence");
   await runWsl(context.manifest, "/", "/usr/bin/test", ["-x", "/usr/bin/setsid"], {},
@@ -1225,7 +1393,10 @@ async function preflight(context) {
     wall_seconds: DEFAULT_WALL_SECONDS, startup_seconds: DEFAULT_STARTUP_SECONDS,
     activity_seconds: DEFAULT_ACTIVITY_SECONDS, progress_seconds: DEFAULT_PROGRESS_SECONDS,
     retries: 0, arm_order: context.manifest.qualification_only ? ["sortie"] : ARMS,
-    qualification_only: context.manifest.qualification_only === true },
+    qualification_only: context.manifest.qualification_only === true,
+    ...(context.manifest.profile === "v0127"
+      ? { pair_wall_seconds: context.manifest.protocol.total_wall_seconds ?? DEFAULT_WALL_SECONDS,
+        pair_deadline_at: new Date(Date.now() + (context.manifest.protocol.total_wall_seconds ?? DEFAULT_WALL_SECONDS) * 1000).toISOString() } : {}) },
   preflight: { status: "pass", official_sha256: pinned.official_sha256,
     package_sha256: pinned.package_sha256, deepswe_commit: deepSweHead,
     versions, opencode_version: context.manifest.opencode.version }, arms: {} };
@@ -1402,11 +1573,13 @@ export async function recordPreAgentFailure(context, state, arm, gate, nativeEvi
 async function runArm(context, arm, debug = false) {
   const state = await readState(context.runtimeRoot);
   assertRunArmAllowed(state, arm, context.manifest.qualification_only === true);
-  invariant(!debug || (arm === "sortie" && context.manifest.profile === "v010" &&
-    context.manifest.qualification_only === true), "debug-mode", "Debug mode is limited to the v0.10 Sortie qualification arm.");
+  if (context.manifest.profile === "v0127") await requirePairTime(context, state, arm);
+  invariant(!debug || (arm === "sortie" && ["v010", "v0127"].includes(context.manifest.profile) &&
+    context.manifest.qualification_only === true), "debug-mode", "Debug mode requires a Sortie qualification arm.");
   if (debug) state.debug = { schema_version: 1, mode: "state-preserving", quality_gate: false,
     methodology_comparable: false, max_cycles: DEBUG_MAX_CYCLES, started_at: new Date().toISOString(),
-    deadline_at: new Date(Date.now() + context.manifest.protocol.wall_seconds * 1000).toISOString(),
+    deadline_at: context.manifest.profile === "v0127" ? state.protocol.pair_deadline_at
+      : new Date(Date.now() + context.manifest.protocol.wall_seconds * 1000).toISOString(),
     status: "running", executions: [] };
   state.arms[arm] = { attempted: true, started_at: new Date().toISOString(), active_pid: null };
   await saveState(context.runtimeRoot, state);
@@ -1422,6 +1595,7 @@ async function runArm(context, arm, debug = false) {
   let groupFile;
   let stopGroup;
   let spec;
+  let wallMs;
   try {
     if (arm === "sortie") packageEvidence = await installSortie(context, workspace, roots);
     inspected = await inspectRunArmPreAgent(context, arm, workspace, roots);
@@ -1431,13 +1605,16 @@ async function runArm(context, arm, debug = false) {
     if (preRunStatus.stdout.length !== 0) throw new HarnessFailure("pre-run-dirty",
       "Arm workspace is dirty before the timed run.", nativeCommandEvidence(preRunStatus));
     cwd = await toWslPath(context.manifest, workspace);
-    args = ["run", "--dir", cwd, "--format", "json", "--model", context.manifest.opencode.model,
-      "--variant", context.manifest.opencode.variant, "--agent", arm === "sortie" ? context.profile.agent : "build", instruction];
+    args = runArmArgs(context.manifest, cwd, arm === "sortie" ? context.profile.agent : "build", instruction);
     groupFile = join(context.runtimeRoot, `${arm}-process-group.pid`);
     const groupFileWsl = await toWslPath(context.manifest, groupFile);
     stopGroup = () => stopWslGroup(context.manifest, groupFile);
     spec = ownedWslSpec(context.manifest, cwd, context.manifest.opencode.executable, args,
       inspected.environment, groupFileWsl);
+    wallMs = context.manifest.profile === "v0127"
+      ? Math.min(pairRemainingMs(state), arm === "bare" ? 45 * 60 * 1000 : DEFAULT_WALL_SECONDS * 1000)
+      : DEFAULT_WALL_SECONDS * 1000;
+    invariant(wallMs > 0, "pair-deadline", "The shared deadline expired before agent launch.");
   } catch (error) {
     const gate = error instanceof HarnessFailure ? error.gate : "pre-agent-internal";
     const nativeEvidence = error instanceof HarnessFailure ? error.nativeEvidence : null;
@@ -1446,7 +1623,7 @@ async function runArm(context, arm, debug = false) {
     throw error;
   }
   const started = Date.now();
-  const result = await execute(spec.executable, spec.args, { timeoutMs: DEFAULT_WALL_SECONDS * 1000,
+  const result = await execute(spec.executable, spec.args, { timeoutMs: wallMs,
     cwd: spec.cwd,
     heartbeat: `run-arm:${arm}`,
     eventGate: expectedOperationEvent,
@@ -1454,10 +1631,10 @@ async function runArm(context, arm, debug = false) {
     initialProgressValue: sha256Bytes(preRunStatus.stdout),
     progressProbe: async () => sha256Bytes((await runTool(context.manifest.tools.git,
       ["status", "--porcelain=v1"], { cwd: workspace }, "watchdog-progress")).stdout),
-    watchdog: { wall_ms: context.manifest.protocol.wall_seconds * 1000,
-      startup_ms: context.manifest.protocol.startup_seconds * 1000,
-      activity_ms: context.manifest.protocol.activity_seconds * 1000,
-      progress_ms: context.manifest.protocol.progress_seconds * 1000 },
+    watchdog: { wall_ms: wallMs,
+      startup_ms: Math.min(context.manifest.protocol.startup_seconds * 1000, wallMs),
+      activity_ms: Math.min(context.manifest.protocol.activity_seconds * 1000, wallMs),
+      progress_ms: Math.min(context.manifest.protocol.progress_seconds * 1000, wallMs) },
     onSpawn: async (pid) => { state.arms[arm].active_pid = pid ?? null; await saveState(context.runtimeRoot, state); } });
   try {
     result.processGroup = await stopGroup();
@@ -1471,12 +1648,18 @@ async function runArm(context, arm, debug = false) {
   const cancellation = await cancellationRequest(context, arm, "run-arm");
   if (cancellation) result.operationFailure = "cancelled";
   state.arms[arm].active_pid = null;
+  if (context.manifest.profile === "v0127") {
+    const evidence = join(context.runtimeRoot, "evidence", arm);
+    await mkdir(evidence, { recursive: true });
+    await writeFile(join(evidence, "opencode-events.jsonl"), result.stdout, { mode: 0o600, flag: "wx" });
+    await writeFile(join(evidence, "opencode-stderr.log"), result.stderr, { mode: 0o600, flag: "wx" });
+  }
   const patch = await collectPatch(context, arm, workspace).catch(() => {
     result.operationFailure ??= "patch-capture-unavailable";
     return { patch_sha256: null, patch_bytes: null, changed_paths: null, uncommitted_present: null, status_sha256: null };
   });
   const metadata = eventMetadata(result.stdout, context.manifest.profile ?? "stable");
-  if (context.manifest.profile === "v010" && metadata.root_session_id !== null) {
+  if (["v010", "v0127"].includes(context.manifest.profile) && metadata.root_session_id !== null) {
     try { metadata.implementation_children = await nativeImplementationChildren(context, metadata.root_session_id, workspace); }
     catch { result.operationFailure ??= "native-child-evidence-unavailable"; metadata.implementation_children = []; }
   }
@@ -1492,6 +1675,7 @@ async function runArm(context, arm, debug = false) {
     token_metric_references: metadata.token_metric_references, cost: metadata.cost, stdout_sha256: metadata.stdout_sha256,
     stderr_sha256: sha256Bytes(result.stderr), model: context.manifest.opencode.model,
     variant: context.manifest.opencode.variant, package: packageEvidence,
+    tool_registration: inspected.toolRegistration ?? null,
     isolation: inspected.isolation, resolved_config_sha256: sha256Bytes(JSON.stringify(inspected.config)),
     patch_sha256: patch.patch_sha256,
     patch_bytes: patch.patch_bytes, changed_paths: patch.changed_paths, uncommitted_present: patch.uncommitted_present,
@@ -1514,9 +1698,10 @@ async function runArm(context, arm, debug = false) {
       (gate.reason === "delivery-not-complete" && state.debug.executions[0].recovery.route === "awaiting-acceptance-review" ||
        gate.reason === "agent-event-error" && (state.debug.executions[0].recovery.route === "acceptance-remediation" ||
          state.debug.executions[0].errors.some(item => item.kind !== "refusal") &&
-         state.debug.executions[0].errors.every(item => item.kind === "refusal" || item.tool === "task")))
+          state.debug.executions[0].errors.every(item => item.kind === "refusal" || ["task", "subagent"].includes(item.tool))))
       ? "recoverable" : "paused";
-  if (gate.status === "fail") state.stopped = { arm, reason: gate.reason,
+  if (gate.status === "fail" && (context.manifest.profile !== "v0127" ||
+    result.cleanupConfirmation !== "confirmed" || cancellation)) state.stopped = { arm, reason: gate.reason,
     ...(cancellation ? { gate: cancellation.signal } : {}), at: new Date().toISOString() };
   await saveState(context.runtimeRoot, state);
   if (state.stopped) {
@@ -1529,16 +1714,18 @@ async function runArm(context, arm, debug = false) {
 
 async function resumeArm(context, arm) {
   const state = await readState(context.runtimeRoot);
-  invariant(arm === "sortie" && context.manifest.profile === "v010" && context.manifest.qualification_only === true &&
+  invariant(arm === "sortie" && ["v010", "v0127"].includes(context.manifest.profile) && context.manifest.qualification_only === true &&
     state.debug?.mode === "state-preserving" && ["recoverable", "paused"].includes(state.debug.status) &&
-    state.stopped?.arm === arm && ["agent-event-error", "debug-unknown-agent-event-error",
+    (state.stopped?.arm === arm || (context.manifest.profile === "v0127" && state.stopped === undefined)) &&
+    ["agent-event-error", "debug-unknown-agent-event-error",
       "debug-public-recovery-unproven", "delivery-not-complete"].includes(state.arms?.[arm]?.run?.expected_operation?.reason),
   "debug-resume-state", "No state-preserving debug arm is available to resume.");
   invariant(state.arms[arm].active_pid === null &&
     (state.arms[arm].verification?.active_pid === undefined || state.arms[arm].verification.active_pid === null),
   "debug-resume-active-process", "Debug continuation is refused while an arm or verifier process is active.");
   invariant(state.debug.executions.length < state.debug.max_cycles, "debug-cycle-cap", "Debug continuation cycle cap reached.");
-  const remainingMs = Date.parse(state.debug.deadline_at) - Date.now();
+  const remainingMs = Math.min(Date.parse(state.debug.deadline_at) - Date.now(),
+    context.manifest.profile === "v0127" ? pairRemainingMs(state) : DEFAULT_WALL_SECONDS * 1000);
   invariant(Number.isFinite(remainingMs) && remainingMs > 0, "debug-wall-cap", "Debug continuation wall cap reached.");
   const workspace = join(context.runtimeRoot, "workspaces", arm);
   invariant((await stat(workspace).catch(() => null))?.isDirectory(), "debug-resume-workspace",
@@ -1574,7 +1761,8 @@ async function resumeArm(context, arm) {
   const errors = debugEventEvidence(result.stdout);
   const recovery = debugRecoveryPacket(result.stdout, rootSessionId);
   if (metadata.root_session_id !== rootSessionId) result.operationFailure = "debug-root-session-mismatch";
-  if (errors.some(item => item.kind !== "refusal" && item.tool !== "task") && recovery?.route !== "acceptance-remediation") {
+  if (errors.some(item => item.kind !== "refusal" && !["task", "subagent"].includes(item.tool)) &&
+    recovery?.route !== "acceptance-remediation") {
     result.operationFailure = "debug-unknown-agent-event-error";
   }
   if (metadata.root_session_id === rootSessionId) {
@@ -1620,7 +1808,8 @@ async function resumeArm(context, arm) {
     state.debug.status = recovery !== null &&
       (gate.reason === "delivery-not-complete" && recovery.route === "awaiting-acceptance-review" ||
        gate.reason === "agent-event-error" &&
-        (recovery.route === "acceptance-remediation" || errors.length > 0 && errors.every(item => item.tool === "task"))) &&
+         (recovery.route === "acceptance-remediation" || errors.length > 0 &&
+           errors.every(item => ["task", "subagent"].includes(item.tool)))) &&
       state.debug.executions.length < state.debug.max_cycles &&
       Date.now() < Date.parse(state.debug.deadline_at) ? "recoverable" : "paused";
   }
@@ -1685,7 +1874,7 @@ async function inspectArm(context, arm) {
   const roots = { opencode: join(context.runtimeRoot, "configs", arm, "opencode"),
     xdg: join(context.runtimeRoot, "configs", arm, "xdg") };
   const inspected = await inspectResolvedConfig(context, arm, workspace, roots);
-  const plugins = inspected.config.plugin;
+  const plugins = context.manifest.profile === "v0127" ? inspected.config.plugins : inspected.config.plugin;
   return { plugin_is_array: Array.isArray(plugins), plugin_count: Array.isArray(plugins) ? plugins.length : null,
     plugin_fingerprints: Array.isArray(plugins) ? plugins.map((value) => sha256Bytes(JSON.stringify(value))) : [],
     config_has_sortie: forbiddenText(JSON.stringify(inspected.config)) };
@@ -1724,6 +1913,7 @@ export function createLocalVerifierConfig(source, logsPath) {
 async function verifyArm(context, arm) {
   const state = await readState(context.runtimeRoot);
   assertVerifyAllowed(state, arm, context.manifest.qualification_only === true);
+  if (context.manifest.profile === "v0127") await requirePairTime(context, state, arm);
   state.arms[arm].verification = { attempted: true, started_at: new Date().toISOString(), active_pid: null };
   await saveState(context.runtimeRoot, state);
   const verifier = join(context.runtimeRoot, "verifiers", arm);
@@ -1784,7 +1974,9 @@ async function verifyArm(context, arm) {
   const stopGroup = () => stopWslGroup(context.manifest, groupFile);
   const spec = ownedWslSpec(context.manifest, verifierWsl, bash.executable, [...bash.args, scriptWsl], environment,
     groupFileWsl);
-  const result = await execute(spec.executable, spec.args, { timeoutMs: DEFAULT_WALL_SECONDS * 1000,
+  const wallMs = context.manifest.profile === "v0127"
+    ? await requirePairTime(context, state, arm) : DEFAULT_WALL_SECONDS * 1000;
+  const result = await execute(spec.executable, spec.args, { timeoutMs: wallMs,
     cwd: spec.cwd,
     heartbeat: `verify-arm:${arm}`,
     stopTree: stopGroup,
@@ -1800,7 +1992,7 @@ async function verifyArm(context, arm) {
   let resultJson = {};
   try { resultJson = JSON.parse(await readFile(rewardPath, "utf8")); } catch {}
   const reward = rewardEvidence(resultJson, context.manifest.verifier.result);
-  await rm(logs, { recursive: true, force: true });
+  if (context.manifest.profile !== "v0127") await rm(logs, { recursive: true, force: true });
   state.arms[arm].verification = { ...state.arms[arm].verification, status: "complete", exit: result.code,
     signal: result.signal, timed_out: result.timedOut, duration_ms: Date.now() - started,
     operation_failure: result.operationFailure ?? null, process_scope: "wsl",
@@ -1840,6 +2032,7 @@ export async function summarize(context) {
     recoverable_refusals: state.arms[arm].run.recoverable_refusals ?? 0,
     refusal_codes: state.arms[arm].run.refusal_codes ?? [],
     exit: state.arms[arm].run.exit, status: state.arms[arm].run.status,
+    expected_operation: state.arms[arm].run.expected_operation,
     duration_ms: state.arms[arm].run.duration_ms, root_session_id: state.arms[arm].run.root_session_id,
     model: state.arms[arm].run.model, variant: state.arms[arm].run.variant,
     package: state.arms[arm].run.package, isolation: state.arms[arm].run.isolation,
@@ -1863,7 +2056,8 @@ export async function summarize(context) {
     qualification_only: context.manifest.qualification_only === true, arms: armSummary,
     comparison: context.manifest.qualification_only
       ? { comparison_eligible: false, speed_ratio: null, cost_ratio: null, refusal: "qualification-only" }
-      : computeSummary(comparisonInput) }, reportSecrets(context.manifest));
+      : computeSummary(comparisonInput, reportArms.every(arm =>
+         state.arms[arm].run.expected_operation?.status === "pass")) }, reportSecrets(context.manifest));
   await atomicJson(join(context.runtimeRoot, REPORT_FILE), report);
   return report;
 }

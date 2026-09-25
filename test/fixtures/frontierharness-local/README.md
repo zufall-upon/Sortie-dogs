@@ -23,10 +23,29 @@ process uses an executable plus argument array; manifest values are never interp
 
 The template is the standalone v0.10 qualification profile: `profile:"v010"` and
 `qualification_only:true`. Existing manifests with no `profile` remain the stable v1 profile and retain
-the paired Bare-then-Sortie behavior. Profiles are closed to `stable|v010`; v0.10 without
+the paired Bare-then-Sortie behavior. Profiles are closed to `stable|v010|v0127`; v0.10 without
 `qualification_only:true` is rejected before preflight so it cannot launch Bare.
 Its `opencode.host_database` pins the known WSL host metadata database. The runner opens it through
 the pinned Python `sqlite3` client with SQLite `mode=ro`; authentication files remain unopened.
+
+The `v0127` profile pins the published v0.12.7 tarball and its SHA-256, runtime marker, GPT-6 Sol
+operator route, and the same official task bytes. It accepts a Bare-then-Sortie pair or an explicit
+`qualification_only:true` Sortie diagnostic. Set `protocol.total_wall_seconds` to shorten the shared
+deadline (for example, `3600` for a 60-minute diagnostic); omitted means 5400 seconds. A diagnostic
+uses `run-arm --arm sortie --debug`, not the v0.10 qualification wrapper. It is not a release gate.
+The published package remains unchanged. The `v0127` profile requires OpenCode V2 `2.0.16` from an
+isolated WSL install of `@opencode/cli`; set `opencode.executable` to its exact binary and
+`opencode.version` to `2.0.16`. The manifest's `opencode.host_database` must equal the **new**
+`runtime_root` WSL path plus `/opencode.db` (not the user's V1 or V2 database). The CLI binary's
+SHA-256 is pinned to `0910f9e7c5b50eb460c9ae53b4348b781cb44220a18ff2bcce514c2427582848`.
+Keep the previous 1.18.29 manifest and run evidence intact; use a fresh manifest and run root for V2.
+The fixture installs `@opencode/plugin@2.0.16` under isolated `XDG_CONFIG_HOME`, adds only a project-local
+V2 wrapper calling `createSortieDogsV2Plugin(SortieDogsPlugin)`, and loads the published agent
+assets byte-for-byte, including `model#variant`. Its private server probe performs **no model call**:
+it requires the plugin's `active` server registration and the six published child routes. V2 does
+not expose the per-agent tool snapshot used by V1 `debug agent`; plugin registration is not proof
+of a completed Worker or successful mission. Inference uses `run --standalone` and the pinned
+`openai/gpt-6-sol#variant` CLI syntax, with the run-local database.
 
 Each tool declares `environment`, exact `executable`, invariant `args`, one-shot `probe_args`, and the
 probe's expected exit. `host` is reserved for Git workspace operations; WSL package/verifier tools use
@@ -113,6 +132,8 @@ Inspect each `run-arm` result before continuing. When the benchmark objective as
 stop immediately if a required-source-change task produces `patch_bytes: 0`, Sortie dispatches no
 implementation child, a successful terminal claim has incomplete delivery, or required parent/child session
 identity is absent. Do not start the next arm or either verifier and do not calculate a performance comparison.
+The `v0127` diagnostic/matched profile may retain and independently grade a failed one-shot candidate;
+its summary includes `expected_operation` and refuses comparison ratios if normal operation is unproven.
 Preserve sanitized state for diagnosis and terminate any recorded process tree. After fixing the product, use a
 new runtime root and rerun the complete matched pair only after a focused reproduction passes.
 
@@ -171,7 +192,8 @@ Model-free WSL stop check: `node test/fixtures/frontierharness-local/run-stop-rp
   materializes `refs/heads/main` at the exact pinned Anko base in each arm (no `master` fallback);
   removes upstream remote, refs, and reflogs; redirects hooks to an empty directory; creates per-arm
   `OPENCODE_CONFIG_DIR` and `XDG_CONFIG_HOME`. In each isolated `XDG_CONFIG_HOME/opencode`, it writes
-  `package.json`, installs `@opencode-ai/plugin` at the exact `opencode.version` manifest pin with the
+  `package.json`, installs `@opencode-ai/plugin` (V1) or `@opencode/plugin` (v0.12.7/V2) at the
+  exact `opencode.version` manifest pin with the
   pinned WSL npm executable, and rejects a version mismatch or linked install using both package-lock
   and installed-package evidence. Install and timeout cleanup use an owned Linux process group.
   Creates the pinned `$GOPATH/bin` directory before execution because the upstream interactive tests
@@ -180,14 +202,18 @@ Model-free WSL stop check: `node test/fixtures/frontierharness-local/run-stop-rp
   config evidence. Sortie installs the exact tgz with WSL npm, initializes project-local canonical
   assets, checks package version/hash/runtime marker/assets, and selects the profile coordinator explicitly
   (`dog-coordinator` for stable, `dog-operator` for v0.10).
-  Resolved config capture runs the normal `opencode debug config` through anonymous memory-backed
-  complete capture and an owned Linux process group. The config body is parsed in memory and never
-  retained. The official instruction is one final argv item.
-  No prompt or raw agent output is persisted. For v0.10, only completed `dog-worker-v010` Tasks with a
+  V1 resolved config capture runs `opencode debug config` through anonymous memory-backed capture;
+  V2 instead queries only agent and plugin registration from a private, authenticated API server
+  and stops it before inference. The config body is parsed in memory and never retained. The
+  official instruction is one final argv item.
+  V1 does not persist prompts or raw agent output; the v0.12.7 diagnostic deliberately retains the
+  private CLI event stream, stderr, and run-local V2 database under `_testenv/` for diagnosis. None
+  of these raw contents enters the sanitized summary or Git. For v0.10, only completed `dog-worker-v010` Tasks with a
   native child session identity and bounded ancestry (maximum eight parents) to the root count as implementation children;
   `dog-operator`, proposal/execution `dogs-coordinator` delegates, failed Tasks, and IDs written in text do not.
-  Identity evidence is limited to the exact fixture directory and bounded session/task rows; raw messages and
-  database contents are neither emitted nor saved. CLI-stream token coverage remains separate from host identity coverage.
+  Identity summaries are limited to the exact fixture directory and bounded session/task rows;
+  raw messages and database contents are not emitted in reports. CLI-stream token coverage remains
+  separate from host identity coverage.
   While an arm is running, the harness writes a sanitized heartbeat to stderr every 120 seconds with
   elapsed time, PID, activity/progress ages, workspace-change count, and captured byte counts.
 - `verify-arm`: makes a separate fresh base clone without applying either patch in the Node runner,
