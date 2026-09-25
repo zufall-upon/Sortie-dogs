@@ -4053,7 +4053,11 @@ for (const [parentStatus, hasWorker, childAgent, expected] of [["completed", fal
         children: async ({ path }: { path: { id: string } }) => ({ data: path.id === root
           ? [{ id: child, parentID: root, agent: childAgent }] : hasWorker ? [{ id: "worker", parentID: child, agent: "dog-worker" }] : [] }),
       } };
-      const hooks = await SortieDogsPlugin({ directory, client } as never);
+      let currentBudget: ((root: string) => Promise<{ consumed_units: number; reserved_units: number } | null>) | undefined;
+      const hooks = await SortieDogsPlugin({ directory, client, runtimeBridge: {
+        profile: STABLE_RUNTIME_PROFILE, assetVersion: RUNTIME_ASSET_VERSION,
+        connected: (control: { currentBudget: typeof currentBudget }) => { currentBudget = control.currentBudget; },
+      } } as never);
       const turn = (id: string) => hooks["chat.message"]!({ sessionID: root, messageID: id, agent: "dog-coordinator" }, {
         message: { id, agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
         parts: [{ type: "text", text: "Continue the new request" }],
@@ -4065,6 +4069,9 @@ for (const [parentStatus, hasWorker, childAgent, expected] of [["completed", fal
       await ledger.appendGoal({ kind: "dispatch.reserved", at: new Date().toISOString(), goal_id: initial.goal_id!,
         unit_id: unitID, session_id: root, ticket_id: null,
         reservation_id: goalFingerprint({ goal_id: initial.goal_id, unit_id: unitID, call_id: callID }) });
+      const budget = await currentBudget!(root);
+      assert.equal(budget!.reserved_units, expected ? 0 : 1);
+      assert.equal(budget!.consumed_units, expected ? 1 : 0);
       await turn("resume");
       const result = (await ledger.readGoal()).state;
       assert.equal(result.outstanding_reservations.length, expected ? 0 : 1);

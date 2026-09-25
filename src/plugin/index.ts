@@ -8100,6 +8100,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     },
     currentBudget: async root => {
       if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) throw new Error("operator-coordinator-required");
+      // Planning must account for terminal native Tasks before reserving new units.
+      // Otherwise a cancelled predecessor keeps a stale unit reservation across missions.
+      await recoverCompletedGoalReservations(root);
       const state = await currentGoal(root);
       if (state.goal_id === null || state.budget === null) return null;
       const reserved = state.outstanding_reservations.length;
