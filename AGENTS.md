@@ -16,7 +16,7 @@ CLI検証はまずWorkerの実セッション起動と実モデルを確認す�
 3. candidate preflightを通す。
 4. `npm run test:full`を通す。
 5. global apply、tag、GitHub Releaseを実施する。
-6. 固定済みの同じ`.tgz`を`npm publish <tgz> --access public --tag latest`で公開し、registryのversion・`latest`・integrityを照合する。公開処理中の404では再publishしない。
+6. 固定済みの同じ`.tgz`を`npm publish <tgz> --access public --tag latest`で公開。成功を記録して先へ進み、registryのversion・`latest`・integrityは後で照合。未反映404で待機・再publishしない。
 
 ## 検証環境の片付け
 
