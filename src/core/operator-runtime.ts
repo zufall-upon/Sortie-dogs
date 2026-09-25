@@ -121,7 +121,7 @@ interface UnitState {
   readonly task: OperatorTask;
   readonly handoffPath: string;
   readonly manifestPath: string;
-  readonly hashes: readonly string[];
+  hashes: readonly string[];
   status: "pending" | "running" | "succeeded" | "failed" | "cancelled";
   callID: string | null;
   childSessionID: string | null;
@@ -1845,6 +1845,30 @@ export class OperatorRuntime {
     if (!declaration || !isAbsolute(declaration)) throw new Error("operator-declaration-path-invalid");
     const contents = await Promise.all([unit.handoffPath, unit.manifestPath, declaration].map(file => readFile(file, "utf8")));
     if (contents.some((value, index) => hash(value) !== unit.hashes[index])) throw new Error("operator-contract-changed");
+  }
+  /** Follow only the host's authorized parent-link repair; keep the durable control pin in sync. */
+  acknowledgeHostHandoffRepair(root: string, taskID: string, path: string, original: string, repaired: string): Promise<void> {
+    return this.serial(root, async () => {
+      const state = await this.read(root);
+      const unit = state?.units.find(candidate => candidate.status === "running" && candidate.handoffPath === path &&
+        /^task_id: (.+)$/m.exec(candidate.task.prompt)?.[1] === taskID);
+      if (!unit) return; // The same host repair also serves non-Operator handoffs.
+      if (hash(original) !== unit.hashes[0] || await readFile(path, "utf8") !== repaired) {
+        throw new Error("operator-host-handoff-repair-unpinned");
+      }
+      const before = JSON.parse(original), after = JSON.parse(repaired);
+      const oldLink = inspectAcceptanceContinuity(before).ledger;
+      const newLink = inspectAcceptanceContinuity(after).ledger;
+      if (!oldLink || !newLink || oldLink.task_id !== taskID || oldLink.parent_fingerprint !== "none" ||
+        newLink.task_id !== taskID || newLink.fingerprint !== oldLink.fingerprint ||
+        newLink.parent_fingerprint === "none" ||
+        JSON.stringify({ ...before, ext: { ...before.ext, [ACCEPTANCE_CONTINUITY_EXTENSION]:
+          { ...oldLink, parent_fingerprint: newLink.parent_fingerprint } } }, null, 2) + "\n" !== repaired) {
+        throw new Error("operator-host-handoff-repair-invalid");
+      }
+      unit.hashes = [hash(repaired), ...unit.hashes.slice(1)];
+      await this.save(state!);
+    });
   }
   private gitPaths(output: string): string[] {
     return output.split("\0").filter(Boolean).map(path => normalizeRelativePath(path.replaceAll("\\", "/")));

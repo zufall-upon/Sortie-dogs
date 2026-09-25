@@ -694,6 +694,76 @@ test("nested mission Worker records validation evidence with an in-scope npm-sty
   assert.equal(status.units[0].status, "succeeded", JSON.stringify(status));
 }));
 
+test("host parent-link repair repins the admitted handoff before accepted-unit continuation", async () => fixture(async root => {
+  await gitRepository(root);
+  await initializeProject(root, "v010");
+  await writeFile(join(root, "check.mjs"), 'import { readFileSync } from "node:fs";\nif(readFileSync("result.txt", "utf8") !== "ready\\n") process.exit(1);\n');
+  await git(root, ["add", "--", "check.mjs"]);
+  await git(root, ["commit", "-m", "add validator"]);
+  const identities: Record<string, { agent: string; parentID?: string }> = {
+    root: { agent: "dog-operator" }, coordinator: { agent: "dogs-coordinator", parentID: "root" },
+    worker: { agent: "dog-worker-v010", parentID: "coordinator" },
+  };
+  const hooks = await SortieDogsV010Plugin({ directory: root, client: { session: {
+    get: async ({ path }: { path: { id: string } }) => ({ data: identities[path.id] }),
+    messages: async () => ({ data: [] }), abort: async () => ({ data: true }),
+  } } } as never);
+  await hooks["chat.message"]!({ sessionID: "root", messageID: "user", agent: "dog-operator" }, {
+    message: { id: "user", agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-6-sol" } },
+    parts: [{ type: "text", text: "Create and validate a ready result" }],
+  });
+  const started = JSON.parse(await hooks.tool!.sortie_v010_start_mission.execute({ requirements: ["Create a ready result"] },
+    { sessionID: "root" }));
+  await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "coordinator-call" },
+    { args: structuredClone(started.task) });
+  await hooks["chat.message"]!({ sessionID: "coordinator", messageID: "delegate", agent: "dogs-coordinator" }, {
+    message: { id: "delegate", agent: "dogs-coordinator", model: { providerID: "openai", modelID: "gpt-6-sol" } },
+    parts: [{ type: "text", text: started.task.prompt }],
+  });
+  const declare = (title: string, reason?: string) => hooks.tool!.sortie_v010_plan_units.execute({
+    units: [{ title, objective: `Produce ${title}`, read: ["check.mjs"], write: ["result.txt"],
+      validation: ["node check.mjs"], requirement_ids: ["R1"] }], ...(reason ? { reason } : {}),
+  }, { sessionID: "coordinator" });
+  const first = JSON.parse(await declare("Initial attempt"));
+  await hooks["tool.execute.before"]!({ tool: "task", sessionID: "coordinator", callID: "first-call" },
+    { args: structuredClone(first.task) });
+  await hooks["tool.execute.after"]!({ tool: "task", sessionID: "coordinator", callID: "first-call" },
+    { output: "Worker did not start", status: "error" });
+  const second = JSON.parse(await declare("Validated attempt", "The initial worker did not start"));
+  assert.ok(second.task, JSON.stringify(second));
+  const secondInput = { args: structuredClone(second.task) };
+  await hooks["tool.execute.before"]!({ tool: "task", sessionID: "coordinator", callID: "second-call" }, secondInput);
+  const runtime = new OperatorRuntime(root, V010_RUNTIME_PROFILE);
+  const state = await runtime.required("root"), handoffPath = state.units[0]!.handoffPath;
+  const handoff = JSON.parse(await readFile(handoffPath, "utf8"));
+  assert.notEqual(handoff.ext["sortie-dogs/acceptance-continuity"].parent_fingerprint, "none",
+    "the host must have repaired the omitted parent link");
+  assert.equal(state.units[0]!.hashes[0], createHash("sha256").update(await readFile(handoffPath)).digest("hex"),
+    "the Operator's durable pin must follow only the host-authorized repair");
+  await hooks["chat.message"]!({ sessionID: "worker", messageID: "worker-user", agent: "dog-worker-v010" }, {
+    message: { id: "worker-user", agent: "dog-worker-v010", model: { providerID: "openai", modelID: "gpt-6-luna-fast" } },
+    parts: [{ type: "text", text: secondInput.args.prompt }],
+  });
+  await hooks["tool.execute.before"]!({ tool: "read", sessionID: "worker", callID: "handoff-read" },
+    { args: { filePath: handoffPath } });
+  await hooks["tool.execute.after"]!({ tool: "read", sessionID: "worker", callID: "handoff-read",
+    args: { filePath: handoffPath } }, { output: "inspected" });
+  assert.equal(JSON.parse(await hooks.tool!.sortie_v010_bind_write_gate.execute({ project_root: root,
+    manifest_path: state.units[0]!.manifestPath }, { sessionID: "worker" })).status, "bound");
+  await writeFile(join(root, "result.txt"), "ready\n");
+  await hooks["tool.execute.before"]!({ tool: "bash", sessionID: "worker", callID: "validate" },
+    { args: { command: "node check.mjs" } });
+  const checked = await promisify(execFile)(process.execPath, ["check.mjs"], { cwd: root, encoding: "utf8" });
+  await hooks["tool.execute.after"]!({ tool: "bash", sessionID: "worker", callID: "validate" },
+    { output: checked.stdout, metadata: { exit: 0, status: "completed" } });
+  await hooks["tool.execute.after"]!({ tool: "task", sessionID: "coordinator", callID: "second-call" },
+    { output: "<task_result>validated</task_result>", metadata: { sessionId: "worker" } });
+  const status = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
+  assert.equal(status.units[0].status, "succeeded", JSON.stringify(status));
+  const third = JSON.parse(await declare("Continue accepted work", "Continue with accepted result"));
+  assert.ok(third.task, JSON.stringify(third));
+}));
+
 test("release smoke accepts plain and branded OpenCode version output", () => {
   assert.equal(parseOpenCodeVersion("2.0.11\n"), "2.0.11");
   assert.equal(parseOpenCodeVersion("opencode v2.0.14\n"), "2.0.14");

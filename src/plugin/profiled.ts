@@ -267,6 +267,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     });
     const runtimeBridge: RuntimeBridge = {
       profile, assetVersion,
+      onHostHandoffRepaired: (root, taskID, path, original, repaired) =>
+        operators.acknowledgeHostHandoffRepair(root, taskID, path, original, repaired),
       continuationCheckpoint: async root => {
         const mission = await missions.read(root);
         if (mission && !["completed", "cancelled"].includes(mission.phase)) return JSON.stringify(missionPacket(mission, await operators.read(root)));

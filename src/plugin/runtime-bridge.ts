@@ -26,6 +26,8 @@ export interface RuntimeBridge {
   requiresExplicitAcceptance?(rootSessionID: string): Promise<boolean>;
   ownsCanonicalValidation?(rootSessionID: string, unitID: string, childSessionID: string,
     command: string): Promise<boolean>;
+  onHostHandoffRepaired?(rootSessionID: string, taskID: string, handoffPath: string,
+    original: string, repaired: string): Promise<void>;
   allowsInvestigativeShell?(sessionID: string): Promise<boolean>;
   onSerialSettlement?(settlement: SerialDispatchSettlement): Promise<void>;
   onRootTerminal?(rootSessionID: string, receipt: GoalTerminalReceipt): Promise<void>;
