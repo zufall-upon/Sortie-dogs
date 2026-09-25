@@ -856,6 +856,14 @@ export class OperatorRuntime {
     // Cancellation stops execution, not the accepted user order. A replacement
     // plan must carry the original ordered criteria; only a completed root clears them.
     const parent = !superseding && previous?.phase === "cancelled" ? previous : undefined;
+    if (parent?.decision === "explicit-cancellation") {
+      const cancelled = parent.units.flatMap(unit => unit.status === "cancelled" && unit.childSessionID !== null
+        ? [unit.childSessionID] : []);
+      if (cancelled.length > 0 && (new Set(terminalChildren).size !== terminalChildren.length ||
+          cancelled.some(id => !terminalChildren.includes(id)))) {
+        throw new Error("mission-cancelled-run-worker-not-terminal");
+      }
+    }
     if (parent?.decision === "operator-contract-repair-unavailable-after-cancel") {
       // The diagnosed transients, not the cancellation itself, block a replacement. Once they are
       // gone the same accepted order may proceed; while they remain the refusal names them exactly.

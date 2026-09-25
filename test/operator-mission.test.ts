@@ -195,6 +195,57 @@ test("a later user turn can replace a cancelled mission without inheriting its o
   assert.deepEqual(archive.acceptance, ["Run v0.12.3", "Keep cumulative budget"]);
 }));
 
+test("same-turn mission retains a cancelled run's exact acceptance before its Coordinator declares units", async () => fixture(async directory => {
+  const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+  const operators = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
+  await missions.capture("root", { id: "u1", text: "Continue MK2-04 under the old acceptance" });
+  const first = await missions.start("root", ["Keep the old validation boundary", "Do not use the user's Go toolchain"]);
+  const old = await operators.prepareMission("root", missionPlan(first, [unit]),
+    { sessionID: "old-coordinator", callID: "old-call" });
+  await operators.interrupted("root", "explicit-cancellation");
+  await missions.update("root", state => { state.phase = "cancelled"; state.runID = old.runID; });
+  const next = await missions.start("root", ["Continue MK2-04"]);
+  assert.equal(next.supersededRunID, undefined);
+  await assert.rejects(operators.prepareMission("root", missionPlan(next, [unit])), /operator-acceptance-carry-forward-required/);
+  const retained = await missions.carryForward("root", next.id, old.acceptance);
+  assert.deepEqual(retained.requirements.map(item => item.text),
+    ["Keep the old validation boundary", "Do not use the user's Go toolchain", "Continue MK2-04"]);
+  const task = missions.task(retained);
+  await missions.admit("root", "new-call", task);
+  await missions.claim("root", "new-coordinator", task.prompt);
+  const cold = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+  const recovered = await cold.carryForward("root", next.id, old.acceptance);
+  assert.deepEqual(recovered.requirements, retained.requirements);
+  const prepared = await operators.prepareMission("root", missionPlan(recovered, [unit]),
+    { sessionID: "new-coordinator", callID: "new-call" });
+  assert.equal(prepared.operatorSessionID, "new-coordinator");
+  assert.equal(prepared.parentRunID, old.runID);
+  assert.deepEqual(prepared.acceptance, retained.requirements.map(item => item.text));
+  assert.ok(operators.nextWorkerTask(prepared));
+}));
+
+test("a same-turn replacement cannot bypass terminal proof of a cancelled Worker", async () => fixture(async directory => {
+  const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+  const operators = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
+  await missions.capture("root", { id: "u1", text: "Continue the old request" });
+  const oldMission = await missions.start("root", ["Keep old acceptance"]);
+  const old = await operators.prepareMission("root", missionPlan(oldMission, [unit]),
+    { sessionID: "old-coordinator", callID: "old-call" });
+  const task = operators.nextWorkerTask(old);
+  await operators.admitWorker("root", "old-coordinator", "worker-call", task);
+  await operators.claimAdmittedWorkerPrompt("root", "old-coordinator", "old-worker", task.prompt);
+  await operators.interrupted("root", "explicit-cancellation");
+  await missions.update("root", state => { state.phase = "cancelled"; state.runID = old.runID; });
+  const next = await missions.start("root", ["Keep old acceptance", "Continue the old request"]);
+  const plan = missionPlan(next, [unit]);
+  await assert.rejects(operators.prepareMission("root", plan, { sessionID: "new-coordinator", callID: "new-call" }),
+    /mission-cancelled-run-worker-not-terminal/);
+  assert.equal((await operators.required("root")).runID, old.runID);
+  const resumed = await operators.prepareMission("root", plan, { sessionID: "new-coordinator", callID: "new-call" },
+    undefined, ["old-worker"]);
+  assert.equal(resumed.parentRunID, old.runID);
+}));
+
 test("a new mission cannot discard an old run that reached a worker", async () => fixture(async directory => {
   const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
   const operators = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);

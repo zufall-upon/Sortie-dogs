@@ -175,6 +175,21 @@ export class OperatorMissionRuntime {
       return state;
     });
   }
+  /** Keep a cancelled same-turn run's host-accepted criteria ahead of new mission text. */
+  carryForward(root: string, missionID: string, acceptance: readonly string[]): Promise<OperatorMission> {
+    return this.update(root, state => {
+      if (state.id !== missionID || state.supersededRunID !== undefined || state.runID !== null ||
+          !["open", "running"].includes(state.phase) || (state.dispatchOpen && state.coordinator === null) ||
+          acceptance.length === 0 || acceptance.some(text => typeof text !== "string" || !text.trim())) {
+        throw new Error("mission-acceptance-carry-forward-unavailable");
+      }
+      const existing = state.requirements.map(item => item.text);
+      if (acceptance.every((text, index) => existing[index] === text)) return;
+      const additions = existing.filter(text => !acceptance.includes(text));
+      if (acceptance.length + additions.length > 64) throw new Error("mission-requirements-limit: carried acceptance and additions exceed 64");
+      state.requirements = [...acceptance, ...additions].map((text, index) => ({ id: `R${index + 1}`, text }));
+    });
+  }
   task(state: OperatorMission): OperatorTask {
     return { subagent_type: profileAgent(this.profile, "dog-operator"), description: state.requirements[0]!.text.slice(0, 100),
       prompt: `${MISSION_REFERENCE}${JSON.stringify({ r: state.root, m: state.id, h: digest(JSON.stringify(state.requirements)) })}`,
