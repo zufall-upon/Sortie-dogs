@@ -184,6 +184,8 @@ export interface OperatorState {
   readonly sourceRefs: readonly string[];
   readonly createdAt: string;
   readonly parentRunID: string | null;
+  /** Archived cancelled run replaced by a later user-authorized mission. */
+  readonly supersededRunID?: string;
   readonly priorAcceptedUnits: readonly OperatorAcceptanceAnchor[];
   readonly remediationParent: {
     readonly taskID: string;
@@ -453,7 +455,8 @@ export class OperatorRuntime {
         !identifier(state.runID) || !Array.isArray(state.units) || state.units.length > OPERATOR_LIMITS.units ||
         !strings(state.acceptance, true) || !Array.isArray(state.acceptanceProof) || state.acceptanceProof.length !== state.acceptance.length ||
         state.acceptanceProof.some(ids => !strings(ids, true)) || state.acceptanceFingerprint !== acceptanceContinuityFingerprint(state.acceptance) ||
-        (state.parentRunID !== null && !identifier(state.parentRunID)) || !Array.isArray(state.priorAcceptedUnits) ||
+         (state.parentRunID !== null && !identifier(state.parentRunID)) ||
+         (state.supersededRunID !== undefined && !identifier(state.supersededRunID)) || !Array.isArray(state.priorAcceptedUnits) ||
         state.priorAcceptedUnits.some(anchor => !record(anchor) || !identifier(anchor.taskID) || typeof anchor.handoffPath !== "string" || !isAbsolute(anchor.handoffPath) ||
           typeof anchor.handoffHash !== "string" || !/^[a-f0-9]{64}$/u.test(anchor.handoffHash)) ||
         (state.remediationParent !== null && (!record(state.remediationParent) || !identifier(state.remediationParent.taskID) ||
@@ -786,8 +789,8 @@ export class OperatorRuntime {
     } catch { return false; }
   }
   /** Mission authority is supplied only by the owning profile, never by a model-authored plan. */
-  prepareMission(root: string, raw: unknown, dispatcher?: { sessionID: string; callID: string }): Promise<OperatorState> {
-    return this.serial(root, () => this.prepareOnce(root, raw, undefined, { dispatcher }));
+  prepareMission(root: string, raw: unknown, dispatcher?: { sessionID: string; callID: string }, supersededRunID?: string): Promise<OperatorState> {
+    return this.serial(root, () => this.prepareOnce(root, raw, undefined, { dispatcher, supersededRunID }));
   }
   retireMissionRun(root: string): Promise<void> {
     return this.serial(root, async () => {
@@ -802,7 +805,7 @@ export class OperatorRuntime {
     });
   }
   private async prepareOnce(root: string, raw: unknown, scopeApprovalTurnID?: string,
-    mission?: { dispatcher?: { sessionID: string; callID: string } }): Promise<OperatorState> {
+    mission?: { dispatcher?: { sessionID: string; callID: string }; supersededRunID?: string }): Promise<OperatorState> {
     const previous = await this.read(root);
     let immutableReplacement = previous?.phase === "cancelled" &&
       [ACCEPTANCE_REMEDIATION_DECISION, REVIEW_REMEDIATION_DECISION].includes(previous.decision ?? "") && record(raw)
@@ -823,17 +826,27 @@ export class OperatorRuntime {
       immutableReplacement = { ...immutableReplacement, goal_declaration: declaration };
     }
     const plan = parseOperatorPlan(immutableReplacement);
+    const validatedPlanHash = hash(JSON.stringify(plan));
+    if (mission?.supersededRunID !== undefined && previous?.supersededRunID === mission.supersededRunID &&
+        previous.planHash === validatedPlanHash && previous.phase !== "cancelled") return previous;
+    const superseding = mission?.supersededRunID !== undefined && previous?.runID === mission.supersededRunID &&
+      previous.phase === "cancelled";
+    if (mission?.supersededRunID !== undefined && !superseding) throw new Error("mission-superseded-run-mismatch");
+    if (superseding && previous && (previous.decision !== "explicit-cancellation" || previous.gitLifecycle !== null ||
+        previous.repairResidualPaths.length > 0 || previous.priorAcceptedUnits.length > 0 ||
+        previous.units.some(unit => unit.childSessionID !== null || unit.status === "succeeded"))) {
+      throw new Error("mission-superseded-run-has-work: reconcile prior workers and evidence before changing acceptance");
+    }
     if (plan.git_lifecycle !== undefined) {
       await ensureGitManagedStateExcluded(this.projectRoot, this.profile, this.gitPath);
     }
-    const planHash = hash(JSON.stringify(plan));
     if (previous && !["completed", "cancelled"].includes(previous.phase)) {
-      if (previous.planHash === planHash) return previous;
+      if (previous.planHash === validatedPlanHash) return previous;
       throw new Error("operator-active-contract-immutable");
     }
     // Cancellation stops execution, not the accepted user order. A replacement
     // plan must carry the original ordered criteria; only a completed root clears them.
-    const parent = previous?.phase === "cancelled" ? previous : undefined;
+    const parent = !superseding && previous?.phase === "cancelled" ? previous : undefined;
     if (parent?.decision === "operator-contract-repair-unavailable-after-cancel") {
       // The diagnosed transients, not the cancellation itself, block a replacement. Once they are
       // gone the same accepted order may proceed; while they remain the refusal names them exactly.
@@ -977,9 +990,9 @@ export class OperatorRuntime {
         childSessionID: null, evidence: [], resultClass: null, repairValidationAttempts: 0, repairValidation: null });
     }
     const gitLifecycle = await this.createGitLifecycle(plan, remediationHead);
-    const state: OperatorState = { schema_version: "0.1", profile: this.profile.id, rootSessionID: root, runID, planHash,
+    const state: OperatorState = { schema_version: "0.1", profile: this.profile.id, rootSessionID: root, runID, planHash: validatedPlanHash,
       acceptance: plan.acceptance, acceptanceProof: plan.acceptance_proof, acceptanceFingerprint, sourceRefs: plan.source_refs, createdAt: new Date().toISOString(),
-      parentRunID: parent?.runID ?? null, priorAcceptedUnits,
+      parentRunID: parent?.runID ?? null, ...(superseding ? { supersededRunID: previous!.runID } : {}), priorAcceptedUnits,
       remediationParent: remediationTaskID && remediationHead && parent?.gitLifecycle ? {
         taskID: remediationTaskID, committedHead: remediationHead, runID: parent.runID,
         acceptanceFingerprint: parent.acceptanceFingerprint, approvedWriteUnion: parent.gitLifecycle.writeUnion,
@@ -1001,6 +1014,14 @@ export class OperatorRuntime {
         const handle = await open(control.path, "wx", 0o600);
         created.push(control.path);
         try { await handle.writeFile(control.content); } finally { await handle.close(); }
+      }
+      if (superseding && previous) {
+        const archive = `${this.file(root)}.${previous.runID}.archive`;
+        try { await writeFile(archive, JSON.stringify(previous), { flag: "wx", mode: 0o600 }); }
+        catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "EEXIST" ||
+              await readFile(archive, "utf8") !== JSON.stringify(previous)) throw error;
+        }
       }
       await this.save(state);
       return state;

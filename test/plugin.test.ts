@@ -4023,6 +4023,56 @@ test(`restart reconciles orphan reservations only from matching terminal host Ta
 });
 }
 
+for (const [parentStatus, hasWorker, expected] of [["completed", false, true], ["running", false, false],
+  ["completed", true, false]] as const) {
+  test(`a terminal unstarted mission child releases only its exact reservation (${parentStatus}, worker=${hasWorker})`, async () => {
+    await withProject("mission-child-reservation", async directory => {
+      const { RunFlightLedger } = await import("../dist/core/run-flight-ledger.js");
+      const { OperatorMissionRuntime } = await import("../dist/core/operator-mission.js");
+      const { STABLE_RUNTIME_PROFILE } = await import("../dist/core/runtime-profile.js");
+      const root = "mission-root", child = "mission-coordinator", runID = "operator-11111111-1111-1111-1111-111111111111";
+      const unitID = `${runID}-1`, callID = "failed-worker-task", parentCall = "mission-task";
+      const missions = new OperatorMissionRuntime(directory, STABLE_RUNTIME_PROFILE);
+      await missions.capture(root, { id: "original", text: "old request" });
+      const old = await missions.start(root, ["old request"]);
+      await missions.update(root, state => { state.phase = "cancelled"; state.coordinator = child;
+        state.callID = parentCall; state.runID = runID; });
+      await missions.capture(root, { id: "new-user", text: "new request" });
+      await missions.start(root, ["new request"]);
+      const parentPart = { type: "tool", tool: "task", callID: parentCall, state: {
+        status: parentStatus, input: { subagent_type: "dog-operator",
+          prompt: `SORTIE_MISSION_REF ${JSON.stringify({ r: root, m: old.id })}` } } };
+      const workerPart = { type: "tool", tool: "task", callID, state: { status: "error", input: {
+        subagent_type: "dog-worker", prompt: `SORTIE_OPERATOR_TASK_REF ${JSON.stringify({ r: root, n: runID,
+          t: unitID, p: "a".repeat(64), h: "b".repeat(64) })}` } } };
+      const client = { session: {
+        get: async () => ({ data: { agent: "dog-coordinator" } }),
+        messages: async ({ path }: { path: { id: string } }) => ({ data: [{ info: { role: "assistant", sessionID: path.id },
+          parts: path.id === root ? [parentPart] : path.id === child ? [workerPart] : [] }] }),
+        children: async ({ path }: { path: { id: string } }) => ({ data: path.id === root
+          ? [{ id: child, parentID: root, agent: "dog-operator" }] : hasWorker ? [{ id: "worker", parentID: child, agent: "dog-worker" }] : [] }),
+      } };
+      const hooks = await SortieDogsPlugin({ directory, client } as never);
+      const turn = (id: string) => hooks["chat.message"]!({ sessionID: root, messageID: id, agent: "dog-coordinator" }, {
+        message: { id, agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
+        parts: [{ type: "text", text: "Continue the new request" }],
+      });
+      await turn("initial");
+      const path = join(directory, ".git", "sortie-dogs", "run-flight", `${createHash("sha256").update(root).digest("hex")}.json`);
+      const ledger = await RunFlightLedger.openGoal(path);
+      const initial = (await ledger.readGoal()).state;
+      await ledger.appendGoal({ kind: "dispatch.reserved", at: new Date().toISOString(), goal_id: initial.goal_id!,
+        unit_id: unitID, session_id: root, ticket_id: null,
+        reservation_id: goalFingerprint({ goal_id: initial.goal_id, unit_id: unitID, call_id: callID }) });
+      await turn("resume");
+      const result = (await ledger.readGoal()).state;
+      assert.equal(result.outstanding_reservations.length, expected ? 0 : 1);
+      assert.equal(result.consumed_units, expected ? 1 : 0);
+      assert.deepEqual(result.satisfied_criteria, []);
+    });
+  });
+}
+
 test("a terminal host Task overrides stale process-local reservation accounting", async () => {
   await withProject("live-orphan-goal-reservation", async directory => {
     await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(operationManifest(["allowed.txt"])));

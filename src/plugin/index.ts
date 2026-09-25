@@ -14,6 +14,7 @@ import {
   type AcceptanceContinuityLedger,
 } from "../core/acceptance-continuity.js";
 import { resolveGlobalConfigRoot } from "../core/initialize.js";
+import { OperatorMissionRuntime } from "../core/operator-mission.js";
 import { admitLunaFabric } from "../core/luna-fabric-contract.js";
 import { summarizeExperienceEvidence } from "../core/experience-evidence-summary.js";
 import { selectExperienceRoute } from "../core/experience-route-policy.js";
@@ -2030,6 +2031,55 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         query: { directory: input.directory } }).catch(() => undefined);
       const data: unknown = isRecord(response) ? response.data : undefined;
       if (!Array.isArray(data)) return;
+      const rootHistory: unknown[] = data;
+      async function terminalCancelledMissionTask(unitID: string, reservationID: string, goalID: string): Promise<string | undefined> {
+        const runID = unitID.replace(/-[1-9][0-9]*$/u, "");
+        if (runID === unitID || !/^operator-[a-f0-9-]+$/u.test(runID) ||
+            input.client?.session?.children === undefined) return undefined;
+        const sessionAPI = input.client.session;
+        const childrenMethod = sessionAPI.children!;
+        const mission = await new OperatorMissionRuntime(input.directory, runtimeProfile).archivedRun(root, runID);
+        if (!mission || !rootHistory.some(message => isRecord(message) && isRecord(message.info) &&
+            message.info.sessionID === root && message.info.role === "assistant" && Array.isArray(message.parts) &&
+            message.parts.some(part => isRecord(part) && part.type === "tool" && part.tool === "task" &&
+              part.callID === mission.callID && isRecord(part.state) && part.state.status === "completed" &&
+              isRecord(part.state.input) && typeof part.state.input.prompt === "string" &&
+              part.state.input.prompt.startsWith("SORTIE_MISSION_REF ") && (() => {
+                try { const ref = JSON.parse(part.state.input.prompt.slice("SORTIE_MISSION_REF ".length));
+                  return isRecord(ref) && ref.r === root && ref.m === mission.id; }
+                catch { return false; }
+              })()))) return undefined;
+        const childrenResponse = await childrenMethod.call(sessionAPI, { path: { id: root }, query: { directory: input.directory } });
+        const children = isRecord(childrenResponse) && Array.isArray(childrenResponse.data) ? childrenResponse.data : [];
+        if (!children.some(child => isRecord(child) && child.id === mission.coordinator &&
+            child.parentID === root && child.agent === "dog-operator")) return undefined;
+        const coordinator = mission.coordinator!;
+        const historyResponse = await messages.call(sessionAPI, { path: { id: coordinator }, query: { directory: input.directory } });
+        const history = isRecord(historyResponse) && Array.isArray(historyResponse.data) ? historyResponse.data : [];
+        const candidates: string[] = [];
+        for (const message of history) {
+          if (!isRecord(message) || !isRecord(message.info) || message.info.role !== "assistant" ||
+              message.info.sessionID !== coordinator || !Array.isArray(message.parts)) continue;
+          for (const part of message.parts) {
+            if (!isRecord(part) || part.type !== "tool" || part.tool !== "task" ||
+                !isRecord(part.state) || part.state.status !== "error" || !isRecord(part.state.input) ||
+                typeof part.state.input.prompt !== "string" || !part.state.input.prompt.startsWith("SORTIE_OPERATOR_TASK_REF ") ||
+                typeof part.callID !== "string") continue;
+            try {
+              const ref = JSON.parse(part.state.input.prompt.slice("SORTIE_OPERATOR_TASK_REF ".length));
+              if (isRecord(ref) && ref.r === root && ref.n === runID && ref.t === unitID &&
+                  /^[a-f0-9]{64}$/u.test(String(ref.p)) && /^[a-f0-9]{64}$/u.test(String(ref.h)) &&
+                  goalFingerprint({ goal_id: goalID, unit_id: unitID, call_id: part.callID }) === reservationID) {
+                candidates.push(part.callID);
+              }
+            } catch { /* malformed native reference cannot prove this reservation */ }
+          }
+        }
+        if (candidates.length !== 1) return undefined;
+        const descendantsResponse = await childrenMethod.call(sessionAPI, { path: { id: coordinator }, query: { directory: input.directory } });
+        if (!isRecord(descendantsResponse) || !Array.isArray(descendantsResponse.data) || descendantsResponse.data.length !== 0) return undefined;
+        return candidates[0];
+      }
       for (const reservation of pending) {
         const matches: Array<{ callID: string; status: string; elapsed: number | null }> = [];
         for (const message of data) {
@@ -2086,7 +2136,12 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
             matches.push({ callID: part.callID, status: String(part.state.status), elapsed });
           }
         }
-        if (matches.length !== 1) continue;
+        if (matches.length !== 1) {
+          const callID = matches.length === 0 ? await terminalCancelledMissionTask(reservation.unit_id,
+            reservation.reservation_id, state.goal_id) : undefined;
+          if (callID === undefined) continue;
+          matches.push({ callID, status: "error", elapsed: null });
+        }
         const match = matches[0]!;
         // Reconcile lifecycle accounting only. Lost in-memory validation bindings cannot be
         // reconstructed from worker prose and must not manufacture acceptance evidence.
