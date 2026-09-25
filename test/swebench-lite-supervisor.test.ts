@@ -90,6 +90,10 @@ test("supervisor atomically claims each instance and writes ordered aggregate ou
     assert.deepEqual(lines.map(line => line.instance_id), ["example__project-1", "example__project-2"]);
     assert.equal((await readFile(join(root, "supervisor-state.json"), "utf8")).includes('"status": "completed"'), true);
     assert.equal((await readFile(state.instances[0]!.child_output, "utf8")).includes("example__project-1"), true);
+    const child = JSON.parse(await readFile(join(root, "manifests", "000-example__project-1.json"), "utf8"));
+    assert.deepEqual(Object.keys(child).sort(), Object.keys(manifestValue).sort(),
+      "the runner rejects supervisor-only fields in its strict inference manifest");
+    assert.equal(child.instances.length, 1);
     const metadata = JSON.parse(await readFile(`${output}.metadata.json`, "utf8"));
     assert.equal(metadata.status, "completed");
     assert.equal((await readdir(root, { recursive: true })).some(path => String(path).endsWith(".tmp")), false);

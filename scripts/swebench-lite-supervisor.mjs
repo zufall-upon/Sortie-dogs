@@ -268,7 +268,6 @@ async function makeChildManifest(value, state, entry, paths) {
       package_tgz: resolve(dirname(state.manifest), value.candidate.package_tgz),
     },
     instances: [value.instances[entry.index]],
-    supervisor: { manifest: state.manifest, input_sha256: state.input_sha256 },
   };
   await writeAtomicJson(paths.manifest, child);
 }

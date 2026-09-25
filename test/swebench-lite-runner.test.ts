@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { promisify } from "node:util";
 import test from "node:test";
-import { benchmarkEnvironment, benchmarkInlineConfig, benchmarkPermissionPolicy, capturePatch, cloneInstance, createDryRunPlan, createInferenceManifest, createInstancePrompt, createLiveRunPlan, runOpenCode, readDirectoryUsage, formatPrediction, parseArguments, runDryRun, runLive, verifyCandidateAgent } from "../scripts/swebench-lite-runner.mjs";
+import { benchmarkEnvironment, benchmarkInlineConfig, benchmarkPermissionPolicy, capturePatch, cloneInstance, createDryRunPlan, createInferenceManifest, createInstancePrompt, createLiveRunPlan, runOpenCode, readDirectoryUsage, formatPrediction, parseArguments, runDryRun, runLive, seedIsolatedV2Credential, verifyCandidateAgent } from "../scripts/swebench-lite-runner.mjs";
 import { runCandidatePreflight } from "../scripts/swebench-candidate-preflight.mjs";
 import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -18,6 +18,31 @@ const instance = (instance_id: string, extra: Record<string, unknown> = {}) => (
   version: "1.0",
   environment_setup_commit: "fedcba9876543210fedcba9876543210fedcba98",
   ...extra,
+});
+
+test("isolated V2 runtime copies only its OAuth route into a private credential store", async () => {
+  const root = await mkdtemp(join(tmpdir(), "swebench-v2-auth-"));
+  const directory = join(root, "isolated"), sourcePath = join(root, "source.db"), targetPath = join(directory, "opencode.db");
+  const schema = "CREATE TABLE credential (id TEXT, integration_id TEXT, label TEXT, value TEXT, connector_id TEXT, method_id TEXT, active INTEGER, time_created INTEGER, time_updated INTEGER)";
+  try {
+    await mkdir(directory);
+    for (const path of [sourcePath, targetPath]) {
+      const db = new DatabaseSync(path);
+      try { db.exec(schema); } finally { db.close(); }
+    }
+    const source = new DatabaseSync(sourcePath);
+    try {
+      const insert = source.prepare("INSERT INTO credential VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+      insert.run("openai-route", "openai", "fixture", JSON.stringify({ type: "oauth", access: "dummy" }), null, null, null, 1, 1);
+      insert.run("unrelated", "other", "fixture", JSON.stringify({ type: "oauth", access: "other" }), null, null, null, 1, 1);
+    } finally { source.close(); }
+    await seedIsolatedV2Credential(sourcePath, targetPath, directory);
+    const target = new DatabaseSync(targetPath, { readOnly: true });
+    try { assert.deepEqual(target.prepare("SELECT id FROM credential").all().map(row => row.id), ["openai-route"]); }
+    finally { target.close(); }
+    assert.equal((await stat(directory)).mode & 0o777, 0o700);
+    assert.equal((await stat(targetPath)).mode & 0o777, 0o600);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("V2 usage reader charges owned sessions including Luna Fast and retains missing usage", async () => {
@@ -40,7 +65,31 @@ test("V2 usage reader charges owned sessions including Luna Fast and retains mis
       assert.deepEqual(readDirectoryUsage(workspace, path), { usd: 0.0014, requests: 2, unpriced: [] });
       write.run("child", "assistant", JSON.stringify({ time: { completed: 2 }, error: { message: "after transport" } }));
       assert.deepEqual(readDirectoryUsage(workspace, path), { usd: 0.0014, requests: 2, unpriced: ["missing-usage"] });
+      db.prepare("DELETE FROM session_message WHERE session_id = ? AND data LIKE ?").run("child", '%after transport%');
+      write.run("child", "assistant", JSON.stringify({ time: { created: 3 }, model: { providerID: "openai", id: "gpt-6-sol" } }));
+      assert.deepEqual(readDirectoryUsage(workspace, path), { usd: 0.0014, requests: 2, unpriced: ["pending-usage"] });
     } finally { db.close(); }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a pending V2 assistant does not abort an in-flight priced request", { skip: process.platform === "win32" }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "swebench-v2-pending-"));
+  try {
+    await mkdir(join(root, "bin"));
+    const executable = join(root, "bin", "opencode");
+    await writeFile(executable, "#!/bin/sh\nsleep 2\nexit 0\n");
+    await chmod(executable, 0o755);
+    await writeFile(join(root, ".bashrc"), `export PATH=${join(root, "bin")}:$PATH\n`);
+    let calls = 0;
+    const result = await runOpenCode({ workspace: root, instanceId: "pending", agent: "dog-operator", prompt: "probe",
+      environment: { HOME: root, PATH: `${join(root, "bin")}:${process.env.PATH ?? ""}` }, timeoutSeconds: 8,
+      costLimitUsd: 1, watchdogSeconds: 5, startedAt: Date.now() }, {
+      readUsage: () => ++calls < 3 ? { usd: 0, requests: 0, unpriced: ["pending-usage"] }
+        : { usd: 0.1, requests: 1, unpriced: [] },
+    });
+    assert.equal(result.reason, "completed");
+    assert.equal(result.usageComplete, true);
+    assert.ok(calls >= 3);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
