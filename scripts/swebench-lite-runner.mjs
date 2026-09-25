@@ -16,6 +16,8 @@ export const MAX_REPLAY_ARTIFACT_BYTES = 8 * 1024 * 1024;
 const DEFAULT_AGENT = "dog-operator";
 const DEFAULT_TIMEOUT_SECONDS = 30 * 60;
 const DEFAULT_WATCHDOG_SECONDS = 120;
+const DEFAULT_UNPRICED_GRACE_SECONDS = 30;
+const MODEL_ROUTE_PATTERN = /^openai\/[a-z0-9][a-z0-9.-]*#[a-z]+$/u;
 const BENCHMARK_ENVIRONMENT_KEYS = Object.freeze([
   "LANG", "LC_ALL", "LC_CTYPE", "LOGNAME", "PATH", "SHELL", "TERM", "TZ", "USER",
   "WSL_DISTRO_NAME",
@@ -119,18 +121,19 @@ export function benchmarkPermissionPolicy(externalDirectory) {
   return rules;
 }
 
-export function benchmarkInlineConfig(plugin, agentNames, externalDirectory) {
+export function benchmarkInlineConfig(plugin, agentNames, externalDirectory, modelOverrides = {}) {
   const permissions = benchmarkPermissionPolicy(externalDirectory);
   return {
     plugins: [plugin],
     permissions,
     agents: Object.fromEntries(agentNames.map(name => [name, {
       permissions,
+      ...(modelOverrides[name] ? { model: modelOverrides[name] } : {}),
     }])),
   };
 }
 
-export function verifyCandidateAgent(name, resolvedAgent) {
+export function verifyCandidateAgent(name, resolvedAgent, override) {
   ensure(resolvedAgent?.id === name, `candidate-agent-not-loaded:${name}`);
   const rules = Array.isArray(resolvedAgent.permissions) ? resolvedAgent.permissions : [];
   const denied = (action, resource) => {
@@ -143,7 +146,8 @@ export function verifyCandidateAgent(name, resolvedAgent) {
   ensure(denied("shell", "*https://*"), `candidate-agent-network-permission-invalid:${name}`);
   const sol = name === "dog-operator" || name === "dogs-coordinator" ||
     name === "dog-reviewer-v010" || name === "dog-advisor-v010";
-  const target = sol ? ["gpt-6-sol", "xhigh"] : ["gpt-6-luna-fast", "max"];
+  const target = override ? override.slice("openai/".length).split("#")
+    : sol ? ["gpt-6-sol", "xhigh"] : ["gpt-6-luna-fast", "max"];
   const selected = resolvedAgent.model;
   ensure(selected?.providerID === "openai" && (selected.id ?? selected.model) === target[0] &&
     selected.variant === target[1], `candidate-agent-model-mismatch:${name}`);
@@ -756,8 +760,9 @@ export async function prepareCandidateRuntime(candidate, packagePath, runRoot, d
       agentNames.push(asset.installPath.slice("agent/".length, -".md".length));
     }
   }
-  environment.OPENCODE_CONFIG_CONTENT = JSON.stringify(benchmarkInlineConfig(plugin, agentNames, runRoot));
-  await (dependencies.probeAgents ?? probeCandidateV2Agents)(candidateRoot, environment, candidate.agent, agentNames);
+  const modelOverrides = dependencies.coordinatorModel ? { "dogs-coordinator": dependencies.coordinatorModel } : {};
+  environment.OPENCODE_CONFIG_CONTENT = JSON.stringify(benchmarkInlineConfig(plugin, agentNames, runRoot, modelOverrides));
+  await (dependencies.probeAgents ?? probeCandidateV2Agents)(candidateRoot, environment, candidate.agent, agentNames, modelOverrides);
   // V2 OAuth connections live in its SQLite credential store. The legacy auth.json
   // alone cannot route the model in an isolated server. Copy only the selected
   // provider's credential into the throwaway runtime, never the host session DB.
@@ -800,7 +805,23 @@ export async function seedIsolatedV2Credential(sourcePath, targetPath, targetDir
   } finally { source.close(); }
 }
 
-async function probeCandidateV2Agents(root, environment, primary, agentNames) {
+/** Keep a credential-free copy of the isolated store so per-role timing can be analyzed after cleanup. */
+export async function retainUsageDatabase(sourcePath, targetPath) {
+  await mkdir(dirname(targetPath), { recursive: true, mode: 0o700 });
+  const source = new DatabaseSync(sourcePath, { readOnly: true });
+  try { source.prepare("VACUUM INTO ?").run(targetPath); } finally { source.close(); }
+  await chmod(targetPath, 0o600);
+  const target = new DatabaseSync(targetPath);
+  try {
+    if (target.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'credential'").get() !== undefined) {
+      target.exec("DELETE FROM credential");
+    }
+    // Rewrite the file so deleted credential pages do not remain on disk.
+    target.exec("VACUUM");
+  } finally { target.close(); }
+}
+
+async function probeCandidateV2Agents(root, environment, primary, agentNames, modelOverrides = {}) {
   const server = await startV2ReleaseServer(root, environment);
   try {
     const headers = { "content-type": "application/json",
@@ -824,7 +845,7 @@ async function probeCandidateV2Agents(root, environment, primary, agentNames) {
     } while (Date.now() < deadline);
     ensure(plugins.data?.some(plugin => plugin.id === "sortie-dogs.v010"), "candidate-plugin-not-loaded");
     const agents = await request("/api/agent");
-    for (const name of agentNames) verifyCandidateAgent(name, agents.data?.find(agent => agent.id === name));
+    for (const name of agentNames) verifyCandidateAgent(name, agents.data?.find(agent => agent.id === name), modelOverrides[name]);
   } finally { await server.stop(); }
 }
 
@@ -1037,12 +1058,18 @@ export async function runOpenCode(options, dependencies = {}) {
     child.once("close", finish);
     timer = setTimeout(() => { void stop("timeout"); }, options.timeoutSeconds * 1000);
     if (options.costLimitUsd !== undefined) {
+      const graceMs = (options.unpricedGraceSeconds ?? DEFAULT_UNPRICED_GRACE_SECONDS) * 1000;
+      let unpricedSince;
       poller = setInterval(async () => {
         if (pollInFlight || stopping) return;
         pollInFlight = true;
         try {
           usage = readUsage(options.workspace, options.databasePath);
-          if (usage.unpriced.some(reason => reason !== "pending-usage")) await stop("pricing-coverage-missing");
+          // A row can be observed between V2's completion and usage writes. Only a
+          // gap that persists is a pricing failure; the final read stays fail-closed.
+          const unpriced = usage.unpriced.some(reason => reason !== "pending-usage");
+          unpricedSince = unpriced ? unpricedSince ?? Date.now() : undefined;
+          if (unpriced && Date.now() - unpricedSince >= graceMs) await stop("pricing-coverage-missing");
           else if (usage.usd >= options.costLimitUsd) await stop("cost-limit");
         } catch {
           await stop("usage-monitor-failed");
@@ -1072,10 +1099,13 @@ export async function runOpenCode(options, dependencies = {}) {
   const cleanupEstablished = await cleanupPromise;
   try { usage = readUsage(options.workspace, options.databasePath); } catch { usage = { usd: usage.usd, requests: usage.requests, unpriced: ["usage-read-failed"] }; }
   await recordWatchdog("exited").catch(() => undefined);
+  // Keep the primary stop cause; incomplete usage is reported by usageComplete.
   const finalReason = !cleanupEstablished ? "cleanup-failed"
-    : usage.unpriced.length > 0 ? "pricing-coverage-missing"
-      : usage.requests === 0 && result.reason === "completed" ? "usage-unverified"
-      : options.costLimitUsd !== undefined && usage.usd >= options.costLimitUsd ? "cost-limit" : result.reason;
+    : result.reason !== "completed" ? result.reason
+      : usage.unpriced.length > 0 ? "pricing-coverage-missing"
+      : usage.requests === 0 ? "usage-unverified"
+      : options.costLimitUsd !== undefined && usage.usd >= options.costLimitUsd ? "cost-limit"
+      : result.exit !== 0 ? "agent-failed" : "completed";
   return { ...result, exit: finalReason === "completed" ? result.exit : result.exit === 0 ? 1 : result.exit,
     reason: finalReason, usage, usageComplete: usage.unpriced.length === 0 && usage.requests > 0,
     cleanupEstablished, watchdogEvents, lastActivityAgeMs: Date.now() - lastActivity };
@@ -1102,6 +1132,7 @@ function costEnforcementStopReason(execution) {
   if (["pricing-coverage-missing", "usage-unverified", "usage-monitor-failed", "watchdog-usage-failed", "usage-read-failed"].includes(reason)) {
     return reason;
   }
+  if ((execution?.usage?.unpriced?.length ?? 0) > 0) return "pricing-coverage-missing";
   return undefined;
 }
 
@@ -1130,7 +1161,10 @@ export async function runLive(value, options, dependencies = {}) {
   const packagePath = resolve(options.manifest ? dirname(resolve(options.manifest)) : process.cwd(),
     plan.candidate.package_tgz);
   const prepareCandidate = dependencies.prepareCandidate ?? prepareCandidateRuntime;
-  const candidateRuntime = await prepareCandidate(plan.candidate, packagePath, runRoot);
+  ensure(options.coordinatorModel === undefined || MODEL_ROUTE_PATTERN.test(options.coordinatorModel), "invalid-coordinator-model");
+  const candidateRuntime = await prepareCandidate(plan.candidate, packagePath, runRoot,
+    options.coordinatorModel ? { coordinatorModel: options.coordinatorModel } : {});
+  let usageDatabase = null;
   const remove = dependencies.remove ?? rm;
   if (!record(candidateRuntime) || !record(candidateRuntime.environment) || !record(candidateRuntime.evidence) ||
       candidateRuntime.evidence.package_sha256 !== plan.candidate.sha256) {
@@ -1300,6 +1334,11 @@ export async function runLive(value, options, dependencies = {}) {
     });
     if (fatalError) throw fatalError;
   } } finally {
+    if (typeof candidateRuntime.databasePath === "string" && existsSync(candidateRuntime.databasePath)) {
+      const retained = join(runRoot, "usage", "opencode.db");
+      usageDatabase = await retainUsageDatabase(candidateRuntime.databasePath, retained)
+        .then(() => retained, error => ({ error: String(error?.message ?? error) }));
+    }
     if (typeof candidateRuntime.runtimeRoot === "string") {
       await remove(candidateRuntime.runtimeRoot, { recursive: true, force: true });
     }
@@ -1327,6 +1366,8 @@ export async function runLive(value, options, dependencies = {}) {
       provider_requests_started: results.some(result => (result.usage?.requests ?? 0) > 0),
       spent_usd: spentUsd,
       usage_complete: results.every(result => result.usage_complete === true),
+      usage_database: usageDatabase,
+      ...(options.coordinatorModel ? { coordinator_model_override: options.coordinatorModel } : {}),
     },
     replay: {
       root: replayRoot,
@@ -1380,10 +1421,11 @@ export function parseArguments(argv) {
     const argument = argv[index];
     if (argument === "--dry-run") { options.dryRun = true; continue; }
     if (argument === "--live") { options.live = true; continue; }
-    if (["--manifest", "--output", "--metadata", "--run-root", "--agent", "--model-name-or-path", "--timeout-seconds", "--watchdog-seconds", "--cost-limit-usd"].includes(argument)) {
+    if (["--manifest", "--output", "--metadata", "--run-root", "--agent", "--model-name-or-path", "--timeout-seconds", "--watchdog-seconds", "--cost-limit-usd", "--coordinator-model"].includes(argument)) {
       const value = argv[++index];
       if (!value) throw new Error(`missing-value:${argument}`);
       if (argument === "--manifest") options.manifest = value;
+      else if (argument === "--coordinator-model") options.coordinatorModel = value;
       else if (argument === "--output") options.output = value;
       else if (argument === "--metadata") options.metadata = value;
       else if (argument === "--run-root") options.runRoot = value;

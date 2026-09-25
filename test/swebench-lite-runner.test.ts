@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { promisify } from "node:util";
 import test from "node:test";
-import { benchmarkEnvironment, benchmarkInlineConfig, benchmarkPermissionPolicy, capturePatch, cloneInstance, createDryRunPlan, createInferenceManifest, createInstancePrompt, createLiveRunPlan, runOpenCode, readDirectoryUsage, formatPrediction, parseArguments, runDryRun, runLive, seedIsolatedV2Credential, verifyCandidateAgent } from "../scripts/swebench-lite-runner.mjs";
+import { benchmarkEnvironment, benchmarkInlineConfig, benchmarkPermissionPolicy, capturePatch, cloneInstance, createDryRunPlan, createInferenceManifest, createInstancePrompt, createLiveRunPlan, runOpenCode, readDirectoryUsage, formatPrediction, parseArguments, retainUsageDatabase, runDryRun, runLive, seedIsolatedV2Credential, verifyCandidateAgent } from "../scripts/swebench-lite-runner.mjs";
 import { runCandidatePreflight } from "../scripts/swebench-candidate-preflight.mjs";
 import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -91,6 +91,86 @@ test("a pending V2 assistant does not abort an in-flight priced request", { skip
     assert.equal(result.usageComplete, true);
     assert.ok(calls >= 3);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+async function fakeOpenCode(script: string) {
+  const root = await mkdtemp(join(tmpdir(), "swebench-v2-fake-"));
+  await mkdir(join(root, "bin"));
+  await writeFile(join(root, "bin", "opencode"), `#!/bin/sh\n${script}\n`);
+  await chmod(join(root, "bin", "opencode"), 0o755);
+  await writeFile(join(root, ".bashrc"), `export PATH=${join(root, "bin")}:$PATH\n`);
+  const options = (extra: Record<string, unknown>) => ({ workspace: root, instanceId: "fake", agent: "dog-operator", prompt: "probe",
+    environment: { HOME: root, PATH: `${join(root, "bin")}:${process.env.PATH ?? ""}` }, costLimitUsd: 1, watchdogSeconds: 30,
+    startedAt: Date.now(), ...extra });
+  return { root, options };
+}
+
+test("a transient terminal usage gap does not kill the run, but a persistent one does", { skip: process.platform === "win32" }, async () => {
+  const { root, options } = await fakeOpenCode("sleep 3\nexit 0");
+  try {
+    let calls = 0;
+    const transient = await runOpenCode(options({ timeoutSeconds: 8, unpricedGraceSeconds: 5 }), {
+      readUsage: () => ++calls === 1 ? { usd: 0.1, requests: 1, unpriced: ["missing-usage"] } : { usd: 0.1, requests: 2, unpriced: [] },
+    });
+    assert.equal(transient.reason, "completed");
+    const persistent = await runOpenCode(options({ timeoutSeconds: 8, unpricedGraceSeconds: 1 }), {
+      readUsage: () => ({ usd: 0.1, requests: 1, unpriced: ["missing-usage"] }),
+    });
+    assert.equal(persistent.reason, "pricing-coverage-missing");
+    assert.equal(persistent.usageComplete, false);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a timeout keeps its cause when usage is incomplete, and a failed exit is not completed", { skip: process.platform === "win32" }, async () => {
+  const slow = await fakeOpenCode("sleep 30");
+  const failed = await fakeOpenCode("exit 1");
+  try {
+    const timeout = await runOpenCode(slow.options({ timeoutSeconds: 1 }), {
+      readUsage: () => ({ usd: 0.1, requests: 1, unpriced: ["pending-usage"] }),
+    });
+    assert.equal(timeout.reason, "timeout");
+    assert.equal(timeout.usageComplete, false);
+    const agentFailure = await runOpenCode(failed.options({ timeoutSeconds: 8 }), {
+      readUsage: () => ({ usd: 0.1, requests: 1, unpriced: [] }),
+    });
+    assert.equal(agentFailure.reason, "agent-failed");
+    assert.notEqual(agentFailure.exit, 0);
+  } finally {
+    await rm(slow.root, { recursive: true, force: true });
+    await rm(failed.root, { recursive: true, force: true });
+  }
+});
+
+test("the retained usage database carries sessions but no credential", async () => {
+  const root = await mkdtemp(join(tmpdir(), "swebench-retain-"));
+  const source = join(root, "source.db"), target = join(root, "usage", "opencode.db");
+  try {
+    const db = new DatabaseSync(source);
+    try {
+      db.exec("CREATE TABLE credential (id TEXT, value TEXT); CREATE TABLE session_v2 (id TEXT, directory TEXT)");
+      db.prepare("INSERT INTO credential VALUES (?, ?)").run("openai", "secret-token-value");
+      db.prepare("INSERT INTO session_v2 VALUES (?, ?)").run("root", "/workspace");
+    } finally { db.close(); }
+    await retainUsageDatabase(source, target);
+    const copy = new DatabaseSync(target, { readOnly: true });
+    try {
+      assert.deepEqual(copy.prepare("SELECT id FROM session_v2").all().map(row => row.id), ["root"]);
+      assert.equal(copy.prepare("SELECT count(*) AS n FROM credential").get()!.n, 0);
+    } finally { copy.close(); }
+    assert.equal((await readFile(target)).includes("secret-token-value"), false);
+    assert.equal((await stat(target)).mode & 0o777, 0o600);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a benchmark coordinator override is applied and verified exactly", () => {
+  const config = benchmarkInlineConfig("/plugin", ["dogs-coordinator", "dog-worker-v010"], "/run",
+    { "dogs-coordinator": "openai/gpt-6-luna-fast#max" });
+  assert.equal(config.agents["dogs-coordinator"].model, "openai/gpt-6-luna-fast#max");
+  assert.equal("model" in config.agents["dog-worker-v010"], false);
+  const permissions = benchmarkPermissionPolicy("/run").map(rule => ({ ...rule }));
+  const luna = { id: "dogs-coordinator", permissions, model: { providerID: "openai", id: "gpt-6-luna-fast", variant: "max" } };
+  verifyCandidateAgent("dogs-coordinator", luna, "openai/gpt-6-luna-fast#max");
+  assert.throws(() => verifyCandidateAgent("dogs-coordinator", luna), /candidate-agent-model-mismatch/);
 });
 
 test("a successful CLI exit without durable usage remains unverified", { skip: process.platform === "win32" }, async () => {
