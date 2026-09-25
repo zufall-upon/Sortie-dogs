@@ -7313,7 +7313,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
                 // Persist it so the worker's Read and later recovery see the same contract.
                 if (reservedParallelDescriptor === undefined && ledger.parent_fingerprint === "none" &&
                   (exactCarryForward || strictAppend)) {
-                  const handoff = JSON.parse(await readFile(handoffPaths[0]!, "utf8"));
+                   const source = await readFile(handoffPaths[0]!, "utf8");
+                   const handoff = JSON.parse(source);
                   const validated = validateHandoffSchema(handoff);
                   const current = validated.ok ? inspectAcceptanceContinuity(validated.value).ledger : undefined;
                   if (current === undefined || JSON.stringify(current) !== JSON.stringify(ledger)) {
@@ -7322,9 +7323,17 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
                         "acceptance_parent_continuity_mismatch")],
                     });
                   }
-                  ledger = { ...ledger, parent_fingerprint: previous.fingerprint };
-                  handoff.ext[ACCEPTANCE_CONTINUITY_EXTENSION] = ledger;
-                  await writeFile(handoffPaths[0]!, `${JSON.stringify(handoff, null, 2)}\n`);
+                   ledger = { ...ledger, parent_fingerprint: previous.fingerprint };
+                   handoff.ext[ACCEPTANCE_CONTINUITY_EXTENSION] = ledger;
+                   const repaired = `${JSON.stringify(handoff, null, 2)}\n`;
+                   await writeFile(handoffPaths[0]!, repaired);
+                   try {
+                     await input.runtimeBridge?.onHostHandoffRepaired?.(toolInput.sessionID, ledger.task_id,
+                       handoffPaths[0]!, source, repaired);
+                   } catch (error) {
+                     await writeFile(handoffPaths[0]!, source);
+                     throw error;
+                   }
                   await inspect(handoffPaths[0]!, undefined, { report: true });
                 }
                 if (ledger.parent_fingerprint !== previous.fingerprint || (!exactCarryForward && !strictAppend)) {
