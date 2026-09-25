@@ -195,6 +195,44 @@ test("a later user turn can replace a cancelled mission without inheriting its o
   assert.deepEqual(archive.acceptance, ["Run v0.12.3", "Keep cumulative budget"]);
 }));
 
+test("cancelled no-run successor preserves the old run's supersession across another user turn and cold reload", async () => fixture(async directory => {
+  const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+  const operators = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
+  await missions.capture("root", { id: "old-request", text: "Assess the old package" });
+  const old = await missions.start("root", ["Old package", "Old verification"]);
+  const oldTask = missions.task(old);
+  await missions.admit("root", "old-call", oldTask);
+  await missions.claim("root", "old-coordinator", oldTask.prompt);
+  const run = await operators.prepareMission("root", missionPlan(old, [unit]),
+    { sessionID: "old-coordinator", callID: "old-call" });
+  await operators.interrupted("root", "explicit-cancellation");
+  await missions.update("root", state => { state.phase = "cancelled"; state.runID = run.runID; });
+
+  await missions.capture("root", { id: "new-request", text: "Study the new package" });
+  const intermediate = await missions.start("root", ["New package"]);
+  assert.equal(intermediate.supersededRunID, run.runID);
+  await missions.capture("root", { id: "latest-request", text: "Continue with five failed instances" });
+  await missions.update("root", state => { state.phase = "cancelled"; });
+  const current = await missions.start("root", ["Inspect the five failed instances"]);
+  assert.equal(current.supersededRunID, run.runID);
+
+  // Already-stuck missions from the old plugin have no persisted predecessor link.
+  const file = join(directory, ".sortie-dogs-v010", "missions", `${createHash("sha256").update("root").digest("hex")}.json`);
+  await writeFile(file, JSON.stringify({ ...current, supersededRunID: undefined }));
+  const recovered = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+  assert.equal(recovered.supersededRunID, run.runID);
+  // Another user turn may cancel the blocked mission before the corrected plugin is installed.
+  await writeFile(file, JSON.stringify({ ...current, phase: "cancelled", supersededRunID: undefined }));
+  const cold = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+  assert.equal((await cold.required("root")).supersededRunID, run.runID);
+  const resumed = await cold.start("root", ["Inspect the five failed instances"]);
+  assert.equal(resumed.supersededRunID, run.runID);
+  const replacement = await operators.prepareMission("root", missionPlan(resumed, [unit]), undefined, resumed.supersededRunID);
+  assert.deepEqual(replacement.acceptance, ["Inspect the five failed instances"]);
+  assert.equal(replacement.parentRunID, null);
+  assert.equal(replacement.supersededRunID, run.runID);
+}));
+
 test("same-turn mission retains a cancelled run's exact acceptance before its Coordinator declares units", async () => fixture(async directory => {
   const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
   const operators = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);

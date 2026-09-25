@@ -2609,6 +2609,36 @@ test("preview plugin exports only its own serial capabilities and ignores ordina
   assert.equal(profileTool(V010_RUNTIME_PROFILE, "sortie_check_contract"), "sortie_v010_check_contract");
 }));
 
+test("Build after a cancelled Sortie turn treats the old interruption as historical, not its own tool gate", async () => fixture(async root => {
+  const hooks = await SortieDogsV010Plugin({ directory: root });
+  await hooks["chat.message"]!({ sessionID: "root", agent: "dog-operator", messageID: "old-user" }, {
+    message: { id: "old-user", agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-6-sol" } },
+    parts: [{ type: "text", text: "Complete the original request" }],
+  });
+  const missions = new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE);
+  const old = await missions.start("root", ["Old acceptance"]);
+  const operators = new OperatorRuntime(root, V010_RUNTIME_PROFILE);
+  await operators.prepareMission("root", missionPlan(old, [{ title: "Old work", objective: "Implement",
+    read: [], write: ["src"], validation: ["node check.mjs"] }]));
+  await hooks["chat.message"]!({ sessionID: "root", agent: "build", messageID: "new-user" }, {
+    message: { id: "new-user", agent: "build", model: { providerID: "openai", modelID: "gpt-6-sol" } },
+    parts: [{ type: "text", text: "Investigate this independently with Build" }],
+  });
+  assert.equal((await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root")).phase, "cancelled");
+  const output: { system: string[] } = { system: [] };
+  await hooks["experimental.chat.system.transform"]!({ sessionID: "root" }, output);
+  assert.match(output.system.join("\n"), /SORTIE_PROFILE_INACTIVE:[\s\S]*not a restriction[\s\S]*native tools/u);
+  assert.doesNotMatch(output.system.join("\n"), /SORTIE_RUNTIME_PROFILE/u);
+  const native = { args: { command: "node check.mjs" } };
+  await hooks["tool.execute.before"]!({ sessionID: "root", tool: "bash", callID: "build-call" }, native);
+  assert.deepEqual(native.args, { command: "node check.mjs" });
+  await assert.rejects(hooks.tool!.sortie_v010_plan_units.execute({ units: [] }, { sessionID: "root" }),
+    /runtime-profile-session-inactive/u);
+  const ordinary: { system: string[] } = { system: [] };
+  await hooks["experimental.chat.system.transform"]!({ sessionID: "unrelated" }, ordinary);
+  assert.deepEqual(ordinary.system, []);
+}));
+
 test("explicit completion requires root identity, matching run and completed units", async () => fixture(async root => {
   const hooks = await SortieDogsV010Plugin({ directory: root });
   await hooks["chat.message"]!({ sessionID: "root", agent: "dog-operator", messageID: "root-user" }, {

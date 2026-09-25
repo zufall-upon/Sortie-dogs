@@ -1709,7 +1709,20 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       },
       "experimental.chat.system.transform": async (request, output) => {
         const root = await rootFor(request.sessionID) ?? await proposalPromptRoot(request.sessionID);
-        if (!root) return;
+        if (!root) {
+          const who = await identity(request.sessionID);
+          if (who.parent === undefined && who.role === undefined &&
+              (await missions.read(request.sessionID))?.phase === "cancelled") {
+            // OpenCode retains the same conversation when the user switches agents. A prior
+            // INTERRUPTED report describes only its Sortie run; it cannot revoke Build's
+            // native tools or turn a new independent request into a cancelled mission.
+            (output.system ??= []).push("SORTIE_PROFILE_INACTIVE: This is a non-Sortie agent. " +
+              "Any earlier INTERRUPTED mission or cancelled operator run in this session is historical state of the Sortie profile, " +
+              "not a restriction on this agent's current user request. Use the current agent's native tools for independent work. " +
+              "Do not revive, overwrite or claim completion of that historical Sortie run.");
+          }
+          return;
+        }
         await core["experimental.chat.system.transform"]?.(request, output);
         (output.system ??= []).push(`SORTIE_RUNTIME_PROFILE ${profile.id}; marker ${assetVersion}. ` +
           `Shared MkII protocol role names are logical: ${protocolMap}. Use only ${profile.toolPrefix} tools for this profile. ` +
