@@ -176,7 +176,8 @@ export async function createSupervisorState(value, options) {
     workers,
     input_sha256: fingerprint(value),
     limits: { cost_limit_usd: options.costLimitUsd ?? null, per_instance_usd: options.perInstanceUsd ?? null, workers,
-      runner_script: options.runnerScript ? resolve(options.runnerScript) : null },
+      runner_script: options.runnerScript ? resolve(options.runnerScript) : null,
+      prepared_environment: options.preparedEnvironment ?? null },
     policy: { attempts_per_instance: 1, retry_count: 0 },
     spent_usd: 0,
     reserved_usd: 0,
@@ -282,7 +283,8 @@ async function spawnRunner(state, entry, paths, options, dependencies) {
   const logFd = openSync(paths.log, "a");
   const args = [runnerScriptPath(options), "--live", "--manifest", paths.manifest,
     "--run-root", paths.root, "--output", paths.output, "--metadata", paths.metadata,
-    "--cost-limit-usd", String(options.costLimitUsd)];
+    "--cost-limit-usd", String(options.costLimitUsd),
+    ...(options.preparedEnvironment ? ["--prepared-environment", options.preparedEnvironment] : [])];
   const child = spawn(process.execPath, args, {
     cwd: process.cwd(),
     env: { ...process.env, ...(options.environment ?? {}) },
@@ -382,7 +384,8 @@ export async function runSupervisor(value, options, dependencies = {}) {
     const limits = state.limits;
     ensure(!limits || ((limits.cost_limit_usd === null || limits.cost_limit_usd === options.costLimitUsd) &&
       limits.per_instance_usd === (options.perInstanceUsd ?? null) && limits.workers === workers &&
-      limits.runner_script === (options.runnerScript ? resolve(options.runnerScript) : null)), "supervisor-limits-changed");
+      limits.runner_script === (options.runnerScript ? resolve(options.runnerScript) : null) &&
+      (limits.prepared_environment ?? null) === (options.preparedEnvironment ?? null)), "supervisor-limits-changed");
     ensure(options.perInstanceUsd === undefined || (Number.isFinite(options.perInstanceUsd) && options.perInstanceUsd > 0), "supervisor-instance-limit-invalid");
     admitted = true;
     state.input_sha256 ??= fingerprint(value);
@@ -584,6 +587,7 @@ export async function startDetachedSupervisor(options) {
     "--workers", String(workers)];
   if (options.runnerScript) args.push("--runner-script", resolve(options.runnerScript));
   if (options.perInstanceUsd) args.push("--per-instance-usd", String(options.perInstanceUsd));
+  if (options.preparedEnvironment) args.push("--prepared-environment", options.preparedEnvironment);
   const child = spawn(process.execPath, args, {
     cwd: process.cwd(),
     env: { ...process.env, ...(options.environment ?? {}) },
@@ -661,7 +665,8 @@ function parseArguments(argv) {
     if (argument.startsWith("--")) {
       const key = argument.slice(2).replaceAll("-", "_");
       const name = { run_root: "runRoot", cost_limit_usd: "costLimitUsd", workers: "workers", heartbeat_seconds: "heartbeatSeconds",
-        stale_seconds: "staleSeconds", report_seconds: "reportSeconds", state_path: "statePath", runner_script: "runnerScript", per_instance_usd: "perInstanceUsd" }[key] ?? key;
+        stale_seconds: "staleSeconds", report_seconds: "reportSeconds", state_path: "statePath", runner_script: "runnerScript", per_instance_usd: "perInstanceUsd",
+        prepared_environment: "preparedEnvironment" }[key] ?? key;
       const value = argv[++index];
       values[name] = ["costLimitUsd", "perInstanceUsd", "workers", "heartbeatSeconds", "staleSeconds", "reportSeconds"].includes(name) ? Number(value) : value;
     }

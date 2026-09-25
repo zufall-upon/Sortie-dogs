@@ -93,6 +93,35 @@ node --experimental-strip-types scripts/swebench-lite-supervisor.mjs \
 `--start` detaches the supervisor and prints its run ID and process identity.
 Predictions are written in manifest order even when children finish out of order.
 
+### Optional: prepared official environment
+
+Add `--prepared-environment official-image-testbed` to give agents the same Python environment the official
+harness scores in, instead of letting them build one on the host.
+
+Before each instance starts, the runner does the following:
+
+- copies `/opt/miniconda3/envs/testbed` from the local `swebench/sweb.eval.x86_64.<instance>` image into the
+  workspace's `.sortie-env/`;
+- copies the editable-install `*.egg-info` directories from the image's `/testbed`, but never the image's
+  repository, which keeps unreachable history;
+- rewrites `/testbed` paths and script shebangs to the new location;
+- puts `.sortie-env/bin` first on `PATH` and tells the agent in the prompt.
+
+The directory is git-excluded and never part of the patch. The option is a different benchmark condition. It is
+recorded in `execution.prepared_environment`, and each result's `prepared_environment` records the image ID and
+Python version. Do not compare runs with and without it as the same condition. The images must already be present
+locally. Each environment uses 0.2–1.4 GB inside the workspace until the instance ends.
+
+The images are also the scoring environment, so their drift limits the reachable score. On 2026-09-25 the gold
+patches resolved 15 of the 23 `dev` instances locally:
+
+- all five pvlib instances fail: numpy 2 removed `np.Inf`;
+- pydicom-1139 and pydicom-1413 fail: pytest 8 dropped nose-style `setup`;
+- pyvista-4315 fails: `libGL.so.1` is missing.
+
+Report scores together with this ceiling. Re-check it with
+`swebench eval SWE-bench/SWE-bench_Lite --gold -s dev` after updating the harness or images.
+
 ## 5. Monitor progress
 
 The durable source of truth is:
