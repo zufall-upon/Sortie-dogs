@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { promisify } from "node:util";
 import test from "node:test";
-import { benchmarkEnvironment, benchmarkInlineConfig, benchmarkPermissionPolicy, capturePatch, cloneInstance, createDryRunPlan, createInferenceManifest, createInstancePrompt, createLiveRunPlan, runOpenCode, readDirectoryUsage, formatPrediction, parseArguments, retainUsageDatabase, runDryRun, runLive, seedIsolatedV2Credential, verifyCandidateAgent } from "../scripts/swebench-lite-runner.mjs";
+import { benchmarkEnvironment, benchmarkInlineConfig, benchmarkPermissionPolicy, capturePatch, cloneInstance, createDryRunPlan, createInferenceManifest, createInstancePrompt, createLiveRunPlan, runOpenCode, readDirectoryUsage, formatPrediction, officialEvaluationImage, parseArguments, relocateOfficialEnvironment, retainUsageDatabase, runDryRun, runLive, seedIsolatedV2Credential, verifyCandidateAgent } from "../scripts/swebench-lite-runner.mjs";
 import { runCandidatePreflight } from "../scripts/swebench-candidate-preflight.mjs";
 import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -584,9 +584,63 @@ test("captured patches exclude runtime artifacts and retain product changes", as
     assert.match(patch, /-base\n\+fixed/u);
     assert.doesNotMatch(patch, /\.sortie-dogs-v010/u);
     assert.doesNotMatch(patch, /\.sortie-env/u);
+    // A prepared environment is also git-ignored; a literal exclude pathspec would make `git add` fail.
+    await writeFile(join(root, ".git", "info", "exclude"), "/.sortie-env/\n");
+    assert.equal(await capturePatch(root), patch);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("an official prepared environment is relocated, activated first on PATH, announced and recorded", async () => {
+  assert.equal(officialEvaluationImage("pvlib__pvlib-python-1154"), "swebench/sweb.eval.x86_64.pvlib_1776_pvlib-python-1154:latest");
+  assert.throws(() => officialEvaluationImage("../escape"), /invalid-instance-id/);
+  const root = await mkdtemp(join(tmpdir(), "swebench-prepared-"));
+  try {
+    const workspace = join(root, "ws"), environment = join(workspace, ".sortie-env"), site = join(environment, "lib", "python3.9", "site-packages");
+    await mkdir(join(site, "pkg-1.0.dist-info"), { recursive: true });
+    await mkdir(join(environment, "bin"), { recursive: true });
+    await writeFile(join(site, "easy-install.pth"), "/testbed\n");
+    await writeFile(join(site, "pkg.egg-link"), "/testbed\n.");
+    await writeFile(join(site, "__editable___pkg_finder.py"), "MAPPING = {'pkg': '/testbed/src/pkg'}\n");
+    await writeFile(join(site, "pkg-1.0.dist-info", "direct_url.json"), '{"url": "file:///testbed"}');
+    await writeFile(join(site, "other.pth"), "/testbedlike\n");
+    await writeFile(join(site, "binary.pth"), Buffer.from([0, 47, 116, 101, 115, 116, 98, 101, 100]));
+    await writeFile(join(environment, "bin", "pytest"), "#!/opt/miniconda3/envs/testbed/bin/python\nimport pytest\n");
+    const rewritten = await relocateOfficialEnvironment(environment, workspace);
+    assert.equal(await readFile(join(site, "easy-install.pth"), "utf8"), `${workspace}\n`);
+    assert.equal(await readFile(join(site, "__editable___pkg_finder.py"), "utf8"), `MAPPING = {'pkg': '${workspace}/src/pkg'}\n`);
+    assert.equal(await readFile(join(site, "pkg-1.0.dist-info", "direct_url.json"), "utf8"), `{"url": "file://${workspace}"}`);
+    assert.equal(await readFile(join(site, "other.pth"), "utf8"), "/testbedlike\n");
+    assert.equal((await readFile(join(environment, "bin", "pytest"), "utf8")).split("\n")[0], `#!${environment}/bin/python`);
+    assert.equal(rewritten.length, 5);
+    assert.match(createTestLiveRunPlan(manifest(), { costLimitUsd: 1, preparedEnvironment: "official-image-testbed" }).instances[0]!.prompt,
+      /already active: \.sortie-env\/ is first on PATH/u);
+    assert.doesNotMatch(createTestLiveRunPlan(manifest(), { costLimitUsd: 1 }).instances[0]!.prompt, /\.sortie-env/u);
+    assert.throws(() => createTestLiveRunPlan(manifest(), { costLimitUsd: 1, preparedEnvironment: "host" }), /invalid-prepared-environment/);
+    const seen: Array<{ path: string; prompt: string }> = [];
+    const result = await runTestLive(manifest(), { costLimitUsd: 5, runRoot: join(root, "run"), output: join(root, "p.jsonl"),
+      preparedEnvironment: "official-image-testbed" }, {
+      prepareCandidate: async (candidateValue: typeof candidate, _packagePath: string, preparedRoot: string) => {
+        const runtimeRoot = join(preparedRoot, "candidate-runtime");
+        await mkdir(runtimeRoot, { recursive: true });
+        return { environment: { HOME: "/isolated", PATH: "/usr/bin" }, runtimeRoot, evidence: { package_sha256: candidateValue.sha256,
+          version: candidateValue.version, runtime_marker: candidateValue.runtime_marker, profile: candidateValue.profile, agent: candidateValue.agent } };
+      },
+      clone: async () => undefined,
+      prepareEnvironment: async () => ({ kind: "official-image-testbed", image: "img", image_id: "sha256:x", python: "3.9.21", rewritten_files: 2 }),
+      execute: async (options: { workspace: string; environment: Record<string, string>; prompt: string }) => {
+        seen.push({ path: options.environment.PATH!, prompt: options.prompt });
+        assert.equal(options.environment.VIRTUAL_ENV, join(options.workspace, ".sortie-env"));
+        return { command: "c", exit: 0, signal: null, reason: "completed", stdout: "", stderr: "", watchdogEvents: 0,
+          lastActivityAgeMs: 0, usage: { usd: 0, requests: 1, unpriced: [] }, usageComplete: true };
+      },
+      git: async (args: string[]) => ({ exit: 0, stdout: args.includes("diff") ? "diff --git a/f b/f\n" : "", stderr: "" }),
+    });
+    assert.ok(seen.every(item => /\/\.sortie-env\/bin:\/usr\/bin$/u.test(item.path) && item.prompt.includes("already active")));
+    assert.equal(result.results[0]!.prepared_environment.image_id, "sha256:x");
+    assert.equal(result.execution.prepared_environment, "official-image-testbed");
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("live run writes one prediction per instance and removes dedicated workspaces", async () => {

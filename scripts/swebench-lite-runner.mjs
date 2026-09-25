@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { appendFile, chmod, lstat, mkdir, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { appendFile, chmod, lstat, mkdir, readFile, readdir, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -17,6 +17,11 @@ const DEFAULT_AGENT = "dog-operator";
 const DEFAULT_TIMEOUT_SECONDS = 30 * 60;
 const DEFAULT_WATCHDOG_SECONDS = 120;
 const DEFAULT_UNPRICED_GRACE_SECONDS = 30;
+// Sortie's shared tool-environment directory; excluded from mission review and patch capture.
+const PREPARED_ENVIRONMENT_DIRECTORY = ".sortie-env";
+const PREPARED_ENVIRONMENTS = Object.freeze(["official-image-testbed"]);
+const OFFICIAL_TESTBED_PREFIX = "/opt/miniconda3/envs/testbed";
+const OFFICIAL_REPOSITORY_ROOT = "/testbed";
 const MODEL_ROUTE_PATTERN = /^openai\/[a-z0-9][a-z0-9.-]*#[a-z]+$/u;
 const BENCHMARK_ENVIRONMENT_KEYS = Object.freeze([
   "LANG", "LC_ALL", "LC_CTYPE", "LOGNAME", "PATH", "SHELL", "TERM", "TZ", "USER",
@@ -541,10 +546,11 @@ async function persistReplayFile(writer, path, value, maxBytes, remove) {
   return { path, bytes: stored.byteLength, sha256: digest(stored) };
 }
 
-export function createInstancePrompt(instance) {
+export function createInstancePrompt(instance, options = {}) {
   const version = instance.version === undefined ? "" : `\nTarget package version: ${instance.version}`;
   return [
     "Solve this public SWE-bench issue in the checked-out repository.",
+    ...(options.preparedEnvironment ? [`A Python environment copied from this instance's official evaluation image is already active: ${PREPARED_ENVIRONMENT_DIRECTORY}/ is first on PATH (python, pytest, pip) with the repository installed in editable mode. Use it for reproduction and tests. Do not create another environment, and install a package only when a check proves it is missing.`] : []),
     "Use the repository's existing development workflow and leave the fix as an uncommitted working-tree diff.",
     "The current working directory is the repository root; when supplying a path yourself, use a relative path and never guess or reconstruct the repository's absolute path.",
     "For initial repository discovery, omit the path argument from glob and grep, and read the repository root as '.'; keep later tool inputs relative and never copy absolute paths returned by tools.",
@@ -582,6 +588,8 @@ export function createLiveRunPlan(value, options = {}, publicRowHashes) {
   ensure(Number.isInteger(timeoutSeconds) && timeoutSeconds > 0, "invalid-timeout-seconds");
   ensure(Number.isInteger(watchdogSeconds) && watchdogSeconds > 0, "invalid-watchdog-seconds");
   ensure(Number.isFinite(costLimitUsd) && costLimitUsd > 0, "live-cost-limit-usd-required");
+  const preparedEnvironment = options.preparedEnvironment ?? null;
+  ensure(preparedEnvironment === null || PREPARED_ENVIRONMENTS.includes(preparedEnvironment), "invalid-prepared-environment");
   return {
     ...manifest,
     mode: "host-inference-for-official-docker-scoring",
@@ -599,9 +607,85 @@ export function createLiveRunPlan(value, options = {}, publicRowHashes) {
       cost_limit_usd: costLimitUsd,
       live_process_started: false,
       provider_requests_started: false,
+      ...(preparedEnvironment ? { prepared_environment: preparedEnvironment } : {}),
     },
-    instances: manifest.instances.map(instance => ({ ...instance, prompt: createInstancePrompt(instance) })),
+    instances: manifest.instances.map(instance => ({ ...instance,
+      prompt: createInstancePrompt(instance, { preparedEnvironment: preparedEnvironment !== null }) })),
   };
+}
+
+/** Local image name the official harness uses for one instance's evaluation environment. */
+export function officialEvaluationImage(instanceID) {
+  ensure(/^[A-Za-z0-9_.-]+__[A-Za-z0-9_.-]+-\d+$/u.test(instanceID), "invalid-instance-id");
+  return `swebench/sweb.eval.x86_64.${instanceID.replace("__", "_1776_").toLowerCase()}:latest`;
+}
+
+/**
+ * Point an environment copied out of an official image at its new location: the editable install of
+ * the repository (/testbed) and script shebangs (conda prefix). Binary files are never rewritten.
+ */
+export async function relocateOfficialEnvironment(environmentRoot, workspace) {
+  const rewritten = [];
+  const replaceIn = async (path, pattern, replacement) => {
+    const bytes = await readFile(path);
+    if (bytes.includes(0)) return;
+    const text = bytes.toString("utf8");
+    const next = text.replace(pattern, replacement);
+    if (next !== text) { await writeFile(path, next); rewritten.push(relative(environmentRoot, path)); }
+  };
+  const repository = new RegExp(`${OFFICIAL_REPOSITORY_ROOT}(?=[/"'\\s]|$)`, "gmu");
+  const libraries = join(environmentRoot, "lib");
+  for (const version of (await readdir(libraries)).filter(name => /^python3\.\d+$/u.test(name))) {
+    const sitePackages = join(libraries, version, "site-packages");
+    for (const entry of await readdir(sitePackages, { recursive: true })) {
+      if (!/(?:\.pth|\.egg-link|^__editable__.*\.py|direct_url\.json|RECORD)$/u.test(entry.split("/").at(-1) ?? "")) continue;
+      const path = join(sitePackages, entry);
+      if ((await lstat(path)).isFile()) await replaceIn(path, repository, workspace);
+    }
+  }
+  const binaries = join(environmentRoot, "bin");
+  for (const name of await readdir(binaries)) {
+    const path = join(binaries, name), metadata = await lstat(path);
+    if (!metadata.isFile() || metadata.size > 1024 * 1024) continue;
+    const head = await readFile(path).then(bytes => bytes.subarray(0, 2).toString("utf8"));
+    if (head === "#!") await replaceIn(path, new RegExp(`^#!${OFFICIAL_TESTBED_PREFIX}(?=/)`, "u"), `#!${environmentRoot}`);
+  }
+  return rewritten.sort();
+}
+
+/** Copy the instance's official evaluation environment into <workspace>/.sortie-env and activate nothing yet. */
+export async function prepareOfficialEnvironment(instance, workspace, dependencies = {}) {
+  const image = officialEvaluationImage(instance.instance_id);
+  const run = dependencies.run ?? ((executable, args) => execFileAsync(executable, args, { maxBuffer: MAX_COMMAND_OUTPUT, encoding: "utf8" }));
+  const imageID = String((await run("docker", ["image", "inspect", "--format", "{{.Id}}", image]).catch(() => {
+    throw new Error(`prepared-environment-image-missing:${image}`);
+  })).stdout).trim();
+  const environmentRoot = join(workspace, PREPARED_ENVIRONMENT_DIRECTORY);
+  await mkdir(environmentRoot);
+  // Editable-install metadata lives beside the source in the image's /testbed. Copy only those generated
+  // directories; the image's repository itself keeps unreachable future history and is never copied.
+  const metadata = String((await run("docker", ["run", "--rm", "--network", "none", "--entrypoint", "find", image,
+    OFFICIAL_REPOSITORY_ROOT, "-maxdepth", "3", "-type", "d", "-name", "*.egg-info", "-not", "-path", "*/.git/*"])).stdout)
+    .split("\n").filter(Boolean).map(path => relative(OFFICIAL_REPOSITORY_ROOT, path));
+  ensure(metadata.every(path => path.length > 0 && !path.startsWith("..") && !path.startsWith("/")), "prepared-environment-metadata-invalid");
+  const container = String((await run("docker", ["create", image])).stdout).trim();
+  try {
+    await run("bash", ["-c", 'set -o pipefail; docker cp "$1:$2" - | tar -x -C "$3" --strip-components=1',
+      "_", container, OFFICIAL_TESTBED_PREFIX, environmentRoot]);
+    for (const path of metadata) {
+      await mkdir(dirname(join(workspace, path)), { recursive: true });
+      await run("docker", ["cp", `${container}:${join(OFFICIAL_REPOSITORY_ROOT, path)}`, join(workspace, path)]);
+    }
+  } finally { await run("docker", ["rm", "--force", container]).catch(() => undefined); }
+  const rewritten = await relocateOfficialEnvironment(environmentRoot, workspace);
+  const probe = await run(join(environmentRoot, "bin", "python"), ["-c", "import sys; print(sys.prefix); print(sys.version.split()[0])"]);
+  const [prefix, python] = String(probe.stdout).trim().split("\n");
+  ensure(resolve(prefix ?? "") === resolve(environmentRoot), "prepared-environment-relocation-failed");
+  const exclude = join(workspace, ".git", "info", "exclude");
+  await mkdir(dirname(exclude), { recursive: true });
+  await appendFile(exclude, `\n${[PREPARED_ENVIRONMENT_DIRECTORY, ...metadata].map(path => `/${path}/`).join("\n")}\n`);
+  return { kind: "official-image-testbed", image, image_id: imageID, python, rewritten_files: rewritten.length,
+    editable_metadata: metadata };
 }
 
 function shellQuote(value) {
@@ -655,7 +739,8 @@ export async function cloneInstance(instance, workspace, git = runGit) {
 }
 
 export async function capturePatch(workspace, git = runGit) {
-  const patchPaths = [".", ":(exclude).sortie-dogs-v010", ":(exclude).sortie-env"];
+  // A literal exclude of an ignored path makes `git add` fail; the glob form works either way.
+  const patchPaths = [".", ":(exclude).sortie-dogs-v010", `:(exclude,glob)**/${PREPARED_ENVIRONMENT_DIRECTORY}/**`];
   const intent = await git(["-C", workspace, "add", "-N", "--", ...patchPaths], process.cwd());
   ensure(intent.exit === 0, "patch-index-failed");
   const diff = await git(["-C", workspace, "diff", "--binary", "--no-ext-diff", "--no-color", "HEAD", "--", ...patchPaths], process.cwd());
@@ -1235,14 +1320,22 @@ export async function runLive(value, options, dependencies = {}) {
     let status = "failed";
     let failure;
     let fatalError;
+    let preparedEnvironment;
     try {
       await clone(instance, workspace);
+      let environment = candidateRuntime.environment;
+      if (plan.execution.prepared_environment) {
+        preparedEnvironment = await (dependencies.prepareEnvironment ?? prepareOfficialEnvironment)(instance, workspace);
+        const bin = join(workspace, PREPARED_ENVIRONMENT_DIRECTORY, "bin");
+        environment = { ...environment, PATH: `${bin}:${environment.PATH ?? ""}`,
+          VIRTUAL_ENV: join(workspace, PREPARED_ENVIRONMENT_DIRECTORY) };
+      }
       execution = await execute({
         workspace,
         instanceId: instance.instance_id,
-        prompt: createInstancePrompt(instance),
+        prompt: createInstancePrompt(instance, { preparedEnvironment: preparedEnvironment !== undefined }),
         agent: plan.execution.agent,
-        environment: candidateRuntime.environment,
+        environment,
         databasePath: candidateRuntime.databasePath,
         timeoutSeconds: plan.execution.timeout_seconds,
         watchdogSeconds: plan.execution.watchdog_interval_seconds,
@@ -1330,6 +1423,7 @@ export async function runLive(value, options, dependencies = {}) {
       watchdog_events: execution?.watchdogEvents ?? 0,
       watchdog_idle_ms: execution?.lastActivityAgeMs ?? 0,
       replay_artifact: storedArtifact,
+      ...(preparedEnvironment ? { prepared_environment: preparedEnvironment } : {}),
       ...(cleanupError ? { cleanup_error: String(cleanupError.message ?? cleanupError) } : {}),
     });
     if (fatalError) throw fatalError;
@@ -1421,10 +1515,11 @@ export function parseArguments(argv) {
     const argument = argv[index];
     if (argument === "--dry-run") { options.dryRun = true; continue; }
     if (argument === "--live") { options.live = true; continue; }
-    if (["--manifest", "--output", "--metadata", "--run-root", "--agent", "--model-name-or-path", "--timeout-seconds", "--watchdog-seconds", "--cost-limit-usd", "--coordinator-model"].includes(argument)) {
+    if (["--manifest", "--output", "--metadata", "--run-root", "--agent", "--model-name-or-path", "--timeout-seconds", "--watchdog-seconds", "--cost-limit-usd", "--coordinator-model", "--prepared-environment"].includes(argument)) {
       const value = argv[++index];
       if (!value) throw new Error(`missing-value:${argument}`);
       if (argument === "--manifest") options.manifest = value;
+      else if (argument === "--prepared-environment") options.preparedEnvironment = value;
       else if (argument === "--coordinator-model") options.coordinatorModel = value;
       else if (argument === "--output") options.output = value;
       else if (argument === "--metadata") options.metadata = value;
