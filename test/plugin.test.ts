@@ -4023,9 +4023,10 @@ test(`restart reconciles orphan reservations only from matching terminal host Ta
 });
 }
 
-for (const [parentStatus, hasWorker, expected] of [["completed", false, true], ["running", false, false],
-  ["completed", true, false]] as const) {
-  test(`a terminal unstarted mission child releases only its exact reservation (${parentStatus}, worker=${hasWorker})`, async () => {
+for (const [parentStatus, hasWorker, childAgent, expected] of [["completed", false, "dogs-coordinator", true],
+  ["running", false, "dogs-coordinator", false], ["completed", true, "dogs-coordinator", false],
+  ["completed", false, "dog-operator", false]] as const) {
+  test(`a terminal unstarted mission child releases only its exact reservation (${parentStatus}, worker=${hasWorker}, agent=${childAgent})`, async () => {
     await withProject("mission-child-reservation", async directory => {
       const { RunFlightLedger } = await import("../dist/core/run-flight-ledger.js");
       const { OperatorMissionRuntime } = await import("../dist/core/operator-mission.js");
@@ -4050,7 +4051,7 @@ for (const [parentStatus, hasWorker, expected] of [["completed", false, true], [
         messages: async ({ path }: { path: { id: string } }) => ({ data: [{ info: { role: "assistant", sessionID: path.id },
           parts: path.id === root ? [parentPart] : path.id === child ? [workerPart] : [] }] }),
         children: async ({ path }: { path: { id: string } }) => ({ data: path.id === root
-          ? [{ id: child, parentID: root, agent: "dog-operator" }] : hasWorker ? [{ id: "worker", parentID: child, agent: "dog-worker" }] : [] }),
+          ? [{ id: child, parentID: root, agent: childAgent }] : hasWorker ? [{ id: "worker", parentID: child, agent: "dog-worker" }] : [] }),
       } };
       const hooks = await SortieDogsPlugin({ directory, client } as never);
       const turn = (id: string) => hooks["chat.message"]!({ sessionID: root, messageID: id, agent: "dog-coordinator" }, {
