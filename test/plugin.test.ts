@@ -4023,10 +4023,15 @@ test(`restart reconciles orphan reservations only from matching terminal host Ta
 });
 }
 
-for (const [parentStatus, hasWorker, childAgent, expected] of [["completed", false, "dogs-coordinator", true],
-  ["running", false, "dogs-coordinator", false], ["completed", true, "dogs-coordinator", false],
-  ["completed", false, "dog-operator", false]] as const) {
-  test(`a terminal unstarted mission child releases only its exact reservation (${parentStatus}, worker=${hasWorker}, agent=${childAgent})`, async () => {
+for (const [parentStatus, hasWorker, childAgent, hasChildren, depthRefused, expected] of [
+  ["completed", false, "dogs-coordinator", true, true, true],
+  ["running", false, "dogs-coordinator", true, true, false],
+  ["completed", true, "dogs-coordinator", true, true, false],
+  ["completed", false, "dog-operator", true, true, false],
+  ["completed", false, "dogs-coordinator", false, true, true],
+  ["completed", false, "dogs-coordinator", false, false, false],
+] as const) {
+  test(`a terminal unstarted mission child releases only its exact reservation (${parentStatus}, worker=${hasWorker}, agent=${childAgent}, children=${hasChildren}, depth=${depthRefused})`, async () => {
     await withProject("mission-child-reservation", async directory => {
       const { RunFlightLedger } = await import("../dist/core/run-flight-ledger.js");
       const { OperatorMissionRuntime } = await import("../dist/core/operator-mission.js");
@@ -4037,21 +4042,24 @@ for (const [parentStatus, hasWorker, childAgent, expected] of [["completed", fal
       await missions.capture(root, { id: "original", text: "old request" });
       const old = await missions.start(root, ["old request"]);
       await missions.update(root, state => { state.phase = "cancelled"; state.coordinator = child;
-        state.callID = parentCall; state.runID = runID; });
+        state.callID = parentCall; state.runID = runID; state.submission = { status: "blocked", summary: "Worker was never admitted" }; });
       await missions.capture(root, { id: "new-user", text: "new request" });
       await missions.start(root, ["new request"]);
       const parentPart = { type: "tool", tool: "task", callID: parentCall, state: {
         status: parentStatus, input: { subagent_type: "dog-operator",
           prompt: `SORTIE_MISSION_REF ${JSON.stringify({ r: root, m: old.id })}` } } };
-      const workerPart = { type: "tool", tool: "task", callID, state: { status: "error", input: {
+      const workerPart = { type: "tool", tool: "task", callID, state: { status: "error", error: { type: "tool.execution",
+        message: depthRefused ? 'Subagent depth limit reached (1). Increase "experimental.subagent_depth" to allow nested subagents.'
+          : "operator-unit-not-authorized" }, input: {
         subagent_type: "dog-worker", prompt: `SORTIE_OPERATOR_TASK_REF ${JSON.stringify({ r: root, n: runID,
           t: unitID, p: "a".repeat(64), h: "b".repeat(64) })}` } } };
       const client = { session: {
-        get: async () => ({ data: { agent: "dog-coordinator" } }),
+        get: async ({ path }: { path: { id: string } }) => ({ data: path.id === child
+          ? { id: child, parentID: root, agent: childAgent, outcome: "succeeded" } : { agent: "dog-coordinator" } }),
         messages: async ({ path }: { path: { id: string } }) => ({ data: [{ info: { role: "assistant", sessionID: path.id },
           parts: path.id === root ? [parentPart] : path.id === child ? [workerPart] : [] }] }),
-        children: async ({ path }: { path: { id: string } }) => ({ data: path.id === root
-          ? [{ id: child, parentID: root, agent: childAgent }] : hasWorker ? [{ id: "worker", parentID: child, agent: "dog-worker" }] : [] }),
+        ...(hasChildren ? { children: async ({ path }: { path: { id: string } }) => ({ data: path.id === root
+          ? [{ id: child, parentID: root, agent: childAgent }] : hasWorker ? [{ id: "worker", parentID: child, agent: "dog-worker" }] : [] }) } : {}),
       } };
       let currentBudget: ((root: string) => Promise<{ consumed_units: number; reserved_units: number } | null>) | undefined;
       const hooks = await SortieDogsPlugin({ directory, client, runtimeBridge: {
