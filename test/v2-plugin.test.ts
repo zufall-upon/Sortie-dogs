@@ -444,6 +444,18 @@ test("package server export resolves to the V2 default definition", async () => 
   assert.deepEqual(packageJson.exports["./server"], { types: "./dist/plugin/v2.d.ts", import: "./dist/plugin/v2.js" });
 });
 
+test("the package name installed by init resolves to the V2 plugin definition", async () => {
+  const entry = await import("sortie-dogs");
+  assert.equal(entry.default.id, V2Plugin.id);
+  assert.equal(entry.default.setup, V2Plugin.setup);
+  assert.equal(typeof entry.SortieDogsPlugin, "function");
+  const fixture = contextFixture();
+  const cleanup = await entry.default.setup(fixture.context);
+  try {
+    assert.ok(fixture.tools.some(tool => (tool as { name?: string }).name === "sortie_v010_start_mission"));
+  } finally { cleanup?.(); }
+});
+
 test("V1 preview and stable package entries remain callable", async () => {
   const preview = await import("sortie-dogs/plugin");
   const stable = await import("sortie-dogs/plugin/stable");
