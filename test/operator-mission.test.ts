@@ -7,6 +7,7 @@ import { MISSION_EVIDENCE_GAP_REVIEW_LIMIT, OperatorMissionRuntime, missionPacke
   missionReviewTraces, missionReviewVerdict } from "../dist/core/operator-mission.js";
 import { OperatorRuntime } from "../dist/core/operator-runtime.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
+import { terminalCancelledMissionChildren } from "../dist/plugin/profiled.js";
 
 async function fixture(run: (directory: string) => Promise<void>) {
   const area = resolve("_testenv");
@@ -211,4 +212,47 @@ test("a new mission cannot discard an old run that reached a worker", async () =
   await assert.rejects(operators.prepareMission("root", missionPlan(newMission, [unit]), undefined, newMission.supersededRunID),
     /mission-superseded-run-has-work/);
   assert.equal((await operators.required("root")).runID, oldRun.runID);
+}));
+
+test("a later mission replaces a cancelled worker and pending unit only after host terminal proof", async () => fixture(async directory => {
+  const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+  const operators = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
+  await missions.capture("root", { id: "old-user", text: "Run the old candidate" });
+  const oldMission = await missions.start("root", ["Run the old candidate"]);
+  const oldRun = await operators.prepareMission("root", missionPlan(oldMission, [unit,
+    { ...unit, title: "Later", validation: ["node later.mjs"] }]), { sessionID: "coordinator", callID: "mission-call" });
+  const task = operators.nextWorkerTask(oldRun);
+  await operators.admitWorker("root", "coordinator", "old-call", task);
+  await operators.claimAdmittedWorkerPrompt("root", "coordinator", "old-worker", task.prompt);
+  await operators.interrupted("root", "explicit-cancellation");
+  const cancelled = await operators.required("root");
+  const sessions = new Map([
+    ["coordinator", { agent: "dogs-coordinator", parentID: "root", outcome: "interrupted" }],
+    ["old-worker", { agent: "dog-worker-v010", parentID: "coordinator", outcome: "interrupted" }],
+  ]);
+  const host = { get: async (id: string) => sessions.get(id),
+    children: async (id: string) => id === "coordinator" ? [{ id: "old-worker" }] : [] };
+  await assert.rejects(terminalCancelledMissionChildren(V010_RUNTIME_PROFILE, "root", cancelled,
+    { reserved_units: 1 }, host), /reservations-pending/);
+  sessions.set("old-worker", { agent: "dog-worker-v010", parentID: "coordinator", outcome: "running" });
+  await assert.rejects(terminalCancelledMissionChildren(V010_RUNTIME_PROFILE, "root", cancelled,
+    { reserved_units: 0 }, host), /worker-not-terminal/);
+  sessions.set("old-worker", { agent: "dog-worker-v010", parentID: "coordinator", outcome: "interrupted" });
+  const proof = await terminalCancelledMissionChildren(V010_RUNTIME_PROFILE, "root", cancelled, { reserved_units: 0 }, host);
+  assert.deepEqual(proof, ["old-worker"]);
+  await missions.update("root", state => { state.phase = "cancelled"; state.runID = oldRun.runID; });
+  await missions.capture("root", { id: "new-user", text: "Run the new candidate" });
+  const nextMission = await missions.start("root", ["Run the new candidate"]);
+  const plan = missionPlan(nextMission, [unit]);
+  await assert.rejects(operators.prepareMission("root", plan, undefined, oldRun.runID), /mission-superseded-run-has-work/);
+  await assert.rejects(operators.prepareMission("root", plan, undefined, oldRun.runID, ["other-worker"]), /mission-superseded-run-has-work/);
+  const next = await operators.prepareMission("root", plan, undefined, oldRun.runID, proof);
+  assert.deepEqual(next.acceptance, ["Run the new candidate"]);
+  assert.deepEqual(next.priorAcceptedUnits, []);
+  assert.equal(next.parentRunID, null);
+  assert.equal(next.supersededRunID, oldRun.runID);
+  const archived = JSON.parse(await readFile(join(directory, ".sortie-dogs-v010", "operators",
+    `${createHash("sha256").update("root").digest("hex")}.json.${oldRun.runID}.archive`), "utf8"));
+  assert.equal(archived.units[0].childSessionID, "old-worker");
+  assert.equal(archived.units[1].status, "pending");
 }));

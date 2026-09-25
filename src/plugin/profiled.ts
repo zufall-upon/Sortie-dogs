@@ -1,5 +1,5 @@
 import { V010_RUNTIME_ASSET_VERSION } from "../asset-version.js";
-import { OperatorContractError, OperatorRuntime } from "../core/operator-runtime.js";
+import { OperatorContractError, OperatorRuntime, type OperatorState } from "../core/operator-runtime.js";
 import { DEFAULT_OPERATOR_PROPOSAL_BUDGET, OPERATOR_APPROVAL_CONTRACT, OPERATOR_PROPOSAL_BUDGET_CAPS, OPERATOR_PROPOSAL_REVISION_CONTRACT,
   OperatorProposalBudgetError, OperatorProposalRuntime } from "../core/operator-proposal.js";
 import { CANONICAL_AGENT_ROLES, canonicalAgent, profileAgent, profileTool, V010_RUNTIME_PROFILE,
@@ -93,6 +93,35 @@ export function previewModelCatalog(
 }
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 const payload = (value: unknown): unknown => record(value) && "data" in value ? value.data : value;
+
+/** Native V2 termination and lineage are required before a cancelled Worker loses its old acceptance. */
+export async function terminalCancelledMissionChildren(profile: RuntimeProfile, root: string, previous: OperatorState,
+  budget: { reserved_units: number } | null,
+  host: { get(id: string): Promise<unknown>; children(id: string): Promise<unknown> }): Promise<string[]> {
+  if (!budget || budget.reserved_units !== 0) throw new Error("mission-superseded-run-reservations-pending");
+  const oldWorkers = previous.units.flatMap(unit => unit.childSessionID === null ? [] : [unit.childSessionID]);
+  if (oldWorkers.length === 0) return [];
+  const coordinatorID = previous.operatorSessionID;
+  const coordinator = coordinatorID && await host.get(coordinatorID);
+  if (coordinatorID === null || !record(coordinator) || coordinator.parentID !== root ||
+      canonicalAgent(profile, coordinator.agent as string) !== "dog-operator" || coordinator.outcome !== "interrupted") {
+    throw new Error("mission-superseded-coordinator-not-terminal");
+  }
+  const children = await host.children(coordinatorID);
+  if (!Array.isArray(children) || children.length !== oldWorkers.length ||
+      children.some(child => !record(child) || !oldWorkers.includes(child.id as string))) {
+    throw new Error("mission-superseded-worker-lineage-unproven");
+  }
+  for (const id of oldWorkers) {
+    const worker = await host.get(id), descendants = await host.children(id);
+    if (!record(worker) || worker.parentID !== coordinatorID ||
+        !["dog-worker", "dog-luna-worker"].includes(canonicalAgent(profile, worker.agent as string) ?? "") ||
+        worker.outcome !== "interrupted" || !Array.isArray(descendants) || descendants.length !== 0) {
+      throw new Error("mission-superseded-worker-not-terminal");
+    }
+  }
+  return oldWorkers;
+}
 const RUNTIME_PROFILE_SESSION_INACTIVE = "runtime-profile-session-inactive: non-profile agents retain native read, edit, patch, shell, and task tools; continue directly without Sortie profile tools";
 const fallbackOptionalSchema = (schema: unknown): unknown => record(schema) && schema.type === "string" && typeof schema.optional !== "function"
   ? { ...schema, "x-sortie-optional": true }
@@ -1035,8 +1064,16 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       }
       const budget = await control!.currentBudget(root);
       if (budget && budget.remaining_units < plan.units.length && !same) throw new Error("mission-budget-exhausted: report the required cumulative extension to Operator");
+      // Cancellation marks the durable units before interrupting their native sessions. A cancelled
+      // status alone therefore cannot prove the old Worker stopped or its reservation settled.
+      const terminalChildren = mission.supersededRunID !== undefined && previous?.runID === mission.supersededRunID &&
+        previous.phase === "cancelled"
+        ? await terminalCancelledMissionChildren(profile, root, previous, budget, {
+          get: async id => payload(await session("get", { path: { id }, query: { directory: input.directory } })),
+          children: async id => payload(await session("children", { path: { id }, query: { directory: input.directory } })),
+        }) : [];
       const state = await operators.prepareMission(root, plan, actor === root ? undefined
-        : { sessionID: actor, callID: mission.callID! }, mission.supersededRunID);
+        : { sessionID: actor, callID: mission.callID! }, mission.supersededRunID, terminalChildren);
       await restorePriorAcceptance(root, state);
       await control!.registerGoalDeclaration(root, state.units[0]!.task.prompt, true);
       control!.enableUnits(root, state.units.filter(unit => unit.status === "pending").length);
