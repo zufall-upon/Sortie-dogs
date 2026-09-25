@@ -1,3 +1,5 @@
+// OpenCode V2 loads the package root named in `plugins`; keep the public named API intact.
+export { default } from "./plugin/v2.js";
 export { lintHandoff } from "./core/validate-semantics.js";
 export { validateWorktreeParallelContract } from "./core/validate-worktree-parallel.js";
 export {
