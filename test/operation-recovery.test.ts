@@ -78,14 +78,16 @@ test("candidate preparation classifies real curl, local archive and tag observat
   }
 });
 
-test("format correction continues within the same bound Worker and scope errors name the remedy", async () => fixture(async root => {
+test("mission shell uses native permissions while file-tool scope errors name the remedy", async () => fixture(async root => {
   const gate = await createWriteGate(await createProjectPaths(root), {
     version: "0.1.0", task_id: "format-repair", read: [], write: ["output/**"], validation: [],
   });
   const shell = (command: string) => gate.check({ tool: "shell", sessionID: "worker", callID: command }, { args: { command } }, { investigativeShell: true });
-  await assert.rejects(shell("curl --progress-bar -o output/result https://example.test/result"), /action=correct-format-within-current-manifest/);
+  await shell("curl --progress-bar -o output/result https://example.test/result");
   await shell("curl -fLsS -o output/result https://example.test/result");
-  await assert.rejects(shell("curl -fLsS -o other/result https://example.test/result"), /Coordinator: expand_unit/);
+  await shell("curl -fLsS -o other/result https://example.test/result");
+  await assert.rejects(gate.check({ tool: "write", sessionID: "worker", callID: "file-write" },
+    { args: { filePath: "other/result", content: "result" } }, { investigativeShell: true }), /Coordinator: expand_unit/);
   await assert.rejects(gate.check({ tool: "shell", sessionID: "legacy", callID: "legacy" },
     { args: { command: "curl --progress-bar -o output/result https://example.test/result" } }), /retry=false/);
 }));
