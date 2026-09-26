@@ -7410,6 +7410,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
                   isRecord(part.state.input) && part.state.input.subagent_type === REVIEWER_AGENT && typeof part.state.input.prompt === "string") prompts.push(part.state.input.prompt);
             }
           }
+          prompts.push(...await input.runtimeBridge?.completedReviewPrompts?.(toolInput.sessionID, output.args.prompt) ?? []);
           fastLane.restoreReviewLineage(toolInput.sessionID, output.args.prompt, prompts);
         }
         const resumedWorkerSessionID = fastLane.beforeTool(toolInput.sessionID, toolInput.tool, output.args, {
