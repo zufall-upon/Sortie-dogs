@@ -9,6 +9,7 @@ const SCHEMA_VERSION = 1;
 const DEFAULT_HEARTBEAT_SECONDS = 5;
 const DEFAULT_STALE_SECONDS = 30;
 const DEFAULT_REPORT_SECONDS = 120;
+const DEFAULT_TIMEOUT_SECONDS = 30 * 60;
 const TERMINAL_STATES = new Set(["completed", "failed"]);
 
 const record = value => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -23,6 +24,12 @@ function workerCount(value) {
   const workers = value ?? 1;
   ensure(Number.isInteger(workers) && workers > 0, "supervisor-workers-required");
   return workers;
+}
+
+function runnerTimeoutSeconds(value) {
+  const seconds = value ?? DEFAULT_TIMEOUT_SECONDS;
+  ensure(Number.isInteger(seconds) && seconds > 0, "invalid-timeout-seconds");
+  return seconds;
 }
 
 async function readJson(path) {
@@ -161,6 +168,7 @@ export async function createSupervisorState(value, options) {
   ensure(record(value) && Array.isArray(value.instances) && value.instances.length > 0, "invalid-supervisor-manifest");
   const supervisor = await processIdentity();
   const workers = workerCount(options.workers);
+  const timeoutSeconds = runnerTimeoutSeconds(options.timeoutSeconds);
   return {
     schema_version: SCHEMA_VERSION,
     run_id: options.runId ?? `swebench-${Date.now()}`,
@@ -176,6 +184,7 @@ export async function createSupervisorState(value, options) {
     workers,
     input_sha256: fingerprint(value),
     limits: { cost_limit_usd: options.costLimitUsd ?? null, per_instance_usd: options.perInstanceUsd ?? null, workers,
+      timeout_seconds: timeoutSeconds,
       runner_script: options.runnerScript ? resolve(options.runnerScript) : null,
       prepared_environment: options.preparedEnvironment ?? null },
     policy: { attempts_per_instance: 1, retry_count: 0 },
@@ -283,7 +292,7 @@ async function spawnRunner(state, entry, paths, options, dependencies) {
   const logFd = openSync(paths.log, "a");
   const args = [runnerScriptPath(options), "--live", "--manifest", paths.manifest,
     "--run-root", paths.root, "--output", paths.output, "--metadata", paths.metadata,
-    "--cost-limit-usd", String(options.costLimitUsd),
+    "--cost-limit-usd", String(options.costLimitUsd), "--timeout-seconds", String(options.timeoutSeconds),
     ...(options.preparedEnvironment ? ["--prepared-environment", options.preparedEnvironment] : [])];
   const child = spawn(process.execPath, args, {
     cwd: process.cwd(),
@@ -360,6 +369,7 @@ export async function runSupervisor(value, options, dependencies = {}) {
   ensure(typeof options.manifestPath === "string" && typeof options.output === "string" &&
     typeof options.runRoot === "string", "supervisor-paths-required");
   ensure(Number.isFinite(options.costLimitUsd) && options.costLimitUsd > 0, "supervisor-cost-limit-required");
+  const timeoutSeconds = runnerTimeoutSeconds(options.timeoutSeconds);
   const runRoot = resolve(options.runRoot);
   const statePath = resolve(options.statePath ?? join(runRoot, "supervisor-state.json"));
   const lock = await acquireRunLock(runRoot);
@@ -373,7 +383,7 @@ export async function runSupervisor(value, options, dependencies = {}) {
   try {
     state = await readJson(statePath).catch(async error => {
       if (error?.code !== "ENOENT") throw error;
-      const initial = await createSupervisorState(value, { ...options, runRoot, statePath });
+      const initial = await createSupervisorState(value, { ...options, timeoutSeconds, runRoot, statePath });
       await writeAtomicJson(statePath, initial);
       return initial;
     });
@@ -382,8 +392,11 @@ export async function runSupervisor(value, options, dependencies = {}) {
     const workers = workerCount(options.workers ?? state.workers);
     ensure(state.input_sha256 === undefined || state.input_sha256 === fingerprint(value), "supervisor-input-changed");
     const limits = state.limits;
-    ensure(!limits || ((limits.cost_limit_usd === null || limits.cost_limit_usd === options.costLimitUsd) &&
+    ensure(!limits ? timeoutSeconds === DEFAULT_TIMEOUT_SECONDS :
+      ((limits.cost_limit_usd === null || limits.cost_limit_usd === options.costLimitUsd) &&
       limits.per_instance_usd === (options.perInstanceUsd ?? null) && limits.workers === workers &&
+      (limits.timeout_seconds === undefined
+        ? timeoutSeconds === DEFAULT_TIMEOUT_SECONDS : limits.timeout_seconds === timeoutSeconds) &&
       limits.runner_script === (options.runnerScript ? resolve(options.runnerScript) : null) &&
       (limits.prepared_environment ?? null) === (options.preparedEnvironment ?? null)), "supervisor-limits-changed");
     ensure(options.perInstanceUsd === undefined || (Number.isFinite(options.perInstanceUsd) && options.perInstanceUsd > 0), "supervisor-instance-limit-invalid");
@@ -391,6 +404,11 @@ export async function runSupervisor(value, options, dependencies = {}) {
     state.input_sha256 ??= fingerprint(value);
     state.held_unknown_usd ??= 0;
     state.workers = workers;
+    state.limits ??= { cost_limit_usd: options.costLimitUsd ?? null,
+      per_instance_usd: options.perInstanceUsd ?? null, workers,
+      runner_script: options.runnerScript ? resolve(options.runnerScript) : null,
+      prepared_environment: options.preparedEnvironment ?? null };
+    state.limits.timeout_seconds ??= timeoutSeconds;
     state.policy ??= { attempts_per_instance: 1, retry_count: 0 };
     state.policy.attempts_per_instance = 1;
     state.policy.retry_count = 0;
@@ -469,6 +487,7 @@ export async function runSupervisor(value, options, dependencies = {}) {
       try {
         const child = await spawnRunner(state, entry, paths, {
           ...options,
+          timeoutSeconds,
           workers,
           costLimitUsd: entry.cost_reservation_usd,
         }, dependencies);
@@ -577,6 +596,7 @@ export async function startDetachedSupervisor(options) {
   ensure(typeof options.manifest === "string" && typeof options.output === "string" &&
     typeof options.runRoot === "string", "supervisor-paths-required");
   ensure(Number.isFinite(options.costLimitUsd) && options.costLimitUsd > 0, "supervisor-cost-limit-required");
+  const timeoutSeconds = runnerTimeoutSeconds(options.timeoutSeconds);
   const workers = workerCount(options.workers);
   const runRoot = resolve(options.runRoot);
   await mkdir(runRoot);
@@ -584,7 +604,7 @@ export async function startDetachedSupervisor(options) {
   const logFd = openSync(logPath, "a");
   const args = [fileURLToPath(import.meta.url), "--supervise", "--manifest", resolve(options.manifest),
     "--run-root", runRoot, "--output", resolve(options.output), "--cost-limit-usd", String(options.costLimitUsd),
-    "--workers", String(workers)];
+    "--workers", String(workers), "--timeout-seconds", String(timeoutSeconds)];
   if (options.runnerScript) args.push("--runner-script", resolve(options.runnerScript));
   if (options.perInstanceUsd) args.push("--per-instance-usd", String(options.perInstanceUsd));
   if (options.preparedEnvironment) args.push("--prepared-environment", options.preparedEnvironment);
@@ -666,9 +686,9 @@ function parseArguments(argv) {
       const key = argument.slice(2).replaceAll("-", "_");
       const name = { run_root: "runRoot", cost_limit_usd: "costLimitUsd", workers: "workers", heartbeat_seconds: "heartbeatSeconds",
         stale_seconds: "staleSeconds", report_seconds: "reportSeconds", state_path: "statePath", runner_script: "runnerScript", per_instance_usd: "perInstanceUsd",
-        prepared_environment: "preparedEnvironment" }[key] ?? key;
+        timeout_seconds: "timeoutSeconds", prepared_environment: "preparedEnvironment" }[key] ?? key;
       const value = argv[++index];
-      values[name] = ["costLimitUsd", "perInstanceUsd", "workers", "heartbeatSeconds", "staleSeconds", "reportSeconds"].includes(name) ? Number(value) : value;
+      values[name] = ["costLimitUsd", "perInstanceUsd", "workers", "heartbeatSeconds", "staleSeconds", "reportSeconds", "timeoutSeconds"].includes(name) ? Number(value) : value;
     }
     else throw new Error(`unknown-option:${argument}`);
   }
