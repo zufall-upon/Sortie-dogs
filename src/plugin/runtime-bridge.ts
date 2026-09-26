@@ -80,9 +80,11 @@ export interface RuntimeBridge {
     renderReturnReport(rootSessionID: string, text: string, receiptFingerprint: string): Promise<string | undefined>;
     recoverUnitEvidence(rootSessionID: string, request: { unitID: string; childSessionID: string; manifestPath: string;
       manifestHash: string; goalFingerprint: string }): Promise<readonly GoalEvidence[]>;
+    completionReadiness(rootSessionID: string): Promise<import("./goal-completion.js").CompletionReadiness>;
     completeRoot(rootSessionID: string, acceptanceFingerprint: string): Promise<{
       status: "succeeded" | "awaiting-evidence";
       receipt?: GoalTerminalReceipt;
+      completion?: import("./goal-completion.js").CompletionReadiness;
     }>;
     stopAutomaticRecovery(rootSessionID: string): Promise<void>;
     stopRoot(rootSessionID: string): Promise<void>;

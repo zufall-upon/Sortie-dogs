@@ -697,7 +697,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             : `Use these host counters, not the model-authored goal_budget_units estimate. Continue the same-goal remediation in this turn within unchanged acceptance and approved scope; normal time, cost, validation and dispatch gates still apply. ${packet.next_action}`;
         packet.next_action = `${counters} ${action}`;
       }
-      return { ...packet, budget };
+      const completion = state.phase === "awaiting-acceptance" ? await control!.completionReadiness(state.rootSessionID) : undefined;
+      return { ...packet, budget, ...(completion ? { completion,
+        ...(!completion.ready ? { next_action: completion.blockers.map(item => item.next_action).join("\n") } : {}) } : {}) };
     }
     /**
      * Proposal accounting without the submitted packet body.
@@ -718,7 +720,14 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         const mission = root && context.sessionID === root ? await reconcileMissionDispatch(root) : root ? await missions.read(root) : undefined;
         // Observation is available to every owned role. Only the root reconciles dispatch above.
         if (mission) {
-          return JSON.stringify({ ...missionDispatchPacket(mission, await operators.read(root!)), budget: await control!.currentBudget(root!) });
+          const run = await operators.read(root!);
+          const completion = run?.phase === "awaiting-acceptance" ? await control!.completionReadiness(root!) : undefined;
+          return JSON.stringify({ ...missionDispatchPacket(mission, run), budget: await control!.currentBudget(root!),
+            ...(completion ? { completion, ...(!completion.ready ? { next_action: completion.blockers.map(item => item.next_action).join("\n") } : {}) } : {}) });
+        }
+        if (root && context.sessionID !== root) {
+          const owned = await operators.read(root);
+          if (owned?.units.some(unit => unit.childSessionID === context.sessionID)) return JSON.stringify(await operatorPacket(owned));
         }
         await requireRoot(context.sessionID);
         const relocated = await relocatedMission(context.sessionID);
@@ -844,12 +853,15 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         if (input.returnReportTransport === "tool-result" && result.receipt?.status === "succeeded") {
           const text = `✅ **DONE** \`${state.runID}\` — ${state.acceptance.length} acceptance requirements verified.\n\n` +
             `**変更点:** ${state.units.map(unit => unit.unit.title).join("; ")}\n\n` +
-            `**確認結果:** PASS — ${[...new Set(state.units.flatMap(unit => unit.unit.validation))].join("; ")}\n\n**次:** なし`;
+            `**確認結果:** 宣言検証合格 — ${[...new Set(state.units.flatMap(unit => unit.unit.validation))].join("; ")}` +
+            (mission?.review ? `\n独立レビュー: ${mission.review.verdict === "evidence-gaps" ? "証拠不足を残して受入れ（レビューPASSではない）" : mission.review.verdict}.` : "") + "\n\n**次:** なし";
           const rendered = await control!.renderReturnReport(context.sessionID, text, goalFingerprint(result.receipt)).catch(() => undefined);
           if (rendered) panel = returnReportPanel(rendered);
         }
         return JSON.stringify({ status: result.status, run_id: state.runID,
           acceptance_fingerprint: state.acceptanceFingerprint, receipt: result.receipt ?? null,
+          ...(result.completion ? { completion: result.completion,
+            next_action: result.completion.blockers.map(item => item.next_action).join("\n") } : {}),
           ...(panel ? { return_report: panel,
             return_report_instruction: "Append return_report verbatim exactly once to your final answer as Markdown, outside any code fence. It is a host-authored receipt display, not a new task or input. Do not summarize, recalculate or request another model turn for it." } : {}) });
       } };
@@ -1202,6 +1214,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             `candidate_id: ${mission.id}`, `review_phase: ${phase}`, "canonical_validation_exit: 0", `risk_tags: [${risk.join(", ")}]`,
             "Review this candidate independently. Use the language of the requirements/traces. Invoke no tools. First line: exactly PASS, FINDINGS or EVIDENCE_GAPS.",
             "Use EVIDENCE_GAPS only when no finding establishes a source/test defect and every finding is proof the supplied artifact cannot settle, including process history later established on the base. Any concrete defect uses FINDINGS.",
+            "This Reviewer's native outcome and final acceptance can only be observed after this review. List those as deferred Operator checks, not as a reason to request another review. Still assess all available source, validation and historical evidence independently.",
             `acceptance: ${JSON.stringify(run.acceptance)}`, `changedLogicSummary: ${JSON.stringify(traces)}`,
             ...run.acceptance.map((_, i) => `acceptance[${i}] -> changedLogicSummary[${i}]`),
             `manifest: ${JSON.stringify(run.units.map(unit => unit.unit))}`, `sourceFingerprint: ${source.fingerprint}`,
@@ -1233,8 +1246,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     tools[completeMission] = { description: "Operator only: after comparing the original request, source, actual checks and required independent review, explicitly accept the whole mission. Returns the measured 🐾 report on success; never treat Worker start or one passing check as completion.",
       args: {}, execute: async (_args, context) => {
         await requireRoot(context.sessionID);
-        const mission = await missions.required(context.sessionID);
-        await assertMissionReview(context.sessionID, mission);
+        await missions.required(context.sessionID);
         const run = await operators.required(context.sessionID);
         const result = await tools[complete]!.execute({ run_id: run.runID, acceptance_fingerprint: run.acceptanceFingerprint }, context);
         if (JSON.parse(result).status === "succeeded") await missions.update(context.sessionID, state => { state.phase = "completed"; });
@@ -1467,7 +1479,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           const allowedRelease = request.tool === release;
           const allowedValidation = ["bash", "shell"].includes(request.tool.toLowerCase()) && typeof args.command === "string" &&
             repairAccess.expected_command !== null && normalizeCommand(args.command) === repairAccess.expected_command;
-          if (!allowedRead && !allowedBind && !allowedRelease && !allowedValidation) {
+          if (request.tool !== status && !allowedRead && !allowedBind && !allowedRelease && !allowedValidation) {
             throw new Error("operator-contract-repair-validation-only");
           }
         }

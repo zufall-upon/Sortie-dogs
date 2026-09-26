@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, mkdir, open, readFile, readdir, readlink, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import { RUNTIME_ASSET_VERSION } from "../asset-version.js";
@@ -137,6 +137,8 @@ import { profileAgent, STABLE_RUNTIME_PROFILE } from "../core/runtime-profile.js
 import type { RuntimeBridge } from "./runtime-bridge.js";
 import { evidenceFromObservedExecution } from "../core/observed-goal-evidence.js";
 import { receiptBoundTerminalText } from "./receipt-presentation.js";
+import { protectedSnapshot, refreshProtectedSnapshot } from "./protected-snapshot.js";
+import { goalCompletionReadiness, type CompletionReadiness } from "./goal-completion.js";
 
 const INPUT_LIMITS = { config: 64 * 1024, manifest: 512 * 1024, handoff: 2 * 1024 * 1024, parallel: 512 * 1024 } as const;
 const INSPECTION_CACHE = { maximum: 256, ttlMilliseconds: 30 * 60 * 1000 } as const;
@@ -546,86 +548,6 @@ async function durableScopeRoot(projectRoot: string): Promise<string | undefined
   } catch {
     return undefined;
   }
-}
-
-async function protectedScopeDigest(projectRoot: string, paths: readonly string[], manifestHash: string): Promise<string | undefined> {
-  const entries: Array<readonly [string, string, string?]> = [];
-  const canonicalRoot = await realpath(projectRoot);
-  const visit = async (absolute: string): Promise<boolean> => {
-    const scoped = relative(projectRoot, absolute).replaceAll("\\", "/");
-    if (scoped === ".." || scoped.startsWith("../") || isAbsolute(scoped)) return false;
-    const metadata = await lstat(absolute).catch((error: unknown) => {
-      if (isRecord(error) && error.code === "ENOENT") return undefined;
-      throw error;
-    });
-    if (metadata === undefined) { entries.push([scoped, "missing"]); return true; }
-    if (metadata.isSymbolicLink()) {
-      // Package managers place executable links under node_modules/.bin. Record
-      // both the link and its target bytes, but never follow a link out of the
-      // project or recurse through a linked directory (which may form a cycle).
-      const target = await realpath(absolute).catch(() => undefined);
-      if (target === undefined) return false;
-      const relativeTarget = relative(canonicalRoot, target);
-      if (relativeTarget === ".." || relativeTarget.startsWith("../") || isAbsolute(relativeTarget) ||
-        !(await stat(target)).isFile()) return false;
-      const link = await readlink(absolute);
-      const contents = await readFile(target);
-      entries.push([scoped, `symlink:${link}`, createHash("sha256").update(contents).digest("hex")]);
-      return true;
-    }
-    if (metadata.isDirectory()) {
-      entries.push([scoped, "directory"]);
-      const children = await readdir(absolute);
-      for (const child of children.sort()) if (!await visit(join(absolute, child))) return false;
-      return true;
-    }
-    if (!metadata.isFile()) return false;
-    entries.push([scoped, "file", createHash("sha256").update(await readFile(absolute)).digest("hex")]);
-    return true;
-  };
-  for (const path of [...new Set(paths)].sort()) if (!await visit(path)) return undefined;
-  return goalFingerprint({ manifest_hash: `sha256:${manifestHash}`, entries });
-}
-
-async function protectedSnapshot(authorization: Pick<SessionAuthorization, "manifestPath" | "manifestHash" | "projectRoot">): Promise<{
-  readonly binding: NonNullable<GoalEvidence["protected_binding"]>;
-  readonly source: string;
-  readonly candidate: string;
-} | undefined> {
-  const manifestSource = await readFile(authorization.manifestPath).catch(() => undefined);
-  if (manifestSource === undefined) return undefined;
-  const manifestHash = createHash("sha256").update(manifestSource).digest("hex");
-  if (manifestHash !== authorization.manifestHash) return undefined;
-  const relativePath = relative(authorization.projectRoot, authorization.manifestPath).replaceAll("\\", "/");
-  const manifest = JSON.parse(manifestSource.toString("utf8")) as OperationManifest;
-  const actualPaths = (entries: readonly string[]) => entries.map((entry) => {
-    const path = normalizeManifestPath(entry);
-    return path.kind === "relative" ? resolve(authorization.projectRoot, path.path) : resolve(path.path);
-  });
-  // Ownership keys may be case-folded even on POSIX (for example DrvFS). Hash the actual manifest paths.
-  const candidatePaths = actualPaths(manifest.write);
-  const sourcePaths = [...new Set([...actualPaths(manifest.read), ...candidatePaths])];
-  const source = await protectedScopeDigest(authorization.projectRoot, sourcePaths, manifestHash);
-  const candidate = await protectedScopeDigest(authorization.projectRoot, candidatePaths, manifestHash);
-  if (source === undefined || candidate === undefined || relativePath.startsWith("../") || isAbsolute(relativePath)) return undefined;
-  return { binding: { manifest_hash: `sha256:${manifestHash}`, project_root: authorization.projectRoot,
-    manifest_path: relativePath,
-    source_paths: sourcePaths.map((path) => relative(authorization.projectRoot, path).replaceAll("\\", "/")),
-    candidate_paths: candidatePaths.map((path) => relative(authorization.projectRoot, path).replaceAll("\\", "/")) },
-    source, candidate };
-}
-
-async function refreshProtectedSnapshot(projectRoot: string, binding: NonNullable<GoalEvidence["protected_binding"]>): Promise<{
-  readonly source: string; readonly candidate: string;
-} | undefined> {
-  const manifestPath = resolve(projectRoot, binding.manifest_path);
-  const manifestSource = await readFile(manifestPath).catch(() => undefined);
-  if (manifestSource === undefined) return undefined;
-  const manifestHash = createHash("sha256").update(manifestSource).digest("hex");
-  if (`sha256:${manifestHash}` !== binding.manifest_hash) return undefined;
-  const source = await protectedScopeDigest(projectRoot, binding.source_paths.map((path) => resolve(projectRoot, path)), manifestHash);
-  const candidate = await protectedScopeDigest(projectRoot, binding.candidate_paths.map((path) => resolve(projectRoot, path)), manifestHash);
-  return source === undefined || candidate === undefined ? undefined : { source, candidate };
 }
 
 interface BindingPin {
@@ -2296,30 +2218,19 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   }
 
   async function terminalGoal(sessionID: string, stopReason: GoalStopReason, status: "succeeded" | "stopped",
-    explicitAcceptance = false): Promise<GoalTerminalReceipt | undefined> {
+    explicitAcceptance = false, onReadiness?: (result: CompletionReadiness) => void): Promise<GoalTerminalReceipt | undefined> {
     const ledger = await goalLedger(sessionID);
-    const state = (await ledger.readGoal()).state;
-    if (state.goal_id === null || state.receipt !== null || state.outstanding_reservations.length > 0 || state.acceptance_fingerprint === null) return state.receipt ?? undefined;
+    const { state, records } = await ledger.readGoal();
+    if (state.receipt !== null) return state.receipt;
     if (status === "succeeded" && !explicitAcceptance &&
         await input.runtimeBridge?.requiresExplicitAcceptance?.(sessionID) === true) return undefined;
-    const records = (await ledger.readGoal()).records;
     const settledEvidence = records.flatMap(({ event }) => event.kind === "unit.settled" || event.kind === "unit.evidence-reconciled" ? event.evidence : []);
-    if (status === "succeeded" && (state.acceptance_contract === null ||
-      state.acceptance_contract.criteria.length === 0 ||
-      !state.acceptance_contract.criteria.every(({ criterion_id }) => state.satisfied_criteria.includes(criterion_id)))) return undefined;
-    if (status === "succeeded" && state.acceptance_contract !== null) {
-      for (const criterion of state.acceptance_contract.criteria) {
-        if (criterion.source_binding !== "current-protected" && criterion.candidate_binding !== "current-protected") continue;
-        const evidence = [...settledEvidence].reverse().find((entry) =>
-          entry.measurement.criterion_ids.includes(criterion.criterion_id) && validGoalEvidence(entry, state));
-        if (evidence?.protected_binding === undefined) return undefined;
-        const current = await refreshProtectedSnapshot(evidence.protected_binding.project_root,
-          evidence.protected_binding).catch(() => undefined);
-        if (current === undefined ||
-          (criterion.source_binding === "current-protected" && current.source !== evidence.identity.source) ||
-          (criterion.candidate_binding === "current-protected" && current.candidate !== evidence.identity.candidate)) return undefined;
-      }
+    if (status === "succeeded") {
+      const readiness = await goalCompletionReadiness(state, settledEvidence);
+      onReadiness?.(readiness);
+      if (!readiness.ready) return undefined;
     }
+    if (state.goal_id === null || state.outstanding_reservations.length > 0 || state.acceptance_fingerprint === null) return undefined;
     const started = [...records].reverse().find(({ event }) => event.kind === "goal.accepted")?.event.at ?? new Date().toISOString();
     const ended = new Date().toISOString();
     const startTime = Date.parse(started);
@@ -8273,6 +8184,11 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       return !snapshot.records.some(({ event }) => event.kind === "dispatch.reserved" && event.reservation_id === expected);
     },
     recoverUnitEvidence,
+    completionReadiness: async root => {
+      const { state, records } = await (await goalLedger(root)).readGoal();
+      return goalCompletionReadiness(state, records.flatMap(({ event }) =>
+        event.kind === "unit.settled" || event.kind === "unit.evidence-reconciled" ? event.evidence : []));
+    },
     completeRoot: async (sessionID, acceptanceFingerprint) => {
       if (!isCoordinatorSession(sessionID) && !await recoverCoordinatorRoot(sessionID)) throw new Error("operator-coordinator-required");
       await recoverCompletedGoalReservations(sessionID);
@@ -8281,8 +8197,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       if (goal.receipt?.status === "stopped" || goal.phase === "stopped") throw new Error("operator-goal-stopped");
       // Same proof/freshness/reservation gate used by terminal text, requested
       // explicitly by the root instead of inferred from a model's wording.
-      const receipt = goal.receipt ?? await terminalGoal(sessionID, "completed", "succeeded", true);
-      if (receipt?.status !== "succeeded") return { status: "awaiting-evidence" };
+      let completion: CompletionReadiness | undefined;
+      const receipt = goal.receipt ?? await terminalGoal(sessionID, "completed", "succeeded", true, result => { completion = result; });
+      if (receipt?.status !== "succeeded") return { status: "awaiting-evidence", completion };
       // Acceptance must return its receipt to the active tool call. Revoking
       // continuation timers is not a user-requested session cancellation.
       await continuation.stopAutomaticRecovery(sessionID, false, true);

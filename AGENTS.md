@@ -1,3 +1,8 @@
+# 設計原則
+
+- 自律的・効率的・可視的を優先し、不要・過剰な制約やセキュリティ機構を設けない。
+- 実作業を妨げる拒否・重複検証・レビュー往復を点検し、停止時は理由と次の操作を明示する。
+
 # Windows テスト
 
 - `npm test` / `npm run test:full`: 現在の作業ファイルを WSL Ubuntu の Linux filesystem に snapshot し、依存準備・build・共通テストを実施。Windows 側の build は不要。
