@@ -110,6 +110,16 @@ export function benchmarkEnvironment(source = process.env) {
     typeof source[key] === "string" && source[key].length > 0 ? [[key, source[key]]] : []));
 }
 
+export function benchmarkPythonCacheEnvironment(cacheRoot) {
+  // Validation fingerprints include every declared source/write path. Incidental
+  // Python/pytest caches must not mutate those paths during an otherwise passing
+  // check. Keep pytest's cache provider available, but in the disposable runtime.
+  return {
+    PYTHONDONTWRITEBYTECODE: "1",
+    PYTEST_ADDOPTS: `-o ${shellQuote(`cache_dir=${join(cacheRoot, "pytest")}`)}`,
+  };
+}
+
 export function benchmarkPermissionPolicy(externalDirectory) {
   const rules = [
     { action: "webfetch", resource: "*", effect: "deny" },
@@ -551,6 +561,7 @@ export function createInstancePrompt(instance, options = {}) {
   return [
     "Solve this public SWE-bench issue in the checked-out repository.",
     ...(options.preparedEnvironment ? [`A Python environment copied from this instance's official evaluation image is already active: ${PREPARED_ENVIRONMENT_DIRECTORY}/ is first on PATH (python, pytest, pip) with the repository installed in editable mode. Use it for reproduction and tests. Do not create another environment, and install a package only when a check proves it is missing.`] : []),
+    "The host disables Python bytecode writes and redirects pytest's cache into the isolated runtime. Preserve these environment settings during reproduction and validation; these incidental caches do not need repository write-scope expansion.",
     "Use the repository's existing development workflow and leave the fix as an uncommitted working-tree diff.",
     "The current working directory is the repository root; when supplying a repository path yourself, use a relative path and never guess or reconstruct the repository's absolute path.",
     "For initial repository discovery, omit the path argument from glob and grep, and read the repository root as '.'; keep later repository path inputs relative and never copy absolute workspace paths returned by tools.",
@@ -794,6 +805,7 @@ export async function prepareCandidateRuntime(candidate, packagePath, runRoot, d
   await symlink(hostAuth, join(dataRoot, "opencode", "auth.json"));
   const environment = {
     ...benchmarkEnvironment(),
+    ...benchmarkPythonCacheEnvironment(cacheRoot),
     HOME: homeRoot,
     OPENCODE_CONFIG_DIR: configRoot,
     OPENCODE_CONFIG: join(configRoot, "opencode.json"),
@@ -867,6 +879,7 @@ export async function prepareCandidateRuntime(candidate, packagePath, runRoot, d
       opencode_version: opencodeVersion,
       asset_count: Object.keys(assetHashes).length,
       assets_sha256: digest(JSON.stringify(assetHashes)),
+      python_cache_policy: "no-bytecode-isolated-pytest-cache-v1",
     },
   };
   } catch (error) {
