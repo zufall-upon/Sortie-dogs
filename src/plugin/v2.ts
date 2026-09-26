@@ -2,6 +2,15 @@ import type { OpenCodeHooks, OpenCodePlugin } from "./index.js";
 import { SortieDogsV010Plugin } from "./profiled.js";
 import { bindMissionProgress } from "./mission-progress.js";
 import { owningServiceSessionList } from "./v2-session-history.js";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+
+// Capture once when this module evaluates. A later package replacement must not make an old
+// process report the replacement's bytes as its loaded adapter.
+const loadedAdapter = Object.freeze({ adapter_url: import.meta.url,
+  adapter_sha256: createHash("sha256").update(readFileSync(new URL(import.meta.url))).digest("hex"),
+  loaded_at: new Date().toISOString(), pid: process.pid });
+const childSelectionKey = (id: string) => `v2-child-model-selection:${id}`;
 
 type JsonObject = Record<string, unknown>;
 type Registration = { dispose(): Promise<void> | void };
@@ -47,6 +56,11 @@ export interface OpenCodeV2Context {
     hook(name: "prompt" | "context" | "compaction", callback: (event: JsonObject) => Promise<void> | void): Promise<Registration>;
   };
   readonly message?: { list(input: JsonObject): Promise<unknown> };
+  readonly storage?: {
+    get(key: string): Promise<unknown>;
+    set(key: string, value: unknown): Promise<void>;
+    remove?(key: string): Promise<void>;
+  };
   readonly permission: {
     hook(name: "evaluate", callback: (event: JsonObject) => Promise<void> | void): Promise<Registration>;
   };
@@ -336,8 +350,8 @@ export function createV2ReturnReportFinalizer(context: OpenCodeV2Context, hooks:
 
 async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks): Promise<void> {
   const explicitlySelectedChildren = new Set<string>();
-  const classifiedSubagentModels = new Map<string, boolean>();
   const selectedChildModels = new Set<string>();
+  const selectionKey = (parent: string, role: string, prompt: string) => `${parent}\0${role}\0${prompt}`;
   // The V1 config hook is not invoked by OpenCode V2. Apply only missing role
   // defaults in its native registry; a user's configured agent model wins.
   await context.agent?.transform(editor => {
@@ -352,25 +366,12 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks)
     ]) editor.update(name, agent => { agent.model ??= { providerID: "openai", id, variant }; });
   });
   await context.tool.transform(editor => {
-    // Mutating execute.before's draft does not reliably affect V2's native
-    // subagent model selection. Wrap the executable tool before child creation.
+    // Task.model is for explicit per-task choices. Defaults remain structured in the registry
+    // and are applied at the first child prompt if the host inherited its parent's model.
     editor.update?.("subagent", tool => {
       const execute = tool.execute;
       tool.execute = async (input, execution) => {
         const value = record(input) ? { ...input } : {};
-        const key = typeof execution?.sessionID === "string" && typeof value.prompt === "string"
-          ? `${execution.sessionID}\0${value.prompt}` : undefined;
-        const explicit = key === undefined ? value.model !== undefined
-          : classifiedSubagentModels.get(key) ?? value.model !== undefined;
-        if (key !== undefined) classifiedSubagentModels.delete(key);
-        if (typeof value.agent === "string" && !explicit && context.agent?.get &&
-          ["dogs-coordinator", "dog-advisor-v010", "dog-reviewer-v010", "dog-scout-v010",
-            "dog-luna-worker-v010", "dog-worker-v010"].includes(value.agent)) {
-          const resolved = await context.agent.get({ agentID: value.agent });
-          const model = resolved.data?.model ?? resolved.model;
-          if (!model) throw new Error(`sortie-v010-subagent-model-unavailable:${value.agent}`);
-          value.model = `${model.providerID}/${model.id}${model.variant ? `#${model.variant}` : ""}`;
-        }
         if (value.agent !== "dogs-coordinator" || typeof execution.progress !== "function") return execute(value, execution);
         const report = execution.progress as (value: JsonObject) => Promise<void>;
         let metadata: JsonObject = {};
@@ -386,31 +387,26 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks)
     });
     for (const [name, definition] of Object.entries(hooks.tool ?? {})) {
       editor.add({ name, description: definition.description, input: toolSchema(definition.args), options: { codemode: false },
-        execute: async (input, execution) => ({ content: await definition.execute(legacyToolArgs(input, definition.args), {
-          sessionID: String(execution.sessionID ?? ""), ...(typeof execution.agent === "string" ? { agent: execution.agent } : {}) }) }) });
+        execute: async (input, execution) => {
+          const content = await definition.execute(legacyToolArgs(input, definition.args), {
+            sessionID: String(execution.sessionID ?? ""), ...(typeof execution.agent === "string" ? { agent: execution.agent } : {}) });
+          if (name !== "sortie_v010_operator_status") return { content };
+          const status: unknown = JSON.parse(content);
+          return { content: record(status) ? JSON.stringify({ ...status,
+            runtime: { ...loadedAdapter, host_version: context.app?.version ?? null } }) : content };
+        } });
     }
   });
   if (hooks["tool.execute.before"]) await context.tool.hook("execute.before", async event => {
-    if (event.tool === "subagent" && record(event.input) && typeof event.input.prompt === "string") {
-      const key = `${event.sessionID}\0${event.input.prompt}`;
-      const explicit = typeof event.input.model === "string";
-      classifiedSubagentModels.set(key, explicit);
-      if (explicit) explicitlySelectedChildren.add(key);
-    }
     const mapped = { args: legacyToolInput(event.tool, event.input) };
     await hooks["tool.execute.before"]!({ tool: legacyToolName(event.tool), sessionID: String(event.sessionID ?? ""),
       callID: String(event.id ?? ""), ...(typeof event.agent === "string" ? { agent: event.agent } : {}) }, mapped);
     event.input = v2ToolInput(event.tool, record(mapped.args) ? mapped.args : {});
-    if (event.tool === "subagent" && record(event.input) && typeof event.input.agent === "string" &&
-      event.input.model === undefined) {
-      const role = event.input.agent;
-      if (["dogs-coordinator", "dog-advisor-v010", "dog-reviewer-v010", "dog-scout-v010",
-        "dog-luna-worker-v010", "dog-worker-v010"].includes(role)) {
-        const configured = await context.agent?.get?.({ agentID: role });
-        const model = configured?.data?.model ?? configured?.model;
-        if (!model) throw new Error(`sortie-v010-subagent-model-unavailable:${role}`);
-        event.input.model = `${model.providerID}/${model.id}${model.variant ? `#${model.variant}` : ""}`;
-      }
+    if (event.tool === "subagent" && record(event.input) && typeof event.input.agent === "string" && typeof event.input.prompt === "string") {
+      // Record only admitted explicit choices, scoped by role as well as parent and prompt.
+      const key = selectionKey(String(event.sessionID), event.input.agent, event.input.prompt);
+      if (typeof event.input.model === "string") explicitlySelectedChildren.add(key);
+      else explicitlySelectedChildren.delete(key);
     }
   });
   if (hooks["tool.execute.after"]) await context.tool.hook("execute.after", async event => {
@@ -429,17 +425,30 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks)
       : nativeText;
     let model = modelReference(info.model) ?? { providerID: "unknown", modelID: "unknown" };
     if (typeof info.parentID === "string" && typeof info.agent === "string" && context.agent?.get) {
-      const key = `${info.parentID}\0${legacyText}`;
+      const key = selectionKey(info.parentID, info.agent, legacyText);
       const explicit = explicitlySelectedChildren.delete(key);
-      if (!explicit && !selectedChildModels.has(String(event.sessionID)) && ["dogs-coordinator", "dog-advisor-v010", "dog-reviewer-v010", "dog-scout-v010",
+      const priorSelection = selectedChildModels.has(String(event.sessionID)) ? undefined
+        : await context.storage?.get(childSelectionKey(String(event.sessionID)));
+      const retained = record(priorSelection) && priorSelection.agent === info.agent;
+      if (!selectedChildModels.has(String(event.sessionID)) && !retained && ["dogs-coordinator", "dog-advisor-v010", "dog-reviewer-v010", "dog-scout-v010",
         "dog-luna-worker-v010", "dog-worker-v010"].includes(info.agent)) {
-        const configured = await context.agent.get({ agentID: info.agent });
-        const selected = configured.data?.model ?? configured.model;
-        if (!selected) throw new Error(`sortie-v010-subagent-model-unavailable:${info.agent}`);
-        if (model.providerID !== selected.providerID || model.modelID !== selected.id || model.variant !== selected.variant) {
-          await context.session.switchModel({ sessionID: String(event.sessionID), model: selected });
-          model = { providerID: selected.providerID, modelID: selected.id, ...(selected.variant ? { variant: selected.variant } : {}) };
+        // Process-local memory is empty after reload. Existing native context proves this is a
+        // resume, whose current model (including a user's later switch) must remain authoritative.
+        const history = explicit ? undefined : await context.session.context({ sessionID: String(event.sessionID) });
+        const messages = Array.isArray(history) ? history : record(history) && Array.isArray(history.data) ? history.data : undefined;
+        if (!explicit && !messages) throw new Error("sortie-v010-child-history-unavailable");
+        if (!explicit && messages!.length === 0) {
+          const configured = await context.agent.get({ agentID: info.agent });
+          const selected = configured.data?.model ?? configured.model;
+          if (!selected) throw new Error(`sortie-v010-subagent-model-unavailable:${info.agent}`);
+          if (model.providerID !== selected.providerID || model.modelID !== selected.id || model.variant !== selected.variant) {
+            await context.session.switchModel({ sessionID: String(event.sessionID), model: selected });
+            model = { providerID: selected.providerID, modelID: selected.id, ...(selected.variant ? { variant: selected.variant } : {}) };
+          }
         }
+        // Queued prompt admission can run this hook before any context message exists. Plugin
+        // storage retains the first selection without racing the host's session metadata writes.
+        await context.storage?.set(childSelectionKey(String(event.sessionID)), { agent: info.agent });
       }
       selectedChildModels.add(String(event.sessionID));
     }
@@ -518,6 +527,7 @@ export function createSortieDogsV2Plugin(legacyFactory: OpenCodePlugin = SortieD
               continue;
             }
             if (id === undefined) continue;
+            if (event.type === "session.deleted") await context.storage?.remove?.(childSelectionKey(id));
             if (event.type === "session.execution.succeeded") await finalize(id);
             if (event.type === "session.created" || event.type === "session.deleted" || event.type === "session.idle") {
               const info = event.type === "session.created" ? await context.session.get({ sessionID: id }).catch(() => ({ id })) : { id };

@@ -317,6 +317,33 @@ WSL CLI execution must use a login shell and explicit project directory. Install
 fixture dependencies inside WSL, verify the tarball is not a working-tree link,
 and observe the actual package, role and model selected by the host.
 
+### V2 model routing and loaded adapter identity
+
+The seven configured roles retain structured `{ providerID, id, variant }` model
+defaults in the V2 registry. `dog-operator` is the primary role; the six child
+roles are `dogs-coordinator`, Advisor, Reviewer, Scout, Luna Worker and Worker.
+Sortie does not serialize a role default into an explicit Task `model` string.
+An explicit per-Task model remains a native host selection.
+
+At a child's first prompt, the adapter corrects an inherited parent model to the
+configured child-role model. A child with existing native context is a resume:
+its current selection is retained, including after plugin reload and after the
+user has switched models. A per-session marker in native plugin storage also
+retains a queued prompt's first selection before any context message exists.
+Failed Task admission cannot leave an explicit-choice
+marker that changes a later dispatch. Both direct `agent.get().model` and wrapped
+`agent.get().data.model` results are supported.
+
+On V2, the authorized `sortie_v010_operator_status` response includes a `runtime`
+object with `adapter_url`, `adapter_sha256`, `loaded_at`, `pid` and `host_version`.
+The adapter captures its URL and on-disk SHA-256 once during module evaluation;
+replacing the package on disk does not update the snapshot in an already-running
+process. Compare this loaded-adapter snapshot with the fixed package's `v2.js`
+hash and expected installation path after restarting the host. It identifies
+the adapter, not every transitive module, and does not prove a Worker ran or that
+a mission passed review. Verify actual session models, checks and review results
+separately.
+
 ## Approved plan and authority
 
 Nontrivial requests can start with a durable proposal phase. The root freezes the
