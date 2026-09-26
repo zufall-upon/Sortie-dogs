@@ -1,5 +1,5 @@
 import { V010_RUNTIME_ASSET_VERSION } from "../asset-version.js";
-import { OperatorContractError, OperatorRuntime, type OperatorState } from "../core/operator-runtime.js";
+import { cancelledMissionRetainsAcceptance, OperatorContractError, OperatorRuntime, type OperatorState } from "../core/operator-runtime.js";
 import { DEFAULT_OPERATOR_PROPOSAL_BUDGET, OPERATOR_APPROVAL_CONTRACT, OPERATOR_PROPOSAL_BUDGET_CAPS, OPERATOR_PROPOSAL_REVISION_CONTRACT,
   OperatorProposalBudgetError, OperatorProposalRuntime } from "../core/operator-proposal.js";
 import { CANONICAL_AGENT_ROLES, canonicalAgent, profileAgent, profileTool, V010_RUNTIME_PROFILE,
@@ -94,29 +94,35 @@ export function previewModelCatalog(
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 const payload = (value: unknown): unknown => record(value) && "data" in value ? value.data : value;
 
-/** Native V2 termination and lineage are required before a cancelled Worker loses its old acceptance. */
+/** Prove native V2 termination of the old dispatch, including earlier units and consultations. */
 export async function terminalCancelledMissionChildren(profile: RuntimeProfile, root: string, previous: OperatorState,
   budget: { reserved_units: number } | null,
   host: { get(id: string): Promise<unknown>; children(id: string): Promise<unknown> }): Promise<string[]> {
   if (!budget || budget.reserved_units !== 0) throw new Error("mission-superseded-run-reservations-pending");
   const oldWorkers = previous.units.flatMap(unit => unit.childSessionID === null ? [] : [unit.childSessionID]);
-  if (oldWorkers.length === 0) return [];
+  const terminal = (value: Record<string, unknown>) => ["succeeded", "failed", "interrupted"].includes(String(value.outcome));
   const coordinatorID = previous.operatorSessionID;
-  const coordinator = coordinatorID && await host.get(coordinatorID);
-  if (coordinatorID === null || !record(coordinator) || coordinator.parentID !== root ||
-      canonicalAgent(profile, coordinator.agent as string) !== "dog-operator" || coordinator.outcome !== "interrupted") {
-    throw new Error("mission-superseded-coordinator-not-terminal");
+  if (coordinatorID !== null) {
+    const coordinator = await host.get(coordinatorID);
+    if (!record(coordinator) || coordinator.id !== coordinatorID || coordinator.parentID !== root ||
+        canonicalAgent(profile, coordinator.agent as string) !== "dog-operator" || !terminal(coordinator)) {
+      throw new Error("mission-superseded-coordinator-not-terminal");
+    }
   }
-  const children = await host.children(coordinatorID);
-  if (!Array.isArray(children) || children.length !== oldWorkers.length ||
-      children.some(child => !record(child) || !oldWorkers.includes(child.id as string))) {
+  // A single-unit root dispatch has no nested Coordinator; unrelated root children are not its work.
+  const children = coordinatorID === null ? oldWorkers.map(id => ({ id })) : await host.children(coordinatorID);
+  if (!Array.isArray(children) || children.some(child => !record(child) || typeof child.id !== "string") ||
+      new Set(children.map(child => child.id)).size !== children.length ||
+      oldWorkers.some(id => !children.some(child => child.id === id))) {
     throw new Error("mission-superseded-worker-lineage-unproven");
   }
-  for (const id of oldWorkers) {
+  for (const { id } of children) {
     const worker = await host.get(id), descendants = await host.children(id);
-    if (!record(worker) || worker.parentID !== coordinatorID ||
-        !["dog-worker", "dog-luna-worker"].includes(canonicalAgent(profile, worker.agent as string) ?? "") ||
-        worker.outcome !== "interrupted" || !Array.isArray(descendants) || descendants.length !== 0) {
+    const roles = oldWorkers.includes(id) ? ["dog-worker", "dog-luna-worker"]
+      : ["dog-worker", "dog-luna-worker", "dog-reviewer", "dog-scout", "dog-advisor"];
+    if (!record(worker) || worker.id !== id || worker.parentID !== (coordinatorID ?? root) ||
+        !roles.includes(canonicalAgent(profile, worker.agent as string) ?? "") ||
+        !terminal(worker) || !Array.isArray(descendants) || descendants.length !== 0) {
       throw new Error("mission-superseded-worker-not-terminal");
     }
   }
@@ -301,7 +307,13 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         operators.acknowledgeHostHandoffRepair(root, taskID, path, original, repaired),
       continuationCheckpoint: async root => {
         const mission = await missions.read(root);
-        if (mission && !["completed", "cancelled"].includes(mission.phase)) return JSON.stringify(missionPacket(mission, await operators.read(root)));
+        const run = await operators.read(root);
+        // Cancellation after settled work remains an unfinished accepted goal. Keep its spend and
+        // evidence bound through a real user restart; the cancelled packet grants no dispatch itself.
+        if (mission && (!["completed", "cancelled"].includes(mission.phase) ||
+            (mission.phase === "cancelled" && run && cancelledMissionRetainsAcceptance(run)))) {
+          return JSON.stringify(missionPacket(mission, run));
+        }
         return await operators.continuationCheckpoint(root) ?? await proposals.continuationCheckpoint(root);
       },
       completedReviewPrompts: async (root, prompt) => completedMissionReviewPrompts(
@@ -414,7 +426,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     async function retainCancelledMissionAcceptance(root: string, mission: OperatorMission,
       prior?: import("../core/operator-runtime.js").OperatorState): Promise<OperatorMission> {
       const previous = prior ?? await operators.read(root);
-      if (previous?.phase !== "cancelled" || mission.supersededRunID !== undefined || mission.runID !== null) return mission;
+      if (previous?.phase !== "cancelled" || mission.runID !== null) return mission;
+      if (mission.supersededRunID !== undefined) {
+        if (mission.supersededRunID !== previous.runID || !cancelledMissionRetainsAcceptance(previous)) return mission;
+        return missions.carryForward(root, mission.id, previous.acceptance, previous.runID);
+      }
       // A different original user request needs the explicit, host-proven supersession path.
       // Only the same source can retain a cancelled run's acceptance as a prefix.
       if (previous.sourceRefs[0] !== `user:${mission.requests[0]?.id}` ||
@@ -1090,8 +1106,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       // status alone therefore cannot prove the old Worker stopped or its reservation settled.
       const cancelledPredecessor = previous?.phase === "cancelled" &&
         (mission.supersededRunID === previous.runID ||
-          (mission.supersededRunID === undefined && previous.decision === "explicit-cancellation" &&
-            previous.units.some(unit => unit.status === "cancelled" && unit.childSessionID !== null)));
+          (mission.supersededRunID === undefined && ["explicit-cancellation", "agent-changed"].includes(previous.decision ?? "") &&
+            previous.units.some(unit => (previous.decision === "agent-changed" || unit.status === "cancelled") && unit.childSessionID !== null)));
       const terminalChildren = cancelledPredecessor
         ? await terminalCancelledMissionChildren(profile, root, previous, budget, {
           get: async id => payload(await session("get", { path: { id }, query: { directory: input.directory } })),

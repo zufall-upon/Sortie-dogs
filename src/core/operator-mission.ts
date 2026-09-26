@@ -183,10 +183,10 @@ export class OperatorMissionRuntime {
       return state;
     });
   }
-  /** Keep a cancelled same-turn run's host-accepted criteria ahead of new mission text. */
-  carryForward(root: string, missionID: string, acceptance: readonly string[]): Promise<OperatorMission> {
+  /** Keep host-accepted criteria ahead of new text, including an exactly linked settled predecessor. */
+  carryForward(root: string, missionID: string, acceptance: readonly string[], supersededRunID?: string): Promise<OperatorMission> {
     return this.update(root, state => {
-      if (state.id !== missionID || state.supersededRunID !== undefined || state.runID !== null ||
+      if (state.id !== missionID || state.supersededRunID !== supersededRunID || state.runID !== null ||
           !["open", "running"].includes(state.phase) || (state.dispatchOpen && state.coordinator === null) ||
           acceptance.length === 0 || acceptance.some(text => typeof text !== "string" || !text.trim())) {
         throw new Error("mission-acceptance-carry-forward-unavailable");

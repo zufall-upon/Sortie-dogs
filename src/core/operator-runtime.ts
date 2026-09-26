@@ -220,6 +220,12 @@ export interface OperatorState {
   receipt: GoalTerminalReceipt | null;
 }
 
+/** A later mission may replace an unexecuted cancellation, but must retain settled work's acceptance. */
+export function cancelledMissionRetainsAcceptance(state: OperatorState): boolean {
+  return state.phase === "cancelled" && (state.decision === "agent-changed" || state.priorAcceptedUnits.length > 0 ||
+    state.units.some(unit => ["succeeded", "failed"].includes(unit.status) || unit.evidence.length > 0));
+}
+
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 const hash = (value: string): string => createHash("sha256").update(value).digest("hex");
 const identifier = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(value);
@@ -835,14 +841,18 @@ export class OperatorRuntime {
       previous.phase === "cancelled";
     if (mission?.supersededRunID !== undefined && !superseding) throw new Error("mission-superseded-run-mismatch");
     const terminalChildren = mission?.terminalChildren ?? [];
-    const cancelledChildren = previous?.units.flatMap(unit => unit.status === "cancelled" && unit.childSessionID !== null
+    const retainAcceptance = previous !== undefined && cancelledMissionRetainsAcceptance(previous);
+    const predecessorChildren = previous?.units.flatMap(unit => unit.childSessionID !== null
       ? [unit.childSessionID] : []) ?? [];
-    if (superseding && previous && (previous.decision !== "explicit-cancellation" || previous.gitLifecycle !== null ||
-        previous.repairResidualPaths.length > 0 || previous.priorAcceptedUnits.length > 0 ||
-        terminalChildren.length !== cancelledChildren.length || new Set(terminalChildren).size !== terminalChildren.length ||
-        cancelledChildren.some(id => !terminalChildren.includes(id)) || previous.units.some(unit =>
-          !["pending", "cancelled"].includes(unit.status) || unit.evidence.length > 0 || unit.resultClass !== null ||
-          unit.repairValidation !== null || (unit.status === "pending" && (unit.callID !== null || unit.childSessionID !== null)) ||
+    if (superseding && previous && (!["explicit-cancellation", "agent-changed"].includes(previous.decision ?? "") || previous.gitLifecycle !== null ||
+        previous.repairResidualPaths.length > 0 || previous.contractRepair !== null ||
+        terminalChildren.length !== predecessorChildren.length || new Set(terminalChildren).size !== terminalChildren.length ||
+        predecessorChildren.some(id => !terminalChildren.includes(id)) || previous.units.some(unit =>
+          !(retainAcceptance ? ["pending", "cancelled", "succeeded", "failed"] : ["pending", "cancelled"]).includes(unit.status) ||
+          (!retainAcceptance && (unit.evidence.length > 0 || unit.resultClass !== null)) ||
+          unit.repairValidation !== null || (unit.status === "pending" && (unit.callID !== null || unit.childSessionID !== null ||
+            unit.evidence.length > 0 || unit.resultClass !== null)) ||
+          (unit.status === "succeeded" && (unit.childSessionID === null || unit.callID === null || unit.evidence.length === 0 || unit.resultClass !== "acceptance")) ||
           (unit.status === "cancelled" && (unit.childSessionID === null || unit.callID === null))))) {
       throw new Error("mission-superseded-run-has-work: reconcile prior workers and evidence before changing acceptance");
     }
@@ -855,9 +865,9 @@ export class OperatorRuntime {
     }
     // Cancellation stops execution, not the accepted user order. A replacement
     // plan must carry the original ordered criteria; only a completed root clears them.
-    const parent = !superseding && previous?.phase === "cancelled" ? previous : undefined;
-    if (parent?.decision === "explicit-cancellation") {
-      const cancelled = parent.units.flatMap(unit => unit.status === "cancelled" && unit.childSessionID !== null
+    const parent = (!superseding || retainAcceptance) && previous?.phase === "cancelled" ? previous : undefined;
+    if (parent && ["explicit-cancellation", "agent-changed"].includes(parent.decision ?? "")) {
+      const cancelled = parent.units.flatMap(unit => (parent.decision === "agent-changed" || unit.status === "cancelled") && unit.childSessionID !== null
         ? [unit.childSessionID] : []);
       if (cancelled.length > 0 && (new Set(terminalChildren).size !== terminalChildren.length ||
           cancelled.some(id => !terminalChildren.includes(id)))) {
