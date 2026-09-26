@@ -1896,6 +1896,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         (output.system ??= []).push(`SORTIE_RUNTIME_PROFILE ${profile.id}; marker ${assetVersion}. ` +
           `Shared MkII protocol role names are logical: ${protocolMap}. Use only ${profile.toolPrefix} tools for this profile. ` +
           "Never rewrite user acceptance or evidence to rename protocol roles. Final acceptance belongs only to the root coordinator.");
+        if ((await identity(request.sessionID)).role === "dog-worker") {
+          const context = await operators.workerContext(root, request.sessionID);
+          if (context) (output.system ??= []).push(context);
+        }
         const proposal = await proposals.read(root);
         if (proposal?.phase !== "approved" && proposal?.proposal_session_id === request.sessionID) {
           // Only immutable identity and the frozen budget caps belong here. Consumed counters move with
@@ -1945,6 +1949,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       "experimental.session.compacting": async (request, output) => {
         const root = await rootFor(request.sessionID);
         if (!root) return;
+        if ((await identity(request.sessionID)).role === "dog-worker") {
+          const context = await operators.workerContext(root, request.sessionID);
+          if (context) (output.context ??= []).push(context +
+            " Preserve the actual edits, tool outcomes and next action in the summary; do not replace them with an empty-work claim.");
+        }
         if ((await identity(request.sessionID)).role === "dog-operator") {
           const mission = await missions.read(root);
           if (mission?.coordinator === request.sessionID) {

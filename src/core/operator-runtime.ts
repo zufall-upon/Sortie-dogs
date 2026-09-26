@@ -1879,6 +1879,24 @@ export class OperatorRuntime {
     if (Buffer.byteLength(JSON.stringify(packet)) > OPERATOR_LIMITS.packetBytes) throw new Error("operator-packet-too-large-no-evidence-truncated");
     return packet;
   }
+  /** Reconstruct the admitted child's instructions without trusting a lossy conversation summary. */
+  async workerContext(root: string, child: string): Promise<string | undefined> {
+    const state = await this.read(root);
+    if (!state || state.phase !== "running") return undefined;
+    const unit = state.units.find(item => item.childSessionID === child && item.status === "running");
+    if (!unit) return undefined;
+    // Keep this prefix stable across reads/edits: changing counters belong in status/tool results.
+    return `SORTIE_WORKER_CONTEXT\n${JSON.stringify({ root_session_id: root, run_id: state.runID,
+      unit_id: unit.unit.id, task_id: /^task_id: (.+)$/m.exec(unit.task.prompt)?.[1],
+      project_root: this.projectRoot, handoff_path: unit.handoffPath, operation_manifest: unit.manifestPath,
+      objective: unit.unit.objective, read: unit.unit.read, write: unit.unit.write,
+      validation: unit.unit.validation, acceptance: state.acceptance,
+      ...(unit.repairValidation === null ? {} : { validation_only: true }),
+    })}\nThis is the durable assignment for this same Worker, including after compaction or reload. ` +
+      "A missing path in a summary does not mean the handoff is missing. Read the retained handoff/manifest and inspect the actual diff and outputs before claiming no edits or replaying work. " +
+      `Use ${this.profile.toolPrefix}operator_status for observed validation and remaining work; do not repeat successful checks for an unchanged candidate. ` +
+      "This context is an assignment, not proof of execution or acceptance.";
+  }
   async continuationCheckpoint(root: string): Promise<string | undefined> {
     const state = await this.read(root);
     const cancelledRemediation = state?.phase === "cancelled" &&

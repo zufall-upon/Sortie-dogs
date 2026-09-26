@@ -150,6 +150,27 @@ for (const mode of ["cancel", "replace", "missed-after"]) test(`cold ${mode} aft
         { args: { filePath: destination, content: "installed" } });
       await mkdir(external, { recursive: true });
       await writeFile(destination, "installed");
+      if (index === 0) {
+        // The native checkpoint can omit both the initial prompt and the successful edit.
+        // A fresh plugin must supply the durable assignment without inventing validation proof.
+        const recoveredHooks = await create();
+        const context = { system: [] as string[] }, compact = { context: [] as string[] };
+        await recoveredHooks["experimental.chat.system.transform"]!({ sessionID: id }, context);
+        await recoveredHooks["experimental.session.compacting"]!({ sessionID: id }, compact);
+        for (const text of [context.system.join("\n"), compact.context.join("\n")]) {
+          assert.match(text, /SORTIE_WORKER_CONTEXT/);
+          assert.ok(text.includes(unit.handoffPath));
+          assert.ok(text.includes(unit.manifestPath));
+          assert.ok(text.includes("node check.mjs one"));
+          assert.match(text, /inspect the actual diff and outputs/);
+        }
+        const observed = await tool("operator_status", id);
+        assert.equal(observed.units[0].handoff_path, unit.handoffPath);
+        assert.equal(observed.units[0].operation_manifest_path, unit.manifestPath);
+        assert.equal(observed.units[0].evidence.length, 0, "recovered assignment must not fabricate proof");
+        assert.equal(await readFile(destination, "utf8"), "installed", "existing edits survive recovery");
+        assert.equal(await runtime.workerContext("root", "oldWorker"), undefined, "retired child must not inherit new work");
+      }
       const command = `node check.mjs ${name}`;
       await hooks["tool.execute.before"]!({ tool: "bash", sessionID: id, callID: `${id}-validation` }, { args: { command } });
       const checked = await exec(process.execPath, ["check.mjs", name], { cwd: root });

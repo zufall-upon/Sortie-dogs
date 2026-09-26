@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import test from "node:test";
 import { benchmarkEnvironment, benchmarkPythonCacheEnvironment, benchmarkInlineConfig, benchmarkPermissionPolicy, capturePatch, cloneInstance, createDryRunPlan, createInferenceManifest, createInstancePrompt, createLiveRunPlan, runOpenCode, waitForBenchmarkModelRoute, readDirectoryUsage, formatPrediction, officialEvaluationImage, parseArguments, relocateOfficialEnvironment, retainUsageDatabase, runDryRun, runLive, seedIsolatedV2Credential, verifyCandidateAgent } from "../scripts/swebench-lite-runner.mjs";
 import { runCandidatePreflight } from "../scripts/swebench-candidate-preflight.mjs";
+import { releaseManifest } from "../scripts/swebench-release-manifest.mjs";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -269,6 +270,40 @@ const createTestLiveRunPlan = (value: ReturnType<typeof manifest>, options: Reco
 const runTestLive = (value: ReturnType<typeof manifest>, options: Record<string, unknown>, dependencies: Record<string, unknown>) =>
   runLive(value, options, { ...dependencies, publicRowHashes: testPublicRowHashes(value) });
 const execFileAsync = promisify(execFile);
+
+test("release manifest selects receipt bytes over a same-version development candidate and records runner identity", async () => {
+  const root = await mkdtemp(join(tmpdir(), "swebench-release-manifest-"));
+  try {
+    const release = join(root, "release"), output = join(root, "campaign.json"), base = manifest();
+    await mkdir(release);
+    const archive = `sortie-dogs-${base.candidate.version}.tgz`;
+    await writeFile(join(root, archive), "earlier development candidate");
+    await writeFile(join(release, archive), "fixed release bytes");
+    await writeFile(join(root, "base.json"), JSON.stringify(base));
+    const hash = createHash("sha256").update("fixed release bytes").digest("hex");
+    const receipt = { version: base.candidate.version, release_commit: "a".repeat(40), package_sha256: hash,
+      candidate_preflight: { candidate: { ...base.candidate, package_sha256: hash } } };
+    const receiptPath = join(release, "release-receipt.json");
+    await writeFile(receiptPath, JSON.stringify(receipt));
+    const dependencies = { publicRowHashes: testPublicRowHashes(base) };
+    const provenance = await releaseManifest(join(root, "base.json"), receiptPath, output, dependencies);
+    const result = JSON.parse(await readFile(output, "utf8"));
+    assert.equal(result.candidate.sha256, hash);
+    assert.equal(result.candidate.package_tgz, `release/${archive}`);
+    assert.deepEqual(result.instances, base.instances);
+    assert.equal(provenance.release_commit, receipt.release_commit);
+    assert.match(provenance.runner_commit, /^[a-f0-9]{40}$/);
+    assert.equal(provenance.runner_sha256["scripts/swebench-lite-runner.mjs"],
+      createHash("sha256").update(await readFile("scripts/swebench-lite-runner.mjs")).digest("hex"));
+    assert.equal(JSON.parse(await readFile(`${output}.provenance.json`, "utf8")).manifest_sha256,
+      createHash("sha256").update(await readFile(output)).digest("hex"));
+    await assert.rejects(releaseManifest(join(root, "base.json"), receiptPath, output, dependencies), /EEXIST/);
+    await writeFile(join(release, archive), "earlier development candidate");
+    await assert.rejects(releaseManifest(join(root, "base.json"), receiptPath, join(root, "wrong.json"), dependencies),
+      /release-archive-sha256-mismatch/);
+    await assert.rejects(readFile(join(root, "wrong.json")), /ENOENT/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
 
 test("dry-run manifest keeps only public issue inputs in stable order", () => {
   const result = createTestInferenceManifest(manifest());
