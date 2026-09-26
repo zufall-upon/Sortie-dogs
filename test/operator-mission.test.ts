@@ -17,6 +17,7 @@ async function fixture(run: (directory: string) => Promise<void>) {
 }
 const unit = { title: "Fix result", objective: "Implement the requested result without changing the oracle", read: ["check.mjs"],
   write: ["src"], validation: ["node check.mjs"] };
+const independentReviewAcceptance = "After implementation and formal validation, the Coordinator must dispatch an independent Dog-Reviewer with review_mission and risk_tags [public-logic] to examine root cause and public logic, then reflect all FINDINGS; this SourceReview is post-validation and must not block Worker dispatch.";
 
 test("mission review accepts grouped requirement traces while preserving coverage", async () => fixture(async directory => {
   const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
@@ -115,6 +116,140 @@ test("mission Coordinator owns a single Worker unit without a proposal or root a
   assert.match(admitted.prompt, /Read-only investigation commands are unrestricted/);
   assert.equal((await operators.required("root")).runID, state.runID);
   await assert.rejects(operators.replanMission("root", state.runID, missionPlan(mission, [{ ...unit, write: ["src", "test"] }])), /still-active/);
+}));
+
+test("mission Worker separates prior decisions from post-validation independent SourceReview", async () => fixture(async directory => {
+  const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+  const operators = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
+  const acceptance = ["Fix result", independentReviewAcceptance];
+  const originalRequest = `Fix result. ${independentReviewAcceptance}`;
+  await missions.capture("root", { id: "u1", text: originalRequest });
+  const mission = await missions.start("root", acceptance);
+  assert.equal(mission.requests[0]?.text, originalRequest);
+  assert.deepEqual(mission.requirements.map(item => item.text), acceptance);
+  const coordinatorTask = missions.task(mission);
+  await missions.admit("root", "coordinator-call", coordinatorTask);
+  await missions.claim("root", "coordinator", coordinatorTask.prompt);
+  const plan = missionPlan(mission, [unit]);
+  assert.deepEqual(plan.acceptance, acceptance);
+  assert.deepEqual(plan.acceptance_proof, [["unit-1"], ["unit-1"]]);
+  assert.deepEqual(plan.units.map(current => current.acceptance_indices), [[0, 1]]);
+  const run = await operators.prepareMission("root", plan, { sessionID: "coordinator", callID: "coordinator-call" });
+  assert.deepEqual(run.acceptance, acceptance);
+  assert.deepEqual(run.acceptanceProof, plan.acceptance_proof);
+  assert.deepEqual(run.units.map(current => current.unit.acceptance_indices), [[0, 1]]);
+  const handoff = JSON.parse(await readFile(run.units[0]!.handoffPath, "utf8"));
+  assert.deepEqual(handoff.ext["sortie-dogs/acceptance-continuity"].criteria, acceptance);
+  assert.deepEqual(handoff.ext["sortie-dogs/unit-coverage"].indices, [0, 1]);
+  assert.equal(handoff.ext["sortie-dogs/unit-coverage"].acceptance_fingerprint, run.acceptanceFingerprint);
+  const workerTask = (await operators.next("root", "coordinator") as { task: typeof coordinatorTask }).task;
+  await operators.admitWorker("root", "coordinator", "worker-call", workerTask);
+  const expanded = await operators.claimAdmittedWorkerPrompt("root", "coordinator", "worker", workerTask.prompt);
+  for (const criterion of acceptance) assert.ok(expanded.prompt.includes(criterion), `expanded Worker prompt omitted acceptance: ${criterion}`);
+  assert.match(expanded.prompt, /Required technical or user decisions that must precede implementation belong to the root before dispatch/u);
+  assert.match(expanded.prompt, /If a required prior decision is missing, return the exact contract gap to the parent/u);
+  assert.match(expanded.prompt, /Independent SourceReview is a separate post-implementation and post-validation review/u);
+  assert.match(expanded.prompt, /do not require it before implementation or formal validation, and do not stop this Task solely because it has not yet occurred/u);
+  assert.match(expanded.prompt, /Coordinator can dispatch the independent review_mission with applicable risk_tags/u);
+  assert.match(expanded.prompt, /applicable risk_tags \(for example, public-logic\)/u);
+  assert.match(expanded.prompt, /Do not conduct or delegate that independent review yourself/u);
+  assert.match(expanded.prompt, /Reflect supplied prior Reviewer FINDINGS within this unit's scope/u);
+  assert.match(expanded.prompt, /Do not spawn nested subagents for consultation/u);
+  assert.doesNotMatch(expanded.prompt, /Required consultations belong to the root before dispatch/u);
+  assert.doesNotMatch(expanded.prompt, /If required consultation results or user decisions are missing/u);
+  assert.equal(expanded.prompt.match(/^unit_acceptance_indices: .*$/mu)?.[0], "unit_acceptance_indices: [0,1]");
+}));
+
+test("multi-unit mission retains the review sequence in both admitted and expanded Worker prompts", async () => fixture(async directory => {
+  const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+  const operators = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
+  const acceptance = ["Fix the root cause.", independentReviewAcceptance, "Preserve compatibility."];
+  await missions.capture("root", { id: "u1", text: acceptance.join(" ") });
+  const mission = await missions.start("root", acceptance);
+  assert.deepEqual(mission.requirements.map(item => item.text), acceptance);
+  const plan = missionPlan(mission, [
+    { ...unit, requirement_ids: ["R1", "R2"] },
+    { ...unit, title: "Preserve compatibility", objective: "Keep the established behavior", validation: ["node verify-compatibility.mjs"],
+      requirement_ids: ["R3"] },
+  ]);
+  assert.deepEqual(plan.acceptance, acceptance);
+  assert.deepEqual(plan.acceptance_proof, [["unit-1"], ["unit-1"], ["unit-2"]]);
+  assert.deepEqual(plan.units.map(current => current.acceptance_indices), [[0, 1], [2]]);
+  const run = await operators.prepareMission("root", plan, { sessionID: "coordinator", callID: "coordinator-call" });
+  assert.equal(run.units.length, 2);
+  assert.deepEqual(run.acceptance, acceptance);
+  assert.deepEqual(run.acceptanceProof, plan.acceptance_proof);
+  assert.deepEqual(run.units.map(current => current.unit.acceptance_indices), [[0, 1], [2]]);
+  const handoffs = await Promise.all(run.units.map(async current => JSON.parse(await readFile(current.handoffPath, "utf8"))));
+  for (const [index, handoff] of handoffs.entries()) {
+    assert.deepEqual(handoff.ext["sortie-dogs/acceptance-continuity"].criteria, acceptance);
+    assert.deepEqual(handoff.ext["sortie-dogs/unit-coverage"].indices, index === 0 ? [0, 1] : [2]);
+    assert.equal(handoff.ext["sortie-dogs/unit-coverage"].acceptance_fingerprint, run.acceptanceFingerprint);
+  }
+
+  const assertMissionWorkerPrompt = (prompt: string, indices: number[]) => {
+    for (const criterion of acceptance) assert.ok(prompt.includes(criterion), `Worker prompt omitted acceptance: ${criterion}`);
+    assert.match(prompt, /Required technical or user decisions that must precede implementation belong to the root before dispatch/u);
+    assert.match(prompt, /If a required prior decision is missing, return the exact contract gap to the parent/u);
+    assert.match(prompt, /Independent SourceReview is a separate post-implementation and post-validation review/u);
+    assert.match(prompt, /do not require it before implementation or formal validation, and do not stop this Task solely because it has not yet occurred/u);
+    assert.match(prompt, /Coordinator can dispatch the independent review_mission with applicable risk_tags \(for example, public-logic\)/u);
+    assert.match(prompt, /Do not conduct or delegate that independent review yourself/u);
+    assert.match(prompt, /Reflect supplied prior Reviewer FINDINGS within this unit's scope/u);
+    assert.match(prompt, /Do not spawn nested subagents for consultation/u);
+    assert.doesNotMatch(prompt, /Required consultations belong to the root before dispatch/u);
+    assert.doesNotMatch(prompt, /If required consultation results or user decisions are missing/u);
+    assert.equal(prompt.match(/^unit_acceptance_indices: .*$/mu)?.[0], `unit_acceptance_indices: ${JSON.stringify(indices)}`);
+  };
+  for (const [index, current] of run.units.entries()) {
+    assert.match(current.task.prompt, /Required technical or user decisions that must precede implementation belong to the root before dispatch/u);
+    assert.match(current.task.prompt, /Independent SourceReview is a separate post-implementation and post-validation review/u);
+    assert.match(current.task.prompt, /Coordinator can dispatch the independent review_mission with applicable risk_tags/u);
+    assertMissionWorkerPrompt(current.task.prompt, index === 0 ? [0, 1] : [2]);
+  }
+  const task = (await operators.next("root", "coordinator") as { task: typeof run.units[number]["task"] }).task;
+  await operators.admitWorker("root", "coordinator", "worker-call-1", task);
+  const expanded = await operators.claimAdmittedWorkerPrompt("root", "coordinator", "worker-1", task.prompt);
+  assertMissionWorkerPrompt(expanded.prompt, [0, 1]);
+  const expandedPrompts = [expanded.prompt];
+  // Worker dispatch is serial; settle unit 1 before exercising unit 2's native admission and claim route.
+  await operators.settled({ rootSessionID: "root", callID: "worker-call-1", unitID: run.units[0]!.unit.id,
+    childSessionID: "worker-1", disposition: "succeeded", evidence: [], resultClass: "acceptance" });
+  const secondTask = (await operators.next("root", "coordinator") as { task: typeof run.units[number]["task"] }).task;
+  await operators.admitWorker("root", "coordinator", "worker-call-2", secondTask);
+  const secondExpanded = await operators.claimAdmittedWorkerPrompt("root", "coordinator", "worker-2", secondTask.prompt);
+  expandedPrompts.push(secondExpanded.prompt);
+  assert.equal(expandedPrompts.length, run.units.length);
+  assertMissionWorkerPrompt(expandedPrompts[1]!, [2]);
+  assert.match(expanded.prompt, /Independent SourceReview is a separate post-implementation and post-validation review/u);
+  assert.equal(expanded.prompt.match(/^unit_acceptance_indices: .*$/mu)?.[0], "unit_acceptance_indices: [0,1]");
+}));
+
+test("legacy OperatorRuntime.prepare preserves the prior consultation contract", async () => fixture(async directory => {
+  const operators = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
+  const input = {
+    schema_version: "0.1",
+    acceptance: ["Preserve the legacy consultation contract"],
+    acceptance_proof: [["legacy-contract"]],
+    source_refs: ["fixture:legacy-request"],
+    goal_declaration: {
+      delivery_intent: "implementation", delivery_mode: "mvp-first", usable_path_established: false, controlled_change: false,
+      defaults: { target: "legacy consultation behavior", entrypoint: "check.mjs", workload: "legacy-contract",
+        oracle_coverage: ["declared legacy behavior"], build_boundary: "not-applicable", source: "source", candidate: "candidate",
+        fixture: "legacy-contract", source_binding: "current-protected", candidate_binding: "current-protected",
+        proof_scope: "requested-full", expected_outcome: "pass" },
+      criteria: [{ criterion_id: "legacy-contract", target: "Legacy consultation contract", entrypoint: "check.mjs",
+        validation_command: "node check.mjs" }],
+    },
+    units: [{ id: "legacy-unit", title: "Preserve legacy consultation contract", objective: "Keep prior consultation wording",
+      read: ["check.mjs"], write: ["src"], validation: ["node check.mjs"], acceptance_indices: [0] }],
+  };
+  const run = await operators.prepare("legacy-root", input);
+  assert.deepEqual(run.acceptance, input.acceptance);
+  assert.deepEqual(run.units.map(current => current.unit.acceptance_indices), [[0]]);
+  const prompt = run.units[0]!.task.prompt;
+  assert.match(prompt, /Required consultations belong to the root before dispatch/u);
+  assert.match(prompt, /If required consultation results or user decisions are missing/u);
 }));
 
 test("mission rejects foreign Coordinator claims and duplicate dispatches", async () => fixture(async directory => {
