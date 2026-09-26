@@ -13,7 +13,7 @@ import { BUILT_IN_MODEL_CATALOG, type CatalogModel } from "./model-routing.js";
 import { goalFingerprint } from "../core/goal-bound.js";
 import { decoratePreviewHeadings, returnReportPanel } from "./receipt-presentation.js";
 import { sanitizeTerminalReport, terminalRunOutcome } from "./run-metrics.js";
-import { extractWritePaths, normalizeCommand } from "./gate.js";
+import { normalizeCommand } from "./gate.js";
 import { normalizeRelativePath } from "../core/path.js";
 import { MISSION_EVIDENCE_GAP_REVIEW_LIMIT, OperatorMissionRuntime, missionPacket, missionPlan, missionReviewAccepted, missionReviewTask,
   missionReviewTraces, missionReviewVerdict, type OperatorMission } from "../core/operator-mission.js";
@@ -347,6 +347,34 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           state.units.some(unit => unit.status === "running" && unit.callID === callID &&
             /^task_id: (.+)$/m.exec(unit.task.prompt)?.[1] === taskID);
       },
+      recoverMissionDispatch: async (root, taskID) => {
+        let run = await operators.read(root);
+        const unit = run?.units.find(item => /^task_id: (.+)$/m.exec(item.task.prompt)?.[1] === taskID);
+        if (!run || !unit?.callID) return undefined;
+        if (run.phase !== "cancelled") {
+          const history = await messages(run.operatorSessionID ?? root);
+          const terminal = history.some(message => Array.isArray(message.parts) && message.parts.some(part =>
+            record(part) && part.type === "tool" && part.callID === unit.callID && record(part.state) &&
+            ["completed", "error"].includes(String(part.state.status))));
+          if (!terminal) return undefined;
+          if (unit.childSessionID) {
+            const child = payload(await session("get", { path: { id: unit.childSessionID }, query: { directory: input.directory } }));
+            if (!record(child) || child.parentID !== (run.operatorSessionID ?? root) ||
+                !["succeeded", "failed", "interrupted"].includes(String(child.outcome))) return undefined;
+          }
+          return { callID: unit.callID, ...(unit.childSessionID ? { childSessionID: unit.childSessionID } : {}), cancelled: false };
+        }
+        await stopCancelledChildren(root, run);
+        run = await operators.required(root);
+        // A Task rejected before creating a child still has a native terminal record.
+        if (!unit.childSessionID) {
+          const history = await messages(run.operatorSessionID ?? root);
+          if (!history.some(message => Array.isArray(message.parts) && message.parts.some(part =>
+            record(part) && part.type === "tool" && part.callID === unit.callID && record(part.state) &&
+            ["completed", "error"].includes(String(part.state.status))))) return undefined;
+        }
+        return { callID: unit.callID, ...(unit.childSessionID ? { childSessionID: unit.childSessionID } : {}), cancelled: true };
+      },
       allowsInvestigativeShell: async child => {
         const root = await rootFor(child);
         if (!root) return false;
@@ -461,7 +489,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const previous = prior ?? await operators.read(root);
       if (previous?.phase !== "cancelled" || mission.runID !== null) return mission;
       if (mission.supersededRunID !== undefined) {
-        if (mission.supersededRunID !== previous.runID || !cancelledMissionRetainsAcceptance(previous)) return mission;
+        // The predecessor remains archived for costs/results, not as obligations for a new request.
+        if (mission.requirementsReplaced || mission.supersededRunID !== previous.runID || !cancelledMissionRetainsAcceptance(previous)) return mission;
         return missions.carryForward(root, mission.id, previous.acceptance, previous.runID);
       }
       // A different original user request needs the explicit, host-proven supersession path.
@@ -608,6 +637,32 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     const reopenProposalScope = profileTool(profile, "sortie_reopen_operator_proposal_scope");
     const reconcileOrphan = profileTool(profile, "sortie_reconcile_orphaned_operator_dispatch");
     const reviseApprovedIntent = profileTool(profile, "sortie_revise_approved_operator_intent");
+    async function stopCancelledChildren(root: string, run: OperatorState): Promise<void> {
+      if (run.phase !== "cancelled") return;
+      const children = new Set(run.units.flatMap(unit => unit.childSessionID ? [unit.childSessionID] : []));
+      if (run.operatorSessionID) {
+        // Older V2 private servers expose get/interrupt but no session.list. The durable
+        // dispatch IDs suffice to cancel our work; a missing listing must not veto that operation.
+        const nested = payload(await session("children", { path: { id: run.operatorSessionID }, query: { directory: input.directory } }).catch(() => undefined));
+        if (Array.isArray(nested)) for (const child of nested) if (record(child) && typeof child.id === "string" &&
+          child.parentID === run.operatorSessionID) children.add(child.id);
+        children.add(run.operatorSessionID);
+      }
+      for (const child of children) {
+        if (run.stoppedChildren?.includes(child)) continue;
+        const who = payload(await session("get", { path: { id: child }, query: { directory: input.directory } }));
+        if (!record(who) || who.parentID !== (child === run.operatorSessionID ? root : run.operatorSessionID ?? root)) {
+          throw new Error(`mission-cancellation-lineage-unavailable: ${child}`);
+        }
+        if (!["succeeded", "failed", "interrupted"].includes(String(who.outcome))) {
+          const result = await session("abort", { path: { id: child }, query: { directory: input.directory } });
+          if (result === undefined || result === false || (record(result) && result.data === false)) {
+            throw new Error(`mission-cancellation-stop-unconfirmed: ${child}`);
+          }
+        }
+        await operators.recordStoppedChild(root, run.runID, child);
+      }
+    }
     async function stop(root: string, reason: string, retireRoot = true): Promise<void> {
       if (retireRoot) retired.add(root);
       if (retireRoot) await control?.stopAutomaticRecovery(root);
@@ -627,6 +682,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         retired.add(child);
         const result = await session("abort", { path: { id: child }, query: { directory: input.directory } });
         if (result === undefined || result === false || (record(result) && result.data === false)) throw new Error("operator-child-stop-unconfirmed");
+        const run = await operators.read(root);
+        if (run) await operators.recordStoppedChild(root, run.runID, child);
       }
       await control?.cancelChildren(root);
       if (retireRoot) await control?.stopRoot(root);
@@ -680,6 +737,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         const root = await rootFor(context.sessionID);
         if (!root) throw new Error("operator-grant-invalid");
         const activeMission = await reconcileMissionDispatch(root);
+        if (activeMission && !["cancelled", "completed"].includes(activeMission.phase) && activeMission.runID === null && context.sessionID !== root) {
+          const budget = await control!.currentBudget(root);
+          return JSON.stringify({ ...missionDispatchPacket(activeMission, await operators.read(root)), budget,
+            next_action: "This mission has no unit plan yet. Call plan_units with the next useful work under the current requirements; prior run results are historical." });
+        }
         if (activeMission && context.sessionID === root && !activeMission.dispatchOpen &&
             ["open", "running"].includes(activeMission.phase)) {
           return JSON.stringify({ ...missionDispatchPacket(activeMission, await operators.read(root)), budget: await control!.currentBudget(root) });
@@ -731,9 +793,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         const mission = root && context.sessionID === root ? await reconcileMissionDispatch(root) : root ? await missions.read(root) : undefined;
         // Observation is available to every owned role. Only the root reconciles dispatch above.
         if (mission) {
+          const budget = await control!.currentBudget(root!);
           const run = await operators.read(root!);
           const completion = run?.phase === "awaiting-acceptance" ? await control!.completionReadiness(root!) : undefined;
-          return JSON.stringify({ ...missionDispatchPacket(mission, run), budget: await control!.currentBudget(root!),
+          return JSON.stringify({ ...missionDispatchPacket(mission, run), budget,
             ...(completion ? { completion, ...(!completion.ready ? { next_action: completion.blockers.map(item => item.next_action).join("\n") } : {}) } : {}) });
         }
         if (root && context.sessionID !== root) {
@@ -1125,19 +1188,22 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       reviewMission = `${profile.toolPrefix}review_mission`, submitMission = `${profile.toolPrefix}submit_mission`,
       completeMission = `${profile.toolPrefix}complete_mission`, expandUnit = `${profile.toolPrefix}expand_unit`;
     const stringList = { type: "array", items: { type: "string" } };
-    tools[startMission] = { description: "Operator: save a few one-line requirements/negative constraints. Original user messages, IDs and ownership are captured automatically. An unfinished mission in another location returns its continuation location. For intentionally separate work in this location, intent=new creates a separate mission without cancelling other missions or resetting cumulative spend. Dispatch the returned Coordinator task immediately, or use plan_units for simple single-unit work.",
+    tools[startMission] = { description: "Operator: save the current user requirements. Use intent=replace when the user changes an existing request (version, parallelism, target): host cancels the previous run and archives its requirements/results while retaining spend. Supply the complete current requirements, retaining constraints the user has not changed. For separate work in a different location use intent=new. Dispatch the Coordinator immediately, or plan_units for a known single-unit procedure; item count and runtime alone do not require a Coordinator.",
       args: { requirements: { ...stringList, minItems: 1, maxItems: 64 } as never,
-        intent: { type: "string", enum: ["", "continue", "new"], "x-sortie-optional": true } as never }, execute: async (args, context) => {
+        intent: { type: "string", enum: ["", "continue", "new", "replace"], "x-sortie-optional": true } as never }, execute: async (args, context) => {
         await requireRoot(context.sessionID);
-        if (args.intent !== undefined && !["", "continue", "new"].includes(args.intent)) throw new Error("mission-intent-invalid");
+        if (args.intent !== undefined && !["", "continue", "new", "replace"].includes(args.intent)) throw new Error("mission-intent-invalid");
         return serializeDispatchTransition(context.sessionID, async () => {
           const existing = await reconcileMissionDispatch(context.sessionID);
+          if (args.intent === "replace" && existing && !["completed", "cancelled"].includes(existing.phase)) {
+            await stop(context.sessionID, "explicit-cancellation", false);
+          }
           if (args.intent !== "new" && (!existing || ["completed", "cancelled"].includes(existing.phase))) {
             const relocated = await relocatedMission(context.sessionID);
             if (relocated) return JSON.stringify({ ...relocated, budget: await control!.currentBudget(context.sessionID) });
           }
           const mission = await retainCancelledMissionAcceptance(context.sessionID,
-            await missions.start(context.sessionID, (args as Record<string, unknown>).requirements));
+            await missions.start(context.sessionID, (args as Record<string, unknown>).requirements, args.intent === "replace" || args.intent === "new"));
           return JSON.stringify({ ...locationObservation(context.sessionID), ...(mission.dispatchOpen
             ? missionDispatchPacket(mission, await operators.read(context.sessionID))
             : { mission_id: mission.id, requirements: mission.requirements, task: missions.task(mission),
@@ -1166,12 +1232,23 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             previous.units.some(unit => (previous.decision === "agent-changed" || unit.status === "cancelled") && unit.childSessionID !== null)));
       const terminalChildren = cancelledPredecessor
         ? await terminalCancelledMissionChildren(profile, root, previous, budget, {
-          get: async id => payload(await session("get", { path: { id }, query: { directory: input.directory } })),
-          children: async id => payload(await session("children", { path: { id }, query: { directory: input.directory } })),
+          get: async id => {
+            const value = payload(await session("get", { path: { id }, query: { directory: input.directory } }));
+            const stopped = (await operators.required(root)).stoppedChildren?.includes(id);
+            return record(value) && stopped ? { ...value, outcome: "interrupted" } : value;
+          },
+          children: async id => {
+            try { return payload(await session("children", { path: { id }, query: { directory: input.directory } })); }
+            catch {
+              const run = await operators.required(root);
+              // The cancellation acknowledgements are scoped to this exact durable run.
+              return id === run.operatorSessionID ? run.units.flatMap(unit => unit.childSessionID ? [{ id: unit.childSessionID }] : []) : [];
+            }
+          },
         }) : [];
       const dispatcher = actor === root ? undefined : { sessionID: actor, callID: mission.callID! };
       const state = replanning ? await operators.replanMission(root, previous.runID, plan, dispatcher)
-        : await operators.prepareMission(root, plan, dispatcher, mission.supersededRunID, terminalChildren);
+        : await operators.prepareMission(root, plan, dispatcher, mission.supersededRunID, terminalChildren, mission.requirementsReplaced);
       await control!.registerGoalDeclaration(root, state.units[0]!.task.prompt, true);
       control!.enableUnits(root, state.units.filter(unit => unit.status === "pending").length);
       await missions.update(root, item => {
@@ -1183,7 +1260,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     }
     tools[planUnits] = { description: "Coordinator (or single-unit Fast-lane Operator): declare useful units, then dispatch the returned Worker immediately. Host generates IDs, handoff, manifest and proof mapping. Keep every original requirement covered. Use write: [] for read-only verification; use dir/** for directory outputs including not-yet-created trees. Native absolute paths support global installs and external outputs under host permissions; include their actual paths in read/write for evidence. Final validation command in each unit proves that unit; read-only diagnostic commands need no registration. Recalling with reason replaces settled work within unchanged requirements and cumulative budget; include required scope extensions here. Rejected budget, contract or control-storage preparation preserves the existing run so you can correct the plan directly.",
       args: { units: { type: "array", minItems: 1, maxItems: 32, items: { type: "object", additionalProperties: false,
-        properties: { title: { type: "string" }, objective: { type: "string" }, read: stringList, write: stringList,
+        properties: { title: { type: "string" }, objective: { type: "string" },
+          read: { ...stringList, description: "Inputs that affect validation, not an allowlist for observation. Do not include whole live session/database/log trees just to inspect them." }, write: stringList,
           validation: stringList, requirement_ids: stringList }, required: ["title", "objective", "write", "validation"] } } as never,
         reason: { type: "string", "x-sortie-optional": true } as never }, execute: async (args, context) => {
         const { root, mission } = await missionAuthority(context.sessionID);
@@ -1503,8 +1581,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         if (missionCoordinator && request.tool !== "task") {
           if (["read", "glob", "grep", "list", "execute", "todowrite", "todoread", "webfetch", "websearch", "skill"].includes(request.tool)) return;
           if (["bash", "shell"].includes(request.tool)) {
-            const writes = extractWritePaths(request.tool, args);
-            if (writes.paths.length || writes.gitMutation || writes.remoteMutation) throw new Error("mission-coordinator-shell-readonly: delegate source changes to Worker");
+            // Native shell permissions own execution. Parsing shell syntax cannot enforce read-only
+            // behavior (interpreter bodies were already opaque); the role still delegates source edits.
             return;
           }
           throw new Error("mission-coordinator-no-edit-tool");

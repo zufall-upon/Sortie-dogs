@@ -1094,6 +1094,10 @@ export class RunFlightLedger {
     try {
       const records = await this.#readGoalRecords();
       if (guard !== undefined) guard(reduceGoalFlight(records));
+      if (event.kind === "unit.usage-reconciled" && records.some(({ event: stored }) =>
+        stored.kind === "unit.usage-reconciled" && stored.goal_id === event.goal_id &&
+        stored.reservation_id === event.reservation_id && stored.native_session_id === event.native_session_id &&
+        stored.cost_usd === event.cost_usd)) return reduceGoalFlight(records);
       if (event.kind === "goal.accepted") {
         const prior = records.find(({ event: stored }) => stored.kind === "goal.accepted" &&
           stored.origin_user_message_id === event.origin_user_message_id);

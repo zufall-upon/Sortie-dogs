@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { goalFingerprint, selectGoalDelivery, validGoalEvidence, type GoalEvidence } from "../dist/core/goal-bound.js";
 import { RunFlightLedger, RunFlightLedgerError } from "../dist/core/run-flight-ledger.js";
 import { evidenceFromObservedExecution } from "../dist/core/observed-goal-evidence.js";
+import { settledUnitUsage } from "../dist/plugin/unit-usage.js";
 
 const root = fileURLToPath(new URL(`../_testenv/goal-bound-${process.pid}/`, import.meta.url));
 const at = "2026-09-08T00:00:00.000Z";
@@ -38,6 +39,40 @@ test("delivery selection follows explicit current-turn facts without a classifie
     irreversible_or_major_scope: true }), "controlled-change");
   assert.equal(selectGoalDelivery({ declared_intent: "repair", requested_usable_path_established: true,
     irreversible_or_major_scope: false, explicit_mode: "mvp-first" }), "mvp-first");
+});
+
+test("late native usage reconciles a cancelled unit once, without replaying work or accepting evidence", async () => {
+  const { ledger } = await accepted("late-usage");
+  for (const id of ["one", "two"]) {
+    await ledger.appendGoal({ kind: "dispatch.reserved", at, goal_id: "goal-late-usage", unit_id: id,
+      reservation_id: id, session_id: "root-session", ticket_id: null });
+    await ledger.appendGoal({ kind: "unit.settled", at, goal_id: "goal-late-usage", unit_id: id,
+      reservation_id: id, receipt_id: `receipt-${id}`, disposition: "cancelled", result_class: "interrupted",
+      progress_fingerprint: null, evidence: [], elapsed_ms: 100, cost_usd: null, native_session_id: `child-${id}` });
+  }
+  const event = { kind: "unit.usage-reconciled" as const, at, goal_id: "goal-late-usage",
+    reservation_id: "one", native_session_id: "child-one", cost_usd: 0.25, source: "native-usage-price-table" as const };
+  assert.equal((await ledger.appendGoal(event)).consumed_cost_usd, null);
+  const before = (await ledger.readGoal()).records.length;
+  await ledger.appendGoal(event);
+  assert.equal((await ledger.readGoal()).records.length, before);
+  await assert.rejects(ledger.appendGoal({ ...event, cost_usd: 0.1 }), /Usage reconciliation/);
+  await assert.rejects(ledger.appendGoal({ ...event, reservation_id: "two", native_session_id: "wrong" }), /Usage reconciliation/);
+  const state = await ledger.appendGoal({ ...event, reservation_id: "two", native_session_id: "child-two", cost_usd: 0.5 });
+  assert.equal(state.consumed_cost_usd, 0.75);
+  assert.equal(state.consumed_units, 2);
+  assert.equal(state.outstanding_reservations.length, 0);
+  assert.deepEqual(state.evidence_refs, []);
+});
+
+test("native pricing excludes earlier dispatches and leaves missing/interrupted requests unknown", () => {
+  const message = { info: { id: "m", role: "assistant", providerID: "openai", modelID: "gpt-6-luna-fast",
+    time: { created: 2000, completed: 3000 }, tokens: { input: 1000, output: 100, reasoning: 0, cache: { read: 0, write: 0 } } } };
+  assert.equal(settledUnitUsage([message, message]), 0.0003);
+  assert.equal(settledUnitUsage([message], new Date(4000).toISOString()), null);
+  assert.equal(settledUnitUsage([{ info: { ...message.info, time: { created: 2000 } } }]), null);
+  assert.equal(settledUnitUsage([{ info: { ...message.info, error: { type: "aborted" },
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } } } }]), null);
 });
 
 test("one passing command preserves distinct criterion measurements and can reconcile a settled bookkeeping defect", async () => {

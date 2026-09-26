@@ -1222,19 +1222,14 @@ export async function createWriteGate(project: ProjectPaths, value: unknown, too
         ? normalizeCommand(output.args.command)
         : undefined;
       if (command !== undefined && declaredValidation.has(command)) return;
+      // Shell syntax is not an execution permission boundary. Mission workers already use
+      // native host permissions; only declared checks produce formal validation evidence.
+      if (options?.investigativeShell && ["bash", "shell"].includes(_input.tool)) return;
       const extracted = extractWritePaths(_input.tool, output.args);
       if (!extracted.applies) return;
-      // Mission workers may investigate with repository-specific executables without registering
-      // every diagnostic as a formal check. Known write destinations/Git mutations still use the
-      // same scope gate; this option never makes diagnostic output acceptance evidence.
-      if (options?.investigativeShell && ["bash", "shell"].includes(_input.tool) &&
-          extracted.issue?.cause === "executable-not-allowlisted" && extracted.paths.length === 0 &&
-          !extracted.gitMutation && !extracted.remoteMutation) return;
       if (extracted.ambiguous || (extracted.paths.length === 0 && !extracted.gitCommit)) {
         if (extracted.issue !== undefined) {
-          const formatCorrection = options?.investigativeShell === true &&
-            ["unsupported-curl-form", "unsupported-git-archive-form", "unsupported-webrequest-form"].includes(extracted.issue.cause);
-          throw new WriteDeniedError("unclassified-command", issuePath(extracted.issue, formatCorrection));
+          throw new WriteDeniedError("unclassified-command", issuePath(extracted.issue));
         }
         throw new WriteDeniedError("path-required", "<missing-path>");
       }

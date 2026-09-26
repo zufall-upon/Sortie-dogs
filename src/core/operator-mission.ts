@@ -24,6 +24,8 @@ export interface OperatorMission {
   root: string;
   requests: MissionRequest[];
   requirements: { id: string; text: string }[];
+  /** The current user intentionally replaced the predecessor's requirements. */
+  requirementsReplaced?: boolean;
   phase: "open" | "running" | "submitted" | "completed" | "cancelled";
   coordinator: string | null;
   callID: string | null;
@@ -146,7 +148,7 @@ export class OperatorMissionRuntime {
       }
     });
   }
-  start(root: string, requirements: unknown): Promise<OperatorMission> {
+  start(root: string, requirements: unknown, replaceRequirements = false): Promise<OperatorMission> {
     return this.serial(root, async () => {
       if (!Array.isArray(requirements) || requirements.length === 0 || requirements.length > 64 ||
           !requirements.every(item => typeof item === "string" && item.trim() && !/[\r\n]/u.test(item))) {
@@ -166,6 +168,7 @@ export class OperatorMissionRuntime {
       if (previous) await this.save(this.file(root, `.${previous.id}`), previous);
       const state: OperatorMission = { version: "0.12", id: `mission-${randomUUID()}`, root, requests: [request],
         requirements: requirements.map((text, index) => ({ id: `R${index + 1}`, text })), phase: "open",
+        ...(replaceRequirements ? { requirementsReplaced: true } : {}),
         coordinator: null, callID: null, dispatchOpen: false, runID: null, plans: 0, progress: [], submission: null,
         ...(previous?.phase === "cancelled" &&
           (previous.runID === null || request.id !== previous.requests[0]?.id) &&
@@ -302,9 +305,14 @@ export function missionPlan(mission: OperatorMission, raw: unknown): OperatorPla
 }
 
 export function missionPacket(mission: OperatorMission, run?: OperatorState): Record<string, unknown> {
+  const predecessor = run && mission.runID !== run.runID && (mission.supersededRunID === run.runID || run.phase === "cancelled") ? run : undefined;
+  if (predecessor) run = undefined;
   const currentReview = mission.review !== undefined && mission.review.runID === (run?.runID ?? mission.runID);
   const reviewAccepted = currentReview && missionReviewAccepted(mission.review!);
   return { mission_id: mission.id, phase: mission.phase, coordinator_session_id: mission.coordinator,
+    ...(predecessor ? { predecessor: { run_id: predecessor.runID, status: predecessor.phase,
+      completed_units: predecessor.units.filter(unit => unit.status === "succeeded").length,
+      note: "Historical results and spend are retained; they do not complete the current requirements." } } : {}),
     requirements: mission.requirements, original_request_refs: mission.requests.map(item => `user:${item.id}`),
     submission: mission.submission, progress: mission.progress,
     execution_summary: { completed_units: run?.units.filter(unit => unit.status === "succeeded").length ?? 0,

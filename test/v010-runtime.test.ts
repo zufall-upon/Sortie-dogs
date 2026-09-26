@@ -1701,7 +1701,8 @@ for (const exhaustBudget of [false, true]) test(`failed repair validation expose
     `${createHash("sha256").update("v010\0root").digest("hex")}.json`));
   const inFlight = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
   const initialGoal = (await budgetLedger.readGoal()).state;
-  const { settled_cost_usd, cost_limit_usd, cost_status, cost_note, ...inFlightUnits } = inFlight.budget;
+  const { settled_cost_usd, cost_limit_usd, cost_status, cost_note, cost_source, ...inFlightUnits } = inFlight.budget;
+  assert.equal(cost_source, "native-usage-price-table");
   assert.equal(settled_cost_usd, initialGoal.consumed_cost_usd);
   assert.equal(cost_limit_usd, initialGoal.budget!.cost_usd);
   assert.equal(cost_status, "in-flight-not-final");
@@ -1753,7 +1754,8 @@ for (const exhaustBudget of [false, true]) test(`failed repair validation expose
     { command: [validator], outcome: "fail", exit_code: 12 });
   assert.match(terminal.next_action, /cancel_operator[\s\S]+prepare_operator/u);
   const settledGoal = (await budgetLedger.readGoal()).state;
-  const { settled_cost_usd: finalCost, cost_limit_usd: finalLimit, cost_status: finalStatus, cost_note: finalNote, ...settledUnits } = terminal.budget;
+  const { settled_cost_usd: finalCost, cost_limit_usd: finalLimit, cost_status: finalStatus, cost_note: finalNote, cost_source: finalSource, ...settledUnits } = terminal.budget;
+  assert.equal(finalSource, cost_source);
   assert.equal(finalCost, settledGoal.consumed_cost_usd);
   assert.equal(finalLimit, settledGoal.budget!.cost_usd);
   assert.equal(finalStatus, finalCost === null ? "unknown-usage" : "settled");
