@@ -266,7 +266,9 @@ test("supervisor resume marks an interrupted attempt and never reruns it", async
       manifestPath: join(root, "manifest.json"),
       runRoot: root,
       output: join(root, "predictions.jsonl"),
+      timeoutSeconds: 2400,
     });
+    assert.equal(state.limits.timeout_seconds, 2400);
     state.instances[0]!.status = "running";
     state.instances[0]!.attempt = 1;
     await writeAtomicJson(statePath, state);
@@ -275,6 +277,7 @@ test("supervisor resume marks an interrupted attempt and never reruns it", async
       runRoot: root,
       output: join(root, "predictions.jsonl"),
       costLimitUsd: 5,
+      timeoutSeconds: 2400,
       watchdog: false,
     }, fakeDependencies(runs));
     assert.deepEqual(runs, ["example__project-2"]);
