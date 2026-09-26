@@ -9,6 +9,8 @@ import { probe } from "./mission-cli-probe.mjs";
 // The observer does not repair state, inject a replacement task or execute the Worker validation.
 const result = await probe(resolve(process.argv[2]), resolve(process.argv[3]), {
   mode: "complete", timeoutSeconds: 360, capUSD: 1,
+  onServer: async ({ server, fixture }) => writeFile(join(fixture.control, "probe-server.json"),
+    JSON.stringify({ url: server.url, password: server.env.OPENCODE_SERVER_PASSWORD }), { mode: 0o600 }),
   prompt: "Delegate to dogs-coordinator using the exact returned Task: replace result.txt with recovered and a trailing newline, then validate node check.mjs. Use Coordinator even for this one-unit compaction diagnostic. Do not change check.mjs or settings. Complete the low-risk mission.",
   setupFixture: async ({ control, run }) => {
     const wrapper = join(control, "plugins/sortie-dogs/index.js");
@@ -30,7 +32,12 @@ export default { id: "sortie-dogs.v010", async setup(ctx) {
     if (event.agent !== "dog-worker-v010" || event.status !== "completed" || compacted.has(event.sessionID)) return;
     if (readFileSync(${JSON.stringify(join(run, "project/result.txt"))}, "utf8") !== "recovered\\n") return;
     compacted.add(event.sessionID);
-    await ctx.session.compact({ sessionID: event.sessionID });
+    // 2.0.18 exposes compaction over HTTP, but not in its plugin session facade.
+    const server = JSON.parse(readFileSync(${JSON.stringify(join(control, "probe-server.json"))}, "utf8"));
+    const response = await fetch(server.url + "/api/session/" + event.sessionID + "/compact", {
+      method: "POST", headers: { "content-type": "application/json",
+        authorization: "Basic " + Buffer.from("opencode:" + server.password).toString("base64") }, body: "{}" });
+    if (!response.ok) throw new Error("probe-compaction-request-failed:" + response.status);
     log({ kind: "compact-requested", session: event.sessionID });
   });
   await ctx.session.hook("compaction", event => {
@@ -70,6 +77,7 @@ assert.equal(compactions.length, 1);
 assert.ok(events.some(event => event.kind === "compaction" && JSON.stringify(event.system).includes("SORTIE_WORKER_CONTEXT")));
 assert.ok(events.some(event => event.kind === "worker-context" && event.after_compaction &&
   JSON.stringify(event.system).includes("SORTIE_WORKER_CONTEXT")));
-assert.ok(events.some(event => event.kind === "progress" && event.value.sortie_progress?.status === "running"));
+assert.ok(events.some(event => event.kind === "progress" && event.value.sortie_progress?.status === "running" &&
+  event.value.sortie_progress?.child_session_id));
 assert.ok(tasks.some(part => part.state?.metadata?.sortie_progress));
 assert.ok(result.models.some(row => row.agent === "dog-worker-v010" && row.model.id === "gpt-6-luna-fast" && row.model.variant === "max"));

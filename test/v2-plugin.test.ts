@@ -15,7 +15,9 @@ import type { OpenCodeHooks, OpenCodePlugin } from "../dist/plugin/index.js";
 import { collectRunMetrics } from "../dist/plugin/run-metrics.js";
 import { terminalCancelledMissionChildren } from "../dist/plugin/profiled.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
-import { OperatorMissionRuntime } from "../dist/core/operator-mission.js";
+import { OperatorMissionRuntime, missionPlan } from "../dist/core/operator-mission.js";
+import { OperatorRuntime } from "../dist/core/operator-runtime.js";
+import { missionProgressReader } from "../dist/plugin/mission-progress.js";
 
 function contextFixture() {
   const history: Record<string, unknown>[] = [{
@@ -135,6 +137,27 @@ test("V2 Task recovers durable progress without a live settlement sink and retai
     assert.deepEqual(result.output, nativeOutput, "preserve native success output schema");
     assert.equal(fixture.synthetic.length, 0, "progress must not queue new model work");
   } finally { clearTimeout(deadline!); cleanup?.(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test("progress observes unit admission after reading the prepared run, rather than retaining its cached state", async () => {
+  const directory = await mkdtemp(resolve("_testenv/v2-progress-state-"));
+  try {
+    const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+    const operators = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
+    await missions.capture("root", { id: "u1", text: "Fix result" });
+    const mission = await missions.start("root", ["Fix result"]);
+    const run = await operators.prepareMission("root", missionPlan(mission, [{ title: "Fix result", objective: "Fix result",
+      read: ["check.mjs"], write: ["result.txt"], validation: ["node check.mjs"] }]));
+    await missions.update("root", state => { state.callID = "call"; state.runID = run.runID; });
+    const observe = missionProgressReader(directory, "root", "call");
+    assert.equal((await observe())?.sortie_progress.unit, null);
+    await operators.admitWorker("root", "root", "worker-call", operators.nextWorkerTask(run));
+    await operators.claimAdmittedWorkerPrompt("root", "root", "worker", operators.nextWorkerTask(run).prompt);
+    const running = (await observe())!.sortie_progress;
+    assert.equal(running.status, "running");
+    assert.equal(running.child_session_id, "worker");
+    assert.equal(await missionProgressReader(directory, "root", "foreign-call")(), undefined);
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
 test("V2 operator dispatch rejects background before admission and accepts explicit foreground", async () => {

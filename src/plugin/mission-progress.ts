@@ -16,11 +16,11 @@ export async function publishMissionProgress(root: string, value: Record<string,
 /** Read durable transitions even when settlement ran in a different/reloaded plugin instance. */
 export function missionProgressReader(directory: string, root: string, callID: string) {
   const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
-  const operators = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
   return async (): Promise<Record<string, unknown> | undefined> => {
     const mission = await missions.read(root);
     if (!mission || mission.callID !== callID) return undefined;
-    const run = await operators.read(root);
+    // OperatorRuntime caches its own writes; a display observer must read a fresh disk snapshot.
+    const run = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).read(root);
     const units = run?.runID === mission.runID ? run.units : [];
     const running = units.find(unit => unit.status === "running");
     const last = mission.progress.at(-1);

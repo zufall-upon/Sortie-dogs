@@ -58,7 +58,7 @@ async function updateBudget(file, update) {
 }
 
 export async function probe(tgz, output, { mode = 'start', prompt, instance, timeoutSeconds = 180, capUSD = 1, pythonBin, budgetFile,
-  setupFixture, model } = {}) {
+  setupFixture, onServer, model } = {}) {
   if (!Number.isFinite(capUSD) || capUSD <= 0 || !Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0) throw Error('Probe needs finite positive limits');
   const fixture = await installedFixture(tgz, output, 'v012', { nested: false });
   const { project, env, run } = fixture;
@@ -87,6 +87,8 @@ export async function probe(tgz, output, { mode = 'start', prompt, instance, tim
     probes.push({ project, charged_usd: capUSD, reserved_usd: capUSD, state: 'reserved' });
   });
   const server = await startV2ReleaseServer(project, env);
+  try { await onServer?.({ server, fixture }); }
+  catch (error) { await server.stop(); throw error; }
   const since = Date.now();
   const buildStart = mode === 'build-start';
   const operatorResponse = mode === 'operator-response';
