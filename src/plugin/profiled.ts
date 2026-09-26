@@ -1139,12 +1139,14 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const plan = missionPlan(mission, raw);
       if (actor === root && (mission.coordinator !== null || plan.units.length !== 1)) throw new Error("mission-coordinator-required: dispatch the returned Coordinator task");
       const same = previous?.planHash === createHash("sha256").update(JSON.stringify(plan)).digest("hex");
-      if (previous && !["completed", "cancelled"].includes(previous.phase) && !same) {
+      const replanning = previous && !["completed", "cancelled"].includes(previous.phase) && !same;
+      if (replanning) {
         if (!reason?.trim()) throw new Error("mission-replan-reason-required: name the observed correction or write-scope extension");
-        await operators.retireMissionRun(root);
       }
       const budget = await control!.currentBudget(root);
-      if (budget && budget.remaining_units < plan.units.length && !same) throw new Error("mission-budget-exhausted: report the required cumulative extension to Operator");
+      if (budget && budget.remaining_units < plan.units.length && !same) throw new Error(
+        `mission-budget-exhausted: plan needs ${plan.units.length} units; ${budget.remaining_units} remain. ` +
+        "The current run is retained. Correct the plan within the remaining budget, or report a necessary cumulative extension to Operator.");
       // Cancellation marks the durable units before interrupting their native sessions. A cancelled
       // status alone therefore cannot prove the old Worker stopped or its reservation settled.
       const cancelledPredecessor = previous?.phase === "cancelled" &&
@@ -1156,8 +1158,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           get: async id => payload(await session("get", { path: { id }, query: { directory: input.directory } })),
           children: async id => payload(await session("children", { path: { id }, query: { directory: input.directory } })),
         }) : [];
-      const state = await operators.prepareMission(root, plan, actor === root ? undefined
-        : { sessionID: actor, callID: mission.callID! }, mission.supersededRunID, terminalChildren);
+      const dispatcher = actor === root ? undefined : { sessionID: actor, callID: mission.callID! };
+      const state = replanning ? await operators.replanMission(root, previous.runID, plan, dispatcher)
+        : await operators.prepareMission(root, plan, dispatcher, mission.supersededRunID, terminalChildren);
       await restorePriorAcceptance(root, state);
       await control!.registerGoalDeclaration(root, state.units[0]!.task.prompt, true);
       control!.enableUnits(root, state.units.filter(unit => unit.status === "pending").length);
@@ -1168,7 +1171,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       });
       return JSON.stringify(await operators.next(root, actor));
     }
-    tools[planUnits] = { description: "Coordinator (or single-unit Fast-lane Operator): declare useful units, then dispatch the returned Worker immediately. Host generates IDs, handoff, manifest and proof mapping. Keep every original requirement covered. Final validation command in each unit proves that unit; read-only diagnostic commands need no registration. Recalling with reason replaces settled work within unchanged requirements and cumulative budget; include required scope extensions here.",
+    tools[planUnits] = { description: "Coordinator (or single-unit Fast-lane Operator): declare useful units, then dispatch the returned Worker immediately. Host generates IDs, handoff, manifest and proof mapping. Keep every original requirement covered. Use write: [] for read-only verification; do not invent a write path. Final validation command in each unit proves that unit; read-only diagnostic commands need no registration. Recalling with reason replaces settled work within unchanged requirements and cumulative budget; include required scope extensions here. Rejected budget, contract or control-storage preparation preserves the existing run so you can correct the plan directly.",
       args: { units: { type: "array", minItems: 1, maxItems: 32, items: { type: "object", additionalProperties: false,
         properties: { title: { type: "string" }, objective: { type: "string" }, read: stringList, write: stringList,
           validation: stringList, requirement_ids: stringList }, required: ["title", "objective", "write", "validation"] } } as never,

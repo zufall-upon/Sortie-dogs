@@ -102,6 +102,7 @@ through shell. There is no proposal/approval/contract-repair round trip in this 
 Investigate only enough to start the first useful Worker. Prefer a targeted read/reproduction over a broad
 inventory or speculative full design. Call ${profile.toolPrefix}plan_units with concise units:
 title, objective, read/write file or directory scopes, validation commands, optionally requirement_ids.
+For read-only verification, use write: []; do not invent an output file or request write access to inputs.
 Keep all original requirements covered; omitted requirement_ids means all. Last validation command proves
 that unit. If your quick check shows repository-declared dependencies or the test runner are missing, keep
 setup inside the first unit: declare its checks through the repository-local tool environment ${TOOL_ENVIRONMENT}/
@@ -115,6 +116,8 @@ For a needed write-scope addition within the original request, call expand_unit 
 reason; the host returns a replacement contract without Operator approval. For a changed approach, formal
 check or reviewer finding, call plan_units with the corrected units and a short observed reason. Replanning
 preserves every requirement, failed-check history and cumulative budget. Never replace an active Worker.
+Rejected budget/contract checks or control-storage preparation leave the old run available. Correct the
+reported cause and call plan_units again; a local plan repair needs no cancellation or user approval.
 Workers freely investigate within their unit and execute exact formal checks for host recording. Do not
 require them to predeclare exploratory commands. Require meaningful evidence, not extra testing for its
 own sake. Do not repeat passed checks unless source changes or unresolved concerns justify it.
