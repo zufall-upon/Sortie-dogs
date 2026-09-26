@@ -316,17 +316,17 @@ test("a later mission replaces a cancelled worker and pending unit only after ho
   await operators.interrupted("root", "explicit-cancellation");
   const cancelled = await operators.required("root");
   const sessions = new Map([
-    ["coordinator", { agent: "dogs-coordinator", parentID: "root", outcome: "interrupted" }],
-    ["old-worker", { agent: "dog-worker-v010", parentID: "coordinator", outcome: "interrupted" }],
+    ["coordinator", { id: "coordinator", agent: "dogs-coordinator", parentID: "root", outcome: "interrupted" }],
+    ["old-worker", { id: "old-worker", agent: "dog-worker-v010", parentID: "coordinator", outcome: "interrupted" }],
   ]);
   const host = { get: async (id: string) => sessions.get(id),
     children: async (id: string) => id === "coordinator" ? [{ id: "old-worker" }] : [] };
   await assert.rejects(terminalCancelledMissionChildren(V010_RUNTIME_PROFILE, "root", cancelled,
     { reserved_units: 1 }, host), /reservations-pending/);
-  sessions.set("old-worker", { agent: "dog-worker-v010", parentID: "coordinator", outcome: "running" });
+  sessions.set("old-worker", { id: "old-worker", agent: "dog-worker-v010", parentID: "coordinator", outcome: "running" });
   await assert.rejects(terminalCancelledMissionChildren(V010_RUNTIME_PROFILE, "root", cancelled,
     { reserved_units: 0 }, host), /worker-not-terminal/);
-  sessions.set("old-worker", { agent: "dog-worker-v010", parentID: "coordinator", outcome: "interrupted" });
+  sessions.set("old-worker", { id: "old-worker", agent: "dog-worker-v010", parentID: "coordinator", outcome: "interrupted" });
   const proof = await terminalCancelledMissionChildren(V010_RUNTIME_PROFILE, "root", cancelled, { reserved_units: 0 }, host);
   assert.deepEqual(proof, ["old-worker"]);
   await missions.update("root", state => { state.phase = "cancelled"; state.runID = oldRun.runID; });
@@ -345,3 +345,53 @@ test("a later mission replaces a cancelled worker and pending unit only after ho
   assert.equal(archived.units[0].childSessionID, "old-worker");
   assert.equal(archived.units[1].status, "pending");
 }));
+
+function terminalHistory() {
+  const previous = { operatorSessionID: "coordinator", units: [{ childSessionID: "worker" }] } as never;
+  const sessions: Record<string, { id: string; agent: string; parentID: string; outcome?: string }> = {
+    coordinator: { id: "coordinator", agent: "dogs-coordinator", parentID: "root", outcome: "succeeded" },
+    worker: { id: "worker", agent: "dog-worker-v010", parentID: "coordinator", outcome: "succeeded" },
+    prior: { id: "prior", agent: "dog-worker-v010", parentID: "coordinator", outcome: "failed" },
+    reviewer: { id: "reviewer", agent: "dog-reviewer-v010", parentID: "coordinator", outcome: "succeeded" },
+    scout: { id: "scout", agent: "dog-scout-v010", parentID: "coordinator", outcome: "interrupted" },
+  };
+  const children: Record<string, { id: string }[]> = { coordinator: ["worker", "prior", "reviewer", "scout"].map(id => ({ id })) };
+  return { previous, sessions, children, host: { get: async (id: string) => sessions[id], children: async (id: string) => children[id] ?? [] } };
+}
+
+test("terminal mission proof accepts completed workers and settled prior consultations", async () => {
+  const f = terminalHistory();
+  assert.deepEqual(await terminalCancelledMissionChildren(V010_RUNTIME_PROFILE, "root", f.previous, { reserved_units: 0 }, f.host), ["worker"]);
+});
+
+test("terminal proof for a root-dispatched Worker does not claim unrelated root sessions", async () => {
+  const f = terminalHistory();
+  f.sessions.worker!.parentID = "root";
+  delete f.sessions.coordinator!.outcome;
+  const previous = { operatorSessionID: null, units: [{ childSessionID: "worker" }] } as never;
+  assert.deepEqual(await terminalCancelledMissionChildren(V010_RUNTIME_PROFILE, "root", previous, { reserved_units: 0 }, f.host), ["worker"]);
+});
+
+test("terminal mission proof rejects active, missing and foreign native lineage", async () => {
+  const changes: [string, (f: ReturnType<typeof terminalHistory>) => void][] = [
+    ["active Coordinator", f => { delete f.sessions.coordinator!.outcome; }],
+    ["active Worker", f => { delete f.sessions.worker!.outcome; }],
+    ["active old Worker", f => { delete f.sessions.prior!.outcome; }],
+    ["active Reviewer", f => { delete f.sessions.reviewer!.outcome; }],
+    ["unknown outcome", f => { f.sessions.worker!.outcome = "idle"; }],
+    ["foreign Coordinator", f => { f.sessions.coordinator!.parentID = "foreign"; }],
+    ["foreign child", f => { f.sessions.reviewer!.parentID = "foreign"; }],
+    ["foreign role", f => { f.sessions.reviewer!.agent = "build"; }],
+    ["wrong child identity", f => { f.sessions.worker!.id = "other"; }],
+    ["missing child", f => { delete f.sessions.worker; }],
+    ["missing listing", f => { f.children.coordinator = [{ id: "reviewer" }]; }],
+    ["duplicate listing", f => { f.children.coordinator!.push({ id: "worker" }); }],
+    ["unproven descendant", f => { f.children.reviewer = [{ id: "nested" }]; }],
+  ];
+  for (const [name, change] of changes) {
+    const f = terminalHistory(); change(f);
+    await assert.rejects(terminalCancelledMissionChildren(V010_RUNTIME_PROFILE, "root", f.previous, { reserved_units: 0 }, f.host), /mission-superseded-/, name);
+  }
+  const f = terminalHistory();
+  await assert.rejects(terminalCancelledMissionChildren(V010_RUNTIME_PROFILE, "root", f.previous, { reserved_units: 1 }, f.host), /reservations-pending/);
+});

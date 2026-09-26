@@ -711,7 +711,7 @@ test("plan_units repairs an already-dispatched mission with cancelled-run accept
   assert.deepEqual(run.acceptance, restored.requirements.map(item => item.text));
 }));
 
-test("nested mission validation and completed review lineage survive plugin reload", async () => fixture(async root => {
+test("nested mission review and accepted work survive reload and agent-change cancellation", async () => fixture(async root => {
   await gitRepository(root);
   await writeFile(join(root, "check.mjs"), [
     'import { readFileSync } from "node:fs";',
@@ -722,14 +722,16 @@ test("nested mission validation and completed review lineage survive plugin relo
   await git(root, ["commit", "-m", "add unit validator"]);
   await mkdir(join(root, "generated"));
   await symlink("../check.mjs", join(root, "generated", "check"));
-  const identities: Record<string, { agent: string; parentID?: string }> = {
+  const identities: Record<string, { agent: string; parentID?: string; outcome?: string }> = {
     root: { agent: "dog-operator" }, coordinator: { agent: "dogs-coordinator", parentID: "root" },
     worker: { agent: "dog-worker-v010", parentID: "coordinator" },
     reviewer: { agent: "dog-reviewer-v010", parentID: "coordinator" },
   };
   const hostMessages: Record<string, Record<string, unknown>[]> = {};
   const create = () => SortieDogsV010Plugin({ directory: root, client: { session: {
-    get: async ({ path }: { path: { id: string } }) => ({ data: identities[path.id] }),
+    get: async ({ path }: { path: { id: string } }) => ({ data: identities[path.id] && { id: path.id, ...identities[path.id] } }),
+    children: async ({ path }: { path: { id: string } }) => ({ data: Object.entries(identities)
+      .filter(([, info]) => info.parentID === path.id).map(([id, info]) => ({ id, ...info })) }),
     messages: async ({ path }: { path: { id: string } }) => ({ data: hostMessages[path.id] ?? [] }),
     abort: async () => ({ data: true }),
   } } } as never);
@@ -806,6 +808,60 @@ test("nested mission validation and completed review lineage survive plugin relo
   assert.match(verification.args.prompt, /^review_phase: verification$/m);
   assert.equal(/^candidate_id: (.+)$/m.exec(verification.args.prompt)![1], /^candidate_id: (.+)$/m.exec(initial.args.prompt)![1]);
   assert.equal(hostMessages.root, undefined, "the completed review belongs to the nested Coordinator, not the root");
+  await cold["tool.execute.after"]!({ tool: "task", sessionID: "coordinator", callID: "verification-review" },
+    { output: "FINDINGS\nStill needs review", metadata: { sessionId: "reviewer" } });
+  const missions = new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE);
+  const operators = new OperatorRuntime(root, V010_RUNTIME_PROFILE);
+  await operators.interrupted("root", "agent-changed");
+  await missions.update("root", mission => { mission.phase = "cancelled"; });
+  for (const id of ["coordinator", "worker", "reviewer"]) identities[id]!.outcome = "succeeded";
+  identities.successor = { agent: "dogs-coordinator", parentID: "root" };
+  identities.newWorker = { agent: "dog-worker-v010", parentID: "successor" };
+  const resumed = await create();
+  await resumed["chat.message"]!({ sessionID: "root", messageID: "resume-user", agent: "dog-operator" }, {
+    message: { id: "resume-user", agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-6-sol" } },
+    parts: [{ type: "text", text: "Resume the validated work and finish independent review" }],
+  });
+  const successor = JSON.parse(await resumed.tool!.sortie_v010_start_mission.execute({ requirements: ["Finish independent review"] }, { sessionID: "root" }));
+  assert.deepEqual(successor.requirements.map((item: { text: string }) => item.text), ["Create a validated result", "Finish independent review"]);
+  const successorMission = await missions.required("root");
+  const replacementUnit = { title: "Revalidate", objective: "Revalidate retained work", read: ["check.mjs"],
+    write: ["result.txt"], validation: ["node check.mjs"] };
+  await assert.rejects(operators.prepareMission("root", missionPlan(successorMission, [replacementUnit]),
+    { sessionID: "successor", callID: "successor-call" }, state.runID), /mission-superseded-run-has-work/);
+  await assert.rejects(operators.prepareMission("root", missionPlan({ ...successorMission,
+    requirements: [{ id: "R1", text: "Discard the old criterion" }] }, [replacementUnit]),
+    { sessionID: "successor", callID: "successor-call" }, state.runID, ["worker"]), /operator-acceptance-carry-forward-required/);
+  await resumed["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "successor-call" }, { args: structuredClone(successor.task) });
+  await resumed["chat.message"]!({ sessionID: "successor", messageID: "successor-user", agent: "dogs-coordinator" }, {
+    message: { id: "successor-user", agent: "dogs-coordinator", model: { providerID: "openai", modelID: "gpt-6-sol" } },
+    parts: [{ type: "text", text: successor.task.prompt }],
+  });
+  const declare = () => resumed.tool!.sortie_v010_plan_units.execute({ units: [{
+    title: "Revalidate retained work", objective: "Revalidate before independent review", read: ["check.mjs"],
+    write: ["result.txt", "generated"], validation: ["node check.mjs"],
+  }] }, { sessionID: "successor" });
+  delete identities.reviewer!.outcome;
+  await assert.rejects(declare(), /mission-superseded-worker-not-terminal/);
+  identities.reviewer!.outcome = "succeeded";
+  const nextRun = JSON.parse(await declare());
+  const retained = await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root");
+  const retainedGoal = await (await RunFlightLedger.openGoal(ledgerPath)).readGoal();
+  assert.equal(retainedGoal.state.goal_id, settled.state.goal_id);
+  assert.equal(retainedGoal.state.consumed_units, settled.state.consumed_units);
+  assert.deepEqual(retainedGoal.state.budget, settled.state.budget);
+  assert.equal(retained.parentRunID, state.runID);
+  assert.equal(retained.supersededRunID, state.runID);
+  assert.equal(retained.priorAcceptedUnits.length, 1);
+  assert.deepEqual(retained.units[0]!.evidence, [], "old validation is retained lineage, not fresh validation");
+  assert.equal((await missions.required("root")).review, undefined, "a new mission still needs independent review");
+  const newWorker = { args: structuredClone(nextRun.task) };
+  await resumed["tool.execute.before"]!({ tool: "task", sessionID: "successor", callID: "new-worker-call" }, newWorker);
+  await resumed["chat.message"]!({ sessionID: "newWorker", messageID: "new-worker-user", agent: "dog-worker-v010" }, {
+    message: { id: "new-worker-user", agent: "dog-worker-v010", model: { providerID: "openai", modelID: "gpt-6-luna-fast" } },
+    parts: [{ type: "text", text: newWorker.args.prompt }],
+  });
+  assert.equal((await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root")).units[0]!.childSessionID, "newWorker");
 }));
 
 test("host parent-link repair repins the admitted handoff before accepted-unit continuation", async () => fixture(async root => {
