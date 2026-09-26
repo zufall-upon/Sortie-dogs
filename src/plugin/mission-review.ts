@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { lstat, readFile, readlink } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { lstat, readlink } from "node:fs/promises";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
 import type { OperatorState } from "../core/operator-runtime.js";
@@ -63,24 +64,50 @@ export async function completedMissionReviewPrompts(mission: OperatorMission | u
 
 /** Pin all scoped tracked/untracked source bytes, including deletions; display a bounded excerpt only. */
 export async function missionReviewSource(directory: string, run: OperatorState): Promise<{ fingerprint: string; excerpt: string }> {
+  const hash = createHash("sha256").update(JSON.stringify(run.units.map(unit => ({ unit: unit.unit, hashes: unit.hashes }))));
+  const writes = [...new Set(run.units.flatMap(unit => unit.unit.write))];
+  if (writes.length === 0) return { fingerprint: `sha256:${hash.digest("hex")}`,
+    excerpt: "[Read-only units: no declared output files. Review the supplied observations, traces and validation evidence.]" };
   // The shared dependency environment is local tooling, never reviewed or pinned source.
-  const scopes = [...new Set(run.units.flatMap(unit => unit.unit.write)), `:(exclude)${TOOL_ENVIRONMENT}`];
+  const scopes = [...writes, `:(exclude)${TOOL_ENVIRONMENT}`];
   const git = async (args: string[]) => (await exec("git", args, { cwd: directory, maxBuffer: 8 * 1024 * 1024 })).stdout;
   const names = await git(["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ...scopes]);
   const untracked = new Set((await git(["ls-files", "-z", "--others", "--exclude-standard", "--", ...scopes])).split("\0").filter(Boolean));
-  const hash = createHash("sha256").update(JSON.stringify(run.units.map(unit => ({ unit: unit.unit, hashes: unit.hashes }))));
+  // Explicitly declared outputs are review evidence even when gitignored (for example a probe
+  // JSON in _testenv). Their bytes must participate in staleness checks as well as the excerpt.
+  const ignored = await git(["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--", ...scopes]);
+  for (const path of ignored.split("\0").filter(Boolean)) untracked.add(path);
   let excerpt = await git(["diff", "--no-ext-diff", "--no-textconv", "HEAD", "--", ...scopes]).catch(() => git(["diff", "--no-ext-diff", "--no-textconv", "--", ...scopes]));
-  for (const path of [...new Set(names.split("\0").filter(Boolean))].sort()) {
+  const unchanged = excerpt.length === 0;
+  const paths = [...new Set([...names.split("\0"), ...ignored.split("\0")].filter(Boolean))].sort();
+  const omitted: string[] = [];
+  for (const path of paths) {
     hash.update(JSON.stringify(path));
     try {
       const absolute = resolve(directory, path), stat = await lstat(absolute);
       hash.update(String(stat.mode));
-      const content = stat.isSymbolicLink() ? Buffer.from(await readlink(absolute)) : await readFile(absolute);
-      hash.update(String(content.length)).update(content);
-      if (untracked.has(path) && Buffer.byteLength(excerpt) < 24_000) excerpt += `\n--- new file: ${path} ---\n${content.toString("utf8")}`;
+      const include = untracked.has(path) || unchanged;
+      const room = include ? Math.max(0, 24_000 - Buffer.byteLength(excerpt)) : 0;
+      let preview = Buffer.alloc(0);
+      if (stat.isSymbolicLink()) {
+        const content = Buffer.from(await readlink(absolute));
+        hash.update(String(content.length)).update(content);
+        preview = content.subarray(0, room);
+      } else {
+        hash.update(String(stat.size));
+        for await (const part of createReadStream(absolute)) {
+          const bytes = Buffer.isBuffer(part) ? part : Buffer.from(part);
+          hash.update(bytes);
+          if (preview.length < room) preview = Buffer.concat([preview, bytes.subarray(0, room - preview.length)]);
+        }
+      }
+      if (include) {
+        if (room) excerpt += `\n--- ${untracked.has(path) ? "new file" : "current file"}: ${path} ---\n${preview.includes(0) ? "[binary artifact: bytes fingerprinted]" : preview.toString("utf8")}`;
+        if (stat.size > room) omitted.push(path);
+      }
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; hash.update("deleted"); }
   }
   const bytes = Buffer.from(excerpt);
-  return { fingerprint: `sha256:${hash.digest("hex")}`, excerpt: bytes.length > 24_000
-    ? `${bytes.subarray(0, 24_000).toString("utf8")}\n[EXCERPT TRUNCATED: report missing evidence; do not infer PASS]` : excerpt };
+  return { fingerprint: `sha256:${hash.digest("hex")}`, excerpt: (bytes.length > 24_000 ? bytes.subarray(0, 24_000).toString("utf8") : excerpt) +
+    (bytes.length > 24_000 || omitted.length ? `\n[EXCERPT TRUNCATED: ${omitted.slice(0, 20).join(", ")}; supply focused traces for missing sections, not another implementation unit]` : "") };
 }
