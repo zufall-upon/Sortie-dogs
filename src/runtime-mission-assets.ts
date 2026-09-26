@@ -5,6 +5,18 @@ import { SCOUT_EVIDENCE_CODES } from "./core/scout-contract.ts";
 /** Repository-local dependency environment shared by all units; excluded from reviewed and captured source. */
 export const TOOL_ENVIRONMENT = ".sortie-env";
 
+const OPERATION_GUIDE = `## Practical operation guide
+
+Use file paths for exact outputs and dir/** for a directory tree, including a directory that does not
+exist yet. The host interprets dir/** consistently for writes, validation fingerprints and review.
+Create the directory with mkdir -p dir; do not add parent directories merely to make child writes work.
+For local source snapshots use git archive --format=tar --output=dir/source.tar <local-ref>.
+For tag observation use git tag --points-at <commit>. For HTTPS downloads use curl -fLsS -o dir/file <url>;
+--write-out '%{http_code} %{size_download}\\n' may print metadata to stdout. Declare all actual outputs.
+Reuse pinned artifacts and successful checks when the request permits and the inputs are unchanged.
+Do not repeat candidate discovery, dependency setup or validation merely because a Worker changed.
+`;
+
 function controls(profile: RuntimeProfile, names: readonly string[]): string {
   return names.map(name => `  ${profile.toolPrefix}${name}: true`).join("\n");
 }
@@ -65,6 +77,10 @@ Ordinary defects return to Coordinator, not the user. Ask through question only 
 an extension beyond the original requirements, or a cumulative budget increase. Resume the same work after
 the answer. Do not reset spend, silently shrink acceptance, or create substitute goals.
 
+When bounded process reflections are injected, pass the relevant prevention in Coordinator feedback while
+preserving the original requirements. After a resolved repeated process failure, record its verified cause/prevention
+through reflection if enabled; retain concrete evidence and prefer a durable fix for recurring causes.
+
 Retain 🐾 Sortie presentation and measured return panels. Append complete_mission's return_report verbatim
 once. Do not invent scores, medals, costs, savings, models or successful checks. Release/publish requires the
 existing user authorization and project gates; npm publication remains manual.
@@ -118,9 +134,13 @@ check or reviewer finding, call plan_units with the corrected units and a short 
 preserves every requirement, failed-check history and cumulative budget. Never replace an active Worker.
 Rejected budget/contract checks or control-storage preparation leave the old run available. Correct the
 reported cause and call plan_units again; a local plan repair needs no cancellation or user approval.
+On a returned denial, correct the exact command form or output scope before redispatch; reuse established
+candidate identity, setup and evidence in the next objective instead of requesting the entire investigation again.
 Workers freely investigate within their unit and execute exact formal checks for host recording. Do not
 require them to predeclare exploratory commands. Require meaningful evidence, not extra testing for its
 own sake. Do not repeat passed checks unless source changes or unresolved concerns justify it.
+
+${OPERATION_GUIDE}
 
 Scout is optional for one precise missing fact. Its prompt includes missing_evidence_code:
 ${SCOUT_EVIDENCE_CODES.join(" | ")}, an exact project_root and at most four known_paths.
@@ -188,7 +208,13 @@ are complete. Never fabricate logs, costs or exits. Do not stage outside declare
 publish, or take over Coordinator decisions. The parent releases your write binding after return.
 
 A local tool/permission/handoff defect returns PROCESS_DEFECT: local: <condition> and its exact diagnostic
-once to Coordinator. Do not repeat the same refused operation. Only a proven external dependency or
+once to Coordinator when its remedy requires a changed contract. If the host explicitly returns
+action=correct-format-within-current-manifest, correct the supported command form in this same Task,
+preserving the operation, inputs and destinations, then continue. An unchanged denied request is not a correction.
+If correcting the form changes the intended operation or requires another output, return the exact required
+correction to Coordinator. Do not repeat the same refused operation. Only a proven external dependency or
 user-only choice uses TRUE_BLOCKER: external: <condition> or TRUE_BLOCKER: user-decision: <condition>.
+
+${OPERATION_GUIDE}
 `;
 }

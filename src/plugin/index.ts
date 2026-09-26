@@ -8054,7 +8054,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       if (state.goal_id === null || state.budget === null) return null;
       const reserved = state.outstanding_reservations.length;
       return { max_units: state.budget.max_units, consumed_units: state.consumed_units,
-        reserved_units: reserved, remaining_units: Math.max(0, state.budget.max_units - state.consumed_units - reserved) };
+        reserved_units: reserved, remaining_units: Math.max(0, state.budget.max_units - state.consumed_units - reserved),
+        settled_cost_usd: state.consumed_cost_usd, cost_limit_usd: state.budget.cost_usd,
+        cost_status: state.consumed_cost_usd === null ? "unknown-usage" : reserved > 0 ? "in-flight-not-final" : "settled",
+        cost_note: "Goal Worker ledger only; excludes unfinalized native requests, orchestration/review and external campaign spend. Zero settled cost does not mean free execution." };
     },
     registerGoalDeclaration: async (root, prompt, missionRevision) => {
       if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) throw new Error("operator-coordinator-required");

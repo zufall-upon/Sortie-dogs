@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { normalizeRelativePath } from "./path.js";
+import { normalizeRelativeScope } from "./path.js";
 import { parseOperatorPlan, type OperatorPlan, type OperatorState, type OperatorTask } from "./operator-runtime.js";
 import { profileAgent, type RuntimeProfile } from "./runtime-profile.js";
 
@@ -260,7 +260,7 @@ export function missionPlan(mission: OperatorMission, raw: unknown): OperatorPla
     const paths = (field: string): string[] => {
       const entries = value[field] ?? [];
       if (!Array.isArray(entries) || !entries.every(item => typeof item === "string")) throw new Error(`mission-unit-${index + 1}: ${field} must be paths`);
-      return [...new Set(entries.map(item => normalizeRelativePath(item)))];
+      return [...new Set(entries.map(item => normalizeRelativeScope(item)))];
     };
     const ids = value.requirement_ids ?? mission.requirements.map(item => item.id);
     if (!Array.isArray(ids) || ids.length === 0 || !ids.every(id => mission.requirements.some(item => item.id === id))) {
@@ -307,6 +307,12 @@ export function missionPacket(mission: OperatorMission, run?: OperatorState): Re
   return { mission_id: mission.id, phase: mission.phase, coordinator_session_id: mission.coordinator,
     requirements: mission.requirements, original_request_refs: mission.requests.map(item => `user:${item.id}`),
     submission: mission.submission, progress: mission.progress,
+    execution_summary: { completed_units: run?.units.filter(unit => unit.status === "succeeded").length ?? 0,
+      running_units: run?.units.filter(unit => unit.status === "running").map(unit => ({ id: unit.unit.id, title: unit.unit.title, child_session_id: unit.childSessionID })) ?? [],
+      pending_units: run?.units.filter(unit => unit.status === "pending").length ?? 0,
+      failed_units: run?.units.filter(unit => unit.status === "failed").length ?? 0,
+      historical_failed_attempts: mission.progress.filter(unit => unit.status === "failed").length,
+      accepted: mission.phase === "completed" },
     review: mission.review ? { risk_tags: mission.review.risk, verdict: mission.review.verdict,
       run_id: mission.review.runID, current_run: currentReview,
       source_fingerprint: mission.review.source, reviewer_session_id: mission.review.child ?? null,

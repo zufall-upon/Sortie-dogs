@@ -175,7 +175,7 @@ hostが実際に提供するmodelとnamed variantだけを宣言する。Sortie�
 - `continuation.taskWatchdogMilliseconds`: implementation Task待機中root inactivity。既定`300000`、範囲`10..1800000`
 - `continuation.summarizeModel`: 任意compaction model。省略時は最新root modelを再利用
 - `validationProfile`: `fast` / `balanced` / `assurance`。既定`balanced`
-- `reflection`: shared schemaでは受理するが、serial v0.10 profileはreflection writeを公開しない。stable reflectionも既定無効のopt-in
+- `reflection`: 既定無効のopt-in。v0.10はroot Operatorが`sortie_v010_reflection`で短い予防策を保存し、次のturn・同じprojectの次セッションへ注入する。モデルの再学習ではない。保存先とmanaged blockはstableから独立
 
 v0.10 hostは`.sortie-dogs-v010/contracts/`配下のhandoffとmanifestを所有する。
 このprofile用にlegacy root `operation-manifest.json`を作らず、生成controlを編集しない。

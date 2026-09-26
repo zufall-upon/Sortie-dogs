@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import { acceptanceContinuityFingerprint, inspectAcceptanceContinuity, normalizeAcceptanceCriteria,
   ACCEPTANCE_CONTINUITY_EXTENSION, MAX_ACCEPTANCE_CONTINUITY_BYTES, MAX_ACCEPTANCE_CRITERIA } from "./acceptance-continuity.js";
 import { expandGoalDeclaration, goalDeclarationDefaults, goalDeclarationFieldDiagnostics, hasGoalCommandAliasConflict } from "./goal-declaration-format.js";
-import { normalizeManifestPath, normalizeRelativePath } from "./path.js";
+import { normalizeManifestPath, normalizeManifestScope, normalizeRelativePath } from "./path.js";
 import { CONTRACT_TEXT_LIMITS, validateHandoffSchema, validateOperationManifestSchema } from "./validate-schema.js";
 import { validateManifest } from "./validate-manifest.js";
 import { profileAgent, RUNTIME_PROFILES, type RuntimeProfile } from "./runtime-profile.js";
@@ -233,7 +233,10 @@ const text = (value: unknown): value is string => typeof value === "string" && v
 export function operatorGitPathAuthorized(path: string, scopes: readonly string[], platform: NodeJS.Platform = process.platform): boolean {
   const key = (value: string): string => platform === "win32" ? value.toLowerCase() : value;
   const candidate = key(path);
-  return scopes.some(scope => candidate === key(scope) || candidate.startsWith(`${key(scope)}/`));
+  return scopes.some(scope => {
+    const base = key(normalizeManifestScope(scope).path);
+    return candidate === base || candidate.startsWith(`${base}/`);
+  });
 }
 const contractError = (diagnostic: OperatorContractDiagnostic): never => { throw new OperatorContractError([diagnostic]); };
 const planError = (pointer: string, code: string, rule: string, repair_kind: OperatorContractDiagnostic["repair_kind"] = "repair-field"): never =>

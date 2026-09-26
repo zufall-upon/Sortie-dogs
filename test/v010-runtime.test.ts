@@ -1701,7 +1701,12 @@ for (const exhaustBudget of [false, true]) test(`failed repair validation expose
     `${createHash("sha256").update("v010\0root").digest("hex")}.json`));
   const inFlight = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
   const initialGoal = (await budgetLedger.readGoal()).state;
-  assert.deepEqual(inFlight.budget, { max_units: initialGoal.budget!.max_units,
+  const { settled_cost_usd, cost_limit_usd, cost_status, cost_note, ...inFlightUnits } = inFlight.budget;
+  assert.equal(settled_cost_usd, initialGoal.consumed_cost_usd);
+  assert.equal(cost_limit_usd, initialGoal.budget!.cost_usd);
+  assert.equal(cost_status, "in-flight-not-final");
+  assert.match(cost_note, /Zero settled cost does not mean free execution/);
+  assert.deepEqual(inFlightUnits, { max_units: initialGoal.budget!.max_units,
     consumed_units: initialGoal.consumed_units, reserved_units: 1,
     remaining_units: initialGoal.budget!.max_units - initialGoal.consumed_units - 1 });
   const validator = "node scripts/validate-generated.mjs";
@@ -1748,7 +1753,12 @@ for (const exhaustBudget of [false, true]) test(`failed repair validation expose
     { command: [validator], outcome: "fail", exit_code: 12 });
   assert.match(terminal.next_action, /cancel_operator[\s\S]+prepare_operator/u);
   const settledGoal = (await budgetLedger.readGoal()).state;
-  assert.deepEqual(terminal.budget, { max_units: settledGoal.budget!.max_units,
+  const { settled_cost_usd: finalCost, cost_limit_usd: finalLimit, cost_status: finalStatus, cost_note: finalNote, ...settledUnits } = terminal.budget;
+  assert.equal(finalCost, settledGoal.consumed_cost_usd);
+  assert.equal(finalLimit, settledGoal.budget!.cost_usd);
+  assert.equal(finalStatus, finalCost === null ? "unknown-usage" : "settled");
+  assert.equal(finalNote, cost_note);
+  assert.deepEqual(settledUnits, { max_units: settledGoal.budget!.max_units,
     consumed_units: settledGoal.consumed_units, reserved_units: 0,
     remaining_units: settledGoal.budget!.max_units - settledGoal.consumed_units });
   assert.ok(terminal.budget.remaining_units > 0);

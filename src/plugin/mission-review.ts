@@ -9,6 +9,7 @@ import { TOOL_ENVIRONMENT } from "../runtime-mission-assets.js";
 import { MISSION_REVIEW_REFERENCE, type OperatorMission } from "../core/operator-mission.js";
 import { canonicalAgent, type RuntimeProfile } from "../core/runtime-profile.js";
 import { taskChildSessionID } from "./task-result-repair.js";
+import { normalizeManifestScope } from "../core/path.js";
 
 const exec = promisify(execFile);
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -65,7 +66,7 @@ export async function completedMissionReviewPrompts(mission: OperatorMission | u
 /** Pin all scoped tracked/untracked source bytes, including deletions; display a bounded excerpt only. */
 export async function missionReviewSource(directory: string, run: OperatorState): Promise<{ fingerprint: string; excerpt: string }> {
   const hash = createHash("sha256").update(JSON.stringify(run.units.map(unit => ({ unit: unit.unit, hashes: unit.hashes }))));
-  const writes = [...new Set(run.units.flatMap(unit => unit.unit.write))];
+  const writes = [...new Set(run.units.flatMap(unit => unit.unit.write).map(path => path === "." ? path : normalizeManifestScope(path).path))];
   if (writes.length === 0) return { fingerprint: `sha256:${hash.digest("hex")}`,
     excerpt: "[Read-only units: no declared output files. Review the supplied observations, traces and validation evidence.]" };
   // The shared dependency environment is local tooling, never reviewed or pinned source.
