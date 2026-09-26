@@ -310,10 +310,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       continuationCheckpoint: async root => {
         const mission = await missions.read(root);
         const run = await operators.read(root);
-        // Cancellation after settled work remains an unfinished accepted goal. Keep its spend and
-        // evidence bound through a real user restart; the cancelled packet grants no dispatch itself.
+        // Cancellation never refunds admitted work. Keep the ledger even when the last Worker
+        // was interrupted before validation; acceptance supersession is decided by mission planning,
+        // not by resetting the goal budget. This checkpoint grants no dispatch itself.
         if (mission && (!["completed", "cancelled"].includes(mission.phase) ||
-            (mission.phase === "cancelled" && run && cancelledMissionRetainsAcceptance(run)))) {
+            (mission.phase === "cancelled" && run))) {
           return JSON.stringify(missionPacket(mission, run));
         }
         return await operators.continuationCheckpoint(root) ?? await proposals.continuationCheckpoint(root);
@@ -336,6 +337,15 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         const active = unit?.status === "running" || (unit?.status === "failed" && unit.repairValidation !== null);
         return active && unit.childSessionID === child &&
           unit.unit.validation.some(candidate => normalizeCommand(candidate) === command);
+      },
+      ownsMissionDispatch: async (root, callID, taskID) => {
+        const owner = taskOwners.get(callID);
+        if (owner?.root !== root || owner.operator) return false;
+        const mission = await missions.read(root), state = await operators.read(root);
+        return mission !== undefined && state !== undefined && mission.runID === state.runID &&
+          mission.phase === "running" && state.phase === "running" &&
+          state.units.some(unit => unit.status === "running" && unit.callID === callID &&
+            /^task_id: (.+)$/m.exec(unit.task.prompt)?.[1] === taskID);
       },
       allowsInvestigativeShell: async child => {
         const root = await rootFor(child);
@@ -436,12 +446,13 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       return missions.reconcileFinishedDispatch(root, mission.id, mission.callID);
     }
     function missionDispatchPacket(mission: OperatorMission, run?: import("../core/operator-runtime.js").OperatorState) {
-      const packet = { ...missionPacket(mission, run), project_root: input.directory,
+      const packet: Record<string, unknown> = { ...missionPacket(mission, run), project_root: input.directory,
         coordinator_dispatch: mission.dispatchOpen ? "active" : ["completed", "cancelled"].includes(mission.phase) ? "terminal" : "resumable" };
       if (!mission.dispatchOpen && (["open", "running"].includes(mission.phase) ||
           (mission.phase === "submitted" && mission.submission?.status !== "ready"))) {
         return { ...packet, task: missions.task(mission),
-          next_action: "The previous Coordinator Task is finished. Dispatch this exact Task to continue the same mission and Coordinator session; keep the original requirements and cumulative budget." };
+          next_action: (run?.units.some(unit => unit.dispatchDenial) ? `${packet.next_action}\n` : "") +
+            "The previous Coordinator Task is finished. Dispatch this exact Task to continue the same mission and Coordinator session; keep the original requirements and cumulative budget." };
       }
       return packet;
     }
@@ -1161,7 +1172,6 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const dispatcher = actor === root ? undefined : { sessionID: actor, callID: mission.callID! };
       const state = replanning ? await operators.replanMission(root, previous.runID, plan, dispatcher)
         : await operators.prepareMission(root, plan, dispatcher, mission.supersededRunID, terminalChildren);
-      await restorePriorAcceptance(root, state);
       await control!.registerGoalDeclaration(root, state.units[0]!.task.prompt, true);
       control!.enableUnits(root, state.units.filter(unit => unit.status === "pending").length);
       await missions.update(root, item => {
@@ -1171,7 +1181,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       });
       return JSON.stringify(await operators.next(root, actor));
     }
-    tools[planUnits] = { description: "Coordinator (or single-unit Fast-lane Operator): declare useful units, then dispatch the returned Worker immediately. Host generates IDs, handoff, manifest and proof mapping. Keep every original requirement covered. Use write: [] for read-only verification; use dir/** for directory outputs including not-yet-created trees. Final validation command in each unit proves that unit; read-only diagnostic commands need no registration. Recalling with reason replaces settled work within unchanged requirements and cumulative budget; include required scope extensions here. Rejected budget, contract or control-storage preparation preserves the existing run so you can correct the plan directly.",
+    tools[planUnits] = { description: "Coordinator (or single-unit Fast-lane Operator): declare useful units, then dispatch the returned Worker immediately. Host generates IDs, handoff, manifest and proof mapping. Keep every original requirement covered. Use write: [] for read-only verification; use dir/** for directory outputs including not-yet-created trees. Native absolute paths support global installs and external outputs under host permissions; include their actual paths in read/write for evidence. Final validation command in each unit proves that unit; read-only diagnostic commands need no registration. Recalling with reason replaces settled work within unchanged requirements and cumulative budget; include required scope extensions here. Rejected budget, contract or control-storage preparation preserves the existing run so you can correct the plan directly.",
       args: { units: { type: "array", minItems: 1, maxItems: 32, items: { type: "object", additionalProperties: false,
         properties: { title: { type: "string" }, objective: { type: "string" }, read: stringList, write: stringList,
           validation: stringList, requirement_ids: stringList }, required: ["title", "objective", "write", "validation"] } } as never,
@@ -1601,7 +1611,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         let expandedWorker: import("../core/operator-runtime.js").OperatorTask | undefined;
         if (delegated) {
           if (!mission || mission.runID !== state!.runID) await proposals.assertExecutionApproved(root, state!.planHash);
-          await restorePriorAcceptance(root, state!);
+          if (!mission || mission.runID !== state!.runID) await restorePriorAcceptance(root, state!);
           expandedWorker = await operators.admitWorker(root, request.sessionID, request.callID, args);
           taskOwners.set(request.callID, { root, actor: request.sessionID, operator: false });
         }
@@ -1655,7 +1665,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             // worker chat hook above delivers this already-admitted canonical prompt.
           } else Object.assign(output, outward);
         } catch (error) {
-          if (delegated) { taskOwners.delete(request.callID); await operators.rejectedAdmission(root, request.callID); }
+          if (delegated) {
+            taskOwners.delete(request.callID);
+            await operators.rejectedAdmission(root, request.callID, error instanceof Error ? error.message : String(error));
+          }
           throw error;
         }
       },

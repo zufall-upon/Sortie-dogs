@@ -28,6 +28,8 @@ export interface RuntimeBridge {
   requiresExplicitAcceptance?(rootSessionID: string): Promise<boolean>;
   ownsCanonicalValidation?(rootSessionID: string, unitID: string, childSessionID: string,
     command: string): Promise<boolean>;
+  /** A mission's hash-pinned Task has already passed durable run/acceptance admission. */
+  ownsMissionDispatch?(rootSessionID: string, callID: string, taskID: string): Promise<boolean>;
   onHostHandoffRepaired?(rootSessionID: string, taskID: string, handoffPath: string,
     original: string, repaired: string): Promise<void>;
   allowsInvestigativeShell?(sessionID: string): Promise<boolean>;

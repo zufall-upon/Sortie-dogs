@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { normalizeRelativeScope } from "./path.js";
+import { normalizeExecutionScope } from "./path.js";
 import { parseOperatorPlan, type OperatorPlan, type OperatorState, type OperatorTask } from "./operator-runtime.js";
 import { profileAgent, type RuntimeProfile } from "./runtime-profile.js";
 
@@ -260,7 +260,7 @@ export function missionPlan(mission: OperatorMission, raw: unknown): OperatorPla
     const paths = (field: string): string[] => {
       const entries = value[field] ?? [];
       if (!Array.isArray(entries) || !entries.every(item => typeof item === "string")) throw new Error(`mission-unit-${index + 1}: ${field} must be paths`);
-      return [...new Set(entries.map(item => normalizeRelativeScope(item)))];
+      return [...new Set(entries.map(item => normalizeExecutionScope(item)))];
     };
     const ids = value.requirement_ids ?? mission.requirements.map(item => item.id);
     if (!Array.isArray(ids) || ids.length === 0 || !ids.every(id => mission.requirements.some(item => item.id === id))) {
@@ -298,7 +298,7 @@ export function missionPlan(mission: OperatorMission, raw: unknown): OperatorPla
       // Keep all detailed instructions in the handoff, not in a 512-character wire label.
       criteria: units.map(unit => ({ criterion_id: unit.id, target: unit.title.slice(0, 512),
         entrypoint: (unit.write[0] ?? unit.read[0] ?? unit.id).slice(0, 512), validation_command: unit.validation.at(-1) })) },
-    units });
+    units }, "execution");
 }
 
 export function missionPacket(mission: OperatorMission, run?: OperatorState): Record<string, unknown> {
@@ -321,11 +321,14 @@ export function missionPacket(mission: OperatorMission, run?: OperatorState): Re
       passed: currentReview && mission.review.verdict === "PASS", permits_submission: reviewAccepted } : null,
     ...(run ? { run_id: run.runID, status: run.phase, decision: run.decision,
       units: run.units.map(unit => ({ id: unit.unit.id, title: unit.unit.title, status: unit.status,
-        child_session_id: unit.childSessionID, result_class: unit.resultClass, evidence: unit.evidence })) } : {}),
+        child_session_id: unit.childSessionID, result_class: unit.resultClass, evidence: unit.evidence,
+        ...(unit.dispatchDenial ? { dispatch_denial: unit.dispatchDenial } : {}) })) } : {}),
     next_action: mission.phase === "completed" ? "Mission completed. Report the accepted result and retained review gaps; no further dispatch or completion call is needed."
       : mission.phase === "submitted" && mission.submission?.status === "ready"
       ? "Operator: compare the submitted candidate with the original requirements and actual evidence, then complete_mission if satisfied. Report remaining evidence gaps; they are not a review PASS."
-      : run?.phase === "awaiting-decision" ? "Coordinator: correct the cause and call plan_units with the remaining work and all requirements; budget is cumulative."
+      : run?.phase === "awaiting-decision" ? (run.units.some(unit => unit.dispatchDenial)
+        ? "Coordinator: inspect units[].dispatch_denial before changing the plan. Correct only its diagnosed cause; do not repeat an unchanged refused Task or replan for a host-state mismatch. Report an unresolved runtime mismatch with the loaded runtime identity; preserve requirements and cumulative spend."
+        : "Coordinator: correct the cause and call plan_units with the remaining work and all requirements; budget is cumulative.")
       : run?.phase === "awaiting-acceptance" ? (currentReview && mission.review?.verdict === "evidence-gaps" && !reviewAccepted
         ? "Coordinator: the Reviewer found only missing evidence. Supply it through review_mission traces (or at most one evidence-only unit) and re-review once; do not re-implement. At the evidence-gap limit, submit_mission ready with the gaps listed."
         : reviewAccepted

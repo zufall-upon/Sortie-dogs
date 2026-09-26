@@ -7198,60 +7198,67 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
                 output.args.prompt = canonical;
                 prompt = canonical;
               }
-              const previous = rootAcceptanceContinuity.get(toolInput.sessionID);
-              if (previous === undefined) {
-                if (ledger.parent_fingerprint !== "none" &&
-                  !await recoverAcceptanceParent(toolInput.sessionID, ledger, reservedParallelDescriptor)) {
-                  throw new HandoffDeniedError("contract-invalid", handoffPaths[0]!, {
-                    defects: [contractDefect("handoff", "/ext/sortie-dogs~1acceptance-continuity",
-                      "acceptance_parent_continuity_mismatch")],
-                  });
-                }
-              } else if (previous.task_id === ledger.task_id && previous.fingerprint === ledger.fingerprint) {
-                if (ledger.parent_fingerprint !== previous.parent_fingerprint) {
-                  throw new HandoffDeniedError("contract-invalid", handoffPaths[0]!, {
-                    defects: [contractDefect("handoff", "/ext/sortie-dogs~1acceptance-continuity",
-                      "acceptance_parent_continuity_mismatch")],
-                  });
-                }
-              } else {
-                const exactCarryForward = ledger.criteria.length === previous.criteria.length &&
-                  previous.criteria.every((criterion, index) => criterion === ledger.criteria[index]);
-                const strictAppend = ledger.criteria.length > previous.criteria.length &&
-                  previous.criteria.every((criterion, index) => criterion === ledger.criteria[index]);
-                // Serial parent identity is controller-owned. Repair only an omitted link on
-                // an otherwise exact carry-forward/append; explicit conflicting links still fail.
-                // Persist it so the worker's Read and later recovery see the same contract.
-                if (reservedParallelDescriptor === undefined && ledger.parent_fingerprint === "none" &&
-                  (exactCarryForward || strictAppend)) {
-                   const source = await readFile(handoffPaths[0]!, "utf8");
-                   const handoff = JSON.parse(source);
-                  const validated = validateHandoffSchema(handoff);
-                  const current = validated.ok ? inspectAcceptanceContinuity(validated.value).ledger : undefined;
-                  if (current === undefined || JSON.stringify(current) !== JSON.stringify(ledger)) {
+              // Mission admission already binds the exact generated Task to its durable run and
+              // ordered requirements. The legacy session-wide chain is a second, incompatible
+              // authority across cancelled missions and cold reloads (including later units).
+              const missionDispatch = await input.runtimeBridge?.ownsMissionDispatch?.(
+                toolInput.sessionID, toolInput.callID, ledger.task_id) === true;
+              if (!missionDispatch) {
+                const previous = rootAcceptanceContinuity.get(toolInput.sessionID);
+                if (previous === undefined) {
+                  if (ledger.parent_fingerprint !== "none" &&
+                    !await recoverAcceptanceParent(toolInput.sessionID, ledger, reservedParallelDescriptor)) {
                     throw new HandoffDeniedError("contract-invalid", handoffPaths[0]!, {
                       defects: [contractDefect("handoff", "/ext/sortie-dogs~1acceptance-continuity",
                         "acceptance_parent_continuity_mismatch")],
                     });
                   }
-                   ledger = { ...ledger, parent_fingerprint: previous.fingerprint };
-                   handoff.ext[ACCEPTANCE_CONTINUITY_EXTENSION] = ledger;
-                   const repaired = `${JSON.stringify(handoff, null, 2)}\n`;
-                   await writeFile(handoffPaths[0]!, repaired);
-                   try {
-                     await input.runtimeBridge?.onHostHandoffRepaired?.(toolInput.sessionID, ledger.task_id,
-                       handoffPaths[0]!, source, repaired);
-                   } catch (error) {
-                     await writeFile(handoffPaths[0]!, source);
-                     throw error;
-                   }
-                  await inspect(handoffPaths[0]!, undefined, { report: true });
-                }
-                if (ledger.parent_fingerprint !== previous.fingerprint || (!exactCarryForward && !strictAppend)) {
-                  throw new HandoffDeniedError("contract-invalid", handoffPaths[0]!, {
-                    defects: [contractDefect("handoff", "/ext/sortie-dogs~1acceptance-continuity",
-                      "acceptance_parent_continuity_mismatch")],
-                  });
+                } else if (previous.task_id === ledger.task_id && previous.fingerprint === ledger.fingerprint) {
+                  if (ledger.parent_fingerprint !== previous.parent_fingerprint) {
+                    throw new HandoffDeniedError("contract-invalid", handoffPaths[0]!, {
+                      defects: [contractDefect("handoff", "/ext/sortie-dogs~1acceptance-continuity",
+                        "acceptance_parent_continuity_mismatch")],
+                    });
+                  }
+                } else {
+                  const exactCarryForward = ledger.criteria.length === previous.criteria.length &&
+                    previous.criteria.every((criterion, index) => criterion === ledger.criteria[index]);
+                  const strictAppend = ledger.criteria.length > previous.criteria.length &&
+                    previous.criteria.every((criterion, index) => criterion === ledger.criteria[index]);
+                  // Serial parent identity is controller-owned. Repair only an omitted link on
+                  // an otherwise exact carry-forward/append; explicit conflicting links still fail.
+                  // Persist it so the worker's Read and later recovery see the same contract.
+                  if (reservedParallelDescriptor === undefined && ledger.parent_fingerprint === "none" &&
+                    (exactCarryForward || strictAppend)) {
+                    const source = await readFile(handoffPaths[0]!, "utf8");
+                    const handoff = JSON.parse(source);
+                    const validated = validateHandoffSchema(handoff);
+                    const current = validated.ok ? inspectAcceptanceContinuity(validated.value).ledger : undefined;
+                    if (current === undefined || JSON.stringify(current) !== JSON.stringify(ledger)) {
+                      throw new HandoffDeniedError("contract-invalid", handoffPaths[0]!, {
+                        defects: [contractDefect("handoff", "/ext/sortie-dogs~1acceptance-continuity",
+                          "acceptance_parent_continuity_mismatch")],
+                      });
+                    }
+                    ledger = { ...ledger, parent_fingerprint: previous.fingerprint };
+                    handoff.ext[ACCEPTANCE_CONTINUITY_EXTENSION] = ledger;
+                    const repaired = `${JSON.stringify(handoff, null, 2)}\n`;
+                    await writeFile(handoffPaths[0]!, repaired);
+                    try {
+                      await input.runtimeBridge?.onHostHandoffRepaired?.(toolInput.sessionID, ledger.task_id,
+                        handoffPaths[0]!, source, repaired);
+                    } catch (error) {
+                      await writeFile(handoffPaths[0]!, source);
+                      throw error;
+                    }
+                    await inspect(handoffPaths[0]!, undefined, { report: true });
+                  }
+                  if (ledger.parent_fingerprint !== previous.fingerprint || (!exactCarryForward && !strictAppend)) {
+                    throw new HandoffDeniedError("contract-invalid", handoffPaths[0]!, {
+                      defects: [contractDefect("handoff", "/ext/sortie-dogs~1acceptance-continuity",
+                        "acceptance_parent_continuity_mismatch")],
+                    });
+                  }
                 }
               }
               validatedRootAcceptance = ledger;

@@ -119,6 +119,10 @@ Investigate only enough to start the first useful Worker. Prefer a targeted read
 inventory or speculative full design. Call ${profile.toolPrefix}plan_units with concise units:
 title, objective, read/write file or directory scopes, validation commands, optionally requirement_ids.
 For read-only verification, use write: []; do not invent an output file or request write access to inputs.
+Use absolute native paths for requested global installations or other external outputs; dir/** declares
+a directory including a not-yet-created tree. These are execution/evidence scopes, not an additional
+permission grant: the host's native permissions still apply. Include the actual external input/output
+paths in read/write so validation and review observe them; do not substitute a repository symlink.
 Keep all original requirements covered; omitted requirement_ids means all. Last validation command proves
 that unit. If your quick check shows repository-declared dependencies or the test runner are missing, keep
 setup inside the first unit: declare its checks through the repository-local tool environment ${TOOL_ENVIRONMENT}/

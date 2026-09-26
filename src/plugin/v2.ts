@@ -4,11 +4,19 @@ import { bindMissionProgress } from "./mission-progress.js";
 import { owningServiceSessionList } from "./v2-session-history.js";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { V010_RUNTIME_ASSET_VERSION } from "../asset-version.js";
 
 // Capture once when this module evaluates. A later package replacement must not make an old
 // process report the replacement's bytes as its loaded adapter.
 const loadedAdapter = Object.freeze({ adapter_url: import.meta.url,
   adapter_sha256: createHash("sha256").update(readFileSync(new URL(import.meta.url))).digest("hex"),
+  runtime_asset_version: V010_RUNTIME_ASSET_VERSION,
+  // Named module snapshots, not a claim to identify every transitive dependency. Retain these
+  // bytes across package replacement so an unchanged adapter cannot conceal an old implementation.
+  implementation_sha256: Object.freeze(Object.fromEntries([
+    "index", "profiled", "gate", "protected-snapshot", "declared-artifacts",
+  ].map(name => [`${name}.js`, createHash("sha256").update(readFileSync(
+    new URL(`./${name}.${import.meta.url.endsWith(".ts") ? "ts" : "js"}`, import.meta.url))).digest("hex")]))),
   loaded_at: new Date().toISOString(), pid: process.pid });
 const childSelectionKey = (id: string) => `v2-child-model-selection:${id}`;
 

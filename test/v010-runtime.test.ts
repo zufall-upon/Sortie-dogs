@@ -995,7 +995,7 @@ test("read-only mission unit reaches validated completion without declaring a fa
   assert.equal(await readFile(join(root, "seed.txt"), "utf8"), "base\n");
 }));
 
-test("host parent-link repair repins the admitted handoff before accepted-unit continuation", async () => fixture(async root => {
+test("mission replan uses durable admission without rewriting a legacy parent link", async () => fixture(async root => {
   await gitRepository(root);
   await initializeProject(root, "v010");
   await writeFile(join(root, "check.mjs"), 'import { readFileSync } from "node:fs";\nif(readFileSync("result.txt", "utf8") !== "ready\\n") process.exit(1);\n');
@@ -1037,10 +1037,10 @@ test("host parent-link repair repins the admitted handoff before accepted-unit c
   const runtime = new OperatorRuntime(root, V010_RUNTIME_PROFILE);
   const state = await runtime.required("root"), handoffPath = state.units[0]!.handoffPath;
   const handoff = JSON.parse(await readFile(handoffPath, "utf8"));
-  assert.notEqual(handoff.ext["sortie-dogs/acceptance-continuity"].parent_fingerprint, "none",
-    "the host must have repaired the omitted parent link");
+  assert.equal(handoff.ext["sortie-dogs/acceptance-continuity"].parent_fingerprint, "none",
+    "mission admission must not repair a redundant legacy session-wide parent link");
   assert.equal(state.units[0]!.hashes[0], createHash("sha256").update(await readFile(handoffPath)).digest("hex"),
-    "the Operator's durable pin must follow only the host-authorized repair");
+    "the Operator's durable pin must remain unchanged");
   await hooks["chat.message"]!({ sessionID: "worker", messageID: "worker-user", agent: "dog-worker-v010" }, {
     message: { id: "worker-user", agent: "dog-worker-v010", model: { providerID: "openai", modelID: "gpt-6-luna-fast" } },
     parts: [{ type: "text", text: secondInput.args.prompt }],
@@ -2679,10 +2679,12 @@ test("rejected dispatches fail only a still-running unit and preserve an existin
   assert.equal(runtime.matchesRecordedWorkerTask(state, state.units[0]!.unit.id, nativeV2), true,
     "V2 records native subagent calls with agent instead of subagent_type");
   await runtime.admitWorker("root", "operator-child", "worker-call", next.task);
-  await runtime.rejectDispatch("root", "worker-call");
+  await runtime.rejectedAdmission("root", "worker-call", "acceptance_parent_continuity_mismatch");
   const rejected = await runtime.required("root");
   assert.equal(rejected.phase, "awaiting-decision");
-  assert.equal(rejected.decision, "native-task-rejected");
+  assert.equal(rejected.decision, "dispatch-admission-rejected");
+  const cold = await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root");
+  assert.equal(cold.units[0]!.dispatchDenial, "acceptance_parent_continuity_mismatch");
   assert.deepEqual(rejected.units[0], { ...rejected.units[0], status: "failed", childSessionID: null,
     evidence: [], resultClass: "process-defect" });
 

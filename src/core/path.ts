@@ -83,3 +83,9 @@ export function normalizeRelativeScope(input: string): string {
   if (scope.kind !== "relative") throw new RelativePathError("absolute");
   return scope.path + (scope.directory ? "/**" : "");
 }
+
+/** Execution scopes may name native absolute destinations (for example global installs). */
+export function normalizeExecutionScope(input: string): string {
+  const scope = normalizeManifestScope(input);
+  return scope.path + (scope.directory ? "/**" : "");
+}

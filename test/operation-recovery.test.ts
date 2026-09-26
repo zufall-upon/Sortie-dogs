@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
+import { existsSync } from "node:fs";
 import test from "node:test";
 import { createProjectPaths, createWriteGate, canonicalManifestWriteScopes, extractWritePaths } from "../dist/plugin/gate.js";
 import { protectedSnapshot, refreshProtectedSnapshot } from "../dist/plugin/protected-snapshot.js";
@@ -87,4 +88,47 @@ test("format correction continues within the same bound Worker and scope errors 
   await assert.rejects(shell("curl -fLsS -o other/result https://example.test/result"), /Coordinator: expand_unit/);
   await assert.rejects(gate.check({ tool: "shell", sessionID: "legacy", callID: "legacy" },
     { args: { command: "curl --progress-bar -o output/result https://example.test/result" } }), /retry=false/);
+}));
+
+test("global-style offline npm install is plannable, writable, snapshot-bound and reviewable", async () => fixture(async area => {
+  const root = join(area, "project"), target = join(area, "external prefix"), source = join(area, "package");
+  await mkdir(root);
+  await mkdir(source);
+  await writeFile(join(source, "package.json"), JSON.stringify({ name: "sortie-fixture-install", version: "1.0.0",
+    bin: { "fixture-command": "cli.js" } }));
+  await writeFile(join(source, "cli.js"), '#!/usr/bin/env node\nconsole.log("installed fixture");\n');
+  const npm = process.env.npm_execpath ?? resolve(process.execPath, "../node_modules/npm/bin/npm-cli.js");
+  const npmCommand = existsSync(npm) ? { file: process.execPath, prefix: [npm] } : { file: "npm", prefix: [] };
+  const runNpm = (args: string[], cwd: string) => exec(npmCommand.file,
+    [...npmCommand.prefix, ...args, "--offline", "--no-audit", "--no-fund", "--cache", join(area, "cache")], { cwd });
+  await runNpm(["pack", "--ignore-scripts", "--pack-destination", root], source);
+  const tarball = join(root, "sortie-fixture-install-1.0.0.tgz");
+  const missions = new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE);
+  await missions.capture("root", { id: "request", text: "Install the fixed package to an external prefix and verify it." });
+  const mission = await missions.start("root", ["Install the fixed package at the requested prefix"]);
+  const plan = missionPlan(mission, [{ title: "Install", objective: "Install and inspect external package",
+    read: [tarball], write: [target + "/"], validation: ["node verify.mjs"] }]);
+  const runtime = new OperatorRuntime(root, V010_RUNTIME_PROFILE);
+  const run = await runtime.prepareMission("root", plan);
+  const manifestPath = run.units[0]!.manifestPath, manifestBytes = await readFile(manifestPath);
+  const gate = await createWriteGate(await createProjectPaths(root), JSON.parse(manifestBytes.toString()));
+  await gate.checkPath(join(target, "node_modules/sortie-fixture-install/package.json"));
+  await assert.rejects(gate.checkPath(join(area, "other/package.json")), /project-root-relative/);
+  await runNpm(["install", "--prefix", target, "--ignore-scripts", tarball], root);
+  const cli = join(target, "node_modules/sortie-fixture-install/cli.js");
+  assert.equal((await exec(process.execPath, [cli])).stdout.trim(), "installed fixture");
+  const snapshot = await protectedSnapshot({ projectRoot: root, manifestPath,
+    manifestHash: createHash("sha256").update(manifestBytes).digest("hex") });
+  assert.ok(snapshot);
+  assert.equal(snapshot.binding.source_policy, "declared-paths-v1");
+  const review = await missionReviewSource(root, run); // No Git repo at this operations-only root.
+  assert.match(review.excerpt, /installed fixture/);
+  assert.deepEqual(await refreshProtectedSnapshot(root, snapshot.binding), { source: snapshot.source, candidate: snapshot.candidate });
+  await writeFile(cli, 'console.log("modified package");\n');
+  assert.notEqual((await refreshProtectedSnapshot(root, snapshot.binding))?.candidate, snapshot.candidate);
+  assert.notEqual((await missionReviewSource(root, run)).fingerprint, review.fingerprint);
+  await assert.rejects(runtime.replanMission("root", run.runID, missionPlan(mission, [{
+    title: "Invalid control write", objective: "Must remain runtime-owned", write: [join(root, ".sortie-dogs-v010/missions")],
+    validation: ["node verify.mjs"],
+  }])), /operator-control-write-forbidden/);
 }));
