@@ -350,7 +350,7 @@ export function parseOperatorPlan(value: unknown): OperatorPlan {
   for (const [unitIndex, unit] of value.units.entries()) {
     if (!record(unit) || !exactKeys(unit, ["id", "title", "objective", "read", "write", "validation", "acceptance_indices"]) ||
         !identifier(unit.id) || ids.has(unit.id) || !text(unit.title) || !text(unit.objective) ||
-          !strings(unit.read) || !strings(unit.write, true) || !strings(unit.validation, true)) return planError(`/units/${unitIndex}`, "operator-unit-invalid", "operator-unit-shape");
+          !strings(unit.read) || !strings(unit.write) || !strings(unit.validation, true)) return planError(`/units/${unitIndex}`, "operator-unit-invalid", "operator-unit-shape");
     unit.validation.forEach((command, index) => rejectValidationAnnotation(command, `/units/${unitIndex}/validation/${index}`));
     ids.add(unit.id);
     if (!Array.isArray(unit.acceptance_indices) || unit.acceptance_indices.length === 0 ||
@@ -799,21 +799,13 @@ export class OperatorRuntime {
     terminalChildren: readonly string[] = []): Promise<OperatorState> {
     return this.serial(root, () => this.prepareOnce(root, raw, undefined, { dispatcher, supersededRunID, terminalChildren }));
   }
-  retireMissionRun(root: string): Promise<void> {
-    return this.serial(root, async () => {
-      const state = await this.required(root);
-      if (state.units.some(unit => unit.status === "running") || state.gitLifecycle !== null) throw new Error("mission-replan-worker-still-active");
-      if (["cancelled", "completed"].includes(state.phase)) return;
-      // Keep the old run and proof for inspection. Replanning does not erase failed checks or spend.
-      await writeFile(`${this.file(root)}.${state.runID}.archive`, JSON.stringify(state), { flag: "wx", mode: 0o600 });
-      state.phase = "cancelled";
-      state.decision = "mission-replan";
-      await this.save(state);
-    });
+  /** Stage a settled mission's replacement; rejected preparation never cancels the usable run. */
+  replanMission(root: string, runID: string, raw: unknown, dispatcher?: { sessionID: string; callID: string }): Promise<OperatorState> {
+    return this.serial(root, () => this.prepareOnce(root, raw, undefined, { dispatcher, replaceRunID: runID }));
   }
   private async prepareOnce(root: string, raw: unknown, scopeApprovalTurnID?: string,
     mission?: { dispatcher?: { sessionID: string; callID: string }; supersededRunID?: string;
-      terminalChildren?: readonly string[] }): Promise<OperatorState> {
+      terminalChildren?: readonly string[]; replaceRunID?: string }): Promise<OperatorState> {
     const previous = await this.read(root);
     let immutableReplacement = previous?.phase === "cancelled" &&
       [ACCEPTANCE_REMEDIATION_DECISION, REVIEW_REMEDIATION_DECISION].includes(previous.decision ?? "") && record(raw)
@@ -835,6 +827,14 @@ export class OperatorRuntime {
     }
     const plan = parseOperatorPlan(immutableReplacement);
     const validatedPlanHash = hash(JSON.stringify(plan));
+    const replanning = mission?.replaceRunID !== undefined;
+    if (replanning) {
+      if (!previous || previous.runID !== mission.replaceRunID || ["cancelled", "completed"].includes(previous.phase)) {
+        throw new Error("mission-replan-run-mismatch");
+      }
+      if (previous.units.some(unit => unit.status === "running") || previous.gitLifecycle !== null) throw new Error("mission-replan-worker-still-active");
+      if (previous.planHash === validatedPlanHash) return previous;
+    }
     if (mission?.supersededRunID !== undefined && previous?.supersededRunID === mission.supersededRunID &&
         previous.planHash === validatedPlanHash && previous.phase !== "cancelled") return previous;
     const superseding = mission?.supersededRunID !== undefined && previous?.runID === mission.supersededRunID &&
@@ -859,13 +859,16 @@ export class OperatorRuntime {
     if (plan.git_lifecycle !== undefined) {
       await ensureGitManagedStateExcluded(this.projectRoot, this.profile, this.gitPath);
     }
-    if (previous && !["completed", "cancelled"].includes(previous.phase)) {
+    if (previous && !replanning && !["completed", "cancelled"].includes(previous.phase)) {
       if (previous.planHash === validatedPlanHash) return previous;
       throw new Error("operator-active-contract-immutable");
     }
     // Cancellation stops execution, not the accepted user order. A replacement
     // plan must carry the original ordered criteria; only a completed root clears them.
-    const parent = (!superseding || retainAcceptance) && previous?.phase === "cancelled" ? previous : undefined;
+    // Treat the predecessor as retired only in this staged replacement. Its durable state remains
+    // intact through schema checks, control writes and archive creation, until save atomically switches it.
+    const parent = replanning ? { ...previous!, phase: "cancelled" as const, decision: "mission-replan" }
+      : (!superseding || retainAcceptance) && previous?.phase === "cancelled" ? previous : undefined;
     if (parent && ["explicit-cancellation", "agent-changed"].includes(parent.decision ?? "")) {
       const cancelled = parent.units.flatMap(unit => (parent.decision === "agent-changed" || unit.status === "cancelled") && unit.childSessionID !== null
         ? [unit.childSessionID] : []);
@@ -1000,7 +1003,7 @@ export class OperatorRuntime {
       const contents = [JSON.stringify(handoff), JSON.stringify(manifest)];
       controls.push({ path: handoffPath, content: contents[0]! }, { path: manifestPath, content: contents[1]! });
       const prompt = ["role: implementation", `task_id: ${taskID}`, `project_root: ${this.projectRoot}`,
-        `source_manifest: ${unit.write.join(", ")}`, `operation_manifest: ${manifestRelative}`, `handoff_path: ${handoffPath}`,
+        `source_manifest: ${(unit.write.length ? unit.write : unit.read).join(", ") || "none"}`, `operation_manifest: ${manifestRelative}`, `handoff_path: ${handoffPath}`,
         `goal_declaration_path: ${declarationPath}`, "acceptance:", ...plan.acceptance.map(value => `  - ${value}`),
         "validation:", ...unit.validation.map(value => `  - ${value}`),
         mission ? "Read-only investigation commands are unrestricted. Use shell to reproduce and diagnose without asking for command registration. Keep all writes, including generated/transient outputs and cleanup, inside unit.write. Run formal validation exactly as listed, in order and in separate calls, so the host records its real result. If a write scope or formal check must change, return the precise change to your Coordinator; it can extend/redeclare immediately within the original requirements. Diagnostic success is not formal acceptance evidence."
@@ -1042,10 +1045,15 @@ export class OperatorRuntime {
         created.push(control.path);
         try { await handle.writeFile(control.content); } finally { await handle.close(); }
       }
-      if (superseding && previous) {
-        const archive = `${this.file(root)}.${previous.runID}.archive`;
-        try { await writeFile(archive, JSON.stringify(previous), { flag: "wx", mode: 0o600 }); }
-        catch (error) {
+      if ((superseding || replanning) && previous) {
+        // A crash before the state switch may leave a checkpoint while the old run later advances.
+        // Sequence-qualified replan snapshots keep that history without blocking a subsequent correction.
+        const archive = `${this.file(root)}.${previous.runID}${replanning ? `.${previous.sequence}` : ""}.archive`;
+        try {
+          const handle = await open(archive, "wx", 0o600);
+          created.push(archive);
+          try { await handle.writeFile(JSON.stringify(previous)); } finally { await handle.close(); }
+        } catch (error) {
           if ((error as NodeJS.ErrnoException).code !== "EEXIST" ||
               await readFile(archive, "utf8") !== JSON.stringify(previous)) throw error;
         }
