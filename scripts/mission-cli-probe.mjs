@@ -57,7 +57,8 @@ async function updateBudget(file, update) {
   } finally { await rm(lock, { recursive: true }); }
 }
 
-export async function probe(tgz, output, { mode = 'start', prompt, instance, timeoutSeconds = 180, capUSD = 1, pythonBin, budgetFile } = {}) {
+export async function probe(tgz, output, { mode = 'start', prompt, instance, timeoutSeconds = 180, capUSD = 1, pythonBin, budgetFile,
+  setupFixture, model } = {}) {
   if (!Number.isFinite(capUSD) || capUSD <= 0 || !Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0) throw Error('Probe needs finite positive limits');
   const fixture = await installedFixture(tgz, output, 'v012', { nested: false });
   const { project, env, run } = fixture;
@@ -75,6 +76,7 @@ export async function probe(tgz, output, { mode = 'start', prompt, instance, tim
   await command('git', ['add', '--', '.gitignore', 'result.txt', 'check.mjs'], project, env);
   await command('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'fixture'], project, env);
   }
+  if (setupFixture) await setupFixture(fixture);
   await updateBudget(budgetFile, budget => {
     const probes = budget.probes ??= [];
     const charged = probes.reduce((sum, item) => sum + item.charged_usd, 0);
@@ -91,7 +93,7 @@ export async function probe(tgz, output, { mode = 'start', prompt, instance, tim
   const rootAgent = buildStart ? 'build' : 'dog-operator';
   const request = prompt ?? (buildStart ? 'Reply with just: ready' : operatorResponse
     ? '作業は不要です。ツールを呼ばず、READYとだけ返してください。' : 'result.txt の seed を recovered に置換して。末尾改行は維持。検証は node check.mjs。check.mjs と設定は変更しない。単純な1ユニット作業として実装して。');
-  const rootModel = operatorResponse ? 'openai/gpt-6-luna-fast#max' : 'openai/gpt-6-sol#xhigh';
+  const rootModel = model ?? (operatorResponse ? 'openai/gpt-6-luna-fast#max' : 'openai/gpt-6-sol#xhigh');
   const child = spawn('opencode', ['run', '--server', server.url, '--format', 'json', '--agent', rootAgent, '--model', rootModel, request], {
     cwd: project, env: { ...server.env, PWD: project }, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
   });

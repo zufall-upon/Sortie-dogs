@@ -3,7 +3,7 @@ import { lstat, realpath } from "node:fs/promises";
 import { basename, dirname, isAbsolute, relative, resolve, win32 } from "node:path";
 import { promisify } from "node:util";
 
-import { RelativePathError, normalizeManifestPath, normalizeRelativePath } from "../core/path.js";
+import { RelativePathError, normalizeManifestPath, normalizeManifestScope, normalizeRelativePath } from "../core/path.js";
 import type { OperationManifest } from "../core/types.js";
 import { validateOperationManifestSchema } from "../core/validate-schema.js";
 
@@ -203,6 +203,12 @@ function curlOutput(tokens: readonly string[]): string | undefined {
       if (!/^\d+$/u.test(tokens[++index] ?? "")) return undefined;
       continue;
     }
+    if (token === "-w" || token === "--write-out" || token.startsWith("--write-out=")) {
+      const format = token.startsWith("--write-out=") ? token.slice(12) : tokens[++index];
+      // curl write-out can open additional files or read a format file. Only stdout metadata is pathless.
+      if (format === undefined || format.startsWith("@") || /%output\{/u.test(format)) return undefined;
+      continue;
+    }
     if (token === "-o" || token === "--output") {
       const candidate = tokens[++index];
       if (candidate === undefined || candidate.startsWith("-") || output !== undefined) return undefined;
@@ -311,7 +317,28 @@ function isRemoteGitHubMutation(tokens: readonly string[]): boolean {
 function isReadOnlyGitCommand(tokens: readonly string[]): boolean {
   const command = tokens[1]?.toLowerCase() ?? "";
   return READ_ONLY_GIT_COMMANDS.has(command) ||
+    (command === "tag" && tokens.length >= 3 && ["--points-at", "--contains", "--list", "-l"].includes(tokens[2]!) &&
+      tokens.slice(3).every(token => !token.startsWith("-"))) ||
     (command === "branch" && tokens.length === 3 && tokens[2] === "--show-current");
+}
+
+function gitArchiveOutput(tokens: readonly string[]): { output?: string } | undefined {
+  let output: string | undefined, tree = false, paths = false;
+  for (let index = 2; index < tokens.length; index++) {
+    const token = tokens[index]!;
+    if (token === "--" && tree) { paths = true; continue; }
+    if (paths || !token.startsWith("-")) { tree = true; continue; }
+    if (token === "-o" || token === "--output") {
+      const value = tokens[++index];
+      if (!value || value.startsWith("-") || output !== undefined) return undefined;
+      output = value;
+    } else if (token.startsWith("--output=")) {
+      if (output !== undefined || !token.slice(9)) return undefined;
+      output = token.slice(9);
+    } else if (/^--(?:format|prefix)=.+$/u.test(token) || /^-[0-9]$/u.test(token)) continue;
+    else return undefined;
+  }
+  return tree ? { output } : undefined;
 }
 
 function exactGitAddPaths(tokens: readonly string[]): string[] | undefined {
@@ -650,6 +677,16 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
       gitMutation = true;
       if (isSafeGitCommit(tokens)) gitCommit = true;
       else ambiguous = true;
+    } else if (executable === "git" && tokens[1] === "archive") {
+      const archive = gitArchiveOutput(tokens);
+      if (archive === undefined) {
+        applies = true;
+        ambiguous = true;
+        issue ??= commandIssue(source, "unsupported-git-archive-form", "use git archive --format=tar --output=<scoped-file> <local-ref>");
+      } else if (archive.output !== undefined) {
+        applies = true;
+        paths.push(archive.output);
+      }
     } else if (executable === "git" && isReadOnlyGitCommand(tokens)) {
       // Explicitly read-only git subcommands.
     } else if (/^gh(?:\.exe)?$/u.test(executable) && isRemoteOnlyGitHubCommand(tokens)) {
@@ -692,8 +729,10 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
   };
 }
 
-function issuePath(issue: CommandIssue): string {
-  return `segment=${issue.segment}; cause=${issue.cause}; hint=${issue.hint}; retry=false; action=return-denial-to-coordinator`;
+function issuePath(issue: CommandIssue, formatCorrection = false): string {
+  return `segment=${issue.segment}; cause=${issue.cause}; hint=${issue.hint}; ` + (formatCorrection
+    ? "retry=after-format-correction; action=correct-format-within-current-manifest; preserve operation and destinations; otherwise return exact required correction to Coordinator"
+    : "retry=false; action=return-denial-to-coordinator");
 }
 
 export function describeUnclassifiedCommand(tool: string, args: unknown): string | undefined {
@@ -937,7 +976,7 @@ async function canonicalManifestScopes(
   entries: readonly string[],
 ): Promise<readonly string[]> {
   const scopes = await Promise.all(entries.map(async (entry) => {
-    const normalized = normalizeManifestPath(entry);
+    const normalized = normalizeManifestScope(entry);
     const absolute = normalized.kind === "relative"
       ? project.absolute(normalized.path)
       : resolve(normalized.path);
@@ -1009,10 +1048,12 @@ export async function createWriteGate(project: ProjectPaths, value: unknown, too
     }
   }
   const writable = new Set<string>();
+  const explicitDirectories = new Set<string>();
   const externalEntries: string[] = [];
   try {
     for (const entry of manifest.write) {
-      const normalized = normalizeManifestPath(entry);
+      const normalized = normalizeManifestScope(entry);
+      if (normalized.directory) explicitDirectories.add(normalized.path);
       if (normalized.kind === "relative") writable.add(normalized.path);
       else {
         if (!isAbsolute(normalized.path)) throw new RelativePathError("absolute");
@@ -1035,7 +1076,7 @@ export async function createWriteGate(project: ProjectPaths, value: unknown, too
         writableDirectories.push({ path, realPath: await realpath(project.absolute(path)) });
       }
     } catch (error) {
-      if ((declaredDirectories.has(path) || inferredDirectories.has(path)) &&
+      if ((explicitDirectories.has(path) || declaredDirectories.has(path) || inferredDirectories.has(path)) &&
         isRecord(error) && error.code === "ENOENT") {
         writableDirectories.push({ path, realPath: await nearestExistingRealPath(project.absolute(path)) });
       }
@@ -1073,7 +1114,9 @@ export async function createWriteGate(project: ProjectPaths, value: unknown, too
       if (!isRecord(error) || error.code !== "ENOENT") {
         throw new WriteDeniedError("manifest-unavailable", "<unknown>", { cause: error });
       }
-      externalFiles.push({ path, anchorRealPath: await nearestExistingRealPath(resolve(path, "..")) });
+      if (explicitDirectories.has(path.replaceAll("\\", "/"))) {
+        externalDirectories.push({ path, realPath: await nearestExistingRealPath(path) });
+      } else externalFiles.push({ path, anchorRealPath: await nearestExistingRealPath(resolve(path, "..")) });
     }
   }
   const matchingExternalScopes = (absolute: string) => ({
@@ -1189,7 +1232,9 @@ export async function createWriteGate(project: ProjectPaths, value: unknown, too
           !extracted.gitMutation && !extracted.remoteMutation) return;
       if (extracted.ambiguous || (extracted.paths.length === 0 && !extracted.gitCommit)) {
         if (extracted.issue !== undefined) {
-          throw new WriteDeniedError("unclassified-command", issuePath(extracted.issue));
+          const formatCorrection = options?.investigativeShell === true &&
+            ["unsupported-curl-form", "unsupported-git-archive-form", "unsupported-webrequest-form"].includes(extracted.issue.cause);
+          throw new WriteDeniedError("unclassified-command", issuePath(extracted.issue, formatCorrection));
         }
         throw new WriteDeniedError("path-required", "<missing-path>");
       }
@@ -1201,7 +1246,13 @@ export async function createWriteGate(project: ProjectPaths, value: unknown, too
           try { normalizeManifestPath(path); }
           catch (error) { throw new WriteDeniedError("project-boundary", path, { cause: error }); }
         }
-        await checkPath(nativeFileTool ? resolve(toolDirectory, path) : path);
+        try { await checkPath(nativeFileTool ? resolve(toolDirectory, path) : path); }
+        catch (error) {
+          if (options?.investigativeShell && error instanceof WriteDeniedError && error.reason === "manifest-scope") {
+            error.message += " Coordinator: expand_unit with the exact missing output directory as dir/**, preserving settled units and cumulative spend; then dispatch the returned Task. No user approval is needed for an in-request correction.";
+          }
+          throw error;
+        }
       }
       if (extracted.gitCommit) await checkCachedSet();
     },

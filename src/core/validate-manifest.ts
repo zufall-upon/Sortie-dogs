@@ -35,9 +35,9 @@ function collectManifestPaths(
 ): Set<string> {
   const normalizedPaths = new Set<string>();
   paths.forEach((path, index) => {
-    let normalized: ReturnType<typeof pathUtils.normalizeManifestPath> | undefined;
+    let normalized: ReturnType<typeof pathUtils.normalizeManifestScope> | undefined;
     try {
-      normalized = pathUtils.normalizeManifestPath(path);
+      normalized = pathUtils.normalizeManifestScope(path);
     } catch (error) {
       if (!(error instanceof pathUtils.RelativePathError)) throw error;
     }
@@ -51,7 +51,7 @@ function collectManifestPaths(
     } else if (normalized.kind === "relative") {
       // Absolute manifest targets authorize tools only. Handoff scope/source and Git paths remain
       // repository-relative and therefore never compare equal to an external target.
-      normalizedPaths.add(normalized.path);
+      normalizedPaths.add(normalized.path + (normalized.directory ? "/**" : ""));
     }
   });
   return normalizedPaths;
@@ -89,7 +89,7 @@ function addPathDiagnostics(
   const reported = new Set<string>();
   paths.forEach((path, index) => {
     const normalized = normalizePath(path);
-    if (normalized !== undefined && (allowed.has(normalized) || reported.has(normalized))) return;
+    if (normalized !== undefined && (scopeAllows(allowed, normalized) || reported.has(normalized))) return;
     if (normalized !== undefined) reported.add(normalized);
     diagnostics.push({
       code,
@@ -98,6 +98,11 @@ function addPathDiagnostics(
       message: MESSAGES[code],
     });
   });
+}
+
+function scopeAllows(scopes: ReadonlySet<string>, path: string): boolean {
+  return scopes.has(path) || [...scopes].some(scope => scope.endsWith("/**") &&
+    (path === scope.slice(0, -3) || path.startsWith(scope.slice(0, -2))));
 }
 
 /** Compare one schema-valid handoff with one schema-valid operation manifest. */
@@ -129,7 +134,7 @@ export function validateManifest(
     const normalized = normalizePath(source.path);
     if (
       normalized !== undefined &&
-      (readableOrWritable.has(normalized) || reportedSources.has(normalized))
+      (scopeAllows(readableOrWritable, normalized) || reportedSources.has(normalized))
     ) return;
     if (normalized !== undefined) reportedSources.add(normalized);
     diagnostics.push({

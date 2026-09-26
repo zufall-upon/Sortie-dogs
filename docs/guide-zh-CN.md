@@ -166,7 +166,7 @@ exact-path commit，不授予arbitrary Git、force push、release或publish auth
 - `continuation.taskWatchdogMilliseconds`：implementation Task进行时允许的root inactivity；默认`300000`，范围`10..1800000`
 - `continuation.summarizeModel`：可选compaction model；省略时复用最新root model
 - `validationProfile`：`fast` / `balanced` / `assurance`；默认`balanced`
-- `reflection`：shared schema可以接收，但serial v0.10 profile不开放reflection write；stable reflection同样默认关闭并需opt-in
+- `reflection`：默认关闭，需opt-in。v0.10的root Operator可通过`sortie_v010_reflection`保存简短预防建议，并注入后续turn及同一project的新会话。这不是模型训练；存储及managed block与stable隔离
 
 v0.10 host拥有`.sortie-dogs-v010/contracts/`下的handoff和manifest。不要为本profile创建legacy root
 `operation-manifest.json`，也不要编辑生成control。只有没有active Sortie run时才能删除`.sortie-dogs-v010/`。

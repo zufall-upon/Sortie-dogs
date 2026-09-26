@@ -67,3 +67,19 @@ export function normalizeManifestPath(input: string): ManifestPath {
 
   return { kind: "relative", path: normalizeRelativePath(input) };
 }
+
+/** A trailing /** (or slash) declares a directory, including one not created yet.
+ * Tool destinations still use normalizeManifestPath: this notation belongs to declarations only.
+ */
+export function normalizeManifestScope(input: string): ManifestPath & { readonly directory: boolean } {
+  const unified = input.replaceAll("\\", "/");
+  const directory = unified.endsWith("/**") || unified.endsWith("/");
+  const path = unified.endsWith("/**") ? unified.slice(0, -3) : unified;
+  return { ...normalizeManifestPath(path), directory };
+}
+
+export function normalizeRelativeScope(input: string): string {
+  const scope = normalizeManifestScope(input);
+  if (scope.kind !== "relative") throw new RelativePathError("absolute");
+  return scope.path + (scope.directory ? "/**" : "");
+}

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { lstat, readFile, readdir, readlink, realpath, stat } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { goalFingerprint, type GoalEvidence } from "../core/goal-bound.js";
-import { normalizeManifestPath } from "../core/path.js";
+import { normalizeManifestScope } from "../core/path.js";
 import { RUNTIME_PROFILES } from "../core/runtime-profile.js";
 import type { OperationManifest } from "../core/types.js";
 
@@ -61,7 +61,7 @@ export async function protectedSnapshot(authorization: { manifestPath: string; m
   const relativePath = relative(authorization.projectRoot, authorization.manifestPath).replaceAll("\\", "/");
   const manifest = JSON.parse(manifestSource.toString("utf8")) as OperationManifest;
   const actualPaths = (entries: readonly string[]) => entries.map((entry) => {
-    const path = normalizeManifestPath(entry);
+    const path = normalizeManifestScope(entry);
     return path.kind === "relative" ? resolve(authorization.projectRoot, path.path) : resolve(path.path);
   });
   const candidatePaths = actualPaths(manifest.write);

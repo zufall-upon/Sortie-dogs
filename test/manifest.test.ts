@@ -278,6 +278,16 @@ test("missing ancestor plus child declaration scopes descendants without widenin
   }
 });
 
+test("explicit directory declarations compare descendants consistently with the execution gate", () => {
+  const handoff = makeHandoff();
+  handoff.scope = { paths: ["output/result.json"] };
+  handoff.sources = [{ path: "input/nested/source.ts", rev: "main" }];
+  const manifest = { ...makeManifest(), read: ["input/**"], write: ["output/**"] };
+  assert.deepEqual(validateManifest(handoff, manifest, ["output/nested/result.json"], true), []);
+  assert.deepEqual(validateManifest(handoff, manifest, ["output-other/result.json"], true).map(item => item.code),
+    ["M005_CHANGED_PATH_NOT_WRITABLE"]);
+});
+
 test("sorts numeric JSON-pointer segments numerically beyond index 9", () => {
   const changedPaths = Array.from({ length: 11 }, (_, index) => `private/change-${index}`);
   assert.deepEqual(
