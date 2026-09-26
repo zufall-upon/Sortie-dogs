@@ -115,8 +115,13 @@ The same helper was then applied to the saved v0.12.8 continuation attempt:
 
 Local evidence: `/tmp/opencode/swebench-test-reset-diagnostic/sqlfluff-2419/`.
 Both diagnostics used fresh containers with networking disabled and identical
-candidate patches; no test-patch contents were changed. The main-integrated
-`84ccdf1` dev23 campaign runs independently under its frozen original conditions.
+candidate patches; no test-patch contents were changed. The independent
+[main-integrated `84ccdf1` dev23 campaign](swebench-main-84ccdf1-dev23-2026-09-26.md)
+has since completed under its frozen original conditions: six resolved, fifteen
+unresolved and two empty predictions. Its `pydicom-901` patch also collided during
+test injection, while its `sqlfluff-2419` attempt stopped with incomplete usage
+and an empty prediction. The supplemental results here apply only to the saved
+earlier patches identified above.
 
 Validation on 2026-09-26: related benchmark tests **67/67 PASS**; after adding the
 helper tests to the quick-test route, `npm test` (including build) **379/379 PASS**.
