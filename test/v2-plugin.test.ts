@@ -646,6 +646,7 @@ test("V2 status reports the loaded adapter snapshot rather than replacement byte
   try {
     await cp(resolve("dist"), join(area, "dist"), { recursive: true });
     const path = join(area, "dist/plugin/v2.js"), bytes = await readFile(path);
+    const implementationPath = join(area, "dist/plugin/index.js"), implementationBytes = await readFile(implementationPath);
     const { createSortieDogsV2Plugin: create } = await import(pathToFileURL(path).href);
     const fixture = contextFixture();
     const dispose = await create(async () => ({ tool: { sortie_v010_operator_status: {
@@ -653,6 +654,7 @@ test("V2 status reports the loaded adapter snapshot rather than replacement byte
     } } })).setup(fixture.context);
     try {
       await writeFile(path, Buffer.concat([bytes, Buffer.from("\n// replaced after module evaluation\n")]));
+      await writeFile(implementationPath, Buffer.concat([implementationBytes, Buffer.from("\n// implementation replacement\n")]));
       const tool = fixture.tools.find(tool => tool.name === "sortie_v010_operator_status") as {
         execute(input: unknown, execution: unknown): Promise<{ content: string }>; };
       const packet = JSON.parse((await tool.execute({}, { sessionID: "root" })).content);
@@ -661,6 +663,9 @@ test("V2 status reports the loaded adapter snapshot rather than replacement byte
       assert.equal(packet.runtime.adapter_url, pathToFileURL(path).href);
       assert.equal(packet.runtime.adapter_sha256, createHash("sha256").update(bytes).digest("hex"));
       assert.notEqual(packet.runtime.adapter_sha256, createHash("sha256").update(await readFile(path)).digest("hex"));
+      assert.equal(packet.runtime.implementation_sha256["index.js"], createHash("sha256").update(implementationBytes).digest("hex"));
+      assert.notEqual(packet.runtime.implementation_sha256["index.js"], createHash("sha256").update(await readFile(implementationPath)).digest("hex"));
+      assert.equal(typeof packet.runtime.runtime_asset_version, "string");
       assert.equal(packet.runtime.pid, process.pid);
       assert.equal(packet.runtime.host_version, fixture.context.app!.version);
     } finally { dispose?.(); }

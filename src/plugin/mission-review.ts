@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { createReadStream } from "node:fs";
 import { lstat, readlink } from "node:fs/promises";
-import { resolve } from "node:path";
+import { isAbsolute, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import type { OperatorState } from "../core/operator-runtime.js";
 import { TOOL_ENVIRONMENT } from "../runtime-mission-assets.js";
@@ -10,6 +10,7 @@ import { MISSION_REVIEW_REFERENCE, type OperatorMission } from "../core/operator
 import { canonicalAgent, type RuntimeProfile } from "../core/runtime-profile.js";
 import { taskChildSessionID } from "./task-result-repair.js";
 import { normalizeManifestScope } from "../core/path.js";
+import { declaredArtifacts } from "./declared-artifacts.js";
 
 const exec = promisify(execFile);
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -70,15 +71,21 @@ export async function missionReviewSource(directory: string, run: OperatorState)
   if (writes.length === 0) return { fingerprint: `sha256:${hash.digest("hex")}`,
     excerpt: "[Read-only units: no declared output files. Review the supplied observations, traces and validation evidence.]" };
   // The shared dependency environment is local tooling, never reviewed or pinned source.
-  const scopes = [...writes, `:(exclude)${TOOL_ENVIRONMENT}`];
+  const external: string[] = [], local: string[] = [];
+  for (const path of writes) {
+    const scoped = relative(directory, resolve(directory, path)).replaceAll("\\", "/");
+    if (scoped === ".." || scoped.startsWith("../") || isAbsolute(scoped)) external.push(resolve(path));
+    else local.push(scoped || ".");
+  }
+  const scopes = [...local, `:(exclude)${TOOL_ENVIRONMENT}`];
   const git = async (args: string[]) => (await exec("git", args, { cwd: directory, maxBuffer: 8 * 1024 * 1024 })).stdout;
-  const names = await git(["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ...scopes]);
-  const untracked = new Set((await git(["ls-files", "-z", "--others", "--exclude-standard", "--", ...scopes])).split("\0").filter(Boolean));
+  const names = local.length ? await git(["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ...scopes]) : "";
+  const untracked = new Set((local.length ? await git(["ls-files", "-z", "--others", "--exclude-standard", "--", ...scopes]) : "").split("\0").filter(Boolean));
   // Explicitly declared outputs are review evidence even when gitignored (for example a probe
   // JSON in _testenv). Their bytes must participate in staleness checks as well as the excerpt.
-  const ignored = await git(["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--", ...scopes]);
+  const ignored = local.length ? await git(["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--", ...scopes]) : "";
   for (const path of ignored.split("\0").filter(Boolean)) untracked.add(path);
-  let excerpt = await git(["diff", "--no-ext-diff", "--no-textconv", "HEAD", "--", ...scopes]).catch(() => git(["diff", "--no-ext-diff", "--no-textconv", "--", ...scopes]));
+  let excerpt = local.length ? await git(["diff", "--no-ext-diff", "--no-textconv", "HEAD", "--", ...scopes]).catch(() => git(["diff", "--no-ext-diff", "--no-textconv", "--", ...scopes])) : "";
   const unchanged = excerpt.length === 0;
   const paths = [...new Set([...names.split("\0"), ...ignored.split("\0")].filter(Boolean))].sort();
   const omitted: string[] = [];
@@ -107,6 +114,12 @@ export async function missionReviewSource(directory: string, run: OperatorState)
         if (stat.size > room) omitted.push(path);
       }
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; hash.update("deleted"); }
+  }
+  if (external.length) {
+    const artifacts = await declaredArtifacts(external, Math.max(1, 24_000 - Buffer.byteLength(excerpt)));
+    hash.update(JSON.stringify(artifacts.entries));
+    excerpt += artifacts.excerpt;
+    if (artifacts.truncated) omitted.push("external artifacts");
   }
   const bytes = Buffer.from(excerpt);
   return { fingerprint: `sha256:${hash.digest("hex")}`, excerpt: (bytes.length > 24_000 ? bytes.subarray(0, 24_000).toString("utf8") : excerpt) +

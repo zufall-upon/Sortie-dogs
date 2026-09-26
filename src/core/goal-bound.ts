@@ -41,7 +41,7 @@ export interface GoalEvidence {
     readonly source_paths: readonly string[];
     readonly candidate_paths: readonly string[];
     /** Missing on legacy evidence: retain its original all-paths snapshot recipe. */
-    readonly source_policy?: "project-files-v1";
+    readonly source_policy?: "project-files-v1" | "declared-paths-v1";
   };
   readonly execution: {
     readonly command: readonly string[];
@@ -258,7 +258,8 @@ export function validGoalEvidence(value: GoalEvidence, state: Pick<GoalFlightSta
     text(protectedBinding.project_root) && text(protectedBinding.manifest_path) && Array.isArray(protectedBinding.source_paths) &&
     protectedBinding.source_paths.every(text) && Array.isArray(protectedBinding.candidate_paths) &&
     protectedBinding.candidate_paths.every(text) &&
-    (protectedBinding.source_policy === undefined || protectedBinding.source_policy === "project-files-v1");
+    (protectedBinding.source_policy === undefined || protectedBinding.source_policy === "project-files-v1" ||
+      protectedBinding.source_policy === "declared-paths-v1");
   const matches = criteria.length > 0 && criteria.length === value.measurement.criterion_ids.length &&
     criteria.every((criterion) => criterion.target === value.measurement.target &&
       criterion.entrypoint === value.measurement.entrypoint && criterion.workload === value.measurement.workload &&

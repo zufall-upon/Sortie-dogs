@@ -5,6 +5,7 @@ import { goalFingerprint, type GoalEvidence } from "../core/goal-bound.js";
 import { normalizeManifestScope } from "../core/path.js";
 import { RUNTIME_PROFILES } from "../core/runtime-profile.js";
 import type { OperationManifest } from "../core/types.js";
+import { declaredArtifacts } from "./declared-artifacts.js";
 
 type Binding = NonNullable<GoalEvidence["protected_binding"]>;
 const controlRoots = new Set([".git", ...Object.values(RUNTIME_PROFILES).map(profile => profile.stateDirectory)]);
@@ -51,6 +52,21 @@ async function protectedScopeDigest(projectRoot: string, paths: readonly string[
   return goalFingerprint({ manifest_hash: `sha256:${manifestHash}`, entries });
 }
 
+function outside(projectRoot: string, path: string): boolean {
+  const scoped = relative(projectRoot, path).replaceAll("\\", "/");
+  return scoped === ".." || scoped.startsWith("../") || isAbsolute(scoped);
+}
+
+async function declaredScopeDigest(projectRoot: string, paths: readonly string[], manifestHash: string,
+  source: boolean): Promise<string | undefined> {
+  const local = paths.filter(path => !outside(projectRoot, path));
+  const external = paths.filter(path => outside(projectRoot, path));
+  const project = await protectedScopeDigest(projectRoot, local, manifestHash, source ? "project-files-v1" : undefined);
+  if (project === undefined) return undefined;
+  const artifacts = await declaredArtifacts(external).catch(() => undefined);
+  return artifacts && goalFingerprint({ project, external: artifacts.entries });
+}
+
 export async function protectedSnapshot(authorization: { manifestPath: string; manifestHash: string; projectRoot: string }): Promise<{
   readonly binding: Binding; readonly source: string; readonly candidate: string;
 } | undefined> {
@@ -66,14 +82,17 @@ export async function protectedSnapshot(authorization: { manifestPath: string; m
   });
   const candidatePaths = actualPaths(manifest.write);
   const sourcePaths = [...new Set([...actualPaths(manifest.read), ...candidatePaths])];
-  const source = await protectedScopeDigest(authorization.projectRoot, sourcePaths, manifestHash, "project-files-v1");
+  const external = sourcePaths.some(path => outside(authorization.projectRoot, path));
+  const source = external ? await declaredScopeDigest(authorization.projectRoot, sourcePaths, manifestHash, true)
+    : await protectedScopeDigest(authorization.projectRoot, sourcePaths, manifestHash, "project-files-v1");
   // Explicit outputs and the exact operation manifest remain pinned, including control-like paths.
-  const candidate = await protectedScopeDigest(authorization.projectRoot, candidatePaths, manifestHash);
+  const candidate = external ? await declaredScopeDigest(authorization.projectRoot, candidatePaths, manifestHash, false)
+    : await protectedScopeDigest(authorization.projectRoot, candidatePaths, manifestHash);
   if (source === undefined || candidate === undefined || relativePath.startsWith("../") || isAbsolute(relativePath)) return undefined;
   return { binding: { manifest_hash: `sha256:${manifestHash}`, project_root: authorization.projectRoot,
-    manifest_path: relativePath, source_policy: "project-files-v1",
-    source_paths: sourcePaths.map(path => relative(authorization.projectRoot, path).replaceAll("\\", "/")),
-    candidate_paths: candidatePaths.map(path => relative(authorization.projectRoot, path).replaceAll("\\", "/")) }, source, candidate };
+    manifest_path: relativePath, source_policy: external ? "declared-paths-v1" : "project-files-v1",
+    source_paths: sourcePaths.map(path => (outside(authorization.projectRoot, path) ? path : relative(authorization.projectRoot, path)).replaceAll("\\", "/")),
+    candidate_paths: candidatePaths.map(path => (outside(authorization.projectRoot, path) ? path : relative(authorization.projectRoot, path)).replaceAll("\\", "/")) }, source, candidate };
 }
 
 export async function refreshProtectedSnapshot(projectRoot: string, binding: Binding): Promise<{
@@ -83,6 +102,11 @@ export async function refreshProtectedSnapshot(projectRoot: string, binding: Bin
   if (manifestSource === undefined) return undefined;
   const manifestHash = createHash("sha256").update(manifestSource).digest("hex");
   if (`sha256:${manifestHash}` !== binding.manifest_hash) return undefined;
+  if (binding.source_policy === "declared-paths-v1") {
+    const source = await declaredScopeDigest(projectRoot, binding.source_paths.map(path => resolve(projectRoot, path)), manifestHash, true);
+    const candidate = await declaredScopeDigest(projectRoot, binding.candidate_paths.map(path => resolve(projectRoot, path)), manifestHash, false);
+    return source === undefined || candidate === undefined ? undefined : { source, candidate };
+  }
   // Legacy evidence retains its original recipe; a new policy cannot relabel stale proof as fresh.
   if (binding.source_policy !== undefined && binding.source_policy !== "project-files-v1") return undefined;
   const source = await protectedScopeDigest(projectRoot, binding.source_paths.map(path => resolve(projectRoot, path)), manifestHash, binding.source_policy);

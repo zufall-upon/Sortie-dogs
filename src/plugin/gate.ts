@@ -1163,7 +1163,7 @@ export async function createWriteGate(project: ProjectPaths, value: unknown, too
       const absolute = resolve(manifestPath.path);
       if (await project.contains(absolute)) {
         const normalized = await project.toRelativePath(absolute);
-        if (!await isWritable(normalized)) throw new WriteDeniedError("manifest-scope", normalized);
+        if (!await isWritable(normalized) && !await isExternalWritable(absolute)) throw new WriteDeniedError("manifest-scope", normalized);
         return;
       }
       const scopes = matchingExternalScopes(absolute);

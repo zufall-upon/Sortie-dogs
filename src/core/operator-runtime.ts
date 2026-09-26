@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import { acceptanceContinuityFingerprint, inspectAcceptanceContinuity, normalizeAcceptanceCriteria,
   ACCEPTANCE_CONTINUITY_EXTENSION, MAX_ACCEPTANCE_CONTINUITY_BYTES, MAX_ACCEPTANCE_CRITERIA } from "./acceptance-continuity.js";
 import { expandGoalDeclaration, goalDeclarationDefaults, goalDeclarationFieldDiagnostics, hasGoalCommandAliasConflict } from "./goal-declaration-format.js";
-import { normalizeManifestPath, normalizeManifestScope, normalizeRelativePath } from "./path.js";
+import { normalizeExecutionScope, normalizeManifestPath, normalizeManifestScope, normalizeRelativePath } from "./path.js";
 import { CONTRACT_TEXT_LIMITS, validateHandoffSchema, validateOperationManifestSchema } from "./validate-schema.js";
 import { validateManifest } from "./validate-manifest.js";
 import { profileAgent, RUNTIME_PROFILES, type RuntimeProfile } from "./runtime-profile.js";
@@ -127,6 +127,7 @@ interface UnitState {
   childSessionID: string | null;
   evidence: readonly GoalEvidence[];
   resultClass: string | null;
+  dispatchDenial?: string;
   repairValidationAttempts: number;
   repairValidation: {
     readonly repair_fingerprint: string;
@@ -268,7 +269,7 @@ function scopePaths(value: unknown, limit: number): value is string[] {
   return paths.every(normalized) && new Set(paths).size === paths.length;
 }
 
-export function parseOperatorPlan(value: unknown): OperatorPlan {
+export function parseOperatorPlan(value: unknown, scopeFormat: "repository" | "execution" = "repository"): OperatorPlan {
   if (!record(value) || !exactKeys(value, ["schema_version", "acceptance", "acceptance_proof", "source_refs", "goal_declaration", "units", "git_lifecycle"])) {
     return planError("/", "operator-plan-invalid", "operator-plan-fields");
   }
@@ -380,8 +381,10 @@ export function parseOperatorPlan(value: unknown): OperatorPlan {
     for (const field of ["read", "write"] as const) {
       for (const [pathIndex, name] of (unit[field] as string[]).entries()) {
         let valid = false;
-        try { valid = normalizeRelativePath(name) === name; } catch { /* Return only a typed pointer, never the path value. */ }
-        if (!valid) return planError(`/units/${unitIndex}/${field}/${pathIndex}`, "operator-scope-invalid", "repository-relative-scope");
+        try { valid = (scopeFormat === "execution" ? normalizeExecutionScope(name) : normalizeRelativePath(name)) === name; }
+        catch { /* Return only a typed pointer, never the path value. */ }
+        if (!valid) return planError(`/units/${unitIndex}/${field}/${pathIndex}`, "operator-scope-invalid",
+          scopeFormat === "execution" ? "normalized-execution-scope" : "repository-relative-scope");
       }
     }
     for (const name of unit.write) {
@@ -828,7 +831,7 @@ export class OperatorRuntime {
       }
       immutableReplacement = { ...immutableReplacement, goal_declaration: declaration };
     }
-    const plan = parseOperatorPlan(immutableReplacement);
+    const plan = parseOperatorPlan(immutableReplacement, mission ? "execution" : "repository");
     const validatedPlanHash = hash(JSON.stringify(plan));
     const replanning = mission?.replaceRunID !== undefined;
     if (replanning) {
@@ -945,6 +948,13 @@ export class OperatorRuntime {
     const units: UnitState[] = [];
     const controls: Array<{ path: string; content: string }> = [{ path: declarationPath, content: declaration }];
     for (const [index, unit] of plan.units.entries()) {
+      for (const name of unit.write) {
+        const scoped = relative(this.projectRoot, resolve(this.projectRoot, normalizeManifestScope(name).path)).replaceAll("\\", "/");
+        if ([".git", ...Object.values(RUNTIME_PROFILES).map(profile => profile.stateDirectory)]
+          .some(directory => scoped === directory || scoped.startsWith(`${directory}/`))) {
+          return planError(`/units/${index}/write`, "operator-control-write-forbidden", "control-write-forbidden");
+        }
+      }
       const taskID = `${runID}-${index + 1}`;
       const manifestPath = join(directory, `${taskID}.operation-manifest.json`);
       const manifestRelative = `${this.profile.stateDirectory}/contracts/${taskID}.operation-manifest.json`;
@@ -1287,18 +1297,19 @@ export class OperatorRuntime {
     await this.save(state);
     return admitted;
   }
-  async rejectedAdmission(root: string, callID: string): Promise<void> {
-    await this.rejectDispatch(root, callID, "dispatch-admission-rejected");
+  async rejectedAdmission(root: string, callID: string, reason?: string): Promise<void> {
+    await this.serial(root, () => this.rejectDispatchOnce(root, callID, "dispatch-admission-rejected", reason));
   }
   rejectDispatch(root: string, callID: string, decision = "native-task-rejected"): Promise<void> {
     return this.serial(root, () => this.rejectDispatchOnce(root, callID, decision));
   }
-  private async rejectDispatchOnce(root: string, callID: string, decision: string): Promise<void> {
+  private async rejectDispatchOnce(root: string, callID: string, decision: string, reason?: string): Promise<void> {
     const state = await this.required(root);
     const unit = state.units.find(item => item.callID === callID && item.status === "running");
     if (!unit) return;
     unit.status = "failed";
     unit.resultClass = "process-defect";
+    if (reason) unit.dispatchDenial = reason.slice(0, 4000);
     state.phase = "awaiting-decision";
     state.decision = decision;
     await this.save(state);
