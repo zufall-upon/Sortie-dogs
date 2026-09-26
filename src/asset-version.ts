@@ -3,6 +3,6 @@
  * installed project marker without importing every asset body.
  */
 export const RUNTIME_ASSET_VERSION = "0.3.89-completion-proof-v1";
-export const V010_RUNTIME_ASSET_VERSION = "0.12.13-mission-cold-recovery-v1";
+export const V010_RUNTIME_ASSET_VERSION = "0.12.14-worker-context-progress-v1";
 
 export type RuntimeAssetVersion = typeof RUNTIME_ASSET_VERSION | typeof V010_RUNTIME_ASSET_VERSION;

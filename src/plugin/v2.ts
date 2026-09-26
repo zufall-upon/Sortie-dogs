@@ -1,6 +1,6 @@
 import type { OpenCodeHooks, OpenCodePlugin } from "./index.js";
 import { SortieDogsV010Plugin } from "./profiled.js";
-import { bindMissionProgress } from "./mission-progress.js";
+import { bindMissionProgress, missionProgressReader } from "./mission-progress.js";
 import { owningServiceSessionList } from "./v2-session-history.js";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -383,14 +383,37 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks)
         if (value.agent !== "dogs-coordinator" || typeof execution.progress !== "function") return execute(value, execution);
         const report = execution.progress as (value: JsonObject) => Promise<void>;
         let metadata: JsonObject = {};
-        const unbind = bindMissionProgress(String(execution.sessionID), async progress => {
-          metadata = { ...metadata, ...progress };
-          await report(metadata);
-        });
-        try { return await execute(value, { ...execution, progress: async (update: JsonObject) => {
+        let pending = Promise.resolve();
+        const update = (update: JsonObject) => {
           metadata = { ...metadata, ...update };
-          await report(metadata);
-        } }); } finally { unbind(); }
+          const snapshot = { ...metadata };
+          pending = pending.catch(() => undefined).then(() => report(snapshot));
+          return pending;
+        };
+        const unbind = bindMissionProgress(String(execution.sessionID), update);
+        const readProgress = missionProgressReader(context.location.directory, String(execution.sessionID), String(execution.id));
+        let previous = "", reading: Promise<void> | undefined;
+        const refresh = (): Promise<void> => {
+          if (reading) return reading;
+          reading = (async () => { try {
+            const progress = await readProgress(), key = JSON.stringify(progress);
+            if (progress && key !== previous) { await update(progress); previous = key; }
+          } catch (error) { console.warn("[sortie-dogs-v010] mission progress unavailable", error instanceof Error ? error.message : "unknown"); }
+          })().finally(() => { reading = undefined; });
+          return reading;
+        };
+        // The native executor is a stable snapshot. Poll only local durable state, not models or
+        // session status APIs; this also recovers progress after another plugin instance settles work.
+        const timer = setInterval(() => { void refresh(); }, 1000);
+        timer.unref();
+        try {
+          await refresh();
+          const result = await execute(value, { ...execution, progress: update });
+          await refresh();
+          await pending.catch(() => undefined);
+          // Native completion replaces metadata, so retain our display fields alongside its own.
+          return { ...result, metadata: { ...metadata, ...(record(result.metadata) ? result.metadata : {}) } };
+        } finally { clearInterval(timer); unbind(); await reading; await pending.catch(() => undefined); }
       };
     });
     for (const [name, definition] of Object.entries(hooks.tool ?? {})) {

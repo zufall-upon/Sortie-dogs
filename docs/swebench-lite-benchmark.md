@@ -28,7 +28,38 @@ Run OpenCode-related commands through a login shell:
 wsl.exe --cd /mnt/m/_work/_Sortie-dogs -e bash -ic '<command>'
 ```
 
-## 1. Build, test, and package the candidate
+## 1. Select the runner and candidate
+
+Start each improvement cycle from current `main`. Preserve an active branch's edits and run evidence;
+use a separate worktree when it is busy. A new runner does not require rebuilding a published package.
+
+```bash
+git fetch origin
+git worktree add --detach /tmp/opencode/swebench-current-main origin/main
+```
+
+Run the following scripts from that worktree. Before repairing an infrastructure failure, compare its
+runner with current main; reuse an integrated fix instead of reimplementing it on an old bench branch.
+
+### Published release
+
+Use the archive next to its release receipt. Do not search by `sortie-dogs-<version>.tgz`: development
+candidates can have the same name/version and different bytes. Reuse the public dataset rows from a
+fixed manifest and select the package directly from the receipt:
+
+```bash
+node scripts/swebench-release-manifest.mjs \
+  /path/to/manifest-dev-23.json \
+  /path/to/releases/<version>/release-receipt.json \
+  /path/to/new-campaign/manifest.json
+```
+
+This writes a new manifest and provenance sidecar with the receipt/package hashes, release commit,
+runner checkout/commit and hashes of the actual runner scripts. Existing manifests are never overwritten.
+The package's commit and runner's commit are separate identities. Keep both with the campaign evidence.
+This already generates the manifest; continue at §3.
+
+### Development candidate
 
 From the repository root on Windows:
 
@@ -74,6 +105,11 @@ node --experimental-strip-types scripts/swebench-candidate-preflight.mjs \
 
 Expected result includes `config_verified:true` and `provider_requests_started:false`.
 Preflight removes only the fresh root it owns.
+
+This checks setup only. Before a new multi-instance campaign, observe a real Worker session and its
+actual model in the exact isolated benchmark environment (reuse an existing matching observation).
+For zero-request model/credential failures, report infrastructure failure, not a benchmark score;
+fix the route before launching more instances. Retain the failed run and its budget record.
 
 ## 4. Start four-slot inference
 
