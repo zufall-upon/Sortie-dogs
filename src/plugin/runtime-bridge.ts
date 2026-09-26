@@ -23,6 +23,8 @@ export interface RuntimeBridge {
   readonly defaultModelCatalog?: import("./model-routing.js").ModelCatalog;
   transformConfiguration?(value: unknown): unknown;
   continuationCheckpoint?(rootSessionID: string): Promise<string | undefined>;
+  /** Completed native reviews owned by the current mission's nested Coordinator. */
+  completedReviewPrompts?(rootSessionID: string, requestedPrompt: string): Promise<readonly string[]>;
   requiresExplicitAcceptance?(rootSessionID: string): Promise<boolean>;
   ownsCanonicalValidation?(rootSessionID: string, unitID: string, childSessionID: string,
     command: string): Promise<boolean>;

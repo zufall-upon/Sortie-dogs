@@ -18,7 +18,7 @@ import { normalizeRelativePath } from "../core/path.js";
 import { MISSION_EVIDENCE_GAP_REVIEW_LIMIT, OperatorMissionRuntime, missionPacket, missionPlan, missionReviewAccepted, missionReviewTask,
   missionReviewTraces, missionReviewVerdict, type OperatorMission } from "../core/operator-mission.js";
 import { publishMissionProgress } from "./mission-progress.js";
-import { missionReviewSource } from "./mission-review.js";
+import { completedMissionReviewPrompts, missionReviewSource } from "./mission-review.js";
 import { SOURCE_REVIEW_RISK_TAGS } from "../core/consultation.js";
 import { createHash } from "node:crypto";
 
@@ -304,6 +304,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         if (mission && !["completed", "cancelled"].includes(mission.phase)) return JSON.stringify(missionPacket(mission, await operators.read(root)));
         return await operators.continuationCheckpoint(root) ?? await proposals.continuationCheckpoint(root);
       },
+      completedReviewPrompts: async (root, prompt) => completedMissionReviewPrompts(
+        await missions.read(root), profile, root, prompt, {
+          get: async id => payload(await session("get", { path: { id }, query: { directory: input.directory } })),
+          messages,
+        }),
       requiresExplicitAcceptance: async root => {
         const mission = await missions.read(root);
         if (mission && !["completed", "cancelled"].includes(mission.phase)) return true;

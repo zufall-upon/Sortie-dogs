@@ -711,7 +711,7 @@ test("plan_units repairs an already-dispatched mission with cancelled-run accept
   assert.deepEqual(run.acceptance, restored.requirements.map(item => item.text));
 }));
 
-test("nested mission Worker records validation evidence with an in-scope npm-style symlink", async () => fixture(async root => {
+test("nested mission validation and completed review lineage survive plugin reload", async () => fixture(async root => {
   await gitRepository(root);
   await writeFile(join(root, "check.mjs"), [
     'import { readFileSync } from "node:fs";',
@@ -725,11 +725,15 @@ test("nested mission Worker records validation evidence with an in-scope npm-sty
   const identities: Record<string, { agent: string; parentID?: string }> = {
     root: { agent: "dog-operator" }, coordinator: { agent: "dogs-coordinator", parentID: "root" },
     worker: { agent: "dog-worker-v010", parentID: "coordinator" },
+    reviewer: { agent: "dog-reviewer-v010", parentID: "coordinator" },
   };
-  const hooks = await SortieDogsV010Plugin({ directory: root, client: { session: {
+  const hostMessages: Record<string, Record<string, unknown>[]> = {};
+  const create = () => SortieDogsV010Plugin({ directory: root, client: { session: {
     get: async ({ path }: { path: { id: string } }) => ({ data: identities[path.id] }),
-    messages: async () => ({ data: [] }), abort: async () => ({ data: true }),
+    messages: async ({ path }: { path: { id: string } }) => ({ data: hostMessages[path.id] ?? [] }),
+    abort: async () => ({ data: true }),
   } } } as never);
+  const hooks = await create();
   await hooks["chat.message"]!({ sessionID: "root", messageID: "mission-user", agent: "dog-operator" }, {
     message: { id: "mission-user", agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-6-sol" } },
     parts: [{ type: "text", text: "Write a ready result and validate it." }],
@@ -783,6 +787,25 @@ test("nested mission Worker records validation evidence with an in-scope npm-sty
     event.disposition === "succeeded" && event.evidence.length > 0));
   const status = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
   assert.equal(status.units[0].status, "succeeded", JSON.stringify(status));
+  const review = async (plugin: V010Hooks, trace: string) => JSON.parse(await plugin.tool!.sortie_v010_review_mission.execute({
+    risk_tags: ["public-logic"], traces: [trace],
+  }, { sessionID: "coordinator" })).task;
+  const initial = { args: await review(hooks, "The Worker wrote and validated result.txt") };
+  await hooks["tool.execute.before"]!({ tool: "task", sessionID: "coordinator", callID: "initial-review" }, initial);
+  assert.match(initial.args.prompt, /^review_phase: initial$/m);
+  hostMessages.coordinator = [{ info: { role: "assistant", sessionID: "coordinator", time: { created: Date.now() } },
+    parts: [{ type: "tool", tool: "task", callID: "initial-review", state: { status: "completed", input: initial.args,
+      metadata: { sessionId: "reviewer" }, output: "FINDINGS\nExplain the validation coverage" } }] }];
+  hostMessages.reviewer = [{ info: { role: "assistant", sessionID: "reviewer" },
+    parts: [{ type: "text", text: "FINDINGS\nExplain the validation coverage" }] }];
+  await hooks["tool.execute.after"]!({ tool: "task", sessionID: "coordinator", callID: "initial-review" },
+    { output: "FINDINGS\nExplain the validation coverage", metadata: { sessionId: "reviewer" } });
+  const cold = await create();
+  const verification = { args: await review(cold, "check.mjs rejects any result other than ready; observed exit 0") };
+  await cold["tool.execute.before"]!({ tool: "task", sessionID: "coordinator", callID: "verification-review" }, verification);
+  assert.match(verification.args.prompt, /^review_phase: verification$/m);
+  assert.equal(/^candidate_id: (.+)$/m.exec(verification.args.prompt)![1], /^candidate_id: (.+)$/m.exec(initial.args.prompt)![1]);
+  assert.equal(hostMessages.root, undefined, "the completed review belongs to the nested Coordinator, not the root");
 }));
 
 test("host parent-link repair repins the admitted handoff before accepted-unit continuation", async () => fixture(async root => {
