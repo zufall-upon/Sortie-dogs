@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
+import { join, resolve } from "node:path";
 import test from "node:test";
 
 import V2Plugin, {
@@ -9,6 +11,8 @@ import V2Plugin, {
 } from "../dist/plugin/v2.js";
 import type { OpenCodeHooks, OpenCodePlugin } from "../dist/plugin/index.js";
 import { collectRunMetrics } from "../dist/plugin/run-metrics.js";
+import { terminalCancelledMissionChildren } from "../dist/plugin/profiled.js";
+import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
 
 function contextFixture() {
   const history: Record<string, unknown>[] = [{
@@ -287,6 +291,92 @@ test("V2 report accounting traverses native pages and retains child model, tool 
     assert.equal(incomplete?.debrief?.complete, false);
   } finally { cleanup?.(); }
 });
+
+async function registeredHost(run: (host: { requests: URL[]; pid: number; repeated: boolean; malformed: boolean;
+  fail: boolean; noRegistration(): Promise<void>; register(pid: number): Promise<void> }) => Promise<void>) {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const area = await mkdtemp(resolve("_testenv/v2-native-history-"));
+  const prior = process.env.XDG_STATE_HOME;
+  const requests: URL[] = [];
+  const host = { requests, pid: process.pid, repeated: false, malformed: false, fail: false,
+    noRegistration: () => rm(join(area, "opencode/service.json")), register: async (pid: number) => {
+      const address = server.address() as { port: number };
+      await writeFile(join(area, "opencode/service.json"), JSON.stringify({ id: "fixture", version: "2.0.18",
+        pid, url: `http://127.0.0.1:${address.port}`, password: "fixture-password" }));
+    } };
+  const server = createServer((request, response) => {
+    const url = new URL(request.url!, "http://localhost");
+    requests.push(url);
+    if (request.headers.authorization !== `Basic ${Buffer.from("opencode:fixture-password").toString("base64")}`) {
+      response.writeHead(401).end(); return;
+    }
+    response.setHeader("content-type", "application/json");
+    if (url.pathname === "/api/info") { response.end(JSON.stringify({ pid: host.pid, version: "2.0.18" })); return; }
+    if (host.fail) { response.writeHead(503).end(JSON.stringify({ message: "unavailable" })); return; }
+    if (host.malformed) { response.end(JSON.stringify({ data: [] })); return; }
+    const parent = url.searchParams.get("parentID"), cursor = url.searchParams.get("cursor");
+    const ids = parent !== "ses_coordinator" ? [] : cursor === null ? ["ses_worker"] : cursor === "page-2" ? ["ses_reviewer"] : [];
+    response.end(JSON.stringify({ data: ids.map(id => ({ id, parentID: parent })),
+      cursor: { next: parent !== "ses_coordinator" ? null : host.repeated || cursor === null ? "page-2" : cursor === "page-2" ? "end" : null } }));
+  });
+  await new Promise<void>(done => server.listen(0, "127.0.0.1", done));
+  try {
+    await mkdir(join(area, "opencode"));
+    await host.register(process.pid);
+    process.env.XDG_STATE_HOME = area;
+    await run(host);
+  } finally {
+    if (prior === undefined) delete process.env.XDG_STATE_HOME; else process.env.XDG_STATE_HOME = prior;
+    server.closeAllConnections();
+    await new Promise<void>((done, reject) => server.close(error => error ? reject(error) : done()));
+    await rm(area, { recursive: true, force: true });
+  }
+}
+
+test("V2 plugin without session.list proves terminal lineage through its owning service", async () => registeredHost(async host => {
+  const fixture = contextFixture();
+  const sessions = {
+    ses_coordinator: { id: "ses_coordinator", parentID: "ses_root", agent: "dogs-coordinator", outcome: "succeeded" },
+    ses_worker: { id: "ses_worker", parentID: "ses_coordinator", agent: "dog-worker-v010", outcome: "succeeded" },
+    ses_reviewer: { id: "ses_reviewer", parentID: "ses_coordinator", agent: "dog-reviewer-v010", outcome: "succeeded" },
+  };
+  fixture.context.session.get = async ({ sessionID }) => sessions[sessionID as keyof typeof sessions];
+  let client: any;
+  const cleanup = await createSortieDogsV2Plugin(async input => { client = input.client; return {}; }).setup(fixture.context);
+  try {
+    const proof = () => terminalCancelledMissionChildren(V010_RUNTIME_PROFILE, "ses_root",
+      { operatorSessionID: "ses_coordinator", units: [{ childSessionID: "ses_worker" }] } as never,
+      { reserved_units: 0 }, { get: async id => (await client.session.get({ path: { id } })).data,
+        children: async id => (await client.session.children({ path: { id } })).data });
+    assert.deepEqual(await proof(), ["ses_worker"]);
+    const pages = host.requests.filter(url => url.pathname === "/api/session" && url.searchParams.get("parentID") === "ses_coordinator");
+    assert.deepEqual(pages.map(url => url.searchParams.get("cursor")), [null, "page-2", "end"]);
+    assert.equal(pages[0]!.searchParams.get("order"), "asc");
+    assert.equal(pages[1]!.searchParams.get("order"), null);
+    sessions.ses_reviewer.outcome = "running";
+    await assert.rejects(proof(), /mission-superseded-worker-not-terminal/);
+    host.repeated = true;
+    await assert.rejects(proof(), /v2-history-cursor-repeated/);
+    host.repeated = false; host.malformed = true;
+    await assert.rejects(proof());
+    host.malformed = false; host.fail = true;
+    await assert.rejects(proof());
+  } finally { cleanup?.(); }
+}));
+
+test("V2 child history refuses missing or foreign service registrations", async () => registeredHost(async host => {
+  let client: any;
+  const fixture = contextFixture();
+  const cleanup = await createSortieDogsV2Plugin(async input => { client = input.client; return {}; }).setup(fixture.context);
+  try {
+    host.pid = process.pid + 1;
+    await host.register(host.pid);
+    await assert.rejects(client.session.children({ path: { id: "ses_parent" } }), /v2-history-owning-service-unavailable/);
+    assert.equal(host.requests.some(url => url.pathname === "/api/session"), false);
+    await host.noRegistration();
+    await assert.rejects(client.session.children({ path: { id: "ses_parent" } }), /v2-history-owning-service-unavailable/);
+  } finally { cleanup?.(); }
+}));
 
 test("V2 server plugin registers tools and translates public hooks without changing the V1 entry", async () => {
   const fixture = contextFixture();
