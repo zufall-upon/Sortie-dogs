@@ -30,6 +30,10 @@ export interface RuntimeBridge {
     command: string): Promise<boolean>;
   /** A mission's hash-pinned Task has already passed durable run/acceptance admission. */
   ownsMissionDispatch?(rootSessionID: string, callID: string, taskID: string): Promise<boolean>;
+  /** Durable operator dispatch identity survives adapter reload and missed after hooks. */
+  recoverMissionDispatch?(rootSessionID: string, taskID: string): Promise<{
+    callID: string; childSessionID?: string; cancelled: boolean;
+  } | undefined>;
   onHostHandoffRepaired?(rootSessionID: string, taskID: string, handoffPath: string,
     original: string, repaired: string): Promise<void>;
   allowsInvestigativeShell?(sessionID: string): Promise<boolean>;

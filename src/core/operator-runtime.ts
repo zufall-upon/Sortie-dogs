@@ -216,6 +216,8 @@ export interface OperatorState {
   operatorCallID: string | null;
   operatorSessionID: string | null;
   dispatched: number;
+  /** Native interrupt acknowledgements for this cancelled run, persisted before settlement. */
+  stoppedChildren?: string[];
   units: UnitState[];
   decision: string | null;
   receipt: GoalTerminalReceipt | null;
@@ -802,8 +804,8 @@ export class OperatorRuntime {
   }
   /** Mission authority is supplied only by the owning profile, never by a model-authored plan. */
   prepareMission(root: string, raw: unknown, dispatcher?: { sessionID: string; callID: string }, supersededRunID?: string,
-    terminalChildren: readonly string[] = []): Promise<OperatorState> {
-    return this.serial(root, () => this.prepareOnce(root, raw, undefined, { dispatcher, supersededRunID, terminalChildren }));
+    terminalChildren: readonly string[] = [], replaceRequirements = false): Promise<OperatorState> {
+    return this.serial(root, () => this.prepareOnce(root, raw, undefined, { dispatcher, supersededRunID, terminalChildren, replaceRequirements }));
   }
   /** Stage a settled mission's replacement; rejected preparation never cancels the usable run. */
   replanMission(root: string, runID: string, raw: unknown, dispatcher?: { sessionID: string; callID: string }): Promise<OperatorState> {
@@ -811,7 +813,7 @@ export class OperatorRuntime {
   }
   private async prepareOnce(root: string, raw: unknown, scopeApprovalTurnID?: string,
     mission?: { dispatcher?: { sessionID: string; callID: string }; supersededRunID?: string;
-      terminalChildren?: readonly string[]; replaceRunID?: string }): Promise<OperatorState> {
+      terminalChildren?: readonly string[]; replaceRunID?: string; replaceRequirements?: boolean }): Promise<OperatorState> {
     const previous = await this.read(root);
     let immutableReplacement = previous?.phase === "cancelled" &&
       [ACCEPTANCE_REMEDIATION_DECISION, REVIEW_REMEDIATION_DECISION].includes(previous.decision ?? "") && record(raw)
@@ -869,12 +871,12 @@ export class OperatorRuntime {
       if (previous.planHash === validatedPlanHash) return previous;
       throw new Error("operator-active-contract-immutable");
     }
-    // Cancellation stops execution, not the accepted user order. A replacement
-    // plan must carry the original ordered criteria; only a completed root clears them.
+    // Same-request continuation retains acceptance. Explicit user replacement keeps the
+    // predecessor's history/spend but uses the current requirements instead of an old prefix.
     // Treat the predecessor as retired only in this staged replacement. Its durable state remains
     // intact through schema checks, control writes and archive creation, until save atomically switches it.
     const parent = replanning ? { ...previous!, phase: "cancelled" as const, decision: "mission-replan" }
-      : (!superseding || retainAcceptance) && previous?.phase === "cancelled" ? previous : undefined;
+      : (!superseding || (retainAcceptance && !mission?.replaceRequirements)) && previous?.phase === "cancelled" ? previous : undefined;
     if (parent && ["explicit-cancellation", "agent-changed"].includes(parent.decision ?? "")) {
       const cancelled = parent.units.flatMap(unit => (parent.decision === "agent-changed" || unit.status === "cancelled") && unit.childSessionID !== null
         ? [unit.childSessionID] : []);
@@ -1579,6 +1581,14 @@ export class OperatorRuntime {
   }
   interrupted(root: string, reason: string): Promise<readonly string[]> {
     return this.serial(root, () => this.interruptedOnce(root, reason));
+  }
+  recordStoppedChild(root: string, runID: string, child: string): Promise<void> {
+    return this.serial(root, async () => {
+      const state = await this.required(root);
+      if (state.runID !== runID || state.phase !== "cancelled") return;
+      state.stoppedChildren = [...new Set([...(state.stoppedChildren ?? []), child])];
+      await this.save(state);
+    });
   }
   private async interruptedOnce(root: string, reason: string): Promise<readonly string[]> {
     const state = await this.read(root);

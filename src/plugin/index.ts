@@ -138,6 +138,7 @@ import type { RuntimeBridge } from "./runtime-bridge.js";
 import { evidenceFromObservedExecution } from "../core/observed-goal-evidence.js";
 import { receiptBoundTerminalText } from "./receipt-presentation.js";
 import { protectedSnapshot, refreshProtectedSnapshot } from "./protected-snapshot.js";
+import { settledUnitUsage } from "./unit-usage.js";
 import { goalCompletionReadiness, type CompletionReadiness } from "./goal-completion.js";
 
 const INPUT_LIMITS = { config: 64 * 1024, manifest: 512 * 1024, handoff: 2 * 1024 * 1024, parallel: 512 * 1024 } as const;
@@ -1949,6 +1950,26 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       ...(outcome === undefined ? {} : { outcome }), ...(immutableRef === undefined ? {} : { immutableRef }), fresh });
   }
 
+  async function nativeUnitCost(child: string | undefined, startedAt?: string): Promise<number | null> {
+    if (!child || !input.client?.session?.messages) return null;
+    try {
+      const response = await input.client.session.messages({ path: { id: child }, query: { directory: input.directory } });
+      return isRecord(response) && Array.isArray(response.data) ? settledUnitUsage(response.data, startedAt) : null;
+    } catch { return null; }
+  }
+  async function reconcileUnitUsage(root: string): Promise<void> {
+    const ledger = await goalLedger(root), snapshot = await ledger.readGoal();
+    const reconciled = new Set(snapshot.records.flatMap(({ event }) => event.kind === "unit.usage-reconciled" ? [event.reservation_id] : []));
+    for (const { event } of snapshot.records) {
+      if (event.kind !== "unit.settled" || event.goal_id !== snapshot.state.goal_id || event.cost_usd !== null ||
+          !event.native_session_id || reconciled.has(event.reservation_id)) continue;
+      const cost = await nativeUnitCost(event.native_session_id, event.native_started_at);
+      if (cost === null) continue;
+      await ledger.appendGoal({ kind: "unit.usage-reconciled", at: new Date().toISOString(), goal_id: event.goal_id,
+        reservation_id: event.reservation_id, native_session_id: event.native_session_id,
+        cost_usd: cost, source: "native-usage-price-table" });
+    }
+  }
   async function recoverCompletedGoalReservations(sessionID: string): Promise<void> {
     const root = goalRoot(sessionID);
     const active = goalReservationRecoveries.get(root);
@@ -1959,7 +1980,29 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       // A terminal host Task is authoritative even when a missed after hook left process-local
       // dispatch accounting behind. Treating that memory as live made the reservation permanent.
       const pending = state.outstanding_reservations;
-      if (pending.length === 0 || state.goal_id === null || input.client?.session?.messages === undefined) return;
+      for (const reservation of pending) {
+        const dispatch = await input.runtimeBridge?.recoverMissionDispatch?.(root, reservation.unit_id);
+        if (!dispatch || !state.goal_id || goalFingerprint({ goal_id: state.goal_id, unit_id: reservation.unit_id,
+          call_id: dispatch.callID }) !== reservation.reservation_id) continue;
+        const startedAt = (await ledger.readGoal()).records.find(({ event }) => event.kind === "dispatch.reserved" &&
+          event.reservation_id === reservation.reservation_id)?.event.at;
+        await ledger.appendGoal({ kind: "unit.settled", at: new Date().toISOString(),
+          reservation_id: reservation.reservation_id,
+          receipt_id: goalFingerprint({ recovered_host_task: dispatch.callID, reservation: reservation.reservation_id }),
+          goal_id: state.goal_id, unit_id: reservation.unit_id,
+          disposition: dispatch.cancelled ? "cancelled" : "failed", result_class: dispatch.cancelled ? "interrupted" : "process-defect",
+          progress_fingerprint: null, evidence: [], elapsed_ms: null,
+          cost_usd: await nativeUnitCost(dispatch.childSessionID, startedAt),
+          ...(dispatch.childSessionID ? { native_session_id: dispatch.childSessionID, native_started_at: startedAt } : {}) });
+        // A missed after hook closes execution, but cannot turn unobserved validation into acceptance.
+        await input.runtimeBridge?.onSerialSettlement?.({ rootSessionID: root, callID: dispatch.callID,
+          unitID: reservation.unit_id, ...(dispatch.childSessionID ? { childSessionID: dispatch.childSessionID } : {}),
+          disposition: dispatch.cancelled ? "cancelled" : "failed", resultClass: dispatch.cancelled ? "interrupted" : "process-defect", evidence: [] });
+        goalReservations.delete(dispatch.callID);
+        if (finishCoordinatorTask(root, dispatch.callID)) fastLane.workerCompleted(root);
+      }
+      const remaining = (await ledger.readGoal()).state.outstanding_reservations;
+      if (remaining.length === 0 || state.goal_id === null || input.client?.session?.messages === undefined) return;
       const messages = input.client.session.messages as unknown as (request: {
         path: { id: string }; query: { directory: string };
       }) => Promise<unknown>;
@@ -2028,7 +2071,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         } else if (mission.submission?.status !== "blocked" || !candidates[0]!.depthRefused) return undefined;
         return candidates[0]!.callID;
       }
-      for (const reservation of pending) {
+      for (const reservation of remaining) {
         const matches: Array<{ callID: string; status: string; elapsed: number | null }> = [];
         for (const message of data) {
           if (!isRecord(message) || !isRecord(message.info) || message.info.role !== "assistant" ||
@@ -2629,10 +2672,12 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   async function settleGoalDispatch(callID: string, output: TaskResultRepairOutput): Promise<void> {
     const reservation = goalReservations.get(callID);
     if (reservation === undefined) return;
-    goalReservations.delete(callID);
     const ledger = await goalLedger(reservation.root);
     const state = (await ledger.readGoal()).state;
-    if (state.goal_id === null) return;
+    if (state.goal_id === null || !state.outstanding_reservations.some(item => item.reservation_id === reservation.reservationID)) {
+      goalReservations.delete(callID);
+      return;
+    }
     const outputText = typeof output.output === "string" ? output.output : "";
     // Task text and Task result metadata are model/child-controlled. Only an exact declared command
     // observed in the child tool hooks with a native host exit may produce goal evidence.
@@ -2677,7 +2722,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       goal_id: state.goal_id, unit_id: reservation.unitID,
       disposition: validated ? "succeeded" : interrupted ? "cancelled" : "failed", result_class: resultClass,
       progress_fingerprint: progress ? goalFingerprint(acceptedEvidence) : null,
-      evidence: acceptedEvidence, elapsed_ms: Math.max(0, Date.now() - reservation.started), cost_usd: null });
+      evidence: acceptedEvidence, elapsed_ms: Math.max(0, Date.now() - reservation.started),
+      cost_usd: await nativeUnitCost(childSessionID, new Date(reservation.started).toISOString()),
+      ...(childSessionID ? { native_session_id: childSessionID, native_started_at: new Date(reservation.started).toISOString() } : {}) });
+    goalReservations.delete(callID);
     await input.runtimeBridge?.onSerialSettlement?.({
       rootSessionID: reservation.root, callID, unitID: reservation.unitID,
       ...(childSessionID === undefined ? {} : { childSessionID }),
@@ -8057,6 +8105,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       // Planning must account for terminal native Tasks before reserving new units.
       // Otherwise a cancelled predecessor keeps a stale unit reservation across missions.
       await recoverCompletedGoalReservations(root);
+      await reconcileUnitUsage(root);
       const state = await currentGoal(root);
       if (state.goal_id === null || state.budget === null) return null;
       const reserved = state.outstanding_reservations.length;
@@ -8064,7 +8113,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         reserved_units: reserved, remaining_units: Math.max(0, state.budget.max_units - state.consumed_units - reserved),
         settled_cost_usd: state.consumed_cost_usd, cost_limit_usd: state.budget.cost_usd,
         cost_status: state.consumed_cost_usd === null ? "unknown-usage" : reserved > 0 ? "in-flight-not-final" : "settled",
-        cost_note: "Goal Worker ledger only; excludes unfinalized native requests, orchestration/review and external campaign spend. Zero settled cost does not mean free execution." };
+        cost_source: "native-usage-price-table",
+        cost_note: "Worker token-price estimates from complete native usage; missing requests remain unknown and are reconciled on later status. Excludes orchestration/review and external campaign spend. Zero settled cost does not mean free execution." };
     },
     registerGoalDeclaration: async (root, prompt, missionRevision) => {
       if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) throw new Error("operator-coordinator-required");
@@ -8221,6 +8271,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       fastLane.grantSerialUnits(sessionID, maximum);
     },
     cancelChildren: async sessionID => {
+      await recoverCompletedGoalReservations(sessionID);
       for (const [callID, reservation] of [...goalReservations]) {
         if (reservation.root !== sessionID) continue;
         await settleGoalDispatch(callID, { status: "cancelled", metadata: { status: "cancelled" }, output: "Owned dispatch cancelled by its coordinator." });

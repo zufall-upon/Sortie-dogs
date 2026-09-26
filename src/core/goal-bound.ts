@@ -128,7 +128,11 @@ export type GoalFlightEvent =
       /** Missing on pre-v0.9.1 ledgers and therefore interpreted as an acceptance result. */
       readonly result_class?: "acceptance" | "process-defect" | "interrupted";
       readonly progress_fingerprint: string | null; readonly evidence: readonly GoalEvidence[];
-       readonly elapsed_ms: number | null; readonly cost_usd: number | null })
+        readonly elapsed_ms: number | null; readonly cost_usd: number | null;
+        readonly native_session_id?: string; readonly native_started_at?: string })
+  | (GoalEventBase & { readonly kind: "unit.usage-reconciled"; readonly goal_id: string;
+        readonly reservation_id: string; readonly native_session_id: string; readonly cost_usd: number;
+        readonly source: "native-usage-price-table" })
   | (GoalEventBase & { readonly kind: "unit.evidence-reconciled"; readonly goal_id: string; readonly unit_id: string;
       readonly previous_receipt_id: string; readonly evidence: readonly GoalEvidence[] })
   | (GoalEventBase & { readonly kind: "validation.admission"; readonly goal_id: string; readonly reservation_id: string;
@@ -314,6 +318,7 @@ export function reduceGoalFlight(records: readonly GoalFlightEventRecord[]): Goa
   let legacyResetRevision = false;
   let previous: string | null = null;
   const processDefects = new Map<string, { unitID: string; revision: number; epoch: number }>();
+  const unitCosts = new Map<string, { cost: number | null; session?: string }>();
   const validationAdmissions = new Map<string, Extract<GoalFlightEvent, { readonly kind: "validation.admission" }>>();
   const validationSettlements = new Map<string, Extract<GoalFlightEvent, { readonly kind: "validation.settled" }>>();
   const reopenedValidationEvidence = new Set<string>();
@@ -326,6 +331,7 @@ export function reduceGoalFlight(records: readonly GoalFlightEventRecord[]): Goa
     if (event.kind === "goal.reported") continue;
     requireState(instant(event.at), "invalid", "Goal event timestamp is invalid.");
     if (event.kind === "goal.accepted") {
+      unitCosts.clear();
       requireState(state.goal_id === null || state.phase === "terminal" || state.phase === "stopped",
         "transition", "An active goal already owns this root.");
       requireState(text(event.goal_id) && HASH.test(event.acceptance_fingerprint) && text(event.origin_user_message_id) &&
@@ -415,6 +421,7 @@ export function reduceGoalFlight(records: readonly GoalFlightEventRecord[]): Goa
         : state.no_progress_results;
       const elapsed = state.consumed_time_ms === null || event.elapsed_ms === null ? null : state.consumed_time_ms + event.elapsed_ms;
       const cost = state.consumed_cost_usd === null || event.cost_usd === null ? null : state.consumed_cost_usd + event.cost_usd;
+      unitCosts.set(event.reservation_id, { cost: event.cost_usd, session: event.native_session_id });
       state = { ...state, consumed_units: state.consumed_units + 1, consumed_time_ms: elapsed, consumed_cost_usd: cost,
         no_progress_results: nextNoProgress, replan_required: nextNoProgress >= 2,
         outstanding_reservations: state.outstanding_reservations.filter((entry) => entry.reservation_id !== event.reservation_id),
@@ -424,6 +431,16 @@ export function reduceGoalFlight(records: readonly GoalFlightEventRecord[]): Goa
       if (event.result_class === "process-defect" && event.evidence.length === 0 && event.disposition !== "cancelled") {
         processDefects.set(event.receipt_id, { unitID: event.unit_id, revision: state.revision, epoch: state.scope_epoch });
       }
+    } else if (event.kind === "unit.usage-reconciled") {
+      const prior = unitCosts.get(event.reservation_id);
+      requireState(event.goal_id === state.goal_id && prior !== undefined && prior.session === event.native_session_id &&
+        event.source === "native-usage-price-table" &&
+        Number.isFinite(event.cost_usd) && event.cost_usd >= 0 &&
+        (prior.cost === null || prior.cost === event.cost_usd), "transition", "Usage reconciliation must identify one settled native unit.");
+      unitCosts.set(event.reservation_id, { cost: event.cost_usd, session: event.native_session_id });
+      const costs = [...unitCosts.values()];
+      state = { ...state, consumed_cost_usd: costs.some(item => item.cost === null) ? null
+        : costs.reduce((sum, item) => sum + item.cost!, 0) };
     } else if (event.kind === "unit.evidence-reconciled") {
       const old = processDefects.get(event.previous_receipt_id);
       requireState(state.phase === "active" && state.receipt === null && old?.unitID === event.unit_id &&
