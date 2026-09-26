@@ -1037,14 +1037,39 @@ export function readDirectoryUsage(directory, databasePath = usageDatabasePath()
   return result;
 }
 
+export async function waitForBenchmarkModelRoute(server, { fetchModel = fetch, timeoutMs = 20_000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  const authorization = `Basic ${Buffer.from(`opencode:${server.env.OPENCODE_SERVER_PASSWORD}`).toString("base64")}`;
+  do {
+    const response = await fetchModel(`${server.url}/api/model`, {
+      headers: { authorization }, signal: AbortSignal.timeout(5_000),
+    });
+    if (response.ok) {
+      const models = (await response.json()).data;
+      if (models?.some(model => model.providerID === "openai" && model.id === "gpt-6-sol" &&
+        model.variants?.some(variant => variant.id === "xhigh"))) return;
+    }
+    await new Promise(resolveWait => setTimeout(resolveWait, 250));
+  } while (Date.now() < deadline);
+  throw new Error("candidate-v2-model-route-unavailable:openai/gpt-6-sol#xhigh");
+}
+
 export async function runOpenCode(options, dependencies = {}) {
   ensure(process.platform !== "win32", "live-mode-requires-wsl-login-shell");
   const readUsage = dependencies.readUsage ?? readDirectoryUsage;
   const watchdogSeconds = options.watchdogSeconds ?? DEFAULT_WATCHDOG_SECONDS;
   const startedAt = options.startedAt ?? Date.now();
+  const server = await (dependencies.startServer ?? startV2ReleaseServer)(options.workspace, options.environment,
+    { inheritEnvironment: false });
+  try {
+    await (dependencies.waitForModelRoute ?? waitForBenchmarkModelRoute)(server);
+  } catch (error) {
+    await server.stop();
+    throw error;
+  }
   const command = [
     "exec", "opencode", "run",
-    "--standalone",
+    "--server", shellQuote(server.url),
     "--format", "json",
     "--print-logs",
     "--agent", shellQuote(options.agent),
@@ -1053,7 +1078,8 @@ export async function runOpenCode(options, dependencies = {}) {
   ].join(" ");
   const child = spawn("bash", ["-ic", command], {
     cwd: options.workspace,
-    env: { ...options.environment, PWD: options.workspace },
+    env: { ...options.environment, OPENCODE_SERVER_PASSWORD: server.env.OPENCODE_SERVER_PASSWORD,
+      PWD: options.workspace },
     detached: true,
     shell: false,
     stdio: ["ignore", "pipe", "pipe"],
@@ -1119,7 +1145,9 @@ export async function runOpenCode(options, dependencies = {}) {
   try {
     await recordWatchdog("started");
   } catch {
-    const cleanupEstablished = await terminateProcessGroup(child.pid);
+    const processStopped = await terminateProcessGroup(child.pid);
+    const serverStopped = await server.stop().then(() => true, () => false);
+    const cleanupEstablished = processStopped && serverStopped;
     return {
       exit: 1,
       signal: null,
@@ -1195,7 +1223,9 @@ export async function runOpenCode(options, dependencies = {}) {
     }, watchdogSeconds * 1000);
   });
   cleanupPromise ??= terminateProcessGroup(child.pid);
-  const cleanupEstablished = await cleanupPromise;
+  const processStopped = await cleanupPromise;
+  const serverStopped = await server.stop().then(() => true, () => false);
+  const cleanupEstablished = processStopped && serverStopped;
   try { usage = readUsage(options.workspace, options.databasePath); } catch { usage = { usd: usage.usd, requests: usage.requests, unpriced: ["usage-read-failed"] }; }
   await recordWatchdog("exited").catch(() => undefined);
   // Keep the primary stop cause; incomplete usage is reported by usageComplete.
