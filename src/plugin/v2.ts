@@ -1,6 +1,7 @@
 import type { OpenCodeHooks, OpenCodePlugin } from "./index.js";
 import { SortieDogsV010Plugin } from "./profiled.js";
 import { bindMissionProgress } from "./mission-progress.js";
+import { owningServiceSessionList } from "./v2-session-history.js";
 
 type JsonObject = Record<string, unknown>;
 type Registration = { dispose(): Promise<void> | void };
@@ -166,6 +167,7 @@ async function nativePages(fetch: (cursor?: string) => Promise<unknown>): Promis
 
 function legacyClient(context: OpenCodeV2Context): JsonObject {
   const directory = context.location.directory;
+  const list = owningServiceSessionList();
   const session = {
     get: async (request: unknown) => {
       const id = sessionID(request);
@@ -180,12 +182,14 @@ function legacyClient(context: OpenCodeV2Context): JsonObject {
       return { data: id === undefined || wanted === undefined ? undefined
         : (await legacyMessages(context, id)).find(message => record(message.info) && message.info.id === wanted) };
     },
-    ...(context.session.list ? { children: async (request: unknown) => {
+    children: async (request: unknown) => {
       const id = sessionID(request);
       if (id === undefined) throw new Error("v2-history-parent-missing");
-      return { data: await nativePages(cursor => context.session.list!({ parentID: id, limit: 100,
-        ...(cursor ? { cursor } : { order: "asc" }) })) };
-    } } : {}),
+      return { data: await nativePages(cursor => {
+        const input = { parentID: id, limit: 100, ...(cursor ? { cursor } : { order: "asc" as const }) };
+        return context.session.list ? context.session.list(input) : list(input);
+      }) };
+    },
     abort: async (request: unknown) => {
       const id = sessionID(request);
       return id === undefined ? undefined : await context.session.interrupt({ sessionID: id, resume: false });
