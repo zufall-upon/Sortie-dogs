@@ -467,7 +467,7 @@ export const runtimeAssets: readonly RuntimeAsset[] = Object.freeze([
       content = content.replace("mode: subagent\n", "mode: subagent\nmodel: openai/gpt-6-sol#xhigh\n");
     }
     if (asset.name === "dog-worker" || asset.name === "dog-luna-worker") {
-      content = content.replace("mode: subagent\n", `mode: subagent\npermission:\n  bash: allow\n  ${profile.toolPrefix}bind_write_gate: allow\n  ${profile.toolPrefix}release_write_gate: allow\ntools:\n  "sortie_*": false\n  ${profile.toolPrefix}bind_write_gate: true\n  ${profile.toolPrefix}release_write_gate: true\n`);
+      content = content.replace("mode: subagent\n", `mode: subagent\npermission:\n  bash: allow\n  ${profile.toolPrefix}bind_write_gate: allow\n  ${profile.toolPrefix}release_write_gate: allow\n  ${profile.toolPrefix}operator_status: allow\ntools:\n  "sortie_*": false\n  ${profile.toolPrefix}bind_write_gate: true\n  ${profile.toolPrefix}release_write_gate: true\n  ${profile.toolPrefix}operator_status: true\n`);
       content += `\n## Root-approved unit coverage\nWhen the immutable handoff contains ext["sortie-dogs/unit-coverage"], its indices identify this unit's assigned criteria within the unchanged global acceptance ledger. Prove those assigned criteria and preserve all global constraints. Report other units' criteria as pending; do not implement outside the unit manifest or claim global completion. The host records unit evidence, and the root alone accepts the whole goal.\n`;
       content += EXISTING_SURFACE_COVERAGE_WORKER;
     }

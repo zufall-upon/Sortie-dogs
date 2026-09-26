@@ -111,3 +111,53 @@ test("mission review source ignores the shared tool environment", async () => {
     assert.doesNotMatch(after.excerpt, /\.sortie-env/u);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+test("declared ignored evidence is excerpted and invalidates a review when its bytes change", async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const root = await mkdtemp(join(resolve("_testenv"), "mission-artifacts-"));
+  try {
+    await git("git", ["init", "--quiet"], { cwd: root });
+    await writeFile(join(root, ".gitignore"), "_testenv/\n");
+    await mkdir(join(root, "_testenv"));
+    await writeFile(join(root, "_testenv", "result.json"), '{"runtime":{"pid":22636},"review":"FINDINGS"}\n');
+    await writeFile(join(root, "_testenv", "unrelated.json"), "not part of this candidate");
+    const run = { units: [{ unit: { write: ["_testenv/result.json"] }, hashes: [] }] } as never;
+    const first = await missionReviewSource(root, run);
+    assert.match(first.excerpt, /"pid":22636/);
+    assert.doesNotMatch(first.excerpt, /unrelated/);
+    await writeFile(join(root, "_testenv", "result.json"), '{"runtime":{"pid":42},"review":"FINDINGS"}\n');
+    const changed = await missionReviewSource(root, run);
+    assert.notEqual(changed.fingerprint, first.fingerprint);
+    assert.match(changed.excerpt, /"pid":42/);
+    await rm(join(root, "_testenv", "result.json"));
+    assert.notEqual((await missionReviewSource(root, run)).fingerprint, changed.fingerprint);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("committed candidates still supply current source and large artifacts expose truncation", async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const root = await mkdtemp(join(resolve("_testenv"), "mission-committed-"));
+  try {
+    await git("git", ["init", "--quiet"], { cwd: root });
+    await git("git", ["config", "user.email", "test@example.invalid"], { cwd: root });
+    await git("git", ["config", "user.name", "test"], { cwd: root });
+    await writeFile(join(root, "source.js"), 'export const result = "validated";\n');
+    await git("git", ["add", "source.js"], { cwd: root });
+    await git("git", ["commit", "--quiet", "-m", "candidate"], { cwd: root });
+    const source = await missionReviewSource(root, { units: [{ unit: { write: ["source.js"] }, hashes: [] }] } as never);
+    assert.match(source.excerpt, /current file: source.js/);
+    assert.match(source.excerpt, /validated/);
+    await writeFile(join(root, "large.txt"), "a".repeat(100_000));
+    const run = { units: [{ unit: { write: ["large.txt"] }, hashes: [] }] } as never;
+    const first = await missionReviewSource(root, run);
+    assert.ok(Buffer.byteLength(first.excerpt) < 25_000);
+    assert.match(first.excerpt, /EXCERPT TRUNCATED: large.txt/);
+    await writeFile(join(root, "large.txt"), "a".repeat(99_999) + "b");
+    assert.notEqual((await missionReviewSource(root, run)).fingerprint, first.fingerprint, "unshown tail bytes are still fingerprinted");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("read-only units do not accidentally collect an entire repository and ignored tooling", async () => {
+  const packet = await missionReviewSource("nonexistent-directory", { units: [{ unit: { write: [], read: ["src"] }, hashes: [] }] } as never);
+  assert.match(packet.excerpt, /Read-only units: no declared output files/);
+});

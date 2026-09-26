@@ -440,8 +440,14 @@ async function v010Config(root: string, global: boolean): Promise<{ entry: Insta
   }
   const options = { formattingOptions: { insertSpaces: true, tabSize: 2 } };
   const update = (path: (string | number)[], value: unknown) => { content = applyEdits(content, modify(content, path, value, options)); };
-  if (!(plugins as unknown[] | undefined)?.some(item => item === "sortie-dogs" ||
-      (item !== null && typeof item === "object" && (item as Record<string, unknown>).package === "sortie-dogs"))) {
+  const wrapper = `${prefix}plugins/sortie-dogs/index.js`;
+  const wrapperSource = await readFile(resolve(root, wrapper), "utf8").catch(() => "");
+  const localV2Wrapper = /^\s*export\s*\{\s*default\s*\}\s*from\s*["']sortie-dogs\/server["'];?\s*$/u.test(wrapperSource);
+  const registered = (plugins as unknown[] | undefined)?.some(item => {
+    const name = typeof item === "string" ? item : item !== null && typeof item === "object" ? (item as Record<string, unknown>).package : undefined;
+    return typeof name === "string" && /^sortie-dogs(?:@[^/]+)?$/u.test(name);
+  });
+  if (!localV2Wrapper && !registered) {
     update(["plugins"], [...(plugins as unknown[] | undefined ?? []), "sortie-dogs"]);
   }
   if (depth === undefined || (depth as number) < 2) update(["experimental", "subagent_depth"], 2);

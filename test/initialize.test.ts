@@ -144,6 +144,35 @@ test("v010 init reports a Coordinator model override without editing it", async 
   } finally { await clean(project); }
 });
 
+test("v010 init retains an automatically discovered V2 wrapper without adding a duplicate loader", async () => {
+  const root = await fixtureDirectory();
+  try {
+    for (const global of [false, true]) {
+      const project = join(root, global ? "global" : "project"), config = global ? project : join(project, ".opencode");
+      await mkdir(join(config, "plugins", "sortie-dogs"), { recursive: true });
+      const wrapper = 'export { default } from "sortie-dogs/server";\n';
+      await writeFile(join(config, "plugins", "sortie-dogs", "index.js"), wrapper);
+      const contents = '{\n  // fixed local package is loaded by plugins/sortie-dogs\n  "plugins": ["other-plugin"],\n  "experimental": { "subagent_depth": 2 }\n}\n';
+      await writeFile(join(config, "opencode.jsonc"), contents);
+      await (global ? initializeGlobal(project, "v010") : initializeProject(project, "v010"));
+      assert.equal(await readFile(join(config, "opencode.jsonc"), "utf8"), contents);
+      assert.equal(await readFile(join(config, "plugins", "sortie-dogs", "index.js"), "utf8"), wrapper);
+    }
+  } finally { await clean(root); }
+});
+
+test("v010 init respects explicitly version-pinned package registrations", async () => {
+  const root = await fixtureDirectory();
+  try {
+    for (const entry of ["sortie-dogs@0.12.8", { package: "sortie-dogs@0.12.8", options: { retain: true } }]) {
+      const source = JSON.stringify({ plugins: [entry], experimental: { subagent_depth: 2 } });
+      await writeFile(join(root, "opencode.json"), source);
+      await initializeGlobal(root, "v010");
+      assert.equal(await readFile(join(root, "opencode.json"), "utf8"), source);
+    }
+  } finally { await clean(root); }
+});
+
 test("v010 rejects malformed OpenCode configuration before installing assets", async () => {
   const project = await fixtureDirectory();
   try {

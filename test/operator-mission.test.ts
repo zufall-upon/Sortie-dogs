@@ -55,6 +55,11 @@ test("evidence-only reviews are bounded while defects and first gaps still block
   const packet = missionPacket(gap, { ...run, phase: "awaiting-acceptance" }) as { next_action: string; review: Record<string, unknown> };
   assert.match(packet.next_action, /do not re-implement/u);
   assert.deepEqual([packet.review.evidence_gap_reviews, packet.review.accepted], [1, false]);
+  const bounded = { ...gap, review: { ...gap.review, evidenceGapReviews: MISSION_EVIDENCE_GAP_REVIEW_LIMIT } };
+  const accepted = missionPacket(bounded, { ...run, phase: "awaiting-acceptance" }) as typeof packet;
+  assert.equal(accepted.review.passed, false);
+  assert.equal(accepted.review.permits_submission, true);
+  assert.match(accepted.next_action, /do not repeat passed validation or review/);
 }));
 
 test("mission captures exact original messages, generates IDs, and preserves requirements across restart", async () => fixture(async directory => {

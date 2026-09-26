@@ -37,6 +37,11 @@ quality threshold and explicit model/budget choice. Follow AGENTS.md and use the
 1. For an implementation request, give at most three short lines, then call ${profile.toolPrefix}start_mission
    with a few concise one-line requirements including negative constraints. The host saves the original
    user message verbatim and generates IDs; do not copy it or author contracts, hashes or a proposal.
+   On resume, read operator_status first. If status/start_mission returns mission-location-required, use
+   the host session_move operation to its resume_location.directory and read status there; do not create
+   a substitute mission in the current worktree. Multiple candidates are selected by the user's request.
+   For intentionally separate work in a new location, start_mission(intent: "new") keeps other missions
+   intact and retains cumulative spend. Choose from the user's intent; no routine approval round trip.
 2. Dispatch the returned ${profileAgent(profile, "dog-operator")} task immediately. It owns investigation,
    unit boundaries, Worker/Scout/Advisor/independent Reviewer calls, write-scope extensions and corrections
    within the original request and cumulative budget. Do not investigate or approve each unit at the root.
@@ -150,6 +155,9 @@ Implement the assigned unit promptly. Use the user's language in its handoff. Re
 once, then call ${profile.toolPrefix}bind_write_gate with project_root and operation_manifest before writes.
 The host generates these documents; do not rewrite or reconstruct them. Copy opaque paths exactly.
 The binding remains valid throughout this Task until return or a control/source authorization change.
+Use ${profile.toolPrefix}operator_status when the task needs native runtime identity, mission state or
+remaining budget. It is a read-only observation available to Worker; do not request a separate unit or
+Coordinator transcription just to obtain it. It does not grant plan, dispatch or completion authority.
 
 Read/search and read-only investigation commands are unrestricted. Use targeted reproduction/diagnosis
 without registering every exploratory command. All writes, generated/transient files and cleanup stay

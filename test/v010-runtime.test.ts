@@ -762,6 +762,10 @@ test("nested mission review and accepted work survive reload and agent-change ca
   const state = await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root");
   const manifestPath = state.units[0]!.manifestPath;
   const handoffPath = state.units[0]!.handoffPath;
+  const workerStatus = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "worker" }));
+  assert.equal(workerStatus.mission_id, started.mission_id, "a running Worker can directly observe its own mission");
+  assert.equal(workerStatus.run_id, state.runID);
+  await assert.rejects(hooks.tool!.sortie_v010_plan_units.execute({ units: [] }, { sessionID: "worker" }), /mission-controller-required/);
   await hooks["tool.execute.before"]!({ tool: "read", sessionID: "worker", callID: "handoff-read" },
     { args: { filePath: handoffPath } });
   await hooks["tool.execute.after"]!({ tool: "read", sessionID: "worker", callID: "handoff-read",
@@ -802,6 +806,11 @@ test("nested mission review and accepted work survive reload and agent-change ca
     parts: [{ type: "text", text: "FINDINGS\nExplain the validation coverage" }] }];
   await hooks["tool.execute.after"]!({ tool: "task", sessionID: "coordinator", callID: "initial-review" },
     { output: "FINDINGS\nExplain the validation coverage", metadata: { sessionId: "reviewer" } });
+  const duplicate = JSON.parse(await hooks.tool!.sortie_v010_review_mission.execute({ risk_tags: ["public-logic"],
+    traces: ["The Worker wrote and validated result.txt"] }, { sessionID: "coordinator" }));
+  assert.equal(duplicate.status, "review-recorded");
+  assert.equal(duplicate.task, undefined, "unchanged input must not schedule another paid review");
+  assert.equal(duplicate.review.verdict, "findings");
   const cold = await create();
   const verification = { args: await review(cold, "check.mjs rejects any result other than ready; observed exit 0") };
   await cold["tool.execute.before"]!({ tool: "task", sessionID: "coordinator", callID: "verification-review" }, verification);
