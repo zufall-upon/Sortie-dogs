@@ -90,7 +90,7 @@ export async function main(mode) {
   if (mode === 'full') args.push('test/helpers/full-test-runner.ts');
   else args.push('--import', './test/setup.ts', '--test', ...(mode === 'windows'
     ? readdirSync('test/windows').filter(p => p.endsWith('.test.ts')).map(p => `test/windows/${p}`)
-    : ['test/plugin.test.ts', 'test/continuation.test.ts', 'test/fast-lane.test.ts', 'test/swebench-lite-grader.test.ts', 'test/swebench-lite-supervisor.test.ts', 'test/swebench-lite-runner.test.ts']));
+    : ['test/plugin.test.ts', 'test/continuation.test.ts', 'test/fast-lane.test.ts', 'test/swebench-lite-grader.test.ts', 'test/swebench-lite-supervisor.test.ts', 'test/swebench-lite-runner.test.ts', 'test/swebench-test-reset.test.ts']));
   mkdirSync('_testenv', { recursive: true });
   return await run(process.execPath, args);
 }
