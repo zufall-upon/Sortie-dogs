@@ -4,7 +4,7 @@ import test from "node:test";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   acquireRunLock,
   createSupervisorState,
@@ -84,6 +84,7 @@ test("supervisor atomically claims each instance and writes ordered aggregate ou
     assert.equal(state.status, "completed");
     assert.equal(state.schema_version, 1);
     assert.equal(state.workers, 1);
+    assert.equal(state.limits.timeout_seconds, 1800);
     assert.deepEqual(state.policy, { attempts_per_instance: 1, retry_count: 0 });
     assert.deepEqual(state.instances.map(entry => entry.status), ["failed", "failed"]);
     const lines = (await readFile(output, "utf8")).trim().split("\n").map(line => JSON.parse(line));
@@ -482,12 +483,14 @@ test("detached supervisor completes after its launcher returns", { skip: process
   const root = await mkdtemp(join(tmpdir(), "swebench-supervisor-detached-"));
   try {
     const fakeRunner = join(root, "fake-runner.mjs");
+    const runnerTimeout = join(root, "runner-timeout-seconds.txt");
     await writeFile(fakeRunner, `import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 const args = process.argv.slice(2);
 const value = key => args[args.indexOf(key) + 1];
 const output = value("--output");
 const metadata = value("--metadata");
+await writeFile(${JSON.stringify(runnerTimeout)}, value("--timeout-seconds") ?? "missing");
 await mkdir(dirname(output), { recursive: true });
 await mkdir(dirname(metadata), { recursive: true });
 await writeFile(output, JSON.stringify({ instance_id: "example__project-1", model_name_or_path: "fake", model_patch: "" }) + "\\n");
@@ -515,7 +518,67 @@ await startDetachedSupervisor(${JSON.stringify({ manifest: manifestPath, runRoot
       if (state.status === "completed") break;
     }
     assert.equal(state?.status, "completed");
+    assert.equal(state?.limits.timeout_seconds, 1800);
+    assert.equal(await readFile(runnerTimeout, "utf8"), "1800");
     assert.equal((await readFile(output, "utf8")).includes("example__project-1"), true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("start CLI forwards and pins a non-default runner timeout", { skip: process.platform === "win32" }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "swebench-supervisor-timeout-"));
+  try {
+    const value = { ...manifestValue, instances: [manifestValue.instances[0]!] };
+    const manifestPath = join(root, "manifest.json");
+    const runRoot = join(root, "run");
+    const output = join(root, "predictions.jsonl");
+    const fakeRunner = join(root, "fake-runner.mjs");
+    const runnerTimeout = join(root, "runner-timeout-seconds.txt");
+    const statePath = join(runRoot, "supervisor-state.json");
+    const supervisorScript = fileURLToPath(new URL("../scripts/swebench-lite-supervisor.mjs", import.meta.url));
+    await writeFile(manifestPath, JSON.stringify(value));
+    await writeFile(fakeRunner, `import { mkdir, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
+const args = process.argv.slice(2);
+const value = key => { const index = args.indexOf(key); return index < 0 ? null : args[index + 1]; };
+const output = value("--output");
+const metadata = value("--metadata");
+await writeFile(${JSON.stringify(runnerTimeout)}, value("--timeout-seconds") ?? "missing");
+await mkdir(dirname(output), { recursive: true });
+await mkdir(dirname(metadata), { recursive: true });
+await writeFile(output, JSON.stringify({ instance_id: "example__project-1", model_name_or_path: "fake", model_patch: "" }) + "\\n");
+await writeFile(metadata, JSON.stringify({ execution: { spent_usd: 0, usage_complete: true }, results: [{ instance_id: "example__project-1", status: "failed", exit_code: 1 }] }));
+`);
+    const startExit = await new Promise<number>(resolvePromise => {
+      const child = spawn(process.execPath, [supervisorScript, "--start", "--manifest", manifestPath,
+        "--run-root", runRoot, "--output", output, "--cost-limit-usd", "5", "--timeout-seconds", "2400",
+        "--runner-script", fakeRunner], { stdio: "ignore" });
+      child.once("error", () => resolvePromise(1));
+      child.once("close", exit => resolvePromise(exit ?? 1));
+    });
+    assert.equal(startExit, 0);
+
+    let state;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      await new Promise(resolvePromise => setTimeout(resolvePromise, 50));
+      try { state = JSON.parse(await readFile(statePath, "utf8")); } catch { continue; }
+      if (state.status === "completed") break;
+    }
+    assert.equal(state?.status, "completed");
+    assert.equal(state?.limits.timeout_seconds, 2400);
+    assert.equal(await readFile(runnerTimeout, "utf8"), "2400");
+    const savedState = await readFile(statePath, "utf8");
+    await assert.rejects(runSupervisor(value, {
+      manifestPath,
+      runRoot,
+      output,
+      costLimitUsd: 5,
+      timeoutSeconds: 1800,
+      runnerScript: fakeRunner,
+      watchdog: false,
+    }, { allowWindows: true }), /supervisor-limits-changed/);
+    assert.equal(await readFile(statePath, "utf8"), savedState);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
