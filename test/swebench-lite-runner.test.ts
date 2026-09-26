@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { promisify } from "node:util";
 import test from "node:test";
-import { benchmarkEnvironment, benchmarkPythonCacheEnvironment, benchmarkInlineConfig, benchmarkPermissionPolicy, capturePatch, cloneInstance, createDryRunPlan, createInferenceManifest, createInstancePrompt, createLiveRunPlan, runOpenCode, readDirectoryUsage, formatPrediction, officialEvaluationImage, parseArguments, relocateOfficialEnvironment, retainUsageDatabase, runDryRun, runLive, seedIsolatedV2Credential, verifyCandidateAgent } from "../scripts/swebench-lite-runner.mjs";
+import { benchmarkEnvironment, benchmarkPythonCacheEnvironment, benchmarkInlineConfig, benchmarkPermissionPolicy, capturePatch, cloneInstance, createDryRunPlan, createInferenceManifest, createInstancePrompt, createLiveRunPlan, runOpenCode, waitForBenchmarkModelRoute, readDirectoryUsage, formatPrediction, officialEvaluationImage, parseArguments, relocateOfficialEnvironment, retainUsageDatabase, runDryRun, runLive, seedIsolatedV2Credential, verifyCandidateAgent } from "../scripts/swebench-lite-runner.mjs";
 import { runCandidatePreflight } from "../scripts/swebench-candidate-preflight.mjs";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -18,6 +18,29 @@ const instance = (instance_id: string, extra: Record<string, unknown> = {}) => (
   version: "1.0",
   environment_setup_commit: "fedcba9876543210fedcba9876543210fedcba98",
   ...extra,
+});
+
+const fakeReadyServer = {
+  startServer: async (_workspace: string, environment: Record<string, string>) => ({
+    url: "http://127.0.0.1:12345", env: environment, stop: async () => undefined,
+  }),
+  waitForModelRoute: async () => undefined,
+};
+
+test("benchmark waits for the selected model and variant before starting a V2 session", async () => {
+  let calls = 0;
+  await waitForBenchmarkModelRoute({ url: "http://127.0.0.1:12345", env: { OPENCODE_SERVER_PASSWORD: "fixture" } }, {
+    fetchModel: async (url: string, options: { headers: { authorization: string } }) => {
+      assert.equal(url, "http://127.0.0.1:12345/api/model");
+      assert.match(options.headers.authorization, /^Basic /u);
+      return { ok: true, json: async () => ({ data: calls++ === 0 ? [] : [{ providerID: "openai", id: "gpt-6-sol",
+        variants: [{ id: "xhigh" }] }] }) };
+    },
+  });
+  assert.equal(calls, 2);
+  await assert.rejects(waitForBenchmarkModelRoute({ url: "http://127.0.0.1:12345", env: { OPENCODE_SERVER_PASSWORD: "fixture" } }, {
+    fetchModel: async () => ({ ok: true, json: async () => ({ data: [] }) }), timeoutMs: 0,
+  }), /candidate-v2-model-route-unavailable/u);
 });
 
 test("isolated V2 runtime copies only its OAuth route into a private credential store", async () => {
@@ -84,10 +107,13 @@ test("a pending V2 assistant does not abort an in-flight priced request", { skip
     const result = await runOpenCode({ workspace: root, instanceId: "pending", agent: "dog-operator", prompt: "probe",
       environment: { HOME: root, PATH: `${join(root, "bin")}:${process.env.PATH ?? ""}` }, timeoutSeconds: 8,
       costLimitUsd: 1, watchdogSeconds: 5, startedAt: Date.now() }, {
+      ...fakeReadyServer,
       readUsage: () => ++calls < 3 ? { usd: 0, requests: 0, unpriced: ["pending-usage"] }
         : { usd: 0.1, requests: 1, unpriced: [] },
     });
     assert.equal(result.reason, "completed");
+    assert.match(result.command, /opencode run --server /u);
+    assert.doesNotMatch(result.command, /--standalone/u);
     assert.equal(result.usageComplete, true);
     assert.ok(calls >= 3);
   } finally { await rm(root, { recursive: true, force: true }); }
@@ -110,10 +136,12 @@ test("a transient terminal usage gap does not kill the run, but a persistent one
   try {
     let calls = 0;
     const transient = await runOpenCode(options({ timeoutSeconds: 8, unpricedGraceSeconds: 5 }), {
+      ...fakeReadyServer,
       readUsage: () => ++calls === 1 ? { usd: 0.1, requests: 1, unpriced: ["missing-usage"] } : { usd: 0.1, requests: 2, unpriced: [] },
     });
     assert.equal(transient.reason, "completed");
     const persistent = await runOpenCode(options({ timeoutSeconds: 8, unpricedGraceSeconds: 1 }), {
+      ...fakeReadyServer,
       readUsage: () => ({ usd: 0.1, requests: 1, unpriced: ["missing-usage"] }),
     });
     assert.equal(persistent.reason, "pricing-coverage-missing");
@@ -126,11 +154,13 @@ test("a timeout keeps its cause when usage is incomplete, and a failed exit is n
   const failed = await fakeOpenCode("exit 1");
   try {
     const timeout = await runOpenCode(slow.options({ timeoutSeconds: 1 }), {
+      ...fakeReadyServer,
       readUsage: () => ({ usd: 0.1, requests: 1, unpriced: ["pending-usage"] }),
     });
     assert.equal(timeout.reason, "timeout");
     assert.equal(timeout.usageComplete, false);
     const agentFailure = await runOpenCode(failed.options({ timeoutSeconds: 8 }), {
+      ...fakeReadyServer,
       readUsage: () => ({ usd: 0.1, requests: 1, unpriced: [] }),
     });
     assert.equal(agentFailure.reason, "agent-failed");
@@ -184,7 +214,8 @@ test("a successful CLI exit without durable usage remains unverified", { skip: p
     await writeFile(join(root, ".bashrc"), `export PATH=${bin}:$PATH\n`);
     const result = await runOpenCode({ workspace: root, instanceId: "no-usage", agent: "dog-operator", prompt: "probe",
       environment: { HOME: root, PATH: `${bin}:${process.env.PATH ?? ""}` }, timeoutSeconds: 5,
-      watchdogSeconds: 5, startedAt: Date.now() }, { readUsage: () => ({ usd: 0, requests: 0, unpriced: [] }) });
+      watchdogSeconds: 5, startedAt: Date.now() }, { ...fakeReadyServer,
+        readUsage: () => ({ usd: 0, requests: 0, unpriced: [] }) });
     assert.equal(result.reason, "usage-unverified");
     assert.equal(result.usageComplete, false);
     assert.equal(result.exit, 1);
@@ -1086,7 +1117,7 @@ test("initial watchdog write failure terminates the process and returns replayab
         watchdogSeconds: 1,
         watchdogPath: join(root, "missing", "watchdog.jsonl"),
         startedAt: Date.now(),
-      }, { readUsage: () => ({ usd: 0, requests: 0, unpriced: [] }) });
+      }, { ...fakeReadyServer, readUsage: () => ({ usd: 0, requests: 0, unpriced: [] }) });
       assert.equal(result.reason, "watchdog-write-failed");
       assert.equal(result.cleanupEstablished, true);
       assert.match(result.command, /opencode run/u);
@@ -1116,7 +1147,7 @@ test("watchdog observes an idle live process until the hard timeout", { skip: pr
       watchdogSeconds: 1,
       watchdogPath,
       startedAt: Date.now(),
-    }, { readUsage: () => ({ usd: 0, requests: 0, unpriced: [] }) });
+    }, { ...fakeReadyServer, readUsage: () => ({ usd: 0, requests: 0, unpriced: [] }) });
     assert.equal(result.reason, "timeout");
     assert.ok(result.watchdogEvents >= 2);
     assert.match(await readFile(watchdogPath, "utf8"), /"event":"heartbeat"/u);
@@ -1147,7 +1178,7 @@ test("cost polling stops an idle live process independently of watchdog activity
         watchdogSeconds: 5,
         startedAt: Date.now(),
         costLimitUsd: 0.5,
-      }, { readUsage: () => ({ usd: reads++ > 0 ? 0.5 : 0, requests: reads, unpriced: [] }) });
+      }, { ...fakeReadyServer, readUsage: () => ({ usd: reads++ > 0 ? 0.5 : 0, requests: reads, unpriced: [] }) });
       assert.equal(result.reason, "cost-limit");
       assert.equal(result.cleanupEstablished, true);
     } finally {

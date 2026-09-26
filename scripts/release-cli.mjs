@@ -63,9 +63,9 @@ async function stopProcessGroup(child) {
   });
 }
 
-export async function startV2ReleaseServer(cwd, env) {
+export async function startV2ReleaseServer(cwd, env, { inheritEnvironment = true } = {}) {
   const password = randomBytes(24).toString('hex');
-  const serverEnv = { ...process.env, ...env, PWD: cwd, OPENCODE_SERVER_PASSWORD: password };
+  const serverEnv = { ...(inheritEnvironment ? process.env : {}), ...env, PWD: cwd, OPENCODE_SERVER_PASSWORD: password };
   const child = spawn('opencode', ['serve', '--hostname', '127.0.0.1', '--port', '0'], {
     cwd, env: serverEnv, shell: false, windowsHide: true, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
   });
