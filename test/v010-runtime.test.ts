@@ -1542,6 +1542,9 @@ test("root discards one exact diagnosed transient and resumes only remaining val
   assert.match(resumedMessage.parts[0]!.text, /validation-only/u);
   const runtime = new OperatorRuntime(root, V010_RUNTIME_PROFILE);
   const repairedState = await runtime.required("root");
+  await hooks["tool.execute.before"]!({ tool: "sortie_v010_operator_status", sessionID: "worker", callID: "repair-status" }, { args: {} });
+  const workerObservation = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "worker" }));
+  assert.equal(workerObservation.run_id, repairedState.runID, "validation-only Worker retains read-only status access");
   const handoffPath = repairedState.units[0]!.handoffPath, manifestPath = repairedState.units[0]!.manifestPath;
   await hooks["tool.execute.before"]!({ tool: "read", sessionID: "worker", callID: "repair-handoff-read" }, { args: { filePath: handoffPath } });
   await readFile(handoffPath);

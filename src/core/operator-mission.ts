@@ -316,7 +316,8 @@ export function missionPacket(mission: OperatorMission, run?: OperatorState): Re
     ...(run ? { run_id: run.runID, status: run.phase, decision: run.decision,
       units: run.units.map(unit => ({ id: unit.unit.id, title: unit.unit.title, status: unit.status,
         child_session_id: unit.childSessionID, result_class: unit.resultClass, evidence: unit.evidence })) } : {}),
-    next_action: mission.phase === "submitted" && mission.submission?.status === "ready"
+    next_action: mission.phase === "completed" ? "Mission completed. Report the accepted result and retained review gaps; no further dispatch or completion call is needed."
+      : mission.phase === "submitted" && mission.submission?.status === "ready"
       ? "Operator: compare the submitted candidate with the original requirements and actual evidence, then complete_mission if satisfied. Report remaining evidence gaps; they are not a review PASS."
       : run?.phase === "awaiting-decision" ? "Coordinator: correct the cause and call plan_units with the remaining work and all requirements; budget is cumulative."
       : run?.phase === "awaiting-acceptance" ? (currentReview && mission.review?.verdict === "evidence-gaps" && !reviewAccepted
