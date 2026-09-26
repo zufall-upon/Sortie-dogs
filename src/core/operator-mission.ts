@@ -39,6 +39,8 @@ export interface OperatorMission {
   review?: { runID: string; risk: string[]; source: string; task: OperatorTask | null;
     requestFingerprint?: string;
     verdict: "pending" | "PASS" | "findings" | "evidence-gaps" | "skipped-low-risk"; result?: string; child?: string;
+    /** Completed, independent initial review for this mission, not merely an inherited child ID. */
+    initialPrompt?: string;
     /** Reviews on this mission that found only missing evidence; bounded by MISSION_EVIDENCE_GAP_REVIEW_LIMIT. */
     evidenceGapReviews?: number };
 }

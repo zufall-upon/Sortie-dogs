@@ -18,7 +18,7 @@ import { normalizeRelativePath } from "../core/path.js";
 import { MISSION_EVIDENCE_GAP_REVIEW_LIMIT, OperatorMissionRuntime, missionPacket, missionPlan, missionReviewAccepted, missionReviewTask,
   missionReviewTraces, missionReviewVerdict, type OperatorMission } from "../core/operator-mission.js";
 import { publishMissionProgress } from "./mission-progress.js";
-import { completedMissionReviewPrompts, missionReviewSource } from "./mission-review.js";
+import { completedMissionReviewPrompts, initialMissionReviewPrompt, missionReviewSource } from "./mission-review.js";
 import { missionLocations, missionLocationPacket } from "./mission-location.js";
 import { SOURCE_REVIEW_RISK_TAGS } from "../core/consultation.js";
 import { createHash } from "node:crypto";
@@ -193,6 +193,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const result = payload(await session("messages", { path: { id }, query: { directory: input.directory } }));
       return Array.isArray(result) ? result.filter(record) : [];
     }
+    async function reviewMessages(id: string): Promise<readonly Record<string, unknown>[]> {
+      const result = payload(await session(typeof nativeSession?.reviewMessages === "function" ? "reviewMessages" : "messages",
+        { path: { id }, query: { directory: input.directory } }));
+      return Array.isArray(result) ? result.filter(record) : [];
+    }
     async function identity(id: string): Promise<{ role?: CanonicalAgentRole; parent?: string }> {
       const info = payload(await session("get", { path: { id }, query: { directory: input.directory } }));
       const parent = record(info) && typeof info.parentID === "string" ? info.parentID : undefined;
@@ -322,7 +327,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       completedReviewPrompts: async (root, prompt) => completedMissionReviewPrompts(
         await missions.read(root), profile, root, prompt, {
           get: async id => payload(await session("get", { path: { id }, query: { directory: input.directory } })),
-          messages,
+          messages: reviewMessages,
         }),
       requiresExplicitAcceptance: async root => {
         const mission = await missions.read(root);
@@ -1299,7 +1304,17 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             next_action: missionReviewAccepted(mission.review) ? "Review is already recorded for this unchanged candidate. Submit ready with any remaining gaps; do not repeat review."
               : "Review is already recorded for this unchanged candidate. Address its findings or supply new evidence through traces; do not repeat the same review." });
         }
-        const phase = mission.review?.child ? "verification" : "initial";
+        // An old child can belong to a previous run, while the fast-lane is reset on a new
+        // turn. Generate verification only when a completed initial review is recoverable;
+        // otherwise generate an admissible initial review instead of trapping the Coordinator.
+        const prior = mission.review?.task?.prompt;
+        const completed = risk.length > 0 && prior && mission.review?.child && !mission.review.initialPrompt
+          ? await completedMissionReviewPrompts(mission, profile, root, prior, {
+            get: async id => payload(await session("get", { path: { id }, query: { directory: input.directory } })),
+            messages: reviewMessages,
+          }).catch(() => []) : [];
+        const initialPrompt = initialMissionReviewPrompt(mission, completed);
+        const phase = initialPrompt ? "verification" : "initial";
         const task = risk.length === 0 ? null : { subagent_type: profileAgent(profile, "dog-reviewer"),
           description: `🔎 ${run.units[0]!.unit.title}`, prompt: [
             `candidate_id: ${mission.id}`, `review_phase: ${phase}`, "canonical_validation_exit: 0", `risk_tags: [${risk.join(", ")}]`,
@@ -1314,6 +1329,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           ].join("\n") };
         const reviewed = await missions.update(root, item => { item.review = { runID: run.runID, risk: risk as string[], source: source.fingerprint, requestFingerprint,
           task, verdict: task ? "pending" : "skipped-low-risk", ...(mission.review?.child ? { child: mission.review.child } : {}),
+          ...(initialPrompt ? { initialPrompt } : {}),
           ...(mission.review?.evidenceGapReviews ? { evidenceGapReviews: mission.review.evidenceGapReviews } : {}) }; });
         return JSON.stringify(task ? { status: "review-required", task: missionReviewTask(reviewed) } : { status: "skipped-low-risk" });
       } };
@@ -1779,6 +1795,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
                 mission.review.verdict = independent ? verdict : "findings";
                 if (mission.review.verdict === "evidence-gaps") mission.review.evidenceGapReviews = (mission.review.evidenceGapReviews ?? 0) + 1;
                 mission.review.child = child;
+                if (independent && last && child && mission.review.task?.prompt.startsWith(`candidate_id: ${mission.id}\nreview_phase: initial\n`)) {
+                  mission.review.initialPrompt = mission.review.task.prompt;
+                }
               }
             });
             if (reviewed.review?.verdict === "evidence-gaps" && typeof output.output === "string") {

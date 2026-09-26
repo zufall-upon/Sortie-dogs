@@ -18,6 +18,7 @@ import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
 import { OperatorMissionRuntime, missionPlan } from "../dist/core/operator-mission.js";
 import { OperatorRuntime } from "../dist/core/operator-runtime.js";
 import { missionProgressReader } from "../dist/plugin/mission-progress.js";
+import { completedMissionReviewPrompts } from "../dist/plugin/mission-review.js";
 
 function contextFixture() {
   const history: Record<string, unknown>[] = [{
@@ -95,6 +96,53 @@ function contextFixture() {
   return { context, history, synthetic, tools, toolHooks, sessionHooks, permissionHooks, agentSwitches, modelSwitches, emit,
     failNextSynthetic: () => { failSynthetic = true; }, failNextContext: () => { failContext = true; }, aborted: () => aborted };
 }
+
+test("V2 review recovery pages past bounded context to a completed initial Reviewer", async () => {
+  const fixture = contextFixture();
+  const initial = "candidate_id: mission-current\nreview_phase: initial\ncanonical_validation_exit: 0\nrisk_tags: [public-logic]\nrevision: first";
+  const verification = initial.replace("review_phase: initial", "review_phase: verification").replace("first", "fixed");
+  const reference = `SORTIE_MISSION_REVIEW_REF ${JSON.stringify({ r: "root", m: "mission-current", n: "old-run",
+    h: createHash("sha256").update(initial).digest("hex") })}`;
+  const history: Record<string, unknown[]> = {
+    coordinator: [{ id: "old-review", type: "assistant", agent: "dogs-coordinator", content: [{ type: "tool", name: "subagent",
+      state: { status: "completed", input: { agent: "dog-reviewer-v010", prompt: reference },
+        metadata: { sessionID: "reviewer" } } }] },
+    { id: "middle", type: "assistant", content: [] }, { id: "recent", type: "assistant", content: [] }],
+    reviewer: [{ id: "reviewer-user", type: "user", text: `You are a subagent spawned by another session.\n${initial}` },
+      { id: "reviewer-reply", type: "assistant", content: [{ type: "text", text: "FINDINGS" }] }],
+  };
+  const pages: string[] = [];
+  const context: OpenCodeV2Context = { ...fixture.context,
+    session: { ...fixture.context.session,
+      get: async ({ sessionID }) => ({ id: sessionID,
+        agent: sessionID === "reviewer" ? "dog-reviewer-v010" : "dogs-coordinator",
+        parentID: sessionID === "coordinator" ? "root" : sessionID === "reviewer" ? "coordinator" : undefined }),
+      context: async ({ sessionID }) => (history[sessionID] ?? []).slice(-1),
+    },
+    message: { list: async ({ sessionID, cursor }) => {
+      const offset = Number(cursor ?? 0), items = history[String(sessionID)] ?? [];
+      pages.push(`${sessionID}:${offset}`);
+      return { data: items.slice(offset, offset + 2), cursor: { next: offset + 2 < items.length ? String(offset + 2) : null } };
+    } },
+  };
+  const cleanup = await createSortieDogsV2Plugin(async input => {
+    assert.equal((await context.session.context({ sessionID: "coordinator" }) as unknown[]).length, 1,
+      "V2 context contains only the recent window");
+    const session = input.client!.session! as typeof input.client.session & { reviewMessages: typeof input.client.session.messages };
+    const full = (await session.messages!({ path: { id: "coordinator" } }) as { data: unknown[] }).data;
+    assert.equal(full.length, 3);
+    const mission = { id: "mission-current", root: "root", phase: "running", coordinator: "coordinator",
+      review: { task: { prompt: verification } } } as never;
+    const prompts = await completedMissionReviewPrompts(mission, V010_RUNTIME_PROFILE, "root", verification, {
+      get: async id => (await session.get!({ path: { id } }) as { data: unknown }).data,
+      messages: async id => (await session.reviewMessages!({ path: { id } }) as { data: Record<string, unknown>[] }).data,
+    });
+    assert.deepEqual(prompts, [initial]);
+    return {};
+  }).setup(context);
+  try { assert.ok(pages.includes("coordinator:2"), "older completed reviews need a second page"); }
+  finally { cleanup?.(); }
+});
 
 test("V2 Task recovers durable progress without a live settlement sink and retains it at native completion", { timeout: 5000 }, async () => {
   const directory = await mkdtemp(resolve("_testenv/v2-progress-"));

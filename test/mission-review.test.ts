@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
-import { completedMissionReviewPrompts, missionReviewSource } from "../dist/plugin/mission-review.js";
+import { completedMissionReviewPrompts, initialMissionReviewPrompt, missionReviewSource } from "../dist/plugin/mission-review.js";
 import { MISSION_REVIEW_REFERENCE, type OperatorMission } from "../dist/core/operator-mission.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
 import { FastLaneController } from "../dist/plugin/fast-lane.js";
@@ -44,6 +44,26 @@ test("nested review recovery restores completed initial and verification prompts
   lane.restoreReviewLineage("root", f.verification, prompts);
   assert.throws(() => lane.beforeTool("root", "task", { subagent_type: "dog-reviewer", prompt: f.verification }), /CONSULTATION_RETRY_INVALID/);
   assert.doesNotThrow(() => lane.beforeTool("root", "task", { subagent_type: "dog-reviewer", prompt: `${f.verification}\nrevision: follow-up` }));
+});
+
+test("a previous child is not initial lineage when native history is unavailable", async () => {
+  const f = reviewHistoryFixture();
+  f.history.coordinator = [];
+  assert.deepEqual(await completedMissionReviewPrompts(f.mission, V010_RUNTIME_PROFILE, "root", f.verification, f.host), []);
+  assert.equal(initialMissionReviewPrompt(f.mission, []), undefined);
+  f.mission.review!.initialPrompt = f.initial.replace("mission-current", "other-mission");
+  assert.equal(initialMissionReviewPrompt(f.mission, []), undefined, "a different candidate is not review proof");
+  f.mission.review!.initialPrompt = f.initial;
+  assert.equal(initialMissionReviewPrompt(f.mission, []), f.initial);
+  const unavailable = { ...f.host, messages: async () => { throw new Error("V2 history unavailable"); } };
+  assert.deepEqual(await completedMissionReviewPrompts(f.mission, V010_RUNTIME_PROFILE, "root", f.verification, unavailable),
+    [f.initial], "a completed initial receipt survives a cold turn without another history lookup");
+  assert.deepEqual(await completedMissionReviewPrompts(f.mission, V010_RUNTIME_PROFILE, "other-root", f.verification, unavailable), []);
+  assert.deepEqual(await completedMissionReviewPrompts(f.mission, V010_RUNTIME_PROFILE, "root", "foreign-request", unavailable), []);
+  const lane = new FastLaneController();
+  lane.beginTurn("root", false);
+  lane.restoreReviewLineage("root", f.verification, [f.initial]);
+  assert.doesNotThrow(() => lane.beforeTool("root", "task", { subagent_type: "dog-reviewer", prompt: f.verification }));
 });
 
 test("opaque historical review references require the exact hash-bound native child prompt", async () => {

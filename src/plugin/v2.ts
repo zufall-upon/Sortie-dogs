@@ -1,7 +1,7 @@
 import type { OpenCodeHooks, OpenCodePlugin } from "./index.js";
 import { SortieDogsV010Plugin } from "./profiled.js";
 import { bindMissionProgress, missionProgressReader } from "./mission-progress.js";
-import { owningServiceSessionList } from "./v2-session-history.js";
+import { owningServiceMessageList, owningServiceSessionList } from "./v2-session-history.js";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { V010_RUNTIME_ASSET_VERSION } from "../asset-version.js";
@@ -159,10 +159,12 @@ function legacyMessage(value: unknown, session: string, agent?: string): JsonObj
   }) };
 }
 
-async function legacyMessages(context: OpenCodeV2Context, id: string): Promise<JsonObject[]> {
+async function legacyMessages(context: OpenCodeV2Context, id: string,
+  paginated?: (input: { sessionID: string; limit: number; order?: "asc"; cursor?: string }) => Promise<unknown>): Promise<JsonObject[]> {
+  const list = paginated ?? (context.message ? (input: JsonObject) => context.message!.list(input) : undefined);
   const [info, history] = await Promise.all([
     context.session.get({ sessionID: id }).catch(() => undefined),
-    context.message ? nativePages(cursor => context.message!.list({ sessionID: id, limit: 100, ...(cursor ? { cursor } : { order: "asc" }) }))
+    list ? nativePages(cursor => list({ sessionID: id, limit: 100, ...(cursor ? { cursor } : { order: "asc" }) }))
       : context.session.context({ sessionID: id }),
   ]);
   const agent = record(info) ? string(info.agent) : undefined;
@@ -190,6 +192,7 @@ async function nativePages(fetch: (cursor?: string) => Promise<unknown>): Promis
 function legacyClient(context: OpenCodeV2Context): JsonObject {
   const directory = context.location.directory;
   const list = owningServiceSessionList();
+  const reviewList = owningServiceMessageList();
   const session = {
     get: async (request: unknown) => {
       const id = sessionID(request);
@@ -198,6 +201,11 @@ function legacyClient(context: OpenCodeV2Context): JsonObject {
     messages: async (request: unknown) => {
       const id = sessionID(request);
       return { data: id === undefined ? [] : await legacyMessages(context, id) };
+    },
+    reviewMessages: async (request: unknown) => {
+      const id = sessionID(request);
+      return { data: id === undefined ? [] : await legacyMessages(context, id,
+        context.message ? input => context.message!.list(input) : reviewList) };
     },
     message: async (request: unknown) => {
       const id = sessionID(request), wanted = messageID(request);
