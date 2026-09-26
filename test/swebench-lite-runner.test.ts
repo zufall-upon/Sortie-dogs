@@ -417,13 +417,19 @@ test("live plan keeps instance sessions independent and prompt input public", ()
   assert.equal(result.execution.cost_limit_usd, 50);
   assert.match(result.instances[0]!.prompt, /Public issue statement:/);
   assert.match(result.instances[0]!.prompt,
-    /when supplying a path yourself, use a relative path and never guess or reconstruct the repository's absolute path/u);
+    /when supplying a repository path yourself, use a relative path and never guess or reconstruct the repository's absolute path/u);
   assert.match(result.instances[0]!.prompt,
-    /omit the path argument from glob and grep, and read the repository root as '\.'; keep later tool inputs relative and never copy absolute paths returned by tools/u);
+    /omit the path argument from glob and grep, and read the repository root as '\.'; keep later repository path inputs relative and never copy absolute workspace paths returned by tools/u);
   assert.match(result.instances[0]!.prompt,
     /For shell commands, omit the workdir argument and use the current repository directory; never construct or copy an absolute workdir/u);
   assert.match(result.instances[0]!.prompt,
-    /Keep every glob, grep, read, and shell path relative even after coordinator or worker handoffs; only the host may use absolute workspace paths/u);
+    /Keep repository paths in glob, grep, read, and shell inputs relative even after coordinator or worker handoffs; only the host may use absolute workspace paths/u);
+  assert.match(result.instances[0]!.prompt,
+    /The null device \/dev\/null is allowed for shell redirection and as the empty-file operand in a diff/u);
+  assert.match(result.instances[0]!.prompt,
+    /Preserve this distinction in delegated requirements and reviews/u);
+  assert.match(result.instances[0]!.prompt,
+    /This allowance does not authorize access to other paths outside the repository or benchmark solution metadata/u);
   assert.match(result.instances[0]!.prompt,
     /Before editing, reproduce the public issue with its smallest concrete example and locate the existing focused regression test or tests that express the expected behavior/u);
   assert.match(result.instances[0]!.prompt,
