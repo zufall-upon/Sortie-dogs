@@ -4,9 +4,9 @@ import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { promisify } from "node:util";
 import test from "node:test";
-import { benchmarkEnvironment, benchmarkInlineConfig, benchmarkPermissionPolicy, capturePatch, cloneInstance, createDryRunPlan, createInferenceManifest, createInstancePrompt, createLiveRunPlan, runOpenCode, readDirectoryUsage, formatPrediction, officialEvaluationImage, parseArguments, relocateOfficialEnvironment, retainUsageDatabase, runDryRun, runLive, seedIsolatedV2Credential, verifyCandidateAgent } from "../scripts/swebench-lite-runner.mjs";
+import { benchmarkEnvironment, benchmarkPythonCacheEnvironment, benchmarkInlineConfig, benchmarkPermissionPolicy, capturePatch, cloneInstance, createDryRunPlan, createInferenceManifest, createInstancePrompt, createLiveRunPlan, runOpenCode, readDirectoryUsage, formatPrediction, officialEvaluationImage, parseArguments, relocateOfficialEnvironment, retainUsageDatabase, runDryRun, runLive, seedIsolatedV2Credential, verifyCandidateAgent } from "../scripts/swebench-lite-runner.mjs";
 import { runCandidatePreflight } from "../scripts/swebench-candidate-preflight.mjs";
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -416,6 +416,7 @@ test("live plan keeps instance sessions independent and prompt input public", ()
   assert.equal(result.execution.watchdog_interval_seconds, 120);
   assert.equal(result.execution.cost_limit_usd, 50);
   assert.match(result.instances[0]!.prompt, /Public issue statement:/);
+  assert.match(result.instances[0]!.prompt, /host disables Python bytecode writes and redirects pytest's cache into the isolated runtime/u);
   assert.match(result.instances[0]!.prompt,
     /when supplying a repository path yourself, use a relative path and never guess or reconstruct the repository's absolute path/u);
   assert.match(result.instances[0]!.prompt,
@@ -490,6 +491,30 @@ test("benchmark child environment omits host credentials and retains only execut
     WSLENV: "host/value", WSL_INTEROP: "/run/WSL/interop" }), {
     LANG: "C.UTF-8", PATH: "/bin",
   });
+});
+
+test("benchmark Python cache policy keeps cold imports out of protected source and quotes pytest cache paths", { skip: process.platform === "win32" }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "swebench-python-cache-"));
+  try {
+    const workspace = join(root, "repository");
+    const cache = join(root, "runtime cache's files");
+    await mkdir(workspace);
+    await writeFile(join(workspace, "subject.py"), "VALUE = 42\n");
+    const execute = promisify(execFile);
+    const clean = benchmarkEnvironment(process.env);
+    const args = ["-c", "import subject; assert subject.VALUE == 42"];
+    await execute("python3", args, { cwd: workspace, env: clean });
+    assert.ok((await readdir(workspace)).includes("__pycache__"), "cold imports reproduce the incidental source mutation");
+    await rm(join(workspace, "__pycache__"), { recursive: true });
+    const before = await readdir(workspace, { recursive: true });
+    const environment = { ...clean, ...benchmarkPythonCacheEnvironment(cache) };
+    await execute("python3", args, { cwd: workspace, env: environment });
+    assert.deepEqual(await readdir(workspace, { recursive: true }), before);
+    assert.equal(await readFile(join(workspace, "subject.py"), "utf8"), "VALUE = 42\n");
+    const parsed = await execute("python3", ["-c", "import json,os,shlex; print(json.dumps(shlex.split(os.environ['PYTEST_ADDOPTS'])))"],
+      { cwd: workspace, env: environment, encoding: "utf8" });
+    assert.deepEqual(JSON.parse(parsed.stdout), ["-o", `cache_dir=${join(cache, "pytest")}`]);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("benchmark permissions deny browsing and remote shell access while retaining local commands", () => {
