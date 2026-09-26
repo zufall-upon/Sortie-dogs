@@ -102,6 +102,54 @@ test("usage and model attribution remain available when only elapsed spans are m
   assert.ok(result.notes?.some(note => note.includes("時刻")));
 });
 
+test("one missing usage record preserves every measured model gauge and labels observed shares", async () => {
+  const missing = message("missing", 3, 4);
+  delete (missing.info as { tokens?: unknown }).tokens;
+  const metrics = await collectRunMetrics({ session: {
+    children: async () => [], messages: async () => [message("before", 1, 2), missing,
+      message("after", 5, 6), message("strong", 7, 8, [], "strong")],
+  } }, "root", undefined, 1000);
+  const result = createSortieResult(receipt, { acceptance_contract: null, consumed_time_ms: null, satisfied_criteria: [] }, metrics);
+  assert.equal(metrics?.tokens, undefined, "a partial subtotal must not become the complete accounting total");
+  assert.deepEqual(result.debrief?.mixCoverage, { complete: false, observedTokens: 36 });
+  assert.equal(result.debrief?.mix?.find(row => row.model === "provider/cheap")?.tokens, 24);
+  const text = insertSortieResult("status: DONE", result);
+  assert.match(text, /使用量\s+36 tokens（観測分）/u);
+  assert.match(text, /モデル内訳\s+観測済みtoken比率（一部未取得）/u);
+  assert.match(text, /🐕 provider\/cheap ██████▋\s+66\.7% 24 tokens/u);
+  assert.match(text, /🐕 provider\/strong ███▍\s+33\.3% 12 tokens/u);
+  assert.doesNotMatch(text, /モデル内訳\s+usage未取得/u);
+  assert.equal(insertSortieResult(text, result), text);
+});
+
+test("a missing sibling history and unknown model do not erase observed model shares", async () => {
+  const unknown = message("unknown", 1, 2);
+  delete (unknown.info as { modelID?: string }).modelID;
+  const metrics = await collectRunMetrics({ session: {
+    children: async ({ path }) => path.id === "root" ? [{ id: "missing" }, { id: "worker" }] : [],
+    messages: async ({ path }) => {
+      if (path.id === "missing") throw new Error("history unavailable");
+      return path.id === "root" ? [unknown] : [message("worker", 3, 4)];
+    },
+  } }, "root", undefined, 1000);
+  const debrief = buildDebrief(receipt, null, metrics?.debrief);
+  assert.equal(metrics?.tokens, undefined);
+  assert.deepEqual(debrief.mixCoverage, { complete: false, observedTokens: 24 });
+  assert.equal(debrief.mix?.find(row => row.model === "provider/cheap")?.percent, 50);
+  assert.equal(debrief.mix?.find(row => row.model === "未分類")?.percent, 50);
+  assert.match(renderDebrief(debrief).join("\n"), /🐕 未分類 █████\s+50\.0% 12 tokens/u);
+});
+
+test("unavailable usage without any measured tokens never creates fabricated zero gauges", async () => {
+  const missing = message("missing", 1, 2);
+  delete (missing.info as { tokens?: unknown }).tokens;
+  const metrics = await collectRunMetrics({ session: { children: async () => [], messages: async () => [missing] } }, "root");
+  const debrief = buildDebrief(receipt, null, metrics?.debrief);
+  assert.equal(debrief.mix, null);
+  assert.equal(debrief.estimatedCost?.unpricedRequests, 1);
+  assert.doesNotMatch(renderDebrief(debrief).join("\n"), /0\.0%|🐕/u);
+});
+
 test("Recovery requires fail, intervening host edit, pass in same child, and completed goal", () => {
   const failed = tool("fail", "bash", 11, 12, { command: "npm test" }, { exit: 1 });
   const edit = tool("edit", "apply_patch", 13, 14, {}, { diff: "-old\n+new" });
