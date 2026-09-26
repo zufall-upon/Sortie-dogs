@@ -51,7 +51,7 @@ test("evidence-only reviews are bounded while defects and first gaps still block
   await missions.capture("root", { id: "u1", text: "Fix result" });
   const mission = await missions.start("root", ["Fix result"]);
   const run = await operators.prepareMission("root", missionPlan(mission, [unit]));
-  const gap = { ...mission, review: { ...review, verdict: "evidence-gaps" as const, evidenceGapReviews: 1 } };
+  const gap = { ...mission, review: { ...review, runID: run.runID, verdict: "evidence-gaps" as const, evidenceGapReviews: 1 } };
   const packet = missionPacket(gap, { ...run, phase: "awaiting-acceptance" }) as { next_action: string; review: Record<string, unknown> };
   assert.match(packet.next_action, /do not re-implement/u);
   assert.deepEqual([packet.review.evidence_gap_reviews, packet.review.accepted], [1, false]);
@@ -77,6 +77,26 @@ test("mission captures exact original messages, generates IDs, and preserves req
   assert.equal(extended.id, mission.id);
 }));
 
+test("mission status preserves review lineage without presenting an old run as currently accepted", async () => fixture(async directory => {
+  const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+  const operators = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
+  await missions.capture("root", { id: "u1", text: "Fix result" });
+  const mission = await missions.start("root", ["Fix result"]);
+  const run = await operators.prepareMission("root", missionPlan(mission, [unit]));
+  const reviewed = { ...mission, runID: run.runID, review: { runID: "old-run", risk: ["public-logic"], source: "old-source",
+    task: null, verdict: "PASS" as const, child: "old-reviewer" } };
+  const packet = missionPacket(reviewed, { ...run, phase: "awaiting-acceptance" }) as { review: Record<string, unknown>; next_action: string };
+  assert.equal(packet.review.verdict, "PASS", "historical review is retained for verification lineage");
+  assert.equal(packet.review.accepted, false);
+  assert.equal(packet.review.permits_submission, false);
+  assert.equal(packet.review.current_run, false);
+  assert.doesNotMatch(packet.next_action, /Submit the candidate|review permits submission/i);
+  assert.match(packet.next_action, /review/);
+  const current = missionPacket({ ...reviewed, review: { ...reviewed.review, runID: run.runID } }, run) as typeof packet;
+  assert.equal(current.review.current_run, true);
+  assert.equal(current.review.permits_submission, true);
+}));
+
 test("mission Coordinator owns a single Worker unit without a proposal or root approval", async () => fixture(async directory => {
   const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
   const operators = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
@@ -94,7 +114,7 @@ test("mission Coordinator owns a single Worker unit without a proposal or root a
   const admitted = await operators.claimAdmittedWorkerPrompt("root", "coordinator", "worker", next.task.prompt);
   assert.match(admitted.prompt, /Read-only investigation commands are unrestricted/);
   assert.equal((await operators.required("root")).runID, state.runID);
-  await assert.rejects(operators.retireMissionRun("root"), /still-active/);
+  await assert.rejects(operators.replanMission("root", state.runID, missionPlan(mission, [{ ...unit, write: ["src", "test"] }])), /still-active/);
 }));
 
 test("mission rejects foreign Coordinator claims and duplicate dispatches", async () => fixture(async directory => {
@@ -146,18 +166,44 @@ test("mission replan archives failed execution, keeps original acceptance and bi
   await missions.capture("root", { id: "u1", text: "Fix result" });
   const mission = await missions.start("root", ["Fix result"]);
   const state = await operators.prepareMission("root", missionPlan(mission, [unit]));
+  const file = join(directory, ".sortie-dogs-v010", "operators", `${createHash("sha256").update("root").digest("hex")}.json`);
+  // A crash can leave the pre-switch checkpoint, after which the prior run is still allowed to advance.
+  const interruptedCheckpoint = `${file}.${state.runID}.${state.sequence}.archive`;
+  await writeFile(interruptedCheckpoint, JSON.stringify(state));
   const task = operators.nextWorkerTask(state);
   await operators.admitWorker("root", "root", "call", task);
   await operators.claimAdmittedWorkerPrompt("root", "root", "worker", task.prompt);
   await operators.settled({ rootSessionID: "root", callID: "call", childSessionID: "worker", unitID: "unit-1",
     disposition: "failed", resultClass: "process-defect", evidence: [], failure: { command: ["node", "check.mjs"], outcome: "fail", exitCode: 1 } });
-  await operators.retireMissionRun("root");
-  const replacement = await operators.prepareMission("root", missionPlan(mission, [{ ...unit, write: ["src", "test"] }]));
+  const failed = await readFile(file, "utf8");
+  const replacement = await operators.replanMission("root", state.runID, missionPlan(mission, [{ ...unit, write: ["src", "test"] }]));
   assert.equal(replacement.parentRunID, state.runID);
   assert.deepEqual(replacement.acceptance, state.acceptance);
   assert.notEqual(replacement.runID, state.runID);
   const manifest = JSON.parse(await readFile(replacement.units[0]!.manifestPath, "utf8"));
   assert.deepEqual(manifest.write, ["src", "test"]);
+  assert.equal(await readFile(interruptedCheckpoint, "utf8"), JSON.stringify(state));
+  assert.equal(await readFile(`${file}.${state.runID}.${JSON.parse(failed).sequence}.archive`, "utf8"), failed);
+}));
+
+test("concurrent mission replans switch only the expected predecessor and retain acceptance", async () => fixture(async directory => {
+  const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+  const operators = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
+  await missions.capture("root", { id: "u1", text: "Fix result" });
+  const mission = await missions.start("root", ["Fix result"]);
+  const first = await operators.prepareMission("root", missionPlan(mission, [unit]));
+  await assert.rejects(operators.replanMission("root", first.runID, missionPlan({ ...mission,
+    requirements: [{ id: "R1", text: "Different goal" }] }, [unit])), /acceptance-carry-forward/);
+  assert.deepEqual(await operators.required("root"), first);
+  const results = await Promise.allSettled(["src/a", "src/b"].map(path => operators.replanMission("root", first.runID,
+    missionPlan(mission, [{ ...unit, write: [path] }]))));
+  assert.equal(results.filter(result => result.status === "fulfilled").length, 1);
+  const rejected = results.find(result => result.status === "rejected") as PromiseRejectedResult;
+  assert.match(rejected.reason.message, /mission-replan-run-mismatch/);
+  const current = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+  assert.equal(current.parentRunID, first.runID);
+  assert.deepEqual(current.acceptance, first.acceptance);
+  assert.ok(operators.nextWorkerTask(current));
 }));
 
 test("a later user turn can replace a cancelled mission without inheriting its old acceptance", async () => fixture(async directory => {

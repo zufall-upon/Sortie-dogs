@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, lstat, mkdtemp, mkdir, readFile, readdir, writeFile, rm, symlink } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, mkdir, readFile, readdir, rename, writeFile, rm, symlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
@@ -22,7 +22,7 @@ import { fixtureOpenCodeConfig, parseOpenCodeVersion, pluginPackageForOpenCodeVe
 import { boundedToolErrors } from "../scripts/operator-smoke.mjs";
 import { expandGoalDeclaration } from "../dist/core/goal-declaration-format.js";
 import { SortieDogsPlugin as CorePlugin } from "../dist/plugin/index.js";
-import { normalizeCommand } from "../dist/plugin/gate.js";
+import { createProjectPaths, createWriteGate, normalizeCommand } from "../dist/plugin/gate.js";
 import { RunFlightLedger } from "../dist/core/run-flight-ledger.js";
 import { goalFingerprint } from "../dist/core/goal-bound.js";
 import type { RuntimeBridge } from "../dist/plugin/runtime-bridge.js";
@@ -871,6 +871,128 @@ test("nested mission review and accepted work survive reload and agent-change ca
     parts: [{ type: "text", text: newWorker.args.prompt }],
   });
   assert.equal((await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root")).units[0]!.childSessionID, "newWorker");
+}));
+
+async function missionCoordinatorFixture(root: string) {
+  await gitRepository(root);
+  await writeFile(join(root, "check.mjs"), 'import { readFileSync } from "node:fs";\nif(readFileSync("seed.txt", "utf8") !== "base\\n") process.exit(1);\n');
+  const identities: Record<string, { agent: string; parentID?: string }> = {
+    root: { agent: "dog-operator" }, coordinator: { agent: "dogs-coordinator", parentID: "root" },
+    worker: { agent: "dog-worker-v010", parentID: "coordinator" },
+  };
+  const hooks = await SortieDogsV010Plugin({ directory: root, client: { session: {
+    get: async ({ path }: { path: { id: string } }) => ({ data: identities[path.id] }),
+    messages: async () => ({ data: [] }),
+  } } } as never);
+  await hooks["chat.message"]!({ sessionID: "root", messageID: "user", agent: "dog-operator" }, {
+    message: { id: "user", agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-6-sol" } },
+    parts: [{ type: "text", text: "Inspect and verify the seed without changing it." }],
+  });
+  const started = JSON.parse(await hooks.tool!.sortie_v010_start_mission.execute({ requirements: ["Verify the seed"] }, { sessionID: "root" }));
+  await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "coordinator-call" }, { args: structuredClone(started.task) });
+  await hooks["chat.message"]!({ sessionID: "coordinator", messageID: "delegate", agent: "dogs-coordinator" }, {
+    message: { id: "delegate", agent: "dogs-coordinator", model: { providerID: "openai", modelID: "gpt-6-sol" } },
+    parts: [{ type: "text", text: started.task.prompt }],
+  });
+  const unit = { title: "Verify seed", objective: "Inspect the seed and execute its validator", read: ["seed.txt", "check.mjs"],
+    write: ["seed.txt"], validation: ["node check.mjs"] };
+  const declare = (units: unknown[], reason?: string) => hooks.tool!.sortie_v010_plan_units.execute({ units, ...(reason ? { reason } : {}) },
+    { sessionID: "coordinator" });
+  return { hooks, unit, declare };
+}
+
+for (const failure of ["budget", "generated-contract", "control-storage", "state-storage"] as const) {
+  test(`rejected mission replan preserves the live run and permits correction after ${failure} failure`, async () => fixture(async root => {
+    const { hooks, unit, declare } = await missionCoordinatorFixture(root);
+    await declare([unit]);
+    const key = createHash("sha256").update("root").digest("hex");
+    const operatorPath = join(root, ".sortie-dogs-v010", "operators", `${key}.json`);
+    const missionPath = join(root, ".sortie-dogs-v010", "missions", `${key}.json`);
+    const ledgerPath = join(root, ".git", "sortie-dogs", "run-flight-v010",
+      `${createHash("sha256").update("v010\0root").digest("hex")}.json`);
+    if (failure === "budget") {
+      // Fixture for an already user-limited cumulative ledger; no change to the plan's requirements.
+      const ledger = await RunFlightLedger.openGoal(ledgerPath), { state } = await ledger.readGoal();
+      await ledger.appendGoal({ kind: "goal.revised", at: new Date().toISOString(), goal_id: state.goal_id!,
+        revision: state.revision + 1, scope_epoch: state.scope_epoch + 1, acceptance_fingerprint: state.acceptance_fingerprint!,
+        origin_user_message_id: state.latest_user_message_id!, session_id: "root", selected_agent: state.selected_agent!,
+        delivery: state.delivery!, budget: { ...state.budget!, max_units: 2, source: "user-revision" },
+        acceptance_contract: state.acceptance_contract });
+    }
+    const status = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
+    const before = await Promise.all([operatorPath, missionPath, ledgerPath].map(path => readFile(path, "utf8")));
+    const controls = join(root, ".sortie-dogs-v010", "contracts");
+    const names = (await readdir(controls)).sort();
+    const revised = { ...unit, title: "Corrected verification" };
+    if (failure === "budget") {
+      assert.ok(status.budget.remaining_units < 32);
+      await assert.rejects(declare(Array.from({ length: status.budget.remaining_units + 1 }, (_, i) =>
+        ({ ...revised, validation: [`node check-${i}.mjs`] })), "Split verification"), /mission-budget-exhausted/);
+    } else if (failure === "generated-contract") {
+      await assert.rejects(declare([{ ...revised, validation: [`node check.mjs ${"x".repeat(1000)}`] }], "Correct validation"),
+        (error: unknown) => error instanceof OperatorContractError && error.diagnostics.some(item => item.code === "schema_maxLength"));
+    } else if (failure === "control-storage") {
+      await rename(controls, `${controls}.saved`);
+      await writeFile(controls, "fixture storage outage");
+      try { await assert.rejects(declare([revised], "Correct validation"), /operator-control-write-failed/); }
+      finally { await rm(controls); await rename(`${controls}.saved`, controls); }
+    } else {
+      await rename(operatorPath, `${operatorPath}.saved`);
+      await mkdir(operatorPath);
+      try { await assert.rejects(declare([revised], "Correct validation"), /operator-control-write-failed|EISDIR|ENOTDIR|EPERM/); }
+      finally { await rm(operatorPath, { recursive: true }); await rename(`${operatorPath}.saved`, operatorPath); }
+    }
+    assert.equal(await readFile(operatorPath, "utf8"), before[0], "rejection must not cancel or rewrite the current run");
+    assert.equal(await readFile(missionPath, "utf8"), before[1]);
+    assert.equal(await readFile(ledgerPath, "utf8"), before[2], "no rejected replan may consume or reset budget");
+    assert.deepEqual((await readdir(controls)).sort(), names, "failed preparation leaves no partial controls");
+    const oldRun = await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root");
+    assert.equal(oldRun.phase, "prepared", "cold readers must still see the dispatchable prior run");
+    const corrected = JSON.parse(await declare([revised], "Correct validation"));
+    assert.ok(corrected.task);
+    const next = await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root");
+    assert.equal(next.parentRunID, oldRun.runID);
+    assert.deepEqual(next.acceptance, oldRun.acceptance);
+    assert.equal(await readFile(`${operatorPath}.${oldRun.runID}.${oldRun.sequence}.archive`, "utf8"), before[0]);
+    assert.deepEqual(JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" })).budget, status.budget);
+    // Idempotent rereads do not archive/recreate the newly prepared run.
+    await declare([revised]);
+    assert.equal((await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root")).runID, next.runID);
+  }));
+}
+
+test("read-only mission unit reaches validated completion without declaring a fake write scope", async () => fixture(async root => {
+  const { hooks, unit, declare } = await missionCoordinatorFixture(root);
+  const next = JSON.parse(await declare([{ ...unit, write: [] }]));
+  const task = { args: structuredClone(next.task) };
+  await hooks["tool.execute.before"]!({ tool: "task", sessionID: "coordinator", callID: "worker-call" }, task);
+  await hooks["chat.message"]!({ sessionID: "worker", messageID: "worker-user", agent: "dog-worker-v010" }, {
+    message: { id: "worker-user", agent: "dog-worker-v010", model: { providerID: "openai", modelID: "gpt-6-luna-fast" } },
+    parts: [{ type: "text", text: task.args.prompt }],
+  });
+  const run = await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root"), worker = run.units[0]!;
+  const manifest = JSON.parse(await readFile(worker.manifestPath, "utf8"));
+  assert.deepEqual(manifest.write, []);
+  const gate = await createWriteGate(await createProjectPaths(root), manifest);
+  await assert.rejects(gate.checkPath("seed.txt"), /manifest write scope/, "read inputs must not become writable");
+  await hooks["tool.execute.before"]!({ tool: "read", sessionID: "worker", callID: "handoff-read" }, { args: { filePath: worker.handoffPath } });
+  await hooks["tool.execute.after"]!({ tool: "read", sessionID: "worker", callID: "handoff-read", args: { filePath: worker.handoffPath } },
+    { output: await readFile(worker.handoffPath, "utf8") });
+  assert.equal(JSON.parse(await hooks.tool!.sortie_v010_bind_write_gate.execute({ project_root: root,
+    manifest_path: worker.manifestPath }, { sessionID: "worker" })).status, "bound");
+  await executeGeneratedCommand(hooks, root, "validate", "node check.mjs", "check.mjs");
+  await hooks["tool.execute.after"]!({ tool: "task", sessionID: "coordinator", callID: "worker-call" },
+    { output: "<task_result>Seed inspected and validated; no edits.</task_result>", metadata: { sessionId: "worker" } });
+  const status = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
+  assert.equal(status.units[0].status, "succeeded", JSON.stringify(status));
+  assert.ok(status.units[0].evidence.length > 0);
+  assert.equal(status.units[0].evidence[0].execution.exit_code, 0);
+  await hooks.tool!.sortie_v010_review_mission.execute({ risk_tags: [], traces: ["R1: check.mjs read the seed and exited 0; no files changed"] },
+    { sessionID: "coordinator" });
+  await hooks.tool!.sortie_v010_submit_mission.execute({ status: "ready", summary: "Seed verified without edits" }, { sessionID: "coordinator" });
+  await hooks.tool!.sortie_v010_complete_mission.execute({}, { sessionID: "root" });
+  assert.equal((await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root")).phase, "completed");
+  assert.equal(await readFile(join(root, "seed.txt"), "utf8"), "base\n");
 }));
 
 test("host parent-link repair repins the admitted handoff before accepted-unit continuation", async () => fixture(async root => {
