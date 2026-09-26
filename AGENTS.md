@@ -1,3 +1,7 @@
+# 実作業の原則
+
+- 自律性・効率・可視性を優先。実V2履歴で停止原因と手戻りを確かめ、既存のホスト権限で足りる作業に独自の承認・過剰なスコープ制約・重複検証を増やさない。要求内の修正は自走し、実行結果・費用・未解決点と次の一手を明示する。
+
 # Windows テスト
 
 - `npm test` / `npm run test:full`: 現在の作業ファイルを WSL Ubuntu の Linux filesystem に snapshot し、依存準備・build・共通テストを実施。Windows 側の build は不要。
