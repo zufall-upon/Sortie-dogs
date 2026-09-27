@@ -96,6 +96,7 @@ Official SWE-bench Lite `dev` results on the same 23 public instances:
 | v0.12.8 (`e0f8cef` adapter) | 5 / 23 (21.7%) | 9 | Four slots; budget amended across two batches; 30-minute timeout | [Campaign](docs/swebench-v0128-dev23-2026-09-26.md) |
 | v0.12.8 (`84ccdf1` main adapter) | 6 / 23 (26.1%) | 2 | Fresh 23-task run; four slots; 30-minute timeout | [Main-integrated run](docs/swebench-main-84ccdf1-dev23-2026-09-26.md) |
 | v0.12.15 (`0c9690d`) | 5 / 23 (21.7%) | 3 | Fresh 23-task ext4 retry; four slots; 40-minute timeout | [Campaign](docs/swebench-v01215-dev23-2026-09-27.md) |
+| v0.12.16 (`9b05a34` release; `b1a6c0e` runner) | 4 / 23 (17.4%) | 5 | Fresh 23-task run; eight slots; 40-minute timeout | [Campaign](docs/swebench-v01216-dev23-2026-09-27.md) |
 
 Every row has 23 submitted official predictions; an empty patch counts against
 the score, not as a missing evaluation. The v0.10.14 report does not separately
@@ -106,8 +107,9 @@ Budgets, runtime/adapter versions, and execution conditions changed between
 campaigns, so this table is a history of observed results, not a controlled
 head-to-head comparison or a general success-rate claim. The v0.10.14 run
 estimated $15.75 in model cost and a 15.2-minute median agent runtime.
-Eight inference slots have only been checked in a model-free scheduler test;
-no eight-slot score is reported here.
+The v0.12.16 run is the first eight-slot inference score in this table;
+five runners timed out, and this does not establish a model-quality regression
+against runs with different concurrency and conditions.
 
 Historical qualification references remain in [benchmark reference](docs/benchmark-reference.md).
 
