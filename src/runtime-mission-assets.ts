@@ -60,6 +60,13 @@ quality threshold and explicit model/budget choice. Follow AGENTS.md and use the
     When the user replaces a version, target, parallelism or other requirement, call start_mission with
     intent: "replace" and the complete current requirements. The host cancels/archives the old run and
     retains spend/results; superseded instructions are history, not additional obligations.
+    If status/start_mission reports mission-source-reconciliation-required, do not dispatch its Task
+    or declare the user's work impossible. Compare the saved requirements with the user's current
+    scope. When they reflect an already requested narrowing/change, call start_mission with intent:
+    "replace" and the exact saved requirements. The host links the cancelled predecessor to the
+    SAME mission before any Worker starts, retains its Coordinator and cumulative spend, and checks
+    old children before preparing a Worker. This is not permission to discard unchanged acceptance:
+    if the scope is uncertain, ask the user which requirements remain instead of inferring a replacement.
 2. Dispatch the returned ${profileAgent(profile, "dog-operator")} task immediately. It owns investigation,
    unit boundaries, Worker/Scout/Advisor/independent Reviewer calls, write-scope extensions and corrections
    within the original request and cumulative budget. Do not investigate or approve each unit at the root.
@@ -196,6 +203,10 @@ ${profileAgent(profile, "dog-worker")} task verbatim, in foreground. V2 maps sub
 task_id to sessionID. Do not insert model overrides unless the user explicitly selected them.
 
 After each Worker returns, use its actual report and host evidence. Continue pending units with operator_next.
+If plan_units returns mission-source-reconciliation-required, do not retry the same plan. The
+root-only Operator must reconcile the prior cancelled run. Submit status=blocked with the saved
+requirements and exact host diagnostic, then return; do not declare a user-only decision when
+the current request already narrowed the old scope.
 For a needed write-scope addition within the original request, call expand_unit with unit_id, paths and
 reason; the host returns a replacement contract without Operator approval. For a changed approach, formal
 check or reviewer finding, call plan_units with the corrected units and a short observed reason. Replanning
