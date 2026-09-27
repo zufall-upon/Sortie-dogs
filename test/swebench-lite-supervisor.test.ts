@@ -104,6 +104,64 @@ test("supervisor atomically claims each instance and writes ordered aggregate ou
   }
 });
 
+test("historical durations schedule longest first without changing prediction order or cost limits", async () => {
+  const root = await mkdtemp(join(tmpdir(), "swebench-supervisor-duration-order-"));
+  const runs: string[] = [];
+  try {
+    const value = { ...manifestValue, instances: Array.from({ length: 4 }, (_, index) => ({
+      ...manifestValue.instances[0], instance_id: `example__project-${index + 1}`,
+    })) };
+    const historyPath = join(root, "previous-supervisor-state.json");
+    const history = { status: "completed", instances: [1, 4, 2, 3].map(index => ({
+      instance_id: `example__project-${index}`,
+      result: { elapsed_ms: [0, 1000, 4000, 4000, 8000][index] },
+    })) };
+    await writeFile(historyPath, JSON.stringify(history));
+    const options = { manifestPath: join(root, "manifest.json"), runRoot: join(root, "run"),
+      output: join(root, "predictions.jsonl"), costLimitUsd: 4, perInstanceUsd: 1,
+      durationHistory: historyPath, workers: 2, watchdog: false };
+    const state = await runSupervisor(value, options, fakeDependencies(runs));
+    assert.deepEqual(runs, ["example__project-4", "example__project-2", "example__project-3", "example__project-1"]);
+    assert.deepEqual(state.schedule.order, [3, 1, 2, 0]);
+    assert.equal(state.schedule.policy, "longest-observed-first-v1");
+    assert.match(state.schedule.history_sha256, /^[a-f0-9]{64}$/);
+    assert.deepEqual(state.instances.map(entry => entry.attempt), [1, 1, 1, 1]);
+    assert.equal(state.spent_usd, 0);
+    assert.equal(state.reserved_usd, 0);
+    const predictions = (await readFile(options.output, "utf8")).trim().split("\n").map(JSON.parse);
+    assert.deepEqual(predictions.map(item => item.instance_id), value.instances.map(item => item.instance_id));
+    assert.deepEqual(JSON.parse(await readFile(join(options.runRoot, "manifests", "003-example__project-4.json"), "utf8"))
+      .instances.map((item: { instance_id: string }) => item.instance_id), ["example__project-4"]);
+    await runSupervisor(value, options, fakeDependencies(runs));
+    assert.equal(runs.length, 4, "a terminal run is not repeated");
+    const saved = await readFile(join(options.runRoot, "supervisor-state.json"), "utf8");
+    await assert.rejects(runSupervisor(value, { ...options, durationHistory: undefined }, fakeDependencies(runs)),
+      /supervisor-schedule-changed/);
+    await writeFile(historyPath, JSON.stringify({ ...history, instances: history.instances.map((item, index) =>
+      index === 0 ? { ...item, result: { elapsed_ms: 2000 } } : item) }));
+    await assert.rejects(runSupervisor(value, options, fakeDependencies(runs)), /supervisor-schedule-changed/);
+    assert.equal(await readFile(join(options.runRoot, "supervisor-state.json"), "utf8"), saved);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("duration history must cover exactly the manifest instances with measured elapsed time", async () => {
+  const root = await mkdtemp(join(tmpdir(), "swebench-supervisor-duration-invalid-"));
+  try {
+    const historyPath = join(root, "previous.json");
+    const options = { manifestPath: join(root, "manifest.json"), runRoot: join(root, "run"),
+      output: join(root, "predictions.jsonl"), costLimitUsd: 5, durationHistory: historyPath, watchdog: false };
+    await writeFile(historyPath, JSON.stringify({ status: "completed", instances: [{
+      instance_id: manifestValue.instances[0].instance_id, result: { elapsed_ms: 1000 },
+    }] }));
+    await assert.rejects(runSupervisor(manifestValue, options, fakeDependencies([])), /duration-history-instances-mismatch/);
+    await writeFile(historyPath, JSON.stringify({ status: "completed", instances: manifestValue.instances.map(item => ({
+      instance_id: item.instance_id, result: { elapsed_ms: 0 },
+    })) }));
+    await assert.rejects(runSupervisor(manifestValue, options, fakeDependencies([])), /invalid-duration-history/);
+    await assert.rejects(readFile(join(options.runRoot, "supervisor-state.json"), "utf8"), /ENOENT/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("replay pins candidate and limits and retains an unpriced reservation", async () => {
   const root = await mkdtemp(join(tmpdir(), "swebench-supervisor-budget-"));
   try {
@@ -713,10 +771,14 @@ test("start CLI forwards and pins a non-default runner timeout", { skip: process
     const runRoot = join(root, "run");
     const output = join(root, "predictions.jsonl");
     const fakeRunner = join(root, "fake-runner.mjs");
+    const durationHistory = join(root, "previous-supervisor-state.json");
     const runnerTimeout = join(root, "runner-timeout-seconds.txt");
     const statePath = join(runRoot, "supervisor-state.json");
     const supervisorScript = fileURLToPath(new URL("../scripts/swebench-lite-supervisor.mjs", import.meta.url));
     await writeFile(manifestPath, JSON.stringify(value));
+    await writeFile(durationHistory, JSON.stringify({ status: "completed", instances: [{
+      instance_id: value.instances[0].instance_id, result: { elapsed_ms: 6000 },
+    }] }));
     await writeFile(fakeRunner, `import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 const args = process.argv.slice(2);
@@ -732,7 +794,7 @@ await writeFile(metadata, JSON.stringify({ execution: { spent_usd: 0, usage_comp
     const startExit = await new Promise<number>(resolvePromise => {
       const child = spawn(process.execPath, [supervisorScript, "--start", "--manifest", manifestPath,
         "--run-root", runRoot, "--output", output, "--cost-limit-usd", "5", "--timeout-seconds", "2400",
-        "--runner-script", fakeRunner], { stdio: "ignore" });
+        "--runner-script", fakeRunner, "--duration-history", durationHistory], { stdio: "ignore" });
       child.once("error", () => resolvePromise(1));
       child.once("close", exit => resolvePromise(exit ?? 1));
     });
@@ -746,6 +808,8 @@ await writeFile(metadata, JSON.stringify({ execution: { spent_usd: 0, usage_comp
     }
     assert.equal(state?.status, "completed");
     assert.equal(state?.limits.timeout_seconds, 2400);
+    assert.equal(state?.schedule?.history, durationHistory);
+    assert.deepEqual(state?.schedule?.order, [0]);
     assert.equal(await readFile(runnerTimeout, "utf8"), "2400");
     const savedState = await readFile(statePath, "utf8");
     await assert.rejects(runSupervisor(value, {
@@ -755,6 +819,7 @@ await writeFile(metadata, JSON.stringify({ execution: { spent_usd: 0, usage_comp
       costLimitUsd: 5,
       timeoutSeconds: 1800,
       runnerScript: fakeRunner,
+      durationHistory,
       watchdog: false,
     }, { allowWindows: true }), /supervisor-limits-changed/);
     assert.equal(await readFile(statePath, "utf8"), savedState);
