@@ -85,7 +85,8 @@ results to guide the following units. Do not invent preparation units or plan-ap
 For operations, plan_units.execution names the actual run/grade commands and working directory. Keep
 setup, execution and result collection in the same Worker. The host records native execution; NO_START
 or setup success cannot complete the operation. Reward/score zero is a result, not failure to execute.
-Use requirement_ids for each unit when there are multiple requirements; these are related requirements,
+Use requirement_ids when splitting multiple requirements across units; a single unit inherits all requirements
+when they are omitted. These are related requirements,
 not claims that a command proves every semantic obligation. Compare the final result yourself.
 
 Copy returned task fields exactly (V2: subagent_type -> agent, task_id -> sessionID). Do not append to a
@@ -105,6 +106,20 @@ once. Do not invent scores, medals, costs, savings, models or successful checks.
 existing user authorization and project gates; npm publication remains manual.
 `;
 }
+
+/** Shared by the installed Reviewer and its host-generated mission prompt. */
+export const MISSION_BEHAVIOR_REVIEW = `For a changed failure handler, inspect the operation it calls and the public inputs reaching it,
+including failures not listed in the new handler. Use the supplied source/tests and established API behavior
+to identify a concrete input that could still violate the requested contract. A passing normal input does
+not settle a different failure outcome of that same operation. A demonstrable defect is FINDINGS; ask for
+an excerpt or result only when a specific material outcome cannot be settled. Do not invent new behavior,
+require an exhaustive exception inventory, or recommend catching every exception.
+
+Behavioral requirements need concrete input/result evidence. For incidental workflow constraints such as
+cache settings or command-path spelling, use the existing host observations and concise compliance trace;
+absence of a separate settings dump or historical log is not itself an evidence gap. Flag observed
+contradictions. The Operator owns final comparison with the original request. If a missing check genuinely
+affects correctness or a requested deliverable, name that consequence and the smallest useful next check.`;
 
 export function missionCoordinatorContent(profile: RuntimeProfile, version: string): string {
   return `---
@@ -149,7 +164,8 @@ select the matching runner/profile before starting rather than changing the pinn
 Investigate only enough to start the first useful Worker. Prefer a targeted read/reproduction over a broad
 inventory or speculative full design. Call ${profile.toolPrefix}plan_units with concise units:
 title, objective, read/write file or directory scopes, validation commands, and related requirement_ids
-when there is more than one requirement. For operation missions, include execution with the actual
+when splitting multiple requirements across multiple units; a single unit inherits all requirements when
+requirement_ids is omitted. For operation missions, include execution with the actual
 run/grade commands and working directory. Setup, launch and result collection normally stay in one Worker;
 do not forbid execution while assigning that Worker the requirement to execute.
 When the issue includes a concrete public reproduction, pass its entrypoint, relevant input and observed
@@ -158,7 +174,9 @@ example depends on a working directory or package layout, preserve that context.
 existing analogous source/tests for the expected contract when available. Avoid separate investigation
 units just to restate the issue. A test of a neighboring name is not an adjacent check unless it runs
 the changed branch on a relevant different input; keep validation focused and do not require an extra
-test when the existing checks already exercise that boundary.
+test when the existing checks already exercise that boundary. For an exception fix, identify the failing
+operation and ask the Worker to consider its other source/API-backed failure inputs, including ones the
+new handler does not catch. A normal input alone does not check a different failure outcome.
 For read-only verification, use write: []; do not invent an output file or request write access to inputs.
 For ordinary diagnostics, use native read/search/shell directly, including while an old run is being
 reconciled. Do not create a dummy validation/console.log unit just to inspect status. The read list is
@@ -169,7 +187,7 @@ Use absolute native paths for requested global installations or other external o
 a directory including a not-yet-created tree. These are execution/evidence scopes, not an additional
 permission grant: the host's native permissions still apply. Include the actual external input/output
 paths in read/write so validation and review observe them; do not substitute a repository symlink.
-Keep all original requirements covered; only a single requirement can be inferred. Last validation command checks
+Keep all original requirements covered. Last validation command checks
 that unit. If your quick check shows repository-declared dependencies or the test runner are missing, keep
 setup inside the first unit: declare its checks through the repository-local tool environment ${TOOL_ENVIRONMENT}/
 (for Python, ${TOOL_ENVIRONMENT}/bin/python -m pytest ...) and let that Worker create it. Never plan a separate setup
@@ -203,7 +221,8 @@ and ask a bounded question in the user's language; do not send generic explorato
 If the user explicitly requested Advisor input before a decision, do not treat it as optional.
 
 After formal validation, call review_mission with risk_tags and one concise implementation/test trace per
-requirement. Include the observed result for required behavioral checks, not a speculative route inventory
+requirement. For changed failure behavior, connect the operation and concrete input to the contract-derived
+expected result and observed result in those existing traces. Include required behavioral checks, not a speculative route inventory
 or raw history to prove incidental process constraints. Recognized tags: ${SOURCE_REVIEW_RISK_TAGS.join(", ")}.
 High-risk changes require the generated independent ${profileAgent(profile, "dog-reviewer")} task.
 Low risk uses [] and the host records the skip. The host supplies source excerpts, manifest, requirement
@@ -259,11 +278,13 @@ formal acceptance evidence. Do not repeat a failed command without a concrete so
 repeat passed checks on unchanged source. Add meaningful tests only when needed by the change/request.
 For a reported bug, keep the public reproduction's entrypoint, input and layout intact during diagnosis;
 after a fix, run it again when the available environment permits. If it cannot run, report exactly
-what remains unverified instead of substituting a different passing check. When a changed condition
-or exception handler also covers an adjacent input demonstrated by the public source/tests, check that
-input on the same branch (e.g. a neighboring exception type), rather than checking only a nearby test
-name. Derive expected behavior from public code and tests, not hidden evaluator details; skip redundant
-checks already covered by formal validation. Return a concrete failed reproduction to Coordinator for
+what remains unverified instead of substituting a different passing check. For a changed condition or
+exception handler, inspect the underlying operation and inputs reaching it, including failures the new
+handler does not catch. Check a materially different failure input when public source/tests or established
+API behavior support the same requested contract; a normal input alone does not check that failure outcome.
+Choose the smallest complete fix, not a catch-all or an exhaustive exception matrix. Derive expected behavior
+from public code and tests, not hidden evaluator details; skip redundant checks already covered by formal validation.
+Return a concrete failed reproduction to Coordinator for
 the same-goal correction loop rather than declaring the whole task complete.
 When changing a failure path, check its public return value, error and post-failure state together against
 the existing API contract; do not stop assertions after matching error text.

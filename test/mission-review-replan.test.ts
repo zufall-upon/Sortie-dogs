@@ -8,6 +8,8 @@ import { OperatorRuntime } from "../dist/core/operator-runtime.js";
 import { OperatorMissionRuntime } from "../dist/core/operator-mission.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
 import { SortieDogsV010Plugin } from "../dist/plugin/profiled.js";
+import { MISSION_BEHAVIOR_REVIEW } from "../dist/runtime-mission-assets.js";
+import { runtimeAssets } from "../dist/runtime-assets-v010.js";
 
 const exec = promisify(execFile);
 
@@ -74,6 +76,9 @@ test("failed implementation then read-only validation and test-only replan keep 
     assert.match(mission.review!.task!.prompt, /changed: source\.js/);
     assert.match(mission.review!.task!.prompt, /return nilValue/);
     assert.match(mission.review!.task!.prompt, /changed: test\.js/);
+    assert.ok(mission.review!.task!.prompt.includes(MISSION_BEHAVIOR_REVIEW));
+    assert.ok(runtimeAssets.find(asset => asset.name === "dog-reviewer-v010")!.content.includes(MISSION_BEHAVIOR_REVIEW),
+      "installed Reviewer and dispatched review use the same behavioral and workflow guidance");
     await missions.update("root", item => { item.review!.verdict = "PASS"; });
     await writeFile(join(root, "source.js"), "return stale;\n");
     await assert.rejects(cold.tool!.sortie_v010_submit_mission.execute({ status: "ready", summary: "done" }, { sessionID: "coordinator" }), /mission-review-required-or-stale/);

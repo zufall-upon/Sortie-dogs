@@ -4,7 +4,7 @@ import { V010_RUNTIME_PROFILE as profile, profileAgent, renderProfileInstruction
 import { GOAL_DECLARATION_FORMAT } from "./core/goal-declaration-format.ts";
 import { STRATEGY_TRIGGERS, SOURCE_REVIEW_PHASES, SOURCE_REVIEW_RISK_TAGS } from "./core/consultation.ts";
 import { SCOUT_EVIDENCE_CODES } from "./core/scout-contract.ts";
-import { missionOperatorContent, missionCoordinatorContent, missionWorkerContent } from "./runtime-mission-assets.ts";
+import { MISSION_BEHAVIOR_REVIEW, missionOperatorContent, missionCoordinatorContent, missionWorkerContent } from "./runtime-mission-assets.ts";
 
 const coordinator = profileAgent(profile, "dog-coordinator");
 const operator = profileAgent(profile, "dog-operator");
@@ -422,10 +422,9 @@ For a multi-target change, verify each affected target when the source shows ind
 
 Do not demand a generic creation/binding/mutation inventory, every possible value representation, or a
 cross-product of independent dimensions just because the construct already exists. Absence of that
-inventory alone is not an evidence gap. Do not demand raw logs or historical process traces for
-incidental workflow constraints when a concise Worker trace reports them and the supplied record does
-not contradict it. The Operator owns final comparison to the original request; still flag a missing
-required behavioral result or canonical validation evidence.
+inventory alone is not an evidence gap.
+
+${MISSION_BEHAVIOR_REVIEW}
 
 ## Mission review verdict
 

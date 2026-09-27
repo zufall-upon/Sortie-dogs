@@ -348,17 +348,20 @@ export function missionPlan(mission: OperatorMission, raw: unknown): OperatorPla
       if (!Array.isArray(entries) || !entries.every(item => typeof item === "string")) throw new Error(`mission-unit-${index + 1}: ${field} must be paths`);
       return [...new Set(entries.map(item => normalizeExecutionScope(item)))];
     };
-    // Scheduling coverage is not semantic proof. Only a single requirement is unambiguous.
-    const ids = value.requirement_ids ?? (mission.requirements.length === 1 ? [mission.requirements[0]!.id] : []);
+    // A sole unit owns the whole request. This schedules work; it does not prove acceptance.
+    const ids = value.requirement_ids ?? (raw.length === 1 || mission.requirements.length === 1 ? mission.requirements.map(item => item.id) : []);
     if (!Array.isArray(ids) || ids.length === 0 || !ids.every(id => mission.requirements.some(item => item.id === id))) {
-      throw new Error(`mission-unit-${index + 1}: requirement_ids must name the related R IDs; multi-requirement work needs explicit coverage`);
+      throw new Error(`mission-unit-${index + 1}: requirement_ids must name the related R IDs; splitting multiple requirements across units needs explicit coverage`);
     }
     if (!Array.isArray(value.validation) || value.validation.length === 0 ||
         !value.validation.every(command => typeof command === "string" && command.trim())) {
       throw new Error(`mission-unit-${index + 1}: validation must contain exact commands; final command proves the unit`);
     }
+    const validation = (value.validation as string[]).map(missionValidationCommand);
+    // Retain last occurrences so removing a redundant check preserves the final proof command.
     return { id: `unit-${index + 1}`, title: line("title"), objective: line("objective"), read: paths("read"), write: paths("write"),
-      validation: (value.validation as string[]).map(missionValidationCommand), acceptance_indices: [...new Set(ids.map(id => mission.requirements.findIndex(item => item.id === id)))] };
+      validation: validation.filter((command, i) => validation.lastIndexOf(command) === i),
+      acceptance_indices: [...new Set(ids.map(id => mission.requirements.findIndex(item => item.id === id)))] };
   });
   // The serial engine counts new proof milestones. Units sharing the same final suite are one
   // milestone, so coalesce them instead of making the model repair a bookkeeping rejection.
@@ -451,7 +454,8 @@ export function missionReviewTraces(mission: OperatorMission, raw: unknown): str
     throw new Error("mission-review-traces: supply concise implementation/test traces");
   }
   const grouped: { text: string; ids: string[] }[] = raw.map(text => ({ text,
-    ids: /^\s*((?:R\d+\s*[/,]?\s*)+):/u.exec(text)?.[1]?.match(/R\d+/gu) ?? [] }));
+    ids: [...text.matchAll(/(?:^|[.;]\s+|[\r\n])\s*((?:R\d+\s*[/,]?\s*)+):/gu)]
+      .flatMap(match => match[1]!.match(/R\d+/gu) ?? []) }));
   if (grouped.every(item => item.ids.length === 0) && raw.length === mission.requirements.length) return raw;
   const unknown = grouped.flatMap(item => item.ids).filter(id => !mission.requirements.some(requirement => requirement.id === id));
   const missing = mission.requirements.filter(requirement => !grouped.some(item => item.ids.includes(requirement.id)));
