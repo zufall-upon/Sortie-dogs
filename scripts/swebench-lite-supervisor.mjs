@@ -554,10 +554,8 @@ export async function runSupervisor(value, options, dependencies = {}) {
       let metadata;
       try { metadata = await readJson(paths.metadata); } catch { metadata = undefined; }
       const childResult = metadata?.results?.[0];
-      if (childResult) {
-        entry.result = childResult;
-        entry.status = childResult.status ?? "completed";
-      } else if (outcome.exit?.timedOut) {
+      // A timed-out process cannot be declared successful from metadata it wrote before exiting.
+      if (outcome.exit?.timedOut) {
         entry.status = "timeout";
         entry.result = {
           instance_id: entry.instance_id,
@@ -567,6 +565,9 @@ export async function runSupervisor(value, options, dependencies = {}) {
           reason: "supervisor-timeout",
           timeout_seconds: timeoutSeconds,
         };
+      } else if (childResult) {
+        entry.result = childResult;
+        entry.status = childResult.status ?? "completed";
       } else if (outcome.error) {
         entry.status = "failed";
         entry.result = {
@@ -584,7 +585,7 @@ export async function runSupervisor(value, options, dependencies = {}) {
       const usage = recordedUsage(metadata, entry.result);
       if (entry.usage_recorded !== true && usage !== null && usage > 0) state.spent_usd += usage;
       entry.usage_usd = usage;
-       if (metadata?.execution?.usage_complete !== true || usage === null) {
+        if (outcome.exit?.timedOut || metadata?.execution?.usage_complete !== true || usage === null) {
         const hold = Math.max(0, (entry.cost_reservation_usd ?? 0) - (usage ?? 0));
         state.held_unknown_usd += hold;
         entry.held_unknown_usd = hold;

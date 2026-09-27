@@ -496,6 +496,39 @@ test("supervisor fails closed when a timed-out runner cannot be stopped", async 
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("supervisor timeout overrides a stale success record and holds unverified remainder", async () => {
+  const root = await mkdtemp(join(tmpdir(), "swebench-supervisor-timeout-metadata-"));
+  let attempts = 0;
+  try {
+    const value = { ...manifestValue, instances: [manifestValue.instances[0]!] };
+    const options = { manifestPath: join(root, "manifest.json"), runRoot: root,
+      output: join(root, "predictions.jsonl"), costLimitUsd: 1.5,
+      timeoutSeconds: 1, watchdog: false };
+    const dependencies = {
+      allowWindows: true,
+      spawnRunner: async (_state: unknown, _entry: unknown, paths: { metadata: string }) => {
+        attempts += 1;
+        await writeAtomicJson(paths.metadata, {
+          execution: { spent_usd: 0.5, usage_complete: true },
+          results: [{ instance_id: value.instances[0]!.instance_id, status: "succeeded", usage: { usd: 0.5 } }],
+        });
+        return { identity: { pid: 99999999, starttime: null } };
+      },
+      waitForChild: async () => ({ exit: 124, signal: "timeout", timedOut: true, runnerStopped: true }),
+    };
+    const state = await runSupervisor(value, options, dependencies);
+    assert.equal(state.status, "completed");
+    assert.equal(state.instances[0]!.status, "timeout");
+    assert.equal(state.instances[0]!.result?.reason, "supervisor-timeout");
+    assert.equal(state.instances[0]!.attempt, 1);
+    assert.equal(state.spent_usd, 0.5);
+    assert.equal(state.held_unknown_usd, 1);
+    assert.equal(state.reserved_usd, 0);
+    await runSupervisor(value, options, dependencies);
+    assert.equal(attempts, 1);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("supervisor passes the remaining global cost budget to each child", async () => {
   const root = await mkdtemp(join(tmpdir(), "swebench-supervisor-cost-"));
   const limits: number[] = [];
