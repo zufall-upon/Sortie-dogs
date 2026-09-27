@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import test from "node:test";
 import { OperatorRuntime } from "../dist/core/operator-runtime.js";
 import { OperatorMissionRuntime } from "../dist/core/operator-mission.js";
-import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
+import { V010_RUNTIME_PROFILE, profileAgent } from "../dist/core/runtime-profile.js";
 import { RunFlightLedger } from "../dist/core/run-flight-ledger.js";
 import { SortieDogsV010Plugin } from "../dist/plugin/profiled.js";
 
@@ -136,5 +136,74 @@ for (const mode of ["implementation", "executed", "NO_START"] as const) test(`mi
     assert.equal(ledger.state.outstanding_reservations.length, 0);
     assert.equal(ledger.records.filter(({ event }) => event.kind === "validation.admission").length, 1, "review and acceptance must not require a second successful check");
     assert.equal(await readFile(join(root, "result.txt"), "utf8"), "ready\n");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("optional mission consultations record bounded use and skip reasons with native model and outcome", async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const root = await mkdtemp(resolve("_testenv/mission-consultation-"));
+  try {
+    const rootRole = profileAgent(V010_RUNTIME_PROFILE, "dog-coordinator");
+    const identities: Record<string, Record<string, unknown>> = {
+      root: { agent: rootRole },
+      coordinator: { agent: profileAgent(V010_RUNTIME_PROFILE, "dog-operator"), parentID: "root" },
+      advisor: { agent: profileAgent(V010_RUNTIME_PROFILE, "dog-advisor"), parentID: "coordinator",
+        model: { providerID: "openai", id: "gpt-6-sol", variant: "xhigh" }, outcome: "succeeded" },
+      scout: { agent: profileAgent(V010_RUNTIME_PROFILE, "dog-scout"), parentID: "coordinator",
+        model: { providerID: "openai", id: "gpt-6-luna-fast", variant: "max" }, outcome: "succeeded" },
+    };
+    const hooks = await SortieDogsV010Plugin({ directory: root, client: { session: {
+      get: async ({ path }: { path: { id: string } }) => ({ data: { id: path.id, ...identities[path.id] } }),
+      children: async ({ path }: { path: { id: string } }) => ({ data: Object.entries(identities)
+        .filter(([, info]) => info.parentID === path.id).map(([id, info]) => ({ id, ...info })) }),
+      messages: async () => ({ data: [] }), abort: async () => ({ data: true }),
+    } } } as never);
+    const chat = async (id: string, text: string) => hooks["chat.message"]!({ sessionID: id, messageID: `${id}-user`, agent: identities[id]!.agent as string }, {
+      message: { id: `${id}-user`, agent: identities[id]!.agent, model: { providerID: "openai", modelID: "gpt-6-sol" } },
+      parts: [{ type: "text", text }],
+    });
+    await chat("root", "Implement this change and consult only for concrete gaps.");
+    const started = JSON.parse(await hooks.tool!.sortie_v010_start_mission.execute(
+      { requirements: ["Complete the requested change"] }, { sessionID: "root" }));
+    await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "coordinator-call" }, { args: structuredClone(started.task) });
+    await chat("coordinator", started.task.prompt);
+
+    const skipped = JSON.parse(await hooks.tool!.sortie_v010_skip_mission_consultation.execute(
+      { role: "advisor", reason: "The acceptance and implementation path are already explicit; no material choice remains." },
+      { sessionID: "coordinator" }));
+    assert.equal(skipped.status, "recorded");
+    const scoutSkipped = JSON.parse(await hooks.tool!.sortie_v010_skip_mission_consultation.execute(
+      { role: "scout", reason: "The declared validator and its invocation were already observed directly." },
+      { sessionID: "coordinator" }));
+    assert.equal(scoutSkipped.status, "recorded");
+    const advisorPrompt = "strategy_trigger: architecture-choice\nShould the existing parser remain the entrypoint? The current call sites show no alternate route.";
+    await hooks["tool.execute.before"]!({ tool: "task", sessionID: "coordinator", callID: "advisor-call" }, { args: {
+      subagent_type: profileAgent(V010_RUNTIME_PROFILE, "dog-advisor"), description: "Bounded architecture question", prompt: advisorPrompt,
+    } });
+    await hooks["tool.execute.after"]!({ tool: "task", sessionID: "coordinator", callID: "advisor-call" },
+      { output: "Keep the parser as the entrypoint.", metadata: { sessionId: "advisor" } });
+
+    const scoutPrompt = `missing_evidence_code: validation\nproject_root: ${root}\nknown_paths: ["check.mjs"]\nWhich exact command is the declared validator?`;
+    await hooks["tool.execute.before"]!({ tool: "task", sessionID: "coordinator", callID: "scout-call" }, { args: {
+      subagent_type: profileAgent(V010_RUNTIME_PROFILE, "dog-scout"), description: "One missing validation fact", prompt: scoutPrompt,
+    } });
+    await hooks["tool.execute.after"]!({ tool: "task", sessionID: "coordinator", callID: "scout-call" },
+      { output: "The declared command is node check.mjs.", metadata: { sessionId: "scout" } });
+
+    const status = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
+    assert.deepEqual(status.consultations.map((entry: Record<string, unknown>) => [entry.role, entry.disposition]), [
+      ["advisor", "skipped"], ["scout", "skipped"], ["advisor", "dispatched"], ["scout", "dispatched"],
+    ]);
+    assert.match(status.consultations[0].reason, /no material choice remains/u);
+    assert.match(status.consultations[1].reason, /validator.*observed directly/u);
+    assert.equal(status.consultations[2].trigger, "architecture-choice");
+    assert.match(status.consultations[2].question, /Should the existing parser/u);
+    assert.equal(status.consultations[2].observedModel, "openai/gpt-6-sol");
+    assert.equal(status.consultations[2].observedVariant, "xhigh");
+    assert.equal(status.consultations[2].outcome, "completed");
+    assert.equal(status.consultations[3].trigger, "validation");
+    assert.equal(status.consultations[3].observedModel, "openai/gpt-6-luna-fast");
+    assert.equal(status.consultations[3].outcome, "completed");
+    assert.equal(status.phase, "running", "optional consultations do not block or accept the mission");
   } finally { await rm(root, { recursive: true, force: true }); }
 });

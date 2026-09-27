@@ -401,6 +401,11 @@ test("progress observes unit admission after reading the prepared run, rather th
     const running = (await observe())!.sortie_progress;
     assert.equal(running.status, "running");
     assert.equal(running.child_session_id, "worker");
+    assert.equal(running.run_created_at, run.createdAt);
+    assert.equal(running.last_transition_at, null, "running alone is not a settled transition or heartbeat");
+    await missions.update("root", state => { state.progress.push({ unit: `${run.runID}/unit-1`, title: "Fix result",
+      status: "failed", at: "2026-09-27T12:00:00.000Z" }); });
+    assert.equal((await observe())!.sortie_progress.last_transition_at, "2026-09-27T12:00:00.000Z");
     assert.equal(await missionProgressReader(directory, "root", "foreign-call")(), undefined);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });

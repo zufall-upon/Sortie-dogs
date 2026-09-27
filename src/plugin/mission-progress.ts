@@ -29,6 +29,10 @@ export function missionProgressReader(directory: string, root: string, callID: s
     return { description: `🐾 ${status}: ${title}`, sortie_progress: {
       mission_id: mission.id, phase: mission.phase, unit: running ? `${run!.runID}/${running.unit.id}` : last?.unit ?? null,
       title, status, child_session_id: running?.childSessionID ?? null,
+      // Stable timestamps, not a fabricated heartbeat. The parent can tell when the
+      // run began and when a unit last settled without generating another model turn.
+      run_created_at: run?.runID === mission.runID ? run.createdAt : null,
+      last_transition_at: last?.at ?? null,
       completed_units: units.filter(unit => unit.status === "succeeded").length,
       failed_units: units.filter(unit => unit.status === "failed").length,
       historical_failed_attempts: mission.progress.filter(unit => unit.status === "failed").length,

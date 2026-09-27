@@ -696,9 +696,13 @@ test("explicit replacement links a cancelled legacy run without reviving its unr
   await missions.update("root", state => { state.phase = "cancelled"; }); // Legacy mission never owned the standalone run.
   await user("new-user", "Only finish the current stage; do not redo earlier stages");
   const requirements = ["Only finish the current stage", "Do not redo earlier stages"];
-  await assert.rejects(hooks.tool!.sortie_v010_start_mission.execute({ requirements }, { sessionID: "root" }),
-    /mission-cancelled-source-unproven/);
+  const unproven = JSON.parse(await hooks.tool!.sortie_v010_start_mission.execute({ requirements }, { sessionID: "root" }));
+  assert.equal(unproven.status, "mission-source-reconciliation-required");
+  assert.equal(unproven.task, undefined, "an unproven mission cannot dispatch a Coordinator");
+  const blockedStatus = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
+  assert.equal(blockedStatus.task, undefined, "status must not resurrect an unproven Coordinator task");
   const started = JSON.parse(await hooks.tool!.sortie_v010_start_mission.execute({ requirements, intent: "replace" }, { sessionID: "root" }));
+  assert.equal(started.mission_id, unproven.mission_id, "repair the saved mission in place");
   assert.deepEqual(started.requirements.map((item: { text: string }) => item.text), requirements);
   assert.equal((await missions.required("root")).supersededRunID, previous.runID);
   const prepared = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ units: [{
@@ -710,6 +714,58 @@ test("explicit replacement links a cancelled legacy run without reviving its unr
   assert.equal(next.supersededRunID, previous.runID);
   assert.deepEqual(next.acceptance, requirements);
   assert.equal(next.priorAcceptedUnits.length, 0);
+}));
+
+test("a submitted source-blocked mission repairs in place and resumes its original Coordinator", async () => fixture(async root => {
+  const identities: Record<string, { id: string; agent: string; parentID?: string }> = {
+    root: { id: "root", agent: "dog-operator" }, coordinator: { id: "coordinator", agent: "dogs-coordinator", parentID: "root" },
+  };
+  const hooks = await SortieDogsV010Plugin({ directory: root, client: { session: {
+    get: async ({ path }: { path: { id: string } }) => ({ data: identities[path.id] }),
+    messages: async () => ({ data: [] }),
+  } } } as never);
+  await hooks["chat.message"]!({ sessionID: "root", messageID: "user-new", agent: "dog-operator" }, {
+    message: { id: "user-new", agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-6-sol" } },
+    parts: [{ type: "text", text: "Continue only the unfinished current milestone" }],
+  });
+  const missions = new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE);
+  const operators = new OperatorRuntime(root, V010_RUNTIME_PROFILE);
+  const old = await operators.prepare("root", plan()); // Legacy source_refs are not user-message IDs.
+  await operators.interrupted("root", "agent-changed");
+  const saved = await missions.start("root", ["Complete the current milestone", "Do not repeat old stages"]);
+  const task = missions.task(saved);
+  await missions.admit("root", "old-call", task);
+  await missions.claim("root", "coordinator", task.prompt);
+  const active = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
+  assert.equal(active.coordinator_dispatch, "active");
+  assert.equal(active.task, undefined);
+  assert.match(active.next_action, /still active/u);
+  await missions.update("root", state => { state.dispatchOpen = false; state.phase = "submitted";
+    state.submission = { status: "blocked", summary: "Legacy source identity is unproven" }; });
+  const status = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
+  assert.equal(status.task, undefined);
+  assert.equal(status.status, "mission-source-reconciliation-required");
+  const attempted = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ units: [{
+    title: "Finish milestone", objective: "Validate the current requirements", read: [], write: ["result.txt"],
+    validation: ["node check.mjs"], requirement_ids: ["R1", "R2"],
+  }] }, { sessionID: "coordinator" }));
+  assert.equal(attempted.status, "mission-source-reconciliation-required");
+  assert.equal(attempted.task, undefined, "do not issue a Worker contract before root reconciliation");
+  const resumed = JSON.parse(await hooks.tool!.sortie_v010_start_mission.execute({
+    requirements: saved.requirements.map(item => item.text), intent: "replace",
+  }, { sessionID: "root" }));
+  assert.equal(resumed.mission_id, saved.id);
+  assert.equal(resumed.task.task_id, "coordinator");
+  assert.equal(resumed.submission, null);
+  assert.equal((await missions.required("root")).supersededRunID, old.runID);
+  await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "resumed-call" }, { args: structuredClone(resumed.task) });
+  const next = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ units: [{
+    title: "Finish milestone", objective: "Validate the current requirements", read: [], write: ["result.txt"],
+    validation: ["node check.mjs"], requirement_ids: ["R1", "R2"],
+  }] }, { sessionID: "coordinator" }));
+  assert.ok(next.task, JSON.stringify(next));
+  assert.deepEqual((await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root")).acceptance,
+    saved.requirements.map(item => item.text));
 }));
 
 test("plan_units repairs an already-dispatched mission with cancelled-run acceptance after plugin reload", async () => fixture(async root => {
@@ -1794,8 +1850,11 @@ for (const exhaustBudget of [false, true]) test(`failed repair validation expose
     `${createHash("sha256").update("v010\0root").digest("hex")}.json`));
   const inFlight = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
   const initialGoal = (await budgetLedger.readGoal()).state;
-  const { settled_cost_usd, cost_limit_usd, cost_status, cost_note, cost_source, ...inFlightUnits } = inFlight.budget;
+  const { settled_time_ms, time_limit_ms, settled_cost_usd, cost_limit_usd, cost_status, cost_note, cost_source,
+    ...inFlightUnits } = inFlight.budget;
   assert.equal(cost_source, "native-usage-price-table");
+  assert.equal(settled_time_ms, initialGoal.consumed_time_ms);
+  assert.equal(time_limit_ms, initialGoal.budget!.time_ms);
   assert.equal(settled_cost_usd, initialGoal.consumed_cost_usd);
   assert.equal(cost_limit_usd, initialGoal.budget!.cost_usd);
   assert.equal(cost_status, "in-flight-not-final");
@@ -1847,8 +1906,11 @@ for (const exhaustBudget of [false, true]) test(`failed repair validation expose
     { command: [validator], outcome: "fail", exit_code: 12 });
   assert.match(terminal.next_action, /cancel_operator[\s\S]+prepare_operator/u);
   const settledGoal = (await budgetLedger.readGoal()).state;
-  const { settled_cost_usd: finalCost, cost_limit_usd: finalLimit, cost_status: finalStatus, cost_note: finalNote, cost_source: finalSource, ...settledUnits } = terminal.budget;
+  const { settled_time_ms: finalTime, time_limit_ms: finalTimeLimit, settled_cost_usd: finalCost, cost_limit_usd: finalLimit,
+    cost_status: finalStatus, cost_note: finalNote, cost_source: finalSource, ...settledUnits } = terminal.budget;
   assert.equal(finalSource, cost_source);
+  assert.equal(finalTime, settledGoal.consumed_time_ms);
+  assert.equal(finalTimeLimit, settledGoal.budget!.time_ms);
   assert.equal(finalCost, settledGoal.consumed_cost_usd);
   assert.equal(finalLimit, settledGoal.budget!.cost_usd);
   assert.equal(finalStatus, finalCost === null ? "unknown-usage" : "settled");

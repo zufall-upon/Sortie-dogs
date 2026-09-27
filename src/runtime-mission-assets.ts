@@ -60,6 +60,13 @@ quality threshold and explicit model/budget choice. Follow AGENTS.md and use the
     When the user replaces a version, target, parallelism or other requirement, call start_mission with
     intent: "replace" and the complete current requirements. The host cancels/archives the old run and
     retains spend/results; superseded instructions are history, not additional obligations.
+    If status/start_mission reports mission-source-reconciliation-required, do not dispatch its Task
+    or declare the user's work impossible. Compare the saved requirements with the user's current
+    scope. When they reflect an already requested narrowing/change, call start_mission with intent:
+    "replace" and the exact saved requirements. The host links the cancelled predecessor to the
+    SAME mission before any Worker starts, retains its Coordinator and cumulative spend, and checks
+    old children before preparing a Worker. This is not permission to discard unchanged acceptance:
+    if the scope is uncertain, ask the user which requirements remain instead of inferring a replacement.
 2. Dispatch the returned ${profileAgent(profile, "dog-operator")} task immediately. It owns investigation,
    unit boundaries, Worker/Scout/Advisor/independent Reviewer calls, write-scope extensions and corrections
    within the original request and cumulative budget. Do not investigate or approve each unit at the root.
@@ -141,7 +148,7 @@ permission:
     ${profileAgent(profile, "dog-advisor")}: allow
 tools:
   "sortie_*": false
-${controls(profile, ["plan_units", "operator_next", "operator_status", "expand_unit", "review_mission", "submit_mission"])}
+${controls(profile, ["plan_units", "operator_next", "operator_status", "expand_unit", "review_mission", "submit_mission", "skip_mission_consultation", "retry_mission_unit", "rescue_mission_unit"])}
 ---
 # ${profileAgent(profile, "dog-operator")}
 
@@ -196,6 +203,10 @@ ${profileAgent(profile, "dog-worker")} task verbatim, in foreground. V2 maps sub
 task_id to sessionID. Do not insert model overrides unless the user explicitly selected them.
 
 After each Worker returns, use its actual report and host evidence. Continue pending units with operator_next.
+If plan_units returns mission-source-reconciliation-required, do not retry the same plan. The
+root-only Operator must reconcile the prior cancelled run. Submit status=blocked with the saved
+requirements and exact host diagnostic, then return; do not declare a user-only decision when
+the current request already narrowed the old scope.
 For a needed write-scope addition within the original request, call expand_unit with unit_id, paths and
 reason; the host returns a replacement contract without Operator approval. For a changed approach, formal
 check or reviewer finding, call plan_units with the corrected units and a short observed reason. Replanning
@@ -219,6 +230,22 @@ the header, correct and redispatch this same consultation once before proceeding
 do not investigate runtime policy or bounce the question to Operator. Use your existing evidence
 and ask a bounded question in the user's language; do not send generic exploratory delegations.
 If the user explicitly requested Advisor input before a decision, do not treat it as optional.
+Actual Advisor/Scout dispatches are recorded in operator_status with their trigger/code, bounded question,
+observed model and native outcome. When you considered a concrete decision or missing fact but existing
+evidence makes consultation unnecessary, record the role and concise skip reason with
+${profile.toolPrefix}skip_mission_consultation. Record only meaningful considered skips, not a generic
+"not needed" for each unit. This is observation only: it neither requires consultation nor adds approval.
+
+After a Mission Worker returns a host-classified failed declared validation (not a Task launch error, contract
+defect, cancellation, or unknown outcome), you may call ${profile.toolPrefix}retry_mission_unit once for that unit.
+It reuses the exact scope, acceptance and validation under the ordinary cumulative budget. If that same normal
+remediation then fails the same declared validation and native termination/writer release are confirmed, you may
+call ${profile.toolPrefix}rescue_mission_unit once. The host records the Astra model actually selected, or a
+specific non_rescue reason; do not expose or substitute the legacy sortie_execute_terminal_rescue capability.
+Rescue is still a normal current-Mission Worker dispatch: its declared validation must pass, then the existing
+independent review, final evidence check and root complete_mission acceptance remain mandatory. A Worker return
+or rescue dispatch alone is never success. On non_rescue, continue the ordinary correction/replan within the same
+requirements and remaining budget; never bypass a failure class or create another run to reset spend.
 
 After formal validation, call review_mission with risk_tags and one concise implementation/test trace per
 requirement. For changed failure behavior, connect the operation and concrete input to the contract-derived
