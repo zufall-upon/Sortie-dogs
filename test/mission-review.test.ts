@@ -216,6 +216,58 @@ test("read-only units do not accidentally collect an entire repository and ignor
   assert.match(packet.excerpt, /Read-only units: no declared output files/);
 });
 
+test("read-only and test-only replans retain earlier source, deletion and stale-review coverage", async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const root = await mkdtemp(join(resolve("_testenv"), "mission-replan-source-"));
+  try {
+    await git("git", ["init", "--quiet"], { cwd: root });
+    await git("git", ["config", "user.name", "test"], { cwd: root });
+    await git("git", ["config", "user.email", "test@example.invalid"], { cwd: root });
+    await writeFile(join(root, "source.js"), "return oldValue;\n");
+    await writeFile(join(root, "deleted.js"), "old path\n");
+    await writeFile(join(root, "outside.js"), "unrelated\n");
+    await git("git", ["add", "--all"], { cwd: root });
+    await git("git", ["commit", "--quiet", "-m", "base"], { cwd: root });
+    const baseline = await missionReviewBaseline(root);
+    await writeFile(join(root, "source.js"), "return nilValue;\n");
+    await rm(join(root, "deleted.js"));
+    await writeFile(join(root, "outside.js"), "must not appear\n");
+    await git("git", ["add", "--all"], { cwd: root });
+    await git("git", ["commit", "--quiet", "-m", "implementation before replan"], { cwd: root });
+    const scope = { read: [], write: ["source.js", "deleted.js"] };
+    for (const write of [[], ["test.js"]]) {
+      const run = { units: [{ unit: { read: [], write }, hashes: [] }] } as never;
+      const source = await missionReviewSource(root, run, [{ path: "source.js", offset: 1, limit: 1 }], baseline, scope);
+      assert.match(source.excerpt, /changed: source\.js/);
+      assert.match(source.excerpt, /changed: deleted\.js/);
+      assert.match(source.excerpt, /return nilValue/);
+      assert.doesNotMatch(source.excerpt, /must not appear|Read-only units/);
+      const automatic = await missionReviewSource(root, run, [], baseline, scope);
+      await writeFile(join(root, "source.js"), "return broken;\n");
+      assert.notEqual((await missionReviewSource(root, run, [], baseline, scope)).fingerprint, automatic.fingerprint);
+      const changed = await missionReviewSource(root, run, [{ path: "source.js", offset: 1, limit: 1 }], baseline, scope);
+      assert.notEqual(changed.fingerprint, source.fingerprint, "earlier implementation changes invalidate the review");
+      await writeFile(join(root, "source.js"), "return nilValue;\n");
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("large focused tests do not starve a later requested error branch", async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const root = await mkdtemp(join(resolve("_testenv"), "mission-focused-budget-"));
+  try {
+    await writeFile(join(root, "large_test.js"), ("test fixture ".repeat(20) + "\n").repeat(200));
+    await writeFile(join(root, "source.js"), "if (error) return [null, error];\n");
+    const run = { units: [{ unit: { read: ["large_test.js", "source.js"], write: [] }, hashes: [] }] } as never;
+    const packet = await missionReviewSource(root, run, [
+      { path: "large_test.js", offset: 1, limit: 200 }, { path: "source.js", offset: 1, limit: 1 },
+    ]);
+    assert.match(packet.excerpt, /FOCUSED EXCERPT TRUNCATED: large_test\.js/);
+    assert.match(packet.excerpt, /1: if \(error\) return \[null, error\]/);
+    assert.ok(Buffer.byteLength(packet.excerpt) < 12_000);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("focused read-only review consumes the original result tail and pins unshown bytes", async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const root = await mkdtemp(join(resolve("_testenv"), "mission-result-tail-"));

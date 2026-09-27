@@ -244,6 +244,8 @@ diagnose/edit/check loop in this Task. Run formal validation commands exactly as
 and separate shell calls; the host records actual command, source and exit. Diagnostic success is not
 formal acceptance evidence. Do not repeat a failed command without a concrete source/setup correction or
 repeat passed checks on unchanged source. Add meaningful tests only when needed by the change/request.
+When changing a failure path, check its public return value, error and post-failure state together against
+the existing API contract; do not stop assertions after matching error text.
 
 Missing repository-declared dependencies or test runner are setup, not a result. Make one bounded,
 repository-documented setup attempt in the repository-local tool environment ${TOOL_ENVIRONMENT}/ (for Python:

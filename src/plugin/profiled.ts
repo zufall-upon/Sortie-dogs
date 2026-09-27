@@ -15,7 +15,7 @@ import { decoratePreviewHeadings, returnReportPanel } from "./receipt-presentati
 import { sanitizeTerminalReport, terminalRunOutcome } from "./run-metrics.js";
 import { normalizeCommand } from "./gate.js";
 import { normalizeRelativePath } from "../core/path.js";
-import { MISSION_EVIDENCE_GAP_REVIEW_LIMIT, OperatorMissionRuntime, missionPacket, missionPlan, missionReviewAccepted, missionReviewTask,
+import { MISSION_EVIDENCE_GAP_REVIEW_LIMIT, OperatorMissionRuntime, missionPacket, missionPlan, missionReviewAccepted, missionReviewScope, missionReviewTask,
   missionCommandOutcome, missionConversationContext, missionExecutionStatus, missionValidationCommand, missionReviewTraces, missionReviewVerdict, type OperatorMission } from "../core/operator-mission.js";
 import { publishMissionProgress } from "./mission-progress.js";
 import { completedMissionReviewPrompts, initialMissionReviewPrompt, missionReviewBaseline, missionReviewSource } from "./mission-review.js";
@@ -1315,6 +1315,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       await control!.registerGoalDeclaration(root, state.units[0]!.task.prompt, true);
       control!.enableUnits(root, state.units.filter(unit => unit.status === "pending").length);
       await missions.update(root, item => {
+        item.reviewScope = missionReviewScope(item.reviewScope,
+          ...(previous && item.runID === previous.runID ? [previous] : []), state);
         if (item.runID !== state.runID) item.plans++;
         item.runID = state.runID; item.phase = "running"; item.submission = null;
         delete item.supersededRunID;
@@ -1364,7 +1366,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         }
         const evidence = (args as Record<string, unknown>).evidence as import("../core/operator-mission.js").MissionEvidenceExcerpt[] | undefined;
         if (evidence !== undefined && (!Array.isArray(evidence) || evidence.length > 6)) throw new Error("mission-review-evidence: select at most six focused excerpts");
-        const source = await missionReviewSource(input.directory, run, evidence, mission.reviewBaseline);
+        const source = await missionReviewSource(input.directory, run, evidence, mission.reviewBaseline, mission.reviewScope);
         const requestFingerprint = goalFingerprint({ run: run.runID, source: source.fingerprint, risk, traces });
         if (mission.review?.requestFingerprint === requestFingerprint && mission.review.verdict !== "pending") {
           return JSON.stringify({ ...missionPacket(mission, run), status: "review-recorded",
@@ -1388,6 +1390,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             "Review this candidate independently. Use the language of the requirements/traces. Invoke no tools. First line: exactly PASS, FINDINGS or EVIDENCE_GAPS.",
             "Use EVIDENCE_GAPS only when no concrete source/test defect is established and a specific acceptance-relevant behavior or required validation cannot be settled by the supplied artifact. Name the affected path and why the missing evidence matters; do not request a generic route inventory or raw history for incidental workflow constraints already covered by a concise Worker trace. Any concrete defect uses FINDINGS.",
             "This Reviewer's native outcome and final acceptance can only be observed after this review. List those as deferred Operator checks, not as a reason to request another review. Still assess all available source, validation and historical evidence independently.",
+            "For changed failure paths, assess the public return value, error and post-failure state together against existing API behavior; matching error text alone does not establish compatibility.",
             `acceptance: ${JSON.stringify(run.acceptance)}`, `changedLogicSummary: ${JSON.stringify(traces)}`,
             ...run.acceptance.map((_, i) => `acceptance[${i}] -> changedLogicSummary[${i}]`),
             `manifest: ${JSON.stringify(run.units.map(unit => unit.unit))}`, `sourceFingerprint: ${source.fingerprint}`,
@@ -1403,7 +1406,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     async function assertMissionReview(root: string, mission: OperatorMission) {
       const run = await operators.required(root), review = mission.review;
       if (!review || review.runID !== run.runID || !missionReviewAccepted(review) ||
-          review.source !== (await missionReviewSource(input.directory, run, review.evidence, mission.reviewBaseline)).fingerprint) throw new Error("mission-review-required-or-stale");
+          review.source !== (await missionReviewSource(input.directory, run, review.evidence, mission.reviewBaseline, mission.reviewScope)).fingerprint) throw new Error("mission-review-required-or-stale");
     }
     tools[submitMission] = { description: "Coordinator: return only a completion candidate, a user-only decision, or a proven external/scope/budget blocker. Continue ordinary investigation, scope extensions and corrections yourself. Unit progress is published automatically without waking Operator.",
       args: { status: { type: "string", enum: ["ready", "needs-decision", "blocked"] } as never, summary: stringSchema }, execute: async (args, context) => {

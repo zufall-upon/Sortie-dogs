@@ -57,6 +57,7 @@ for (const mode of ["implementation", "executed", "NO_START"] as const) test(`mi
       execution: { commands: mode === "implementation" ? [] : ["node check.mjs"], directory: root } }, { sessionID: "coordinator" }));
     assert.equal((await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root")).reviewBaseline, baseline);
     if (mode === "implementation") assert.equal((await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root")).kind, "implementation");
+    assert.deepEqual((await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root")).reviewScope?.write, ["result.txt"]);
     const worker = { args: structuredClone(next.task) };
     await hooks["tool.execute.before"]!({ tool: "task", sessionID: "coordinator", callID: "worker-call" }, worker);
     await chat("worker", worker.args.prompt);
