@@ -87,12 +87,32 @@ test("duplicate skip preserves budget and reports prior duration; settlement fin
   assert.notEqual(validationResultFingerprint(first, "passed", 0), validationResultFingerprint(first, "failed", 1));
 });
 
-test("in-flight or non-passed evidence denies instead of producing a false skip", () => {
+test("blocked evidence denies instead of producing a false skip", () => {
   const key = validationEvidenceKey(request());
   for (const blocked of [key]) {
     const result = decideValidationBudget(request(), state(0, [], undefined, [blocked]));
     assert.deepEqual({ decision: result.decision, reason: result.reason, consumed: result.consumed },
       { decision: "DENY", reason: "duplicate-evidence", consumed: 0 });
+  }
+});
+
+test("nonzero failures can consume a fresh attempt, while active and unsettled outcomes remain blocked", () => {
+  const key = validationEvidenceKey(request());
+  const admission = { kind: "validation.admission", decision: "ALLOW", reservation_id: "first", evidence_key: key };
+  const failure = { kind: "validation.settled", reservation_id: "first", evidence_key: key, outcome: "failed", exit_code: 1 };
+  const evidence = validationEvidenceState([admission, failure]);
+  assert.deepEqual(evidence, { reusable: [], blocked: [] });
+  const budget = { limit: 2, consumed: 1, evidence_keys: evidence.reusable, blocked_evidence_keys: evidence.blocked };
+  assert.deepEqual(decideValidationBudget(request(), budget), {
+    decision: "ALLOW", reason: "allowed", scope: "targeted", evidence_key: key, consumed: 2, redundant_time_ms: 0,
+  });
+  assert.equal(decideValidationBudget(request(), { ...budget, limit: 1 }).reason, "budget-exhausted");
+  const retry = { ...admission, reservation_id: "second" };
+  assert.deepEqual(validationEvidenceState([admission, failure, retry]), { reusable: [], blocked: [key] });
+  assert.deepEqual(validationEvidenceState([admission, failure, retry, { ...failure, reservation_id: "second", outcome: "passed", exit_code: 0 }]),
+    { reusable: [key], blocked: [] });
+  for (const [outcome, exit_code] of [["failed", 0], ["failed", null], ["timeout", 124], ["interrupted", 130], ["cancelled", null]]) {
+    assert.deepEqual(validationEvidenceState([admission, { ...failure, outcome, exit_code }]), { reusable: [], blocked: [key] });
   }
 });
 

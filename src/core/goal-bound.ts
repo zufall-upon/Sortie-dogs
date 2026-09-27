@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { CONTRACT_TEXT_LIMITS } from "./contract-limits.ts";
-import type { ValidationOutcome, ValidationScope } from "./validation-budget.js";
+import { retryableValidationFailure, type ValidationOutcome, type ValidationScope } from "./validation-budget.js";
 import type { GoalReport } from "./goal-report.js";
 
 export const GOAL_BOUND_SCHEMA_VERSION = "0.1" as const;
@@ -469,8 +469,8 @@ export function reduceGoalFlight(records: readonly GoalFlightEventRecord[]): Goa
           !reopenedValidationEvidence.has(event.evidence_key);
         const duplicate = state.validation_budget.evidence_keys.includes(event.evidence_key);
         const inFlight = state.validation_budget.reservations.some((entry) => entry.evidence_key === event.evidence_key);
-        const blocked = [...validationSettlements.values()].some((entry) =>
-          entry.evidence_key === event.evidence_key && entry.outcome !== "passed");
+        const latest = [...validationSettlements.values()].filter(entry => entry.evidence_key === event.evidence_key).at(-1);
+        const blocked = latest !== undefined && latest.outcome !== "passed" && !retryableValidationFailure(latest.outcome, latest.exit_code);
         requireState(event.scope !== null && event.consumed === state.validation_budget.consumed + 1 &&
           (state.validation_budget.limit === null || event.limit >= state.validation_budget.limit) &&
           ((!duplicate && !blocked && !inFlight && reopen === undefined) || (validReopen && !inFlight)) &&

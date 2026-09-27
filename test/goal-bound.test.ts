@@ -307,12 +307,16 @@ test("goal validation evidence becomes reusable only after a passed settlement",
   const inFlight = await ledger.reserveValidation({ ...request, operation_id: "in-flight" }, 4);
   assert.deepEqual({ decision: inFlight.decision, reason: inFlight.reason }, { decision: "DENY", reason: "duplicate-evidence" });
   await ledger.settleValidation(first.reservation_id!, request, "failed", 1, 7);
-  const failed = await ledger.reserveValidation({ ...request, operation_id: "after-failure" }, 4);
-  assert.deepEqual({ decision: failed.decision, reason: failed.reason }, { decision: "DENY", reason: "duplicate-evidence" });
   assert.deepEqual((await ledger.readGoal()).state.validation_budget.evidence_keys, []);
-  const passedRequest = { ...request, operation_id: "passed" , candidate: "changed" };
-  const passed = await ledger.reserveValidation(passedRequest, 4);
+  // Reopen the durable ledger: repairing a setup directory need not change the candidate key.
+  const cold = await RunFlightLedger.openGoal(path.join(root, "validation-settlement-gate", ".sortie-dogs", "run-flight", "root.json"));
+  const exhausted = await cold.reserveValidation({ ...request, operation_id: "exhausted" }, 1);
+  assert.equal(exhausted.reason, "budget-exhausted");
+  const passedRequest = { ...request, operation_id: "after-setup-repair" };
+  const passed = await cold.reserveValidation(passedRequest, 4);
   assert.equal(passed.decision, "ALLOW");
+  assert.equal(passed.consumed, 2);
+  assert.equal(passed.evidence_key, first.evidence_key);
   await ledger.settleValidation(passed.reservation_id!, passedRequest, "passed", 0, 11);
   await assert.rejects(ledger.reserveValidation({ ...passedRequest, operation_id: "guarded-reuse" }, 4, {
     unit_id: "unit", source: "source", candidate: "candidate", command: passedRequest.command, evidence: [],
@@ -361,14 +365,14 @@ test("one operator-authorized repair retry reopens only interrupted evidence and
     first.reservation_id);
 });
 
-for (const outcome of ["passed", "failed", "cancelled"] as const) test(`operator retry cannot reopen ${outcome} evidence`, async () => {
+for (const outcome of ["passed", "cancelled"] as const) test(`operator retry cannot reopen ${outcome} evidence`, async () => {
   const { ledger } = await accepted(`validation-no-reopen-${outcome}`, 4);
   const request = { run_id: `goal-validation-no-reopen-${outcome}`, operation_id: "first", source_snapshot: "source",
     candidate: "candidate", command: ["node", "check"], scope: "targeted" as const,
     environment: { platform: "win32", arch: "x64", runtime: "node-22" }, owner: "worker" as const,
     expected_evidence: ["criterion", "unit:repair-unit"], marginal_value: { unmet_criteria: ["criterion"], risk_hypothesis: null }, reason: "acceptance" as const };
   const first = await ledger.reserveValidation(request, 4);
-  await ledger.settleValidation(first.reservation_id!, request, outcome, outcome === "passed" ? 0 : outcome === "failed" ? 1 : null);
+  await ledger.settleValidation(first.reservation_id!, request, outcome, outcome === "passed" ? 0 : null);
   const retry = await ledger.reserveInterruptedValidationRetry({ ...request, operation_id: "retry" }, 4, {
     authority: "operator-repair-validation-retry", operator_run_id: "operator-run", unit_id: "repair-unit",
     operator_generation: 2, plan_hash: "a".repeat(64), control_hash: `sha256:${"b".repeat(64)}`,
