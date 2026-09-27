@@ -199,6 +199,15 @@ distinct reasons and the progress decision. A location-shutdown error emitted *o
 the hard stop cannot be detected earlier from that error alone. These are inference-runtime
 policies, not changes to the official grader or proof of a recovered score.
 
+After process cleanup, the runner freezes the working-tree patch even for a stopped attempt
+(including `timeout` and `cost-limit`) before removing its workspace. Metadata records
+`patch_capture: after-process-cleanup-including-interrupted`. The original execution status,
+usage completeness and spend remain independent of patch availability. Nonempty interrupted
+patches are submitted for official scoring as the same single attempt, without a retry.
+An unchanged tree remains empty; a capture failure records `patch-capture-failed` evidence.
+Unconfirmed process cleanup still prevents capture and prediction publication. Supervisor-level
+termination that prevents the runner from finishing cannot guarantee patch capture.
+
 ## 6. Stop safely without rerunning completed work
 
 Stop through the supervisor CLI, not by deleting state or output files:

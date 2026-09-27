@@ -79,6 +79,23 @@ test("completed snapshot excludes pending/running entries and binds the candidat
   }
 });
 
+test("official scoring accepts interrupted patches without rewriting their inference status", async () => {
+  const root = await mkdtemp(join(tmpdir(), "swebench-grader-interrupted-"));
+  try {
+    for (const status of ["timeout", "cost-limit"]) {
+      const state = stateFor(root);
+      state.instances[0]!.status = status;
+      state.instances[0]!.result!.status = status;
+      await writeStateFixture(root, state);
+      const snapshot = await createCompletedSnapshot(state, { manifest });
+      const request = createOfficialHarnessRequest(snapshot);
+      assert.equal(request.predictions[0]!.model_patch, "diff --git a/one b/one\n");
+      assert.equal(state.instances[0]!.status, status);
+      assert.equal(request.retry_count, 0);
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("official harness request is fixed to dev and one worker", async () => {
   const root = await mkdtemp(join(tmpdir(), "swebench-grader-contract-"));
   try {
