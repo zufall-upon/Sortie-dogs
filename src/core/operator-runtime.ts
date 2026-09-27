@@ -1018,9 +1018,11 @@ export class OperatorRuntime {
       const contents = [JSON.stringify(handoff), JSON.stringify(manifest)];
       controls.push({ path: handoffPath, content: contents[0]! }, { path: manifestPath, content: contents[1]! });
       const prompt = ["role: implementation", `task_id: ${taskID}`, `project_root: ${this.projectRoot}`,
-        `source_manifest: ${(unit.write.length ? unit.write : unit.read).join(", ") || "none"}`, `operation_manifest: ${manifestRelative}`, `handoff_path: ${handoffPath}`,
+        `source_manifest: ${(unit.write.length ? unit.write : unit.read).join(", ") || "none"}`, `operation_manifest: ${manifestRelative}`,
+        `handoff_path: ${handoffPath}`,
         `goal_declaration_path: ${declarationPath}`, "acceptance:", ...plan.acceptance.map(value => `  - ${value}`),
         "validation:", ...unit.validation.map(value => `  - ${value}`),
+        ...(mission ? ["Read handoff_path and other repository files using their project-relative paths as supplied. The native working directory is project_root; do not prepend or reconstruct its absolute path for read/search/shell. Copy project_root only when binding the write gate. Preserve explicitly declared external paths."] : []),
         mission ? "Read-only investigation commands are unrestricted. Use shell to reproduce and diagnose without asking for command registration. Keep all writes, including generated/transient outputs and cleanup, inside unit.write. Run formal validation exactly as listed, in order and in separate calls, so the host records its real result. If a write scope or formal check must change, return the precise change to your Coordinator; it can extend/redeclare immediately within the original requirements. Diagnostic success is not formal acceptance evidence."
           : "Execute validation in its declared order. Earlier entries may be approved generator, build, formatter, or exact cleanup commands required before canonical criterion tests. Every persistent or transient generator output must be declared in unit.write. Cleanup may remove only declared unit.write outputs and must be an explicit ordered command after generation and before post-commit or canonical validation; never add an ignore rule or remove an undeclared path. If any necessary command, input, output, or cleanup is missing, do not run an undeclared command or variant and do not use resume evidence tooling to invent permission; return a contract-repair decision.",
         ...(mission ? [] : ["Preserve existing public API success and error return semantics unless acceptance explicitly changes them, and cover those compatibility boundaries in the declared validation."]),
@@ -1888,12 +1890,12 @@ export class OperatorRuntime {
     // Keep this prefix stable across reads/edits: changing counters belong in status/tool results.
     return `SORTIE_WORKER_CONTEXT\n${JSON.stringify({ root_session_id: root, run_id: state.runID,
       unit_id: unit.unit.id, task_id: /^task_id: (.+)$/m.exec(unit.task.prompt)?.[1],
-      project_root: this.projectRoot, handoff_path: unit.handoffPath, operation_manifest: unit.manifestPath,
+      project_root: this.projectRoot, handoff_path: this.controlReference(unit.handoffPath), operation_manifest: this.controlReference(unit.manifestPath),
       objective: unit.unit.objective, read: unit.unit.read, write: unit.unit.write,
       validation: unit.unit.validation, acceptance: state.acceptance,
       ...(unit.repairValidation === null ? {} : { validation_only: true }),
     })}\nThis is the durable assignment for this same Worker, including after compaction or reload. ` +
-      "A missing path in a summary does not mean the handoff is missing. Read the retained handoff/manifest and inspect the actual diff and outputs before claiming no edits or replaying work. " +
+      "A missing path in a summary does not mean the handoff is missing. Read the retained handoff/manifest using these project-relative paths without prepending project_root, and inspect the actual diff and outputs before claiming no edits or replaying work. " +
       `Use ${this.profile.toolPrefix}operator_status for observed validation and remaining work; do not repeat successful checks for an unchanged candidate. ` +
       "This context is an assignment, not proof of execution or acceptance.";
   }
@@ -1917,6 +1919,11 @@ export class OperatorRuntime {
           : state.phase === "cancelled"
             ? `call ${this.profile.toolPrefix}operator_status and execute its prepare_operator next_action in this turn; do not stop after reporting status`
             : `call ${this.profile.toolPrefix}operator_status and execute its exact next_action in this turn; do not stop after reporting status` });
+  }
+  private controlReference(path: string): string {
+    const local = relative(this.projectRoot, path);
+    return local === ".." || local.startsWith(`..${sep}`) || isAbsolute(local)
+      ? path : local.replaceAll("\\", "/");
   }
   private async verifyControls(unit: UnitState): Promise<void> {
     if (!isAbsolute(unit.handoffPath) || !isAbsolute(unit.manifestPath)) throw new Error("operator-control-path-invalid");
