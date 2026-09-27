@@ -188,6 +188,17 @@ console.log(`${n}/${entries.length}`, JSON.stringify({
 The watchdog report records heartbeat, active runner identities, `n/max`, and runner loss events.
 Treat stale heartbeat, runner loss, malformed state, or budget exhaustion as fail-closed conditions.
 
+The runner checks progress after 20 minutes of inference. An uncommitted candidate working-tree change
+(excluding generated control files and the prepared environment) or priced model activity
+in the preceding five minutes permits the run to continue only up to its configured hard
+timeout (30 minutes by default; a campaign may explicitly pin a different maximum).
+Otherwise it stops with `no-progress-at-checkpoint`. A native `read` still running after
+three minutes stops with `read-stalled`; an observed location-shutdown event or loss of the
+private OpenCode server stops immediately. The watchdog and result metadata retain these
+distinct reasons and the progress decision. A location-shutdown error emitted *only after*
+the hard stop cannot be detected earlier from that error alone. These are inference-runtime
+policies, not changes to the official grader or proof of a recovered score.
+
 ## 6. Stop safely without rerunning completed work
 
 Stop through the supervisor CLI, not by deleting state or output files:

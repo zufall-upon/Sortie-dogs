@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { promisify } from "node:util";
 import test from "node:test";
-import { benchmarkEnvironment, benchmarkPythonCacheEnvironment, benchmarkInlineConfig, benchmarkPermissionPolicy, capturePatch, cloneInstance, createDryRunPlan, createInferenceManifest, createInstancePrompt, createLiveRunPlan, runOpenCode, waitForBenchmarkModelRoute, readDirectoryUsage, formatPrediction, officialEvaluationImage, parseArguments, relocateOfficialEnvironment, retainUsageDatabase, runDryRun, runLive, seedIsolatedV2Credential, verifyCandidateAgent } from "../scripts/swebench-lite-runner.mjs";
+import { benchmarkEnvironment, benchmarkPythonCacheEnvironment, benchmarkInlineConfig, benchmarkPermissionPolicy, capturePatch, cloneInstance, createDryRunPlan, createInferenceManifest, createInstancePrompt, createLiveRunPlan, runOpenCode, waitForBenchmarkModelRoute, readDirectoryUsage, readStalledRead, hasSourceChange, formatPrediction, officialEvaluationImage, parseArguments, relocateOfficialEnvironment, retainUsageDatabase, runDryRun, runLive, seedIsolatedV2Credential, verifyCandidateAgent } from "../scripts/swebench-lite-runner.mjs";
 import { runCandidatePreflight } from "../scripts/swebench-candidate-preflight.mjs";
 import { releaseManifest } from "../scripts/swebench-release-manifest.mjs";
 import { estimateModelUsageCost as benchmarkModelCost } from "../scripts/swebench-model-cost.mjs";
@@ -207,6 +207,88 @@ test("a timeout keeps its cause when usage is incomplete, and a failed exit is n
   } finally {
     await rm(slow.root, { recursive: true, force: true });
     await rm(failed.root, { recursive: true, force: true });
+  }
+});
+
+test("20-minute checkpoint stops an inactive run, but source changes or recent model work extend to the hard cap",
+  { skip: process.platform === "win32" }, async () => {
+    const { root, options } = await fakeOpenCode("sleep 30");
+    const watchdogPath = join(root, "progress.jsonl");
+    try {
+      const base = { timeoutSeconds: 3, progressCheckSeconds: 1, watchdogPath };
+      const empty = await runOpenCode(options(base), { ...fakeReadyServer,
+        readUsage: () => ({ usd: 0, requests: 0, unpriced: [] }), hasSourceChange: async () => false });
+      assert.equal(empty.reason, "no-progress-at-checkpoint");
+      assert.equal(empty.progressDecision, "no-progress");
+      assert.match(await readFile(watchdogPath, "utf8"), /"progress_decision":"no-progress"/u);
+      const edited = await runOpenCode(options(base), { ...fakeReadyServer,
+        readUsage: () => ({ usd: 0, requests: 0, unpriced: [] }), hasSourceChange: async () => true });
+      assert.equal(edited.reason, "timeout");
+      assert.equal(edited.progressDecision, "extended");
+      const active = await runOpenCode(options(base), { ...fakeReadyServer,
+        readUsage: () => ({ usd: 0.1, requests: 1, unpriced: [] }), hasSourceChange: async () => false });
+      assert.equal(active.reason, "timeout");
+      assert.equal(active.progressDecision, "extended");
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+test("progress source check ignores host controls and prepared environment, but sees uncommitted source", async () => {
+  const root = await mkdtemp(join(tmpdir(), "swebench-progress-source-"));
+  const git = (args: string[]) => promisify(execFile)("git", ["-C", root, ...args]);
+  try {
+    await git(["init", "-q"]);
+    await writeFile(join(root, "source.py"), "base\n");
+    await git(["add", "source.py"]);
+    await git(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.com", "commit", "-qm", "base"]);
+    await mkdir(join(root, ".sortie-dogs-v010"));
+    await mkdir(join(root, ".sortie-env"));
+    await writeFile(join(root, ".sortie-dogs-v010", "state"), "host");
+    await writeFile(join(root, ".sortie-env", "tool"), "host");
+    assert.equal(await hasSourceChange(root, process.env), false);
+    await writeFile(join(root, "source.py"), "fix\n");
+    assert.equal(await hasSourceChange(root, process.env), true);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a persistent native read is stopped before the hard timeout and its cause is retained", { skip: process.platform === "win32" }, async () => {
+  const { root, options } = await fakeOpenCode("sleep 30");
+  const databasePath = join(root, "read.db");
+  try {
+    const db = new DatabaseSync(databasePath);
+    try {
+      db.exec("CREATE TABLE session_v2 (id TEXT, directory TEXT); CREATE TABLE session_message (session_id TEXT, type TEXT, data TEXT)");
+      db.prepare("INSERT INTO session_v2 VALUES (?, ?)").run("worker", root);
+      db.prepare("INSERT INTO session_message VALUES (?, 'assistant', ?)").run("worker", JSON.stringify({ content: [
+        { type: "tool", name: "read", state: { status: "running" }, time: { ran: Date.now() - 5000 } },
+      ] }));
+    } finally { db.close(); }
+    assert.equal(readStalledRead(root, databasePath, Date.now(), 1), true);
+    assert.equal(readStalledRead(join(root, "foreign"), databasePath, Date.now(), 1), false);
+    const result = await runOpenCode(options({ databasePath, readStallSeconds: 1, readCheckSeconds: 1,
+      timeoutSeconds: 8 }), { ...fakeReadyServer,
+      readUsage: () => ({ usd: 0.1, requests: 1, unpriced: ["pending-usage"] }) });
+    assert.equal(result.reason, "read-stalled");
+    assert.equal(result.cleanupEstablished, true);
+    assert.equal(result.usageComplete, false);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a native location shutdown or server exit stops the owned process immediately", { skip: process.platform === "win32" }, async () => {
+  const failed = await fakeOpenCode('printf \'%s\\n\' \'{"type":"error","error":{"message":"Interaction cancelled because the location shut down"}}\'\nsleep 30');
+  const closed = await fakeOpenCode("sleep 30");
+  try {
+    const stopped = await runOpenCode(failed.options({ timeoutSeconds: 8 }), { ...fakeReadyServer,
+      readUsage: () => ({ usd: 0.1, requests: 1, unpriced: [] }) });
+    assert.equal(stopped.reason, "location-shut-down");
+    const exited = await runOpenCode(closed.options({ timeoutSeconds: 8 }), { ...fakeReadyServer,
+      startServer: async (_workspace: string, environment: Record<string, string>) => ({
+        url: "http://127.0.0.1:12345", env: environment, closed: new Promise(resolve => setTimeout(resolve, 500)),
+        stop: async () => undefined,
+      }), readUsage: () => ({ usd: 0.1, requests: 1, unpriced: [] }) });
+    assert.equal(exited.reason, "server-exited");
+  } finally {
+    await rm(failed.root, { recursive: true, force: true });
+    await rm(closed.root, { recursive: true, force: true });
   }
 });
 
@@ -519,6 +601,9 @@ test("live plan keeps instance sessions independent and prompt input public", ()
   assert.deepEqual(result.instances.map(item => item.instance_id), ["example__project-1", "example__project-2"]);
   assert.equal(result.execution.agent, "dog-operator");
   assert.equal(result.execution.timeout_seconds, 1800);
+  assert.equal(result.execution.progress_check_seconds, 1200);
+  assert.equal(result.execution.recent_progress_seconds, 300);
+  assert.equal(result.execution.stalled_read_seconds, 180);
   assert.equal(result.execution.watchdog_interval_seconds, 120);
   assert.equal(result.execution.cost_limit_usd, 50);
   assert.match(result.instances[0]!.prompt, /Public issue statement:/);

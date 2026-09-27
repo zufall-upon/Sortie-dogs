@@ -69,6 +69,7 @@ export async function startV2ReleaseServer(cwd, env, { inheritEnvironment = true
   const child = spawn('opencode', ['serve', '--hostname', '127.0.0.1', '--port', '0'], {
     cwd, env: serverEnv, shell: false, windowsHide: true, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
   });
+  const closed = new Promise(resolve => child.once('close', resolve));
   child.stderr.resume();
   try {
     const url = await new Promise((resolveReady, rejectReady) => {
@@ -95,7 +96,7 @@ export async function startV2ReleaseServer(cwd, env, { inheritEnvironment = true
       child.once('error', onError);
       child.once('close', onClose);
     });
-    return { url, env: serverEnv, stop: () => stopProcessGroup(child) };
+    return { url, env: serverEnv, closed, stop: () => stopProcessGroup(child) };
   } catch (error) {
     await stopProcessGroup(child);
     throw error;
