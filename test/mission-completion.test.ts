@@ -47,9 +47,13 @@ for (const mode of ["implementation", "executed", "NO_START"] as const) test(`mi
       kind: mode === "implementation" ? "implementation" : "operation" }, { sessionID: "root" }));
     await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "coordinator-call" }, { args: structuredClone(started.task) });
     await chat("coordinator", started.task.prompt);
+    if (mode === "executed") await assert.rejects(hooks.tool!.sortie_v010_plan_units.execute({ units: [{
+      title: "Incomplete operation", objective: "Run the operation", write: ["result.txt"], validation: ["node check.mjs"],
+    }], execution: { commands: [], directory: root } }, { sessionID: "coordinator" }), /mission-operation-input/);
     const next = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ units: [{ title: "Validated result", objective: "Write result and validate it",
       read: ["check.mjs", ".sortie-dogs-v010/missions"], write: ["result.txt"], validation: ["node check.mjs"] }],
-      ...(mode === "implementation" ? {} : { execution: { commands: ["node check.mjs"], directory: root } }) }, { sessionID: "coordinator" }));
+      execution: { commands: mode === "implementation" ? [] : ["node check.mjs"], directory: root } }, { sessionID: "coordinator" }));
+    if (mode === "implementation") assert.equal((await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root")).kind, "implementation");
     const worker = { args: structuredClone(next.task) };
     await hooks["tool.execute.before"]!({ tool: "task", sessionID: "coordinator", callID: "worker-call" }, worker);
     await chat("worker", worker.args.prompt);

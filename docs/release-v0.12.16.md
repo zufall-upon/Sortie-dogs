@@ -1,6 +1,7 @@
 # v0.12.16 — Mission execution and focused review
 
 - Preserve recent public request context in mission handoffs; record actual operation outcomes separately from setup, checks, and review. Preparation-only `NO_START` does not count as completion, while an executed operation with reward zero can complete.
+- Ignore an empty optional operation field on ordinary implementation plans so it cannot block the first Worker; operation plans still require concrete commands and a working directory.
 - Recover foreground Worker lineage across cache expiry and release recoverable serial reservations. Accept focused, fresh original-file evidence instead of requiring generic coverage inventories or copied historical logs.
 - Repair Advisor trigger admission and make model-route and named-release checks visible before a one-shot case-study attempt. Add a version-independent V2 fixture profile without changing the pinned v0.12.7 comparison.
 

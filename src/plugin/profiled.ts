@@ -1227,7 +1227,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const previous = await operators.read(root);
       mission = await retainCancelledMissionAcceptance(root, mission, previous);
       let operation = mission.execution;
-      if (execution !== undefined) {
+      // Models can serialize an optional operation field as an empty object for a normal edit.
+      // Do not turn an implementation mission into an operation (or block its first Worker).
+      const emptyImplementationExecution = mission.kind === "implementation" && record(execution) &&
+        Array.isArray(execution.commands) && execution.commands.length === 0;
+      if (execution !== undefined && !emptyImplementationExecution) {
         if (!record(execution) || typeof execution.directory !== "string" || !execution.directory.trim() ||
           !Array.isArray(execution.commands) || execution.commands.length === 0 || execution.commands.length > 16 ||
           !execution.commands.every(command => typeof command === "string" && command.trim())) throw new Error("mission-operation-input: supply the actual operation commands and their working directory");
