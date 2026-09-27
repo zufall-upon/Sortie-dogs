@@ -68,6 +68,20 @@ test("MobAds missing and invented advisor headers explain the canonical repair w
   }));
 });
 
+test("Japanese prose attached to a known Advisor trigger is separated before dispatch without an extra consultation", () => {
+  const lane = new FastLaneController();
+  lane.beginTurn("mission", false);
+  const args = { subagent_type: "dog-advisor", prompt: "strategy_trigger: material-uncertainty。日本語で答えて。評価開始前の判断を相談。" };
+  assert.doesNotThrow(() => lane.beforeTool("mission", "task", args));
+  assert.equal(args.prompt, "strategy_trigger: material-uncertainty\n日本語で答えて。評価開始前の判断を相談。");
+  const second = { subagent_type: "dog-advisor", prompt: "strategy_trigger: architecture-choice。  別の設計上の質問。" };
+  assert.doesNotThrow(() => lane.beforeTool("mission", "task", second));
+  assert.equal(second.prompt, "strategy_trigger: architecture-choice\n別の設計上の質問。");
+  assert.throws(() => lane.beforeTool("mission", "task", {
+    subagent_type: "dog-advisor", prompt: "strategy_trigger: invented。日本語で答えて。",
+  }), (error: unknown) => error instanceof FastLaneDeniedError && error.code === "ADVISOR_TRIGGER_REQUIRED");
+});
+
 function expectDenial(action: () => void, code: FastLaneDeniedError["code"]): void {
   assert.throws(action, (error: unknown) => {
     assert.ok(error instanceof FastLaneDeniedError);

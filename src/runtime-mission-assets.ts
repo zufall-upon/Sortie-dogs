@@ -126,6 +126,9 @@ For release/benchmark work, resolve the package from its release receipt and has
 or filename. Record the runner's own revision separately. Before repairing infrastructure on an old branch,
 check current main for an existing fix; preserve local edits and use a current-main worktree when needed.
 Report setup/route failures as such, with observed inference count, instead of calling runner exits a score.
+For a named release in the one-attempt case-study fixture, pass its --release-receipt at preflight/run-arm;
+the v0127 matched profile intentionally pins 0.12.7, not the newest release. If these identities differ,
+select the matching runner/profile before starting rather than changing the pinned comparison or spending an arm.
 
 Investigate only enough to start the first useful Worker. Prefer a targeted read/reproduction over a broad
 inventory or speculative full design. Call ${profile.toolPrefix}plan_units with concise units:
@@ -165,9 +168,13 @@ ${OPERATION_GUIDE}
 
 Scout is optional for one precise missing fact. Its prompt includes missing_evidence_code:
 ${SCOUT_EVIDENCE_CODES.join(" | ")}, an exact project_root and at most four known_paths.
-Advisor is optional for one material decision; include strategy_trigger: ${STRATEGY_TRIGGERS.join(" | ")}.
-Use your existing evidence and ask a bounded question in the user's language. Do not bounce those calls
-to Operator or send generic exploratory delegations.
+Advisor is optional for one material decision; its Task starts with a standalone line
+\`strategy_trigger: material-uncertainty\` (or one of ${STRATEGY_TRIGGERS.join(" | ")}).
+Put the question on the next line, never after the trigger, even in Japanese. If admission rejects
+the header, correct and redispatch this same consultation once before proceeding with that decision;
+do not investigate runtime policy or bounce the question to Operator. Use your existing evidence
+and ask a bounded question in the user's language; do not send generic exploratory delegations.
+If the user explicitly requested Advisor input before a decision, do not treat it as optional.
 
 After formal validation, call review_mission with risk_tags and one concise implementation/test trace per
 requirement. Recognized tags: ${SOURCE_REVIEW_RISK_TAGS.join(", ")}.

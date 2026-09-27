@@ -22,8 +22,10 @@ import {
   debugRecoveryPacket,
   debugResumeArgs,
   eventMetadata,
+  ensureV2PluginWrapper,
   hasPinnedSubagentDepth,
   isolatedConfig,
+  main as runLocalCaseStudy,
   deliveryResult,
   expectedOperation,
   expectedOperationEvent,
@@ -33,6 +35,7 @@ import {
   pinnedWorkspaceRefCommands,
   recordPreAgentFailure,
   registeredHostAgentRoutes,
+  registeredOperatorModelRoute,
   registeredV2Plugin,
   requireIsolatedV2Database,
   resolvedConfigCommandArgs,
@@ -46,9 +49,55 @@ import {
   validateManifest,
   v2PluginWrapperSource,
   verifyPinnedFiles,
+  verifyExpectedRelease,
   verifyConfigLoaderDependency,
   watchdogReason,
 } from "./fixtures/frontierharness-local/run-local-case-study.mjs";
+
+test("explicit requested release is checked before the one-shot fixture can start", async () => {
+  const root = await mkdtemp(join(tmpdir(), "sortie-release-target-"));
+  try {
+    const context = { manifest: manifest(process.cwd()) };
+    const receiptPath = join(root, "release-receipt.json");
+    const expected = context.manifest.package as { version: string; sha256: string };
+    await writeFile(receiptPath, JSON.stringify({ version: "0.12.15", package_sha256: "f".repeat(64) }));
+    await assert.rejects(verifyExpectedRelease(context, receiptPath),
+      (error: Error & { gate?: string }) => error.gate === "release-target-mismatch");
+    const manifestPath = join(root, "manifest.json");
+    await writeFile(manifestPath, JSON.stringify(context.manifest));
+    await assert.rejects(runLocalCaseStudy(["run-arm", "--manifest", manifestPath, "--arm", "sortie",
+      "--release-receipt", receiptPath]),
+    (error: Error & { gate?: string }) => error.gate === "release-target-mismatch");
+    await writeFile(receiptPath, JSON.stringify({ version: expected.version, package_sha256: expected.sha256 }));
+    assert.deepEqual(await verifyExpectedRelease(context, receiptPath),
+      { version: expected.version, package_sha256: expected.sha256 });
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("V2 registration metadata is not mistaken for available operator and Worker routes", () => {
+  const value = manifest(process.cwd());
+  const checked = [{ model: (value.opencode as { model: string }).model,
+    variant: (value.opencode as { variant: string }).variant }, { model: "openai/gpt-6-luna-fast", variant: "max" }];
+  assert.equal(registeredOperatorModelRoute({ agents: [{ id: "dog-operator" }] }, value), false);
+  assert.equal(registeredOperatorModelRoute({ model_routes: { checked, missing: [checked[1]] } }, value), false);
+  assert.equal(registeredOperatorModelRoute({ model_routes: { checked: [checked[0]], missing: [] } }, value), false);
+  assert.equal(registeredOperatorModelRoute({ model_routes: { checked, missing: [] } }, value), true);
+  assert.equal(registeredOperatorModelRoute({ model_routes: { checked: [checked[0]], missing: [] } }, value, "bare"), true);
+});
+
+test("an unstarted arm can reuse its exact generated V2 wrapper after a route failure", async () => {
+  const root = await mkdtemp(join(tmpdir(), "sortie-v2-wrapper-"));
+  try {
+    const path = join(root, "plugins", "sortie-dogs", "index.js");
+    await ensureV2PluginWrapper(path);
+    await ensureV2PluginWrapper(path);
+    assert.equal(await readFile(path, "utf8"), v2PluginWrapperSource());
+    await writeFile(path, "user-owned content");
+    await assert.rejects(ensureV2PluginWrapper(path),
+      (error: Error & { gate?: string }) => error.gate === "sortie-plugin-existing");
+    assert.equal(await readFile(path, "utf8"), "user-owned content");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
 
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 const officialPaths = [
@@ -601,7 +650,23 @@ test("first error stops a live process and partial summary permits cleanup witho
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("pre-agent native failure consumes attempt and persists only bounded evidence for summary and cleanup", async () => {
+test("failed model readiness remains visible without consuming the one-shot arm", async () => {
+  const root = await mkdtemp(join(process.cwd(), "_testenv", "frontier-readiness-"));
+  try {
+    const state = { schema_version: 1, arms: {}, readiness: { arm: "sortie", status: "failed",
+      gate: "required-model-route-unavailable", at: "2026-09-27T00:00:00.000Z" } };
+    await writeFile(join(root, "frontierharness-state.json"), JSON.stringify(state));
+    const context = { runtimeRoot: root, manifest: manifest(process.cwd()) };
+    const report = await summarize(context);
+    assert.equal(report.readiness.gate, "required-model-route-unavailable");
+    assert.equal(report.arms.sortie.status, "not-run");
+    assert.equal(report.comparison.comparison_eligible, false);
+    assert.doesNotThrow(() => assertRunArmAllowed({ ...state, preflight: { status: "pass" },
+      prepared: { status: "pass" } }, "sortie", true));
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("historical consumed pre-agent failure retains bounded evidence for summary and cleanup", async () => {
   const root = await mkdtemp(join(process.cwd(), "_testenv", "frontier-pre-agent-"));
   try {
     const result = await execute(process.execPath, ["-e",
@@ -631,7 +696,7 @@ test("pre-agent native failure consumes attempt and persists only bounded eviden
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("pre-agent WSL timeout keeps cleanup fail-closed when Linux process cleanup is unconfirmed", async () => {
+test("historical pre-agent WSL timeout keeps cleanup evidence when process exit is unconfirmed", async () => {
   const root = await mkdtemp(join(process.cwd(), "_testenv", "frontier-pre-agent-wsl-timeout-"));
   try {
     const state: any = { schema_version: 1, arms: { sortie: { attempted: true,
