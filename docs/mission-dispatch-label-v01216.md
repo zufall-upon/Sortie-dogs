@@ -51,3 +51,41 @@ record remain under `_testenv/` outside Git.
 
 `npm test` passed the WSL quick suite (384 tests) with the fix. The unit test
 specifically covers the previously rejected presentation-only change.
+
+## Fixed-release Anko follow-up (Desktop)
+
+This is a separate run of the **released** v0.12.16 archive, not the repacked
+dispatch-label fix. The Desktop-owned OpenCode V2 2.0.18 service (PID 41012)
+loaded runtime marker `0.12.16-operation-efficiency-v1` and ran one root prompt
+(`ses_f1ed65149ffeycrcFhJ6JWYwWy`) against the Anko typed-variable-bindings
+task. The initial observer lost its transport connection, but the same root
+session and Worker continued; the read-only observer reconnected without a new
+prompt. The original 60-minute/$5 estimated-usage bounds stayed in force.
+
+- Native run: 2026-09-27 04:40:01–05:32:59 UTC (52m 58s); one Coordinator
+  (`ses_f1ed60843ffeEDIjVcInZDvma9`), four Worker sessions, four independent
+  Reviewer sessions, five plans and four units (first failed, next three
+  succeeded). Estimated priced model usage: $1.63087728, with zero unpriced
+  messages at the final observation and zero user continuation prompts.
+- The first independent review found a concrete mismatch in required type-error
+  text; the same Coordinator delegated a correction and the candidate gained
+  commits `7d6725e`, `1cdd4f7`, `6a4363c`. Subsequent reviews produced three
+  `EVIDENCE_GAPS` verdicts, largely requesting excerpts or specific public-test
+  traces, not establishing another source defect. The Operator checked source
+  and public tests and accepted with those gaps disclosed; no Reviewer PASS.
+- The original Anko workspace ended clean at `6a4363c8a47d00a455123b2ea5e4cb6838eeb947`.
+  After all ten native sessions stopped, a separate copy received **one** local
+  scoring attempt using pinned official test bytes. Candidate patch SHA-256:
+  `445e6a391056e0d50c417f2a0ca304d9eeee2eb432620b6a2bb30f8fa010f258`.
+  The official test script exited 0: 9/9 fail-to-pass, 94/94 pass-to-pass,
+  reward 1. This was a local path-adapted verifier without Docker/Runta, not a
+  methodology-comparable hosted score.
+
+The run establishes same-Coordinator correction following a **Reviewer**
+finding, autonomous Operator acceptance, and a passing local Anko score. It
+does **not** establish an Operator quality-rejection-and-return loop: the
+Operator did not reject this candidate. Evidence-only review churn consumed
+time, but did not justify further implementation changes after local reward 1.
+The launch, native histories, terminal observation, frozen snapshot, patch,
+grader logs and result remain under `_testenv/anko-desktop-v01216-1/` outside
+Git. No hidden grader bytes were provided to the live agent workspace.
