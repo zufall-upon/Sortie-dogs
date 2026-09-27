@@ -45,6 +45,8 @@ export interface OperatorMission {
   callID: string | null;
   dispatchOpen: boolean;
   runID: string | null;
+  /** Git HEAD before this mission's first implementation unit, retained across replans and commits. */
+  reviewBaseline?: string;
   /** A cancelled run replaced by a later real user turn; never reuse its acceptance or evidence. */
   supersededRunID?: string;
   plans: number;
