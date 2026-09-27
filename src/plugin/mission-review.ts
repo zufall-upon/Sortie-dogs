@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import { createInterface } from "node:readline";
 import type { OperatorState } from "../core/operator-runtime.js";
 import { TOOL_ENVIRONMENT } from "../runtime-mission-assets.js";
-import { MISSION_REVIEW_REFERENCE, type MissionEvidenceExcerpt, type OperatorMission } from "../core/operator-mission.js";
+import { MISSION_REVIEW_REFERENCE, missionReviewScope, type MissionEvidenceExcerpt, type MissionReviewScope, type OperatorMission } from "../core/operator-mission.js";
 import { canonicalAgent, type RuntimeProfile } from "../core/runtime-profile.js";
 import { taskChildSessionID } from "./task-result-repair.js";
 import { normalizeManifestScope } from "../core/path.js";
@@ -85,13 +85,14 @@ export async function completedMissionReviewPrompts(mission: OperatorMission | u
 
 /** Pin all scoped tracked/untracked source bytes, including deletions; display a bounded excerpt only. */
 export async function missionReviewSource(directory: string, run: OperatorState,
-  evidence: readonly MissionEvidenceExcerpt[] = [], baseline?: string): Promise<{ fingerprint: string; excerpt: string }> {
-  const hash = createHash("sha256").update(JSON.stringify({ baseline, units: run.units.map(unit => ({ unit: unit.unit, hashes: unit.hashes })) }));
+  evidence: readonly MissionEvidenceExcerpt[] = [], baseline?: string, priorScope?: MissionReviewScope): Promise<{ fingerprint: string; excerpt: string }> {
+  const scope = missionReviewScope(priorScope, run);
+  const hash = createHash("sha256").update(JSON.stringify({ baseline, scope, units: run.units.map(unit => ({ unit: unit.unit, hashes: unit.hashes })) }));
   let selected = "";
   for (const entry of evidence) {
     const absolute = resolve(directory, entry.path);
-    const allowed = run.units.flatMap(unit => [...unit.unit.read, ...unit.unit.write]).some(scope => {
-      const root = resolve(directory, scope === "." ? scope : normalizeManifestScope(scope).path), rest = relative(root, absolute);
+    const allowed = [...scope.read, ...scope.write].some(path => {
+      const root = resolve(directory, path === "." ? path : normalizeManifestScope(path).path), rest = relative(root, absolute);
       return rest === "" || (rest !== ".." && !rest.startsWith(`..${sep}`) && !isAbsolute(rest));
     });
     if (!allowed || !Number.isSafeInteger(entry.offset) || entry.offset < 1 ||
@@ -103,15 +104,20 @@ export async function missionReviewSource(directory: string, run: OperatorState,
     stream.on("data", chunk => hash.update(chunk));
     const lines = createInterface({ input: stream, crlfDelay: Infinity });
     selected += `\n--- evidence: ${entry.path}:${entry.offset} ---\n`;
-    let number = 0;
+    // Share the focused budget rather than silently starving later requested error branches.
+    const allowance = Math.floor(11_000 / evidence.length);
+    let number = 0, bytes = 0, truncated = false;
     for await (const line of lines) {
       number++;
-      if (number >= entry.offset && number < entry.offset + entry.limit && Buffer.byteLength(selected) < 12_000) {
-        selected += `${number}: ${line.slice(0, 2_000)}\n`;
+      if (number >= entry.offset && number < entry.offset + entry.limit) {
+        const text = `${number}: ${line.slice(0, 2_000)}\n`, size = Buffer.byteLength(text);
+        if (!truncated && bytes + size <= allowance) { selected += text; bytes += size; }
+        else truncated = true;
       }
     }
+    if (truncated) selected += `[FOCUSED EXCERPT TRUNCATED: ${entry.path}:${entry.offset}; request a smaller range]\n`;
   }
-  const writes = [...new Set(run.units.flatMap(unit => unit.unit.write).map(path => path === "." ? path : normalizeManifestScope(path).path))];
+  const writes = [...new Set(scope.write.map(path => path === "." ? path : normalizeManifestScope(path).path))];
   if (writes.length === 0) return { fingerprint: `sha256:${hash.digest("hex")}`,
     excerpt: selected + "[Read-only units: no declared output files. Review the supplied observations, traces and validation evidence.]" };
   // The shared dependency environment is local tooling, never reviewed or pinned source.

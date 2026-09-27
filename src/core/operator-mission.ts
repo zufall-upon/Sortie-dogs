@@ -20,6 +20,7 @@ export function missionValidationCommand(command: string): string {
 export interface MissionRequest { id: string; text: string }
 export interface MissionContext extends MissionRequest { role: "user" | "assistant" }
 export interface MissionEvidenceExcerpt { path: string; offset: number; limit: number }
+export interface MissionReviewScope { read: string[]; write: string[] }
 export interface MissionExecution {
   commands: string[];
   directory: string;
@@ -47,6 +48,8 @@ export interface OperatorMission {
   runID: string | null;
   /** Git HEAD before this mission's first implementation unit, retained across replans and commits. */
   reviewBaseline?: string;
+  /** Cumulative declared review inputs/outputs, including units that failed after writing source. */
+  reviewScope?: MissionReviewScope;
   /** A cancelled run replaced by a later real user turn; never reuse its acceptance or evidence. */
   supersededRunID?: string;
   plans: number;
@@ -67,6 +70,14 @@ export interface OperatorMission {
  * Worker unit, so after this many evidence-only reviews the candidate may be submitted with the gaps listed.
  */
 export const MISSION_EVIDENCE_GAP_REVIEW_LIMIT = 2;
+
+/** Review coverage survives a narrower replan; it is not a Worker write grant. */
+export function missionReviewScope(previous: MissionReviewScope | undefined, ...runs: OperatorState[]): MissionReviewScope {
+  return {
+    read: [...new Set([...(previous?.read ?? []), ...runs.flatMap(run => run.units.flatMap(({ unit }) => unit.read ?? []))])].sort(),
+    write: [...new Set([...(previous?.write ?? []), ...runs.flatMap(run => run.units.flatMap(({ unit }) => unit.write))])].sort(),
+  };
+}
 
 /** Classify an independent Reviewer's first line. Anything else is a finding. */
 export function missionReviewVerdict(text: string): "PASS" | "evidence-gaps" | "findings" {
