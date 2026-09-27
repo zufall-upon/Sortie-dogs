@@ -17,6 +17,9 @@ const DEFAULT_AGENT = "dog-operator";
 const DEFAULT_TIMEOUT_SECONDS = 30 * 60;
 const DEFAULT_WATCHDOG_SECONDS = 120;
 const DEFAULT_UNPRICED_GRACE_SECONDS = 30;
+const PROGRESS_CHECK_SECONDS = 20 * 60;
+const RECENT_PROGRESS_SECONDS = 5 * 60;
+const STALLED_READ_SECONDS = 3 * 60;
 // Sortie's shared tool-environment directory; excluded from mission review and patch capture.
 const PREPARED_ENVIRONMENT_DIRECTORY = ".sortie-env";
 const PREPARED_ENVIRONMENTS = Object.freeze(["official-image-testbed"]);
@@ -615,6 +618,9 @@ export function createLiveRunPlan(value, options = {}, publicRowHashes) {
       agent,
       model_name_or_path: modelNameOrPath,
       timeout_seconds: timeoutSeconds,
+      progress_check_seconds: Math.min(PROGRESS_CHECK_SECONDS, timeoutSeconds),
+      recent_progress_seconds: RECENT_PROGRESS_SECONDS,
+      stalled_read_seconds: STALLED_READ_SECONDS,
       watchdog_interval_seconds: watchdogSeconds,
       cost_limit_usd: costLimitUsd,
       live_process_started: false,
@@ -1037,6 +1043,41 @@ export function readDirectoryUsage(directory, databasePath = usageDatabasePath()
   return result;
 }
 
+export function readStalledRead(directory, databasePath, now = Date.now(), limitSeconds = STALLED_READ_SECONDS) {
+  if (!databasePath || !existsSync(databasePath)) return false;
+  const database = new DatabaseSync(databasePath, { readOnly: true });
+  try {
+    if (!database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_v2'").get()) return false;
+    const sessions = database.prepare("SELECT id FROM session_v2 WHERE directory = ?").all(directory);
+    const messages = database.prepare("SELECT data FROM session_message WHERE session_id = ? AND type = 'assistant'");
+    return sessions.some(session => messages.all(session.id).some(row => {
+      let message;
+      try { message = JSON.parse(row.data); } catch { return false; }
+      return message.content?.some?.(part => record(part) && part.type === "tool" && part.name === "read" &&
+        part.state?.status === "running" && Number.isFinite(part.time?.ran) &&
+        now - part.time.ran >= limitSeconds * 1000) === true;
+    }));
+  } finally { database.close(); }
+}
+
+export async function hasSourceChange(workspace, environment, git = runGit) {
+  const paths = [".", ":(exclude).sortie-dogs-v010", `:(exclude,glob)**/${PREPARED_ENVIRONMENT_DIRECTORY}/**`];
+  const status = await git(["-C", workspace, "status", "--porcelain=v1", "--untracked-files=normal", "--", ...paths],
+    process.cwd(), environment);
+  ensure(status.exit === 0 && !status.outputOverflow, "progress-source-check-failed");
+  return status.stdout.trim().length > 0;
+}
+
+function locationShutdownEvent(line) {
+  let event;
+  try { event = JSON.parse(line); } catch { return false; }
+  if (!record(event)) return false;
+  const message = event.type === "error" ? event.error?.message ?? event.message
+    : event.type === "tool_use" && event.part?.state?.status === "error"
+      ? event.part.state.error?.message : undefined;
+  return typeof message === "string" && /interaction cancelled because the location shut down/iu.test(message);
+}
+
 export async function waitForBenchmarkModelRoute(server, { fetchModel = fetch, timeoutMs = 20_000 } = {}) {
   const deadline = Date.now() + timeoutMs;
   const authorization = `Basic ${Buffer.from(`opencode:${server.env.OPENCODE_SERVER_PASSWORD}`).toString("base64")}`;
@@ -1101,8 +1142,14 @@ export async function runOpenCode(options, dependencies = {}) {
   let timer;
   let poller;
   let watchdogTimer;
+  let progressTimer;
+  let readTimer;
+  let settled = false;
+  let progressDecision = "not-reached";
+  let lastUsageProgress = Date.now();
+  let stdoutLine = "";
   const stop = async reason => {
-    if (stopping) return;
+    if (stopping || settled) return;
     stopping = true;
     stopReason = reason;
     cleanupPromise ??= terminateProcessGroup(child.pid);
@@ -1122,12 +1169,17 @@ export async function runOpenCode(options, dependencies = {}) {
   child.stdout?.on("data", chunk => {
     stdoutBytes = captureOutput(stdoutChunks, chunk, stdoutBytes);
     lastActivity = Date.now();
+    stdoutLine += chunk.toString("utf8");
+    const lines = stdoutLine.split("\n");
+    stdoutLine = lines.pop() ?? "";
+    for (const line of lines) if (locationShutdownEvent(line)) void stop("location-shut-down");
+    if (stdoutLine.length > 64 * 1024) stdoutLine = "";
   });
   child.stderr?.on("data", chunk => {
     stderrBytes = captureOutput(stderrChunks, chunk, stderrBytes);
     lastActivity = Date.now();
   });
-  const recordWatchdog = async event => {
+  const recordWatchdog = async (event, details = {}) => {
     if (!options.watchdogPath) return;
     await appendFile(options.watchdogPath, `${JSON.stringify({
       at: new Date().toISOString(),
@@ -1139,6 +1191,7 @@ export async function runOpenCode(options, dependencies = {}) {
       stdout_bytes: stdoutBytes,
       stderr_bytes: stderrBytes,
       usage,
+      ...details,
     })}\n`, "utf8");
     watchdogEvents += 1;
   };
@@ -1166,9 +1219,13 @@ export async function runOpenCode(options, dependencies = {}) {
   }
   const result = await new Promise(resolvePromise => {
     const finish = (exit, signal) => {
+      if (settled) return;
+      settled = true;
       if (timer) clearTimeout(timer);
       if (poller) clearInterval(poller);
       if (watchdogTimer) clearInterval(watchdogTimer);
+      if (progressTimer) clearTimeout(progressTimer);
+      if (readTimer) clearInterval(readTimer);
       resolvePromise({
         exit: exit ?? (signal ? 1 : 0),
         signal,
@@ -1184,6 +1241,34 @@ export async function runOpenCode(options, dependencies = {}) {
     child.once("error", error => { stopReason = "spawn-failed"; finish(127, error.code); });
     child.once("close", finish);
     timer = setTimeout(() => { void stop("timeout"); }, options.timeoutSeconds * 1000);
+    const progressCheckSeconds = Math.min(options.progressCheckSeconds ?? PROGRESS_CHECK_SECONDS, options.timeoutSeconds);
+    if (progressCheckSeconds < options.timeoutSeconds) progressTimer = setTimeout(() => { void (async () => {
+      if (stopping || settled) return;
+      try {
+        const current = readUsage(options.workspace, options.databasePath);
+        if (current.requests !== previousUsage.requests || current.usd !== previousUsage.usd) lastUsageProgress = Date.now();
+        previousUsage = { usd: current.usd, requests: current.requests };
+        usage = current;
+        const sourceChanged = await (dependencies.hasSourceChange ?? hasSourceChange)(options.workspace, options.environment);
+        if (stopping || settled) return;
+        const recentUsage = current.requests > 0 && Date.now() - lastUsageProgress <=
+          (options.recentProgressSeconds ?? RECENT_PROGRESS_SECONDS) * 1000;
+        progressDecision = sourceChanged || recentUsage ? "extended" : "no-progress";
+        await recordWatchdog("progress-check", { progress_decision: progressDecision,
+          source_changed: sourceChanged, recent_usage: recentUsage });
+        if (progressDecision === "no-progress") await stop("no-progress-at-checkpoint");
+      } catch {
+        await stop("progress-check-failed");
+      }
+    })(); }, progressCheckSeconds * 1000);
+    if (options.databasePath) readTimer = setInterval(() => { void (async () => {
+      if (stopping || settled) return;
+      try {
+        if (readStalledRead(options.workspace, options.databasePath, Date.now(),
+          options.readStallSeconds ?? STALLED_READ_SECONDS)) await stop("read-stalled");
+      } catch { await stop("read-monitor-failed"); }
+    })(); }, (options.readCheckSeconds ?? 10) * 1000);
+    if (server.closed) void server.closed.then(() => stop("server-exited"));
     if (options.costLimitUsd !== undefined) {
       const graceMs = (options.unpricedGraceSeconds ?? DEFAULT_UNPRICED_GRACE_SECONDS) * 1000;
       let unpricedSince;
@@ -1196,6 +1281,8 @@ export async function runOpenCode(options, dependencies = {}) {
           // gap that persists is a pricing failure; the final read stays fail-closed.
           const unpriced = usage.unpriced.some(reason => reason !== "pending-usage");
           unpricedSince = unpriced ? unpricedSince ?? Date.now() : undefined;
+          if (usage.requests !== previousUsage.requests || usage.usd !== previousUsage.usd) lastUsageProgress = Date.now();
+          previousUsage = { usd: usage.usd, requests: usage.requests };
           if (unpriced && Date.now() - unpricedSince >= graceMs) await stop("pricing-coverage-missing");
           else if (usage.usd >= options.costLimitUsd) await stop("cost-limit");
         } catch {
@@ -1210,7 +1297,10 @@ export async function runOpenCode(options, dependencies = {}) {
       watchdogInFlight = true;
       try {
         const nextUsage = readUsage(options.workspace, options.databasePath);
-        if (nextUsage.requests !== previousUsage.requests || nextUsage.usd !== previousUsage.usd) lastActivity = Date.now();
+        if (nextUsage.requests !== previousUsage.requests || nextUsage.usd !== previousUsage.usd) {
+          lastActivity = Date.now();
+          lastUsageProgress = Date.now();
+        }
         previousUsage = { usd: nextUsage.usd, requests: nextUsage.requests };
         usage = nextUsage;
         await recordWatchdog("heartbeat");
@@ -1237,7 +1327,7 @@ export async function runOpenCode(options, dependencies = {}) {
       : result.exit !== 0 ? "agent-failed" : "completed";
   return { ...result, exit: finalReason === "completed" ? result.exit : result.exit === 0 ? 1 : result.exit,
     reason: finalReason, usage, usageComplete: usage.unpriced.length === 0 && usage.requests > 0,
-    cleanupEstablished, watchdogEvents, lastActivityAgeMs: Date.now() - lastActivity };
+    cleanupEstablished, watchdogEvents, lastActivityAgeMs: Date.now() - lastActivity, progressDecision };
 }
 
 function emptyLiveResult(instance, status) {
@@ -1382,6 +1472,7 @@ export async function runLive(value, options, dependencies = {}) {
         environment,
         databasePath: candidateRuntime.databasePath,
         timeoutSeconds: plan.execution.timeout_seconds,
+        progressCheckSeconds: plan.execution.progress_check_seconds,
         watchdogSeconds: plan.execution.watchdog_interval_seconds,
         watchdogPath: join(runRoot, "watchdog", `${String(index).padStart(3, "0")}-${encodeURIComponent(instance.instance_id)}.jsonl`),
         startedAt: started,
@@ -1466,6 +1557,7 @@ export async function runLive(value, options, dependencies = {}) {
       usage_complete: usageComplete,
       watchdog_events: execution?.watchdogEvents ?? 0,
       watchdog_idle_ms: execution?.lastActivityAgeMs ?? 0,
+      progress_decision: execution?.progressDecision ?? "not-reached",
       replay_artifact: storedArtifact,
       ...(preparedEnvironment ? { prepared_environment: preparedEnvironment } : {}),
       ...(cleanupError ? { cleanup_error: String(cleanupError.message ?? cleanupError) } : {}),
