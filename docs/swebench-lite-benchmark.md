@@ -254,6 +254,41 @@ The grader:
 
 Do not publish or compare a score until the official harness report covers the intended immutable set.
 
+### Post-score stage diagnosis (no regrade)
+
+Once the official report and predictions are frozen, analyze the candidate's official log
+directory separately, without re-running inference or the harness:
+
+```bash
+node scripts/swebench-score-diagnosis.mjs \
+  --candidate-root /path/to/official/logs/run_evaluation/<run-id>/<model-name> \
+  --predictions /path/to/frozen/predictions.jsonl \
+  --output /path/to/new/diagnosis.json
+```
+
+The tool records input SHA-256 values, observed candidate application versus the *report*
+`patch_successfully_applied` flag, test-patch collisions, collection/import errors, actual
+test IDs and inner `Test Exit Code`. A report flag of `false` alone does **not** establish
+a candidate-patch application failure; `infra_failure: false` does not establish that tests
+collected. Stages are diagnostic, not a replacement for official `resolved` or a claim
+about the root cause of an import failure. Missing logs remain unconfirmed.
+
+The optional `--supplemental /path/to/frozen/test-reset/results.json` attaches **separate**
+results from [`swebench-test-reset.py`](swebench-test-reset-diagnostics.md) after verifying
+candidate patch and evaluator hashes. Each supplemental entry includes image ID, helper and
+output hashes, the actual test IDs, container exit **and inner test exit**. No supplemental
+PASS is counted as officially resolved. Keep the output in a new file outside Git; an
+existing diagnostic file will not be overwritten. Never copy evaluator patches or test
+expectations into the inference workspace.
+
+Model-free verification against the frozen v0.12.17 dev23 evidence (2026-09-27):
+6 official resolved, 6 collection/import, 2 test-injection collisions, 8 observed
+assertion/test failures and 1 empty prediction. The original official 6/23 is unchanged.
+With the two previously recorded supplemental reset checks, `sqlfluff-2419` has
+inner test exit 0 and `pydicom-901` has inner test exit 1; neither is promoted
+to an official resolution. The separate local diagnostic JSON has SHA-256
+`5a9b570f3dc846e5c412237ff0549c5b6f3e62c35fdd8daed9a729dc9c3e0673`.
+
 ## 8. Artifacts to retain outside Git
 
 Retain these together for reproducibility:

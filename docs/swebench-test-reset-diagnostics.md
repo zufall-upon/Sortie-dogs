@@ -65,6 +65,12 @@ Compare the production diff before and after evaluation. Record the supplemental
 result separately, including assertion failures and missing test IDs. Do not
 overwrite predictions, original reports, or the official campaign total.
 
+For runs with frozen official logs, `scripts/swebench-score-diagnosis.mjs` can attach
+the helper's independently recorded outcome through `--supplemental` if the candidate
+patch and original evaluator hashes match. It records the image ID, helper/output
+hashes, observed test IDs, container exit and inner `Test Exit Code` in a separate
+diagnostic entry with `official_score: false`; official resolved counts stay unchanged.
+
 ## Recorded pydicom-901 validation
 
 - Runtime archive SHA-256:
