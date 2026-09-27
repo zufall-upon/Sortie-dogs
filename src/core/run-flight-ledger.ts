@@ -945,7 +945,7 @@ export class RunFlightLedger {
     return { ...decision, reservation_id };
   }
 
-  /** Internal operator retry path. Generic reserveValidation remains strict evidence-key dedupe. */
+  /** Internal operator retry path for interruptions; ordinary failed exits use reserveValidation. */
   async reserveInterruptedValidationRetry(request: ValidationBudgetRequest, limit: number,
     authorization: GoalValidationRetryAuthorization,
     skipReconciliation?: ValidationSkipReconciliation): Promise<ValidationBudgetDecision & { readonly reservation_id: string | null }> {

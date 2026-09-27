@@ -5065,6 +5065,15 @@ test("validation admission-only failures do not consume no-progress and cannot e
         await hooks["tool.execute.before"]!({ tool: "bash", sessionID: child, callID: `first-check-${index}` }, { args: { command } });
         await hooks["tool.execute.after"]!({ tool: "bash", sessionID: child, callID: `first-check-${index}`, args: { command } },
           { output: index === 0 ? "failed" : "host execution unavailable", metadata: index === 0 ? { exit: 1 } : {} });
+        if (index === 0) {
+          // A settled nonzero exit now permits a fresh attempt. A later host failure or denial
+          // must still preserve the earlier real failed check at the unit boundary.
+          const retry = { args: { command } };
+          await hooks["tool.execute.before"]!({ tool: "bash", sessionID: child, callID: "retry-check" }, retry);
+          assert.equal(retry.args.command, command);
+          await hooks["tool.execute.after"]!({ tool: "bash", sessionID: child, callID: "retry-check", args: retry.args },
+            { output: "host execution unavailable", metadata: {} });
+        }
         await assert.rejects(hooks["tool.execute.before"]!({ tool: "bash", sessionID: child, callID: `denied-${index}` },
           { args: { command } }), /SORTIE_VALIDATION_BUDGET_DENIED/u, `unit ${index} must reject duplicate validation`);
       }

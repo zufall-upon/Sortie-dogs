@@ -36,7 +36,7 @@ export interface ValidationBudgetState {
   readonly limit: number;
   readonly consumed: number;
   readonly evidence_keys: readonly string[];
-  /** Evidence that was attempted but is not eligible for reuse, or is still in flight. */
+  /** In-flight or non-retryable evidence. A completed nonzero exit is neither reusable nor blocked. */
   readonly blocked_evidence_keys?: readonly string[];
   readonly prior_duration_ms?: number;
 }
@@ -49,6 +49,11 @@ export interface ValidationBudgetDecision {
   readonly evidence_key: string | null;
   readonly consumed: number;
   readonly redundant_time_ms: number;
+}
+
+/** A real failed process can be rerun after setup repair without changing source or command identity. */
+export function retryableValidationFailure(outcome: unknown, exitCode: unknown): boolean {
+  return outcome === "failed" && typeof exitCode === "number" && Number.isSafeInteger(exitCode) && exitCode !== 0;
 }
 
 export function validationEvidenceState(events: readonly unknown[]): {
@@ -74,7 +79,8 @@ export function validationEvidenceState(events: readonly unknown[]): {
         blocked.delete(event.evidence_key);
       } else {
         reusable.delete(event.evidence_key);
-        blocked.add(event.evidence_key);
+        if (retryableValidationFailure(event.outcome, event.exit_code)) blocked.delete(event.evidence_key);
+        else blocked.add(event.evidence_key);
       }
     }
   }
