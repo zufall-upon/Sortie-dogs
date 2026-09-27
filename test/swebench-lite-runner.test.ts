@@ -718,18 +718,45 @@ test("benchmark permissions deny browsing and remote shell access while retainin
   assert.equal(policy.some(rule => rule.action === "external_directory"), false);
   assert.ok(has(benchmarkPermissionPolicy("/tmp/opencode/swebench-run"), "external_directory",
     "/tmp/opencode/swebench-run/*", "allow"));
-  for (const pattern of ["*curl *", "*wget *", "*gh *", "*git fetch *", "*git push *", "*https://*"]) {
+  for (const pattern of ["*curl *", "*wget *", "*gh *", "*git fetch *", "*git push *", "*git+*"]) {
     assert.ok(has(policy, "shell", pattern, "deny"));
   }
   const inline = benchmarkInlineConfig("file:///candidate/plugin.js", ["dog-operator", "dog-worker"]);
   assert.deepEqual(inline.plugins, ["file:///candidate/plugin.js"]);
-  assert.ok(has(inline.permissions, "shell", "*https://*", "deny"));
+  assert.ok(has(inline.permissions, "shell", "*git fetch *", "deny"));
   assert.ok(has(inline.agents["dog-operator"]!.permissions, "webfetch", "*", "deny"));
   assert.ok(has(inline.agents["dog-worker"]!.permissions, "websearch", "*", "deny"));
   const scopedInline = benchmarkInlineConfig("file:///candidate/plugin.js", ["dog-operator"], "/tmp/opencode/swebench-run");
   assert.ok(has(scopedInline.permissions, "external_directory", "/tmp/opencode/swebench-run/*", "allow"));
   assert.ok(has(scopedInline.agents["dog-operator"]!.permissions,
     "external_directory", "/tmp/opencode/swebench-run/*", "allow"));
+});
+
+test("URL test data and explicit package registries are allowed for every benchmark agent", async () => {
+  const inline = benchmarkInlineConfig("file:///candidate/plugin.js",
+    ["dog-operator", "dogs-coordinator", "dog-worker-v010", "dog-reviewer-v010"]);
+  // V2 whole-value wildcard matching, last match wins. These are command resources,
+  // not a shell parser or a network sandbox.
+  const matches = (pattern: string, value: string) => new RegExp(`^${pattern.split("*")
+    .map(part => part.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")).join(".*")}$`, "su").test(value);
+  const python = 'get_uri = lambda: "https://example.test/blob"; assert get_uri() == "https://example.test/blob"';
+  for (const rules of [inline.permissions, ...Object.values(inline.agents).map(agent => agent.permissions)]) {
+    const effect = (action: string, resource: string) => rules.filter(rule =>
+      matches(rule.action, action) && matches(rule.resource, resource)).at(-1)?.effect;
+    for (const command of [`python -c '${python}'`, 'python -c \'print("http://example.test/blob")\'',
+      "timeout 25s .sortie-env/bin/python -m pip download --no-deps --only-binary=:all: --timeout 5 --retries 0 --index-url https://pypi.org/simple --dest .sortie-env/pylint-download 'pylint==2.12.2'",
+      "python -m pip install --index-url https://pypi.org/simple pytest"]) {
+      assert.equal(effect("shell", command), "allow", command);
+    }
+    for (const command of ["curl https://example.test/solution", "wget https://example.test/solution",
+      "gh pr view 1", "git fetch https://example.test/repo", "git push origin main",
+      "python -m pip install git+https://example.test/repo"]) {
+      assert.equal(effect("shell", command), "deny", command);
+    }
+    assert.equal(effect("webfetch", "https://example.test/solution"), "deny");
+    assert.equal(effect("websearch", "issue solution"), "deny");
+  }
+  if (process.platform !== "win32") await promisify(execFile)("python3", ["-c", python]);
 });
 
 test("candidate agent verification rejects missing models and later allow rules", () => {
@@ -742,6 +769,8 @@ test("candidate agent verification rejects missing models and later allow rules"
   assert.throws(() => verifyCandidateAgent(base.id, { ...base, permissions: [
     ...base.permissions, { action: "shell", resource: "*", effect: "allow" },
   ] }), /candidate-agent-network-permission-invalid/);
+  assert.throws(() => verifyCandidateAgent(base.id, { ...base, permissions: base.permissions
+    .filter(rule => rule.resource !== "*git fetch *") }), /candidate-agent-network-permission-invalid/);
 });
 
 test("base checkout fetches one commit directly and retains no remote", async () => {

@@ -131,7 +131,7 @@ export function benchmarkPermissionPolicy(externalDirectory) {
     ...["*curl *", "*wget *", "*gh *", "*ssh *", "*scp *", "*rsync *",
       "*git clone *", "*git fetch *", "*git pull *", "*git push *", "*git ls-remote *",
       "*git remote add *", "*git remote set-url *", "*git archive *--remote*",
-      "*http://*", "*https://*", "*git+*"].map(resource => ({ action: "shell", resource, effect: "deny" })),
+      "*git+*"].map(resource => ({ action: "shell", resource, effect: "deny" })),
   ];
   if (typeof externalDirectory === "string" && externalDirectory.length > 0) {
     rules.push({ action: "external_directory", resource: `${resolve(externalDirectory)}/*`, effect: "allow" });
@@ -161,7 +161,8 @@ export function verifyCandidateAgent(name, resolvedAgent, override) {
   };
   ensure(denied("webfetch", "*") && denied("websearch", "*"),
     `candidate-agent-web-permission-invalid:${name}`);
-  ensure(denied("shell", "*https://*"), `candidate-agent-network-permission-invalid:${name}`);
+  ensure(benchmarkPermissionPolicy().filter(rule => rule.action === "shell" && rule.effect === "deny")
+    .every(rule => denied(rule.action, rule.resource)), `candidate-agent-network-permission-invalid:${name}`);
   const sol = name === "dog-operator" || name === "dogs-coordinator" ||
     name === "dog-reviewer-v010" || name === "dog-advisor-v010";
   const target = override ? override.slice("openai/".length).split("#")
@@ -574,6 +575,7 @@ export function createInstancePrompt(instance, options = {}) {
     "Before editing, reproduce the public issue with its smallest concrete example and locate the existing focused regression test or tests that express the expected behavior.",
     "Time-box dependency setup to a brief, repository-documented attempt; do not repeatedly create environments or install unrelated packages.",
     "Installing repository-declared build/runtime/test dependencies from package registries is allowed. Follow the repository's compatible versions; do not impose an offline install or a conflicting latest-package pin merely because web/solution retrieval is forbidden.",
+    "A registry URL in a dependency command or a URL used as local test data is allowed; a URL string by itself is not web browsing. The prohibition on retrieving issue/PR pages or benchmark solutions still applies.",
     "If a dependency remains unavailable, inspect the source and implement the smallest plausible fix, then run every focused check that the available environment permits.",
     "If required behavioral verification still cannot execute, retain the patch and report a blocked/incomplete outcome, not succeeded completion based on compilation or an unrelated reproduction.",
     "Do not invent an expected output from the issue alone; inspect existing public code, nearby visitor methods, node string or name conventions, and public tests before choosing a regression assertion.",
