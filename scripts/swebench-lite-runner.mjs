@@ -615,6 +615,7 @@ export function createLiveRunPlan(value, options = {}, publicRowHashes) {
     execution: {
       inference: "host-wsl-opencode",
       scoring: "external-official-docker-harness-after-patch-freeze",
+      patch_capture: "after-process-cleanup-including-interrupted",
       agent,
       model_name_or_path: modelNameOrPath,
       timeout_seconds: timeoutSeconds,
@@ -1486,14 +1487,20 @@ export async function runLive(value, options, dependencies = {}) {
       if (execution.output_limit_exceeded === true) {
         throw replayFailure("replay-artifact-capacity-exceeded:command-output");
       }
-      if (execution.reason === "completed" && execution.exit === 0) {
+      const completed = execution.reason === "completed" && execution.exit === 0;
+      status = completed ? "empty-patch" : execution.reason === "completed" ? "agent-failed" : execution.reason ?? "failed";
+      // A stopped attempt can still contain useful work. Freeze it after process cleanup,
+      // before deleting the workspace, without promoting the execution to succeeded.
+      try {
         patch = await capturePatch(workspace, git);
-        status = patch.length > 0 ? "succeeded" : "empty-patch";
-      } else {
-        status = execution.reason ?? "failed";
+        if (completed && patch.length > 0) status = "succeeded";
+      } catch (error) {
+        failure = `patch-capture-failed:${String(error?.message ?? error)}`;
+        if (completed) status = "patch-capture-failed";
       }
       validateExecutionHashes(execution, candidateSha256, environmentSha256, patch);
     } catch (error) {
+      patch = "";
       if (error?.replayFatal) {
         fatalError = error;
         failure = error.message;
@@ -1527,7 +1534,7 @@ export async function runLive(value, options, dependencies = {}) {
       environment_sha256: environmentSha256,
       execution: artifactExecution,
       status,
-      patch: status === "succeeded" ? patch : "",
+      patch,
       ...(failure === undefined ? {} : { failure }),
       ...(cleanupError ? { cleanup_error: String(cleanupError.message ?? cleanupError) } : {}),
       max_bytes: replayMaxBytes,
@@ -1542,7 +1549,7 @@ export async function runLive(value, options, dependencies = {}) {
     predictions.push(formatPrediction({
       instance_id: instance.instance_id,
       model_name_or_path: plan.execution.model_name_or_path,
-      model_patch: status === "succeeded" ? patch : "",
+      model_patch: patch,
     }));
     results.push({
       instance_id: instance.instance_id,
@@ -1550,8 +1557,8 @@ export async function runLive(value, options, dependencies = {}) {
       status,
       exit_code: execution?.exit ?? null,
       signal: execution?.signal ?? null,
-      patch_bytes: status === "succeeded" ? Buffer.byteLength(patch) : 0,
-      patch_sha256: status === "succeeded" ? digest(patch) : null,
+      patch_bytes: Buffer.byteLength(patch),
+      patch_sha256: patch.length > 0 ? digest(patch) : null,
       elapsed_ms: Date.now() - started,
       usage,
       usage_complete: usageComplete,
@@ -1559,6 +1566,7 @@ export async function runLive(value, options, dependencies = {}) {
       watchdog_idle_ms: execution?.lastActivityAgeMs ?? 0,
       progress_decision: execution?.progressDecision ?? "not-reached",
       replay_artifact: storedArtifact,
+      ...(failure === undefined ? {} : { failure }),
       ...(preparedEnvironment ? { prepared_environment: preparedEnvironment } : {}),
       ...(cleanupError ? { cleanup_error: String(cleanupError.message ?? cleanupError) } : {}),
     });

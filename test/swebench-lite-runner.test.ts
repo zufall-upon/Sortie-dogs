@@ -945,6 +945,88 @@ test("live run writes one prediction per instance and removes dedicated workspac
   await assert.rejects(stat(join(runRoot, "candidate-runtime")));
 });
 
+test("interrupted attempts freeze edited and untracked files without losing the stop cause or spend", async t => {
+  for (const reason of ["cost-limit", "timeout"]) {
+    await t.test(reason, async () => {
+      const root = await mkdtemp(join(tmpdir(), "swebench-interrupted-patch-"));
+      const output = join(root, "predictions.jsonl");
+      let workspace = "", calls = 0;
+      try {
+        const result = await runTestLive(manifest(), {
+          costLimitUsd: 1, runRoot: join(root, "run"), output,
+        }, {
+          prepareCandidate: async () => ({ environment: process.env, evidence: { package_sha256: candidate.sha256 } }),
+          clone: async (_instance: unknown, path: string) => {
+            workspace = path;
+            await mkdir(path, { recursive: true });
+            const git = (args: string[]) => promisify(execFile)("git", ["-C", path, ...args]);
+            await git(["init"]);
+            await writeFile(join(path, "source.py"), "before\n");
+            await git(["add", "."]);
+            await git(["-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-m", "base"]);
+          },
+          execute: async () => {
+            calls++;
+            await writeFile(join(workspace, "source.py"), "after\n");
+            await writeFile(join(workspace, "test_regression.py"), "regression\n");
+            for (const path of [".sortie-dogs-v010", ".sortie-env"]) {
+              await mkdir(join(workspace, path));
+              await writeFile(join(workspace, path, "generated"), "excluded\n");
+            }
+            return { command: "fixture", exit: 1, signal: "SIGTERM", reason, cleanupEstablished: true,
+              stdout: "partial", stderr: "", usage: { usd: 1.02, requests: 2, unpriced: [] }, usageComplete: false };
+          },
+        });
+        const prediction = JSON.parse((await readFile(output, "utf8")).split("\n")[0]!);
+        const patch = prediction.model_patch;
+        assert.match(patch, /diff --git a\/source.py b\/source.py/u);
+        assert.match(patch, /diff --git a\/test_regression.py b\/test_regression.py/u);
+        assert.doesNotMatch(patch, /excluded|\.sortie-env|\.sortie-dogs/u);
+        assert.equal(calls, 1);
+        assert.deepEqual(result.results.map(item => item.status), [reason, "not-run-cost-limit"]);
+        assert.equal(result.execution.spent_usd, 1.02);
+        assert.equal(result.execution.usage_complete, false);
+        assert.equal(result.execution.patch_capture, "after-process-cleanup-including-interrupted");
+        assert.equal(result.results[0]!.patch_bytes, Buffer.byteLength(patch));
+        assert.equal(result.results[0]!.patch_sha256, createHash("sha256").update(patch).digest("hex"));
+        const artifact = JSON.parse(await readFile(result.results[0]!.replay_artifact.path, "utf8"));
+        assert.equal(artifact.patch, patch);
+        assert.equal(artifact.status, reason);
+        assert.equal(artifact.execution.reason, reason);
+        assert.equal(artifact.execution.exit_code, 1);
+        await assert.rejects(stat(workspace));
+      } finally { await rm(root, { recursive: true, force: true }); }
+    });
+  }
+});
+
+test("stopped attempts distinguish an unchanged tree from a failed patch capture", async t => {
+  for (const captureFails of [false, true]) {
+    await t.test(captureFails ? "capture failure" : "no edits", async () => {
+      const root = await mkdtemp(join(tmpdir(), "swebench-empty-interrupted-"));
+      try {
+        const result = await runTestLive(manifest([instance("example__project-1")]), {
+          costLimitUsd: 1, runRoot: join(root, "run"), output: join(root, "predictions.jsonl"),
+        }, {
+          prepareCandidate: async () => ({ environment: process.env, evidence: { package_sha256: candidate.sha256 } }),
+          clone: async () => undefined,
+          execute: async () => ({ command: "fixture", exit: 1, reason: "timeout", cleanupEstablished: true,
+            stdout: "", stderr: "", usage: { usd: 0.2, requests: 1, unpriced: [] }, usageComplete: true }),
+          git: async () => ({ exit: captureFails ? 1 : 0, stdout: "", stderr: "" }),
+        });
+        const item = result.results[0]!;
+        assert.equal(item.status, "timeout");
+        assert.equal(item.patch_bytes, 0);
+        assert.equal(item.patch_sha256, null);
+        assert.equal(item.failure, captureFails ? "patch-capture-failed:patch-index-failed" : undefined);
+        const artifact = JSON.parse(await readFile(item.replay_artifact.path, "utf8"));
+        assert.equal(artifact.patch, "");
+        assert.equal(artifact.failure, item.failure);
+      } finally { await rm(root, { recursive: true, force: true }); }
+    });
+  }
+});
+
 test("cost enforcement failures stop later instances with deterministic replay evidence", async t => {
   for (const reason of ["pricing-coverage-missing", "usage-monitor-failed"]) {
     await t.test(reason, async () => {
@@ -1201,6 +1283,7 @@ test("unconfirmed process cleanup fails closed before predictions are written", 
       clone: async () => undefined,
       execute: async () => ({ command: "host", exit: 1, reason: "cleanup-failed", stdout: "", stderr: "",
         cleanupEstablished: false, usage: { usd: 0, requests: 0, unpriced: [] } }),
+      git: async () => { assert.fail("must not capture while process cleanup is unconfirmed"); },
     }), /replay-process-cleanup-failed/);
     await assert.rejects(stat(output));
   } finally {
