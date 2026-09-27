@@ -90,25 +90,40 @@ export async function missionReviewSource(directory: string, run: OperatorState,
   let selected = "";
   for (const entry of evidence) {
     const absolute = resolve(directory, entry.path);
-    const allowed = run.units.flatMap(unit => [...unit.unit.read, ...unit.unit.write]).some(scope => {
-      const root = resolve(directory, scope === "." ? scope : normalizeManifestScope(scope).path), rest = relative(root, absolute);
-      return rest === "" || (rest !== ".." && !rest.startsWith(`..${sep}`) && !isAbsolute(rest));
-    });
-    if (!allowed || !Number.isSafeInteger(entry.offset) || entry.offset < 1 ||
-        !Number.isSafeInteger(entry.limit) || entry.limit < 1 || entry.limit > 200) throw new Error("mission-review-evidence: select up to 200 lines from a declared input/output");
-    const info = await lstat(absolute);
-    if (!info.isFile()) throw new Error("mission-review-evidence: select a regular file");
-    hash.update(JSON.stringify(entry)).update(String(info.size));
-    const stream = createReadStream(absolute);
-    stream.on("data", chunk => hash.update(chunk));
-    const lines = createInterface({ input: stream, crlfDelay: Infinity });
-    selected += `\n--- evidence: ${entry.path}:${entry.offset} ---\n`;
-    let number = 0;
-    for await (const line of lines) {
-      number++;
-      if (number >= entry.offset && number < entry.offset + entry.limit && Buffer.byteLength(selected) < 12_000) {
-        selected += `${number}: ${line.slice(0, 2_000)}\n`;
-      }
+    const local = relative(resolve(directory), absolute);
+    // Review references are read-only context, not new execution/validation inputs.
+    // Keep the existing declared external-artifact route as well.
+    const allowed = (local !== ".." && !local.startsWith(`..${sep}`) && !isAbsolute(local)) ||
+      run.units.flatMap(unit => [...unit.unit.read, ...unit.unit.write]).some(scope => {
+        const root = resolve(directory, scope === "." ? scope : normalizeManifestScope(scope).path), rest = relative(root, absolute);
+        return rest === "" || (rest !== ".." && !rest.startsWith(`..${sep}`) && !isAbsolute(rest));
+      });
+    const fail = (reason: string) => new Error(`mission-review-evidence: ${entry.path}: ${reason}`);
+    if (!allowed) throw fail("outside the project and declared inputs/outputs; select a project file or an existing declared input/output");
+    if (!Number.isSafeInteger(entry.offset) || entry.offset < 1 || !Number.isSafeInteger(entry.limit) || entry.limit < 1 || entry.limit > 200) {
+      throw fail("use a positive line offset and a limit between 1 and 200");
+    }
+    try {
+      const info = await lstat(absolute);
+      if (!info.isFile()) throw new Error("select a regular file");
+      hash.update(JSON.stringify(entry)).update(String(info.size));
+      const stream = createReadStream(absolute);
+      stream.on("data", chunk => hash.update(chunk));
+      const lines = createInterface({ input: stream, crlfDelay: Infinity });
+      stream.on("error", error => lines.emit("error", error));
+      selected += `\n--- evidence: ${entry.path}:${entry.offset} ---\n`;
+      let number = 0;
+      try {
+        for await (const line of lines) {
+          number++;
+          if (number >= entry.offset && number < entry.offset + entry.limit && Buffer.byteLength(selected) < 12_000) {
+            selected += `${number}: ${line.slice(0, 2_000)}\n`;
+          }
+        }
+      } finally { lines.close(); stream.destroy(); }
+      if (entry.offset > number) throw new Error(`offset ${entry.offset} exceeds ${number} lines; select existing lines`);
+    } catch (error) {
+      throw fail(error instanceof Error ? error.message : String(error));
     }
   }
   const writes = [...new Set(run.units.flatMap(unit => unit.unit.write).map(path => path === "." ? path : normalizeManifestScope(path).path))];

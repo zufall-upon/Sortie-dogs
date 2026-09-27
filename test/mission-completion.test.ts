@@ -24,6 +24,8 @@ for (const mode of ["implementation", "executed", "NO_START"] as const) test(`mi
       (mode === "implementation" ? '' : 'writeFileSync("result.txt", "ready\\n");\n') +
       'if (readFileSync("result.txt", "utf8") !== "ready\\n") process.exit(1);\n' +
       `console.log(JSON.stringify(${JSON.stringify({ status: mode, attempts: mode === "NO_START" ? 0 : 1, reward: 0 })}));\n`;
+    const reference = "Public result contract: ready followed by a newline.\n";
+    await writeFile(join(root, "reference.md"), reference);
     await writeFile(join(root, "check.mjs"), validator);
     await exec("git", ["add", "check.mjs"], { cwd: root });
     await exec("git", ["commit", "--quiet", "-m", "validator"], { cwd: root });
@@ -76,10 +78,15 @@ for (const mode of ["implementation", "executed", "NO_START"] as const) test(`mi
     await hooks["tool.execute.after"]!({ tool: "bash", sessionID: "worker", callID: "validate" }, { output: checked.stdout, metadata: { exit: 0, status: "completed" } });
     identities.worker!.outcome = "succeeded";
     await hooks["tool.execute.after"]!({ tool: "task", sessionID: "coordinator", callID: "worker-call" }, { output: "validated", metadata: { sessionId: "worker" } });
-    const review = JSON.parse(await hooks.tool!.sortie_v010_review_mission.execute({ risk_tags: ["public-logic"], traces: ["check.mjs observed ready result, exit 0"] }, { sessionID: "coordinator" }));
+    const validatedUnits = structuredClone((await runtime.required("root")).units);
+    const review = JSON.parse(await hooks.tool!.sortie_v010_review_mission.execute({ risk_tags: ["public-logic"],
+      traces: ["check.mjs observed ready result, exit 0"], evidence: [{ path: "reference.md", offset: 1, limit: 1 }] }, { sessionID: "coordinator" }));
     const reviewer = { args: structuredClone(review.task) };
     await hooks["tool.execute.before"]!({ tool: "task", sessionID: "coordinator", callID: "reviewer-call" }, reviewer);
     assert.match(reviewer.args.prompt, /deferred Operator checks/);
+    assert.match(reviewer.args.prompt, /Public result contract: ready followed by a newline/u);
+    assert.deepEqual((await runtime.required("root")).units, validatedUnits,
+      "attaching undeclared project context does not replan, rerun validation, or dispatch another Worker");
     identities.reviewer!.outcome = "succeeded";
     await hooks["tool.execute.after"]!({ tool: "task", sessionID: "coordinator", callID: "reviewer-call" }, { output: "PASS\nThe result is validated.", metadata: { sessionId: "reviewer" } });
     if (mode === "NO_START") {
@@ -94,6 +101,11 @@ for (const mode of ["implementation", "executed", "NO_START"] as const) test(`mi
       assert.equal((await runtime.required("root")).receipt, null);
       return;
     }
+    await writeFile(join(root, "reference.md"), reference + "changed after review\n");
+    await assert.rejects(hooks.tool!.sortie_v010_submit_mission.execute({ status: "ready", summary: "ready" },
+      { sessionID: "coordinator" }), /mission-review-required-or-stale/);
+    await writeFile(join(root, "reference.md"), reference);
+    assert.equal((await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root")).coordinator, "coordinator");
     await hooks.tool!.sortie_v010_submit_mission.execute({ status: "ready", summary: "Validated result, reviewed independently" }, { sessionID: "coordinator" });
     identities.coordinator!.outcome = "succeeded";
     await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "coordinator-call" }, { output: "ready", metadata: { sessionId: "coordinator" } });
