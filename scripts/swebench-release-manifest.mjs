@@ -26,7 +26,8 @@ export async function releaseManifest(basePath, receiptPath, outputPath, { publi
   } };
   createDryRunPlan(manifest, publicRowHashes); // The same dataset/candidate parser used by inference.
   const runnerRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-  const sources = ["scripts/swebench-lite-runner.mjs", "scripts/swebench-lite-supervisor.mjs", "scripts/release-cli.mjs"];
+  const sources = ["scripts/swebench-lite-runner.mjs", "scripts/swebench-model-cost.mjs",
+    "scripts/swebench-lite-supervisor.mjs", "scripts/release-cli.mjs"];
   const runnerHashes = Object.fromEntries(await Promise.all(sources.map(async path => [path, sha256(await readFile(resolve(runnerRoot, path)))])));
   const provenance = { release_commit: receipt.release_commit, package_sha256: receipt.package_sha256,
     receipt_path: resolve(receiptPath), receipt_sha256: sha256(receiptBytes), runner_root: runnerRoot,
