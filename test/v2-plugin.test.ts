@@ -3,7 +3,9 @@ import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { createServer } from "node:http";
-import { join, resolve } from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import test from "node:test";
 
 import V2Plugin, {
@@ -97,6 +99,152 @@ function contextFixture() {
   return { context, history, synthetic, tools, toolHooks, sessionHooks, permissionHooks, agentSwitches, modelSwitches, emit,
     failNextSynthetic: () => { failSynthetic = true; }, failNextContext: () => { failContext = true; }, aborted: () => aborted };
 }
+
+for (const legacy of [false, true]) test(`V2 ${legacy ? "saved absolute" : "relative"} mission controls survive Operator correction and cold resume`, async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const directory = await mkdtemp(resolve("_testenv/swebench-night-long-project-root-"));
+  const exec = promisify(execFile);
+  const history: Record<string, Record<string, unknown>[]> = {};
+  const agents: Record<string, { agent: string; parentID?: string; outcome?: string }> = {
+    root: { agent: "dog-operator" }, coordinator: { agent: "dogs-coordinator", parentID: "root" },
+    first: { agent: "dog-worker-v010", parentID: "coordinator" }, second: { agent: "dog-worker-v010", parentID: "coordinator" },
+  };
+  let fixture = contextFixture(), cleanup: (() => void) | void, counter = 0;
+  const start = async () => {
+    fixture = contextFixture();
+    cleanup = await V2Plugin.setup({ ...fixture.context, location: { directory },
+      session: { ...fixture.context.session,
+        get: async ({ sessionID }) => ({ id: sessionID, ...agents[sessionID], model: { providerID: "openai",
+          id: agents[sessionID]?.agent === "dog-worker-v010" ? "gpt-6-luna-fast" : "gpt-6-sol", variant: "max" } }),
+        context: async ({ sessionID }) => history[sessionID] ?? [],
+      } });
+  };
+  const prompt = async (sessionID: string, text: string) => {
+    const messageID = `msg_${++counter}`;
+    const event = { sessionID, messageID, prompt: { text: sessionID === "root" ? text : `You are a subagent spawned by another session.\n${text}` } };
+    await fixture.sessionHooks.get("prompt")!(event);
+    (history[sessionID] ??= []).push({ id: messageID, type: "user", text: event.prompt.text, time: { created: Date.now() } });
+    return event.prompt.text;
+  };
+  const before = async (sessionID: string, tool: string, input: Record<string, unknown>) => {
+    const event = { sessionID, agent: agents[sessionID]!.agent, tool, id: `call_${++counter}`, input };
+    await fixture.toolHooks.get("execute.before")!(event);
+    return event;
+  };
+  const after = async (event: Record<string, unknown>, content: string, metadata: Record<string, unknown> = {}) => {
+    const sessionID = String(event.sessionID), now = Date.now();
+    (history[sessionID] ??= []).push({ id: `msg_${++counter}`, type: "assistant", agent: agents[sessionID]!.agent,
+      finish: "tool-calls", time: { created: now, completed: now }, content: [{ type: "tool", name: event.tool, id: event.id,
+        state: { status: "completed", input: event.input, content: [{ type: "text", text: content }], metadata },
+        time: { created: now, ran: now, completed: now } }] });
+    await fixture.toolHooks.get("execute.after")!({ ...event, status: "completed", result: { content, metadata } });
+  };
+  const tool = async (sessionID: string, name: string, input: Record<string, unknown> = {}) => {
+    const fullName = `sortie_v010_${name}`;
+    const event = await before(sessionID, fullName, input);
+    const definition = fixture.tools.find(tool => tool.name === fullName) as { execute(input: unknown, context: unknown): Promise<{ content: string }> };
+    const result = await definition.execute(event.input, { sessionID, agent: agents[sessionID]!.agent });
+    await after(event, result.content);
+    return JSON.parse(result.content);
+  };
+  const nativeTask = (task: Record<string, unknown>) => ({ agent: task.subagent_type, prompt: task.prompt,
+    description: task.description, ...(task.task_id ? { sessionID: task.task_id } : {}) });
+  try {
+    assert.notEqual(directory, process.cwd(), "control resolution must use the Location, not the service cwd");
+    await exec("git", ["init", "--quiet"], { cwd: directory });
+    await writeFile(join(directory, "check.mjs"), 'import assert from "node:assert/strict";\nimport {readFileSync} from "node:fs";\n' +
+      'const value = readFileSync("result.txt", "utf8");\nassert.ok(value.length);\nif (process.argv[2] === "ready") assert.equal(value, "ready\\n");\nconsole.log("PASS");\n');
+    await start();
+    const original = "Create result.txt containing ready, and leave an uncommitted diff.";
+    const objective = `${original} Keep this example text verbatim: handoff_path: /external/example.json`;
+    await prompt("root", original);
+    const mission = await tool("root", "start_mission", { requirements: [original] });
+    let dispatch = await before("root", "subagent", nativeTask(mission.task));
+    await prompt("coordinator", String(dispatch.input.prompt));
+    let firstRun: string | undefined;
+    let budget: { max_units: number; consumed_units: number } | undefined;
+    for (const [index, child] of ["first", "second"].entries()) {
+      const command = `node check.mjs ${index === 0 ? "present" : "ready"}`;
+      const plan = await tool("coordinator", "plan_units", { units: [{ title: "Write result", objective,
+        read: ["check.mjs"], write: ["result.txt"], validation: [command] }],
+        ...(index === 1 ? { reason: "Operator rejected the partial output; preserve the original requirement and correct it" } : {}) });
+      let runtime = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
+      let state = await runtime.required("root");
+      let task = nativeTask(plan.task);
+      if (legacy && index === 0) {
+        // Recreate a pre-change saved mission, including its exact old Task reference/hash.
+        state.units[0]!.task.prompt = state.units[0]!.task.prompt.replace(/^(handoff_path|goal_declaration_path): (.+)$/gm,
+          (_line, name: string, path: string) => `${name}: ${resolve(directory, path)}`)
+          .replace(/^Read handoff_path and other repository files.*\n/m, "");
+        const file = join(directory, ".sortie-dogs-v010/operators", `${createHash("sha256").update("root").digest("hex")}.json`);
+        await writeFile(file, JSON.stringify(state));
+        runtime = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
+        task = nativeTask(runtime.nextWorkerTask(await runtime.required("root")) as unknown as Record<string, unknown>);
+        cleanup?.(); await start();
+      }
+      const unit = state.units[0]!;
+      if (index === 0) firstRun = state.runID;
+      else { assert.notEqual(state.runID, firstRun); assert.deepEqual(state.acceptance, [original]); }
+      const reference = task.prompt;
+      const worker = await before("coordinator", "subagent", task);
+      assert.equal(worker.input.prompt, reference, "native delegation keeps the exact opaque reference");
+      const expanded = await prompt(child, String(reference));
+      assert.ok(expanded.endsWith(objective), "projection must not rewrite task data below the generated header");
+      const handoff = /^handoff_path: (.+)$/m.exec(expanded)![1]!;
+      const declaration = /^goal_declaration_path: (.+)$/m.exec(expanded)![1]!;
+      assert.equal(isAbsolute(handoff), false);
+      assert.equal(isAbsolute(declaration), false);
+      assert.equal(resolve(directory, handoff), unit.handoffPath);
+      assert.equal(JSON.parse(await readFile(resolve(directory, declaration), "utf8")).delivery_intent, "implementation");
+      // V2 native read(path) reaches the shared engine as filePath without rewriting its target.
+      const read = await before(child, "read", { path: handoff });
+      assert.equal(read.input.path, handoff);
+      await after(read, await readFile(resolve(directory, String(read.input.path)), "utf8"));
+      const manifest = /^operation_manifest: (.+)$/m.exec(expanded)![1]!;
+      assert.equal((await tool(child, "bind_write_gate", { project_root: directory, manifest_path: manifest })).status, "bound");
+      const recovery = { sessionID: child, agent: "dog-worker-v010", system: [] as { text: string }[], tools: {} };
+      await fixture.sessionHooks.get("context")!(recovery);
+      const retained = recovery.system.find(part => part.text.startsWith("SORTIE_WORKER_CONTEXT\n"))!.text;
+      const paths = JSON.parse(retained.split("\n")[1]!);
+      assert.equal(paths.handoff_path, relative(directory, unit.handoffPath).replaceAll("\\", "/"));
+      assert.equal(paths.operation_manifest, manifest);
+      const patchText = index === 0 ? "*** Begin Patch\n*** Add File: result.txt\n+partial\n*** End Patch"
+        : "*** Begin Patch\n*** Update File: result.txt\n@@\n-partial\n+ready\n*** End Patch";
+      const patch = await before(child, "patch", { patchText });
+      await writeFile(join(directory, "result.txt"), index === 0 ? "partial\n" : "ready\n");
+      await after(patch, "Updated result.txt");
+      const validation = await before(child, "shell", { command });
+      const checked = await exec(process.execPath, ["check.mjs", index === 0 ? "present" : "ready"], { cwd: directory });
+      await after(validation, checked.stdout, { exit: 0 });
+      agents[child]!.outcome = "succeeded";
+      await after(worker, "Validation passed", { sessionID: child });
+      await tool("coordinator", "review_mission", { risk_tags: [], traces: [`R1: result.txt checked using ${command}`] });
+      await tool("coordinator", "submit_mission", { status: "ready", summary: "Candidate for Operator acceptance" });
+      agents.coordinator!.outcome = "succeeded";
+      await after(dispatch, "Candidate ready", { sessionID: "coordinator" });
+      const status = await tool("root", "operator_status");
+      assert.equal(status.budget.consumed_units, index + 1);
+      assert.equal(status.budget.reserved_units, 0);
+      if (budget) assert.equal(status.budget.max_units, budget.max_units);
+      budget = status.budget;
+      assert.equal((await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).receipt, null);
+      if (index === 0) {
+        cleanup?.(); await start(); // Same durable mission/Coordinator; no additional user turn.
+        delete agents.coordinator!.outcome;
+        dispatch = await before("root", "subagent", { agent: "dogs-coordinator", sessionID: "coordinator",
+          description: "Correct incomplete candidate", prompt: "The original request requires ready; replace partial and verify the actual value." });
+        await prompt("coordinator", String(dispatch.input.prompt));
+      }
+    }
+    assert.equal((await tool("root", "complete_mission")).status, "succeeded");
+    const final = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+    assert.equal(final.id, mission.mission_id);
+    assert.equal(final.coordinator, "coordinator");
+    assert.equal(final.requests.length, 1, "Operator correction does not need another user instruction");
+    assert.equal(final.requests[0]!.text, original);
+    assert.equal(await readFile(join(directory, "result.txt"), "utf8"), "ready\n");
+  } finally { cleanup?.(); await rm(directory, { recursive: true, force: true }); }
+});
 
 test("V2 review recovery pages past bounded context to a completed initial Reviewer", async () => {
   const fixture = contextFixture();

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 import { OperatorRuntime } from "../dist/core/operator-runtime.js";
@@ -159,8 +159,8 @@ for (const mode of ["cancel", "replace", "missed-after"]) test(`cold ${mode} aft
         await recoveredHooks["experimental.session.compacting"]!({ sessionID: id }, compact);
         for (const text of [context.system.join("\n"), compact.context.join("\n")]) {
           assert.match(text, /SORTIE_WORKER_CONTEXT/);
-          assert.ok(text.includes(unit.handoffPath));
-          assert.ok(text.includes(unit.manifestPath));
+          assert.ok(text.includes(relative(root, unit.handoffPath).replaceAll("\\", "/")));
+          assert.ok(text.includes(relative(root, unit.manifestPath).replaceAll("\\", "/")));
           assert.ok(text.includes("node check.mjs one"));
           assert.match(text, /inspect the actual diff and outputs/);
         }

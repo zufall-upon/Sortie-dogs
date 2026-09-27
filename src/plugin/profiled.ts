@@ -7,7 +7,7 @@ import { CANONICAL_AGENT_ROLES, canonicalAgent, profileAgent, profileTool, V010_
 import { SortieDogsPlugin as canonicalPlugin, type OpenCodeHooks, type OpenCodePlugin, type OpenCodePluginInput } from "./index.js";
 import { taskChildSessionID } from "./task-result-repair.js";
 import type { RuntimeBridge } from "./runtime-bridge.js";
-import { relative, resolve, sep } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { readFile, realpath } from "node:fs/promises";
 import { BUILT_IN_MODEL_CATALOG, type CatalogModel } from "./model-routing.js";
 import { goalFingerprint } from "../core/goal-bound.js";
@@ -275,6 +275,20 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       if (role) return role;
       return CANONICAL_AGENT_ROLES.includes(value as CanonicalAgentRole) ? `foreign/${value}` : value;
     }
+    function workerControlPrompt(text: string, outward: boolean): string {
+      // Project only the generated header, never acceptance, commands or the user's objective.
+      // Durable Tasks and the shared engine retain their canonical absolute identities.
+      if (!/^role: implementation\ntask_id: operator-/u.test(text)) return text;
+      const end = text.indexOf("\nacceptance:\n");
+      if (end < 0) return text;
+      return text.slice(0, end).replace(/^(handoff_path|goal_declaration_path): (.+)$/gm,
+        (_line, name: string, path: string) => {
+          const absolute = resolve(input.directory, path);
+          const local = relative(input.directory, absolute);
+          const inside = local !== ".." && !local.startsWith(`..${sep}`) && !isAbsolute(local);
+          return `${name}: ${outward && inside ? local.replaceAll("\\", "/") : absolute}`;
+        }) + text.slice(end);
+    }
     function translate(value: unknown, outward: boolean): unknown {
       if (Array.isArray(value)) return value.map(item => translate(item, outward));
       if (!record(value)) return value;
@@ -302,7 +316,21 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
               const request = args[0];
               if ((method === "prompt" || method === "promptAsync") && record(request) && record(request.path) &&
                   typeof request.path.id === "string" && retired.has(request.path.id)) throw new Error("runtime-profile-revoked");
-              return translate(await operation.apply(group, args.map(argument => translate(argument, true))), false);
+              const result = translate(await operation.apply(group, args.map(argument => translate(argument, true))), false);
+              // Native Worker history stores short references. Only its generated user
+              // header is projected back for core recovery; root requests and tool evidence
+              // keep their original text, including any path-like lines in task data.
+              if (method === "messages" || method === "message") {
+                const data = payload(result);
+                for (const message of Array.isArray(data) ? data : [data]) {
+                  if (!record(message) || !record(message.info) || message.info.role !== "user" ||
+                      message.info.agent !== "dog-worker" || !Array.isArray(message.parts)) continue;
+                  for (const part of message.parts) if (record(part) && part.type === "text" && typeof part.text === "string") {
+                    part.text = workerControlPrompt(part.text, false);
+                  }
+                }
+              }
+              return result;
             };
           },
         });
@@ -1574,6 +1602,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         const mapped = translate(output, false) as typeof output;
         await core["chat.message"]?.(translate(chat, false) as typeof chat, mapped);
         Object.assign(output, translate(mapped, true));
+        if (role === "dog-worker") for (const part of output.parts) {
+          if (record(part) && part.type === "text" && typeof part.text === "string") part.text = workerControlPrompt(part.text, true);
+        }
         if (role === "dog-worker" && explicitWorkerSelection) {
           if (explicitWorkerSelection.model) {
             const split = explicitWorkerSelection.model.indexOf("/");
@@ -1615,9 +1646,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         if (repairAccess !== null) {
           const bind = profileTool(profile, "sortie_bind_write_gate"), release = profileTool(profile, "sortie_release_write_gate");
           const allowedRead = request.tool.toLowerCase() === "read" && typeof args.filePath === "string" &&
-            resolve(args.filePath) === resolve(repairAccess.handoff_path);
+            resolve(input.directory, args.filePath) === resolve(repairAccess.handoff_path);
           const allowedBind = request.tool === bind && args.project_root === input.directory &&
-            resolve(String(args.manifest_path ?? "")) === resolve(repairAccess.manifest_path);
+            resolve(input.directory, String(args.manifest_path ?? "")) === resolve(repairAccess.manifest_path);
           const allowedRelease = request.tool === release;
           const allowedValidation = ["bash", "shell"].includes(request.tool.toLowerCase()) && typeof args.command === "string" &&
             repairAccess.expected_command !== null && normalizeCommand(args.command) === repairAccess.expected_command;
