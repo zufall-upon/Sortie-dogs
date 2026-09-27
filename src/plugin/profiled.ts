@@ -22,7 +22,10 @@ import { publishMissionProgress } from "./mission-progress.js";
 import { completedMissionReviewPrompts, initialMissionReviewPrompt, missionReviewBaseline, missionReviewSource } from "./mission-review.js";
 import { missionLocations, missionLocationPacket } from "./mission-location.js";
 import { SOURCE_REVIEW_RISK_TAGS } from "../core/consultation.js";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { proposeTerminalRescue } from "../core/terminal-rescue-policy.js";
+import { DEFAULT_TERMINAL_RESCUE_MODEL } from "./terminal-rescue-host.js";
+import { readHostModels, type OpenCodeModelAvailabilityClient } from "./model-routing-hook.js";
 
 const SERIAL_CAPABILITIES = new Set([
   "sortie_bind_write_gate", "sortie_release_write_gate", "sortie_check_contract",
@@ -96,6 +99,18 @@ export function previewModelCatalog(
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 const payload = (value: unknown): unknown => record(value) && "data" in value ? value.data : value;
 
+function missionConsultationDetails(role: "advisor" | "scout", prompt: string) {
+  const marker = role === "advisor" ? /^strategy_trigger:\s*(\S+)\s*$/mu : /^missing_evidence_code:\s*(\S+)\s*$/mu;
+  const match = marker.exec(prompt);
+  const lines = prompt.split(/\r?\n/u);
+  const start = match === null ? 0 : lines.findIndex(line => marker.test(line)) + 1;
+  const question = lines.slice(Math.max(0, start)).map(line => line.trim()).find(line => line.length > 0 &&
+    !/^(?:project_root|known_paths|missing_evidence_code|strategy_trigger|role|task_id|acceptance|validation)\s*:/u.test(line));
+  const summary = (question ?? prompt.trim().split(/\r?\n/u).find(line => line.trim()) ?? "consultation requested").slice(0, 1000);
+  return { reason: summary, ...(question === undefined ? {} : { question: question.slice(0, 1000) }),
+    ...(match === null ? {} : { trigger: match[1]!.slice(0, 128) }) };
+}
+
 /** Prove native V2 termination of the old dispatch, including earlier units and consultations. */
 export async function terminalCancelledMissionChildren(profile: RuntimeProfile, root: string, previous: OperatorState,
   budget: { reserved_units: number } | null,
@@ -168,6 +183,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     const selected = new Map<string, string>();
     const operatorParents = new Map<string, string>();
     const taskOwners = new Map<string, { root: string; actor: string; operator: boolean; proposal?: boolean; mission?: boolean; consultation?: string }>();
+    const missionRescueSelections = new Map<string, { attemptID: string; model: string; variant: string | null }>();
     const operatorTurnLifecycle = new Map<string, "historical" | "cancelled">();
     const historicalTurnMessages = new Map<string, string>();
     const dispatchTransitions = new Map<string, Promise<unknown>>();
@@ -198,6 +214,18 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const result = payload(await session(typeof nativeSession?.reviewMessages === "function" ? "reviewMessages" : "messages",
         { path: { id }, query: { directory: input.directory } }));
       return Array.isArray(result) ? result.filter(record) : [];
+    }
+    async function observedSessionModel(id: string): Promise<{ model?: string; variant?: string; outcome: "completed" | "failed" | "unknown" }> {
+      const info = payload(await session("get", { path: { id }, query: { directory: input.directory } }).catch(() => undefined));
+      if (!record(info)) return { outcome: "unknown" };
+      const model = record(info.model) ? info.model : info;
+      const provider = typeof model.providerID === "string" ? model.providerID : info.providerID;
+      const modelID = typeof model.modelID === "string" ? model.modelID : typeof model.id === "string" ? model.id : info.modelID;
+      const variant = typeof model.variant === "string" ? model.variant : typeof info.variant === "string" ? info.variant : undefined;
+      const outcome = ["succeeded", "completed"].includes(String(info.outcome)) ? "completed"
+        : ["failed", "interrupted", "cancelled"].includes(String(info.outcome)) ? "failed" : "unknown";
+      return { ...(typeof provider === "string" && typeof modelID === "string" ? { model: `${provider}/${modelID}` } : {}),
+        ...(variant === undefined ? {} : { variant }), outcome };
     }
     async function identity(id: string): Promise<{ role?: CanonicalAgentRole; parent?: string }> {
       const info = payload(await session("get", { path: { id }, query: { directory: input.directory } }));
@@ -442,8 +470,43 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         const run = await operators.required(result.rootSessionID);
         const unit = run.units.find(unit => unit.callID === result.callID);
         if (!unit) return;
+        const recordedAttempt = [...(mission.attempts ?? [])].reverse().find(attempt => attempt.callID === result.callID);
+        const observed = result.childSessionID ? await observedSessionModel(result.childSessionID) : { outcome: "unknown" as const };
+        const currentCandidate = result.resultClass === "acceptance" && result.failure?.outcome === "fail"
+          ? await missionReviewSource(input.directory, run, [], mission.reviewBaseline, mission.reviewScope).then(value => value.fingerprint)
+          : undefined;
+        const attemptFailure = result.disposition === "cancelled"
+          ? { category: "cancellation" as const, code: "native-task-cancelled" }
+          : result.resultClass === "acceptance" && result.failure?.outcome === "fail" && observed.outcome === "completed"
+            ? { category: "implementation" as const,
+                code: `validation-failed:${result.failure.exitCode ?? "unknown"}` }
+            : result.resultClass === "process-defect"
+              ? { category: "contract" as const, code: result.resultClass }
+              : { category: "unknown" as const, code: result.resultClass };
         const progress = { unit: `${run.runID}/${unit.unit.id}`, title: unit.unit.title, status: unit.status, at: new Date().toISOString() };
-        await missions.update(result.rootSessionID, state => { state.progress.push(progress); });
+        await missions.update(result.rootSessionID, state => {
+          state.progress.push(progress);
+          const attempt = recordedAttempt && state.attempts?.find(item => item.attemptID === recordedAttempt.attemptID);
+          if (attempt) {
+            attempt.status = result.disposition;
+            attempt.resultClass = result.resultClass;
+            attempt.nativeOutcome = observed.outcome;
+            if (result.childSessionID) attempt.childSessionID = result.childSessionID;
+            if (observed.model) attempt.observedModel = observed.model;
+            if (observed.variant) attempt.observedVariant = observed.variant;
+            if (result.disposition !== "succeeded") attempt.failure = attemptFailure;
+            else delete attempt.failure;
+            if (currentCandidate) attempt.candidateID = currentCandidate;
+          }
+          if (state.rescue && state.rescue.attemptID === unit.terminalRescue?.attempt_id) {
+            state.rescue.status = result.disposition === "succeeded" ? "succeeded"
+              : result.disposition === "cancelled" ? "cancelled" : "failed";
+            state.rescue.outcome = result.disposition;
+            if (observed.model) state.rescue.observedModel = observed.model;
+            if (observed.variant) state.rescue.observedVariant = observed.variant;
+          }
+        });
+        if (result.childSessionID) missionRescueSelections.delete(result.childSessionID);
         await publishMissionProgress(result.rootSessionID, { description: `🐾 ${unit.status === "succeeded" ? "✅" : "🔧"} ${unit.unit.title}`,
           sortie_progress: progress });
       },
@@ -493,6 +556,48 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const mission = await missions.required(root);
       if (["cancelled", "completed"].includes(mission.phase) || (id !== root && mission.coordinator !== id)) throw new Error("mission-controller-required");
       return { root, mission };
+    }
+    async function missionWorkerTerminalProof(root: string, mission: OperatorMission,
+      run: OperatorState, attempt: NonNullable<OperatorMission["attempts"]>[number]): Promise<
+        { status: "ready"; child: string } | { status: "non_rescue"; reason: string }> {
+      if (!attempt.callID || !attempt.childSessionID || !mission.coordinator ||
+          !control) {
+        return { status: "non_rescue", reason: "terminal_not_reconciled" };
+      }
+      if (attempt.runID !== run.runID || attempt.unitID !== run.units.find(unit => unit.unit.id === attempt.unitID)?.unit.id) {
+        return { status: "non_rescue", reason: "terminal_identity_conflict" };
+      }
+      try {
+        await control.assertActiveGoal(root, await operators.completionGoalFingerprint(run));
+      } catch {
+        return { status: "non_rescue", reason: "goal_not_active" };
+      }
+      const budget = await control.currentBudget(root);
+      if (!budget || budget.reserved_units !== 0) return { status: "non_rescue", reason: "goal_reservation_unsettled" };
+      const child = attempt.childSessionID;
+      const who = await identity(child);
+      if (who.role !== "dog-worker" || who.parent !== mission.coordinator) {
+        return { status: "non_rescue", reason: "terminal_identity_conflict" };
+      }
+      const info = payload(await session("get", { path: { id: child }, query: { directory: input.directory } }).catch(() => undefined));
+      const outcome = record(info) ? String(info.outcome) : "unknown";
+      if (!record(info) || info.id !== child || info.parentID !== mission.coordinator ||
+          !["succeeded", "completed"].includes(outcome)) {
+        return { status: "non_rescue", reason: "terminal_not_reconciled" };
+      }
+      const descendants = payload(await session("children", { path: { id: child }, query: { directory: input.directory } }).catch(() => undefined));
+      if (!Array.isArray(descendants) || descendants.length !== 0) {
+        return { status: "non_rescue", reason: "terminal_not_reconciled" };
+      }
+      const terminalObserver = (control as unknown as { missionWorkerTerminal?:
+        (childSessionID: string, writeScopes: readonly string[]) => Promise<boolean> } | undefined)?.missionWorkerTerminal;
+      if (!terminalObserver) {
+        return { status: "non_rescue", reason: "terminal_not_reconciled" };
+      }
+      if (!await terminalObserver(child, run.units.find(unit => unit.unit.id === attempt.unitID)!.unit.write)) {
+        return { status: "non_rescue", reason: "writer_not_released" };
+      }
+      return { status: "ready", child };
     }
     async function reconcileMissionDispatch(root: string): Promise<OperatorMission | undefined> {
       const mission = await missions.read(root);
@@ -1239,7 +1344,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       } };
     const startMission = `${profile.toolPrefix}start_mission`, planUnits = `${profile.toolPrefix}plan_units`,
       reviewMission = `${profile.toolPrefix}review_mission`, submitMission = `${profile.toolPrefix}submit_mission`,
-      completeMission = `${profile.toolPrefix}complete_mission`, expandUnit = `${profile.toolPrefix}expand_unit`;
+      completeMission = `${profile.toolPrefix}complete_mission`, expandUnit = `${profile.toolPrefix}expand_unit`,
+      skipMissionConsultation = `${profile.toolPrefix}skip_mission_consultation`;
     const stringList = { type: "array", items: { type: "string" } };
     tools[startMission] = { description: "Operator: save the current user requirements. Use intent=replace when the user changes an existing request (version, parallelism, target): host cancels the previous run and archives its requirements/results while retaining spend. If status reports mission-source-reconciliation-required and the saved requirements reflect that changed scope, call intent=replace with those exact requirements: the host repairs this mission in place and keeps its Coordinator. Supply the complete current requirements, retaining constraints the user has not changed. For separate work in a different location use intent=new. Dispatch the Coordinator immediately, or plan_units for a known single-unit procedure; item count and runtime alone do not require a Coordinator.",
       args: { requirements: { ...stringList, minItems: 1, maxItems: 64 } as never,
@@ -1291,6 +1397,130 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             : { mission_id: mission.id, requirements: mission.requirements, task: missions.task(mission),
               next_action: "Nontrivial: dispatch task now. Simple single-unit work with known scope/check: call plan_units directly. Do not create a proposal or ask for plan approval." }) });
         });
+      } };
+    tools[skipMissionConsultation] = { description: "Coordinator: durably record why a concrete optional Advisor/Scout consultation is unnecessary. This is observation only: it adds no approval, consultation requirement, or dispatch gate.",
+      args: { role: { type: "string", enum: ["advisor", "scout"] } as never, reason: stringSchema }, execute: async (args, context) => {
+        const { root, mission } = await missionAuthority(context.sessionID);
+        if (context.sessionID !== mission.coordinator || (await identity(context.sessionID)).role !== "dog-operator") {
+          throw new Error("mission-consultation-coordinator-required");
+        }
+        const consultation = await missions.recordConsultationSkip(root, args.role as "advisor" | "scout", args.reason);
+        return JSON.stringify({ status: "recorded", consultation: consultation.consultations?.at(-1) });
+      } };
+    const retryMissionUnit = `${profile.toolPrefix}retry_mission_unit`, rescueMissionUnit = `${profile.toolPrefix}rescue_mission_unit`;
+    tools[retryMissionUnit] = { description: "Coordinator: after one host-classified implementation validation failure, dispatch exactly one same-scope ordinary Mission Worker remediation. Native child termination, released reservation/writer, and remaining cumulative unit budget are required; this does not change acceptance or scope.",
+      args: { unit_id: stringSchema }, execute: async (args, context) => {
+        const { root, mission } = await missionAuthority(context.sessionID);
+        if (context.sessionID !== mission.coordinator || (await identity(context.sessionID)).role !== "dog-operator") {
+          throw new Error("mission-remediation-coordinator-required");
+        }
+        const run = await operators.required(root), unitID = String(args.unit_id);
+        const unit = run.units.find(item => item.unit.id === unitID);
+        const attempt = [...(mission.attempts ?? [])].reverse().find(item => item.runID === run.runID && item.unitID === unitID);
+        if (!unit || unit.status !== "failed" || unit.resultClass !== "acceptance" || unit.failure?.outcome !== "fail" ||
+            unit.normalRemediationUsed || !attempt || attempt.kind !== "implementation" || attempt.status !== "failed" ||
+            attempt.failure?.category !== "implementation") throw new Error("operator-mission-normal-remediation-unavailable");
+        const terminal = await missionWorkerTerminalProof(root, mission, run, attempt);
+        if (terminal.status !== "ready") {
+          const packet = missionPacket(mission, run);
+          return JSON.stringify({ ...packet, run_status: packet.status, status: "non_rescue", reason: terminal.reason });
+        }
+        const budget = await control!.currentBudget(root);
+        if (!budget || budget.remaining_units < 1) {
+          const packet = missionPacket(mission, run);
+          return JSON.stringify({ ...packet, run_status: packet.status, status: "non_rescue", reason: "budget_exhausted", budget });
+        }
+        const prepared = await operators.prepareMissionNormalRemediation(root, run.runID, unitID);
+        control!.enableUnits(root, 1);
+        const next = await operators.next(root, context.sessionID);
+        return JSON.stringify({ status: "normal_remediation_prepared", run_id: prepared.runID,
+          unit_id: unitID, task: record(next) ? next.task : undefined, budget: await control!.currentBudget(root) });
+      } };
+    tools[rescueMissionUnit] = { description: "Coordinator: only after the same unit's one ordinary remediation failed the same declared validation, evaluate one optional Astra Rescue. The host requires the current Mission failure class, reconciled native terminal, exact current candidate/acceptance/scope/validation, discovered model availability, one-use and cumulative budget; the returned Worker must still pass ordinary validation, independent review, and root acceptance. This is not the legacy sortie_execute_terminal_rescue tool.",
+      args: { unit_id: stringSchema }, execute: async (args, context) => {
+        const { root, mission } = await missionAuthority(context.sessionID);
+        if (context.sessionID !== mission.coordinator || (await identity(context.sessionID)).role !== "dog-operator") {
+          throw new Error("mission-rescue-coordinator-required");
+        }
+        const run = await operators.required(root), unitID = String(args.unit_id);
+        const unit = run.units.find(item => item.unit.id === unitID);
+        const attempt = [...(mission.attempts ?? [])].reverse().find(item => item.runID === run.runID && item.unitID === unitID);
+        const nonRescue = async (reason: string) => {
+          await missions.update(root, state => { state.rescue = { attemptID: attempt?.attemptID ?? randomUUID(),
+            runID: run.runID, unitID, status: "non_rescue", reason }; });
+          const packet = missionPacket(await missions.required(root), await operators.read(root));
+          return JSON.stringify({ ...packet, run_status: packet.status, status: "non_rescue", reason });
+        };
+        if (!unit || unit.status !== "failed" || unit.resultClass !== "acceptance" || unit.failure?.outcome !== "fail" ||
+            unit.normalRemediationUsed !== true || unit.terminalRescue || !attempt || attempt.kind !== "normal_remediation" ||
+            attempt.status !== "failed" || attempt.resultClass !== "acceptance" || attempt.failure?.category !== "implementation") {
+          return nonRescue("normal_remediation_not_exhausted");
+        }
+        const terminal = await missionWorkerTerminalProof(root, mission, run, attempt);
+        if (terminal.status !== "ready") return nonRescue(terminal.reason);
+        const candidate = await missionReviewSource(input.directory, run, [], mission.reviewBaseline, mission.reviewScope);
+        if (!attempt.candidateID || attempt.candidateID !== candidate.fingerprint) return nonRescue("accepted_candidate_changed");
+        const budget = await control!.currentBudget(root);
+        if (!budget || budget.reserved_units !== 0) return nonRescue("budget_exhausted");
+        const budgetDetails = budget as typeof budget & { settled_time_ms?: number | null; time_limit_ms?: number | null;
+          settled_cost_usd?: number | null; cost_limit_usd?: number | null };
+        const hasTimeLimit = typeof budgetDetails.time_limit_ms === "number";
+        const timeLimit = hasTimeLimit ? budgetDetails.time_limit_ms! : Number.MAX_SAFE_INTEGER;
+        const consumedTime = hasTimeLimit ? budgetDetails.settled_time_ms : 0;
+        const hasCostLimit = typeof budgetDetails.cost_limit_usd === "number";
+        const costLimit = hasCostLimit ? budgetDetails.cost_limit_usd! : Number.MAX_VALUE;
+        const consumedCost = hasCostLimit ? budgetDetails.settled_cost_usd : (budgetDetails.settled_cost_usd ?? 0);
+        if (!Number.isSafeInteger(timeLimit) || timeLimit < 0 || !Number.isSafeInteger(consumedTime) || consumedTime! < 0 ||
+            !Number.isFinite(costLimit) || costLimit < 0 || typeof consumedCost !== "number" || !Number.isFinite(consumedCost) || consumedCost < 0) {
+          return nonRescue("budget_exhausted");
+        }
+        if ((hasTimeLimit && consumedTime! >= timeLimit) || (hasCostLimit && consumedCost >= costLimit)) {
+          return nonRescue("budget_exhausted");
+        }
+        const nativeModels = await readHostModels(input.client as OpenCodeModelAvailabilityClient | undefined);
+        const target = nativeModels?.has(DEFAULT_TERMINAL_RESCUE_MODEL)
+          ? { model: DEFAULT_TERMINAL_RESCUE_MODEL, variant: null } : null;
+        const terminalIdentity = { run_id: run.runID, unit_id: unitID, attempt_id: attempt.attemptID,
+          predecessor_attempt_id: attempt.predecessorAttemptID ?? null, candidate_id: candidate.fingerprint,
+          route_id: `${profile.id}:mission:${unitID}`, child_id: terminal.child, call_id: attempt.callID! };
+        const priorFailure = attempt.failure;
+        const policy = proposeTerminalRescue({ prior_attempt: { identity: terminalIdentity, role: "implementation", recovery_kind: "normal_remediation",
+          disposition: "failed", failure: priorFailure ? { category: priorFailure.category, code: priorFailure.code } : null },
+          terminal_reconciliation: { current: terminalIdentity, observation: { identity: terminalIdentity, disposition: "failed" }, evidence: {
+            terminal: "satisfied", tools_quiescent: "satisfied", artifact_window_closed: "satisfied", writer_released: "satisfied",
+            gate_released: "satisfied", lease_released: "satisfied", worktree_released: "satisfied" } },
+          accepted_base: { candidate_id: candidate.fingerprint, contract_id: run.acceptanceFingerprint, scope: [...unit.unit.write],
+            acceptance: [...run.acceptance], validation: [...unit.unit.validation] }, available_target: target,
+          explicit_override: (attempt.selectedModel !== undefined && attempt.selectedModel !== PREVIEW_WORKER_ROUTE.model) ||
+            (attempt.observedModel !== undefined && attempt.observedModel !== PREVIEW_WORKER_ROUTE.model) ||
+            (attempt.observedVariant !== undefined && attempt.observedVariant !== PREVIEW_WORKER_ROUTE.variant),
+          unit_rescue_count: (mission.attempts ?? []).filter(item => item.runID === run.runID && item.unitID === unitID && item.kind === "astra_rescue").length,
+          active_run_rescue_count: (mission.attempts ?? []).filter(item => item.runID === run.runID && item.kind === "astra_rescue").length,
+          budget_limits: { counters: { recovery_actions: budget.max_units, probe_iterations: 0, model_attempts: budget.max_units },
+            resources: { time_ms: timeLimit, cost_usd: costLimit } },
+          budget_consumed: { counters: { recovery_actions: budget.consumed_units + budget.reserved_units, probe_iterations: 0,
+            model_attempts: budget.consumed_units + budget.reserved_units },
+            resources: { time_ms: consumedTime!, cost_usd: consumedCost } },
+          budget_request: { counters: { recovery_actions: 1, probe_iterations: 0, model_attempts: 1 },
+            // Current Mission charges native time/cost through its cumulative goal ledger at normal dispatch settlement;
+            // this policy reservation consumes one existing unit, not an invented parallel resource allowance.
+            resources: { time_ms: 0, cost_usd: 0 } } });
+        if (policy.status !== "proposed") return nonRescue(policy.reason);
+        const rescueAttemptID = randomUUID();
+        const prepared = await operators.prepareMissionTerminalRescue(root, run.runID, unitID, {
+          attempt_id: rescueAttemptID, selected_model: policy.proposal.target.model,
+          selected_variant: policy.proposal.target.variant,
+          accepted_base: { candidate_id: policy.proposal.accepted_base_candidate_id, contract_id: policy.proposal.contract_id,
+            scope: policy.proposal.scope, acceptance: policy.proposal.acceptance, validation: policy.proposal.validation },
+        });
+        control!.enableUnits(root, 1);
+        await missions.update(root, state => { state.rescue = { attemptID: rescueAttemptID, runID: run.runID, unitID,
+          selectedModel: policy.proposal.target.model, selectedVariant: policy.proposal.target.variant, status: "prepared" }; });
+        const next = await operators.next(root, context.sessionID);
+        return JSON.stringify({ status: "prepared", rescue: { attempt_id: rescueAttemptID, selected_model: policy.proposal.target.model,
+          selected_variant: policy.proposal.target.variant, accepted_base_candidate_id: policy.proposal.accepted_base_candidate_id,
+          obligations: policy.proposal.obligations }, run_id: prepared.runID, unit_id: unitID,
+          task: record(next) ? next.task : undefined, budget: await control!.currentBudget(root) });
       } };
     async function declareMissionUnits(root: string, actor: string, mission: OperatorMission, raw: unknown, reason?: string, execution?: unknown) {
       const previous = await operators.read(root);
@@ -1481,7 +1711,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         if (JSON.parse(result).status === "succeeded") await missions.update(context.sessionID, state => { state.phase = "completed"; });
         return result;
       } };
-    const ownTools = new Set([startMission, planUnits, expandUnit, reviewMission, submitMission, completeMission,
+    const ownTools = new Set([startMission, planUnits, expandUnit, reviewMission, submitMission, completeMission, skipMissionConsultation,
+      retryMissionUnit, rescueMissionUnit,
       prepare, repair, next, status, cancel, complete, resume, resolveContractRepair,
       beginProposal, submitProposal, approveProposal, reviseProposal, extendProposalBudget, reopenProposalScope,
       reconcileOrphan, reviseApprovedIntent]);
@@ -1656,15 +1887,31 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
               });
             }
             textParts[0]!.text = admitted.prompt;
+            const current = await operators.required(root);
+            const activeUnit = current.units.find(unit => unit.status === "running" && unit.childSessionID === chat.sessionID);
+            if (activeUnit?.terminalRescue) missionRescueSelections.set(chat.sessionID, {
+              attemptID: activeUnit.terminalRescue.attempt_id,
+              model: activeUnit.terminalRescue.selected_model, variant: activeUnit.terminalRescue.selected_variant,
+            });
           }
         }
         const mapped = translate(output, false) as typeof output;
-        await core["chat.message"]?.(translate(chat, false) as typeof chat, mapped);
+        const mappedChat = translate(chat, false) as typeof chat & { missionRescueSelection?:
+          { attempt_id: string; model: string; variant: string | null } };
+        const rescueSelection = role === "dog-worker" ? missionRescueSelections.get(chat.sessionID) : undefined;
+        if (rescueSelection) mappedChat.missionRescueSelection = { attempt_id: rescueSelection.attemptID,
+          model: rescueSelection.model, variant: rescueSelection.variant };
+        await core["chat.message"]?.(mappedChat, mapped);
         Object.assign(output, translate(mapped, true));
         if (role === "dog-worker") for (const part of output.parts) {
           if (record(part) && part.type === "text" && typeof part.text === "string") part.text = workerControlPrompt(part.text, true);
         }
-        if (role === "dog-worker" && explicitWorkerSelection) {
+        if (rescueSelection) {
+          const split = rescueSelection.model.indexOf("/");
+          if (split <= 0) throw new Error("invalid-mission-terminal-rescue-model");
+          output.message.model = { providerID: rescueSelection.model.slice(0, split), modelID: rescueSelection.model.slice(split + 1),
+            ...(rescueSelection.variant === null ? {} : { variant: rescueSelection.variant }) };
+        } else if (role === "dog-worker" && explicitWorkerSelection) {
           if (explicitWorkerSelection.model) {
             const split = explicitWorkerSelection.model.indexOf("/");
             if (split <= 0) throw new Error("invalid-explicit-worker-model");
@@ -1752,6 +1999,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           const mapped = translate(output, false) as typeof output;
           await core["tool.execute.before"]?.({ ...request, sessionID: root, agent: "dog-coordinator" }, mapped);
           Object.assign(output, translate(mapped, true));
+          if ((consultRole === "dog-advisor" || consultRole === "dog-scout") && typeof args.prompt === "string") {
+            const role = consultRole === "dog-advisor" ? "advisor" : "scout";
+            await missions.recordConsultationDispatch(root, { role, callID: request.callID,
+              ...missionConsultationDetails(role, args.prompt) });
+          }
           taskOwners.set(request.callID, { root, actor: request.sessionID, operator: false, consultation: consultRole });
           return;
         }
@@ -1829,6 +2081,12 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         if (who.role === "dog-operator" && request.tool === "task" && !delegated) throw new Error("operator-worker-task-required");
         let expandedWorker: import("../core/operator-runtime.js").OperatorTask | undefined;
         if (delegated) {
+          const pendingUnit = state!.units.find(unit => unit.status !== "succeeded");
+          if (pendingUnit?.terminalRescue) {
+            const requiredModel = pendingUnit.terminalRescue.selected_model;
+            if (args.model !== undefined && args.model !== requiredModel) throw new Error("operator-mission-terminal-rescue-model-mismatch");
+            args.model = requiredModel;
+          }
           if (!mission || mission.runID !== state!.runID) await proposals.assertExecutionApproved(root, state!.planHash);
           if (!mission || mission.runID !== state!.runID) await restorePriorAcceptance(root, state!);
           expandedWorker = await operators.admitWorker(root, request.sessionID, request.callID, args);
@@ -1901,6 +2159,27 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           }
           throw error;
         }
+        if (delegated && mission?.runID === state!.runID) {
+          const admitted = await operators.required(root);
+          const unit = admitted.units.find(candidate => candidate.callID === request.callID);
+          const taskID = unit && /^task_id: (.+)$/m.exec(unit.task.prompt)?.[1];
+          if (unit && taskID) {
+            const previousAttempt = [...(mission.attempts ?? [])].reverse().find(attempt =>
+              attempt.runID === admitted.runID && attempt.unitID === unit.unit.id);
+            const kind = unit.terminalRescue ? "astra_rescue" as const
+              : unit.normalRemediationUsed ? "normal_remediation" as const : "implementation" as const;
+            await missions.update(root, current => {
+              current.attempts ??= [];
+              if (current.attempts.some(attempt => attempt.callID === request.callID)) return;
+              current.attempts.push({ attemptID: unit.terminalRescue?.attempt_id ?? randomUUID(), runID: admitted.runID,
+                unitID: unit.unit.id, taskID, ...(previousAttempt ? { predecessorAttemptID: previousAttempt.attemptID } : { predecessorAttemptID: null }),
+                kind, status: "dispatched", callID: request.callID,
+                ...(unit.terminalRescue ? { selectedModel: unit.terminalRescue.selected_model } :
+                  typeof args.model === "string" ? { selectedModel: args.model } : {}) });
+              current.attempts = current.attempts.slice(-64);
+            });
+          }
+        }
       },
       "tool.execute.after": async (request, output) => {
         const id = request.sessionID;
@@ -1942,6 +2221,15 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
                 ? `\n\nHOST: evidence-gap review ${count}/${MISSION_EVIDENCE_GAP_REVIEW_LIMIT} reached the limit. Review is closed with gaps; this does not prove execution or requirement completion. Submit ready only when the requested result is complete, and list the gaps.`
                 : `\n\nHOST: evidence-gap review ${count}/${MISSION_EVIDENCE_GAP_REVIEW_LIMIT}. Supply focused original-file excerpts through review_mission evidence and traces. Do not create an evidence-copying Worker or re-implement.`;
             }
+          } else if (ownership.consultation === "dog-advisor" || ownership.consultation === "dog-scout") {
+            const child = taskChildSessionID(output);
+            const observed = child ? await observedSessionModel(child) : { outcome: "unknown" as const };
+            await missions.settleConsultation(ownership.root, request.callID!, observed.outcome, {
+              ...(child === undefined ? {} : { childSessionID: child }),
+              ...(observed.model === undefined ? {} : { observedModel: observed.model }),
+              ...(observed.variant === undefined ? {} : { observedVariant: observed.variant }),
+              ...(typeof raw === "string" ? { result: raw } : {}),
+            });
           }
           taskOwners.delete(request.callID!);
           return;

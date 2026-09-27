@@ -21,6 +21,52 @@ export interface MissionRequest { id: string; text: string }
 export interface MissionContext extends MissionRequest { role: "user" | "assistant" }
 export interface MissionEvidenceExcerpt { path: string; offset: number; limit: number }
 export interface MissionReviewScope { read: string[]; write: string[] }
+export interface MissionConsultation {
+  id: string;
+  role: "advisor" | "scout";
+  disposition: "skipped" | "dispatched";
+  reason: string;
+  at: string;
+  trigger?: string;
+  question?: string;
+  callID?: string;
+  childSessionID?: string;
+  observedModel?: string;
+  observedVariant?: string;
+  outcome?: "completed" | "failed" | "unknown";
+  result?: string;
+}
+export interface MissionAttempt {
+  attemptID: string;
+  runID: string;
+  unitID: string;
+  taskID: string;
+  predecessorAttemptID?: string | null;
+  /** Fingerprint of the settled scoped candidate against which a later Rescue is proposed. */
+  candidateID?: string;
+  kind: "implementation" | "normal_remediation" | "astra_rescue";
+  status: "pending" | "dispatched" | "succeeded" | "failed" | "cancelled" | "unconfirmed";
+  callID?: string;
+  childSessionID?: string;
+  nativeOutcome?: "completed" | "failed" | "unknown";
+  observedModel?: string;
+  observedVariant?: string;
+  failure?: { category: "infrastructure" | "authorization" | "contract" | "cancellation" | "implementation" | "unknown"; code: string };
+  resultClass?: string;
+  selectedModel?: string;
+}
+export interface MissionTerminalRescue {
+  attemptID: string;
+  runID: string;
+  unitID: string;
+  selectedModel?: string;
+  selectedVariant?: string | null;
+  status: "prepared" | "dispatched" | "succeeded" | "failed" | "cancelled" | "unconfirmed" | "non_rescue";
+  reason?: string;
+  observedModel?: string;
+  observedVariant?: string;
+  outcome?: "succeeded" | "failed" | "cancelled" | "unknown";
+}
 export interface MissionExecution {
   commands: string[];
   directory: string;
@@ -50,6 +96,12 @@ export interface OperatorMission {
   reviewBaseline?: string;
   /** Cumulative declared review inputs/outputs, including units that failed after writing source. */
   reviewScope?: MissionReviewScope;
+  /** Optional Advisor/Scout decisions and native consultation outcomes; never an admission gate. */
+  consultations?: MissionConsultation[];
+  /** Host-observed current-Mission Worker attempts; only an implementation failure followed by a failed remediation can qualify for Rescue. */
+  attempts?: MissionAttempt[];
+  /** One bounded Astra Rescue per eligible unit; validation, independent review and root acceptance remain separate. */
+  rescue?: MissionTerminalRescue;
   /** A cancelled run replaced by a later real user turn; never reuse its acceptance or evidence. */
   supersededRunID?: string;
   plans: number;
@@ -70,6 +122,7 @@ export interface OperatorMission {
  * Worker unit, so after this many evidence-only reviews the candidate may be submitted with the gaps listed.
  */
 export const MISSION_EVIDENCE_GAP_REVIEW_LIMIT = 2;
+export const MISSION_CONSULTATION_LIMIT = 32;
 
 /** Review coverage survives a narrower replan; it is not a Worker write grant. */
 export function missionReviewScope(previous: MissionReviewScope | undefined, ...runs: OperatorState[]): MissionReviewScope {
@@ -268,6 +321,40 @@ export class OperatorMissionRuntime {
       return state;
     });
   }
+  recordConsultationSkip(root: string, role: MissionConsultation["role"], reason: string): Promise<OperatorMission> {
+    if ((role !== "advisor" && role !== "scout") || typeof reason !== "string" || !reason.trim() ||
+        reason.length > 1000 || /[\r\n]/u.test(reason)) throw new Error("mission-consultation-input-invalid");
+    return this.update(root, state => {
+      state.consultations = [...(state.consultations ?? []), { id: randomUUID(), role, disposition: "skipped" as const,
+        reason: reason.trim(), at: new Date().toISOString() }].slice(-MISSION_CONSULTATION_LIMIT);
+    });
+  }
+  recordConsultationDispatch(root: string, input: { role: MissionConsultation["role"]; callID: string; reason: string;
+    trigger?: string; question?: string }): Promise<OperatorMission> {
+    if ((input.role !== "advisor" && input.role !== "scout") || !input.callID || !input.reason.trim() ||
+        input.reason.length > 1000 || /[\r\n]/u.test(input.reason) ||
+        (input.trigger !== undefined && (input.trigger.length > 128 || /[\r\n]/u.test(input.trigger))) ||
+        (input.question !== undefined && (input.question.length > 1000 || /[\r\n]/u.test(input.question)))) {
+      throw new Error("mission-consultation-input-invalid");
+    }
+    return this.update(root, state => {
+      state.consultations = [...(state.consultations ?? []), { id: randomUUID(), role: input.role,
+        disposition: "dispatched" as const, reason: input.reason.trim(), at: new Date().toISOString(), callID: input.callID,
+        ...(input.trigger === undefined ? {} : { trigger: input.trigger }),
+        ...(input.question === undefined ? {} : { question: input.question }) }].slice(-MISSION_CONSULTATION_LIMIT);
+    });
+  }
+  settleConsultation(root: string, callID: string, outcome: MissionConsultation["outcome"], details: {
+    childSessionID?: string; observedModel?: string; observedVariant?: string; result?: string;
+  } = {}): Promise<OperatorMission> {
+    if (!callID || !["completed", "failed", "unknown"].includes(String(outcome))) throw new Error("mission-consultation-input-invalid");
+    return this.update(root, state => {
+      const item = [...(state.consultations ?? [])].reverse().find(entry => entry.callID === callID);
+      if (!item) return;
+      if (details.result !== undefined && details.result.length > 4000) details.result = details.result.slice(0, 4000);
+      Object.assign(item, { outcome, ...details });
+    });
+  }
   /** Keep host-accepted criteria ahead of new text, including an exactly linked settled predecessor. */
   carryForward(root: string, missionID: string, acceptance: readonly string[], supersededRunID?: string): Promise<OperatorMission> {
     return this.update(root, state => {
@@ -406,7 +493,8 @@ export function missionPacket(mission: OperatorMission, run?: OperatorState): Re
       completed_units: predecessor.units.filter(unit => unit.status === "succeeded").length,
       note: "Historical results and spend are retained; they do not complete the current requirements." } } : {}),
     requirements: mission.requirements, original_request_refs: mission.requests.map(item => `user:${item.id}`),
-    submission: mission.submission, progress: mission.progress,
+    submission: mission.submission, progress: mission.progress, consultations: mission.consultations ?? [],
+    attempts: mission.attempts ?? [], ...(mission.rescue ? { rescue: mission.rescue } : {}),
     operation: { kind: mission.kind ?? "implementation", status: missionExecutionStatus(mission),
       ...(mission.execution ? { ...mission.execution } : {}) },
     execution_summary: { completed_units: run?.units.filter(unit => unit.status === "succeeded").length ?? 0,
@@ -425,14 +513,20 @@ export function missionPacket(mission: OperatorMission, run?: OperatorState): Re
       units: run.units.map(unit => ({ id: unit.unit.id, title: unit.unit.title, status: unit.status,
         child_session_id: unit.childSessionID, result_class: unit.resultClass, evidence: unit.evidence,
         handoff_path: unit.handoffPath, operation_manifest_path: unit.manifestPath,
-        scope_read: unit.unit.read, scope_write: unit.unit.write, validation: unit.unit.validation,
-        ...(unit.dispatchDenial ? { dispatch_denial: unit.dispatchDenial } : {}) })) } : {}),
+         scope_read: unit.unit.read, scope_write: unit.unit.write, validation: unit.unit.validation,
+         normal_remediation_used: unit.normalRemediationUsed ?? false,
+         ...(unit.failure ? { failure: { outcome: unit.failure.outcome, exit_code: unit.failure.exitCode } } : {}),
+         ...(unit.dispatchDenial ? { dispatch_denial: unit.dispatchDenial } : {}) })) } : {}),
     next_action: mission.phase === "completed" ? "Mission completed. Report the accepted result and retained review gaps; no further dispatch or completion call is needed."
       : mission.phase === "submitted" && mission.submission?.status === "ready"
       ? "Operator: compare the submitted candidate with the original requirements and actual evidence, then complete_mission if satisfied. Report remaining evidence gaps; they are not a review PASS."
       : run?.phase === "awaiting-decision" ? (run.units.some(unit => unit.dispatchDenial)
         ? "Coordinator: inspect units[].dispatch_denial before changing the plan. Correct only its diagnosed cause; do not repeat an unchanged refused Task or replan for a host-state mismatch. Report an unresolved runtime mismatch with the loaded runtime identity; preserve requirements and cumulative spend."
-        : "Coordinator: correct the cause and call plan_units with the remaining work and all requirements; budget is cumulative.")
+        : run.units.some(unit => unit.status === "failed" && unit.resultClass === "acceptance" && unit.failure?.outcome === "fail" && !unit.normalRemediationUsed)
+          ? "Coordinator: one exact declared validation failed. Reconcile the returned Worker and cumulative budget, then call retry_mission_unit once for that unit before replanning. This preserves the same scope and acceptance."
+          : run.units.some(unit => unit.status === "failed" && unit.resultClass === "acceptance" && unit.failure?.outcome === "fail" && unit.normalRemediationUsed && !unit.terminalRescue)
+            ? "Coordinator: the one ordinary remediation failed the declared validation again. If its native terminal, writer release, exact candidate and cumulative budget permit, call rescue_mission_unit once; inspect and report a non_rescue reason, then continue ordinary correction within budget. Rescue does not bypass validation, review or root acceptance."
+            : "Coordinator: correct the cause and call plan_units with the remaining work and all requirements; budget is cumulative.")
       : run?.phase === "awaiting-acceptance" && !operationComplete
         ? `Requested operation is ${operationStatus}. Continue the actual operation or report its blocker; auxiliary checks and review disposition cannot complete it.`
       : run?.phase === "awaiting-acceptance" ? (currentReview && mission.review?.verdict === "evidence-gaps" && !reviewAccepted

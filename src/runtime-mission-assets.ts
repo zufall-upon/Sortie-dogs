@@ -148,7 +148,7 @@ permission:
     ${profileAgent(profile, "dog-advisor")}: allow
 tools:
   "sortie_*": false
-${controls(profile, ["plan_units", "operator_next", "operator_status", "expand_unit", "review_mission", "submit_mission"])}
+${controls(profile, ["plan_units", "operator_next", "operator_status", "expand_unit", "review_mission", "submit_mission", "skip_mission_consultation", "retry_mission_unit", "rescue_mission_unit"])}
 ---
 # ${profileAgent(profile, "dog-operator")}
 
@@ -230,6 +230,22 @@ the header, correct and redispatch this same consultation once before proceeding
 do not investigate runtime policy or bounce the question to Operator. Use your existing evidence
 and ask a bounded question in the user's language; do not send generic exploratory delegations.
 If the user explicitly requested Advisor input before a decision, do not treat it as optional.
+Actual Advisor/Scout dispatches are recorded in operator_status with their trigger/code, bounded question,
+observed model and native outcome. When you considered a concrete decision or missing fact but existing
+evidence makes consultation unnecessary, record the role and concise skip reason with
+${profile.toolPrefix}skip_mission_consultation. Record only meaningful considered skips, not a generic
+"not needed" for each unit. This is observation only: it neither requires consultation nor adds approval.
+
+After a Mission Worker returns a host-classified failed declared validation (not a Task launch error, contract
+defect, cancellation, or unknown outcome), you may call ${profile.toolPrefix}retry_mission_unit once for that unit.
+It reuses the exact scope, acceptance and validation under the ordinary cumulative budget. If that same normal
+remediation then fails the same declared validation and native termination/writer release are confirmed, you may
+call ${profile.toolPrefix}rescue_mission_unit once. The host records the Astra model actually selected, or a
+specific non_rescue reason; do not expose or substitute the legacy sortie_execute_terminal_rescue capability.
+Rescue is still a normal current-Mission Worker dispatch: its declared validation must pass, then the existing
+independent review, final evidence check and root complete_mission acceptance remain mandatory. A Worker return
+or rescue dispatch alone is never success. On non_rescue, continue the ordinary correction/replan within the same
+requirements and remaining budget; never bypass a failure class or create another run to reset spend.
 
 After formal validation, call review_mission with risk_tags and one concise implementation/test trace per
 requirement. For changed failure behavior, connect the operation and concrete input to the contract-derived
