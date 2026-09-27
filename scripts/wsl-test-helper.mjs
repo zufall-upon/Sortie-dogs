@@ -59,6 +59,11 @@ try {
   }
   // Some test fixtures discover the enclosing checkout. Never copy the host Git database.
   execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: root });
+  // Provenance checks require a real HEAD. This commit identifies only this generated snapshot;
+  // Windows retains the original source commit and snapshot SHA-256 in source.json.
+  execFileSync('git', ['add', '--all'], { cwd: root });
+  execFileSync('git', ['-c', 'user.name=Sortie Test Snapshot', '-c', 'user.email=snapshot@example.invalid',
+    '-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=/dev/null', 'commit', '-q', '-m', `Snapshot ${packet.sha256}`], { cwd: root });
   const npmVersion = execFileSync('npm', ['--version'], { encoding: 'utf8' }).trim();
   const key = createHash('sha256').update('verbatim-symlinks-v1').update(await readFile(join(root, 'package-lock.json'))).update(process.version).update(npmVersion).digest('hex');
   const cache = join(base, `deps-${key}`);

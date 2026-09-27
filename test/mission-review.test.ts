@@ -181,3 +181,19 @@ test("read-only units do not accidentally collect an entire repository and ignor
   const packet = await missionReviewSource("nonexistent-directory", { units: [{ unit: { write: [], read: ["src"] }, hashes: [] }] } as never);
   assert.match(packet.excerpt, /Read-only units: no declared output files/);
 });
+
+test("focused read-only review consumes the original result tail and pins unshown bytes", async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const root = await mkdtemp(join(resolve("_testenv"), "mission-result-tail-"));
+  try {
+    const prefix = "setup\n".repeat(6000);
+    await writeFile(join(root, "result.log"), prefix + '{"attempts":1,"reward":0}\n');
+    const run = { units: [{ unit: { read: ["result.log"], write: [] }, hashes: [] }] } as never;
+    const selection = [{ path: "result.log", offset: 6001, limit: 1 }];
+    const first = await missionReviewSource(root, run, selection);
+    assert.match(first.excerpt, /6001:.*"reward":0/);
+    assert.doesNotMatch(first.excerpt, /setup/);
+    await writeFile(join(root, "result.log"), prefix.replace("setup", "other") + '{"attempts":1,"reward":0}\n');
+    assert.notEqual((await missionReviewSource(root, run, selection)).fingerprint, first.fingerprint);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

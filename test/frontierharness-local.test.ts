@@ -254,6 +254,26 @@ test("v0127 V2 host preserves published #variant routes and requires active plug
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("native V2 profile changes candidate and CLI pins without a new runner profile", async () => {
+  const root = join(tmpdir(), "schema-native-v2");
+  const schema = JSON.parse(await readFile(new URL("./fixtures/frontierharness-local/manifest.schema.json", import.meta.url), "utf8"));
+  const validate = new Ajv2020().compile(schema);
+  const value = manifest(root) as any;
+  value.profile = "v2";
+  value.package.required_assets = ["agent/dog-operator.md", "agent/dogs-coordinator.md", "agent/dog-worker-v010.md", "command/sortie-v010.md"];
+  Object.assign(value.opencode, { model: "openai/gpt-6-sol", version: "2.0.18", sha256: "a".repeat(64), host_database: "/tmp/isolated/opencode.db" });
+  for (const version of ["0.12.15", "0.12.16"]) {
+    Object.assign(value.package, { version, runtime_marker: `${version}-candidate`, sha256: version.endsWith("15") ? "b".repeat(64) : "c".repeat(64) });
+    assert.equal(validate(value), true, JSON.stringify(validate.errors));
+    assert.equal(validateManifest(value, join(root, "manifest.json"), root).profile.agent, "dog-operator");
+    assert.ok(runArmArgs(value, "/tmp/workspace", "dog-operator", "task").includes("--standalone"));
+  }
+  assert.deepEqual(isolatedConfig("v2"), isolatedConfig("v0127"));
+  delete value.opencode.sha256;
+  assert.equal(validate(value), false);
+  assert.throws(() => validateManifest(value, join(root, "manifest.json"), root), /SHA-256/);
+});
+
 test("rejects approved pin and byte hash mismatches", async () => {
   const root = await mkdtemp(join(tmpdir(), "frontier-pins-"));
   try {

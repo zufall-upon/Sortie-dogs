@@ -137,7 +137,7 @@ import { profileAgent, STABLE_RUNTIME_PROFILE } from "../core/runtime-profile.js
 import type { RuntimeBridge } from "./runtime-bridge.js";
 import { evidenceFromObservedExecution } from "../core/observed-goal-evidence.js";
 import { receiptBoundTerminalText } from "./receipt-presentation.js";
-import { protectedSnapshot, refreshProtectedSnapshot } from "./protected-snapshot.js";
+import { operationInputSnapshot, protectedSnapshot, refreshProtectedSnapshot } from "./protected-snapshot.js";
 import { settledUnitUsage } from "./unit-usage.js";
 import { goalCompletionReadiness, type CompletionReadiness } from "./goal-completion.js";
 
@@ -475,6 +475,7 @@ interface HostGoalExecution {
   readonly binding: NonNullable<GoalEvidence["protected_binding"]>;
   readonly source: string;
   readonly candidate: string;
+  readonly operationInputs?: string;
   readonly validation?: { readonly ledger: RunFlightLedger; readonly request: ValidationBudgetRequest; readonly reservation: string };
   readonly reusedEvidence?: readonly GoalEvidence[];
   endedAt?: string;
@@ -1903,10 +1904,15 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         }
       }
     }
+    const mission = await new OperatorMissionRuntime(input.directory, runtimeProfile).read(root);
+    const operationInputs = mission?.kind === "operation" && mission.execution?.commands.includes(rawCommand) &&
+      resolve(input.directory, typeof args?.workdir === "string" ? args.workdir : ".") === mission.execution.directory
+      ? await operationInputSnapshot(authorization.projectRoot, snapshot.binding).catch(() => undefined) : undefined;
     hostGoalExecutions.set(toolInput.callID, { root, projectRoot: authorization.projectRoot,
       sessionID: toolInput.sessionID,
       callID: toolInput.callID, tool: toolInput.tool, command: [rawCommand], startedAt: new Date().toISOString(),
       binding: snapshot.binding, source: snapshot.source, candidate: snapshot.candidate,
+      ...(operationInputs === undefined ? {} : { operationInputs }),
       owner: validation?.request.owner ?? "worker", validation,
       ...(reusedEvidence === undefined ? {} : { reusedEvidence }) });
   }
@@ -1936,10 +1942,11 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       ? new Date(timing.start).toISOString() : execution.startedAt;
     const endedAt = typeof timing?.end === "number" && Number.isFinite(timing.end)
       ? new Date(timing.end).toISOString() : new Date().toISOString();
-    // The candidate is expected to change during a valid implementation task (the goal fixture
-    // itself is a declared write). Protect the source snapshot across the task, then bind evidence
-    // to the post-task candidate snapshot instead of rejecting the genuine mutation.
-    const fresh = refreshed !== undefined && refreshed.source === execution.source;
+    // Existing operations produce declared outputs. Preserve their read-only inputs during execution,
+    // then bind ordinary evidence to all post-operation bytes, including those outputs.
+    const fresh = refreshed !== undefined && (execution.operationInputs === undefined
+      ? refreshed.source === execution.source
+      : await operationInputSnapshot(execution.projectRoot, execution.binding).catch(() => undefined) === execution.operationInputs);
     const immutableRef = outcome === undefined || execution.reusedEvidence !== undefined ? undefined : goalFingerprint({ root: execution.root,
       child_session_id: execution.sessionID, call_id: execution.callID, command: execution.command,
       started_at: observedStartedAt, ended_at: endedAt, exit_code: exitCode ?? null, outcome,
@@ -5165,6 +5172,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         remedy: "No write-gate state changed after one retry; stop this candidate and record the local blocker.",
       },
     };
+    let conflicts: { session_id: string; requested: string; held: string; access: string }[] = [];
     const deny = (reason: string, defects: readonly string[] = []): string => {
       const detail = remedies[reason] ?? {
         recoverable: false,
@@ -5193,6 +5201,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         reason,
         ...detail,
         ...(reported.length === 0 ? {} : { defects: reported }),
+        ...(reason === "manifest-overlap" && conflicts.length ? { conflicts } : {}),
         escalation,
       });
     };
@@ -5295,13 +5304,21 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       const conflictsWithActiveAuthorization = (
         writeScopes: readonly string[],
         readScopes: readonly string[],
-      ): boolean =>
-        [...sessionAuthorizations.entries()].some(([ownerSessionID, authorization]) =>
-          ownerSessionID !== sessionID && !authorization.suspended &&
-          (writeScopesOverlap(writeScopes, authorization.writeScopes) ||
-            writeScopesOverlap(writeScopes, authorization.readScopes) ||
-            writeScopesOverlap(readScopes, authorization.writeScopes))
-        );
+      ): boolean => {
+        conflicts = [];
+        for (const [ownerSessionID, authorization] of sessionAuthorizations) {
+          if (ownerSessionID === sessionID || authorization.suspended) continue;
+          for (const [requested, held, access] of [[writeScopes, authorization.writeScopes, "write/write"],
+            [writeScopes, authorization.readScopes, "write/read"], [readScopes, authorization.writeScopes, "read/write"]] as const) {
+            for (const left of requested) for (const right of held) {
+              if (conflicts.length < 8 && writeScopesOverlap([left], [right])) {
+                conflicts.push({ session_id: ownerSessionID, requested: left, held: right, access });
+              }
+            }
+          }
+        }
+        return conflicts.length > 0;
+      };
       const acquireDurableLease = async (
         readScopes: readonly string[],
         writeScopes: readonly string[],
@@ -5503,7 +5520,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   function pruneActiveSessions(now: number, reserveSlot = false): void {
     for (const [sessionID, state] of activeSessions) {
       if (state.expiresAt > now) continue;
-      if (state.inFlightCalls.size > 0) state.expiresAt = now + ACTIVE_SESSION_CACHE.ttlMilliseconds;
+      if (state.inFlightCalls.size > 0 || childHasInFlightParentTask(sessionID)) state.expiresAt = now + ACTIVE_SESSION_CACHE.ttlMilliseconds;
       else expireSession(sessionID);
     }
     const limit = ACTIVE_SESSION_CACHE.maximum - (reserveSlot ? 1 : 0);
@@ -5514,7 +5531,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     for (const [sessionID, state] of coordinatorRoots) {
       if (state.expiresAt > now) continue;
       const hasInFlightChild = [...sessionRoots.entries()].some(([childID, rootID]) =>
-        rootID === sessionID && (activeSessions.get(childID)?.inFlightCalls.size ?? 0) > 0
+        rootID === sessionID && ((activeSessions.get(childID)?.inFlightCalls.size ?? 0) > 0 || childHasInFlightParentTask(childID))
       );
       if (hasInFlightChild) state.expiresAt = now + ACTIVE_SESSION_CACHE.ttlMilliseconds;
       else {
@@ -6926,6 +6943,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           diagnosis.accepting = false;
           diagnosisCalls.delete(toolInput.callID ?? "");
         }
+        const returnedMissionWorker = completedChildSessionID !== undefined &&
+          await input.runtimeBridge?.allowsInvestigativeShell?.(completedChildSessionID);
         parallelCalls.delete(toolInput.callID ?? "");
         activeSessions.get(toolInput.sessionID ?? "")?.inFlightCalls.delete(toolInput.callID ?? "");
         if (coordinatorTaskFinished && diagnosis === undefined) {
@@ -6943,6 +6962,11 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         if (completedChildSessionID !== undefined && !recoverableWorkerChildren.has(completedChildSessionID)) {
           evictSession(completedChildSessionID);
           void childLifecycles.get(completedChildSessionID)?.check();
+        } else if (completedChildSessionID !== undefined && activeSessions.get(completedChildSessionID)?.parallel !== "valid" &&
+            returnedMissionWorker) {
+          // Keep same-worker recovery identity, but a returned serial Task must not keep a live
+          // write reservation. Rebinding the retained manifest reacquires it before any later write.
+          await releaseWriteGate(completedChildSessionID);
         }
       }
     },

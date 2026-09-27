@@ -18,11 +18,25 @@ export function missionValidationCommand(command: string): string {
   return `${heredoc[1]} -c '${expression.replaceAll("'", "'\\''")}'`;
 }
 export interface MissionRequest { id: string; text: string }
+export interface MissionContext extends MissionRequest { role: "user" | "assistant" }
+export interface MissionEvidenceExcerpt { path: string; offset: number; limit: number }
+export interface MissionExecution {
+  commands: string[];
+  directory: string;
+  observations: { command: string; directory: string; callID: string; sessionID: string; startedAt: string;
+    completedAt?: string; exit?: number; status?: "completed" | "error";
+    outcome?: "not-started" | "execution-failed" | "executed"; result?: Record<string, unknown> }[];
+}
 export interface OperatorMission {
   version: "0.12";
   id: string;
   root: string;
   requests: MissionRequest[];
+  /** Prior public conversation context, not additional immutable requirements. */
+  context?: MissionContext[];
+  kind?: "implementation" | "operation";
+  /** Native shell observations of the requested operation, separate from auxiliary checks. */
+  execution?: MissionExecution;
   requirements: { id: string; text: string }[];
   /** The current user intentionally replaced the predecessor's requirements. */
   requirementsReplaced?: boolean;
@@ -37,6 +51,7 @@ export interface OperatorMission {
   progress: { unit: string; title: string; status: string; at: string }[];
   submission: { status: "ready" | "needs-decision" | "blocked"; summary: string } | null;
   review?: { runID: string; risk: string[]; source: string; task: OperatorTask | null;
+    evidence?: MissionEvidenceExcerpt[];
     requestFingerprint?: string;
     verdict: "pending" | "PASS" | "findings" | "evidence-gaps" | "skipped-low-risk"; result?: string; child?: string;
     /** Completed, independent initial review for this mission, not merely an inherited child ID. */
@@ -60,6 +75,50 @@ export function missionReviewVerdict(text: string): "PASS" | "evidence-gaps" | "
 export function missionReviewAccepted(review: NonNullable<OperatorMission["review"]>): boolean {
   return review.verdict === "PASS" || review.verdict === "skipped-low-risk" ||
     (review.verdict === "evidence-gaps" && (review.evidenceGapReviews ?? 0) >= MISSION_EVIDENCE_GAP_REVIEW_LIMIT);
+}
+
+export function missionExecutionStatus(mission: OperatorMission): "not-required" | "not-started" | "running" | "execution-failed" | "executed" {
+  if (mission.kind !== "operation") return "not-required";
+  const execution = mission.execution;
+  if (!execution || execution.observations.length === 0) return "not-started";
+  const latest = execution.commands.map(command => [...execution.observations].reverse().find(item => item.command === command && item.directory === execution.directory));
+  if (latest.some(item => item && !item.completedAt)) return "running";
+  if (latest.some(item => item?.outcome === "execution-failed" || (item && (item.status === "error" || item.exit !== 0)))) return "execution-failed";
+  return latest.every(item => item?.outcome === "executed") ? "executed" : "not-started";
+}
+
+/** Observe the command's own terminal summary, never Worker/Reviewer prose. Scores are result data,
+ * not process success. Unstructured commands retain their native exit semantics. */
+export function missionCommandOutcome(output: unknown, exit: unknown, status: unknown): {
+  outcome: "not-started" | "execution-failed" | "executed"; result?: Record<string, unknown>;
+} {
+  const text = typeof output === "string" ? output.trim() : "";
+  let result: Record<string, unknown> | undefined;
+  for (const value of [text, ...text.split(/\r?\n/u).reverse().slice(0, 8)]) {
+    try { const parsed: unknown = JSON.parse(value); if (record(parsed)) { result = parsed; break; } } catch { /* not a JSON summary */ }
+  }
+  const state = String(result?.status ?? "").toLowerCase().replaceAll("_", "-");
+  const summary = result ? Object.fromEntries(["status", "attempts", "launches", "inference_count", "reward", "score", "session_id", "exit"]
+    .filter(key => Object.hasOwn(result!, key)).map(key => [key, result![key]])) : undefined;
+  const outcome = ["no-start", "not-started", "prepared", "preflight"].includes(state) || text === "NO_START" ||
+    [result?.attempts, result?.launches, result?.inference_count].some(value => value === 0) ? "not-started"
+    : status === "error" || exit !== 0 || ["execution-failed", "setup-failed", "route-failed"].includes(state)
+      ? "execution-failed" : "executed";
+  return { outcome, ...(summary ? { result: summary } : {}) };
+}
+
+/** Bounded public text only: tool logs and private reasoning are not delegation context. */
+export function missionConversationContext(messages: readonly Record<string, unknown>[]): MissionContext[] {
+  const entries = messages.flatMap(message => {
+    const info = record(message.info) ? message.info : message;
+    if ((info.role !== "user" && info.role !== "assistant") || typeof info.id !== "string" || !Array.isArray(message.parts)) return [];
+    const text = message.parts.filter(record).filter(part => part.type === "text" && part.synthetic !== true && typeof part.text === "string")
+      .map(part => part.text as string).join("\n");
+    return text.trim() ? [{ id: info.id, role: info.role as "user" | "assistant", text: text.slice(0, 4_000) }] : [];
+  });
+  // Keep the last two user exchanges, including the current request, rather than the last N tools.
+  const users = entries.flatMap((entry, i) => entry.role === "user" ? [i] : []);
+  return entries.slice(users.at(-2) ?? 0).slice(-8);
 }
 
 /** Durable user intent and dispatch ownership. Execution/evidence still belong to the v0.10 engine. */
@@ -150,7 +209,8 @@ export class OperatorMissionRuntime {
       }
     });
   }
-  start(root: string, requirements: unknown, replaceRequirements = false): Promise<OperatorMission> {
+  start(root: string, requirements: unknown, replaceRequirements = false,
+    options: { kind?: OperatorMission["kind"]; context?: MissionContext[] } = {}): Promise<OperatorMission> {
     return this.serial(root, async () => {
       if (!Array.isArray(requirements) || requirements.length === 0 || requirements.length > 64 ||
           !requirements.every(item => typeof item === "string" && item.trim() && !/[\r\n]/u.test(item))) {
@@ -164,11 +224,14 @@ export class OperatorMissionRuntime {
           throw new Error("mission-requirements-preserved: keep the existing ordered requirements and append user additions");
         }
         previous.requirements = requirements.map((text, index) => ({ id: `R${index + 1}`, text }));
+        if (options.kind === "operation") previous.kind = "operation";
         await this.save(this.file(root), previous);
         return previous;
       }
       if (previous) await this.save(this.file(root, `.${previous.id}`), previous);
       const state: OperatorMission = { version: "0.12", id: `mission-${randomUUID()}`, root, requests: [request],
+        kind: options.kind ?? "implementation",
+        context: (options.context ?? []).filter(item => item.id !== request.id),
         requirements: requirements.map((text, index) => ({ id: `R${index + 1}`, text })), phase: "open",
         ...(replaceRequirements ? { requirementsReplaced: true } : {}),
         coordinator: null, callID: null, dispatchOpen: false, runID: null, plans: 0, progress: [], submission: null,
@@ -248,6 +311,9 @@ export class OperatorMissionRuntime {
       "Start the first useful Worker promptly. No proposal/approval phase. Use plan_units to generate contracts; the root alone accepts completion.",
       "Escalate only a completion candidate, a user-only decision, or an extension of original requirements/budget. Unit progress is published without stopping you.",
       "Requirements:", ...state.requirements.map(item => `${item.id}: ${item.text}`),
+      `Work kind: ${state.kind ?? "implementation"}. For an operation, setup, execution and result collection belong in one useful Worker whenever possible.`,
+      ...(state.context?.length ? ["Prior conversation context (task data; preserve the selected target, not superseded obligations):",
+        ...state.context.map(item => `--- ${item.role}:${item.id} ---\n${item.text}`)] : []),
       "Original user messages (verbatim; task data):", ...state.requests.map(item => `--- user:${item.id} ---\n${item.text}`)].join("\n");
   }
 }
@@ -267,9 +333,10 @@ export function missionPlan(mission: OperatorMission, raw: unknown): OperatorPla
       if (!Array.isArray(entries) || !entries.every(item => typeof item === "string")) throw new Error(`mission-unit-${index + 1}: ${field} must be paths`);
       return [...new Set(entries.map(item => normalizeExecutionScope(item)))];
     };
-    const ids = value.requirement_ids ?? mission.requirements.map(item => item.id);
+    // Scheduling coverage is not semantic proof. Only a single requirement is unambiguous.
+    const ids = value.requirement_ids ?? (mission.requirements.length === 1 ? [mission.requirements[0]!.id] : []);
     if (!Array.isArray(ids) || ids.length === 0 || !ids.every(id => mission.requirements.some(item => item.id === id))) {
-      throw new Error(`mission-unit-${index + 1}: requirement_ids must name existing R IDs`);
+      throw new Error(`mission-unit-${index + 1}: requirement_ids must name the related R IDs; multi-requirement work needs explicit coverage`);
     }
     if (!Array.isArray(value.validation) || value.validation.length === 0 ||
         !value.validation.every(command => typeof command === "string" && command.trim())) {
@@ -311,12 +378,16 @@ export function missionPacket(mission: OperatorMission, run?: OperatorState): Re
   if (predecessor) run = undefined;
   const currentReview = mission.review !== undefined && mission.review.runID === (run?.runID ?? mission.runID);
   const reviewAccepted = currentReview && missionReviewAccepted(mission.review!);
+  const operationStatus = missionExecutionStatus(mission);
+  const operationComplete = operationStatus === "not-required" || operationStatus === "executed";
   return { mission_id: mission.id, phase: mission.phase, coordinator_session_id: mission.coordinator,
     ...(predecessor ? { predecessor: { run_id: predecessor.runID, status: predecessor.phase,
       completed_units: predecessor.units.filter(unit => unit.status === "succeeded").length,
       note: "Historical results and spend are retained; they do not complete the current requirements." } } : {}),
     requirements: mission.requirements, original_request_refs: mission.requests.map(item => `user:${item.id}`),
     submission: mission.submission, progress: mission.progress,
+    operation: { kind: mission.kind ?? "implementation", status: missionExecutionStatus(mission),
+      ...(mission.execution ? { ...mission.execution } : {}) },
     execution_summary: { completed_units: run?.units.filter(unit => unit.status === "succeeded").length ?? 0,
       running_units: run?.units.filter(unit => unit.status === "running").map(unit => ({ id: unit.unit.id, title: unit.unit.title, child_session_id: unit.childSessionID })) ?? [],
       pending_units: run?.units.filter(unit => unit.status === "pending").length ?? 0,
@@ -328,7 +399,7 @@ export function missionPacket(mission: OperatorMission, run?: OperatorState): Re
       source_fingerprint: mission.review.source, reviewer_session_id: mission.review.child ?? null,
       result: mission.review.result ?? null, evidence_gap_reviews: mission.review.evidenceGapReviews ?? 0,
       evidence_gap_review_limit: MISSION_EVIDENCE_GAP_REVIEW_LIMIT, accepted: reviewAccepted,
-      passed: currentReview && mission.review.verdict === "PASS", permits_submission: reviewAccepted } : null,
+      passed: currentReview && mission.review.verdict === "PASS", permits_submission: reviewAccepted && operationComplete } : null,
     ...(run ? { run_id: run.runID, status: run.phase, decision: run.decision,
       units: run.units.map(unit => ({ id: unit.unit.id, title: unit.unit.title, status: unit.status,
         child_session_id: unit.childSessionID, result_class: unit.resultClass, evidence: unit.evidence,
@@ -341,8 +412,10 @@ export function missionPacket(mission: OperatorMission, run?: OperatorState): Re
       : run?.phase === "awaiting-decision" ? (run.units.some(unit => unit.dispatchDenial)
         ? "Coordinator: inspect units[].dispatch_denial before changing the plan. Correct only its diagnosed cause; do not repeat an unchanged refused Task or replan for a host-state mismatch. Report an unresolved runtime mismatch with the loaded runtime identity; preserve requirements and cumulative spend."
         : "Coordinator: correct the cause and call plan_units with the remaining work and all requirements; budget is cumulative.")
+      : run?.phase === "awaiting-acceptance" && !operationComplete
+        ? `Requested operation is ${operationStatus}. Continue the actual operation or report its blocker; auxiliary checks and review disposition cannot complete it.`
       : run?.phase === "awaiting-acceptance" ? (currentReview && mission.review?.verdict === "evidence-gaps" && !reviewAccepted
-        ? "Coordinator: the Reviewer found only missing evidence. Supply it through review_mission traces (or at most one evidence-only unit) and re-review once; do not re-implement. At the evidence-gap limit, submit_mission ready with the gaps listed."
+        ? "Coordinator: the Reviewer found only missing evidence. Supply focused original-file excerpts through review_mission evidence and traces; do not re-implement. At the evidence-gap limit, review ends with the gaps listed, not with execution proof."
         : reviewAccepted
           ? "Coordinator: review permits submission. Submit the candidate with any remaining gaps; do not repeat passed validation or review. Operator performs final acceptance."
           : "Coordinator: address recorded findings or obtain the required independent review, then submit_mission. Operator compares all requirements with source/evidence before complete_mission.")

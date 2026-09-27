@@ -242,3 +242,15 @@ Model-free WSL stop check: `node test/fixtures/frontierharness-local/run-stop-rp
 Tracked committed, staged, and unstaged work is retained; untracked work is reported but excluded. Reports contain only timings, exits/status, root session id,
 hashes, package/version/marker/model, reward counts, changed paths, and token metric field references.
 They exclude prompts, raw logs, provider URLs, credentials/auth JSON, source, and patch bodies.
+# Version-independent native V2 runs
+
+Use `profile: "v2"` for current native OpenCode V2 candidates. Pin the selected
+package's `version`, `sha256`, `runtime_marker`, and required assets in the manifest;
+pin `opencode.version`, `opencode.sha256`, and its executable independently. Changing
+the candidate for a later patch release requires manifest updates, not another runner
+profile. `v0127` remains a compatibility profile for its historical pinned run.
+
+Record whether the selected package is a published archive or a local repack. Their
+archive hashes need not match: line endings, modes and tar metadata can differ. Once
+selected, that exact archive remains fixed for the run. A user-selected published
+artifact must still be used when that is the requested target.

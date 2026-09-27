@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { MISSION_EVIDENCE_GAP_REVIEW_LIMIT, OperatorMissionRuntime, missionPacket, missionPlan, missionReviewAccepted, missionReviewTask,
-  missionReviewTraces, missionReviewVerdict } from "../dist/core/operator-mission.js";
+  missionCommandOutcome, missionConversationContext, missionExecutionStatus, missionReviewTraces, missionReviewVerdict } from "../dist/core/operator-mission.js";
 import { OperatorRuntime } from "../dist/core/operator-runtime.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
 import { terminalCancelledMissionChildren } from "../dist/plugin/profiled.js";
@@ -130,7 +130,7 @@ test("mission Worker separates prior decisions from post-validation independent 
   const coordinatorTask = missions.task(mission);
   await missions.admit("root", "coordinator-call", coordinatorTask);
   await missions.claim("root", "coordinator", coordinatorTask.prompt);
-  const plan = missionPlan(mission, [unit]);
+  const plan = missionPlan(mission, [{ ...unit, requirement_ids: ["R1", "R2"] }]);
   assert.deepEqual(plan.acceptance, acceptance);
   assert.deepEqual(plan.acceptance_proof, [["unit-1"], ["unit-1"]]);
   assert.deepEqual(plan.units.map(current => current.acceptance_indices), [[0, 1]]);
@@ -146,15 +146,9 @@ test("mission Worker separates prior decisions from post-validation independent 
   await operators.admitWorker("root", "coordinator", "worker-call", workerTask);
   const expanded = await operators.claimAdmittedWorkerPrompt("root", "coordinator", "worker", workerTask.prompt);
   for (const criterion of acceptance) assert.ok(expanded.prompt.includes(criterion), `expanded Worker prompt omitted acceptance: ${criterion}`);
-  assert.match(expanded.prompt, /Required technical or user decisions that must precede implementation belong to the root before dispatch/u);
-  assert.match(expanded.prompt, /If a required prior decision is missing, return the exact contract gap to the parent/u);
-  assert.match(expanded.prompt, /Independent SourceReview is a separate post-implementation and post-validation review/u);
-  assert.match(expanded.prompt, /do not require it before implementation or formal validation, and do not stop this Task solely because it has not yet occurred/u);
-  assert.match(expanded.prompt, /Coordinator can dispatch the independent review_mission with applicable risk_tags/u);
-  assert.match(expanded.prompt, /applicable risk_tags \(for example, public-logic\)/u);
-  assert.match(expanded.prompt, /Do not conduct or delegate that independent review yourself/u);
-  assert.match(expanded.prompt, /Reflect supplied prior Reviewer FINDINGS within this unit's scope/u);
-  assert.match(expanded.prompt, /Do not spawn nested subagents for consultation/u);
+  assert.match(expanded.prompt, /Coordinator handles any applicable independent review after your return/u);
+  assert.match(expanded.prompt, /review is not a prerequisite to execution/u);
+  assert.match(expanded.prompt, /Do not spawn nested subagents/u);
   assert.doesNotMatch(expanded.prompt, /Required consultations belong to the root before dispatch/u);
   assert.doesNotMatch(expanded.prompt, /If required consultation results or user decisions are missing/u);
   assert.equal(expanded.prompt.match(/^unit_acceptance_indices: .*$/mu)?.[0], "unit_acceptance_indices: [0,1]");
@@ -189,22 +183,14 @@ test("multi-unit mission retains the review sequence in both admitted and expand
 
   const assertMissionWorkerPrompt = (prompt: string, indices: number[]) => {
     for (const criterion of acceptance) assert.ok(prompt.includes(criterion), `Worker prompt omitted acceptance: ${criterion}`);
-    assert.match(prompt, /Required technical or user decisions that must precede implementation belong to the root before dispatch/u);
-    assert.match(prompt, /If a required prior decision is missing, return the exact contract gap to the parent/u);
-    assert.match(prompt, /Independent SourceReview is a separate post-implementation and post-validation review/u);
-    assert.match(prompt, /do not require it before implementation or formal validation, and do not stop this Task solely because it has not yet occurred/u);
-    assert.match(prompt, /Coordinator can dispatch the independent review_mission with applicable risk_tags \(for example, public-logic\)/u);
-    assert.match(prompt, /Do not conduct or delegate that independent review yourself/u);
-    assert.match(prompt, /Reflect supplied prior Reviewer FINDINGS within this unit's scope/u);
-    assert.match(prompt, /Do not spawn nested subagents for consultation/u);
+    assert.match(prompt, /Coordinator handles any applicable independent review after your return/u);
+    assert.match(prompt, /review is not a prerequisite to execution/u);
+    assert.match(prompt, /Do not spawn nested subagents/u);
     assert.doesNotMatch(prompt, /Required consultations belong to the root before dispatch/u);
     assert.doesNotMatch(prompt, /If required consultation results or user decisions are missing/u);
     assert.equal(prompt.match(/^unit_acceptance_indices: .*$/mu)?.[0], `unit_acceptance_indices: ${JSON.stringify(indices)}`);
   };
   for (const [index, current] of run.units.entries()) {
-    assert.match(current.task.prompt, /Required technical or user decisions that must precede implementation belong to the root before dispatch/u);
-    assert.match(current.task.prompt, /Independent SourceReview is a separate post-implementation and post-validation review/u);
-    assert.match(current.task.prompt, /Coordinator can dispatch the independent review_mission with applicable risk_tags/u);
     assertMissionWorkerPrompt(current.task.prompt, index === 0 ? [0, 1] : [2]);
   }
   const task = (await operators.next("root", "coordinator") as { task: typeof run.units[number]["task"] }).task;
@@ -221,7 +207,7 @@ test("multi-unit mission retains the review sequence in both admitted and expand
   expandedPrompts.push(secondExpanded.prompt);
   assert.equal(expandedPrompts.length, run.units.length);
   assertMissionWorkerPrompt(expandedPrompts[1]!, [2]);
-  assert.match(expanded.prompt, /Independent SourceReview is a separate post-implementation and post-validation review/u);
+  assert.match(expanded.prompt, /review is not a prerequisite to execution/u);
   assert.equal(expanded.prompt.match(/^unit_acceptance_indices: .*$/mu)?.[0], "unit_acceptance_indices: [0,1]");
 }));
 
@@ -287,11 +273,13 @@ test("generated proof retains negative constraints and rejects dropped requireme
   const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
   await missions.capture("root", { id: "u1", text: "Fix result; do not change tests" });
   const mission = await missions.start("root", ["Fix result", "Do not change tests"]);
-  const plan = missionPlan(mission, [unit]);
+  assert.throws(() => missionPlan(mission, [unit]), /multi-requirement work needs explicit coverage/);
+  const related = { ...unit, requirement_ids: ["R1", "R2"] };
+  const plan = missionPlan(mission, [related]);
   assert.deepEqual(plan.acceptance, ["Fix result", "Do not change tests"]);
   assert.deepEqual(plan.units[0]!.acceptance_indices, [0, 1]);
   assert.throws(() => missionPlan(mission, [{ ...unit, requirement_ids: ["R1"] }]), /mission-uncovered: R2/);
-  assert.throws(() => missionPlan(mission, [{ ...unit, write: [".git"] }]), /control-write-forbidden/);
+  assert.throws(() => missionPlan(mission, [{ ...related, write: [".git"] }]), /control-write-forbidden/);
   assert.throws(() => missionPlan(mission, [{ ...unit, write: ["../escape"] }]));
 }));
 
@@ -389,7 +377,7 @@ test("cancelled no-run successor preserves the old run's supersession across ano
   const oldTask = missions.task(old);
   await missions.admit("root", "old-call", oldTask);
   await missions.claim("root", "old-coordinator", oldTask.prompt);
-  const run = await operators.prepareMission("root", missionPlan(old, [unit]),
+  const run = await operators.prepareMission("root", missionPlan(old, [{ ...unit, requirement_ids: ["R1", "R2"] }]),
     { sessionID: "old-coordinator", callID: "old-call" });
   await operators.interrupted("root", "explicit-cancellation");
   await missions.update("root", state => { state.phase = "cancelled"; state.runID = run.runID; });
@@ -424,7 +412,7 @@ test("same-turn mission retains a cancelled run's exact acceptance before its Co
   const operators = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
   await missions.capture("root", { id: "u1", text: "Continue MK2-04 under the old acceptance" });
   const first = await missions.start("root", ["Keep the old validation boundary", "Do not use the user's Go toolchain"]);
-  const old = await operators.prepareMission("root", missionPlan(first, [unit]),
+  const old = await operators.prepareMission("root", missionPlan(first, [{ ...unit, requirement_ids: ["R1", "R2"] }]),
     { sessionID: "old-coordinator", callID: "old-call" });
   await operators.interrupted("root", "explicit-cancellation");
   await missions.update("root", state => { state.phase = "cancelled"; state.runID = old.runID; });
@@ -440,7 +428,7 @@ test("same-turn mission retains a cancelled run's exact acceptance before its Co
   const cold = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
   const recovered = await cold.carryForward("root", next.id, old.acceptance);
   assert.deepEqual(recovered.requirements, retained.requirements);
-  const prepared = await operators.prepareMission("root", missionPlan(recovered, [unit]),
+  const prepared = await operators.prepareMission("root", missionPlan(recovered, [{ ...unit, requirement_ids: ["R1", "R2", "R3"] }]),
     { sessionID: "new-coordinator", callID: "new-call" });
   assert.equal(prepared.operatorSessionID, "new-coordinator");
   assert.equal(prepared.parentRunID, old.runID);
@@ -461,7 +449,7 @@ test("a same-turn replacement cannot bypass terminal proof of a cancelled Worker
   await operators.interrupted("root", "explicit-cancellation");
   await missions.update("root", state => { state.phase = "cancelled"; state.runID = old.runID; });
   const next = await missions.start("root", ["Keep old acceptance", "Continue the old request"]);
-  const plan = missionPlan(next, [unit]);
+  const plan = missionPlan(next, [{ ...unit, requirement_ids: ["R1", "R2"] }]);
   await assert.rejects(operators.prepareMission("root", plan, { sessionID: "new-coordinator", callID: "new-call" }),
     /mission-cancelled-run-worker-not-terminal/);
   assert.equal((await operators.required("root")).runID, old.runID);
@@ -549,6 +537,26 @@ test("terminal mission proof accepts completed workers and settled prior consult
   const f = terminalHistory();
   assert.deepEqual(await terminalCancelledMissionChildren(V010_RUNTIME_PROFILE, "root", f.previous, { reserved_units: 0 }, f.host), ["worker"]);
 });
+
+test("short follow-up inherits recent selected target without tool logs or new requirements", async () => fixture(async directory => {
+  const context = missionConversationContext([
+    { info: { id: "older", role: "user" }, parts: [{ type: "text", text: "obsolete v0.12.7" }] },
+    { info: { id: "apply", role: "user" }, parts: [{ type: "text", text: "Apply v0.12.15" }] },
+    { info: { id: "applied", role: "assistant" }, parts: [{ type: "text", text: "Applied v0.12.15, local.tgz SHA-256 pinned" }, { type: "reasoning", text: "private" }, { type: "tool", text: "raw log" }] },
+    { info: { id: "run", role: "user" }, parts: [{ type: "text", text: "Run the benchmark once" }] },
+  ]);
+  const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+  await missions.capture("root", { id: "run", text: "Run the benchmark once" });
+  const mission = await missions.start("root", ["Run benchmark once"], false, { kind: "operation", context });
+  const brief = missions.brief(mission);
+  assert.match(brief, /Applied v0.12.15, local.tgz/);
+  assert.doesNotMatch(brief, /obsolete|private|raw log/);
+  assert.deepEqual(mission.requirements.map(item => item.text), ["Run benchmark once"]);
+  assert.equal(missionExecutionStatus(mission), "not-started");
+  assert.equal(missionCommandOutcome('{"status":"NO_START","attempts":0}', 0, "completed").outcome, "not-started");
+  assert.deepEqual(missionCommandOutcome('{"status":"executed","attempts":1,"reward":0}', 0, "completed"),
+    { outcome: "executed", result: { status: "executed", attempts: 1, reward: 0 } });
+}));
 
 test("terminal proof for a root-dispatched Worker does not claim unrelated root sessions", async () => {
   const f = terminalHistory();

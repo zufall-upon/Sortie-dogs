@@ -2,11 +2,12 @@ import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { createReadStream } from "node:fs";
 import { lstat, readlink } from "node:fs/promises";
-import { isAbsolute, relative, resolve } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
+import { createInterface } from "node:readline";
 import type { OperatorState } from "../core/operator-runtime.js";
 import { TOOL_ENVIRONMENT } from "../runtime-mission-assets.js";
-import { MISSION_REVIEW_REFERENCE, type OperatorMission } from "../core/operator-mission.js";
+import { MISSION_REVIEW_REFERENCE, type MissionEvidenceExcerpt, type OperatorMission } from "../core/operator-mission.js";
 import { canonicalAgent, type RuntimeProfile } from "../core/runtime-profile.js";
 import { taskChildSessionID } from "./task-result-repair.js";
 import { normalizeManifestScope } from "../core/path.js";
@@ -75,11 +76,36 @@ export async function completedMissionReviewPrompts(mission: OperatorMission | u
 }
 
 /** Pin all scoped tracked/untracked source bytes, including deletions; display a bounded excerpt only. */
-export async function missionReviewSource(directory: string, run: OperatorState): Promise<{ fingerprint: string; excerpt: string }> {
+export async function missionReviewSource(directory: string, run: OperatorState,
+  evidence: readonly MissionEvidenceExcerpt[] = []): Promise<{ fingerprint: string; excerpt: string }> {
   const hash = createHash("sha256").update(JSON.stringify(run.units.map(unit => ({ unit: unit.unit, hashes: unit.hashes }))));
+  let selected = "";
+  for (const entry of evidence) {
+    const absolute = resolve(directory, entry.path);
+    const allowed = run.units.flatMap(unit => [...unit.unit.read, ...unit.unit.write]).some(scope => {
+      const root = resolve(directory, scope === "." ? scope : normalizeManifestScope(scope).path), rest = relative(root, absolute);
+      return rest === "" || (rest !== ".." && !rest.startsWith(`..${sep}`) && !isAbsolute(rest));
+    });
+    if (!allowed || !Number.isSafeInteger(entry.offset) || entry.offset < 1 ||
+        !Number.isSafeInteger(entry.limit) || entry.limit < 1 || entry.limit > 200) throw new Error("mission-review-evidence: select up to 200 lines from a declared input/output");
+    const info = await lstat(absolute);
+    if (!info.isFile()) throw new Error("mission-review-evidence: select a regular file");
+    hash.update(JSON.stringify(entry)).update(String(info.size));
+    const stream = createReadStream(absolute);
+    stream.on("data", chunk => hash.update(chunk));
+    const lines = createInterface({ input: stream, crlfDelay: Infinity });
+    selected += `\n--- evidence: ${entry.path}:${entry.offset} ---\n`;
+    let number = 0;
+    for await (const line of lines) {
+      number++;
+      if (number >= entry.offset && number < entry.offset + entry.limit && Buffer.byteLength(selected) < 12_000) {
+        selected += `${number}: ${line.slice(0, 2_000)}\n`;
+      }
+    }
+  }
   const writes = [...new Set(run.units.flatMap(unit => unit.unit.write).map(path => path === "." ? path : normalizeManifestScope(path).path))];
   if (writes.length === 0) return { fingerprint: `sha256:${hash.digest("hex")}`,
-    excerpt: "[Read-only units: no declared output files. Review the supplied observations, traces and validation evidence.]" };
+    excerpt: selected + "[Read-only units: no declared output files. Review the supplied observations, traces and validation evidence.]" };
   // The shared dependency environment is local tooling, never reviewed or pinned source.
   const external: string[] = [], local: string[] = [];
   for (const path of writes) {
@@ -95,8 +121,9 @@ export async function missionReviewSource(directory: string, run: OperatorState)
   // JSON in _testenv). Their bytes must participate in staleness checks as well as the excerpt.
   const ignored = local.length ? await git(["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--", ...scopes]) : "";
   for (const path of ignored.split("\0").filter(Boolean)) untracked.add(path);
-  let excerpt = local.length ? await git(["diff", "--no-ext-diff", "--no-textconv", "HEAD", "--", ...scopes]).catch(() => git(["diff", "--no-ext-diff", "--no-textconv", "--", ...scopes])) : "";
-  const unchanged = excerpt.length === 0;
+  const diff = local.length ? await git(["diff", "--no-ext-diff", "--no-textconv", "HEAD", "--", ...scopes]).catch(() => git(["diff", "--no-ext-diff", "--no-textconv", "--", ...scopes])) : "";
+  const unchanged = diff.length === 0;
+  let excerpt = selected + diff;
   const paths = [...new Set([...names.split("\0"), ...ignored.split("\0")].filter(Boolean))].sort();
   const omitted: string[] = [];
   for (const path of paths) {

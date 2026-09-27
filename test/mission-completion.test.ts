@@ -6,20 +6,24 @@ import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 import { OperatorRuntime } from "../dist/core/operator-runtime.js";
+import { OperatorMissionRuntime } from "../dist/core/operator-mission.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
 import { RunFlightLedger } from "../dist/core/run-flight-ledger.js";
 import { SortieDogsV010Plugin } from "../dist/plugin/profiled.js";
 
 const exec = promisify(execFile);
 
-test("mission validation survives review, submission, reload and final acceptance with live control reads", async () => {
+for (const mode of ["implementation", "executed", "NO_START"] as const) test(`mission completion keeps checks, review and operation outcomes separate: ${mode}`, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const root = await mkdtemp(resolve("_testenv/mission-completion-"));
   try {
     await exec("git", ["init", "--quiet"], { cwd: root });
     await exec("git", ["config", "user.name", "test"], { cwd: root });
     await exec("git", ["config", "user.email", "test@example.invalid"], { cwd: root });
-    const validator = 'import { readFileSync } from "node:fs";\nif (readFileSync("result.txt", "utf8") !== "ready\\n") process.exit(1);\n';
+    const validator = 'import { readFileSync, writeFileSync } from "node:fs";\n' +
+      (mode === "implementation" ? '' : 'writeFileSync("result.txt", "ready\\n");\n') +
+      'if (readFileSync("result.txt", "utf8") !== "ready\\n") process.exit(1);\n' +
+      `console.log(JSON.stringify(${JSON.stringify({ status: mode, attempts: mode === "NO_START" ? 0 : 1, reward: 0 })}));\n`;
     await writeFile(join(root, "check.mjs"), validator);
     await exec("git", ["add", "check.mjs"], { cwd: root });
     await exec("git", ["commit", "--quiet", "-m", "validator"], { cwd: root });
@@ -39,20 +43,27 @@ test("mission validation survives review, submission, reload and final acceptanc
       parts: [{ type: "text", text }],
     });
     await chat("root", "Write and validate a ready result, then review and accept it.");
-    const started = JSON.parse(await hooks.tool!.sortie_v010_start_mission.execute({ requirements: ["Create a validated result"] }, { sessionID: "root" }));
+    const started = JSON.parse(await hooks.tool!.sortie_v010_start_mission.execute({ requirements: ["Create a validated result"],
+      kind: mode === "implementation" ? "implementation" : "operation" }, { sessionID: "root" }));
     await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "coordinator-call" }, { args: structuredClone(started.task) });
     await chat("coordinator", started.task.prompt);
     const next = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ units: [{ title: "Validated result", objective: "Write result and validate it",
-      read: ["check.mjs", ".sortie-dogs-v010/missions"], write: ["result.txt"], validation: ["node check.mjs"] }] }, { sessionID: "coordinator" }));
+      read: ["check.mjs", ".sortie-dogs-v010/missions"], write: ["result.txt"], validation: ["node check.mjs"] }],
+      ...(mode === "implementation" ? {} : { execution: { commands: ["node check.mjs"], directory: root } }) }, { sessionID: "coordinator" }));
     const worker = { args: structuredClone(next.task) };
     await hooks["tool.execute.before"]!({ tool: "task", sessionID: "coordinator", callID: "worker-call" }, worker);
     await chat("worker", worker.args.prompt);
     const runtime = new OperatorRuntime(root, V010_RUNTIME_PROFILE), state = await runtime.required("root");
     const unit = state.units[0]!;
-    await hooks["tool.execute.before"]!({ tool: "read", sessionID: "worker", callID: "handoff" }, { args: { filePath: unit.handoffPath } });
-    await hooks["tool.execute.after"]!({ tool: "read", sessionID: "worker", callID: "handoff", args: { filePath: unit.handoffPath } }, { output: "inspected" });
-    assert.equal(JSON.parse(await hooks.tool!.sortie_v010_bind_write_gate.execute({ project_root: root, manifest_path: unit.manifestPath }, { sessionID: "worker" })).status, "bound");
-    await writeFile(join(root, "result.txt"), "ready\n");
+    const clock = Date.now;
+    try {
+      if (mode === "executed") { const aged = clock() + 31 * 60_000; Date.now = () => aged; }
+      await hooks["tool.execute.before"]!({ tool: "read", sessionID: "worker", callID: "handoff" }, { args: { filePath: unit.handoffPath } });
+      await hooks["tool.execute.after"]!({ tool: "read", sessionID: "worker", callID: "handoff", args: { filePath: unit.handoffPath } }, { output: "inspected" });
+      const binding = JSON.parse(await hooks.tool!.sortie_v010_bind_write_gate.execute({ project_root: root, manifest_path: unit.manifestPath }, { sessionID: "worker" }));
+      assert.equal(binding.status, "bound", JSON.stringify(binding));
+    } finally { Date.now = clock; }
+    if (mode === "implementation") await writeFile(join(root, "result.txt"), "ready\n");
     await hooks["tool.execute.before"]!({ tool: "bash", sessionID: "worker", callID: "validate" }, { args: { command: "node check.mjs" } });
     const checked = await exec(process.execPath, ["check.mjs"], { cwd: root });
     await hooks["tool.execute.after"]!({ tool: "bash", sessionID: "worker", callID: "validate" }, { output: checked.stdout, metadata: { exit: 0, status: "completed" } });
@@ -64,6 +75,18 @@ test("mission validation survives review, submission, reload and final acceptanc
     assert.match(reviewer.args.prompt, /deferred Operator checks/);
     identities.reviewer!.outcome = "succeeded";
     await hooks["tool.execute.after"]!({ tool: "task", sessionID: "coordinator", callID: "reviewer-call" }, { output: "PASS\nThe result is validated.", metadata: { sessionId: "reviewer" } });
+    if (mode === "NO_START") {
+      const missions = new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE);
+      await missions.update("root", mission => { mission.review!.verdict = "evidence-gaps"; mission.review!.evidenceGapReviews = 2; });
+      const submitted = JSON.parse(await hooks.tool!.sortie_v010_submit_mission.execute({ status: "ready", summary: "auxiliary check passed" }, { sessionID: "coordinator" }));
+      assert.equal(submitted.status, "operation-incomplete");
+      const cold = await create();
+      const completed = JSON.parse(await cold.tool!.sortie_v010_complete_mission.execute({}, { sessionID: "root" }));
+      assert.equal(completed.status, "not-ready");
+      assert.equal(completed.operation_status, "not-started");
+      assert.equal((await runtime.required("root")).receipt, null);
+      return;
+    }
     await hooks.tool!.sortie_v010_submit_mission.execute({ status: "ready", summary: "Validated result, reviewed independently" }, { sessionID: "coordinator" });
     identities.coordinator!.outcome = "succeeded";
     await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "coordinator-call" }, { output: "ready", metadata: { sessionId: "coordinator" } });
