@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { CONTRACT_TEXT_LIMITS } from "./contract-limits.ts";
-import { retryableValidationFailure, type ValidationOutcome, type ValidationScope } from "./validation-budget.js";
+import { retryableValidationFailure, type ValidationOutcome, type ValidationScope } from "./validation-budget.ts";
 import type { GoalReport } from "./goal-report.js";
 
 export const GOAL_BOUND_SCHEMA_VERSION = "0.1" as const;

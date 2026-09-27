@@ -63,12 +63,12 @@ quality threshold and explicit model/budget choice. Follow AGENTS.md and use the
 2. Dispatch the returned ${profileAgent(profile, "dog-operator")} task immediately. It owns investigation,
    unit boundaries, Worker/Scout/Advisor/independent Reviewer calls, write-scope extensions and corrections
    within the original request and cumulative budget. Do not investigate or approve each unit at the root.
- 3. Compare the returned completion candidate against the original request, real source and observed evidence.
-    For a reported bug with a concrete public reproduction, check that evidence exercises the same entrypoint,
-    input and observed failure, not only a nearby invented test or syntax check. A material gap goes back
-    to the SAME Coordinator to repair within the original request; do not treat a Reviewer PASS as proof
-    that an unrun public scenario works.
-    If incomplete, resume the SAME Coordinator with concrete feedback. If complete and required review passed
+3. Compare the returned completion candidate against the original request, real source and observed evidence.
+   For a reported bug with a concrete public reproduction, check that evidence exercises the same entrypoint,
+   input and observed failure, not only a nearby invented test or syntax check. A material gap goes back
+   to the SAME Coordinator to repair within the original request; do not treat a Reviewer PASS as proof
+   that an unrun public scenario works.
+   If incomplete, resume the SAME Coordinator with concrete feedback. If complete and required review passed
    (or the host accepted it at the evidence-gap limit, with the gaps reported), call
    ${profile.toolPrefix}complete_mission. Only its succeeded receipt authorizes DONE.
 
