@@ -678,6 +678,40 @@ test("start_mission carries a cancelled same-turn contract from the host before 
   assert.deepEqual(run.acceptance, started.requirements.map((item: { text: string }) => item.text));
 }));
 
+test("explicit replacement links a cancelled legacy run without reviving its unrelated acceptance", async () => fixture(async root => {
+  const hooks = await SortieDogsV010Plugin({ directory: root, client: { session: {
+    get: async ({ path }: { path: { id: string } }) => ({ data: { id: path.id, agent: "dog-operator" } }),
+    messages: async () => ({ data: [] }),
+  } } } as never);
+  const user = async (id: string, text: string) => hooks["chat.message"]!({ sessionID: "root", messageID: id, agent: "dog-operator" }, {
+    message: { id, agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-6-sol" } },
+    parts: [{ type: "text", text }],
+  });
+  await user("old-user", "Complete all earlier stages");
+  const missions = new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE);
+  const operators = new OperatorRuntime(root, V010_RUNTIME_PROFILE);
+  await missions.start("root", ["Complete all earlier stages"]);
+  const previous = await operators.prepare("root", plan());
+  await operators.interrupted("root", "agent-changed");
+  await missions.update("root", state => { state.phase = "cancelled"; }); // Legacy mission never owned the standalone run.
+  await user("new-user", "Only finish the current stage; do not redo earlier stages");
+  const requirements = ["Only finish the current stage", "Do not redo earlier stages"];
+  await assert.rejects(hooks.tool!.sortie_v010_start_mission.execute({ requirements }, { sessionID: "root" }),
+    /mission-cancelled-source-unproven/);
+  const started = JSON.parse(await hooks.tool!.sortie_v010_start_mission.execute({ requirements, intent: "replace" }, { sessionID: "root" }));
+  assert.deepEqual(started.requirements.map((item: { text: string }) => item.text), requirements);
+  assert.equal((await missions.required("root")).supersededRunID, previous.runID);
+  const prepared = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ units: [{
+    title: "Finish current stage", objective: "Validate only the new acceptance", read: [], write: ["result.txt"],
+    validation: ["node check.mjs"], requirement_ids: ["R1", "R2"],
+  }] }, { sessionID: "root" }));
+  assert.ok(prepared.task, JSON.stringify(prepared));
+  const next = await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root");
+  assert.equal(next.supersededRunID, previous.runID);
+  assert.deepEqual(next.acceptance, requirements);
+  assert.equal(next.priorAcceptedUnits.length, 0);
+}));
+
 test("plan_units repairs an already-dispatched mission with cancelled-run acceptance after plugin reload", async () => fixture(async root => {
   const identities: Record<string, { agent: string; parentID?: string }> = {
     root: { agent: "dog-operator" }, coordinator: { agent: "dogs-coordinator", parentID: "root" },
