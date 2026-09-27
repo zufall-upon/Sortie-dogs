@@ -13,6 +13,7 @@ import V2Plugin, {
 } from "../dist/plugin/v2.js";
 import type { OpenCodeHooks, OpenCodePlugin } from "../dist/plugin/index.js";
 import { collectRunMetrics } from "../dist/plugin/run-metrics.js";
+import { buildDebrief, renderDebrief } from "../dist/plugin/sortie-debrief.js";
 import { terminalCancelledMissionChildren } from "../dist/plugin/profiled.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
 import { OperatorMissionRuntime, missionPlan } from "../dist/core/operator-mission.js";
@@ -158,6 +159,37 @@ test("progress observes unit admission after reading the prepared run, rather th
     assert.equal(running.child_session_id, "worker");
     assert.equal(await missionProgressReader(directory, "root", "foreign-call")(), undefined);
   } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("V2 missing child-list API recovers nested model gauges from native Task history in one message pass", async () => {
+  const fixture = contextFixture();
+  const identities = { root: { agent: "dog-operator" }, coordinator: { agent: "dogs-coordinator", parentID: "root" },
+    worker: { agent: "dog-worker-v010", parentID: "coordinator" }, foreign: { agent: "build", parentID: "another-root" } };
+  const native = (id: string, model: string, children: string[] = []) => ({ id: `message-${id}`, type: "assistant",
+    agent: identities[id as keyof typeof identities].agent, model: { providerID: "openai", id: model },
+    time: { created: 1, completed: 9 }, tokens: { input: 10, output: 2, reasoning: 0, cache: { read: 0, write: 0 } },
+    content: children.map((child, index) => ({ type: "tool", name: "subagent", id: `call-${id}-${index}`,
+      time: { created: 2, completed: 8 }, state: { status: "completed", input: { agent: "dog-worker-v010" },
+        metadata: { sessionID: child }, content: [] } })) });
+  const histories = { root: [native("root", "gpt-6-sol", ["coordinator", "coordinator", "foreign"])],
+    coordinator: [native("coordinator", "gpt-6-sol", ["worker"])], worker: [native("worker", "gpt-6-luna-fast")] };
+  const reads: string[] = [];
+  let metrics: Awaited<ReturnType<typeof collectRunMetrics>>;
+  const cleanup = await createSortieDogsV2Plugin(async input => {
+    metrics = await collectRunMetrics(input.client, "root", undefined, 10);
+    return {};
+  }).setup({ ...fixture.context, session: { ...fixture.context.session,
+    list: async () => { throw new Error("session.list unavailable in private V2 facade"); },
+    get: async ({ sessionID }) => ({ id: sessionID, ...identities[sessionID as keyof typeof identities] }),
+    context: async ({ sessionID }) => { reads.push(sessionID); return histories[sessionID as keyof typeof histories]; },
+  } });
+  try {
+    assert.deepEqual(reads, ["root", "coordinator", "worker"]);
+    assert.equal(metrics!.tokens, undefined, "recorded dispatches do not prove exhaustive host coverage");
+    const debrief = buildDebrief({ goal_id: "g", evidence_refs: [], session_ids: [], status: "stopped" } as never, null, metrics!.debrief);
+    assert.deepEqual(debrief.mixCoverage, { complete: false, observedTokens: 36 });
+    assert.match(renderDebrief(debrief).join("\n"), /🐕 openai\/gpt-6-luna-fast ███▍\s+33\.3% 12 tokens/u);
+  } finally { cleanup?.(); }
 });
 
 test("V2 operator dispatch rejects background before admission and accepts explicit foreground", async () => {

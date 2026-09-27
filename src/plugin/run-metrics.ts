@@ -329,7 +329,28 @@ export async function collectRunMetrics(
   for (const id of ids) {
     try {
       const messages = assistantMessages(await session.messages.call(session, { path: { id }, query: { directory } }));
-      if (messages === undefined) return undefined;
+      if (messages === undefined) { messagesComplete = false; continue; }
+      if (!hierarchyComplete && session.get !== undefined) {
+        // Some V2 plugin facades cannot list children. Recover recorded native dispatches
+        // during this same history pass, without rerunning work or discarding parent usage.
+        const recorded = new Set<string>();
+        for (const message of messages) for (const raw of Array.isArray(message.parts) ? message.parts : []) {
+          const part = record(raw), state = record(part?.state), metadata = record(state?.metadata);
+          if (part?.type !== "tool" || part.tool !== "task") continue;
+          const input = record(state?.input);
+          for (const child of [metadata?.sessionId, metadata?.sessionID, input?.task_id]) {
+            if (typeof child === "string" && child && !visited.has(child)) recorded.add(child);
+          }
+        }
+        for (const child of recorded) {
+          if (ids.length >= MAX_SESSIONS) break;
+          try {
+            const info = record(unwrap(await session.get.call(session, { path: { id: child }, query: { directory } })));
+            if (info?.parentID !== id) continue;
+            visited.add(child); ids.push(child);
+          } catch { /* Keep this partial display; unobserved usage is never zero-filled. */ }
+        }
+      }
       const observed = observeDebriefSession(id, id === rootSessionID, messages,
         window === undefined ? undefined : { start: windowStart!, end: windowEnd! });
       observedSessions.push(observed);
@@ -370,9 +391,9 @@ export async function collectRunMetrics(
           const modelKey = typeof provider === "string" && typeof model === "string" ? `${provider}/${model}` : "未分類";
           observed.models[modelKey] = tokens === undefined || observed.models[modelKey] === null ? null
             : (observed.models[modelKey] ?? 0) + tokens.total;
+          const modelUsage = observed.modelUsage![modelKey] ??= { tokens: 0, uncachedInputTokens: 0, cacheReadTokens: 0,
+            cacheWriteTokens: 0, cost: 0, costAvailable: true, estimatedCost: 0, pricedRequests: 0, unpricedRequests: 0 };
           if (tokens !== undefined) {
-            const modelUsage = observed.modelUsage![modelKey] ?? { tokens: 0, uncachedInputTokens: 0, cacheReadTokens: 0,
-              cacheWriteTokens: 0, cost: 0, costAvailable: true, estimatedCost: 0, pricedRequests: 0, unpricedRequests: 0 };
             modelUsage.tokens += tokens.total;
             modelUsage.uncachedInputTokens += tokens.input;
             modelUsage.cacheReadTokens += tokens.cacheRead;
@@ -399,22 +420,26 @@ export async function collectRunMetrics(
             role.reasoningTokens += tokens.reasoning;
             role.cacheReadTokens += tokens.cacheRead;
             role.cacheWriteTokens += tokens.cacheWrite;
-          } else tokensAvailable = false;
+          } else {
+            tokensAvailable = false;
+            modelUsage.unpricedRequests = (modelUsage.unpricedRequests ?? 0) + 1;
+          }
           const usageInfo = record(usage.value.info) ?? usage.value;
           const reportedCost = number(usageInfo.cost) ?? number(usage.value.cost);
           if (reportedCost === undefined) {
             costAvailable = false;
             role.costAvailable = false;
-            if (tokens !== undefined) observed.modelUsage![modelKey]!.costAvailable = false;
+            modelUsage.costAvailable = false;
           } else {
             cost += reportedCost;
             role.cost += reportedCost;
-            if (tokens !== undefined) observed.modelUsage![modelKey]!.cost += reportedCost;
+            modelUsage.cost += reportedCost;
           }
         }
       }
-    } catch { return undefined; }
+    } catch { messagesComplete = false; }
   }
+  if (observedSessions.length === 0) return undefined;
   let created: number | undefined;
   if (session.get !== undefined) {
     try {
@@ -501,6 +526,10 @@ export function formatSortieResult(result: SortieResult, presentation: SortieRes
   const estimatedCost = estimate === undefined ? "計測不可"
     : estimate.pricedRequests === 0 ? "未換算"
       : `$${estimate.usd.toFixed(4)}${estimate.unpricedRequests > 0 ? "（一部未換算）" : ""}`;
+  const measuredTokens = result.debrief?.mixCoverage?.observedTokens;
+  const tokenText = result.cost.total_tokens.availability === "unavailable" && measuredTokens !== undefined && measuredTokens > 0
+    ? `${measuredTokens.toLocaleString("ja-JP")} tokens（観測分）`
+    : metricText(result.cost.total_tokens, (value) => `${value.toLocaleString("ja-JP")} tokens`);
   const body = [
     "🐾 SORTIE DOGS — 帰還報告",
     result.result_id[0],
@@ -524,7 +553,7 @@ export function formatSortieResult(result: SortieResult, presentation: SortieRes
     displayText(presentation.next),
     "",
     "🪙 COST / PACK",
-    `使用量        ${metricText(result.cost.total_tokens, (value) => `${value.toLocaleString("ja-JP")} tokens`)}`,
+    `使用量        ${tokenText}`,
     `予測費用      ${estimatedCost} ※予測概算`,
     "",
     ...renderDebrief(result.debrief),

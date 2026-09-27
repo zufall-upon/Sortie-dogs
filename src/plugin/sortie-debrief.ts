@@ -50,6 +50,8 @@ export interface Debrief {
     };
     readonly hostCostZero?: boolean;
   }[] | null;
+  /** Shares use observed tokens; incomplete history must not erase known model usage. */
+  readonly mixCoverage?: { readonly complete: boolean; readonly observedTokens: number };
   readonly estimatedCost?: {
     readonly usd: number;
     readonly pricedRequests: number;
@@ -195,17 +197,20 @@ export function buildDebrief(receipt: GoalTerminalReceipt, contract: GoalAccepta
   const modelUsage = new Map<string, { uncachedInputTokens: number; cacheReadTokens: number; cacheWriteTokens: number;
     cost: number; costAvailable: boolean; estimatedCost: number; pricedRequests: number; unpricedRequests: number;
     pricingComplete: boolean; complete: boolean }>();
-  let usageComplete = observation.complete;
+  let usageComplete = true;
   for (const session of sessions) {
     for (const [model, tokens] of Object.entries(session.models)) {
       if (tokens === null || model === "未分類") usageComplete = false;
-      else {
-        totals.set(model, (totals.get(model) ?? 0) + tokens);
-        const observed = session.modelUsage?.[model];
+      const observed = session.modelUsage?.[model];
+      // A missing request leaves models[model] null. The independent accumulator still
+      // contains real usage from this model's other requests, including older snapshots.
+      const measured = tokens ?? observed?.tokens;
+      if (measured !== undefined) {
+        if (measured > 0) totals.set(model, (totals.get(model) ?? 0) + measured);
         const aggregate = modelUsage.get(model) ?? { uncachedInputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0,
           cost: 0, costAvailable: true, estimatedCost: 0, pricedRequests: 0, unpricedRequests: 0,
           pricingComplete: true, complete: true };
-        if (observed === undefined || observed.tokens !== tokens) aggregate.complete = false;
+        if (observed === undefined || observed.tokens !== measured) aggregate.complete = false;
         else {
           aggregate.uncachedInputTokens += observed.uncachedInputTokens;
           aggregate.cacheReadTokens += observed.cacheReadTokens;
@@ -310,13 +315,14 @@ export function buildDebrief(receipt: GoalTerminalReceipt, contract: GoalAccepta
     session.mutations.some((edit) => edit.end > entry.at))).at(-1);
   const packComplete = observation.complete && sessions.every(session => session.root || session.timingComplete || Object.keys(session.models).length > 0);
   return { pack: packComplete ? [...counts].sort(([a], [b]) => a.localeCompare(b)).map(([model, count]) => ({ model, count })) : null,
-    mix: usageComplete && total > 0 ? [...totals].sort(([a], [b]) => a.localeCompare(b)).map(([model, tokens]) => {
+    mix: total > 0 ? [...totals].sort(([a], [b]) => a.localeCompare(b)).map(([model, tokens]) => {
       const usage = modelUsage.get(model);
       return { model, tokens, percent: tokens / total * 100,
         ...(usage?.complete ? { inputCache: { uncachedInputTokens: usage.uncachedInputTokens,
           cacheReadTokens: usage.cacheReadTokens, cacheWriteTokens: usage.cacheWriteTokens } } : {}),
         ...(usage?.complete && usage.costAvailable && tokens > 0 && usage.cost === 0 ? { hostCostZero: true } : {}) };
     }) : null,
+    mixCoverage: { complete: observation.complete && usageComplete, observedTokens: total },
     ...(pricing.complete && pricing.pricedRequests + pricing.unpricedRequests > 0 ? { estimatedCost: {
       usd: pricing.usd, pricedRequests: pricing.pricedRequests, unpricedRequests: pricing.unpricedRequests } } : {}),
     validation, review: review?.status ?? "未確認", reviewSource: review?.source ?? "controller", traits, firstPassEligible,
@@ -362,13 +368,15 @@ export function renderDebrief(debrief: Debrief | undefined): string[] {
     : value === "WAIVED" ? "免除" : "未記録";
   const counts = new Map(packVisible.map((entry) => [entry.model, entry.count]));
   return [
-    ...(mix === null ? ["モデル内訳    usage未取得"] : visible.map((entry) => {
+    `モデル内訳    ${mix === null ? "usage未取得" : debrief?.mixCoverage?.complete === false
+      ? "観測済みtoken比率（一部未取得）" : "token比率"}`,
+    ...visible.map((entry) => {
       const count = counts.get(entry.model);
        const input = entry.inputCache === undefined ? 0 : entry.inputCache.uncachedInputTokens +
          entry.inputCache.cacheReadTokens + entry.inputCache.cacheWriteTokens;
        const cache = entry.inputCache === undefined || input === 0 ? "未取得" : `${(entry.inputCache.cacheReadTokens / input * 100).toFixed(0)}%`;
        return `🐕 ${label(entry.model)} ${gauge(entry.percent)} ${entry.percent.toFixed(1)}% ${entry.tokens.toLocaleString("ja-JP")} tokens${count === undefined ? "" : ` ×${count}`} ↺${cache}${entry.hostCostZero ? "†" : ""}`;
-     })),
+      }),
     ...(visible.some((entry) => entry.hostCostZero) ? ["   †host費用0計上あり（無料・全体価格の評価ではありません）"] : []),
     `⚡ 実行重複率 ${debrief?.overlap !== undefined && debrief.overlap.wallMilliseconds > 0
       ? `${(debrief.overlap.workerMilliseconds / debrief.overlap.wallMilliseconds).toFixed(2)}×`
