@@ -48,6 +48,12 @@ export interface Debrief {
       readonly cacheReadTokens: number;
       readonly cacheWriteTokens: number;
     };
+    readonly estimatedCost?: {
+      readonly usd: number;
+      readonly pricedRequests: number;
+      readonly unpricedRequests: number;
+      readonly complete: boolean;
+    };
     readonly hostCostZero?: boolean;
   }[] | null;
   /** Shares use observed tokens; incomplete history must not erase known model usage. */
@@ -320,6 +326,9 @@ export function buildDebrief(receipt: GoalTerminalReceipt, contract: GoalAccepta
       return { model, tokens, percent: tokens / total * 100,
         ...(usage?.complete ? { inputCache: { uncachedInputTokens: usage.uncachedInputTokens,
           cacheReadTokens: usage.cacheReadTokens, cacheWriteTokens: usage.cacheWriteTokens } } : {}),
+        ...(usage ? { estimatedCost: { usd: usage.estimatedCost, pricedRequests: usage.pricedRequests,
+          unpricedRequests: usage.unpricedRequests,
+          complete: usage.complete && usage.pricingComplete && usage.unpricedRequests === 0 && usage.pricedRequests > 0 } } : {}),
         ...(usage?.complete && usage.costAvailable && tokens > 0 && usage.cost === 0 ? { hostCostZero: true } : {}) };
     }) : null,
     mixCoverage: { complete: observation.complete && usageComplete, observedTokens: total },
@@ -337,6 +346,7 @@ export function buildDebrief(receipt: GoalTerminalReceipt, contract: GoalAccepta
 const label = (text: string): string => text.replace(/[\r\n\t]/gu, " ").replace(/[\\`*_{}\[\]()<>!|]/gu, "").slice(0, 120);
 const milliseconds = (value: number | null): string => value === null ? "未記録"
   : value < 1000 ? `${value}ms` : `${(value / 1000).toFixed(2)}s`;
+const dollars = (usd: number): string => `$${usd.toFixed(usd > 0 && usd < 0.00005 ? 6 : 4)}`;
 const gauge = (percent: number): string => {
   const eighths = Math.max(0, Math.min(80, Math.round(percent * 0.8)));
   const whole = Math.floor(eighths / 8), remainder = eighths % 8;
@@ -350,13 +360,22 @@ export function renderDebrief(debrief: Debrief | undefined): string[] {
   const pack = debrief?.pack == null ? null : [...debrief.pack].sort((a, b) => b.count - a.count || a.model.localeCompare(b.model));
   const packVisible = pack?.slice(0, 4) ?? [];
   if (pack !== null && pack.length > 4) packVisible.push({ model: "その他", count: pack.slice(4).reduce((sum, entry) => sum + entry.count, 0) });
-  const mix = debrief?.mix == null ? null : [...debrief.mix].sort((a, b) => b.tokens - a.tokens || a.model.localeCompare(b.model));
+  const mix = debrief?.mix == null ? null : [...debrief.mix].sort((a, b) =>
+    (b.estimatedCost?.pricedRequests ? 1 : 0) - (a.estimatedCost?.pricedRequests ? 1 : 0) ||
+    (b.estimatedCost?.usd ?? 0) - (a.estimatedCost?.usd ?? 0) || b.tokens - a.tokens || a.model.localeCompare(b.model));
+  const pricedUsd = mix?.reduce((sum, entry) => sum + (entry.estimatedCost?.usd ?? 0), 0) ?? 0;
+  const hasPriced = mix?.some(entry => (entry.estimatedCost?.pricedRequests ?? 0) > 0);
+  const partiallyPriced = debrief?.mixCoverage?.complete === false || mix?.some(entry => !entry.estimatedCost?.complete);
   const visible = mix?.slice(0, 4) ?? [];
   if (mix !== null && mix.length > 4) {
     const tail = mix.slice(4);
     const cacheKnown = tail.every((entry) => entry.inputCache !== undefined);
     visible.push({ model: "その他", tokens: tail.reduce((sum, entry) => sum + entry.tokens, 0),
       percent: tail.reduce((sum, entry) => sum + entry.percent, 0),
+      estimatedCost: { usd: tail.reduce((sum, entry) => sum + (entry.estimatedCost?.usd ?? 0), 0),
+        pricedRequests: tail.reduce((sum, entry) => sum + (entry.estimatedCost?.pricedRequests ?? 0), 0),
+        unpricedRequests: tail.reduce((sum, entry) => sum + (entry.estimatedCost?.unpricedRequests ?? 0), 0),
+        complete: tail.every(entry => entry.estimatedCost?.complete) },
       ...(cacheKnown ? { inputCache: {
         uncachedInputTokens: tail.reduce((sum, entry) => sum + entry.inputCache!.uncachedInputTokens, 0),
         cacheReadTokens: tail.reduce((sum, entry) => sum + entry.inputCache!.cacheReadTokens, 0),
@@ -368,15 +387,23 @@ export function renderDebrief(debrief: Debrief | undefined): string[] {
     : value === "WAIVED" ? "免除" : "未記録";
   const counts = new Map(packVisible.map((entry) => [entry.model, entry.count]));
   return [
-    `モデル内訳    ${mix === null ? "usage未取得" : debrief?.mixCoverage?.complete === false
-      ? "観測済みtoken比率（一部未取得）" : "token比率"}`,
+    `モデル内訳    ${mix === null ? "usage未取得" : !hasPriced
+      ? "予測費用未換算（モデル別token数）" : pricedUsd === 0
+        ? "予測費用比率（合計$0・算出不可）" : partiallyPriced
+          ? "換算済み予測費用の比率（一部未換算）" : "予測費用比率"}`,
     ...visible.map((entry) => {
       const count = counts.get(entry.model);
-       const input = entry.inputCache === undefined ? 0 : entry.inputCache.uncachedInputTokens +
-         entry.inputCache.cacheReadTokens + entry.inputCache.cacheWriteTokens;
-       const cache = entry.inputCache === undefined || input === 0 ? "未取得" : `${(entry.inputCache.cacheReadTokens / input * 100).toFixed(0)}%`;
-       return `🐕 ${label(entry.model)} ${gauge(entry.percent)} ${entry.percent.toFixed(1)}% ${entry.tokens.toLocaleString("ja-JP")} tokens${count === undefined ? "" : ` ×${count}`} ↺${cache}${entry.hostCostZero ? "†" : ""}`;
-      }),
+      const input = entry.inputCache === undefined ? 0 : entry.inputCache.uncachedInputTokens +
+        entry.inputCache.cacheReadTokens + entry.inputCache.cacheWriteTokens;
+      const cache = entry.inputCache === undefined || input === 0 ? "未取得" : `${(entry.inputCache.cacheReadTokens / input * 100).toFixed(0)}%`;
+      const cost = entry.estimatedCost;
+      const share = cost?.pricedRequests
+        ? pricedUsd > 0
+          ? `${gauge(cost.usd / pricedUsd * 100)} ${(cost.usd / pricedUsd * 100).toFixed(1)}% · ${dollars(cost.usd)}${cost.complete ? "" : "（一部未換算）"}`
+          : `比率算出不可 · ${dollars(cost.usd)}`
+        : "費用未換算";
+      return `🐕 ${label(entry.model)} ${share} · ${entry.tokens.toLocaleString("ja-JP")} tokens${count === undefined ? "" : ` ×${count}`} ↺${cache}${entry.hostCostZero ? "†" : ""}`;
+    }),
     ...(visible.some((entry) => entry.hostCostZero) ? ["   †host費用0計上あり（無料・全体価格の評価ではありません）"] : []),
     `⚡ 実行重複率 ${debrief?.overlap !== undefined && debrief.overlap.wallMilliseconds > 0
       ? `${(debrief.overlap.workerMilliseconds / debrief.overlap.wallMilliseconds).toFixed(2)}×`
