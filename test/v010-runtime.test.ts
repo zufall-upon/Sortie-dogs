@@ -269,18 +269,23 @@ test("preview assets coexist with stable assets and markers", async () => fixtur
     const asset = previewAssets.find(item => item.name === name)!.content;
     assert.match(asset, /^model: openai\/gpt-6-luna-fast#max$/m);
     assert.match(asset, /^permission:\r?\n  bash: allow\r?\n  sortie_v010_bind_write_gate: allow\r?\n  sortie_v010_release_write_gate: allow$/mu);
-    assert.match(asset, /Treat independently selected syntax or dispatch dimensions as combinations/u);
-    assert.match(asset, /multi-target route prove the rule and result for every target/u);
+    assert.match(asset, /inspect the affected source branches and the public\nentry path in the request/u);
+    assert.match(asset, /add targeted cases for\nindependent branches or multiple affected targets/u);
+    assert.match(asset, /Do not turn this into an exhaustive inventory of creation, binding, mutation/u);
+    assert.doesNotMatch(asset, /every existing form that reaches/u);
   }
   const reviewer = previewAssets.find(asset => asset.name === "dog-reviewer-v010")!.content;
   assert.match(reviewer, /^model: openai\/gpt-6-sol#xhigh$/m);
   assert.match(previewAssets.find(asset => asset.name === "dog-scout-v010")!.content, /^model: openai\/gpt-6-luna-fast#max$/m);
   assert.match(previewAssets.find(asset => asset.name === "dogs-coordinator")!.content, /^model: openai\/gpt-6-sol#xhigh$/m);
-  assert.match(reviewer, /Reject a matrix that lists independent syntax or dispatch dimensions but traces them only in isolation/u);
-  assert.match(reviewer, /proving only the first target is a concrete asymmetry finding/u);
+  assert.match(reviewer, /another route, representation, branch, or target that can materially change\nthe result/u);
+  assert.match(reviewer, /Absence of that\ninventory alone is not an evidence gap/u);
+  assert.match(reviewer, /still flag a missing\nrequired behavioral result or canonical validation evidence/u);
+  assert.doesNotMatch(reviewer, /Require the enumeration to name the target artifact/u);
   assert.match(reviewer, /Start with exactly one of PASS, FINDINGS or EVIDENCE_GAPS/u);
   const coordinator = previewAssets.find(asset => asset.name === "dogs-coordinator")!.content;
   assert.match(coordinator, /EVIDENCE_GAPS means missing proof, not a defect/u);
+  assert.match(coordinator, /not a speculative route inventory\nor raw history to prove incidental process constraints/u);
   assert.match(coordinator, /Never plan a separate setup\nunit/u);
   const worker = previewAssets.find(asset => asset.name === "dog-worker-v010")!.content;
   assert.match(worker, /Missing repository-declared dependencies or test runner are setup, not a result/u);
@@ -802,6 +807,9 @@ test("nested mission review and accepted work survive reload and agent-change ca
   const initial = { args: await review(hooks, "The Worker wrote and validated result.txt") };
   await hooks["tool.execute.before"]!({ tool: "task", sessionID: "coordinator", callID: "initial-review" }, initial);
   assert.match(initial.args.prompt, /^review_phase: initial$/m);
+  assert.match(initial.args.prompt, /specific acceptance-relevant behavior or required validation/u);
+  assert.match(initial.args.prompt, /do not request a generic route inventory or raw history/u);
+  assert.doesNotMatch(initial.args.prompt, /process history later established on the base/u);
   hostMessages.coordinator = [{ info: { role: "assistant", sessionID: "coordinator", time: { created: Date.now() } },
     parts: [{ type: "tool", tool: "task", callID: "initial-review", state: { status: "completed", input: initial.args,
       metadata: { sessionId: "reviewer" }, output: "FINDINGS\nExplain the validation coverage" } }] }];
