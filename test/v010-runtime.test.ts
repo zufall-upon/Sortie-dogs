@@ -167,7 +167,8 @@ async function startGeneratedOutputWorker(root: string, proposedPlan: ReturnType
   assert.ok(manifestPath && handoffPath);
   const manifest = JSON.parse(await readFile(resolve(root, manifestPath), "utf8"));
   await hooks["tool.execute.before"]!({ tool: "read", sessionID: "worker", callID: "handoff-read" }, { args: { filePath: handoffPath } });
-  await readFile(handoffPath);
+  // Native Read resolves a project-relative Worker header from its project, not this test process's cwd.
+  await readFile(resolve(root, handoffPath));
   await hooks["tool.execute.after"]!({ tool: "read", sessionID: "worker", callID: "handoff-read", args: { filePath: handoffPath } },
     { output: "inspected" });
   assert.equal(JSON.parse(await hooks.tool!.sortie_v010_bind_write_gate.execute(
@@ -1859,7 +1860,7 @@ for (const exhaustBudget of [false, true]) test(`failed repair validation expose
   assert.ok(replacementManifest && replacementHandoff);
   await replacementHooks["tool.execute.before"]!({ tool: "read", sessionID: "replacement-worker", callID: "replacement-handoff" },
     { args: { filePath: replacementHandoff } });
-  await readFile(replacementHandoff);
+  await readFile(resolve(root, replacementHandoff));
   await replacementHooks["tool.execute.after"]!({ tool: "read", sessionID: "replacement-worker", callID: "replacement-handoff",
     args: { filePath: replacementHandoff } }, { output: "inspected" });
   assert.equal(JSON.parse(await replacementHooks.tool!.sortie_v010_bind_write_gate.execute(
@@ -3023,7 +3024,7 @@ test("proposal preserves an observed generator before canonical evidence without
   assert.match(workerMessage.parts[0]!.text, /Cleanup may remove only declared unit\.write outputs.*before post-commit or canonical validation/u);
   assert.match(workerMessage.parts[0]!.text, /If any necessary command, input, output, or cleanup is missing.*contract-repair decision/u);
   await hooks["tool.execute.before"]!({ tool: "read", sessionID: "worker", callID: "handoff-read" }, { args: { filePath: handoffPath } });
-  await readFile(handoffPath);
+  await readFile(resolve(root, handoffPath));
   await hooks["tool.execute.after"]!({ tool: "read", sessionID: "worker", callID: "handoff-read", args: { filePath: handoffPath } }, { output: "inspected" });
   assert.equal(JSON.parse(await hooks.tool!.sortie_v010_bind_write_gate.execute(
     { project_root: root, manifest_path: manifestPath }, { sessionID: "worker" })).status, "bound");
@@ -3149,7 +3150,7 @@ test("plugin API commits before final validation and accepts only fresh native p
   const handoffPath = /^handoff_path: (.+)$/m.exec(workerMessage.parts[0]!.text)?.[1];
   assert.ok(manifestPath && handoffPath);
   await hooks["tool.execute.before"]!({ tool: "read", sessionID: "worker", callID: "handoff-read" }, { args: { filePath: handoffPath } });
-  await readFile(handoffPath);
+  await readFile(resolve(root, handoffPath));
   await hooks["tool.execute.after"]!({ tool: "read", sessionID: "worker", callID: "handoff-read", args: { filePath: handoffPath } }, { output: "inspected" });
   const bound = JSON.parse(await hooks.tool!.sortie_v010_bind_write_gate.execute(
     { project_root: root, manifest_path: manifestPath }, { sessionID: "worker" }));
@@ -3282,7 +3283,7 @@ test("blocking review replaces a succeeded awaiting-acceptance run from its comm
   assert.ok(manifestPath && handoffPath);
   await replacementHooks["tool.execute.before"]!({ tool: "read", sessionID: "review-remediation-worker", callID: "review-remediation-handoff" },
     { args: { filePath: handoffPath } });
-  await readFile(handoffPath);
+  await readFile(resolve(root, handoffPath));
   await replacementHooks["tool.execute.after"]!({ tool: "read", sessionID: "review-remediation-worker", callID: "review-remediation-handoff",
     args: { filePath: handoffPath } }, { output: "inspected" });
   assert.equal(JSON.parse(await replacementHooks.tool!.sortie_v010_bind_write_gate.execute(
@@ -3542,7 +3543,7 @@ test("failed post-commit acceptance cancels into a same-contract replacement fro
   assert.ok(replacementManifest && replacementHandoff);
   await replacementHooks["tool.execute.before"]!({ tool: "read", sessionID: "replacement-worker", callID: "replacement-handoff" },
     { args: { filePath: replacementHandoff } });
-  await readFile(replacementHandoff);
+  await readFile(resolve(root, replacementHandoff));
   await replacementHooks["tool.execute.after"]!({ tool: "read", sessionID: "replacement-worker", callID: "replacement-handoff",
     args: { filePath: replacementHandoff } }, { output: "inspected" });
   assert.equal(JSON.parse(await replacementHooks.tool!.sortie_v010_bind_write_gate.execute(
@@ -3634,7 +3635,7 @@ test("same-contract replacement inherits the clean parent commit and runs native
   assert.ok(manifestPath && handoffPath);
   await replacementHooks["tool.execute.before"]!({ tool: "read", sessionID: "inherit-replacement-worker", callID: "inherit-handoff" },
     { args: { filePath: handoffPath } });
-  await readFile(handoffPath);
+  await readFile(resolve(root, handoffPath));
   await replacementHooks["tool.execute.after"]!({ tool: "read", sessionID: "inherit-replacement-worker", callID: "inherit-handoff",
     args: { filePath: handoffPath } }, { output: "inspected" });
   assert.equal(JSON.parse(await replacementHooks.tool!.sortie_v010_bind_write_gate.execute(
