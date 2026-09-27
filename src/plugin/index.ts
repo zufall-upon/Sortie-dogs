@@ -6633,13 +6633,24 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       let terminalRescueTarget: ModelTarget | undefined;
       if (selectedAgent === SERIAL_WORKER_AGENT) {
         const text = explicitTaskText(output);
-        const rescueRequested = text !== undefined && handoffValue(handoffEntries(text), ["terminal_rescue_attempt"]) !== undefined;
+        const rescueAttemptID = text === undefined ? undefined : handoffValue(handoffEntries(text), ["terminal_rescue_attempt"]);
+        const rescueRequested = rescueAttemptID !== undefined;
+        const missionSelection = (chatInput as typeof chatInput & { missionRescueSelection?:
+          { attempt_id?: unknown; model?: unknown; variant?: unknown } }).missionRescueSelection;
+        const missionRescueTarget = runtimeProfile.id === "v010" && rescueRequested && isRecord(missionSelection) &&
+          missionSelection.attempt_id === rescueAttemptID && typeof missionSelection.model === "string" &&
+          missionSelection.model.includes("/") &&
+          (missionSelection.variant === null || typeof missionSelection.variant === "string")
+          ? { model: missionSelection.model,
+            ...(missionSelection.variant === null ? {} : { variant: missionSelection.variant as string }) }
+          : undefined;
         if (text !== undefined && !rescueRequested) terminalRescueHandoffs.delete(chatInput.sessionID);
         const suppliedPath = !rescueRequested ? undefined : handoffValue(handoffEntries(text!), ["handoff_path"]);
         const path = suppliedPath === undefined ? terminalRescueHandoffs.get(chatInput.sessionID) : unquoteValue(suppliedPath);
         if (path !== undefined) {
-          const identity = await inspect(path, undefined, { report: true, rescueSessionID: chatInput.sessionID });
-          terminalRescueTarget = identity?.terminalRescueTarget;
+          const identity = await inspect(path, undefined, { report: true,
+            ...(missionRescueTarget === undefined ? { rescueSessionID: chatInput.sessionID } : {}) });
+          terminalRescueTarget = missionRescueTarget ?? identity?.terminalRescueTarget;
           if (rescueRequested && terminalRescueTarget === undefined) throw new Error("rescue-binding-unavailable");
           if (terminalRescueTarget !== undefined) {
             terminalRescueHandoffs.set(chatInput.sessionID, path);
@@ -6943,10 +6954,11 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           diagnosis.accepting = false;
           diagnosisCalls.delete(toolInput.callID ?? "");
         }
-        const returnedMissionWorker = completedChildSessionID !== undefined &&
-          await input.runtimeBridge?.allowsInvestigativeShell?.(completedChildSessionID);
         parallelCalls.delete(toolInput.callID ?? "");
         activeSessions.get(toolInput.sessionID ?? "")?.inFlightCalls.delete(toolInput.callID ?? "");
+        // Snapshot Mission ownership before settling a failed validation changes its durable phase to awaiting-decision.
+        const returnedMissionWorker = completedChildSessionID !== undefined &&
+          await input.runtimeBridge?.allowsInvestigativeShell?.(completedChildSessionID);
         if (coordinatorTaskFinished && diagnosis === undefined) {
           if (toolInput.callID !== undefined) {
             await settleGoalDispatch(toolInput.callID, output).catch((error) => {
@@ -6959,14 +6971,15 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           const repair = operatorContractRepairResumes.get(toolInput.sessionID!);
           if (repair?.callID === toolInput.callID) operatorContractRepairResumes.delete(toolInput.sessionID!);
         }
+        if (completedChildSessionID !== undefined && activeSessions.get(completedChildSessionID)?.parallel !== "valid" &&
+            returnedMissionWorker) {
+          // Mission failures also leave the run awaiting-decision before this return hook completes. Release the
+          // serial writer before settlement/correction can observe terminal ownership, then evict as usual.
+          await releaseWriteGate(completedChildSessionID);
+        }
         if (completedChildSessionID !== undefined && !recoverableWorkerChildren.has(completedChildSessionID)) {
           evictSession(completedChildSessionID);
           void childLifecycles.get(completedChildSessionID)?.check();
-        } else if (completedChildSessionID !== undefined && activeSessions.get(completedChildSessionID)?.parallel !== "valid" &&
-            returnedMissionWorker) {
-          // Keep same-worker recovery identity, but a returned serial Task must not keep a live
-          // write reservation. Rebinding the retained manifest reacquires it before any later write.
-          await releaseWriteGate(completedChildSessionID);
         }
       }
     },
@@ -8133,12 +8146,27 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       const state = await currentGoal(root);
       if (state.goal_id === null || state.budget === null) return null;
       const reserved = state.outstanding_reservations.length;
-      return { max_units: state.budget.max_units, consumed_units: state.consumed_units,
+      const snapshot = { max_units: state.budget.max_units, consumed_units: state.consumed_units,
         reserved_units: reserved, remaining_units: Math.max(0, state.budget.max_units - state.consumed_units - reserved),
+        settled_time_ms: state.consumed_time_ms, time_limit_ms: state.budget.time_ms,
         settled_cost_usd: state.consumed_cost_usd, cost_limit_usd: state.budget.cost_usd,
         cost_status: state.consumed_cost_usd === null ? "unknown-usage" : reserved > 0 ? "in-flight-not-final" : "settled",
         cost_source: "native-usage-price-table",
         cost_note: "Worker token-price estimates from complete native usage; missing requests remain unknown and are reconciled on later status. Excludes orchestration/review and external campaign spend. Zero settled cost does not mean free execution." };
+      return snapshot;
+    },
+    ...{
+      missionWorkerTerminal: async (childSessionID: string, writeScopes: readonly string[]) => {
+        const active = activeSessions.get(childSessionID), authorization = sessionAuthorizations.get(childSessionID);
+        if ((active?.inFlightCalls.size ?? 0) !== 0 || (active !== undefined && active.released !== true) ||
+            (authorization !== undefined && (!authorization.suspended || authorization.lease !== undefined))) return false;
+        const scopeRoot = await durableScopeRoot(project?.root ?? input.directory);
+        if (scopeRoot === undefined) return false;
+        try {
+          const scope = normalizeWorktreeScope({ read: [], write: [...writeScopes] });
+          return !await new ScopeLeaseRegistry(scopeRoot).hasConflictingLease(scope);
+        } catch { return false; }
+      },
     },
     registerGoalDeclaration: async (root, prompt, missionRevision) => {
       if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) throw new Error("operator-coordinator-required");

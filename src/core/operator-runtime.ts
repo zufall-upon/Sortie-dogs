@@ -118,15 +118,32 @@ export type OperatorProposal = { status: "prepared"; state: OperatorState } | {
 type OperatorPhase = "prepared" | "running" | "awaiting-decision" | "awaiting-acceptance" | "completed" | "cancelled";
 interface UnitState {
   readonly unit: OperatorUnit;
-  readonly task: OperatorTask;
+  task: OperatorTask;
   readonly handoffPath: string;
   readonly manifestPath: string;
-  hashes: readonly string[];
+  hashes: string[];
   status: "pending" | "running" | "succeeded" | "failed" | "cancelled";
   callID: string | null;
   childSessionID: string | null;
   evidence: readonly GoalEvidence[];
   resultClass: string | null;
+  failure?: SerialDispatchSettlement["failure"];
+  normalRemediationUsed?: boolean;
+  terminalRescue?: {
+    readonly attempt_id: string;
+    readonly selected_model: string;
+    readonly selected_variant: string | null;
+    readonly accepted_base: {
+      readonly candidate_id: string;
+      readonly contract_id: string;
+      readonly scope: readonly string[];
+      readonly acceptance: readonly string[];
+      readonly validation: readonly string[];
+    };
+    readonly prior_failure: SerialDispatchSettlement["failure"];
+    status: "prepared" | "dispatched" | "settled";
+    disposition?: "succeeded" | "failed" | "cancelled";
+  };
   dispatchDenial?: string;
   repairValidationAttempts: number;
   repairValidation: {
@@ -1297,6 +1314,7 @@ export class OperatorRuntime {
     } else state.dispatched++;
     unit.status = "running";
     unit.callID = callID;
+    if (unit.terminalRescue) unit.terminalRescue.status = "dispatched";
     state.phase = "running";
     await this.save(state);
     return admitted;
@@ -1536,7 +1554,12 @@ export class OperatorRuntime {
     unit.evidence = result.evidence;
     unit.resultClass = result.resultClass;
     if (result.failure !== undefined) (unit as UnitState & { failure?: SerialDispatchSettlement["failure"] }).failure = result.failure;
+    else delete unit.failure;
     unit.status = result.disposition;
+    if (unit.terminalRescue) {
+      unit.terminalRescue.status = "settled";
+      unit.terminalRescue.disposition = result.disposition;
+    }
     if (result.disposition !== "succeeded") {
       state.phase = "awaiting-decision";
       state.decision = result.resultClass === "acceptance" ? ACCEPTANCE_REMEDIATION_DECISION : result.resultClass;
@@ -1547,6 +1570,87 @@ export class OperatorRuntime {
       state.decision = readiness;
     }
     await this.save(state);
+  }
+  /** One ordinary same-scope Mission retry before any optional model Rescue is considered. */
+  prepareMissionNormalRemediation(root: string, runID: string, unitID: string): Promise<OperatorState> {
+    return this.serial(root, async () => {
+      const state = await this.required(root);
+      const unit = state.units.find(candidate => candidate.unit.id === unitID);
+      if (state.runID !== runID || state.phase !== "awaiting-decision" || state.units.some(candidate => candidate.status === "running") ||
+          !unit || unit.status !== "failed" || unit.resultClass !== "acceptance" || !unit.failure ||
+          unit.failure.outcome !== "fail" || unit.normalRemediationUsed || unit.terminalRescue ||
+          state.units.some(candidate => candidate.terminalRescue)) throw new Error("operator-mission-normal-remediation-unavailable");
+      await this.verifyControls(unit);
+      unit.normalRemediationUsed = true;
+      unit.status = "pending";
+      unit.callID = null;
+      unit.childSessionID = null;
+      unit.evidence = [];
+      unit.resultClass = null;
+      delete unit.failure;
+      unit.repairValidation = null;
+      state.phase = "prepared";
+      state.decision = null;
+      await this.save(state);
+      return structuredClone(state);
+    });
+  }
+  /** Requeue a host-classified normal-remediation failure through the ordinary Mission Worker gates. */
+  prepareMissionTerminalRescue(root: string, runID: string, unitID: string, input: {
+    attempt_id: string;
+    selected_model: string;
+    selected_variant: string | null;
+    accepted_base: {
+      candidate_id: string;
+      contract_id: string;
+      scope: readonly string[];
+      acceptance: readonly string[];
+      validation: readonly string[];
+    };
+  }): Promise<OperatorState> {
+    return this.serial(root, async () => {
+      const state = await this.required(root);
+      const unit = state.units.find(candidate => candidate.unit.id === unitID);
+      const base = input.accepted_base;
+      if (state.runID !== runID || state.phase !== "awaiting-decision" || state.units.some(candidate => candidate.status === "running") ||
+          !unit || unit.status !== "failed" || unit.resultClass !== "acceptance" || !unit.failure ||
+          unit.failure.outcome !== "fail" || unit.normalRemediationUsed !== true || unit.terminalRescue ||
+          state.units.some(candidate => candidate.terminalRescue) ||
+          !identifier(input.attempt_id) || !text(input.selected_model) ||
+          (input.selected_variant !== null && !text(input.selected_variant))) {
+        throw new Error("operator-mission-terminal-rescue-unavailable");
+      }
+      if (!/^sha256:[0-9a-f]{64}$/u.test(base.candidate_id) ||
+          !text(base.contract_id) || base.contract_id !== state.acceptanceFingerprint ||
+          !strings(base.scope, true) || JSON.stringify(base.scope) !== JSON.stringify(unit.unit.write) ||
+          !strings(base.acceptance, true) || base.acceptance.length !== state.acceptance.length ||
+          base.acceptance.some((criterion, index) => criterion !== state.acceptance[index]) ||
+          !strings(base.validation, true) || JSON.stringify(base.validation) !== JSON.stringify(unit.unit.validation)) {
+        throw new Error("operator-mission-terminal-rescue-contract-mismatch");
+      }
+      const header = /^task_id: [^\r\n]+$/mu;
+      if (!header.test(unit.task.prompt) || /^terminal_rescue_attempt:/mu.test(unit.task.prompt)) {
+        throw new Error("operator-mission-terminal-rescue-task-invalid");
+      }
+      await this.verifyControls(unit);
+      // The Rescue route is sealed in host-owned operator state and the returned Task reference.
+      // Do not alter the registered handoff or expose the stable runtime's rescue capability.
+      unit.task = { ...unit.task, prompt: unit.task.prompt.replace(header,
+        line => `${line}\nterminal_rescue_attempt: ${input.attempt_id}`) };
+      unit.terminalRescue = { attempt_id: input.attempt_id, selected_model: input.selected_model,
+        selected_variant: input.selected_variant, accepted_base: structuredClone(base), prior_failure: structuredClone(unit.failure), status: "prepared" };
+      unit.status = "pending";
+      unit.callID = null;
+      unit.childSessionID = null;
+      unit.evidence = [];
+      unit.resultClass = null;
+      delete unit.failure;
+      unit.repairValidation = null;
+      state.phase = "prepared";
+      state.decision = null;
+      await this.save(state);
+      return structuredClone(state);
+    });
   }
   observeChild(root: string, callID: string, childID: string): Promise<void> {
     return this.serial(root, () => this.observeChildOnce(root, callID, childID));
@@ -1869,9 +1973,13 @@ export class OperatorRuntime {
         id: unit.unit.id, status: unit.status, child_session_id: unit.childSessionID, result_class: unit.resultClass,
          task_ref: unit.status === "pending" ? (unit.repairValidation === null ? this.workerTask(state, unit).prompt : this.repairWorkerTask(state, unit).prompt) : null,
         handoff_path: unit.handoffPath, operation_manifest_path: unit.manifestPath,
-        scope_read: unit.unit.read, scope_write: unit.unit.write, validation: unit.unit.validation,
-        acceptance_indices: unit.unit.acceptance_indices,
-        evidence: unit.evidence.map(item => ({ id: item.evidence_id, criteria: item.measurement.criterion_ids,
+         scope_read: unit.unit.read, scope_write: unit.unit.write, validation: unit.unit.validation,
+         acceptance_indices: unit.unit.acceptance_indices,
+         normal_remediation_used: unit.normalRemediationUsed ?? false,
+         ...(unit.terminalRescue ? { terminal_rescue: { attempt_id: unit.terminalRescue.attempt_id,
+           selected_model: unit.terminalRescue.selected_model, selected_variant: unit.terminalRescue.selected_variant,
+           status: unit.terminalRescue.status, ...(unit.terminalRescue.disposition ? { disposition: unit.terminalRescue.disposition } : {}) } } : {}),
+         evidence: unit.evidence.map(item => ({ id: item.evidence_id, criteria: item.measurement.criterion_ids,
           candidate: item.identity.candidate, command: item.execution.command, outcome: item.execution.outcome, exit_code: item.execution.exit_code })),
           repair_validation: unit.repairValidation === null ? null : { repair_fingerprint: unit.repairValidation.repair_fingerprint,
             remaining_validation: unit.repairValidation.commands.slice(unit.repairValidation.next_index) },

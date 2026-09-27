@@ -516,7 +516,7 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks)
     if (record(event.tools)) {
       const visible: Record<string, string[]> = {
         "dog-operator": ["start_mission", "plan_units", "operator_next", "operator_status", "expand_unit", "review_mission", "complete_mission", "cancel_operator", "reflection"],
-        "dogs-coordinator": ["plan_units", "operator_next", "operator_status", "expand_unit", "review_mission", "submit_mission"],
+        "dogs-coordinator": ["plan_units", "operator_next", "operator_status", "expand_unit", "review_mission", "submit_mission", "skip_mission_consultation", "retry_mission_unit", "rescue_mission_unit"],
         "dog-worker-v010": ["bind_write_gate", "release_write_gate", "operator_status"],
         "dog-luna-worker-v010": ["bind_write_gate", "release_write_gate", "operator_status"],
         "dog-reviewer-v010": [], "dog-scout-v010": [], "dog-advisor-v010": [],
