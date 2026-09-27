@@ -276,8 +276,10 @@ export class OperatorMissionRuntime {
     return this.update(root, state => {
       const expected = this.task(state);
       const resume = state.coordinator !== null && args.task_id === state.coordinator && typeof args.prompt === "string" && args.prompt.trim();
+      // The description is a presentation label. The opaque prompt binds the original request and
+      // requirements; changing only the label must not force a second Coordinator dispatch.
       if (["cancelled", "completed"].includes(state.phase) || state.dispatchOpen || args.subagent_type !== expected.subagent_type ||
-          (!resume && (args.prompt !== expected.prompt || args.description !== expected.description || args.task_id))) {
+          (!resume && (args.prompt !== expected.prompt || args.task_id))) {
         const reason = ["cancelled", "completed"].includes(state.phase) ? `mission is ${state.phase}`
           : state.dispatchOpen ? "Coordinator Task is still admitted; read operator_status to reconcile its native completion"
             : args.task_id && args.task_id !== state.coordinator ? `this location owns Coordinator ${state.coordinator ?? "not yet claimed"}, not ${String(args.task_id)}`
