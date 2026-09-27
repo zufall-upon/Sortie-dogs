@@ -97,7 +97,7 @@
         "additionalProperties": false,
         "required": ["check", "status", "summary"],
         "properties": {
-          "check": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "check": { "type": "string", "minLength": 1, "maxLength": 8192 },
           "status": { "enum": ["pass", "fail", "not_run"] },
           "exit_code": { "type": ["integer", "null"] },
           "summary": { "type": "string", "minLength": 1, "maxLength": 1000 }

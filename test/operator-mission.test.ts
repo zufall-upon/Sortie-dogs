@@ -29,8 +29,8 @@ test("public reproduction and shared-branch checks remain in the same mission Wo
   assert.match(coordinator, /working directory or package layout/u);
   assert.match(coordinator, /not an adjacent check unless it runs\s+the changed branch/u);
   assert.match(worker, /entrypoint, input and layout intact/u);
-  assert.match(worker, /same branch \(e\.g\. a neighboring exception type\)/u);
-  assert.match(worker, /skip redundant\s+checks already covered by formal validation/u);
+  assert.match(worker, /including failures the new\s+handler does not catch/u);
+  assert.match(worker, /skip redundant checks already covered by formal validation/u);
   assert.doesNotMatch(worker, /hidden evaluator details.*as (?:proof|tests)/u);
 
   // Public-only synthetic case analogous to a shared exception handler. This asserts the
@@ -61,6 +61,10 @@ test("mission review accepts grouped requirement traces while preserving coverag
   assert.deepEqual(missionReviewTraces(mission, ["R1/R2: fix and focused test", "R3: scope retained"]),
     ["R1/R2: fix and focused test", "R1/R2: fix and focused test", "R3: scope retained"]);
   assert.deepEqual(missionReviewTraces(mission, ["fix", "test", "scope"]), ["fix", "test", "scope"]);
+  assert.deepEqual(missionReviewTraces(mission, ["R1: fix. R2/R3: tests passed; scope retained"]),
+    Array(3).fill("R1: fix. R2/R3: tests passed; scope retained"));
+  assert.deepEqual(missionReviewTraces(mission, ["R1: fix; R2: tests passed\nR3: scope retained"]),
+    Array(3).fill("R1: fix; R2: tests passed\nR3: scope retained"));
   assert.throws(() => missionReviewTraces(mission, ["R1/R2: fix and test"]), /missing R3/);
   assert.throws(() => missionReviewTraces(mission, ["R1/R2/R3/R4: claims"]), /unknown R4/);
   mission.review = { runID: "run", risk: ["public-logic"], source: "source", verdict: "pending",
@@ -320,7 +324,16 @@ test("generated proof retains negative constraints and rejects dropped requireme
   const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
   await missions.capture("root", { id: "u1", text: "Fix result; do not change tests" });
   const mission = await missions.start("root", ["Fix result", "Do not change tests"]);
-  assert.throws(() => missionPlan(mission, [unit]), /multi-requirement work needs explicit coverage/);
+  const inferred = missionPlan(mission, [unit]);
+  assert.deepEqual(inferred.acceptance, ["Fix result", "Do not change tests"]);
+  assert.deepEqual(inferred.units[0]!.acceptance_indices, [0, 1]);
+  const operators = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
+  const run = await operators.prepareMission("root", inferred);
+  const handoff = JSON.parse(await readFile(run.units[0]!.handoffPath, "utf8"));
+  assert.deepEqual(handoff.ext["sortie-dogs/acceptance-continuity"].criteria, inferred.acceptance);
+  assert.deepEqual(handoff.ext["sortie-dogs/unit-coverage"].indices, [0, 1]);
+  assert.equal(run.phase, "prepared", "scheduling all requirements is not completion evidence");
+  assert.throws(() => missionPlan(mission, [unit, { ...unit, validation: ["node other.mjs"] }]), /splitting multiple requirements/);
   const related = { ...unit, requirement_ids: ["R1", "R2"] };
   const plan = missionPlan(mission, [related]);
   assert.deepEqual(plan.acceptance, ["Fix result", "Do not change tests"]);
@@ -328,6 +341,19 @@ test("generated proof retains negative constraints and rejects dropped requireme
   assert.throws(() => missionPlan(mission, [{ ...unit, requirement_ids: ["R1"] }]), /mission-uncovered: R2/);
   assert.throws(() => missionPlan(mission, [{ ...related, write: [".git"] }]), /control-write-forbidden/);
   assert.throws(() => missionPlan(mission, [{ ...unit, write: ["../escape"] }]));
+}));
+
+test("mission validation drops repeated checks while retaining the final proof command", async () => fixture(async directory => {
+  const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+  await missions.capture("root", { id: "u1", text: "Fix and verify the result" });
+  const mission = await missions.start("root", ["Fix the result", "Verify behavior"]);
+  const plan = missionPlan(mission, [{ ...unit, validation: ["node check.mjs", "node adjacent.mjs", "node check.mjs"] }]);
+  const operators = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
+  const run = await operators.prepareMission("root", plan);
+  const manifest = JSON.parse(await readFile(run.units[0]!.manifestPath, "utf8"));
+  assert.deepEqual(manifest.validation, ["node adjacent.mjs", "node check.mjs"]);
+  assert.equal((plan.goal_declaration.criteria as { validation_command: string }[])[0]!.validation_command, "node check.mjs");
+  assert.deepEqual(plan.acceptance, ["Fix the result", "Verify behavior"]);
 }));
 
 test("mission replan archives failed execution, keeps original acceptance and binds a fresh bounded scope", async () => fixture(async directory => {

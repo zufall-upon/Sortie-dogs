@@ -581,7 +581,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     );
     assert.match(
       reviewer.content,
-      /every acceptance item explicitly\s+maps to at least one changedLogicSummary entry[\s\S]+Missing or incomplete coverage is a concrete finding, never PASS/i,
+      /every acceptance item explicitly\s+maps to at least one changedLogicSummary entry[\s\S]+Missing behavioral evidence is an evidence gap; a demonstrated source\/test defect is a finding/i,
     );
     assert.match(reviewer.content, /indexed acceptance\[i\] -> changedLogicSummary\[j\] mapping line per acceptance item/i);
     assert.ok(reviewer.content.length >= 350, "dog-reviewer needs a substantive risk-gated role");

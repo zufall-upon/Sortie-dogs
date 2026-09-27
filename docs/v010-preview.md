@@ -85,7 +85,7 @@ has ended or the host has restarted. It accepts `revision_json` with exactly:
 #### Execution plan and acceptance
 
 - Preparation validates all handoffs and manifests before creating any controls.
-  Handoff and manifest command limits use the same 1,000-character constant;
+  Handoff, manifest and goal-evidence commands use the same 8,192-character constant;
   the full objective remains in `task.objective`, while `state.next` uses its title.
 - Invalid preparation returns bounded diagnostic codes and pointers, not input
   values. The invalid draft is root/profile-bound and does not grant dispatch.
@@ -412,7 +412,7 @@ any of them or granting execution. The exact original criteria remain in every
 handoff; unit completion does not mean global acceptance.
 
 Objectives remain verbatim in `task.objective`; `state.next` uses the bounded unit
-title. Handoff checks and manifest validation commands share a 1000-character
+title. Handoff checks and manifest validation commands share an 8,192-character
 limit. Invalid plans report bounded `document`, JSON `pointer`, `code`, `rule`,
 length/limit when applicable, and `repair_kind` metadata without echoing source
 values. Repair only that field or explicit proof mapping; do not regenerate the

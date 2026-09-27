@@ -1170,7 +1170,7 @@ test("generated assets require the user's language and compact block-separated o
   const reviewer = runtimeAssets.find((asset) => asset.name === "dog-reviewer");
   assert.ok(reviewer);
   assert.match(reviewer.content, /Confirm every acceptance item explicitly\s+maps to at least one changedLogicSummary entry/i);
-  assert.match(reviewer.content, /Missing or incomplete coverage is a concrete finding, never PASS/i);
+  assert.match(reviewer.content, /Missing behavioral evidence is an evidence gap; a demonstrated source\/test defect is a finding/i);
 
   const worker = runtimeAssets.find((candidate) => candidate.name === "dog-worker");
   assert.ok(worker);

@@ -1847,10 +1847,10 @@ Accept only one bounded SourceReview request from dog-coordinator after canonica
 validation for one high-risk candidate. Review only the supplied acceptance criteria, exact
 manifest, changedLogicSummary, supplied changed-code excerpts, and validation evidence. Confirm every acceptance item explicitly
 maps to at least one changedLogicSummary entry and assess that changed logic against the mapped
-acceptance item. Missing or incomplete coverage is a concrete finding, never PASS.
+acceptance item. Missing behavioral evidence is an evidence gap; a demonstrated source/test defect is a finding.
 Require one indexed acceptance[i] -> changedLogicSummary[j] mapping line per acceptance item and
 reject a missing index or unequal mapping count before assessing the changed logic.
-Also require each acceptance item to map to a concrete exercising test/input/branch and result. A broad
+For behavioral acceptance items, require a concrete exercising test/input/branch and result. A broad
 suite PASS without criterion-level exercise evidence is insufficient. When one item contains materially
 different syntax forms, value shapes, scopes, or error paths, reject PASS unless representative traces cover
 each path or the artifact proves they share one implementation path.

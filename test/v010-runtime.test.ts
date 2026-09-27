@@ -6,6 +6,7 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 import { OperatorContractError, OperatorRuntime, operatorGitPathAuthorized, parseOperatorPlan, type OperatorTask } from "../dist/core/operator-runtime.js";
+import { CONTRACT_TEXT_LIMITS } from "../dist/core/contract-limits.js";
 import { OperatorProposalRuntime } from "../dist/core/operator-proposal.js";
 import { OperatorMissionRuntime, missionPlan } from "../dist/core/operator-mission.js";
 import { V010_RUNTIME_PROFILE, STABLE_RUNTIME_PROFILE, canonicalAgent, profileAgent, profileTool } from "../dist/core/runtime-profile.js";
@@ -281,7 +282,7 @@ test("preview assets coexist with stable assets and markers", async () => fixtur
   assert.match(previewAssets.find(asset => asset.name === "dogs-coordinator")!.content, /^model: openai\/gpt-6-sol#xhigh$/m);
   assert.match(reviewer, /another route, representation, branch, or target that can materially change\nthe result/u);
   assert.match(reviewer, /Absence of that\ninventory alone is not an evidence gap/u);
-  assert.match(reviewer, /still flag a missing\nrequired behavioral result or canonical validation evidence/u);
+  assert.match(reviewer, /If a missing check genuinely\naffects correctness or a requested deliverable/u);
   assert.doesNotMatch(reviewer, /Require the enumeration to name the target artifact/u);
   assert.match(reviewer, /Start with exactly one of PASS, FINDINGS or EVIDENCE_GAPS/u);
   const coordinator = previewAssets.find(asset => asset.name === "dogs-coordinator")!.content;
@@ -809,7 +810,8 @@ test("nested mission review and accepted work survive reload and agent-change ca
   await hooks["tool.execute.before"]!({ tool: "task", sessionID: "coordinator", callID: "initial-review" }, initial);
   assert.match(initial.args.prompt, /^review_phase: initial$/m);
   assert.match(initial.args.prompt, /specific acceptance-relevant behavior or required validation/u);
-  assert.match(initial.args.prompt, /do not request a generic route inventory or raw history/u);
+  assert.match(initial.args.prompt, /do not request a generic route inventory/u);
+  assert.match(initial.args.prompt, /absence of a separate settings dump or historical log is not itself an evidence gap/u);
   assert.doesNotMatch(initial.args.prompt, /process history later established on the base/u);
   hostMessages.coordinator = [{ info: { role: "assistant", sessionID: "coordinator", time: { created: Date.now() } },
     parts: [{ type: "tool", tool: "task", callID: "initial-review", state: { status: "completed", input: initial.args,
@@ -964,17 +966,28 @@ for (const failure of ["budget", "generated-contract", "control-storage", "state
       await assert.rejects(declare(Array.from({ length: status.budget.remaining_units + 1 }, (_, i) =>
         ({ ...revised, validation: [`node check-${i}.mjs`] })), "Split verification"), /mission-budget-exhausted/);
     } else if (failure === "generated-contract") {
-      await assert.rejects(declare([{ ...revised, validation: [`node check.mjs ${"x".repeat(1000)}`] }], "Correct validation"),
-        (error: unknown) => error instanceof OperatorContractError && error.diagnostics.some(item => item.code === "schema_maxLength"));
+      const rejected = JSON.parse(await declare([{ ...revised, validation: [`node check.mjs ${"x".repeat(CONTRACT_TEXT_LIMITS.command)}`] }], "Correct validation"));
+      assert.equal(rejected.status, "invalid-plan");
+      assert.ok(rejected.diagnostics.some(item => item.pointer === "/validation/0" && item.code === "schema_maxLength" &&
+        item.limit === CONTRACT_TEXT_LIMITS.command && item.length > item.limit));
+      assert.match(rejected.next_action, /retry plan_units directly/);
     } else if (failure === "control-storage") {
       await rename(controls, `${controls}.saved`);
       await writeFile(controls, "fixture storage outage");
-      try { await assert.rejects(declare([revised], "Correct validation"), /operator-control-write-failed/); }
+      try {
+        const rejected = JSON.parse(await declare([revised], "Correct validation"));
+        assert.equal(rejected.status, "invalid-plan");
+        assert.ok(rejected.diagnostics.some(item => item.code === "operator-control-write-failed"));
+      }
       finally { await rm(controls); await rename(`${controls}.saved`, controls); }
     } else {
       await rename(operatorPath, `${operatorPath}.saved`);
       await mkdir(operatorPath);
-      try { await assert.rejects(declare([revised], "Correct validation"), /operator-control-write-failed|EISDIR|ENOTDIR|EPERM/); }
+      try {
+        const rejected = JSON.parse(await declare([revised], "Correct validation"));
+        assert.equal(rejected.status, "invalid-plan");
+        assert.ok(rejected.diagnostics.some(item => item.code === "operator-control-write-failed"));
+      }
       finally { await rm(operatorPath, { recursive: true }); await rename(`${operatorPath}.saved`, operatorPath); }
     }
     assert.equal(await readFile(operatorPath, "utf8"), before[0], "rejection must not cancel or rewrite the current run");
@@ -996,9 +1009,13 @@ for (const failure of ["budget", "generated-contract", "control-storage", "state
   }));
 }
 
-test("read-only mission unit reaches validated completion without declaring a fake write scope", async () => fixture(async root => {
+test("read-only mission unit preserves a long validation command through dispatch and observed completion", async () => fixture(async root => {
   const { hooks, unit, declare } = await missionCoordinatorFixture(root);
-  const next = JSON.parse(await declare([{ ...unit, write: [] }]));
+  const values = Array.from({ length: 200 }, (_, i) => `item-${i}`);
+  const code = `const assert = require("node:assert/strict"); assert.equal(require("node:fs").readFileSync("seed.txt", "utf8"), "base\\n"); const values = ${JSON.stringify(values)}; assert.equal(values.length, 200); assert.equal(values.at(-1), "item-199"); console.log("200 items verified");`;
+  const command = `node -e '${code}'`;
+  assert.ok(command.length > 1000 && command.length < CONTRACT_TEXT_LIMITS.command);
+  const next = JSON.parse(await declare([{ ...unit, write: [], validation: [command] }]));
   const task = { args: structuredClone(next.task) };
   await hooks["tool.execute.before"]!({ tool: "task", sessionID: "coordinator", callID: "worker-call" }, task);
   await hooks["chat.message"]!({ sessionID: "worker", messageID: "worker-user", agent: "dog-worker-v010" }, {
@@ -1008,6 +1025,7 @@ test("read-only mission unit reaches validated completion without declaring a fa
   const run = await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root"), worker = run.units[0]!;
   const manifest = JSON.parse(await readFile(worker.manifestPath, "utf8"));
   assert.deepEqual(manifest.write, []);
+  assert.deepEqual(manifest.validation, [command]);
   const gate = await createWriteGate(await createProjectPaths(root), manifest);
   await assert.rejects(gate.checkPath("seed.txt"), /manifest write scope/, "read inputs must not become writable");
   await hooks["tool.execute.before"]!({ tool: "read", sessionID: "worker", callID: "handoff-read" }, { args: { filePath: worker.handoffPath } });
@@ -1015,14 +1033,20 @@ test("read-only mission unit reaches validated completion without declaring a fa
     { output: await readFile(worker.handoffPath, "utf8") });
   assert.equal(JSON.parse(await hooks.tool!.sortie_v010_bind_write_gate.execute({ project_root: root,
     manifest_path: worker.manifestPath }, { sessionID: "worker" })).status, "bound");
-  await executeGeneratedCommand(hooks, root, "validate", "node check.mjs", "check.mjs");
+  const invocation = { args: { command } };
+  await hooks["tool.execute.before"]!({ tool: "bash", sessionID: "worker", callID: "validate" }, invocation);
+  assert.equal(invocation.args.command, command);
+  const result = await promisify(execFile)(process.execPath, ["-e", code], { cwd: root, encoding: "utf8" });
+  assert.match(result.stdout, /200 items verified/);
+  await hooks["tool.execute.after"]!({ tool: "bash", sessionID: "worker", callID: "validate" },
+    { output: result.stdout, metadata: { exit: 0, status: "completed" } });
   await hooks["tool.execute.after"]!({ tool: "task", sessionID: "coordinator", callID: "worker-call" },
-    { output: "<task_result>Seed inspected and validated; no edits.</task_result>", metadata: { sessionId: "worker" } });
+    { output: "<task_result>Seed and inline data verified; no edits.</task_result>", metadata: { sessionId: "worker" } });
   const status = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
   assert.equal(status.units[0].status, "succeeded", JSON.stringify(status));
   assert.ok(status.units[0].evidence.length > 0);
   assert.equal(status.units[0].evidence[0].execution.exit_code, 0);
-  await hooks.tool!.sortie_v010_review_mission.execute({ risk_tags: [], traces: ["R1: check.mjs read the seed and exited 0; no files changed"] },
+  await hooks.tool!.sortie_v010_review_mission.execute({ risk_tags: [], traces: ["R1: Seed and inline data verification exited 0; no files changed"] },
     { sessionID: "coordinator" });
   await hooks.tool!.sortie_v010_submit_mission.execute({ status: "ready", summary: "Seed verified without edits" }, { sessionID: "coordinator" });
   await hooks.tool!.sortie_v010_complete_mission.execute({}, { sessionID: "root" });

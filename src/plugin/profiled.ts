@@ -1,4 +1,5 @@
 import { V010_RUNTIME_ASSET_VERSION } from "../asset-version.js";
+import { MISSION_BEHAVIOR_REVIEW } from "../runtime-mission-assets.js";
 import { cancelledMissionRetainsAcceptance, OperatorContractError, OperatorRuntime, type OperatorState } from "../core/operator-runtime.js";
 import { DEFAULT_OPERATOR_PROPOSAL_BUDGET, OPERATOR_APPROVAL_CONTRACT, OPERATOR_PROPOSAL_BUDGET_CAPS, OPERATOR_PROPOSAL_REVISION_CONTRACT,
   OperatorProposalBudgetError, OperatorProposalRuntime } from "../core/operator-proposal.js";
@@ -1328,14 +1329,20 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       args: { units: { type: "array", minItems: 1, maxItems: 32, items: { type: "object", additionalProperties: false,
         properties: { title: { type: "string" }, objective: { type: "string" },
           read: { ...stringList, description: "Inputs that affect validation, not an allowlist for observation. Do not include whole live session/database/log trees just to inspect them." }, write: stringList,
-          validation: stringList, requirement_ids: stringList }, required: ["title", "objective", "write", "validation"] } } as never,
+          validation: stringList, requirement_ids: { ...stringList, description: "Related requirement IDs. A single unit inherits all requirements when omitted; specify coverage when splitting work across units." } }, required: ["title", "objective", "write", "validation"] } } as never,
         execution: { type: "object", properties: { commands: stringList, directory: { type: "string" } },
           required: ["commands", "directory"], additionalProperties: false,
           description: "For an operation: the actual run/grade commands, not a preflight or NO_START check. Host observes their native shell completion; no handwritten proof file is needed.", "x-sortie-optional": true } as never,
         reason: { type: "string", "x-sortie-optional": true } as never }, execute: async (args, context) => {
         const { root, mission } = await missionAuthority(context.sessionID);
-        return serializeDispatchTransition(root, () => declareMissionUnits(root, context.sessionID, mission,
-          (args as Record<string, unknown>).units, args.reason, (args as Record<string, unknown>).execution));
+        try {
+          return await serializeDispatchTransition(root, () => declareMissionUnits(root, context.sessionID, mission,
+            (args as Record<string, unknown>).units, args.reason, (args as Record<string, unknown>).execution));
+        } catch (error) {
+          if (!(error instanceof OperatorContractError)) throw error;
+          return JSON.stringify({ status: "invalid-plan", diagnostics: error.diagnostics, diagnostics_truncated: error.diagnostics_truncated,
+            next_action: "Correct the reported field or control-storage problem and retry plan_units directly. Keep the original requirements and existing run; do not cancel or repeat passed work to repair the plan." });
+        }
       } };
     tools[expandUnit] = { description: "Coordinator: extend the stopped unit's write scope immediately within the original request. Keeps original requirements and cumulative budget; generates a replacement Worker contract. No Operator approval or handwritten manifest repair is needed. Use only after the Worker has returned.",
       args: { unit_id: stringSchema, paths: stringList as never, reason: stringSchema }, execute: async (args, context) => {
@@ -1388,9 +1395,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           description: `🔎 ${run.units[0]!.unit.title}`, prompt: [
             `candidate_id: ${mission.id}`, `review_phase: ${phase}`, "canonical_validation_exit: 0", `risk_tags: [${risk.join(", ")}]`,
             "Review this candidate independently. Use the language of the requirements/traces. Invoke no tools. First line: exactly PASS, FINDINGS or EVIDENCE_GAPS.",
-            "Use EVIDENCE_GAPS only when no concrete source/test defect is established and a specific acceptance-relevant behavior or required validation cannot be settled by the supplied artifact. Name the affected path and why the missing evidence matters; do not request a generic route inventory or raw history for incidental workflow constraints already covered by a concise Worker trace. Any concrete defect uses FINDINGS.",
+            "Use EVIDENCE_GAPS only when no concrete source/test defect is established and a specific acceptance-relevant behavior or required validation cannot be settled by the supplied artifact. Name the affected path and why the missing evidence matters; do not request a generic route inventory. Any concrete defect uses FINDINGS.",
             "This Reviewer's native outcome and final acceptance can only be observed after this review. List those as deferred Operator checks, not as a reason to request another review. Still assess all available source, validation and historical evidence independently.",
             "For changed failure paths, assess the public return value, error and post-failure state together against existing API behavior; matching error text alone does not establish compatibility.",
+            MISSION_BEHAVIOR_REVIEW,
             `acceptance: ${JSON.stringify(run.acceptance)}`, `changedLogicSummary: ${JSON.stringify(traces)}`,
             ...run.acceptance.map((_, i) => `acceptance[${i}] -> changedLogicSummary[${i}]`),
             `manifest: ${JSON.stringify(run.units.map(unit => unit.unit))}`, `sourceFingerprint: ${source.fingerprint}`,

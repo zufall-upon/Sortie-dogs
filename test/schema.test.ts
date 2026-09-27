@@ -6,6 +6,7 @@ import Ajv2020 from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
 
 import {
+  CONTRACT_TEXT_LIMITS,
   validateHandoffSchema,
   validateOperationManifestSchema,
 } from "../src/core/validate-schema.ts";
@@ -179,7 +180,7 @@ test("operation manifest enforces version and string length boundaries", () => {
   atBoundary.task_id = "t".repeat(128);
   atBoundary.read = ["r".repeat(512)];
   atBoundary.write = ["w".repeat(512)];
-  atBoundary.validation = ["v".repeat(1000)];
+  atBoundary.validation = ["v".repeat(CONTRACT_TEXT_LIMITS.command)];
   assertValidOperation(atBoundary);
 
   for (const mutate of [
@@ -191,7 +192,7 @@ test("operation manifest enforces version and string length boundaries", () => {
     (candidate) => { candidate.write = [""]; },
     (candidate) => { candidate.write = ["w".repeat(513)]; },
     (candidate) => { candidate.validation = [""]; },
-    (candidate) => { candidate.validation = ["v".repeat(1001)]; }
+    (candidate) => { candidate.validation = ["v".repeat(CONTRACT_TEXT_LIMITS.command + 1)]; }
   ]) {
     const candidate = clone(validOperation);
     mutate(candidate);
@@ -200,17 +201,21 @@ test("operation manifest enforces version and string length boundaries", () => {
 });
 
 test("runtime handoff and manifest schemas share the validation command limit", () => {
-  const command = "v".repeat(1000);
+  const command = "v".repeat(CONTRACT_TEXT_LIMITS.command);
   const handoff = clone(minimal);
   handoff.verification = [{ check: command, status: "not_run", exit_code: null, summary: "Boundary command." }];
   const manifest = clone(validOperation);
   manifest.validation = [command];
   assert.equal(validateHandoffSchema(handoff).ok, true);
   assert.equal(validateOperationManifestSchema(manifest).ok, true);
+  assertValid(handoff);
+  assertValidOperation(manifest);
   handoff.verification[0].check += "v";
   manifest.validation[0] += "v";
   assert.equal(validateHandoffSchema(handoff).ok, false);
   assert.equal(validateOperationManifestSchema(manifest).ok, false);
+  assertInvalid(handoff);
+  assertInvalidOperation(manifest);
 });
 
 test("accepts minimal investigation, minimal interruption, and full completion fixtures", () => {
