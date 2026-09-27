@@ -135,6 +135,21 @@ node --experimental-strip-types scripts/swebench-lite-supervisor.mjs \
 `--start` detaches the supervisor and prints its run ID and process identity.
 Predictions are written in manifest order even when children finish out of order.
 
+### Optional: longest-observed-first launch order
+
+For a **future** run over the same instances, add `--duration-history /path/to/previous/run/supervisor-state.json`
+to the `--start` command (and select `--workers 8` if the campaign calls for eight slots). The previous
+supervisor run must be completed and have a positive `result.elapsed_ms` for each instance. The supervisor
+launches the longest observed cases first, breaking ties by manifest position; freed slots take the next
+case. It leaves the manifest and final predictions in their original order. `supervisor-state.json` records
+the history path, SHA-256 and planned launch order; resume requires the same file and contents. Keep the
+history snapshot available until the run is finished.
+
+This is an inference wall-time optimization, **not** a score improvement or a reason to change an active
+run. With the v0.12.17 dev23 durations, an eight-slot list-scheduling simulation changes ~39.8 minutes
+in manifest order to ~35.2 minutes longest-first. Actual duration and result can change with concurrency;
+record the scheduling policy as a changed comparison condition. The official scorer is separate.
+
 ### Optional: prepared official environment
 
 Add `--prepared-environment official-image-testbed` to give agents the same Python environment the official

@@ -165,6 +165,37 @@ function instanceEntry(instance, index) {
   };
 }
 
+async function durationSchedule(value, path) {
+  if (!path) return null;
+  const historyPath = resolve(path);
+  const bytes = await readFile(historyPath);
+  const history = JSON.parse(bytes);
+  ensure(history.status === "completed" && Array.isArray(history.instances), "invalid-duration-history");
+  const durations = new Map();
+  for (const entry of history.instances) {
+    const milliseconds = entry?.result?.elapsed_ms;
+    ensure(typeof entry?.instance_id === "string" && !durations.has(entry.instance_id) &&
+      Number.isFinite(milliseconds) && milliseconds > 0, "invalid-duration-history");
+    durations.set(entry.instance_id, milliseconds);
+  }
+  const indices = value.instances.map((_, index) => index);
+  ensure(durations.size === indices.length && indices.every(index => durations.has(value.instances[index].instance_id)) &&
+    new Set(value.instances.map(entry => entry.instance_id)).size === indices.length, "duration-history-instances-mismatch");
+  indices.sort((left, right) => durations.get(value.instances[right].instance_id) -
+    durations.get(value.instances[left].instance_id) || left - right);
+  return {
+    policy: "longest-observed-first-v1",
+    history: historyPath,
+    history_sha256: createHash("sha256").update(bytes).digest("hex"),
+    order: indices,
+  };
+}
+
+function firstPendingIndex(state) {
+  const order = state.schedule?.order ?? state.instances.map((_, index) => index);
+  return order.find(index => state.instances[index].status === "pending") ?? -1;
+}
+
 export async function createSupervisorState(value, options) {
   ensure(record(value) && Array.isArray(value.instances) && value.instances.length > 0, "invalid-supervisor-manifest");
   const supervisor = await processIdentity();
@@ -193,6 +224,7 @@ export async function createSupervisorState(value, options) {
     reserved_usd: 0,
     held_unknown_usd: 0,
     next_index: 0,
+    ...(options.schedule ? { schedule: options.schedule } : {}),
     instances: value.instances.map(instanceEntry),
   };
 }
@@ -250,7 +282,7 @@ async function markInterrupted(state) {
     entry.cost_reservation_usd = entry.cost_reservation_usd ?? null;
   }
   state.reserved_usd = 0;
-  state.next_index = state.instances.findIndex(entry => entry.status === "pending");
+  state.next_index = firstPendingIndex(state);
   if (state.next_index < 0) state.next_index = state.instances.length;
 }
 
@@ -420,9 +452,10 @@ export async function runSupervisor(value, options, dependencies = {}) {
   let admitted = false;
   const active = new Map();
   try {
+    const schedule = await durationSchedule(value, options.durationHistory);
     state = await readJson(statePath).catch(async error => {
       if (error?.code !== "ENOENT") throw error;
-      const initial = await createSupervisorState(value, { ...options, timeoutSeconds, runRoot, statePath });
+      const initial = await createSupervisorState(value, { ...options, schedule, timeoutSeconds, runRoot, statePath });
       await writeAtomicJson(statePath, initial);
       return initial;
     });
@@ -430,6 +463,7 @@ export async function runSupervisor(value, options, dependencies = {}) {
     ensure(Array.isArray(state.instances), "invalid-supervisor-state");
     const workers = workerCount(options.workers ?? state.workers);
     ensure(state.input_sha256 === undefined || state.input_sha256 === fingerprint(value), "supervisor-input-changed");
+    ensure(JSON.stringify(state.schedule ?? null) === JSON.stringify(schedule), "supervisor-schedule-changed");
     const limits = state.limits;
     ensure(!limits ? timeoutSeconds === DEFAULT_TIMEOUT_SECONDS :
       ((limits.cost_limit_usd === null || limits.cost_limit_usd === options.costLimitUsd) &&
@@ -480,7 +514,11 @@ export async function runSupervisor(value, options, dependencies = {}) {
       heartbeatInFlight = true;
       writes.enqueue().catch(() => undefined).finally(() => { heartbeatInFlight = false; });
     }, (options.heartbeatSeconds ?? DEFAULT_HEARTBEAT_SECONDS) * 1000);
-    const firstPending = () => state.instances.findIndex(entry => entry.status === "pending");
+    const firstPending = () => firstPendingIndex(state);
+    const nextIndex = () => {
+      const index = firstPending();
+      return index < 0 ? state.instances.length : index;
+    };
     const reservationFor = () => {
       const pending = state.instances.filter(entry => entry.status === "pending").length;
       const slots = Math.max(1, Math.min(workers - active.size, pending));
@@ -494,7 +532,7 @@ export async function runSupervisor(value, options, dependencies = {}) {
       entry.status = "not-run-cost-limit";
       entry.finished_at = now();
       entry.result = { instance_id: entry.instance_id, status: entry.status };
-      state.next_index = Math.max(state.next_index ?? 0, index + 1);
+      state.next_index = nextIndex();
       await writes.enqueue();
     };
     const claim = async (index, reservation) => {
@@ -506,7 +544,7 @@ export async function runSupervisor(value, options, dependencies = {}) {
         entry.status = "failed";
         entry.finished_at = now();
         entry.result = { instance_id: entry.instance_id, status: "failed", error: String(error?.message ?? error) };
-        state.next_index = Math.max(state.next_index ?? 0, index + 1);
+        state.next_index = nextIndex();
         await writes.enqueue();
         return null;
       }
@@ -517,7 +555,7 @@ export async function runSupervisor(value, options, dependencies = {}) {
       entry.child_output = paths.output;
       entry.child_metadata = paths.metadata;
       state.reserved_usd += reservation;
-      state.next_index = Math.max(state.next_index ?? 0, index + 1);
+      state.next_index = nextIndex();
       await writes.enqueue();
       return paths;
     };
@@ -665,6 +703,7 @@ export async function startDetachedSupervisor(options) {
   if (options.runnerScript) args.push("--runner-script", resolve(options.runnerScript));
   if (options.perInstanceUsd) args.push("--per-instance-usd", String(options.perInstanceUsd));
   if (options.preparedEnvironment) args.push("--prepared-environment", options.preparedEnvironment);
+  if (options.durationHistory) args.push("--duration-history", resolve(options.durationHistory));
   const child = spawn(process.execPath, args, {
     cwd: process.cwd(),
     env: { ...process.env, ...(options.environment ?? {}) },
@@ -743,7 +782,7 @@ function parseArguments(argv) {
       const key = argument.slice(2).replaceAll("-", "_");
       const name = { run_root: "runRoot", cost_limit_usd: "costLimitUsd", workers: "workers", heartbeat_seconds: "heartbeatSeconds",
         stale_seconds: "staleSeconds", report_seconds: "reportSeconds", state_path: "statePath", runner_script: "runnerScript", per_instance_usd: "perInstanceUsd",
-        timeout_seconds: "timeoutSeconds", prepared_environment: "preparedEnvironment" }[key] ?? key;
+        timeout_seconds: "timeoutSeconds", prepared_environment: "preparedEnvironment", duration_history: "durationHistory" }[key] ?? key;
       const value = argv[++index];
       values[name] = ["costLimitUsd", "perInstanceUsd", "workers", "heartbeatSeconds", "staleSeconds", "reportSeconds", "timeoutSeconds"].includes(name) ? Number(value) : value;
     }
