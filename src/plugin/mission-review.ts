@@ -35,6 +35,17 @@ function focusedAllowances(sizes: readonly number[], budget: number): number[] {
   return allowances;
 }
 
+function visibleLineCount(lines: readonly string[], allowance: number): number {
+  let bytes = 0, count = 0;
+  for (const line of lines) {
+    const size = Buffer.byteLength(line);
+    if (bytes + size > allowance) break;
+    bytes += size;
+    count++;
+  }
+  return count;
+}
+
 export async function missionReviewBaseline(directory: string): Promise<string | undefined> {
   try {
     const { stdout } = await exec("git", ["rev-parse", "--verify", "HEAD^{commit}"], { cwd: directory });
@@ -150,26 +161,34 @@ export async function missionReviewSource(directory: string, run: OperatorState,
       throw fail(error instanceof Error ? error.message : String(error));
     }
   }
-  // Keep room for the baseline diff; reserve headings and truncation notices before allocating
-  // the remaining focused bytes. Explicit references take precedence over automatic diff prefixes.
+  // Keep room for the baseline diff. Reserve notices only after the allocated whole lines show
+  // truncation; pre-reserving every possible notice can hide all six otherwise fitting references.
   const heading = (entry: MissionEvidenceExcerpt) => `\n--- evidence: ${entry.path}:${entry.offset} ---\n`;
   const truncated = (entry: MissionEvidenceExcerpt) => `[FOCUSED EXCERPT TRUNCATED: ${entry.path}:${entry.offset}; request a smaller range]\n`;
-  const overhead = focused.reduce((size, { entry }) => size + Buffer.byteLength(heading(entry) + truncated(entry)), 0);
   // Read-only reviews retain their smaller existing envelope; code reviews may use the space
   // previously reserved for automatic diff prefixes, while leaving room for changed-file context.
-  const allowances = focusedAllowances(focused.map(item => item.bytes), Math.max(0, (writes.length ? 18_000 : 11_000) - overhead));
+  const limit = writes.length ? 18_000 : 11_000;
+  const headings = focused.reduce((size, { entry }) => size + Buffer.byteLength(heading(entry)), 0);
+  const needsNotice = focused.map(() => false);
+  let allowances: number[];
+  while (true) {
+    const notices = focused.reduce((size, { entry }, index) =>
+      size + (needsNotice[index] ? Buffer.byteLength(truncated(entry)) : 0), 0);
+    allowances = focusedAllowances(focused.map(item => item.bytes), Math.max(0, limit - headings - notices));
+    let changed = false;
+    for (const [index, item] of focused.entries()) {
+      if (!needsNotice[index] && visibleLineCount(item.lines, allowances[index]!) < item.lines.length) {
+        needsNotice[index] = true;
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
   let selected = "";
   for (const [index, item] of focused.entries()) {
     selected += heading(item.entry);
-    let shown = 0, bytes = 0;
-    for (const line of item.lines) {
-      const size = Buffer.byteLength(line);
-      if (bytes + size > allowances[index]!) break;
-      selected += line;
-      bytes += size;
-      shown++;
-    }
-    if (shown < item.lines.length) selected += truncated(item.entry);
+    selected += item.lines.slice(0, visibleLineCount(item.lines, allowances[index]!)).join("");
+    if (needsNotice[index]) selected += truncated(item.entry);
   }
   if (writes.length === 0) return { fingerprint: `sha256:${hash.digest("hex")}`,
     excerpt: selected + "[Read-only units: no declared output files. Review the supplied observations, traces and validation evidence.]" };

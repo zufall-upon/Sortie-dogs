@@ -307,6 +307,22 @@ test("large focused tests do not starve a later requested error branch", async (
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("six single-line references fitting the read-only budget are not displaced by unused notices", async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const root = await mkdtemp(join(resolve("_testenv"), "mission-focused-lines-"));
+  try {
+    const paths = ["a.log", "b.log", "c.log", "d.log", "e.log", "f.log"];
+    for (const path of paths) await writeFile(join(root, path), "x".repeat(1_796) + "\n");
+    const run = { units: [{ unit: { read: paths, write: [] }, hashes: [] }] } as never;
+    const packet = await missionReviewSource(root, run, paths.map(path => ({ path, offset: 1, limit: 1 })));
+    for (const path of paths) {
+      assert.match(packet.excerpt, new RegExp(`--- evidence: ${path.replace(".", "\\.")}:1 ---\\n1: x{1796}\\n`));
+      assert.doesNotMatch(packet.excerpt, new RegExp(`FOCUSED EXCERPT TRUNCATED: ${path.replace(".", "\\.")}`));
+    }
+    assert.ok(Buffer.byteLength(packet.excerpt) < 12_000);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("focused read-only review consumes the original result tail and pins unshown bytes", async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const root = await mkdtemp(join(resolve("_testenv"), "mission-result-tail-"));
