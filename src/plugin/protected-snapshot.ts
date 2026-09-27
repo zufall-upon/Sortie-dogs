@@ -17,10 +17,11 @@ export function isRuntimeControlPath(path: string): boolean {
 }
 
 async function protectedScopeDigest(projectRoot: string, paths: readonly string[], manifestHash: string,
-  sourcePolicy?: Binding["source_policy"]): Promise<string | undefined> {
+  sourcePolicy?: Binding["source_policy"], excluded: readonly string[] = []): Promise<string | undefined> {
   const entries: Array<readonly [string, string, string?]> = [];
   const canonicalRoot = await realpath(projectRoot);
   const visit = async (absolute: string): Promise<boolean> => {
+    if (excluded.some(root => !outside(root, absolute))) return true;
     const scoped = relative(projectRoot, absolute).replaceAll("\\", "/");
     if (scoped === ".." || scoped.startsWith("../") || isAbsolute(scoped)) return false;
     if (sourcePolicy === "project-files-v1" && isRuntimeControlPath(scoped)) return true;
@@ -58,13 +59,26 @@ function outside(projectRoot: string, path: string): boolean {
 }
 
 async function declaredScopeDigest(projectRoot: string, paths: readonly string[], manifestHash: string,
-  source: boolean): Promise<string | undefined> {
+  source: boolean, excluded: readonly string[] = []): Promise<string | undefined> {
   const local = paths.filter(path => !outside(projectRoot, path));
   const external = paths.filter(path => outside(projectRoot, path));
-  const project = await protectedScopeDigest(projectRoot, local, manifestHash, source ? "project-files-v1" : undefined);
+  const project = await protectedScopeDigest(projectRoot, local, manifestHash, source ? "project-files-v1" : undefined, excluded);
   if (project === undefined) return undefined;
   const artifacts = await declaredArtifacts(external).catch(() => undefined);
-  return artifacts && goalFingerprint({ project, external: artifacts.entries });
+  return artifacts && goalFingerprint({ project, external: artifacts.entries.filter(([path]) => !excluded.some(root => !outside(root, path))) });
+}
+
+/** An existing operation may create its declared outputs. Compare its other inputs during execution;
+ * ordinary evidence still pins the full post-operation source and outputs for later acceptance. */
+export async function operationInputSnapshot(projectRoot: string, binding: Binding): Promise<string | undefined> {
+  const manifest = await readFile(resolve(projectRoot, binding.manifest_path)).catch(() => undefined);
+  if (!manifest || `sha256:${createHash("sha256").update(manifest).digest("hex")}` !== binding.manifest_hash) return undefined;
+  const paths = binding.source_paths.map(path => resolve(projectRoot, path));
+  const outputs = binding.candidate_paths.map(path => resolve(projectRoot, path));
+  const hash = binding.manifest_hash.slice("sha256:".length);
+  return binding.source_policy === "declared-paths-v1"
+    ? await declaredScopeDigest(projectRoot, paths, hash, true, outputs)
+    : await protectedScopeDigest(projectRoot, paths, hash, binding.source_policy, outputs);
 }
 
 export async function protectedSnapshot(authorization: { manifestPath: string; manifestHash: string; projectRoot: string }): Promise<{

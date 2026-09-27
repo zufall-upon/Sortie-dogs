@@ -9109,6 +9109,8 @@ test("parallel worker bindings allow disjoint scopes and reject equal or ancesto
       const denied = await executeBindWriteGate(hooks, directory, id, `${id}.operation-manifest.json`);
       assert.equal(denied.reason, "manifest-overlap");
       assert.equal(denied.recoverable, true);
+      assert.ok(denied.conflicts.some((item: { session_id: string; access: string }) => item.session_id === "unit-a" &&
+        ["write/write", "read/write"].includes(item.access)), JSON.stringify(denied.conflicts));
       assert.deepEqual(denied.defects, ["manifest /write parallel_write_scope_overlap"]);
       assert.deepEqual(denied.escalation, {
         action: "blocker-resolution-takeover",

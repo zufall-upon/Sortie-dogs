@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import test from "node:test";
-import { protectedSnapshot, refreshProtectedSnapshot } from "../dist/plugin/protected-snapshot.js";
+import { operationInputSnapshot, protectedSnapshot, refreshProtectedSnapshot } from "../dist/plugin/protected-snapshot.js";
 import { goalFingerprint } from "../dist/core/goal-bound.js";
 
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -86,4 +86,19 @@ test("legacy bindings retain their recipe rather than silently discarding change
   await writeFile(join(root, ".sortie-dogs-v010/state.json"), "second");
   assert.notEqual((await refreshProtectedSnapshot(root, legacy))?.source, old?.source);
   assert.equal((await refreshProtectedSnapshot(root, pinned.binding))?.source, pinned.source);
+}));
+
+test("operation output creation preserves input identity but input changes do not", async () => fixture(async root => {
+  await mkdir(join(root, "work"));
+  await writeFile(join(root, "work/run.mjs"), "original");
+  const pinned = await pin(root, ["work"], ["work/result.json"]);
+  const inputs = await operationInputSnapshot(root, pinned.binding);
+  assert.ok(inputs);
+  await writeFile(join(root, "work/result.json"), "result");
+  assert.equal(await operationInputSnapshot(root, pinned.binding), inputs);
+  assert.notEqual((await refreshProtectedSnapshot(root, pinned.binding))?.source, pinned.source);
+  await writeFile(join(root, "work/run.mjs"), "modified");
+  assert.notEqual(await operationInputSnapshot(root, pinned.binding), inputs);
+  await writeFile(join(root, "manifest.json"), "{}");
+  assert.equal(await operationInputSnapshot(root, pinned.binding), undefined);
 }));

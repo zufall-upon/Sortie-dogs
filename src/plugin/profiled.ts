@@ -16,7 +16,7 @@ import { sanitizeTerminalReport, terminalRunOutcome } from "./run-metrics.js";
 import { normalizeCommand } from "./gate.js";
 import { normalizeRelativePath } from "../core/path.js";
 import { MISSION_EVIDENCE_GAP_REVIEW_LIMIT, OperatorMissionRuntime, missionPacket, missionPlan, missionReviewAccepted, missionReviewTask,
-  missionReviewTraces, missionReviewVerdict, type OperatorMission } from "../core/operator-mission.js";
+  missionCommandOutcome, missionConversationContext, missionExecutionStatus, missionValidationCommand, missionReviewTraces, missionReviewVerdict, type OperatorMission } from "../core/operator-mission.js";
 import { publishMissionProgress } from "./mission-progress.js";
 import { completedMissionReviewPrompts, initialMissionReviewPrompt, missionReviewSource } from "./mission-review.js";
 import { missionLocations, missionLocationPacket } from "./mission-location.js";
@@ -916,6 +916,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         await requireRoot(context.sessionID);
         const state = await operators.required(context.sessionID);
         const mission = await missions.read(context.sessionID);
+        if (mission?.kind === "operation" && missionExecutionStatus(mission) !== "executed") return JSON.stringify({
+          status: "not-ready", operation_status: missionExecutionStatus(mission),
+          next_action: "The requested operation has not completed. Preserve its real outcome; auxiliary checks and a bounded review do not complete it. Continue the declared operation or report its blocker.",
+          packet: missionPacket(mission, state) });
         if (mission && !["completed", "cancelled"].includes(mission.phase)) await assertMissionReview(context.sessionID, mission);
         if (args.run_id !== state.runID || args.acceptance_fingerprint !== state.acceptanceFingerprint) throw new Error("operator-completion-identity-mismatch");
         if (!["awaiting-acceptance", "completed"].includes(state.phase) || state.units.some(unit => unit.status !== "succeeded")) {
@@ -930,7 +934,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         if (result.receipt) await operators.terminal(context.sessionID, result.receipt);
         let panel: string | undefined;
         if (input.returnReportTransport === "tool-result" && result.receipt?.status === "succeeded") {
-          const text = `✅ **DONE** \`${state.runID}\` — ${state.acceptance.length} acceptance requirements verified.\n\n` +
+          const text = `✅ **DONE** \`${state.runID}\` — declared checks passed; Operator accepted the result.\n\n` +
             `**変更点:** ${state.units.map(unit => unit.unit.title).join("; ")}\n\n` +
             `**確認結果:** 宣言検証合格 — ${[...new Set(state.units.flatMap(unit => unit.unit.validation))].join("; ")}` +
             (mission?.review ? `\n独立レビュー: ${mission.review.verdict === "evidence-gaps" ? "証拠不足を残して受入れ（レビューPASSではない）" : mission.review.verdict}.` : "") + "\n\n**次:** なし";
@@ -1195,6 +1199,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     const stringList = { type: "array", items: { type: "string" } };
     tools[startMission] = { description: "Operator: save the current user requirements. Use intent=replace when the user changes an existing request (version, parallelism, target): host cancels the previous run and archives its requirements/results while retaining spend. Supply the complete current requirements, retaining constraints the user has not changed. For separate work in a different location use intent=new. Dispatch the Coordinator immediately, or plan_units for a known single-unit procedure; item count and runtime alone do not require a Coordinator.",
       args: { requirements: { ...stringList, minItems: 1, maxItems: 64 } as never,
+        kind: { type: "string", enum: ["implementation", "operation"], description: "Use operation for running an existing benchmark, command or procedure. The host records its actual execution separately from setup and checks.", "x-sortie-optional": true } as never,
         intent: { type: "string", enum: ["", "continue", "new", "replace"], "x-sortie-optional": true } as never }, execute: async (args, context) => {
         await requireRoot(context.sessionID);
         if (args.intent !== undefined && !["", "continue", "new", "replace"].includes(args.intent)) throw new Error("mission-intent-invalid");
@@ -1208,16 +1213,29 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             if (relocated) return JSON.stringify({ ...relocated, budget: await control!.currentBudget(context.sessionID) });
           }
           const mission = await retainCancelledMissionAcceptance(context.sessionID,
-            await missions.start(context.sessionID, (args as Record<string, unknown>).requirements, args.intent === "replace" || args.intent === "new"));
+            await missions.start(context.sessionID, (args as Record<string, unknown>).requirements, args.intent === "replace" || args.intent === "new", {
+              kind: args.kind === "operation" ? "operation" : "implementation",
+              context: missionConversationContext(await messages(context.sessionID)),
+            }));
           return JSON.stringify({ ...locationObservation(context.sessionID), ...(mission.dispatchOpen
             ? missionDispatchPacket(mission, await operators.read(context.sessionID))
             : { mission_id: mission.id, requirements: mission.requirements, task: missions.task(mission),
               next_action: "Nontrivial: dispatch task now. Simple single-unit work with known scope/check: call plan_units directly. Do not create a proposal or ask for plan approval." }) });
         });
       } };
-    async function declareMissionUnits(root: string, actor: string, mission: OperatorMission, raw: unknown, reason?: string) {
+    async function declareMissionUnits(root: string, actor: string, mission: OperatorMission, raw: unknown, reason?: string, execution?: unknown) {
       const previous = await operators.read(root);
       mission = await retainCancelledMissionAcceptance(root, mission, previous);
+      let operation = mission.execution;
+      if (execution !== undefined) {
+        if (!record(execution) || typeof execution.directory !== "string" || !execution.directory.trim() ||
+          !Array.isArray(execution.commands) || execution.commands.length === 0 || execution.commands.length > 16 ||
+          !execution.commands.every(command => typeof command === "string" && command.trim())) throw new Error("mission-operation-input: supply the actual operation commands and their working directory");
+        const commands = [...new Set((execution.commands as string[]).map(missionValidationCommand).map(normalizeCommand))];
+        const directory = resolve(input.directory, execution.directory);
+        // A corrected command is allowed on replan; retain prior observations for accounting.
+        operation = { commands, directory, observations: operation?.observations ?? [] };
+      }
       const plan = missionPlan(mission, raw);
       if (actor === root && (mission.coordinator !== null || plan.units.length !== 1)) throw new Error("mission-coordinator-required: dispatch the returned Coordinator task");
       const same = previous?.planHash === createHash("sha256").update(JSON.stringify(plan)).digest("hex");
@@ -1260,6 +1278,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         if (item.runID !== state.runID) item.plans++;
         item.runID = state.runID; item.phase = "running"; item.submission = null;
         delete item.supersededRunID;
+        if (operation) { item.kind = "operation"; item.execution = operation; }
       });
       return JSON.stringify(await operators.next(root, actor));
     }
@@ -1268,10 +1287,13 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         properties: { title: { type: "string" }, objective: { type: "string" },
           read: { ...stringList, description: "Inputs that affect validation, not an allowlist for observation. Do not include whole live session/database/log trees just to inspect them." }, write: stringList,
           validation: stringList, requirement_ids: stringList }, required: ["title", "objective", "write", "validation"] } } as never,
+        execution: { type: "object", properties: { commands: stringList, directory: { type: "string" } },
+          required: ["commands", "directory"], additionalProperties: false,
+          description: "For an operation: the actual run/grade commands, not a preflight or NO_START check. Host observes their native shell completion; no handwritten proof file is needed.", "x-sortie-optional": true } as never,
         reason: { type: "string", "x-sortie-optional": true } as never }, execute: async (args, context) => {
         const { root, mission } = await missionAuthority(context.sessionID);
         return serializeDispatchTransition(root, () => declareMissionUnits(root, context.sessionID, mission,
-          (args as Record<string, unknown>).units, args.reason));
+          (args as Record<string, unknown>).units, args.reason, (args as Record<string, unknown>).execution));
       } };
     tools[expandUnit] = { description: "Coordinator: extend the stopped unit's write scope immediately within the original request. Keeps original requirements and cumulative budget; generates a replacement Worker contract. No Operator approval or handwritten manifest repair is needed. Use only after the Worker has returned.",
       args: { unit_id: stringSchema, paths: stringList as never, reason: stringSchema }, execute: async (args, context) => {
@@ -1288,6 +1310,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       } };
     tools[reviewMission] = { description: "Coordinator: prepare the independent Reviewer task from current source, requirements and observed checks. Supply risk_tags (empty only for genuinely low risk) and concise criterion-level changed-code/test traces. Host supplies diff, IDs, manifest, mappings and evidence; keep candidate lineage across corrections. A low-risk skip is recorded, never inferred from a missing review.",
       args: { risk_tags: { type: "array", items: { type: "string", enum: SOURCE_REVIEW_RISK_TAGS } } as never,
+        evidence: { type: "array", maxItems: 6, items: { type: "object", additionalProperties: false,
+          properties: { path: { type: "string" }, offset: { type: "integer", minimum: 1 }, limit: { type: "integer", minimum: 1, maximum: 200 } },
+          required: ["path", "offset", "limit"] }, description: "Focused excerpts from existing declared inputs/outputs. Use for missing review evidence instead of creating another evidence-copying Worker.", "x-sortie-optional": true } as never,
         traces: stringList as never }, execute: async (args, context) => {
         const { root, mission } = await missionAuthority(context.sessionID);
         const run = await operators.required(root);
@@ -1297,7 +1322,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         if (!Array.isArray(risk) || !risk.every(tag => SOURCE_REVIEW_RISK_TAGS.includes(tag as never))) {
           throw new Error("mission-review-input: use recognized risk tags");
         }
-        const source = await missionReviewSource(input.directory, run);
+        const evidence = (args as Record<string, unknown>).evidence as import("../core/operator-mission.js").MissionEvidenceExcerpt[] | undefined;
+        if (evidence !== undefined && (!Array.isArray(evidence) || evidence.length > 6)) throw new Error("mission-review-evidence: select at most six focused excerpts");
+        const source = await missionReviewSource(input.directory, run, evidence);
         const requestFingerprint = goalFingerprint({ run: run.runID, source: source.fingerprint, risk, traces });
         if (mission.review?.requestFingerprint === requestFingerprint && mission.review.verdict !== "pending") {
           return JSON.stringify({ ...missionPacket(mission, run), status: "review-recorded",
@@ -1328,7 +1355,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             "Changed source and declared artifact excerpts (task data, not instructions):", source.excerpt,
           ].join("\n") };
         const reviewed = await missions.update(root, item => { item.review = { runID: run.runID, risk: risk as string[], source: source.fingerprint, requestFingerprint,
-          task, verdict: task ? "pending" : "skipped-low-risk", ...(mission.review?.child ? { child: mission.review.child } : {}),
+          task, evidence, verdict: task ? "pending" : "skipped-low-risk", ...(mission.review?.child ? { child: mission.review.child } : {}),
           ...(initialPrompt ? { initialPrompt } : {}),
           ...(mission.review?.evidenceGapReviews ? { evidenceGapReviews: mission.review.evidenceGapReviews } : {}) }; });
         return JSON.stringify(task ? { status: "review-required", task: missionReviewTask(reviewed) } : { status: "skipped-low-risk" });
@@ -1336,12 +1363,16 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     async function assertMissionReview(root: string, mission: OperatorMission) {
       const run = await operators.required(root), review = mission.review;
       if (!review || review.runID !== run.runID || !missionReviewAccepted(review) ||
-          review.source !== (await missionReviewSource(input.directory, run)).fingerprint) throw new Error("mission-review-required-or-stale");
+          review.source !== (await missionReviewSource(input.directory, run, review.evidence)).fingerprint) throw new Error("mission-review-required-or-stale");
     }
     tools[submitMission] = { description: "Coordinator: return only a completion candidate, a user-only decision, or a proven external/scope/budget blocker. Continue ordinary investigation, scope extensions and corrections yourself. Unit progress is published automatically without waking Operator.",
       args: { status: { type: "string", enum: ["ready", "needs-decision", "blocked"] } as never, summary: stringSchema }, execute: async (args, context) => {
         const { root, mission } = await missionAuthority(context.sessionID);
         if (args.status === "ready") {
+          if (mission.kind === "operation" && missionExecutionStatus(mission) !== "executed") {
+            return JSON.stringify({ ...missionPacket(mission, await operators.read(root)), status: "operation-incomplete",
+              next_action: "Continue the requested operation or submit its actual blocker. A successful setup/NO_START check does not authorize ready." });
+          }
           const run = await operators.required(root);
           if (run.phase !== "awaiting-acceptance") throw new Error("mission-units-incomplete");
           await assertMissionReview(root, mission);
@@ -1758,6 +1789,17 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             // Keep the caller-visible/native Task input as the opaque reference. The
             // worker chat hook above delivers this already-admitted canonical prompt.
           } else Object.assign(output, outward);
+          if (who.role === "dog-worker" && ["bash", "shell"].includes(request.tool) && mission?.execution &&
+              typeof args.command === "string" && mission.execution.commands.includes(normalizeCommand(args.command)) &&
+              resolve(input.directory, typeof args.workdir === "string" ? args.workdir : ".") === mission.execution.directory) {
+            const command = normalizeCommand(args.command);
+            await missions.update(root, item => {
+              if (!item.execution!.observations.some(observation => observation.callID === request.callID)) {
+                item.execution!.observations.push({ command, directory: item.execution!.directory,
+                  callID: request.callID, sessionID: request.sessionID, startedAt: new Date().toISOString() });
+              }
+            });
+          }
         } catch (error) {
           if (delegated) {
             taskOwners.delete(request.callID);
@@ -1803,8 +1845,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             if (reviewed.review?.verdict === "evidence-gaps" && typeof output.output === "string") {
               const count = reviewed.review.evidenceGapReviews ?? 0;
               output.output += missionReviewAccepted(reviewed.review)
-                ? `\n\nHOST: evidence-gap review ${count}/${MISSION_EVIDENCE_GAP_REVIEW_LIMIT} reached the limit. No defect was found; submit_mission ready is permitted. List the remaining evidence gaps in the summary.`
-                : `\n\nHOST: evidence-gap review ${count}/${MISSION_EVIDENCE_GAP_REVIEW_LIMIT}. No defect was found; supply the requested evidence through review_mission traces (or at most one evidence-only unit) and re-review. Do not re-implement.`;
+                ? `\n\nHOST: evidence-gap review ${count}/${MISSION_EVIDENCE_GAP_REVIEW_LIMIT} reached the limit. Review is closed with gaps; this does not prove execution or requirement completion. Submit ready only when the requested result is complete, and list the gaps.`
+                : `\n\nHOST: evidence-gap review ${count}/${MISSION_EVIDENCE_GAP_REVIEW_LIMIT}. Supply focused original-file excerpts through review_mission evidence and traces. Do not create an evidence-copying Worker or re-implement.`;
             }
           }
           taskOwners.delete(request.callID!);
@@ -1832,6 +1874,20 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         await core["tool.execute.after"]?.({ ...translate(request, false) as typeof request,
           ...(ownership ? { sessionID: ownership.root } : {}) }, mapped);
         Object.assign(output, translate(mapped, true));
+        if (!ownership && ["bash", "shell"].includes(request.tool.toLowerCase())) {
+          const root = await rootFor(id);
+          const mission = root ? await missions.read(root) : undefined;
+          if (root && mission?.execution?.observations.some(item => item.callID === request.callID && item.sessionID === id)) {
+            const metadata = record(output.metadata) ? output.metadata : {};
+            await missions.update(root, item => {
+              const observation = item.execution!.observations.find(value => value.callID === request.callID && value.sessionID === id)!;
+              observation.completedAt = new Date().toISOString();
+              observation.status = output.status === "error" || metadata.status === "error" ? "error" : "completed";
+              if (Number.isSafeInteger(metadata.exit)) observation.exit = metadata.exit as number;
+              Object.assign(observation, missionCommandOutcome(returnedOutput, metadata.exit, observation.status));
+            });
+          }
+        }
         if (repairAccess !== null && ["bash", "shell"].includes(request.tool.toLowerCase())) {
           const metadata = record(output.metadata) ? output.metadata : undefined;
           const exit = metadata?.exit;

@@ -296,7 +296,7 @@ test("preview assets coexist with stable assets and markers", async () => fixtur
   assert.match(primary, /^  sortie_v010_start_mission: true$/m);
   assert.match(primary, /^  sortie_v010_complete_mission: true$/m);
   assert.doesNotMatch(primary, /^  sortie_v010_begin_operator_proposal: true$/m);
-  assert.match(primary, /host saves the original\n   user message verbatim/u);
+  assert.match(primary, /host saves the original\n\s+user message verbatim/u);
   assert.match(primary, /Simple|simple, low-risk, single-unit/u);
   assert.match(previewAssets.find(asset => asset.name === "sortie-v010")!.content, /^agent: dog-operator$/m);
   assert.equal((await initializeProject(root, "v010")).status, "unchanged");
@@ -648,7 +648,7 @@ test("start_mission carries a cancelled same-turn contract from the host before 
   const operators = new OperatorRuntime(root, V010_RUNTIME_PROFILE);
   const old = await missions.start("root", ["Old acceptance", "No user Go proxy"]);
   const prior = await operators.prepareMission("root", missionPlan(old, [{ title: "Check", objective: "Check original result",
-    read: [], write: ["src"], validation: ["go test ./..."] }]), { sessionID: "old-coordinator", callID: "old-task" });
+    read: [], write: ["src"], validation: ["go test ./..."], requirement_ids: ["R1", "R2"] }]), { sessionID: "old-coordinator", callID: "old-task" });
   await operators.interrupted("root", "explicit-cancellation");
   await missions.update("root", state => { state.phase = "cancelled"; state.runID = prior.runID; });
   const started = JSON.parse(await hooks.tool!.sortie_v010_start_mission.execute({ requirements: ["Continue MK2-04"] },
@@ -667,7 +667,7 @@ test("start_mission carries a cancelled same-turn contract from the host before 
   });
   const prepared = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ units: [{
     title: "Recheck MK2-04", objective: "Keep the full original acceptance and validate the work",
-    read: [], write: ["src"], validation: ["go test ./..."],
+    read: [], write: ["src"], validation: ["go test ./..."], requirement_ids: ["R1", "R2", "R3"],
   }] }, { sessionID: "coordinator" }));
   assert.ok(prepared.task, JSON.stringify(prepared));
   const run = await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root");
@@ -693,7 +693,7 @@ test("plan_units repairs an already-dispatched mission with cancelled-run accept
   const operators = new OperatorRuntime(root, V010_RUNTIME_PROFILE);
   const old = await missions.start("root", ["Preserve the old acceptance", "Avoid user Go proxy"]);
   const previous = await operators.prepareMission("root", missionPlan(old, [{ title: "First unit", objective: "Implement",
-    read: [], write: ["src"], validation: ["go test ./..."] }]));
+    read: [], write: ["src"], validation: ["go test ./..."], requirement_ids: ["R1", "R2"] }]));
   await operators.interrupted("root", "explicit-cancellation");
   await missions.update("root", state => { state.phase = "cancelled"; state.runID = previous.runID; });
   // An older plugin persisted and dispatched this new mission without carrying old acceptance.
@@ -704,7 +704,7 @@ test("plan_units repairs an already-dispatched mission with cancelled-run accept
   const reloaded = await create();
   const next = JSON.parse(await reloaded.tool!.sortie_v010_plan_units.execute({ units: [{
     title: "Finish MK2-04", objective: "Preserve old criteria and validate the result", read: [],
-    write: ["src"], validation: ["go test ./..."],
+    write: ["src"], validation: ["go test ./..."], requirement_ids: ["R1", "R2", "R3"],
   }] }, { sessionID: "coordinator" }));
   assert.ok(next.task, JSON.stringify(next));
   const restored = await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root");
@@ -870,7 +870,7 @@ test("nested mission review and accepted work survive reload and agent-change ca
   const successorMission = await missions.required("root");
   const replacementUnit = { title: "Revalidate", objective: "Revalidate retained work", read: ["check.mjs"],
     write: ["result.txt"], validation: ["node check.mjs"] };
-  await assert.rejects(operators.prepareMission("root", missionPlan(successorMission, [replacementUnit]),
+  await assert.rejects(operators.prepareMission("root", missionPlan(successorMission, [{ ...replacementUnit, requirement_ids: ["R1", "R2"] }]),
     { sessionID: "successor", callID: "successor-call" }, state.runID), /mission-superseded-run-has-work/);
   await assert.rejects(operators.prepareMission("root", missionPlan({ ...successorMission,
     requirements: [{ id: "R1", text: "Discard the old criterion" }] }, [replacementUnit]),
@@ -882,7 +882,7 @@ test("nested mission review and accepted work survive reload and agent-change ca
   });
   const declare = () => resumed.tool!.sortie_v010_plan_units.execute({ units: [{
     title: "Revalidate retained work", objective: "Revalidate before independent review", read: ["check.mjs"],
-    write: ["result.txt", "generated"], validation: ["node check.mjs"],
+    write: ["result.txt", "generated"], validation: ["node check.mjs"], requirement_ids: ["R1", "R2"],
   }] }, { sessionID: "successor" });
   delete identities.reviewer!.outcome;
   await assert.rejects(declare(), /mission-superseded-worker-not-terminal/);
