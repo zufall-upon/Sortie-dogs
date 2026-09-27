@@ -250,6 +250,18 @@ test("mission rejects foreign Coordinator claims and duplicate dispatches", asyn
   await assert.rejects(missions.claim("root", "foreign-child", task.prompt), /claim-invalid/);
 }));
 
+test("mission admits a paraphrased Coordinator label while keeping the opaque request reference", async () => fixture(async directory => {
+  const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+  await missions.capture("root", { id: "u1", text: "Fix the result; preserve the validation command" });
+  const mission = await missions.start("root", ["Fix the result", "Preserve the validation command"]);
+  const task = missions.task(mission);
+  await assert.rejects(missions.admit("root", "wrong-ref", { ...task, prompt: "other request" }), /not-authorized/u);
+  await missions.admit("root", "actual-call", { ...task, description: "Repair and validate the result" });
+  const brief = await missions.claim("root", "coordinator", task.prompt);
+  assert.match(brief, /Fix the result; preserve the validation command/u);
+  assert.match(brief, /R2: Preserve the validation command/u);
+}));
+
 test("cold mission reopens only the terminal native dispatch and retains its Coordinator", async () => fixture(async directory => {
   const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
   await missions.capture("root", { id: "u1", text: "Fix result" });
