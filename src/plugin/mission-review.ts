@@ -91,31 +91,46 @@ export async function missionReviewSource(directory: string, run: OperatorState,
   let selected = "";
   for (const entry of evidence) {
     const absolute = resolve(directory, entry.path);
-    const allowed = [...scope.read, ...scope.write].some(path => {
-      const root = resolve(directory, path === "." ? path : normalizeManifestScope(path).path), rest = relative(root, absolute);
-      return rest === "" || (rest !== ".." && !rest.startsWith(`..${sep}`) && !isAbsolute(rest));
-    });
-    if (!allowed || !Number.isSafeInteger(entry.offset) || entry.offset < 1 ||
-        !Number.isSafeInteger(entry.limit) || entry.limit < 1 || entry.limit > 200) throw new Error("mission-review-evidence: select up to 200 lines from a declared input/output");
-    const info = await lstat(absolute);
-    if (!info.isFile()) throw new Error("mission-review-evidence: select a regular file");
-    hash.update(JSON.stringify(entry)).update(String(info.size));
-    const stream = createReadStream(absolute);
-    stream.on("data", chunk => hash.update(chunk));
-    const lines = createInterface({ input: stream, crlfDelay: Infinity });
-    selected += `\n--- evidence: ${entry.path}:${entry.offset} ---\n`;
-    // Share the focused budget rather than silently starving later requested error branches.
-    const allowance = Math.floor(11_000 / evidence.length);
-    let number = 0, bytes = 0, truncated = false;
-    for await (const line of lines) {
-      number++;
-      if (number >= entry.offset && number < entry.offset + entry.limit) {
-        const text = `${number}: ${line.slice(0, 2_000)}\n`, size = Buffer.byteLength(text);
-        if (!truncated && bytes + size <= allowance) { selected += text; bytes += size; }
-        else truncated = true;
-      }
+    const local = relative(resolve(directory), absolute);
+    // Review references are read-only context, not new execution/validation inputs.
+    // Keep the declared external-artifact route across narrower replans as well.
+    const allowed = (local !== ".." && !local.startsWith(`..${sep}`) && !isAbsolute(local)) ||
+      [...scope.read, ...scope.write].some(path => {
+        const root = resolve(directory, path === "." ? path : normalizeManifestScope(path).path), rest = relative(root, absolute);
+        return rest === "" || (rest !== ".." && !rest.startsWith(`..${sep}`) && !isAbsolute(rest));
+      });
+    const fail = (reason: string) => new Error(`mission-review-evidence: ${entry.path}: ${reason}`);
+    if (!allowed) throw fail("outside the project and declared inputs/outputs; select a project file or an existing declared input/output");
+    if (!Number.isSafeInteger(entry.offset) || entry.offset < 1 || !Number.isSafeInteger(entry.limit) || entry.limit < 1 || entry.limit > 200) {
+      throw fail("use a positive line offset and a limit between 1 and 200");
     }
-    if (truncated) selected += `[FOCUSED EXCERPT TRUNCATED: ${entry.path}:${entry.offset}; request a smaller range]\n`;
+    try {
+      const info = await lstat(absolute);
+      if (!info.isFile()) throw new Error("select a regular file");
+      hash.update(JSON.stringify(entry)).update(String(info.size));
+       const stream = createReadStream(absolute);
+       stream.on("data", chunk => hash.update(chunk));
+       const lines = createInterface({ input: stream, crlfDelay: Infinity });
+       stream.on("error", error => lines.emit("error", error));
+       selected += `\n--- evidence: ${entry.path}:${entry.offset} ---\n`;
+       // Share the focused budget rather than silently starving later requested error branches.
+       const allowance = Math.floor(11_000 / evidence.length);
+       let number = 0, bytes = 0, truncated = false;
+       try {
+         for await (const line of lines) {
+           number++;
+           if (number >= entry.offset && number < entry.offset + entry.limit) {
+             const text = `${number}: ${line.slice(0, 2_000)}\n`, size = Buffer.byteLength(text);
+             if (!truncated && bytes + size <= allowance) { selected += text; bytes += size; }
+             else truncated = true;
+           }
+         }
+       } finally { lines.close(); stream.destroy(); }
+       if (entry.offset > number) throw new Error(`offset ${entry.offset} exceeds ${number} lines; select existing lines`);
+       if (truncated) selected += `[FOCUSED EXCERPT TRUNCATED: ${entry.path}:${entry.offset}; request a smaller range]\n`;
+     } catch (error) {
+       throw fail(error instanceof Error ? error.message : String(error));
+     }
   }
   const writes = [...new Set(scope.write.map(path => path === "." ? path : normalizeManifestScope(path).path))];
   if (writes.length === 0) return { fingerprint: `sha256:${hash.digest("hex")}`,

@@ -199,7 +199,9 @@ Low risk uses [] and the host records the skip. The host supplies source excerpt
 mapping and validation evidence; do not handwrite that envelope. Fix concrete FINDINGS defects yourself
 through Worker and rerun affected validation/review. EVIDENCE_GAPS means missing proof, not a defect: answer
 it with sharper traces and evidence: [{path, offset, limit}] from the existing original files in the next
-review_mission, never an evidence-copying Worker. The host caps evidence-only reviews; at its limit,
+  review_mission, never an evidence-copying Worker. Existing project source/docs can be selected even
+  outside unit read/write; attaching review context does not require replanning or rerunning validation.
+  Declared external input/output excerpts remain available. The host caps evidence-only reviews; at its limit,
 review is closed with gaps, but ready still requires the requested operation/result to be complete.
 Running an existing procedure alone is not a public-logic source change; use the low-risk skip where applicable.
 Preserve candidate lineage and independence; your own opinion or Worker PASS is not independent review.
