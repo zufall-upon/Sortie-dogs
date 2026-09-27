@@ -728,11 +728,14 @@ test("nested mission review and accepted work survive reload and agent-change ca
     reviewer: { agent: "dog-reviewer-v010", parentID: "coordinator" },
   };
   const hostMessages: Record<string, Record<string, unknown>[]> = {};
+  let coordinatorContextTruncated = false;
   const create = () => SortieDogsV010Plugin({ directory: root, client: { session: {
     get: async ({ path }: { path: { id: string } }) => ({ data: identities[path.id] && { id: path.id, ...identities[path.id] } }),
     children: async ({ path }: { path: { id: string } }) => ({ data: Object.entries(identities)
       .filter(([, info]) => info.parentID === path.id).map(([id, info]) => ({ id, ...info })) }),
-    messages: async ({ path }: { path: { id: string } }) => ({ data: hostMessages[path.id] ?? [] }),
+    messages: async ({ path }: { path: { id: string } }) => ({ data: coordinatorContextTruncated && path.id === "coordinator"
+      ? [] : hostMessages[path.id] ?? [] }),
+    reviewMessages: async ({ path }: { path: { id: string } }) => ({ data: hostMessages[path.id] ?? [] }),
     abort: async () => ({ data: true }),
   } } } as never);
   const hooks = await create();
@@ -806,15 +809,38 @@ test("nested mission review and accepted work survive reload and agent-change ca
     parts: [{ type: "text", text: "FINDINGS\nExplain the validation coverage" }] }];
   await hooks["tool.execute.after"]!({ tool: "task", sessionID: "coordinator", callID: "initial-review" },
     { output: "FINDINGS\nExplain the validation coverage", metadata: { sessionId: "reviewer" } });
+  const recordedInitial = await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root");
+  assert.equal(recordedInitial.review?.initialPrompt, initial.args.prompt,
+    "only a completed, independent initial review becomes durable lineage");
   const duplicate = JSON.parse(await hooks.tool!.sortie_v010_review_mission.execute({ risk_tags: ["public-logic"],
     traces: ["The Worker wrote and validated result.txt"] }, { sessionID: "coordinator" }));
   assert.equal(duplicate.status, "review-recorded");
   assert.equal(duplicate.task, undefined, "unchanged input must not schedule another paid review");
   assert.equal(duplicate.review.verdict, "findings");
+  const savedCoordinatorHistory = hostMessages.coordinator;
+  const previousReview = structuredClone((await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root")).review!);
+  const missionsForRecovery = new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE);
+  await missionsForRecovery.update("root", item => { delete item.review!.initialPrompt; });
+  coordinatorContextTruncated = true;
+  const pagedHistory = await create();
+  await review(pagedHistory, "Old initial review is outside the bounded Coordinator context but in paginated history");
+  const restored = await missionsForRecovery.required("root");
+  assert.match(restored.review!.task!.prompt, /^review_phase: verification$/m);
+  assert.equal(restored.review!.initialPrompt, initial.args.prompt, "completed V2 history seeds future turns without re-reading it");
+  await missionsForRecovery.update("root", item => { item.review = structuredClone(previousReview); delete item.review.initialPrompt; });
+  hostMessages.coordinator = [];
+  const oldStateWithoutHistory = await create();
+  await review(oldStateWithoutHistory, "Recovered old child ID but initial Reviewer history is unavailable");
+  const safeFirst = await missionsForRecovery.required("root");
+  assert.match(safeFirst.review!.task!.prompt, /^review_phase: initial$/m,
+    "an inherited child alone must never generate an inadmissible verification Task");
+  await missionsForRecovery.update("root", item => { item.review = previousReview; });
   const cold = await create();
   const verification = { args: await review(cold, "check.mjs rejects any result other than ready; observed exit 0") };
   await cold["tool.execute.before"]!({ tool: "task", sessionID: "coordinator", callID: "verification-review" }, verification);
   assert.match(verification.args.prompt, /^review_phase: verification$/m);
+  coordinatorContextTruncated = false;
+  hostMessages.coordinator = savedCoordinatorHistory;
   assert.equal(/^candidate_id: (.+)$/m.exec(verification.args.prompt)![1], /^candidate_id: (.+)$/m.exec(initial.args.prompt)![1]);
   assert.equal(hostMessages.root, undefined, "the completed review belongs to the nested Coordinator, not the root");
   await cold["tool.execute.after"]!({ tool: "task", sessionID: "coordinator", callID: "verification-review" },

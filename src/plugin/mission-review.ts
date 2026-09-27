@@ -15,6 +15,13 @@ import { declaredArtifacts } from "./declared-artifacts.js";
 const exec = promisify(execFile);
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 
+/** A child ID alone cannot establish the initial phase after a restart or failed dispatch. */
+export function initialMissionReviewPrompt(mission: OperatorMission, prompts: readonly string[]): string | undefined {
+  return [mission.review?.initialPrompt, ...prompts].find(prompt => typeof prompt === "string" &&
+    prompt.startsWith(`candidate_id: ${mission.id}\n`) && /^review_phase: initial$/mu.test(prompt) &&
+    /^canonical_validation_exit: 0$/mu.test(prompt));
+}
+
 /** Recover from native completion records, never from the pending review's inherited child ID. */
 export async function completedMissionReviewPrompts(mission: OperatorMission | undefined, profile: RuntimeProfile,
   root: string, requestedPrompt: string,
@@ -22,6 +29,9 @@ export async function completedMissionReviewPrompts(mission: OperatorMission | u
 ): Promise<string[]> {
   if (!mission || mission.root !== root || !mission.coordinator || ["completed", "cancelled"].includes(mission.phase) ||
       mission.review?.task?.prompt !== requestedPrompt) return [];
+  // The completion hook has already bound this prompt to a real independent Reviewer child.
+  // Avoid a second V2 history read when its page/list API is temporarily unavailable.
+  if (initialMissionReviewPrompt(mission, [])) return [mission.review!.initialPrompt!];
   const coordinator = await host.get(mission.coordinator);
   if (!record(coordinator) || coordinator.parentID !== root || canonicalAgent(profile, coordinator.agent as string) !== "dog-operator") return [];
   const prompts: string[] = [];
