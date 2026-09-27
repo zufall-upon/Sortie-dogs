@@ -94,6 +94,14 @@ function lineValue(prompt: string, key: string): string | undefined {
   return values.length === 1 ? values[0]![1] : undefined;
 }
 
+/** Keep an unambiguous, known Strategy trigger when Japanese sentence punctuation joins its prose. */
+function normalizeAdvisorPrompt(prompt: string): string {
+  return prompt.replace(
+    /^([ \t]*strategy_trigger[ \t]*:[ \t]*(?:architecture-choice|cross-boundary-tradeoff|material-uncertainty))[。．][ \t]*(?=\S)/mu,
+    "$1\n",
+  );
+}
+
 function hasReviewEvidence(prompt: string): boolean {
   if (lineValue(prompt, "canonical_validation_exit") !== "0") return false;
   const rawTags = lineValue(prompt, "risk_tags");
@@ -487,13 +495,16 @@ export class FastLaneController {
       return;
     }
     if (role === "dog-advisor") {
-      const trigger = lineValue(prompt, "strategy_trigger");
+      const normalized = normalizeAdvisorPrompt(prompt);
+      const trigger = lineValue(normalized, "strategy_trigger");
       if (trigger === undefined || !STRATEGY_TRIGGER_SET.has(trigger)) {
         const error = new FastLaneDeniedError("ADVISOR_TRIGGER_REQUIRED");
-        error.message += `; required: strategy_trigger: <${STRATEGY_TRIGGERS.join(" | ")}>; repair the request header, not runtime policy`;
+        error.message += `; required: strategy_trigger: <${STRATEGY_TRIGGERS.join(" | ")}> on its own line; ` +
+          "correct this Task header and redispatch the same consultation before proceeding, not runtime policy";
         throw error;
       }
-      const basis = fallbackBasis(prompt);
+      if (normalized !== prompt) (args as { prompt: string }).prompt = normalized;
+      const basis = fallbackBasis(normalized);
       const dispatches = state.advisorRequests.get(basis) ?? 0;
       const retry = lineValue(prompt, "fallback_retry");
       if ((dispatches === 0 && retry !== undefined) || (dispatches === 1 && retry !== "true")) {

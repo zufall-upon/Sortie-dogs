@@ -4,8 +4,8 @@ import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 
 // This probe starts a private V2 server, reads only registration metadata, and never creates a session.
-const [cli, workspace] = process.argv.slice(2);
-if (!cli || !workspace || !process.env.OPENCODE_DB || !process.env.XDG_CONFIG_HOME)
+const [cli, workspace, requestedModel, requestedVariant] = process.argv.slice(2);
+if (!cli || !workspace || !requestedModel || !requestedVariant || !process.env.OPENCODE_DB || !process.env.XDG_CONFIG_HOME)
   throw new Error("V2 probe requires a pinned CLI, workspace, isolated database and config root.");
 const password = randomBytes(32).toString("hex");
 const expectSortie = existsSync(`${workspace}/.opencode/plugins/sortie-dogs`);
@@ -52,11 +52,24 @@ try {
   }
   if (!agents?.data?.length || !plugins?.data?.length || Date.now() >= deadline)
     throw new Error("Private V2 registration did not settle before the deadline.");
+  const requestedRoutes = [{ model: requestedModel, variant: requestedVariant },
+    ...(expectSortie ? [{ model: "openai/gpt-6-luna-fast", variant: "max" }] : [])];
+  let missingRoutes = requestedRoutes;
+  while (missingRoutes.length && Date.now() < deadline) {
+    const models = await get("/api/model");
+    missingRoutes = requestedRoutes.filter(route => {
+      const [providerID, modelID] = route.model.split("/", 2);
+      return models.data?.some(model => model.providerID === providerID && model.id === modelID &&
+        model.variants?.some(variant => variant.id === route.variant)) !== true;
+    });
+    if (missingRoutes.length) await wait(250);
+  }
   const selected = agents.data.filter(agent => /^(?:dog-|dogs-)/u.test(agent.id) || agent.id === "build")
     .map(agent => ({ id: agent.id, model: agent.model }));
   const external = plugins.data.filter(plugin => !plugin.id.startsWith("opencode."))
     .map(plugin => ({ id: plugin.id, state: plugin.state?.status, server: plugin.features?.server === true }));
-  process.stdout.write(JSON.stringify({ agents: selected, plugins: external }) + "\n");
+  process.stdout.write(JSON.stringify({ agents: selected, plugins: external,
+    model_routes: { checked: requestedRoutes, missing: missingRoutes } }) + "\n");
 } finally {
   if (!closed) child.kill("SIGTERM");
   for (let i = 0; i < 30 && !closed; i += 1) await wait(100);
