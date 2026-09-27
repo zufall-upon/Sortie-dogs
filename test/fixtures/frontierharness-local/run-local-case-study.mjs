@@ -292,6 +292,15 @@ export async function verifyPinnedFiles(context) {
   return { official_sha256: observations, package_sha256: packageHash };
 }
 
+/** An explicit release target must match the fixture before its one-shot arm is touched. */
+export async function verifyExpectedRelease(context, receiptPath) {
+  const receipt = JSON.parse(await readFile(resolve(receiptPath), "utf8"));
+  invariant(receipt.version === context.manifest.package.version &&
+    receipt.package_sha256 === context.manifest.package.sha256,
+  "release-target-mismatch", "The fixture package does not match the requested release receipt; select a matching runner/profile before starting an arm.");
+  return { version: receipt.version, package_sha256: receipt.package_sha256 };
+}
+
 export function buildSpawnSpec(executable, args, options = {}) {
   invariant(string(executable) && Array.isArray(args) && args.every((arg) => typeof arg === "string"),
     "spawn-spec", "Unsafe process specification.");
@@ -756,7 +765,8 @@ export async function inspectResolvedConfig(context, arm, workspace, roots, opti
     const probe = await toWslPath(context.manifest,
       join(context.repositoryRoot, "test", "fixtures", "frontierharness-local", "probe-v2-host.mjs"));
     const spec = ownedWslSpec(context.manifest, cwd, context.manifest.tools.node.executable,
-      [...context.manifest.tools.node.args, probe, context.manifest.opencode.executable, cwd], environment, groupFileWsl);
+      [...context.manifest.tools.node.args, probe, context.manifest.opencode.executable, cwd,
+        context.manifest.opencode.model, context.manifest.opencode.variant], environment, groupFileWsl);
     const result = await checkedOwnedWslSpec(context.manifest, spec, groupFile,
       { timeoutMs: options.timeoutMs ?? 90_000 }, "v2-host-registration");
     const nativeEvidence = nativeCommandEvidence(result);
@@ -794,6 +804,17 @@ export function v2PluginWrapperSource() {
     'export default createSortieDogsV2Plugin(SortieDogsPlugin);\n';
 }
 
+export async function ensureV2PluginWrapper(entry) {
+  await mkdir(dirname(entry), { recursive: true });
+  const previous = await readFile(entry, "utf8").catch(error => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  });
+  if (previous === null) await writeFile(entry, v2PluginWrapperSource(), { flag: "wx", mode: 0o600 });
+  else invariant(previous === v2PluginWrapperSource(), "sortie-plugin-existing",
+    "Existing generated plugin wrapper differs; keep it for inspection rather than overwriting it.");
+}
+
 export function registeredHostAgentRoutes(config) {
   return [...Object.entries(V0127_HOST_AGENT_ROUTES),
     ["agent/dog-operator.md", { model: "openai/gpt-6-sol", variant: "xhigh" }]].every(([path, route]) => {
@@ -811,6 +832,15 @@ export function registeredV2Plugin(config, arm) {
       plugins[0]?.state === "active" && plugins[0]?.server === true);
 }
 
+export function registeredOperatorModelRoute(config, manifest, arm = "sortie") {
+  const routes = config?.model_routes;
+  const expected = [{ model: manifest.opencode.model, variant: manifest.opencode.variant },
+    ...(arm === "sortie" ? [{ model: "openai/gpt-6-luna-fast", variant: "max" }] : [])];
+  return Array.isArray(routes?.checked) && routes.checked.length === expected.length &&
+    expected.every(route => routes.checked.some(actual => actual.model === route.model && actual.variant === route.variant)) &&
+    Array.isArray(routes.missing) && routes.missing.length === 0;
+}
+
 export function requireIsolatedV2Database(runtimeRootWsl, database) {
   invariant(safeWslPath(runtimeRootWsl) && database === `${runtimeRootWsl}/opencode.db`,
     "v0127-database-isolation", "The V2 database must reside inside the new run root, not the host profile.");
@@ -819,6 +849,10 @@ export function requireIsolatedV2Database(runtimeRootWsl, database) {
 export async function inspectRunArmPreAgent(context, arm, workspace, roots, options = {}) {
   const inspected = await inspectResolvedConfig(context, arm, workspace, roots, options);
   if (context.manifest.profile === "v0127") {
+    if (!registeredOperatorModelRoute(inspected.config, context.manifest, arm))
+      throw new HarnessFailure("required-model-route-unavailable",
+        "The private V2 server did not offer the selected operator/Worker model variants; no arm attempt started.",
+        { ...inspected.nativeEvidence, missing_model_routes: inspected.config.model_routes?.missing ?? [] });
     if (!registeredV2Plugin(inspected.config, arm)) throw new HarnessFailure("sortie-plugin-registration",
       "The private V2 server did not register the expected project-local Sortie plugin.", inspected.nativeEvidence);
     if (arm === "sortie" && !registeredHostAgentRoutes(inspected.config))
@@ -868,10 +902,7 @@ export async function installSortie(context, workspace, roots, candidate = null)
   let entry = join(installed, "dist", "plugin", "opencode.js");
   if (context.manifest.profile === "v0127") {
     entry = join(control, "plugins", "sortie-dogs", "index.js");
-    if (candidate === null) {
-      await mkdir(dirname(entry), { recursive: true });
-      await writeFile(entry, v2PluginWrapperSource(), { flag: "wx", mode: 0o600 });
-    }
+    if (candidate === null) await ensureV2PluginWrapper(entry);
   }
   const plugin = context.manifest.profile === "v0127" ? null : `file://${await toWslPath(context.manifest, entry)}`;
   if (candidate === null) {
@@ -1398,7 +1429,8 @@ async function preflight(context) {
       ? { pair_wall_seconds: context.manifest.protocol.total_wall_seconds ?? DEFAULT_WALL_SECONDS,
         pair_deadline_at: new Date(Date.now() + (context.manifest.protocol.total_wall_seconds ?? DEFAULT_WALL_SECONDS) * 1000).toISOString() } : {}) },
   preflight: { status: "pass", official_sha256: pinned.official_sha256,
-    package_sha256: pinned.package_sha256, deepswe_commit: deepSweHead,
+    package_sha256: pinned.package_sha256, package_version: context.manifest.package.version,
+    profile: context.manifest.profile ?? "stable", deepswe_commit: deepSweHead,
     versions, opencode_version: context.manifest.opencode.version }, arms: {} };
   await saveState(context.runtimeRoot, state);
   return state.preflight;
@@ -1581,8 +1613,6 @@ async function runArm(context, arm, debug = false) {
     deadline_at: context.manifest.profile === "v0127" ? state.protocol.pair_deadline_at
       : new Date(Date.now() + context.manifest.protocol.wall_seconds * 1000).toISOString(),
     status: "running", executions: [] };
-  state.arms[arm] = { attempted: true, started_at: new Date().toISOString(), active_pid: null };
-  await saveState(context.runtimeRoot, state);
   const workspace = join(context.runtimeRoot, "workspaces", arm);
   const roots = { opencode: join(context.runtimeRoot, "configs", arm, "opencode"),
     xdg: join(context.runtimeRoot, "configs", arm, "xdg") };
@@ -1596,6 +1626,7 @@ async function runArm(context, arm, debug = false) {
   let stopGroup;
   let spec;
   let wallMs;
+  // A package/config/model-route failure is setup, not the one allowed agent attempt.
   try {
     if (arm === "sortie") packageEvidence = await installSortie(context, workspace, roots);
     inspected = await inspectRunArmPreAgent(context, arm, workspace, roots);
@@ -1619,9 +1650,15 @@ async function runArm(context, arm, debug = false) {
     const gate = error instanceof HarnessFailure ? error.gate : "pre-agent-internal";
     const nativeEvidence = error instanceof HarnessFailure ? error.nativeEvidence : null;
     if (debug) state.debug.status = "paused";
-    await recordPreAgentFailure(context, state, arm, gate, nativeEvidence, packageEvidence);
+    state.readiness = { arm, status: "failed", gate, at: new Date().toISOString(),
+      package: packageEvidence, ...(nativeEvidence ? { native_evidence: nativeEvidence } : {}) };
+    await saveState(context.runtimeRoot, state);
+    await summarize(context);
     throw error;
   }
+  delete state.readiness;
+  state.arms[arm] = { attempted: true, started_at: new Date().toISOString(), active_pid: null };
+  await saveState(context.runtimeRoot, state);
   const started = Date.now();
   const result = await execute(spec.executable, spec.args, { timeoutMs: wallMs,
     cwd: spec.cwd,
@@ -2012,6 +2049,16 @@ async function verifyArm(context, arm) {
 
 export async function summarize(context) {
   const state = await readState(context.runtimeRoot);
+  if (state.readiness?.status === "failed" && !state.stopped) {
+    const report = sanitizeForReport({ schema_version: 1, task_id: TASK_ID, unofficial: true,
+      methodology_comparable: false, leaderboard: false, public_publish: false,
+      readiness: state.readiness, arms: Object.fromEntries(ARMS.map(arm => [arm,
+        state.arms?.[arm]?.run ?? { status: "not-run" }])),
+      comparison: { comparison_eligible: false, speed_ratio: null, cost_ratio: null,
+        refusal: "pre-agent-readiness" } }, reportSecrets(context.manifest));
+    await atomicJson(join(context.runtimeRoot, REPORT_FILE), report);
+    return report;
+  }
   if (state.stopped) {
     const report = sanitizeForReport({ schema_version: 1, task_id: TASK_ID, unofficial: true,
       methodology_comparable: false, leaderboard: false, public_publish: false,
@@ -2112,7 +2159,8 @@ function parseCli(argv) {
   for (let index = 1; index < argv.length; index += 1) {
     const key = argv[index];
     if (key === "--confirm" || key === "--debug") { options[key.slice(2)] = true; continue; }
-    invariant(key === "--manifest" || key === "--arm" || key === "--gate" || key === "--signal" || key === "--candidate",
+    invariant(key === "--manifest" || key === "--arm" || key === "--gate" || key === "--signal" || key === "--candidate" ||
+      key === "--release-receipt",
       "usage", "Unknown CLI option.");
     invariant(argv[index + 1] !== undefined, "usage", "CLI option value is missing.");
     options[key.slice(2)] = argv[++index];
@@ -2142,6 +2190,7 @@ async function loadContext(manifestPath) {
 export async function main(argv = process.argv.slice(2)) {
   const { command, options } = parseCli(argv);
   const context = await loadContext(options.manifest);
+  if (options["release-receipt"]) await verifyExpectedRelease(context, options["release-receipt"]);
   let output;
   if (command === "preflight") output = await preflight(context);
   else if (command === "prepare") output = await prepare(context);
