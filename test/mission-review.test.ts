@@ -283,3 +283,63 @@ test("focused read-only review consumes the original result tail and pins unshow
     assert.notEqual((await missionReviewSource(root, run, selection)).fingerprint, first.fingerprint);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+test("review references can use adjacent project sources without changing the validated unit", async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const root = await mkdtemp(join(resolve("_testenv"), "mission-reference-"));
+  try {
+    await mkdir(join(root, "docs"));
+    await writeFile(join(root, "docs", "contract.md"), "public entrypoint\nimplementation detail\n");
+    const run = { units: [{ unit: { read: ["check.mjs"], write: [] }, hashes: ["validated-source"] }] } as never;
+    const saved = structuredClone(run);
+    const selection = [{ path: "docs/contract.md", offset: 1, limit: 1 }];
+    const source = await missionReviewSource(root, run, selection);
+    assert.match(source.excerpt, /evidence: docs\/contract.md:1/u);
+    assert.match(source.excerpt, /1: public entrypoint/u);
+    assert.doesNotMatch(source.excerpt, /implementation detail/u);
+    await writeFile(join(root, "docs", "contract.md"), "public entrypoint\nchanged detail\n");
+    assert.notEqual((await missionReviewSource(root, run, selection)).fingerprint, source.fingerprint,
+      "even unshown reference bytes invalidate the review");
+    assert.deepEqual(run, saved, "review references never expand the validated unit");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("review references retain declared external inputs and report actionable path errors", async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const root = await mkdtemp(join(resolve("_testenv"), "mission-external-reference-"));
+  try {
+    const project = join(root, "project"), external = join(root, "report.log");
+    await mkdir(project);
+    await writeFile(external, "observed result\n");
+    await writeFile(join(project, "source.py"), "public source\n");
+    const run = { units: [{ unit: { read: [external], write: [] }, hashes: [] }] } as never;
+    const source = await missionReviewSource(project, run, [{ path: external, offset: 1, limit: 1 }]);
+    assert.match(source.excerpt, /observed result/u);
+    for (const [entry, reason] of [
+      [{ path: "missing.py", offset: 1, limit: 1 }, /missing.py: ENOENT/u],
+      [{ path: ".", offset: 1, limit: 1 }, /\.: select a regular file/u],
+      [{ path: "source.py", offset: 2, limit: 1 }, /source.py: offset 2 exceeds 1 lines/u],
+      [{ path: "source.py", offset: 1, limit: 201 }, /source.py: use a positive line offset/u],
+      [{ path: "../undeclared.log", offset: 1, limit: 1 }, /undeclared.log: outside the project/u],
+    ] as const) {
+      await assert.rejects(missionReviewSource(project, run, [entry]), reason);
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("narrow replans retain earlier declared external review references", async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const root = await mkdtemp(join(resolve("_testenv"), "mission-external-replan-"));
+  try {
+    const project = join(root, "project"), external = join(root, "report.log");
+    await mkdir(project);
+    await writeFile(external, "prior observation\n");
+    const run = { units: [{ unit: { read: ["test.js"], write: [] }, hashes: [] }] } as never;
+    const source = await missionReviewSource(project, run, [{ path: external, offset: 1, limit: 1 }], undefined,
+      { read: [external], write: [] });
+    assert.match(source.excerpt, /prior observation/u);
+    await writeFile(external, "updated observation\n");
+    assert.notEqual((await missionReviewSource(project, run, [{ path: external, offset: 1, limit: 1 }], undefined,
+      { read: [external], write: [] })).fingerprint, source.fingerprint);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
