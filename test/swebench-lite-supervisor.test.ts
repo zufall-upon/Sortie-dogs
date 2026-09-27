@@ -221,8 +221,8 @@ test("eight inference slots retain one attempt per instance and the fixed campai
         assert(active <= 8);
         if (runs.length === 8) releaseInitial();
         await writeAtomicJson(paths.metadata, {
-          execution: { spent_usd: 0.5, usage_complete: true },
-          results: [{ instance_id: entry.instance_id, status: "succeeded", usage: { usd: 0.5 } }],
+          execution: { spent_usd: 1.5, usage_complete: true },
+          results: [{ instance_id: entry.instance_id, status: "succeeded", usage: { usd: 1.5 } }],
         });
         return { identity: { pid: 99999999, starttime: null } };
       },
@@ -236,7 +236,7 @@ test("eight inference slots retain one attempt per instance and the fixed campai
     assert.deepEqual(runs, liteDev23Manifest.instances.map(item => item.instance_id));
     assert(state.instances.every(entry => entry.attempt === 1));
     assert.equal(state.status, "completed");
-    assert.equal(state.spent_usd, 11.5);
+    assert.equal(state.spent_usd, 34.5);
     assert.equal(state.reserved_usd, 0);
     assert.equal(state.held_unknown_usd, 0);
     assert.equal(state.limits.workers, 8);
@@ -469,6 +469,31 @@ test("supervisor recovers a child that never exits without another inference att
     }
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("supervisor fails closed when a timed-out runner cannot be stopped", async () => {
+  const root = await mkdtemp(join(tmpdir(), "swebench-supervisor-termination-failed-"));
+  let attempts = 0;
+  try {
+    const options = { manifestPath: join(root, "manifest.json"), runRoot: root,
+      output: join(root, "predictions.jsonl"), costLimitUsd: 3,
+      workers: 1, timeoutSeconds: 1, watchdog: false };
+    await assert.rejects(runSupervisor(manifestValue, options, {
+      allowWindows: true,
+      spawnRunner: async () => {
+        attempts += 1;
+        return { identity: { pid: 99999999, starttime: null } };
+      },
+      waitForChild: async () => ({ exit: 124, signal: "timeout", timedOut: true, runnerStopped: false }),
+    }), /runner-timeout-termination-failed/);
+    const state = JSON.parse(await readFile(join(root, "supervisor-state.json"), "utf8"));
+    assert.equal(state.status, "failed");
+    assert.equal(state.failure, `runner-timeout-termination-failed:${manifestValue.instances[0]!.instance_id}`);
+    assert.equal(state.instances[0]!.status, "interrupted");
+    assert.equal(state.instances[0]!.attempt, 1);
+    assert.equal(state.instances[1]!.status, "pending");
+    assert.equal(attempts, 1);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("supervisor passes the remaining global cost budget to each child", async () => {
