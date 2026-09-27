@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
-import { completedMissionReviewPrompts, initialMissionReviewPrompt, missionReviewSource } from "../dist/plugin/mission-review.js";
+import { completedMissionReviewPrompts, initialMissionReviewPrompt, missionReviewBaseline, missionReviewSource } from "../dist/plugin/mission-review.js";
 import { MISSION_REVIEW_REFERENCE, type OperatorMission } from "../dist/core/operator-mission.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
 import { FastLaneController } from "../dist/plugin/fast-lane.js";
@@ -174,6 +174,40 @@ test("committed candidates still supply current source and large artifacts expos
     assert.match(first.excerpt, /EXCERPT TRUNCATED: large.txt/);
     await writeFile(join(root, "large.txt"), "a".repeat(99_999) + "b");
     assert.notEqual((await missionReviewSource(root, run)).fingerprint, first.fingerprint, "unshown tail bytes are still fingerprinted");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("mission baseline exposes committed changes across replans without a generated file swallowing later changes", async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const root = await mkdtemp(join(resolve("_testenv"), "mission-review-baseline-"));
+  try {
+    await git("git", ["init", "--quiet"], { cwd: root });
+    await git("git", ["config", "user.email", "test@example.invalid"], { cwd: root });
+    await git("git", ["config", "user.name", "test"], { cwd: root });
+    for (const [name, content] of [["a.js", "export const value = 0;\n"], ["generated.js", "// generated\n"],
+      ["z_test.js", "assert.equal(value, 0);\n"], ["outside.js", "untouched\n"]]) {
+      await writeFile(join(root, name), content);
+    }
+    await git("git", ["add", "--all"], { cwd: root });
+    await git("git", ["commit", "--quiet", "-m", "base"], { cwd: root });
+    const baseline = await missionReviewBaseline(root);
+    assert.match(baseline!, /^[a-f0-9]{40,64}$/u);
+    await writeFile(join(root, "a.js"), "export const value = 42;\n");
+    await writeFile(join(root, "generated.js"), "// generated\n" + "long-generated-line\n".repeat(10_000));
+    await writeFile(join(root, "z_test.js"), "assert.equal(value, 42);\n");
+    await writeFile(join(root, "outside.js"), "unrelated change\n");
+    await git("git", ["add", "--all"], { cwd: root });
+    await git("git", ["commit", "--quiet", "-m", "candidate"], { cwd: root });
+    const run = { units: [{ unit: { write: ["a.js", "generated.js", "z_test.js"] }, hashes: [] }] } as never;
+    const source = await missionReviewSource(root, run, [], baseline);
+    assert.match(source.excerpt, /Changed since mission baseline/u);
+    assert.match(source.excerpt, /export const value = 42/u);
+    assert.match(source.excerpt, /assert\.equal\(value, 42\)/u);
+    assert.doesNotMatch(source.excerpt, /unrelated change/u);
+    assert.ok(Buffer.byteLength(source.excerpt) < 25_000);
+    assert.match(source.excerpt, /EXCERPT TRUNCATED: generated\.js/u);
+    await writeFile(join(root, "z_test.js"), "assert.equal(value, 43);\n");
+    assert.notEqual((await missionReviewSource(root, run, [], baseline)).fingerprint, source.fingerprint);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

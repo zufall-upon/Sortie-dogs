@@ -18,7 +18,7 @@ import { normalizeRelativePath } from "../core/path.js";
 import { MISSION_EVIDENCE_GAP_REVIEW_LIMIT, OperatorMissionRuntime, missionPacket, missionPlan, missionReviewAccepted, missionReviewTask,
   missionCommandOutcome, missionConversationContext, missionExecutionStatus, missionValidationCommand, missionReviewTraces, missionReviewVerdict, type OperatorMission } from "../core/operator-mission.js";
 import { publishMissionProgress } from "./mission-progress.js";
-import { completedMissionReviewPrompts, initialMissionReviewPrompt, missionReviewSource } from "./mission-review.js";
+import { completedMissionReviewPrompts, initialMissionReviewPrompt, missionReviewBaseline, missionReviewSource } from "./mission-review.js";
 import { missionLocations, missionLocationPacket } from "./mission-location.js";
 import { SOURCE_REVIEW_RISK_TAGS } from "../core/consultation.js";
 import { createHash } from "node:crypto";
@@ -1212,11 +1212,15 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             const relocated = await relocatedMission(context.sessionID);
             if (relocated) return JSON.stringify({ ...relocated, budget: await control!.currentBudget(context.sessionID) });
           }
-          const mission = await retainCancelledMissionAcceptance(context.sessionID,
+          let mission = await retainCancelledMissionAcceptance(context.sessionID,
             await missions.start(context.sessionID, (args as Record<string, unknown>).requirements, args.intent === "replace" || args.intent === "new", {
               kind: args.kind === "operation" ? "operation" : "implementation",
               context: missionConversationContext(await messages(context.sessionID)),
             }));
+          if (!mission.reviewBaseline) {
+            const baseline = await missionReviewBaseline(input.directory);
+            if (baseline) mission = await missions.update(context.sessionID, state => { state.reviewBaseline = baseline; });
+          }
           return JSON.stringify({ ...locationObservation(context.sessionID), ...(mission.dispatchOpen
             ? missionDispatchPacket(mission, await operators.read(context.sessionID))
             : { mission_id: mission.id, requirements: mission.requirements, task: missions.task(mission),
@@ -1251,6 +1255,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       if (budget && budget.remaining_units < plan.units.length && !same) throw new Error(
         `mission-budget-exhausted: plan needs ${plan.units.length} units; ${budget.remaining_units} remain. ` +
         "The current run is retained. Correct the plan within the remaining budget, or report a necessary cumulative extension to Operator.");
+      if (!mission.reviewBaseline) {
+        const baseline = await missionReviewBaseline(input.directory);
+        if (baseline) mission = await missions.update(root, state => { state.reviewBaseline ??= baseline; });
+      }
       // Cancellation marks the durable units before interrupting their native sessions. A cancelled
       // status alone therefore cannot prove the old Worker stopped or its reservation settled.
       const cancelledPredecessor = previous?.phase === "cancelled" &&
@@ -1328,7 +1336,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         }
         const evidence = (args as Record<string, unknown>).evidence as import("../core/operator-mission.js").MissionEvidenceExcerpt[] | undefined;
         if (evidence !== undefined && (!Array.isArray(evidence) || evidence.length > 6)) throw new Error("mission-review-evidence: select at most six focused excerpts");
-        const source = await missionReviewSource(input.directory, run, evidence);
+        const source = await missionReviewSource(input.directory, run, evidence, mission.reviewBaseline);
         const requestFingerprint = goalFingerprint({ run: run.runID, source: source.fingerprint, risk, traces });
         if (mission.review?.requestFingerprint === requestFingerprint && mission.review.verdict !== "pending") {
           return JSON.stringify({ ...missionPacket(mission, run), status: "review-recorded",
@@ -1367,7 +1375,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     async function assertMissionReview(root: string, mission: OperatorMission) {
       const run = await operators.required(root), review = mission.review;
       if (!review || review.runID !== run.runID || !missionReviewAccepted(review) ||
-          review.source !== (await missionReviewSource(input.directory, run, review.evidence)).fingerprint) throw new Error("mission-review-required-or-stale");
+          review.source !== (await missionReviewSource(input.directory, run, review.evidence, mission.reviewBaseline)).fingerprint) throw new Error("mission-review-required-or-stale");
     }
     tools[submitMission] = { description: "Coordinator: return only a completion candidate, a user-only decision, or a proven external/scope/budget blocker. Continue ordinary investigation, scope extensions and corrections yourself. Unit progress is published automatically without waking Operator.",
       args: { status: { type: "string", enum: ["ready", "needs-decision", "blocked"] } as never, summary: stringSchema }, execute: async (args, context) => {
