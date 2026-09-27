@@ -111,6 +111,12 @@ actual model in the exact isolated benchmark environment (reuse an existing matc
 For zero-request model/credential failures, report infrastructure failure, not a benchmark score;
 fix the route before launching more instances. Retain the failed run and its budget record.
 
+Benchmark permissions allow URL strings in local test data and explicit registry URLs for
+repository-declared dependencies. Web tools and the existing remote Git/download command rules
+remain denied; the public-only prompt forbids solution retrieval. Shell string rules describe
+these operation restrictions, not complete network isolation. Preflight verifies the operation
+rules for each resolved agent rather than requiring a blanket URL-string denial.
+
 ## 4. Start four-slot inference
 
 Choose an explicit global budget before starting.
