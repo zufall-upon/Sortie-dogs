@@ -62,7 +62,8 @@ test("goal-boundary timing and unrelated tool metadata do not erase known tokens
   assert.equal(metrics?.tokens, 24);
   assert.deepEqual(result.pack, [{ model: "provider/cheap", count: 1 }]);
   assert.deepEqual(result.mix, [{ model: "provider/cheap", tokens: 24, percent: 100,
-    inputCache: { uncachedInputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0 }, hostCostZero: true }]);
+    inputCache: { uncachedInputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    estimatedCost: { usd: 0, pricedRequests: 0, unpricedRequests: 2, complete: false }, hostCostZero: true }]);
   assert.equal(result.validation, "PASS");
   assert.deepEqual(result.overlap, { workerMilliseconds: 50, wallMilliseconds: 50 });
 });
@@ -102,7 +103,7 @@ test("usage and model attribution remain available when only elapsed spans are m
   assert.ok(result.notes?.some(note => note.includes("時刻")));
 });
 
-test("one missing usage record preserves every measured model gauge and labels observed shares", async () => {
+test("one missing usage record preserves measured tokens without inventing cost shares", async () => {
   const missing = message("missing", 3, 4);
   delete (missing.info as { tokens?: unknown }).tokens;
   const metrics = await collectRunMetrics({ session: {
@@ -115,9 +116,9 @@ test("one missing usage record preserves every measured model gauge and labels o
   assert.equal(result.debrief?.mix?.find(row => row.model === "provider/cheap")?.tokens, 24);
   const text = insertSortieResult("status: DONE", result);
   assert.match(text, /使用量\s+36 tokens（観測分）/u);
-  assert.match(text, /モデル内訳\s+観測済みtoken比率（一部未取得）/u);
-  assert.match(text, /🐕 provider\/cheap ██████▋\s+66\.7% 24 tokens/u);
-  assert.match(text, /🐕 provider\/strong ███▍\s+33\.3% 12 tokens/u);
+  assert.match(text, /モデル内訳\s+予測費用未換算（モデル別token数）/u);
+  assert.match(text, /🐕 provider\/cheap 費用未換算 · 24 tokens/u);
+  assert.match(text, /🐕 provider\/strong 費用未換算 · 12 tokens/u);
   assert.doesNotMatch(text, /モデル内訳\s+usage未取得/u);
   assert.equal(insertSortieResult(text, result), text);
 });
@@ -137,7 +138,7 @@ test("a missing sibling history and unknown model do not erase observed model sh
   assert.deepEqual(debrief.mixCoverage, { complete: false, observedTokens: 24 });
   assert.equal(debrief.mix?.find(row => row.model === "provider/cheap")?.percent, 50);
   assert.equal(debrief.mix?.find(row => row.model === "未分類")?.percent, 50);
-  assert.match(renderDebrief(debrief).join("\n"), /🐕 未分類 █████\s+50\.0% 12 tokens/u);
+  assert.match(renderDebrief(debrief).join("\n"), /🐕 未分類 費用未換算 · 12 tokens/u);
 });
 
 test("unavailable usage without any measured tokens never creates fabricated zero gauges", async () => {
@@ -245,17 +246,28 @@ test("in-flight root terminal text is excluded but incomplete child execution is
   assert.equal(buildDebrief(receipt, contract, (await run())?.debrief).pack, null);
 });
 
-test("token bars use observed shares, group the tail, and remain idempotent with Career", () => {
+test("cost bars use priced shares rather than token shares, group the tail, and remain idempotent with Career", () => {
   const result = createSortieResult(receipt, { acceptance_contract: null, consumed_time_ms: null, satisfied_criteria: [] }, undefined);
+  const tokenCounts = [1, 2, 3, 4, 5, 45];
   const populated = { ...result, debrief: { pack: [{ model: "fixture/m", count: 1 }],
-    mix: Array.from({ length: 6 }, (_, index) => ({ model: `fixture/${index}`, tokens: 10, percent: 100 / 6 })),
+    mix: [0.50, 0.25, 0.10, 0.05, 0.05, 0.05].map((usd, index) => ({ model: `fixture/${index}`,
+      tokens: tokenCounts[index]!, percent: tokenCounts[index]! / 60 * 100,
+      estimatedCost: { usd, pricedRequests: 1, unpricedRequests: 0, complete: true } })),
     validation: "未確認", review: "未確認", traits: [] } } as typeof result;
   const text = insertSortieResult("status: DONE", populated);
   assert.equal((text.match(/^🐕 /gmu) ?? []).length, 5);
-  assert.match(text, /🐕 その他 ███▍\s+33\.3% 20 tokens/u);
+  assert.match(text, /モデル内訳\s+予測費用比率/u);
+  assert.match(text, /🐕 fixture\/0 █████\s+50\.0% · \$0\.5000 · 1 tokens/u);
+  assert.match(text, /🐕 その他 █\s+10\.0% · \$0\.1000 · 50 tokens/u);
   assert.match(text, /↺未取得/u);
   assert.match(text, /⚡ 実行重複率 稼働区間の記録不足\n   ※worker区間・速度倍率ではありません/u);
   assert.equal(insertSortieResult(text, populated), text);
+
+  const partial = { ...populated.debrief, mix: populated.debrief.mix.map(entry => entry.model === "fixture/5"
+    ? { ...entry, estimatedCost: { usd: 0, pricedRequests: 0, unpricedRequests: 1, complete: false } } : entry) };
+  const partialText = renderDebrief(partial).join("\n");
+  assert.match(partialText, /モデル内訳\s+換算済み予測費用の比率（一部未換算）/u);
+  assert.match(partialText, /🐕 その他 ▌\s+5\.3% · \$0\.0500（一部未換算） · 50 tokens/u);
 });
 
 test("model rows show input cache ratios, weight the tail, and distinguish host zero cost", () => {
@@ -286,7 +298,39 @@ test("return report renders request estimates without replacing unknown prices w
     children: async () => [], messages: async () => messages,
   } }, "root", undefined, 5);
   const partial = createSortieResult(receipt, { acceptance_contract: null, consumed_time_ms: null, satisfied_criteria: [] }, await collect([priced, unknown]));
-  assert.match(insertSortieResult("status: DONE", partial), /予測費用\s+\$0\.0001（一部未換算） ※予測概算/u);
+  const partialText = insertSortieResult("status: DONE", partial);
+  assert.match(partialText, /予測費用\s+\$0\.0001（一部未換算） ※予測概算/u);
+  assert.match(partialText, /モデル内訳\s+換算済み予測費用の比率（一部未換算）/u);
+  assert.match(partialText, /🐕 openai\/gpt-5\.6-sol ██████████ 100\.0% · \$0\.0001 · 12 tokens/u);
+  assert.match(partialText, /🐕 private\/private-model 費用未換算 · 12 tokens/u);
+  assert.doesNotMatch(partialText, /🐕 private\/private-model[^\n]*0\.0%/u);
   const unpriced = createSortieResult(receipt, { acceptance_contract: null, consumed_time_ms: null, satisfied_criteria: [] }, await collect([unknown]));
   assert.match(insertSortieResult("status: DONE", unpriced), /予測費用\s+未換算 ※予測概算/u);
+});
+
+test("a partially priced model shows only its known cost and never treats missing usage as free", async () => {
+  const priced = message("priced", 1, 2, [], "gpt-6-sol");
+  priced.info.providerID = "openai";
+  const missing = message("missing", 3, 4, [], "gpt-6-sol");
+  missing.info.providerID = "openai";
+  delete (missing.info as { tokens?: unknown }).tokens;
+  const metrics = await collectRunMetrics({ session: { children: async () => [],
+    messages: async () => [priced, missing] } }, "root", undefined, 5);
+  const debrief = buildDebrief(receipt, null, metrics?.debrief);
+  assert.deepEqual(debrief.mix?.[0]?.estimatedCost, {
+    usd: 0.00004, pricedRequests: 1, unpricedRequests: 1, complete: false,
+  });
+  const text = renderDebrief(debrief).join("\n");
+  assert.match(text, /モデル内訳\s+換算済み予測費用の比率（一部未換算）/u);
+  assert.match(text, /🐕 openai\/gpt-6-sol ██████████ 100\.0% · \$0\.000040（一部未換算） · 12 tokens/u);
+});
+
+test("zero known cost is not mislabeled as missing pricing or a zero percent share", () => {
+  const debrief = { pack: [], mix: [{ model: "fixture/zero", tokens: 1, percent: 100,
+    estimatedCost: { usd: 0, pricedRequests: 1, unpricedRequests: 0, complete: true } }],
+  validation: "未確認" as const, review: "未確認" as const, traits: [] };
+  const text = renderDebrief(debrief).join("\n");
+  assert.match(text, /モデル内訳\s+予測費用比率（合計\$0・算出不可）/u);
+  assert.match(text, /🐕 fixture\/zero 比率算出不可 · \$0\.0000 · 1 tokens/u);
+  assert.doesNotMatch(text, /0\.0%|費用未換算/u);
 });

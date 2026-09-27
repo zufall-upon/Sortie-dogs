@@ -236,7 +236,7 @@ test("V2 missing child-list API recovers nested model gauges from native Task hi
     assert.equal(metrics!.tokens, undefined, "recorded dispatches do not prove exhaustive host coverage");
     const debrief = buildDebrief({ goal_id: "g", evidence_refs: [], session_ids: [], status: "stopped" } as never, null, metrics!.debrief);
     assert.deepEqual(debrief.mixCoverage, { complete: false, observedTokens: 36 });
-    assert.match(renderDebrief(debrief).join("\n"), /🐕 openai\/gpt-6-luna-fast ███▍\s+33\.3% 12 tokens/u);
+    assert.match(renderDebrief(debrief).join("\n"), /🐕 openai\/gpt-6-luna-fast ▌\s+4\.8% · \$0\.000004 · 12 tokens/u);
   } finally { cleanup?.(); }
 });
 
