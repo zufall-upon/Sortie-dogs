@@ -63,8 +63,12 @@ quality threshold and explicit model/budget choice. Follow AGENTS.md and use the
 2. Dispatch the returned ${profileAgent(profile, "dog-operator")} task immediately. It owns investigation,
    unit boundaries, Worker/Scout/Advisor/independent Reviewer calls, write-scope extensions and corrections
    within the original request and cumulative budget. Do not investigate or approve each unit at the root.
-3. Compare the returned completion candidate against the original request, real source and observed evidence.
-   If incomplete, resume the SAME Coordinator with concrete feedback. If complete and required review passed
+ 3. Compare the returned completion candidate against the original request, real source and observed evidence.
+    For a reported bug with a concrete public reproduction, check that evidence exercises the same entrypoint,
+    input and observed failure, not only a nearby invented test or syntax check. A material gap goes back
+    to the SAME Coordinator to repair within the original request; do not treat a Reviewer PASS as proof
+    that an unrun public scenario works.
+    If incomplete, resume the SAME Coordinator with concrete feedback. If complete and required review passed
    (or the host accepted it at the evidence-gap limit, with the gaps reported), call
    ${profile.toolPrefix}complete_mission. Only its succeeded receipt authorizes DONE.
 
@@ -148,6 +152,13 @@ title, objective, read/write file or directory scopes, validation commands, and 
 when there is more than one requirement. For operation missions, include execution with the actual
 run/grade commands and working directory. Setup, launch and result collection normally stay in one Worker;
 do not forbid execution while assigning that Worker the requirement to execute.
+When the issue includes a concrete public reproduction, pass its entrypoint, relevant input and observed
+failure into the first useful unit objective without inventing an expected representation. If the public
+example depends on a working directory or package layout, preserve that context. Point the Worker at
+existing analogous source/tests for the expected contract when available. Avoid separate investigation
+units just to restate the issue. A test of a neighboring name is not an adjacent check unless it runs
+the changed branch on a relevant different input; keep validation focused and do not require an extra
+test when the existing checks already exercise that boundary.
 For read-only verification, use write: []; do not invent an output file or request write access to inputs.
 For ordinary diagnostics, use native read/search/shell directly, including while an old run is being
 reconciled. Do not create a dummy validation/console.log unit just to inspect status. The read list is
@@ -244,6 +255,14 @@ diagnose/edit/check loop in this Task. Run formal validation commands exactly as
 and separate shell calls; the host records actual command, source and exit. Diagnostic success is not
 formal acceptance evidence. Do not repeat a failed command without a concrete source/setup correction or
 repeat passed checks on unchanged source. Add meaningful tests only when needed by the change/request.
+For a reported bug, keep the public reproduction's entrypoint, input and layout intact during diagnosis;
+after a fix, run it again when the available environment permits. If it cannot run, report exactly
+what remains unverified instead of substituting a different passing check. When a changed condition
+or exception handler also covers an adjacent input demonstrated by the public source/tests, check that
+input on the same branch (e.g. a neighboring exception type), rather than checking only a nearby test
+name. Derive expected behavior from public code and tests, not hidden evaluator details; skip redundant
+checks already covered by formal validation. Return a concrete failed reproduction to Coordinator for
+the same-goal correction loop rather than declaring the whole task complete.
 When changing a failure path, check its public return value, error and post-failure state together against
 the existing API contract; do not stop assertions after matching error text.
 
