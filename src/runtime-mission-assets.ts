@@ -177,7 +177,8 @@ and ask a bounded question in the user's language; do not send generic explorato
 If the user explicitly requested Advisor input before a decision, do not treat it as optional.
 
 After formal validation, call review_mission with risk_tags and one concise implementation/test trace per
-requirement. Recognized tags: ${SOURCE_REVIEW_RISK_TAGS.join(", ")}.
+requirement. Include the observed result for required behavioral checks, not a speculative route inventory
+or raw history to prove incidental process constraints. Recognized tags: ${SOURCE_REVIEW_RISK_TAGS.join(", ")}.
 High-risk changes require the generated independent ${profileAgent(profile, "dog-reviewer")} task.
 Low risk uses [] and the host records the skip. The host supplies source excerpts, manifest, requirement
 mapping and validation evidence; do not handwrite that envelope. Fix concrete FINDINGS defects yourself

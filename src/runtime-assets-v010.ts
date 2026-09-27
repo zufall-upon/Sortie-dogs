@@ -395,59 +395,44 @@ Only in the execution phase, call next to read authoritative queue state and its
 reconstructing criteria from a summary. Never use a standalone/generic worker as a fallback.
 `;
 
-/**
- * A constraint added to an existing construct is only complete when every existing form that reaches
- * that construct is intercepted or explicitly excluded. Partial interception passes a narrow suite and
- * still changes public behavior, so both the implementer and the reviewer require the same enumeration.
- * Syntax forms alone do not cover it: the same form can reach the rule through a different value
- * representation, and a case run with the rule inactive only reproduces the pre-existing behavior.
- */
-const EXISTING_SURFACE_COVERAGE_WORKER = `
-## Existing-surface coverage
+/** Keep coverage tied to actual changed branches, not a generic inventory of the whole API. */
+const CHANGED_PATH_COVERAGE_WORKER = `
+## Changed-path coverage
 
-When the unit adds or tightens a rule on a construct the target already supports, enumerate the existing
-forms that create, bind, or mutate that construct before editing: single and multi-value forms, nested and
-composite values, every scope, and generated or implicit paths. Derive that list from the target's own
-grammar, node kinds, or dispatch tables, not from the request wording, and enumerate creation and binding
-routes separately from mutation routes; a request that names one route never proves the other is absent.
-Enumerate the value representations that reach the new rule as well: a value taken from a container element,
-field, or dynamic holder arrives through a different representation than a directly produced value, so it is a
-distinct entry even when its syntax form is already listed. Intercept each enumerated form or state why it
-stays out of scope, and exercise each intercepted form in the declared validation with the new rule active;
-a case that exercises the form while the new rule is inactive proves only the pre-existing behavior. Return
-the enumeration and its derivation source with the unit evidence. An enumerated form without a trace or a
-stated exclusion is an open defect, not a completed unit.
+When a fix changes a rule on an existing construct, inspect the affected source branches and the public
+entry path in the request. Check other routes or value representations only when the changed code, an
+existing test, or acceptance shows that they can reach a materially different branch or result. Exercise
+the reported case with the new rule active and the relevant adjacent behavior; add targeted cases for
+independent branches or multiple affected targets. A passing case with the new rule inactive does not
+prove the fix. Explain any material branch left unverified in the unit evidence.
 
-Treat independently selected syntax or dispatch dimensions as combinations, not as interchangeable labels.
-For example, cardinality, optional-clause presence, scope, and value representation can select different
-branches even when each dimension works in one other case. Exercise the material combinations needed to cover
-those branches, and for a multi-target route prove the rule and result for every target rather than only the
-first target. A trace for one combination or one target does not cover the others.
+Do not turn this into an exhaustive inventory of creation, binding, mutation, syntax forms, value
+representations, or their Cartesian product. Do not add tests or scope for hypothetical routes without
+a source-backed reason that they affect the requested behavior.
 `;
-const EXISTING_SURFACE_COVERAGE_REVIEWER = `
-## Existing-surface coverage
+const CHANGED_PATH_COVERAGE_REVIEWER = `
+## Changed-path coverage
 
-When an acceptance item constrains a construct the target already supports, require the artifact to enumerate
-the existing forms that create, bind, or mutate it and to trace each form to a result or a stated exclusion.
-Require the enumeration to name the target artifact it was derived from and to list creation and binding
-routes separately from mutation routes; an enumeration justified only by the request wording, or one that
-covers mutation routes while leaving creation routes unlisted, is incomplete. Require the value representations
-that reach the rule to be listed too, and require each trace to exercise the form with the new rule active; a
-trace whose case leaves the new rule inactive evidences only the pre-existing behavior. A missing enumeration, an
-excluded form without a reason, or an enumerated form without a trace is never PASS. When the supplied
-excerpts cannot settle the form and no defect is established, it is an evidence gap, not a FINDINGS defect.
+Review the requested public behavior, changed source branches, and relevant adjacent checks. If the supplied
+source or acceptance identifies another route, representation, branch, or target that can materially change
+the result, identify that concrete path and the missing or contradictory evidence. A demonstrated defect
+is FINDINGS; a specific material path whose outcome cannot be settled by the supplied artifact is
+EVIDENCE_GAPS. A test where the changed rule is inactive does not establish the requested behavior.
+For a multi-target change, verify each affected target when the source shows independent handling.
 
-Reject a matrix that lists independent syntax or dispatch dimensions but traces them only in isolation. Require
-the material combinations that can select different branches, including cardinality with optional-clause
-presence, scope, and value representation where applicable. For a multi-target route, require evidence for every
-target; proving only the first target is a concrete asymmetry finding.
+Do not demand a generic creation/binding/mutation inventory, every possible value representation, or a
+cross-product of independent dimensions just because the construct already exists. Absence of that
+inventory alone is not an evidence gap. Do not demand raw logs or historical process traces for
+incidental workflow constraints when a concise Worker trace reports them and the supplied record does
+not contradict it. The Operator owns final comparison to the original request; still flag a missing
+required behavioral result or canonical validation evidence.
 
 ## Mission review verdict
 
-Start with exactly one of PASS, FINDINGS or EVIDENCE_GAPS. Use FINDINGS when any finding establishes a
-source/test defect or an observed behavior contradicting an acceptance item. Use EVIDENCE_GAPS when every finding
-is proof the artifact cannot settle: a missing excerpt, trace, enumeration, or process history later established
-on the base. List all gaps you see in one response rather than one per round; the host bounds evidence rounds.
+Start with exactly one of PASS, FINDINGS or EVIDENCE_GAPS. Use FINDINGS when a source/test defect or
+observed contradiction is established. Use EVIDENCE_GAPS only for a specific acceptance-relevant behavior
+or required validation that the supplied artifact cannot settle; name why the missing evidence matters.
+List all material gaps in one response rather than one per round; the host bounds evidence rounds.
 `;
 
 export const runtimeAssets: readonly RuntimeAsset[] = Object.freeze([
@@ -469,9 +454,9 @@ export const runtimeAssets: readonly RuntimeAsset[] = Object.freeze([
     if (asset.name === "dog-worker" || asset.name === "dog-luna-worker") {
       content = content.replace("mode: subagent\n", `mode: subagent\npermission:\n  bash: allow\n  ${profile.toolPrefix}bind_write_gate: allow\n  ${profile.toolPrefix}release_write_gate: allow\n  ${profile.toolPrefix}operator_status: allow\ntools:\n  "sortie_*": false\n  ${profile.toolPrefix}bind_write_gate: true\n  ${profile.toolPrefix}release_write_gate: true\n  ${profile.toolPrefix}operator_status: true\n`);
       content += `\n## Root-approved unit coverage\nWhen the immutable handoff contains ext["sortie-dogs/unit-coverage"], its indices identify this unit's assigned criteria within the unchanged global acceptance ledger. Prove those assigned criteria and preserve all global constraints. Report other units' criteria as pending; do not implement outside the unit manifest or claim global completion. The host records unit evidence, and the root alone accepts the whole goal.\n`;
-      content += EXISTING_SURFACE_COVERAGE_WORKER;
+      content += CHANGED_PATH_COVERAGE_WORKER;
     }
-    if (asset.name === "dog-reviewer") content += EXISTING_SURFACE_COVERAGE_REVIEWER;
+    if (asset.name === "dog-reviewer") content += CHANGED_PATH_COVERAGE_REVIEWER;
     if (asset.name !== "dog-coordinator") {
       content = content.replace(/^description: .*$/m, match => `${match} [${V010_RUNTIME_ASSET_VERSION}]`);
     }
