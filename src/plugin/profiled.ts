@@ -530,7 +530,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       // Only the same source can retain a cancelled run's acceptance as a prefix.
       if (previous.sourceRefs[0] !== `user:${mission.requests[0]?.id}` ||
           !previous.sourceRefs.every(ref => mission.requests.some(request => ref === `user:${request.id}`))) {
-        throw new Error("mission-cancelled-source-unproven");
+        throw new Error("mission-cancelled-source-unproven: the cancelled run's source_refs do not prove this is the same request. " +
+          "If the user changed or narrowed the goal, start_mission with intent=replace and the complete current requirements; " +
+          "otherwise preserve the earlier accepted criteria and establish the original source before continuing.");
       }
       return previous.acceptance.every((text, index) => mission.requirements[index]?.text === text)
         ? mission : missions.carryForward(root, mission.id, previous.acceptance);
@@ -1240,10 +1242,12 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             const relocated = await relocatedMission(context.sessionID);
             if (relocated) return JSON.stringify({ ...relocated, budget: await control!.currentBudget(context.sessionID) });
           }
+          const prior = await operators.read(context.sessionID);
           let mission = await retainCancelledMissionAcceptance(context.sessionID,
             await missions.start(context.sessionID, (args as Record<string, unknown>).requirements, args.intent === "replace" || args.intent === "new", {
               kind: args.kind === "operation" ? "operation" : "implementation",
               context: missionConversationContext(await messages(context.sessionID)),
+              ...(args.intent === "replace" && prior?.phase === "cancelled" ? { cancelledRunID: prior.runID } : {}),
             }));
           if (!mission.reviewBaseline) {
             const baseline = await missionReviewBaseline(input.directory);

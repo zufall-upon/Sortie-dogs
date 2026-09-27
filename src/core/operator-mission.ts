@@ -223,7 +223,7 @@ export class OperatorMissionRuntime {
     });
   }
   start(root: string, requirements: unknown, replaceRequirements = false,
-    options: { kind?: OperatorMission["kind"]; context?: MissionContext[] } = {}): Promise<OperatorMission> {
+    options: { kind?: OperatorMission["kind"]; context?: MissionContext[]; cancelledRunID?: string } = {}): Promise<OperatorMission> {
     return this.serial(root, async () => {
       if (!Array.isArray(requirements) || requirements.length === 0 || requirements.length > 64 ||
           !requirements.every(item => typeof item === "string" && item.trim() && !/[\r\n]/u.test(item))) {
@@ -242,16 +242,19 @@ export class OperatorMissionRuntime {
         return previous;
       }
       if (previous) await this.save(this.file(root, `.${previous.id}`), previous);
+      // A cancelled standalone/legacy run has no mission-owned runID. Only an explicit
+      // replacement may link it; normal continuation must not silently inherit its goal.
+      const predecessor = previous?.runID ?? previous?.supersededRunID ??
+        (replaceRequirements ? options.cancelledRunID : undefined);
       const state: OperatorMission = { version: "0.12", id: `mission-${randomUUID()}`, root, requests: [request],
         kind: options.kind ?? "implementation",
         context: (options.context ?? []).filter(item => item.id !== request.id),
         requirements: requirements.map((text, index) => ({ id: `R${index + 1}`, text })), phase: "open",
         ...(replaceRequirements ? { requirementsReplaced: true } : {}),
         coordinator: null, callID: null, dispatchOpen: false, runID: null, plans: 0, progress: [], submission: null,
-        ...(previous?.phase === "cancelled" &&
-          (previous.runID === null || request.id !== previous.requests[0]?.id) &&
-          (previous.runID ?? previous.supersededRunID)
-          ? { supersededRunID: (previous.runID ?? previous.supersededRunID)! } : {}) };
+        ...((previous === undefined || previous.phase === "cancelled") &&
+          (previous?.runID === null || previous === undefined || request.id !== previous.requests[0]?.id) && predecessor
+          ? { supersededRunID: predecessor } : {}) };
       await this.save(this.file(root), state);
       return state;
     });
