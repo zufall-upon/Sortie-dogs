@@ -250,7 +250,7 @@ test("cost bars use priced shares rather than token shares, group the tail, and 
   const result = createSortieResult(receipt, { acceptance_contract: null, consumed_time_ms: null, satisfied_criteria: [] }, undefined);
   const tokenCounts = [1, 2, 3, 4, 5, 45];
   const populated = { ...result, debrief: { pack: [{ model: "fixture/m", count: 1 }],
-    mix: [0.50, 0.25, 0.10, 0.05, 0.05, 0.05].map((usd, index) => ({ model: `fixture/${index}`,
+    mix: [0.50, 0.25, 0.10, 0.08, 0.04, 0.03].map((usd, index) => ({ model: `fixture/${index}`,
       tokens: tokenCounts[index]!, percent: tokenCounts[index]! / 60 * 100,
       estimatedCost: { usd, pricedRequests: 1, unpricedRequests: 0, complete: true } })),
     validation: "未確認", review: "未確認", traits: [] } } as typeof result;
@@ -258,7 +258,7 @@ test("cost bars use priced shares rather than token shares, group the tail, and 
   assert.equal((text.match(/^🐕 /gmu) ?? []).length, 5);
   assert.match(text, /モデル内訳\s+予測費用比率/u);
   assert.match(text, /🐕 fixture\/0 █████\s+50\.0% · \$0\.5000 · 1 tokens/u);
-  assert.match(text, /🐕 その他 █\s+10\.0% · \$0\.1000 · 50 tokens/u);
+  assert.match(text, /🐕 その他 ▊\s+7\.0% · \$0\.0700 · 50 tokens/u);
   assert.match(text, /↺未取得/u);
   assert.match(text, /⚡ 実行重複率 稼働区間の記録不足\n   ※worker区間・速度倍率ではありません/u);
   assert.equal(insertSortieResult(text, populated), text);
@@ -267,7 +267,7 @@ test("cost bars use priced shares rather than token shares, group the tail, and 
     ? { ...entry, estimatedCost: { usd: 0, pricedRequests: 0, unpricedRequests: 1, complete: false } } : entry) };
   const partialText = renderDebrief(partial).join("\n");
   assert.match(partialText, /モデル内訳\s+換算済み予測費用の比率（一部未換算）/u);
-  assert.match(partialText, /🐕 その他 ▌\s+5\.3% · \$0\.0500（一部未換算） · 50 tokens/u);
+  assert.match(partialText, /🐕 その他 ▍\s+4\.1% · \$0\.0400（一部未換算） · 50 tokens/u);
 });
 
 test("model rows show input cache ratios, weight the tail, and distinguish host zero cost", () => {
