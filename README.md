@@ -87,19 +87,27 @@ goal; preserving quality while reducing unnecessary expensive work is.
 
 ### SWE-bench evaluation
 
-A frozen Sortie-dogs v0.10.14 build was evaluated on 23 fixed tasks.
+Official SWE-bench Lite `dev` results on the same 23 public instances:
 
-- Official verifier PASS: 6 / 23
-- Scored FAIL: 17 / 23
-- Infrastructure blocked: 0 / 23
-- Total estimated model cost: $15.75
-- Median agent runtime: 15.2 min
+| Candidate / benchmark adapter | Official resolved | Empty patches | Run conditions | Details |
+| --- | ---: | ---: | --- | --- |
+| v0.10.6 candidate (`859c396`) | 4 / 23 (17.4%) | 5 | Four inference slots | [Handoff](docs/swebench-handoff-2026-09-21.md) |
+| Frozen v0.10.14 build | 6 / 23 (26.1%) | — | Four slots; $1.50/task | [Per-task results](docs/benchmark-v0.10.14-dev23.md) |
+| v0.12.8 (`e0f8cef` adapter) | 5 / 23 (21.7%) | 9 | Four slots; budget amended across two batches; 30-minute timeout | [Campaign](docs/swebench-v0128-dev23-2026-09-26.md) |
+| v0.12.8 (`84ccdf1` main adapter) | 6 / 23 (26.1%) | 2 | Fresh 23-task run; four slots; 30-minute timeout | [Main-integrated run](docs/swebench-main-84ccdf1-dev23-2026-09-26.md) |
+| v0.12.15 (`0c9690d`) | 5 / 23 (21.7%) | 3 | Fresh 23-task ext4 retry; four slots; 40-minute timeout | [Campaign](docs/swebench-v01215-dev23-2026-09-27.md) |
 
-The same Sortie-dogs candidate, model routes, budgets, tools, and verification
-procedure were held fixed for all tasks. This is one frozen evaluation, not a
-general success-rate claim.
-
-Full methodology and per-task results: [benchmark details](docs/benchmark-v0.10.14-dev23.md)
+Every row has 23 submitted official predictions; an empty patch counts against
+the score, not as a missing evaluation. The v0.10.14 report does not separately
+summarize empty patches. The v0.12.15 row is the separately approved fresh
+run after an initial `/tmp` quota failure, not an additional score for that
+failed attempt. Inference completion is **not** official resolution.
+Budgets, runtime/adapter versions, and execution conditions changed between
+campaigns, so this table is a history of observed results, not a controlled
+head-to-head comparison or a general success-rate claim. The v0.10.14 run
+estimated $15.75 in model cost and a 15.2-minute median agent runtime.
+Eight inference slots have only been checked in a model-free scheduler test;
+no eight-slot score is reported here.
 
 Historical qualification references remain in [benchmark reference](docs/benchmark-reference.md).
 

@@ -7,7 +7,7 @@ import { appendFile, chmod, lstat, mkdir, readFile, readdir, rename, rm, stat, s
 import { promisify } from "node:util";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { estimateModelUsageCost } from "../dist/plugin/model-cost.js";
+import { estimateModelUsageCost } from "./swebench-model-cost.mjs";
 import { startV2ReleaseServer, v2PluginWrapperSource } from "./release-cli.mjs";
 
 const execFileAsync = promisify(execFile);

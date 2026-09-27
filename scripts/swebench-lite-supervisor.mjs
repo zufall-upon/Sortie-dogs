@@ -10,6 +10,7 @@ const DEFAULT_HEARTBEAT_SECONDS = 5;
 const DEFAULT_STALE_SECONDS = 30;
 const DEFAULT_REPORT_SECONDS = 120;
 const DEFAULT_TIMEOUT_SECONDS = 30 * 60;
+const SUPERVISOR_TIMEOUT_MULTIPLIER = 1.25;
 const TERMINAL_STATES = new Set(["completed", "failed"]);
 
 const record = value => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -304,10 +305,48 @@ async function spawnRunner(state, entry, paths, options, dependencies) {
   return { child, identity: await processIdentity(child.pid) };
 }
 
-function waitForChild(child) {
+function waitForChild(child, identity, timeoutSeconds) {
   return new Promise(resolvePromise => {
-    child.once("error", error => resolvePromise({ exit: 127, signal: error.code ?? "spawn-error" }));
-    child.once("close", (exit, signal) => resolvePromise({ exit: exit ?? 1, signal }));
+    let settled = false;
+    let timedOut = false;
+    let timer;
+    const finish = result => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.removeListener("error", onError);
+      child.removeListener("close", onClose);
+      resolvePromise(result);
+    };
+    const onError = error => {
+      if (!timedOut) finish({ exit: 127, signal: error.code ?? "spawn-error" });
+    };
+    const onClose = (exit, signal) => {
+      if (!timedOut) finish({ exit: exit ?? 1, signal });
+    };
+    child.once("error", onError);
+    child.once("close", onClose);
+    timer = setTimeout(() => {
+      timedOut = true;
+      if (!record(identity) || !Number.isInteger(identity.pid)) {
+        finish({ exit: 124, signal: "timeout", timedOut: true, runnerStopped: false });
+        return;
+      }
+      void killProcessGroup(identity).then(runnerStopped => finish({
+        exit: 124,
+        signal: "timeout",
+        timedOut: true,
+        runnerStopped,
+      }), () => finish({
+        exit: 124,
+        signal: "timeout",
+        timedOut: true,
+        runnerStopped: false,
+      }));
+    // The runner starts its own inference deadline after candidate and workspace setup.
+    // Give that setup a bounded allowance before the supervisor's outer deadline.
+    }, timeoutSeconds * 1000 * SUPERVISOR_TIMEOUT_MULTIPLIER);
+    if (child.exitCode !== null || child.signalCode !== null) onClose(child.exitCode, child.signalCode);
   });
 }
 
@@ -494,12 +533,19 @@ export async function runSupervisor(value, options, dependencies = {}) {
         const identity = child?.identity ?? (Number.isInteger(child?.child?.pid)
           ? await processIdentity(child.child.pid) : null);
         entry.runner = identity;
+        const pendingExit = dependencies.waitForChild ? null : waitForChild(child.child, identity, timeoutSeconds);
         await writes.enqueue();
         const exit = dependencies.waitForChild
-          ? await dependencies.waitForChild(child, entry)
-          : await waitForChild(child.child);
+          ? await dependencies.waitForChild(child, entry, identity, timeoutSeconds)
+          : await pendingExit;
+        if (exit.timedOut && !exit.runnerStopped) {
+          const error = new Error(`runner-timeout-termination-failed:${entry.instance_id}`);
+          error.fatal = true;
+          throw error;
+        }
         return { exit };
       } catch (error) {
+        if (error?.fatal) throw error;
         return { error };
       }
     };
@@ -511,6 +557,16 @@ export async function runSupervisor(value, options, dependencies = {}) {
       if (childResult) {
         entry.result = childResult;
         entry.status = childResult.status ?? "completed";
+      } else if (outcome.exit?.timedOut) {
+        entry.status = "timeout";
+        entry.result = {
+          instance_id: entry.instance_id,
+          status: "timeout",
+          exit_code: outcome.exit.exit,
+          signal: outcome.exit.signal,
+          reason: "supervisor-timeout",
+          timeout_seconds: timeoutSeconds,
+        };
       } else if (outcome.error) {
         entry.status = "failed";
         entry.result = {

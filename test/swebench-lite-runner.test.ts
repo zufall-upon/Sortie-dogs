@@ -7,6 +7,8 @@ import test from "node:test";
 import { benchmarkEnvironment, benchmarkPythonCacheEnvironment, benchmarkInlineConfig, benchmarkPermissionPolicy, capturePatch, cloneInstance, createDryRunPlan, createInferenceManifest, createInstancePrompt, createLiveRunPlan, runOpenCode, waitForBenchmarkModelRoute, readDirectoryUsage, formatPrediction, officialEvaluationImage, parseArguments, relocateOfficialEnvironment, retainUsageDatabase, runDryRun, runLive, seedIsolatedV2Credential, verifyCandidateAgent } from "../scripts/swebench-lite-runner.mjs";
 import { runCandidatePreflight } from "../scripts/swebench-candidate-preflight.mjs";
 import { releaseManifest } from "../scripts/swebench-release-manifest.mjs";
+import { estimateModelUsageCost as benchmarkModelCost } from "../scripts/swebench-model-cost.mjs";
+import { estimateModelUsageCost as productModelCost } from "../src/plugin/model-cost.ts";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -27,6 +29,42 @@ const fakeReadyServer = {
   }),
   waitForModelRoute: async () => undefined,
 };
+
+test("runner starts without a dist build, even after its script is moved to an isolated directory", async () => {
+  const root = await mkdtemp(join(tmpdir(), "swebench-runner-no-dist-"));
+  try {
+    for (const name of ["swebench-lite-runner.mjs", "swebench-model-cost.mjs", "swebench-lite-public-lock.json",
+      "release-cli.mjs", "release-process.mjs", "release-profiles.mjs"]) {
+      await writeFile(join(root, name), await readFile(join("scripts", name)));
+    }
+    const { stdout } = await promisify(execFile)(process.execPath, ["--input-type=module", "--eval",
+      "const runner = process.argv[1]; process.argv[1] = 'isolated-import-test'; await import(runner); console.log('runner-loaded')",
+      join(root, "swebench-lite-runner.mjs")], {
+      cwd: root,
+    });
+    assert.equal(stdout.trim(), "runner-loaded");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("benchmark-local pricing matches the product estimator across supported routes and failure cases", () => {
+  for (const [providerID, modelID] of [
+    ...["gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-6-luna-fast", "gpt-5.6-sol",
+      "gpt-5.6", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6-luna-fast"].map(model => ["openai", model]),
+    ["anthropic", "claude-opus-5"], ["anthropic", "claude-opus-5-5"],
+    ["unknown", "unknown-model"],
+  ]) {
+    for (const serviceTier of [undefined, "standard", "fast", "priority", "unsupported"]) {
+      for (const input of [10_000, 273_000]) {
+        const usage = { providerID, modelID, serviceTier, uncachedInputTokens: input,
+          cacheReadTokens: 100, cacheWriteTokens: 20, outputTokens: 1_000, reasoningTokens: 500 };
+        assert.deepEqual(benchmarkModelCost(usage), productModelCost(usage), `${providerID}/${modelID}:${serviceTier}:${input}`);
+      }
+    }
+  }
+  const incomplete = { providerID: "openai", modelID: "gpt-6-luna-fast", uncachedInputTokens: 100,
+    cacheReadTokens: undefined, cacheWriteTokens: 0, outputTokens: 0, reasoningTokens: 0 };
+  assert.deepEqual(benchmarkModelCost(incomplete), productModelCost(incomplete));
+});
 
 test("benchmark waits for the selected model and variant before starting a V2 session", async () => {
   let calls = 0;
@@ -295,6 +333,8 @@ test("release manifest selects receipt bytes over a same-version development can
     assert.match(provenance.runner_commit, /^[a-f0-9]{40}$/);
     assert.equal(provenance.runner_sha256["scripts/swebench-lite-runner.mjs"],
       createHash("sha256").update(await readFile("scripts/swebench-lite-runner.mjs")).digest("hex"));
+    assert.equal(provenance.runner_sha256["scripts/swebench-model-cost.mjs"],
+      createHash("sha256").update(await readFile("scripts/swebench-model-cost.mjs")).digest("hex"));
     assert.equal(JSON.parse(await readFile(`${output}.provenance.json`, "utf8")).manifest_sha256,
       createHash("sha256").update(await readFile(output)).digest("hex"));
     await assert.rejects(releaseManifest(join(root, "base.json"), receiptPath, output, dependencies), /EEXIST/);

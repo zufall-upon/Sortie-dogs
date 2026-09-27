@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   acquireRunLock,
   createSupervisorState,
+  processAlive,
   processIdentity,
   releaseRunLock,
   runSupervisor,
@@ -198,6 +199,53 @@ test("fixed Lite dev23 runs pass@1 with four active runners and one queued state
   }
 });
 
+test("eight inference slots retain one attempt per instance and the fixed campaign ceiling", async () => {
+  const root = await mkdtemp(join(tmpdir(), "swebench-supervisor-dev23-eight-"));
+  const runs: string[] = [];
+  let active = 0;
+  let maximumActive = 0;
+  let releaseInitial: () => void = () => undefined;
+  const initialEight = new Promise<void>(resolvePromise => { releaseInitial = resolvePromise; });
+  try {
+    const state = await runSupervisor(liteDev23Manifest, {
+      manifestPath: join(root, "manifest.json"), runRoot: root,
+      output: join(root, "predictions.jsonl"), costLimitUsd: 34.5,
+      perInstanceUsd: 1.5, workers: 8, watchdog: false,
+    }, {
+      allowWindows: true,
+      spawnRunner: async (_state: unknown, entry: { instance_id: string }, paths: { metadata: string }, options: { costLimitUsd: number }) => {
+        runs.push(entry.instance_id);
+        active += 1;
+        maximumActive = Math.max(maximumActive, active);
+        assert(options.costLimitUsd > 0 && options.costLimitUsd <= 1.5);
+        assert(active <= 8);
+        if (runs.length === 8) releaseInitial();
+        await writeAtomicJson(paths.metadata, {
+          execution: { spent_usd: 0.5, usage_complete: true },
+          results: [{ instance_id: entry.instance_id, status: "succeeded", usage: { usd: 0.5 } }],
+        });
+        return { identity: { pid: 99999999, starttime: null } };
+      },
+      waitForChild: async () => {
+        await initialEight;
+        active -= 1;
+        return { exit: 0, signal: null };
+      },
+    });
+    assert.equal(maximumActive, 8);
+    assert.deepEqual(runs, liteDev23Manifest.instances.map(item => item.instance_id));
+    assert(state.instances.every(entry => entry.attempt === 1));
+    assert.equal(state.status, "completed");
+    assert.equal(state.spent_usd, 11.5);
+    assert.equal(state.reserved_usd, 0);
+    assert.equal(state.held_unknown_usd, 0);
+    assert.equal(state.limits.workers, 8);
+    assert.equal(state.limits.cost_limit_usd, 34.5);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("workers bound active runners, preserve claim/output order, and reserve cost per instance", async () => {
   const root = await mkdtemp(join(tmpdir(), "swebench-supervisor-workers-"));
   const runs: string[] = [];
@@ -349,6 +397,76 @@ test("child failure is recorded while the supervisor advances to the next instan
     assert.equal(result.instances[0]!.status, "watchdog-stale");
     assert.equal(result.instances[1]!.status, "failed");
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a runner that exits before the supervisor attaches its close listener is settled promptly", {
+  skip: process.platform === "win32",
+}, async () => {
+  const root = await mkdtemp(join(tmpdir(), "swebench-supervisor-early-exit-"));
+  try {
+    const value = { ...manifestValue, instances: [manifestValue.instances[0]!] };
+    const started = Date.now();
+    const result = await runSupervisor(value, {
+      manifestPath: join(root, "manifest.json"), runRoot: root,
+      output: join(root, "predictions.jsonl"), costLimitUsd: 5,
+      timeoutSeconds: 3, watchdog: false,
+    }, {
+      allowWindows: true,
+      spawnRunner: async () => {
+        const child = spawn(process.execPath, ["--eval", "process.exit(17)"], { detached: true, stdio: "ignore" });
+        await new Promise<void>(resolvePromise => child.once("close", () => resolvePromise()));
+        return { child, identity: await processIdentity(child.pid!) };
+      },
+    });
+    assert(Date.now() - started < 2000, "the exit must not wait for the supervisor deadline");
+    assert.equal(result.instances[0]!.status, "failed");
+    assert.equal(result.instances[0]!.result?.exit_code, 17);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("supervisor recovers a child that never exits without another inference attempt", {
+  skip: process.platform === "win32",
+}, async () => {
+  const root = await mkdtemp(join(tmpdir(), "swebench-supervisor-hung-runner-"));
+  const runnerScript = join(root, "hung-runner.mjs");
+  let runnerIdentity: Awaited<ReturnType<typeof processIdentity>> | undefined;
+  let attempts = 0;
+  try {
+    await writeFile(runnerScript, "setInterval(() => {}, 1000);\n");
+    const value = { ...manifestValue, instances: [manifestValue.instances[0]!] };
+    const options = { manifestPath: join(root, "manifest.json"), runRoot: root,
+      output: join(root, "predictions.jsonl"), costLimitUsd: 5,
+      timeoutSeconds: 1, watchdog: false };
+    const dependencies = {
+      allowWindows: true,
+      spawnRunner: async () => {
+        attempts += 1;
+        const child = spawn(process.execPath, [runnerScript], { detached: true, stdio: "ignore" });
+        runnerIdentity = await processIdentity(child.pid!);
+        return { child, identity: runnerIdentity };
+      },
+    };
+    const result = await runSupervisor(value, options, dependencies);
+    assert.equal(result.status, "completed");
+    assert.equal(result.instances[0]!.status, "timeout");
+    assert.equal(result.instances[0]!.result?.reason, "supervisor-timeout");
+    assert.equal(result.instances[0]!.attempt, 1);
+    assert.equal(result.reserved_usd, 0);
+    assert.equal(result.held_unknown_usd, 5);
+    assert.equal(await processAlive(runnerIdentity), false);
+    const prediction = JSON.parse((await readFile(options.output, "utf8")).trim());
+    assert.equal(prediction.instance_id, value.instances[0]!.instance_id);
+    assert.equal(prediction.model_patch, "");
+    await runSupervisor(value, options, dependencies);
+    assert.equal(attempts, 1);
+  } finally {
+    if (runnerIdentity && await processAlive(runnerIdentity)) {
+      try { process.kill(-runnerIdentity.pid, "SIGKILL"); } catch { /* already stopped */ }
+    }
     await rm(root, { recursive: true, force: true });
   }
 });
