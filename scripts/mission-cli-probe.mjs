@@ -34,7 +34,8 @@ export function observeMissionCLI(project, since = 0, rootAgent = 'dog-operator'
         if (price.status === 'priced') usd += price.usd;
         else unpriced++;
         for (const part of data.content ?? []) if (part.type === 'tool') {
-          tools.push({ agent: session.agent, tool: part.name, status: part.state?.status, at_ms: part.time?.created - root.time_created });
+          tools.push({ agent: session.agent, tool: part.name, status: part.state?.status, at_ms: part.time?.created - root.time_created,
+            ...(part.name === 'sortie_v010_operator_status' ? { model: data.model } : {}) });
           if (part.state?.status === 'error') errors.push({ sessionID: session.id, tool: part.name,
             error: String(JSON.stringify(part.state?.error ?? part.state?.content)).slice(0, 1500) });
         }
@@ -43,6 +44,19 @@ export function observeMissionCLI(project, since = 0, rootAgent = 'dog-operator'
     }
     return { root: root?.id, models, tools, responses, errors, priced_usd: usd, unpriced_requests: unpriced };
   } finally { db.close(); }
+}
+
+/** An explicit route/status probe is not a Mission run. Observe one real model turn and one status call. */
+export function statusProbeStopReason(observed, expectedModel) {
+  const first = observed.models.find(item => item.sessionID === observed.root && item.agent === 'dog-operator');
+  if (!first) return null;
+  const match = model => model?.providerID && model?.id &&
+    `${model.providerID}/${model.id}${model.variant ? `#${model.variant}` : ''}` === expectedModel;
+  if (!match(first.model)) return 'model-mismatch';
+  const status = observed.tools.find(item => item.agent === 'dog-operator' && item.tool === 'sortie_v010_operator_status' &&
+    item.status === 'completed');
+  if (!status) return null;
+  return match(status.model) ? 'status-observed' : 'model-mismatch';
 }
 
 async function updateBudget(file, update) {
@@ -92,8 +106,10 @@ export async function probe(tgz, output, { mode = 'start', prompt, instance, tim
   const since = Date.now();
   const buildStart = mode === 'build-start';
   const operatorResponse = mode === 'operator-response';
+  const statusOnly = mode === 'status';
   const rootAgent = buildStart ? 'build' : 'dog-operator';
-  const request = prompt ?? (buildStart ? 'Reply with just: ready' : operatorResponse
+  const request = prompt ?? (statusOnly ? 'Call sortie_v010_operator_status once. Do not start a Mission or dispatch a Worker.' :
+    buildStart ? 'Reply with just: ready' : operatorResponse
     ? '作業は不要です。ツールを呼ばず、READYとだけ返してください。' : 'result.txt の seed を recovered に置換して。末尾改行は維持。検証は node check.mjs。check.mjs と設定は変更しない。単純な1ユニット作業として実装して。');
   const rootModel = model ?? (operatorResponse ? 'openai/gpt-6-luna-fast#max' : 'openai/gpt-6-sol#xhigh');
   const child = spawn('opencode', ['run', '--server', server.url, '--format', 'json', '--agent', rootAgent, '--model', rootModel, request], {
@@ -111,8 +127,10 @@ export async function probe(tgz, output, { mode = 'start', prompt, instance, tim
   };
   const timer = setInterval(() => {
     const observed = observeMissionCLI(project, since, rootAgent);
+    const statusReason = statusOnly ? statusProbeStopReason(observed, rootModel) : null;
     if (observed.priced_usd >= capUSD) stop('budget');
     else if (observed.errors.length) stop('tool-error');
+    else if (statusReason) stop(statusReason);
     else if (mode === 'start' && observed.models.some(item => item.agent === 'dog-worker-v010')) stop('worker-started');
     else if (buildStart && observed.responses.some(item => item.agent === 'build')) stop('build-responded');
     else if (operatorResponse && observed.responses.some(item => item.agent === 'dog-operator')) stop('operator-responded');
@@ -129,7 +147,10 @@ export async function probe(tgz, output, { mode = 'start', prompt, instance, tim
     catch (error) { if (error.code === 'ENOENT') return null; throw error; }
   };
   const mission = await state('missions'), operator = await state('operators');
-  const result = { ...observed, ...(cutoff ? { errors: cutoff.errors,
+  const result = { ...observed, ...(statusOnly ? { expected_model: rootModel,
+    observed_model: observed.tools.find(item => item.agent === 'dog-operator' && item.tool === 'sortie_v010_operator_status' &&
+      item.status === 'completed')?.model ?? observed.models.find(item => item.sessionID === observed.root)?.model ?? null } : {}),
+    ...(cutoff ? { errors: cutoff.errors,
     cancellation_errors: observed.errors.filter(error => /"type":"aborted"/.test(error.error)) } : {}),
     project, mode, stopped, code, elapsed_ms: Date.now() - since,
     mission_phase: mission?.phase ?? null, receipt_status: operator?.receipt?.status ?? null,
@@ -137,7 +158,9 @@ export async function probe(tgz, output, { mode = 'start', prompt, instance, tim
     candidate_sha256: createHash('sha256').update(await readFile(tgz)).digest('hex') };
   const worker = result.models.find(item => item.agent === 'dog-worker-v010');
   const schemaRejected = /invalid_function_parameters|Invalid schema for function/u.test(stdout + stderr);
-  result.accepted = operatorResponse ? !schemaRejected && !result.errors.length &&
+  result.accepted = statusOnly ? !schemaRejected && !result.errors.length && stopped === 'status-observed' &&
+    result.mission_phase === null :
+    operatorResponse ? !schemaRejected && !result.errors.length &&
     (stopped === 'operator-responded' || (!stopped && code === 0)) && result.responses.some(item => item.agent === 'dog-operator') &&
     result.models.some(item => item.agent === 'dog-operator' && item.model?.id === 'gpt-6-luna-fast' && item.model.variant === 'max') :
     buildStart ? !result.errors.length && (stopped === 'build-responded' || (!stopped && code === 0)) &&
@@ -165,7 +188,7 @@ if (process.argv[1] && resolve(process.argv[1]) === resolve(import.meta.filename
   // CLI-only start probes have already persisted their observation and logs.
   // Drop the large isolated installation so old tool schemas cannot be loaded
   // when the shared OpenCode server later revisits this fixture's session.
-  if (result.accepted && ['start', 'build-start', 'operator-response'].includes(result.mode)) {
+  if (result.accepted && ['start', 'build-start', 'operator-response', 'status'].includes(result.mode)) {
     const control = join(result.project, '.opencode');
     const observation = JSON.parse(await readFile(join(dirname(result.project), 'observation.json'), 'utf8'));
     if (observation.project === result.project && observation.candidate_sha256 === result.candidate_sha256 &&
