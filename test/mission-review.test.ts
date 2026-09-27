@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
@@ -211,6 +211,45 @@ test("mission baseline exposes committed changes across replans without a genera
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("focused review shares unused reference space and keeps changed-file inventory visible", async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const root = await mkdtemp(join(resolve("_testenv"), "mission-review-focused-"));
+  try {
+    await git("git", ["init", "--quiet"], { cwd: root });
+    await git("git", ["config", "user.email", "test@example.invalid"], { cwd: root });
+    await git("git", ["config", "user.name", "test"], { cwd: root });
+    const paths = ["impl0.go", "impl1.go", "impl2.go", "impl3.go", "shortA.go", "shortB.go", "generated.go"];
+    for (const path of paths) await writeFile(join(root, path), "base\n");
+    await git("git", ["add", "--all"], { cwd: root });
+    await git("git", ["commit", "--quiet", "-m", "base"], { cwd: root });
+    const baseline = await missionReviewBaseline(root);
+    for (let index = 0; index < 4; index++) {
+      const count = index === 0 ? 120 : 40;
+      await writeFile(join(root, paths[index]!), Array.from({ length: count }, (_, line) =>
+        `branch_${index}_${line + 1} = "${"x".repeat(65)}"\n`).join(""));
+    }
+    await writeFile(join(root, "shortA.go"), "short_acceptance_A\n");
+    await writeFile(join(root, "shortB.go"), "short_acceptance_B\n");
+    await writeFile(join(root, "generated.go"), "// generated\n" + "generated\n".repeat(10_000));
+    await git("git", ["add", "--all"], { cwd: root });
+    await git("git", ["commit", "--quiet", "-m", "candidate"], { cwd: root });
+    const evidence = paths.slice(0, 6).map((path, index) => ({ path, offset: 1, limit: index === 0 ? 120 : 40 }));
+    const run = { units: [{ unit: { write: ["."] }, hashes: [] }] } as never;
+    const source = await missionReviewSource(root, run, evidence, baseline);
+    for (let index = 1; index < 4; index++) {
+      assert.match(source.excerpt, new RegExp(`40: branch_${index}_40 =`), "a long, acceptance-relevant tail remains visible");
+      assert.doesNotMatch(source.excerpt, new RegExp(`FOCUSED EXCERPT TRUNCATED: impl${index}\\.go`));
+    }
+    assert.match(source.excerpt, /short_acceptance_A/u);
+    assert.match(source.excerpt, /short_acceptance_B/u);
+    assert.match(source.excerpt, /FOCUSED EXCERPT TRUNCATED: impl0\.go:1/u);
+    assert.match(source.excerpt, /--- changed: generated\.go ---/u);
+    assert.ok(Buffer.byteLength(source.excerpt) < 25_000);
+    await appendFile(join(root, "impl2.go"), "changed outside original selection\n");
+    assert.notEqual((await missionReviewSource(root, run, evidence, baseline)).fingerprint, source.fingerprint);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("read-only units do not accidentally collect an entire repository and ignored tooling", async () => {
   const packet = await missionReviewSource("nonexistent-directory", { units: [{ unit: { write: [], read: ["src"] }, hashes: [] }] } as never);
   assert.match(packet.excerpt, /Read-only units: no declared output files/);
@@ -264,6 +303,22 @@ test("large focused tests do not starve a later requested error branch", async (
     ]);
     assert.match(packet.excerpt, /FOCUSED EXCERPT TRUNCATED: large_test\.js/);
     assert.match(packet.excerpt, /1: if \(error\) return \[null, error\]/);
+    assert.ok(Buffer.byteLength(packet.excerpt) < 12_000);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("six single-line references fitting the read-only budget are not displaced by unused notices", async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const root = await mkdtemp(join(resolve("_testenv"), "mission-focused-lines-"));
+  try {
+    const paths = ["a.log", "b.log", "c.log", "d.log", "e.log", "f.log"];
+    for (const path of paths) await writeFile(join(root, path), "x".repeat(1_796) + "\n");
+    const run = { units: [{ unit: { read: paths, write: [] }, hashes: [] }] } as never;
+    const packet = await missionReviewSource(root, run, paths.map(path => ({ path, offset: 1, limit: 1 })));
+    for (const path of paths) {
+      assert.match(packet.excerpt, new RegExp(`--- evidence: ${path.replace(".", "\\.")}:1 ---\\n1: x{1796}\\n`));
+      assert.doesNotMatch(packet.excerpt, new RegExp(`FOCUSED EXCERPT TRUNCATED: ${path.replace(".", "\\.")}`));
+    }
     assert.ok(Buffer.byteLength(packet.excerpt) < 12_000);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
