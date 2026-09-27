@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
@@ -208,6 +208,45 @@ test("mission baseline exposes committed changes across replans without a genera
     assert.match(source.excerpt, /EXCERPT TRUNCATED: generated\.js/u);
     await writeFile(join(root, "z_test.js"), "assert.equal(value, 43);\n");
     assert.notEqual((await missionReviewSource(root, run, [], baseline)).fingerprint, source.fingerprint);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("focused review shares unused reference space and keeps changed-file inventory visible", async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const root = await mkdtemp(join(resolve("_testenv"), "mission-review-focused-"));
+  try {
+    await git("git", ["init", "--quiet"], { cwd: root });
+    await git("git", ["config", "user.email", "test@example.invalid"], { cwd: root });
+    await git("git", ["config", "user.name", "test"], { cwd: root });
+    const paths = ["impl0.go", "impl1.go", "impl2.go", "impl3.go", "shortA.go", "shortB.go", "generated.go"];
+    for (const path of paths) await writeFile(join(root, path), "base\n");
+    await git("git", ["add", "--all"], { cwd: root });
+    await git("git", ["commit", "--quiet", "-m", "base"], { cwd: root });
+    const baseline = await missionReviewBaseline(root);
+    for (let index = 0; index < 4; index++) {
+      const count = index === 0 ? 120 : 40;
+      await writeFile(join(root, paths[index]!), Array.from({ length: count }, (_, line) =>
+        `branch_${index}_${line + 1} = "${"x".repeat(65)}"\n`).join(""));
+    }
+    await writeFile(join(root, "shortA.go"), "short_acceptance_A\n");
+    await writeFile(join(root, "shortB.go"), "short_acceptance_B\n");
+    await writeFile(join(root, "generated.go"), "// generated\n" + "generated\n".repeat(10_000));
+    await git("git", ["add", "--all"], { cwd: root });
+    await git("git", ["commit", "--quiet", "-m", "candidate"], { cwd: root });
+    const evidence = paths.slice(0, 6).map((path, index) => ({ path, offset: 1, limit: index === 0 ? 120 : 40 }));
+    const run = { units: [{ unit: { write: ["."] }, hashes: [] }] } as never;
+    const source = await missionReviewSource(root, run, evidence, baseline);
+    for (let index = 1; index < 4; index++) {
+      assert.match(source.excerpt, new RegExp(`40: branch_${index}_40 =`), "a long, acceptance-relevant tail remains visible");
+      assert.doesNotMatch(source.excerpt, new RegExp(`FOCUSED EXCERPT TRUNCATED: impl${index}\\.go`));
+    }
+    assert.match(source.excerpt, /short_acceptance_A/u);
+    assert.match(source.excerpt, /short_acceptance_B/u);
+    assert.match(source.excerpt, /FOCUSED EXCERPT TRUNCATED: impl0\.go:1/u);
+    assert.match(source.excerpt, /--- changed: generated\.go ---/u);
+    assert.ok(Buffer.byteLength(source.excerpt) < 25_000);
+    await appendFile(join(root, "impl2.go"), "changed outside original selection\n");
+    assert.notEqual((await missionReviewSource(root, run, evidence, baseline)).fingerprint, source.fingerprint);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

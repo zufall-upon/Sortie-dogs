@@ -16,6 +16,25 @@ import { declaredArtifacts } from "./declared-artifacts.js";
 const exec = promisify(execFile);
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 
+/** Use the space left by short references for longer requested branches, without starving later references. */
+function focusedAllowances(sizes: readonly number[], budget: number): number[] {
+  const allowances = sizes.map(() => 0);
+  let remaining = budget;
+  let pending = sizes.map((_, index) => index);
+  while (pending.length && remaining > 0) {
+    const share = Math.floor(remaining / pending.length);
+    const complete = pending.filter(index => sizes[index]! <= share);
+    if (!complete.length) {
+      for (const index of pending) allowances[index] = share;
+      for (const index of pending.slice(0, remaining - share * pending.length)) allowances[index]!++;
+      break;
+    }
+    for (const index of complete) { allowances[index] = sizes[index]!; remaining -= sizes[index]!; }
+    pending = pending.filter(index => !complete.includes(index));
+  }
+  return allowances;
+}
+
 export async function missionReviewBaseline(directory: string): Promise<string | undefined> {
   try {
     const { stdout } = await exec("git", ["rev-parse", "--verify", "HEAD^{commit}"], { cwd: directory });
@@ -88,7 +107,8 @@ export async function missionReviewSource(directory: string, run: OperatorState,
   evidence: readonly MissionEvidenceExcerpt[] = [], baseline?: string, priorScope?: MissionReviewScope): Promise<{ fingerprint: string; excerpt: string }> {
   const scope = missionReviewScope(priorScope, run);
   const hash = createHash("sha256").update(JSON.stringify({ baseline, scope, units: run.units.map(unit => ({ unit: unit.unit, hashes: unit.hashes })) }));
-  let selected = "";
+  const writes = [...new Set(scope.write.map(path => path === "." ? path : normalizeManifestScope(path).path))];
+  const focused: { entry: MissionEvidenceExcerpt; lines: string[]; bytes: number }[] = [];
   for (const entry of evidence) {
     const absolute = resolve(directory, entry.path);
     const local = relative(resolve(directory), absolute);
@@ -108,31 +128,49 @@ export async function missionReviewSource(directory: string, run: OperatorState,
       const info = await lstat(absolute);
       if (!info.isFile()) throw new Error("select a regular file");
       hash.update(JSON.stringify(entry)).update(String(info.size));
-       const stream = createReadStream(absolute);
-       stream.on("data", chunk => hash.update(chunk));
-       const lines = createInterface({ input: stream, crlfDelay: Infinity });
-       stream.on("error", error => lines.emit("error", error));
-       selected += `\n--- evidence: ${entry.path}:${entry.offset} ---\n`;
-       // Share the focused budget rather than silently starving later requested error branches.
-       const allowance = Math.floor(11_000 / evidence.length);
-       let number = 0, bytes = 0, truncated = false;
-       try {
-         for await (const line of lines) {
-           number++;
-           if (number >= entry.offset && number < entry.offset + entry.limit) {
-             const text = `${number}: ${line.slice(0, 2_000)}\n`, size = Buffer.byteLength(text);
-             if (!truncated && bytes + size <= allowance) { selected += text; bytes += size; }
-             else truncated = true;
-           }
-         }
-       } finally { lines.close(); stream.destroy(); }
-       if (entry.offset > number) throw new Error(`offset ${entry.offset} exceeds ${number} lines; select existing lines`);
-       if (truncated) selected += `[FOCUSED EXCERPT TRUNCATED: ${entry.path}:${entry.offset}; request a smaller range]\n`;
-     } catch (error) {
-       throw fail(error instanceof Error ? error.message : String(error));
-     }
+      const stream = createReadStream(absolute);
+      stream.on("data", chunk => hash.update(chunk));
+      const lines = createInterface({ input: stream, crlfDelay: Infinity });
+      stream.on("error", error => lines.emit("error", error));
+      const excerpt: string[] = [];
+      let number = 0, bytes = 0;
+      try {
+        for await (const line of lines) {
+          number++;
+          if (number >= entry.offset && number < entry.offset + entry.limit) {
+            const text = `${number}: ${line.slice(0, 2_000)}\n`;
+            excerpt.push(text);
+            bytes += Buffer.byteLength(text);
+          }
+        }
+      } finally { lines.close(); stream.destroy(); }
+      if (entry.offset > number) throw new Error(`offset ${entry.offset} exceeds ${number} lines; select existing lines`);
+      focused.push({ entry, lines: excerpt, bytes });
+    } catch (error) {
+      throw fail(error instanceof Error ? error.message : String(error));
+    }
   }
-  const writes = [...new Set(scope.write.map(path => path === "." ? path : normalizeManifestScope(path).path))];
+  // Keep room for the baseline diff; reserve headings and truncation notices before allocating
+  // the remaining focused bytes. Explicit references take precedence over automatic diff prefixes.
+  const heading = (entry: MissionEvidenceExcerpt) => `\n--- evidence: ${entry.path}:${entry.offset} ---\n`;
+  const truncated = (entry: MissionEvidenceExcerpt) => `[FOCUSED EXCERPT TRUNCATED: ${entry.path}:${entry.offset}; request a smaller range]\n`;
+  const overhead = focused.reduce((size, { entry }) => size + Buffer.byteLength(heading(entry) + truncated(entry)), 0);
+  // Read-only reviews retain their smaller existing envelope; code reviews may use the space
+  // previously reserved for automatic diff prefixes, while leaving room for changed-file context.
+  const allowances = focusedAllowances(focused.map(item => item.bytes), Math.max(0, (writes.length ? 18_000 : 11_000) - overhead));
+  let selected = "";
+  for (const [index, item] of focused.entries()) {
+    selected += heading(item.entry);
+    let shown = 0, bytes = 0;
+    for (const line of item.lines) {
+      const size = Buffer.byteLength(line);
+      if (bytes + size > allowances[index]!) break;
+      selected += line;
+      bytes += size;
+      shown++;
+    }
+    if (shown < item.lines.length) selected += truncated(item.entry);
+  }
   if (writes.length === 0) return { fingerprint: `sha256:${hash.digest("hex")}`,
     excerpt: selected + "[Read-only units: no declared output files. Review the supplied observations, traces and validation evidence.]" };
   // The shared dependency environment is local tooling, never reviewed or pinned source.
