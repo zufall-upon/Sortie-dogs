@@ -246,6 +246,54 @@ for (const legacy of [false, true]) test(`V2 ${legacy ? "saved absolute" : "rela
   } finally { cleanup?.(); await rm(directory, { recursive: true, force: true }); }
 });
 
+test("V2 interrupted Coordinator Task reconciles its native error despite a live dispatch owner", async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const directory = await mkdtemp(resolve("_testenv/mission-interrupted-dispatch-"));
+  const fixture = contextFixture();
+  const history: Record<string, unknown[]> = { root: [] };
+  const context: OpenCodeV2Context = { ...fixture.context, location: { directory },
+    session: { ...fixture.context.session,
+      get: async ({ sessionID }) => ({ id: sessionID, agent: sessionID === "root" ? "dog-operator" : "dogs-coordinator",
+        ...(sessionID === "root" ? {} : { parentID: "root" }), model: { providerID: "openai", id: "gpt-6-sol" } }),
+      context: async ({ sessionID }) => history[sessionID] ?? [],
+    } };
+  const cleanup = await V2Plugin.setup(context);
+  try {
+    const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+    await missions.capture("root", { id: "msg_request", text: "Complete the existing run and report its result" });
+    const mission = await missions.start("root", ["Complete the existing run and report its result"]);
+    const task = missions.task(mission);
+    const first = { sessionID: "root", agent: "dog-operator", tool: "subagent", id: "call_interrupted",
+      input: { agent: task.subagent_type, description: task.description, prompt: task.prompt } };
+    await fixture.toolHooks.get("execute.before")!(first);
+    await fixture.sessionHooks.get("prompt")!({ sessionID: "coordinator", messageID: "msg_child",
+      prompt: { text: `You are a subagent spawned by another session.\n${task.prompt}` } });
+    const status = fixture.tools.find(tool => tool.name === "sortie_v010_operator_status") as {
+      execute(input: unknown, context: unknown): Promise<{ content: string }>;
+    };
+    const readStatus = async () => JSON.parse((await status.execute({}, { sessionID: "root", agent: "dog-operator" })).content);
+    assert.equal((await readStatus()).coordinator_dispatch, "active", "a running Task cannot be redispatched");
+    history.root!.push({ id: "msg_other", type: "assistant", agent: "dog-operator", content: [{
+      type: "tool", id: "call_other", name: "subagent", state: { status: "error", input: first.input },
+    }] });
+    assert.equal((await readStatus()).coordinator_dispatch, "active", "a different terminal call cannot release this Task");
+    history.root!.push({ id: "msg_interrupted", type: "assistant", agent: "dog-operator", content: [{
+      type: "tool", id: first.id, name: "subagent", state: { status: "error", input: first.input,
+        error: { type: "aborted", message: "Tool execution interrupted" } },
+    }] });
+    const reconciled = await readStatus();
+    assert.equal(reconciled.coordinator_dispatch, "resumable");
+    assert.equal(reconciled.task.task_id, "coordinator", "reuse the same child and original Mission");
+    assert.equal((await missions.required("root")).dispatchOpen, false);
+    const resumed = { sessionID: "root", agent: "dog-operator", tool: "subagent", id: "call_resumed",
+      input: { agent: task.subagent_type, sessionID: "coordinator", description: "Continue existing run", prompt: "Recover results" } };
+    await fixture.toolHooks.get("execute.before")!(resumed);
+    assert.equal((await missions.required("root")).callID, "call_resumed");
+    assert.equal((await readStatus()).coordinator_dispatch, "active", "the new live Task remains protected");
+    await assert.rejects(fixture.toolHooks.get("execute.before")!({ ...resumed, id: "call_duplicate" }), /mission-dispatch-not-authorized/u);
+  } finally { cleanup?.(); await rm(directory, { recursive: true, force: true }); }
+});
+
 test("V2 review recovery pages past bounded context to a completed initial Reviewer", async () => {
   const fixture = contextFixture();
   const initial = "candidate_id: mission-current\nreview_phase: initial\ncanonical_validation_exit: 0\nrisk_tags: [public-logic]\nrevision: first";
