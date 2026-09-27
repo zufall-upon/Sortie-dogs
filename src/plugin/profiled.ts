@@ -481,6 +481,12 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           next_action: "Use a known Coordinator's native location to resume. Absence here does not prove absence in other locations." },
       } : {}) };
     }
+    function sourceReconciliationRequired(mission: OperatorMission, previous?: OperatorState): boolean {
+      return previous?.phase === "cancelled" && !["completed", "cancelled"].includes(mission.phase) &&
+        mission.runID === null && mission.supersededRunID === undefined &&
+        (previous.sourceRefs[0] !== `user:${mission.requests[0]?.id}` ||
+          !previous.sourceRefs.every(ref => mission.requests.some(request => ref === `user:${request.id}`)));
+    }
     async function missionAuthority(id: string): Promise<{ root: string; mission: OperatorMission }> {
       const root = await rootFor(id);
       if (!root) throw new Error(RUNTIME_PROFILE_SESSION_INACTIVE);
@@ -510,6 +516,12 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     function missionDispatchPacket(mission: OperatorMission, run?: import("../core/operator-runtime.js").OperatorState) {
       const packet: Record<string, unknown> = { ...missionPacket(mission, run), project_root: input.directory,
         coordinator_dispatch: mission.dispatchOpen ? "active" : ["completed", "cancelled"].includes(mission.phase) ? "terminal" : "resumable" };
+      if (sourceReconciliationRequired(mission, run)) return { ...packet, status: "mission-source-reconciliation-required",
+        next_action: mission.dispatchOpen ? "The Coordinator Task is still active. Do not redispatch; wait for its native completion and reconcile via operator_status."
+          : `The cancelled run's source_refs cannot prove this mission is the same goal. Do not dispatch or repeat plan_units. ` +
+          `If these saved requirements reflect the user's changed or narrowed scope, Operator: call ${profile.toolPrefix}start_mission ` +
+          `with intent=replace and the exact requirements array shown here. The host repairs this mission in place, retains spend, ` +
+          `and verifies old children before preparing a Worker. Otherwise obtain the user's scope decision.` };
       if (!mission.dispatchOpen && (["open", "running"].includes(mission.phase) ||
           (mission.phase === "submitted" && mission.submission?.status !== "ready"))) {
         return { ...packet, task: missions.task(mission),
@@ -529,8 +541,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       }
       // A different original user request needs the explicit, host-proven supersession path.
       // Only the same source can retain a cancelled run's acceptance as a prefix.
-      if (previous.sourceRefs[0] !== `user:${mission.requests[0]?.id}` ||
-          !previous.sourceRefs.every(ref => mission.requests.some(request => ref === `user:${request.id}`))) {
+      if (sourceReconciliationRequired(mission, previous)) {
         throw new Error("mission-cancelled-source-unproven: the cancelled run's source_refs do not prove this is the same request. " +
           "If the user changed or narrowed the goal, start_mission with intent=replace and the complete current requirements; " +
           "otherwise preserve the earlier accepted criteria and establish the original source before continuing.");
@@ -775,6 +786,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         const activeMission = await reconcileMissionDispatch(root);
         if (activeMission && !["cancelled", "completed"].includes(activeMission.phase) && activeMission.runID === null && context.sessionID !== root) {
           const budget = await control!.currentBudget(root);
+          const prior = await operators.read(root);
+          if (sourceReconciliationRequired(activeMission, prior)) return JSON.stringify({ ...missionDispatchPacket(activeMission, prior), budget });
           return JSON.stringify({ ...missionDispatchPacket(activeMission, await operators.read(root)), budget,
             next_action: "This mission has no unit plan yet. Call plan_units with the next useful work under the current requirements; prior run results are historical." });
         }
@@ -1228,7 +1241,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       reviewMission = `${profile.toolPrefix}review_mission`, submitMission = `${profile.toolPrefix}submit_mission`,
       completeMission = `${profile.toolPrefix}complete_mission`, expandUnit = `${profile.toolPrefix}expand_unit`;
     const stringList = { type: "array", items: { type: "string" } };
-    tools[startMission] = { description: "Operator: save the current user requirements. Use intent=replace when the user changes an existing request (version, parallelism, target): host cancels the previous run and archives its requirements/results while retaining spend. Supply the complete current requirements, retaining constraints the user has not changed. For separate work in a different location use intent=new. Dispatch the Coordinator immediately, or plan_units for a known single-unit procedure; item count and runtime alone do not require a Coordinator.",
+    tools[startMission] = { description: "Operator: save the current user requirements. Use intent=replace when the user changes an existing request (version, parallelism, target): host cancels the previous run and archives its requirements/results while retaining spend. If status reports mission-source-reconciliation-required and the saved requirements reflect that changed scope, call intent=replace with those exact requirements: the host repairs this mission in place and keeps its Coordinator. Supply the complete current requirements, retaining constraints the user has not changed. For separate work in a different location use intent=new. Dispatch the Coordinator immediately, or plan_units for a known single-unit procedure; item count and runtime alone do not require a Coordinator.",
       args: { requirements: { ...stringList, minItems: 1, maxItems: 64 } as never,
         kind: { type: "string", enum: ["implementation", "operation"], description: "Use operation for running an existing benchmark, command or procedure. The host records its actual execution separately from setup and checks.", "x-sortie-optional": true } as never,
         intent: { type: "string", enum: ["", "continue", "new", "replace"], "x-sortie-optional": true } as never }, execute: async (args, context) => {
@@ -1236,6 +1249,23 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         if (args.intent !== undefined && !["", "continue", "new", "replace"].includes(args.intent)) throw new Error("mission-intent-invalid");
         return serializeDispatchTransition(context.sessionID, async () => {
           const existing = await reconcileMissionDispatch(context.sessionID);
+          const prior = await operators.read(context.sessionID);
+          const requirements = (args as Record<string, unknown>).requirements;
+          if (args.intent === "replace" && existing && !existing.dispatchOpen && existing.runID === null &&
+              existing.phase !== "cancelled" && existing.phase !== "completed" &&
+              (existing.phase !== "submitted" || existing.submission?.status === "blocked") &&
+              sourceReconciliationRequired(existing, prior) && Array.isArray(requirements) &&
+              requirements.length === existing.requirements.length &&
+              existing.requirements.every((item, index) => item.text === requirements[index])) {
+            const repaired = await missions.update(context.sessionID, state => {
+              if (state.id !== existing.id || state.runID !== null || state.dispatchOpen) throw new Error("mission-source-reconciliation-stale");
+              state.supersededRunID = prior!.runID;
+              state.requirementsReplaced = true;
+              if (state.phase === "submitted") { state.phase = "running"; state.submission = null; }
+            });
+            return JSON.stringify({ ...locationObservation(context.sessionID), ...missionDispatchPacket(repaired, prior),
+              budget: await control!.currentBudget(context.sessionID) });
+          }
           if (args.intent === "replace" && existing && !["completed", "cancelled"].includes(existing.phase)) {
             await stop(context.sessionID, "explicit-cancellation", false);
           }
@@ -1243,13 +1273,15 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             const relocated = await relocatedMission(context.sessionID);
             if (relocated) return JSON.stringify({ ...relocated, budget: await control!.currentBudget(context.sessionID) });
           }
-          const prior = await operators.read(context.sessionID);
-          let mission = await retainCancelledMissionAcceptance(context.sessionID,
-            await missions.start(context.sessionID, (args as Record<string, unknown>).requirements, args.intent === "replace" || args.intent === "new", {
+          const cancelled = await operators.read(context.sessionID);
+          let mission = await missions.start(context.sessionID, requirements, args.intent === "replace" || args.intent === "new", {
               kind: args.kind === "operation" ? "operation" : "implementation",
               context: missionConversationContext(await messages(context.sessionID)),
-              ...(args.intent === "replace" && prior?.phase === "cancelled" ? { cancelledRunID: prior.runID } : {}),
-            }));
+              ...(args.intent === "replace" && cancelled?.phase === "cancelled" ? { cancelledRunID: cancelled.runID } : {}),
+            });
+          if (sourceReconciliationRequired(mission, cancelled)) return JSON.stringify({ ...locationObservation(context.sessionID),
+            ...missionDispatchPacket(mission, cancelled), budget: await control!.currentBudget(context.sessionID) });
+          mission = await retainCancelledMissionAcceptance(context.sessionID, mission, cancelled);
           if (!mission.reviewBaseline) {
             const baseline = await missionReviewBaseline(input.directory);
             if (baseline) mission = await missions.update(context.sessionID, state => { state.reviewBaseline = baseline; });
@@ -1262,6 +1294,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       } };
     async function declareMissionUnits(root: string, actor: string, mission: OperatorMission, raw: unknown, reason?: string, execution?: unknown) {
       const previous = await operators.read(root);
+      if (sourceReconciliationRequired(mission, previous)) return JSON.stringify({ ...missionDispatchPacket(mission, previous),
+        next_action: `Coordinator: do not repeat plan_units. Call ${submitMission} with status=blocked and report the saved ` +
+          `requirements to Operator. Operator can relink this mission in place via ${startMission} intent=replace ` +
+          `when they match the user's changed scope; no Worker can start before that decision.` });
       mission = await retainCancelledMissionAcceptance(root, mission, previous);
       let operation = mission.execution;
       // Models can serialize an optional operation field as an empty object for a normal edit.
