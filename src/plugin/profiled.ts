@@ -601,8 +601,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     }
     async function reconcileMissionDispatch(root: string): Promise<OperatorMission | undefined> {
       const mission = await missions.read(root);
-      if (!mission?.dispatchOpen || !mission.callID || ["cancelled", "completed"].includes(mission.phase) ||
-          taskOwners.has(mission.callID)) return mission;
+      if (!mission?.dispatchOpen || !mission.callID || ["cancelled", "completed"].includes(mission.phase)) return mission;
+      // A native Task can be interrupted without an execute.after/event callback. Its in-memory
+      // owner then survives even though the host has already persisted a terminal tool part.
+      // The native record, not that cache, decides whether this exact dispatch can be resumed.
       const history = await messages(root);
       const finished = history.flatMap(message => Array.isArray(message.parts) ? message.parts : []).filter(part =>
         record(part) && part.type === "tool" && part.tool === "task" && part.callID === mission.callID &&
@@ -616,7 +618,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         const who = await identity(mission.coordinator);
         if (who.parent !== root || who.role !== "dog-operator") return mission;
       }
-      return missions.reconcileFinishedDispatch(root, mission.id, mission.callID);
+      const reconciled = await missions.reconcileFinishedDispatch(root, mission.id, mission.callID);
+      taskOwners.delete(mission.callID);
+      return reconciled;
     }
     function missionDispatchPacket(mission: OperatorMission, run?: import("../core/operator-runtime.js").OperatorState) {
       const packet: Record<string, unknown> = { ...missionPacket(mission, run), project_root: input.directory,
