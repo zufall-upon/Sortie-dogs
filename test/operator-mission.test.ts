@@ -7,6 +7,7 @@ import { MISSION_EVIDENCE_GAP_REVIEW_LIMIT, OperatorMissionRuntime, missionPacke
   missionCommandOutcome, missionConversationContext, missionExecutionStatus, missionReviewTraces, missionReviewVerdict } from "../dist/core/operator-mission.js";
 import { OperatorRuntime } from "../dist/core/operator-runtime.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
+import { missionCoordinatorContent, missionOperatorContent, missionWorkerContent } from "../dist/runtime-mission-assets.js";
 import { terminalCancelledMissionChildren } from "../dist/plugin/profiled.js";
 
 async function fixture(run: (directory: string) => Promise<void>) {
@@ -18,6 +19,40 @@ async function fixture(run: (directory: string) => Promise<void>) {
 const unit = { title: "Fix result", objective: "Implement the requested result without changing the oracle", read: ["check.mjs"],
   write: ["src"], validation: ["node check.mjs"] };
 const independentReviewAcceptance = "After implementation and formal validation, the Coordinator must dispatch an independent Dog-Reviewer with review_mission and risk_tags [public-logic] to examine root cause and public logic, then reflect all FINDINGS; this SourceReview is post-validation and must not block Worker dispatch.";
+
+test("public reproduction and shared-branch checks remain in the same mission Worker handoff", async () => fixture(async directory => {
+  const operator = missionOperatorContent(V010_RUNTIME_PROFILE, "0.12.17");
+  const coordinator = missionCoordinatorContent(V010_RUNTIME_PROFILE, "0.12.17");
+  const worker = missionWorkerContent(V010_RUNTIME_PROFILE);
+  assert.match(operator, /SAME Coordinator to repair within the original request/u);
+  assert.match(coordinator, /first useful unit objective/u);
+  assert.match(coordinator, /working directory or package layout/u);
+  assert.match(coordinator, /not an adjacent check unless it runs\s+the changed branch/u);
+  assert.match(worker, /entrypoint, input and layout intact/u);
+  assert.match(worker, /same branch \(e\.g\. a neighboring exception type\)/u);
+  assert.match(worker, /skip redundant\s+checks already covered by formal validation/u);
+  assert.doesNotMatch(worker, /hidden evaluator details.*as (?:proof|tests)/u);
+
+  // Public-only synthetic case analogous to a shared exception handler. This asserts the
+  // objective survives the existing mission path, not that a model now solves that bug.
+  const objective = "Reproduce public format_value('{') ValueError from src/project layout; repair the formatter and check the adjacent TypeError on the same exception branch using existing source/tests.";
+  const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+  await missions.capture("root", { id: "public-issue", text: "format_value('{') fails in src/project layout; preserve the working formatter" });
+  const mission = await missions.start("root", ["Fix the public format failure", "Preserve working formatting"]);
+  const operators = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
+  const run = await operators.prepareMission("root", missionPlan(mission, [{
+    title: "Repair formatter", objective, read: ["src/project/format.py"], write: ["src/project/format.py", "tests/test_format.py"],
+    validation: ["python -m pytest tests/test_format.py"], requirement_ids: ["R1", "R2"],
+  }]));
+  const task = (await operators.next("root", "root") as { task: { prompt: string } }).task;
+  await operators.admitWorker("root", "root", "worker-call", task as never);
+  const expanded = await operators.claimAdmittedWorkerPrompt("root", "root", "worker", task.prompt);
+  assert.match(expanded.prompt, /format_value\('\{'\) ValueError/u);
+  assert.match(expanded.prompt, /adjacent TypeError on the same exception branch/u);
+  assert.match(expanded.prompt, /python -m pytest tests\/test_format.py/u);
+  assert.deepEqual(run.acceptance, ["Fix the public format failure", "Preserve working formatting"]);
+  assert.equal(run.units.length, 1, "no separate setup or review Worker is required");
+}));
 
 test("mission review accepts grouped requirement traces while preserving coverage", async () => fixture(async directory => {
   const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
