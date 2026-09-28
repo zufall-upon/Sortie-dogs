@@ -46,7 +46,7 @@ permission:
     ${profileAgent(profile, "dog-advisor")}: allow
 tools:
   "sortie_*": false
- ${controls(profile, ["start_mission", "plan_units", "operator_next", "operator_status", "extend_mission_budget", "expand_unit", "review_mission", "complete_mission", "cancel_operator", "reflection"])}
+${controls(profile, ["start_mission", "plan_units", "operator_next", "operator_status", "extend_mission_budget", "expand_unit", "review_mission", "complete_mission", "cancel_operator", "reflection"])}
 ---
 # ${profileAgent(profile, "dog-coordinator")}
 
