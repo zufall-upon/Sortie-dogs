@@ -134,9 +134,22 @@ for (const mode of ["implementation", "executed", "NO_START"] as const) test(`mi
     assert.deepEqual(stale.completion, blocked.completion);
     assert.equal(stale.next_action, blocked.next_action, "status must not blindly send the root back to the same refused completion");
     await writeFile(join(root, "check.mjs"), validator);
+    if (mode === "implementation") {
+      await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).update("root", mission => {
+        mission.review!.verdict = "evidence-gaps";
+        mission.review!.evidenceGapReviews = 2;
+        mission.review!.result = "EVIDENCE_GAPS\nThe decisive return line is not visible.";
+      });
+    }
     const completed = JSON.parse(await cold.tool!.sortie_v010_complete_mission.execute({}, { sessionID: "root" }));
     assert.equal(completed.status, "succeeded", JSON.stringify(completed));
     assert.equal(completed.receipt.status, "succeeded");
+    if (mode === "implementation") {
+      assert.match(completed.review_evidence_gaps, /decisive return line is not visible/u);
+      assert.match(completed.return_report, /SourceReview\s+🟡 EVIDENCE_GAPS（PASSではない）/u);
+      assert.match(completed.return_report, /⏳ 未実施\n独立Reviewの未解決証拠/u);
+      assert.match(completed.return_report, /➡️ NEXT\n未解決証拠を報告/u);
+    }
     const final = await status();
     assert.equal(final.phase, "completed");
     assert.match(final.next_action, /no further dispatch or completion/);

@@ -35,6 +35,10 @@ for (const verdict of ["PASS", "FINDINGS"] as const) test(`Fast-first ${verdict}
       /exact entrypoint, input \(including named paths\) and observed\s+failure into the first unit objective/u);
     assert.match(hooks.tool!.sortie_v010_plan_units.description,
       /exact entrypoint, named input paths and observed failure in the first unit objective/u);
+    assert.match(missionOperatorContent(V010_RUNTIME_PROFILE, "test"),
+      /include\s+the entire relevant expression and input\/result in the chosen offset and limit/u);
+    assert.match(missionOperatorContent(V010_RUNTIME_PROFILE, "test"),
+      /never say Review PASS or "next: none" for those gaps/u);
     await hooks["chat.message"]!({ sessionID: "root", messageID: "request", agent: agents.root!.agent }, {
       message: { id: "request", agent: agents.root!.agent, model: { providerID: "openai", modelID: "gpt-6-sol" } },
       parts: [{ type: "text", text: "Create result.txt with ready, validate and review it." }],

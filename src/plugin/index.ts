@@ -7779,7 +7779,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     },
   };
   input.runtimeBridge?.connected?.({
-    renderReturnReport: async (root, text, expectedReceipt) => {
+    renderReturnReport: async (root, text, expectedReceipt, missionReview) => {
       let rendered: string | undefined;
       await serializeChatTransition(root, async () => {
       if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) return undefined;
@@ -7802,7 +7802,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           result = { ...result, career: await collectCareer([...goalLedgerDirectories], currentPath, records, path => RunFlightLedger.readGoalFile(path)) };
         }
       } catch { appLogInfo("run-metrics.career-unavailable", root, { profile: runtimeProfile.id }, "warn"); }
-      rendered = insertSortieResult(receiptBoundTerminalText(text, receipt), result);
+       rendered = insertSortieResult(receiptBoundTerminalText(text, receipt), result, missionReview);
       });
       return rendered;
     },

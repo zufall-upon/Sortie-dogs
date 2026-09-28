@@ -55,6 +55,13 @@ const PREVIEW_ROUTES: readonly { readonly model: string; readonly variant: strin
   PREVIEW_REVIEW_ROUTE,
 ]);
 
+function missionReportReview(mission: OperatorMission | undefined, runID: string) {
+  const review = mission?.review;
+  if (review?.runID !== runID) return undefined;
+  return review.verdict === "PASS" || review.verdict === "evidence-gaps" || review.verdict === "skipped-low-risk"
+    ? review.verdict : undefined;
+}
+
 export function processRemediationReplacementPacket(code: string, packet: unknown, cancelTool: string, prepareTool: string) {
   const durable = record(packet) ? { ...packet, resume_requires_host_reconciliation: false,
     next_action: `This immutable run is not resumable. Call ${cancelTool} with reason=plain, then call ${prepareTool} for a replacement run under the same goal.` } : packet;
@@ -1123,15 +1130,23 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         if (result.receipt) await operators.terminal(context.sessionID, result.receipt);
         let panel: string | undefined;
         if (input.returnReportTransport === "tool-result" && result.receipt?.status === "succeeded") {
+          const reviewGaps = missionReportReview(mission, state.runID) === "evidence-gaps"
+            ? mission!.review!.result?.trim() || "独立Reviewの未解決証拠あり" : undefined;
+          const gapSummary = reviewGaps?.replace(/^EVIDENCE_GAPS\s*/u, "").replace(/\s+/gu, " ").slice(0, 500);
           const text = `✅ **DONE** \`${state.runID}\` — declared checks passed; Operator accepted the result.\n\n` +
             `**変更点:** ${state.units.map(unit => unit.unit.title).join("; ")}\n\n` +
             `**確認結果:** 宣言検証合格 — ${[...new Set(state.units.flatMap(unit => unit.unit.validation))].join("; ")}` +
-            (mission?.review ? `\n独立レビュー: ${mission.review.verdict === "evidence-gaps" ? "証拠不足を残して受入れ（レビューPASSではない）" : mission.review.verdict}.` : "") + "\n\n**次:** なし";
-          const rendered = await control!.renderReturnReport(context.sessionID, text, goalFingerprint(result.receipt)).catch(() => undefined);
+            (mission?.review ? `\n独立レビュー: ${mission.review.verdict === "evidence-gaps" ? "証拠不足を残して受入れ（レビューPASSではない）" : mission.review.verdict}.` : "") +
+            (reviewGaps ? `\n\n**未実施:** 独立Reviewの未解決証拠: ${gapSummary}\n\n**次:** 未解決証拠を報告し、必要なら対象箇所を後続確認（今回のReviewはPASSではない）`
+              : "\n\n**次:** なし");
+          const rendered = await control!.renderReturnReport(context.sessionID, text, goalFingerprint(result.receipt),
+            missionReportReview(mission, state.runID)).catch(() => undefined);
           if (rendered) panel = returnReportPanel(rendered);
         }
         return JSON.stringify({ status: result.status, run_id: state.runID,
           acceptance_fingerprint: state.acceptanceFingerprint, receipt: result.receipt ?? null,
+          ...(result.receipt?.status === "succeeded" && missionReportReview(mission, state.runID) === "evidence-gaps"
+            ? { review_evidence_gaps: mission!.review!.result ?? null } : {}),
           ...(result.completion ? { completion: result.completion,
             next_action: result.completion.blockers.map(item => item.next_action).join("\n") } : {}),
           ...(panel ? { return_report: panel,
@@ -1820,7 +1835,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         if (!record(part) || typeof part.id !== "string" || typeof part.text !== "string" || part.sessionID !== sessionID || part.messageID !== info.id) return;
         const key = `${messageKey}:${part.id}`;
         if (renderedParts.get(key) === goalFingerprint(part.text)) return;
-        const text = await control!.renderReturnReport(sessionID, decoratePreviewHeadings(part.text), goalFingerprint(receipt));
+        const run = await operators.read(sessionID);
+        const mission = await missions.read(sessionID);
+        const text = await control!.renderReturnReport(sessionID, decoratePreviewHeadings(part.text), goalFingerprint(receipt),
+          run ? missionReportReview(mission, run.runID) : undefined);
         if (text === undefined) return;
         if (text === part.text) { rememberRendered(key, text); return; }
         const raw = input.client as unknown as Record<string, unknown> | undefined;
@@ -2492,7 +2510,12 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         if (role === "dog-coordinator") {
           const receipt = await control!.currentReceipt(request.sessionID);
           if (receipt?.status === "succeeded") {
-            if (!hadTerminalHeading) output.text = await control!.renderReturnReport(request.sessionID, output.text, goalFingerprint(receipt)) ?? output.text;
+            if (!hadTerminalHeading) {
+              const run = await operators.read(request.sessionID);
+              const mission = await missions.read(request.sessionID);
+              output.text = await control!.renderReturnReport(request.sessionID, output.text, goalFingerprint(receipt),
+                run ? missionReportReview(mission, run.runID) : undefined) ?? output.text;
+            }
             if (output.text.includes("<summary><strong>🐾 SORTIE DOGS — 帰還報告")) rememberRendered(`${request.sessionID}:${request.messageID}:${request.partID}`, output.text);
           }
         }

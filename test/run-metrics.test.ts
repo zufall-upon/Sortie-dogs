@@ -268,6 +268,11 @@ test("builds a completed Sortie Result from the goal receipt, ledger, and host m
   assert.match(inserted, /🛑 STOP REASON\ncompleted[\s\S]*※使用量は最終応答生成前の計測\n~~~/u);
   assert.doesNotMatch(inserted, /evidence-1|evidence ref|completed\)|sha256:/u);
   assert.equal(insertSortieResult(inserted, result), inserted);
+  const gaps = insertSortieResult("status: DONE — checks passed\n\n**未実施:** 未解決の返却行\n\n**次:** 返却行を確認", result, "evidence-gaps");
+  assert.match(gaps, /SourceReview\s+🟡 EVIDENCE_GAPS（PASSではない）/u);
+  assert.match(gaps, /⏳ 未実施\n未解決の返却行[\s\S]*➡️ NEXT\n返却行を確認/u);
+  assert.equal(insertSortieResult(gaps, result, "evidence-gaps"), gaps, "the native final renderer retains the host review verdict");
+  assert.match(insertSortieResult("status: DONE", result, "PASS"), /SourceReview\s+🟢 PASS（独立Reviewer）/u);
   const sanitized = insertSortieResult("status: DONE\n\n**EVIDENCE:** model claim\nraw_status: fake\n" +
     "```yaml\nEVIDENCE_REFS: [fake]\nraw: claim\n```\n<details><summary>Evidence</summary>fake</details>", result);
   assert.doesNotMatch(sanitized, /EVIDENCE|raw_status|EVIDENCE_REFS|raw: claim/iu);

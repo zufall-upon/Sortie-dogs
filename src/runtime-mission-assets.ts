@@ -97,8 +97,11 @@ quality threshold and explicit model/budget choice. Follow AGENTS.md and use the
    check. Call ${profile.toolPrefix}review_mission promptly with real risk_tags and concise traces.
    Dispatch its exact independent Reviewer Task when required;
    use [] only for genuinely low-risk work. A review skip is not implied by Fast-lane. If source/evidence
-   is unchanged, do not repeat validation or an identical review. Supply focused original-file evidence
-   for EVIDENCE_GAPS without an evidence-copying Worker. If the result is incomplete, a declared check fails,
+   is unchanged, do not repeat validation or an identical review. For EVIDENCE_GAPS, use focused original-file
+   evidence without an evidence-copying Worker: locate the exact missing return/assertion lines and include
+   the entire relevant expression and input/result in the chosen offset and limit. A range ending one line
+   before the requested result is still missing evidence. Do not repeat an unchanged review. If the result
+   is incomplete, a declared check fails,
    a necessary write scope changes, or Review finds a defect, dispatch the SAME mission's Coordinator Task
    from operator_status with the existing changes, checks and concrete remaining work. Do not restart the
    mission or ask the user to approve routine correction. Never replace a still-active Worker.
@@ -110,7 +113,9 @@ quality threshold and explicit model/budget choice. Follow AGENTS.md and use the
    that an unrun public scenario works.
    If incomplete, resume the SAME Coordinator with concrete feedback. If complete and required review passed
    (or the host accepted it at the evidence-gap limit, with the gaps reported), call
-   ${profile.toolPrefix}complete_mission. Only its succeeded receipt authorizes DONE.
+   ${profile.toolPrefix}complete_mission. At that limit, name the specific unresolved evidence and a
+   useful follow-up in the final answer; never say Review PASS or "next: none" for those gaps.
+   Only its succeeded receipt authorizes DONE.
 
 Fast-lane: Call ${profile.toolPrefix}plan_units directly after start_mission for one useful Worker unit, then
 dispatch its exact Worker task. The formal validation command must be real and exact, not a dummy check;
@@ -308,9 +313,11 @@ Low risk uses [] and the host records the skip. The host supplies source excerpt
 mapping and validation evidence; do not handwrite that envelope. Fix concrete FINDINGS defects yourself
 through Worker and rerun affected validation/review. EVIDENCE_GAPS means missing proof, not a defect: answer
 it with sharper traces and evidence: [{path, offset, limit}] from the existing original files in the next
-  review_mission, never an evidence-copying Worker. Existing project source/docs can be selected even
-  outside unit read/write; attaching review context does not require replanning or rerunning validation.
-  Declared external input/output excerpts remain available. The host caps evidence-only reviews; at its limit,
+review_mission, never an evidence-copying Worker. Existing project source/docs can be selected even
+outside unit read/write; attaching review context does not require replanning or rerunning validation.
+Select ranges that include the exact return/assertion and relevant input/result named by the Reviewer;
+a range that stops before the decisive line does not close the gap. Do not repeat an unchanged review.
+Declared external input/output excerpts remain available. The host caps evidence-only reviews; at its limit,
 review is closed with gaps, but ready still requires the requested operation/result to be complete.
 Running an existing procedure alone is not a public-logic source change; use the low-risk skip where applicable.
 Evaluating an unchanged published package is not a release or source edit: use the native execution,

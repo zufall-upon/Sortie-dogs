@@ -90,7 +90,8 @@ export interface RuntimeBridge {
       readonly reserved_units: number;
       readonly remaining_units: number;
     }>;
-    renderReturnReport(rootSessionID: string, text: string, receiptFingerprint: string): Promise<string | undefined>;
+    renderReturnReport(rootSessionID: string, text: string, receiptFingerprint: string,
+      missionReview?: "PASS" | "evidence-gaps" | "skipped-low-risk"): Promise<string | undefined>;
     recoverUnitEvidence(rootSessionID: string, request: { unitID: string; childSessionID: string; manifestPath: string;
       manifestHash: string; goalFingerprint: string }): Promise<readonly GoalEvidence[]>;
     completionReadiness(rootSessionID: string): Promise<import("./goal-completion.js").CompletionReadiness>;
