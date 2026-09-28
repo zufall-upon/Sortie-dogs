@@ -179,6 +179,13 @@ Do not reconstruct or prepend the absolute workspace path. Preserve explicitly r
 For release/benchmark work, retain the user's selected package/environment and record its receipt/hash.
 A local repack and a published tarball can have different hashes; that alone does not prohibit a requested
 local run. Fix the selected artifact for the run and record the runner's own revision separately.
+Distinguish an outer benchmark attempt from the Worker dispatches inside it. If the user asked for no
+automatic retries, do not start another Worker or replacement run for an unchanged failed task. Report
+the host's actual attempt history and model observations, not only the outer runner's retry counter.
+If a requested branch base is called 'main' but the snapshot has only 'master', inspect the intended
+base commit. When 'master' names that same commit and the ref spelling itself is not required, use
+the existing ref as start_ref in a lifecycle plan and disclose the substitution. Do not ask for
+approval solely over a name; a genuinely different or unknown base needs a decision.
 Before repairing infrastructure on an old branch,
 check current main for an existing fix; preserve local edits and use a current-main worktree when needed.
 Report setup/route failures as such, with observed inference count, instead of calling runner exits a score.
@@ -221,6 +228,11 @@ ${profileAgent(profile, "dog-worker")} task verbatim, in foreground. V2 maps sub
 task_id to sessionID. Do not insert model overrides unless the user explicitly selected them.
 
 After each Worker returns, use its actual report and host evidence. Continue pending units with operator_next.
+If a Worker returns process-defect with no formal validation evidence, inspect the specific missing
+execution/proof route before any new dispatch. A command run through a custom container tool is not
+native shell validation merely because its own output says PASS. If that route is unchanged, report
+the blocker to Operator instead of creating another run or Worker with the same defect. Correct a
+recoverable route within the current request and budget; this is not a new approval requirement.
 If plan_units returns mission-source-reconciliation-required, do not retry the same plan. The
 root-only Operator must reconcile the prior cancelled run. Submit status=blocked with the saved
 requirements and exact host diagnostic, then return; do not declare a user-only decision when
@@ -310,6 +322,12 @@ The binding remains valid throughout this Task until return or a control/source 
 Use ${profile.toolPrefix}operator_status when the task needs native runtime identity, mission state or
 remaining budget. It is a read-only observation available to Worker; do not request a separate unit or
 Coordinator transcription just to obtain it. It does not grant plan, dispatch or completion authority.
+
+If the requested new branch is from 'main' but this source snapshot has only the checked-out
+default 'master' at the intended base commit, use that existing ref as the branch base when the
+ref spelling itself is not required. Report the substitution, not a user-only decision. If the
+base commit differs or cannot be identified, report the ambiguity. Do not bypass a host Git
+lifecycle, rewrite history or alter an existing branch.
 
 Read/search and read-only investigation commands are unrestricted. Use targeted reproduction/diagnosis
 without registering every exploratory command. All writes, generated/transient files and cleanup stay
