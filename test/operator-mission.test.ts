@@ -522,6 +522,33 @@ test("cancelled no-run successor preserves the old run's supersession across ano
   assert.equal(replacement.supersededRunID, run.runID);
 }));
 
+test("explicit replacement prefers the current cancelled run over a stale no-run ancestor", async () => fixture(async directory => {
+  const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+  const operators = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
+  await missions.capture("root", { id: "old-request", text: "Run the earlier version" });
+  const old = await missions.start("root", ["Run the earlier version"]);
+  const ancestor = await operators.prepareMission("root", missionPlan(old, [unit]));
+  await operators.interrupted("root", "explicit-cancellation");
+  await missions.update("root", state => { state.phase = "cancelled"; state.runID = ancestor.runID; });
+
+  await missions.capture("root", { id: "middle-request", text: "Run the next version" });
+  const middle = await missions.start("root", ["Run the next version"], true, { cancelledRunID: ancestor.runID });
+  const latest = await operators.prepareMission("root", missionPlan(middle, [unit]), undefined, middle.supersededRunID, [], true);
+  await operators.interrupted("root", "explicit-cancellation");
+  await missions.update("root", state => { state.phase = "cancelled"; state.runID = latest.runID; });
+
+  await missions.capture("root", { id: "current-request", text: "Run the newest version once" });
+  const blocked = await missions.start("root", ["Run the newest version once"], true, { cancelledRunID: latest.runID });
+  assert.equal(blocked.supersededRunID, latest.runID);
+  // A pre-fix mission was stopped before plan_units and retained the ancestor instead of the latest run.
+  await missions.update("root", state => { state.phase = "cancelled"; state.supersededRunID = ancestor.runID; });
+  const current = await missions.start("root", ["Run the newest version once"], true, { cancelledRunID: latest.runID });
+  assert.equal(current.supersededRunID, latest.runID);
+  const prepared = await operators.prepareMission("root", missionPlan(current, [unit]), undefined, current.supersededRunID, [], true);
+  assert.equal(prepared.supersededRunID, latest.runID);
+  assert.deepEqual(prepared.acceptance, ["Run the newest version once"]);
+}));
+
 test("same-turn mission retains a cancelled run's exact acceptance before its Coordinator declares units", async () => fixture(async directory => {
   const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
   const operators = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);

@@ -295,11 +295,11 @@ export class OperatorMissionRuntime {
         return previous;
       }
       if (previous) await this.save(this.file(root, `.${previous.id}`), previous);
-      // Explicit replacement links the latest cancelled run even when a user narrows the
-      // request in the same turn. Ordinary same-turn continuation still retains acceptance.
-      // A cancelled standalone/legacy run has no mission-owned runID; only replacement links it.
-      const predecessor = previous?.runID ?? previous?.supersededRunID ??
-        (replaceRequirements ? options.cancelledRunID : undefined);
+      // The Operator runtime's current cancelled run is authoritative for an explicit
+      // replacement. A no-run mission can still carry an older ancestor's run ID.
+      // Ordinary continuation retains that predecessor when no current run is supplied.
+      const predecessor = (replaceRequirements ? options.cancelledRunID : undefined) ??
+        previous?.runID ?? previous?.supersededRunID;
       const state: OperatorMission = { version: "0.12", id: `mission-${randomUUID()}`, root, requests: [request],
         kind: options.kind ?? "implementation",
         context: (options.context ?? []).filter(item => item.id !== request.id),
