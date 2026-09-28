@@ -1292,6 +1292,43 @@ test("completed Coordinator Task with a still-streaming Worker offers root-only 
   assert.deepEqual(host.interrupts, [], "reading status does not stop or duplicate the Worker");
 }));
 
+test("mission planning prepares an explicit in-project TMPDIR before dispatching the Worker", async () => fixture(async root => {
+  const { hooks, unit, declare } = await missionCoordinatorFixture(root);
+  const scratch = join(root, ".tmp");
+  const wslRoot = process.platform === "win32" ? `/mnt/${root[0]!.toLowerCase()}${root.slice(2).replaceAll("\\", "/")}` : root;
+  const command = process.platform === "win32"
+    ? `wsl.exe --cd "${wslRoot}" -e /usr/bin/env GOCACHE="${wslRoot}/.gocache" TMPDIR="${wslRoot}/.tmp" go test ./...`
+    : `TMPDIR="${scratch}" node check.mjs`;
+  const next = JSON.parse(await declare([{ ...unit, validation: [command] }]));
+  assert.ok(next.task, JSON.stringify(next));
+  assert.deepEqual(next.validation_setup?.prepared_directories, [".tmp"]);
+  assert.equal((await lstat(scratch)).isDirectory(), true,
+    "the formal validator must not fail because its declared TMPDIR was never created");
+  const status = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
+  assert.equal(status.budget.consumed_units, 0, "preparing scratch must not consume a Worker unit");
+  assert.equal(status.execution_summary.running_units.length, 0, "preparing scratch must not dispatch a Worker");
+}));
+
+test("unpreparable TMPDIR remains an actionable notice rather than a rejected Mission plan", async () => fixture(async root => {
+  const { hooks, unit, declare } = await missionCoordinatorFixture(root);
+  await writeFile(join(root, ".tmp"), "occupied by a file\n");
+  const result = JSON.parse(await declare([{ ...unit, validation: [`TMPDIR="${join(root, ".tmp")}" node check.mjs`] }]));
+  assert.ok(result.task, JSON.stringify(result));
+  assert.deepEqual(result.validation_setup?.unprepared_directories, [".tmp"]);
+  assert.match(result.next_action, /Before dispatch, correct or prepare/u);
+  const status = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
+  assert.equal(status.budget.consumed_units, 0);
+}));
+
+test("declared TMPDIR inside control metadata is reported but never created", async () => fixture(async root => {
+  const { unit, declare } = await missionCoordinatorFixture(root);
+  const scratch = join(root, ".git", "scratch");
+  const result = JSON.parse(await declare([{ ...unit, validation: [`TMPDIR="${scratch}" node check.mjs`] }]));
+  assert.ok(result.task, JSON.stringify(result));
+  assert.deepEqual(result.validation_setup?.unprepared_directories, [".git/scratch"]);
+  await assert.rejects(lstat(scratch), { code: "ENOENT" });
+}));
+
 test("a user-approved cumulative Mission unit increase resumes the same Coordinator without resetting spend", async () => fixture(async root => {
   const { hooks, unit, declare } = await missionCoordinatorFixture(root);
   const status = () => hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }).then(JSON.parse);

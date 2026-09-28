@@ -21,6 +21,7 @@ import { MISSION_EVIDENCE_GAP_REVIEW_LIMIT, OperatorMissionRuntime, missionPacke
 import { publishMissionProgress } from "./mission-progress.js";
 import { completedMissionReviewPrompts, initialMissionReviewPrompt, missionReviewBaseline, missionReviewSource } from "./mission-review.js";
 import { missionLocations, missionLocationPacket } from "./mission-location.js";
+import { prepareValidationScratch } from "./validation-scratch.js";
 import { SOURCE_REVIEW_RISK_TAGS } from "../core/consultation.js";
 import { createHash, randomUUID } from "node:crypto";
 import { proposeTerminalRescue } from "../core/terminal-rescue-policy.js";
@@ -1629,7 +1630,13 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         delete item.supersededRunID;
         if (operation) { item.kind = "operation"; item.execution = operation; }
       });
-      return JSON.stringify(await operators.next(root, actor));
+      const next = await operators.next(root, actor);
+      if (!record(next) || !record(next.task)) return JSON.stringify(next);
+      const setup = await prepareValidationScratch(input.directory, plan.units.flatMap(unit => unit.validation));
+      return JSON.stringify(setup.prepared_directories.length || setup.unprepared_directories.length
+        ? { ...next, validation_setup: setup, ...(setup.unprepared_directories.length ? {
+          next_action: "Before dispatch, correct or prepare the listed in-project TMPDIR directories. Keep this plan and its budget; no new approval or validation run is needed." } : {}) }
+        : next);
     }
     tools[planUnits] = { description: "Coordinator (or single-unit Fast-lane Operator): declare useful units, then dispatch the returned Worker immediately. Host generates IDs, handoff, manifest and proof mapping. Keep every original requirement covered. Use write: [] for read-only verification; use dir/** for directory outputs including not-yet-created trees. Native absolute paths support global installs and external outputs under host permissions; include their actual paths in read/write for evidence. Final validation command in each unit proves that unit; read-only diagnostic commands need no registration. Recalling with reason replaces settled work within unchanged requirements and cumulative budget; include required scope extensions here. Rejected budget, contract or control-storage preparation preserves the existing run so you can correct the plan directly.",
       args: { units: { type: "array", minItems: 1, maxItems: 32, items: { type: "object", additionalProperties: false,
