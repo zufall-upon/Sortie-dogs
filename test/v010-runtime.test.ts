@@ -299,7 +299,8 @@ test("preview assets coexist with stable assets and markers", async () => fixtur
   assert.match(primary, /^  sortie_v010_complete_mission: true$/m);
   assert.doesNotMatch(primary, /^  sortie_v010_begin_operator_proposal: true$/m);
   assert.match(primary, /host saves the original\n\s+user message verbatim/u);
-  assert.match(primary, /Simple|simple, low-risk, single-unit/u);
+  assert.match(primary, /Start with the direct Worker Fast-lane/u);
+  assert.match(primary, /use \[\] only for genuinely low-risk work/u);
   assert.match(previewAssets.find(asset => asset.name === "sortie-v010")!.content, /^agent: dog-operator$/m);
   assert.equal((await initializeProject(root, "v010")).status, "unchanged");
 }));
@@ -431,7 +432,8 @@ test("preview primary closes every task turn with one machine terminal checkpoin
 test("preview primary continues approved sequential scope and uses interactive questions", () => {
   const primary = previewAssets.find(asset => asset.name === "dog-operator")!.content;
   const coordinator = previewAssets.find(asset => asset.name === "dogs-coordinator")!.content;
-  assert.match(primary, /Do not investigate or approve each unit at the root/);
+  assert.match(primary, /No per-unit root approval/);
+  assert.match(primary, /SAME mission's Coordinator Task/u);
   assert.match(primary, /Ask through question only for a user-only choice/);
   assert.match(primary, /Resume the same work after\nthe answer/);
   assert.match(primary, /Ordinary defects return to Coordinator/);

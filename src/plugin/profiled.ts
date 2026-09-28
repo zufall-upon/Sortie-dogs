@@ -639,12 +639,36 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           : `The mission is not linked to the current cancelled run. Do not dispatch or repeat plan_units. ` +
           `If these saved requirements reflect the user's changed or narrowed scope, Operator: call ${profile.toolPrefix}start_mission ` +
           `with intent=replace and the exact requirements array shown here. The host repairs this mission in place, retains spend, ` +
-          `and verifies old children before preparing a Worker. Otherwise obtain the user's scope decision.` };
+           `and verifies old children before preparing a Worker. Otherwise obtain the user's scope decision.` };
+      if (mission.coordinator === null && mission.runID === null && !mission.dispatchOpen && mission.phase === "open") {
+        return { ...packet, task: missions.task(mission),
+          next_action: "Fast-lane: plan one useful Worker unit with honest scope and exact meaningful validation, then dispatch its Task. Dispatch the returned Coordinator Task only when the work cannot be declared as one useful unit." };
+      }
+      if (mission.coordinator === null && mission.runID === run?.runID && !mission.dispatchOpen &&
+          run?.phase === "awaiting-acceptance" && mission.kind === "operation" && missionExecutionStatus(mission) !== "executed") {
+        return { ...packet, task: missions.task(mission),
+          next_action: "Fast-lane operation is not executed. Dispatch this same mission's Coordinator Task to finish or report its actual blocker; a setup or validation success is not operation completion." };
+      }
+      if (mission.coordinator === null && mission.runID === run?.runID && !mission.dispatchOpen &&
+          run?.phase === "awaiting-acceptance" && mission.review?.verdict === "pending") {
+        return { ...packet, next_action: "Fast-lane: dispatch the exact Reviewer Task from review_mission if not yet active; otherwise wait for that Reviewer. Do not start a Coordinator or another Worker while review is pending." };
+      }
+      if (mission.coordinator === null && mission.runID === run?.runID && !mission.dispatchOpen &&
+          run?.phase === "awaiting-acceptance" &&
+          (!mission.review || missionReviewAccepted(mission.review) || mission.review.verdict === "evidence-gaps")) {
+        return { ...packet, next_action: mission.review && missionReviewAccepted(mission.review)
+          ? "Fast-lane: compare all original requirements with actual evidence and review disposition, then call complete_mission. Report any remaining evidence gaps; they are not PASS."
+          : mission.review?.verdict === "evidence-gaps"
+            ? "Fast-lane: provide focused original-file excerpts and traces through review_mission, then dispatch its exact Reviewer Task. Do not create an evidence-copying Worker."
+            : "Fast-lane: assess actual risk and call review_mission with real risk_tags and criterion traces. Dispatch its Reviewer Task if required; then compare all requirements before complete_mission." };
+      }
       if (!mission.dispatchOpen && (["open", "running"].includes(mission.phase) ||
           (mission.phase === "submitted" && mission.submission?.status !== "ready"))) {
         return { ...packet, task: missions.task(mission),
           next_action: (run?.units.some(unit => unit.dispatchDenial) ? `${packet.next_action}\n` : "") +
-            "The previous Coordinator Task is finished. Dispatch this exact Task to continue the same mission and Coordinator session; keep the original requirements and cumulative budget." };
+            (mission.coordinator === null
+              ? "Fast-lane needs correction or coordination: dispatch this exact Coordinator Task with the existing Worker changes, checks and concrete remaining work. Keep the same mission, requirements and cumulative budget; do not replace an active Worker."
+              : "The previous Coordinator Task is finished. Dispatch this exact Task to continue the same mission and Coordinator session; keep the original requirements and cumulative budget.") };
       }
       return packet;
     }
@@ -1425,7 +1449,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           return JSON.stringify({ ...locationObservation(context.sessionID), ...(mission.dispatchOpen
             ? missionDispatchPacket(mission, await operators.read(context.sessionID))
             : { mission_id: mission.id, requirements: mission.requirements, task: missions.task(mission),
-              next_action: "Nontrivial: dispatch task now. Simple single-unit work with known scope/check: call plan_units directly. Do not create a proposal or ask for plan approval." }) });
+              next_action: "Default to plan_units for one useful Worker unit with an honest scope and exact meaningful check; dispatch its returned Task. Use the Coordinator Task when coordination or targeted contract discovery is actually needed. Do not create a proposal or ask for plan approval." }) });
         });
       } };
     tools[skipMissionConsultation] = { description: "Coordinator: durably record why a concrete optional Advisor/Scout consultation is unnecessary. This is observation only: it adds no approval, consultation requirement, or dispatch gate.",
@@ -1678,7 +1702,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           return declareMissionUnits(root, context.sessionID, mission, units, args.reason);
         });
       } };
-    tools[reviewMission] = { description: "Coordinator: prepare the independent Reviewer task from current source, requirements and observed checks. Supply risk_tags (empty only for genuinely low risk) and concise criterion-level changed-code/test traces. Host supplies diff, IDs, manifest, mappings and evidence; if truncated_evidence is returned, narrow those ranges before dispatching the Reviewer. Keep candidate lineage across corrections. A low-risk skip is recorded, never inferred from a missing review.",
+    tools[reviewMission] = { description: "Coordinator or direct Fast-lane root: prepare the independent Reviewer task from current source, requirements and observed checks. Supply actual risk_tags (empty only for genuinely low risk) and concise criterion-level changed-code/test traces. Host supplies diff, IDs, manifest, mappings and evidence; if truncated_evidence is returned, narrow those ranges before dispatching the Reviewer. Keep candidate lineage across corrections. A low-risk skip is recorded, never inferred from a missing review.",
       args: { risk_tags: { type: "array", items: { type: "string", enum: SOURCE_REVIEW_RISK_TAGS } } as never,
         evidence: { type: "array", maxItems: 6, items: { type: "object", additionalProperties: false,
           properties: { path: { type: "string" }, offset: { type: "integer", minimum: 1 }, limit: { type: "integer", minimum: 1, maximum: 200 } },
@@ -2020,6 +2044,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         const mission = await missions.read(root);
         const missionCoordinator = who.role === "dog-operator" && mission?.coordinator === request.sessionID &&
           !["cancelled", "completed"].includes(mission.phase);
+        const fastReviewer = who.role === "dog-coordinator" && request.sessionID === root && mission?.coordinator === null &&
+          mission?.runID !== null && !["cancelled", "completed"].includes(mission?.phase ?? "cancelled") &&
+          request.tool === "task" && args.subagent_type === profileAgent(profile, "dog-reviewer");
         if (missionCoordinator && request.tool !== "task") {
           if (["read", "glob", "grep", "list", "execute", "todowrite", "todoread", "webfetch", "websearch", "skill"].includes(request.tool)) return;
           if (["bash", "shell"].includes(request.tool)) {
@@ -2043,7 +2070,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           return;
         }
         const consultRole = typeof args.subagent_type === "string" ? canonicalAgent(profile, args.subagent_type) : undefined;
-        if (missionCoordinator && request.tool === "task" && ["dog-scout", "dog-reviewer", "dog-advisor"].includes(consultRole ?? "")) {
+        if ((missionCoordinator || fastReviewer) && request.tool === "task" && ["dog-scout", "dog-reviewer", "dog-advisor"].includes(consultRole ?? "")) {
           if (consultRole === "dog-reviewer") {
             if (!mission.review?.task || args.prompt !== missionReviewTask(mission).prompt || args.task_id) {
               throw new Error("mission-review-task-required: dispatch review_mission's generated task");
