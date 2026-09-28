@@ -294,6 +294,36 @@ test("V2 interrupted Coordinator Task reconciles its native error despite a live
   } finally { cleanup?.(); await rm(directory, { recursive: true, force: true }); }
 });
 
+test("V2 aborted Worker Task exposes the native error and interrupt acknowledgement to recovery", async () => {
+  const fixture = contextFixture();
+  const interrupted: string[] = [];
+  const history = [{ id: "msg_aborted_worker", type: "assistant", agent: "dogs-coordinator", content: [{
+    type: "tool", id: "call_worker", name: "subagent", state: { status: "error",
+      input: { agent: "dog-worker-v010", prompt: "SORTIE_MISSION_TASK_REF" },
+      error: { type: "aborted", message: "Tool execution interrupted: subagent" } },
+    time: { created: 1, ran: 2, completed: 3 },
+  }] }];
+  const context: OpenCodeV2Context = { ...fixture.context, session: { ...fixture.context.session,
+    get: async ({ sessionID }) => ({ id: sessionID, agent: sessionID === "worker" ? "dog-worker-v010" : "dogs-coordinator",
+      ...(sessionID === "worker" ? { parentID: "coordinator" } : {}) }),
+    context: async () => history,
+    interrupt: async ({ sessionID }) => { interrupted.push(sessionID); return { interrupted: true }; },
+  } };
+  const cleanup = await createSortieDogsV2Plugin(async input => {
+    const legacy = input.client!.session!;
+    const messages = (await legacy.messages!({ path: { id: "coordinator" } }) as { data: Record<string, unknown>[] }).data;
+    const part = (messages[0]!.parts as Record<string, unknown>[])[0]!;
+    assert.equal(part.tool, "task");
+    assert.equal(part.callID, "call_worker");
+    assert.deepEqual((part.state as { status: string; error: unknown }).error,
+      { type: "aborted", message: "Tool execution interrupted: subagent" });
+    assert.deepEqual(await legacy.abort!({ path: { id: "worker" } }), { interrupted: true });
+    return {};
+  }).setup(context);
+  try { assert.deepEqual(interrupted, ["worker"]); }
+  finally { cleanup?.(); }
+});
+
 test("V2 review recovery pages past bounded context to a completed initial Reviewer", async () => {
   const fixture = contextFixture();
   const initial = "candidate_id: mission-current\nreview_phase: initial\ncanonical_validation_exit: 0\nrisk_tags: [public-logic]\nrevision: first";
