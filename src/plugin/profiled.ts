@@ -2114,6 +2114,19 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
               }
             }
           }
+          const operationArgs = record(mapped.args) ? mapped.args : {};
+          // A decorated launch would spend on the real operation but leave the native mission observation empty.
+          // Ask the same Worker to correct its shell input before that expensive side effect.
+          if (who.role === "dog-worker" && ["bash", "shell"].includes(request.tool.toLowerCase()) && mission?.execution &&
+              typeof operationArgs.command === "string" &&
+              resolve(input.directory, typeof operationArgs.workdir === "string" ? operationArgs.workdir : ".") === mission.execution.directory) {
+            const actual = normalizeCommand(operationArgs.command);
+            const decorated = mission.execution.commands.some(declared => actual.startsWith(declared) &&
+              /^\s*(?:\||\d?>|&&?|;)/u.test(actual.slice(declared.length)));
+            if (decorated) throw new Error("mission-operation-command-not-observed: run the declared operation command exactly; " +
+              "do not append a pipe, tee, redirection or chained command. Capture its tool output or write a separate result file afterward. " +
+              "No new plan or approval is needed; if the run already started, inspect its existing state instead of starting another one.");
+          }
           await core["tool.execute.before"]?.({ ...translate(request, false) as typeof request,
             ...(delegated ? { sessionID: root, agent: "dog-coordinator" } : {}) }, mapped);
           if (who.role === "dog-worker") {

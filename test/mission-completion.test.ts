@@ -74,6 +74,16 @@ for (const mode of ["implementation", "executed", "NO_START"] as const) test(`mi
       assert.equal(binding.status, "bound", JSON.stringify(binding));
     } finally { Date.now = clock; }
     if (mode === "implementation") await writeFile(join(root, "result.txt"), "ready\n");
+    if (mode === "executed") {
+      for (const command of ["node check.mjs | tee result.txt", "node check.mjs > result.txt",
+        "node check.mjs 2> result.txt", "node check.mjs && echo done"]) {
+        await assert.rejects(hooks["tool.execute.before"]!({ tool: "bash", sessionID: "worker", callID: `decorated-${command}` },
+          { args: { command } }), /mission-operation-command-not-observed: run the declared operation command exactly/);
+      }
+      assert.equal((await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root")).execution?.observations.length, 0,
+        "a decorated operation is corrected before it starts, without a second Worker or plan");
+      await assert.rejects(readFile(join(root, "result.txt"), "utf8"), { code: "ENOENT" });
+    }
     await hooks["tool.execute.before"]!({ tool: "bash", sessionID: "worker", callID: "validate" }, { args: { command: "node check.mjs" } });
     const checked = await exec(process.execPath, ["check.mjs"], { cwd: root });
     await hooks["tool.execute.after"]!({ tool: "bash", sessionID: "worker", callID: "validate" }, { output: checked.stdout, metadata: { exit: 0, status: "completed" } });

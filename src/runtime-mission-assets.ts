@@ -15,6 +15,13 @@ For tag observation use git tag --points-at <commit>. For HTTPS downloads use cu
 --write-out '%{http_code} %{size_download}\\n' may print metadata to stdout. Declare all actual outputs.
 Reuse pinned artifacts and successful checks when the request permits and the inputs are unchanged.
 Do not repeat candidate discovery, dependency setup or validation merely because a Worker changed.
+Before launching a detached operation, verify supported options and budget from the CLI/preflight;
+a preview is not the live run. Check the actual state after launch, before relying on its limits.
+Run each declared execution command as the exact native shell input; do not append a tee pipeline,
+redirection or wrapper that was not declared. The host observes that command, not a nearby script or result file.
+Save its output separately when needed. A successful launch only proves the process started;
+use that same run's terminal state and official result for completion, never launch it again
+to repair a missing observation.
 `;
 
 function controls(profile: RuntimeProfile, names: readonly string[]): string {
@@ -92,6 +99,8 @@ results to guide the following units. Do not invent preparation units or plan-ap
 For operations, plan_units.execution names the actual run/grade commands and working directory. Keep
 setup, execution and result collection in the same Worker. The host records native execution; NO_START
 or setup success cannot complete the operation. Reward/score zero is a result, not failure to execute.
+Do not turn a chosen preflight step into a user requirement that the live run's state exists before launch.
+Observe supported flags and budget before launch, then observe the real state immediately after launch.
 Use requirement_ids when splitting multiple requirements across units; a single unit inherits all requirements
 when they are omitted. These are related requirements,
 not claims that a command proves every semantic obligation. Compare the final result yourself.
@@ -261,6 +270,8 @@ it with sharper traces and evidence: [{path, offset, limit}] from the existing o
   Declared external input/output excerpts remain available. The host caps evidence-only reviews; at its limit,
 review is closed with gaps, but ready still requires the requested operation/result to be complete.
 Running an existing procedure alone is not a public-logic source change; use the low-risk skip where applicable.
+Evaluating an unchanged published package is not a release or source edit: use the native execution,
+result and hash records rather than adding an independent source-review round solely for its label.
 Preserve candidate lineage and independence; your own opinion or Worker PASS is not independent review.
 
 Call submit_mission only for: ready (complete candidate with evidence/review), needs-decision (only the user
