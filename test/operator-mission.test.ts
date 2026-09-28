@@ -451,6 +451,39 @@ test("a later user turn can replace a cancelled mission without inheriting its o
   assert.deepEqual(archive.acceptance, ["Run v0.12.3", "Keep cumulative budget"]);
 }));
 
+test("explicit same-turn narrowing replaces the latest cancelled run, not an older ancestor", async () => fixture(async directory => {
+  const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+  const operators = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
+  await missions.capture("root", { id: "old-request", text: "Run all 30 tasks" });
+  const original = await missions.start("root", ["Run all 30 tasks"]);
+  const oldRun = await operators.prepareMission("root", missionPlan(original, [unit]));
+  await operators.interrupted("root", "explicit-cancellation");
+  await missions.update("root", state => { state.phase = "cancelled"; state.runID = oldRun.runID; });
+
+  await missions.capture("root", { id: "current-request", text: "Run v0.12.23 once, then decide" });
+  const campaign = await missions.start("root", ["Run v0.12.23 once"], true);
+  assert.equal(campaign.supersededRunID, oldRun.runID);
+  const campaignRun = await operators.prepareMission("root", missionPlan(campaign, [unit]), undefined, campaign.supersededRunID);
+  const task = operators.nextWorkerTask(campaignRun);
+  await operators.admitWorker("root", "root", "call", task);
+  await operators.claimAdmittedWorkerPrompt("root", "root", "worker", task.prompt);
+  await operators.settled({ rootSessionID: "root", callID: "call", childSessionID: "worker", unitID: "unit-1",
+    disposition: "failed", resultClass: "process-defect", evidence: [],
+    failure: { command: ["node", "check.mjs"], outcome: "fail", exitCode: 1 } });
+  await operators.interrupted("root", "explicit-cancellation");
+  await missions.update("root", state => { state.phase = "cancelled"; state.runID = campaignRun.runID; });
+
+  // The scope decision arrived as a question answer in the same user turn: no new message ID.
+  const single = await missions.start("root", ["Run only Anko once"], true);
+  assert.equal(single.supersededRunID, campaignRun.runID);
+  assert.notEqual(single.supersededRunID, oldRun.runID);
+  const next = await operators.prepareMission("root", missionPlan(single, [unit]), undefined,
+    single.supersededRunID, ["worker"], true);
+  assert.deepEqual(next.acceptance, ["Run only Anko once"]);
+  assert.equal(next.supersededRunID, campaignRun.runID);
+  assert.deepEqual(next.priorAcceptedUnits, []);
+}));
+
 test("cancelled no-run successor preserves the old run's supersession across another user turn and cold reload", async () => fixture(async directory => {
   const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
   const operators = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);

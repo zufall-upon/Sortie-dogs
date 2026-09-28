@@ -768,6 +768,68 @@ test("a submitted source-blocked mission repairs in place and resumes its origin
     saved.requirements.map(item => item.text));
 }));
 
+test("a same-turn single-task replacement relinks a stale grandparent run without another mission or approval", async () => fixture(async root => {
+  await gitRepository(root);
+  const identities: Record<string, { id: string; agent: string; parentID?: string }> = {
+    root: { id: "root", agent: "dog-operator" }, coordinator: { id: "coordinator", agent: "dogs-coordinator", parentID: "root" },
+  };
+  const create = () => SortieDogsV010Plugin({ directory: root, client: { session: {
+    get: async ({ path }: { path: { id: string } }) => ({ data: identities[path.id] }), messages: async () => ({ data: [] }),
+  } } } as never);
+  const hooks = await create();
+  const missions = new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE);
+  const operators = new OperatorRuntime(root, V010_RUNTIME_PROFILE);
+  const user = async (id: string, text: string) => hooks["chat.message"]!({ sessionID: "root", messageID: id, agent: "dog-operator" }, {
+    message: { id, agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-6-sol" } },
+    parts: [{ type: "text", text }],
+  });
+  await user("old-user", "Run the previous version");
+  await missions.start("root", ["Run the previous version"], false, { kind: "operation" });
+  const oldPrepared = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ units: [{ title: "Old", objective: "Run the old version",
+    read: [], write: ["old.txt"], validation: ["node check.mjs"] }] }, { sessionID: "root" }));
+  assert.ok(oldPrepared.task);
+  const ancestor = await operators.required("root");
+  await operators.interrupted("root", "explicit-cancellation");
+  await missions.update("root", state => { state.phase = "cancelled"; state.runID = ancestor.runID; });
+  await user("current-user", "Run v0.12.23 once, then decide");
+  const campaign = await missions.start("root", ["Run all 30 once"], true, { kind: "operation" });
+  assert.equal(campaign.supersededRunID, ancestor.runID);
+  const latest = await operators.prepareMission("root", missionPlan(campaign, [{ title: "Campaign", objective: "Run once",
+    read: [], write: ["campaign.txt"], validation: ["node check.mjs"] }]), undefined, campaign.supersededRunID);
+  await operators.interrupted("root", "explicit-cancellation");
+  await missions.update("root", state => { state.phase = "cancelled"; state.runID = latest.runID; });
+  const single = await missions.start("root", ["Run only Anko once"], true, { kind: "operation" });
+  assert.equal(single.supersededRunID, latest.runID);
+  await missions.update("root", state => { state.phase = "submitted"; state.coordinator = "coordinator";
+    state.submission = { status: "blocked", summary: "Old plugin linked the grandparent run" };
+    delete state.supersededRunID; });
+  assert.equal((await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root")).supersededRunID, undefined,
+    "cold recovery must not silently select an older run for explicit replacement");
+  await missions.update("root", state => { state.supersededRunID = ancestor.runID; });
+  const fresh = await create();
+  const status = JSON.parse(await fresh.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
+  assert.equal(status.status, "mission-source-reconciliation-required", JSON.stringify(status));
+  assert.equal(status.task, undefined);
+  assert.match(status.next_action, /start_mission.*intent=replace/u);
+  const units = [{ title: "Anko", objective: "Run the single task", read: [], write: ["result.txt"],
+    validation: ["node check.mjs"] }];
+  const blocked = JSON.parse(await fresh.tool!.sortie_v010_plan_units.execute({ units }, { sessionID: "coordinator" }));
+  assert.equal(blocked.status, "mission-source-reconciliation-required");
+  assert.match(blocked.next_action, /do not repeat plan_units/u);
+  const repaired = JSON.parse(await fresh.tool!.sortie_v010_start_mission.execute({
+    requirements: ["Run only Anko once"], kind: "operation", intent: "replace",
+  }, { sessionID: "root" }));
+  assert.equal(repaired.mission_id, single.id);
+  assert.equal(repaired.task.task_id, "coordinator");
+  assert.equal((await missions.required("root")).supersededRunID, latest.runID);
+  const prepared = JSON.parse(await fresh.tool!.sortie_v010_plan_units.execute({ units,
+    execution: { commands: ["node runner.mjs"], directory: root } }, { sessionID: "coordinator" }));
+  assert.ok(prepared.task, JSON.stringify(prepared));
+  const run = await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root");
+  assert.equal(run.supersededRunID, latest.runID);
+  assert.deepEqual(run.acceptance, ["Run only Anko once"]);
+}));
+
 test("plan_units repairs an already-dispatched mission with cancelled-run acceptance after plugin reload", async () => fixture(async root => {
   const identities: Record<string, { agent: string; parentID?: string }> = {
     root: { agent: "dog-operator" }, coordinator: { agent: "dogs-coordinator", parentID: "root" },

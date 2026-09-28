@@ -198,10 +198,10 @@ export class OperatorMissionRuntime {
     try { return JSON.parse(await readFile(file, "utf8")) as T; }
     catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
   }
-  /** Recover the predecessor link for missions started before this fix, using one exact archived mission. */
+  /** Recover non-replacement continuations only; an explicit replacement must link the current cancelled run. */
   private async loadMission(root: string): Promise<OperatorMission | undefined> {
     const state = await this.load<OperatorMission>(this.file(root));
-    if (!state || state.supersededRunID !== undefined || state.runID !== null ||
+    if (!state || state.supersededRunID !== undefined || state.runID !== null || state.requirementsReplaced ||
         !["open", "running", "submitted", "cancelled"].includes(state.phase) || state.requests.length === 0) return state;
     const directory = join(this.projectRoot, this.profile.stateDirectory, "missions");
     let entries: string[];
@@ -295,8 +295,9 @@ export class OperatorMissionRuntime {
         return previous;
       }
       if (previous) await this.save(this.file(root, `.${previous.id}`), previous);
-      // A cancelled standalone/legacy run has no mission-owned runID. Only an explicit
-      // replacement may link it; normal continuation must not silently inherit its goal.
+      // Explicit replacement links the latest cancelled run even when a user narrows the
+      // request in the same turn. Ordinary same-turn continuation still retains acceptance.
+      // A cancelled standalone/legacy run has no mission-owned runID; only replacement links it.
       const predecessor = previous?.runID ?? previous?.supersededRunID ??
         (replaceRequirements ? options.cancelledRunID : undefined);
       const state: OperatorMission = { version: "0.12", id: `mission-${randomUUID()}`, root, requests: [request],
@@ -306,7 +307,7 @@ export class OperatorMissionRuntime {
         ...(replaceRequirements ? { requirementsReplaced: true } : {}),
         coordinator: null, callID: null, dispatchOpen: false, runID: null, plans: 0, progress: [], submission: null,
         ...((previous === undefined || previous.phase === "cancelled") &&
-          (previous?.runID === null || previous === undefined || request.id !== previous.requests[0]?.id) && predecessor
+          (replaceRequirements || previous?.runID === null || previous === undefined || request.id !== previous.requests[0]?.id) && predecessor
           ? { supersededRunID: predecessor } : {}) };
       await this.save(this.file(root), state);
       return state;
