@@ -31,6 +31,10 @@ test("public reproduction and shared-branch checks remain in the same mission Wo
   assert.match(worker, /entrypoint, input and layout intact/u);
   assert.match(worker, /including failures the new\s+handler does not catch/u);
   assert.match(worker, /skip redundant checks already covered by formal validation/u);
+  assert.match(worker, /do not append a tee pipeline/u);
+  assert.match(coordinator, /a preview is not the live run/u);
+  assert.match(operator, /Do not turn a chosen preflight step into a user requirement/u);
+  assert.match(coordinator, /Evaluating an unchanged published package is not a release or source edit/u);
   assert.doesNotMatch(worker, /hidden evaluator details.*as (?:proof|tests)/u);
 
   // Public-only synthetic case analogous to a shared exception handler. This asserts the
