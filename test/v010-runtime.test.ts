@@ -300,6 +300,8 @@ test("preview assets coexist with stable assets and markers", async () => fixtur
   assert.doesNotMatch(primary, /^  sortie_v010_begin_operator_proposal: true$/m);
   assert.match(primary, /host saves the original\n\s+user message verbatim/u);
   assert.match(primary, /Start with the direct Worker Fast-lane/u);
+  assert.match(primary, /inspect only missing source or evidence/u);
+  assert.match(primary, /Batch focused reads where practical/u);
   assert.match(primary, /use \[\] only for genuinely low-risk work/u);
   assert.match(previewAssets.find(asset => asset.name === "sortie-v010")!.content, /^agent: dog-operator$/m);
   assert.equal((await initializeProject(root, "v010")).status, "unchanged");

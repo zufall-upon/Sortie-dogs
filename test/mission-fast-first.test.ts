@@ -28,6 +28,8 @@ for (const verdict of ["PASS", "FINDINGS"] as const) test(`Fast-first ${verdict}
         .filter(([, info]) => info.parentID === path.id).map(([id, info]) => ({ id, ...info })) }),
       messages: async () => ({ data: [] }), abort: async () => ({ data: true }),
     } } } as never);
+    assert.match(hooks.tool!.sortie_v010_start_mission.description, /dispatch its Worker directly/u);
+    assert.doesNotMatch(hooks.tool!.sortie_v010_start_mission.description, /Dispatch the Coordinator immediately/u);
     await hooks["chat.message"]!({ sessionID: "root", messageID: "request", agent: agents.root!.agent }, {
       message: { id: "request", agent: agents.root!.agent, model: { providerID: "openai", modelID: "gpt-6-sol" } },
       parts: [{ type: "text", text: "Create result.txt with ready, validate and review it." }],

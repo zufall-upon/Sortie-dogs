@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { statusProbeStopReason } from "../scripts/mission-cli-probe.mjs";
+import { resolve } from "node:path";
+import { observationDirectories, statusProbeStopReason, workerStartWithinProbeLimit } from "../scripts/mission-cli-probe.mjs";
+import { nativeCLI } from "../scripts/release-cli.mjs";
 
 const expected = "openai/gpt-6-sol#xhigh";
 const root = { sessionID: "root", agent: "dog-operator", model: { providerID: "openai", id: "gpt-6-sol", variant: "xhigh" } };
@@ -21,4 +23,28 @@ test("a wrong model ends only the explicit probe, even if it can call status", (
   assert.equal(statusProbeStopReason({ root: "root", models: [root], tools: [
     { ...status, status: "error" }, { ...status, agent: "dog-worker-v010" },
   ] }, expected), null);
+});
+
+test("CLI probes invoke native Windows npm and OpenCode binaries without a shell", () => {
+  const entry = resolve("test/mission-cli-probe.test.ts");
+  assert.deepEqual(nativeCLI("npm", ["install", "--force"], {
+    platform: "win32", node: "node.exe", npmEntry: entry, openCodeEntry: entry,
+  }), { executable: "node.exe", args: [entry, "install", "--force"] });
+  assert.deepEqual(nativeCLI("opencode", ["run", "user prompt"], {
+    platform: "win32", node: "node.exe", npmEntry: entry, openCodeEntry: entry,
+  }), { executable: entry, args: ["run", "user prompt"] });
+  assert.deepEqual(nativeCLI("npm", ["install"], { platform: "linux", npmEntry: entry }),
+    { executable: "npm", args: ["install"] });
+});
+
+test("native V2 session directories use forward slashes even for Windows projects", () => {
+  assert.deepEqual(observationDirectories("M:\\work\\fixture"), ["M:\\work\\fixture", "M:/work/fixture"]);
+  assert.deepEqual(observationDirectories("/home/user/fixture"), ["/home/user/fixture", "/home/user/fixture"]);
+});
+
+test("the start-only Worker deadline does not invalidate a completed native receipt", () => {
+  const worker = { started_ms: 75_895 };
+  assert.equal(workerStartWithinProbeLimit("start", worker), false);
+  assert.equal(workerStartWithinProbeLimit("start", worker, { repo: "example/repo" }), true);
+  assert.equal(workerStartWithinProbeLimit("complete", worker), true);
 });

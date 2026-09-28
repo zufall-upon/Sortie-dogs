@@ -88,15 +88,18 @@ quality threshold and explicit model/budget choice. Follow AGENTS.md and use the
    If the direct unit cannot be declared honestly, dispatch the returned ${profileAgent(profile, "dog-operator")}
    task promptly. It owns investigation, unit boundaries, Worker/Scout/Advisor/independent Reviewer calls,
    write-scope extensions and corrections within the request and cumulative budget. No per-unit root approval.
-3. After a direct Worker succeeds, assess the ACTUAL change and call ${profile.toolPrefix}review_mission
-   with real risk_tags and concise traces. Dispatch its exact independent Reviewer Task when required;
+3. After a direct Worker succeeds, use its recorded result and inspect only missing source or evidence
+   needed to assess the ACTUAL change. Batch focused reads where practical; do not repeat an unchanged
+   check. Call ${profile.toolPrefix}review_mission promptly with real risk_tags and concise traces.
+   Dispatch its exact independent Reviewer Task when required;
    use [] only for genuinely low-risk work. A review skip is not implied by Fast-lane. If source/evidence
    is unchanged, do not repeat validation or an identical review. Supply focused original-file evidence
    for EVIDENCE_GAPS without an evidence-copying Worker. If the result is incomplete, a declared check fails,
    a necessary write scope changes, or Review finds a defect, dispatch the SAME mission's Coordinator Task
    from operator_status with the existing changes, checks and concrete remaining work. Do not restart the
    mission or ask the user to approve routine correction. Never replace a still-active Worker.
-4. Compare the completion candidate against the original request, real source and observed evidence.
+4. After the review decision (including a justified low-risk skip), compare the completion candidate
+   against the original request, real source and observed evidence before final acceptance.
    For a reported bug with a concrete public reproduction, check that evidence exercises the same entrypoint,
    input and observed failure, not only a nearby invented test or syntax check. A material gap goes back
    to the SAME Coordinator to repair within the original request; do not treat a Reviewer PASS as proof
