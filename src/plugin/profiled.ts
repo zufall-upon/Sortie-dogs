@@ -545,10 +545,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       } : {}) };
     }
     function sourceReconciliationRequired(mission: OperatorMission, previous?: OperatorState): boolean {
-      return previous?.phase === "cancelled" && !["completed", "cancelled"].includes(mission.phase) &&
-        mission.runID === null && mission.supersededRunID === undefined &&
-        (previous.sourceRefs[0] !== `user:${mission.requests[0]?.id}` ||
-          !previous.sourceRefs.every(ref => mission.requests.some(request => ref === `user:${request.id}`)));
+      if (previous?.phase !== "cancelled" || ["completed", "cancelled"].includes(mission.phase) || mission.runID !== null) return false;
+      if (mission.supersededRunID !== undefined) return mission.supersededRunID !== previous.runID;
+      return mission.requirementsReplaced === true || previous.sourceRefs[0] !== `user:${mission.requests[0]?.id}` ||
+        !previous.sourceRefs.every(ref => mission.requests.some(request => ref === `user:${request.id}`));
     }
     async function missionAuthority(id: string): Promise<{ root: string; mission: OperatorMission }> {
       const root = await rootFor(id);
@@ -635,7 +635,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       }
       if (sourceReconciliationRequired(mission, run)) return { ...packet, status: "mission-source-reconciliation-required",
         next_action: mission.dispatchOpen ? "The Coordinator Task is still active. Do not redispatch; wait for its native completion and reconcile via operator_status."
-          : `The cancelled run's source_refs cannot prove this mission is the same goal. Do not dispatch or repeat plan_units. ` +
+          : `The mission is not linked to the current cancelled run. Do not dispatch or repeat plan_units. ` +
           `If these saved requirements reflect the user's changed or narrowed scope, Operator: call ${profile.toolPrefix}start_mission ` +
           `with intent=replace and the exact requirements array shown here. The host repairs this mission in place, retains spend, ` +
           `and verifies old children before preparing a Worker. Otherwise obtain the user's scope decision.` };
@@ -1556,7 +1556,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       if (sourceReconciliationRequired(mission, previous)) return JSON.stringify({ ...missionDispatchPacket(mission, previous),
         next_action: `Coordinator: do not repeat plan_units. Call ${submitMission} with status=blocked and report the saved ` +
           `requirements to Operator. Operator can relink this mission in place via ${startMission} intent=replace ` +
-          `when they match the user's changed scope; no Worker can start before that decision.` });
+          `with those exact requirements when they match the user's changed scope; no Worker can start before that decision.` });
       mission = await retainCancelledMissionAcceptance(root, mission, previous);
       let operation = mission.execution;
       // Models can serialize an optional operation field as an empty object for a normal edit.
