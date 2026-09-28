@@ -155,6 +155,45 @@ test("declared ignored evidence is excerpted and invalidates a review when its b
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("an ignored build cache in the write scope cannot displace review source or invalidate its proof", async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const root = await mkdtemp(join(resolve("_testenv"), "mission-review-cache-"));
+  try {
+    await git("git", ["init", "--quiet"], { cwd: root });
+    await git("git", ["config", "user.email", "test@example.invalid"], { cwd: root });
+    await git("git", ["config", "user.name", "test"], { cwd: root });
+    await writeFile(join(root, ".gitignore"), ".gocache/\n_testenv/\n");
+    await writeFile(join(root, "source.js"), "export const answer = 0;\n");
+    await git("git", ["add", ".gitignore", "source.js"], { cwd: root });
+    await git("git", ["commit", "--quiet", "-m", "base"], { cwd: root });
+    const baseline = await missionReviewBaseline(root);
+    await writeFile(join(root, "source.js"), "export const answer = 42;\n");
+    await git("git", ["add", "source.js"], { cwd: root });
+    await git("git", ["commit", "--quiet", "-m", "candidate"], { cwd: root });
+    await mkdir(join(root, ".gocache"));
+    await mkdir(join(root, "_testenv"));
+    await writeFile(join(root, ".gocache", "cache"), "cache content ".repeat(5_000));
+    await writeFile(join(root, "_testenv", "result.json"), '{"result":"observed"}\n');
+    const run = { units: [{ unit: { write: ["source.js", ".gocache/**", "_testenv/**"] }, hashes: [] }] } as never;
+    const first = await missionReviewSource(root, run, [], baseline);
+    assert.match(first.excerpt, /export const answer = 42/u);
+    assert.match(first.excerpt, /"result":"observed"/u, "ignored output directories remain visible");
+    assert.doesNotMatch(first.excerpt, /\.gocache|cache content/u);
+    await writeFile(join(root, ".gocache", "cache"), "different cache content");
+    assert.equal((await missionReviewSource(root, run, [], baseline)).fingerprint, first.fingerprint,
+      "tool cache activity cannot stale a review of unchanged candidate source");
+    const cacheEvidence = [{ path: ".gocache/cache", offset: 1, limit: 1 }];
+    const pinnedCache = await missionReviewSource(root, run, cacheEvidence, baseline);
+    assert.match(pinnedCache.excerpt, /1: different cache content/u);
+    await writeFile(join(root, ".gocache", "cache"), "explicit cache evidence changed");
+    assert.notEqual((await missionReviewSource(root, run, cacheEvidence, baseline)).fingerprint, pinnedCache.fingerprint,
+      "an explicit reference still pins ignored bytes");
+    await writeFile(join(root, "_testenv", "result.json"), '{"result":"changed"}\n');
+    assert.notEqual((await missionReviewSource(root, run, [], baseline)).fingerprint, first.fingerprint,
+      "the ignored output directory still invalidates stale review proof");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("committed candidates still supply current source and large artifacts expose truncation", async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const root = await mkdtemp(join(resolve("_testenv"), "mission-committed-"));
@@ -303,8 +342,13 @@ test("large focused tests do not starve a later requested error branch", async (
       { path: "large_test.js", offset: 1, limit: 200 }, { path: "source.js", offset: 1, limit: 1 },
     ]);
     assert.match(packet.excerpt, /FOCUSED EXCERPT TRUNCATED: large_test\.js/);
+    assert.deepEqual(packet.truncatedEvidence, ["large_test.js:1"], "the Coordinator can narrow this reference before paying for a Reviewer");
     assert.match(packet.excerpt, /1: if \(error\) return \[null, error\]/);
     assert.ok(Buffer.byteLength(packet.excerpt) < 12_000);
+    const narrowed = await missionReviewSource(root, run, [
+      { path: "large_test.js", offset: 1, limit: 5 }, { path: "source.js", offset: 1, limit: 1 },
+    ]);
+    assert.deepEqual(narrowed.truncatedEvidence, []);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

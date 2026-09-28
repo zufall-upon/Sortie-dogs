@@ -628,7 +628,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       if (mission.phase === "submitted" && mission.submission?.status === "blocked" &&
           run?.units.some(unit => unit.status === "running")) {
         return { ...packet, next_action: `If the native Worker Task is still active, wait for it; do not start a duplicate. ` +
-          `If its parent Task was interrupted and the user chose to stop/replan, Operator root (not Coordinator): ` +
+          `If the parent Coordinator Task has finished or was interrupted, and the user chose to stop/replan, Operator root (not Coordinator): ` +
           `call ${profile.toolPrefix}cancel_operator with reason=plain to stop owned children, then ` +
           `${profile.toolPrefix}start_mission with intent=replace and the saved requirements. ` +
           `Use the returned Coordinator Task; the previous Mission is archived and cumulative spend is retained.` };
@@ -1671,7 +1671,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           return declareMissionUnits(root, context.sessionID, mission, units, args.reason);
         });
       } };
-    tools[reviewMission] = { description: "Coordinator: prepare the independent Reviewer task from current source, requirements and observed checks. Supply risk_tags (empty only for genuinely low risk) and concise criterion-level changed-code/test traces. Host supplies diff, IDs, manifest, mappings and evidence; keep candidate lineage across corrections. A low-risk skip is recorded, never inferred from a missing review.",
+    tools[reviewMission] = { description: "Coordinator: prepare the independent Reviewer task from current source, requirements and observed checks. Supply risk_tags (empty only for genuinely low risk) and concise criterion-level changed-code/test traces. Host supplies diff, IDs, manifest, mappings and evidence; if truncated_evidence is returned, narrow those ranges before dispatching the Reviewer. Keep candidate lineage across corrections. A low-risk skip is recorded, never inferred from a missing review.",
       args: { risk_tags: { type: "array", items: { type: "string", enum: SOURCE_REVIEW_RISK_TAGS } } as never,
         evidence: { type: "array", maxItems: 6, items: { type: "object", additionalProperties: false,
           properties: { path: { type: "string" }, offset: { type: "integer", minimum: 1 }, limit: { type: "integer", minimum: 1, maximum: 200 } },
@@ -1723,7 +1723,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           task, evidence, verdict: task ? "pending" : "skipped-low-risk", ...(mission.review?.child ? { child: mission.review.child } : {}),
           ...(initialPrompt ? { initialPrompt } : {}),
           ...(mission.review?.evidenceGapReviews ? { evidenceGapReviews: mission.review.evidenceGapReviews } : {}) }; });
-        return JSON.stringify(task ? { status: "review-required", task: missionReviewTask(reviewed) } : { status: "skipped-low-risk" });
+        return JSON.stringify(task ? { status: "review-required", task: missionReviewTask(reviewed),
+          ...(source.truncatedEvidence.length ? { truncated_evidence: source.truncatedEvidence,
+            next_action: "Narrow these focused evidence ranges with review_mission before dispatching the Reviewer; no Worker or new validation is needed." } : {}) }
+          : { status: "skipped-low-risk" });
       } };
     async function assertMissionReview(root: string, mission: OperatorMission) {
       const run = await operators.required(root), review = mission.review;
