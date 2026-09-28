@@ -628,7 +628,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       if (mission.phase === "submitted" && mission.submission?.status === "blocked" &&
           run?.units.some(unit => unit.status === "running")) {
         return { ...packet, next_action: `If the native Worker Task is still active, wait for it; do not start a duplicate. ` +
-          `If its parent Task was interrupted and the user chose to stop/replan, Operator root (not Coordinator): ` +
+          `If the parent Coordinator Task has finished or was interrupted, and the user chose to stop/replan, Operator root (not Coordinator): ` +
           `call ${profile.toolPrefix}cancel_operator with reason=plain to stop owned children, then ` +
           `${profile.toolPrefix}start_mission with intent=replace and the saved requirements. ` +
           `Use the returned Coordinator Task; the previous Mission is archived and cumulative spend is retained.` };
