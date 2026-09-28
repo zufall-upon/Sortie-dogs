@@ -74,6 +74,12 @@ quality threshold and explicit model/budget choice. Follow AGENTS.md and use the
     SAME mission before any Worker starts, retains its Coordinator and cumulative spend, and checks
     old children before preparing a Worker. This is not permission to discard unchanged acceptance:
     if the scope is uncertain, ask the user which requirements remain instead of inferring a replacement.
+    If a Coordinator reports mission-replan-worker-still-active after an interrupted native Task,
+    it cannot call cancel_operator (root-only). Inspect operator_status and the native Task outcome.
+    If the Worker is still active, wait, not duplicate. If the user chose to stop/replan, root calls
+    ${profile.toolPrefix}cancel_operator with reason: "plain" to stop its owned children, then
+    ${profile.toolPrefix}start_mission with intent: "replace" and the saved requirements. The cancelled
+    Mission is archived; cumulative spend is retained. Dispatch only the returned Coordinator Task.
 2. Dispatch the returned ${profileAgent(profile, "dog-operator")} task immediately. It owns investigation,
    unit boundaries, Worker/Scout/Advisor/independent Reviewer calls, write-scope extensions and corrections
    within the original request and cumulative budget. Do not investigate or approve each unit at the root.
