@@ -597,6 +597,47 @@ test("a later mission replaces a cancelled worker and pending unit only after ho
   assert.equal(archived.units[1].status, "pending");
 }));
 
+test("an explicit changed-version mission replaces a cancelled failed acceptance without laundering its work", async () => fixture(async directory => {
+  const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+  const operators = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
+  await missions.capture("root", { id: "old-user", text: "Run Anko with v0.12.20" });
+  const oldMission = await missions.start("root", ["Run Anko with v0.12.20", "Do not score"]);
+  const old = await operators.prepareMission("root", missionPlan(oldMission, [unit]),
+    { sessionID: "old-coordinator", callID: "old-mission-call" });
+  const task = operators.nextWorkerTask(old);
+  await operators.admitWorker("root", "old-coordinator", "old-worker-call", task);
+  await operators.claimAdmittedWorkerPrompt("root", "old-coordinator", "old-worker", task.prompt);
+  await operators.settled({ rootSessionID: "root", callID: "old-worker-call", childSessionID: "old-worker",
+    unitID: `${old.runID}-1`, disposition: "failed", resultClass: "acceptance", evidence: [],
+    failure: { command: ["node check.mjs"], outcome: "fail", exitCode: 1 } });
+  await operators.interrupted("root", "explicit-cancellation");
+  const cancelled = await operators.required("root");
+  assert.equal(cancelled.decision, "operator-acceptance-remediation-required");
+  assert.equal(cancelled.gitLifecycle, null);
+  await missions.update("root", state => { state.phase = "cancelled"; state.runID = old.runID; });
+  await missions.capture("root", { id: "new-user", text: "Run Anko with v0.12.21 instead" });
+  const nextMission = await missions.start("root", ["Run Anko with v0.12.21", "Do not score"], true);
+  assert.equal(nextMission.supersededRunID, old.runID);
+  assert.equal(nextMission.requirementsReplaced, true);
+  const plan = missionPlan(nextMission, [unit]);
+  await assert.rejects(operators.prepareMission("root", plan,
+    { sessionID: "new-coordinator", callID: "new-mission-call" }, old.runID, [], true), /mission-superseded-run-has-work/);
+  await assert.rejects(operators.prepareMission("root", plan,
+    { sessionID: "new-coordinator", callID: "new-mission-call" }, old.runID, ["old-worker"], false), /mission-superseded-run-has-work/);
+  const replacement = await operators.prepareMission("root", plan,
+    { sessionID: "new-coordinator", callID: "new-mission-call" }, old.runID, ["old-worker"], true);
+  assert.notEqual(replacement.runID, old.runID);
+  assert.deepEqual(replacement.acceptance, ["Run Anko with v0.12.21", "Do not score"]);
+  assert.deepEqual(replacement.priorAcceptedUnits, [], "failed work is not accepted into the replacement");
+  assert.equal(replacement.parentRunID, null);
+  assert.equal(replacement.supersededRunID, old.runID);
+  const archived = JSON.parse(await readFile(join(directory, ".sortie-dogs-v010", "operators",
+    `${createHash("sha256").update("root").digest("hex")}.json.${old.runID}.archive`), "utf8"));
+  assert.equal(archived.units[0].status, "failed");
+  assert.equal(archived.units[0].resultClass, "acceptance");
+  assert.deepEqual(archived.units[0].evidence, []);
+}));
+
 function terminalHistory() {
   const previous = { operatorSessionID: "coordinator", units: [{ childSessionID: "worker" }] } as never;
   const sessions: Record<string, { id: string; agent: string; parentID: string; outcome?: string }> = {

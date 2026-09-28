@@ -899,6 +899,87 @@ test("plan_units reconciles an aborted old delegate reservation before replacing
   assert.notEqual((await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root")).runID, middle.runID);
 }));
 
+test("changed-version start_mission and plan_units continue after a cancelled failed operation", async () => fixture(async root => {
+  await gitRepository(root);
+  const sessions: Record<string, { id: string; agent: string; parentID?: string; outcome?: string }> = {
+    root: { id: "root", agent: "dog-operator" },
+    old: { id: "old", agent: "dogs-coordinator", parentID: "root", outcome: "succeeded" },
+    worker: { id: "worker", agent: "dog-worker-v010", parentID: "old", outcome: "succeeded" },
+    next: { id: "next", agent: "dogs-coordinator", parentID: "root" },
+  };
+  const create = () => SortieDogsV010Plugin({ directory: root, client: { session: {
+    get: async ({ path }: { path: { id: string } }) => ({ data: sessions[path.id] }),
+    children: async ({ path }: { path: { id: string } }) => ({ data: Object.values(sessions).filter(value => value.parentID === path.id) }),
+    messages: async () => ({ data: [] }),
+  } } } as never);
+  const first = await create();
+  await first["chat.message"]!({ sessionID: "root", messageID: "old-user", agent: "dog-operator" }, {
+    message: { id: "old-user", agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-6-sol" } },
+    parts: [{ type: "text", text: "Run the single v0.12.20 Anko session without official scoring" }],
+  });
+  const missions = new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE);
+  const operators = new OperatorRuntime(root, V010_RUNTIME_PROFILE);
+  const oldMission = await missions.start("root", ["Run v0.12.20 Anko", "Do not score"], false, { kind: "operation" });
+  const old = await operators.prepareMission("root", missionPlan(oldMission, [{
+    title: "Old run", objective: "Observe the old run", read: [], write: ["result.txt"], validation: ["node check.mjs"],
+  }]), { sessionID: "old", callID: "old-mission" });
+  const oldTask = operators.nextWorkerTask(old);
+  await operators.admitWorker("root", "old", "old-worker", oldTask);
+  await operators.claimAdmittedWorkerPrompt("root", "old", "worker", oldTask.prompt);
+  await operators.settled({ rootSessionID: "root", callID: "old-worker", unitID: `${old.runID}-1`,
+    childSessionID: "worker", disposition: "failed", resultClass: "acceptance", evidence: [],
+    failure: { command: ["node check.mjs"], outcome: "fail", exitCode: 1 } });
+  await operators.interrupted("root", "explicit-cancellation");
+  await missions.update("root", state => { state.phase = "cancelled"; state.runID = old.runID; });
+  const ledgerPath = join(root, ".git", "sortie-dogs", "run-flight-v010",
+    `${createHash("sha256").update("v010\0root").digest("hex")}.json`);
+  const ledger = await RunFlightLedger.openGoal(ledgerPath);
+  const goal = (await ledger.readGoal()).state;
+  assert.ok(goal.goal_id);
+  const at = new Date().toISOString();
+  await ledger.appendGoal({ kind: "dispatch.reserved", at, goal_id: goal.goal_id, unit_id: `${old.runID}-1`,
+    session_id: "root", ticket_id: null, reservation_id: "old-reservation" });
+  await ledger.appendGoal({ kind: "unit.settled", at, goal_id: goal.goal_id, unit_id: `${old.runID}-1`,
+    reservation_id: "old-reservation", receipt_id: "old-receipt", disposition: "failed", result_class: "acceptance",
+    progress_fingerprint: null, evidence: [], elapsed_ms: null, cost_usd: null });
+  const before = (await ledger.readGoal()).state;
+  assert.equal(before.consumed_units, 1);
+  const resumed = await create();
+  await resumed["chat.message"]!({ sessionID: "root", messageID: "new-user", agent: "dog-operator" }, {
+    message: { id: "new-user", agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-6-sol" } },
+    parts: [{ type: "text", text: "Run the single v0.12.21 Anko session instead; keep no-scoring and cumulative spend" }],
+  });
+  const started = JSON.parse(await resumed.tool!.sortie_v010_start_mission.execute({
+    requirements: ["Run v0.12.21 Anko", "Do not score"], kind: "operation", intent: "replace",
+  }, { sessionID: "root" }));
+  assert.ok(started.task, JSON.stringify(started));
+  await resumed["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "new-mission" },
+    { args: structuredClone(started.task) });
+  await resumed["chat.message"]!({ sessionID: "next", messageID: "new-coordinator-user", agent: "dogs-coordinator" }, {
+    message: { id: "new-coordinator-user", agent: "dogs-coordinator", model: { providerID: "openai", modelID: "gpt-6-sol" } },
+    parts: [{ type: "text", text: started.task.prompt }],
+  });
+  const next = JSON.parse(await resumed.tool!.sortie_v010_plan_units.execute({ units: [{
+    title: "New run", objective: "Execute and observe the one v0.12.21 run", read: [], write: ["result.txt"],
+    validation: ["node check.mjs"], requirement_ids: ["R1", "R2"],
+  }], execution: { directory: root, commands: ["node runner.mjs"] } }, { sessionID: "next" }));
+  assert.ok(next.task, JSON.stringify(next));
+  assert.match(next.task.prompt, /^SORTIE_OPERATOR_TASK_REF /u);
+  const current = await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root");
+  assert.deepEqual(current.acceptance, ["Run v0.12.21 Anko", "Do not score"]);
+  assert.deepEqual(current.priorAcceptedUnits, []);
+  assert.equal(current.supersededRunID, old.runID);
+  const status = JSON.parse(await resumed.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
+  assert.equal(status.budget.consumed_units, before.consumed_units);
+  assert.equal(status.budget.remaining_units, before.budget!.max_units - before.consumed_units);
+  assert.equal((await ledger.readGoal()).state.consumed_units, before.consumed_units);
+  assert.equal((await ledger.readGoal()).state.outstanding_reservations.length, 0);
+  const archived = JSON.parse(await readFile(join(root, ".sortie-dogs-v010", "operators",
+    `${createHash("sha256").update("root").digest("hex")}.json.${old.runID}.archive`), "utf8"));
+  assert.equal(archived.units[0].status, "failed");
+  assert.equal(archived.units[0].resultClass, "acceptance");
+}));
+
 test("nested mission review and accepted work survive reload and agent-change cancellation", async () => fixture(async root => {
   await gitRepository(root);
   await writeFile(join(root, "check.mjs"), [
