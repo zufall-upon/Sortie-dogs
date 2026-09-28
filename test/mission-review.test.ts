@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { appendFile, chmod, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
@@ -9,6 +9,7 @@ import { completedMissionReviewPrompts, initialMissionReviewPrompt, missionRevie
 import { MISSION_REVIEW_REFERENCE, type OperatorMission } from "../dist/core/operator-mission.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
 import { FastLaneController } from "../dist/plugin/fast-lane.js";
+import { declaredArtifacts } from "../dist/plugin/declared-artifacts.js";
 
 const git = promisify(execFile);
 
@@ -441,4 +442,35 @@ test("narrow replans retain earlier declared external review references", async 
     assert.notEqual((await missionReviewSource(project, run, [{ path: external, offset: 1, limit: 1 }], undefined,
       { read: [external], write: [] })).fingerprint, source.fingerprint);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("review reports an unreadable external runtime directory without hiding readable results", async t => {
+  if (process.platform === "win32") return t.skip("POSIX directory permissions required");
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const area = await mkdtemp(join(resolve("_testenv"), "mission-unreadable-review-"));
+  const project = join(area, "project"), runtime = join(area, "runtime"), output = join(area, "output.json");
+  try {
+    await mkdir(project);
+    await mkdir(runtime);
+    await writeFile(join(runtime, "private.txt"), "host managed\n");
+    await writeFile(output, '{"resolved":7}\n');
+    await chmod(runtime, 0o111);
+    try { await readdir(runtime); return t.skip("directory is readable by this process"); }
+    catch (error) { assert.equal((error as NodeJS.ErrnoException).code, "EACCES"); }
+    const run = { units: [{ unit: { write: [runtime + "/**", output], read: [output] }, hashes: [] }] } as never;
+    const evidence = [{ path: output, offset: 1, limit: 1 }];
+    const first = await missionReviewSource(project, run, evidence);
+    assert.match(first.excerpt, /not inspected: permission denied/u);
+    assert.match(first.excerpt, /"resolved":7/u);
+    assert.match(first.excerpt, /UNINSPECTED EXTERNAL DIRECTORIES:/u);
+    assert.doesNotMatch(first.excerpt, /EXCERPT TRUNCATED:/u);
+    assert.equal(first.fingerprint, (await missionReviewSource(project, run, evidence)).fingerprint);
+    await writeFile(output, '{"resolved":8}\n');
+    assert.notEqual((await missionReviewSource(project, run, evidence)).fingerprint, first.fingerprint);
+    await assert.rejects(declaredArtifacts([runtime]), /EACCES/u,
+      "protected output snapshots do not silently accept an unreadable directory");
+  } finally {
+    await chmod(runtime, 0o700);
+    await rm(area, { recursive: true, force: true });
+  }
 });

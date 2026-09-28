@@ -11,7 +11,8 @@ const within = (root: string, path: string) => {
 /** Explicit external artifacts are filesystem inputs, not Git pathspecs. Stream complete bytes;
  * previews are bounded independently. Follow package links only inside a declared physical root.
  */
-export async function declaredArtifacts(paths: readonly string[], previewLimit = 0) {
+export async function declaredArtifacts(paths: readonly string[], previewLimit = 0,
+  options: { reportUnreadableDirectories?: boolean } = {}) {
   const roots = [...new Set(paths.map(path => resolve(path)))].sort();
   const physical = await Promise.all(roots.map(path => realpath(path).catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return path;
@@ -19,6 +20,7 @@ export async function declaredArtifacts(paths: readonly string[], previewLimit =
   })));
   const entries: Array<readonly [string, string, string?]> = [];
   const excerpts: string[] = [];
+  const unreadable: string[] = [];
   let remaining = previewLimit, truncated = false;
   const visited = new Set<string>();
   const visit = async (path: string, ancestors: ReadonlySet<string>): Promise<void> => {
@@ -41,7 +43,22 @@ export async function declaredArtifacts(paths: readonly string[], previewLimit =
     if (metadata.isDirectory()) {
       entries.push([label, "directory", canonical]);
       const next = new Set([...ancestors, canonical]);
-      for (const child of (await readdir(path)).sort()) await visit(join(path, child), next);
+      let children: string[];
+      try { children = await readdir(path); }
+      catch (error) {
+        if (!options.reportUnreadableDirectories || !["EACCES", "EPERM"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+        entries.push([label, `unreadable:${(error as NodeJS.ErrnoException).code}`, canonical]);
+        unreadable.push(label);
+        const notice = `\n--- external directory: ${label} ---\n[not inspected: permission denied; select specific result files as review evidence]\n`;
+        const bytes = Buffer.from(notice), bounded = bytes.subarray(0, remaining);
+        if (bounded.length) {
+          excerpts.push(bounded.toString("utf8"));
+          remaining -= bounded.length;
+        }
+        if (bounded.length < bytes.length) truncated = true;
+        return;
+      }
+      for (const child of children.sort()) await visit(join(path, child), next);
       return;
     }
     if (!metadata.isFile()) throw new Error("declared-artifact-not-file-or-directory");
@@ -65,5 +82,5 @@ export async function declaredArtifacts(paths: readonly string[], previewLimit =
     }
   };
   for (const path of roots) await visit(path, new Set());
-  return { entries, excerpt: excerpts.join(""), truncated };
+  return { entries, excerpt: excerpts.join(""), truncated, unreadable };
 }
