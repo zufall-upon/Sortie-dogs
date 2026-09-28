@@ -625,6 +625,14 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     function missionDispatchPacket(mission: OperatorMission, run?: import("../core/operator-runtime.js").OperatorState) {
       const packet: Record<string, unknown> = { ...missionPacket(mission, run), project_root: input.directory,
         coordinator_dispatch: mission.dispatchOpen ? "active" : ["completed", "cancelled"].includes(mission.phase) ? "terminal" : "resumable" };
+      if (mission.phase === "submitted" && mission.submission?.status === "blocked" &&
+          run?.units.some(unit => unit.status === "running")) {
+        return { ...packet, next_action: `If the native Worker Task is still active, wait for it; do not start a duplicate. ` +
+          `If its parent Task was interrupted and the user chose to stop/replan, Operator root (not Coordinator): ` +
+          `call ${profile.toolPrefix}cancel_operator with reason=plain to stop owned children, then ` +
+          `${profile.toolPrefix}start_mission with intent=replace and the saved requirements. ` +
+          `Use the returned Coordinator Task; the previous Mission is archived and cumulative spend is retained.` };
+      }
       if (sourceReconciliationRequired(mission, run)) return { ...packet, status: "mission-source-reconciliation-required",
         next_action: mission.dispatchOpen ? "The Coordinator Task is still active. Do not redispatch; wait for its native completion and reconcile via operator_status."
           : `The cancelled run's source_refs cannot prove this mission is the same goal. Do not dispatch or repeat plan_units. ` +
@@ -995,7 +1003,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         const mission = await missions.read(context.sessionID);
         if (mission && !["completed", "cancelled"].includes(mission.phase)) {
           await stop(context.sessionID, "explicit-cancellation", false);
-          return JSON.stringify(missionPacket(await missions.required(context.sessionID), await operators.read(context.sessionID)));
+          return JSON.stringify({ ...missionPacket(await missions.required(context.sessionID), await operators.read(context.sessionID)),
+            next_action: `Owned children were stopped; cumulative spend is retained. To continue the same request, ` +
+              `Operator root calls ${profile.toolPrefix}start_mission with intent=replace and the saved requirements, ` +
+              `then dispatches its returned Coordinator Task. The cancelled Mission is historical; do not reuse its Worker.` });
         }
         const rawReason = (args as { reason?: unknown }).reason;
         const requestedReason = rawReason === "plain" || rawReason === undefined ? undefined : rawReason;
@@ -1634,6 +1645,14 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           return await serializeDispatchTransition(root, () => declareMissionUnits(root, context.sessionID, mission,
             (args as Record<string, unknown>).units, args.reason, (args as Record<string, unknown>).execution));
         } catch (error) {
+          if (error instanceof Error && error.message === "mission-replan-worker-still-active") {
+            return JSON.stringify({ status: error.message, mission_id: mission.id,
+              next_action: `Coordinator: do not repeat plan_units or try ${cancel} (root-only). ` +
+                `If the Worker Task is still active, wait for its native completion. If its parent Task was interrupted, ` +
+                `submit_mission with status=blocked and report this code, the Worker/Task IDs and what did not run. ` +
+                `Operator root can then use ${cancel} with reason=plain to stop owned children and resume the request ` +
+                `through ${startMission} with intent=replace, preserving cumulative spend. No duplicate Worker.` });
+          }
           if (!(error instanceof OperatorContractError)) throw error;
           return JSON.stringify({ status: "invalid-plan", diagnostics: error.diagnostics, diagnostics_truncated: error.diagnostics_truncated,
             next_action: "Correct the reported field or control-storage problem and retry plan_units directly. Keep the original requirements and existing run; do not cancel or repeat passed work to repair the plan." });

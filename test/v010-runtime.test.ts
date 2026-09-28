@@ -1172,16 +1172,21 @@ test("nested mission review and accepted work survive reload and agent-change ca
   assert.equal((await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root")).units[0]!.childSessionID, "newWorker");
 }));
 
-async function missionCoordinatorFixture(root: string) {
+async function missionCoordinatorFixture(root: string, host?: { history: Record<string, unknown[]>; interrupts: string[] }) {
   await gitRepository(root);
   await writeFile(join(root, "check.mjs"), 'import { readFileSync } from "node:fs";\nif(readFileSync("seed.txt", "utf8") !== "base\\n") process.exit(1);\n');
   const identities: Record<string, { agent: string; parentID?: string }> = {
     root: { agent: "dog-operator" }, coordinator: { agent: "dogs-coordinator", parentID: "root" },
+    successor: { agent: "dogs-coordinator", parentID: "root" },
     worker: { agent: "dog-worker-v010", parentID: "coordinator" },
   };
   const hooks = await SortieDogsV010Plugin({ directory: root, client: { session: {
-    get: async ({ path }: { path: { id: string } }) => ({ data: identities[path.id] }),
-    messages: async () => ({ data: [] }),
+    get: async ({ path }: { path: { id: string } }) => ({ data: host ? { id: path.id, ...identities[path.id],
+      outcome: host.interrupts.includes(path.id) ? "interrupted" : "running" } : identities[path.id] }),
+    children: async ({ path }: { path: { id: string } }) => ({ data: Object.entries(identities)
+      .filter(([_id, value]) => value.parentID === path.id).map(([id, value]) => ({ id, ...value })) }),
+    messages: async ({ path }: { path: { id: string } }) => ({ data: host?.history[path.id] ?? [] }),
+    abort: async ({ path }: { path: { id: string } }) => { host?.interrupts.push(path.id); return { data: true }; },
   } } } as never);
   await hooks["chat.message"]!({ sessionID: "root", messageID: "user", agent: "dog-operator" }, {
     message: { id: "user", agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-6-sol" } },
@@ -1199,6 +1204,61 @@ async function missionCoordinatorFixture(root: string) {
     { sessionID: "coordinator" });
   return { hooks, unit, declare };
 }
+
+test("interrupted V2 Coordinator with a recorded running Worker returns the root-only stop/replan route", async () => fixture(async root => {
+  const host = { history: {} as Record<string, unknown[]>, interrupts: [] as string[] };
+  const { hooks, unit, declare } = await missionCoordinatorFixture(root, host);
+  const first = JSON.parse(await declare([unit]));
+  const input = { args: structuredClone(first.task) };
+  await hooks["tool.execute.before"]!({ tool: "task", sessionID: "coordinator", callID: "worker-call" }, input);
+  await hooks["chat.message"]!({ sessionID: "worker", messageID: "worker-user", agent: "dog-worker-v010" }, {
+    message: { id: "worker-user", agent: "dog-worker-v010", model: { providerID: "openai", modelID: "gpt-6-luna-fast" } },
+    parts: [{ type: "text", text: input.args.prompt }],
+  });
+  const prior = await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root");
+  assert.equal(prior.units[0]!.status, "running");
+  const blocked = JSON.parse(await declare([{ ...unit, objective: "Correct the interrupted run" }], "native Task interrupted"));
+  assert.equal(blocked.status, "mission-replan-worker-still-active");
+  assert.match(blocked.next_action, /Coordinator:[\s\S]+root-only[\s\S]+submit_mission[\s\S]+cancel_operator/u);
+  assert.equal((await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root")).runID, prior.runID);
+
+  host.history.root = [{ info: { role: "assistant", sessionID: "root" }, parts: [{ type: "tool", tool: "task",
+    callID: "coordinator-call", state: { status: "error", error: { type: "aborted" },
+      input: { subagent_type: "dogs-coordinator", task_id: "coordinator" } } }] }];
+  await hooks.tool!.sortie_v010_submit_mission.execute({ status: "blocked", summary: blocked.status }, { sessionID: "coordinator" });
+  const status = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
+  assert.equal(status.coordinator_dispatch, "resumable");
+  assert.equal(status.execution_summary.running_units.length, 1);
+  assert.equal(status.budget.reserved_units, 1);
+  assert.match(status.next_action, /Operator root \(not Coordinator\): call sortie_v010_cancel_operator with reason=plain/u);
+  await assert.rejects(hooks.tool!.sortie_v010_cancel_operator.execute({ reason: "plain" }, { sessionID: "coordinator" }),
+    /profile-coordinator-root-required/);
+
+  const stopped = JSON.parse(await hooks.tool!.sortie_v010_cancel_operator.execute({ reason: "plain" }, { sessionID: "root" }));
+  assert.deepEqual(new Set(host.interrupts), new Set(["worker", "coordinator"]));
+  assert.match(stopped.next_action, /start_mission[\s\S]+intent=replace/u);
+  const afterStop = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
+  assert.equal(afterStop.budget.reserved_units, 0);
+  assert.equal(afterStop.budget.consumed_units, status.budget.consumed_units + 1);
+  const replacement = JSON.parse(await hooks.tool!.sortie_v010_start_mission.execute({
+    requirements: ["Verify the seed"], intent: "replace",
+  }, { sessionID: "root" }));
+  assert.ok(replacement.task, JSON.stringify(replacement));
+  assert.notEqual(replacement.mission_id, status.mission_id, "the cancelled mission is archived, not silently reused");
+  assert.equal((await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }).then(JSON.parse))
+    .budget.consumed_units, afterStop.budget.consumed_units);
+  assert.equal((await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root")).units[0]!.status, "cancelled");
+  await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "next-coordinator-call" },
+    { args: structuredClone(replacement.task) });
+  await hooks["chat.message"]!({ sessionID: "successor", messageID: "next-user", agent: "dogs-coordinator" }, {
+    message: { id: "next-user", agent: "dogs-coordinator", model: { providerID: "openai", modelID: "gpt-6-sol" } },
+    parts: [{ type: "text", text: replacement.task.prompt }],
+  });
+  const resumed = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ units: [unit] }, { sessionID: "successor" }));
+  assert.ok(resumed.task, JSON.stringify(resumed));
+  assert.equal((await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }).then(JSON.parse))
+    .budget.consumed_units, afterStop.budget.consumed_units);
+}));
 
 test("a user-approved cumulative Mission unit increase resumes the same Coordinator without resetting spend", async () => fixture(async root => {
   const { hooks, unit, declare } = await missionCoordinatorFixture(root);
