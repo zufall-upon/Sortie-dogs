@@ -1360,8 +1360,22 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     const startMission = `${profile.toolPrefix}start_mission`, planUnits = `${profile.toolPrefix}plan_units`,
       reviewMission = `${profile.toolPrefix}review_mission`, submitMission = `${profile.toolPrefix}submit_mission`,
       completeMission = `${profile.toolPrefix}complete_mission`, expandUnit = `${profile.toolPrefix}expand_unit`,
-      skipMissionConsultation = `${profile.toolPrefix}skip_mission_consultation`;
+      skipMissionConsultation = `${profile.toolPrefix}skip_mission_consultation`,
+      extendMissionBudget = `${profile.toolPrefix}extend_mission_budget`;
     const stringList = { type: "array", items: { type: "string" } };
+    tools[extendMissionBudget] = { description: "Root-only: after the user explicitly approves a cumulative Worker-unit increase, extend the same active Mission's host goal budget. max_units is the new cumulative total, not an increment. Preserve consumed/reserved units, requirements and execution; this does not dispatch a Worker or change the campaign cost cap. Read operator_status for the exact mission ID and counters, then resume its existing Coordinator.",
+      args: { mission_id: stringSchema, max_units: { type: "integer", minimum: 1 } }, execute: async (args, context) => {
+        await requireRoot(context.sessionID);
+        return serializeDispatchTransition(context.sessionID, async () => {
+          const mission = await missions.required(context.sessionID);
+          if (mission.id !== args.mission_id || ["cancelled", "completed"].includes(mission.phase)) throw new Error("mission-budget-mission-not-active");
+          const maxUnits = Number(args.max_units);
+          const result = await control!.extendMissionUnitBudget(context.sessionID, maxUnits);
+          const { status, ...budget } = result;
+          return JSON.stringify({ status, mission_id: mission.id, budget,
+            next_action: "Read operator_status: if the Coordinator dispatch is active, continue it; otherwise dispatch the returned task to resume the same Coordinator. Retain requirements, spend and candidate; no new mission or plan approval." });
+        });
+      } };
     tools[startMission] = { description: "Operator: save the current user requirements. Use intent=replace when the user changes an existing request (version, parallelism, target): host cancels the previous run and archives its requirements/results while retaining spend. If status reports mission-source-reconciliation-required and the saved requirements reflect that changed scope, call intent=replace with those exact requirements: the host repairs this mission in place and keeps its Coordinator. Supply the complete current requirements, retaining constraints the user has not changed. For separate work in a different location use intent=new. Dispatch the Coordinator immediately, or plan_units for a known single-unit procedure; item count and runtime alone do not require a Coordinator.",
       args: { requirements: { ...stringList, minItems: 1, maxItems: 64 } as never,
         kind: { type: "string", enum: ["implementation", "operation"], description: "Use operation for running an existing benchmark, command or procedure. The host records its actual execution separately from setup and checks.", "x-sortie-optional": true } as never,

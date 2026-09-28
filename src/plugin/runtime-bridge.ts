@@ -83,6 +83,13 @@ export interface RuntimeBridge {
       readonly reserved_units: number;
       readonly remaining_units: number;
     } | null>;
+    extendMissionUnitBudget(rootSessionID: string, maxUnits: number): Promise<{
+      readonly status: "extended" | "unchanged";
+      readonly max_units: number;
+      readonly consumed_units: number;
+      readonly reserved_units: number;
+      readonly remaining_units: number;
+    }>;
     renderReturnReport(rootSessionID: string, text: string, receiptFingerprint: string): Promise<string | undefined>;
     recoverUnitEvidence(rootSessionID: string, request: { unitID: string; childSessionID: string; manifestPath: string;
       manifestHash: string; goalFingerprint: string }): Promise<readonly GoalEvidence[]>;

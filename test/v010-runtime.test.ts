@@ -1260,6 +1260,48 @@ test("interrupted V2 Coordinator with a recorded running Worker returns the root
     .budget.consumed_units, afterStop.budget.consumed_units);
 }));
 
+test("a user-approved cumulative Mission unit increase resumes the same Coordinator without resetting spend", async () => fixture(async root => {
+  const { hooks, unit, declare } = await missionCoordinatorFixture(root);
+  const status = () => hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }).then(JSON.parse);
+  const before = await status(), missionID = before.mission_id;
+  const ledgerPath = join(root, ".git", "sortie-dogs", "run-flight-v010",
+    `${createHash("sha256").update("v010\0root").digest("hex")}.json`);
+  const ledger = await RunFlightLedger.openGoal(ledgerPath);
+  const initial = (await ledger.readGoal()).state;
+  for (let i = 1; i <= 32; i++) {
+    const unitID = `historical-worker-${i}`, reservationID = goalFingerprint({ unitID });
+    await ledger.appendGoal({ kind: "dispatch.reserved", at: new Date().toISOString(), goal_id: initial.goal_id!,
+      unit_id: unitID, session_id: "root", ticket_id: null, reservation_id: reservationID });
+    await ledger.appendGoal({ kind: "unit.settled", at: new Date().toISOString(), goal_id: initial.goal_id!,
+      unit_id: unitID, reservation_id: reservationID, receipt_id: `prior-receipt-${i}`,
+      disposition: "cancelled", result_class: "interrupted", progress_fingerprint: null, evidence: [],
+      elapsed_ms: 12, cost_usd: 0.25 });
+  }
+  const state = (await ledger.readGoal()).state;
+  const used = state.consumed_units + state.outstanding_reservations.length;
+  assert.equal(used, 32, "the existing Mission spent its cumulative 32-unit allowance");
+  assert.equal((await status()).budget.remaining_units, 0);
+  await assert.rejects(declare([unit]), /mission-budget-exhausted/);
+  const mission = await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root");
+  assert.equal(mission.id, missionID);
+  const extend = (id: string, total: number, sessionID = "root") =>
+    hooks.tool!.sortie_v010_extend_mission_budget.execute({ mission_id: id, max_units: total }, { sessionID });
+  await assert.rejects(extend(missionID, used + 1, "coordinator"), /profile-coordinator-root-required/);
+  await assert.rejects(extend("stale-mission", used + 1), /mission-budget-mission-not-active/);
+  await assert.rejects(extend(missionID, 1.5), /mission-budget-limit-invalid/);
+  const revised = JSON.parse(await extend(missionID, used + 1));
+  assert.equal(revised.status, "extended");
+  assert.deepEqual(revised.budget, { max_units: used + 1, consumed_units: state.consumed_units,
+    reserved_units: state.outstanding_reservations.length, remaining_units: 1 });
+  const records = (await ledger.readGoal()).records.length;
+  assert.equal(JSON.parse(await extend(missionID, used + 1)).status, "unchanged");
+  assert.equal((await ledger.readGoal()).records.length, records, "a duplicate request is read-only");
+  assert.equal((await status()).mission_id, missionID);
+  const next = JSON.parse(await declare([unit]));
+  assert.ok(next.task, "the original Coordinator can dispatch the same unit after the cumulative increase");
+  assert.equal((await status()).budget.max_units, used + 1);
+}));
+
 for (const failure of ["budget", "generated-contract", "control-storage", "state-storage"] as const) {
   test(`rejected mission replan preserves the live run and permits correction after ${failure} failure`, async () => fixture(async root => {
     const { hooks, unit, declare } = await missionCoordinatorFixture(root);
