@@ -808,6 +808,97 @@ test("plan_units repairs an already-dispatched mission with cancelled-run accept
   assert.deepEqual(run.acceptance, restored.requirements.map(item => item.text));
 }));
 
+test("plan_units reconciles an aborted old delegate reservation before replacing a cancelled mission", async () => fixture(async root => {
+  await gitRepository(root);
+  const sessions: Record<string, { id: string; agent: string; parentID?: string; outcome?: string }> = {
+    root: { id: "root", agent: "dog-operator" },
+    old: { id: "old", agent: "dogs-coordinator", parentID: "root", outcome: "interrupted" },
+    worker: { id: "worker", agent: "dog-worker-v010", parentID: "old" },
+    middle: { id: "middle", agent: "dogs-coordinator", parentID: "root", outcome: "succeeded" },
+    next: { id: "next", agent: "dogs-coordinator", parentID: "root" },
+  };
+  const history: Record<string, unknown[]> = {};
+  const interrupts: string[] = [];
+  let boundedContext = false;
+  const create = () => SortieDogsV010Plugin({ directory: root, client: { session: {
+    get: async ({ path }: { path: { id: string } }) => ({ data: sessions[path.id] }),
+    children: async ({ path }: { path: { id: string } }) => ({ data: Object.values(sessions).filter(s => s.parentID === path.id) }),
+    messages: async ({ path }: { path: { id: string } }) => ({ data: boundedContext ? [] : history[path.id] ?? [] }),
+    reviewMessages: async ({ path }: { path: { id: string } }) => ({ data: history[path.id] ?? [] }),
+    abort: async ({ path }: { path: { id: string } }) => { interrupts.push(path.id); return { interrupted: false }; },
+  } } } as never);
+  const first = await create();
+  await first["chat.message"]!({ sessionID: "root", messageID: "old-user", agent: "dog-operator" }, {
+    message: { id: "old-user", agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-6-sol" } },
+    parts: [{ type: "text", text: "Complete MK2-01 and retain the cumulative budget" }],
+  });
+  const missions = new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE);
+  const operators = new OperatorRuntime(root, V010_RUNTIME_PROFILE);
+  const oldMission = await missions.start("root", ["Complete MK2-01"]);
+  const oldPlan = missionPlan(oldMission, [{
+    title: "MK2-01", objective: "Implement MK2-01", read: [], write: ["result.txt"], validation: ["node check.mjs"],
+  }]);
+  const old = await operators.prepareMission("root", oldPlan, { sessionID: "old", callID: "mission-old" });
+  const unitID = `${old.runID}-1`, workerCall = "worker-call";
+  const ledgerPath = join(root, ".git", "sortie-dogs", "run-flight-v010",
+    `${createHash("sha256").update("v010\0root").digest("hex")}.json`);
+  const ledger = await RunFlightLedger.openGoal(ledgerPath);
+  const goal = (await ledger.readGoal()).state;
+  assert.ok(goal.goal_id);
+  const reservationID = goalFingerprint({ goal_id: goal.goal_id, unit_id: unitID, call_id: workerCall });
+  await ledger.appendGoal({ kind: "dispatch.reserved", at: new Date().toISOString(), goal_id: goal.goal_id,
+    unit_id: unitID, session_id: "root", ticket_id: null, reservation_id: reservationID });
+  const binding = { r: "root", n: old.runID, p: "a".repeat(64), g: 5 };
+  history.root = [{ info: { role: "assistant", sessionID: "root" }, parts: [{ type: "tool", tool: "task",
+    callID: "delegate-call", state: { status: "error", error: { type: "aborted" }, time: { start: 1000, end: 4000 },
+      input: { subagent_type: "dogs-coordinator", prompt: `SORTIE_OPERATOR_DELEGATE_REF ${JSON.stringify({ k: "delegate", ...binding, h: "b".repeat(64) })}` } } }] }];
+  history.old = [{ info: { role: "assistant", sessionID: "old" }, parts: [{ type: "tool", tool: "task",
+    callID: workerCall, state: { status: "running", input: { subagent_type: "dog-worker-v010",
+      prompt: `SORTIE_OPERATOR_TASK_REF ${JSON.stringify({ ...binding, u: "MK2-01", t: unitID, h: "c".repeat(64) })}` } } }] }];
+  history.worker = [{ info: { role: "user", sessionID: "worker", time: { created: 2500 } },
+    parts: [{ type: "text", text: `role: implementation\ntask_id: ${unitID}` }] },
+  { info: { role: "assistant", sessionID: "worker", time: { created: 3000 } }, parts: [] }];
+  await operators.interrupted("root", "agent-changed");
+  // Like MK2-05, a later cancelled run is the immediate predecessor; the orphan belongs to
+  // an earlier run and its native Worker has no terminal outcome even after interrupt(false).
+  const middle = await operators.prepareMission("root", oldPlan, { sessionID: "middle", callID: "mission-middle" }, old.runID, []);
+  await operators.interrupted("root", "agent-changed");
+  await missions.update("root", state => { state.phase = "cancelled"; state.runID = middle.runID; });
+  const resumed = await create();
+  await resumed["chat.message"]!({ sessionID: "root", messageID: "new-user", agent: "dog-operator" }, {
+    message: { id: "new-user", agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-6-sol" } },
+    parts: [{ type: "text", text: "Continue MK2-01 with the same accepted requirements" }],
+  });
+  const nextMission = JSON.parse(await resumed.tool!.sortie_v010_start_mission.execute({ requirements: ["Continue MK2-01"] }, { sessionID: "root" }));
+  await resumed["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "next-call" }, { args: structuredClone(nextMission.task) });
+  await resumed["chat.message"]!({ sessionID: "next", messageID: "next-user", agent: "dogs-coordinator" }, {
+    message: { id: "next-user", agent: "dogs-coordinator", model: { providerID: "openai", modelID: "gpt-6-sol" } },
+    parts: [{ type: "text", text: nextMission.task.prompt }],
+  });
+  const declare = () => resumed.tool!.sortie_v010_plan_units.execute({ units: [{
+    title: "Continue MK2-01", objective: "Complete accepted behavior", read: [], write: ["result.txt"],
+    validation: ["node check.mjs"], requirement_ids: ["R1", "R2"],
+  }] }, { sessionID: "next" });
+  const workerHistory = history.worker;
+  boundedContext = true; // The 9/22 native Task is no longer in the 9/28 bounded context window.
+  history.worker = [{ info: { role: "user", sessionID: "worker", time: { created: 2500 } },
+    parts: [{ type: "text", text: "role: implementation\ntask_id: wrong-unit" }] }];
+  await assert.rejects(declare(), /mission-superseded-run-reservations-pending/);
+  assert.deepEqual(interrupts, [], "unproven lineage must not interrupt a child");
+  assert.equal((await ledger.readGoal()).state.outstanding_reservations.length, 1);
+  history.worker = workerHistory;
+  const next = JSON.parse(await declare());
+  assert.ok(next.task, JSON.stringify(next));
+  assert.deepEqual(interrupts, ["worker", "old"]);
+  const settled = await ledger.readGoal();
+  assert.equal(settled.state.outstanding_reservations.length, 0);
+  assert.equal(settled.state.consumed_units, 1, "interrupted work consumes the original budget");
+  assert.equal(settled.records.filter(({ event }) => event.kind === "unit.settled" && event.reservation_id === reservationID).length, 1);
+  assert.deepEqual(settled.state.satisfied_criteria, [], "interrupted work cannot imply validation or acceptance");
+  assert.notEqual((await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root")).runID, old.runID);
+  assert.notEqual((await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root")).runID, middle.runID);
+}));
+
 test("nested mission review and accepted work survive reload and agent-change cancellation", async () => fixture(async root => {
   await gitRepository(root);
   await writeFile(join(root, "check.mjs"), [

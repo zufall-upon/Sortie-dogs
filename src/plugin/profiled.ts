@@ -1554,7 +1554,18 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       if (replanning) {
         if (!reason?.trim()) throw new Error("mission-replan-reason-required: name the observed correction or write-scope extension");
       }
-      const budget = await control!.currentBudget(root);
+      // A cancelled V2 delegate may leave its Worker Task running after the parent Task aborts.
+      // Reconcile that exact native orphan before checking the cumulative budget or replacing
+      // the run; an unproven orphan remains reserved and the normal terminal check still blocks.
+      const cancelledPredecessor = previous?.phase === "cancelled" &&
+        (mission.supersededRunID === previous.runID ||
+          (mission.supersededRunID === undefined && ["explicit-cancellation", "agent-changed"].includes(previous.decision ?? "") &&
+            previous.units.some(unit => (previous.decision === "agent-changed" || unit.status === "cancelled") && unit.childSessionID !== null)));
+      let budget = await control!.currentBudget(root);
+      if (cancelledPredecessor && budget?.reserved_units) {
+        await control!.reconcileAbortedOperatorOrphan(root);
+        budget = await control!.currentBudget(root);
+      }
       if (budget && budget.remaining_units < plan.units.length && !same) throw new Error(
         `mission-budget-exhausted: plan needs ${plan.units.length} units; ${budget.remaining_units} remain. ` +
         "The current run is retained. Correct the plan within the remaining budget, or report a necessary cumulative extension to Operator.");
@@ -1564,10 +1575,6 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       }
       // Cancellation marks the durable units before interrupting their native sessions. A cancelled
       // status alone therefore cannot prove the old Worker stopped or its reservation settled.
-      const cancelledPredecessor = previous?.phase === "cancelled" &&
-        (mission.supersededRunID === previous.runID ||
-          (mission.supersededRunID === undefined && ["explicit-cancellation", "agent-changed"].includes(previous.decision ?? "") &&
-            previous.units.some(unit => (previous.decision === "agent-changed" || unit.status === "cancelled") && unit.childSessionID !== null)));
       const terminalChildren = cancelledPredecessor
         ? await terminalCancelledMissionChildren(profile, root, previous, budget, {
           get: async id => {
