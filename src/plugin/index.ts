@@ -7847,8 +7847,16 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         return { status: "unproven", reservation_id: reservation.reservation_id, reason: "owned-native-lineage-unavailable" };
       }
       const sessionAPI = input.client.session;
+      // V2's session.context is bounded. The aborted parent Task can be days older than
+      // that window; use the owning service's paginated history when the adapter offers it.
+      const historyAPI = sessionAPI as typeof sessionAPI & { reviewMessages?: typeof sessionAPI.messages };
+      const readHistory = historyAPI.reviewMessages ?? sessionAPI.messages!;
       const messages = async (id: string): Promise<Record<string, unknown>[]> => {
-        const response = await sessionAPI.messages!({ path: { id }, query: { directory: input.directory } });
+        const request = { path: { id }, query: { directory: input.directory } };
+        const response = await readHistory.call(sessionAPI, request).catch(error => {
+          if (readHistory === sessionAPI.messages) throw error;
+          return sessionAPI.messages!(request);
+        });
         return isRecord(response) && Array.isArray(response.data) ? response.data.filter(isRecord) : [];
       };
       const children = async (id: string): Promise<Record<string, unknown>[]> => {
