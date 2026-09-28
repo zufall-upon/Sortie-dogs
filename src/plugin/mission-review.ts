@@ -208,6 +208,7 @@ export async function missionReviewSource(directory: string, run: OperatorState,
   const ignored = local.length ? await git(["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--", ...scopes]) : "";
   for (const path of ignored.split("\0").filter(Boolean)) untracked.add(path);
   const omitted: string[] = [];
+  const unreadable: string[] = [];
   let diff = "";
   if (local.length && baseline) {
     // HEAD-only diffs are empty once the Worker commits. Show bounded changes from the
@@ -263,12 +264,18 @@ export async function missionReviewSource(directory: string, run: OperatorState,
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; hash.update("deleted"); }
   }
   if (external.length) {
-    const artifacts = await declaredArtifacts(external, Math.max(1, 24_000 - Buffer.byteLength(excerpt)));
+    // A declared write scope can also be a host-managed runtime directory (e.g. Docker's data root).
+    // Do not make review depend on listing it; record the missing coverage instead. Protected
+    // validation still requires readable outputs and does not use this review-only option.
+    const artifacts = await declaredArtifacts(external, Math.max(1, 24_000 - Buffer.byteLength(excerpt)),
+      { reportUnreadableDirectories: true });
     hash.update(JSON.stringify(artifacts.entries));
     excerpt += artifacts.excerpt;
     if (artifacts.truncated) omitted.push("external artifacts");
+    unreadable.push(...artifacts.unreadable);
   }
   const bytes = Buffer.from(excerpt);
   return { fingerprint: `sha256:${hash.digest("hex")}`, excerpt: (bytes.length > 24_000 ? bytes.subarray(0, 24_000).toString("utf8") : excerpt) +
-    (bytes.length > 24_000 || omitted.length ? `\n[EXCERPT TRUNCATED: ${omitted.slice(0, 20).join(", ")}; supply focused traces for missing sections, not another implementation unit]` : "") };
+    (bytes.length > 24_000 || omitted.length ? `\n[EXCERPT TRUNCATED: ${omitted.slice(0, 20).join(", ")}; supply focused traces for missing sections, not another implementation unit]` : "") +
+    (unreadable.length ? `\n[UNINSPECTED EXTERNAL DIRECTORIES: ${unreadable.slice(0, 20).join(", ")}; select specific result files as review evidence]` : "") };
 }
