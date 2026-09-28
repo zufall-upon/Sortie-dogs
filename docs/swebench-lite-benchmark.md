@@ -13,6 +13,8 @@ Keep credentials, raw logs, package archives, and benchmark outputs outside Git.
 - Official scoring is intentionally sequential: `split=dev`, `max_workers=1`.
 - Never commit `_testenv/`, `/tmp` run roots, credentials, raw logs, predictions, or replay artifacts.
 - Never start a second supervisor against the same run root.
+- A per-case `--timeout-seconds` is the **hard maximum**, not a promise to run each case that long.
+  The built-in progress checkpoint and early stop policy in §5 also apply.
 
 ## Prerequisites
 
@@ -135,6 +137,45 @@ node --experimental-strip-types scripts/swebench-lite-supervisor.mjs \
 `--start` detaches the supervisor and prints its run ID and process identity.
 Predictions are written in manifest order even when children finish out of order.
 
+### 8-slot dev23 / staged timeout (v0.12.21-style comparison)
+
+For a one-attempt comparison with the v0.12.19 corrected run and v0.12.20, pin the
+same 23 public instance IDs, dataset revision, official images, `official-image-testbed`,
+eight slots, effective **$2 per instance**, and the **20-minute progress checkpoint
+with a 40-minute hard maximum**. Do not call this a fixed 40-minute-per-case timeout.
+The checkpoint is built into `scripts/swebench-lite-runner.mjs`; there is no extra
+supervisor flag for it. The optional longest-first scheduling in §4 is a different
+condition and should not be silently enabled for a matched comparison.
+
+Before starting, fix the release commit, downloaded `.tgz` SHA-256, runtime marker,
+manifest hash, runner commit, and campaign exposure. Verify the public artifact hash,
+preflight (`config_verified:true`, `provider_requests_started:false`), and that
+`prior_conservative_exposure + 23 × $2 <= campaign_cap`. Use a fresh run root; do
+not overwrite any prior run or start a second supervisor to correct an observation.
+Here `RUN` is a new absolute directory, `MANIFEST` is its frozen manifest, and
+`SUPERVISOR` is the script in the frozen runner checkout:
+
+```bash
+node "$SUPERVISOR" --start \
+  --manifest "$MANIFEST" --run-root "$RUN" --output "$RUN/predictions.jsonl" \
+  --cost-limit-usd 46 --per-instance-usd 2 --workers 8 \
+  --timeout-seconds 2400 --prepared-environment official-image-testbed
+```
+
+Run the **exact native command**, not `... | tee launch.json`, a redirection, or a
+chained command: the mission host records the declared shell input, and a pipeline
+is a different input with different exit semantics. Preserve the returned tool
+output as a separate record if needed. A detached start is not a completed run.
+Read `$RUN/supervisor-state.json` **after** start and check `limits` (46, 2, 8,
+2400, prepared environment), `policy` (one attempt, zero retries), actual
+reservations (at most $2) and the heartbeat. A pre-start preview is not live
+state. In the isolated candidate runtime observe a *real* `dog-worker-v010`
+session's model `openai/gpt-6-luna-fast#max`; the configured agent alone is
+not an actual model observation. Do not wait for an entire small probe to be
+solved just to confirm routing. If zero requests or the route is wrong, record
+the infrastructure failure and preserve its cost/state rather than claim a score.
+Keep the active candidate and runner unchanged until this run finishes.
+
 ### Optional: longest-observed-first launch order
 
 For a **future** run over the same instances, add `--duration-history /path/to/previous/run/supervisor-state.json`
@@ -209,16 +250,30 @@ console.log(`${n}/${entries.length}`, JSON.stringify({
 The watchdog report records heartbeat, active runner identities, `n/max`, and runner loss events.
 Treat stale heartbeat, runner loss, malformed state, or budget exhaustion as fail-closed conditions.
 
-The runner checks progress after 20 minutes of inference. An uncommitted candidate working-tree change
+For the staged dev23 condition above, the runner checks progress at **20 minutes**
+and stops at that checkpoint if there is no qualifying progress. An uncommitted candidate working-tree change
 (excluding generated control files and the prepared environment) or priced model activity
 in the preceding five minutes permits the run to continue only up to its configured hard
-timeout (30 minutes by default; a campaign may explicitly pin a different maximum).
+ timeout (**40 minutes** with `--timeout-seconds 2400`; 30 minutes by default if omitted).
 Otherwise it stops with `no-progress-at-checkpoint`. A native `read` still running after
 three minutes stops with `read-stalled`; an observed location-shutdown event or loss of the
 private OpenCode server stops immediately. The watchdog and result metadata retain these
 distinct reasons and the progress decision. A location-shutdown error emitted *only after*
 the hard stop cannot be detected earlier from that error alone. These are inference-runtime
 policies, not changes to the official grader or proof of a recovered score.
+
+Observe `progress_decision` (`not-reached`, `extended`, `no-progress`) and the
+watchdog/result stop reason for each case. `extended` means only that this
+single attempt may continue to the hard maximum; it does not create a new
+attempt, restart the clock, or establish an official resolution. When the
+supervisor is terminal, verify exactly 23 attempts, the immutable predictions,
+actual cost plus unknown-usage holds against the precommitted campaign cap
+($285 for the v0.12.19–v0.12.21 campaign), and the
+official image IDs. Then score the frozen predictions **once** with the
+official SWE-bench harness (one scoring worker, `split=dev`), retain its report
+and SHA-256, and compare *official resolved IDs* rather than patch presence.
+If host observation was missed after an otherwise completed run, preserve the
+run and report the observation defect; do not rerun inference to repair it.
 
 After process cleanup, the runner freezes the working-tree patch even for a stopped attempt
 (including `timeout` and `cost-limit`) before removing its workspace. Metadata records

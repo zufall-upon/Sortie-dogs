@@ -50,6 +50,7 @@ OpenCode完全再起動は手動。`preflight`、`npm test`、`npm run test:full
 - 流れ: Ubuntuで失敗19件を分類 → 改善1件を短命branchで検証 → `main`統合 → 最新`main`でpackage再生成・23件評価 → Windowsへ同じpackageをglobal applyして実運用確認。
 - 改善中は23件一括より単件反復を優先。旧失敗1件を推論・公式採点・原因分析し、必要なら1テーマ修正後に同じ1件を再確認して次へ進む。
 - campaign累計予算を固定し、単件ごとに上限を割り当てて残額を継承。実行中のcandidate、package hash、条件は変更しない。
+- dev23の段階式timeoutを「各40分固定」と説明しない。`--timeout-seconds 2400`はハード上限で、runnerは開始20分で進捗確認、進捗なしなら停止、ソース変更または直近5分のモデル活動ありなら最大40分まで続行する。read停滞3分も別判定。起動・live state・Worker実モデル・公式採点・費用記録の手順は[`docs/swebench-lite-benchmark.md`](docs/swebench-lite-benchmark.md)の「8-slot dev23 / staged timeout」を参照する。宣言した起動コマンドに`tee`やredirectを足さない。
 
 ## GitHub カンバン
 
