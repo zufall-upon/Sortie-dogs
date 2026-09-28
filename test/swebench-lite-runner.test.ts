@@ -125,9 +125,29 @@ test("V2 usage reader charges owned sessions including Luna Fast and retains mis
       write.run("child", "assistant", JSON.stringify(message));
       write.run("other", "assistant", JSON.stringify(message));
       assert.deepEqual(readDirectoryUsage(workspace, path), { usd: 0.0014, requests: 2, unpriced: [] });
-      write.run("child", "assistant", JSON.stringify({ time: { completed: 2 }, error: { message: "after transport" } }));
-      assert.deepEqual(readDirectoryUsage(workspace, path), { usd: 0.0014, requests: 2, unpriced: ["missing-usage"] });
-      db.prepare("DELETE FROM session_message WHERE session_id = ? AND data LIKE ?").run("child", '%after transport%');
+      write.run("child", "assistant", JSON.stringify({ agent: "dogs-coordinator",
+        model: { providerID: "openai", id: "gpt-6-sol" }, time: { completed: 2 },
+        error: { type: "provider.transport", message: "WebSocket closed with code 1012: private detail" },
+        content: [{ type: "text", text: "private prompt" }] }));
+      const gap = readDirectoryUsage(workspace, path);
+      assert.deepEqual(gap, { usd: 0.0014, requests: 2, unpriced: ["missing-usage"], unpriced_count: 1,
+        unpriced_details: [{ reason: "missing-usage", session_id: "child", agent: "dogs-coordinator",
+          model: "openai/gpt-6-sol", error_type: "provider.transport", transport_code: 1012, completed_at_ms: 2 }],
+        latest_priced_at_ms: 1 });
+      assert.doesNotMatch(JSON.stringify(gap), /private/u, "neither provider text nor prompt content enters the usage record");
+      write.run("child", "assistant", JSON.stringify({ ...message, time: { completed: 4 } }));
+      const recovered = readDirectoryUsage(workspace, path);
+      assert.equal(recovered.requests, 3);
+      assert.equal(recovered.latest_priced_at_ms, 4, "subsequent priced activity remains visible alongside the gap");
+      assert.equal(recovered.unpriced_count, 1, "a later priced request does not erase unknown spend");
+      write.run("child", "assistant", JSON.stringify({ ...message, model: { providerID: "unknown", id: "unpriced" },
+        time: { completed: 5 } }));
+      const unsupported = readDirectoryUsage(workspace, path);
+      assert.equal(unsupported.latest_priced_at_ms, 4, "an unpriced request is not reported as priced progress");
+      assert.equal(unsupported.unpriced_count, 2);
+      db.prepare("DELETE FROM session_message WHERE session_id = ? AND data LIKE ?").run("child", '%"completed":5%');
+      db.prepare("DELETE FROM session_message WHERE session_id = ? AND data LIKE ?").run("child", '%"completed":4%');
+      db.prepare("DELETE FROM session_message WHERE session_id = ? AND data LIKE ?").run("child", '%private detail%');
       write.run("child", "assistant", JSON.stringify({ time: { created: 3 }, model: { providerID: "openai", id: "gpt-6-sol" } }));
       assert.deepEqual(readDirectoryUsage(workspace, path), { usd: 0.0014, requests: 2, unpriced: ["pending-usage"] });
     } finally { db.close(); }
@@ -1062,6 +1082,10 @@ test("cost enforcement failures stop later instances with deterministic replay e
       const root = await mkdtemp(join(tmpdir(), "swebench-replay-usage-stop-"));
       const runRoot = join(root, "run");
       let executeCalls = 0;
+      const gapUsage = { usd: 0.1, requests: 1, unpriced: ["missing-usage"], unpriced_count: 1,
+        unpriced_details: [{ reason: "missing-usage", session_id: "coordinator", agent: "dogs-coordinator",
+          model: "openai/gpt-6-sol", error_type: "provider.transport", transport_code: 1012, completed_at_ms: 2 }],
+        latest_priced_at_ms: 3 };
       try {
         const result = await runTestLive(manifest(), {
           agent: "dog-operator",
@@ -1097,13 +1121,18 @@ test("cost enforcement failures stop later instances with deterministic replay e
               reason,
               stdout: "",
               stderr: "",
-              usage: { usd: 0, requests: 0, unpriced: [] },
+              usage: reason === "pricing-coverage-missing" ? gapUsage : { usd: 0, requests: 0, unpriced: [] },
             };
           },
         });
         const notRunStatus = `not-run-${reason}`;
         assert.equal(executeCalls, 1);
         assert.deepEqual(result.results.map(item => item.status), [reason, notRunStatus]);
+        if (reason === "pricing-coverage-missing") {
+          assert.deepEqual(result.results[0]!.usage, gapUsage);
+          const metadata = JSON.parse(await readFile(join(root, "predictions.jsonl.metadata.json"), "utf8"));
+          assert.deepEqual(metadata.results[0].usage, gapUsage, "the diagnostic survives into durable run metadata");
+        }
         const replayManifest = JSON.parse(await readFile(result.replay.manifest.path, "utf8"));
         assert.deepEqual(replayManifest.artifacts.map((item: { status: string }) => item.status), [reason, notRunStatus]);
         const failedArtifact = JSON.parse(await readFile(join(runRoot, "replay", replayManifest.artifacts[0].path), "utf8"));

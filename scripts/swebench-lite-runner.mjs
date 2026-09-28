@@ -1004,6 +1004,25 @@ export function readDirectoryUsage(directory, databasePath = usageDatabasePath()
   if (!existsSync(databasePath)) throw new Error("usage-database-unavailable");
   const database = new DatabaseSync(databasePath, { readOnly: true });
   const unpriced = new Set();
+  const unpricedDetails = [];
+  let unpricedCount = 0;
+  let latestPricedAtMs = 0;
+  const recordUnpriced = (reason, session, message) => {
+    if (reason === "pending-usage") return;
+    unpricedCount += 1;
+    if (unpricedDetails.length >= 8) return;
+    const error = message?.error;
+    const transportCode = typeof error?.message === "string"
+      ? /\bWebSocket closed with code (\d{4})\b/u.exec(error.message)?.[1] : undefined;
+    unpricedDetails.push({ reason, session_id: session.id,
+      ...(typeof message?.agent === "string" ? { agent: message.agent } : {}),
+      ...(typeof message?.model?.providerID === "string" && typeof message.model.id === "string"
+        ? { model: `${message.model.providerID}/${message.model.id}` } : {}),
+      ...(typeof error?.type === "string" ? { error_type: error.type } : {}),
+      ...(transportCode ? { transport_code: Number(transportCode) } : {}),
+      ...(Number.isFinite(message?.time?.completed) ? { completed_at_ms: message.time.completed } : {}),
+    });
+  };
   try {
     const v2 = database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'session_v2'").get() !== undefined;
     const sessions = database.prepare(`SELECT id FROM ${v2 ? "session_v2" : "session"} WHERE directory = ?`).all(directory);
@@ -1013,6 +1032,7 @@ export function readDirectoryUsage(directory, databasePath = usageDatabasePath()
         let message;
         try { message = JSON.parse(row.data); } catch {
           unpriced.add("missing-usage");
+          recordUnpriced("missing-usage", session);
           continue;
         }
         if (v2 ? !["assistant", "compaction"].includes(row.type) : message?.role !== "assistant") continue;
@@ -1020,7 +1040,9 @@ export function readDirectoryUsage(directory, databasePath = usageDatabasePath()
           // V2 persists the assistant before a model request finishes. Keep the
           // reservation while it is in flight; only a terminal missing usage
           // record is a pricing failure.
-          unpriced.add(v2 && !message.time?.completed && !message.error ? "pending-usage" : "missing-usage");
+          const reason = v2 && !message.time?.completed && !message.error ? "pending-usage" : "missing-usage";
+          unpriced.add(reason);
+          recordUnpriced(reason, session, message);
           continue;
         }
         result.requests += 1;
@@ -1035,14 +1057,22 @@ export function readDirectoryUsage(directory, databasePath = usageDatabasePath()
           reasoningTokens: tokens.reasoning,
           serviceTier: v2 ? message.providerState?.serviceTier : message.serviceTier,
         });
-        if (estimate.status === "priced") result.usd += estimate.usd;
-        else unpriced.add(estimate.reason);
+        if (estimate.status === "priced") {
+          result.usd += estimate.usd;
+          if (Number.isFinite(message.time?.completed)) latestPricedAtMs = Math.max(latestPricedAtMs, message.time.completed);
+        }
+        else { unpriced.add(estimate.reason); recordUnpriced(estimate.reason, session, message); }
       }
     }
   } finally {
     database.close();
   }
   result.unpriced = [...unpriced];
+  if (unpricedCount) {
+    result.unpriced_count = unpricedCount;
+    result.unpriced_details = unpricedDetails;
+    if (latestPricedAtMs) result.latest_priced_at_ms = latestPricedAtMs;
+  }
   return result;
 }
 
