@@ -832,8 +832,15 @@ export class OperatorRuntime {
     mission?: { dispatcher?: { sessionID: string; callID: string }; supersededRunID?: string;
       terminalChildren?: readonly string[]; replaceRunID?: string; replaceRequirements?: boolean }): Promise<OperatorState> {
     const previous = await this.read(root);
+    const superseding = mission?.supersededRunID !== undefined && previous?.runID === mission.supersededRunID &&
+      previous.phase === "cancelled";
+    // A later user-requested mission is not a repair of the old failed acceptance. Preserve
+    // the old run and its spend, but do not rewrite the new requirements to its remediation plan.
+    const replacingFailedAcceptance = superseding && mission?.replaceRequirements === true &&
+      previous.decision === ACCEPTANCE_REMEDIATION_DECISION;
     let immutableReplacement = previous?.phase === "cancelled" &&
-      [ACCEPTANCE_REMEDIATION_DECISION, REVIEW_REMEDIATION_DECISION].includes(previous.decision ?? "") && record(raw)
+      [ACCEPTANCE_REMEDIATION_DECISION, REVIEW_REMEDIATION_DECISION].includes(previous.decision ?? "") &&
+      !replacingFailedAcceptance && record(raw)
       ? { ...raw, acceptance: [...previous.acceptance], source_refs: [...previous.sourceRefs] }
       : raw;
     if (immutableReplacement !== raw && previous && record(immutableReplacement) && record(immutableReplacement.goal_declaration)) {
@@ -862,14 +869,12 @@ export class OperatorRuntime {
     }
     if (mission?.supersededRunID !== undefined && previous?.supersededRunID === mission.supersededRunID &&
         previous.planHash === validatedPlanHash && previous.phase !== "cancelled") return previous;
-    const superseding = mission?.supersededRunID !== undefined && previous?.runID === mission.supersededRunID &&
-      previous.phase === "cancelled";
     if (mission?.supersededRunID !== undefined && !superseding) throw new Error("mission-superseded-run-mismatch");
     const terminalChildren = mission?.terminalChildren ?? [];
     const retainAcceptance = previous !== undefined && cancelledMissionRetainsAcceptance(previous);
     const predecessorChildren = previous?.units.flatMap(unit => unit.childSessionID !== null
       ? [unit.childSessionID] : []) ?? [];
-    if (superseding && previous && (!["explicit-cancellation", "agent-changed"].includes(previous.decision ?? "") || previous.gitLifecycle !== null ||
+    if (superseding && previous && (!replacingFailedAcceptance && !["explicit-cancellation", "agent-changed"].includes(previous.decision ?? "") || previous.gitLifecycle !== null ||
         previous.repairResidualPaths.length > 0 || previous.contractRepair !== null ||
         terminalChildren.length !== predecessorChildren.length || new Set(terminalChildren).size !== terminalChildren.length ||
         predecessorChildren.some(id => !terminalChildren.includes(id)) || previous.units.some(unit =>
