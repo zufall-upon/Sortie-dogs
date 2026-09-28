@@ -8,6 +8,7 @@ import { OperatorMissionRuntime } from "../dist/core/operator-mission.js";
 import { OperatorRuntime } from "../dist/core/operator-runtime.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
 import { SortieDogsV010Plugin } from "../dist/plugin/profiled.js";
+import { missionOperatorContent } from "../dist/runtime-mission-assets.js";
 
 const exec = promisify(execFile);
 
@@ -30,6 +31,10 @@ for (const verdict of ["PASS", "FINDINGS"] as const) test(`Fast-first ${verdict}
     } } } as never);
     assert.match(hooks.tool!.sortie_v010_start_mission.description, /dispatch its Worker directly/u);
     assert.doesNotMatch(hooks.tool!.sortie_v010_start_mission.description, /Dispatch the Coordinator immediately/u);
+    assert.match(missionOperatorContent(V010_RUNTIME_PROFILE, "test"),
+      /exact entrypoint, input \(including named paths\) and observed\s+failure into the first unit objective/u);
+    assert.match(hooks.tool!.sortie_v010_plan_units.description,
+      /exact entrypoint, named input paths and observed failure in the first unit objective/u);
     await hooks["chat.message"]!({ sessionID: "root", messageID: "request", agent: agents.root!.agent }, {
       message: { id: "request", agent: agents.root!.agent, model: { providerID: "openai", modelID: "gpt-6-sol" } },
       parts: [{ type: "text", text: "Create result.txt with ready, validate and review it." }],

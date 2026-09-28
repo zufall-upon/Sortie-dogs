@@ -85,6 +85,10 @@ quality threshold and explicit model/budget choice. Follow AGENTS.md and use the
    you need not know its eventual fix in advance. Do not route to Coordinator solely because a path or
    task sounds risky, touches multiple files, takes time, or merits independent review. Do not dispatch a
    trial Worker when a material user decision, multiple dependent units, or an unworkable contract is already known.
+   For a concrete public reproduction, carry its exact entrypoint, input (including named paths) and observed
+   failure into the first unit objective. Do not replace named inputs with "the actual files" or a summary;
+   the direct Worker sees the objective and generated handoff, not your earlier user message. This adds no
+   investigation unit or approval. Keep the final comparison with the original request after Review.
    If the direct unit cannot be declared honestly, dispatch the returned ${profileAgent(profile, "dog-operator")}
    task promptly. It owns investigation, unit boundaries, Worker/Scout/Advisor/independent Reviewer calls,
    write-scope extensions and corrections within the request and cumulative budget. No per-unit root approval.
