@@ -81,6 +81,23 @@ export async function operationInputSnapshot(projectRoot: string, binding: Bindi
     : await protectedScopeDigest(projectRoot, paths, hash, binding.source_policy, outputs);
 }
 
+/** A validation may populate write-only caches. Keep its declared read inputs stable
+ * while binding the resulting candidate (including those outputs) after the command. */
+export async function validationInputSnapshot(projectRoot: string, binding: Binding): Promise<string | undefined> {
+  const manifestSource = await readFile(resolve(projectRoot, binding.manifest_path)).catch(() => undefined);
+  if (!manifestSource || `sha256:${createHash("sha256").update(manifestSource).digest("hex")}` !== binding.manifest_hash) return undefined;
+  const manifest = JSON.parse(manifestSource.toString("utf8")) as OperationManifest;
+  if (!manifest.read.length) return undefined; // Keep the original full-source check when no inputs were declared.
+  const paths = manifest.read.map(entry => {
+    const path = normalizeManifestScope(entry);
+    return path.kind === "relative" ? resolve(projectRoot, path.path) : resolve(path.path);
+  });
+  const hash = binding.manifest_hash.slice("sha256:".length);
+  return binding.source_policy === "declared-paths-v1"
+    ? declaredScopeDigest(projectRoot, paths, hash, true)
+    : protectedScopeDigest(projectRoot, paths, hash, binding.source_policy);
+}
+
 export async function protectedSnapshot(authorization: { manifestPath: string; manifestHash: string; projectRoot: string }): Promise<{
   readonly binding: Binding; readonly source: string; readonly candidate: string;
 } | undefined> {

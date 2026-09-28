@@ -5024,6 +5024,59 @@ test("serial settled-pass reuse replaces only the duplicate call and reconciles 
   });
 });
 
+test("validation accepts declared write-only cache output but not changed read inputs", async () => {
+  for (const changedInput of [false, true]) {
+    await withProject(`goal-validation-output-${changedInput}`, async (directory) => {
+      const command = "node --test candidate.test.mjs";
+      await mkdir(join(directory, "source"));
+      await mkdir(join(directory, "cache"));
+      await writeFile(join(directory, "source", "candidate.test.mjs"), "// original input\n");
+      const hooks = await SortieDogsPlugin({ directory, client: { session: {
+        get: async ({ path }: { path: { id: string } }) => ({ data: path.id === "root"
+          ? { agent: "dog-coordinator" } : { agent: "dog-worker", parentID: "root" } }),
+        messages: async () => ({ data: [] }),
+      } } as never });
+      await hooks["chat.message"]!({ sessionID: "root", agent: "dog-coordinator", messageID: "goal-user" }, {
+        message: { id: "goal-user", agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-6-sol" } },
+        parts: [{ type: "text", text: "validate the candidate" }],
+      });
+      const taskID = "cache-unit", child = "cache-child", manifest = "cache-unit.json";
+      const handoff = join(directory, "handoff.cache-unit.json");
+      await writeFile(join(directory, manifest), JSON.stringify({ ...operationManifest(["cache/**"]),
+        task_id: taskID, read: ["source/**"], validation: [command] }));
+      await writeFile(handoff, JSON.stringify({ ...writeGateHandoff(directory, manifest), id: taskID }));
+      const prompt = [`task_id: ${taskID}`, "role: implementation", `project_root: ${directory}`, `handoff_path: ${handoff}`,
+        "source_manifest: [source/**]", `operation_manifest: ${manifest}`, "acceptance: candidate passes",
+        `validation: { level: targeted, command: ${command}, diagnostics: [] }`, `goal_acceptance_fingerprint: sha256:${"a".repeat(64)}`,
+        "goal_criterion_id: candidate", "goal_target: candidate", "goal_entrypoint: fixture", "goal_workload: one unit",
+        "goal_oracle_coverage:\n  - acceptance", "goal_build_boundary: not-applicable", "goal_source: current protected source",
+        "goal_candidate: current protected candidate", "goal_source_binding: current-protected", "goal_candidate_binding: current-protected",
+        "goal_fixture: fixture", "goal_proof_scope: document-deliverable", "goal_expected_outcome: pass", "delivery_intent: implementation",
+        "usable_path_established: false", "controlled_change: false", "goal_budget_units: 2"].join("\n");
+      await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: taskID },
+        { args: { subagent_type: "dog-worker", prompt } });
+      await hooks.event!({ event: { type: "session.created", properties: { info: { id: child, parentID: "root", directory } } } });
+      await hooks["chat.message"]!({ sessionID: child, agent: "dog-worker", parentID: "root" } as never, {
+        message: { agent: "dog-worker", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: prompt }],
+      });
+      await inspectHandoffWithRead(hooks, handoff, child);
+      assert.equal((await executeBindWriteGate(hooks, directory, child, manifest)).status, "bound");
+      await hooks["tool.execute.before"]!({ tool: "bash", sessionID: child, callID: "check" }, { args: { command } });
+      await writeFile(join(directory, "cache", "compiled.bin"), "generated during validation");
+      if (changedInput) await writeFile(join(directory, "source", "candidate.test.mjs"), "// changed during validation\n");
+      await hooks["tool.execute.after"]!({ tool: "bash", sessionID: child, callID: "check", args: { command } },
+        { output: "passed", metadata: { exit: 0 } });
+      await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: taskID },
+        { output: "<task_result>validation finished</task_result>", metadata: { sessionId: child } });
+      const path = join(directory, ".git", "sortie-dogs", "run-flight", `${createHash("sha256").update("root").digest("hex")}.json`);
+      const ledger = JSON.parse(await readFile(path, "utf8"));
+      const settlement = ledger.goal_events.find(({ event }: { event: { kind: string } }) => event.kind === "unit.settled")?.event;
+      assert.equal(settlement?.disposition, changedInput ? "failed" : "succeeded");
+      assert.equal(settlement?.evidence.length, changedInput ? 0 : 1);
+    });
+  }
+});
+
 test("validation admission-only failures do not consume no-progress and cannot erase a real failed check", async () => {
   await withProject("goal-validation-process-defect", async (directory) => {
     const command = "node --test candidate.test.mjs";
