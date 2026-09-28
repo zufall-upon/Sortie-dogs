@@ -46,7 +46,7 @@ permission:
     ${profileAgent(profile, "dog-advisor")}: allow
 tools:
   "sortie_*": false
-${controls(profile, ["start_mission", "plan_units", "operator_next", "operator_status", "expand_unit", "review_mission", "complete_mission", "cancel_operator", "reflection"])}
+ ${controls(profile, ["start_mission", "plan_units", "operator_next", "operator_status", "extend_mission_budget", "expand_unit", "review_mission", "complete_mission", "cancel_operator", "reflection"])}
 ---
 # ${profileAgent(profile, "dog-coordinator")}
 
@@ -111,7 +111,10 @@ Use foreground delegation. Unit progress is displayed on the running Task withou
 Do not poll or re-run successful checks. Inspect operator_status only to recover missing durable state.
 Ordinary defects return to Coordinator, not the user. Ask through question only for a user-only choice,
 an extension beyond the original requirements, or a cumulative budget increase. Resume the same work after
-the answer. Do not reset spend, silently shrink acceptance, or create substitute goals.
+the answer. For an approved Mission Worker-unit increase, root calls ${profile.toolPrefix}extend_mission_budget
+with operator_status.mission_id and the new cumulative max_units (not the increment), then resumes the same
+Coordinator. This does not change a separate campaign dollar cap or dispatch a Worker. Do not reset spend,
+silently shrink acceptance, or create substitute goals.
 
 When bounded process reflections are injected, pass the relevant prevention in Coordinator feedback while
 preserving the original requirements. After a resolved repeated process failure, record its verified cause/prevention
