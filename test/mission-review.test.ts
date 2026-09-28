@@ -212,6 +212,7 @@ test("committed candidates still supply current source and large artifacts expos
     const first = await missionReviewSource(root, run);
     assert.ok(Buffer.byteLength(first.excerpt) < 25_000);
     assert.match(first.excerpt, /EXCERPT TRUNCATED: large.txt/);
+    assert.deepEqual(first.truncatedSource, ["large.txt"], "automatic truncation is visible before dispatch");
     await writeFile(join(root, "large.txt"), "a".repeat(99_999) + "b");
     assert.notEqual((await missionReviewSource(root, run)).fingerprint, first.fingerprint, "unshown tail bytes are still fingerprinted");
   } finally { await rm(root, { recursive: true, force: true }); }
@@ -246,6 +247,7 @@ test("mission baseline exposes committed changes across replans without a genera
     assert.doesNotMatch(source.excerpt, /unrelated change/u);
     assert.ok(Buffer.byteLength(source.excerpt) < 25_000);
     assert.match(source.excerpt, /EXCERPT TRUNCATED: generated\.js/u);
+    assert.ok(source.truncatedSource.includes("generated.js"), "committed diff omissions are reported to the Coordinator");
     await writeFile(join(root, "z_test.js"), "assert.equal(value, 43);\n");
     assert.notEqual((await missionReviewSource(root, run, [], baseline)).fingerprint, source.fingerprint);
   } finally { await rm(root, { recursive: true, force: true }); }
@@ -293,6 +295,7 @@ test("focused review shares unused reference space and keeps changed-file invent
 test("read-only units do not accidentally collect an entire repository and ignored tooling", async () => {
   const packet = await missionReviewSource("nonexistent-directory", { units: [{ unit: { write: [], read: ["src"] }, hashes: [] }] } as never);
   assert.match(packet.excerpt, /Read-only units: no declared output files/);
+  assert.deepEqual(packet.truncatedSource, []);
 });
 
 test("read-only and test-only replans retain earlier source, deletion and stale-review coverage", async () => {

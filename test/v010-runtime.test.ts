@@ -1084,7 +1084,7 @@ test("nested mission review and accepted work survive reload and agent-change ca
   });
   const next = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ units: [{
     title: "Validated result", objective: "Write the result and run the exact validator", read: ["check.mjs"],
-    write: ["result.txt", "generated"], validation: ["node check.mjs"], requirement_ids: ["R1"],
+    write: ["result.txt", "generated", "large-evidence.md"], validation: ["node check.mjs"], requirement_ids: ["R1"],
   }] }, { sessionID: "coordinator" }));
   assert.ok(next.task, JSON.stringify(next));
   const workerInput = { args: structuredClone(next.task) };
@@ -1127,12 +1127,23 @@ test("nested mission review and accepted work survive reload and agent-change ca
     event.disposition === "succeeded" && event.evidence.length > 0));
   const status = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
   assert.equal(status.units[0].status, "succeeded", JSON.stringify(status));
+  await writeFile(join(root, "large-evidence.md"), ("supplemental generated evidence\n").repeat(4_000));
+  const automatic = JSON.parse(await hooks.tool!.sortie_v010_review_mission.execute({ risk_tags: ["public-logic"],
+    traces: ["The Worker wrote and validated result.txt"],
+  }, { sessionID: "coordinator" }));
+  assert.ok(automatic.task, "automatic clipping does not block the returned Reviewer task");
+  assert.ok(automatic.automatic_truncated_source?.includes("large-evidence.md"),
+    "the Coordinator can see automatic omissions before dispatching an opaque task reference");
+  assert.match(automatic.evidence_hint, /otherwise dispatch the returned Reviewer task/u);
+  assert.equal(automatic.truncated_evidence, undefined, "automatic clipping does not become a focused-evidence rejection");
   await writeFile(join(root, "long-context.md"), ("a long incidental context line ".repeat(12) + "\n").repeat(200));
   const clipped = JSON.parse(await hooks.tool!.sortie_v010_review_mission.execute({ risk_tags: ["public-logic"],
     traces: ["The Worker wrote and validated result.txt"], evidence: [{ path: "long-context.md", offset: 1, limit: 200 }],
   }, { sessionID: "coordinator" }));
   assert.deepEqual(clipped.truncated_evidence, ["long-context.md:1"]);
   assert.match(clipped.next_action, /before dispatching the Reviewer/u);
+  assert.ok(clipped.automatic_truncated_source.includes("large-evidence.md"));
+  assert.equal(clipped.evidence_hint, undefined, "the focused truncation instruction takes precedence");
   const review = async (plugin: V010Hooks, trace: string) => JSON.parse(await plugin.tool!.sortie_v010_review_mission.execute({
     risk_tags: ["public-logic"], traces: [trace],
   }, { sessionID: "coordinator" })).task;
