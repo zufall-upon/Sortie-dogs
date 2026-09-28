@@ -35,6 +35,11 @@ test("public reproduction and shared-branch checks remain in the same mission Wo
   assert.match(coordinator, /a preview is not the live run/u);
   assert.match(operator, /Do not turn a chosen preflight step into a user requirement/u);
   assert.match(coordinator, /Evaluating an unchanged published package is not a release or source edit/u);
+  assert.match(coordinator, /Distinguish an outer benchmark attempt from the Worker dispatches/u);
+  assert.match(coordinator, /process-defect with no formal validation evidence/u);
+  assert.match(coordinator, /custom container tool is not\s+native shell validation/u);
+  assert.match(coordinator, /use\s+the existing ref as start_ref in a lifecycle plan/u);
+  assert.match(worker, /only the checked-out\s+default 'master' at the intended base commit/u);
   assert.doesNotMatch(worker, /hidden evaluator details.*as (?:proof|tests)/u);
 
   // Public-only synthetic case analogous to a shared exception handler. This asserts the
