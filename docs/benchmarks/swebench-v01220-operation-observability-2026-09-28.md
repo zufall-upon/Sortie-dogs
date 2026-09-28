@@ -12,6 +12,23 @@ different inference runs, not a causal measurement of one change. The v0.12.19
 run without the effective per-instance cap also resolved 7/23, but it is not a
 strict same-condition comparison.
 
+The corrected v0.12.19 run used release/runner commit
+`24f5386ee0d0d73a08ed5942020e4665603d7994` and public package SHA-256
+`37f7938f5fb8af81ca0f407d5f097f3038f63ad0b13002361858390e659a484d`.
+It pinned the SWE-bench Lite `dev` revision
+`6ec7bb89b9342f664a54a6e0a6ea6501d3437cc2`, eight inference slots,
+the effective $2 per-instance cap, a 40-minute per-instance timeout, one
+attempt per case and official-image testbeds. Inference produced 23 nonempty
+patches (22 succeeded, `sqlfluff__sqlfluff-1763` timed out); official scoring
+completed all 23 predictions with **8 resolved, 15 unresolved and zero empty
+patches or scoring errors**. Predictions SHA-256:
+`62da5f1a75c03ea87acd4a4912d8ea28b39a6d947bab383682529632900187df`;
+official report SHA-256:
+`61e9eccbc72384871bc2cffc2dedb58c689f32849eb17caf69a17230f11d1347`.
+Run spend was $12.55950188 plus $0.21700352 held for unknown usage. The
+original result, manifest and official report remain under
+`_testenv/swebench-v01219-dev23-matched-20260927/` in the benchmark checkout.
+
 The v0.12.20 run spent $11.95648556 with no unknown usage. Conservative campaign
 exposure reached $222.90097688/$285 (remaining $62.09902312). Per-instance
 reservations were capped at $2. Predictions SHA-256:

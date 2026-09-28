@@ -97,6 +97,8 @@ Official SWE-bench Lite `dev` results on the same 23 public instances:
 | v0.12.8 (`84ccdf1` main adapter) | 6 / 23 (26.1%) | 2 | Fresh 23-task run; four slots; 30-minute timeout | [Main-integrated run](docs/swebench-main-84ccdf1-dev23-2026-09-26.md) |
 | v0.12.15 (`0c9690d`) | 5 / 23 (21.7%) | 3 | Fresh 23-task ext4 retry; four slots; 40-minute timeout | [Campaign](docs/swebench-v01215-dev23-2026-09-27.md) |
 | v0.12.16 (`9b05a34` release; `b1a6c0e` runner) | 4 / 23 (17.4%) | 5 | Fresh 23-task run; eight slots; 40-minute timeout | [Campaign](docs/swebench-v01216-dev23-2026-09-27.md) |
+| v0.12.19 (`24f5386` release; matched rerun) | 8 / 23 (34.8%) | 0 | Eight slots; effective $2/instance; 40-minute timeout; one inference timeout | [Official result and provenance](docs/benchmarks/swebench-v01220-operation-observability-2026-09-28.md) |
+| v0.12.20 (`628eb81` release) | 7 / 23 (30.4%) | 0 | Eight slots; effective $2/instance; 40-minute timeout | [Official result and caveat](docs/benchmarks/swebench-v01220-operation-observability-2026-09-28.md) |
 
 Every row has 23 submitted official predictions; an empty patch counts against
 the score, not as a missing evaluation. The v0.10.14 report does not separately
@@ -110,6 +112,11 @@ estimated $15.75 in model cost and a 15.2-minute median agent runtime.
 The v0.12.16 run is the first eight-slot inference score in this table;
 five runners timed out, and this does not establish a model-quality regression
 against runs with different concurrency and conditions.
+The v0.12.19 row is the corrected run with an effective $2 per-instance cap;
+an earlier v0.12.19 run scored 7/23 but had no effective per-instance cap and
+is not a same-condition comparison. The v0.12.20 run lost the
+`sqlfluff__sqlfluff-2419` resolution relative to the corrected run; this
+single run-to-run difference does not establish causation.
 
 Historical qualification references remain in [benchmark reference](docs/benchmark-reference.md).
 
