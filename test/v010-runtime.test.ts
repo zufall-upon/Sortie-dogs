@@ -1065,6 +1065,12 @@ test("nested mission review and accepted work survive reload and agent-change ca
     event.disposition === "succeeded" && event.evidence.length > 0));
   const status = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
   assert.equal(status.units[0].status, "succeeded", JSON.stringify(status));
+  await writeFile(join(root, "long-context.md"), ("a long incidental context line ".repeat(12) + "\n").repeat(200));
+  const clipped = JSON.parse(await hooks.tool!.sortie_v010_review_mission.execute({ risk_tags: ["public-logic"],
+    traces: ["The Worker wrote and validated result.txt"], evidence: [{ path: "long-context.md", offset: 1, limit: 200 }],
+  }, { sessionID: "coordinator" }));
+  assert.deepEqual(clipped.truncated_evidence, ["long-context.md:1"]);
+  assert.match(clipped.next_action, /before dispatching the Reviewer/u);
   const review = async (plugin: V010Hooks, trace: string) => JSON.parse(await plugin.tool!.sortie_v010_review_mission.execute({
     risk_tags: ["public-logic"], traces: [trace],
   }, { sessionID: "coordinator" })).task;

@@ -115,7 +115,8 @@ export async function completedMissionReviewPrompts(mission: OperatorMission | u
 
 /** Pin all scoped tracked/untracked source bytes, including deletions; display a bounded excerpt only. */
 export async function missionReviewSource(directory: string, run: OperatorState,
-  evidence: readonly MissionEvidenceExcerpt[] = [], baseline?: string, priorScope?: MissionReviewScope): Promise<{ fingerprint: string; excerpt: string }> {
+  evidence: readonly MissionEvidenceExcerpt[] = [], baseline?: string, priorScope?: MissionReviewScope): Promise<{
+    fingerprint: string; excerpt: string; truncatedEvidence: string[] }> {
   const scope = missionReviewScope(priorScope, run);
   const hash = createHash("sha256").update(JSON.stringify({ baseline, scope, units: run.units.map(unit => ({ unit: unit.unit, hashes: unit.hashes })) }));
   const writes = [...new Set(scope.write.map(path => path === "." ? path : normalizeManifestScope(path).path))];
@@ -190,8 +191,10 @@ export async function missionReviewSource(directory: string, run: OperatorState,
     selected += item.lines.slice(0, visibleLineCount(item.lines, allowances[index]!)).join("");
     if (needsNotice[index]) selected += truncated(item.entry);
   }
+  const truncatedEvidence = focused.flatMap(({ entry }, index) => needsNotice[index] ? [`${entry.path}:${entry.offset}`] : []);
   if (writes.length === 0) return { fingerprint: `sha256:${hash.digest("hex")}`,
-    excerpt: selected + "[Read-only units: no declared output files. Review the supplied observations, traces and validation evidence.]" };
+    excerpt: selected + "[Read-only units: no declared output files. Review the supplied observations, traces and validation evidence.]",
+    truncatedEvidence };
   // The shared dependency environment is local tooling, never reviewed or pinned source.
   const external: string[] = [], local: string[] = [];
   for (const path of writes) {
@@ -203,9 +206,11 @@ export async function missionReviewSource(directory: string, run: OperatorState,
   const git = async (args: string[]) => (await exec("git", args, { cwd: directory, maxBuffer: 8 * 1024 * 1024 })).stdout;
   const names = local.length ? await git(["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ...scopes]) : "";
   const untracked = new Set((local.length ? await git(["ls-files", "-z", "--others", "--exclude-standard", "--", ...scopes]) : "").split("\0").filter(Boolean));
-  // Explicitly declared outputs are review evidence even when gitignored (for example a probe
-  // JSON in _testenv). Their bytes must participate in staleness checks as well as the excerpt.
-  const ignored = local.length ? await git(["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--", ...scopes]) : "";
+  // Go's ignored in-project caches may be writable during validation but are not candidate
+  // output. Keep every other ignored declared output visible and fingerprinted, including
+  // directories of generated artifacts; focused references can still pin a cache file.
+  const ignored = local.length ? await git(["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--",
+    ...scopes, ...[".gocache", ".gomodcache", ".gopath"].map(path => `:(exclude)${path}`)]) : "";
   for (const path of ignored.split("\0").filter(Boolean)) untracked.add(path);
   const omitted: string[] = [];
   let diff = "";
@@ -270,5 +275,6 @@ export async function missionReviewSource(directory: string, run: OperatorState,
   }
   const bytes = Buffer.from(excerpt);
   return { fingerprint: `sha256:${hash.digest("hex")}`, excerpt: (bytes.length > 24_000 ? bytes.subarray(0, 24_000).toString("utf8") : excerpt) +
-    (bytes.length > 24_000 || omitted.length ? `\n[EXCERPT TRUNCATED: ${omitted.slice(0, 20).join(", ")}; supply focused traces for missing sections, not another implementation unit]` : "") };
+    (bytes.length > 24_000 || omitted.length ? `\n[EXCERPT TRUNCATED: ${omitted.slice(0, 20).join(", ")}; supply focused traces for missing sections, not another implementation unit]` : ""),
+    truncatedEvidence };
 }
