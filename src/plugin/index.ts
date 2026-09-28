@@ -137,7 +137,7 @@ import { profileAgent, STABLE_RUNTIME_PROFILE } from "../core/runtime-profile.js
 import type { RuntimeBridge } from "./runtime-bridge.js";
 import { evidenceFromObservedExecution } from "../core/observed-goal-evidence.js";
 import { receiptBoundTerminalText } from "./receipt-presentation.js";
-import { operationInputSnapshot, protectedSnapshot, refreshProtectedSnapshot } from "./protected-snapshot.js";
+import { operationInputSnapshot, protectedSnapshot, refreshProtectedSnapshot, validationInputSnapshot } from "./protected-snapshot.js";
 import { settledUnitUsage } from "./unit-usage.js";
 import { goalCompletionReadiness, type CompletionReadiness } from "./goal-completion.js";
 
@@ -476,6 +476,7 @@ interface HostGoalExecution {
   readonly source: string;
   readonly candidate: string;
   readonly operationInputs?: string;
+  readonly validationInputs?: string;
   readonly validation?: { readonly ledger: RunFlightLedger; readonly request: ValidationBudgetRequest; readonly reservation: string };
   readonly reusedEvidence?: readonly GoalEvidence[];
   endedAt?: string;
@@ -1908,11 +1909,14 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const operationInputs = mission?.kind === "operation" && mission.execution?.commands.includes(rawCommand) &&
       resolve(input.directory, typeof args?.workdir === "string" ? args.workdir : ".") === mission.execution.directory
       ? await operationInputSnapshot(authorization.projectRoot, snapshot.binding).catch(() => undefined) : undefined;
+    const validationInputs = validation !== undefined && operationInputs === undefined
+      ? await validationInputSnapshot(authorization.projectRoot, snapshot.binding).catch(() => undefined) : undefined;
     hostGoalExecutions.set(toolInput.callID, { root, projectRoot: authorization.projectRoot,
       sessionID: toolInput.sessionID,
       callID: toolInput.callID, tool: toolInput.tool, command: [rawCommand], startedAt: new Date().toISOString(),
       binding: snapshot.binding, source: snapshot.source, candidate: snapshot.candidate,
       ...(operationInputs === undefined ? {} : { operationInputs }),
+      ...(validationInputs === undefined ? {} : { validationInputs }),
       owner: validation?.request.owner ?? "worker", validation,
       ...(reusedEvidence === undefined ? {} : { reusedEvidence }) });
   }
@@ -1942,11 +1946,13 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       ? new Date(timing.start).toISOString() : execution.startedAt;
     const endedAt = typeof timing?.end === "number" && Number.isFinite(timing.end)
       ? new Date(timing.end).toISOString() : new Date().toISOString();
-    // Existing operations produce declared outputs. Preserve their read-only inputs during execution,
-    // then bind ordinary evidence to all post-operation bytes, including those outputs.
-    const fresh = refreshed !== undefined && (execution.operationInputs === undefined
-      ? refreshed.source === execution.source
-      : await operationInputSnapshot(execution.projectRoot, execution.binding).catch(() => undefined) === execution.operationInputs);
+    // Declared outputs can change during a successful validation. Read inputs must not;
+    // the evidence still binds to the complete post-command candidate and source.
+    const fresh = refreshed !== undefined && (execution.operationInputs !== undefined
+      ? await operationInputSnapshot(execution.projectRoot, execution.binding).catch(() => undefined) === execution.operationInputs
+      : execution.validationInputs !== undefined
+        ? await validationInputSnapshot(execution.projectRoot, execution.binding).catch(() => undefined) === execution.validationInputs
+        : refreshed.source === execution.source);
     const immutableRef = outcome === undefined || execution.reusedEvidence !== undefined ? undefined : goalFingerprint({ root: execution.root,
       child_session_id: execution.sessionID, call_id: execution.callID, command: execution.command,
       started_at: observedStartedAt, ended_at: endedAt, exit_code: exitCode ?? null, outcome,
