@@ -1260,6 +1260,32 @@ test("interrupted V2 Coordinator with a recorded running Worker returns the root
     .budget.consumed_units, afterStop.budget.consumed_units);
 }));
 
+test("completed Coordinator Task with a still-streaming Worker offers root-only stop/replan, not redispatch", async () => fixture(async root => {
+  const host = { history: {} as Record<string, unknown[]>, interrupts: [] as string[] };
+  const { hooks, unit, declare } = await missionCoordinatorFixture(root, host);
+  const planned = JSON.parse(await declare([unit]));
+  const input = { args: structuredClone(planned.task) };
+  await hooks["tool.execute.before"]!({ tool: "task", sessionID: "coordinator", callID: "worker-call" }, input);
+  await hooks["chat.message"]!({ sessionID: "worker", messageID: "worker-user", agent: "dog-worker-v010" }, {
+    message: { id: "worker-user", agent: "dog-worker-v010", model: { providerID: "openai", modelID: "gpt-6-luna-fast" } },
+    parts: [{ type: "text", text: input.args.prompt }],
+  });
+  host.history.worker = [{ info: { role: "assistant", sessionID: "worker" }, parts: [{ type: "tool", tool: "patch",
+    callID: "unfinished-patch", state: { status: "streaming", input: {} } }] }];
+  host.history.root = [{ info: { role: "assistant", sessionID: "root" }, parts: [{ type: "tool", tool: "task",
+    callID: "coordinator-call", state: { status: "completed",
+      input: { subagent_type: "dogs-coordinator", task_id: "coordinator" } } }] }];
+  await hooks.tool!.sortie_v010_submit_mission.execute({ status: "blocked", summary: "Worker outcome unrecorded" },
+    { sessionID: "coordinator" });
+  const status = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
+  assert.equal(status.coordinator_dispatch, "resumable");
+  assert.equal(status.execution_summary.running_units.length, 1);
+  assert.equal(status.budget.reserved_units, 1);
+  assert.equal(status.task, undefined, "do not redispatch the finished Coordinator into a running Worker");
+  assert.match(status.next_action, /parent Coordinator Task has finished[\s\S]+Operator root \(not Coordinator\): call sortie_v010_cancel_operator/u);
+  assert.deepEqual(host.interrupts, [], "reading status does not stop or duplicate the Worker");
+}));
+
 test("a user-approved cumulative Mission unit increase resumes the same Coordinator without resetting spend", async () => fixture(async root => {
   const { hooks, unit, declare } = await missionCoordinatorFixture(root);
   const status = () => hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }).then(JSON.parse);
