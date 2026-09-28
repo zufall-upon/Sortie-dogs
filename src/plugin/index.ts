@@ -8169,6 +8169,29 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         cost_note: "Worker token-price estimates from complete native usage; missing requests remain unknown and are reconciled on later status. Excludes orchestration/review and external campaign spend. Zero settled cost does not mean free execution." };
       return snapshot;
     },
+    extendMissionUnitBudget: (root, maxUnits) => serializeChatTransition(root, async () => {
+      if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) throw new Error("operator-coordinator-required");
+      await recoverPendingRealGoalTurn(root);
+      await recoverCompletedGoalReservations(root);
+      const ledger = await goalLedger(root), state = (await ledger.readGoal()).state;
+      if (state.phase !== "active" || state.receipt !== null || state.goal_id === null || state.budget === null ||
+          state.latest_user_message_id === null) throw new Error("mission-budget-goal-not-active");
+      if (!Number.isSafeInteger(maxUnits) || maxUnits <= 0 || maxUnits < state.budget.max_units ||
+          maxUnits < state.consumed_units + state.outstanding_reservations.length) throw new Error("mission-budget-limit-invalid");
+      const changed = maxUnits > state.budget.max_units;
+      if (changed) {
+        await ledger.appendGoal({ kind: "goal.revised", at: new Date().toISOString(), goal_id: state.goal_id,
+          revision: state.revision + 1, scope_epoch: state.scope_epoch + 1,
+          acceptance_fingerprint: state.acceptance_fingerprint!, origin_user_message_id: state.latest_user_message_id,
+          session_id: root, selected_agent: state.selected_agent!, delivery: state.delivery!,
+          budget: { ...state.budget, max_units: maxUnits, source: "user-revision" },
+          acceptance_contract: state.acceptance_contract });
+      }
+      const updated = (await ledger.readGoal()).state;
+      const reserved = updated.outstanding_reservations.length;
+      return { status: changed ? "extended" : "unchanged", max_units: updated.budget!.max_units, consumed_units: updated.consumed_units,
+        reserved_units: reserved, remaining_units: updated.budget!.max_units - updated.consumed_units - reserved };
+    }),
     ...{
       missionWorkerTerminal: async (childSessionID: string, writeScopes: readonly string[]) => {
         const active = activeSessions.get(childSessionID), authorization = sessionAuthorizations.get(childSessionID);
