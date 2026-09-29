@@ -20,7 +20,7 @@ async function protectedScopeDigest(projectRoot: string, paths: readonly string[
   sourcePolicy?: Binding["source_policy"], excluded: readonly string[] = []): Promise<string | undefined> {
   const entries: Array<readonly [string, string, string?]> = [];
   const canonicalRoot = await realpath(projectRoot);
-  const visit = async (absolute: string): Promise<boolean> => {
+  const visit = async (absolute: string, ancestors: ReadonlySet<string> = new Set()): Promise<boolean> => {
     if (excluded.some(root => !outside(root, absolute))) return true;
     const scoped = relative(projectRoot, absolute).replaceAll("\\", "/");
     if (scoped === ".." || scoped.startsWith("../") || isAbsolute(scoped)) return false;
@@ -35,14 +35,26 @@ async function protectedScopeDigest(projectRoot: string, paths: readonly string[
       if (target === undefined) return false;
       const relativeTarget = relative(canonicalRoot, target);
       if (relativeTarget === ".." || relativeTarget.startsWith("../") || isAbsolute(relativeTarget) ||
-        !(await stat(target)).isFile()) return false;
+        ancestors.has(target)) return false;
+      const targetMetadata = await stat(target);
       const link = await readlink(absolute);
+      if (targetMetadata.isDirectory()) {
+        // Keep the logical scope path and link target in the digest; do not follow external links or cycles.
+        entries.push([scoped, `symlink:${link}`]);
+        const next = new Set([...ancestors, target]);
+        for (const child of (await readdir(absolute)).sort()) if (!await visit(join(absolute, child), next)) return false;
+        return true;
+      }
+      if (!targetMetadata.isFile()) return false;
       entries.push([scoped, `symlink:${link}`, createHash("sha256").update(await readFile(target)).digest("hex")]);
       return true;
     }
     if (metadata.isDirectory()) {
+      const real = await realpath(absolute);
+      if (ancestors.has(real)) return false;
       entries.push([scoped, "directory"]);
-      for (const child of (await readdir(absolute)).sort()) if (!await visit(join(absolute, child))) return false;
+      const next = new Set([...ancestors, real]);
+      for (const child of (await readdir(absolute)).sort()) if (!await visit(join(absolute, child), next)) return false;
       return true;
     }
     if (!metadata.isFile()) return false;

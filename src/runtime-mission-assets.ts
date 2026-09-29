@@ -91,6 +91,8 @@ quality threshold and explicit model/budget choice. Follow AGENTS.md and use the
     investigation unit or approval. Keep the final comparison with the original request after Review.
     When the entrypoint and related test are known, choose task-sufficient write paths and requested or
     repository-required build and target checks; do not list speculative write paths or unrelated test suites as a precaution.
+    If declared build or tests create known generated paths, include those outputs in the initial write scope
+    (for example dist/, node_modules/ or _testenv/ when those commands actually use them).
     This is not a file-count limit or a restriction on read/search or real directory outputs. If the actual
     change needs a wider scope, the SAME mission's Coordinator handles it without routine user approval.
     If the direct unit cannot be declared honestly, dispatch the returned ${profileAgent(profile, "dog-operator")}
@@ -251,6 +253,8 @@ test when the existing checks already exercise that boundary. For an exception f
 operation and ask the Worker to consider its other source/API-backed failure inputs, including ones the
 new handler does not catch. A normal input alone does not check a different failure outcome.
 For read-only verification, use write: []; do not invent an output file or request write access to inputs.
+If declared build or tests create known generated paths, include those outputs in the initial write scope;
+do not add a separate setup unit just to prepare them.
 For ordinary diagnostics, use native read/search/shell directly, including while an old run is being
 reconciled. Do not create a dummy validation/console.log unit just to inspect status. The read list is
 the input set whose bytes affect the unit's validation, not every directory you may inspect. Keep live

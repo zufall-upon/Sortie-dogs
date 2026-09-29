@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { createServer } from "node:http";
@@ -187,7 +187,7 @@ for (const legacy of [false, true]) test(`V2 ${legacy ? "saved absolute" : "rela
     for (const [index, child] of ["first", "second"].entries()) {
       const command = `node check.mjs ${index === 0 ? "present" : "ready"}`;
       const plan = await tool("coordinator", "plan_units", { units: [{ title: "Write result", objective,
-        read: ["check.mjs"], write: ["result.txt"], validation: [command] }],
+        read: ["check.mjs"], write: index === 0 ? ["result.txt"] : ["result.txt", "node_modules/**"], validation: [command] }],
         ...(index === 1 ? { reason: "Operator rejected the partial output; preserve the original requirement and correct it" } : {}) });
       let runtime = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
       let state = await runtime.required("root");
@@ -223,6 +223,12 @@ for (const legacy of [false, true]) test(`V2 ${legacy ? "saved absolute" : "rela
       await after(read, await readFile(resolve(directory, String(read.input.path)), "utf8"));
       const manifest = /^operation_manifest: (.+)$/m.exec(expanded)![1]!;
       assert.equal((await tool(child, "bind_write_gate", { project_root: directory, manifest_path: manifest })).status, "bound");
+      if (index === 1) {
+        // The real V2 Worker linked a project-local dependency environment before native shell validation.
+        await mkdir(join(directory, ".sortie-env/node_modules/pkg"), { recursive: true });
+        await writeFile(join(directory, ".sortie-env/node_modules/pkg/index.js"), "dependency");
+        await symlink(".sortie-env/node_modules", join(directory, "node_modules"), "dir");
+      }
       const recovery = { sessionID: child, agent: "dog-worker-v010", system: [] as { text: string }[], tools: {} };
       await fixture.sessionHooks.get("context")!(recovery);
       const retained = recovery.system.find(part => part.text.startsWith("SORTIE_WORKER_CONTEXT\n"))!.text;
