@@ -287,6 +287,8 @@ test("preview assets coexist with stable assets and markers", async () => fixtur
   assert.match(reviewer, /If a missing check genuinely\naffects correctness or a requested deliverable/u);
   assert.doesNotMatch(reviewer, /Require the enumeration to name the target artifact/u);
   assert.match(reviewer, /Start with exactly one of PASS, FINDINGS or EVIDENCE_GAPS/u);
+  assert.match(reviewer, /Report FINDINGS only for concrete major or medium defects with a material impact/u);
+  assert.match(reviewer, /Do not turn minor style, wording, optional improvements or speculative edge cases into FINDINGS or EVIDENCE_GAPS/u);
   const coordinator = previewAssets.find(asset => asset.name === "dogs-coordinator")!.content;
   assert.match(coordinator, /EVIDENCE_GAPS means missing proof, not a defect/u);
   assert.match(coordinator, /not a speculative route inventory\nor raw history to prove incidental process constraints/u);

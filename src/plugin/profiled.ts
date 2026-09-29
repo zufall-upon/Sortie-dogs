@@ -1828,7 +1828,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           description: `🔎 ${run.units[0]!.unit.title}`, prompt: [
             `candidate_id: ${mission.id}`, `review_phase: ${phase}`, "canonical_validation_exit: 0", `risk_tags: [${risk.join(", ")}]`,
             "Review this candidate independently. Use the language of the requirements/traces. Invoke no tools. First line: exactly PASS, FINDINGS or EVIDENCE_GAPS.",
-            "Use EVIDENCE_GAPS only when no concrete source/test defect is established and a specific acceptance-relevant behavior or required validation cannot be settled by the supplied artifact. Name the affected path and why the missing evidence matters; do not request a generic route inventory. Any concrete defect uses FINDINGS.",
+            "Use EVIDENCE_GAPS only when no concrete material defect is established and a specific acceptance-relevant behavior or required validation with material impact cannot be settled by the supplied artifact. Name the affected path and consequence; do not request a generic route inventory or minor proof. A concrete major or medium defect uses FINDINGS.",
             "This Reviewer's native outcome and final acceptance can only be observed after this review. List those as deferred Operator checks, not as a reason to request another review. Still assess all available source, validation and historical evidence independently.",
             "For changed failure paths, assess the public return value, error and post-failure state together against existing API behavior; matching error text alone does not establish compatibility.",
             MISSION_BEHAVIOR_REVIEW,

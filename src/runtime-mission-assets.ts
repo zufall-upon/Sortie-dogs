@@ -172,13 +172,18 @@ existing user authorization and project gates; npm publication remains manual.
 export const MISSION_BEHAVIOR_REVIEW = `For a changed failure handler, inspect the operation it calls and the public inputs reaching it,
 including failures not listed in the new handler. Use the supplied source/tests and established API behavior
 to identify a concrete input that could still violate the requested contract. A passing normal input does
-not settle a different failure outcome of that same operation. A demonstrable defect is FINDINGS; ask for
+not settle a different failure outcome of that same operation. A demonstrable material defect is FINDINGS; ask for
 an excerpt or result only when a specific material outcome cannot be settled. Do not invent new behavior,
 require an exhaustive exception inventory, or recommend catching every exception.
 
+Report FINDINGS only for concrete major or medium defects with a material impact on the original requirements,
+public behavior, correctness or required validation. Name the consequence and smallest necessary fix.
+Do not turn minor style, wording, optional improvements or speculative edge cases into FINDINGS or EVIDENCE_GAPS.
+Missing evidence warrants EVIDENCE_GAPS only when it could conceal such a material defect; otherwise omit the concern.
+
 Behavioral requirements need concrete input/result evidence. For incidental workflow constraints such as
 cache settings or command-path spelling, use the existing host observations and concise compliance trace;
-absence of a separate settings dump or historical log is not itself an evidence gap. Flag observed
+absence of a separate settings dump or historical log is not itself an evidence gap. Flag observed material
 contradictions. The Operator owns final comparison with the original request. If a missing check genuinely
 affects correctness or a requested deliverable, name that consequence and the smallest useful next check.`;
 
