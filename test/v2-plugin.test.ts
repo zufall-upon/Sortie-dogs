@@ -21,7 +21,7 @@ import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
 import { OperatorMissionRuntime, missionPlan } from "../dist/core/operator-mission.js";
 import { OperatorRuntime } from "../dist/core/operator-runtime.js";
 import { missionProgressReader } from "../dist/plugin/mission-progress.js";
-import { completedMissionReviewPrompts } from "../dist/plugin/mission-review.js";
+import { completedMissionReviewPrompts, observedMissionValidation } from "../dist/plugin/mission-review.js";
 
 function contextFixture() {
   const history: Record<string, unknown>[] = [{
@@ -99,6 +99,27 @@ function contextFixture() {
   return { context, history, synthetic, tools, toolHooks, sessionHooks, permissionHooks, agentSwitches, modelSwitches, emit,
     failNextSynthetic: () => { failSynthetic = true; }, failNextContext: () => { failContext = true; }, aborted: () => aborted };
 }
+
+test("V2 native shell results retain build→test exits and timestamps through the Review history adapter", async () => {
+  const fixture = contextFixture();
+  const tool = (id: string, command: string, ran: number, completed: number) => ({ type: "tool", id, name: "shell",
+    state: { status: "completed", input: { command }, content: [], metadata: { status: "completed", exit: 0 } },
+    time: { created: ran - 1, ran, completed } });
+  fixture.history.push({ id: "msg_worker", type: "assistant", agent: "dog-worker-v010", content: [
+    tool("call_build", "npm run build", 100, 200), tool("call_test", "node check.mjs", 250, 300),
+  ], time: { created: 99, completed: 301 } });
+  let client: any;
+  const cleanup = await createSortieDogsV2Plugin(async input => { client = input.client; return {}; }).setup(fixture.context);
+  try {
+    const history = (await client.session.messages({ path: { id: "worker" } })).data;
+    assert.deepEqual(observedMissionValidation(["npm run build", "node check.mjs"], "worker", history), {
+      attempts: [
+        { command: "npm run build", exit_code: 0, started_ms: 100, completed_ms: 200 },
+        { command: "node check.mjs", exit_code: 0, started_ms: 250, completed_ms: 300 },
+      ], not_observed: [], omitted_attempts: 0,
+    });
+  } finally { cleanup?.(); }
+});
 
 for (const legacy of [false, true]) test(`V2 ${legacy ? "saved absolute" : "relative"} mission controls survive Operator correction and cold resume`, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
