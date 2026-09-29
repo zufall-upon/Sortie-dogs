@@ -16,6 +16,25 @@ Keep credentials, raw logs, package archives, and benchmark outputs outside Git.
 - A per-case `--timeout-seconds` is the **hard maximum**, not a promise to run each case that long.
   The built-in progress checkpoint and early stop policy in §5 also apply.
 
+### Next 300-case Lite test campaign
+
+The [v0.12.24 test-300 report](benchmarks/swebench-lite-v01224-test300-2026-09-29.md)
+records the capacity pause, pricing gap, one-to-two-heavy-image handoff and final
+submission. Before starting or resuming a new 300-case campaign, run the **read-only**
+`scripts/swebench-lite-campaign-check.mjs --manifest <frozen-manifest> --plan <frozen-plan> --campaign <campaign-dir>`.
+It verifies the package and prior predictions, then separates `infer`, `score_only`,
+`needs_attention` and already-scored IDs. Never re-infer `score_only` or
+`needs_attention` IDs; finish scoring frozen predictions first. Import
+`admission`/`nextAdmission` from that script in a new controller and recheck free
+space at each serialized image pull. The 22/20-GiB heavy-image thresholds are
+observations for the old host, **not** universal defaults for another machine.
+At completion, preserve the single 300-case report and original trajectories;
+use a separate current upstream submit CLI for packaging and verification, not
+the evaluation environment's CLI 5.0.2. The historical audit script in
+`scripts/swebench-lite-submission-audit.py` is pinned to v0.12.24; update its
+candidate identity and evidence paths for a new run rather than treating its
+old hardcoded hashes as new-run evidence.
+
 ## Prerequisites
 
 - Node.js 22.6 or newer.
