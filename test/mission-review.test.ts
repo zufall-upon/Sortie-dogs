@@ -5,13 +5,34 @@ import { appendFile, chmod, mkdir, mkdtemp, readdir, rm, writeFile } from "node:
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
-import { completedMissionReviewPrompts, initialMissionReviewPrompt, missionReviewBaseline, missionReviewSource } from "../dist/plugin/mission-review.js";
+import { completedMissionReviewPrompts, initialMissionReviewPrompt, missionReviewBaseline, missionReviewSource,
+  observedMissionValidation } from "../dist/plugin/mission-review.js";
 import { MISSION_REVIEW_REFERENCE, type OperatorMission } from "../dist/core/operator-mission.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
 import { FastLaneController } from "../dist/plugin/fast-lane.js";
 import { declaredArtifacts } from "../dist/plugin/declared-artifacts.js";
 
 const git = promisify(execFile);
+
+test("native validation history reports only the current Worker's exact commands and real exits", () => {
+  const part = (command: string, exit?: number, started = 100) => ({ type: "tool", tool: "shell", state: {
+    status: "completed", input: { command }, metadata: exit === undefined ? {} : { exit } },
+    time: { ran: started, completed: started + 20 } });
+  const history = [
+    { info: { role: "assistant", sessionID: "previous-worker" }, parts: [part("node build.mjs", 0)] },
+    { info: { role: "user", sessionID: "worker" }, parts: [part("node build.mjs", 0)] },
+    { info: { role: "assistant", sessionID: "worker" }, parts: [{ type: "text", text: "node build.mjs PASS" },
+      part("node build.mjs"), part("node check.mjs", 1, 200), part("node check.mjs", 0, 300), part("node other.mjs", 0)] },
+  ];
+  const result = observedMissionValidation(["node build.mjs", "node check.mjs"], "worker", history);
+  assert.deepEqual(result, { attempts: [
+    { command: "node build.mjs", exit_code: null, started_ms: 100, completed_ms: 120 },
+    { command: "node check.mjs", exit_code: 1, started_ms: 200, completed_ms: 220 },
+    { command: "node check.mjs", exit_code: 0, started_ms: 300, completed_ms: 320 },
+  ], not_observed: [], omitted_attempts: 0 });
+  assert.deepEqual(observedMissionValidation(["node build.mjs", "node check.mjs"], "new-worker", history), {
+    attempts: [], not_observed: ["node build.mjs", "node check.mjs"], omitted_attempts: 0 });
+});
 
 function reviewHistoryFixture() {
   const initial = "candidate_id: mission-current\nreview_phase: initial\ncanonical_validation_exit: 0\nrisk_tags: [public-logic]\nrevision: first";

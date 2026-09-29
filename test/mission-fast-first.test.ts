@@ -19,6 +19,10 @@ for (const verdict of ["PASS", "FINDINGS"] as const) test(`Fast-first ${verdict}
     await exec("git", ["init", "--quiet"], { cwd: directory });
     await writeFile(join(directory, "check.mjs"),
       'import { readFileSync } from "node:fs";\nif (readFileSync("result.txt", "utf8") !== "ready\\n") process.exit(1);\n');
+    if (verdict === "PASS") await writeFile(join(directory, "build.mjs"),
+      'import { writeFileSync } from "node:fs";\nwriteFileSync("result.txt", "ready\\n");\n');
+    const history: Record<string, Record<string, unknown>[]> = { worker: [] };
+    let workerHistoryReads = 0;
     const agents: Record<string, { agent: string; parentID?: string; outcome?: string }> = {
       root: { agent: "dog-operator" }, worker: { agent: "dog-worker-v010", parentID: "root" },
       reviewer: { agent: "dog-reviewer-v010", parentID: "root" },
@@ -27,7 +31,10 @@ for (const verdict of ["PASS", "FINDINGS"] as const) test(`Fast-first ${verdict}
       get: async ({ path }: { path: { id: string } }) => ({ data: { id: path.id, ...agents[path.id] } }),
       children: async ({ path }: { path: { id: string } }) => ({ data: Object.entries(agents)
         .filter(([, info]) => info.parentID === path.id).map(([id, info]) => ({ id, ...info })) }),
-      messages: async () => ({ data: [] }), abort: async () => ({ data: true }),
+      messages: async ({ path }: { path: { id: string } }) => {
+        if (path.id === "worker") workerHistoryReads++;
+        return { data: history[path.id] ?? [] };
+      }, abort: async () => ({ data: true }),
     } } } as never);
     assert.match(hooks.tool!.sortie_v010_start_mission.description, /dispatch its Worker directly/u);
     assert.doesNotMatch(hooks.tool!.sortie_v010_start_mission.description, /Dispatch the Coordinator immediately/u);
@@ -54,8 +61,8 @@ for (const verdict of ["PASS", "FINDINGS"] as const) test(`Fast-first ${verdict}
     assert.match(open.next_action, /Fast-lane.*plan one useful Worker/);
     assert.ok(open.task, "the same Coordinator reference remains available when the contract is not one unit");
     const planned = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ units: [{ title: "Write ready result",
-      objective: "Create result.txt with ready followed by newline", read: ["check.mjs"], write: ["result.txt"],
-      validation: ["node check.mjs"] }] }, { sessionID: "root" }));
+      objective: "Create result.txt with ready followed by newline", read: ["check.mjs", ...(verdict === "PASS" ? ["build.mjs"] : [])],
+      write: ["result.txt"], validation: [...(verdict === "PASS" ? ["node build.mjs"] : []), "node check.mjs"] }] }, { sessionID: "root" }));
     const worker = { args: structuredClone(planned.task) };
     await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "worker-call" }, worker);
     await hooks["chat.message"]!({ sessionID: "worker", messageID: "worker-request", agent: agents.worker!.agent }, {
@@ -68,12 +75,24 @@ for (const verdict of ["PASS", "FINDINGS"] as const) test(`Fast-first ${verdict}
       { output: await readFile(unit.handoffPath, "utf8") });
     await hooks.tool!.sortie_v010_bind_write_gate.execute({ project_root: directory, manifest_path: unit.manifestPath },
       { sessionID: "worker" });
-    await writeFile(join(directory, "result.txt"), "ready\n");
+    if (verdict === "PASS") {
+      await hooks["tool.execute.before"]!({ tool: "bash", sessionID: "worker", callID: "build" },
+        { args: { command: "node build.mjs" } });
+      await exec(process.execPath, ["build.mjs"], { cwd: directory });
+      await hooks["tool.execute.after"]!({ tool: "bash", sessionID: "worker", callID: "build" },
+        { output: "built", metadata: { exit: 0, status: "completed" } });
+      history.worker!.push({ info: { role: "assistant", sessionID: "worker" }, parts: [{ type: "tool", tool: "bash",
+        state: { status: "completed", input: { command: "node build.mjs" }, metadata: { exit: 0 } },
+        time: { ran: 1000, completed: 1100 } }] });
+    } else await writeFile(join(directory, "result.txt"), "ready\n");
     await hooks["tool.execute.before"]!({ tool: "bash", sessionID: "worker", callID: "validation" },
       { args: { command: "node check.mjs" } });
     await exec(process.execPath, ["check.mjs"], { cwd: directory });
     await hooks["tool.execute.after"]!({ tool: "bash", sessionID: "worker", callID: "validation" },
       { output: "PASS", metadata: { exit: 0, status: "completed" } });
+    if (verdict === "PASS") history.worker!.push({ info: { role: "assistant", sessionID: "worker" }, parts: [{ type: "tool", tool: "bash",
+      state: { status: "completed", input: { command: "node check.mjs" }, metadata: { exit: 0 } },
+      time: { ran: 1200, completed: 1300 } }] });
     agents.worker!.outcome = "succeeded";
     await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "worker-call" },
       { output: "Validated result", metadata: { sessionId: "worker" } });
@@ -82,8 +101,22 @@ for (const verdict of ["PASS", "FINDINGS"] as const) test(`Fast-first ${verdict}
     assert.equal(status.units[0].status, "succeeded");
     assert.equal(status.task, undefined, "a successful Fast unit must not prompt a Coordinator dispatch");
     assert.match(status.next_action, /Fast-lane.*review_mission/);
+    const historyReadsBeforeReview = workerHistoryReads;
     const review = JSON.parse(await hooks.tool!.sortie_v010_review_mission.execute({ risk_tags: ["public-logic"],
       traces: ["R1: result.txt has ready newline; node check.mjs exited 0"] }, { sessionID: "root" }));
+    if (verdict === "PASS") {
+      const fullPrompt = (await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).review?.task?.prompt ?? "";
+      const native = JSON.parse(/^observed_validation: (.+)$/mu.exec(fullPrompt)?.[1] ?? "null");
+      assert.ok(native, "the stored native Reviewer prompt must include the build/test observation");
+      assert.deepEqual(native?.[0]?.attempts?.map((item: { command: string; exit_code: number; started_ms: number }) =>
+        [item.command, item.exit_code, item.started_ms]), [["node build.mjs", 0, 1000], ["node check.mjs", 0, 1200]],
+        "the Reviewer sees the native build→test order");
+      const accepted = JSON.parse(/^validation: (.+)$/mu.exec(fullPrompt)?.[1] ?? "null");
+      assert.ok(accepted?.[0]?.evidence?.length > 0);
+      assert.ok(accepted[0].evidence.every((item: { execution: { command: string[] } }) =>
+        item.execution.command[0] === "node check.mjs"), "the build observation is not acceptance evidence");
+      assert.equal(workerHistoryReads - historyReadsBeforeReview, 1, "one native history read, no second check or Reviewer turn");
+    }
     const pending = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
     assert.equal(pending.task, undefined);
     assert.match(pending.next_action, /Fast-lane.*Reviewer Task/);
