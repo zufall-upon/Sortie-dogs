@@ -2157,6 +2157,18 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             if (!mission.review?.task || args.prompt !== missionReviewTask(mission).prompt || args.task_id) {
               throw new Error("mission-review-task-required: dispatch review_mission's generated task");
             }
+            // The candidate can change after review_mission prepares the Task but before the
+            // native Reviewer starts. Do not spend a Review on an obsolete validation/snapshot.
+            const run = await operators.required(root);
+            const readiness = await control!.completionReadiness(root);
+            if (run.phase !== "awaiting-acceptance" || mission.review.runID !== run.runID ||
+                readiness.blockers.some(item => item.reason === "source-changed" || item.reason === "candidate-changed")) {
+              throw new Error("mission-review-awaits-current-validation: prepare a fresh Review after formal validation of the current candidate");
+            }
+            if (mission.review.source !== (await missionReviewSource(input.directory, run, mission.review.evidence,
+              mission.reviewBaseline, mission.reviewScope)).fingerprint) {
+              throw new Error("mission-review-snapshot-stale: refresh review_mission with current evidence; revalidate only if the candidate changed");
+            }
             args.prompt = mission.review.task.prompt;
           }
           const mapped = translate(output, false) as typeof output;
