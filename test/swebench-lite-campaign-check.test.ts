@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { admission, checkBudget, inspectCampaign, nextAdmission } from "../scripts/swebench-lite-campaign-check.mjs";
@@ -28,7 +29,9 @@ test("refill slots prefer ordinary images, keep heavy images through scoring cle
 });
 
 test("a handoff scores frozen terminal predictions first and never retries an active attempt", async t => {
-  const root = await mkdtemp("/tmp/opencode/swebench-lite-guard-");
+  const tempBase = join(tmpdir(), "opencode");
+  await mkdir(tempBase, { recursive: true });
+  const root = await mkdtemp(join(tempBase, "swebench-lite-guard-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const manifestPath = join(root, "manifest.json"), planPath = join(root, "plan.json");
   const campaignDir = join(root, "campaign"), packagePath = join(root, "candidate.tgz");
