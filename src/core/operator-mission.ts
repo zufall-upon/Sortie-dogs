@@ -546,17 +546,30 @@ export function missionReviewTask(mission: OperatorMission): OperatorTask {
     m: mission.id, n: review.runID, h: digest(review.task.prompt) })}` };
 }
 
-/** Project explicitly grouped R-ID traces into the legacy reviewer's ordered criterion mapping. */
+/** Project grouped R-ID traces, including consecutive ranges, into the existing per-criterion mapping. */
 export function missionReviewTraces(mission: OperatorMission, raw: unknown): string[] {
   if (!Array.isArray(raw) || raw.length === 0 || !raw.every(item => typeof item === "string" && item.trim())) {
     throw new Error("mission-review-traces: supply concise implementation/test traces");
   }
   const grouped: { text: string; ids: string[] }[] = raw.map(text => ({ text,
-    ids: [...text.matchAll(/(?:^|[.;]\s+|[\r\n])\s*((?:R\d+\s*[/,]?\s*)+):/gu)]
-      .flatMap(match => match[1]!.match(/R\d+/gu) ?? []) }));
+    ids: [...text.matchAll(/(?:^|[.;]\s+|[\r\n])\s*((?:R\d+\s*[-/,]?\s*)+):/gu)]
+      .flatMap(match => [...match[1]!.matchAll(/R(\d+)(?:\s*-\s*R(\d+))?/gu)]
+        .flatMap(([, first, last]) => {
+          const firstID = `R${first}`;
+          if (last === undefined) return [firstID];
+          const lastID = `R${last}`;
+          const start = mission.requirements.findIndex(item => item.id === firstID);
+          const end = mission.requirements.findIndex(item => item.id === lastID);
+          if (start < 0 || end < 0) return [firstID, lastID];
+          if (start > end) throw new Error(`mission-review-traces: descending range ${firstID}-${lastID}`);
+          return mission.requirements.slice(start, end + 1).map(item => item.id);
+        })) }));
   if (grouped.every(item => item.ids.length === 0) && raw.length === mission.requirements.length) return raw;
   const unknown = grouped.flatMap(item => item.ids).filter(id => !mission.requirements.some(requirement => requirement.id === id));
   const missing = mission.requirements.filter(requirement => !grouped.some(item => item.ids.includes(requirement.id)));
-  if (unknown.length || missing.length) throw new Error(`mission-review-traces: name the existing R IDs; missing ${missing.map(item => item.id).join(", ")}; unknown ${unknown.join(", ")}`);
+  if (unknown.length || missing.length) throw new Error(`mission-review-traces: name the existing R IDs; ${[
+    ...(missing.length ? [`missing ${missing.map(item => item.id).join(", ")}`] : []),
+    ...(unknown.length ? [`unknown ${unknown.join(", ")}`] : []),
+  ].join("; ")}`);
   return mission.requirements.map(requirement => grouped.filter(item => item.ids.includes(requirement.id)).map(item => item.text).join("\n"));
 }

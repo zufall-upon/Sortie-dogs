@@ -75,8 +75,20 @@ test("mission review accepts grouped requirement traces while preserving coverag
     Array(3).fill("R1: fix. R2/R3: tests passed; scope retained"));
   assert.deepEqual(missionReviewTraces(mission, ["R1: fix; R2: tests passed\nR3: scope retained"]),
     Array(3).fill("R1: fix; R2: tests passed\nR3: scope retained"));
-  assert.throws(() => missionReviewTraces(mission, ["R1/R2: fix and test"]), /missing R3/);
+  assert.deepEqual(missionReviewTraces(mission, ["R1-R3: fix, tests and scope retained"]),
+    Array(3).fill("R1-R3: fix, tests and scope retained"));
+  await missions.capture("grouped", { id: "u2", text: "Fix, test, review, keep paths relative and avoid remote access" });
+  const five = await missions.start("grouped", ["Fix", "Test", "Review", "Keep paths relative", "Avoid remote access"]);
+  assert.deepEqual(missionReviewTraces(five, ["R1: fix", "R2: tests", "R3: review",
+    "R4-R5: relative paths and no remote access"]),
+    ["R1: fix", "R2: tests", "R3: review", "R4-R5: relative paths and no remote access",
+      "R4-R5: relative paths and no remote access"]);
+  assert.throws(() => missionReviewTraces(mission, ["R1/R2: fix and test"]), error =>
+    error instanceof Error && /missing R3/u.test(error.message) && !error.message.includes("unknown "),
+    "do not report an empty unknown-ID list");
   assert.throws(() => missionReviewTraces(mission, ["R1/R2/R3/R4: claims"]), /unknown R4/);
+  assert.throws(() => missionReviewTraces(mission, ["R3-R1: wrong order"]), /descending range R3-R1/);
+  assert.throws(() => missionReviewTraces(mission, ["R1-R4: out of scope"]), /unknown R4/);
   mission.review = { runID: "run", risk: ["public-logic"], source: "source", verdict: "pending",
     task: { subagent_type: "dog-reviewer-v010", description: "Review", prompt: "original evidence ".repeat(1000) } };
   const task = missionReviewTask(mission);
