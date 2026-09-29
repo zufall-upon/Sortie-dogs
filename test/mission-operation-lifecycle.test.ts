@@ -11,7 +11,7 @@ import { initializeProject } from "../dist/core/initialize.js";
 
 const exec = promisify(execFile);
 
-for (const mode of ["cancel", "replace", "missed-after"]) test(`cold ${mode} after accepted work -> external outputs -> reload -> acceptance`, async () => {
+for (const mode of ["cancel", "replace", "missed-after", "orphan-abort"]) test(`cold ${mode} after accepted work -> external outputs -> reload -> acceptance`, async () => {
   const replaceActive = mode === "replace";
   await mkdir(resolve("_testenv"), { recursive: true });
   const area = await mkdtemp(resolve("_testenv/mission-operations-"));
@@ -35,6 +35,7 @@ for (const mode of ["cancel", "replace", "missed-after"]) test(`cold ${mode} aft
       reviewer: { agent: "dog-reviewer-v010", parentID: "current" },
     };
     const aborted: string[] = [];
+    let stopConfirmed = true;
     const history: Record<string, unknown[]> = {};
     const create = () => SortieDogsV010Plugin({ directory: root, returnReportTransport: "tool-result", client: { session: {
       get: async ({ path }: { path: { id: string } }) => ({ data: { id: path.id, ...identities[path.id] } }),
@@ -43,7 +44,7 @@ for (const mode of ["cancel", "replace", "missed-after"]) test(`cold ${mode} aft
         return { data: Object.entries(identities).filter(([, info]) => info.parentID === path.id).map(([id, info]) => ({ id, ...info })) };
       },
       messages: async ({ path }: { path: { id: string } }) => ({ data: history[path.id] ?? [] }), abort: async ({ path }: { path: { id: string } }) => {
-        aborted.push(path.id); return { data: true };
+        aborted.push(path.id); return { data: stopConfirmed };
       },
     } } } as never);
     let hooks = await create();
@@ -98,6 +99,34 @@ for (const mode of ["cancel", "replace", "missed-after"]) test(`cold ${mode} aft
       assert.equal(recovered.units[1].status, "failed");
       assert.equal(recovered.units[1].result_class, "process-defect");
       assert.deepEqual(recovered.units[1].evidence, []);
+    }
+    if (mode === "orphan-abort") {
+      assert.equal((await tool("operator_status", "root")).budget.reserved_units, 1,
+        "an in-flight parent Task must not be interrupted by a status read");
+      history.old = [{ info: { role: "assistant", sessionID: "old" }, parts: [
+        { type: "tool", tool: "task", callID: "old-worker-call", state: { status: "error",
+          input: planned.task, error: { type: "timeout" } } },
+      ] }];
+      assert.equal((await tool("operator_status", "root")).budget.reserved_units, 1);
+      assert.deepEqual(aborted, [], "a non-aborted native error does not stop a child with an unknown outcome");
+      (history.old[0] as { parts: { state: { error: { type: string } } }[] }).parts[0]!.state.error.type = "aborted";
+      identities.oldWorker!.parentID = "foreign";
+      assert.equal((await tool("operator_status", "root")).budget.reserved_units, 1);
+      assert.deepEqual(aborted, [], "an unrelated child cannot be interrupted");
+      identities.oldWorker!.parentID = "old";
+      stopConfirmed = false;
+      assert.equal((await tool("operator_status", "root")).budget.reserved_units, 1);
+      assert.deepEqual(aborted, ["oldWorker"], "a refused interrupt cannot settle the reservation");
+      stopConfirmed = true;
+      const recovered = await tool("operator_status", "root");
+      assert.deepEqual(aborted, ["oldWorker", "oldWorker"], "retry only the unconfirmed interrupt");
+      assert.equal(recovered.mission_id, old.mission_id, "retain the original Mission rather than starting replacement work");
+      assert.equal(recovered.budget.reserved_units, 0);
+      assert.equal(recovered.units[1].status, "failed");
+      assert.equal(recovered.units[1].result_class, "process-defect");
+      assert.deepEqual(recovered.units[1].evidence, [], "an interrupt acknowledgement is not validation or acceptance");
+      await tool("operator_status", "root");
+      assert.deepEqual(aborted, ["oldWorker", "oldWorker"], "settled status does not repeat the interrupt");
     }
     if (!replaceActive) await tool("cancel_operator", "root", { reason: "plain" });
     // Native interruption may acknowledge closure before idle_outcome is written.

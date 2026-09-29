@@ -416,14 +416,28 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         if (!run || !unit?.callID) return undefined;
         if (run.phase !== "cancelled") {
           const history = await messages(run.operatorSessionID ?? root);
-          const terminal = history.some(message => Array.isArray(message.parts) && message.parts.some(part =>
+          const terminal = history.flatMap(message => Array.isArray(message.parts) ? message.parts : []).filter(part =>
             record(part) && part.type === "tool" && part.callID === unit.callID && record(part.state) &&
-            ["completed", "error"].includes(String(part.state.status))));
-          if (!terminal) return undefined;
+            ["completed", "error"].includes(String(part.state.status)));
+          if (!terminal.length) return undefined;
           if (unit.childSessionID) {
-            const child = payload(await session("get", { path: { id: unit.childSessionID }, query: { directory: input.directory } }));
-            if (!record(child) || child.parentID !== (run.operatorSessionID ?? root) ||
-                !["succeeded", "failed", "interrupted"].includes(String(child.outcome))) return undefined;
+            const request = { path: { id: unit.childSessionID }, query: { directory: input.directory } };
+            let child = payload(await session("get", request));
+            if (!record(child) || child.parentID !== (run.operatorSessionID ?? root)) return undefined;
+            if (!["succeeded", "failed", "interrupted"].includes(String(child.outcome))) {
+              // V2 can abort the parent Task while leaving its Worker without an idle outcome.
+              // Stop only that exact orphan. Native interrupt acknowledgement closes the lost
+              // dispatch as a process defect, never as successful validation or acceptance.
+              const state = terminal.length === 1 && record(terminal[0]) && record(terminal[0].state)
+                ? terminal[0].state : undefined;
+              if (!record(state) || state.status !== "error" || !record(state.error) || state.error.type !== "aborted" ||
+                  child.id !== unit.childSessionID ||
+                  !["dog-worker", "dog-luna-worker"].includes(String(canonicalAgent(profile, child.agent as string)))) return undefined;
+              const stopped = await session("abort", request).catch(() => undefined);
+              const acknowledgement = record(stopped) && "data" in stopped ? stopped.data : stopped;
+              if (acknowledgement !== true && (!record(acknowledgement) ||
+                  typeof acknowledgement.interrupted !== "boolean")) return undefined;
+            }
           }
           return { callID: unit.callID, ...(unit.childSessionID ? { childSessionID: unit.childSessionID } : {}), cancelled: false };
         }
