@@ -218,6 +218,33 @@ test("committed candidates still supply current source and large artifacts expos
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("automatic review names untracked paths clipped by their heading or rendered preview", async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const root = await mkdtemp(join(resolve("_testenv"), "mission-review-boundary-"));
+  try {
+    await git("git", ["init", "--quiet"], { cwd: root });
+    const padHeading = "\n--- new file: pad.txt ---\n";
+    const targetHeading = "\n--- new file: target.txt ---\n";
+    const run = { units: [{ unit: { write: ["pad.txt", "target.txt"] }, hashes: [] }] } as never;
+    for (const [name, content, room] of [
+      ["heading", Buffer.from("x"), Buffer.byteLength(targetHeading) - 1],
+      ["invalid UTF-8", Buffer.from([0xff]), Buffer.byteLength(targetHeading) + 1],
+      ["binary placeholder", Buffer.from([0]), Buffer.byteLength(targetHeading) + 1],
+    ] as const) {
+      await writeFile(join(root, "pad.txt"), "a".repeat(24_000 - Buffer.byteLength(padHeading) - room));
+      await writeFile(join(root, "target.txt"), content);
+      const packet = await missionReviewSource(root, run);
+      assert.deepEqual(packet.truncatedSource, ["target.txt"], `${name}: name the omitted path, not a generic overflow`);
+      assert.match(packet.excerpt, /EXCERPT TRUNCATED: target\.txt/u);
+      assert.doesNotMatch(packet.excerpt, /source diff exceeds excerpt budget/u);
+      assert.ok(Buffer.byteLength(packet.excerpt.split("\n[EXCERPT TRUNCATED:")[0]!) <= 24_000);
+    }
+    await writeFile(join(root, "target.txt"), "x");
+    const fits = await missionReviewSource(root, run);
+    assert.deepEqual(fits.truncatedSource, [], "an exactly fitting heading and body is not omitted");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("mission baseline exposes committed changes across replans without a generated file swallowing later changes", async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const root = await mkdtemp(join(resolve("_testenv"), "mission-review-baseline-"));

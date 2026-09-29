@@ -248,7 +248,8 @@ export async function missionReviewSource(directory: string, run: OperatorState,
       const absolute = resolve(directory, path), stat = await lstat(absolute);
       hash.update(String(stat.mode));
       const include = untracked.has(path) || unchanged;
-      const room = include ? Math.max(0, 24_000 - Buffer.byteLength(excerpt)) : 0;
+      const heading = `\n--- ${untracked.has(path) ? "new file" : "current file"}: ${path} ---\n`;
+      const room = include ? Math.max(0, 24_000 - Buffer.byteLength(excerpt) - Buffer.byteLength(heading)) : 0;
       let preview = Buffer.alloc(0);
       if (stat.isSymbolicLink()) {
         const content = Buffer.from(await readlink(absolute));
@@ -263,8 +264,24 @@ export async function missionReviewSource(directory: string, run: OperatorState,
         }
       }
       if (include) {
-        if (room) excerpt += `\n--- ${untracked.has(path) ? "new file" : "current file"}: ${path} ---\n${preview.includes(0) ? "[binary artifact: bytes fingerprinted]" : preview.toString("utf8")}`;
-        if (stat.size > room) omitted.push(path);
+        const headingFits = Buffer.byteLength(excerpt) + Buffer.byteLength(heading) <= 24_000;
+        if (headingFits) {
+          const rendered = preview.includes(0) ? "[binary artifact: bytes fingerprinted]" : preview.toString("utf8");
+          let shown = rendered;
+          if (Buffer.byteLength(rendered) > room) {
+            let used = 0;
+            const chars: string[] = [];
+            for (const char of rendered) {
+              const bytes = Buffer.byteLength(char);
+              if (used + bytes > room) break;
+              chars.push(char);
+              used += bytes;
+            }
+            shown = chars.join("");
+          }
+          excerpt += heading + shown;
+          if (stat.size > room || Buffer.byteLength(rendered) > room) omitted.push(path);
+        } else omitted.push(path);
       }
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; hash.update("deleted"); }
   }
