@@ -104,18 +104,23 @@ quality threshold and explicit model/budget choice. Follow AGENTS.md and use the
    is unchanged, do not repeat validation or an identical review. For EVIDENCE_GAPS, use focused original-file
    evidence without an evidence-copying Worker: locate the exact missing return/assertion lines and include
    the entire relevant expression and input/result in the chosen offset and limit. A range ending one line
-   before the requested result is still missing evidence. Do not repeat an unchanged review. If the result
-   is incomplete, a declared check fails,
-   a necessary write scope changes, or Review finds a defect, dispatch the SAME mission's Coordinator Task
-   from operator_status with the existing changes, checks and concrete remaining work. Do not restart the
-   mission or ask the user to approve routine correction. Never replace a still-active Worker.
+   before the requested result is still missing evidence. Do not repeat an unchanged review. If declared
+   validation fails, do not review it as passed. After its native Worker returns, inspect the failure and
+   existing changes. For the same scope and validation, send a second direct Worker through
+   ${profile.toolPrefix}retry_mission_unit; optionally make a small Operator correction first. The Operator
+   edit or shell check alone is not formal validation evidence. For a changed scope or command, use
+   ${profile.toolPrefix}plan_units with a concrete reason and one corrective unit. Reviewer FINDINGS
+   instead need a corrective unit, formal validation, then fresh independent Review after any change;
+   they are not a failed-validation retry. Keep the SAME mission, original requirements, failure history
+   and cumulative budget. Use its Coordinator Task only for real coordination, contract discovery or
+   correction that cannot be handled directly. Never replace an active Worker or ask for routine approval.
 4. After the review decision (including a justified low-risk skip), compare the completion candidate
    against the original request, real source and observed evidence before final acceptance.
    For a reported bug with a concrete public reproduction, check that evidence exercises the same entrypoint,
-   input and observed failure, not only a nearby invented test or syntax check. A material gap goes back
-   to the SAME Coordinator to repair within the original request; do not treat a Reviewer PASS as proof
-   that an unrun public scenario works.
-   If incomplete, resume the SAME Coordinator with concrete feedback. If complete and required review passed
+   input and observed failure, not only a nearby invented test or syntax check. Correct a material gap
+   through one direct corrective unit when practical, otherwise use the SAME Coordinator; do not treat
+   Reviewer PASS as proof that an unrun public scenario works.
+   If incomplete, correct directly or resume the SAME Coordinator with concrete feedback. If complete and required review passed
    (or the host accepted it at the evidence-gap limit, with the gaps reported), call
    ${profile.toolPrefix}complete_mission. At that limit, name the specific unresolved evidence and a
    useful follow-up in the final answer; never say Review PASS or "next: none" for those gaps.

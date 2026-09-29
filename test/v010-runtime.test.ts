@@ -436,10 +436,10 @@ test("preview primary continues approved sequential scope and uses interactive q
   const primary = previewAssets.find(asset => asset.name === "dog-operator")!.content;
   const coordinator = previewAssets.find(asset => asset.name === "dogs-coordinator")!.content;
   assert.match(primary, /No per-unit root approval/);
-  assert.match(primary, /SAME mission's Coordinator Task/u);
+  assert.match(primary, /Coordinator Task only for real coordination/u);
   assert.match(primary, /Ask through question only for a user-only choice/);
   assert.match(primary, /Resume the same work after\nthe answer/);
-  assert.match(primary, /Ordinary defects return to Coordinator/);
+  assert.match(primary, /Reviewer FINDINGS\s+instead need a corrective unit, formal validation, then fresh independent Review/u);
   assert.match(primary, /cumulative budget increase/);
   assert.match(primary, /Only its succeeded receipt authorizes DONE/);
   assert.match(coordinator, /write-scope addition within the original request/);

@@ -24,7 +24,8 @@ test("public reproduction and shared-branch checks remain in the same mission Wo
   const operator = missionOperatorContent(V010_RUNTIME_PROFILE, "0.12.17");
   const coordinator = missionCoordinatorContent(V010_RUNTIME_PROFILE, "0.12.17");
   const worker = missionWorkerContent(V010_RUNTIME_PROFILE);
-  assert.match(operator, /SAME Coordinator to repair within the original request/u);
+  assert.match(operator, /Keep the SAME mission, original requirements, failure history\s+and cumulative budget/u);
+  assert.match(operator, /Coordinator Task only for real coordination/u);
   assert.match(coordinator, /first useful unit objective/u);
   assert.match(coordinator, /working directory or package layout/u);
   assert.match(coordinator, /not an adjacent check unless it runs\s+the changed branch/u);

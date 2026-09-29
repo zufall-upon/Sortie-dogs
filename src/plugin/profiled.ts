@@ -580,8 +580,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     async function missionWorkerTerminalProof(root: string, mission: OperatorMission,
       run: OperatorState, attempt: NonNullable<OperatorMission["attempts"]>[number]): Promise<
         { status: "ready"; child: string } | { status: "non_rescue"; reason: string }> {
-      if (!attempt.callID || !attempt.childSessionID || !mission.coordinator ||
-          !control) {
+      if (!attempt.callID || !attempt.childSessionID || !control) {
         return { status: "non_rescue", reason: "terminal_not_reconciled" };
       }
       if (attempt.runID !== run.runID || attempt.unitID !== run.units.find(unit => unit.unit.id === attempt.unitID)?.unit.id) {
@@ -596,12 +595,13 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       if (!budget || budget.reserved_units !== 0) return { status: "non_rescue", reason: "goal_reservation_unsettled" };
       const child = attempt.childSessionID;
       const who = await identity(child);
-      if (who.role !== "dog-worker" || who.parent !== mission.coordinator) {
+      const owner = mission.coordinator ?? root;
+      if (who.role !== "dog-worker" || who.parent !== owner) {
         return { status: "non_rescue", reason: "terminal_identity_conflict" };
       }
       const info = payload(await session("get", { path: { id: child }, query: { directory: input.directory } }).catch(() => undefined));
       const outcome = record(info) ? String(info.outcome) : "unknown";
-      if (!record(info) || info.id !== child || info.parentID !== mission.coordinator ||
+      if (!record(info) || info.id !== child || info.parentID !== owner ||
           !["succeeded", "completed"].includes(outcome)) {
         return { status: "non_rescue", reason: "terminal_not_reconciled" };
       }
@@ -679,7 +679,26 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           ? "Fast-lane: compare all original requirements with actual evidence and review disposition, then call complete_mission. Report any remaining evidence gaps; they are not PASS."
           : mission.review?.verdict === "evidence-gaps"
             ? "Fast-lane: provide focused original-file excerpts and traces through review_mission, then dispatch its exact Reviewer Task. Do not create an evidence-copying Worker."
-            : "Fast-lane: assess actual risk and call review_mission with real risk_tags and criterion traces. Dispatch its Reviewer Task if required; then compare all requirements before complete_mission." };
+             : "Fast-lane: assess actual risk and call review_mission with real risk_tags and criterion traces. Dispatch its Reviewer Task if required; then compare all requirements before complete_mission." };
+      }
+      if (mission.coordinator === null && mission.runID === run?.runID && !mission.dispatchOpen &&
+          run?.phase === "awaiting-decision" && run.units.length === 1 &&
+          run.units[0]?.status === "failed" && run.units[0]?.resultClass === "acceptance" &&
+          run.units[0]?.failure?.outcome === "fail" && !run.units[0]?.normalRemediationUsed) {
+        return { ...packet, task: missions.task(mission),
+          next_action: `Fast-lane: declared validation failed. After the Worker returns, for the same scope and command ` +
+            `make a small Operator correction if useful, then call ${retryMissionUnit} once for this unit and dispatch its ` +
+            `second direct Worker Task for formal validation. For a changed contract use ${planUnits} with reason and one ` +
+            `corrective unit instead. The existing Coordinator Task remains available for actual coordination; ` +
+            `do not dispatch a duplicate or treat the Operator edit as validation. Keep cumulative budget and failed history.` };
+      }
+      if (mission.coordinator === null && mission.runID === run?.runID && !mission.dispatchOpen &&
+          run?.phase === "awaiting-acceptance" && mission.review?.verdict === "findings") {
+        return { ...packet, task: missions.task(mission),
+          next_action: `Fast-lane: Reviewer FINDINGS require correction. If one corrective unit suffices, ` +
+            `call ${planUnits} with the concrete finding as reason; after its Worker passes formal validation, ` +
+            `dispatch a fresh independent Reviewer for the changed candidate. Do not use failed-validation retry ` +
+            `or reuse the old Review. Otherwise dispatch this same mission's Coordinator Task.` };
       }
       if (!mission.dispatchOpen && (["open", "running"].includes(mission.phase) ||
           (mission.phase === "submitted" && mission.submission?.status !== "ready"))) {
@@ -1007,7 +1026,13 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           const run = await operators.read(root!);
           const completion = run?.phase === "awaiting-acceptance" ? await control!.completionReadiness(root!) : undefined;
           return JSON.stringify({ ...missionDispatchPacket(mission, run), budget,
-            ...(completion ? { completion, ...(!completion.ready ? { next_action: completion.blockers.map(item => item.next_action).join("\n") } : {}) } : {}) });
+            ...(completion ? { completion, ...(!completion.ready ? { next_action: mission.coordinator === null &&
+                completion.blockers.some(item => item.reason === "source-changed" || item.reason === "candidate-changed")
+                ? `Fast-lane: source or candidate changed after formal validation. Call ${planUnits} with reason and ` +
+                  `one corrective unit to validate the current candidate; then obtain a fresh Review. ` +
+                  `Keep the same mission and cumulative budget; old validation or Review cannot complete it.\n` +
+                  completion.blockers.map(item => item.next_action).join("\n")
+                : completion.blockers.map(item => item.next_action).join("\n") } : {}) } : {}) });
         }
         if (root && context.sessionID !== root) {
           const owned = await operators.read(root);
@@ -1428,7 +1453,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             next_action: "Read operator_status: if the Coordinator dispatch is active, continue it; otherwise dispatch the returned task to resume the same Coordinator. Retain requirements, spend and candidate; no new mission or plan approval." });
         });
       } };
-    tools[startMission] = { description: "Operator: save the current user requirements. Use intent=replace when the user changes an existing request (version, parallelism, target): host cancels the previous run and archives its requirements/results while retaining spend. If status reports mission-source-reconciliation-required and the saved requirements reflect that changed scope, call intent=replace with those exact requirements: the host repairs this mission in place and keeps its Coordinator. Supply the complete current requirements, retaining constraints the user has not changed. For separate work in a different location use intent=new. For one honest unit with an exact meaningful validation command, use plan_units and dispatch its Worker directly; send the Coordinator only when that unit cannot be declared or real correction is needed. Item count, duration and independent review alone do not require a Coordinator.",
+    tools[startMission] = { description: "Operator: save the current user requirements. Use intent=replace when the user changes an existing request (version, parallelism, target): host cancels the previous run and archives its requirements/results while retaining spend. If status reports mission-source-reconciliation-required and the saved requirements reflect that changed scope, call intent=replace with those exact requirements: the host repairs this mission in place and keeps its Coordinator. Supply the complete current requirements, retaining constraints the user has not changed. For separate work in a different location use intent=new. For one honest unit with an exact meaningful validation command, use plan_units and dispatch its Worker directly; after a returned failed Worker use one direct correction/retry when practical. Send the Coordinator for actual coordination or a contract that cannot be declared honestly. Item count, duration and independent review alone do not require a Coordinator.",
       args: { requirements: { ...stringList, minItems: 1, maxItems: 64 } as never,
         kind: { type: "string", enum: ["implementation", "operation"], description: "Use operation for running an existing benchmark, command or procedure. The host records its actual execution separately from setup and checks.", "x-sortie-optional": true } as never,
         intent: { type: "string", enum: ["", "continue", "new", "replace"], "x-sortie-optional": true } as never }, execute: async (args, context) => {
@@ -1489,10 +1514,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         return JSON.stringify({ status: "recorded", consultation: consultation.consultations?.at(-1) });
       } };
     const retryMissionUnit = `${profile.toolPrefix}retry_mission_unit`, rescueMissionUnit = `${profile.toolPrefix}rescue_mission_unit`;
-    tools[retryMissionUnit] = { description: "Coordinator: after one host-classified implementation validation failure, dispatch exactly one same-scope ordinary Mission Worker remediation. Native child termination, released reservation/writer, and remaining cumulative unit budget are required; this does not change acceptance or scope.",
+    tools[retryMissionUnit] = { description: "Owning Coordinator or direct Fast-lane Operator: after one host-classified implementation validation failure, dispatch exactly one same-scope ordinary Mission Worker remediation. The Operator may make a small correction before retry, but only the second Worker's formal validation counts. Native child termination, released reservation/writer, and remaining cumulative unit budget are required; this does not change acceptance or scope.",
       args: { unit_id: stringSchema }, execute: async (args, context) => {
         const { root, mission } = await missionAuthority(context.sessionID);
-        if (context.sessionID !== mission.coordinator || (await identity(context.sessionID)).role !== "dog-operator") {
+        if (context.sessionID !== (mission.coordinator ?? root) ||
+            (await identity(context.sessionID)).role !== (mission.coordinator ? "dog-operator" : "dog-coordinator")) {
           throw new Error("mission-remediation-coordinator-required");
         }
         const run = await operators.required(root), unitID = String(args.unit_id);
@@ -1630,6 +1656,15 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const replanning = previous && !["completed", "cancelled"].includes(previous.phase) && !same;
       if (replanning) {
         if (!reason?.trim()) throw new Error("mission-replan-reason-required: name the observed correction or write-scope extension");
+        if (actor === root) for (const unit of previous.units) {
+          if (!unit.childSessionID) continue;
+          const attempt = [...(mission.attempts ?? [])].reverse().find(item =>
+            item.runID === previous.runID && item.unitID === unit.unit.id && item.childSessionID === unit.childSessionID);
+          if (!attempt || !["succeeded", "failed"].includes(attempt.status) ||
+              (await missionWorkerTerminalProof(root, mission, previous, attempt)).status !== "ready") {
+            throw new Error("mission-replan-worker-still-active");
+          }
+        }
       }
       // A cancelled V2 delegate may leave its Worker Task running after the parent Task aborts.
       // Reconcile that exact native orphan before checking the cumulative budget or replacing
@@ -1689,7 +1724,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           next_action: "Before dispatch, correct or prepare the listed in-project TMPDIR directories. Keep this plan and its budget; no new approval or validation run is needed." } : {}) }
         : next);
     }
-    tools[planUnits] = { description: "Coordinator (or single-unit Fast-lane Operator): declare useful units, then dispatch the returned Worker immediately. Host generates IDs, handoff, manifest and proof mapping. Keep every original requirement covered. For a concrete public reproduction, include its exact entrypoint, named input paths and observed failure in the first unit objective; the Worker does not see the earlier user message. When entrypoint/test are known, choose task-sufficient write paths and requested or repository-required build and target checks; do not list speculative write paths or unrelated test suites as a precaution. Read/search is unrestricted; this is not a file-count limit, and actual directory outputs or later same-mission scope extensions remain available. Use write: [] for read-only verification; use dir/** for directory outputs including not-yet-created trees. Native absolute paths support global installs and external outputs under host permissions; include their actual paths in read/write for evidence. Final validation command in each unit proves that unit; read-only diagnostic commands need no registration. Recalling with reason replaces settled work within unchanged requirements and cumulative budget; include required scope extensions here. Rejected budget, contract or control-storage preparation preserves the existing run so you can correct the plan directly.",
+    tools[planUnits] = { description: "Coordinator (or single-unit Fast-lane Operator): declare useful units, then dispatch the returned Worker immediately. Host generates IDs, handoff, manifest and proof mapping. Keep every original requirement covered. For a concrete public reproduction, include its exact entrypoint, named input paths and observed failure in the first unit objective; the Worker does not see the earlier user message. When entrypoint/test are known, choose task-sufficient write paths and requested or repository-required build and target checks; do not list speculative write paths or unrelated test suites as a precaution. Read/search is unrestricted; this is not a file-count limit, and actual directory outputs or later same-mission scope extensions remain available. Use write: [] for read-only verification; use dir/** for directory outputs including not-yet-created trees. Native absolute paths support global installs and external outputs under host permissions; include their actual paths in read/write for evidence. Final validation command in each unit proves that unit; read-only diagnostic commands need no registration. Recalling with reason replaces settled work within unchanged requirements and cumulative budget; include the observed failure or Reviewer finding in a corrective unit's objective and required scope extensions here. Repeating an unchanged plan does not retry a failed Worker: use retry_mission_unit for same-scope validation failure. Rejected budget, contract or control-storage preparation preserves the existing run so you can correct the plan directly.",
       args: { units: { type: "array", minItems: 1, maxItems: 32, items: { type: "object", additionalProperties: false,
         properties: { title: { type: "string" }, objective: { type: "string" },
           read: { ...stringList, description: "Inputs that affect validation, not an allowlist for observation. Do not include whole live session/database/log trees just to inspect them." }, write: stringList,
@@ -1705,7 +1740,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         } catch (error) {
           if (error instanceof Error && error.message === "mission-replan-worker-still-active") {
             return JSON.stringify({ status: error.message, mission_id: mission.id,
-              next_action: `Coordinator: do not repeat plan_units or try ${cancel} (root-only). ` +
+              next_action: (context.sessionID === root ? `Operator: do not repeat plan_units while a Worker is active. `
+                : `Coordinator: do not repeat plan_units or try ${cancel} (root-only). `) +
                 `If the Worker Task is still active, wait for its native completion. If its parent Task was interrupted, ` +
                 `submit_mission with status=blocked and report this code, the Worker/Task IDs and what did not run. ` +
                 `Operator root can then use ${cancel} with reason=plain to stop owned children and resume the request ` +
@@ -1738,6 +1774,12 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         const { root, mission } = await missionAuthority(context.sessionID);
         const run = await operators.required(root);
         if (run.phase !== "awaiting-acceptance") throw new Error("mission-review-awaits-unit-validation");
+        // A source fingerprint alone would let a fresh Reviewer assess an edit against an old
+        // Worker's successful check. Reuse the completion snapshot instead of adding a check run.
+        const readiness = await control!.completionReadiness(root);
+        if (readiness.blockers.some(item => item.reason === "source-changed" || item.reason === "candidate-changed")) {
+          throw new Error("mission-review-awaits-current-validation: revalidate the changed candidate in the same mission before Review");
+        }
         const risk = (args as Record<string, unknown>).risk_tags;
         const traces = missionReviewTraces(mission, (args as Record<string, unknown>).traces);
         if (!Array.isArray(risk) || !risk.every(tag => SOURCE_REVIEW_RISK_TAGS.includes(tag as never))) {

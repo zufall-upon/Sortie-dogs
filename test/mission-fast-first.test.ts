@@ -132,8 +132,8 @@ for (const verdict of ["PASS", "FINDINGS"] as const) test(`Fast-first ${verdict}
     assert.equal(reviewed.review.reviewer_session_id, "reviewer");
     assert.equal(reviewed.coordinator_session_id, null);
     if (verdict === "FINDINGS") {
-      assert.ok(reviewed.task, "a concrete defect needs the same mission's Coordinator, not a new mission");
-      assert.match(reviewed.next_action, /Fast-lane needs correction/);
+      assert.ok(reviewed.task, "the same mission's Coordinator remains an available fallback");
+      assert.match(reviewed.next_action, /Fast-lane: Reviewer FINDINGS require correction/);
       assert.equal(await readFile(join(directory, "result.txt"), "utf8"), "ready\n", "Fast work survives escalation");
       agents.coordinator = { agent: "dogs-coordinator", parentID: "root" };
       await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "coordinator-call" },
