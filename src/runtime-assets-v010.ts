@@ -415,7 +415,7 @@ const CHANGED_PATH_COVERAGE_REVIEWER = `
 
 Review the requested public behavior, changed source branches, and relevant adjacent checks. If the supplied
 source or acceptance identifies another route, representation, branch, or target that can materially change
-the result, identify that concrete path and the missing or contradictory evidence. A demonstrated defect
+the result, identify that concrete path and the missing or contradictory evidence. A demonstrated material defect
 is FINDINGS; a specific material path whose outcome cannot be settled by the supplied artifact is
 EVIDENCE_GAPS. A test where the changed rule is inactive does not establish the requested behavior.
 For a multi-target change, verify each affected target when the source shows independent handling.
@@ -428,8 +428,8 @@ ${MISSION_BEHAVIOR_REVIEW}
 
 ## Mission review verdict
 
-Start with exactly one of PASS, FINDINGS or EVIDENCE_GAPS. Use FINDINGS when a source/test defect or
-observed contradiction is established. Use EVIDENCE_GAPS only for a specific acceptance-relevant behavior
+Start with exactly one of PASS, FINDINGS or EVIDENCE_GAPS. Use FINDINGS when a material source/test defect or
+material observed contradiction is established. Use EVIDENCE_GAPS only for a specific material acceptance-relevant behavior
 or required validation that the supplied artifact cannot settle; name why the missing evidence matters.
 List all material gaps in one response rather than one per round; the host bounds evidence rounds.
 `;

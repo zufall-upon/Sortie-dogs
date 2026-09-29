@@ -104,14 +104,16 @@ for (const verdict of ["PASS", "FINDINGS"] as const) test(`Fast-first ${verdict}
     const historyReadsBeforeReview = workerHistoryReads;
     const review = JSON.parse(await hooks.tool!.sortie_v010_review_mission.execute({ risk_tags: ["public-logic"],
       traces: ["R1: result.txt has ready newline; node check.mjs exited 0"] }, { sessionID: "root" }));
+    const reviewPrompt = (await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).review?.task?.prompt ?? "";
+    assert.match(reviewPrompt, /Report FINDINGS only for concrete major or medium defects with a material impact/u);
+    assert.match(reviewPrompt, /Do not turn minor style, wording, optional improvements or speculative edge cases into FINDINGS or EVIDENCE_GAPS/u);
     if (verdict === "PASS") {
-      const fullPrompt = (await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).review?.task?.prompt ?? "";
-      const native = JSON.parse(/^observed_validation: (.+)$/mu.exec(fullPrompt)?.[1] ?? "null");
+      const native = JSON.parse(/^observed_validation: (.+)$/mu.exec(reviewPrompt)?.[1] ?? "null");
       assert.ok(native, "the stored native Reviewer prompt must include the build/test observation");
       assert.deepEqual(native?.[0]?.attempts?.map((item: { command: string; exit_code: number; started_ms: number }) =>
         [item.command, item.exit_code, item.started_ms]), [["node build.mjs", 0, 1000], ["node check.mjs", 0, 1200]],
         "the Reviewer sees the native build→test order");
-      const accepted = JSON.parse(/^validation: (.+)$/mu.exec(fullPrompt)?.[1] ?? "null");
+      const accepted = JSON.parse(/^validation: (.+)$/mu.exec(reviewPrompt)?.[1] ?? "null");
       assert.ok(accepted?.[0]?.evidence?.length > 0);
       assert.ok(accepted[0].evidence.every((item: { execution: { command: string[] } }) =>
         item.execution.command[0] === "node check.mjs"), "the build observation is not acceptance evidence");
