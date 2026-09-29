@@ -12,9 +12,39 @@ import { canonicalAgent, type RuntimeProfile } from "../core/runtime-profile.js"
 import { taskChildSessionID } from "./task-result-repair.js";
 import { normalizeManifestScope } from "../core/path.js";
 import { declaredArtifacts } from "./declared-artifacts.js";
+import { normalizeCommand } from "./gate.js";
 
 const exec = promisify(execFile);
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
+
+/** Show native command outcomes to the Reviewer without turning non-criterion checks into acceptance evidence. */
+export function observedMissionValidation(validation: readonly string[], childSessionID: string | null,
+  history: readonly Record<string, unknown>[]): {
+    attempts: readonly { command: string; exit_code: number | null; started_ms: number | null; completed_ms: number | null }[];
+    not_observed: readonly string[]; omitted_attempts: number;
+  } {
+  const declared = validation.map(normalizeCommand), expected = new Set(declared);
+  const time = (value: unknown): number | null => typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+  const attempts = childSessionID === null ? [] : history.flatMap(message => {
+    if (!record(message.info) || message.info.role !== "assistant" || message.info.sessionID !== childSessionID ||
+        !Array.isArray(message.parts)) return [];
+    return message.parts.flatMap(part => {
+      if (!record(part) || part.type !== "tool" || !["bash", "shell", "powershell", "pwsh"].includes(String(part.tool)) ||
+          !record(part.state) || part.state.status !== "completed" || !record(part.state.input) ||
+          typeof part.state.input.command !== "string") return [];
+      const command = normalizeCommand(part.state.input.command);
+      if (!expected.has(command)) return [];
+      const exit = record(part.state.metadata) ? part.state.metadata.exit : undefined;
+      return [{ command, exit_code: typeof exit === "number" && Number.isSafeInteger(exit) ? exit : null,
+        started_ms: record(part.time) ? time(part.time.ran) : null,
+        completed_ms: record(part.time) ? time(part.time.completed) : null }];
+    });
+  });
+  // Retain early attempts and the latest checks if a Worker retried many times.
+  const shown = attempts.length > 32 ? [...attempts.slice(0, 8), ...attempts.slice(-24)] : attempts;
+  return { attempts: shown, not_observed: declared.filter(command => !attempts.some(item => item.command === command)),
+    omitted_attempts: attempts.length - shown.length };
+}
 
 /** Use the space left by short references for longer requested branches, without starving later references. */
 function focusedAllowances(sizes: readonly number[], budget: number): number[] {

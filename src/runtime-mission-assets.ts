@@ -80,24 +80,60 @@ quality threshold and explicit model/budget choice. Follow AGENTS.md and use the
     ${profile.toolPrefix}cancel_operator with reason: "plain" to stop its owned children, then
     ${profile.toolPrefix}start_mission with intent: "replace" and the saved requirements. The cancelled
     Mission is archived; cumulative spend is retained. Dispatch only the returned Coordinator Task.
-2. Dispatch the returned ${profileAgent(profile, "dog-operator")} task immediately. It owns investigation,
-   unit boundaries, Worker/Scout/Advisor/independent Reviewer calls, write-scope extensions and corrections
-   within the original request and cumulative budget. Do not investigate or approve each unit at the root.
-3. Compare the returned completion candidate against the original request, real source and observed evidence.
+2. Start with the direct Worker Fast-lane when the next useful work fits one unit with an honest write scope
+   and an exact, meaningful validation command. The Worker can investigate, edit and validate in that Task;
+   you need not know its eventual fix in advance. Do not route to Coordinator solely because a path or
+   task sounds risky, touches multiple files, takes time, or merits independent review. Do not dispatch a
+   trial Worker when a material user decision, multiple dependent units, or an unworkable contract is already known.
+   For a concrete public reproduction, carry its exact entrypoint, input (including named paths) and observed
+   failure into the first unit objective. Do not replace named inputs with "the actual files" or a summary;
+    the direct Worker sees the objective and generated handoff, not your earlier user message. This adds no
+    investigation unit or approval. Keep the final comparison with the original request after Review.
+    When the entrypoint and related test are known, choose task-sufficient write paths and requested or
+    repository-required build and target checks; do not list speculative write paths or unrelated test suites as a precaution.
+    This is not a file-count limit or a restriction on read/search or real directory outputs. If the actual
+    change needs a wider scope, the SAME mission's Coordinator handles it without routine user approval.
+    If the direct unit cannot be declared honestly, dispatch the returned ${profileAgent(profile, "dog-operator")}
+   task promptly. It owns investigation, unit boundaries, Worker/Scout/Advisor/independent Reviewer calls,
+   write-scope extensions and corrections within the request and cumulative budget. No per-unit root approval.
+3. After a direct Worker succeeds, use its recorded result and inspect only missing source or evidence
+   needed to assess the ACTUAL change. Batch focused reads where practical; do not repeat an unchanged
+   check. Call ${profile.toolPrefix}review_mission promptly with real risk_tags and concise traces.
+   Dispatch its exact independent Reviewer Task when required;
+   use [] only for genuinely low-risk work. A review skip is not implied by Fast-lane. If source/evidence
+   is unchanged, do not repeat validation or an identical review. For EVIDENCE_GAPS, use focused original-file
+   evidence without an evidence-copying Worker: locate the exact missing return/assertion lines and include
+   the entire relevant expression and input/result in the chosen offset and limit. A range ending one line
+   before the requested result is still missing evidence. Do not repeat an unchanged review. If declared
+   validation fails, do not review it as passed. After its native Worker returns, inspect the failure and
+   existing changes. For the same scope and validation, send a second direct Worker through
+   ${profile.toolPrefix}retry_mission_unit; optionally make a small Operator correction first. The Operator
+   edit or shell check alone is not formal validation evidence. For a changed scope or command, use
+   ${profile.toolPrefix}plan_units with a concrete reason and one corrective unit. Reviewer FINDINGS
+   instead need a corrective unit, formal validation, then fresh independent Review after any change;
+   they are not a failed-validation retry. Keep the SAME mission, original requirements, failure history
+   and cumulative budget. Use its Coordinator Task only for real coordination, contract discovery or
+   correction that cannot be handled directly. Never replace an active Worker or ask for routine approval.
+4. After the review decision (including a justified low-risk skip), compare the completion candidate
+   against the original request, real source and observed evidence before final acceptance.
    For a reported bug with a concrete public reproduction, check that evidence exercises the same entrypoint,
-   input and observed failure, not only a nearby invented test or syntax check. A material gap goes back
-   to the SAME Coordinator to repair within the original request; do not treat a Reviewer PASS as proof
-   that an unrun public scenario works.
-   If incomplete, resume the SAME Coordinator with concrete feedback. If complete and required review passed
+   input and observed failure, not only a nearby invented test or syntax check. Correct a material gap
+   through one direct corrective unit when practical, otherwise use the SAME Coordinator; do not treat
+   Reviewer PASS as proof that an unrun public scenario works.
+   If incomplete, correct directly or resume the SAME Coordinator with concrete feedback. If complete and required review passed
    (or the host accepted it at the evidence-gap limit, with the gaps reported), call
-   ${profile.toolPrefix}complete_mission. Only its succeeded receipt authorizes DONE.
+   ${profile.toolPrefix}complete_mission. At that limit, name the specific unresolved evidence and a
+   useful follow-up in the final answer; never say Review PASS or "next: none" for those gaps.
+   Only its succeeded receipt authorizes DONE.
 
-Fast-lane: Simple known procedures that one Worker can complete, with known scope and meaningful validation, may use
-${profile.toolPrefix}plan_units directly after start_mission, then dispatch its exact Worker task.
+Fast-lane: Call ${profile.toolPrefix}plan_units directly after start_mission for one useful Worker unit, then
+dispatch its exact Worker task. The formal validation command must be real and exact, not a dummy check;
+the Worker owns investigation within that unit. If no honest validation command can yet be declared,
+send the Coordinator for targeted discovery rather than inventing proof.
 Use title, objective, read/write file or directory scopes, and validation commands. The final command
-proves the unit; investigation commands need no registration. After success, record the low-risk review
-skip with review_mission (risk_tags: [], one concise trace per requirement), then complete_mission.
-Everything else goes through Coordinator. Unit start or a passing tiny task is never whole-task completion.
+proves the unit; investigation commands need no registration. After success, record actual risk tags and
+one concise trace per requirement in review_mission, dispatch its Reviewer if returned, then complete_mission
+only after required review and your final comparison. Unit start or a passing tiny task is never whole-task completion.
 Item count, parallelism inside an existing runner, or long duration alone do not require Coordinator.
 For example, a configured 23-case benchmark run can be one unit. A subsequent result-dependent
 reproduce/fix/PR loop needs Coordinator, which should start the known runner promptly and use actual
@@ -286,9 +322,11 @@ Low risk uses [] and the host records the skip. The host supplies source excerpt
 mapping and validation evidence; do not handwrite that envelope. Fix concrete FINDINGS defects yourself
 through Worker and rerun affected validation/review. EVIDENCE_GAPS means missing proof, not a defect: answer
 it with sharper traces and evidence: [{path, offset, limit}] from the existing original files in the next
-  review_mission, never an evidence-copying Worker. Existing project source/docs can be selected even
-  outside unit read/write; attaching review context does not require replanning or rerunning validation.
-  Declared external input/output excerpts remain available. The host caps evidence-only reviews; at its limit,
+review_mission, never an evidence-copying Worker. Existing project source/docs can be selected even
+outside unit read/write; attaching review context does not require replanning or rerunning validation.
+Select ranges that include the exact return/assertion and relevant input/result named by the Reviewer;
+a range that stops before the decisive line does not close the gap. Do not repeat an unchanged review.
+Declared external input/output excerpts remain available. The host caps evidence-only reviews; at its limit,
 review is closed with gaps, but ready still requires the requested operation/result to be complete.
 Running an existing procedure alone is not a public-logic source change; use the low-risk skip where applicable.
 Evaluating an unchanged published package is not a release or source edit: use the native execution,

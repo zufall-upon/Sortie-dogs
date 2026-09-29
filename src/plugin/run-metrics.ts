@@ -500,6 +500,8 @@ export interface SortieResultPresentation {
   readonly commit?: string;
   readonly statusSummary?: string;
   readonly stopReason?: string;
+  /** Host-owned Mission review disposition; the generic debrief may not observe native Reviewer Tasks. */
+  readonly missionReview?: "PASS" | "evidence-gaps" | "skipped-low-risk";
 }
 
 const displayText = (value: string | undefined): string => value?.replace(/[\r\n\t]+/gu, " ").trim() || "未取得";
@@ -522,6 +524,9 @@ export function formatSortieResult(result: SortieResult, presentation: SortieRes
       : result.mission.status === "EXTERNAL_BLOCKER" ? "外部要因で未完了" : "ユーザー判断待ち（未完了）";
   const color = result.mission.status === "COMPLETED" ? "🟢" : result.mission.status === "EXTERNAL_BLOCKER" ? "🔴" : "🟡";
   const proof = renderDebriefProof(result.debrief);
+  const review = presentation.missionReview === "PASS" ? "🟢 PASS（独立Reviewer）"
+    : presentation.missionReview === "evidence-gaps" ? "🟡 EVIDENCE_GAPS（PASSではない）"
+      : presentation.missionReview === "skipped-low-risk" ? "免除（低リスク）" : proof.review;
   const estimate = result.debrief?.estimatedCost;
   const estimatedCost = estimate === undefined ? "計測不可"
     : estimate.pricedRequests === 0 ? "未換算"
@@ -540,7 +545,7 @@ export function formatSortieResult(result: SortieResult, presentation: SortieRes
     `経過          ⏱ ${metricText(result.speed.goal_wall_ms, duration)} ※待機含む`,
     `最終達成条件  ◔ ${criteria}`,
     `対象検証      ${proof.validation}`,
-    `SourceReview  ${proof.review}`,
+    `SourceReview  ${review}`,
     `Commit        ${displayText(presentation.commit)}`,
     "",
     "🔧 実装",
@@ -683,14 +688,37 @@ export function insertRunMetrics(text: string, metrics: RunMetrics): string {
   return lines.join(newline);
 }
 
-export function insertSortieResult(text: string, result: SortieResult): string {
-  const presentation = extractSortiePresentation(text);
+export function insertSortieResult(text: string, result: SortieResult,
+  missionReview?: SortieResultPresentation["missionReview"], reviewEvidenceGaps?: string): string {
   const visible = sanitizeTerminalReport(text);
+  const gapSummary = missionReview === "evidence-gaps"
+    ? reviewEvidenceGaps?.replace(/^EVIDENCE_GAPS\s*/u, "").replace(/\s+/gu, " ").trim().slice(0, 500) || "独立Reviewの証拠不足が未解決"
+    : undefined;
+  const nextAction = "未解決証拠を報告し、必要なら対象箇所を後続確認（今回のReviewはPASSではない）";
+  const reported = extractSortiePresentation(text);
+  const meaningful = (value: string | undefined) => value && !/^(?:なし|none|未取得)(?:。)?$/iu.test(value.trim());
+  const pending = meaningful(reported.pending) ? reported.pending : undefined;
+  const presentation = { ...reported, missionReview,
+    ...(gapSummary ? {
+      pending: pending?.includes(gapSummary) ? pending : `${pending ? `${pending} / ` : ""}独立Reviewの未解決証拠: ${gapSummary}`,
+      next: meaningful(reported.next) ? reported.next : nextAction,
+    } : {}) };
   const checkpoint = terminalCheckpoint(visible);
   if (checkpoint === undefined) return visible;
   // A title in model text is not trusted evidence. Replace existing cards, including legacy cards.
   const newline = visible.includes("\r\n") ? "\r\n" : "\n";
   const lines = visible.split(/\r?\n/u);
+  if (gapSummary) {
+    const top = topLevelLines(visible);
+    for (const [position, { index, line }] of top.entries()) {
+      if (index <= checkpoint.index) continue;
+      const staleNext = /^([ \t]*(?:\*\*(?:次|NEXT):\*\*|\*\*(?:次|NEXT)\*\*:|(?:次|NEXT):)[ \t]*)(?:なし|none)(?:。)?[ \t]*$/iu.exec(line);
+      if (staleNext) { lines[index] = `${staleNext[1]}${nextAction}`; continue; }
+      if (!/^[ \t]*(?:#{1,6}[ \t]*)?(?:\*\*(?:次|NEXT):?\*\*|(?:次|NEXT):?)[ \t]*$/iu.test(line)) continue;
+      const following = top.slice(position + 1).find(item => item.line.trim().length > 0);
+      if (following && /^(?:なし|none)(?:。)?$/iu.test(following.line.trim())) lines[following.index] = nextAction;
+    }
+  }
   const cardLines = new Set<number>();
   let legacyCard = false;
   let previousIndex = checkpoint.index;

@@ -5,6 +5,7 @@ import { chmod, lstat, mkdtemp, mkdir, readFile, readdir, rename, writeFile, rm,
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
+import { pathToFileURL } from "node:url";
 import { OperatorContractError, OperatorRuntime, operatorGitPathAuthorized, parseOperatorPlan, type OperatorTask } from "../dist/core/operator-runtime.js";
 import { CONTRACT_TEXT_LIMITS } from "../dist/core/contract-limits.js";
 import { OperatorProposalRuntime } from "../dist/core/operator-proposal.js";
@@ -300,7 +301,10 @@ test("preview assets coexist with stable assets and markers", async () => fixtur
   assert.match(primary, /^  sortie_v010_complete_mission: true$/m);
   assert.doesNotMatch(primary, /^  sortie_v010_begin_operator_proposal: true$/m);
   assert.match(primary, /host saves the original\n\s+user message verbatim/u);
-  assert.match(primary, /Simple|simple, low-risk, single-unit/u);
+  assert.match(primary, /Start with the direct Worker Fast-lane/u);
+  assert.match(primary, /inspect only missing source or evidence/u);
+  assert.match(primary, /Batch focused reads where practical/u);
+  assert.match(primary, /use \[\] only for genuinely low-risk work/u);
   assert.match(previewAssets.find(asset => asset.name === "sortie-v010")!.content, /^agent: dog-operator$/m);
   assert.equal((await initializeProject(root, "v010")).status, "unchanged");
 }));
@@ -432,10 +436,11 @@ test("preview primary closes every task turn with one machine terminal checkpoin
 test("preview primary continues approved sequential scope and uses interactive questions", () => {
   const primary = previewAssets.find(asset => asset.name === "dog-operator")!.content;
   const coordinator = previewAssets.find(asset => asset.name === "dogs-coordinator")!.content;
-  assert.match(primary, /Do not investigate or approve each unit at the root/);
+  assert.match(primary, /No per-unit root approval/);
+  assert.match(primary, /Coordinator Task only for real coordination/u);
   assert.match(primary, /Ask through question only for a user-only choice/);
   assert.match(primary, /Resume the same work after\nthe answer/);
-  assert.match(primary, /Ordinary defects return to Coordinator/);
+  assert.match(primary, /Reviewer FINDINGS\s+instead need a corrective unit, formal validation, then fresh independent Review/u);
   assert.match(primary, /cumulative budget increase/);
   assert.match(primary, /Only its succeeded receipt authorizes DONE/);
   assert.match(coordinator, /write-scope addition within the original request/);
@@ -596,7 +601,7 @@ test("only the isolated preview fixture enables two-level native subagents", () 
   assert.equal(fixtureOpenCodeConfig("/tmp/preview.js", V010_RUNTIME_PROFILE).experimental?.subagent_depth, 2);
   assert.equal("experimental" in fixtureOpenCodeConfig("/tmp/stable.js", STABLE_RUNTIME_PROFILE), false);
   assert.deepEqual(fixtureOpenCodeConfig("/tmp/stable.js", STABLE_RUNTIME_PROFILE, "2.0.14").plugins,
-    ["file:///tmp/stable.js"]);
+    [pathToFileURL("/tmp/stable.js").href]);
   assert.equal("plugin" in fixtureOpenCodeConfig("/tmp/stable.js", STABLE_RUNTIME_PROFILE, "2.0.14"), false);
 });
 

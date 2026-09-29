@@ -6447,7 +6447,12 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
             appLogInfo("run-metrics.career-unavailable", textInput.sessionID, { outcome: runOutcome }, "warn");
           }
         }
-        if (sortieResult !== undefined) textOutput.text = insertSortieResult(textOutput.text, sortieResult);
+        if (sortieResult !== undefined) {
+          const review = terminal?.receipt?.status === "succeeded"
+            ? await input.runtimeBridge?.missionReviewPresentation?.(textInput.sessionID).catch(() => undefined)
+            : undefined;
+          textOutput.text = insertSortieResult(textOutput.text, sortieResult, review?.verdict, review?.evidenceGaps);
+        }
         else if (metrics !== undefined && runOutcome === "DONE") textOutput.text = insertRunMetrics(textOutput.text, metrics);
         const { debrief: _debriefObservation, ...metricSummary } = metrics ?? {};
         appLogInfo("run-metrics.snapshot", textInput.sessionID, {
@@ -7779,7 +7784,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     },
   };
   input.runtimeBridge?.connected?.({
-    renderReturnReport: async (root, text, expectedReceipt) => {
+    renderReturnReport: async (root, text, expectedReceipt, missionReview, reviewEvidenceGaps) => {
       let rendered: string | undefined;
       await serializeChatTransition(root, async () => {
       if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) return undefined;
@@ -7802,7 +7807,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           result = { ...result, career: await collectCareer([...goalLedgerDirectories], currentPath, records, path => RunFlightLedger.readGoalFile(path)) };
         }
       } catch { appLogInfo("run-metrics.career-unavailable", root, { profile: runtimeProfile.id }, "warn"); }
-      rendered = insertSortieResult(receiptBoundTerminalText(text, receipt), result);
+       rendered = insertSortieResult(receiptBoundTerminalText(text, receipt), result, missionReview, reviewEvidenceGaps);
       });
       return rendered;
     },

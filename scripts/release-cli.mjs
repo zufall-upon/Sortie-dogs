@@ -1,9 +1,10 @@
 import { mkdir, writeFile, readFile, lstat, readdir } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { join, resolve, relative } from 'node:path';
+import { dirname, join, resolve, relative } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { runProcess, shellQuote } from './release-process.mjs';
+import { runProcess, shellQuote, commandFor } from './release-process.mjs';
 import { releaseProfile } from './release-profiles.mjs';
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -20,6 +21,16 @@ export const runLocationArgsForOpenCodeVersion = (version, project, serverURL) =
   Number.parseInt(version.split('.')[0], 10) >= 2
     ? serverURL === undefined ? ['--standalone'] : ['--server', serverURL]
     : ['--dir', project];
+
+/** Invoke Windows npm/OpenCode native entrypoints rather than shell-only npm wrappers. */
+export function nativeCLI(executable, args, { platform = process.platform, node = process.execPath,
+  npmEntry = process.env.npm_execpath ?? join(dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js'),
+  openCodeEntry = process.env.SORTIE_OPENCODE_EXECUTABLE ?? join(dirname(process.execPath), 'node_modules/@opencode/cli/bin/opencode.exe'),
+} = {}) {
+  if (platform === 'win32' && executable === 'npm' && existsSync(npmEntry)) return { executable: node, args: [npmEntry, ...args] };
+  if (platform === 'win32' && executable === 'opencode' && existsSync(openCodeEntry)) return { executable: openCodeEntry, args };
+  return commandFor(executable, args);
+}
 export const RELEASE_SMOKE_RUN_TIMEOUT_SECONDS = 900;
 export const RELEASE_SMOKE_TERMINAL_TIMEOUT_SECONDS = 180;
 export const RELEASE_SMOKE_TERMINAL_PROMPT =
@@ -32,7 +43,8 @@ export const releaseSmokeWorkerStarted = (events, records, unitID) =>
   events.some(event => event.type === 'tool_use' && event.part?.tool === 'task' && event.part.state?.status === 'completed') ||
   records.some(({ event }) => event.kind === 'unit.settled' && event.unit_id === unitID && event.disposition === 'succeeded');
 export async function command(executable, args, cwd, env, timeoutMs = 600_000) {
-  const result = await runProcess(executable, args, { cwd, env: { ...process.env, ...env, PWD: cwd }, timeoutMs });
+  const launch = nativeCLI(executable, args);
+  const result = await runProcess(launch.executable, launch.args, { cwd, env: { ...process.env, ...env, PWD: cwd }, timeoutMs });
   if (executable === 'wsl.exe') {
     for (const line of result.stderr.split(/\r?\n/)) {
       try { const evidence = JSON.parse(line); if (['checkpoint', 'outcome'].includes(evidence.phase)) process.stderr.write(JSON.stringify(evidence) + '\n'); }
@@ -49,8 +61,17 @@ export async function command(executable, args, cwd, env, timeoutMs = 600_000) {
   return result.stdout;
 }
 
-async function stopProcessGroup(child) {
+export async function stopProcessGroup(child) {
   if (child.exitCode !== null || child.signalCode !== null || !child.pid) return;
+  if (process.platform === 'win32') {
+    await new Promise((resolveStop, rejectStop) => {
+      const timer = setTimeout(() => rejectStop(Error(`Owned process ${child.pid} did not stop after taskkill`)), 7_000);
+      child.once('close', () => { clearTimeout(timer); resolveStop(); });
+      const killer = spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
+      killer.once('error', () => { try { child.kill(); } catch { /* already exited */ } });
+    });
+    return;
+  }
   const signal = name => { try { process.kill(-child.pid, name); } catch { /* exited */ } };
   signal('SIGTERM');
   await new Promise(resolve => {
@@ -66,7 +87,8 @@ async function stopProcessGroup(child) {
 export async function startV2ReleaseServer(cwd, env, { inheritEnvironment = true } = {}) {
   const password = randomBytes(24).toString('hex');
   const serverEnv = { ...(inheritEnvironment ? process.env : {}), ...env, PWD: cwd, OPENCODE_SERVER_PASSWORD: password };
-  const child = spawn('opencode', ['serve', '--hostname', '127.0.0.1', '--port', '0'], {
+  const launch = nativeCLI('opencode', ['serve', '--hostname', '127.0.0.1', '--port', '0']);
+  const child = spawn(launch.executable, launch.args, {
     cwd, env: serverEnv, shell: false, windowsHide: true, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
   });
   const closed = new Promise(resolve => child.once('close', resolve));

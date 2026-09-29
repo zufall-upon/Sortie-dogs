@@ -106,6 +106,9 @@ for (const rescueWorks of [false, true]) test(`current Mission Astra Rescue keep
     assert.equal(first.attempts?.[0]?.kind, "implementation");
     assert.equal(first.attempts?.[0]?.failure?.category, "implementation");
     assert.equal(first.attempts?.[0]?.nativeOutcome, "completed");
+    await assert.rejects(state.hooks.tool!.sortie_v010_retry_mission_unit.execute(
+      { unit_id: "unit-1" }, { sessionID: "root" }), /mission-remediation-coordinator-required/u,
+    "root cannot take over a Coordinator-owned retry");
     const retry = JSON.parse(await state.hooks.tool!.sortie_v010_retry_mission_unit.execute(
       { unit_id: "unit-1" }, { sessionID: "coordinator" }));
     assert.equal(retry.status, "normal_remediation_prepared", JSON.stringify(retry));
