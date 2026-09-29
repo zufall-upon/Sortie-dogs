@@ -61,8 +61,9 @@ export function statusProbeStopReason(observed, expectedModel) {
   return match(status.model) ? 'status-observed' : 'model-mismatch';
 }
 
-export const workerStartWithinProbeLimit = (mode, worker, instance) =>
-  mode !== 'start' || worker.started_ms <= (instance ? 180_000 : 60_000);
+export const workerStartWithinProbeLimit = (mode, worker, instance, deadlineMs) =>
+  mode !== 'start' || Number.isFinite(worker?.started_ms) && worker.started_ms >= 0 &&
+    worker.started_ms <= (deadlineMs ?? (instance ? 180_000 : 60_000));
 
 async function updateBudget(file, update) {
   if (!file) return;
@@ -77,9 +78,9 @@ async function updateBudget(file, update) {
 }
 
 export async function probe(tgz, output, { mode = 'start', prompt, instance, timeoutSeconds = 180, capUSD = 1, pythonBin, budgetFile,
-  setupFixture, onServer, model } = {}) {
+  setupFixture, onServer, model, profileId = 'v012', workerStartDeadlineMs } = {}) {
   if (!Number.isFinite(capUSD) || capUSD <= 0 || !Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0) throw Error('Probe needs finite positive limits');
-  const fixture = await installedFixture(tgz, output, 'v012', { nested: false });
+  const fixture = await installedFixture(tgz, output, profileId, { nested: false });
   const { project, env, run } = fixture;
   if (instance) {
     await command('git', ['init', '-q'], project, env);
@@ -157,6 +158,7 @@ export async function probe(tgz, output, { mode = 'start', prompt, instance, tim
     ...(cutoff ? { errors: cutoff.errors,
     cancellation_errors: observed.errors.filter(error => /"type":"aborted"/.test(error.error)) } : {}),
     project, mode, stopped, code, elapsed_ms: Date.now() - since,
+    package_version: fixture.pkg.version, runtime_marker: fixture.runtimeMarker,
     mission_phase: mission?.phase ?? null, receipt_status: operator?.receipt?.status ?? null,
     review: mission?.review ? { verdict: mission.review.verdict, child: mission.review.child ?? null } : null,
     candidate_sha256: createHash('sha256').update(await readFile(tgz)).digest('hex') };
@@ -171,7 +173,8 @@ export async function probe(tgz, output, { mode = 'start', prompt, instance, tim
     result.responses.some(item => item.agent === 'build') &&
     result.models.some(item => item.agent === 'build' && item.model?.id === 'gpt-6-sol') :
     !schemaRejected && worker?.model?.id === 'gpt-6-luna-fast' && worker.model.variant === 'max' &&
-    workerStartWithinProbeLimit(mode, worker, instance) && (mode === 'start' ? stopped === 'worker-started'
+    workerStartWithinProbeLimit(mode, worker, instance, workerStartDeadlineMs) &&
+    (mode === 'start' ? stopped === 'worker-started'
       : !stopped && code === 0 && result.mission_phase === 'completed' && result.receipt_status === 'succeeded');
   await writeFile(join(run, 'cli.stdout.jsonl'), stdout);
   await writeFile(join(run, 'cli.stderr.log'), stderr);

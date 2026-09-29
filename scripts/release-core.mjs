@@ -205,6 +205,9 @@ export class Release {
     }
   }
   async prepare() {
+    // This legacy batch commits after global apply; v0.13 requires a fixed commit before packaging.
+    // Keep preflight read-only and use the fixed-commit release sequence instead.
+    if (this.profile.id === 'v013') throw Error('v013-release-requires-fixed-commit: use the fixed-commit release gate, not legacy prepare');
     try { await this.initialize(); }
     catch (error) { await this.failure(error, 'initialize'); throw error; }
     await this.phase('version', async () => {

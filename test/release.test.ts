@@ -107,6 +107,15 @@ test('preflight runs the target release test without release side effects', asyn
   });
 });
 
+test('v0.13 rejects the legacy batch that commits after package/global apply', async () => {
+  const manifest = { schema: 1, repository: 'fixture/repo', remote: 'origin', branch: 'main', releaseProfile: 'v013',
+    npm: 'npm', gh: 'gh', globalRoot: resolve('_testenv/global'), files: ['package.json', 'package-lock.json', 'README.md'],
+    versionTextFiles: ['README.md'], targetTests: ['test/release.test.ts'], notesFile: 'docs/release-batch.md' };
+  const batch = new Release({ root: resolve('.'), version: '0.13.0', manifest, execute: async () => ok() });
+  await assert.rejects(batch.prepare(), /v013-release-requires-fixed-commit/u,
+    'the legacy batch must not package before the release commit or apply globally before tests');
+});
+
 test('failed phase writes a typed receipt with the exact command and success clears it', async () => {
   await fixture(async ({ root, batch, service }) => {
     service.fail = 'npm test';

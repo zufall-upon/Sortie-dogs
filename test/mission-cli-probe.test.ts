@@ -46,5 +46,8 @@ test("the start-only Worker deadline does not invalidate a completed native rece
   const worker = { started_ms: 75_895 };
   assert.equal(workerStartWithinProbeLimit("start", worker), false);
   assert.equal(workerStartWithinProbeLimit("start", worker, { repo: "example/repo" }), true);
+  assert.equal(workerStartWithinProbeLimit("start", worker, undefined, 180_000), true,
+    "a release startup probe has its own deadline, not the benchmark's 60-second target");
+  assert.equal(workerStartWithinProbeLimit("start", { started_ms: -1 }, undefined, 180_000), false);
   assert.equal(workerStartWithinProbeLimit("complete", worker), true);
 });
