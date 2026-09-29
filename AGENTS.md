@@ -23,6 +23,8 @@ CLI検証はまずWorkerの実セッション起動と実モデルを確認す�
 5. global apply、tag、GitHub Releaseを実施する。
 6. 固定済みの同じ`.tgz`を`npm publish <tgz> --access public --tag latest`で公開。成功を記録して先へ進み、registryのversion・`latest`・integrityは後で照合。未反映404で待機・再publishしない。
 
+global apply時はnpm global版だけでなく、`~/.config/opencode/plugins/sortie-dogs/index.js`が参照する`~/.config/opencode/node_modules/sortie-dogs`も同じ固定`.tgz`で更新・照合する。`init --global`後、OpenCodeの再起動で読込版を確認する。
+
 ## 検証環境の片付け
 
 - CLI probe・preflight後は観測JSON、ログ、費用記録、固定packageとSHA-256を残し、不要になった隔離環境の`.opencode/`、`node_modules`、npm cacheを順次削除する。古いプラグインを再起動時に読み込ませない。
