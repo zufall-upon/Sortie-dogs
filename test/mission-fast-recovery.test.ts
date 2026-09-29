@@ -149,12 +149,13 @@ test("Fast-lane Reviewer FINDINGS use a corrective direct unit and a new Reviewe
       reviewer2: { agent: "dog-reviewer-v010", parentID: "root" },
     };
     const history: Record<string, Record<string, unknown>[]> = { reviewer1: [], reviewer2: [] };
-    const hooks = await SortieDogsV010Plugin({ directory, client: { session: {
+    const create = () => SortieDogsV010Plugin({ directory, client: { session: {
       get: async ({ path }: { path: { id: string } }) => ({ data: { id: path.id, ...agents[path.id] } }),
       children: async ({ path }: { path: { id: string } }) => ({ data: Object.entries(agents)
         .filter(([, info]) => info.parentID === path.id).map(([id, info]) => ({ id, ...info })) }),
       messages: async ({ path }: { path: { id: string } }) => ({ data: history[path.id] ?? [] }), abort: async () => ({ data: true }),
     } } } as never);
+    let hooks = await create();
     await hooks["chat.message"]!({ sessionID: "root", messageID: "request", agent: agents.root!.agent }, {
       message: { id: "request", agent: agents.root!.agent, model: { providerID: "openai", modelID: "gpt-6-sol" } },
       parts: [{ type: "text", text: "Make result.txt fixed, then review the actual code." }],
@@ -191,6 +192,13 @@ test("Fast-lane Reviewer FINDINGS use a corrective direct unit and a new Reviewe
       const request = JSON.parse(await hooks.tool!.sortie_v010_review_mission.execute({ risk_tags: ["public-logic"],
         traces: [id === "reviewer1" ? "check passed, but requested fixed value is missing" : "fixed value present; check passed"] },
         { sessionID: "root" }));
+      if (id === "reviewer2") {
+        const pending = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+        assert.equal(pending.coordinator, null);
+        assert.match(pending.review?.task?.prompt ?? "", /^review_phase: verification$/mu);
+        assert.ok(pending.review?.initialPrompt, "the first independent Review remains durable");
+        hooks = await create(); // A fresh plugin/turn must admit the exact pending verification Task.
+      }
       await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: id },
         { args: structuredClone(request.task) });
       agents[id]!.outcome = "succeeded";

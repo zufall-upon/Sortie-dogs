@@ -88,6 +88,51 @@ test("a previous child is not initial lineage when native history is unavailable
   assert.doesNotThrow(() => lane.beforeTool("root", "task", { subagent_type: "dog-reviewer", prompt: f.verification }));
 });
 
+test("a direct Fast-lane Review restores completed initial lineage after a cold turn", async () => {
+  const f = reviewHistoryFixture();
+  f.mission.coordinator = null;
+  f.mission.callID = null;
+  f.mission.dispatchOpen = false;
+  f.mission.review!.initialPrompt = f.initial;
+  f.history.coordinator = [];
+  const unavailable = { ...f.host, messages: async () => { throw new Error("V2 history unavailable"); } };
+  const prompts = await completedMissionReviewPrompts(f.mission, V010_RUNTIME_PROFILE, "root", f.verification, unavailable);
+  assert.deepEqual(prompts, [f.initial], "the root-owned initial receipt is durable even without native history");
+  const lane = new FastLaneController();
+  lane.beginTurn("root", false);
+  lane.restoreReviewLineage("root", f.verification, prompts);
+  assert.doesNotThrow(() => lane.beforeTool("root", "task", { subagent_type: "dog-reviewer", prompt: f.verification }));
+  assert.throws(() => lane.beforeTool("root", "task", { subagent_type: "dog-reviewer", prompt: f.verification }),
+    /CONSULTATION_RETRY_INVALID/u, "a cold turn does not grant duplicate verification");
+  assert.deepEqual(await completedMissionReviewPrompts(f.mission, V010_RUNTIME_PROFILE, "other-root", f.verification, unavailable), []);
+  assert.deepEqual(await completedMissionReviewPrompts(f.mission, V010_RUNTIME_PROFILE, "root", "foreign-request", unavailable), []);
+  f.mission.review!.initialPrompt = f.initial.replace("mission-current", "foreign-mission");
+  const noHistory = { ...f.host, messages: async () => [] };
+  assert.deepEqual(await completedMissionReviewPrompts(f.mission, V010_RUNTIME_PROFILE, "root", f.verification, noHistory), []);
+});
+
+test("direct Fast-lane Review can recover its native root-owned initial child when the durable receipt is missing", async () => {
+  const f = reviewHistoryFixture();
+  f.mission.coordinator = null;
+  f.mission.callID = null;
+  f.mission.dispatchOpen = false;
+  f.identities.reviewer!.parentID = "root";
+  f.history.root = [{ ...f.message, info: { role: "assistant", sessionID: "root" } }];
+  assert.deepEqual(await completedMissionReviewPrompts(f.mission, V010_RUNTIME_PROFILE, "root", f.verification, f.host),
+    [f.initial]);
+  const ref = { r: "root", m: f.mission.id, n: "initial-run", h: createHash("sha256").update(f.initial).digest("hex") };
+  f.completion.state.input.prompt = MISSION_REVIEW_REFERENCE + JSON.stringify(ref);
+  f.childMessage.parts[0]!.text = `Native Reviewer preamble\n${f.initial}`;
+  assert.deepEqual(await completedMissionReviewPrompts(f.mission, V010_RUNTIME_PROFILE, "root", f.verification, f.host),
+    [f.initial], "a root-owned opaque Task resolves through its exact native child prompt");
+  f.completion.state.input.prompt = MISSION_REVIEW_REFERENCE + JSON.stringify({ ...ref, h: "0".repeat(64) });
+  assert.deepEqual(await completedMissionReviewPrompts(f.mission, V010_RUNTIME_PROFILE, "root", f.verification, f.host), []);
+  f.completion.state.input.prompt = MISSION_REVIEW_REFERENCE + JSON.stringify(ref);
+  f.identities.reviewer!.parentID = "foreign";
+  assert.deepEqual(await completedMissionReviewPrompts(f.mission, V010_RUNTIME_PROFILE, "root", f.verification, f.host), [],
+    "a different parent's child cannot establish direct Review lineage");
+});
+
 test("opaque historical review references require the exact hash-bound native child prompt", async () => {
   const f = reviewHistoryFixture();
   const ref = { r: "root", m: f.mission.id, n: "initial-run", h: createHash("sha256").update(f.initial).digest("hex") };
