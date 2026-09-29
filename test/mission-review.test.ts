@@ -212,8 +212,36 @@ test("committed candidates still supply current source and large artifacts expos
     const first = await missionReviewSource(root, run);
     assert.ok(Buffer.byteLength(first.excerpt) < 25_000);
     assert.match(first.excerpt, /EXCERPT TRUNCATED: large.txt/);
+    assert.deepEqual(first.truncatedSource, ["large.txt"], "automatic truncation is visible before dispatch");
     await writeFile(join(root, "large.txt"), "a".repeat(99_999) + "b");
     assert.notEqual((await missionReviewSource(root, run)).fingerprint, first.fingerprint, "unshown tail bytes are still fingerprinted");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("automatic review names untracked paths clipped by their heading or rendered preview", async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const root = await mkdtemp(join(resolve("_testenv"), "mission-review-boundary-"));
+  try {
+    await git("git", ["init", "--quiet"], { cwd: root });
+    const padHeading = "\n--- new file: pad.txt ---\n";
+    const targetHeading = "\n--- new file: target.txt ---\n";
+    const run = { units: [{ unit: { write: ["pad.txt", "target.txt"] }, hashes: [] }] } as never;
+    for (const [name, content, room] of [
+      ["heading", Buffer.from("x"), Buffer.byteLength(targetHeading) - 1],
+      ["invalid UTF-8", Buffer.from([0xff]), Buffer.byteLength(targetHeading) + 1],
+      ["binary placeholder", Buffer.from([0]), Buffer.byteLength(targetHeading) + 1],
+    ] as const) {
+      await writeFile(join(root, "pad.txt"), "a".repeat(24_000 - Buffer.byteLength(padHeading) - room));
+      await writeFile(join(root, "target.txt"), content);
+      const packet = await missionReviewSource(root, run);
+      assert.deepEqual(packet.truncatedSource, ["target.txt"], `${name}: name the omitted path, not a generic overflow`);
+      assert.match(packet.excerpt, /EXCERPT TRUNCATED: target\.txt/u);
+      assert.doesNotMatch(packet.excerpt, /source diff exceeds excerpt budget/u);
+      assert.ok(Buffer.byteLength(packet.excerpt.split("\n[EXCERPT TRUNCATED:")[0]!) <= 24_000);
+    }
+    await writeFile(join(root, "target.txt"), "x");
+    const fits = await missionReviewSource(root, run);
+    assert.deepEqual(fits.truncatedSource, [], "an exactly fitting heading and body is not omitted");
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -246,6 +274,7 @@ test("mission baseline exposes committed changes across replans without a genera
     assert.doesNotMatch(source.excerpt, /unrelated change/u);
     assert.ok(Buffer.byteLength(source.excerpt) < 25_000);
     assert.match(source.excerpt, /EXCERPT TRUNCATED: generated\.js/u);
+    assert.ok(source.truncatedSource.includes("generated.js"), "committed diff omissions are reported to the Coordinator");
     await writeFile(join(root, "z_test.js"), "assert.equal(value, 43);\n");
     assert.notEqual((await missionReviewSource(root, run, [], baseline)).fingerprint, source.fingerprint);
   } finally { await rm(root, { recursive: true, force: true }); }
@@ -293,6 +322,7 @@ test("focused review shares unused reference space and keeps changed-file invent
 test("read-only units do not accidentally collect an entire repository and ignored tooling", async () => {
   const packet = await missionReviewSource("nonexistent-directory", { units: [{ unit: { write: [], read: ["src"] }, hashes: [] }] } as never);
   assert.match(packet.excerpt, /Read-only units: no declared output files/);
+  assert.deepEqual(packet.truncatedSource, []);
 });
 
 test("read-only and test-only replans retain earlier source, deletion and stale-review coverage", async () => {

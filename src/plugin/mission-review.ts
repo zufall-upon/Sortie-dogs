@@ -116,7 +116,7 @@ export async function completedMissionReviewPrompts(mission: OperatorMission | u
 /** Pin all scoped tracked/untracked source bytes, including deletions; display a bounded excerpt only. */
 export async function missionReviewSource(directory: string, run: OperatorState,
   evidence: readonly MissionEvidenceExcerpt[] = [], baseline?: string, priorScope?: MissionReviewScope): Promise<{
-    fingerprint: string; excerpt: string; truncatedEvidence: string[] }> {
+    fingerprint: string; excerpt: string; truncatedEvidence: string[]; truncatedSource: string[] }> {
   const scope = missionReviewScope(priorScope, run);
   const hash = createHash("sha256").update(JSON.stringify({ baseline, scope, units: run.units.map(unit => ({ unit: unit.unit, hashes: unit.hashes })) }));
   const writes = [...new Set(scope.write.map(path => path === "." ? path : normalizeManifestScope(path).path))];
@@ -194,7 +194,7 @@ export async function missionReviewSource(directory: string, run: OperatorState,
   const truncatedEvidence = focused.flatMap(({ entry }, index) => needsNotice[index] ? [`${entry.path}:${entry.offset}`] : []);
   if (writes.length === 0) return { fingerprint: `sha256:${hash.digest("hex")}`,
     excerpt: selected + "[Read-only units: no declared output files. Review the supplied observations, traces and validation evidence.]",
-    truncatedEvidence };
+    truncatedEvidence, truncatedSource: [] };
   // The shared dependency environment is local tooling, never reviewed or pinned source.
   const external: string[] = [], local: string[] = [];
   for (const path of writes) {
@@ -248,7 +248,8 @@ export async function missionReviewSource(directory: string, run: OperatorState,
       const absolute = resolve(directory, path), stat = await lstat(absolute);
       hash.update(String(stat.mode));
       const include = untracked.has(path) || unchanged;
-      const room = include ? Math.max(0, 24_000 - Buffer.byteLength(excerpt)) : 0;
+      const heading = `\n--- ${untracked.has(path) ? "new file" : "current file"}: ${path} ---\n`;
+      const room = include ? Math.max(0, 24_000 - Buffer.byteLength(excerpt) - Buffer.byteLength(heading)) : 0;
       let preview = Buffer.alloc(0);
       if (stat.isSymbolicLink()) {
         const content = Buffer.from(await readlink(absolute));
@@ -263,8 +264,24 @@ export async function missionReviewSource(directory: string, run: OperatorState,
         }
       }
       if (include) {
-        if (room) excerpt += `\n--- ${untracked.has(path) ? "new file" : "current file"}: ${path} ---\n${preview.includes(0) ? "[binary artifact: bytes fingerprinted]" : preview.toString("utf8")}`;
-        if (stat.size > room) omitted.push(path);
+        const headingFits = Buffer.byteLength(excerpt) + Buffer.byteLength(heading) <= 24_000;
+        if (headingFits) {
+          const rendered = preview.includes(0) ? "[binary artifact: bytes fingerprinted]" : preview.toString("utf8");
+          let shown = rendered;
+          if (Buffer.byteLength(rendered) > room) {
+            let used = 0;
+            const chars: string[] = [];
+            for (const char of rendered) {
+              const bytes = Buffer.byteLength(char);
+              if (used + bytes > room) break;
+              chars.push(char);
+              used += bytes;
+            }
+            shown = chars.join("");
+          }
+          excerpt += heading + shown;
+          if (stat.size > room || Buffer.byteLength(rendered) > room) omitted.push(path);
+        } else omitted.push(path);
       }
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; hash.update("deleted"); }
   }
@@ -280,8 +297,10 @@ export async function missionReviewSource(directory: string, run: OperatorState,
     unreadable.push(...artifacts.unreadable);
   }
   const bytes = Buffer.from(excerpt);
+  const truncatedSource = [...new Set(omitted)];
+  if (bytes.length > 24_000 && truncatedSource.length === 0) truncatedSource.push("(source diff exceeds excerpt budget)");
   return { fingerprint: `sha256:${hash.digest("hex")}`, excerpt: (bytes.length > 24_000 ? bytes.subarray(0, 24_000).toString("utf8") : excerpt) +
-    (bytes.length > 24_000 || omitted.length ? `\n[EXCERPT TRUNCATED: ${omitted.slice(0, 20).join(", ")}; supply focused traces for missing sections, not another implementation unit]` : "") +
+    (truncatedSource.length ? `\n[EXCERPT TRUNCATED: ${truncatedSource.slice(0, 20).join(", ")}; supply focused traces for missing sections, not another implementation unit]` : "") +
     (unreadable.length ? `\n[UNINSPECTED EXTERNAL DIRECTORIES: ${unreadable.slice(0, 20).join(", ")}; select specific result files as review evidence]` : ""),
-    truncatedEvidence };
+    truncatedEvidence, truncatedSource };
 }

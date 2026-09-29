@@ -1730,7 +1730,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           task, evidence, verdict: task ? "pending" : "skipped-low-risk", ...(mission.review?.child ? { child: mission.review.child } : {}),
           ...(initialPrompt ? { initialPrompt } : {}),
           ...(mission.review?.evidenceGapReviews ? { evidenceGapReviews: mission.review.evidenceGapReviews } : {}) }; });
+        const automaticTruncation = source.truncatedSource.length ? { automatic_truncated_source: source.truncatedSource,
+          ...(source.truncatedEvidence.length ? {} : { evidence_hint: "Automatic source excerpts were clipped. If acceptance-relevant sections are missing, call review_mission with focused evidence before dispatch; otherwise dispatch the returned Reviewer task. No Worker or new validation is needed just to expose source." }) } : {};
         return JSON.stringify(task ? { status: "review-required", task: missionReviewTask(reviewed),
+          ...automaticTruncation,
           ...(source.truncatedEvidence.length ? { truncated_evidence: source.truncatedEvidence,
             next_action: "Narrow these focused evidence ranges with review_mission before dispatching the Reviewer; no Worker or new validation is needed." } : {}) }
           : { status: "skipped-low-risk" });
