@@ -1,5 +1,7 @@
 # v0.13.x PR proposal: Fast-first Mission
 
+Ubuntu continuation instructions and current release hold: [`fast-first-v013-ubuntu-handoff.md`](fast-first-v013-ubuntu-handoff.md).
+
 ## User problem and target
 
 Sortie-dogs produces useful results but takes too long to return them. For a request that fits one useful Worker unit, the normal path should be Operator → Worker investigation/edit/validation → independent Reviewer **when warranted by the actual change** → Operator acceptance. Coordinator joins only when a real correction or coordination need is known. The measure of success is time to a validated answer, not the share of requests labeled Fast or the time to a Task launch.
