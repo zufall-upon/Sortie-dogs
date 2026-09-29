@@ -28,6 +28,14 @@ implementation, validation, review, and model routing.
 Guides: [日本語](docs/guide-ja.md) · [简体中文](docs/guide-zh-CN.md) ·
 [Testing](docs/testing.md) · [CLI testing](docs/cli-testing.md)
 
+## SWE-bench Lite: 170/300 (56.67%)
+
+The fixed **Sortie-dogs v0.12.24** harness resolved **170 of 300 SWE-bench Lite test issues** in one pass@1 campaign, with 9 empty patches and no official evaluation errors. Every instance has a frozen prediction and an inference-time trajectory. The task Workers ran `openai/gpt-6-luna-fast#max`; operator, coordinator and review roles ran `openai/gpt-6-sol#xhigh`. This is a system result, **not** a Luna-only model comparison or a Verified/full SWE-bench score.
+
+[Technical report and per-repository results](docs/benchmarks/swebench-lite-v01224-test300-2026-09-29.md) · [Public predictions, logs and trajectories](https://github.com/zufall-upon/sortie-dogs-swebench-lite-20260929)
+
+The single official 300-instance report and frozen predictions are hash-bound in the report. Confirmed inference expense was **$162.99**; a separate **$34.60** of usage has unknown pricing and is held against the campaign cap, **not** counted as known expense. Leaderboard registration and maintainer acceptance are separate from this official local evaluation.
+
 > **Beta:** v0.12.2 builds on the v0.10.23 execution engine. Runtime behavior,
 > configuration, and generated assets may still change before 1.0.
 
