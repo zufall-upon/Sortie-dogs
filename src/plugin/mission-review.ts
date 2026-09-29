@@ -96,16 +96,19 @@ export async function completedMissionReviewPrompts(mission: OperatorMission | u
   root: string, requestedPrompt: string,
   host: { get(id: string): Promise<unknown>; messages(id: string): Promise<readonly Record<string, unknown>[]> },
 ): Promise<string[]> {
-  if (!mission || mission.root !== root || !mission.coordinator || ["completed", "cancelled"].includes(mission.phase) ||
+  if (!mission || mission.root !== root || ["completed", "cancelled"].includes(mission.phase) ||
       mission.review?.task?.prompt !== requestedPrompt) return [];
   // The completion hook has already bound this prompt to a real independent Reviewer child.
   // Avoid a second V2 history read when its page/list API is temporarily unavailable.
   if (initialMissionReviewPrompt(mission, [])) return [mission.review!.initialPrompt!];
-  const coordinator = await host.get(mission.coordinator);
-  if (!record(coordinator) || coordinator.parentID !== root || canonicalAgent(profile, coordinator.agent as string) !== "dog-operator") return [];
+  const owner = mission.coordinator ?? root;
+  if (mission.coordinator !== null) {
+    const coordinator = await host.get(owner);
+    if (!record(coordinator) || coordinator.parentID !== root || canonicalAgent(profile, coordinator.agent as string) !== "dog-operator") return [];
+  }
   const prompts: string[] = [];
-  for (const message of (await host.messages(mission.coordinator)).slice(-1000)) {
-    if (!record(message.info) || message.info.role !== "assistant" || message.info.sessionID !== mission.coordinator ||
+  for (const message of (await host.messages(owner)).slice(-1000)) {
+    if (!record(message.info) || message.info.role !== "assistant" || message.info.sessionID !== owner ||
         !Array.isArray(message.parts)) continue;
     for (const part of message.parts) {
       if (!record(part) || part.type !== "tool" || part.tool !== "task" || !record(part.state) || part.state.status !== "completed" ||
@@ -114,7 +117,7 @@ export async function completedMissionReviewPrompts(mission: OperatorMission | u
       const childID = taskChildSessionID(part.state);
       if (!childID) continue;
       const child = await host.get(childID);
-      if (!record(child) || child.parentID !== mission.coordinator || canonicalAgent(profile, child.agent as string) !== "dog-reviewer") continue;
+      if (!record(child) || child.parentID !== owner || canonicalAgent(profile, child.agent as string) !== "dog-reviewer") continue;
       let prompt = part.state.input.prompt;
       if (prompt.startsWith(MISSION_REVIEW_REFERENCE)) {
         let ref: unknown;
