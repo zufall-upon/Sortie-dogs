@@ -1,5 +1,9 @@
 # Sortie-dogs
 
+<p align="center">
+  <img src="docs/assets/sortie-dogs-logo.png" alt="Sortie-dogs logo" width="640">
+</p>
+
 **A goal-preserving, adaptive execution harness for OpenCode that optimizes cost,
 time, and proof without taking your setup over.**
 
