@@ -69,8 +69,10 @@ test("a handoff scores frozen terminal predictions first and never retries an ac
   assert.deepEqual(result.scored, [ids[1]]);
   assert.deepEqual(result.needs_attention, [ids[2]]);
   assert.equal(result.infer.length, 297);
-  assert.equal(result.known_spent_usd, 1.5);
-  assert.equal(result.held_unknown_usd, 1.5);
+  assert.equal(result.new_known_spent_usd, 1.5);
+  assert.equal(result.new_held_unknown_usd, 1.5);
+  assert.equal(result.total_known_spent_usd, null);
+  assert.equal(result.prior_cost_note, null);
   assert.match(result.next_step, /do-not-reinfer/);
   await writeFile(join(terminal, "receipt.json"), json({ ids: [ids[1]] }));
   await assert.rejects(inspectCampaign(options), /not-one-attempt|duplicate-attempt/);

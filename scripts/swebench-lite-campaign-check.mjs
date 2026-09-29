@@ -153,19 +153,30 @@ export async function inspectCampaign({ manifestPath, planPath, campaignDir, pac
   assert(priced + held <= plan.total_conservative_exposure_usd + 1e-8, "campaign-exposure-exceeded");
   const finalPath = join(campaignDir, "final-summary.json");
   let finalVerified = false;
+  let totalKnownSpend = null;
   if (await exists(finalPath)) {
     const final = await json(finalPath);
+    const priorSpent = final.prior_spent_usd ?? final.initial_five_spent_usd ?? (prior.length ? NaN : 0);
     const reports = (await readdir(campaignDir)).filter(name => name.endsWith(`.${final.run_id}.json`));
     assert(infer.length === 0 && attention.size === 0 && scoreOnly.size === 0 &&
       scored.size + prior.length === 300 && final.total === 300 && final.submitted === 300 &&
       final.candidate_sha256 === plan.candidate_package_sha256 && final.manifest_sha256 === plan.manifest_sha256 &&
       final.predictions_sha256 === await sha(join(campaignDir, "predictions-300.jsonl")) &&
-      reports.length === 1 && final.report_sha256 === await sha(join(campaignDir, reports[0])),
+      reports.length === 1 && final.report_sha256 === await sha(join(campaignDir, reports[0])) &&
+      Math.abs(final.new_spent_usd - priced) < 1e-8 &&
+      Math.abs(final.new_held_unknown_usd - held) < 1e-8 &&
+      Number.isFinite(priorSpent) && priorSpent >= 0,
     "final-report-or-predictions-changed");
     finalVerified = true;
+    totalKnownSpend = priorSpent + priced;
   }
+  // Receipts here cover only new IDs. Prior smoke/pilot spending is accounted
+  // separately in their original records; never call this the campaign total.
   return { prior_protected: prior, scored: [...scored], score_only: [...scoreOnly], needs_attention: [...attention],
-    infer, known_spent_usd: priced, held_unknown_usd: held, max_exposure_usd: plan.total_conservative_exposure_usd,
+    infer, new_known_spent_usd: priced, new_held_unknown_usd: held,
+    total_known_spent_usd: totalKnownSpend,
+    prior_cost_note: prior.length ? "new_known_spent_usd excludes prior smoke/pilot; total_known_spent_usd includes them only when the hash-checked final summary provides prior spend." : null,
+    max_exposure_usd: plan.total_conservative_exposure_usd,
     final_report_verified: finalVerified,
     next_step: finalVerified ? "complete; preserve-original-evidence" :
       attention.size ? "inspect-active-or-interrupted-attempts; do-not-reinfer" :
