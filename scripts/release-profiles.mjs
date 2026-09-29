@@ -1,6 +1,9 @@
 import { isAbsolute, relative, resolve } from 'node:path';
 
 export const RELEASE_PROFILES = Object.freeze({
+  'v013': Object.freeze({ id: 'v013', branch: 'main', prerelease: false, npmTag: 'latest', latest: true,
+    runtimeProfile: 'v010', assetsModule: 'runtime-assets-v010.js', markerExport: 'V010_RUNTIME_ASSET_VERSION', markerFile: 'sortie-dogs-v010.version',
+    allowInitialBranch: false, isolatedInstall: false, line: [0, 13] }),
   'v012': Object.freeze({ id: 'v012', branch: 'main', prerelease: false, npmTag: 'latest', latest: true,
     runtimeProfile: 'v010', assetsModule: 'runtime-assets-v010.js', markerExport: 'V010_RUNTIME_ASSET_VERSION', markerFile: 'sortie-dogs-v010.version',
     allowInitialBranch: false, isolatedInstall: false, line: [0, 12] }),

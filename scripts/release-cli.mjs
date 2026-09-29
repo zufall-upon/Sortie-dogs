@@ -1,4 +1,4 @@
-import { mkdir, writeFile, readFile, lstat, readdir } from 'node:fs/promises';
+import { mkdir, writeFile, readFile, lstat, readdir, rm } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
@@ -42,6 +42,8 @@ export const v2PluginWrapperSource = runtime => `import { createSortieDogsV2Plug
 export const releaseSmokeWorkerStarted = (events, records, unitID) =>
   events.some(event => event.type === 'tool_use' && event.part?.tool === 'task' && event.part.state?.status === 'completed') ||
   records.some(({ event }) => event.kind === 'unit.settled' && event.unit_id === unitID && event.disposition === 'succeeded');
+/** v0.13 only needs native Worker start and actual model identity at the CLI gate. */
+export const missionReleaseSmokeMode = profileId => profileId === 'v013' ? 'start' : profileId === 'v012' ? 'complete' : null;
 export async function command(executable, args, cwd, env, timeoutMs = 600_000) {
   const launch = nativeCLI(executable, args);
   const result = await runProcess(launch.executable, launch.args, { cwd, env: { ...process.env, ...env, PWD: cwd }, timeoutMs });
@@ -183,13 +185,32 @@ export async function installedFixture(tgz, directory, profileId = 'stable', { n
 }
 
 export async function inside(tgz, directory, profileId = 'stable', { capUSD = 1, budgetFile } = {}) {
-  if (profileId === 'v012') {
+  const missionMode = missionReleaseSmokeMode(profileId);
+  if (missionMode) {
     const { probe } = await import('./mission-cli-probe.mjs');
-    const result = await probe(tgz, directory, { mode: 'complete', timeoutSeconds: 300, capUSD, budgetFile });
-    assert(result.errors.length === 0 && result.code === 0 && !result.stopped, 'Mission CLI did not finish without procedural errors');
+    const result = await probe(tgz, directory, { mode: missionMode, timeoutSeconds: missionMode === 'start' ? 180 : 300,
+      capUSD, budgetFile, profileId, ...(missionMode === 'start' ? { workerStartDeadlineMs: 180_000 } : {}) });
+    assert(result.accepted && result.errors.length === 0, 'Mission CLI did not meet its declared probe contract');
     const worker = result.models.find(item => item.agent === 'dog-worker-v010');
-    assert(worker?.model?.id === 'gpt-6-luna-fast' && worker.model.variant === 'max' && worker.started_ms <= 60_000,
-      'Mission Worker must start on Luna Fast/max within 60 seconds');
+    const operator = result.models.find(item => item.sessionID === result.root && item.agent === 'dog-operator');
+    assert(operator?.model?.providerID === 'openai' && operator.model.id === 'gpt-6-sol' && operator.model.variant === 'xhigh',
+      'Mission Operator must actually run on Sol/xhigh');
+    assert(worker?.model?.providerID === 'openai' && worker.model.id === 'gpt-6-luna-fast' && worker.model.variant === 'max' &&
+      (missionMode !== 'complete' || worker.started_ms <= 60_000),
+      'Mission Worker must actually start on Luna Fast/max');
+    if (missionMode === 'start') {
+      assert(result.stopped === 'worker-started', 'Start probe did not observe the Worker');
+      assert(/^0\.13\.\d+$/.test(result.package_version) && result.runtime_marker?.startsWith(`${result.package_version}-`),
+        'v013 candidate version and installed Mission marker do not match');
+      // The probe has stopped its private server. Keep its observation/logs, not a stale plugin installation.
+      await rm(join(result.project, '.opencode'), { recursive: true });
+      return { schema: 1, version: result.package_version, profile: 'v010', sha256: result.candidate_sha256,
+        sessionID: result.root, workerStarted: true, workerStartedMs: worker.started_ms, workerModel: worker.model,
+        operatorModel: operator.model, runtimeMarker: result.runtime_marker, canonicalExit: null,
+        terminal: 'worker-started', artifactMatch: true, priced_usd: result.priced_usd,
+        unpriced_requests: result.unpriced_requests };
+    }
+    assert(result.code === 0 && !result.stopped, 'Mission CLI did not finish without procedural errors');
     const runtime = { stateDirectory: '.sortie-dogs-v010' };
     const mission = JSON.parse(await readFile(join(result.project, runtime.stateDirectory, 'missions', `${hash(result.root)}.json`), 'utf8'));
     const run = JSON.parse(await readFile(join(result.project, runtime.stateDirectory, 'operators', `${hash(result.root)}.json`), 'utf8'));
@@ -197,7 +218,7 @@ export async function inside(tgz, directory, profileId = 'stable', { capUSD = 1,
     assert(run.units.every(unit => unit.evidence.some(item => item.execution.exit_code === 0 && item.execution.outcome === 'pass')),
       'Mission has no observed successful unit validation');
     await command('node', ['check.mjs'], result.project, {});
-    return { schema: 1, version: '0.12.0', profile: 'v010', sha256: result.candidate_sha256, sessionID: result.root,
+    return { schema: 1, version: result.package_version, profile: 'v010', sha256: result.candidate_sha256, sessionID: result.root,
       workerStarted: true, workerStartedMs: worker.started_ms, workerModel: worker.model, canonicalExit: 0,
       terminal: 'succeeded', artifactMatch: true, priced_usd: result.priced_usd, unpriced_requests: result.unpriced_requests };
   }

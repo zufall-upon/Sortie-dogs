@@ -316,10 +316,16 @@ test("language follow-up marker upgrades the installed language1 preview", async
   assert.equal((await initializeProject(root, "v010")).version, V010_RUNTIME_ASSET_VERSION);
 }));
 
-test("v0.12 restore does not accept a v0.11 runtime marker", async () => fixture(async root => {
+test("v0.13 restore does not accept a v0.11 runtime marker", async () => fixture(async root => {
   await initializeProject(root, "v010");
   await writeFile(join(root, ".opencode/sortie-dogs-v010.version"), "0.11.4\n");
   await assert.rejects(initializeProject(root, "v010"), /cannot be updated/u);
+}));
+
+test("v0.13 refresh accepts the installed v0.12 Mission marker", async () => fixture(async root => {
+  await initializeProject(root, "v010");
+  await writeFile(join(root, ".opencode/sortie-dogs-v010.version"), "0.12.25-mission-continuity-v1\n");
+  assert.equal((await initializeProject(root, "v010")).version, V010_RUNTIME_ASSET_VERSION);
 }));
 
 test("preview role names are a bijection over separate logical authority identities", () => {
@@ -1352,6 +1358,8 @@ test("completed Coordinator Task with a still-streaming Worker offers root-only 
   host.history.root = [{ info: { role: "assistant", sessionID: "root" }, parts: [{ type: "tool", tool: "task",
     callID: "coordinator-call", state: { status: "completed",
       input: { subagent_type: "dogs-coordinator", task_id: "coordinator" } } }] }];
+  assert.equal((host.history.worker[0] as { parts: { state: { status: string } }[] }).parts[0]!.state.status,
+    "streaming", "the unfinished tool belongs to the Worker session, not the Coordinator Task");
   await hooks.tool!.sortie_v010_submit_mission.execute({ status: "blocked", summary: "Worker outcome unrecorded" },
     { sessionID: "coordinator" });
   const status = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
@@ -1361,6 +1369,11 @@ test("completed Coordinator Task with a still-streaming Worker offers root-only 
   assert.equal(status.task, undefined, "do not redispatch the finished Coordinator into a running Worker");
   assert.match(status.next_action, /parent Coordinator Task has finished[\s\S]+Operator root \(not Coordinator\): call sortie_v010_cancel_operator/u);
   assert.deepEqual(host.interrupts, [], "reading status does not stop or duplicate the Worker");
+  const replan = JSON.parse(await declare([{ ...unit, objective: "Replan after completed parent" }], "Worker is unresolved"));
+  assert.equal(replan.status, "mission-replan-worker-still-active", "a completed parent does not settle the Worker");
+  const after = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
+  assert.equal(after.budget.reserved_units, status.budget.reserved_units);
+  assert.deepEqual(host.interrupts, []);
 }));
 
 test("mission planning prepares an explicit in-project TMPDIR before dispatching the Worker", async () => fixture(async root => {

@@ -167,10 +167,10 @@ function classifyVersionTransition(installedValue: string, currentValue: string,
   // cross-minor migration; skipped lines still fail closed instead of bypassing migration steps.
   const adjacentPreOneLine = installed.major === 0 && current.major === 0 &&
     current.minor === installed.minor + 1;
-  // v0.11 used a different runtime. This explicit v010 asset migration restores
-  // the 0.10 line directly into 0.12 without selecting any v0.11 execution path.
+  // v0.11 used a different runtime. The v010 asset migration restores the 0.10
+  // preview into the 0.12/0.13 Mission line without selecting a v0.11 execution path.
   const restoredPreview = v010Restore && installed.major === 0 && installed.minor === 10 &&
-    current.major === 0 && current.minor === 12;
+    current.major === 0 && (current.minor === 12 || current.minor === 13);
   return sameLine || adjacentPreOneLine || restoredPreview ? "compatible-update" : "incompatible";
 }
 
