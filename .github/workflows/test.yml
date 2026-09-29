@@ -24,11 +24,24 @@ jobs:
     name: npm run test:windows
     runs-on: windows-latest
     timeout-minutes: 30
+    env:
+      SORTIE_WSL_DISTRO: Ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
+      - uses: Vampire/setup-wsl@v7
+        with:
+          distribution: Ubuntu-24.04
+      - name: Prepare Node in WSL for process-ownership test
+        shell: wsl-bash {0}
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq curl ca-certificates xz-utils git
+          curl -fsSL https://nodejs.org/dist/v22.22.1/node-v22.22.1-linux-x64.tar.xz | tar -xJ -C /usr/local --strip-components=1
+          node --version
+          npm --version
       - run: npm ci
       - run: npm run test:windows
