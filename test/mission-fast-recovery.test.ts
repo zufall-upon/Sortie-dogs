@@ -18,6 +18,7 @@ test("Fast-lane failed validation permits root micro-fix then a second direct Wo
     await exec("git", ["init", "--quiet"], { cwd: directory });
     await writeFile(join(directory, "check.mjs"),
       'import { readFileSync } from "node:fs";\nif (readFileSync("result.txt", "utf8") !== "fixed\\n") process.exit(1);\n');
+    await writeFile(join(directory, "review-notes.txt"), "Original review context\n");
     const agents: Record<string, { agent: string; parentID?: string; outcome?: string }> = {
       root: { agent: "dog-operator" }, first: { agent: "dog-worker-v010", parentID: "root" },
       second: { agent: "dog-worker-v010", parentID: "root" }, reviewer: { agent: "dog-reviewer-v010", parentID: "root" },
@@ -105,8 +106,22 @@ test("Fast-lane failed validation permits root micro-fix then a second direct Wo
       traces: ["Old check exited 0"] }, { sessionID: "root" }), /mission-review-awaits-current-validation/u,
     "a new Review may not bless an Operator edit against stale Worker validation");
     await writeFile(join(directory, "result.txt"), "fixed\n");
+    const preparedReview = JSON.parse(await hooks.tool!.sortie_v010_review_mission.execute({ risk_tags: ["public-logic"],
+      traces: ["check.mjs exited 0 after the correction"], evidence: [{ path: "review-notes.txt", offset: 1, limit: 1 }] },
+    { sessionID: "root" }));
+    await writeFile(join(directory, "result.txt"), "changed after Review preparation\n");
+    await assert.rejects(hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "stale-review-call" },
+      { args: structuredClone(preparedReview.task) }), /mission-review-awaits-current-validation/u,
+    "a prepared Reviewer Task must not launch against source changed after its evidence was captured");
+    await writeFile(join(directory, "result.txt"), "fixed\n");
+    await writeFile(join(directory, "review-notes.txt"), "Changed review context\n");
+    await assert.rejects(hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "stale-evidence-call" },
+      { args: structuredClone(preparedReview.task) }), /mission-review-snapshot-stale/u,
+    "changed review-only evidence must not be dispatched with an old Reviewer snapshot");
+    await writeFile(join(directory, "review-notes.txt"), "Original review context\n");
     const review = JSON.parse(await hooks.tool!.sortie_v010_review_mission.execute({ risk_tags: ["public-logic"],
-      traces: ["check.mjs exited 0 after the correction"] }, { sessionID: "root" }));
+      traces: ["check.mjs exited 0 after the correction"], evidence: [{ path: "review-notes.txt", offset: 1, limit: 1 }] },
+    { sessionID: "root" }));
     await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "review-call" },
       { args: structuredClone(review.task) });
     agents.reviewer!.outcome = "succeeded";
