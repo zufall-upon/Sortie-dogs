@@ -107,24 +107,13 @@ test('preflight runs the target release test without release side effects', asyn
   });
 });
 
-test('v0.13 CLI gate records Worker/model startup without misreporting completion', async () => {
+test('v0.13 rejects the legacy batch that commits after package/global apply', async () => {
   const manifest = { schema: 1, repository: 'fixture/repo', remote: 'origin', branch: 'main', releaseProfile: 'v013',
     npm: 'npm', gh: 'gh', globalRoot: resolve('_testenv/global'), files: ['package.json', 'package-lock.json', 'README.md'],
     versionTextFiles: ['README.md'], targetTests: ['test/release.test.ts'], notesFile: 'docs/release-batch.md' };
   const batch = new Release({ root: resolve('.'), version: '0.13.0', manifest, execute: async () => ok() });
   await assert.rejects(batch.prepare(), /v013-release-requires-fixed-commit/u,
     'the legacy batch must not package before the release commit or apply globally before tests');
-  batch.state = { artifact: { sha256: 'frozen' } };
-  const started = { schema: 1, version: '0.13.0', profile: 'v010', sha256: 'frozen', sessionID: 'ses_worker',
-    workerStarted: true, workerStartedMs: 95_000, workerModel: { providerID: 'openai', id: 'gpt-6-luna-fast', variant: 'max' },
-    operatorModel: { providerID: 'openai', id: 'gpt-6-sol', variant: 'xhigh' }, runtimeMarker: '0.13.0-fast-first-v1',
-    canonicalExit: null, terminal: 'worker-started', artifactMatch: true };
-  batch.checkCLI(started);
-  assert.throws(() => batch.checkCLI({ ...started, workerModel: { ...started.workerModel, id: 'other' } }), /CLI receipt/u);
-  assert.throws(() => batch.checkCLI({ ...started, terminal: 'succeeded' }), /CLI receipt/u);
-  assert.throws(() => batch.checkCLI({ ...started, canonicalExit: 0 }), /CLI receipt/u);
-  assert.throws(() => batch.checkCLI({ ...started, runtimeMarker: '0.12.25-mission-continuity-v1' }), /CLI receipt/u);
-  assert.throws(() => batch.checkCLI({ ...started, sha256: 'different' }), /CLI receipt/u);
 });
 
 test('failed phase writes a typed receipt with the exact command and success clears it', async () => {

@@ -309,18 +309,11 @@ export class Release {
       ...this.state.artifact, url: this.state.steps.release.url, npmPublish: 'manual' };
   }
   checkCLI(receipt) {
-    const v013StartOnly = this.profile.id === 'v013';
     ensure(receipt?.schema === 1 && receipt.version === this.version && receipt.sha256 === this.state.artifact.sha256 &&
       typeof receipt.runtimeMarker === 'string' && receipt.runtimeMarker.length > 0 &&
       typeof receipt.sessionID === 'string' && receipt.sessionID.startsWith('ses_') &&
-      receipt.workerStarted === true && (v013StartOnly
-        ? receipt.terminal === 'worker-started' && receipt.canonicalExit === null &&
-          receipt.runtimeMarker.startsWith(`${this.version}-`) &&
-          Number.isFinite(receipt.workerStartedMs) && receipt.workerStartedMs >= 0 &&
-          receipt.operatorModel?.providerID === 'openai' && receipt.operatorModel.id === 'gpt-6-sol' && receipt.operatorModel.variant === 'xhigh' &&
-          receipt.workerModel?.providerID === 'openai' && receipt.workerModel.id === 'gpt-6-luna-fast' && receipt.workerModel.variant === 'max'
-        : receipt.canonicalExit === 0 && receipt.terminal === 'succeeded') &&
-      receipt.artifactMatch === true, 'CLI receipt does not prove the required frozen-candidate probe');
+      receipt.workerStarted === true && receipt.canonicalExit === 0 && receipt.terminal === 'succeeded' &&
+      receipt.artifactMatch === true, 'CLI receipt does not prove the frozen candidate completed');
     if (this.profile.runtimeProfile !== 'stable') ensure(receipt.profile === this.profile.runtimeProfile, 'CLI receipt runtime profile mismatch');
   }
   async checkCommit(head) {

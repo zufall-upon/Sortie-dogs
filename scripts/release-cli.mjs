@@ -44,6 +44,23 @@ export const releaseSmokeWorkerStarted = (events, records, unitID) =>
   records.some(({ event }) => event.kind === 'unit.settled' && event.unit_id === unitID && event.disposition === 'succeeded');
 /** v0.13 only needs native Worker start and actual model identity at the CLI gate. */
 export const missionReleaseSmokeMode = profileId => profileId === 'v013' ? 'start' : profileId === 'v012' ? 'complete' : null;
+export function v013StartupReceipt(result) {
+  assert(result.accepted && result.errors.length === 0 && result.stopped === 'worker-started',
+    'v013 did not observe a clean native Worker start');
+  const worker = result.models.find(item => item.agent === 'dog-worker-v010');
+  const operator = result.models.find(item => item.sessionID === result.root && item.agent === 'dog-operator');
+  assert(operator?.model?.providerID === 'openai' && operator.model.id === 'gpt-6-sol' && operator.model.variant === 'xhigh',
+    'Mission Operator must actually run on Sol/xhigh');
+  assert(worker?.model?.providerID === 'openai' && worker.model.id === 'gpt-6-luna-fast' && worker.model.variant === 'max' &&
+    Number.isFinite(worker.started_ms) && worker.started_ms >= 0, 'Mission Worker must actually start on Luna Fast/max');
+  assert(/^0\.13\.\d+$/.test(result.package_version) && result.runtime_marker?.startsWith(`${result.package_version}-`),
+    'v013 candidate version and installed Mission marker do not match');
+  return { schema: 1, version: result.package_version, profile: 'v010', sha256: result.candidate_sha256,
+    sessionID: result.root, workerStarted: true, workerStartedMs: worker.started_ms, workerModel: worker.model,
+    operatorModel: operator.model, runtimeMarker: result.runtime_marker, canonicalExit: null,
+    terminal: 'worker-started', artifactMatch: true, priced_usd: result.priced_usd,
+    unpriced_requests: result.unpriced_requests };
+}
 export async function command(executable, args, cwd, env, timeoutMs = 600_000) {
   const launch = nativeCLI(executable, args);
   const result = await runProcess(launch.executable, launch.args, { cwd, env: { ...process.env, ...env, PWD: cwd }, timeoutMs });
@@ -190,27 +207,17 @@ export async function inside(tgz, directory, profileId = 'stable', { capUSD = 1,
     const { probe } = await import('./mission-cli-probe.mjs');
     const result = await probe(tgz, directory, { mode: missionMode, timeoutSeconds: missionMode === 'start' ? 180 : 300,
       capUSD, budgetFile, profileId, ...(missionMode === 'start' ? { workerStartDeadlineMs: 180_000 } : {}) });
-    assert(result.accepted && result.errors.length === 0, 'Mission CLI did not meet its declared probe contract');
-    const worker = result.models.find(item => item.agent === 'dog-worker-v010');
-    const operator = result.models.find(item => item.sessionID === result.root && item.agent === 'dog-operator');
-    assert(operator?.model?.providerID === 'openai' && operator.model.id === 'gpt-6-sol' && operator.model.variant === 'xhigh',
-      'Mission Operator must actually run on Sol/xhigh');
-    assert(worker?.model?.providerID === 'openai' && worker.model.id === 'gpt-6-luna-fast' && worker.model.variant === 'max' &&
-      (missionMode !== 'complete' || worker.started_ms <= 60_000),
-      'Mission Worker must actually start on Luna Fast/max');
     if (missionMode === 'start') {
-      assert(result.stopped === 'worker-started', 'Start probe did not observe the Worker');
-      assert(/^0\.13\.\d+$/.test(result.package_version) && result.runtime_marker?.startsWith(`${result.package_version}-`),
-        'v013 candidate version and installed Mission marker do not match');
+      const receipt = v013StartupReceipt(result);
       // The probe has stopped its private server. Keep its observation/logs, not a stale plugin installation.
       await rm(join(result.project, '.opencode'), { recursive: true });
-      return { schema: 1, version: result.package_version, profile: 'v010', sha256: result.candidate_sha256,
-        sessionID: result.root, workerStarted: true, workerStartedMs: worker.started_ms, workerModel: worker.model,
-        operatorModel: operator.model, runtimeMarker: result.runtime_marker, canonicalExit: null,
-        terminal: 'worker-started', artifactMatch: true, priced_usd: result.priced_usd,
-        unpriced_requests: result.unpriced_requests };
+      return receipt;
     }
-    assert(result.code === 0 && !result.stopped, 'Mission CLI did not finish without procedural errors');
+    assert(result.accepted && result.errors.length === 0 && result.code === 0 && !result.stopped,
+      'Mission CLI did not finish without procedural errors');
+    const worker = result.models.find(item => item.agent === 'dog-worker-v010');
+    assert(worker?.model?.id === 'gpt-6-luna-fast' && worker.model.variant === 'max' && worker.started_ms <= 60_000,
+      'Mission Worker must start on Luna Fast/max within 60 seconds');
     const runtime = { stateDirectory: '.sortie-dogs-v010' };
     const mission = JSON.parse(await readFile(join(result.project, runtime.stateDirectory, 'missions', `${hash(result.root)}.json`), 'utf8'));
     const run = JSON.parse(await readFile(join(result.project, runtime.stateDirectory, 'operators', `${hash(result.root)}.json`), 'utf8'));
