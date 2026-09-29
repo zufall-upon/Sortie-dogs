@@ -149,6 +149,19 @@ for (const mode of ["implementation", "executed", "NO_START"] as const) test(`mi
       assert.match(completed.return_report, /SourceReview\s+🟡 EVIDENCE_GAPS（PASSではない）/u);
       assert.match(completed.return_report, /⏳ 未実施\n独立Reviewの未解決証拠/u);
       assert.match(completed.return_report, /➡️ NEXT\n未解決証拠を報告/u);
+      const visible = { text: `✅ **DONE** — validated result\n\n**次:** なし\n\n${completed.return_report}` };
+      await cold["experimental.text.complete"]!({ sessionID: "root", messageID: "final", partID: "final-text" }, visible);
+      assert.match(visible.text, /SourceReview\s+🟡 EVIDENCE_GAPS（PASSではない）/u,
+        "the final user-facing renderer must retain the native Review verdict, not only the completion tool result");
+      assert.match(visible.text, /⏳ 未実施\n独立Reviewの未解決証拠/u);
+      assert.doesNotMatch(visible.text, /SourceReview\s+未記録/u);
+      assert.doesNotMatch(visible.text, /\*\*次:\*\* なし/u);
+    }
+    if (mode === "executed") {
+      const visible = { text: "✅ **DONE** — validated operation\n\n**次:** なし" };
+      await cold["experimental.text.complete"]!({ sessionID: "root", messageID: "final-pass", partID: "final-text" }, visible);
+      assert.match(visible.text, /SourceReview\s+🟢 PASS（独立Reviewer）/u);
+      assert.doesNotMatch(visible.text, /EVIDENCE_GAPS/u);
     }
     const final = await status();
     assert.equal(final.phase, "completed");

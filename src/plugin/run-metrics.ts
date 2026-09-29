@@ -689,14 +689,36 @@ export function insertRunMetrics(text: string, metrics: RunMetrics): string {
 }
 
 export function insertSortieResult(text: string, result: SortieResult,
-  missionReview?: SortieResultPresentation["missionReview"]): string {
-  const presentation = { ...extractSortiePresentation(text), missionReview };
+  missionReview?: SortieResultPresentation["missionReview"], reviewEvidenceGaps?: string): string {
   const visible = sanitizeTerminalReport(text);
+  const gapSummary = missionReview === "evidence-gaps"
+    ? reviewEvidenceGaps?.replace(/^EVIDENCE_GAPS\s*/u, "").replace(/\s+/gu, " ").trim().slice(0, 500) || "独立Reviewの証拠不足が未解決"
+    : undefined;
+  const nextAction = "未解決証拠を報告し、必要なら対象箇所を後続確認（今回のReviewはPASSではない）";
+  const reported = extractSortiePresentation(text);
+  const meaningful = (value: string | undefined) => value && !/^(?:なし|none|未取得)(?:。)?$/iu.test(value.trim());
+  const pending = meaningful(reported.pending) ? reported.pending : undefined;
+  const presentation = { ...reported, missionReview,
+    ...(gapSummary ? {
+      pending: pending?.includes(gapSummary) ? pending : `${pending ? `${pending} / ` : ""}独立Reviewの未解決証拠: ${gapSummary}`,
+      next: meaningful(reported.next) ? reported.next : nextAction,
+    } : {}) };
   const checkpoint = terminalCheckpoint(visible);
   if (checkpoint === undefined) return visible;
   // A title in model text is not trusted evidence. Replace existing cards, including legacy cards.
   const newline = visible.includes("\r\n") ? "\r\n" : "\n";
   const lines = visible.split(/\r?\n/u);
+  if (gapSummary) {
+    const top = topLevelLines(visible);
+    for (const [position, { index, line }] of top.entries()) {
+      if (index <= checkpoint.index) continue;
+      const staleNext = /^([ \t]*(?:\*\*(?:次|NEXT):\*\*|\*\*(?:次|NEXT)\*\*:|(?:次|NEXT):)[ \t]*)(?:なし|none)(?:。)?[ \t]*$/iu.exec(line);
+      if (staleNext) { lines[index] = `${staleNext[1]}${nextAction}`; continue; }
+      if (!/^[ \t]*(?:#{1,6}[ \t]*)?(?:\*\*(?:次|NEXT):?\*\*|(?:次|NEXT):?)[ \t]*$/iu.test(line)) continue;
+      const following = top.slice(position + 1).find(item => item.line.trim().length > 0);
+      if (following && /^(?:なし|none)(?:。)?$/iu.test(following.line.trim())) lines[following.index] = nextAction;
+    }
+  }
   const cardLines = new Set<number>();
   let legacyCard = false;
   let previousIndex = checkpoint.index;

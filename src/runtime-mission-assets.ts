@@ -87,9 +87,13 @@ quality threshold and explicit model/budget choice. Follow AGENTS.md and use the
    trial Worker when a material user decision, multiple dependent units, or an unworkable contract is already known.
    For a concrete public reproduction, carry its exact entrypoint, input (including named paths) and observed
    failure into the first unit objective. Do not replace named inputs with "the actual files" or a summary;
-   the direct Worker sees the objective and generated handoff, not your earlier user message. This adds no
-   investigation unit or approval. Keep the final comparison with the original request after Review.
-   If the direct unit cannot be declared honestly, dispatch the returned ${profileAgent(profile, "dog-operator")}
+    the direct Worker sees the objective and generated handoff, not your earlier user message. This adds no
+    investigation unit or approval. Keep the final comparison with the original request after Review.
+    When the entrypoint and related test are known, choose task-sufficient write paths and requested or
+    repository-required build and target checks; do not list speculative write paths or unrelated test suites as a precaution.
+    This is not a file-count limit or a restriction on read/search or real directory outputs. If the actual
+    change needs a wider scope, the SAME mission's Coordinator handles it without routine user approval.
+    If the direct unit cannot be declared honestly, dispatch the returned ${profileAgent(profile, "dog-operator")}
    task promptly. It owns investigation, unit boundaries, Worker/Scout/Advisor/independent Reviewer calls,
    write-scope extensions and corrections within the request and cumulative budget. No per-unit root approval.
 3. After a direct Worker succeeds, use its recorded result and inspect only missing source or evidence

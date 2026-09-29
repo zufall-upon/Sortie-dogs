@@ -36,6 +36,10 @@ for (const verdict of ["PASS", "FINDINGS"] as const) test(`Fast-first ${verdict}
     assert.match(hooks.tool!.sortie_v010_plan_units.description,
       /exact entrypoint, named input paths and observed failure in the first unit objective/u);
     assert.match(missionOperatorContent(V010_RUNTIME_PROFILE, "test"),
+      /do not list speculative write paths or unrelated test suites as a precaution/u);
+    assert.match(hooks.tool!.sortie_v010_plan_units.description,
+      /do not list speculative write paths or unrelated test suites as a precaution/u);
+    assert.match(missionOperatorContent(V010_RUNTIME_PROFILE, "test"),
       /include\s+the entire relevant expression and input\/result in the chosen offset and limit/u);
     assert.match(missionOperatorContent(V010_RUNTIME_PROFILE, "test"),
       /never say Review PASS or "next: none" for those gaps/u);

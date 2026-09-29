@@ -62,6 +62,10 @@ function missionReportReview(mission: OperatorMission | undefined, runID: string
     ? review.verdict : undefined;
 }
 
+function missionReportReviewGaps(mission: OperatorMission | undefined, runID: string): string | undefined {
+  return missionReportReview(mission, runID) === "evidence-gaps" ? mission?.review?.result : undefined;
+}
+
 export function processRemediationReplacementPacket(code: string, packet: unknown, cancelTool: string, prepareTool: string) {
   const durable = record(packet) ? { ...packet, resume_requires_host_reconciliation: false,
     next_action: `This immutable run is not resumable. Call ${cancelTool} with reason=plain, then call ${prepareTool} for a replacement run under the same goal.` } : packet;
@@ -394,6 +398,13 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           get: async id => payload(await session("get", { path: { id }, query: { directory: input.directory } })),
           messages: reviewMessages,
         }),
+      missionReviewPresentation: async root => {
+        const run = await operators.read(root);
+        if (!run) return undefined;
+        const mission = await missions.read(root);
+        return { verdict: missionReportReview(mission, run.runID),
+          evidenceGaps: missionReportReviewGaps(mission, run.runID) };
+      },
       requiresExplicitAcceptance: async root => {
         const mission = await missions.read(root);
         if (mission && !["completed", "cancelled"].includes(mission.phase)) return true;
@@ -1140,7 +1151,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             (reviewGaps ? `\n\n**未実施:** 独立Reviewの未解決証拠: ${gapSummary}\n\n**次:** 未解決証拠を報告し、必要なら対象箇所を後続確認（今回のReviewはPASSではない）`
               : "\n\n**次:** なし");
           const rendered = await control!.renderReturnReport(context.sessionID, text, goalFingerprint(result.receipt),
-            missionReportReview(mission, state.runID)).catch(() => undefined);
+            missionReportReview(mission, state.runID), missionReportReviewGaps(mission, state.runID)).catch(() => undefined);
           if (rendered) panel = returnReportPanel(rendered);
         }
         return JSON.stringify({ status: result.status, run_id: state.runID,
@@ -1677,7 +1688,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           next_action: "Before dispatch, correct or prepare the listed in-project TMPDIR directories. Keep this plan and its budget; no new approval or validation run is needed." } : {}) }
         : next);
     }
-    tools[planUnits] = { description: "Coordinator (or single-unit Fast-lane Operator): declare useful units, then dispatch the returned Worker immediately. Host generates IDs, handoff, manifest and proof mapping. Keep every original requirement covered. For a concrete public reproduction, include its exact entrypoint, named input paths and observed failure in the first unit objective; the Worker does not see the earlier user message. Use write: [] for read-only verification; use dir/** for directory outputs including not-yet-created trees. Native absolute paths support global installs and external outputs under host permissions; include their actual paths in read/write for evidence. Final validation command in each unit proves that unit; read-only diagnostic commands need no registration. Recalling with reason replaces settled work within unchanged requirements and cumulative budget; include required scope extensions here. Rejected budget, contract or control-storage preparation preserves the existing run so you can correct the plan directly.",
+    tools[planUnits] = { description: "Coordinator (or single-unit Fast-lane Operator): declare useful units, then dispatch the returned Worker immediately. Host generates IDs, handoff, manifest and proof mapping. Keep every original requirement covered. For a concrete public reproduction, include its exact entrypoint, named input paths and observed failure in the first unit objective; the Worker does not see the earlier user message. When entrypoint/test are known, choose task-sufficient write paths and requested or repository-required build and target checks; do not list speculative write paths or unrelated test suites as a precaution. Read/search is unrestricted; this is not a file-count limit, and actual directory outputs or later same-mission scope extensions remain available. Use write: [] for read-only verification; use dir/** for directory outputs including not-yet-created trees. Native absolute paths support global installs and external outputs under host permissions; include their actual paths in read/write for evidence. Final validation command in each unit proves that unit; read-only diagnostic commands need no registration. Recalling with reason replaces settled work within unchanged requirements and cumulative budget; include required scope extensions here. Rejected budget, contract or control-storage preparation preserves the existing run so you can correct the plan directly.",
       args: { units: { type: "array", minItems: 1, maxItems: 32, items: { type: "object", additionalProperties: false,
         properties: { title: { type: "string" }, objective: { type: "string" },
           read: { ...stringList, description: "Inputs that affect validation, not an allowlist for observation. Do not include whole live session/database/log trees just to inspect them." }, write: stringList,
@@ -1838,7 +1849,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         const run = await operators.read(sessionID);
         const mission = await missions.read(sessionID);
         const text = await control!.renderReturnReport(sessionID, decoratePreviewHeadings(part.text), goalFingerprint(receipt),
-          run ? missionReportReview(mission, run.runID) : undefined);
+          run ? missionReportReview(mission, run.runID) : undefined,
+          run ? missionReportReviewGaps(mission, run.runID) : undefined);
         if (text === undefined) return;
         if (text === part.text) { rememberRendered(key, text); return; }
         const raw = input.client as unknown as Record<string, unknown> | undefined;
@@ -2512,9 +2524,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           if (receipt?.status === "succeeded") {
             if (!hadTerminalHeading) {
               const run = await operators.read(request.sessionID);
-              const mission = await missions.read(request.sessionID);
+              const mission = run ? await missions.read(request.sessionID) : undefined;
               output.text = await control!.renderReturnReport(request.sessionID, output.text, goalFingerprint(receipt),
-                run ? missionReportReview(mission, run.runID) : undefined) ?? output.text;
+                run ? missionReportReview(mission, run.runID) : undefined,
+                run ? missionReportReviewGaps(mission, run.runID) : undefined) ?? output.text;
             }
             if (output.text.includes("<summary><strong>🐾 SORTIE DOGS — 帰還報告")) rememberRendered(`${request.sessionID}:${request.messageID}:${request.partID}`, output.text);
           }

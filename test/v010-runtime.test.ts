@@ -5,6 +5,7 @@ import { chmod, lstat, mkdtemp, mkdir, readFile, readdir, rename, writeFile, rm,
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
+import { pathToFileURL } from "node:url";
 import { OperatorContractError, OperatorRuntime, operatorGitPathAuthorized, parseOperatorPlan, type OperatorTask } from "../dist/core/operator-runtime.js";
 import { CONTRACT_TEXT_LIMITS } from "../dist/core/contract-limits.js";
 import { OperatorProposalRuntime } from "../dist/core/operator-proposal.js";
@@ -599,7 +600,7 @@ test("only the isolated preview fixture enables two-level native subagents", () 
   assert.equal(fixtureOpenCodeConfig("/tmp/preview.js", V010_RUNTIME_PROFILE).experimental?.subagent_depth, 2);
   assert.equal("experimental" in fixtureOpenCodeConfig("/tmp/stable.js", STABLE_RUNTIME_PROFILE), false);
   assert.deepEqual(fixtureOpenCodeConfig("/tmp/stable.js", STABLE_RUNTIME_PROFILE, "2.0.14").plugins,
-    ["file:///tmp/stable.js"]);
+    [pathToFileURL("/tmp/stable.js").href]);
   assert.equal("plugin" in fixtureOpenCodeConfig("/tmp/stable.js", STABLE_RUNTIME_PROFILE, "2.0.14"), false);
 });
 
