@@ -13,7 +13,7 @@ import { SortieDogsV010Plugin } from "../dist/plugin/profiled.js";
 
 const exec = promisify(execFile);
 
-for (const mode of ["implementation", "executed", "NO_START"] as const) test(`mission completion keeps checks, review and operation outcomes separate: ${mode}`, async () => {
+for (const mode of ["implementation", "executed", "NO_START", "legacy-background"] as const) test(`mission completion keeps checks, review and operation outcomes separate: ${mode}`, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const root = await mkdtemp(resolve("_testenv/mission-completion-"));
   try {
@@ -73,8 +73,29 @@ for (const mode of ["implementation", "executed", "NO_START"] as const) test(`mi
       const binding = JSON.parse(await hooks.tool!.sortie_v010_bind_write_gate.execute({ project_root: root, manifest_path: unit.manifestPath }, { sessionID: "worker" }));
       assert.equal(binding.status, "bound", JSON.stringify(binding));
     } finally { Date.now = clock; }
+    if (mode === "legacy-background") {
+      // V2 returns a completed tool call for a launched background shell, with no process exit.
+      // This is the metadata captured by the real Anko run, not an operation result.
+      await hooks["tool.execute.before"]!({ tool: "shell", sessionID: "worker", callID: "background-launch" },
+        { args: { command: "node check.mjs", workdir: root } });
+      await hooks["tool.execute.after"]!({ tool: "shell", sessionID: "worker", callID: "background-launch" },
+        { output: "", metadata: { status: "running", shellID: "sh_anko" } });
+      const observed = await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root");
+      assert.equal(observed.execution?.observations[0]?.completedAt, undefined,
+        "a background launch must not be recorded as a terminal failure or success");
+      assert.equal(observed.execution?.observations[0]?.status, "running");
+      const submitted = JSON.parse(await hooks.tool!.sortie_v010_submit_mission.execute({ status: "ready", summary: "launched" },
+        { sessionID: "coordinator" }));
+      assert.equal(submitted.status, "operation-incomplete");
+      assert.equal(submitted.operation.status, "running");
+      assert.match(submitted.next_action, /do not (?:relaunch|start another)/iu);
+      return;
+    }
     if (mode === "implementation") await writeFile(join(root, "result.txt"), "ready\n");
     if (mode === "executed") {
+      await assert.rejects(hooks["tool.execute.before"]!({ tool: "shell", sessionID: "worker", callID: "background-operation" },
+        { args: { command: "node check.mjs", workdir: root, background: true, timeout: 0 } }),
+      /mission-operation-background: run the declared command in foreground/);
       for (const command of ["node check.mjs | tee result.txt", "node check.mjs > result.txt",
         "node check.mjs 2> result.txt", "node check.mjs && echo done"]) {
         await assert.rejects(hooks["tool.execute.before"]!({ tool: "bash", sessionID: "worker", callID: `decorated-${command}` },
