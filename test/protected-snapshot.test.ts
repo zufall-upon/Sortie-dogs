@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { operationInputSnapshot, protectedSnapshot, refreshProtectedSnapshot } from "../dist/plugin/protected-snapshot.js";
@@ -101,4 +101,24 @@ test("operation output creation preserves input identity but input changes do no
   assert.notEqual(await operationInputSnapshot(root, pinned.binding), inputs);
   await writeFile(join(root, "manifest.json"), "{}");
   assert.equal(await operationInputSnapshot(root, pinned.binding), undefined);
+}));
+
+test("project-local tool dependency directory symlinks remain verifiable, but external links do not", async () => fixture(async root => {
+  await mkdir(join(root, ".sortie-env/node_modules/pkg"), { recursive: true });
+  await writeFile(join(root, ".sortie-env/node_modules/pkg/index.js"), "first");
+  await symlink(".sortie-env/node_modules", join(root, "node_modules"), "dir");
+  const pinned = await pin(root, ["input.txt"], ["result.txt", "node_modules/**"]);
+  assert.deepEqual(await refreshProtectedSnapshot(root, pinned.binding), { source: pinned.source, candidate: pinned.candidate });
+  await writeFile(join(root, ".sortie-env/node_modules/pkg/index.js"), "second");
+  const changed = await refreshProtectedSnapshot(root, pinned.binding);
+  assert.ok(changed);
+  assert.notEqual(changed.candidate, pinned.candidate);
+  await rm(join(root, "node_modules"));
+  await symlink(resolve("_testenv"), join(root, "node_modules"), "dir");
+  assert.equal(await protectedSnapshot({ projectRoot: root, manifestPath: join(root, "manifest.json"),
+    manifestHash: hash((await readFile(join(root, "manifest.json"))).toString("utf8")) }), undefined);
+  await rm(join(root, "node_modules"));
+  await symlink(".sortie-env/node_modules", join(root, "node_modules"), "dir");
+  await symlink("../..", join(root, ".sortie-env/node_modules/loop"), "dir");
+  assert.equal(await refreshProtectedSnapshot(root, pinned.binding), undefined, "internal directory cycles cannot become evidence");
 }));
