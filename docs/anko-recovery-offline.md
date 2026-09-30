@@ -9,6 +9,11 @@ PR: https://github.com/zufall-upon/Sortie-dogs/pull/146 (base: `main`).
 Subsequent user-authorized real-session findings and repairs are recorded in
 [`anko-recovery-live.md`](anko-recovery-live.md); the status below describes the
 original offline candidate, not the later live follow-up.
+Live follow-up: actual V2 same-Task scope recovery and a deliberately missed native
+Task after-hook both completed with independent Dog-Reviewer **PASS** and
+**succeeded** receipts. Runtime follow-up `be1dd37`, launcher correction `2a6d265`;
+integrated offline checks **1394/1394 PASS**. These bounded fixture results do not
+establish canonical Anko completion or its official score.
 This is an offline runtime fix, not a release or an Anko completion report.
 The original working tree, existing campaigns and historical Anko artifacts were
 not modified. No paid Worker/model campaign, publish or global apply was run.

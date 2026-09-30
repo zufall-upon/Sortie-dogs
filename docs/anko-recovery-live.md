@@ -82,7 +82,62 @@ Review is still required in the rerun.
   Product/package bytes and the successful offline candidate are unchanged;
   the launcher-only correction is checked through the actual startup path.
 
-Next: package the corrected commit once, rerun the exact prompt and fixed input
-checks, require actual same-Worker shell scope repair and Mission-child Review,
-then exercise a deliberately missed Task after-hook with real native history.
-No real-session success, Anko completion or official score is claimed yet.
+## Completed real V2 reruns
+
+Runtime candidate: `be1dd37c3f191bc0a2ff828d87bfb43ece870417`, fixed package
+SHA-256 `e3673065cedd6a4942ed5bd5e357333eb56a8980a0e494da1cee9af5020036fa`.
+Launcher-only credential correction: `2a6d265`. Both ran sequentially with the
+same pinned package, original prompt, fixed input hashes and actual model routes;
+the second deliberately omitted only the Worker's Task after-hook. The original
+unregistered launcher was corrected between failed and successful runs, so this
+is not a claim that launcher conditions were identical throughout.
+
+| Scenario | Actual root / Worker / Reviewer | Native + assertion exit / runtime | Priced USD | Result |
+| --- | --- | --- | --- | --- |
+| Same-Task native/shell scope repair | `ses_f0e856c47ffeEzOfbe5chSej7T` / `ses_f0e840b34ffe5PunEZJsAvi6fq` / `ses_f0e80e311ffemHEmqvqYOM08Gv` | 0 / 0, 583.925 s | 0.48394276 | independent Reviewer **PASS**, receipt **succeeded**, fixture commit `6be339c8594e45097a3d9bc2c5a9dbc146bad0ee` |
+| Controlled missed native Task after-hook | `ses_f0e7c677affexfaGr2WOAEJ230` / `ses_f0e7b3737ffeleGtx5JOqNhkbx` / `ses_f0e790191ffeV56KMxJZVabXYz` | 0 / 0, 524.668 s | 0.45063056 | independent Reviewer **PASS**, receipt **succeeded**, fixture commit `7cc6463fd31b19d21558d444b99261d1005ef875` |
+
+The command for both is `node
+_testenv/anko-recovery-pr-evidence/live-probe.mjs <fixed-tgz> <isolated-output>
+_testenv/anko-recovery-pr-evidence/live-budget.json`; the controlled case also sets
+`SORTIE_LIVE_DROP_WORKER_AFTER=1`. Retained runner SHA-256:
+`a9af73704cf031482d2706764813c2008fc02137409f39309f84de9652c3a81d`.
+The launcher was detached only to survive host restarts; its native 600-second
+watchdog, USD cap, saved exits and stop conditions remained active. Cancellation
+notifications affected the waiting commands, not these completed executions.
+
+Both assertions verify one Worker, one unit/attempt, one formal validation
+admission, actual Worker `expand_unit`, unchanged fixed inputs, requested Git
+commit, independent Reviewer and the succeeded receipt. The Worker's initial
+read of the not-yet-created `extra.txt` returned file-not-found in both runs;
+this harmless discovery error did not require retry, permission or another unit.
+
+The missed-after wrapper records a real durable `running` unit, a dispatched
+attempt and no saved terminal while the native Task has already returned. The
+subsequent Review recovers the same attempt/run/unit/Task/call/child/fingerprint,
+then records exactly one successful settlement with existing observed command
+proof. No probe code repairs a Mission or ledger. Final ledgers contain one
+reservation and one matching settlement, no outstanding reservation, and no
+durable writer leases. Process-local authorization release is not separately
+exposed; do not claim that its internal memory was independently inspected.
+The supplied fixture checks and these lifecycle assertions are independent of
+the Anko benchmark's quality and official scoring.
+
+Worker-only settled estimates are $0.01636236 and $0.01083216, distinct from the
+total per-probe estimates in the table. Successful probes have zero unpriced
+messages. Through these completions, the lane measured $1.81168364 in priced
+usage, but retained the full $1.50 reservation for each of the two earlier
+interrupted/unpriced probes: accounted total **$3.97172612**, conservative
+remaining **$2.02827388** of $6. The reported priced sum is not the known total.
+
+No additional runtime change or repeat full suite was needed for these green
+observations. Raw lifecycle assertions are in
+`_testenv/anko-recovery-pr-evidence/live-green-assertions.json`; raw sessions,
+native CLI logs, hashes and before/after ledgers are retained in their fixture
+directories.
+
+Next: one bounded actual V2 check of the still-offline-only fixed scratch cleanup
+and confirmed-condition handoff, using this same package. Canonical Anko runner
+source remains unavailable; Anko completion, independent Anko Review and official
+score are still unverified. This repair lane does not substitute a probe for that
+runner, merge the PR, publish a release or apply globally.
