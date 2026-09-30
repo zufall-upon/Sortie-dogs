@@ -63,6 +63,7 @@
     "postbuild": "node --input-type=module --eval \"import fs from 'node:fs'; const path = 'dist/cli/main.js'; const source = fs.readFileSync(path, 'utf8'); if (!source.startsWith('#!')) fs.writeFileSync(path, '#!/usr/bin/env node\\n' + source); if (process.platform !== 'win32') fs.chmodSync(path, 0o755);\"",
     "prepack": "npm run build",
     "test": "node scripts/test-router.mjs quick",
+    "test:targeted": "node scripts/test-router.mjs targeted",
     "test:windows": "node scripts/test-router.mjs windows",
     "pretest:dispatch": "npm run build",
     "test:dispatch": "node --experimental-strip-types --import ./test/setup.ts --test --test-timeout=100000 --test-reporter=spec \"test/execution-plan.test.ts\" \"test/worktree-parallel-dispatch.test.ts\" \"test/acceptance-compiler.test.ts\" \"test/run-flight-ledger.test.ts\" \"test/evidence-capsule.test.ts\"",

@@ -5,9 +5,25 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 export function route(platform, mode) {
-  if (!['quick', 'full', 'windows'].includes(mode)) throw new Error(`Unknown test mode: ${mode}`);
+  if (!['quick', 'targeted', 'full', 'windows'].includes(mode)) throw new Error(`Unknown test mode: ${mode}`);
   if (mode === 'windows' && platform !== 'win32') throw new Error('test:windows requires Windows');
   return platform === 'win32' && mode !== 'windows' ? 'wsl' : 'native';
+}
+
+export function targetedArgs(args) {
+  const files = [], options = [];
+  for (let i = 0; i < args.length; i++) {
+    const value = args[i];
+    if (value === '--test-name-pattern' || value.startsWith('--test-name-pattern=')) {
+      const pattern = value === '--test-name-pattern' ? args[++i] : value.slice('--test-name-pattern='.length);
+      if (!pattern || pattern.startsWith('--')) throw new Error('--test-name-pattern requires a nonempty pattern');
+      new RegExp(pattern);
+      options.push(`--test-name-pattern=${pattern}`);
+    } else if (!value.startsWith('-') && /\.test\.(ts|js|mjs)$/.test(value)) files.push(value);
+    else throw new Error(`Targeted tests require explicit .test.ts/.test.js/.test.mjs files: ${value}`);
+  }
+  if (!files.length) throw new Error('test:targeted requires at least one test file; it never falls back to the full suite');
+  return [...options, ...files];
 }
 
 export function snapshot(root) {
@@ -40,14 +56,14 @@ export function run(command, args, options = {}) {
   });
 }
 
-async function offload(mode) {
+async function offload(mode, args) {
   const started = Date.now();
   const root = process.cwd();
   const source = snapshot(root);
   const id = `wsl-${Date.now()}-${process.pid}`;
   const logs = resolve(root, '_testenv', id);
   mkdirSync(logs, { recursive: true });
-  writeFileSync(resolve(logs, 'source.json'), JSON.stringify({ sha256: source.sha256, head: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), paths: source.files.map(f => f.path) }));
+  writeFileSync(resolve(logs, 'source.json'), JSON.stringify({ sha256: source.sha256, head: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), paths: source.files.map(f => f.path), mode, args }));
   console.log(`SORTIE_WSL_SOURCE ${JSON.stringify({ id, sha256: source.sha256, logs })}`);
   const helper = snapshotHelper(source);
   const command = `p=$(mktemp /tmp/sortie-test-XXXXXX.mjs); printf %s ${helper} | base64 -d > $p; node $p; rc=$?; rm -f $p; exit $rc`;
@@ -57,7 +73,7 @@ async function offload(mode) {
   child.stdout.pipe(out); child.stderr.pipe(err);
   child.stdout.pipe(process.stdout); child.stderr.pipe(process.stderr);
   child.stdin.on('error', () => {});
-  child.stdin.write(JSON.stringify({ ...source, mode, id }) + '\n');
+  child.stdin.write(JSON.stringify({ ...source, mode, args, id }) + '\n');
   const heartbeat = setInterval(() => {
     if (process.env.SORTIE_TEST_CANCEL_FILE && existsSync(process.env.SORTIE_TEST_CANCEL_FILE)) child.stdin.end();
     else if (!child.stdin.writableEnded) child.stdin.write('heartbeat\n');
@@ -78,24 +94,33 @@ async function offload(mode) {
   });
 }
 
-export async function main(mode) {
-  if (route(process.platform, mode) === 'wsl') return await offload(mode);
+async function timedRun(mode, phase, command, args) {
+  const started = Date.now();
+  console.log(`SORTIE_TEST_PHASE ${JSON.stringify({ mode, phase, status: 'started', command: [command, ...args] })}`);
+  const exit = await run(command, args);
+  console.log(`SORTIE_TEST_PHASE ${JSON.stringify({ mode, phase, status: 'completed', exit, duration_ms: Date.now() - started })}`);
+  return exit;
+}
+
+export async function main(mode, selection = []) {
+  const selected = mode === 'targeted' ? targetedArgs(selection) : [];
+  if (route(process.platform, mode) === 'wsl') return await offload(mode, selected);
   {
     const build = process.platform === 'win32'
-      ? await run(process.execPath, [process.env.npm_execpath || resolve(process.execPath, '../node_modules/npm/bin/npm-cli.js'), 'run', 'build'])
-      : await run('npm', ['run', 'build']);
+      ? await timedRun(mode, 'build', process.execPath, [process.env.npm_execpath || resolve(process.execPath, '../node_modules/npm/bin/npm-cli.js'), 'run', 'build'])
+      : await timedRun(mode, 'build', 'npm', ['run', 'build']);
     if (build) return build;
   }
   const args = ['--experimental-strip-types'];
   if (mode === 'full') args.push('test/helpers/full-test-runner.ts');
-  else args.push('--import', './test/setup.ts', '--test', ...(mode === 'windows'
+  else args.push('--import', './test/setup.ts', '--test', ...(mode === 'targeted' ? selected : mode === 'windows'
     ? readdirSync('test/windows').filter(p => p.endsWith('.test.ts')).map(p => `test/windows/${p}`)
     : ['test/plugin.test.ts', 'test/continuation.test.ts', 'test/fast-lane.test.ts', 'test/v2-plugin.test.ts', 'test/mission-cli-probe.test.ts', 'test/frontierharness-v2-observe.test.ts', 'test/swebench-lite-grader.test.ts', 'test/swebench-lite-supervisor.test.ts', 'test/swebench-lite-runner.test.ts', 'test/swebench-lite-campaign-check.test.ts', 'test/swebench-test-reset.test.ts', 'test/swebench-score-diagnosis.test.ts']));
   mkdirSync('_testenv', { recursive: true });
-  return await run(process.execPath, args);
+  return await timedRun(mode, 'test', process.execPath, args);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  try { process.exitCode = await main(process.argv[2]); }
+  try { process.exitCode = await main(process.argv[2], process.argv.slice(3)); }
   catch (error) { console.error(error); process.exitCode = 1; }
 }

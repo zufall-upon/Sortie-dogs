@@ -6,6 +6,7 @@
 # Windows テスト
 
 - `npm test` / `npm run test:full`: 現在の作業ファイルを WSL Ubuntu の Linux filesystem に snapshot し、依存準備・build・共通テストを実施。Windows 側の build は不要。
+- 修正中は関連変更をまとめ、`npm run test:targeted -- test/<file>.test.ts`で限定検証。必須の全体検証は既知の修正を終えた統合候補で実施。再実行は変更影響・失敗根拠・hostの証跡鮮度条件に応じて選び、command・exit・所要時間・理由を残す。新しい承認や禁止を追加しない。
 - `npm ci` 後、`npm run test:windows`: Windows 専用の junction・case・process cleanup・PowerShell controller を検証。
 - Windows での全体検証は `npm run test:full` と `npm run test:windows` の両方を順次通す。
 - WSL は `bash -lc` で Node >=22.6、npm、git が使えること。別 distro は `SORTIE_WSL_DISTRO` 指定。

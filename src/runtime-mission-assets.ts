@@ -5,6 +5,26 @@ import { SCOUT_EVIDENCE_CODES } from "./core/scout-contract.ts";
 /** Repository-local dependency environment shared by all units; excluded from reviewed and captured source. */
 export const TOOL_ENVIRONMENT = ".sortie-env";
 
+export const VALIDATION_WORKFLOW = `## Time-aware validation workflow
+
+Operator/Coordinator: choose the smallest meaningful unit check and put focused reproduction/test commands
+in the objective. Keep any user/project-required broad validation for the final integrated candidate,
+not every implementation unit. Do not add a full suite merely as a precaution or create a testing agent.
+Worker: reproduce, batch the related edits, inspect the complete diff, then run the focused checks.
+Fix failures with the smallest exercising check before starting a costly suite. Do not execute the entire
+formal validation list after each patch; run it in declared order when the unit candidate is stable.
+If broad validation is already declared, defer it until focused checks pass and known edits are finished;
+do not remove it, substitute a tiny check for it, or claim an unrun requirement passed.
+After a late fix, select checks for the affected inputs; repeat broad validation when the requested
+contract or host evidence freshness requires it, not solely because any file or Worker changed.
+Documentation-only changes do not automatically invalidate unrelated runtime/test results; retain the
+checked candidate and show why reuse is valid under project and host rules. Never promote stale proof.
+Before a costly check, state its purpose and known duration (unknown if unmeasured). In the concise return,
+report command, scope, actual exit/elapsed time and any rerun reason; never invent savings or timings.
+Review evidence gaps need original excerpts, not another patch or full test. Keep autonomous correction,
+required review, accepted criteria and cumulative budget intact; this workflow adds no approval or denial.
+`;
+
 const OPERATION_GUIDE = `## Practical operation guide
 
 Use file paths for exact outputs and dir/** for a directory tree, including a directory that does not
@@ -125,6 +145,8 @@ quality threshold and explicit model/budget choice. Follow AGENTS.md and use the
    permits submission (PASS, low-risk skip, or advisory EVIDENCE_GAPS), call ${profile.toolPrefix}complete_mission.
    Preserve advisory notes without calling them Review PASS or inventing unfinished work or mandatory follow-up.
    Only its succeeded receipt authorizes DONE.
+
+${VALIDATION_WORKFLOW}
 
 Fast-lane: Call ${profile.toolPrefix}plan_units directly after start_mission for one useful Worker unit, then
 dispatch its exact Worker task. The formal validation command must be real and exact, not a dummy check;
@@ -345,6 +367,8 @@ Workers freely investigate within their unit and execute exact formal checks for
 require them to predeclare exploratory commands. Require meaningful evidence, not extra testing for its
 own sake. Do not repeat passed checks unless source changes or unresolved concerns justify it.
 
+${VALIDATION_WORKFLOW}
+
 ${OPERATION_GUIDE}
 
 Scout is optional for one precise missing fact. Its prompt includes missing_evidence_code:
@@ -468,6 +492,8 @@ preserving the operation, inputs and destinations, then continue. An unchanged d
 If correcting the form changes the intended operation or requires another output, return the exact required
 correction to Coordinator. Do not repeat the same refused operation. Only a proven external dependency or
 user-only choice uses TRUE_BLOCKER: external: <condition> or TRUE_BLOCKER: user-decision: <condition>.
+
+${VALIDATION_WORKFLOW}
 
 ${OPERATION_GUIDE}
 `;

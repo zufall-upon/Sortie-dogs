@@ -17,16 +17,24 @@ npm ci
 node --input-type=module --eval "import { mkdirSync } from 'node:fs'; mkdirSync('_testenv', { recursive: true });"
 ```
 
-通常の変更では、変更対象のtestと`npm test`を実行します。例えばrunner/controllerの変更なら:
+修正中は関連する変更をまとめ、変更対象のtestを先に実行します。例えばrunner/controllerの変更なら:
 
 ```sh
-npm test
-node --experimental-strip-types --import ./test/setup.ts --test "test/full-test-runner.test.ts" "test/full-test-controller.test.ts"
+npm run test:targeted -- test/full-test-runner.test.ts test/full-test-controller.test.ts
 ```
 
-`npm test`にはclean buildが含まれます。その後sourceを変更していなければ、続く限定testは
-同じ`dist/`を使用できます。限定testを先に実行する場合やsourceを再編集した場合は、
-`npm run build`で`dist/`を更新してください。直接の`node --test`には自動buildがありません。
+`npm run test:targeted`はclean buildを1回実施し、指定したtestファイルだけを実行します。
+Windowsでは現在の作業ファイルをWSLのLinux filesystemへsnapshotし、依存準備・build・限定testを
+実行します。Windows側のbuildは不要です。対象省略で全件実行へ切り替わることはありません。
+
+test名でも限定できます。フィルターはファイル名の前後どちらでも指定できます:
+
+```sh
+npm run test:targeted -- test/test-router.test.ts --test-name-pattern="targeted"
+```
+
+sourceを変更していなければ、Linuxでの直接実行は既存の`dist/`を使用できます。
+直接の`node --test`には自動buildがありません。source再編集後はbuild付きの入口を使ってください。
 
 `--import ./test/setup.ts`は、test用のOpenCode設定rootをprocessごとに分離します。
 開発者のglobal設定をtestへ持ち込まないため、直接実行でも指定してください。
@@ -34,16 +42,26 @@ node --experimental-strip-types --import ./test/setup.ts --test "test/full-test-
 ### 実行対象の選び方
 
 - `npm test`: plugin、continuation、fast-laneの通常検証です。全testではありません。
+- `npm run test:targeted -- test/<file>.test.ts`: build後、指定したファイルと任意の名前フィルターだけを実行します。WindowsではWSLへ転送します。
 - `npm run test:dispatch`: execution plan、dispatch、acceptance、ledger、evidenceの対象testを実行します。
 - `npm run test:integration`: worktree dispatchの重いintegration層を実行します。
 - `node --experimental-strip-types --import ./test/setup.ts --test "test/<file>.test.ts"`:
   任意の対象ファイルを限定して実行します。`<file>`を実在する名前へ置き換えてください。
 - `npm run test:full`: build後、`test/**/*.test.ts`を全件実行するリリース検証です。
 
-ここで挙げたnpmの各test scriptは、対応するpretest buildを持ちます。
-通常の開発でfullを繰り返す必要はありません。**fullはリリースルーチンの実施を明示的に
-依頼されたときに実行します。** 同一候補の完了済み検証を重複起動せず、再編集や新しい失敗根拠が
-ある場合に必要な検証を選び直してください。
+ここで挙げたnpmの各test scriptはbuildを含みます。
+通常の開発でfullをパッチごとに繰り返す必要はありません。関連修正・diff確認・限定testを先に
+終え、ユーザー／プロジェクトが要求する全体検証は最終の統合候補で実行します。
+必要な全体検証を限定testで代用したり、未実行の要件を合格扱いしたりしません。
+後から修正した場合は変更影響とhostの証跡鮮度条件に応じて再検証を選びます。
+docsだけの変更やWorker交代を理由に無関係なruntime/testの成功を自動的に破棄せず、
+検証済み候補・入力不変の根拠を残します。既存hostが古い証跡を認めない場合はその条件を守ります。
+レビューの証跡不足には元のsource/assertionを提示し、無関係なパッチやfull再実行を追加しません。
+
+routerは`SORTIE_TEST_PHASE`でmode・build/test・開始／終了・command・exit・`duration_ms`を出力します。
+Windowsの`_testenv/wsl-*/source.json`にはsource SHA-256とmode・対象引数、`result.json`には全体の
+exit・所要時間が残ります。再実行時は変更入力・失敗根拠・必須条件のどれが理由かを報告します。
+重い検証の前に目的と既知の所要時間（未計測なら未計測）を短く示し、削減時間を推測で報告しません。
 
 ## 2. Full testの同期実行
 

@@ -4,16 +4,80 @@ import { createHash } from 'node:crypto';
 import { mkdtemp, writeFile, mkdir, rm, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { snapshot, snapshotHelper, route, run } from '../scripts/test-router.mjs';
+import { snapshot, snapshotHelper, route, run, targetedArgs } from '../scripts/test-router.mjs';
 
 test('router preserves native Linux commands and rejects Windows suite on other hosts', () => {
   assert.equal(route('win32', 'quick'), 'wsl');
   assert.equal(route('win32', 'full'), 'wsl');
+  assert.equal(route('win32', 'targeted'), 'wsl');
   assert.equal(route('linux', 'quick'), 'native');
   assert.equal(route('linux', 'full'), 'native');
+  assert.equal(route('linux', 'targeted'), 'native');
   assert.equal(route('win32', 'windows'), 'native');
   assert.throws(() => route('linux', 'windows'), /requires Windows/);
   assert.throws(() => route('win32', 'unknown'), /Unknown/);
+});
+
+test('targeted selection keeps explicit files and name filters without a broad fallback', () => {
+  assert.deepEqual(targetedArgs(['test/a.test.ts', 'test/b.test.mjs']), ['test/a.test.ts', 'test/b.test.mjs']);
+  assert.deepEqual(targetedArgs(['test/a.test.ts', '--test-name-pattern', '^changed handler$']),
+    ['--test-name-pattern=^changed handler$', 'test/a.test.ts']);
+  assert.deepEqual(targetedArgs(['--test-name-pattern=exact', 'test/a.test.js']),
+    ['--test-name-pattern=exact', 'test/a.test.js']);
+  assert.throws(() => targetedArgs([]), /requires at least one test file/);
+  assert.throws(() => targetedArgs(['--test-name-pattern=exact']), /requires at least one test file/);
+  assert.throws(() => targetedArgs(['--test-name-pattern']), /requires a nonempty pattern/);
+  assert.throws(() => targetedArgs(['--test-name-pattern=[', 'test/a.test.ts']), SyntaxError);
+  assert.throws(() => targetedArgs(['test']), /explicit/);
+});
+
+test('native targeted runner builds once, filters real tests, records time and preserves failure', async () => {
+  const root = await mkdtemp(join(process.cwd(), '_testenv', 'targeted-'));
+  try {
+    await mkdir(join(root, 'scripts')); await mkdir(join(root, 'test'));
+    await writeFile(join(root, 'scripts/test-router.mjs'), await readFile('scripts/test-router.mjs'));
+    await writeFile(join(root, 'package.json'), JSON.stringify({ type: 'module', scripts: {
+      build: 'node scripts/build.mjs',
+    } }));
+    await writeFile(join(root, 'scripts/build.mjs'), 'console.log("BUILD_ONCE");');
+    await writeFile(join(root, 'test/setup.ts'), '');
+    const selected = join(root, 'test/selected.test.mjs');
+    await writeFile(selected, 'import test from "node:test"; import assert from "node:assert/strict";\n' +
+      'test("picked", () => assert.ok(true)); test("other", () => assert.fail("UNSELECTED_BODY_EXECUTED"));');
+    await writeFile(join(root, 'test/unselected.test.mjs'), 'throw new Error("UNSELECTED_FILE_EXECUTED");');
+    const execute = () => {
+      const env = { ...process.env };
+      delete env.NODE_TEST_CONTEXT;
+      const child = spawn(process.execPath, ['scripts/test-router.mjs', 'targeted',
+        '--test-name-pattern', '^picked$', 'test/selected.test.mjs'], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] });
+      let output = '';
+      child.stdout.on('data', data => { output += data; }); child.stderr.on('data', data => { output += data; });
+      return new Promise<{ exit: number | null; output: string }>((resolve, reject) => {
+        child.once('error', reject); child.once('close', exit => resolve({ exit, output }));
+      });
+    };
+    const passed = await execute();
+    assert.equal(passed.exit, 0, passed.output);
+    assert.equal(passed.output.split('BUILD_ONCE').length - 1, 1);
+    assert.match(passed.output, /# pass 1/);
+    assert.doesNotMatch(passed.output, /UNSELECTED_(?:BODY|FILE)_EXECUTED/);
+    const phases = passed.output.split('\n').filter(line => line.startsWith('SORTIE_TEST_PHASE '))
+      .map(line => JSON.parse(line.slice('SORTIE_TEST_PHASE '.length)));
+    assert.deepEqual(phases.map(item => [item.mode, item.phase, item.status]), [
+      ['targeted', 'build', 'started'], ['targeted', 'build', 'completed'],
+      ['targeted', 'test', 'started'], ['targeted', 'test', 'completed'],
+    ]);
+    for (const phase of phases.filter(item => item.status === 'completed')) {
+      assert.equal(phase.exit, 0); assert.ok(phase.duration_ms >= 0);
+    }
+    await writeFile(selected, 'import test from "node:test"; test("picked", () => { throw new Error("EXPECTED_FAILURE"); });');
+    const failed = await execute();
+    assert.equal(failed.exit, 1, failed.output);
+    assert.match(failed.output, /EXPECTED_FAILURE/);
+    const result = failed.output.split('\n').filter(line => line.startsWith('SORTIE_TEST_PHASE '))
+      .map(line => JSON.parse(line.slice('SORTIE_TEST_PHASE '.length))).at(-1);
+    assert.equal(result.phase, 'test'); assert.equal(result.exit, 1);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test('snapshot takes current dirty bytes, binary and nonignored untracked files, excluding deleted and generated state', async () => {
@@ -65,9 +129,9 @@ test('WSL helper execution stays bound to the captured source after edits', asyn
 });
 
 test('Linux snapshot helper propagates exit, isolates runs and cancels detached descendants', { skip: process.platform !== 'linux', timeout: 30000 }, async () => {
-  const start = (code: string) => {
+  const start = (code: string, mode = 'quick', args: string[] = []) => {
     const contents = {
-      'package.json': '{"name":"router-fixture","version":"1.0.0","type":"module","scripts":{"test":"node scripts/test-router.mjs"}}',
+      'package.json': '{"name":"router-fixture","version":"1.0.0","type":"module","scripts":{"test":"node scripts/test-router.mjs","test:targeted":"node scripts/test-router.mjs"}}',
       'package-lock.json': '{"name":"router-fixture","version":"1.0.0","lockfileVersion":3,"packages":{"":{"name":"router-fixture","version":"1.0.0"}}}',
       'scripts/test-router.mjs': code,
     };
@@ -76,7 +140,7 @@ test('Linux snapshot helper propagates exit, isolates runs and cancels detached 
     let output = '';
     child.stdout.on('data', chunk => { output += chunk; });
     child.stderr.on('data', chunk => { output += chunk; });
-    child.stdin.write(JSON.stringify({ files, sha256: createHash('sha256').update(JSON.stringify(files)).digest('hex'), mode: 'quick' }) + '\n');
+    child.stdin.write(JSON.stringify({ files, sha256: createHash('sha256').update(JSON.stringify(files)).digest('hex'), mode, args }) + '\n');
     const heartbeat = setInterval(() => { if (!child.stdin.writableEnded) child.stdin.write('heartbeat\n'); }, 1000);
     child.stdin.on('error', () => {});
     const closed = new Promise<number | null>(resolve => child.once('close', code => { clearInterval(heartbeat); resolve(code); }));
@@ -86,6 +150,12 @@ test('Linux snapshot helper propagates exit, isolates runs and cancels detached 
   assert.equal(await first.closed, 37, first.output());
   const firstRoot = JSON.parse(first.output().split('\n').find(line => line.startsWith('SORTIE_WSL_RUN '))!.slice(15)).root;
   await assert.rejects(readFile(join(firstRoot, 'package.json')), { code: 'ENOENT' });
+  const selected = ['--test-name-pattern=with spaces', 'test/chosen.test.ts'];
+  const targeted = start('console.log("TARGETED_ARGS "+JSON.stringify(process.argv.slice(2))); process.exit(38);', 'targeted', selected);
+  assert.equal(await targeted.closed, 38, targeted.output());
+  const forwarded = targeted.output().split('\n').find(line => line.startsWith('TARGETED_ARGS '));
+  assert.ok(forwarded, targeted.output());
+  assert.deepEqual(JSON.parse(forwarded.slice('TARGETED_ARGS '.length)), selected);
   const second = start("import {spawn} from 'node:child_process'; const c=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{detached:true,stdio:'ignore'}); console.log('DESCENDANT '+c.pid); setInterval(()=>{},1000);");
   const until = Date.now() + 10000;
   while (!second.output().includes('DESCENDANT ') && Date.now() < until) await new Promise(done => setTimeout(done, 50));
