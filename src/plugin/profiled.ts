@@ -1865,7 +1865,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         if (args.status === "ready") {
           if (mission.kind === "operation" && missionExecutionStatus(mission) !== "executed") {
             return JSON.stringify({ ...missionPacket(mission, await operators.read(root)), status: "operation-incomplete",
-              next_action: "Continue the requested operation or submit its actual blocker. A successful setup/NO_START check does not authorize ready." });
+              next_action: missionExecutionStatus(mission) === "running"
+                ? "The declared operation is already running. Inspect its native shell/progress; do not start another Worker or run. Wait for a terminal result, or report the existing run as blocked if its completion cannot be observed."
+                : "Continue the requested operation or submit its actual blocker. A successful setup/NO_START check does not authorize ready." });
           }
           const run = await operators.required(root);
           if (run.phase !== "awaiting-acceptance") throw new Error("mission-units-incomplete");
@@ -2309,6 +2311,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
               typeof operationArgs.command === "string" &&
               resolve(input.directory, typeof operationArgs.workdir === "string" ? operationArgs.workdir : ".") === mission.execution.directory) {
             const actual = normalizeCommand(operationArgs.command);
+            if (operationArgs.background === true && mission.execution.commands.includes(actual)) {
+              throw new Error("mission-operation-background: run the declared command in foreground with a suitable timeout. " +
+                "A background shell reports only launch, not process exit; no run was started by this refused call. " +
+                "Correct this same Worker command without a new plan or approval.");
+            }
             const decorated = mission.execution.commands.some(declared => actual.startsWith(declared) &&
               /^\s*(?:\||\d?>|&&?|;)/u.test(actual.slice(declared.length)));
             if (decorated) throw new Error("mission-operation-command-not-observed: run the declared operation command exactly; " +
@@ -2468,6 +2475,13 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             const metadata = record(output.metadata) ? output.metadata : {};
             await missions.update(root, item => {
               const observation = item.execution!.observations.find(value => value.callID === request.callID && value.sessionID === id)!;
+              // V2's background shell finishes the launch tool while its process is still running.
+              // Keep that observation pending; it cannot establish a process exit or justify a retry.
+              if (metadata.status === "running" && output.status !== "error") {
+                observation.status = "running";
+                if (typeof metadata.shellID === "string") observation.shellID = metadata.shellID;
+                return;
+              }
               observation.completedAt = new Date().toISOString();
               observation.status = output.status === "error" || metadata.status === "error" ? "error" : "completed";
               if (Number.isSafeInteger(metadata.exit)) observation.exit = metadata.exit as number;

@@ -15,13 +15,13 @@ For tag observation use git tag --points-at <commit>. For HTTPS downloads use cu
 --write-out '%{http_code} %{size_download}\\n' may print metadata to stdout. Declare all actual outputs.
 Reuse pinned artifacts and successful checks when the request permits and the inputs are unchanged.
 Do not repeat candidate discovery, dependency setup or validation merely because a Worker changed.
-Before launching a detached operation, verify supported options and budget from the CLI/preflight;
-a preview is not the live run. Check the actual state after launch, before relying on its limits.
-Run each declared execution command as the exact native shell input; do not append a tee pipeline,
-redirection or wrapper that was not declared. The host observes that command, not a nearby script or result file.
-Save its output separately when needed. A successful launch only proves the process started;
-use that same run's terminal state and official result for completion, never launch it again
-to repair a missing observation.
+Before a long operation, verify its supported options and budget; a preview is not the live run.
+Run each declared execution command as the exact native shell input in foreground, with a timeout
+that accommodates its declared bound. Native shell background mode reports only process launch,
+not its exit; it cannot complete the declared operation. This does not restrict background diagnostics.
+For a declared operation, do not append a tee pipeline, redirection or wrapper that was not declared. Save output separately
+when needed. Use that same run's terminal state and result for completion. If a run already started,
+inspect its progress and report a missing terminal observation instead of launching it again.
 `;
 
 function controls(profile: RuntimeProfile, names: readonly string[]): string {

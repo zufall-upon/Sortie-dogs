@@ -71,7 +71,7 @@ export interface MissionExecution {
   commands: string[];
   directory: string;
   observations: { command: string; directory: string; callID: string; sessionID: string; startedAt: string;
-    completedAt?: string; exit?: number; status?: "completed" | "error";
+    completedAt?: string; exit?: number; status?: "running" | "completed" | "error"; shellID?: string;
     outcome?: "not-started" | "execution-failed" | "executed"; result?: Record<string, unknown> }[];
 }
 export interface OperatorMission {
@@ -521,6 +521,8 @@ export function missionPacket(mission: OperatorMission, run?: OperatorState): Re
     next_action: mission.phase === "completed" ? "Mission completed. Report the accepted result and retained review gaps; no further dispatch or completion call is needed."
       : mission.phase === "submitted" && mission.submission?.status === "ready"
       ? "Operator: compare the submitted candidate with the original requirements and actual evidence, then complete_mission if satisfied. Report remaining evidence gaps; they are not a review PASS."
+      : mission.kind === "operation" && operationStatus === "running"
+        ? "The declared operation is already running. Inspect its native shell/progress; do not start another Worker or run. Wait for a terminal result, or report the existing run as blocked if its completion cannot be observed."
       : run?.phase === "awaiting-decision" ? (run.units.some(unit => unit.dispatchDenial)
         ? "Coordinator: inspect units[].dispatch_denial before changing the plan. Correct only its diagnosed cause; do not repeat an unchanged refused Task or replan for a host-state mismatch. Report an unresolved runtime mismatch with the loaded runtime identity; preserve requirements and cumulative spend."
         : run.units.some(unit => unit.status === "failed" && unit.resultClass === "acceptance" && unit.failure?.outcome === "fail" && !unit.normalRemediationUsed)
