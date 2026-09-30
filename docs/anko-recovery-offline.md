@@ -14,9 +14,16 @@ Task after-hook both completed with independent Dog-Reviewer **PASS** and
 **succeeded** receipts. Runtime follow-up `be1dd37`, launcher correction `2a6d265`;
 integrated offline checks **1394/1394 PASS**. These bounded fixture results do not
 establish canonical Anko completion or its official score.
+The scratch/condition fixture confirmed real Worker PASS, post-PASS cache cleanup
+and conditions retained in handoff/status, but timed out during native Review with
+no receipt. A later separate actual Dog-Reviewer independently assessed those
+saved records and source as **PASS**, with no further repair needed in that scope.
+This consultation is not a third completed Mission or a substitute for the missing
+receipt. See the live record for exact results, costs and remaining limitations.
 This is an offline runtime fix, not a release or an Anko completion report.
 The original working tree, existing campaigns and historical Anko artifacts were
-not modified. No paid Worker/model campaign, publish or global apply was run.
+not modified. The original offline phase ran no paid Worker/model campaign,
+publish or global apply; the later bounded live probes are recorded separately.
 
 ## Changes
 
@@ -113,11 +120,11 @@ The source map was unchanged at completion of the final full run.
    preserve its exact inputs/flags before running Anko. Saved launch conditions
    are implemented; canonical runner persistence is **not** complete. No old
    fixture/probe was substituted for it.
-2. No real V2 session recovery has been exercised for this candidate. With valid
-   existing execution authorization and remaining budget, verify actual sessions,
-   Worker models, lifecycle/expense records and the original Anko acceptance.
-   Current evidence does not establish independent Anko Review, commit,
-   acceptance or official score.
+2. The original offline candidate had no real V2 recovery proof. The follow-up
+   now has actual same-Task scope and missed-after-hook recovery, native Worker
+   models, independent fixture Reviews and lifecycle/expense records. These
+   bounded fixtures still do not establish the original Anko's independent
+   Review, commit, acceptance or official score.
 3. Freshness retains the established declared input/output scopes, not a whole
    project fingerprint that would invalidate prior units on later-unit output.
    The saved environment covers host runtime/platform, common toolchain variables

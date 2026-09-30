@@ -136,8 +136,92 @@ observations. Raw lifecycle assertions are in
 native CLI logs, hashes and before/after ledgers are retained in their fixture
 directories.
 
-Next: one bounded actual V2 check of the still-offline-only fixed scratch cleanup
-and confirmed-condition handoff, using this same package. Canonical Anko runner
-source remains unavailable; Anko completion, independent Anko Review and official
-score are still unverified. This repair lane does not substitute a probe for that
-runner, merge the PR, publish a release or apply globally.
+## Actual scratch / condition check: partial, not Mission success
+
+The same fixed package ran one separate scratch/condition fixture:
+`node _testenv/anko-recovery-pr-evidence/freshness-probe.mjs <fixed-tgz>
+_testenv/anko-recovery-live/freshness-conditions-1
+_testenv/anko-recovery-pr-evidence/live-budget.json`.
+Runner SHA-256: `379bc537c326ade51bbeae30bdb22aef01c1160aede5df49960de08632c786d4`.
+
+- Root `ses_f0e6b94e9ffeZxkTtO8I9P1wjQ`, actual Luna Fast/max Worker
+  `ses_f0e6a1c30ffexigNGQ0n726Khb`, actual Sol/xhigh Reviewer
+  `ses_f0e66ccc3ffe6BzgeCAB5QFLaZ`.
+- The only formal command, `TMPDIR=scratch-tmp GOCACHE=.gocache node check.mjs`,
+  passed once, native exit 0, host-observed 25 ms. `node cleanup.mjs` then removed
+  exactly the two generated cache files in the same Worker Task. No formal rerun,
+  extra Worker, source/check/input change, commit, push or release occurred.
+- The saved validation recipe excludes only `.gocache` and `scratch-tmp`. The
+  real `.tmp/actual-input.txt` remains explicitly protected. Fixed input hashes,
+  one validation admission and successful settlement match the real native history.
+  Post-cleanup `review_mission` and the real Reviewer dispatch both passed the
+  host's current-validation checks.
+- Fixed conditions (600 seconds, $1.50, one probe attempt, grading `none`, exact
+  entrypoint/input and explicit applicability) were recorded by `start_mission`
+  and retained in the handoff and the Worker's status response. The status call
+  passed `confirmed_conditions: ""`, did not erase them and retained one active
+  Worker reservation before native return. Worker units and Worker-only cost
+  were not presented as external attempt/campaign limits.
+- The Reviewer continued read-only source/API-history inspection until the
+  declared deadline. No tool refusal or freshness invalidation was observed,
+  but no final verdict or receipt was produced. **Native exit 130, runner exit 1,
+  timeout 600.286 s; Review pending/interrupted, Mission not accepted.** Do not
+  turn the successful Worker/check into an independent Review PASS or completion.
+- Priced usage $0.50254664 plus one unpriced interrupted request; Worker-only
+  settlement $0.01319584. The full $1.50 reservation remains accounted.
+
+Saved partial assertions are in the fixture's `partial-assertions.json` and
+`freshness-partial-assertions.json`. Through this failed whole-Mission probe, known
+priced usage is $2.31423028, conservative accounted usage is **$5.47172612**,
+and admissible remaining is **$0.52827388**. No new runtime defect is inferred
+solely from the Review timeout; no speculative code patch or repeat full suite
+was made.
+
+## Final read-only Dog-Reviewer consultation
+
+Actual root `ses_f0e5af075ffepa70WebvDi2ToK`, `openai/gpt-6.1-sol#xhigh`:
+**PASS**, native/assertion exit 0, 185.951 s, priced $0.22617080, zero unpriced
+requests or tool errors. This separate consultation was bounded to $0.50 / 240
+seconds and used the exact generated Dog-Reviewer asset. Its full reply and native
+reads are saved under `reviewer-freshness-consult-1/smoke-1/`.
+
+It independently read faithful pretty-printed copies of existing native Worker
+history, ledger, state, fixed source and the relevant loaded implementation. It
+confirmed one formal PASS, cache-only cleanup, actual input protection, fixed
+conditions in handoff/status and successful current-validation gating through the
+original Reviewer dispatch. It found no major/medium defect or further repair
+needed within that consultation's scope.
+
+The root-only consultation did not load the Mission routing plugin, avoiding the
+earlier standalone profile read refusal. It did not create another implementation
+attempt, rerun any check, modify source or repair saved state. All original
+source/state hashes in its provenance remain unchanged after the consultation.
+Its PASS explicitly **does not replace the original Mission's missing succeeded
+receipt**; that Mission remains timeout / Review pending / not accepted.
+
+## Lane outcome and remaining work
+
+- **2 completed actual V2 Missions**, both independent Reviewer PASS and succeeded
+  receipts: same-Task scope recovery and controlled missed-Task-after recovery.
+- **1 partial actual V2 Mission**: scratch cleanup and condition inheritance are
+  host-observed and independently confirmed, but original Review timed out.
+- Integrated offline candidate: **1394/1394 PASS**; no runtime patch was required
+  after those checks or inferred from the third probe's time bound.
+- Final measured priced usage **$2.54040108**, plus **3 unpriced interrupted
+  requests**. Retaining their full reservations gives accounted usage
+  **$5.69789692 / $6**, conservative remaining **$0.30210308**, no active reservations.
+  Worker-only estimates are not the total lane cost. No additional paid probe was
+  launched after this consultation; raw results are in `final-lane-result.json`.
+- Generated isolated `.opencode` installations are removed only after terminal
+  observations/provenance are saved and no live process uses each fixture. Native
+  records, source, fixed packages/hashes, Mission/flight ledgers and cost records
+  are retained. No original working tree, database or historical campaign is deleted.
+
+Canonical Anko runner source remains unavailable (including Git history). Obtain
+the original Windows `run-once.mjs` and its exact input/flags before any Anko
+inference. Anko completion, independent Anko Review and official score remain
+unverified. Unregistered private standalone history, Windows-only tests and an
+independent inspection of process-local authorization release are also not proved
+by this Linux lane. Do not repeat these successful fixtures as a substitute for
+the missing runner or silently raise the budget; do not merge, release, publish
+or apply globally under this request.
