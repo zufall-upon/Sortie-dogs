@@ -65,6 +65,23 @@ Review is still required in the rerun.
   private listener and owned PID. Shared service registration was not replaced.
 - `git diff --check`: exit 0.
 
+## Integrated offline result and launcher credential correction
+
+- Candidate `be1dd37`: `bash -lc 'time npm run test:full'`, exit 0,
+  166.409 s, **1394/1394 PASS**, all 90 files completed, valid scheduler.
+  A server-restart notification incorrectly labelled the tool cancelled; the
+  original process continued and its saved native terminal was recovered.
+  This successful execution was not repeated.
+- The next live launch saved native exit 1 after 333 ms, **before any session or
+  model request**, cost $0. `--service` generates its own credential, so the
+  launcher's requested environment password was rejected. This is not a failed
+  Worker or a runtime solution result.
+- The launcher now passes the credential from its own isolated native service
+  registration to clients. A no-model authenticated `/api/info` request proved
+  this route on V2 `2.0.20`. No credential value is included in evidence or Git.
+  Product/package bytes and the successful offline candidate are unchanged;
+  the launcher-only correction is checked through the actual startup path.
+
 Next: package the corrected commit once, rerun the exact prompt and fixed input
 checks, require actual same-Worker shell scope repair and Mission-child Review,
 then exercise a deliberately missed Task after-hook with real native history.

@@ -143,6 +143,12 @@ export async function startV2ReleaseServer(cwd, env, { inheritEnvironment = true
       child.once('error', onError);
       child.once('close', onClose);
     });
+    // --service owns its generated credential. Its registration, not the requested
+    // environment password, is authoritative for clients of this isolated listener.
+    const registration = JSON.parse(await readFile(join(state, 'opencode', 'service.json'), 'utf8'));
+    assert(registration.url === url, 'Owned V2 service registration does not match its listener');
+    if (typeof registration.password === 'string') serverEnv.OPENCODE_SERVER_PASSWORD = registration.password;
+    else delete serverEnv.OPENCODE_SERVER_PASSWORD;
     return { url, env: serverEnv, closed, stop: () => stopProcessGroup(child) };
   } catch (error) {
     await stopProcessGroup(child);
