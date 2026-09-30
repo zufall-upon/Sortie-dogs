@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import test from "node:test";
-import { MISSION_EVIDENCE_GAP_REVIEW_LIMIT, OperatorMissionRuntime, missionPacket, missionPlan, missionReviewAccepted, missionReviewTask,
+import { OperatorMissionRuntime, missionPacket, missionPlan, missionReviewAccepted, missionReviewTask,
   missionCommandOutcome, missionConversationContext, missionExecutionStatus, missionReviewTraces, missionReviewVerdict } from "../dist/core/operator-mission.js";
 import { OperatorRuntime } from "../dist/core/operator-runtime.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
@@ -64,31 +64,26 @@ test("public reproduction and shared-branch checks remain in the same mission Wo
   assert.equal(run.units.length, 1, "no separate setup or review Worker is required");
 }));
 
-test("mission review accepts grouped requirement traces while preserving coverage", async () => fixture(async directory => {
+test("mission review notes are optional and cannot turn prose formatting into a coverage gate", async () => fixture(async directory => {
   const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
   await missions.capture("root", { id: "u1", text: "Fix result, test it, retain scope" });
   const mission = await missions.start("root", ["Fix result", "Test it", "Retain scope"]);
   assert.deepEqual(missionReviewTraces(mission, ["R1/R2: fix and focused test", "R3: scope retained"]),
-    ["R1/R2: fix and focused test", "R1/R2: fix and focused test", "R3: scope retained"]);
+    ["R1/R2: fix and focused test", "R3: scope retained"]);
   assert.deepEqual(missionReviewTraces(mission, ["fix", "test", "scope"]), ["fix", "test", "scope"]);
   assert.deepEqual(missionReviewTraces(mission, ["R1: fix. R2/R3: tests passed; scope retained"]),
-    Array(3).fill("R1: fix. R2/R3: tests passed; scope retained"));
+    ["R1: fix. R2/R3: tests passed; scope retained"]);
   assert.deepEqual(missionReviewTraces(mission, ["R1: fix; R2: tests passed\nR3: scope retained"]),
-    Array(3).fill("R1: fix; R2: tests passed\nR3: scope retained"));
+    ["R1: fix; R2: tests passed\nR3: scope retained"]);
   assert.deepEqual(missionReviewTraces(mission, ["R1-R3: fix, tests and scope retained"]),
-    Array(3).fill("R1-R3: fix, tests and scope retained"));
-  await missions.capture("grouped", { id: "u2", text: "Fix, test, review, keep paths relative and avoid remote access" });
-  const five = await missions.start("grouped", ["Fix", "Test", "Review", "Keep paths relative", "Avoid remote access"]);
-  assert.deepEqual(missionReviewTraces(five, ["R1: fix", "R2: tests", "R3: review",
-    "R4-R5: relative paths and no remote access"]),
-    ["R1: fix", "R2: tests", "R3: review", "R4-R5: relative paths and no remote access",
-      "R4-R5: relative paths and no remote access"]);
-  assert.throws(() => missionReviewTraces(mission, ["R1/R2: fix and test"]), error =>
-    error instanceof Error && /missing R3/u.test(error.message) && !error.message.includes("unknown "),
-    "do not report an empty unknown-ID list");
-  assert.throws(() => missionReviewTraces(mission, ["R1/R2/R3/R4: claims"]), /unknown R4/);
-  assert.throws(() => missionReviewTraces(mission, ["R3-R1: wrong order"]), /descending range R3-R1/);
-  assert.throws(() => missionReviewTraces(mission, ["R1-R4: out of scope"]), /unknown R4/);
+    ["R1-R3: fix, tests and scope retained"]);
+  assert.deepEqual(missionReviewTraces(mission, undefined), []);
+  assert.deepEqual(missionReviewTraces(mission, []), []);
+  assert.deepEqual(missionReviewTraces(mission, ["R1/R2: fix and test"]), ["R1/R2: fix and test"]);
+  assert.deepEqual(missionReviewTraces(mission, ["R3-R1: free-form note", "R99: note"]), ["R3-R1: free-form note", "R99: note"]);
+  assert.deepEqual(mission.requirements.map(item => item.text), ["Fix result", "Test it", "Retain scope"],
+    "loosening note formatting does not remove original requirements");
+  assert.throws(() => missionReviewTraces(mission, [123]), /optional notes must be strings/);
   mission.review = { runID: "run", risk: ["public-logic"], source: "source", verdict: "pending",
     task: { subagent_type: "dog-reviewer-v010", description: "Review", prompt: "original evidence ".repeat(1000) } };
   const task = missionReviewTask(mission);
@@ -98,14 +93,14 @@ test("mission review accepts grouped requirement traces while preserving coverag
   assert.notEqual(missionReviewTask(mission).prompt, task.prompt);
 }));
 
-test("evidence-only reviews are bounded while defects and first gaps still block submission", async () => fixture(async directory => {
+test("first evidence-only review permits submission while defects and pending review still block", async () => fixture(async directory => {
   assert.equal(missionReviewVerdict("PASS"), "PASS");
   assert.equal(missionReviewVerdict("EVIDENCE_GAPS\nThe multi-value route has no trace."), "evidence-gaps");
   assert.equal(missionReviewVerdict("FINDINGS\nzero dhi remains positive"), "findings");
   assert.equal(missionReviewVerdict("I think EVIDENCE_GAPS"), "findings");
   const review = { runID: "run", risk: ["public-logic"], source: "source", task: null };
-  assert.equal(missionReviewAccepted({ ...review, verdict: "evidence-gaps", evidenceGapReviews: 1 }), false);
-  assert.equal(missionReviewAccepted({ ...review, verdict: "evidence-gaps", evidenceGapReviews: MISSION_EVIDENCE_GAP_REVIEW_LIMIT }), true);
+  assert.equal(missionReviewAccepted({ ...review, verdict: "evidence-gaps", evidenceGapReviews: 1 }), true);
+  assert.equal(missionReviewAccepted({ ...review, verdict: "evidence-gaps" }), true, "legacy records need no retry to fill a counter");
   assert.equal(missionReviewAccepted({ ...review, verdict: "findings", evidenceGapReviews: 5 }), false);
   assert.equal(missionReviewAccepted({ ...review, verdict: "pending", evidenceGapReviews: 5 }), false);
   const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
@@ -115,13 +110,11 @@ test("evidence-only reviews are bounded while defects and first gaps still block
   const run = await operators.prepareMission("root", missionPlan(mission, [unit]));
   const gap = { ...mission, review: { ...review, runID: run.runID, verdict: "evidence-gaps" as const, evidenceGapReviews: 1 } };
   const packet = missionPacket(gap, { ...run, phase: "awaiting-acceptance" }) as { next_action: string; review: Record<string, unknown> };
-  assert.match(packet.next_action, /do not re-implement/u);
-  assert.deepEqual([packet.review.evidence_gap_reviews, packet.review.accepted], [1, false]);
-  const bounded = { ...gap, review: { ...gap.review, evidenceGapReviews: MISSION_EVIDENCE_GAP_REVIEW_LIMIT } };
-  const accepted = missionPacket(bounded, { ...run, phase: "awaiting-acceptance" }) as typeof packet;
-  assert.equal(accepted.review.passed, false);
-  assert.equal(accepted.review.permits_submission, true);
-  assert.match(accepted.next_action, /do not repeat passed validation or review/);
+  assert.deepEqual([packet.review.evidence_gap_reviews, packet.review.accepted], [1, true]);
+  assert.equal(packet.review.passed, false);
+  assert.equal(packet.review.permits_submission, true);
+  assert.equal(packet.review.evidence_gaps_advisory, true);
+  assert.match(packet.next_action, /do not repeat passed validation or review/);
 }));
 
 test("mission captures exact original messages, generates IDs, and preserves requirements across restart", async () => fixture(async directory => {

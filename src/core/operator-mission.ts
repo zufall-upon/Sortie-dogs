@@ -71,7 +71,7 @@ export interface MissionExecution {
   commands: string[];
   directory: string;
   observations: { command: string; directory: string; callID: string; sessionID: string; startedAt: string;
-    completedAt?: string; exit?: number; status?: "completed" | "error";
+    completedAt?: string; exit?: number; status?: "running" | "completed" | "error"; shellID?: string;
     outcome?: "not-started" | "execution-failed" | "executed"; result?: Record<string, unknown> }[];
 }
 export interface OperatorMission {
@@ -113,15 +113,10 @@ export interface OperatorMission {
     verdict: "pending" | "PASS" | "findings" | "evidence-gaps" | "skipped-low-risk"; result?: string; child?: string;
     /** Completed, independent initial review for this mission, not merely an inherited child ID. */
     initialPrompt?: string;
-    /** Reviews on this mission that found only missing evidence; bounded by MISSION_EVIDENCE_GAP_REVIEW_LIMIT. */
+    /** Observed evidence-only reviews; reporting only, never an acceptance threshold. */
     evidenceGapReviews?: number };
 }
 
-/**
- * Evidence-only findings do not establish a defect. Each extra round costs a full Reviewer pass and often a
- * Worker unit, so after this many evidence-only reviews the candidate may be submitted with the gaps listed.
- */
-export const MISSION_EVIDENCE_GAP_REVIEW_LIMIT = 2;
 export const MISSION_CONSULTATION_LIMIT = 32;
 
 /** Review coverage survives a narrower replan; it is not a Worker write grant. */
@@ -140,7 +135,7 @@ export function missionReviewVerdict(text: string): "PASS" | "evidence-gaps" | "
 /** Whether the recorded review permits submission and acceptance of the current candidate. */
 export function missionReviewAccepted(review: NonNullable<OperatorMission["review"]>): boolean {
   return review.verdict === "PASS" || review.verdict === "skipped-low-risk" ||
-    (review.verdict === "evidence-gaps" && (review.evidenceGapReviews ?? 0) >= MISSION_EVIDENCE_GAP_REVIEW_LIMIT);
+    review.verdict === "evidence-gaps";
 }
 
 export function missionExecutionStatus(mission: OperatorMission): "not-required" | "not-started" | "running" | "execution-failed" | "executed" {
@@ -508,7 +503,7 @@ export function missionPacket(mission: OperatorMission, run?: OperatorState): Re
       run_id: mission.review.runID, current_run: currentReview,
       source_fingerprint: mission.review.source, reviewer_session_id: mission.review.child ?? null,
       result: mission.review.result ?? null, evidence_gap_reviews: mission.review.evidenceGapReviews ?? 0,
-      evidence_gap_review_limit: MISSION_EVIDENCE_GAP_REVIEW_LIMIT, accepted: reviewAccepted,
+      evidence_gaps_advisory: true, accepted: reviewAccepted,
       passed: currentReview && mission.review.verdict === "PASS", permits_submission: reviewAccepted && operationComplete } : null,
     ...(run ? { run_id: run.runID, status: run.phase, decision: run.decision,
       units: run.units.map(unit => ({ id: unit.unit.id, title: unit.unit.title, status: unit.status,
@@ -521,6 +516,8 @@ export function missionPacket(mission: OperatorMission, run?: OperatorState): Re
     next_action: mission.phase === "completed" ? "Mission completed. Report the accepted result and retained review gaps; no further dispatch or completion call is needed."
       : mission.phase === "submitted" && mission.submission?.status === "ready"
       ? "Operator: compare the submitted candidate with the original requirements and actual evidence, then complete_mission if satisfied. Report remaining evidence gaps; they are not a review PASS."
+      : mission.kind === "operation" && operationStatus === "running"
+        ? "The declared operation is already running. Inspect its native shell/progress; do not start another Worker or run. Wait for a terminal result, or report the existing run as blocked if its completion cannot be observed."
       : run?.phase === "awaiting-decision" ? (run.units.some(unit => unit.dispatchDenial)
         ? "Coordinator: inspect units[].dispatch_denial before changing the plan. Correct only its diagnosed cause; do not repeat an unchanged refused Task or replan for a host-state mismatch. Report an unresolved runtime mismatch with the loaded runtime identity; preserve requirements and cumulative spend."
         : run.units.some(unit => unit.status === "failed" && unit.resultClass === "acceptance" && unit.failure?.outcome === "fail" && !unit.normalRemediationUsed)
@@ -530,10 +527,8 @@ export function missionPacket(mission: OperatorMission, run?: OperatorState): Re
             : "Coordinator: correct the cause and call plan_units with the remaining work and all requirements; budget is cumulative.")
       : run?.phase === "awaiting-acceptance" && !operationComplete
         ? `Requested operation is ${operationStatus}. Continue the actual operation or report its blocker; auxiliary checks and review disposition cannot complete it.`
-      : run?.phase === "awaiting-acceptance" ? (currentReview && mission.review?.verdict === "evidence-gaps" && !reviewAccepted
-        ? "Coordinator: the Reviewer found only missing evidence. Supply focused original-file excerpts through review_mission evidence and traces; do not re-implement. At the evidence-gap limit, review ends with the gaps listed, not with execution proof."
-        : reviewAccepted
-          ? "Coordinator: review permits submission. Submit the candidate with any remaining gaps; do not repeat passed validation or review. Operator performs final acceptance."
+      : run?.phase === "awaiting-acceptance" ? (reviewAccepted
+          ? "Coordinator: review permits submission. Retain advisory review notes; do not repeat passed validation or review for evidence formatting. Operator performs final acceptance against the original requirements."
           : "Coordinator: address recorded findings or obtain the required independent review, then submit_mission. Operator compares all requirements with source/evidence before complete_mission.")
       : "Coordinator: continue the next useful unit within original requirements. Return only a completion candidate, user-only decision, or scope/budget extension." };
 }
@@ -546,30 +541,11 @@ export function missionReviewTask(mission: OperatorMission): OperatorTask {
     m: mission.id, n: review.runID, h: digest(review.task.prompt) })}` };
 }
 
-/** Project grouped R-ID traces, including consecutive ranges, into the existing per-criterion mapping. */
-export function missionReviewTraces(mission: OperatorMission, raw: unknown): string[] {
-  if (!Array.isArray(raw) || raw.length === 0 || !raw.every(item => typeof item === "string" && item.trim())) {
-    throw new Error("mission-review-traces: supply concise implementation/test traces");
+/** Optional implementation notes supplement host-observed source/checks; prose is not a coverage gate. */
+export function missionReviewTraces(_mission: OperatorMission, raw: unknown): string[] {
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw) || !raw.every(item => typeof item === "string")) {
+    throw new Error("mission-review-traces: optional notes must be strings");
   }
-  const grouped: { text: string; ids: string[] }[] = raw.map(text => ({ text,
-    ids: [...text.matchAll(/(?:^|[.;]\s+|[\r\n])\s*((?:R\d+\s*[-/,]?\s*)+):/gu)]
-      .flatMap(match => [...match[1]!.matchAll(/R(\d+)(?:\s*-\s*R(\d+))?/gu)]
-        .flatMap(([, first, last]) => {
-          const firstID = `R${first}`;
-          if (last === undefined) return [firstID];
-          const lastID = `R${last}`;
-          const start = mission.requirements.findIndex(item => item.id === firstID);
-          const end = mission.requirements.findIndex(item => item.id === lastID);
-          if (start < 0 || end < 0) return [firstID, lastID];
-          if (start > end) throw new Error(`mission-review-traces: descending range ${firstID}-${lastID}`);
-          return mission.requirements.slice(start, end + 1).map(item => item.id);
-        })) }));
-  if (grouped.every(item => item.ids.length === 0) && raw.length === mission.requirements.length) return raw;
-  const unknown = grouped.flatMap(item => item.ids).filter(id => !mission.requirements.some(requirement => requirement.id === id));
-  const missing = mission.requirements.filter(requirement => !grouped.some(item => item.ids.includes(requirement.id)));
-  if (unknown.length || missing.length) throw new Error(`mission-review-traces: name the existing R IDs; ${[
-    ...(missing.length ? [`missing ${missing.map(item => item.id).join(", ")}`] : []),
-    ...(unknown.length ? [`unknown ${unknown.join(", ")}`] : []),
-  ].join("; ")}`);
-  return mission.requirements.map(requirement => grouped.filter(item => item.ids.includes(requirement.id)).map(item => item.text).join("\n"));
+  return raw.map(text => text.trim()).filter(Boolean);
 }

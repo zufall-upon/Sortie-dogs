@@ -82,7 +82,8 @@ try {
     } finally { await rm(staging, { recursive: true, force: true }); }
   }
   console.log(`SORTIE_WSL_RUN ${JSON.stringify({ root, sha256: packet.sha256, node: process.version, npm: npmVersion, dependency_key: key })}`);
-  process.exitCode = await run('npm', packet.mode === 'full' ? ['run', 'test:full'] : ['test'], root);
+  process.exitCode = await run('npm', packet.mode === 'targeted' ? ['run', 'test:targeted', '--', ...packet.args]
+    : packet.mode === 'full' ? ['run', 'test:full'] : ['test'], root);
   if (cancelled) process.exitCode = 130;
 } catch (error) { console.error(error); process.exitCode = 1; }
 finally {

@@ -13,7 +13,7 @@ import { SortieDogsV010Plugin } from "../dist/plugin/profiled.js";
 
 const exec = promisify(execFile);
 
-for (const mode of ["implementation", "executed", "NO_START"] as const) test(`mission completion keeps checks, review and operation outcomes separate: ${mode}`, async () => {
+for (const mode of ["implementation", "executed", "NO_START", "legacy-background"] as const) test(`mission completion keeps checks, review and operation outcomes separate: ${mode}`, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const root = await mkdtemp(resolve("_testenv/mission-completion-"));
   try {
@@ -73,8 +73,29 @@ for (const mode of ["implementation", "executed", "NO_START"] as const) test(`mi
       const binding = JSON.parse(await hooks.tool!.sortie_v010_bind_write_gate.execute({ project_root: root, manifest_path: unit.manifestPath }, { sessionID: "worker" }));
       assert.equal(binding.status, "bound", JSON.stringify(binding));
     } finally { Date.now = clock; }
+    if (mode === "legacy-background") {
+      // V2 returns a completed tool call for a launched background shell, with no process exit.
+      // This is the metadata captured by the real Anko run, not an operation result.
+      await hooks["tool.execute.before"]!({ tool: "shell", sessionID: "worker", callID: "background-launch" },
+        { args: { command: "node check.mjs", workdir: root } });
+      await hooks["tool.execute.after"]!({ tool: "shell", sessionID: "worker", callID: "background-launch" },
+        { output: "", metadata: { status: "running", shellID: "sh_anko" } });
+      const observed = await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root");
+      assert.equal(observed.execution?.observations[0]?.completedAt, undefined,
+        "a background launch must not be recorded as a terminal failure or success");
+      assert.equal(observed.execution?.observations[0]?.status, "running");
+      const submitted = JSON.parse(await hooks.tool!.sortie_v010_submit_mission.execute({ status: "ready", summary: "launched" },
+        { sessionID: "coordinator" }));
+      assert.equal(submitted.status, "operation-incomplete");
+      assert.equal(submitted.operation.status, "running");
+      assert.match(submitted.next_action, /do not (?:relaunch|start another)/iu);
+      return;
+    }
     if (mode === "implementation") await writeFile(join(root, "result.txt"), "ready\n");
     if (mode === "executed") {
+      await assert.rejects(hooks["tool.execute.before"]!({ tool: "shell", sessionID: "worker", callID: "background-operation" },
+        { args: { command: "node check.mjs", workdir: root, background: true, timeout: 0 } }),
+      /mission-operation-background: run the declared command in foreground/);
       for (const command of ["node check.mjs | tee result.txt", "node check.mjs > result.txt",
         "node check.mjs 2> result.txt", "node check.mjs && echo done"]) {
         await assert.rejects(hooks["tool.execute.before"]!({ tool: "bash", sessionID: "worker", callID: `decorated-${command}` },
@@ -102,7 +123,7 @@ for (const mode of ["implementation", "executed", "NO_START"] as const) test(`mi
     await hooks["tool.execute.after"]!({ tool: "task", sessionID: "coordinator", callID: "reviewer-call" }, { output: "PASS\nThe result is validated.", metadata: { sessionId: "reviewer" } });
     if (mode === "NO_START") {
       const missions = new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE);
-      await missions.update("root", mission => { mission.review!.verdict = "evidence-gaps"; mission.review!.evidenceGapReviews = 2; });
+      await missions.update("root", mission => { mission.review!.verdict = "evidence-gaps"; mission.review!.evidenceGapReviews = 1; });
       const submitted = JSON.parse(await hooks.tool!.sortie_v010_submit_mission.execute({ status: "ready", summary: "auxiliary check passed" }, { sessionID: "coordinator" }));
       assert.equal(submitted.status, "operation-incomplete");
       const cold = await create();
@@ -137,7 +158,7 @@ for (const mode of ["implementation", "executed", "NO_START"] as const) test(`mi
     if (mode === "implementation") {
       await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).update("root", mission => {
         mission.review!.verdict = "evidence-gaps";
-        mission.review!.evidenceGapReviews = 2;
+        mission.review!.evidenceGapReviews = 1;
         mission.review!.result = "EVIDENCE_GAPS\nThe decisive return line is not visible.";
       });
     }
@@ -146,16 +167,16 @@ for (const mode of ["implementation", "executed", "NO_START"] as const) test(`mi
     assert.equal(completed.receipt.status, "succeeded");
     if (mode === "implementation") {
       assert.match(completed.review_evidence_gaps, /decisive return line is not visible/u);
-      assert.match(completed.return_report, /SourceReview\s+🟡 EVIDENCE_GAPS（PASSではない）/u);
-      assert.match(completed.return_report, /⏳ 未実施\n独立Reviewの未解決証拠/u);
-      assert.match(completed.return_report, /➡️ NEXT\n未解決証拠を報告/u);
+      assert.match(completed.return_report, /SourceReview\s+🟡 補足あり（非ブロッキング・PASSではない）/u);
+      assert.match(completed.return_report, /レビュー補足\s+The decisive return line is not visible/u);
+      assert.match(completed.return_report, /➡️ NEXT\nなし/u);
       const visible = { text: `✅ **DONE** — validated result\n\n**次:** なし\n\n${completed.return_report}` };
       await cold["experimental.text.complete"]!({ sessionID: "root", messageID: "final", partID: "final-text" }, visible);
-      assert.match(visible.text, /SourceReview\s+🟡 EVIDENCE_GAPS（PASSではない）/u,
+      assert.match(visible.text, /SourceReview\s+🟡 補足あり（非ブロッキング・PASSではない）/u,
         "the final user-facing renderer must retain the native Review verdict, not only the completion tool result");
-      assert.match(visible.text, /⏳ 未実施\n独立Reviewの未解決証拠/u);
+      assert.match(visible.text, /レビュー補足\s+The decisive return line is not visible/u);
       assert.doesNotMatch(visible.text, /SourceReview\s+未記録/u);
-      assert.doesNotMatch(visible.text, /\*\*次:\*\* なし/u);
+      assert.match(visible.text, /\*\*次:\*\* なし/u);
     }
     if (mode === "executed") {
       const visible = { text: "✅ **DONE** — validated operation\n\n**次:** なし" };
