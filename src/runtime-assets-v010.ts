@@ -4,7 +4,7 @@ import { V010_RUNTIME_PROFILE as profile, profileAgent, renderProfileInstruction
 import { GOAL_DECLARATION_FORMAT } from "./core/goal-declaration-format.ts";
 import { STRATEGY_TRIGGERS, SOURCE_REVIEW_PHASES, SOURCE_REVIEW_RISK_TAGS } from "./core/consultation.ts";
 import { SCOUT_EVIDENCE_CODES } from "./core/scout-contract.ts";
-import { MISSION_BEHAVIOR_REVIEW, missionOperatorContent, missionCoordinatorContent, missionWorkerContent } from "./runtime-mission-assets.ts";
+import { missionReviewerContent, missionOperatorContent, missionCoordinatorContent, missionWorkerContent } from "./runtime-mission-assets.ts";
 
 const coordinator = profileAgent(profile, "dog-coordinator");
 const operator = profileAgent(profile, "dog-operator");
@@ -410,36 +410,13 @@ Do not turn this into an exhaustive inventory of creation, binding, mutation, sy
 representations, or their Cartesian product. Do not add tests or scope for hypothetical routes without
 a source-backed reason that they affect the requested behavior.
 `;
-const CHANGED_PATH_COVERAGE_REVIEWER = `
-## Changed-path coverage
-
-Review the requested public behavior, changed source branches, and relevant adjacent checks. If the supplied
-source or acceptance identifies another route, representation, branch, or target that can materially change
-the result, identify that concrete path and the missing or contradictory evidence. A demonstrated material defect
-is FINDINGS; a specific material path whose outcome cannot be settled by the supplied artifact is
-EVIDENCE_GAPS. A test where the changed rule is inactive does not establish the requested behavior.
-For a multi-target change, verify each affected target when the source shows independent handling.
-
-Do not demand a generic creation/binding/mutation inventory, every possible value representation, or a
-cross-product of independent dimensions just because the construct already exists. Absence of that
-inventory alone is not an evidence gap.
-
-${MISSION_BEHAVIOR_REVIEW}
-
-## Mission review verdict
-
-Start with exactly one of PASS, FINDINGS or EVIDENCE_GAPS. Use FINDINGS when a material source/test defect or
-material observed contradiction is established. Use EVIDENCE_GAPS only for a specific material acceptance-relevant behavior
-or required validation that the supplied artifact cannot settle; name why the missing evidence matters.
-List all material gaps in one response rather than one per round; the host bounds evidence rounds.
-`;
-
 export const runtimeAssets: readonly RuntimeAsset[] = Object.freeze([
   ...canonicalAssets.map((asset): RuntimeAsset => {
     const name = asset.name === "sortie" ? profile.commandName : profileAgent(profile, asset.name as Parameters<typeof profileAgent>[1]);
     let content = asset.name === "dog-coordinator" ? missionOperatorContent(profile, V010_RUNTIME_ASSET_VERSION) +
         PREVIEW_PRESENTATION_POLICY.replaceAll("complete_operator", "complete_mission") + PREVIEW_TERMINAL_REPORT_POLICY.replaceAll("complete_operator", "complete_mission")
       : asset.name === "dog-worker" ? missionWorkerContent(profile)
+      : asset.name === "dog-reviewer" ? missionReviewerContent(profile)
       : renderProfileInstructions(profile, asset.content).replaceAll(RUNTIME_ASSET_VERSION, V010_RUNTIME_ASSET_VERSION);
     if (asset.name !== "dog-coordinator" && asset.installPath.startsWith("agent/")) {
       content = content.replace("mode: subagent\n", "mode: subagent\nhidden: true\n");
@@ -455,7 +432,6 @@ export const runtimeAssets: readonly RuntimeAsset[] = Object.freeze([
       content += `\n## Root-approved unit coverage\nWhen the immutable handoff contains ext["sortie-dogs/unit-coverage"], its indices identify this unit's assigned criteria within the unchanged global acceptance ledger. Prove those assigned criteria and preserve all global constraints. Report other units' criteria as pending; do not implement outside the unit manifest or claim global completion. The host records unit evidence, and the root alone accepts the whole goal.\n`;
       content += CHANGED_PATH_COVERAGE_WORKER;
     }
-    if (asset.name === "dog-reviewer") content += CHANGED_PATH_COVERAGE_REVIEWER;
     if (asset.name !== "dog-coordinator") {
       content = content.replace(/^description: .*$/m, match => `${match} [${V010_RUNTIME_ASSET_VERSION}]`);
     }

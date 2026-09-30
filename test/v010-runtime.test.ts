@@ -282,15 +282,21 @@ test("preview assets coexist with stable assets and markers", async () => fixtur
   assert.match(reviewer, /^model: openai\/gpt-6-sol#xhigh$/m);
   assert.match(previewAssets.find(asset => asset.name === "dog-scout-v010")!.content, /^model: openai\/gpt-6-luna-fast#max$/m);
   assert.match(previewAssets.find(asset => asset.name === "dogs-coordinator")!.content, /^model: openai\/gpt-6-sol#xhigh$/m);
-  assert.match(reviewer, /another route, representation, branch, or target that can materially change\nthe result/u);
-  assert.match(reviewer, /Absence of that\ninventory alone is not an evidence gap/u);
+  for (const tool of ["read", "glob", "grep", "list"]) {
+    assert.match(reviewer, new RegExp(`^  ${tool}: allow$`, "m"));
+    assert.match(reviewer, new RegExp(`^  ${tool}: true$`, "m"));
+  }
+  for (const tool of ["edit", "write", "patch", "bash", "task"]) {
+    assert.match(reviewer, new RegExp(`^  ${tool}: deny$`, "m"));
+  }
+  assert.doesNotMatch(reviewer, /invoke no tools|reject a missing index|mapping count|supplied artifact.*only/u);
   assert.match(reviewer, /If a missing check genuinely\naffects correctness or a requested deliverable/u);
   assert.doesNotMatch(reviewer, /Require the enumeration to name the target artifact/u);
   assert.match(reviewer, /Start with exactly one of PASS, FINDINGS or EVIDENCE_GAPS/u);
   assert.match(reviewer, /Report FINDINGS only for concrete major or medium defects with a material impact/u);
   assert.match(reviewer, /Do not turn minor style, wording, optional improvements or speculative edge cases into FINDINGS or EVIDENCE_GAPS/u);
   const coordinator = previewAssets.find(asset => asset.name === "dogs-coordinator")!.content;
-  assert.match(coordinator, /EVIDENCE_GAPS means missing proof, not a defect/u);
+  assert.match(coordinator, /EVIDENCE_GAPS means an advisory uncertainty, not a defect/u);
   assert.match(coordinator, /not a speculative route inventory\nor raw history to prove incidental process constraints/u);
   assert.match(coordinator, /Never plan a separate setup\nunit/u);
   const worker = previewAssets.find(asset => asset.name === "dog-worker-v010")!.content;
@@ -1158,14 +1164,14 @@ test("nested mission review and accepted work survive reload and agent-change ca
   assert.ok(automatic.task, "a validated clipped source does not block the returned Reviewer task");
   assert.ok(automatic.automatic_truncated_source?.includes("large-evidence.md"),
     "the public response names a path clipped by UTF-8 rendering at the exact source budget");
-  assert.match(automatic.evidence_hint, /otherwise dispatch the returned Reviewer task/u);
+  assert.match(automatic.evidence_hint, /Dispatch the Reviewer; it can read\/search relevant files directly/u);
   assert.equal(automatic.truncated_evidence, undefined, "automatic clipping does not become a focused-evidence rejection");
   await writeFile(join(root, "long-context.md"), ("a long incidental context line ".repeat(12) + "\n").repeat(200));
   const clipped = JSON.parse(await hooks.tool!.sortie_v010_review_mission.execute({ risk_tags: ["public-logic"],
     traces: ["The Worker wrote and validated result.txt"], evidence: [{ path: "long-context.md", offset: 1, limit: 200 }],
   }, { sessionID: "coordinator" }));
   assert.deepEqual(clipped.truncated_evidence, ["long-context.md:1"]);
-  assert.match(clipped.next_action, /before dispatching the Reviewer/u);
+  assert.match(clipped.next_action, /Dispatch the Reviewer; it can read the clipped ranges directly/u);
   assert.ok(clipped.automatic_truncated_source.includes("large-evidence.md"));
   assert.equal(clipped.evidence_hint, undefined, "the focused truncation instruction takes precedence");
   const review = async (plugin: V010Hooks, trace: string) => JSON.parse(await plugin.tool!.sortie_v010_review_mission.execute({
@@ -1174,8 +1180,8 @@ test("nested mission review and accepted work survive reload and agent-change ca
   const initial = { args: await review(hooks, "The Worker wrote and validated result.txt") };
   await hooks["tool.execute.before"]!({ tool: "task", sessionID: "coordinator", callID: "initial-review" }, initial);
   assert.match(initial.args.prompt, /^review_phase: initial$/m);
-  assert.match(initial.args.prompt, /specific acceptance-relevant behavior or required validation/u);
-  assert.match(initial.args.prompt, /do not request a generic route inventory/u);
+  assert.match(initial.args.prompt, /EVIDENCE_GAPS is advisory/u);
+  assert.match(initial.args.prompt, /Missing prose, mappings or excerpt lines alone are not defects/u);
   assert.match(initial.args.prompt, /absence of a separate settings dump or historical log is not itself an evidence gap/u);
   assert.doesNotMatch(initial.args.prompt, /process history later established on the base/u);
   hostMessages.coordinator = [{ info: { role: "assistant", sessionID: "coordinator", time: { created: Date.now() } },
