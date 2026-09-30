@@ -13,6 +13,19 @@ export interface SerialDispatchSettlement {
   readonly evidence: readonly GoalEvidence[];
   readonly resultClass: string;
   readonly failure?: { readonly command: readonly string[]; readonly outcome: "fail"; readonly exitCode: number | null };
+  readonly nativeOutcome?: "completed" | "failed";
+}
+
+/** Persisted on the existing Mission attempt, not a separate recovery ledger. */
+export interface MissionWorkerTerminalRecord {
+  readonly runID: string;
+  readonly unitID: string;
+  readonly taskID: string;
+  readonly callID: string;
+  readonly childSessionID: string;
+  readonly ownerSessionID: string;
+  readonly outcome: "completed" | "failed";
+  readonly descendants: readonly string[];
 }
 
 /** Host-owned extension. It is not parsed from project JSON or a worker's prompt. */
@@ -36,11 +49,15 @@ export interface RuntimeBridge {
   ownsMissionDispatch?(rootSessionID: string, callID: string, taskID: string): Promise<boolean>;
   /** Durable operator dispatch identity survives adapter reload and missed after hooks. */
   recoverMissionDispatch?(rootSessionID: string, taskID: string): Promise<{
-    callID: string; childSessionID?: string; cancelled: boolean;
+    callID: string; childSessionID?: string; cancelled: boolean; nativeOutcome?: "completed" | "failed";
   } | undefined>;
   onHostHandoffRepaired?(rootSessionID: string, taskID: string, handoffPath: string,
     original: string, repaired: string): Promise<void>;
   allowsInvestigativeShell?(sessionID: string): Promise<boolean>;
+  assertMissionWrite?(sessionID: string, paths: readonly string[]): Promise<void>;
+  expandMissionScope?(rootSessionID: string, childSessionID: string, taskID: string, paths: readonly string[],
+    activate: (manifest: import("../core/types.js").OperationManifest) => Promise<() => Promise<void>>): Promise<void>;
+  missionDispatchCall?(rootSessionID: string, childSessionID: string, taskID: string): Promise<string | undefined>;
   onSerialSettlement?(settlement: SerialDispatchSettlement): Promise<void>;
   onRootTerminal?(rootSessionID: string, receipt: GoalTerminalReceipt): Promise<void>;
   connected?(control: {
@@ -81,7 +98,7 @@ export interface RuntimeBridge {
     currentReceipt(rootSessionID: string): Promise<GoalTerminalReceipt | undefined>;
     retireHistoricalGoal(rootSessionID: string): Promise<boolean>;
     isUncontractedGoal(rootSessionID: string, latestUserMessageID: string): Promise<boolean>;
-    currentBudget(rootSessionID: string): Promise<{
+    currentBudget(rootSessionID: string, options?: { reconcileUsage?: boolean }): Promise<{
       readonly max_units: number;
       readonly consumed_units: number;
       readonly reserved_units: number;
@@ -99,6 +116,9 @@ export interface RuntimeBridge {
     recoverUnitEvidence(rootSessionID: string, request: { unitID: string; childSessionID: string; manifestPath: string;
       manifestHash: string; goalFingerprint: string }): Promise<readonly GoalEvidence[]>;
     completionReadiness(rootSessionID: string): Promise<import("./goal-completion.js").CompletionReadiness>;
+    missionWorkerTerminal(rootSessionID: string, terminal: MissionWorkerTerminalRecord,
+      writeScopes: readonly string[]): Promise<{ ready: boolean; reason?: string }>;
+    expandMissionWriteGate(childSessionID: string, paths: readonly string[]): Promise<void>;
     completeRoot(rootSessionID: string, acceptanceFingerprint: string): Promise<{
       status: "succeeded" | "awaiting-evidence";
       receipt?: GoalTerminalReceipt;

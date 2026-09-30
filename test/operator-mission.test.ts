@@ -30,8 +30,8 @@ test("public reproduction and shared-branch checks remain in the same mission Wo
   assert.match(coordinator, /working directory or package layout/u);
   assert.match(coordinator, /not an adjacent check unless it runs\s+the changed branch/u);
   assert.match(worker, /entrypoint, input and layout intact/u);
-  assert.match(worker, /including failures the new\s+handler does not catch/u);
-  assert.match(worker, /skip redundant checks already covered by formal validation/u);
+  assert.match(worker, /underlying operation, reachable inputs and uncaught failures/u);
+  assert.match(worker, /avoid redundant\s+checks/u);
   assert.match(worker, /do not append a tee pipeline/u);
   assert.match(coordinator, /a preview is not the live run/u);
   assert.match(operator, /Do not turn a chosen preflight step into a user requirement/u);
@@ -40,7 +40,7 @@ test("public reproduction and shared-branch checks remain in the same mission Wo
   assert.match(coordinator, /process-defect with no formal validation evidence/u);
   assert.match(coordinator, /custom container tool is not\s+native shell validation/u);
   assert.match(coordinator, /use\s+the existing ref as start_ref in a lifecycle plan/u);
-  assert.match(worker, /only the checked-out\s+default 'master' at the intended base commit/u);
+  assert.match(worker, /checked-out default 'master' has the intended base commit/u);
   assert.doesNotMatch(worker, /hidden evaluator details.*as (?:proof|tests)/u);
 
   // Public-only synthetic case analogous to a shared exception handler. This asserts the
@@ -57,9 +57,10 @@ test("public reproduction and shared-branch checks remain in the same mission Wo
   const task = (await operators.next("root", "root") as { task: { prompt: string } }).task;
   await operators.admitWorker("root", "root", "worker-call", task as never);
   const expanded = await operators.claimAdmittedWorkerPrompt("root", "root", "worker", task.prompt);
-  assert.match(expanded.prompt, /format_value\('\{'\) ValueError/u);
-  assert.match(expanded.prompt, /adjacent TypeError on the same exception branch/u);
-  assert.match(expanded.prompt, /python -m pytest tests\/test_format.py/u);
+  assert.match(expanded.prompt, /^contract_reference: handoff$/m);
+  const handoff = JSON.parse(await readFile(run.units[0]!.handoffPath, "utf8"));
+  assert.equal(handoff.task.objective, objective, "public entrypoint, layout and adjacent failure stay verbatim in the mandatory handoff");
+  assert.deepEqual(handoff.verification.map((item: { check: string }) => item.check), ["python -m pytest tests/test_format.py"]);
   assert.deepEqual(run.acceptance, ["Fix the public format failure", "Preserve working formatting"]);
   assert.equal(run.units.length, 1, "no separate setup or review Worker is required");
 }));
@@ -167,7 +168,8 @@ test("mission Coordinator owns a single Worker unit without a proposal or root a
   await operators.admitWorker("root", "coordinator", "worker-call", next.task);
   await assert.rejects(operators.claimAdmittedWorkerPrompt("root", "root", "worker", next.task.prompt), /parent-mismatch/);
   const admitted = await operators.claimAdmittedWorkerPrompt("root", "coordinator", "worker", next.task.prompt);
-  assert.match(admitted.prompt, /Read-only investigation commands are unrestricted/);
+  assert.match(admitted.prompt, /^contract_reference: handoff$/m);
+  assert.match(missionWorkerContent(V010_RUNTIME_PROFILE), /Read\/search\/investigation use existing host permissions/);
   assert.equal((await operators.required("root")).runID, state.runID);
   await assert.rejects(operators.replanMission("root", state.runID, missionPlan(mission, [{ ...unit, write: ["src", "test"] }])), /still-active/);
 }));
@@ -199,16 +201,16 @@ test("mission Worker separates prior decisions from post-validation independent 
   const workerTask = (await operators.next("root", "coordinator") as { task: typeof coordinatorTask }).task;
   await operators.admitWorker("root", "coordinator", "worker-call", workerTask);
   const expanded = await operators.claimAdmittedWorkerPrompt("root", "coordinator", "worker", workerTask.prompt);
-  for (const criterion of acceptance) assert.ok(expanded.prompt.includes(criterion), `expanded Worker prompt omitted acceptance: ${criterion}`);
-  assert.match(expanded.prompt, /Coordinator handles any applicable independent review after your return/u);
-  assert.match(expanded.prompt, /review is not a prerequisite to execution/u);
-  assert.match(expanded.prompt, /Do not spawn nested subagents/u);
+  assert.match(expanded.prompt, /^contract_reference: handoff$/m);
+  const instructions = missionWorkerContent(V010_RUNTIME_PROFILE);
+  assert.match(instructions, /parent handles required independent\s+review after your return, not before execution/u);
+  assert.match(instructions, /Do not spawn nested subagents/u);
   assert.doesNotMatch(expanded.prompt, /Required consultations belong to the root before dispatch/u);
   assert.doesNotMatch(expanded.prompt, /If required consultation results or user decisions are missing/u);
   assert.equal(expanded.prompt.match(/^unit_acceptance_indices: .*$/mu)?.[0], "unit_acceptance_indices: [0,1]");
 }));
 
-test("multi-unit mission retains the review sequence in both admitted and expanded Worker prompts", async () => fixture(async directory => {
+test("multi-unit mission retains review sequence in each referenced handoff and Worker system", async () => fixture(async directory => {
   const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
   const operators = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
   const acceptance = ["Fix the root cause.", independentReviewAcceptance, "Preserve compatibility."];
@@ -236,10 +238,11 @@ test("multi-unit mission retains the review sequence in both admitted and expand
   }
 
   const assertMissionWorkerPrompt = (prompt: string, indices: number[]) => {
-    for (const criterion of acceptance) assert.ok(prompt.includes(criterion), `Worker prompt omitted acceptance: ${criterion}`);
-    assert.match(prompt, /Coordinator handles any applicable independent review after your return/u);
-    assert.match(prompt, /review is not a prerequisite to execution/u);
-    assert.match(prompt, /Do not spawn nested subagents/u);
+    assert.match(prompt, /^contract_reference: handoff$/m);
+    assert.match(prompt, /^acceptance: handoff\.ext\["sortie-dogs\/acceptance-continuity"\]\.criteria$/m);
+    const instructions = missionWorkerContent(V010_RUNTIME_PROFILE);
+    assert.match(instructions, /parent handles required independent\s+review after your return, not before execution/u);
+    assert.match(instructions, /Do not spawn nested subagents/u);
     assert.doesNotMatch(prompt, /Required consultations belong to the root before dispatch/u);
     assert.doesNotMatch(prompt, /If required consultation results or user decisions are missing/u);
     assert.equal(prompt.match(/^unit_acceptance_indices: .*$/mu)?.[0], `unit_acceptance_indices: ${JSON.stringify(indices)}`);
@@ -261,7 +264,7 @@ test("multi-unit mission retains the review sequence in both admitted and expand
   expandedPrompts.push(secondExpanded.prompt);
   assert.equal(expandedPrompts.length, run.units.length);
   assertMissionWorkerPrompt(expandedPrompts[1]!, [2]);
-  assert.match(expanded.prompt, /review is not a prerequisite to execution/u);
+  assert.match(missionWorkerContent(V010_RUNTIME_PROFILE), /review after your return, not before execution/u);
   assert.equal(expanded.prompt.match(/^unit_acceptance_indices: .*$/mu)?.[0], "unit_acceptance_indices: [0,1]");
 }));
 

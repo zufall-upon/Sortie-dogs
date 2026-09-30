@@ -22,6 +22,7 @@ import { OperatorMissionRuntime, missionPlan } from "../dist/core/operator-missi
 import { OperatorRuntime } from "../dist/core/operator-runtime.js";
 import { missionProgressReader } from "../dist/plugin/mission-progress.js";
 import { completedMissionReviewPrompts, observedMissionValidation } from "../dist/plugin/mission-review.js";
+import { runtimeAssets } from "../dist/runtime-assets-v010.js";
 
 function contextFixture() {
   const history: Record<string, unknown>[] = [{
@@ -100,6 +101,36 @@ function contextFixture() {
     failNextSynthetic: () => { failSynthetic = true; }, failNextContext: () => { failContext = true; }, aborted: () => aborted };
 }
 
+test("generated Mission Worker assets expose same-Task scope repair, not Coordinator controls", () => {
+  for (const name of ["dog-worker-v010", "dog-luna-worker-v010"]) {
+    const content = runtimeAssets.find(asset => asset.name === name)!.content;
+    assert.match(content, /sortie_v010_expand_unit: allow/);
+    assert.match(content, /sortie_v010_expand_unit: true/);
+    assert.doesNotMatch(content, /sortie_v010_(?:plan_units|complete_mission|cancel_operator): true/);
+  }
+});
+
+test("V2 optional condition objects admit omission without manufacturing provenance or erasing fixed facts", async () => {
+  const fixture = contextFixture();
+  const received: unknown[] = [];
+  const cleanup = await createSortieDogsV2Plugin(async () => ({ tool: { sortie_v010_conditions: {
+    description: "condition fixture", args: { confirmed_conditions: { type: "object", "x-sortie-optional": true,
+      required: ["source", "applies_to"], properties: { source: { type: "string" }, applies_to: { type: "string" } } } as never },
+    execute: async args => { received.push(args); return JSON.stringify(args); },
+  } } })).setup(fixture.context);
+  try {
+    const tool = fixture.tools.find(item => item.name === "sortie_v010_conditions") as any;
+    assert.equal(tool.input.properties.confirmed_conditions.anyOf[0].type, "object");
+    assert.deepEqual(tool.input.properties.confirmed_conditions.anyOf[1].enum, [""]);
+    for (const confirmed_conditions of ["", {}, { source: "", applies_to: "" }]) await tool.execute({ confirmed_conditions }, { sessionID: "root" });
+    const meaningful = { source: "User", applies_to: "original run" };
+    await tool.execute({ confirmed_conditions: meaningful }, { sessionID: "root" });
+    const invalid = { source: "", applies_to: "run", timeout_seconds: 0 };
+    await tool.execute({ confirmed_conditions: invalid }, { sessionID: "root" });
+    assert.deepEqual(received, [{}, {}, {}, { confirmed_conditions: meaningful }, { confirmed_conditions: invalid }]);
+  } finally { cleanup?.(); }
+});
+
 test("V2 native shell results retain build→test exits and timestamps through the Review history adapter", async () => {
   const fixture = contextFixture();
   const tool = (id: string, command: string, ran: number, completed: number) => ({ type: "tool", id, name: "shell",
@@ -135,6 +166,8 @@ for (const legacy of [false, true]) test(`V2 ${legacy ? "saved absolute" : "rela
     fixture = contextFixture();
     cleanup = await V2Plugin.setup({ ...fixture.context, location: { directory },
       session: { ...fixture.context.session,
+        list: async ({ parentID }) => ({ data: Object.entries(agents).filter(([, info]) => info.parentID === parentID)
+          .map(([id, info]) => ({ id, ...info })), cursor: { next: null } }),
         get: async ({ sessionID }) => ({ id: sessionID, ...agents[sessionID], model: { providerID: "openai",
           id: agents[sessionID]?.agent === "dog-worker-v010" ? "gpt-6-luna-fast" : "gpt-6-sol", variant: "max" } }),
         context: async ({ sessionID }) => history[sessionID] ?? [],
@@ -196,7 +229,8 @@ for (const legacy of [false, true]) test(`V2 ${legacy ? "saved absolute" : "rela
         // Recreate a pre-change saved mission, including its exact old Task reference/hash.
         state.units[0]!.task.prompt = state.units[0]!.task.prompt.replace(/^(handoff_path|goal_declaration_path): (.+)$/gm,
           (_line, name: string, path: string) => `${name}: ${resolve(directory, path)}`)
-          .replace(/^Read handoff_path and other repository files.*\n/m, "");
+          .replace(/^acceptance: handoff\..*\nvalidation: handoff\.verification\n/m, "")
+          .replace("contract_reference: handoff\n", `acceptance:\n  - ${original}\nvalidation:\n  - ${command}\n`) + `\n${objective}`;
         const file = join(directory, ".sortie-dogs-v010/operators", `${createHash("sha256").update("root").digest("hex")}.json`);
         await writeFile(file, JSON.stringify(state));
         runtime = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
@@ -210,7 +244,8 @@ for (const legacy of [false, true]) test(`V2 ${legacy ? "saved absolute" : "rela
       const worker = await before("coordinator", "subagent", task);
       assert.equal(worker.input.prompt, reference, "native delegation keeps the exact opaque reference");
       const expanded = await prompt(child, String(reference));
-      assert.ok(expanded.endsWith(objective), "projection must not rewrite task data below the generated header");
+      if (legacy && index === 0) assert.ok(expanded.endsWith(objective), "legacy projection must not rewrite task data below the generated header");
+      else assert.ok(!expanded.includes(objective), "new Mission Tasks use the existing required handoff, not a repeated objective");
       const handoff = /^handoff_path: (.+)$/m.exec(expanded)![1]!;
       const declaration = /^goal_declaration_path: (.+)$/m.exec(expanded)![1]!;
       assert.equal(isAbsolute(handoff), false);
@@ -220,7 +255,9 @@ for (const legacy of [false, true]) test(`V2 ${legacy ? "saved absolute" : "rela
       // V2 native read(path) reaches the shared engine as filePath without rewriting its target.
       const read = await before(child, "read", { path: handoff });
       assert.equal(read.input.path, handoff);
-      await after(read, await readFile(resolve(directory, String(read.input.path)), "utf8"));
+      const handoffSource = await readFile(resolve(directory, String(read.input.path)), "utf8");
+      assert.equal(JSON.parse(handoffSource).task.objective, objective, "original objective and embedded example remain verbatim");
+      await after(read, handoffSource);
       const manifest = /^operation_manifest: (.+)$/m.exec(expanded)![1]!;
       assert.equal((await tool(child, "bind_write_gate", { project_root: directory, manifest_path: manifest })).status, "bound");
       if (index === 1) {
@@ -873,7 +910,7 @@ test("V2 compaction excludes Sortie schemas even when it bypasses the normal con
   } finally { cleanup?.(); }
 });
 
-test("V2 Worker can observe status without acquiring Coordinator control tools", async () => {
+test("V2 Worker can observe status and repair its scope without acquiring Coordinator control tools", async () => {
   const fixture = contextFixture();
   const cleanup = await V2Plugin.setup(fixture.context);
   try {
@@ -881,7 +918,7 @@ test("V2 Worker can observe status without acquiring Coordinator control tools",
     for (const agent of ["dog-worker-v010", "dog-luna-worker-v010"]) {
       const event = { sessionID: "worker", agent, system: [], tools: { ...exposed, read: {} } };
       await fixture.sessionHooks.get("context")!(event);
-      assert.deepEqual(Object.keys(event.tools).sort(), ["read", "sortie_v010_bind_write_gate", "sortie_v010_operator_status", "sortie_v010_release_write_gate"]);
+      assert.deepEqual(Object.keys(event.tools).sort(), ["read", "sortie_v010_bind_write_gate", "sortie_v010_expand_unit", "sortie_v010_operator_status", "sortie_v010_release_write_gate"]);
     }
   } finally { cleanup?.(); }
 });

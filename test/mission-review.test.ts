@@ -11,6 +11,7 @@ import { MISSION_REVIEW_REFERENCE, type OperatorMission } from "../dist/core/ope
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
 import { FastLaneController } from "../dist/plugin/fast-lane.js";
 import { declaredArtifacts } from "../dist/plugin/declared-artifacts.js";
+import { protectedSnapshot } from "../dist/plugin/protected-snapshot.js";
 
 const git = promisify(execFile);
 
@@ -240,7 +241,15 @@ test("an ignored build cache in the write scope cannot displace review source or
     await mkdir(join(root, "_testenv"));
     await writeFile(join(root, ".gocache", "cache"), "cache content ".repeat(5_000));
     await writeFile(join(root, "_testenv", "result.json"), '{"result":"observed"}\n');
-    const run = { units: [{ unit: { write: ["source.js", ".gocache/**", "_testenv/**"] }, hashes: [] }] } as never;
+    const manifestPath = join(root, ".sortie-dogs-v010/manifest.json");
+    await mkdir(join(root, ".sortie-dogs-v010"));
+    const manifest = JSON.stringify({ task_id: "cache-test", read: ["source.js"], write: ["source.js", ".gocache/**", "_testenv/**"],
+      validation: [`GOCACHE=${join(root, ".gocache")} node check.mjs`] });
+    await writeFile(manifestPath, manifest);
+    const snapshot = await protectedSnapshot({ projectRoot: root, manifestPath, manifestHash: createHash("sha256").update(manifest).digest("hex") });
+    assert.ok(snapshot);
+    const run = { units: [{ unit: { id: "cache-test", read: ["source.js"], write: ["source.js", ".gocache/**", "_testenv/**"], validation: [], acceptance_indices: [0] },
+      hashes: [], evidence: [{ protected_binding: snapshot.binding }] }] } as never;
     const first = await missionReviewSource(root, run, [], baseline);
     assert.match(first.excerpt, /export const answer = 42/u);
     assert.match(first.excerpt, /"result":"observed"/u, "ignored output directories remain visible");
@@ -257,6 +266,31 @@ test("an ignored build cache in the write scope cannot displace review source or
     await writeFile(join(root, "_testenv", "result.json"), '{"result":"changed"}\n');
     assert.notEqual((await missionReviewSource(root, run, [], baseline)).fingerprint, first.fingerprint,
       "the ignored output directory still invalidates stale review proof");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+for (const promotion of ["exact-output", "tracked-source"]) test(`Review includes a new ${promotion} under previously excluded scratch`, async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const root = await mkdtemp(join(resolve("_testenv"), "mission-review-promotion-"));
+  try {
+    await git("git", ["init", "--quiet"], { cwd: root });
+    await writeFile(join(root, "result.txt"), "verified");
+    const manifestPath = join(root, "manifest.json"), value = { version: "0.1.0", task_id: "unit", read: [],
+      write: ["result.txt", ".tmp/**"], validation: [`TMPDIR=${root}/.tmp node check.mjs`] };
+    await writeFile(manifestPath, JSON.stringify(value));
+    const snapshot = await protectedSnapshot({ projectRoot: root, manifestPath, manifestHash: createHash("sha256").update(JSON.stringify(value)).digest("hex") });
+    assert.ok(snapshot);
+    const run = { units: [{ unit: { id: "unit", ...value, acceptance_indices: [0] }, hashes: [], evidence: [{ protected_binding: snapshot.binding }] }] } as never;
+    const first = await missionReviewSource(root, run);
+    await mkdir(join(root, ".tmp"));
+    await writeFile(join(root, ".tmp/cache"), "cache only");
+    assert.equal((await missionReviewSource(root, run)).fingerprint, first.fingerprint);
+    await writeFile(join(root, ".tmp/new-deliverable.txt"), "unverified output");
+    if (promotion === "exact-output") value.write.push(".tmp/new-deliverable.txt");
+    else await git("git", ["add", "--", ".tmp/new-deliverable.txt"], { cwd: root });
+    const changed = await missionReviewSource(root, run);
+    assert.notEqual(changed.fingerprint, first.fingerprint);
+    assert.match(changed.excerpt, /new-deliverable.txt/);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

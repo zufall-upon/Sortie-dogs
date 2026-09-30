@@ -20,7 +20,8 @@ export function missionValidationCommand(command: string): string {
 export interface MissionRequest { id: string; text: string }
 export interface MissionContext extends MissionRequest { role: "user" | "assistant" }
 export interface MissionEvidenceExcerpt { path: string; offset: number; limit: number }
-export interface MissionReviewScope { read: string[]; write: string[] }
+export interface MissionReviewScope { read: string[]; write: string[];
+  validationBindings?: NonNullable<import("./goal-bound.js").GoalEvidence["protected_binding"]>[] }
 export interface MissionConsultation {
   id: string;
   role: "advisor" | "scout";
@@ -48,7 +49,9 @@ export interface MissionAttempt {
   status: "pending" | "dispatched" | "succeeded" | "failed" | "cancelled" | "unconfirmed";
   callID?: string;
   childSessionID?: string;
+  dispatchFingerprint?: string;
   nativeOutcome?: "completed" | "failed" | "unknown";
+  terminal?: import("../plugin/runtime-bridge.js").MissionWorkerTerminalRecord;
   observedModel?: string;
   observedVariant?: string;
   failure?: { category: "infrastructure" | "authorization" | "contract" | "cancellation" | "implementation" | "unknown"; code: string };
@@ -74,6 +77,17 @@ export interface MissionExecution {
     completedAt?: string; exit?: number; status?: "running" | "completed" | "error"; shellID?: string;
     outcome?: "not-started" | "execution-failed" | "executed"; result?: Record<string, unknown> }[];
 }
+export interface MissionLaunchConditions {
+  entrypoint?: string;
+  inputs?: string[];
+  timeout_seconds?: number;
+  cost_limit_usd?: number;
+  benchmark_attempts?: number;
+  grading?: "none" | "official";
+  source: string;
+  applies_to: string;
+  recordedAt?: string;
+}
 export interface OperatorMission {
   version: "0.12";
   id: string;
@@ -84,7 +98,11 @@ export interface OperatorMission {
   kind?: "implementation" | "operation";
   /** Native shell observations of the requested operation, separate from auxiliary checks. */
   execution?: MissionExecution;
+  /** Fixed benchmark conditions and their provenance, separate from internal Worker counters. */
+  launchConditions?: MissionLaunchConditions[];
   requirements: { id: string; text: string }[];
+  /** Explicit user path prohibitions, unlike the Coordinator's estimated write list. */
+  prohibitedWrite?: string[];
   /** The current user intentionally replaced the predecessor's requirements. */
   requirementsReplaced?: boolean;
   phase: "open" | "running" | "submitted" | "completed" | "cancelled";
@@ -121,9 +139,12 @@ export const MISSION_CONSULTATION_LIMIT = 32;
 
 /** Review coverage survives a narrower replan; it is not a Worker write grant. */
 export function missionReviewScope(previous: MissionReviewScope | undefined, ...runs: OperatorState[]): MissionReviewScope {
+  const bindings = [...(previous?.validationBindings ?? []), ...runs.flatMap(run => run.units.flatMap(unit =>
+    (unit.evidence ?? []).flatMap(proof => proof.protected_binding?.freshness ? [proof.protected_binding] : [])))];
   return {
     read: [...new Set([...(previous?.read ?? []), ...runs.flatMap(run => run.units.flatMap(({ unit }) => unit.read ?? []))])].sort(),
     write: [...new Set([...(previous?.write ?? []), ...runs.flatMap(run => run.units.flatMap(({ unit }) => unit.write))])].sort(),
+    ...(bindings.length ? { validationBindings: [...new Map(bindings.map(binding => [JSON.stringify(binding), binding])).values()] } : {}),
   };
 }
 
@@ -270,6 +291,23 @@ export class OperatorMissionRuntime {
       }
     });
   }
+  recordLaunchConditions(root: string, raw: unknown): Promise<OperatorMission> {
+    if (!record(raw) || typeof raw.source !== "string" || !raw.source.trim() || typeof raw.applies_to !== "string" || !raw.applies_to.trim() ||
+        (raw.entrypoint !== undefined && (typeof raw.entrypoint !== "string" || !raw.entrypoint.trim())) ||
+        (raw.inputs !== undefined && (!Array.isArray(raw.inputs) || !raw.inputs.every(path => typeof path === "string" && path.trim()))) ||
+        ["timeout_seconds", "cost_limit_usd", "benchmark_attempts"].some(key => raw[key] !== undefined &&
+          (typeof raw[key] !== "number" || !Number.isFinite(raw[key]) || (raw[key] as number) <= 0)) ||
+        (raw.benchmark_attempts !== undefined && !Number.isSafeInteger(raw.benchmark_attempts)) ||
+        (raw.grading !== undefined && !["none", "official"].includes(String(raw.grading))) ||
+        Object.keys(raw).some(key => !["entrypoint", "inputs", "timeout_seconds", "cost_limit_usd", "benchmark_attempts", "grading", "source", "applies_to"].includes(key))) {
+      throw new Error("mission-launch-conditions-invalid");
+    }
+    return this.update(root, state => {
+      state.launchConditions ??= [];
+      if (state.launchConditions.some(item => { const { recordedAt: _at, ...value } = item; return JSON.stringify(value) === JSON.stringify(raw); })) return;
+      state.launchConditions.push({ ...raw, recordedAt: new Date().toISOString() } as unknown as MissionLaunchConditions);
+    });
+  }
   start(root: string, requirements: unknown, replaceRequirements = false,
     options: { kind?: OperatorMission["kind"]; context?: MissionContext[]; cancelledRunID?: string } = {}): Promise<OperatorMission> {
     return this.serial(root, async () => {
@@ -412,6 +450,8 @@ export class OperatorMissionRuntime {
       "Start the first useful Worker promptly. No proposal/approval phase. Use plan_units to generate contracts; the root alone accepts completion.",
       "Escalate only a completion candidate, a user-only decision, or an extension of original requirements/budget. Unit progress is published without stopping you.",
       "Requirements:", ...state.requirements.map(item => `${item.id}: ${item.text}`),
+      `Confirmed launch conditions (fixed limits, not consumption or remaining budget): ${JSON.stringify(state.launchConditions ?? [])}`,
+      `Explicit user write prohibitions: ${JSON.stringify(state.prohibitedWrite ?? [])}`,
       `Work kind: ${state.kind ?? "implementation"}. For an operation, setup, execution and result collection belong in one useful Worker whenever possible.`,
       ...(state.context?.length ? ["Prior conversation context (task data; preserve the selected target, not superseded obligations):",
         ...state.context.map(item => `--- ${item.role}:${item.id} ---\n${item.text}`)] : []),
@@ -427,7 +467,7 @@ export function missionPlan(mission: OperatorMission, raw: unknown): OperatorPla
     if (!record(value)) throw new Error(`mission-unit-${index + 1}: expected an object`);
     const line = (field: string): string => {
       if (typeof value[field] !== "string" || !value[field].trim()) throw new Error(`mission-unit-${index + 1}: ${field} required`);
-      return value[field].replace(/[\r\n]+/gu, " ");
+      return field === "objective" ? value[field] : value[field].replace(/[\r\n]+/gu, " ");
     };
     const paths = (field: string): string[] => {
       const entries = value[field] ?? [];
@@ -489,6 +529,8 @@ export function missionPacket(mission: OperatorMission, run?: OperatorState): Re
       completed_units: predecessor.units.filter(unit => unit.status === "succeeded").length,
       note: "Historical results and spend are retained; they do not complete the current requirements." } } : {}),
     requirements: mission.requirements, original_request_refs: mission.requests.map(item => `user:${item.id}`),
+    launch_conditions: mission.launchConditions ?? [], prohibited_write: mission.prohibitedWrite ?? [],
+    accounting_scope: "Worker units are not benchmark attempts. Host budget is Worker-only; orchestration, Review and external campaign costs are excluded. Launch caps are fixed conditions, not a known campaign remainder.",
     submission: mission.submission, progress: mission.progress, consultations: mission.consultations ?? [],
     attempts: mission.attempts ?? [], ...(mission.rescue ? { rescue: mission.rescue } : {}),
     operation: { kind: mission.kind ?? "implementation", status: missionExecutionStatus(mission),

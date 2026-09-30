@@ -384,7 +384,7 @@ export function parseOperatorPlan(value: unknown, scopeFormat: "repository" | "e
   const mappingDiagnostics: OperatorContractDiagnostic[] = [];
   for (const [unitIndex, unit] of value.units.entries()) {
     if (!record(unit) || !exactKeys(unit, ["id", "title", "objective", "read", "write", "validation", "acceptance_indices"]) ||
-        !identifier(unit.id) || ids.has(unit.id) || !text(unit.title) || !text(unit.objective) ||
+        !identifier(unit.id) || ids.has(unit.id) || !text(unit.title) || typeof unit.objective !== "string" || !unit.objective.trim() ||
           !strings(unit.read) || !strings(unit.write) || !strings(unit.validation, true)) return planError(`/units/${unitIndex}`, "operator-unit-invalid", "operator-unit-shape");
     unit.validation.forEach((command, index) => rejectValidationAnnotation(command, `/units/${unitIndex}/validation/${index}`));
     ids.add(unit.id);
@@ -833,16 +833,16 @@ export class OperatorRuntime {
   }
   /** Mission authority is supplied only by the owning profile, never by a model-authored plan. */
   prepareMission(root: string, raw: unknown, dispatcher?: { sessionID: string; callID: string }, supersededRunID?: string,
-    terminalChildren: readonly string[] = [], replaceRequirements = false): Promise<OperatorState> {
-    return this.serial(root, () => this.prepareOnce(root, raw, undefined, { dispatcher, supersededRunID, terminalChildren, replaceRequirements }));
+    terminalChildren: readonly string[] = [], replaceRequirements = false, context?: Record<string, unknown>): Promise<OperatorState> {
+    return this.serial(root, () => this.prepareOnce(root, raw, undefined, { dispatcher, supersededRunID, terminalChildren, replaceRequirements, context }));
   }
   /** Stage a settled mission's replacement; rejected preparation never cancels the usable run. */
-  replanMission(root: string, runID: string, raw: unknown, dispatcher?: { sessionID: string; callID: string }): Promise<OperatorState> {
-    return this.serial(root, () => this.prepareOnce(root, raw, undefined, { dispatcher, replaceRunID: runID }));
+  replanMission(root: string, runID: string, raw: unknown, dispatcher?: { sessionID: string; callID: string }, context?: Record<string, unknown>): Promise<OperatorState> {
+    return this.serial(root, () => this.prepareOnce(root, raw, undefined, { dispatcher, replaceRunID: runID, context }));
   }
   private async prepareOnce(root: string, raw: unknown, scopeApprovalTurnID?: string,
     mission?: { dispatcher?: { sessionID: string; callID: string }; supersededRunID?: string;
-      terminalChildren?: readonly string[]; replaceRunID?: string; replaceRequirements?: boolean }): Promise<OperatorState> {
+      terminalChildren?: readonly string[]; replaceRunID?: string; replaceRequirements?: boolean; context?: Record<string, unknown> }): Promise<OperatorState> {
     const previous = await this.read(root);
     const superseding = mission?.supersededRunID !== undefined && previous?.runID === mission.supersededRunID &&
       previous.phase === "cancelled";
@@ -1001,6 +1001,7 @@ export class OperatorRuntime {
         task: { title: unit.title, objective: unit.objective }, state: { done: [], next: [unit.title], blocked: [] }, risks: [],
         verification: unit.validation.map(check => ({ check, status: "not_run", exit_code: null, summary: "Execute in the admitted worker." })),
         ext: {
+          ...(mission ? { "sortie-dogs/mission-context": { write_scope_origin: "coordinator-estimate", ...mission.context } } : {}),
           "sortie-dogs/write-gate": { operation_manifest: manifestRelative, project_root: this.projectRoot },
           [ACCEPTANCE_CONTINUITY_EXTENSION]: { schema_version: "0.1", authority: "dispatch", task_id: taskID,
             criteria: plan.acceptance, fingerprint: acceptanceFingerprint,
@@ -1051,23 +1052,27 @@ export class OperatorRuntime {
       if (diagnostics.length > 0) throw new OperatorContractError(diagnostics);
       const contents = [JSON.stringify(handoff), JSON.stringify(manifest)];
       controls.push({ path: handoffPath, content: contents[0]! }, { path: manifestPath, content: contents[1]! });
-      const prompt = ["role: implementation", `task_id: ${taskID}`, `project_root: ${this.projectRoot}`,
+      const promptHeader = ["role: implementation", `task_id: ${taskID}`, `project_root: ${this.projectRoot}`,
         `source_manifest: ${(unit.write.length ? unit.write : unit.read).join(", ") || "none"}`, `operation_manifest: ${manifestRelative}`,
-        `handoff_path: ${handoffPath}`,
-        `goal_declaration_path: ${declarationPath}`, "acceptance:", ...plan.acceptance.map(value => `  - ${value}`),
+        `handoff_path: ${handoffPath}`, `goal_declaration_path: ${declarationPath}`];
+      const commitBoundary = plan.git_lifecycle !== undefined && index === plan.units.length - 1 ? [
+        `git_post_commit_validation: ${JSON.stringify(plan.git_lifecycle.post_commit_validation)}`,
+        "Complete every source write before invoking any git_post_commit_validation command. Its first exact invocation is the host commit boundary; after it, source mutation and undeclared shell commands are denied. Run every listed command and return its real evidence.",
+      ] : [];
+      // Mission Workers already must read this host-generated handoff before binding. Preserve its
+      // verbatim objective, original requests, criteria and checks there, not in another prompt copy.
+      // Saved Tasks and non-Mission dispatch keep their existing text/identity.
+      const prompt = (mission ? [...promptHeader, "contract_reference: handoff",
+        'acceptance: handoff.ext["sortie-dogs/acceptance-continuity"].criteria', "validation: handoff.verification",
+        `unit_acceptance_indices: ${JSON.stringify(unit.acceptance_indices)}`, "",
+        "Read handoff_path once before binding. Implement task.objective; preserve the original requests, global criteria and constraints in ext, and prove this unit's assigned indices. Run verification checks exactly in order within this Task. Use supplied paths; do not reconstruct project_root. Return actual results and limitations, not whole-Mission completion.",
+        ...commitBoundary,
+      ] : [...promptHeader, "acceptance:", ...plan.acceptance.map(value => `  - ${value}`),
         "validation:", ...unit.validation.map(value => `  - ${value}`),
-        ...(mission ? ["Read handoff_path and other repository files using their project-relative paths as supplied. The native working directory is project_root; do not prepend or reconstruct its absolute path for read/search/shell. Copy project_root only when binding the write gate. Preserve explicitly declared external paths."] : []),
-        mission ? "Read-only investigation commands are unrestricted. Use shell to reproduce and diagnose without asking for command registration. Keep all writes, including generated/transient outputs and cleanup, inside unit.write. Run formal validation exactly as listed, in order and in separate calls, so the host records its real result. If a write scope or formal check must change, return the precise change to your parent Operator or Coordinator; it can extend/redeclare immediately within the original requirements. Diagnostic success is not formal acceptance evidence."
-          : "Execute validation in its declared order. Earlier entries may be approved generator, build, formatter, or exact cleanup commands required before canonical criterion tests. Every persistent or transient generator output must be declared in unit.write. Cleanup may remove only declared unit.write outputs and must be an explicit ordered command after generation and before post-commit or canonical validation; never add an ignore rule or remove an undeclared path. If any necessary command, input, output, or cleanup is missing, do not run an undeclared command or variant and do not use resume evidence tooling to invent permission; return a contract-repair decision.",
-        ...(mission ? [] : ["Preserve existing public API success and error return semantics unless acceptance explicitly changes them, and cover those compatibility boundaries in the declared validation."]),
-        mission
-          ? "Complete the assigned work and listed validation within this Task. For a known operation, proceed through setup, execution and result collection; preparation alone is not execution. Preserve existing public behavior when changing source. Do not spawn nested subagents. The parent Operator or Coordinator handles any applicable independent review after your return; review is not a prerequisite to execution. Return actual results, including failed or not-started operations, and any exact contract correction needed."
-          : "Do not spawn nested subagents for consultation. Required consultations belong to the root before dispatch; use the confirmed decisions and evidence declared in the unit objective and inputs. If required consultation results or user decisions are missing, return the exact contract gap to the parent instead of attempting a deeper Task, inventing consent, or asking the user to repeat an already recorded decision.",
-        ...(plan.git_lifecycle !== undefined && index === plan.units.length - 1 ? [
-          `git_post_commit_validation: ${JSON.stringify(plan.git_lifecycle.post_commit_validation)}`,
-          "Complete every source write before invoking any git_post_commit_validation command. Its first exact invocation is the host commit boundary; after it, source mutation and undeclared shell commands are denied. Run every listed command and return its real evidence.",
-        ] : []),
-        `unit_acceptance_indices: ${JSON.stringify(unit.acceptance_indices)}`, "", unit.objective].join("\n");
+        "Execute validation in its declared order. Earlier entries may be approved generator, build, formatter, or exact cleanup commands required before canonical criterion tests. Every persistent or transient generator output must be declared in unit.write. Cleanup may remove only declared unit.write outputs and must be an explicit ordered command after generation and before post-commit or canonical validation; never add an ignore rule or remove an undeclared path. If any necessary command, input, output, or cleanup is missing, do not run an undeclared command or variant and do not use resume evidence tooling to invent permission; return a contract-repair decision.",
+        "Preserve existing public API success and error return semantics unless acceptance explicitly changes them, and cover those compatibility boundaries in the declared validation.",
+        "Do not spawn nested subagents for consultation. Required consultations belong to the root before dispatch; use the confirmed decisions and evidence declared in the unit objective and inputs. If required consultation results or user decisions are missing, return the exact contract gap to the parent instead of attempting a deeper Task, inventing consent, or asking the user to repeat an already recorded decision.",
+        ...commitBoundary, `unit_acceptance_indices: ${JSON.stringify(unit.acceptance_indices)}`, "", unit.objective]).join("\n");
       units.push({ unit, task: { subagent_type: profileAgent(this.profile, "dog-worker"), description: unit.title, prompt },
         handoffPath, manifestPath, hashes: [...contents.map(hash), hash(declaration)], status: "pending", callID: null,
         childSessionID: null, evidence: [], resultClass: null, repairValidationAttempts: 0, repairValidation: null });
@@ -1560,6 +1565,48 @@ export class OperatorRuntime {
   }
   settled(result: SerialDispatchSettlement): Promise<void> {
     return this.serial(result.rootSessionID, () => this.settledOnce(result));
+  }
+  /** Correct an estimated Mission scope without dispatching, restarting, or reserving another unit. */
+  expandMissionWriteScope(root: string, child: string, taskID: string, paths: readonly string[],
+    activate: (manifest: import("./types.js").OperationManifest) => Promise<() => Promise<void>>): Promise<void> {
+    return this.serial(root, async () => {
+      const state = await this.required(root);
+      const unit = state.units.find(item => /^task_id: (.+)$/m.exec(item.task.prompt)?.[1] === taskID && item.childSessionID === child);
+      if (!unit || !["running", "failed", "succeeded"].includes(unit.status) ||
+          !["running", "awaiting-decision", "awaiting-acceptance"].includes(state.phase) || !unit.callID || state.gitLifecycle) {
+        throw new Error("mission-scope-update-current-task-required");
+      }
+      await this.verifyControls(unit);
+      const write = [...new Set([...unit.unit.write, ...paths.map(normalizeExecutionScope)])];
+      for (const path of write) {
+        const scoped = relative(this.projectRoot, resolve(this.projectRoot, normalizeManifestScope(path).path)).replaceAll("\\", "/");
+        if ([".git", ...Object.values(RUNTIME_PROFILES).map(profile => profile.stateDirectory)].some(dir => scoped === dir || scoped.startsWith(`${dir}/`))) {
+          throw new Error(`operator-control-write-forbidden:${path}`);
+        }
+      }
+      if (JSON.stringify(write) === JSON.stringify(unit.unit.write)) return;
+      const oldManifest = await readFile(unit.manifestPath, "utf8"), oldHandoff = await readFile(unit.handoffPath, "utf8");
+      const manifest = { ...JSON.parse(oldManifest), write } as import("./types.js").OperationManifest;
+      const handoff = JSON.parse(oldHandoff);
+      const m = validateOperationManifestSchema(manifest), h = validateHandoffSchema(handoff);
+      if (!m.ok || !h.ok) throw new Error("mission-scope-update-invalid-contract");
+      const nextManifest = JSON.stringify(manifest), nextHandoff = JSON.stringify(handoff);
+      let rollback: (() => Promise<void>) | undefined;
+      try {
+        await writeFile(unit.manifestPath, nextManifest);
+        await writeFile(unit.handoffPath, nextHandoff);
+        rollback = await activate(manifest);
+        (unit as { unit: OperatorUnit }).unit = { ...unit.unit, write };
+        unit.hashes = [hash(nextHandoff), hash(nextManifest), unit.hashes[2]!];
+        unit.task = { ...unit.task, prompt: unit.task.prompt.replace(/^source_manifest: .*$/mu, `source_manifest: ${write.join(", ")}`) };
+        await this.save(state);
+      } catch (error) {
+        await writeFile(unit.manifestPath, oldManifest);
+        await writeFile(unit.handoffPath, oldHandoff);
+        await rollback?.();
+        throw error;
+      }
+    });
   }
   private async settledOnce(result: SerialDispatchSettlement): Promise<void> {
     const state = await this.read(result.rootSessionID);

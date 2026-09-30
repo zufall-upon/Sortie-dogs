@@ -19,7 +19,7 @@ import { admitLunaFabric } from "../core/luna-fabric-contract.js";
 import { summarizeExperienceEvidence } from "../core/experience-evidence-summary.js";
 import { selectExperienceRoute } from "../core/experience-route-policy.js";
 import { resolveExperienceRouting } from "../core/experience-routing-runtime.js";
-import { normalizeManifestPath, normalizeRelativePath, RelativePathError } from "../core/path.js";
+import { normalizeManifestPath, normalizeManifestScope, normalizeRelativePath, RelativePathError } from "../core/path.js";
 import { ScopeLeaseError, ScopeLeaseRegistry, type ScopeLease } from "../core/scope-lease-registry.js";
 import {
   produceWorktreeCommitArtifact,
@@ -514,6 +514,7 @@ interface SessionAuthorization {
   rootSessionID: string;
   suspended: boolean;
   taskID: string;
+  dispatchCallID?: string;
   validationCommands: ReadonlySet<string>;
   writeScopes: readonly string[];
 }
@@ -1997,6 +1998,21 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         const dispatch = await input.runtimeBridge?.recoverMissionDispatch?.(root, reservation.unit_id);
         if (!dispatch || !state.goal_id || goalFingerprint({ goal_id: state.goal_id, unit_id: reservation.unit_id,
           call_id: dispatch.callID }) !== reservation.reservation_id) continue;
+        if (!dispatch.cancelled && dispatch.nativeOutcome === "completed" && goalReservations.get(dispatch.callID)?.reservationID === reservation.reservation_id) {
+          // Reuse host-observed command exits/bindings when still present. A terminal outcome alone
+          // never supplies evidence, and the ordinary settlement still classifies missing proof as failure.
+          await settleGoalDispatch(dispatch.callID, { output: "Recovered exact native Task completion",
+            metadata: { sessionId: dispatch.childSessionID } }, dispatch.nativeOutcome);
+          if (!(await ledger.readGoal()).state.outstanding_reservations.some(item => item.reservation_id === reservation.reservation_id)) {
+            if (dispatch.childSessionID) {
+              const authorization = sessionAuthorizations.get(dispatch.childSessionID);
+              if (authorization?.rootSessionID === root && authorization.taskID === reservation.unit_id &&
+                  authorization.dispatchCallID === dispatch.callID) await releaseWriteGate(dispatch.childSessionID);
+            }
+            if (finishCoordinatorTask(root, dispatch.callID)) fastLane.workerCompleted(root);
+            continue;
+          }
+        }
         const startedAt = (await ledger.readGoal()).records.find(({ event }) => event.kind === "dispatch.reserved" &&
           event.reservation_id === reservation.reservation_id)?.event.at;
         await ledger.appendGoal({ kind: "unit.settled", at: new Date().toISOString(),
@@ -2011,6 +2027,14 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         await input.runtimeBridge?.onSerialSettlement?.({ rootSessionID: root, callID: dispatch.callID,
           unitID: reservation.unit_id, ...(dispatch.childSessionID ? { childSessionID: dispatch.childSessionID } : {}),
           disposition: dispatch.cancelled ? "cancelled" : "failed", resultClass: dispatch.cancelled ? "interrupted" : "process-defect", evidence: [] });
+        if (dispatch.childSessionID) {
+          // Only this recovered Task owns this suspension; a different task/session grant is retained.
+          const authorization = sessionAuthorizations.get(dispatch.childSessionID);
+          if (authorization?.rootSessionID === root && authorization.taskID === reservation.unit_id &&
+              authorization.dispatchCallID === dispatch.callID) {
+            await releaseWriteGate(dispatch.childSessionID);
+          }
+        }
         goalReservations.delete(dispatch.callID);
         if (finishCoordinatorTask(root, dispatch.callID)) fastLane.workerCompleted(root);
       }
@@ -2147,6 +2171,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           matches.push({ callID, status: "error", elapsed: null });
         }
         const match = matches[0]!;
+        // A current Mission dispatch belongs to the stricter child/descendant/ownership recovery
+        // above. The generic legacy path must not settle a Task whose terminal proof was rejected.
+        if (await input.runtimeBridge?.ownsMissionDispatch?.(root, match.callID, reservation.unit_id) === true) continue;
         // Reconcile lifecycle accounting only. Lost in-memory validation bindings cannot be
         // reconstructed from worker prose and must not manufacture acceptance evidence.
         await ledger.appendGoal({ kind: "unit.settled", at: new Date().toISOString(),
@@ -2682,7 +2709,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     goalReservations.set(callID, { root: goalRoot(sessionID), reservationID, unitID, started: Date.now() });
   }
 
-  async function settleGoalDispatch(callID: string, output: TaskResultRepairOutput): Promise<void> {
+  async function settleGoalDispatch(callID: string, output: TaskResultRepairOutput, nativeOutcome?: "completed" | "failed"): Promise<void> {
     const reservation = goalReservations.get(callID);
     if (reservation === undefined) return;
     const ledger = await goalLedger(reservation.root);
@@ -2717,10 +2744,16 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const progress = newEvidence.length > 0;
     // Revalidation can succeed for an already-satisfied criterion after a candidate change.
     // New criterion coverage controls progress accounting, not the validation disposition.
-    const validated = acceptedEvidence.length > 0;
     const metadata = isRecord(output.metadata) ? output.metadata : undefined;
+    const child = childSessionID ? await input.client?.session?.get?.({ path: { id: childSessionID }, query: { directory: input.directory } }).catch(() => undefined) : undefined;
+    const childInfo = isRecord(child) && "data" in child ? child.data : child;
+    const childOutcome = isRecord(childInfo) ? childInfo.outcome : undefined;
+    const terminalFailed = nativeOutcome === "failed" || metadata?.status === "error" || output.status === "error" ||
+      ["failed", "interrupted", "cancelled"].includes(String(childOutcome));
     const interrupted = metadata?.status === "cancel" || metadata?.status === "cancelled" ||
-      output.status === "cancel" || output.status === "cancelled";
+      output.status === "cancel" || output.status === "cancelled" || ["interrupted", "cancelled"].includes(String(childOutcome));
+    const validated = !terminalFailed && !interrupted && acceptedEvidence.length > 0;
+    const settlementEvidence = terminalFailed || interrupted ? [] : acceptedEvidence;
     const hostBindingDefect = childSessionID !== undefined && [...(bindingDenials.get(reservation.root)?.values() ?? [])]
       .some((candidateDenials) => [...candidateDenials.values()].includes(childSessionID));
     const failedAcceptanceExecution = [...hostGoalExecutions.values()].find((execution) =>
@@ -2734,8 +2767,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       reservation_id: reservation.reservationID, receipt_id: goalFingerprint({ call_id: callID, output: outputText.slice(0, 2048) }),
       goal_id: state.goal_id, unit_id: reservation.unitID,
       disposition: validated ? "succeeded" : interrupted ? "cancelled" : "failed", result_class: resultClass,
-      progress_fingerprint: progress ? goalFingerprint(acceptedEvidence) : null,
-      evidence: acceptedEvidence, elapsed_ms: Math.max(0, Date.now() - reservation.started),
+      progress_fingerprint: progress && validated ? goalFingerprint(settlementEvidence) : null,
+      evidence: settlementEvidence, elapsed_ms: Math.max(0, Date.now() - reservation.started),
       cost_usd: await nativeUnitCost(childSessionID, new Date(reservation.started).toISOString()),
       ...(childSessionID ? { native_session_id: childSessionID, native_started_at: new Date(reservation.started).toISOString() } : {}) });
     goalReservations.delete(callID);
@@ -2743,7 +2776,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       rootSessionID: reservation.root, callID, unitID: reservation.unitID,
       ...(childSessionID === undefined ? {} : { childSessionID }),
       disposition: validated ? "succeeded" : interrupted ? "cancelled" : "failed",
-      evidence: acceptedEvidence, resultClass,
+      evidence: settlementEvidence, resultClass, nativeOutcome: terminalFailed || interrupted ? "failed" : "completed",
       ...(resultClass === "acceptance" && failedAcceptanceExecution !== undefined ? { failure: {
         command: failedAcceptanceExecution.command.slice(0, 8), outcome: "fail" as const,
         exitCode: failedAcceptanceExecution.exitCode ?? null,
@@ -2783,9 +2816,16 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     if (identity?.parentID === undefined || (identity.parentID !== root && coordinatorRootForSession(request.childSessionID) !== root)) {
       throw new Error("operator-recovery-child-owner-mismatch");
     }
-    const current = await protectedSnapshot({ projectRoot: input.directory, manifestPath: request.manifestPath, manifestHash: request.manifestHash });
-    if (!current) throw new Error("operator-recovery-snapshot-unavailable");
     const prior = snapshot.records.map(record => record.event).find(event => event.kind === "unit.evidence-reconciled" && event.previous_receipt_id === defect.receipt_id);
+    const savedBinding = prior?.kind === "unit.evidence-reconciled" ? prior.evidence[0]?.protected_binding :
+      [...hostGoalExecutions.values()].find(execution => execution.root === root && execution.sessionID === request.childSessionID &&
+        execution.endedAt !== undefined && execution.fresh === true)?.binding;
+    const refreshedBinding = savedBinding && await refreshProtectedSnapshot(input.directory, savedBinding);
+    // Historical admissions without a saved recipe must retain the old full manifest/path recipe.
+    // Never acquire today's scratch exclusions when recovering yesterday's PASS.
+    const current = savedBinding ? refreshedBinding && { binding: savedBinding, ...refreshedBinding } :
+      await protectedSnapshot({ projectRoot: input.directory, manifestPath: request.manifestPath, manifestHash: request.manifestHash }, { captureFreshness: false });
+    if (!current) throw new Error("operator-recovery-snapshot-unavailable");
     if (prior?.kind === "unit.evidence-reconciled") {
       if (!prior.evidence.every(entry => entry.identity.source === current.source && entry.identity.candidate === current.candidate && validGoalEvidence(entry, goal))) {
         throw new Error("operator-recovery-evidence-stale");
@@ -5386,6 +5426,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       const gate = await createWriteGate(candidate, validation.value, input.directory);
       const readScopes = await canonicalManifestReadScopes(candidate, validation.value);
       const writeScopes = await canonicalManifestWriteScopes(candidate, validation.value);
+      const dispatchCallID = await input.runtimeBridge?.missionDispatchCall?.(inspectedEntry.rootSessionID, sessionID, handoffValidation.value.id);
       // Keep conflict detection and registration in one JavaScript turn so competing binds fail closed.
       if (conflictsWithActiveAuthorization(writeScopes, readScopes)) {
         return deny("manifest-overlap", [
@@ -5426,6 +5467,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           rootSessionID: inspectedEntry.rootSessionID,
           suspended: false,
           taskID: handoffValidation.value.id,
+          dispatchCallID,
           validationCommands: new Set(validation.value.validation.map(normalizeCommand)),
           writeScopes,
         });
@@ -5521,6 +5563,64 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
 
   async function authorizedGate(sessionID: string): Promise<WriteGate | undefined> {
     return await sessionGate(sessionID);
+  }
+
+  async function expandMissionWriteGate(sessionID: string, paths: readonly string[]): Promise<void> {
+    const authorization = sessionAuthorizations.get(sessionID);
+    if (!authorization || authorization.suspended || !input.runtimeBridge?.expandMissionScope || bindingOperations.has(sessionID)) {
+      throw new Error("mission-scope-update-binding-unavailable");
+    }
+    bindingOperations.add(sessionID);
+    const old = { ...authorization }, oldPin = bindingPins.get(sessionID), oldScope = authorization.lease?.scope;
+    try {
+      await input.runtimeBridge.expandMissionScope(authorization.rootSessionID, sessionID, authorization.taskID, paths, async manifest => {
+        const project = await createProjectPaths(authorization.projectRoot);
+        const readScopes = await canonicalManifestReadScopes(project, manifest), writeScopes = await canonicalManifestWriteScopes(project, manifest);
+        const assertNoConflict = () => {
+          for (const [owner, held] of sessionAuthorizations) {
+            if (owner === sessionID || held.suspended) continue;
+            if (writeScopesOverlap(writeScopes, [...held.writeScopes, ...held.readScopes]) || writeScopesOverlap(readScopes, held.writeScopes)) {
+              throw new Error(`mission-scope-update-writer-conflict:${owner}`);
+            }
+          }
+        };
+        const gate = await createWriteGate(project, manifest, input.directory);
+        const pinned = await readPinnedJson(authorization.manifestPath, INPUT_LIMITS.manifest);
+        const restore = async () => {
+          if (oldScope) await old.lease!.replaceScope(oldScope);
+          const original = await readPinnedJson(old.manifestPath, INPUT_LIMITS.manifest);
+          Object.assign(authorization, old, { manifestMtimeMs: original.mtimeMs });
+          if (oldPin) bindingPins.set(sessionID, { ...oldPin, manifestMtimeMs: original.mtimeMs });
+          else bindingPins.delete(sessionID);
+        };
+        let leaseChanged = false;
+        try {
+          assertNoConflict();
+          if (authorization.lease) {
+            await authorization.lease.replaceScope(normalizeWorktreeScope({
+              read: await Promise.all(readScopes.map(path => project.toRelativePath(path))),
+              write: await Promise.all(writeScopes.map(path => project.toRelativePath(path))),
+            }));
+            leaseChanged = true;
+          }
+          // No await between final overlap observation and registration.
+          assertNoConflict();
+          Object.assign(authorization, { gate, readScopes, writeScopes, manifestHash: pinned.hash, manifestMtimeMs: pinned.mtimeMs });
+          bindingPins.set(sessionID, { manifestPath: authorization.manifestPath, manifestHash: pinned.hash, manifestMtimeMs: pinned.mtimeMs });
+        } catch (error) {
+          if (leaseChanged && oldScope) await old.lease!.replaceScope(oldScope);
+          throw error;
+        }
+        return restore;
+      });
+    } catch (error) {
+      const original = await readPinnedJson(old.manifestPath, INPUT_LIMITS.manifest).catch(() => undefined);
+      if (original?.hash === old.manifestHash) {
+        Object.assign(authorization, old, { manifestMtimeMs: original.mtimeMs });
+        if (oldPin) bindingPins.set(sessionID, { ...oldPin, manifestMtimeMs: original.mtimeMs });
+      }
+      throw error;
+    } finally { bindingOperations.delete(sessionID); }
   }
 
   function pruneActiveSessions(now: number, reserveSlot = false): void {
@@ -7176,6 +7276,12 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
             taskBlockHasContent(contractPrompt, ["source_manifest", "sourcemanifest"]);
           const explicitBlockHandoff = isBlockTaskHandoff(contractPrompt);
           const taskIDs = taskValues(contractPrompt, ["task_id"]);
+          // Only the host-admitted exact Mission Task can reference its already inspected ledger.
+          // Generic/legacy dispatch still supplies and checks inline criteria. This changes no
+          // Worker-visible Task text and does not trust a prompt marker as dispatch authority.
+          const missionContractReference = taskHeaderCount(contractPrompt, ["contract_reference"]) === 1 &&
+            taskValues(contractPrompt, ["contract_reference"])[0] === "handoff" && taskIDs.length === 1 &&
+            await input.runtimeBridge?.ownsMissionDispatch?.(toolInput.sessionID, toolInput.callID, taskIDs[0]!) === true;
           const resumeDeltas = taskValues(contractPrompt, ["resume_delta"]);
           const resumeDeltaPresent = resumeDeltas.length === 1 && hasResumeContractShape(contractPrompt);
           const contractRedefinitions = [
@@ -7283,8 +7389,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
                   defects: [contractDefect("contract", "/acceptance", "acceptance_continuity_mismatch")],
                 });
               }
-              if (criteria === undefined || criteria.length !== ledger.criteria.length ||
-                criteria.some((criterion, index) => criterion !== ledger.criteria[index])) {
+              if (!missionContractReference && (criteria === undefined || criteria.length !== ledger.criteria.length ||
+                criteria.some((criterion, index) => criterion !== ledger.criteria[index]))) {
                 const canonical = canonicalTaskAcceptance(prompt, ledger.criteria);
                 if (canonical === undefined) {
                   throw new HandoffDeniedError("contract-invalid", handoffPaths[0]!, {
@@ -7297,7 +7403,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
               // Mission admission already binds the exact generated Task to its durable run and
               // ordered requirements. The legacy session-wide chain is a second, incompatible
               // authority across cancelled missions and cold reloads (including later units).
-              const missionDispatch = await input.runtimeBridge?.ownsMissionDispatch?.(
+              const missionDispatch = missionContractReference || await input.runtimeBridge?.ownsMissionDispatch?.(
                 toolInput.sessionID, toolInput.callID, ledger.task_id) === true;
               if (!missionDispatch) {
                 const previous = rootAcceptanceContinuity.get(toolInput.sessionID);
@@ -7549,8 +7655,27 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           const relativeWrite = extracted.paths.find((path) => !isAbsolute(path));
           if (relativeWrite !== undefined) throw new WriteDeniedError("parallel-relative-path", relativeWrite);
         }
-        await gate.check(toolInput, output, { investigativeShell: ["bash", "shell"].includes(toolInput.tool) &&
-          await input.runtimeBridge?.allowsInvestigativeShell?.(toolInput.sessionID) === true });
+        const missionWorker = await input.runtimeBridge?.allowsInvestigativeShell?.(toolInput.sessionID) === true;
+        if (missionWorker) {
+          const extracted = extractWritePaths(toolInput.tool, output.args);
+          const nativeFile = /^(?:write|edit)(?:$|[_-])/iu.test(toolInput.tool) || /patch/iu.test(toolInput.tool);
+          if (nativeFile && !extracted.ambiguous && extracted.paths.length) {
+            await input.runtimeBridge?.assertMissionWrite?.(toolInput.sessionID, extracted.paths);
+            const missing: string[] = [];
+            for (const path of extracted.paths) {
+              const actual = nativeFile ? resolve(input.directory, path) : path;
+              try { await gate.checkPath(actual); }
+              catch (error) {
+                if (!(error instanceof WriteDeniedError) || !["manifest-scope", "project-boundary"].includes(error.reason)) throw error;
+                const local = relative(authorization!.projectRoot, resolve(input.directory, actual)).replaceAll("\\", "/");
+                missing.push(local === ".." || local.startsWith("../") || isAbsolute(local) ? resolve(input.directory, actual) : local);
+              }
+            }
+            if (missing.length) await expandMissionWriteGate(toolInput.sessionID, missing);
+          }
+        }
+        await (sessionAuthorizations.get(toolInput.sessionID)?.gate ?? gate).check(toolInput, output,
+          { investigativeShell: ["bash", "shell"].includes(toolInput.tool) && missionWorker });
       } catch (error) {
         activeState?.inFlightCalls.delete(toolInput.callID);
         if (error instanceof WriteDeniedError) goalValidationDefects.add(toolInput.sessionID);
@@ -8156,12 +8281,13 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       if (current !== undefined && !known) throw new Error("operator-continuity-newer-state");
       rootAcceptanceContinuity.delete(root);
     },
-    currentBudget: async root => {
+    currentBudget: async (root, options) => {
       if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) throw new Error("operator-coordinator-required");
       // Planning must account for terminal native Tasks before reserving new units.
       // Otherwise a cancelled predecessor keeps a stale unit reservation across missions.
       await recoverCompletedGoalReservations(root);
-      await reconcileUnitUsage(root);
+      // Terminal proof/Review only needs lifecycle recovery, not duplicate pricing history reads.
+      if (options?.reconcileUsage !== false) await reconcileUnitUsage(root);
       const state = await currentGoal(root);
       if (state.goal_id === null || state.budget === null) return null;
       const reserved = state.outstanding_reservations.length;
@@ -8171,6 +8297,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         settled_cost_usd: state.consumed_cost_usd, cost_limit_usd: state.budget.cost_usd,
         cost_status: state.consumed_cost_usd === null ? "unknown-usage" : reserved > 0 ? "in-flight-not-final" : "settled",
         cost_source: "native-usage-price-table",
+        cost_scope: "worker-only", campaign_remaining_usd: null,
         cost_note: "Worker token-price estimates from complete native usage; missing requests remain unknown and are reconciled on later status. Excludes orchestration/review and external campaign spend. Zero settled cost does not mean free execution." };
       return snapshot;
     },
@@ -8197,19 +8324,49 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       return { status: changed ? "extended" : "unchanged", max_units: updated.budget!.max_units, consumed_units: updated.consumed_units,
         reserved_units: reserved, remaining_units: updated.budget!.max_units - updated.consumed_units - reserved };
     }),
-    ...{
-      missionWorkerTerminal: async (childSessionID: string, writeScopes: readonly string[]) => {
+      missionWorkerTerminal: async (root, terminal, writeScopes) => {
+        const childSessionID = terminal.childSessionID;
+        const snapshot = await (await goalLedger(root)).readGoal();
+        const reservationID = goalFingerprint({ goal_id: snapshot.state.goal_id, unit_id: terminal.taskID, call_id: terminal.callID });
+        if (snapshot.state.outstanding_reservations.some(item => item.reservation_id === reservationID) ||
+            !snapshot.records.some(({ event }) => event.kind === "unit.settled" && event.goal_id === snapshot.state.goal_id &&
+              event.unit_id === terminal.taskID && event.reservation_id === reservationID)) {
+          return { ready: false, reason: "exact_dispatch_settlement_missing" };
+        }
         const active = activeSessions.get(childSessionID), authorization = sessionAuthorizations.get(childSessionID);
-        if ((active?.inFlightCalls.size ?? 0) !== 0 || (active !== undefined && active.released !== true) ||
-            (authorization !== undefined && (!authorization.suspended || authorization.lease !== undefined))) return false;
+        if (authorization && (authorization.rootSessionID !== root || authorization.taskID !== terminal.taskID ||
+            authorization.dispatchCallID !== terminal.callID)) {
+          return { ready: false, reason: "writer_owned_by_other_dispatch" };
+        }
+        if (active?.inFlightCalls.size) {
+          const response = await input.client?.session?.messages?.({ path: { id: childSessionID }, query: { directory: input.directory } }).catch(() => undefined);
+          const history = isRecord(response) && Array.isArray(response.data) ? response.data : undefined;
+          if (!history) return { ready: false, reason: "tool_terminal_records_unavailable" };
+          for (const callID of active.inFlightCalls) {
+            const parts = history.flatMap(message => isRecord(message) && isRecord(message.info) &&
+              message.info.sessionID === childSessionID && Array.isArray(message.parts) ? message.parts : [])
+              .filter(part => isRecord(part) && part.type === "tool" && part.callID === callID);
+            if (parts.length !== 1 || !isRecord(parts[0]) || !isRecord(parts[0].state) ||
+                !["completed", "error"].includes(String(parts[0].state.status))) return { ready: false, reason: "tool_dispatch_active_or_unproven" };
+          }
+          active.inFlightCalls.clear();
+        }
+        const released = JSON.parse(await releaseWriteGate(childSessionID));
+        if (released.status === "denied") return { ready: false, reason: released.reason };
+        if (active) active.released = true;
         const scopeRoot = await durableScopeRoot(project?.root ?? input.directory);
-        if (scopeRoot === undefined) return false;
+        if (scopeRoot === undefined) return active?.parallel === "valid"
+          ? { ready: false, reason: "writer_registry_unavailable" } : { ready: true };
         try {
-          const scope = normalizeWorktreeScope({ read: [], write: [...writeScopes] });
-          return !await new ScopeLeaseRegistry(scopeRoot).hasConflictingLease(scope);
-        } catch { return false; }
+          const local = writeScopes.map(path => relative(project?.root ?? input.directory,
+            resolve(project?.root ?? input.directory, normalizeManifestScope(path).path)).replaceAll("\\", "/"))
+            .filter(path => path !== ".." && !path.startsWith("../") && !isAbsolute(path));
+          const scope = normalizeWorktreeScope({ read: [], write: local });
+          return await new ScopeLeaseRegistry(scopeRoot).hasConflictingLease(scope)
+            ? { ready: false, reason: "writer_lease_owned_elsewhere" } : { ready: true };
+        } catch { return { ready: false, reason: "writer_registry_unavailable" }; }
       },
-    },
+    expandMissionWriteGate,
     registerGoalDeclaration: async (root, prompt, missionRevision) => {
       if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) throw new Error("operator-coordinator-required");
       // In one-shot CLI turns OpenCode may persist the user message only after chat.message returns.

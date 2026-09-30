@@ -13,6 +13,7 @@ import { taskChildSessionID } from "./task-result-repair.js";
 import { normalizeManifestScope } from "../core/path.js";
 import { declaredArtifacts } from "./declared-artifacts.js";
 import { normalizeCommand } from "./gate.js";
+import { currentSnapshotProtection, snapshotScratchExcluded } from "./protected-snapshot.js";
 
 const exec = promisify(execFile);
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -151,7 +152,21 @@ export async function missionReviewSource(directory: string, run: OperatorState,
   evidence: readonly MissionEvidenceExcerpt[] = [], baseline?: string, priorScope?: MissionReviewScope): Promise<{
     fingerprint: string; excerpt: string; truncatedEvidence: string[]; truncatedSource: string[] }> {
   const scope = missionReviewScope(priorScope, run);
-  const hash = createHash("sha256").update(JSON.stringify({ baseline, scope, units: run.units.map(unit => ({ unit: unit.unit, hashes: unit.hashes })) }));
+  const bindings = scope.validationBindings ?? [];
+  const protection = bindings.some(binding => binding.freshness) ? await currentSnapshotProtection(directory, scope) : [];
+  const excluded = (path: string) => {
+    const absolute = resolve(directory, path);
+    const covers = (binding: typeof bindings[number]) => [...binding.source_paths, ...binding.candidate_paths].some(root => {
+      const rest = relative(resolve(directory, root), absolute);
+      return rest === "" || (rest !== ".." && !rest.startsWith(`..${sep}`) && !isAbsolute(rest));
+    });
+    return bindings.some(binding => snapshotScratchExcluded(binding, absolute, protection)) &&
+      !bindings.some(binding => covers(binding) && !snapshotScratchExcluded(binding, absolute, protection));
+  };
+  const hash = createHash("sha256").update(JSON.stringify({ baseline,
+    scope: bindings.length ? { read: scope.read } : scope,
+    units: run.units.map(unit => bindings.length ? { id: unit.unit.id, read: unit.unit.read, validation: unit.unit.validation,
+      acceptance: unit.unit.acceptance_indices } : { unit: unit.unit, hashes: unit.hashes }) }));
   const writes = [...new Set(scope.write.map(path => path === "." ? path : normalizeManifestScope(path).path))];
   const focused: { entry: MissionEvidenceExcerpt; lines: string[]; bytes: number }[] = [];
   for (const entry of evidence) {
@@ -235,15 +250,15 @@ export async function missionReviewSource(directory: string, run: OperatorState,
     if (scoped === ".." || scoped.startsWith("../") || isAbsolute(scoped)) external.push(resolve(path));
     else local.push(scoped || ".");
   }
-  const scopes = [...local, `:(exclude)${TOOL_ENVIRONMENT}`];
+  const toolInput = scope.read.some(path => normalizeManifestScope(path).path.startsWith(TOOL_ENVIRONMENT));
+  const scopes = [...local, ...(toolInput ? [] : [`:(exclude)${TOOL_ENVIRONMENT}`])];
   const git = async (args: string[]) => (await exec("git", args, { cwd: directory, maxBuffer: 8 * 1024 * 1024 })).stdout;
   const names = local.length ? await git(["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ...scopes]) : "";
   const untracked = new Set((local.length ? await git(["ls-files", "-z", "--others", "--exclude-standard", "--", ...scopes]) : "").split("\0").filter(Boolean));
   // Go's ignored in-project caches may be writable during validation but are not candidate
   // output. Keep every other ignored declared output visible and fingerprinted, including
   // directories of generated artifacts; focused references can still pin a cache file.
-  const ignored = local.length ? await git(["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--",
-    ...scopes, ...[".gocache", ".gomodcache", ".gopath"].map(path => `:(exclude)${path}`)]) : "";
+  const ignored = local.length ? await git(["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--", ...scopes]) : "";
   for (const path of ignored.split("\0").filter(Boolean)) untracked.add(path);
   const omitted: string[] = [];
   const unreadable: string[] = [];
@@ -252,7 +267,7 @@ export async function missionReviewSource(directory: string, run: OperatorState,
     // HEAD-only diffs are empty once the Worker commits. Show bounded changes from the
     // mission's original HEAD across all replans, not arbitrary alphabetical repository files.
     const changed = (await git(["diff", "--name-only", "-z", "--no-ext-diff", baseline, "--", ...scopes]))
-      .split("\0").filter(Boolean);
+      .split("\0").filter(path => path && !excluded(path));
     const shown = changed.slice(0, 16);
     const heading = changed.length ? `Changed since mission baseline (${baseline}; ${changed.length} paths):\n` : "";
     const headers = shown.map(path => `\n--- changed: ${path} ---\n`);
@@ -277,6 +292,7 @@ export async function missionReviewSource(directory: string, run: OperatorState,
   const paths = [...new Set([...names.split("\0"), ...ignored.split("\0")].filter(Boolean))].sort();
   const visited = new Set<string>();
   const visit = async (path: string, includedByParent = false): Promise<void> => {
+    if (excluded(path)) return;
     if (visited.has(path)) return;
     visited.add(path);
     hash.update(JSON.stringify(path));

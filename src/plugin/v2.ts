@@ -273,6 +273,10 @@ function toolSchema(args: Record<string, unknown>): JsonObject {
     const schema = plainSchema(value);
     if (optionalArgument(value)) {
       schema.description = `${typeof schema.description === "string" ? `${schema.description} ` : ""}Pass an empty string to omit this argument.`;
+      // Object-typed optional arguments otherwise force a model to manufacture blank
+      // required provenance fields. Admit the same omission sentinel we already decode.
+      if (schema.type === "object") return [name, { anyOf: [schema, { type: "string", enum: [""], minLength: 0, maxLength: 0 }],
+        description: schema.description }];
     }
     return [name, schema];
   })),
@@ -286,7 +290,8 @@ function toolSchema(args: Record<string, unknown>): JsonObject {
 function legacyToolArgs(input: unknown, args: Record<string, unknown>): Record<string, string> {
   const value = record(input) ? { ...input } : {};
   for (const [name, schema] of Object.entries(args)) {
-    if (optionalArgument(schema) && value[name] === "") delete value[name];
+    if (optionalArgument(schema) && (value[name] === "" || record(value[name]) &&
+        Object.values(value[name]).every(item => typeof item === "string" && !item.trim()))) delete value[name];
   }
   return value as Record<string, string>;
 }
@@ -517,8 +522,8 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks)
       const visible: Record<string, string[]> = {
         "dog-operator": ["start_mission", "plan_units", "operator_next", "operator_status", "expand_unit", "review_mission", "complete_mission", "cancel_operator", "reflection"],
         "dogs-coordinator": ["plan_units", "operator_next", "operator_status", "expand_unit", "review_mission", "submit_mission", "skip_mission_consultation", "retry_mission_unit", "rescue_mission_unit"],
-        "dog-worker-v010": ["bind_write_gate", "release_write_gate", "operator_status"],
-        "dog-luna-worker-v010": ["bind_write_gate", "release_write_gate", "operator_status"],
+        "dog-worker-v010": ["bind_write_gate", "release_write_gate", "operator_status", "expand_unit"],
+        "dog-luna-worker-v010": ["bind_write_gate", "release_write_gate", "operator_status", "expand_unit"],
         "dog-reviewer-v010": [], "dog-scout-v010": [], "dog-advisor-v010": [],
       };
        const allowed = visible[String(event.agent)];

@@ -10,6 +10,31 @@ import { ScopeLeaseError, ScopeLeaseRegistry } from "../dist/core/scope-lease-re
 const scope = (read: string[] = [], write: string[] = []) => ({ read, write });
 const childFixture = fileURLToPath(new URL("./fixtures/scope-lease-child.mjs", import.meta.url));
 
+test("scope replacement is atomic, identity-bound and retains the original lease on conflict", async () => {
+  const root = await mkdtemp(join(tmpdir(), "sortie-lease-replace-"));
+  const registry = new ScopeLeaseRegistry(root);
+  const a = await registry.acquire({ ownerId: "a", scope: scope([], ["a.txt"]) });
+  const b = await registry.acquire({ ownerId: "b", scope: scope([], ["b.txt"]) });
+  try {
+    await assert.rejects(a.replaceScope(scope([], ["a.txt", "b.txt"])), (error: unknown) => error instanceof ScopeLeaseError && error.code === "scope-conflict");
+    assert.deepEqual(a.scope, scope([], ["a.txt"]));
+    await a.assertHeld(); await b.assertHeld();
+    const id = a.id;
+    await a.replaceScope(scope(["read.txt"], ["a.txt", "extra.txt"]));
+    assert.equal(a.id, id);
+    assert.deepEqual(a.scope, scope(["read.txt"], ["a.txt", "extra.txt"]));
+    assert.equal(await registry.hasConflictingLease(scope([], ["extra.txt"])), true);
+    await a.replaceScope(scope([], ["a.txt"]));
+    assert.equal(await registry.hasConflictingLease(scope([], ["extra.txt"])), false);
+    await a.release();
+    const replacement = await registry.acquire({ scope: scope([], ["a.txt"]) });
+    try {
+      await assert.rejects(a.replaceScope(scope([], ["replacement.txt"])), (error: unknown) => error instanceof ScopeLeaseError && error.code === "not-held");
+      await replacement.assertHeld();
+    } finally { await replacement.release(); }
+  } finally { await a.release().catch(() => undefined); await b.release(); await rm(root, { recursive: true, force: true }); }
+});
+
 type ChildResult = { status: "held" | "denied" | "released"; code?: string };
 
 function useElapsedClock(context: TestContext): void {

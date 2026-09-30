@@ -313,7 +313,7 @@ test("enforces string length, ID pattern, and unique scope boundaries", () => {
   const atBoundary = clone(full);
   atBoundary.id = `h${"a".repeat(127)}`;
   atBoundary.task.title = "t".repeat(160);
-  atBoundary.task.objective = "o".repeat(2000);
+  atBoundary.task.objective = "o".repeat(CONTRACT_TEXT_LIMITS.objective);
   atBoundary.scope.paths = ["p".repeat(512)];
   assertValid(atBoundary);
 
@@ -322,7 +322,7 @@ test("enforces string length, ID pattern, and unique scope boundaries", () => {
     (candidate) => { candidate.id = "-invalid"; },
     (candidate) => { candidate.task.title = ""; },
     (candidate) => { candidate.task.title = "t".repeat(161); },
-    (candidate) => { candidate.task.objective = "o".repeat(2001); },
+    (candidate) => { candidate.task.objective = "o".repeat(CONTRACT_TEXT_LIMITS.objective + 1); },
     (candidate) => { candidate.scope.paths = []; },
     (candidate) => { candidate.scope.paths = ["same", "same"]; }
   ]) {

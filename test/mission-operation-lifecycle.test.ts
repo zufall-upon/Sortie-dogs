@@ -40,7 +40,7 @@ for (const mode of ["cancel", "replace", "missed-after", "orphan-abort"]) test(`
     const create = () => SortieDogsV010Plugin({ directory: root, returnReportTransport: "tool-result", client: { session: {
       get: async ({ path }: { path: { id: string } }) => ({ data: { id: path.id, ...identities[path.id] } }),
       children: async ({ path }: { path: { id: string } }) => {
-        if (replaceActive) throw new Error("v2-history-owning-service-unavailable");
+        if (replaceActive && ["root", "old", "oldWorker", "priorWorker"].includes(path.id)) throw new Error("v2-history-owning-service-unavailable");
         return { data: Object.entries(identities).filter(([, info]) => info.parentID === path.id).map(([id, info]) => ({ id, ...info })) };
       },
       messages: async ({ path }: { path: { id: string } }) => ({ data: history[path.id] ?? [] }), abort: async ({ path }: { path: { id: string } }) => {
@@ -114,6 +114,15 @@ for (const mode of ["cancel", "replace", "missed-after", "orphan-abort"]) test(`
       assert.equal((await tool("operator_status", "root")).budget.reserved_units, 1);
       assert.deepEqual(aborted, [], "an unrelated child cannot be interrupted");
       identities.oldWorker!.parentID = "old";
+      const terminal = (history.old[0] as { parts: { state: { input: Record<string, unknown>; metadata?: { sessionId: string } } }[] }).parts[0]!.state;
+      terminal.input = { ...planned.task, prompt: "foreign Task" };
+      assert.equal((await tool("operator_status", "root")).budget.reserved_units, 1);
+      assert.deepEqual(aborted, [], "a foreign parent Task prompt cannot authorize an orphan interrupt");
+      terminal.input = planned.task;
+      terminal.metadata = { sessionId: "foreign" };
+      assert.equal((await tool("operator_status", "root")).budget.reserved_units, 1);
+      assert.deepEqual(aborted, [], "a foreign child reference cannot authorize an orphan interrupt");
+      delete terminal.metadata;
       stopConfirmed = false;
       assert.equal((await tool("operator_status", "root")).budget.reserved_units, 1);
       assert.deepEqual(aborted, ["oldWorker"], "a refused interrupt cannot settle the reservation");

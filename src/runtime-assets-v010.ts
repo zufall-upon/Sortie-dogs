@@ -219,7 +219,7 @@ The repair tool also permits add/replace of /goal_declaration/criteria/<index>/g
 only when the exact command is already declared in the validation list of a unit assigned to that criterion.
 This binds existing declared proof; it cannot introduce a new command or change criterion identity or target.
 Contract text limits are checked before controls are published; long exact validation commands up to 1000 characters
-and objective text up to 2000 characters remain verbatim. Diagnostics never echo user values.
+and objective text up to 32768 characters remain verbatim. Diagnostics never echo user values.
 
 Each unit's validation must prove its intended milestone. Avoid a plan where an early unit requires later, still absent
 implementation to pass. The final evidence must cover the entire original goal against the current protected candidate.
@@ -428,7 +428,7 @@ export const runtimeAssets: readonly RuntimeAsset[] = Object.freeze([
       content = content.replace("mode: subagent\n", "mode: subagent\nmodel: openai/gpt-6.1-sol#xhigh\n");
     }
     if (asset.name === "dog-worker" || asset.name === "dog-luna-worker") {
-      content = content.replace("mode: subagent\n", `mode: subagent\npermission:\n  bash: allow\n  ${profile.toolPrefix}bind_write_gate: allow\n  ${profile.toolPrefix}release_write_gate: allow\n  ${profile.toolPrefix}operator_status: allow\ntools:\n  "sortie_*": false\n  ${profile.toolPrefix}bind_write_gate: true\n  ${profile.toolPrefix}release_write_gate: true\n  ${profile.toolPrefix}operator_status: true\n`);
+      content = content.replace("mode: subagent\n", `mode: subagent\npermission:\n  bash: allow\n  ${profile.toolPrefix}bind_write_gate: allow\n  ${profile.toolPrefix}release_write_gate: allow\n  ${profile.toolPrefix}operator_status: allow\n  ${profile.toolPrefix}expand_unit: allow\ntools:\n  "sortie_*": false\n  ${profile.toolPrefix}bind_write_gate: true\n  ${profile.toolPrefix}release_write_gate: true\n  ${profile.toolPrefix}operator_status: true\n  ${profile.toolPrefix}expand_unit: true\n`);
       content += `\n## Root-approved unit coverage\nWhen the immutable handoff contains ext["sortie-dogs/unit-coverage"], its indices identify this unit's assigned criteria within the unchanged global acceptance ledger. Prove those assigned criteria and preserve all global constraints. Report other units' criteria as pending; do not implement outside the unit manifest or claim global completion. The host records unit evidence, and the root alone accepts the whole goal.\n`;
       content += CHANGED_PATH_COVERAGE_WORKER;
     }
