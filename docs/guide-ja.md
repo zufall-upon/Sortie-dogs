@@ -114,6 +114,15 @@ restart/compaction recoveryを行う。stale、foreign-root、変更済みrefere
 任意Git lifecycleはnon-overwriting branchを1回作成し、exact path commitを1回実行できるが、
 arbitrary Git、force push、release、publish authorityは付与しない。
 
+### 簡潔な進捗表示
+
+`sortie_v010_operator_status`は`view`省略時に従来どおり完全な判断・証跡packetを返す。短い表示が必要な場合だけ
+`{ "view": "progress" }`を渡すと、既存Missionまたはexecution runから`run_id`、段階、現在Unit、完了数/総Unit数、
+host budget残数、既存の`next_action`を投影する。Missionは完全packetの値、legacy execution runは完全packetの値を優先し、
+省略されている場合のみ既存の継続checkpointを使う。継続不要なら`null`。進捗表示からretry・dispatch・acceptanceは発生しない。
+進捗投影は状態を追加・変更せず、retry・dispatch・acceptanceもしない。Mission statusに既存のdispatch reconciliationがある場合も完全packet経路と同じ動作。
+判断、証跡確認、継続/差し戻しには完全packetを使う。execution runのないproposal/draftは既存表示を維持する。
+
 ## 設定
 
 ### Profile fileと優先順

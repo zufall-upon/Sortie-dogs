@@ -727,6 +727,15 @@ test("explicit replacement links a cancelled legacy run without reviving its unr
   assert.equal(started.mission_id, unproven.mission_id, "repair the saved mission in place");
   assert.deepEqual(started.requirements.map((item: { text: string }) => item.text), requirements);
   assert.equal((await missions.required("root")).supersededRunID, previous.runID);
+  const full = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
+  const progress = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({ view: "progress" }, { sessionID: "root" }));
+  assert.equal(full.predecessor.run_id, previous.runID);
+  assert.equal(progress.run_id, null, "a predecessor is not the current mission's execution run");
+  assert.equal(progress.current_unit, null);
+  assert.equal(progress.total_units, 0);
+  assert.equal(progress.completed_units, full.execution_summary.completed_units);
+  assert.equal(progress.decision, null);
+  assert.equal(progress.next_action, full.next_action);
   const prepared = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ units: [{
     title: "Finish current stage", objective: "Validate only the new acceptance", read: [], write: ["result.txt"],
     validation: ["node check.mjs"], requirement_ids: ["R1", "R2"],
@@ -2791,6 +2800,117 @@ test("representative three-unit contracts preserve long objectives and commands"
     assert.deepEqual(manifest.validation, request.units[index]!.validation);
     assert.deepEqual(unit.unit.acceptance_indices, [index]);
   }
+}));
+
+test("operator status progress is a compact read-only projection that reproduces after restart", async () => fixture(async root => {
+  const sessionID = "progress-root";
+  const hooks = await SortieDogsV010Plugin({ directory: root });
+  await hooks["chat.message"]!({ sessionID, agent: "dog-operator", messageID: "progress-user" }, {
+    message: { agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-6-sol" } },
+    parts: [{ type: "text", text: "Prepare a representative three-unit run." }],
+  });
+  const request = representativeLongPlan();
+  await hooks.tool!.sortie_v010_prepare_operator.execute({ plan_json: JSON.stringify(request) }, { sessionID });
+
+  const full = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID }));
+  const runtime = new OperatorRuntime(root, V010_RUNTIME_PROFILE);
+  const beforeProgress = await runtime.read(sessionID);
+  assert.ok(beforeProgress);
+  const currentStateUnit = beforeProgress.units.find(unit => unit.status !== "succeeded");
+  assert.ok(currentStateUnit);
+  const compact = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({ view: "progress" }, { sessionID }));
+  assert.equal(compact.view, "progress");
+  assert.equal(compact.run_id, full.run_id);
+  assert.equal(compact.stage, full.status);
+  assert.equal(compact.decision, full.decision);
+  assert.deepEqual(compact.current_unit, { id: currentStateUnit.unit.id, title: currentStateUnit.unit.title, status: currentStateUnit.status });
+  assert.equal(compact.completed_units, full.units.filter((unit: { status: string }) => unit.status === "succeeded").length);
+  assert.equal(compact.total_units, full.units.length);
+  assert.equal(compact.budget_remaining_units, full.budget.remaining_units);
+  const checkpoint = await runtime.continuationCheckpoint(sessionID);
+  assert.ok(checkpoint);
+  assert.equal(compact.next_action, JSON.parse(checkpoint).next_action,
+    "when the complete packet omits next_action, progress must reuse the existing continuation decision");
+  assert.equal(Object.hasOwn(compact, "acceptance"), false);
+  assert.equal(Object.hasOwn(compact, "evidence"), false);
+  const fullBytes = Buffer.byteLength(JSON.stringify(full));
+  const compactBytes = Buffer.byteLength(JSON.stringify(compact));
+  assert.ok(compactBytes * 2 < fullBytes,
+    `the long three-unit fixture should return less than half the complete packet (${compactBytes}/${fullBytes} bytes)`);
+  assert.deepEqual(await runtime.read(sessionID), beforeProgress, "reading compact progress must not mutate durable execution state");
+  const fullAgain = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID }));
+  assert.deepEqual(fullAgain, full, "omitting view keeps the complete packet unchanged");
+
+  const persisted = await runtime.read(sessionID);
+  assert.ok(persisted);
+  const advanced = structuredClone(persisted);
+  advanced.units[0]!.status = "succeeded";
+  const advancedPacket = runtime.packet(advanced) as { next_action: string; units: { id: string; title: string; status: string }[] };
+  const advancedProgress = runtime.progress(advanced, full.budget.remaining_units, advancedPacket.next_action);
+  const expectedCurrent = advanced.units.find(unit => unit.status !== "succeeded");
+  assert.equal(advancedProgress.completed_units, advancedPacket.units.filter(unit => unit.status === "succeeded").length);
+  assert.equal(advancedProgress.total_units, advancedPacket.units.length);
+  assert.deepEqual(advancedProgress.current_unit, expectedCurrent === undefined ? null : {
+    id: expectedCurrent.unit.id, title: expectedCurrent.unit.title, status: expectedCurrent.status,
+  });
+
+  await runtime.interrupted(sessionID, "explicit-cancellation");
+  const coldHooks = await SortieDogsV010Plugin({ directory: root, client: { session: {
+    get: async ({ path }: { path: { id: string } }) => ({ data: { agent: path.id === sessionID ? "dog-operator" : undefined } }),
+    messages: async () => ({ data: [] }), status: async () => ({ data: {} }), abort: async () => ({ data: true }),
+  } } } as never);
+  await coldHooks["chat.message"]!({ sessionID, agent: "dog-operator", messageID: "progress-restart-user" }, {
+    message: { agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-6-sol" } },
+    parts: [{ type: "text", text: "Inspect the existing run after restart." }],
+  });
+  const interruptedFull = JSON.parse(await coldHooks.tool!.sortie_v010_operator_status.execute({}, { sessionID }));
+  const interruptedProgress = JSON.parse(await coldHooks.tool!.sortie_v010_operator_status.execute({ view: "progress" }, { sessionID }));
+  assert.equal(interruptedProgress.stage, "cancelled");
+  assert.equal(interruptedProgress.budget_remaining_units, interruptedFull.budget.remaining_units);
+  assert.equal(interruptedProgress.next_action, interruptedFull.next_action ?? null);
+  const afterInterruption = new OperatorRuntime(root, V010_RUNTIME_PROFILE);
+  const interruptedState = await afterInterruption.read(sessionID);
+  assert.ok(interruptedState);
+  assert.deepEqual(afterInterruption.progress(interruptedState, interruptedFull.budget.remaining_units, interruptedFull.next_action),
+    interruptedProgress, "a cold runtime reproduces interrupted progress from durable state");
+}));
+
+test("operator status progress preserves the current Mission route and its action", async () => fixture(async root => {
+  const sessionID = "mission-progress-root";
+  const hooks = await SortieDogsV010Plugin({ directory: root });
+  await hooks["chat.message"]!({ sessionID, agent: "dog-operator", messageID: "mission-progress-user" }, {
+    message: { agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-6-sol" } },
+    parts: [{ type: "text", text: "Implement the current mission milestone." }],
+  });
+  const missions = new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE);
+  const mission = await missions.start(sessionID, ["Implement the current mission milestone."]);
+  const runtime = new OperatorRuntime(root, V010_RUNTIME_PROFILE);
+  const run = await runtime.prepareMission(sessionID, missionPlan(mission, [{
+    title: "Current mission unit", objective: "Implement and validate the accepted milestone.", read: [], write: ["result.txt"],
+    validation: ["node --version"], requirement_ids: mission.requirements.map(item => item.id),
+  }]));
+  await missions.update(sessionID, state => { state.phase = "running"; state.runID = run.runID; });
+
+  const full = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID }));
+  const missionBefore = await missions.read(sessionID);
+  const runBefore = await runtime.read(sessionID);
+  const compact = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({ view: "progress" }, { sessionID }));
+  assert.equal(compact.view, "progress");
+  assert.equal(compact.mission_id, full.mission_id);
+  assert.equal(compact.mission_phase, full.phase);
+  assert.equal(compact.stage, full.status);
+  assert.equal(compact.run_id, full.run_id);
+  assert.deepEqual(compact.current_unit, { id: full.units[0].id, title: full.units[0].title, status: full.units[0].status });
+  assert.equal(compact.completed_units, full.execution_summary.completed_units);
+  assert.equal(compact.total_units, full.units.length);
+  assert.equal(compact.budget_remaining_units, full.budget?.remaining_units ?? null);
+  assert.equal(compact.next_action, full.next_action, "Mission progress reuses the mission packet's action without another decision rule");
+  assert.equal(Object.hasOwn(compact, "requirements"), false);
+  assert.equal(Object.hasOwn(compact, "evidence"), false);
+  assert.deepEqual(await missions.read(sessionID), missionBefore, "the compact view must not update Mission state");
+  assert.deepEqual(await runtime.read(sessionID), runBefore, "the compact view must not update execution state");
+  assert.deepEqual(JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID })), full,
+    "the omitted-view Mission packet remains unchanged");
 }));
 
 test("operator diagnostics identify one invalid proof mapping without echoing values", () => {
