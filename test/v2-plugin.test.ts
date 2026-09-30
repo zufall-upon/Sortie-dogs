@@ -549,7 +549,7 @@ test("V2 role defaults preserve explicit agent models and keep review separate f
   const fixture = contextFixture();
   const models = new Map<string, { providerID: string; id: string; variant?: string } | undefined>([
     ["dog-operator", undefined], ["dogs-coordinator", undefined],
-    ["dog-worker-v010", undefined], ["dog-reviewer-v010", undefined],
+    ["dog-worker-v010", undefined], ["dog-reviewer-v010", undefined], ["dog-advisor-v010", undefined],
     ["dog-scout-v010", { providerID: "anthropic", id: "custom", variant: "high" }],
   ]);
   const context: OpenCodeV2Context = { ...fixture.context, agent: { transform: async callback => {
@@ -563,10 +563,11 @@ test("V2 role defaults preserve explicit agent models and keep review separate f
   } } };
   const dispose = await createSortieDogsV2Plugin(async () => ({})).setup(context);
   try {
-    assert.deepEqual(models.get("dog-operator"), { providerID: "openai", id: "gpt-6-sol", variant: "xhigh" });
-    assert.deepEqual(models.get("dogs-coordinator"), { providerID: "openai", id: "gpt-6-sol", variant: "xhigh" });
+    assert.deepEqual(models.get("dog-operator"), { providerID: "openai", id: "gpt-6.1-sol", variant: "xhigh" });
+    assert.deepEqual(models.get("dogs-coordinator"), { providerID: "openai", id: "gpt-6.1-sol", variant: "xhigh" });
     assert.deepEqual(models.get("dog-worker-v010"), { providerID: "openai", id: "gpt-6-luna-fast", variant: "max" });
-    assert.deepEqual(models.get("dog-reviewer-v010"), { providerID: "openai", id: "gpt-6-sol", variant: "xhigh" });
+    assert.deepEqual(models.get("dog-reviewer-v010"), { providerID: "openai", id: "gpt-6.1-sol", variant: "xhigh" });
+    assert.deepEqual(models.get("dog-advisor-v010"), { providerID: "openai", id: "gpt-6.1-sol", variant: "xhigh" });
     assert.deepEqual(models.get("dog-scout-v010"), { providerID: "anthropic", id: "custom", variant: "high" });
   } finally { if (typeof dispose === "function") dispose(); }
 });

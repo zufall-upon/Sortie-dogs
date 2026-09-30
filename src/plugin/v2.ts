@@ -372,10 +372,10 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks)
   // defaults in its native registry; a user's configured agent model wins.
   await context.agent?.transform(editor => {
     for (const [name, id, variant] of [
-      ["dog-operator", "gpt-6-sol", "xhigh"],
-      ["dogs-coordinator", "gpt-6-sol", "xhigh"],
-      ["dog-advisor-v010", "gpt-6-sol", "xhigh"],
-      ["dog-reviewer-v010", "gpt-6-sol", "xhigh"],
+      ["dog-operator", "gpt-6.1-sol", "xhigh"],
+      ["dogs-coordinator", "gpt-6.1-sol", "xhigh"],
+      ["dog-advisor-v010", "gpt-6.1-sol", "xhigh"],
+      ["dog-reviewer-v010", "gpt-6.1-sol", "xhigh"],
       ["dog-scout-v010", "gpt-6-luna-fast", "max"],
       ["dog-luna-worker-v010", "gpt-6-luna-fast", "max"],
       ["dog-worker-v010", "gpt-6-luna-fast", "max"],

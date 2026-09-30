@@ -45,7 +45,7 @@ test("v013 CLI proof is a real-model Worker startup, never a completed Mission",
   const observed = { accepted: true, errors: [], stopped: "worker-started", root: "ses_root", candidate_sha256: "frozen",
     package_version: "0.13.0", runtime_marker: "0.13.0-fast-first-v1", priced_usd: 0.1, unpriced_requests: 0,
     models: [{ sessionID: "ses_root", agent: "dog-operator",
-      model: { providerID: "openai", id: "gpt-6-sol", variant: "xhigh" } },
+      model: { providerID: "openai", id: "gpt-6.1-sol", variant: "xhigh" } },
     { sessionID: "ses_worker", agent: "dog-worker-v010", started_ms: 95_000,
       model: { providerID: "openai", id: "gpt-6-luna-fast", variant: "max" } }] };
   const receipt = v013StartupReceipt(observed);

@@ -71,7 +71,7 @@ for (const args of [['init', '-q'], ['add', 'AGENTS.md', '.gitignore', 'run.mjs'
 }
 const marker = (await import(pathToFileURL(join(installed, 'dist/asset-version.js')).href)).V010_RUNTIME_ASSET_VERSION;
 const root = await client.session.create({ title: `Sortie Desktop efficiency ${mode}`, agent: 'dog-operator',
-  model: { providerID: 'openai', id: 'gpt-6-sol', variant: 'xhigh' }, location: { directory: project } });
+  model: { providerID: 'openai', id: 'gpt-6.1-sol', variant: 'xhigh' }, location: { directory: project } });
 // Plugin inventory is a live startup snapshot and may initially be empty, even after create.
 let plugins = [];
 for (let attempt = 0; attempt < 100; attempt++) {
@@ -124,7 +124,7 @@ const observation = { root: root.id, host, parent, marker, mode, elapsed_ms: Dat
 await writeFile(join(output, 'observation.json'), JSON.stringify(observation, null, 2));
 console.log(JSON.stringify(observation, null, 2));
 assert(!timedOut, 'Desktop probe timed out');
-assert(models.some(item => item.sessionID === root.id && item.model?.id === 'gpt-6-sol' && item.model.variant === 'xhigh'), 'Real SOL/xhigh Operator must execute');
+assert(models.some(item => item.sessionID === root.id && item.model?.id === 'gpt-6.1-sol' && item.model.variant === 'xhigh'), 'Real GPT-6.1 Sol/xhigh Operator must execute');
 assert(models.some(item => item.agent === 'dog-worker-v010' && item.model?.id === 'gpt-6-luna-fast' && item.model.variant === 'max'), 'Real Luna/max Worker must execute');
 assert.equal(models.filter(item => item.agent === 'dog-worker-v010').length, 1, 'The routine operation must not require an evidence-only successor');
 assert(mission?.context?.some(item => item.text.includes('candidate-v0.12.15')), 'Previous target must survive the short follow-up');

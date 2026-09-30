@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { existsSync, realpathSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -86,14 +87,18 @@ function gate(input: {
 }
 
 test("packed package exposes plugin and versioned runtime assets", async () => {
-  const npmCli = process.env.npm_execpath ?? join(dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
+  const bundledNpmCli = join(dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
+  const npmOnPath = process.platform === "win32" ? undefined : process.env.PATH?.split(delimiter)
+    .map(directory => join(directory, "npm")).find(existsSync);
+  const npmCli = process.env.npm_execpath ?? (existsSync(bundledNpmCli) ? bundledNpmCli
+    : npmOnPath === undefined ? bundledNpmCli : realpathSync(npmOnPath));
 
   await mkdir(testEnvironment, { recursive: true });
   const fixture = await mkdtemp(join(testEnvironment, "package-export-"));
   try {
     const { stdout: packOutput } = await execFileAsync(
       process.execPath,
-      [npmCli, "pack", "--json", "--pack-destination", fixture],
+      [npmCli, "pack", "--ignore-scripts", "--json", "--pack-destination", fixture],
       { cwd: projectRoot },
     );
     const packed = JSON.parse(packOutput) as Array<{ filename: string; files?: Array<{ path: string }> }>;
@@ -149,7 +154,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     );
     const packedPrimary = await readFile(join(packedProject, ".opencode", "agent", "dog-operator.md"), "utf8");
     assert.match(packedPrimary, /^mode: primary$/m);
-    assert.match(packedPrimary, /^model: openai\/gpt-6-sol$/m);
+    assert.match(packedPrimary, /^model: openai\/gpt-6.1-sol$/m);
     assert.match(packedPrimary, /^variant: xhigh$/m);
     assert.match(await readFile(join(packedProject, ".opencode", "agent", "dogs-coordinator.md"), "utf8"), /^hidden: true$/m);
     await assert.rejects(readFile(join(packedProject, ".opencode", "agent", "dog-coordinator-v010.md")), { code: "ENOENT" });
@@ -506,7 +511,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.equal(RUNTIME_ASSET_VERSION, "0.3.89-completion-proof-v1");
     const coordinatorFrontmatter = /^---\r?\n([\s\S]*?)\r?\n---/u.exec(coordinator.content)?.[1];
     assert.ok(coordinatorFrontmatter);
-    assert.match(coordinatorFrontmatter, /^model: openai\/gpt-6-sol$/m);
+    assert.match(coordinatorFrontmatter, /^model: openai\/gpt-6.1-sol$/m);
     assert.match(coordinatorFrontmatter, /^variant: high$/m);
     assert.equal(/^---\r?\n[\s\S]*?\r?\n---/u.exec(worker.content)?.[0].includes("model:"), false);
     assert.equal(worker.content.includes(DEDICATED_WORKER_MODEL), false);

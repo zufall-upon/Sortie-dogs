@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { createReadStream } from "node:fs";
-import { lstat, readlink } from "node:fs/promises";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { lstat, readlink, readdir } from "node:fs/promises";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { createInterface } from "node:readline";
 import type { OperatorState } from "../core/operator-runtime.js";
@@ -275,20 +275,40 @@ export async function missionReviewSource(directory: string, run: OperatorState,
   const unchanged = diff.length === 0;
   let excerpt = selected + diff;
   const paths = [...new Set([...names.split("\0"), ...ignored.split("\0")].filter(Boolean))].sort();
-  for (const path of paths) {
+  const visited = new Set<string>();
+  const visit = async (path: string, includedByParent = false): Promise<void> => {
+    if (visited.has(path)) return;
+    visited.add(path);
     hash.update(JSON.stringify(path));
     try {
       const absolute = resolve(directory, path), stat = await lstat(absolute);
       hash.update(String(stat.mode));
-      const include = untracked.has(path) || unchanged;
-      const heading = `\n--- ${untracked.has(path) ? "new file" : "current file"}: ${path} ---\n`;
+      const include = includedByParent || untracked.has(path) || unchanged;
+      const heading = `\n--- ${includedByParent || untracked.has(path) ? "new file" : "current file"}: ${path} ---\n`;
       const room = include ? Math.max(0, 24_000 - Buffer.byteLength(excerpt) - Buffer.byteLength(heading)) : 0;
       let preview = Buffer.alloc(0);
       if (stat.isSymbolicLink()) {
         const content = Buffer.from(await readlink(absolute));
         hash.update(String(content.length)).update(content);
         preview = content.subarray(0, room);
+      } else if (stat.isDirectory()) {
+        hash.update("directory");
+        if (include) {
+          const marker = "[directory; contained artifacts follow]\n";
+          const headingFits = Buffer.byteLength(excerpt) + Buffer.byteLength(heading) + Buffer.byteLength(marker) <= 24_000;
+          if (headingFits) excerpt += heading + marker;
+          else omitted.push(path);
+        }
+        // Nested repository metadata is not candidate output and can crowd out its actual files.
+        const children = (await readdir(absolute, { withFileTypes: true }))
+          .filter(child => child.name !== ".git")
+          .sort((left, right) => Number(left.isDirectory()) - Number(right.isDirectory()) ||
+            (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
+        for (const child of children) {
+          await visit(join(path, child.name).replaceAll("\\", "/"), include);
+        }
       } else {
+        if (!stat.isFile()) throw new Error("mission-review-source: unsupported artifact type");
         hash.update(String(stat.size));
         for await (const part of createReadStream(absolute)) {
           const bytes = Buffer.isBuffer(part) ? part : Buffer.from(part);
@@ -296,7 +316,7 @@ export async function missionReviewSource(directory: string, run: OperatorState,
           if (preview.length < room) preview = Buffer.concat([preview, bytes.subarray(0, room - preview.length)]);
         }
       }
-      if (include) {
+      if (include && !stat.isDirectory()) {
         const headingFits = Buffer.byteLength(excerpt) + Buffer.byteLength(heading) <= 24_000;
         if (headingFits) {
           const rendered = preview.includes(0) ? "[binary artifact: bytes fingerprinted]" : preview.toString("utf8");
@@ -317,7 +337,8 @@ export async function missionReviewSource(directory: string, run: OperatorState,
         } else omitted.push(path);
       }
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; hash.update("deleted"); }
-  }
+  };
+  for (const path of paths) await visit(path);
   if (external.length) {
     // A declared write scope can also be a host-managed runtime directory (e.g. Docker's data root).
     // Do not make review depend on listing it; record the missing coverage instead. Protected

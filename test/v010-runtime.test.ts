@@ -279,9 +279,11 @@ test("preview assets coexist with stable assets and markers", async () => fixtur
     assert.doesNotMatch(asset, /every existing form that reaches/u);
   }
   const reviewer = previewAssets.find(asset => asset.name === "dog-reviewer-v010")!.content;
-  assert.match(reviewer, /^model: openai\/gpt-6-sol#xhigh$/m);
+  assert.match(reviewer, /^model: openai\/gpt-6.1-sol#xhigh$/m);
+  assert.match(previewAssets.find(asset => asset.name === "dog-advisor-v010")!.content,
+    /^model: openai\/gpt-6.1-sol#xhigh$/m);
   assert.match(previewAssets.find(asset => asset.name === "dog-scout-v010")!.content, /^model: openai\/gpt-6-luna-fast#max$/m);
-  assert.match(previewAssets.find(asset => asset.name === "dogs-coordinator")!.content, /^model: openai\/gpt-6-sol#xhigh$/m);
+  assert.match(previewAssets.find(asset => asset.name === "dogs-coordinator")!.content, /^model: openai\/gpt-6.1-sol#xhigh$/m);
   assert.match(reviewer, /another route, representation, branch, or target that can materially change\nthe result/u);
   assert.match(reviewer, /Absence of that\ninventory alone is not an evidence gap/u);
   assert.match(reviewer, /If a missing check genuinely\naffects correctness or a requested deliverable/u);
@@ -296,7 +298,7 @@ test("preview assets coexist with stable assets and markers", async () => fixtur
   const worker = previewAssets.find(asset => asset.name === "dog-worker-v010")!.content;
   assert.match(worker, /Missing repository-declared dependencies or test runner are setup, not a result/u);
   assert.match(worker, /Reuse an existing \.sortie-env\/ and never delete it/u);
-  assert.match(primary, /^model: openai\/gpt-6-sol$/m);
+  assert.match(primary, /^model: openai\/gpt-6.1-sol$/m);
   assert.match(primary, /^variant: xhigh$/m);
   assert.match(primary, /^  "sortie_v010_\*": allow$/m);
   assert.match(primary, /^  sortie_v010_start_mission: true$/m);
@@ -348,7 +350,7 @@ test("operations defaults do not overwrite an explicit native model variant", as
   });
   const defaults = { agent: { "dogs-coordinator": { mode: "subagent" } } };
   await hooks.config(defaults);
-  assert.deepEqual(defaults.agent["dogs-coordinator"], { mode: "subagent", model: "openai/gpt-6-sol", variant: "xhigh" });
+  assert.deepEqual(defaults.agent["dogs-coordinator"], { mode: "subagent", model: "openai/gpt-6.1-sol", variant: "xhigh" });
   const otherRoles = { agent: { "dog-scout-v010": { mode: "subagent" }, "dog-luna-worker-v010": { mode: "subagent" } } };
   await hooks.config(otherRoles);
   for (const name of ["dog-scout-v010", "dog-luna-worker-v010"] as const) assert.deepEqual(otherRoles.agent[name], {
@@ -361,7 +363,7 @@ test("operations defaults do not overwrite an explicit native model variant", as
   await hooks.config(custom);
   assert.deepEqual(custom.agent["dogs-coordinator"], { mode: "subagent", model: "openai/gpt-5.6-terra" });
   const asset = previewAssets.find(item => item.name === "dogs-coordinator")!.content;
-  assert.match(asset, /^model: openai\/gpt-6-sol#xhigh$/m);
+  assert.match(asset, /^model: openai\/gpt-6.1-sol#xhigh$/m);
 }));
 
 test("preview tools are denied globally and allowed only by profile agents", async () => fixture(async root => {
@@ -477,11 +479,11 @@ test("operator control packet preserves Japanese user prose as language context"
 
 test("preview default primary route resolves without an injected catalog", async () => fixture(async root => {
   const hooks = await SortieDogsV010Plugin({ directory: root, client: { config: { providers: async () => ({ data: {
-    providers: [{ id: "openai", models: { "gpt-6-sol": { id: "gpt-6-sol" } } }],
+    providers: [{ id: "openai", models: { "gpt-6.1-sol": { id: "gpt-6.1-sol" } } }],
   } }) } } } as never);
-  const output = { message: { agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-6-sol", variant: undefined as string | undefined } }, parts: [] };
+  const output = { message: { agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-6.1-sol", variant: undefined as string | undefined } }, parts: [] };
   await hooks["chat.message"]!({ sessionID: "default", agent: "dog-operator", messageID: "user" }, output);
-  assert.equal(output.message.model.modelID, "gpt-6-sol");
+  assert.equal(output.message.model.modelID, "gpt-6.1-sol");
   assert.equal(output.message.model.variant, "xhigh");
 }));
 
@@ -530,13 +532,13 @@ test("rename migration rejects unowned new-name targets before modifying any fil
 
 function oldRoleAsset(name: "dog-operator" | "dogs-coordinator"): string {
   let content = (name === "dog-operator" ? legacyCoordinatorContent : legacyOperatorContent) + COMMUNICATION_LANGUAGE_POLICY;
-  if (name === "dogs-coordinator") content = content.replace("model: openai/gpt-6-sol#xhigh\n", "")
+  if (name === "dogs-coordinator") content = content.replace("model: openai/gpt-6.1-sol#xhigh\n", "")
     .replace("hidden: true\n", "hidden: true\nmodel: openai/gpt-5.6-terra\nvariant: high\n");
   const oldDescription = name === "dog-operator"
     ? "description: Sortie-dogs v0.10 preview — strategic coordinator with an optional bounded operator."
     : "description: Sortie-dogs v0.10 bounded operations delegate; no source or acceptance authority.";
   return content
-    .replace(/^model: openai\/gpt-6-sol$/m, "model: openai/gpt-6-luna")
+    .replace(/^model: openai\/gpt-6\.1-sol$/m, "model: openai/gpt-6-luna")
     .replace(/^variant: xhigh$/m, "variant: max")
     .replace(/For a nontrivial request whose source facts,[\s\S]*?whose complete contract is already known\.\n\n/u, "")
     .replace(/^  sortie_v010_submit_operator_proposal: true\n/m, "")

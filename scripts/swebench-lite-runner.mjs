@@ -166,7 +166,7 @@ export function verifyCandidateAgent(name, resolvedAgent, override) {
   const sol = name === "dog-operator" || name === "dogs-coordinator" ||
     name === "dog-reviewer-v010" || name === "dog-advisor-v010";
   const target = override ? override.slice("openai/".length).split("#")
-    : sol ? ["gpt-6-sol", "xhigh"] : ["gpt-6-luna-fast", "max"];
+    : sol ? ["gpt-6.1-sol", "xhigh"] : ["gpt-6-luna-fast", "max"];
   const selected = resolvedAgent.model;
   ensure(selected?.providerID === "openai" && (selected.id ?? selected.model) === target[0] &&
     selected.variant === target[1], `candidate-agent-model-mismatch:${name}`);
@@ -1120,12 +1120,12 @@ export async function waitForBenchmarkModelRoute(server, { fetchModel = fetch, t
     });
     if (response.ok) {
       const models = (await response.json()).data;
-      if (models?.some(model => model.providerID === "openai" && model.id === "gpt-6-sol" &&
+      if (models?.some(model => model.providerID === "openai" && model.id === "gpt-6.1-sol" &&
         model.variants?.some(variant => variant.id === "xhigh"))) return;
     }
     await new Promise(resolveWait => setTimeout(resolveWait, 250));
   } while (Date.now() < deadline);
-  throw new Error("candidate-v2-model-route-unavailable:openai/gpt-6-sol#xhigh");
+  throw new Error("candidate-v2-model-route-unavailable:openai/gpt-6.1-sol#xhigh");
 }
 
 export async function runOpenCode(options, dependencies = {}) {
@@ -1147,7 +1147,7 @@ export async function runOpenCode(options, dependencies = {}) {
     "--format", "json",
     "--print-logs",
     "--agent", shellQuote(options.agent),
-    "--model", "openai/gpt-6-sol#xhigh",
+    "--model", "openai/gpt-6.1-sol#xhigh",
     shellQuote(options.prompt),
   ].join(" ");
   const child = spawn("bash", ["-ic", command], {

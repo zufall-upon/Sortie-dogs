@@ -7,8 +7,9 @@ const estimate = (modelID: string, overrides: Partial<Parameters<typeof estimate
     cacheReadTokens: 100_000, cacheWriteTokens: 10_000, outputTokens: 10_000, reasoningTokens: 5_000, ...overrides });
 
 test("snapshot identifies the checked official sources and Standard assumptions", () => {
-  assert.equal(MODEL_COST_PRICING_SNAPSHOT.checkedAt, "2026-09-23");
+  assert.equal(MODEL_COST_PRICING_SNAPSHOT.checkedAt, "2026-09-30");
   assert.ok(MODEL_COST_PRICING_SNAPSHOT.sources.some(source => source.includes("developers.openai.com")));
+  assert.ok(MODEL_COST_PRICING_SNAPSHOT.sources.includes("https://developers.openai.com/api/docs/models/gpt-6.1-sol"));
   assert.ok(MODEL_COST_PRICING_SNAPSHOT.sources.some(source => source.includes("platform.claude.com")));
   assert.match(MODEL_COST_PRICING_SNAPSHOT.assumptions.join(" "), /Standard[\s\S]*5-minute/u);
 });
@@ -29,8 +30,17 @@ test("calculates verified aliases per request and charges reasoning output once"
   assert.deepEqual(opus55, { status: "priced", usd: 19.2, longContext: false, priceKey: "anthropic/claude-opus-5-5" });
 });
 
-test("prices the released GPT-6 Sol and Luna definitions from their official schedules", () => {
+test("prices GPT-6 Sol, GPT-6.1 Sol, and Luna from their official schedules", () => {
   assert.deepEqual(estimate("gpt-6-sol"), { status: "priced", usd: 0.395, longContext: false, priceKey: "openai/gpt-6-sol" });
+  assert.deepEqual(estimate("gpt-6.1-sol"), { status: "priced", usd: 0.385, longContext: false, priceKey: "openai/gpt-6.1-sol" });
+  assert.deepEqual(estimate("gpt-6.1-sol", { serviceTier: "priority" }), {
+    status: "priced", usd: 0.77, longContext: false, priceKey: "openai/gpt-6.1-sol#fast",
+  });
+  assert.deepEqual(estimate("gpt-6.1-sol-fast"), {
+    status: "priced", usd: 0.77, longContext: false, priceKey: "openai/gpt-6.1-sol-fast",
+  });
+  assert.deepEqual(estimate("gpt-6.1-sol", { serviceTier: "batch" }),
+    { status: "unpriced", reason: "unsupported-service-tier" });
   assert.deepEqual(estimate("gpt-6-luna"), { status: "priced", usd: 0.01975, longContext: false, priceKey: "openai/gpt-6-luna" });
 });
 
@@ -46,6 +56,12 @@ test("prices the Luna fast route so a routed worker never audits as unpriced", (
 });
 
 test("applies the OpenAI long-context band to each request instead of aggregate usage", () => {
+  const sol61Long = estimate("gpt-6.1-sol", { uncachedInputTokens: 272_001, cacheReadTokens: 0, cacheWriteTokens: 0,
+    outputTokens: 10_000, reasoningTokens: 0 });
+  assert.deepEqual(sol61Long, { status: "priced", usd: 1.238004, longContext: true, priceKey: "openai/gpt-6.1-sol" });
+  const sol61FastLong = estimate("gpt-6.1-sol", { uncachedInputTokens: 272_001, cacheReadTokens: 0, cacheWriteTokens: 0,
+    outputTokens: 10_000, reasoningTokens: 0, serviceTier: "fast" });
+  assert.deepEqual(sol61FastLong, { status: "priced", usd: 2.476008, longContext: true, priceKey: "openai/gpt-6.1-sol#fast" });
   const long = estimate("gpt-5.6-sol", { uncachedInputTokens: 272_001, cacheReadTokens: 0, cacheWriteTokens: 0,
     outputTokens: 10_000, reasoningTokens: 0 });
   assert.deepEqual(long, { status: "priced", usd: 2.476008, longContext: true, priceKey: "openai/gpt-5.6-sol" });

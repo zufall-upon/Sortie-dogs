@@ -117,7 +117,7 @@ export async function probe(tgz, output, { mode = 'start', prompt, instance, tim
   const request = prompt ?? (statusOnly ? 'Call sortie_v010_operator_status once. Do not start a Mission or dispatch a Worker.' :
     buildStart ? 'Reply with just: ready' : operatorResponse
     ? '作業は不要です。ツールを呼ばず、READYとだけ返してください。' : 'result.txt の seed を recovered に置換して。末尾改行は維持。検証は node check.mjs。check.mjs と設定は変更しない。単純な1ユニット作業として実装して。');
-  const rootModel = model ?? (operatorResponse ? 'openai/gpt-6-luna-fast#max' : 'openai/gpt-6-sol#xhigh');
+  const rootModel = model ?? (operatorResponse ? 'openai/gpt-6-luna-fast#max' : 'openai/gpt-6.1-sol#xhigh');
   const launch = nativeCLI('opencode', ['run', '--server', server.url, '--format', 'json', '--agent', rootAgent, '--model', rootModel, request]);
   const child = spawn(launch.executable, launch.args, {
     cwd: project, env: { ...server.env, PWD: project }, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
@@ -171,7 +171,7 @@ export async function probe(tgz, output, { mode = 'start', prompt, instance, tim
     result.models.some(item => item.agent === 'dog-operator' && item.model?.id === 'gpt-6-luna-fast' && item.model.variant === 'max') :
     buildStart ? !result.errors.length && (stopped === 'build-responded' || (!stopped && code === 0)) &&
     result.responses.some(item => item.agent === 'build') &&
-    result.models.some(item => item.agent === 'build' && item.model?.id === 'gpt-6-sol') :
+    result.models.some(item => item.agent === 'build' && item.model?.id === 'gpt-6.1-sol') :
     !schemaRejected && worker?.model?.id === 'gpt-6-luna-fast' && worker.model.variant === 'max' &&
     workerStartWithinProbeLimit(mode, worker, instance, workerStartDeadlineMs) &&
     (mode === 'start' ? stopped === 'worker-started'

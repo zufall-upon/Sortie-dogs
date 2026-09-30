@@ -10,12 +10,14 @@ test("every shipped preview route is declared, so no role resolves against an ab
   const catalog = previewModelCatalog();
   const routes = [
     { model: "openai/gpt-6-luna-fast", variant: "max" },
-    { model: "openai/gpt-6-sol", variant: "xhigh" },
+    { model: "openai/gpt-6.1-sol", variant: "xhigh" },
   ];
   for (const route of routes) {
     assert.ok(declares(catalog, route.model, route.variant),
       `preview route ${route.model}/${route.variant} is undeclared`);
   }
+  assert.deepEqual(catalog.find(entry => entry.model === "openai/gpt-6.1-sol")?.variants,
+    ["low", "medium", "high", "xhigh", "max"]);
   assert.equal(new Set(catalog.map(entry => entry.model)).size, catalog.length);
 });
 
