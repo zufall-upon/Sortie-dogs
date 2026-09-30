@@ -73,3 +73,29 @@ We deliberately do not add another model to approve or rewrite Reviewer verdicts
 elapsed time, review-only round trips, real defect corrections and official outcomes on
 fixed single-case runs before claiming a quality or speed improvement. Preserve the same
 candidate package, conditions and campaign budget within each run.
+
+### Recorded checks (2026-09-30)
+
+- Linux `npm run test:full`: 87 files, 1,362 tests passed, zero failures/skips.
+  After the final excerpt-guidance wording change, build and 140 related tests passed.
+- Native OpenCode V2 `2.0.18`, runtime commit
+  `a13be3b3d7d018cce2f15fe2e47ad79cbc0fe060`, package SHA-256
+  `971776297339f0d99808b2457fabf76c8aa1606bd2baab110f17c4229b7758a2`.
+- A fixed `formatCount` compatibility fixture required zero/positive success, RangeError
+  for invalid numeric input and TypeError for non-numbers. The task requested independent
+  review with a direct read of `reference.md`; it is a targeted runtime check, not a benchmark.
+- One Worker and one Reviewer, no Coordinator or evidence-only retry. Worker actually
+  used `openai/gpt-6-luna-fast#max` (first model message at 25.544s); Operator and Reviewer
+  used `openai/gpt-6-sol#xhigh`. Reviewer completed five native reads and returned PASS;
+  Mission completed with a succeeded receipt. Total elapsed: 136.093s.
+- Estimated model cost: $0.209697, unpriced requests: 0. Campaign cap: $1; timeout: 240s.
+  Two reads of an absent `AGENTS.md` returned file-not-found (one per child). Neither caused
+  a review retry or completion failure; this run is not described as error-free.
+- Root session: `ses_f103021eaffeRAZvTiegIBmebM`. Local ignored evidence:
+  `_testenv/quality-first-review/` contains the launcher/prompt, fixed package and hash,
+  test logs, budget, summary and `smoke-1/observation.json` plus CLI logs and candidate.
+  The completed probe's generated plugin installation is removed after preserving records.
+
+The first-advisory-verdict completion path is covered by regression tests. This native
+run returned PASS, so it does not demonstrate an actual model's EVIDENCE_GAPS completion
+or quantify saved time against a baseline.
