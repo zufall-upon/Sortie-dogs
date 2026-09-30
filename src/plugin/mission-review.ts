@@ -13,7 +13,7 @@ import { taskChildSessionID } from "./task-result-repair.js";
 import { normalizeManifestScope } from "../core/path.js";
 import { declaredArtifacts } from "./declared-artifacts.js";
 import { normalizeCommand } from "./gate.js";
-import { currentSnapshotProtection, snapshotScratchExcluded } from "./protected-snapshot.js";
+import { currentSnapshotProtection, snapshotScratchExclusion } from "./protected-snapshot.js";
 
 const exec = promisify(execFile);
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -154,21 +154,22 @@ export async function missionReviewSource(directory: string, run: OperatorState,
   const scope = missionReviewScope(priorScope, run);
   const bindings = scope.validationBindings ?? [];
   const protection = bindings.some(binding => binding.freshness) ? await currentSnapshotProtection(directory, scope) : [];
+  const scratch = bindings.map(binding => ({ binding, excludes: snapshotScratchExclusion(binding, protection) }));
   const excluded = (path: string) => {
     const absolute = resolve(directory, path);
     const covers = (binding: typeof bindings[number]) => [...binding.source_paths, ...binding.candidate_paths].some(root => {
       const rest = relative(resolve(directory, root), absolute);
       return rest === "" || (rest !== ".." && !rest.startsWith(`..${sep}`) && !isAbsolute(rest));
     });
-    return bindings.some(binding => snapshotScratchExcluded(binding, absolute, protection)) &&
-      !bindings.some(binding => covers(binding) && !snapshotScratchExcluded(binding, absolute, protection));
+    return scratch.some(item => item.excludes(absolute)) &&
+      !scratch.some(item => covers(item.binding) && !item.excludes(absolute));
   };
   const hash = createHash("sha256").update(JSON.stringify({ baseline,
     scope: bindings.length ? { read: scope.read } : scope,
     units: run.units.map(unit => bindings.length ? { id: unit.unit.id, read: unit.unit.read, validation: unit.unit.validation,
       acceptance: unit.unit.acceptance_indices } : { unit: unit.unit, hashes: unit.hashes }) }));
   const writes = [...new Set(scope.write.map(path => path === "." ? path : normalizeManifestScope(path).path))];
-  const focused: { entry: MissionEvidenceExcerpt; lines: string[]; bytes: number }[] = [];
+  const focused: { entry: MissionEvidenceExcerpt; lines: string[]; bytes: number; lineCapped: boolean }[] = [];
   for (const entry of evidence) {
     const absolute = resolve(directory, entry.path);
     const local = relative(resolve(directory), absolute);
@@ -181,8 +182,8 @@ export async function missionReviewSource(directory: string, run: OperatorState,
       });
     const fail = (reason: string) => new Error(`mission-review-evidence: ${entry.path}: ${reason}`);
     if (!allowed) throw fail("outside the project and declared inputs/outputs; select a project file or an existing declared input/output");
-    if (!Number.isSafeInteger(entry.offset) || entry.offset < 1 || !Number.isSafeInteger(entry.limit) || entry.limit < 1 || entry.limit > 200) {
-      throw fail("use a positive line offset and a limit between 1 and 200");
+    if (!Number.isSafeInteger(entry.offset) || entry.offset < 1 || !Number.isSafeInteger(entry.limit) || entry.limit < 1) {
+      throw fail("use a positive safe-integer line offset and limit");
     }
     try {
       const info = await lstat(absolute);
@@ -197,7 +198,7 @@ export async function missionReviewSource(directory: string, run: OperatorState,
       try {
         for await (const line of lines) {
           number++;
-          if (number >= entry.offset && number < entry.offset + entry.limit) {
+          if (number >= entry.offset && number - entry.offset < Math.min(entry.limit, 200)) {
             const text = `${number}: ${line.slice(0, 2_000)}\n`;
             excerpt.push(text);
             bytes += Buffer.byteLength(text);
@@ -205,7 +206,7 @@ export async function missionReviewSource(directory: string, run: OperatorState,
         }
       } finally { lines.close(); stream.destroy(); }
       if (entry.offset > number) throw new Error(`offset ${entry.offset} exceeds ${number} lines; select existing lines`);
-      focused.push({ entry, lines: excerpt, bytes });
+      focused.push({ entry, lines: excerpt, bytes, lineCapped: entry.limit > 200 && number - entry.offset >= 200 });
     } catch (error) {
       throw fail(error instanceof Error ? error.message : String(error));
     }
@@ -218,7 +219,7 @@ export async function missionReviewSource(directory: string, run: OperatorState,
   // previously reserved for automatic diff prefixes, while leaving room for changed-file context.
   const limit = writes.length ? 18_000 : 11_000;
   const headings = focused.reduce((size, { entry }) => size + Buffer.byteLength(heading(entry)), 0);
-  const needsNotice = focused.map(() => false);
+  const needsNotice = focused.map(({ lineCapped }) => lineCapped);
   let allowances: number[];
   while (true) {
     const notices = focused.reduce((size, { entry }, index) =>

@@ -2,6 +2,7 @@ import type { OpenCodeHooks, OpenCodePlugin } from "./index.js";
 import { SortieDogsV010Plugin } from "./profiled.js";
 import { bindMissionProgress, missionProgressReader } from "./mission-progress.js";
 import { owningServiceMessageList, owningServiceSessionList } from "./v2-session-history.js";
+import { nativeContractReadView } from "./native-contract-read.js";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { V010_RUNTIME_ASSET_VERSION } from "../asset-version.js";
@@ -14,7 +15,7 @@ const loadedAdapter = Object.freeze({ adapter_url: import.meta.url,
   // Named module snapshots, not a claim to identify every transitive dependency. Retain these
   // bytes across package replacement so an unchanged adapter cannot conceal an old implementation.
   implementation_sha256: Object.freeze(Object.fromEntries([
-    "index", "profiled", "gate", "protected-snapshot", "declared-artifacts",
+    "index", "profiled", "gate", "protected-snapshot", "declared-artifacts", "native-contract-read",
   ].map(name => [`${name}.js`, createHash("sha256").update(readFileSync(
     new URL(`./${name}.${import.meta.url.endsWith(".ts") ? "ts" : "js"}`, import.meta.url))).digest("hex")]))),
   loaded_at: new Date().toISOString(), pid: process.pid });
@@ -453,11 +454,15 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks)
       else explicitlySelectedChildren.delete(key);
     }
   });
-  if (hooks["tool.execute.after"]) await context.tool.hook("execute.after", async event => {
+  await context.tool.hook("execute.after", async event => {
     const result = record(event.result) ? event.result : {};
     const mapped: JsonObject = { status: event.status, output: toolContentText(result.content), metadata: result.metadata ?? event.error };
-    await hooks["tool.execute.after"]!({ tool: legacyToolName(event.tool), sessionID: String(event.sessionID ?? ""),
+    await hooks["tool.execute.after"]?.({ tool: legacyToolName(event.tool), sessionID: String(event.sessionID ?? ""),
       callID: String(event.id ?? "") }, mapped);
+    if (event.tool === "read" && event.status === "completed") {
+      const view = await nativeContractReadView(context.location.directory, event.input);
+      if (view !== undefined) mapped.output = view;
+    }
     if (typeof mapped.output === "string" && event.status === "completed") event.result = replaceToolContent(result, mapped.output);
   });
   if (hooks["chat.message"]) await context.session.hook("prompt", async event => {

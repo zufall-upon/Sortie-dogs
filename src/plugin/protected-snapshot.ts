@@ -25,10 +25,27 @@ const validationContractHash = (manifest: OperationManifest) => goalFingerprint(
   read: manifest.read, validation: manifest.validation });
 
 export function snapshotScratchExcluded(binding: Binding, absolute: string, currentProtection: readonly string[] = []): boolean {
+  return snapshotScratchExclusion(binding, currentProtection)(absolute);
+}
+
+/** Prepare the same lexical containment rules once per snapshot/Review, not once per
+ * cache-file × protected-file pair. This is call-local; edits and new deliverables are
+ * still rediscovered by currentSnapshotProtection on the next freshness check. */
+export function snapshotScratchExclusion(binding: Binding, currentProtection: readonly string[] = []): (absolute: string) => boolean {
   const fixed = binding.freshness;
-  if (!fixed) return false;
-  return fixed.scratch_paths.some(root => !outside(root, absolute)) &&
-    ![...fixed.protected_paths, ...currentProtection].some(path => !outside(path, absolute) || !outside(absolute, path));
+  if (!fixed) return () => false;
+  const canonical = (path: string) => {
+    const normalized = resolve(path).replaceAll("\\", "/");
+    return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+  };
+  const prepared = (path: string) => ({ exact: path, prefix: path.endsWith("/") ? path : `${path}/` });
+  const scratch = fixed.scratch_paths.map(path => prepared(canonical(path)));
+  const protection = [...new Set([...fixed.protected_paths, ...currentProtection].map(canonical))].map(prepared);
+  return absolute => {
+    const target = prepared(canonical(absolute));
+    return scratch.some(root => target.exact === root.exact || target.exact.startsWith(root.prefix)) &&
+      !protection.some(path => target.exact === path.exact || target.exact.startsWith(path.prefix) || path.exact.startsWith(target.prefix));
+  };
 }
 
 /** Tighten old scratch exclusions for current real inputs/outputs; never rewrite the saved recipe. */
@@ -66,9 +83,10 @@ async function protectedScopeDigest(projectRoot: string, paths: readonly string[
   sourcePolicy?: Binding["source_policy"], excluded: readonly string[] = [], binding?: Binding): Promise<string | undefined> {
   const entries: Array<readonly [string, string, string?]> = [];
   const canonicalRoot = await realpath(projectRoot);
+  const scratchExcluded = binding ? snapshotScratchExclusion(binding) : () => false;
   const visit = async (absolute: string, ancestors: ReadonlySet<string> = new Set()): Promise<boolean> => {
     if (excluded.some(root => !outside(root, absolute))) return true;
-    if (binding && snapshotScratchExcluded(binding, absolute)) return true;
+    if (scratchExcluded(absolute)) return true;
     const scoped = relative(projectRoot, absolute).replaceAll("\\", "/");
     if (scoped === ".." || scoped.startsWith("../") || isAbsolute(scoped)) return false;
     if (sourcePolicy === "project-files-v1" && isRuntimeControlPath(scoped)) return true;

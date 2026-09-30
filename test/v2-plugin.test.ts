@@ -822,6 +822,33 @@ test("V2 child history refuses missing or foreign service registrations", async 
   } finally { cleanup?.(); }
 }));
 
+test("V2 read result projection exposes full original requirements on the native hook path", async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const directory = await mkdtemp(resolve("_testenv/v2-contract-view-"));
+  const fixture = contextFixture();
+  const path = ".sortie-dogs-v010/contracts/handoff.native.json";
+  await mkdir(join(directory, ".sortie-dogs-v010/contracts"), { recursive: true });
+  const requirement = "Context. ".repeat(300) + "\nError text must contain type error and <nil>.";
+  const source = JSON.stringify({ task: { objective: "typed bindings" }, ext: { original_requests: [{ text: requirement }] } });
+  await writeFile(join(directory, path), source);
+  const cleanup = await createSortieDogsV2Plugin(async () => ({})).setup({ ...fixture.context, location: { directory } });
+  try {
+    const after = fixture.toolHooks.get("execute.after")!;
+    const nativeResult = { content: [{ type: "text", text: `1: ${source.slice(0, 2000)}` }], metadata: { truncated: false } };
+    const completed = { tool: "read", input: { path }, status: "completed", result: nativeResult };
+    await after(completed);
+    assert(completed.result.content[0]!.text.includes(requirement));
+    assert.deepEqual(completed.result.metadata, { truncated: false });
+    assert.equal(await readFile(join(directory, path), "utf8"), source);
+    const failed = { tool: "read", input: { path }, status: "error", result: nativeResult };
+    await after(failed);
+    assert.equal(failed.result, nativeResult, "failed native reads must not be replaced with successful content");
+    const ordinary = { tool: "read", input: { path: "user.json" }, status: "completed", result: nativeResult };
+    await after(ordinary);
+    assert.equal(ordinary.result.content[0]!.text, nativeResult.content[0]!.text);
+  } finally { cleanup?.(); await rm(directory, { recursive: true, force: true }); }
+});
+
 test("V2 server plugin registers tools and translates public hooks without changing the V1 entry", async () => {
   const fixture = contextFixture();
   let beforeInput: unknown;
