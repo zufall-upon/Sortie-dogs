@@ -5,15 +5,29 @@ import { RUNTIME_PROFILES } from "../core/runtime-profile.js";
 
 const controlDirectories = new Set([".git", ".opencode", ...Object.values(RUNTIME_PROFILES).map(profile => profile.stateDirectory)]);
 
+/** WSL's default drive mount and a native Windows project share one path identity. */
+function nativeScratchPath(directory: string, value: string): string | undefined {
+  const declared = value.replace(/^\$\{?PWD\}?/u, directory);
+  if (/[$`]/u.test(declared)) return undefined;
+  const wsl = process.platform === "win32" ? /^\/mnt\/([a-z])\/(.+)$/iu.exec(declared) : null;
+  return wsl ? win32.resolve(`${wsl[1]!.toUpperCase()}:\\`, wsl[2]!.replaceAll("/", "\\")) : resolve(directory, declared);
+}
+
+function localScratchPath(directory: string, target: string): string | undefined {
+  const scoped = relative(directory, target).replaceAll("\\", "/");
+  return !scoped || scoped === ".." || scoped.startsWith("../") || isAbsolute(scoped) ? undefined : scoped;
+}
+
+const isControl = (path: string) => controlDirectories.has(process.platform === "win32" ? path.split("/")[0]!.toLowerCase() : path.split("/")[0]!);
+
 /** Only explicitly configured tool scratch/cache outputs; no filename, ignored or untracked heuristic. */
 export function validationScratchPaths(directory: string, commands: readonly string[]): string[] {
   const paths = new Set<string>();
   for (const command of commands) for (const match of command.matchAll(/(?:^|\s)(TMPDIR|GOCACHE|GOMODCACHE|GOPATH)=(?:"([^"]+)"|'([^']+)'|([^\s"']+))/gu)) {
-    let value = (match[2] ?? match[3] ?? match[4]!).replace(/^\$\{?PWD\}?/u, directory);
-    if (/[$`]/u.test(value)) continue;
-    const absolute = resolve(directory, value);
-    const scoped = relative(directory, absolute).replaceAll("\\", "/");
-    if (!scoped || scoped === ".." || scoped.startsWith("../") || controlDirectories.has(scoped.split("/")[0]!)) continue;
+    const absolute = nativeScratchPath(directory, match[2] ?? match[3] ?? match[4]!);
+    if (!absolute) continue;
+    const scoped = localScratchPath(directory, absolute);
+    if (!scoped || isControl(scoped)) continue;
     if (match[1] === "GOPATH") { paths.add(resolve(absolute, "pkg/mod")); paths.add(resolve(absolute, "pkg/sumdb")); }
     else paths.add(absolute);
   }
@@ -31,16 +45,13 @@ export async function prepareValidationScratch(directory: string, commands: read
   for (const command of commands) {
     for (const match of command.matchAll(/(?:^|\s)TMPDIR=(?:"([^"]+)"|'([^']+)'|([^\s"']+))/gu)) {
       const declared = match[1] ?? match[2] ?? match[3]!;
-      // WSL's default drive mount and a native Windows project refer to the same directory.
-      // Other mounts are not inferred from command text.
-      const wsl = process.platform === "win32" ? /^\/mnt\/([a-z])\/(.+)$/iu.exec(declared) : null;
-      const target = wsl ? win32.resolve(`${wsl[1]!.toUpperCase()}:\\`, wsl[2]!.replaceAll("/", "\\"))
-        : isAbsolute(declared) ? resolve(declared) : null;
+      // Preparation retains its absolute-path contract; freshness also accepts explicit local paths.
+      const target = isAbsolute(declared) ? nativeScratchPath(directory, declared) : undefined;
       if (!target) continue;
-      const path = relative(project.root, target).replaceAll("\\", "/");
-      if (!path || path === ".." || path.startsWith("../") || seen.has(path)) continue;
+      const path = localScratchPath(project.root, target);
+      if (!path || seen.has(path)) continue;
       seen.add(path);
-      if (controlDirectories.has(path.split("/")[0]!) || !await project.contains(target).catch(() => false)) {
+      if (isControl(path) || !await project.contains(target).catch(() => false)) {
         unprepared_directories.push(path);
         continue;
       }

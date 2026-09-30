@@ -269,6 +269,31 @@ test("an ignored build cache in the write scope cannot displace review source or
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+for (const promotion of ["exact-output", "tracked-source"]) test(`Review includes a new ${promotion} under previously excluded scratch`, async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const root = await mkdtemp(join(resolve("_testenv"), "mission-review-promotion-"));
+  try {
+    await git("git", ["init", "--quiet"], { cwd: root });
+    await writeFile(join(root, "result.txt"), "verified");
+    const manifestPath = join(root, "manifest.json"), value = { version: "0.1.0", task_id: "unit", read: [],
+      write: ["result.txt", ".tmp/**"], validation: [`TMPDIR=${root}/.tmp node check.mjs`] };
+    await writeFile(manifestPath, JSON.stringify(value));
+    const snapshot = await protectedSnapshot({ projectRoot: root, manifestPath, manifestHash: createHash("sha256").update(JSON.stringify(value)).digest("hex") });
+    assert.ok(snapshot);
+    const run = { units: [{ unit: { id: "unit", ...value, acceptance_indices: [0] }, hashes: [], evidence: [{ protected_binding: snapshot.binding }] }] } as never;
+    const first = await missionReviewSource(root, run);
+    await mkdir(join(root, ".tmp"));
+    await writeFile(join(root, ".tmp/cache"), "cache only");
+    assert.equal((await missionReviewSource(root, run)).fingerprint, first.fingerprint);
+    await writeFile(join(root, ".tmp/new-deliverable.txt"), "unverified output");
+    if (promotion === "exact-output") value.write.push(".tmp/new-deliverable.txt");
+    else await git("git", ["add", "--", ".tmp/new-deliverable.txt"], { cwd: root });
+    const changed = await missionReviewSource(root, run);
+    assert.notEqual(changed.fingerprint, first.fingerprint);
+    assert.match(changed.excerpt, /new-deliverable.txt/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("committed candidates still supply current source and large artifacts expose truncation", async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const root = await mkdtemp(join(resolve("_testenv"), "mission-committed-"));

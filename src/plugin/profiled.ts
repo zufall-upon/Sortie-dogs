@@ -330,7 +330,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       // Project only the generated header, never acceptance, commands or the user's objective.
       // Durable Tasks and the shared engine retain their canonical absolute identities.
       if (!/^role: implementation\ntask_id: operator-/u.test(text)) return text;
-      const end = text.indexOf("\nacceptance:\n");
+      const reference = text.indexOf("\ncontract_reference: handoff\n"), acceptance = text.indexOf("\nacceptance:\n");
+      const end = reference < 0 ? acceptance : acceptance < 0 ? reference : Math.min(reference, acceptance);
       if (end < 0) return text;
       return text.slice(0, end).replace(/^(handoff_path|goal_declaration_path): (.+)$/gm,
         (_line, name: string, path: string) => {

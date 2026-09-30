@@ -7276,6 +7276,12 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
             taskBlockHasContent(contractPrompt, ["source_manifest", "sourcemanifest"]);
           const explicitBlockHandoff = isBlockTaskHandoff(contractPrompt);
           const taskIDs = taskValues(contractPrompt, ["task_id"]);
+          // Only the host-admitted exact Mission Task can reference its already inspected ledger.
+          // Generic/legacy dispatch still supplies and checks inline criteria. This changes no
+          // Worker-visible Task text and does not trust a prompt marker as dispatch authority.
+          const missionContractReference = taskHeaderCount(contractPrompt, ["contract_reference"]) === 1 &&
+            taskValues(contractPrompt, ["contract_reference"])[0] === "handoff" && taskIDs.length === 1 &&
+            await input.runtimeBridge?.ownsMissionDispatch?.(toolInput.sessionID, toolInput.callID, taskIDs[0]!) === true;
           const resumeDeltas = taskValues(contractPrompt, ["resume_delta"]);
           const resumeDeltaPresent = resumeDeltas.length === 1 && hasResumeContractShape(contractPrompt);
           const contractRedefinitions = [
@@ -7383,8 +7389,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
                   defects: [contractDefect("contract", "/acceptance", "acceptance_continuity_mismatch")],
                 });
               }
-              if (criteria === undefined || criteria.length !== ledger.criteria.length ||
-                criteria.some((criterion, index) => criterion !== ledger.criteria[index])) {
+              if (!missionContractReference && (criteria === undefined || criteria.length !== ledger.criteria.length ||
+                criteria.some((criterion, index) => criterion !== ledger.criteria[index]))) {
                 const canonical = canonicalTaskAcceptance(prompt, ledger.criteria);
                 if (canonical === undefined) {
                   throw new HandoffDeniedError("contract-invalid", handoffPaths[0]!, {
@@ -7397,7 +7403,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
               // Mission admission already binds the exact generated Task to its durable run and
               // ordered requirements. The legacy session-wide chain is a second, incompatible
               // authority across cancelled missions and cold reloads (including later units).
-              const missionDispatch = await input.runtimeBridge?.ownsMissionDispatch?.(
+              const missionDispatch = missionContractReference || await input.runtimeBridge?.ownsMissionDispatch?.(
                 toolInput.sessionID, toolInput.callID, ledger.task_id) === true;
               if (!missionDispatch) {
                 const previous = rootAcceptanceContinuity.get(toolInput.sessionID);

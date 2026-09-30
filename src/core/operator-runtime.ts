@@ -1052,23 +1052,27 @@ export class OperatorRuntime {
       if (diagnostics.length > 0) throw new OperatorContractError(diagnostics);
       const contents = [JSON.stringify(handoff), JSON.stringify(manifest)];
       controls.push({ path: handoffPath, content: contents[0]! }, { path: manifestPath, content: contents[1]! });
-      const prompt = ["role: implementation", `task_id: ${taskID}`, `project_root: ${this.projectRoot}`,
+      const promptHeader = ["role: implementation", `task_id: ${taskID}`, `project_root: ${this.projectRoot}`,
         `source_manifest: ${(unit.write.length ? unit.write : unit.read).join(", ") || "none"}`, `operation_manifest: ${manifestRelative}`,
-        `handoff_path: ${handoffPath}`,
-        `goal_declaration_path: ${declarationPath}`, "acceptance:", ...plan.acceptance.map(value => `  - ${value}`),
+        `handoff_path: ${handoffPath}`, `goal_declaration_path: ${declarationPath}`];
+      const commitBoundary = plan.git_lifecycle !== undefined && index === plan.units.length - 1 ? [
+        `git_post_commit_validation: ${JSON.stringify(plan.git_lifecycle.post_commit_validation)}`,
+        "Complete every source write before invoking any git_post_commit_validation command. Its first exact invocation is the host commit boundary; after it, source mutation and undeclared shell commands are denied. Run every listed command and return its real evidence.",
+      ] : [];
+      // Mission Workers already must read this host-generated handoff before binding. Preserve its
+      // verbatim objective, original requests, criteria and checks there, not in another prompt copy.
+      // Saved Tasks and non-Mission dispatch keep their existing text/identity.
+      const prompt = (mission ? [...promptHeader, "contract_reference: handoff",
+        'acceptance: handoff.ext["sortie-dogs/acceptance-continuity"].criteria', "validation: handoff.verification",
+        `unit_acceptance_indices: ${JSON.stringify(unit.acceptance_indices)}`, "",
+        "Read handoff_path once before binding. Implement task.objective; preserve the original requests, global criteria and constraints in ext, and prove this unit's assigned indices. Run verification checks exactly in order within this Task. Use supplied paths; do not reconstruct project_root. Return actual results and limitations, not whole-Mission completion.",
+        ...commitBoundary,
+      ] : [...promptHeader, "acceptance:", ...plan.acceptance.map(value => `  - ${value}`),
         "validation:", ...unit.validation.map(value => `  - ${value}`),
-        ...(mission ? ["Read handoff_path and other repository files using their project-relative paths as supplied. The native working directory is project_root; do not prepend or reconstruct its absolute path for read/search/shell. Copy project_root only when binding the write gate. Preserve explicitly declared external paths."] : []),
-        mission ? `Read-only investigation commands are unrestricted. Use native host permissions for work within the original request; unit.write is the Coordinator's estimate, not a user prohibition. Concrete native write paths are reconciled automatically. For unknown shell output paths call ${this.profile.toolPrefix}expand_unit in this same Task with unit_id=${unit.id}, exact paths and reason; no return, approval or redispatch is needed. Respect explicit user prohibitions. Run formal validation exactly as listed, in order and separate calls; diagnostic success is not formal evidence. A changed formal check still needs the existing contract update. Requested git add -- <paths> and git commit -m ... use the existing source-scope Git path; missing .git/** is not a refusal. Report actual host errors, not inferred permission gaps.`
-          : "Execute validation in its declared order. Earlier entries may be approved generator, build, formatter, or exact cleanup commands required before canonical criterion tests. Every persistent or transient generator output must be declared in unit.write. Cleanup may remove only declared unit.write outputs and must be an explicit ordered command after generation and before post-commit or canonical validation; never add an ignore rule or remove an undeclared path. If any necessary command, input, output, or cleanup is missing, do not run an undeclared command or variant and do not use resume evidence tooling to invent permission; return a contract-repair decision.",
-        ...(mission ? [] : ["Preserve existing public API success and error return semantics unless acceptance explicitly changes them, and cover those compatibility boundaries in the declared validation."]),
-        mission
-          ? "Complete the assigned work and listed validation within this Task. For a known operation, proceed through setup, execution and result collection; preparation alone is not execution. Preserve existing public behavior when changing source. Do not spawn nested subagents. The parent Operator or Coordinator handles any applicable independent review after your return; review is not a prerequisite to execution. Return actual results, including failed or not-started operations, and any exact contract correction needed."
-          : "Do not spawn nested subagents for consultation. Required consultations belong to the root before dispatch; use the confirmed decisions and evidence declared in the unit objective and inputs. If required consultation results or user decisions are missing, return the exact contract gap to the parent instead of attempting a deeper Task, inventing consent, or asking the user to repeat an already recorded decision.",
-        ...(plan.git_lifecycle !== undefined && index === plan.units.length - 1 ? [
-          `git_post_commit_validation: ${JSON.stringify(plan.git_lifecycle.post_commit_validation)}`,
-          "Complete every source write before invoking any git_post_commit_validation command. Its first exact invocation is the host commit boundary; after it, source mutation and undeclared shell commands are denied. Run every listed command and return its real evidence.",
-        ] : []),
-        `unit_acceptance_indices: ${JSON.stringify(unit.acceptance_indices)}`, "", unit.objective].join("\n");
+        "Execute validation in its declared order. Earlier entries may be approved generator, build, formatter, or exact cleanup commands required before canonical criterion tests. Every persistent or transient generator output must be declared in unit.write. Cleanup may remove only declared unit.write outputs and must be an explicit ordered command after generation and before post-commit or canonical validation; never add an ignore rule or remove an undeclared path. If any necessary command, input, output, or cleanup is missing, do not run an undeclared command or variant and do not use resume evidence tooling to invent permission; return a contract-repair decision.",
+        "Preserve existing public API success and error return semantics unless acceptance explicitly changes them, and cover those compatibility boundaries in the declared validation.",
+        "Do not spawn nested subagents for consultation. Required consultations belong to the root before dispatch; use the confirmed decisions and evidence declared in the unit objective and inputs. If required consultation results or user decisions are missing, return the exact contract gap to the parent instead of attempting a deeper Task, inventing consent, or asking the user to repeat an already recorded decision.",
+        ...commitBoundary, `unit_acceptance_indices: ${JSON.stringify(unit.acceptance_indices)}`, "", unit.objective]).join("\n");
       units.push({ unit, task: { subagent_type: profileAgent(this.profile, "dog-worker"), description: unit.title, prompt },
         handoffPath, manifestPath, hashes: [...contents.map(hash), hash(declaration)], status: "pending", callID: null,
         childSessionID: null, evidence: [], resultClass: null, repairValidationAttempts: 0, repairValidation: null });

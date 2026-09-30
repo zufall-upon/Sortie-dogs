@@ -13,7 +13,7 @@ import { taskChildSessionID } from "./task-result-repair.js";
 import { normalizeManifestScope } from "../core/path.js";
 import { declaredArtifacts } from "./declared-artifacts.js";
 import { normalizeCommand } from "./gate.js";
-import { snapshotScratchExcluded } from "./protected-snapshot.js";
+import { currentSnapshotProtection, snapshotScratchExcluded } from "./protected-snapshot.js";
 
 const exec = promisify(execFile);
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -153,14 +153,15 @@ export async function missionReviewSource(directory: string, run: OperatorState,
     fingerprint: string; excerpt: string; truncatedEvidence: string[]; truncatedSource: string[] }> {
   const scope = missionReviewScope(priorScope, run);
   const bindings = scope.validationBindings ?? [];
+  const protection = bindings.some(binding => binding.freshness) ? await currentSnapshotProtection(directory, scope) : [];
   const excluded = (path: string) => {
     const absolute = resolve(directory, path);
     const covers = (binding: typeof bindings[number]) => [...binding.source_paths, ...binding.candidate_paths].some(root => {
       const rest = relative(resolve(directory, root), absolute);
       return rest === "" || (rest !== ".." && !rest.startsWith(`..${sep}`) && !isAbsolute(rest));
     });
-    return bindings.some(binding => snapshotScratchExcluded(binding, absolute)) &&
-      !bindings.some(binding => covers(binding) && !snapshotScratchExcluded(binding, absolute));
+    return bindings.some(binding => snapshotScratchExcluded(binding, absolute, protection)) &&
+      !bindings.some(binding => covers(binding) && !snapshotScratchExcluded(binding, absolute, protection));
   };
   const hash = createHash("sha256").update(JSON.stringify({ baseline,
     scope: bindings.length ? { read: scope.read } : scope,

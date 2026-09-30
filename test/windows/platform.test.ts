@@ -6,10 +6,25 @@ import { test } from 'node:test';
 import { projectKey } from '../../dist/reflection/config.js';
 import { createProjectPaths, createWriteGate, WriteDeniedError } from '../../dist/plugin/gate.js';
 import { stopOwnedTree } from '../helpers/full-test-runner.ts';
+import { validationScratchPaths, prepareValidationScratch } from '../../dist/plugin/validation-scratch.js';
 
 assert.equal(process.platform, 'win32', 'Windows suite requires Windows');
 test('Windows reflection identity is case insensitive', () => {
   assert.equal(projectKey('C:\\Projects\\Example'), projectKey('c:\\projects\\EXAMPLE'));
+});
+test('WSL validation scratch uses the native project identity for freshness and preparation', async () => {
+  const root = 'M:\\_work\\_Anko';
+  const command = 'wsl.exe -d Ubuntu -- bash -lc \'cd /mnt/m/_work/_Anko && /usr/bin/env GOCACHE="/mnt/m/_work/_Anko/.gocache" GOMODCACHE="/mnt/m/_work/_Anko/.gomodcache" GOPATH="/mnt/m/_work/_Anko/.gopath" TMPDIR="/mnt/m/_work/_Anko/.tmp" go test ./parser ./env ./vm\'';
+  assert.deepEqual(validationScratchPaths(root, [command]), [join(root, '.gocache'), join(root, '.gomodcache'),
+    join(root, '.gopath/pkg/mod'), join(root, '.gopath/pkg/sumdb'), join(root, '.tmp')].sort());
+  assert.deepEqual(validationScratchPaths(root, ['TMPDIR=/mnt/c/outside GOCACHE=/mnt/m/_work/_Anko/.git/cache TMPDIR="$UNKNOWN"']), []);
+  const directory = await mkdtemp(join(process.cwd(), '_testenv', 'windows-scratch-'));
+  try {
+    const wsl = `/mnt/${directory[0]!.toLowerCase()}/${directory.slice(3).replaceAll('\\', '/')}/.tmp`;
+    const checks = [`wsl.exe -- /usr/bin/env TMPDIR="${wsl}" go test ./parser`];
+    assert.deepEqual(validationScratchPaths(directory, checks), [join(directory, '.tmp')]);
+    assert.deepEqual((await prepareValidationScratch(directory, checks)).prepared_directories, ['.tmp']);
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });
 test('Windows junction cannot escape the declared write scope', async () => {
   const root = await mkdtemp(join(process.cwd(), '_testenv', 'windows-junction-'));

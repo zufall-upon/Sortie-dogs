@@ -24,11 +24,23 @@ const environment = (manifest: OperationManifest) => ({
 const validationContractHash = (manifest: OperationManifest) => goalFingerprint({ task_id: manifest.task_id,
   read: manifest.read, validation: manifest.validation });
 
-export function snapshotScratchExcluded(binding: Binding, absolute: string): boolean {
+export function snapshotScratchExcluded(binding: Binding, absolute: string, currentProtection: readonly string[] = []): boolean {
   const fixed = binding.freshness;
   if (!fixed) return false;
   return fixed.scratch_paths.some(root => !outside(root, absolute)) &&
-    !fixed.protected_paths.some(path => !outside(path, absolute) || !outside(absolute, path));
+    ![...fixed.protected_paths, ...currentProtection].some(path => !outside(path, absolute) || !outside(absolute, path));
+}
+
+/** Tighten old scratch exclusions for current real inputs/outputs; never rewrite the saved recipe. */
+export async function currentSnapshotProtection(projectRoot: string, manifest: Pick<OperationManifest, "read" | "write">): Promise<string[]> {
+  const actual = (entry: string) => resolve(projectRoot, normalizeManifestScope(entry).path);
+  const tracked = await exec("git", ["ls-files", "-z"], { cwd: projectRoot, maxBuffer: 16 * 1024 * 1024 })
+    .then(value => value.stdout.split("\0").filter(Boolean).map(path => resolve(projectRoot, path))).catch(() => []);
+  const outputs = manifest.write.filter(path => !path.endsWith("/**")).map(actual);
+  // An absent execution grant is not a newly delivered artifact. Initial missing paths remain
+  // protected by the immutable binding, while new outputs become protected when materialized.
+  const materialized = await Promise.all(outputs.map(async path => await lstat(path).catch(() => undefined) ? path : undefined));
+  return [...new Set([...manifest.read.map(actual), ...tracked, ...materialized.filter((path): path is string => path !== undefined)])];
 }
 
 async function snapshotManifest(projectRoot: string, binding: Binding): Promise<{ manifest: OperationManifest; hash: string } | undefined> {
@@ -197,6 +209,9 @@ export async function refreshProtectedSnapshot(projectRoot: string, binding: Bin
   const sourcePaths = binding.source_paths.map(path => resolve(projectRoot, path));
   const candidatePaths = binding.candidate_paths.map(path => resolve(projectRoot, path));
   if (binding.freshness) {
+    const protection = await currentSnapshotProtection(projectRoot, current.manifest);
+    binding = { ...binding, freshness: { ...binding.freshness,
+      protected_paths: [...new Set([...binding.freshness.protected_paths, ...protection])] } };
     // A compatible scope-only revision does not change old proof. Newly materialized outputs
     // outside its protected recipe do change the candidate; absent execution grants do not.
     for (const entry of current.manifest.write) {

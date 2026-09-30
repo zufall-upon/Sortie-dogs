@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import test from 'node:test';
-import { VALIDATION_WORKFLOW } from '../dist/runtime-mission-assets.js';
+import { VALIDATION_WORKFLOW, WORKER_VALIDATION_WORKFLOW } from '../dist/runtime-mission-assets.js';
 import { runtimeAssets } from '../dist/runtime-assets-v010.js';
 
 const roles = ['dog-operator', 'dogs-coordinator', 'dog-worker-v010'];
@@ -13,7 +13,8 @@ test('planning and implementation share a staged validation workflow without new
   for (const name of roles) {
     const asset = runtimeAssets.find(item => item.name === name);
     assert.ok(asset, name);
-    assert.equal(asset.content.split(VALIDATION_WORKFLOW).length, 2, `${name}: policy exactly once`);
+    const policy = name === 'dog-worker-v010' ? WORKER_VALIDATION_WORKFLOW : VALIDATION_WORKFLOW;
+    assert.equal(asset.content.split(policy).length, 2, `${name}: role policy exactly once`);
   }
   assert.match(VALIDATION_WORKFLOW, /final integrated candidate,\s+not every implementation unit/);
   assert.match(VALIDATION_WORKFLOW, /Do not execute the entire\s+formal validation list after each patch/);
@@ -22,9 +23,17 @@ test('planning and implementation share a staged validation workflow without new
   assert.match(VALIDATION_WORKFLOW, /Documentation-only changes do not automatically invalidate/);
   assert.match(VALIDATION_WORKFLOW, /actual exit\/elapsed time and any rerun reason/);
   assert.match(VALIDATION_WORKFLOW, /this workflow adds no approval or denial/);
+  assert.match(WORKER_VALIDATION_WORKFLOW, /never drop required broad validation/);
+  assert.match(WORKER_VALIDATION_WORKFLOW, /host evidence freshness requires it/);
+  assert.match(WORKER_VALIDATION_WORKFLOW, /independent\s+review, accepted criteria and cumulative budget/);
+  assert.doesNotMatch(WORKER_VALIDATION_WORKFLOW, /Operator\/Coordinator:/);
   const worker = runtimeAssets.find(item => item.name === 'dog-worker-v010')!.content;
   assert.match(worker, /Run formal validation commands exactly as listed, in declared order/);
   assert.match(worker, /Do not ask the user or delegate to another agent/);
+  for (const boundary of [/same operation/, /\.git\/\*\* scope/, /formal evidence/, /uncaught failures/,
+    /public return value, error and post-failure state/, /\.sortie-env\//, /Do not spawn nested subagents/,
+    /PROCESS_DEFECT: local:/, /TRUE_BLOCKER: external:/, /correct-format-within-current-manifest/,
+    /not before execution/, /Native shell background mode reports only process launch/]) assert.match(worker, boundary);
 });
 
 test('native CLI init installs the validation workflow in each active mission role', async () => {
@@ -34,7 +43,8 @@ test('native CLI init installs the validation workflow in each active mission ro
     await promisify(execFile)(process.execPath, ['dist/cli/main.js', 'init', root], { cwd: process.cwd() });
     for (const role of roles) {
       const installed = await readFile(join(root, '.opencode', 'agent', `${role}.md`), 'utf8');
-      assert.equal(installed.split(VALIDATION_WORKFLOW).length, 2, role);
+      const policy = role === 'dog-worker-v010' ? WORKER_VALIDATION_WORKFLOW : VALIDATION_WORKFLOW;
+      assert.equal(installed.split(policy).length, 2, role);
     }
   } finally { await rm(root, { recursive: true, force: true }); }
 });

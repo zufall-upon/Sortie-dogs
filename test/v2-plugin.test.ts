@@ -229,7 +229,8 @@ for (const legacy of [false, true]) test(`V2 ${legacy ? "saved absolute" : "rela
         // Recreate a pre-change saved mission, including its exact old Task reference/hash.
         state.units[0]!.task.prompt = state.units[0]!.task.prompt.replace(/^(handoff_path|goal_declaration_path): (.+)$/gm,
           (_line, name: string, path: string) => `${name}: ${resolve(directory, path)}`)
-          .replace(/^Read handoff_path and other repository files.*\n/m, "");
+          .replace(/^acceptance: handoff\..*\nvalidation: handoff\.verification\n/m, "")
+          .replace("contract_reference: handoff\n", `acceptance:\n  - ${original}\nvalidation:\n  - ${command}\n`) + `\n${objective}`;
         const file = join(directory, ".sortie-dogs-v010/operators", `${createHash("sha256").update("root").digest("hex")}.json`);
         await writeFile(file, JSON.stringify(state));
         runtime = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
@@ -243,7 +244,8 @@ for (const legacy of [false, true]) test(`V2 ${legacy ? "saved absolute" : "rela
       const worker = await before("coordinator", "subagent", task);
       assert.equal(worker.input.prompt, reference, "native delegation keeps the exact opaque reference");
       const expanded = await prompt(child, String(reference));
-      assert.ok(expanded.endsWith(objective), "projection must not rewrite task data below the generated header");
+      if (legacy && index === 0) assert.ok(expanded.endsWith(objective), "legacy projection must not rewrite task data below the generated header");
+      else assert.ok(!expanded.includes(objective), "new Mission Tasks use the existing required handoff, not a repeated objective");
       const handoff = /^handoff_path: (.+)$/m.exec(expanded)![1]!;
       const declaration = /^goal_declaration_path: (.+)$/m.exec(expanded)![1]!;
       assert.equal(isAbsolute(handoff), false);
@@ -253,7 +255,9 @@ for (const legacy of [false, true]) test(`V2 ${legacy ? "saved absolute" : "rela
       // V2 native read(path) reaches the shared engine as filePath without rewriting its target.
       const read = await before(child, "read", { path: handoff });
       assert.equal(read.input.path, handoff);
-      await after(read, await readFile(resolve(directory, String(read.input.path)), "utf8"));
+      const handoffSource = await readFile(resolve(directory, String(read.input.path)), "utf8");
+      assert.equal(JSON.parse(handoffSource).task.objective, objective, "original objective and embedded example remain verbatim");
+      await after(read, handoffSource);
       const manifest = /^operation_manifest: (.+)$/m.exec(expanded)![1]!;
       assert.equal((await tool(child, "bind_write_gate", { project_root: directory, manifest_path: manifest })).status, "bound");
       if (index === 1) {

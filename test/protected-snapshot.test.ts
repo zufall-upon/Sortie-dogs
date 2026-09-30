@@ -96,6 +96,28 @@ test("legacy PASS never gains scratch exclusions or scope-only compatibility ret
   assert.equal(await refreshProtectedSnapshot(root, pinned.binding), undefined);
 }));
 
+for (const promotion of ["exact-output", "tracked-source"]) test(`a new ${promotion} inside old scratch invalidates immutable PASS`, async () => fixture(async root => {
+  await exec("git", ["init", "--quiet"], { cwd: root });
+  await writeFile(join(root, "result.txt"), "verified");
+  const pinned = await validationPin(root, [], ["result.txt", ".tmp/**"], [`TMPDIR=${root}/.tmp node check.mjs`]);
+  const saved = JSON.stringify(pinned.binding), unchanged = { source: pinned.source, candidate: pinned.candidate };
+  await mkdir(join(root, ".tmp"));
+  await writeFile(join(root, ".tmp/cache"), "cache only");
+  assert.deepEqual(await refreshProtectedSnapshot(root, pinned.binding), unchanged);
+  if (promotion === "exact-output") {
+    const manifest = JSON.parse(await readFile(join(root, "manifest.json"), "utf8"));
+    manifest.write.push(".tmp/new-deliverable.txt");
+    await writeFile(join(root, "manifest.json"), JSON.stringify(manifest));
+    assert.deepEqual(await refreshProtectedSnapshot(root, pinned.binding), unchanged, "an absent scope-only grant creates no output");
+  }
+  await writeFile(join(root, ".tmp/new-deliverable.txt"), "unverified output");
+  if (promotion === "tracked-source") await exec("git", ["add", "--", ".tmp/new-deliverable.txt"], { cwd: root });
+  const current = await refreshProtectedSnapshot(root, pinned.binding);
+  assert.notEqual(current?.source, pinned.source);
+  assert.notEqual(current?.candidate, pinned.candidate);
+  assert.equal(JSON.stringify(pinned.binding), saved, "old proof is never recaptured or relabelled");
+}));
+
 test("live control changes do not invalidate source read directly or through a parent scope", async () => fixture(async root => {
   await writeFile(join(root, "result.txt"), "ready");
   let generation = 0;
