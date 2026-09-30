@@ -12,13 +12,14 @@ import { missionOperatorContent } from "../dist/runtime-mission-assets.js";
 
 const exec = promisify(execFile);
 
-for (const verdict of ["PASS", "FINDINGS"] as const) test(`Fast-first ${verdict}: one direct Worker and an independent Reviewer`, async () => {
+for (const verdict of ["PASS", "FINDINGS", "EVIDENCE_GAPS"] as const) test(`Fast-first ${verdict}: one direct Worker and an independent Reviewer`, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const directory = await mkdtemp(resolve("_testenv/mission-fast-review-"));
   try {
     await exec("git", ["init", "--quiet"], { cwd: directory });
     await writeFile(join(directory, "check.mjs"),
       'import { readFileSync } from "node:fs";\nif (readFileSync("result.txt", "utf8") !== "ready\\n") process.exit(1);\n');
+    await writeFile(join(directory, "public-contract.md"), "Public output is ready followed by a newline.\n");
     if (verdict === "PASS") await writeFile(join(directory, "build.mjs"),
       'import { writeFileSync } from "node:fs";\nwriteFileSync("result.txt", "ready\\n");\n');
     const history: Record<string, Record<string, unknown>[]> = { worker: [] };
@@ -46,10 +47,7 @@ for (const verdict of ["PASS", "FINDINGS"] as const) test(`Fast-first ${verdict}
       /do not list speculative write paths or unrelated test suites as a precaution/u);
     assert.match(hooks.tool!.sortie_v010_plan_units.description,
       /do not list speculative write paths or unrelated test suites as a precaution/u);
-    assert.match(missionOperatorContent(V010_RUNTIME_PROFILE, "test"),
-      /include\s+the entire relevant expression and input\/result in the chosen offset and limit/u);
-    assert.match(missionOperatorContent(V010_RUNTIME_PROFILE, "test"),
-      /never say Review PASS or "next: none" for those gaps/u);
+    assert.match(missionOperatorContent(V010_RUNTIME_PROFILE, "test"), /EVIDENCE_GAPS is advisory/u);
     await hooks["chat.message"]!({ sessionID: "root", messageID: "request", agent: agents.root!.agent }, {
       message: { id: "request", agent: agents.root!.agent, model: { providerID: "openai", modelID: "gpt-6-sol" } },
       parts: [{ type: "text", text: "Create result.txt with ready, validate and review it." }],
@@ -103,7 +101,7 @@ for (const verdict of ["PASS", "FINDINGS"] as const) test(`Fast-first ${verdict}
     assert.match(status.next_action, /Fast-lane.*review_mission/);
     const historyReadsBeforeReview = workerHistoryReads;
     const review = JSON.parse(await hooks.tool!.sortie_v010_review_mission.execute({ risk_tags: ["public-logic"],
-      traces: ["R1: result.txt has ready newline; node check.mjs exited 0"] }, { sessionID: "root" }));
+      ...(verdict === "EVIDENCE_GAPS" ? {} : { traces: ["R1: result.txt has ready newline; node check.mjs exited 0"] }) }, { sessionID: "root" }));
     const reviewPrompt = (await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).review?.task?.prompt ?? "";
     assert.match(reviewPrompt, /Report FINDINGS only for concrete major or medium defects with a material impact/u);
     assert.match(reviewPrompt, /Do not turn minor style, wording, optional improvements or speculative edge cases into FINDINGS or EVIDENCE_GAPS/u);
@@ -126,14 +124,22 @@ for (const verdict of ["PASS", "FINDINGS"] as const) test(`Fast-first ${verdict}
     await assert.rejects(hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "altered-review" },
       { args: { ...reviewer.args, prompt: reviewer.args.prompt + "\nchanged" } }), /mission-review-task-required/);
     await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "review-call" }, reviewer);
+    await hooks["chat.message"]!({ sessionID: "reviewer", messageID: "reviewer-request", agent: agents.reviewer!.agent }, {
+      message: { id: "reviewer-request", agent: agents.reviewer!.agent, model: { providerID: "openai", modelID: "gpt-6-sol" } },
+      parts: [{ type: "text", text: reviewer.args.prompt }],
+    });
+    for (const [tool, args] of [["read", { filePath: "public-contract.md" }], ["grep", { pattern: "ready" }], ["glob", { pattern: "*.mjs" }]] as const) {
+      await hooks["tool.execute.before"]!({ tool, sessionID: "reviewer", callID: `review-${tool}` }, { args: { ...args } });
+    }
     agents.reviewer!.outcome = "succeeded";
     await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "review-call" },
       { output: `${verdict}\nReviewed actual result and validation.`, metadata: { sessionId: "reviewer" } });
     const reviewed = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
-    assert.equal(reviewed.review.verdict, verdict === "PASS" ? "PASS" : "findings");
+    assert.equal(reviewed.review.verdict, verdict === "PASS" ? "PASS" : verdict === "EVIDENCE_GAPS" ? "evidence-gaps" : "findings");
     assert.equal(reviewed.review.reviewer_session_id, "reviewer");
     assert.equal(reviewed.coordinator_session_id, null);
     if (verdict === "FINDINGS") {
+      await assert.rejects(hooks.tool!.sortie_v010_complete_mission.execute({}, { sessionID: "root" }), /mission-review-required-or-stale/);
       assert.ok(reviewed.task, "the same mission's Coordinator remains an available fallback");
       assert.match(reviewed.next_action, /Fast-lane: Reviewer FINDINGS require correction/);
       assert.equal(await readFile(join(directory, "result.txt"), "utf8"), "ready\n", "Fast work survives escalation");
@@ -158,6 +164,15 @@ for (const verdict of ["PASS", "FINDINGS"] as const) test(`Fast-first ${verdict}
     }
     assert.equal(reviewed.task, undefined);
     assert.match(reviewed.next_action, /Fast-lane.*complete_mission/);
+    if (verdict === "EVIDENCE_GAPS") {
+      assert.equal(reviewed.review.evidence_gap_reviews, 1);
+      assert.equal(reviewed.review.passed, false);
+      assert.equal(reviewed.review.permits_submission, true);
+      const repeated = JSON.parse(await hooks.tool!.sortie_v010_review_mission.execute({ risk_tags: ["public-logic"],
+        traces: ["Rewritten explanation of the same ready result"] }, { sessionID: "root" }));
+      assert.equal(repeated.status, "review-recorded");
+      assert.equal(repeated.task, undefined, "prose changes must not purchase another review of the same candidate");
+    }
     const completed = JSON.parse(await hooks.tool!.sortie_v010_complete_mission.execute({}, { sessionID: "root" }));
     assert.equal(completed.status, "succeeded", JSON.stringify(completed));
     assert.equal((await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).coordinator, null);

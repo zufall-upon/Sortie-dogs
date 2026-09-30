@@ -198,7 +198,7 @@ export async function missionReviewSource(directory: string, run: OperatorState,
   // Keep room for the baseline diff. Reserve notices only after the allocated whole lines show
   // truncation; pre-reserving every possible notice can hide all six otherwise fitting references.
   const heading = (entry: MissionEvidenceExcerpt) => `\n--- evidence: ${entry.path}:${entry.offset} ---\n`;
-  const truncated = (entry: MissionEvidenceExcerpt) => `[FOCUSED EXCERPT TRUNCATED: ${entry.path}:${entry.offset}; request a smaller range]\n`;
+  const truncated = (entry: MissionEvidenceExcerpt) => `[FOCUSED EXCERPT TRUNCATED: ${entry.path}:${entry.offset}; Reviewer can read the remaining lines directly]\n`;
   // Read-only reviews retain their smaller existing envelope; code reviews may use the space
   // previously reserved for automatic diff prefixes, while leaving room for changed-file context.
   const limit = writes.length ? 18_000 : 11_000;
@@ -333,7 +333,7 @@ export async function missionReviewSource(directory: string, run: OperatorState,
   const truncatedSource = [...new Set(omitted)];
   if (bytes.length > 24_000 && truncatedSource.length === 0) truncatedSource.push("(source diff exceeds excerpt budget)");
   return { fingerprint: `sha256:${hash.digest("hex")}`, excerpt: (bytes.length > 24_000 ? bytes.subarray(0, 24_000).toString("utf8") : excerpt) +
-    (truncatedSource.length ? `\n[EXCERPT TRUNCATED: ${truncatedSource.slice(0, 20).join(", ")}; supply focused traces for missing sections, not another implementation unit]` : "") +
+    (truncatedSource.length ? `\n[EXCERPT TRUNCATED: ${truncatedSource.slice(0, 20).join(", ")}; Reviewer can read/search the relevant source directly]` : "") +
     (unreadable.length ? `\n[UNINSPECTED EXTERNAL DIRECTORIES: ${unreadable.slice(0, 20).join(", ")}; select specific result files as review evidence]` : ""),
     truncatedEvidence, truncatedSource };
 }
