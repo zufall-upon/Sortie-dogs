@@ -34,14 +34,21 @@ export function snapshotScratchExcluded(binding: Binding, absolute: string, curr
 export function snapshotScratchExclusion(binding: Binding, currentProtection: readonly string[] = []): (absolute: string) => boolean {
   const fixed = binding.freshness;
   if (!fixed) return () => false;
+  const rawProtection = [...fixed.protected_paths, ...currentProtection];
+  const previous = (absolute: string) => fixed.scratch_paths.some(root => !outside(root, absolute)) &&
+    !rawProtection.some(path => !outside(path, absolute) || !outside(absolute, path));
+  // POSIX permits literal backslashes in a filename. The previous relative-path rule
+  // must decide those uncommon names; they are not Windows directory separators.
+  if (process.platform !== "win32" && [...fixed.scratch_paths, ...rawProtection].some(path => path.includes("\\"))) return previous;
   const canonical = (path: string) => {
     const normalized = resolve(path).replaceAll("\\", "/");
     return process.platform === "win32" ? normalized.toLowerCase() : normalized;
   };
   const prepared = (path: string) => ({ exact: path, prefix: path.endsWith("/") ? path : `${path}/` });
   const scratch = fixed.scratch_paths.map(path => prepared(canonical(path)));
-  const protection = [...new Set([...fixed.protected_paths, ...currentProtection].map(canonical))].map(prepared);
+  const protection = [...new Set(rawProtection.map(canonical))].map(prepared);
   return absolute => {
+    if (process.platform !== "win32" && absolute.includes("\\")) return previous(absolute);
     const target = prepared(canonical(absolute));
     return scratch.some(root => target.exact === root.exact || target.exact.startsWith(root.prefix)) &&
       !protection.some(path => target.exact === path.exact || target.exact.startsWith(path.prefix) || path.exact.startsWith(target.prefix));
