@@ -18,7 +18,8 @@ for (const readOnly of [false, true]) test(`returned recoverable mission Worker 
       coordinator: { agent: "dogs-coordinator", parentID: "root" },
       old: { agent: "dog-worker-v010", parentID: "coordinator" }, next: { agent: "dog-worker-v010", parentID: "coordinator" } };
     const hooks = await SortieDogsV010Plugin({ directory, client: { session: {
-      get: async ({ path }: { path: { id: string } }) => ({ data: identities[path.id] }), messages: async () => ({ data: [] }),
+      get: async ({ path }: { path: { id: string } }) => ({ data: { id: path.id, ...identities[path.id] } }),
+      children: async () => ({ data: [] }), messages: async () => ({ data: [] }),
     } } } as never);
     const tool = async (name: string, sessionID: string, args = {}) => JSON.parse(await hooks.tool![`sortie_v010_${name}`]!.execute(args, { sessionID }));
     const chat = (sessionID: string, text: string, agent: string) => hooks["chat.message"]!({ sessionID, messageID: sessionID + "-user", agent },
@@ -44,6 +45,7 @@ for (const readOnly of [false, true]) test(`returned recoverable mission Worker 
     await inspect("old", join(directory, "check.mjs"), "keep-authorization-live");
     now += 2 * 60_000;
     assert.equal((await tool("bind_write_gate", "old", { project_root: directory, manifest_path: old.manifestPath })).reason, "handoff-uninspected");
+    identities.old = { agent: "dog-worker-v010", parentID: "coordinator", outcome: "interrupted" };
     await hooks["tool.execute.after"]!({ sessionID: "coordinator", callID: "old-call", tool: "task" },
       { output: "PROCESS_DEFECT: local: handoff-uninspected", metadata: { sessionId: "old" } });
     const second = await tool("plan_units", "coordinator", { units: [{ ...unit, title: "Continue", objective: "Continue retained operation",

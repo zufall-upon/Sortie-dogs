@@ -1,0 +1,299 @@
+import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
+import { promisify } from "node:util";
+import test from "node:test";
+import { SortieDogsV010Plugin } from "../dist/plugin/profiled.js";
+import { OperatorRuntime } from "../dist/core/operator-runtime.js";
+import { OperatorMissionRuntime } from "../dist/core/operator-mission.js";
+import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
+
+const exec = promisify(execFile);
+
+async function fixture(run: (f: any) => Promise<void>) {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const directory = await mkdtemp(resolve("_testenv/anko-recovery-"));
+  try {
+    await exec("git", ["init", "--quiet"], { cwd: directory });
+    await writeFile(join(directory, "check.mjs"), "console.log('PASS');\n");
+    await writeFile(join(directory, "result.txt"), "before\n");
+    const agents: Record<string, any> = { root: { agent: "dog-operator" }, worker: { agent: "dog-worker-v010", parentID: "root" } };
+    const history: Record<string, any[]> = {};
+    const unavailable = new Set<string>();
+    const create = () => SortieDogsV010Plugin({ directory, returnReportTransport: "tool-result", client: { session: {
+      get: async ({ path }: any) => {
+        if (unavailable.has(path.id)) throw Error("native API unavailable");
+        return { data: { id: path.id, ...agents[path.id] } };
+      },
+      children: async ({ path }: any) => {
+        if (unavailable.has(path.id)) throw Error("native API unavailable");
+        return { data: Object.entries(agents).filter(([, info]) => info.parentID === path.id).map(([id, info]) => ({ id, ...info })) };
+      },
+      messages: async ({ path }: any) => {
+        if (unavailable.has(path.id)) throw Error("native API unavailable");
+        return { data: history[path.id] ?? [] };
+      }, abort: async () => { throw Error("recovery must not cancel"); },
+    } } } as never);
+    const hooks = await create();
+    const runtime = { required: (root: string) => new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required(root) };
+    const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+    const tool = async (name: string, args: any = {}, id = "root") => JSON.parse(await hooks.tool![`sortie_v010_${name}`]!.execute(args, { sessionID: id }));
+    const chat = (id: string, text: string) => hooks["chat.message"]!({ sessionID: id, messageID: `${id}-request`, agent: agents[id].agent }, {
+      message: { id: `${id}-request`, agent: agents[id].agent, model: { providerID: "openai", modelID: id === "root" ? "gpt-6.1-sol" : "gpt-6-luna-fast" } },
+      parts: [{ type: "text", text }],
+    });
+    await chat("root", "Implement requested source and verify it. Preserve check.mjs; do not write forbidden.txt. Original negative acceptance remains required.");
+    const start = async (conditions?: object) => tool("start_mission", { requirements: ["Implement result and preserve checks", "Do not write forbidden.txt"],
+      prohibited_write: ["forbidden.txt"], ...(conditions ? { confirmed_conditions: conditions } : {}) });
+    const dispatch = async (objective = "Implement and verify", validation = "node check.mjs", write = ["result.txt"]) => {
+      const planned = await tool("plan_units", { units: [{ title: "Implement result", objective, read: ["check.mjs"], write, validation: [validation] }] });
+      const task = { args: structuredClone(planned.task) };
+      await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "worker-call" }, task);
+      await chat("worker", String(task.args.prompt));
+      const unit = (await runtime.required("root")).units[0]!;
+      await hooks["tool.execute.before"]!({ tool: "read", sessionID: "worker", callID: "handoff-read" }, { args: { filePath: unit.handoffPath } });
+      await hooks["tool.execute.after"]!({ tool: "read", sessionID: "worker", callID: "handoff-read" }, { output: await readFile(unit.handoffPath, "utf8") });
+      assert.equal((await tool("bind_write_gate", { project_root: directory, manifest_path: unit.manifestPath }, "worker")).status, "bound");
+      return { unit, task };
+    };
+    const validate = async (command = "node check.mjs", during?: () => Promise<void>) => {
+      await hooks["tool.execute.before"]!({ tool: "bash", sessionID: "worker", callID: "check-call" }, { args: { command } });
+      await during?.();
+      const result = await exec("bash", ["-lc", command], { cwd: directory });
+      await hooks["tool.execute.after"]!({ tool: "bash", sessionID: "worker", callID: "check-call" }, { output: result.stdout, metadata: { exit: 0, status: "completed" } });
+    };
+    const finish = async (outcome = "succeeded") => {
+      agents.worker.outcome = outcome;
+      await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "worker-call" }, { output: "Done. Checks passed.", metadata: { sessionId: "worker" } });
+    };
+    await run({ directory, hooks, runtime, missions, tool, chat, start, dispatch, validate, finish, agents, history, unavailable, create });
+  } finally { await rm(directory, { recursive: true, force: true }); }
+}
+
+test("exact native Task terminal repairs reservation and writer in the same Review; settlement is idempotent", async () => fixture(async f => {
+  await f.start();
+  const { task } = await f.dispatch();
+  await writeFile(join(f.directory, "result.txt"), "fixed\n");
+  await f.validate();
+  f.agents.worker.outcome = "succeeded";
+  f.agents.historical = { agent: "dog-worker-v010", parentID: "worker", outcome: "interrupted" };
+  f.history.root = [{ info: { role: "assistant", sessionID: "root" }, parts: [{ type: "tool", tool: "task", callID: "worker-call",
+    state: { status: "completed", input: task.args, metadata: { sessionId: "worker" } } }] }];
+  assert.equal((await f.runtime.required("root")).units[0].status, "running", "missed Task after hook leaves the durable unit active");
+  assert.equal((await f.tool("review_mission", { risk_tags: [] })).status, "skipped-low-risk");
+  const budget = (await f.tool("operator_status")).budget;
+  assert.equal(budget.consumed_units, 1);
+  assert.equal(budget.reserved_units, 0);
+  assert.equal((await f.runtime.required("root")).units[0].status, "succeeded", "only already observed validation, not terminal outcome, proves success");
+  f.unavailable.add("worker");
+  assert.equal((await f.tool("review_mission", { risk_tags: [] })).status, "review-recorded", "sufficient saved exact record needs no native re-fetch");
+  assert.deepEqual((await f.tool("operator_status")).budget, budget, "no additional settlement, unit or spend on repeated reconciliation");
+  assert.equal((await f.tool("complete_mission")).status, "succeeded");
+}));
+
+test("active descendants and unavailable terminal records remain distinct; an old call cannot close a new dispatch", async () => fixture(async f => {
+  await f.start();
+  const { task } = await f.dispatch();
+  await f.finish(); // Missing validation remains a process defect, never PASS.
+  const mission = await f.missions.required("root");
+  assert.equal(mission.attempts[0].status, "failed");
+  await f.missions.update("root", (state: any) => { delete state.attempts[0].terminal; });
+  f.history.root = [{ info: { role: "assistant", sessionID: "root" }, parts: [{ type: "tool", tool: "task", callID: "worker-call",
+    state: { status: "completed", input: task.args, metadata: { sessionId: "worker" } } }] }];
+  const args = { units: [{ title: "Correct", objective: "Finish real remaining work", read: ["check.mjs"], write: ["result.txt"], validation: ["node check.mjs"] }], reason: "Missing formal check" };
+  f.agents.active = { agent: "dog-worker-v010", parentID: "worker", outcome: "running" };
+  let result = await f.tool("plan_units", args);
+  assert.equal(result.status, "mission-replan-terminal-unreconciled:descendant_dispatch_active");
+  delete f.agents.active;
+  f.unavailable.add("worker");
+  result = await f.tool("plan_units", args);
+  assert.equal(result.status, "mission-replan-terminal-unreconciled:terminal_record_unavailable");
+  f.unavailable.delete("worker");
+  await f.missions.update("root", (state: any) => { state.attempts[0].callID = "old-call"; });
+  result = await f.tool("plan_units", args);
+  assert.equal(result.status, "mission-replan-terminal-unreconciled:terminal_identity_conflict");
+  assert.equal((await f.tool("operator_status")).budget.consumed_units, 1);
+}));
+
+for (const outcome of ["failed", "interrupted"]) test(`${outcome} native terminal closes ownership but never promotes an observed PASS`, async () => fixture(async f => {
+  await f.start();
+  await f.dispatch();
+  await f.validate();
+  await f.finish(outcome);
+  const status = await f.tool("operator_status");
+  assert.notEqual(status.units[0].status, "succeeded");
+  assert.deepEqual(status.units[0].evidence, []);
+  assert.equal(status.budget.consumed_units, 1);
+  assert.equal(status.budget.reserved_units, 0);
+  assert.notEqual(status.status, "awaiting-acceptance");
+  const before = status.budget;
+  const replan = await f.tool("plan_units", { units: [{ title: "Continue", objective: "Finish actual remaining work", read: ["check.mjs"],
+    write: ["result.txt"], validation: ["node check.mjs"] }], reason: "Native Task ended unsuccessfully" });
+  assert.ok(replan.task);
+  assert.deepEqual((await f.tool("operator_status")).budget, before);
+}));
+
+for (const defect of ["missing-task", "foreign-owner", "foreign-prompt", "wrong-child", "duplicate-task", "active-descendant"]) {
+  test(`native terminal proof retains reservation for ${defect}, without cancelling or duplicating work`, async () => fixture(async f => {
+    await f.start();
+    const { task } = await f.dispatch();
+    await f.validate();
+    f.agents.worker.outcome = "succeeded";
+    const part = { type: "tool", tool: "task", callID: "worker-call", state: { status: "completed", input: task.args,
+      metadata: { sessionId: defect === "wrong-child" ? "foreign" : "worker" } } };
+    if (defect === "foreign-prompt") part.state.input = { ...task.args, prompt: "different Task" };
+    if (defect === "active-descendant") f.agents.live = { agent: "dog-worker-v010", parentID: "worker", outcome: "running" };
+    f.history.root = defect === "missing-task" ? [] : [{ info: { role: "assistant", sessionID: defect === "foreign-owner" ? "foreign" : "root" },
+      parts: defect === "duplicate-task" ? [part, structuredClone(part)] : [part] }];
+    await assert.rejects(f.tool("review_mission", { risk_tags: [] }), /mission-review-terminal-unreconciled/);
+    const status = await f.tool("operator_status");
+    assert.equal(status.budget.reserved_units, 1);
+    assert.equal(status.budget.consumed_units, 0);
+    assert.equal(status.units[0].status, "running");
+    assert.deepEqual((await f.tool("operator_status")).budget, status.budget);
+  }));
+}
+
+test("an insufficient saved terminal record reports its unavailable native source, not active-child or PASS", async () => fixture(async f => {
+  await f.start();
+  await f.dispatch();
+  await f.validate();
+  await f.finish();
+  await f.missions.update("root", (mission: any) => { delete mission.attempts[0].terminal.descendants; });
+  f.unavailable.add("worker");
+  await assert.rejects(f.tool("review_mission", { risk_tags: [] }), /terminal_record_unavailable/);
+  assert.equal((await f.tool("operator_status")).budget.consumed_units, 1);
+}));
+
+test("native write and shell scope correction keep the same Task, call, unit and budget; explicit prohibitions stay enforced", async () => fixture(async f => {
+  await f.start();
+  const initial = await f.dispatch();
+  const before = (await f.tool("operator_status")).budget;
+  await f.hooks["tool.execute.before"]({ tool: "write", sessionID: "worker", callID: "native-write" }, { args: { filePath: "extra.txt", content: "needed" } });
+  await writeFile(join(f.directory, "extra.txt"), "needed");
+  await f.hooks["tool.execute.after"]({ tool: "write", sessionID: "worker", callID: "native-write" }, { output: "written" });
+  let state = await f.runtime.required("root");
+  assert.equal(state.runID, (await f.missions.required("root")).runID);
+  assert.equal(state.units[0].callID, "worker-call");
+  assert.equal(state.units[0].childSessionID, "worker");
+  assert.ok(state.units[0].unit.write.includes("extra.txt"));
+  const expanded = await f.tool("expand_unit", { unit_id: "unit-1", paths: ["generated/**"], reason: "Known shell generator outputs" }, "worker");
+  assert.equal(expanded.status, "scope-updated");
+  assert.equal(expanded.task, undefined);
+  assert.deepEqual(expanded.budget, before);
+  const manifest = await readFile(initial.unit.manifestPath, "utf8");
+  await assert.rejects(f.hooks["tool.execute.before"]({ tool: "write", sessionID: "worker", callID: "forbidden-write" },
+    { args: { filePath: "forbidden.txt", content: "no" } }), /mission-explicit-write-prohibition/);
+  assert.equal(await readFile(initial.unit.manifestPath, "utf8"), manifest);
+  await assert.rejects(f.tool("expand_unit", { unit_id: "unit-1", paths: [".git/**"], reason: "Not a valid correction" }, "worker"), /operator-control-write-forbidden/);
+  assert.equal(await readFile(initial.unit.manifestPath, "utf8"), manifest);
+  await f.hooks["tool.execute.before"]({ tool: "write", sessionID: "worker", callID: "retained-write" }, { args: { filePath: "result.txt", content: "fixed" } });
+  await writeFile(join(f.directory, "result.txt"), "fixed");
+  await f.hooks["tool.execute.after"]({ tool: "write", sessionID: "worker", callID: "retained-write" }, { output: "written" });
+  await f.validate();
+  await f.finish();
+  state = await f.runtime.required("root");
+  assert.equal(state.units[0].status, "succeeded");
+  assert.equal((await f.tool("operator_status")).budget.consumed_units, 1);
+}));
+
+test("scope update persistence failure rolls back manifest, handoff and binding without a new unit", async () => fixture(async f => {
+  await f.start();
+  const { unit } = await f.dispatch();
+  const before = await f.tool("operator_status");
+  const manifest = await readFile(unit.manifestPath, "utf8"), handoff = await readFile(unit.handoffPath, "utf8");
+  const prototype = OperatorRuntime.prototype as any, save = prototype.save;
+  prototype.save = async function(state: any) {
+    if (state.units[0].unit.write.includes("extra.txt")) throw Error("injected-scope-state-save-failure");
+    return save.call(this, state);
+  };
+  try { await assert.rejects(f.tool("expand_unit", { unit_id: "unit-1", paths: ["extra.txt"], reason: "In-request output" }, "worker"), /injected-scope/); }
+  finally { prototype.save = save; }
+  assert.equal(await readFile(unit.manifestPath, "utf8"), manifest);
+  assert.equal(await readFile(unit.handoffPath, "utf8"), handoff);
+  assert.deepEqual((await f.tool("operator_status")).budget, before.budget);
+  assert.deepEqual((await f.runtime.required("root")).units[0].hashes, unit.hashes);
+  await f.hooks["tool.execute.before"]({ tool: "write", sessionID: "worker", callID: "original-write" }, { args: { filePath: "result.txt", content: "fixed" } });
+  await f.hooks["tool.execute.after"]({ tool: "write", sessionID: "worker", callID: "original-write" }, { output: "written" });
+  assert.equal((await f.tool("expand_unit", { unit_id: "unit-1", paths: ["extra.txt"], reason: "Storage restored" }, "worker")).status, "scope-updated");
+  await f.validate();
+  await f.finish();
+  assert.equal((await f.tool("operator_status")).budget.consumed_units, 1);
+}));
+
+test("another writer blocks only the overlapping scope update and retains both original bindings", async () => fixture(async f => {
+  await f.start();
+  const { unit } = await f.dispatch();
+  f.agents.root2 = { agent: "dog-operator" };
+  f.agents.worker2 = { agent: "dog-worker-v010", parentID: "root2" };
+  await f.chat("root2", "Implement held.txt and verify it");
+  await f.tool("start_mission", { requirements: ["Implement held output"] }, "root2");
+  const plan = await f.tool("plan_units", { units: [{ title: "Other output", objective: "Implement requested output", read: ["check.mjs"],
+    write: ["held.txt"], validation: ["node check.mjs"] }] }, "root2");
+  await f.hooks["tool.execute.before"]({ tool: "task", sessionID: "root2", callID: "other-call" }, { args: structuredClone(plan.task) });
+  await f.chat("worker2", plan.task.prompt);
+  const other = (await f.runtime.required("root2")).units[0];
+  await f.hooks["tool.execute.before"]({ tool: "read", sessionID: "worker2", callID: "other-read" }, { args: { filePath: other.handoffPath } });
+  await f.hooks["tool.execute.after"]({ tool: "read", sessionID: "worker2", callID: "other-read" }, { output: await readFile(other.handoffPath, "utf8") });
+  assert.equal((await f.tool("bind_write_gate", { project_root: f.directory, manifest_path: other.manifestPath }, "worker2")).status, "bound");
+  const original = await readFile(unit.manifestPath, "utf8"), budget = (await f.tool("operator_status")).budget;
+  await assert.rejects(f.tool("expand_unit", { unit_id: "unit-1", paths: ["held.txt"], reason: "Overlapping requested output" }, "worker"), /writer-conflict/);
+  assert.equal(await readFile(unit.manifestPath, "utf8"), original);
+  assert.deepEqual((await f.tool("operator_status")).budget, budget);
+  for (const [sessionID, filePath] of [["worker", "result.txt"], ["worker2", "held.txt"]]) {
+    await f.hooks["tool.execute.before"]({ tool: "write", sessionID, callID: `retained-${sessionID}` }, { args: { filePath, content: "still owned" } });
+    await f.hooks["tool.execute.after"]({ tool: "write", sessionID, callID: `retained-${sessionID}` }, { output: "written" });
+  }
+}));
+
+test("validation cache generation and post-PASS cleanup preserve freshness and Review; real .tmp input stays protected", async () => fixture(async f => {
+  await f.start();
+  const command = `TMPDIR=${join(f.directory, ".tmp")} GOCACHE=${join(f.directory, ".gocache")} node check.mjs`;
+  await f.dispatch("Implement and verify", command, ["result.txt", ".tmp/**", ".gocache/**"]);
+  await f.validate(command, async () => {
+    await mkdir(join(f.directory, ".tmp"), { recursive: true });
+    await mkdir(join(f.directory, ".gocache"));
+    await writeFile(join(f.directory, ".tmp/cache"), "temporary");
+    await writeFile(join(f.directory, ".gocache/cache"), "cached");
+  });
+  await f.finish();
+  const evidence = (await f.runtime.required("root")).units[0].evidence;
+  assert.equal((await f.tool("operator_status")).completion.ready, true);
+  await f.tool("review_mission", { risk_tags: [] });
+  await rm(join(f.directory, ".tmp"), { recursive: true });
+  await rm(join(f.directory, ".gocache"), { recursive: true });
+  assert.equal((await f.tool("operator_status")).completion.ready, true);
+  assert.equal((await f.tool("review_mission", { risk_tags: [] })).status, "review-recorded");
+  assert.deepEqual((await f.runtime.required("root")).units[0].evidence, evidence, "old PASS and binding are immutable");
+  await f.tool("expand_unit", { unit_id: "unit-1", paths: ["unused-output/**"], reason: "Host-only contract correction" });
+  assert.equal((await f.tool("operator_status")).budget.consumed_units, 1);
+  assert.equal((await f.tool("operator_status")).completion.ready, true);
+  await writeFile(join(f.directory, "result.txt"), "changed after check");
+  assert.equal((await f.tool("operator_status")).completion.ready, false);
+  await assert.rejects(f.tool("review_mission", { risk_tags: [] }), /mission-review-awaits-current-validation/);
+}));
+
+for (const length of [2337, 2022, 2007]) test(`objective ${length} and original acceptance/conditions survive without summary transcription`, async () => fixture(async f => {
+  const conditions = { entrypoint: "scripts/anko/run-once.mjs", inputs: ["public/anko/input.json"], timeout_seconds: 3600,
+    cost_limit_usd: 5, benchmark_attempts: 1, grading: "none", source: "user:root-request", applies_to: "Anko benchmark attempt, not internal Worker units" };
+  await f.start(conditions);
+  const prefix = "Original entrypoint/input and negative acceptance\n";
+  const objective = prefix + "x".repeat(length - prefix.length);
+  assert.equal(objective.length, length);
+  const { unit } = await f.dispatch(objective);
+  const handoff = JSON.parse(await readFile(unit.handoffPath, "utf8"));
+  assert.equal(handoff.task.objective, objective);
+  assert.deepEqual(handoff.ext["sortie-dogs/mission-context"].requirements.map((r: any) => r.text), ["Implement result and preserve checks", "Do not write forbidden.txt"]);
+  assert.match(handoff.ext["sortie-dogs/mission-context"].original_requests[0].text, /Original negative acceptance/);
+  await f.tool("operator_status", { confirmed_conditions: { entrypoint: conditions.entrypoint, source: "runner metadata", applies_to: conditions.applies_to } }, "worker");
+  await f.validate();
+  await f.finish(); // Deliberately omits budget/entrypoint in Worker prose.
+  const status = await f.tool("operator_status");
+  assert.equal(status.launch_conditions[0].cost_limit_usd, 5);
+  assert.equal(status.launch_conditions[0].benchmark_attempts, 1);
+  assert.equal(status.launch_conditions[0].grading, "none");
+  assert.equal(status.launch_conditions.length, 2);
+  assert.equal(status.budget.cost_scope, "worker-only");
+  assert.equal(status.budget.campaign_remaining_usd, null);
+}));

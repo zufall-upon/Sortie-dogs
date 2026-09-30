@@ -42,6 +42,13 @@ export interface GoalEvidence {
     readonly candidate_paths: readonly string[];
     /** Missing on legacy evidence: retain its original all-paths snapshot recipe. */
     readonly source_policy?: "project-files-v1" | "declared-paths-v1";
+    /** Fixed when validation starts. Full manifest_hash still identifies the historical execution contract. */
+    readonly freshness?: {
+      readonly contract_hash: string;
+      readonly scratch_paths: readonly string[];
+      readonly protected_paths: readonly string[];
+      readonly environment: Readonly<Record<string, string | null>>;
+    };
   };
   readonly execution: {
     readonly command: readonly string[];
@@ -263,7 +270,13 @@ export function validGoalEvidence(value: GoalEvidence, state: Pick<GoalFlightSta
     protectedBinding.source_paths.every(text) && Array.isArray(protectedBinding.candidate_paths) &&
     protectedBinding.candidate_paths.every(text) &&
     (protectedBinding.source_policy === undefined || protectedBinding.source_policy === "project-files-v1" ||
-      protectedBinding.source_policy === "declared-paths-v1");
+      protectedBinding.source_policy === "declared-paths-v1") &&
+    (protectedBinding.freshness === undefined || (protectedBinding.freshness !== null && typeof protectedBinding.freshness === "object" &&
+      HASH.test(protectedBinding.freshness.contract_hash) &&
+      Array.isArray(protectedBinding.freshness.scratch_paths) && protectedBinding.freshness.scratch_paths.every(text) &&
+      Array.isArray(protectedBinding.freshness.protected_paths) && protectedBinding.freshness.protected_paths.every(text) &&
+      protectedBinding.freshness.environment !== null && typeof protectedBinding.freshness.environment === "object" &&
+      !Array.isArray(protectedBinding.freshness.environment) && Object.values(protectedBinding.freshness.environment).every(value => value === null || typeof value === "string")));
   const matches = criteria.length > 0 && criteria.length === value.measurement.criterion_ids.length &&
     criteria.every((criterion) => criterion.target === value.measurement.target &&
       criterion.entrypoint === value.measurement.entrypoint && criterion.workload === value.measurement.workload &&

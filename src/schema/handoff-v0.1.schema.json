@@ -21,7 +21,7 @@
       "required": ["title", "objective"],
       "properties": {
         "title": { "type": "string", "minLength": 1, "maxLength": 160 },
-        "objective": { "type": "string", "minLength": 1, "maxLength": 2000 }
+        "objective": { "type": "string", "minLength": 1, "maxLength": 32768 }
       }
     },
     "scope": {

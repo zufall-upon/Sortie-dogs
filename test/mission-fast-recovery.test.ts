@@ -82,6 +82,7 @@ test("Fast-lane failed validation permits root micro-fix then a second direct Wo
     assert.equal(notTerminal.status, "non_rescue");
     assert.equal(notTerminal.reason, "terminal_not_reconciled", "a non-terminal native child cannot be replaced");
     agents.first!.outcome = "succeeded";
+    agents["historical-child"] = { agent: "dog-worker-v010", parentID: "first", outcome: "interrupted" };
     await assert.rejects(hooks.tool!.sortie_v010_review_mission.execute({ risk_tags: ["public-logic"], traces: ["check passed"] },
       { sessionID: "root" }), /mission-review-awaits-unit-validation/u);
     // Operator may make a tiny correction directly, but its edit is not validation evidence.

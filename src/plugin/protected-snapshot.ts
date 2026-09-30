@@ -6,9 +6,43 @@ import { normalizeManifestScope } from "../core/path.js";
 import { RUNTIME_PROFILES } from "../core/runtime-profile.js";
 import type { OperationManifest } from "../core/types.js";
 import { declaredArtifacts } from "./declared-artifacts.js";
+import { validationScratchPaths } from "./validation-scratch.js";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 
 type Binding = NonNullable<GoalEvidence["protected_binding"]>;
 const controlRoots = new Set([".git", ...Object.values(RUNTIME_PROFILES).map(profile => profile.stateDirectory)]);
+const exec = promisify(execFile);
+const environmentKeys = ["PATH", "GOOS", "GOARCH", "CGO_ENABLED", "GOFLAGS", "GOPROXY", "GOSUMDB", "NODE_OPTIONS", "NODE_ENV",
+  "PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV", "CC", "CXX", "CFLAGS", "CXXFLAGS", "LDFLAGS"];
+const environment = (manifest: OperationManifest) => ({
+  ...Object.fromEntries([...new Set([...environmentKeys, ...manifest.validation.flatMap(command =>
+    [...command.matchAll(/\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/gu)].map(match => match[1] ?? match[2]!))])]
+    .map(key => [key, process.env[key] ?? null])),
+  "@platform": process.platform, "@arch": process.arch, "@runtime": process.version, "@executable": process.execPath,
+});
+const validationContractHash = (manifest: OperationManifest) => goalFingerprint({ task_id: manifest.task_id,
+  read: manifest.read, validation: manifest.validation });
+
+export function snapshotScratchExcluded(binding: Binding, absolute: string): boolean {
+  const fixed = binding.freshness;
+  if (!fixed) return false;
+  return fixed.scratch_paths.some(root => !outside(root, absolute)) &&
+    !fixed.protected_paths.some(path => !outside(path, absolute) || !outside(absolute, path));
+}
+
+async function snapshotManifest(projectRoot: string, binding: Binding): Promise<{ manifest: OperationManifest; hash: string } | undefined> {
+  const source = await readFile(resolve(projectRoot, binding.manifest_path)).catch(() => undefined);
+  if (!source) return undefined;
+  const hash = createHash("sha256").update(source).digest("hex");
+  const manifest = JSON.parse(source.toString("utf8")) as OperationManifest;
+  if (binding.freshness) {
+    if (validationContractHash(manifest) !== binding.freshness.contract_hash ||
+        goalFingerprint(environment(manifest)) !== goalFingerprint(binding.freshness.environment)) return undefined;
+    return { manifest, hash: binding.freshness.contract_hash.slice("sha256:".length) };
+  }
+  return `sha256:${hash}` === binding.manifest_hash ? { manifest, hash } : undefined;
+}
 
 /** Live orchestration/Git bookkeeping is readable context, not the source being validated. */
 export function isRuntimeControlPath(path: string): boolean {
@@ -17,11 +51,12 @@ export function isRuntimeControlPath(path: string): boolean {
 }
 
 async function protectedScopeDigest(projectRoot: string, paths: readonly string[], manifestHash: string,
-  sourcePolicy?: Binding["source_policy"], excluded: readonly string[] = []): Promise<string | undefined> {
+  sourcePolicy?: Binding["source_policy"], excluded: readonly string[] = [], binding?: Binding): Promise<string | undefined> {
   const entries: Array<readonly [string, string, string?]> = [];
   const canonicalRoot = await realpath(projectRoot);
   const visit = async (absolute: string, ancestors: ReadonlySet<string> = new Set()): Promise<boolean> => {
     if (excluded.some(root => !outside(root, absolute))) return true;
+    if (binding && snapshotScratchExcluded(binding, absolute)) return true;
     const scoped = relative(projectRoot, absolute).replaceAll("\\", "/");
     if (scoped === ".." || scoped.startsWith("../") || isAbsolute(scoped)) return false;
     if (sourcePolicy === "project-files-v1" && isRuntimeControlPath(scoped)) return true;
@@ -71,10 +106,10 @@ function outside(projectRoot: string, path: string): boolean {
 }
 
 async function declaredScopeDigest(projectRoot: string, paths: readonly string[], manifestHash: string,
-  source: boolean, excluded: readonly string[] = []): Promise<string | undefined> {
+  source: boolean, excluded: readonly string[] = [], binding?: Binding): Promise<string | undefined> {
   const local = paths.filter(path => !outside(projectRoot, path));
   const external = paths.filter(path => outside(projectRoot, path));
-  const project = await protectedScopeDigest(projectRoot, local, manifestHash, source ? "project-files-v1" : undefined, excluded);
+  const project = await protectedScopeDigest(projectRoot, local, manifestHash, source ? "project-files-v1" : undefined, excluded, binding);
   if (project === undefined) return undefined;
   const artifacts = await declaredArtifacts(external).catch(() => undefined);
   return artifacts && goalFingerprint({ project, external: artifacts.entries.filter(([path]) => !excluded.some(root => !outside(root, path))) });
@@ -83,34 +118,35 @@ async function declaredScopeDigest(projectRoot: string, paths: readonly string[]
 /** An existing operation may create its declared outputs. Compare its other inputs during execution;
  * ordinary evidence still pins the full post-operation source and outputs for later acceptance. */
 export async function operationInputSnapshot(projectRoot: string, binding: Binding): Promise<string | undefined> {
-  const manifest = await readFile(resolve(projectRoot, binding.manifest_path)).catch(() => undefined);
-  if (!manifest || `sha256:${createHash("sha256").update(manifest).digest("hex")}` !== binding.manifest_hash) return undefined;
+  const manifest = await snapshotManifest(projectRoot, binding);
+  if (!manifest) return undefined;
   const paths = binding.source_paths.map(path => resolve(projectRoot, path));
-  const outputs = binding.candidate_paths.map(path => resolve(projectRoot, path));
-  const hash = binding.manifest_hash.slice("sha256:".length);
+  const outputs = manifest.manifest.write.map(path => resolve(projectRoot, normalizeManifestScope(path).path));
+  const hash = manifest.hash;
   return binding.source_policy === "declared-paths-v1"
-    ? await declaredScopeDigest(projectRoot, paths, hash, true, outputs)
-    : await protectedScopeDigest(projectRoot, paths, hash, binding.source_policy, outputs);
+    ? await declaredScopeDigest(projectRoot, paths, hash, true, outputs, binding)
+    : await protectedScopeDigest(projectRoot, paths, hash, binding.source_policy, outputs, binding);
 }
 
 /** A validation may populate write-only caches. Keep its declared read inputs stable
  * while binding the resulting candidate (including those outputs) after the command. */
 export async function validationInputSnapshot(projectRoot: string, binding: Binding): Promise<string | undefined> {
-  const manifestSource = await readFile(resolve(projectRoot, binding.manifest_path)).catch(() => undefined);
-  if (!manifestSource || `sha256:${createHash("sha256").update(manifestSource).digest("hex")}` !== binding.manifest_hash) return undefined;
-  const manifest = JSON.parse(manifestSource.toString("utf8")) as OperationManifest;
+  const current = await snapshotManifest(projectRoot, binding);
+  if (!current) return undefined;
+  const manifest = current.manifest;
   if (!manifest.read.length) return undefined; // Keep the original full-source check when no inputs were declared.
   const paths = manifest.read.map(entry => {
     const path = normalizeManifestScope(entry);
     return path.kind === "relative" ? resolve(projectRoot, path.path) : resolve(path.path);
   });
-  const hash = binding.manifest_hash.slice("sha256:".length);
+  const hash = current.hash;
   return binding.source_policy === "declared-paths-v1"
-    ? declaredScopeDigest(projectRoot, paths, hash, true)
-    : protectedScopeDigest(projectRoot, paths, hash, binding.source_policy);
+    ? declaredScopeDigest(projectRoot, paths, hash, true, [], binding)
+    : protectedScopeDigest(projectRoot, paths, hash, binding.source_policy, [], binding);
 }
 
-export async function protectedSnapshot(authorization: { manifestPath: string; manifestHash: string; projectRoot: string }): Promise<{
+export async function protectedSnapshot(authorization: { manifestPath: string; manifestHash: string; projectRoot: string },
+  options: { captureFreshness?: boolean } = {}): Promise<{
   readonly binding: Binding; readonly source: string; readonly candidate: string;
 } | undefined> {
   const manifestSource = await readFile(authorization.manifestPath).catch(() => undefined);
@@ -126,6 +162,20 @@ export async function protectedSnapshot(authorization: { manifestPath: string; m
   const candidatePaths = actualPaths(manifest.write);
   const sourcePaths = [...new Set([...actualPaths(manifest.read), ...candidatePaths])];
   const external = sourcePaths.some(path => outside(authorization.projectRoot, path));
+  if (options.captureFreshness !== false && Array.isArray(manifest.validation) && manifest.validation.length && manifest.task_id) {
+    // New evidence pins validation inputs/outputs independently of the execution manifest hash.
+    // Existing records keep their original recipe and cannot acquire exclusions retroactively.
+    const tracked = await exec("git", ["ls-files", "-z"], { cwd: authorization.projectRoot, maxBuffer: 16 * 1024 * 1024 }).then(value => value.stdout.split("\0").filter(Boolean)).catch(() => []);
+    const binding: Binding = { manifest_hash: `sha256:${manifestHash}`, project_root: authorization.projectRoot,
+      manifest_path: relativePath, source_policy: external ? "declared-paths-v1" : "project-files-v1",
+      source_paths: sourcePaths.map(path => outside(authorization.projectRoot, path) ? path : relative(authorization.projectRoot, path).replaceAll("\\", "/")),
+      candidate_paths: candidatePaths.map(path => outside(authorization.projectRoot, path) ? path : relative(authorization.projectRoot, path).replaceAll("\\", "/")),
+      freshness: { contract_hash: validationContractHash(manifest), scratch_paths: validationScratchPaths(authorization.projectRoot, manifest.validation),
+        protected_paths: [...new Set([...actualPaths(manifest.read), ...tracked.map(path => resolve(authorization.projectRoot, path)),
+          ...actualPaths(manifest.write.filter(path => !path.endsWith("/**")))] )], environment: environment(manifest) } };
+    const current = await refreshProtectedSnapshot(authorization.projectRoot, binding);
+    return current && { binding, ...current };
+  }
   const source = external ? await declaredScopeDigest(authorization.projectRoot, sourcePaths, manifestHash, true)
     : await protectedScopeDigest(authorization.projectRoot, sourcePaths, manifestHash, "project-files-v1");
   // Explicit outputs and the exact operation manifest remain pinned, including control-like paths.
@@ -141,18 +191,28 @@ export async function protectedSnapshot(authorization: { manifestPath: string; m
 export async function refreshProtectedSnapshot(projectRoot: string, binding: Binding): Promise<{
   readonly source: string; readonly candidate: string;
 } | undefined> {
-  const manifestSource = await readFile(resolve(projectRoot, binding.manifest_path)).catch(() => undefined);
-  if (manifestSource === undefined) return undefined;
-  const manifestHash = createHash("sha256").update(manifestSource).digest("hex");
-  if (`sha256:${manifestHash}` !== binding.manifest_hash) return undefined;
+  const current = await snapshotManifest(projectRoot, binding);
+  if (!current) return undefined;
+  const manifestHash = current.hash;
+  const sourcePaths = binding.source_paths.map(path => resolve(projectRoot, path));
+  const candidatePaths = binding.candidate_paths.map(path => resolve(projectRoot, path));
+  if (binding.freshness) {
+    // A compatible scope-only revision does not change old proof. Newly materialized outputs
+    // outside its protected recipe do change the candidate; absent execution grants do not.
+    for (const entry of current.manifest.write) {
+      const path = resolve(projectRoot, normalizeManifestScope(entry).path);
+      if (snapshotScratchExcluded(binding, path) || candidatePaths.some(root => !outside(root, path)) || !await lstat(path).catch(() => undefined)) continue;
+      sourcePaths.push(path); candidatePaths.push(path);
+    }
+  }
   if (binding.source_policy === "declared-paths-v1") {
-    const source = await declaredScopeDigest(projectRoot, binding.source_paths.map(path => resolve(projectRoot, path)), manifestHash, true);
-    const candidate = await declaredScopeDigest(projectRoot, binding.candidate_paths.map(path => resolve(projectRoot, path)), manifestHash, false);
+    const source = await declaredScopeDigest(projectRoot, sourcePaths, manifestHash, true, [], binding);
+    const candidate = await declaredScopeDigest(projectRoot, candidatePaths, manifestHash, false, [], binding);
     return source === undefined || candidate === undefined ? undefined : { source, candidate };
   }
   // Legacy evidence retains its original recipe; a new policy cannot relabel stale proof as fresh.
   if (binding.source_policy !== undefined && binding.source_policy !== "project-files-v1") return undefined;
-  const source = await protectedScopeDigest(projectRoot, binding.source_paths.map(path => resolve(projectRoot, path)), manifestHash, binding.source_policy);
-  const candidate = await protectedScopeDigest(projectRoot, binding.candidate_paths.map(path => resolve(projectRoot, path)), manifestHash);
+  const source = await protectedScopeDigest(projectRoot, sourcePaths, manifestHash, binding.source_policy, [], binding);
+  const candidate = await protectedScopeDigest(projectRoot, candidatePaths, manifestHash, undefined, [], binding);
   return source === undefined || candidate === undefined ? undefined : { source, candidate };
 }

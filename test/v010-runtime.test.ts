@@ -1302,7 +1302,7 @@ async function missionCoordinatorFixture(root: string, host?: { history: Record<
   };
   const hooks = await SortieDogsV010Plugin({ directory: root, client: { session: {
     get: async ({ path }: { path: { id: string } }) => ({ data: host ? { id: path.id, ...identities[path.id],
-      outcome: host.interrupts.includes(path.id) ? "interrupted" : "running" } : identities[path.id] }),
+      outcome: host.interrupts.includes(path.id) ? "interrupted" : "running" } : { id: path.id, ...identities[path.id] } }),
     children: async ({ path }: { path: { id: string } }) => ({ data: Object.entries(identities)
       .filter(([_id, value]) => value.parentID === path.id).map(([id, value]) => ({ id, ...value })) }),
     messages: async ({ path }: { path: { id: string } }) => ({ data: host?.history[path.id] ?? [] }),
@@ -1338,8 +1338,8 @@ test("interrupted V2 Coordinator with a recorded running Worker returns the root
   const prior = await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root");
   assert.equal(prior.units[0]!.status, "running");
   const blocked = JSON.parse(await declare([{ ...unit, objective: "Correct the interrupted run" }], "native Task interrupted"));
-  assert.equal(blocked.status, "mission-replan-worker-still-active");
-  assert.match(blocked.next_action, /Coordinator:[\s\S]+root-only[\s\S]+submit_mission[\s\S]+cancel_operator/u);
+  assert.equal(blocked.status, "mission-replan-terminal-unreconciled:terminal_not_reconciled");
+  assert.match(blocked.next_action, /active dispatch[\s\S]+Retain this mission[\s\S]+No cancel\/replace/u);
   assert.equal((await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root")).runID, prior.runID);
 
   host.history.root = [{ info: { role: "assistant", sessionID: "root" }, parts: [{ type: "tool", tool: "task",
@@ -1407,7 +1407,7 @@ test("completed Coordinator Task with a still-streaming Worker offers root-only 
   assert.match(status.next_action, /parent Coordinator Task has finished[\s\S]+Operator root \(not Coordinator\): call sortie_v010_cancel_operator/u);
   assert.deepEqual(host.interrupts, [], "reading status does not stop or duplicate the Worker");
   const replan = JSON.parse(await declare([{ ...unit, objective: "Replan after completed parent" }], "Worker is unresolved"));
-  assert.equal(replan.status, "mission-replan-worker-still-active", "a completed parent does not settle the Worker");
+  assert.equal(replan.status, "mission-replan-terminal-unreconciled:terminal_not_reconciled", "a completed parent does not settle the Worker");
   const after = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
   assert.equal(after.budget.reserved_units, status.budget.reserved_units);
   assert.deepEqual(host.interrupts, []);
@@ -1619,8 +1619,8 @@ test("mission replan uses durable admission without rewriting a legacy parent li
     worker: { agent: "dog-worker-v010", parentID: "coordinator" },
   };
   const hooks = await SortieDogsV010Plugin({ directory: root, client: { session: {
-    get: async ({ path }: { path: { id: string } }) => ({ data: identities[path.id] }),
-    messages: async () => ({ data: [] }), abort: async () => ({ data: true }),
+    get: async ({ path }: { path: { id: string } }) => ({ data: { id: path.id, ...identities[path.id] } }),
+    children: async () => ({ data: [] }), messages: async () => ({ data: [] }), abort: async () => ({ data: true }),
   } } } as never);
   await hooks["chat.message"]!({ sessionID: "root", messageID: "user", agent: "dog-operator" }, {
     message: { id: "user", agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-6-sol" } },
@@ -2314,9 +2314,11 @@ for (const exhaustBudget of [false, true]) test(`failed repair validation expose
     `${createHash("sha256").update("v010\0root").digest("hex")}.json`));
   const inFlight = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
   const initialGoal = (await budgetLedger.readGoal()).state;
-  const { settled_time_ms, time_limit_ms, settled_cost_usd, cost_limit_usd, cost_status, cost_note, cost_source,
+  const { settled_time_ms, time_limit_ms, settled_cost_usd, cost_limit_usd, cost_status, cost_note, cost_source, cost_scope, campaign_remaining_usd,
     ...inFlightUnits } = inFlight.budget;
   assert.equal(cost_source, "native-usage-price-table");
+  assert.equal(cost_scope, "worker-only");
+  assert.equal(campaign_remaining_usd, null);
   assert.equal(settled_time_ms, initialGoal.consumed_time_ms);
   assert.equal(time_limit_ms, initialGoal.budget!.time_ms);
   assert.equal(settled_cost_usd, initialGoal.consumed_cost_usd);
@@ -2371,7 +2373,10 @@ for (const exhaustBudget of [false, true]) test(`failed repair validation expose
   assert.match(terminal.next_action, /cancel_operator[\s\S]+prepare_operator/u);
   const settledGoal = (await budgetLedger.readGoal()).state;
   const { settled_time_ms: finalTime, time_limit_ms: finalTimeLimit, settled_cost_usd: finalCost, cost_limit_usd: finalLimit,
-    cost_status: finalStatus, cost_note: finalNote, cost_source: finalSource, ...settledUnits } = terminal.budget;
+    cost_status: finalStatus, cost_note: finalNote, cost_source: finalSource, cost_scope: finalScope,
+    campaign_remaining_usd: finalRemainder, ...settledUnits } = terminal.budget;
+  assert.equal(finalScope, "worker-only");
+  assert.equal(finalRemainder, null);
   assert.equal(finalSource, cost_source);
   assert.equal(finalTime, settledGoal.consumed_time_ms);
   assert.equal(finalTimeLimit, settledGoal.budget!.time_ms);
@@ -3052,12 +3057,12 @@ test("re-registering a plan on an active contract returns the existing run statu
 
 test("generated contract validation and storage failure leave no partial controls", async () => fixture(async root => {
   const invalid = representativeLongPlan();
-  invalid.units[0]!.objective = "o".repeat(2001);
+  invalid.units[0]!.objective = "o".repeat(CONTRACT_TEXT_LIMITS.objective + 1);
   const runtime = new OperatorRuntime(root, V010_RUNTIME_PROFILE);
   await assert.rejects(runtime.prepare("invalid-root", invalid), (error: unknown) => {
     assert.ok(error instanceof OperatorContractError);
     assert.deepEqual(error.diagnostics[0], { document: "handoff", pointer: "/task/objective", unit_index: 0, code: "schema_maxLength",
-      rule: "maxLength", repair_kind: "repair-field", length: 2001, limit: 2000 });
+      rule: "maxLength", repair_kind: "repair-field", length: CONTRACT_TEXT_LIMITS.objective + 1, limit: CONTRACT_TEXT_LIMITS.objective });
     return true;
   });
   await assert.rejects(lstat(join(root, V010_RUNTIME_PROFILE.stateDirectory, "contracts")), { code: "ENOENT" });
@@ -4911,6 +4916,8 @@ test("cold completion reconciles a terminal proposal reservation before relinkin
   value.units = value.units.slice(0, 1);
   value.goal_declaration.criteria = value.goal_declaration.criteria.slice(0, 1);
   value.acceptance_proof = [["first"], ["first"]];
+  // The relink fixture needs a strictly older goal, not an accidental same-millisecond scope.
+  await new Promise(resolve => setTimeout(resolve, 2));
   const runtime = new OperatorRuntime(root, V010_RUNTIME_PROFILE);
   const prepared = await runtime.prepare(sessionID, value);
   const next = await runtime.next(sessionID, sessionID) as { task: object };

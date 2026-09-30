@@ -115,6 +115,7 @@ export interface ScopeLease {
   assertHeld(): Promise<void>;
   isReleased(): Promise<boolean>;
   release(): Promise<void>;
+  replaceScope(scope: WorktreeScope): Promise<void>;
   abandon(): Promise<void>;
   close(): void;
 }
@@ -263,7 +264,26 @@ export class ScopeLeaseRegistry {
     return Object.freeze({
       id,
       ownerId,
-      scope: Object.freeze({ read: [...scope.read], write: [...scope.write] }),
+      get scope() { return Object.freeze({ read: [...scope.read], write: [...scope.write] }); },
+      replaceScope: (replacement: WorktreeScope) => {
+        const normalized = this.validateRequest(replacement);
+        const result = pending.then(async () => {
+          if (!active || closing) throw new ScopeLeaseError("not-held", "Lease is not held.");
+          await this.withLock(async mutex => {
+            const state = await this.load();
+            const held = state.leases.find(lease => lease.id === id && lease.ownerHash === ownerHash && lease.tokenHash === credentialHash);
+            if (!held || held.expiresAt <= Date.now()) throw new ScopeLeaseError("not-held", "Lease is not held.");
+            if (state.leases.some(lease => lease.id !== id && lease.expiresAt > Date.now() && worktreeScopesConflict(normalized, lease))) {
+              throw new ScopeLeaseError("scope-conflict", "Requested scope is already leased.");
+            }
+            held.read = [...normalized.read]; held.write = [...normalized.write];
+            await this.save({ ...state, revision: state.revision + 1 }, mutex);
+            scope = normalized;
+          });
+        });
+        pending = result.catch(() => undefined);
+        return result;
+      },
       heartbeat: () => serialized("heartbeat"),
       assertHeld: () => serialized("assert"),
       isReleased: () => this.withLock(async () => {

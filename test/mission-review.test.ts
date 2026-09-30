@@ -11,6 +11,7 @@ import { MISSION_REVIEW_REFERENCE, type OperatorMission } from "../dist/core/ope
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
 import { FastLaneController } from "../dist/plugin/fast-lane.js";
 import { declaredArtifacts } from "../dist/plugin/declared-artifacts.js";
+import { protectedSnapshot } from "../dist/plugin/protected-snapshot.js";
 
 const git = promisify(execFile);
 
@@ -240,7 +241,15 @@ test("an ignored build cache in the write scope cannot displace review source or
     await mkdir(join(root, "_testenv"));
     await writeFile(join(root, ".gocache", "cache"), "cache content ".repeat(5_000));
     await writeFile(join(root, "_testenv", "result.json"), '{"result":"observed"}\n');
-    const run = { units: [{ unit: { write: ["source.js", ".gocache/**", "_testenv/**"] }, hashes: [] }] } as never;
+    const manifestPath = join(root, ".sortie-dogs-v010/manifest.json");
+    await mkdir(join(root, ".sortie-dogs-v010"));
+    const manifest = JSON.stringify({ task_id: "cache-test", read: ["source.js"], write: ["source.js", ".gocache/**", "_testenv/**"],
+      validation: [`GOCACHE=${join(root, ".gocache")} node check.mjs`] });
+    await writeFile(manifestPath, manifest);
+    const snapshot = await protectedSnapshot({ projectRoot: root, manifestPath, manifestHash: createHash("sha256").update(manifest).digest("hex") });
+    assert.ok(snapshot);
+    const run = { units: [{ unit: { id: "cache-test", read: ["source.js"], write: ["source.js", ".gocache/**", "_testenv/**"], validation: [], acceptance_indices: [0] },
+      hashes: [], evidence: [{ protected_binding: snapshot.binding }] }] } as never;
     const first = await missionReviewSource(root, run, [], baseline);
     assert.match(first.excerpt, /export const answer = 42/u);
     assert.match(first.excerpt, /"result":"observed"/u, "ignored output directories remain visible");

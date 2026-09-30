@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
 import { operationInputSnapshot, protectedSnapshot, refreshProtectedSnapshot } from "../dist/plugin/protected-snapshot.js";
 import { goalFingerprint } from "../dist/core/goal-bound.js";
 
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
+const exec = promisify(execFile);
 async function fixture(run: (root: string) => Promise<void>) {
   await mkdir(resolve("_testenv"), { recursive: true });
   const root = await mkdtemp(resolve("_testenv/source-policy-"));
@@ -19,6 +22,79 @@ async function pin(root: string, read: string[], write = ["result.txt"]) {
   assert.ok(pinned);
   return pinned;
 }
+
+async function validationPin(root: string, read: string[], write: string[], validation: string[]) {
+  const manifestPath = join(root, "manifest.json"), manifest = JSON.stringify({ version: "0.1.0", task_id: "unit", read, write, validation });
+  await writeFile(manifestPath, manifest);
+  const pinned = await protectedSnapshot({ projectRoot: root, manifestPath, manifestHash: hash(manifest) });
+  assert.ok(pinned?.binding.freshness);
+  return pinned;
+}
+
+test("fixed validation scratch ignores generation/cleanup but protects read, tracked and exact deliverables", async () => fixture(async root => {
+  await exec("git", ["init", "--quiet"], { cwd: root });
+  await mkdir(join(root, ".tmp"));
+  await mkdir(join(root, "parser"));
+  for (const path of [".tmp/input", ".tmp/tracked", ".tmp/deliverable", "parser/y.output", "result.txt"]) await writeFile(join(root, path), "original");
+  await exec("git", ["add", "--", ".tmp/tracked"], { cwd: root });
+  const pinned = await validationPin(root, [".tmp/input", "parser/y.output"], [".tmp/**", ".tmp/deliverable", "result.txt"], [`TMPDIR=${root}/.tmp node check.mjs`]);
+  const original = JSON.stringify(pinned.binding);
+  const unchanged = { source: pinned.source, candidate: pinned.candidate };
+  await writeFile(join(root, ".tmp/cache"), "cache bytes");
+  assert.deepEqual(await refreshProtectedSnapshot(root, pinned.binding), unchanged);
+  await rm(join(root, ".tmp/cache"));
+  assert.deepEqual(await refreshProtectedSnapshot(root, pinned.binding), unchanged);
+  for (const path of [".tmp/input", ".tmp/tracked", ".tmp/deliverable", "parser/y.output", "result.txt"]) {
+    await writeFile(join(root, path), "changed");
+    assert.notDeepEqual(await refreshProtectedSnapshot(root, pinned.binding), unchanged, `${path} must stay protected`);
+    await writeFile(join(root, path), "original");
+  }
+  assert.equal(JSON.stringify(pinned.binding), original, "freshness never rewrites the old execution binding");
+}));
+
+test("scope-only grants preserve proof; new real output, input, check and environment changes invalidate it", async () => fixture(async root => {
+  await writeFile(join(root, "input.tmp"), "real input");
+  await writeFile(join(root, "result.txt"), "verified");
+  const pinned = await validationPin(root, ["input.tmp"], ["result.txt"], ["node check.mjs $SORTIE_TEST_INPUT_ENV"]);
+  const unchanged = { source: pinned.source, candidate: pinned.candidate };
+  const source = await readFile(join(root, "manifest.json"), "utf8"), manifest = JSON.parse(source);
+  manifest.write.push("unused-output/**");
+  await writeFile(join(root, "manifest.json"), JSON.stringify(manifest));
+  assert.deepEqual(await refreshProtectedSnapshot(root, pinned.binding), unchanged);
+  await mkdir(join(root, "unused-output"));
+  await writeFile(join(root, "unused-output/result"), "new unverified output");
+  assert.notDeepEqual(await refreshProtectedSnapshot(root, pinned.binding), unchanged);
+  await rm(join(root, "unused-output"), { recursive: true });
+  await writeFile(join(root, "input.tmp"), "changed");
+  assert.notEqual((await refreshProtectedSnapshot(root, pinned.binding))?.source, pinned.source);
+  await writeFile(join(root, "input.tmp"), "real input");
+  for (const [key, value] of [["read", ["input.tmp", "another-input"]], ["validation", ["node other-check.mjs"]]]) {
+    await writeFile(join(root, "manifest.json"), JSON.stringify({ ...manifest, [key]: value }));
+    assert.equal(await refreshProtectedSnapshot(root, pinned.binding), undefined);
+  }
+  await writeFile(join(root, "manifest.json"), source);
+  for (const key of ["GOFLAGS", "SORTIE_TEST_INPUT_ENV"]) {
+    const previous = process.env[key];
+    try { process.env[key] = "meaningful-change"; assert.equal(await refreshProtectedSnapshot(root, pinned.binding), undefined); }
+    finally { if (previous === undefined) delete process.env[key]; else process.env[key] = previous; }
+  }
+  assert.deepEqual(await refreshProtectedSnapshot(root, pinned.binding), unchanged);
+}));
+
+test("legacy PASS never gains scratch exclusions or scope-only compatibility retroactively", async () => fixture(async root => {
+  await mkdir(join(root, ".tmp"));
+  await writeFile(join(root, ".tmp/cache"), "old bytes");
+  const manifestPath = join(root, "manifest.json"), manifest = JSON.stringify({ version: "0.1.0", task_id: "unit", read: [], write: [".tmp/**"],
+    validation: [`TMPDIR=${root}/.tmp node check.mjs`] });
+  await writeFile(manifestPath, manifest);
+  const pinned = await protectedSnapshot({ projectRoot: root, manifestPath, manifestHash: hash(manifest) }, { captureFreshness: false });
+  assert.ok(pinned);
+  assert.equal(pinned.binding.freshness, undefined);
+  await rm(join(root, ".tmp/cache"));
+  assert.notEqual((await refreshProtectedSnapshot(root, pinned.binding))?.candidate, pinned.candidate);
+  await writeFile(manifestPath, JSON.stringify({ ...JSON.parse(manifest), write: [".tmp/**", "new/**"] }));
+  assert.equal(await refreshProtectedSnapshot(root, pinned.binding), undefined);
+}));
 
 test("live control changes do not invalidate source read directly or through a parent scope", async () => fixture(async root => {
   await writeFile(join(root, "result.txt"), "ready");

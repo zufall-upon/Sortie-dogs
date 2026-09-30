@@ -219,7 +219,7 @@ The repair tool also permits add/replace of /goal_declaration/criteria/<index>/g
 only when the exact command is already declared in the validation list of a unit assigned to that criterion.
 This binds existing declared proof; it cannot introduce a new command or change criterion identity or target.
 Contract text limits are checked before controls are published; long exact validation commands up to 1000 characters
-and objective text up to 2000 characters remain verbatim. Diagnostics never echo user values.
+and objective text up to 32768 characters remain verbatim. Diagnostics never echo user values.
 
 Each unit's validation must prove its intended milestone. Avoid a plan where an early unit requires later, still absent
 implementation to pass. The final evidence must cover the entire original goal against the current protected candidate.

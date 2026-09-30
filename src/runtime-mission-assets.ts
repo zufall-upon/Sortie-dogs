@@ -356,7 +356,9 @@ root-only Operator must reconcile the prior cancelled run. Submit status=blocked
 requirements and exact host diagnostic, then return; do not declare a user-only decision when
 the current request already narrowed the old scope.
 For a needed write-scope addition within the original request, call expand_unit with unit_id, paths and
-reason; the host returns a replacement contract without Operator approval. For a changed approach, formal
+reason; the host updates the active Task's contract/binding in place without Operator approval or extra unit.
+Concrete native paths are reconciled automatically. After return, the host repairs contracts; dispatch a
+continuation only for actual remaining code work, never solely to copy scope. For a changed approach, formal
 check or reviewer finding, call plan_units with the corrected units and a short observed reason. Replanning
 preserves every requirement, failed-check history and cumulative budget. Never replace an active Worker.
 Rejected budget/contract checks or control-storage preparation leave the old run available. Correct the
@@ -373,6 +375,8 @@ ${OPERATION_GUIDE}
 
 Scout is optional for one precise missing fact. Its prompt includes missing_evidence_code:
 ${SCOUT_EVIDENCE_CODES.join(" | ")}, an exact project_root and at most four known_paths.
+Scout cannot investigate external resources, session history or arbitrary artifacts. Read those directly
+with existing parent/Worker host permissions; do not route through a doomed Scout or add a mandatory researcher.
 Advisor is optional for one material decision; its Task starts with a standalone line
 \`strategy_trigger: material-uncertainty\` (or one of ${STRATEGY_TRIGGERS.join(" | ")}).
 Put the question on the next line, never after the trigger, even in Japanese. If admission rejects
@@ -447,12 +451,15 @@ ref spelling itself is not required. Report the substitution, not a user-only de
 base commit differs or cannot be identified, report the ambiguity. Do not bypass a host Git
 lifecycle, rewrite history or alter an existing branch.
 
-Read/search and read-only investigation commands are unrestricted. Use targeted reproduction/diagnosis
-without registering every exploratory command. All writes, generated/transient files and cleanup stay
-inside the unit's file/directory scopes, except the tool environment below. Do not write outside them through
-scripts or tools. If scope must
-expand or a formal check must change, return the exact paths/command and reason to Coordinator; it can
-approve an in-request extension immediately. Do not ask the user or delegate to another agent.
+Read/search and investigation commands use existing host permissions; no exploratory command registration.
+unit.write is an estimated execution scope, not a user prohibition. For in-request writes the host reconciles
+concrete native paths and writer conflicts automatically before continuing that same operation. For unknown
+shell outputs call ${profile.toolPrefix}expand_unit with your unit_id, exact paths and reason in this same Task.
+No return, Worker restart, additional unit or user approval is needed. Respect explicit user prohibitions.
+Do not ask the user or delegate to another agent for in-request scope repair.
+Requested git add -- <paths> and git commit -m ... are normal source-scope Git operations; they do not require
+.git/** direct-write scope. Attempt the supported path and retain actual host denials; do not infer refusal.
+Formal validation changes use the existing contract update; never manufacture PASS or reset spend.
 
 Choose the smallest complete fix consistent with surrounding code and public behavior. Continue the
 diagnose/edit/check loop in this Task. Run formal validation commands exactly as listed, in declared order
@@ -485,12 +492,13 @@ Never claim other units or the whole mission
 are complete. Never fabricate logs, costs or exits. Do not stage outside declared paths, amend, push,
 publish, or take over Coordinator decisions. The parent releases your write binding after return.
 
-A local tool/permission/handoff defect returns PROCESS_DEFECT: local: <condition> and its exact diagnostic
-once to Coordinator when its remedy requires a changed contract. If the host explicitly returns
+A local tool/permission/handoff defect is corrected in this Task when the existing host update can repair it.
+Use expand_unit for in-request scope corrections. Only an unrecoverable defect returns PROCESS_DEFECT:
+local: <condition> and its exact diagnostic. If the host explicitly returns
 action=correct-format-within-current-manifest, correct the supported command form in this same Task,
 preserving the operation, inputs and destinations, then continue. An unchanged denied request is not a correction.
-If correcting the form changes the intended operation or requires another output, return the exact required
-correction to Coordinator. Do not repeat the same refused operation. Only a proven external dependency or
+For another in-request output, reconcile scope in this Task, then continue the intended operation.
+Do not blindly repeat the same refused operation. Only a proven external dependency or
 user-only choice uses TRUE_BLOCKER: external: <condition> or TRUE_BLOCKER: user-decision: <condition>.
 
 ${VALIDATION_WORKFLOW}

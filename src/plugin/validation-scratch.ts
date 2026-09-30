@@ -5,6 +5,21 @@ import { RUNTIME_PROFILES } from "../core/runtime-profile.js";
 
 const controlDirectories = new Set([".git", ".opencode", ...Object.values(RUNTIME_PROFILES).map(profile => profile.stateDirectory)]);
 
+/** Only explicitly configured tool scratch/cache outputs; no filename, ignored or untracked heuristic. */
+export function validationScratchPaths(directory: string, commands: readonly string[]): string[] {
+  const paths = new Set<string>();
+  for (const command of commands) for (const match of command.matchAll(/(?:^|\s)(TMPDIR|GOCACHE|GOMODCACHE|GOPATH)=(?:"([^"]+)"|'([^']+)'|([^\s"']+))/gu)) {
+    let value = (match[2] ?? match[3] ?? match[4]!).replace(/^\$\{?PWD\}?/u, directory);
+    if (/[$`]/u.test(value)) continue;
+    const absolute = resolve(directory, value);
+    const scoped = relative(directory, absolute).replaceAll("\\", "/");
+    if (!scoped || scoped === ".." || scoped.startsWith("../") || controlDirectories.has(scoped.split("/")[0]!)) continue;
+    if (match[1] === "GOPATH") { paths.add(resolve(absolute, "pkg/mod")); paths.add(resolve(absolute, "pkg/sumdb")); }
+    else paths.add(absolute);
+  }
+  return [...paths].sort();
+}
+
 /** Prepare only an explicitly declared, in-project TMPDIR before a Worker starts validation. */
 export async function prepareValidationScratch(directory: string, commands: readonly string[]): Promise<{
   prepared_directories: string[]; unprepared_directories: string[];

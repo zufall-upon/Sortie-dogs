@@ -1,6 +1,6 @@
 import { V010_RUNTIME_ASSET_VERSION } from "../asset-version.js";
 import { MISSION_BEHAVIOR_REVIEW } from "../runtime-mission-assets.js";
-import { cancelledMissionRetainsAcceptance, OperatorContractError, OperatorRuntime, type OperatorProgress, type OperatorState } from "../core/operator-runtime.js";
+import { cancelledMissionRetainsAcceptance, operatorGitPathAuthorized, OperatorContractError, OperatorRuntime, type OperatorProgress, type OperatorState } from "../core/operator-runtime.js";
 import { DEFAULT_OPERATOR_PROPOSAL_BUDGET, OPERATOR_APPROVAL_CONTRACT, OPERATOR_PROPOSAL_BUDGET_CAPS, OPERATOR_PROPOSAL_REVISION_CONTRACT,
   OperatorProposalBudgetError, OperatorProposalRuntime } from "../core/operator-proposal.js";
 import { CANONICAL_AGENT_ROLES, canonicalAgent, profileAgent, profileTool, V010_RUNTIME_PROFILE,
@@ -15,7 +15,7 @@ import { goalFingerprint } from "../core/goal-bound.js";
 import { decoratePreviewHeadings, returnReportPanel } from "./receipt-presentation.js";
 import { sanitizeTerminalReport, terminalRunOutcome } from "./run-metrics.js";
 import { normalizeCommand } from "./gate.js";
-import { normalizeRelativePath } from "../core/path.js";
+import { normalizeExecutionScope, normalizeManifestScope, normalizeRelativePath } from "../core/path.js";
 import { OperatorMissionRuntime, missionPacket, missionPlan, missionReviewAccepted, missionReviewScope, missionReviewTask,
   missionCommandOutcome, missionConversationContext, missionExecutionStatus, missionValidationCommand, missionReviewTraces, missionReviewVerdict, type OperatorMission } from "../core/operator-mission.js";
 import { publishMissionProgress } from "./mission-progress.js";
@@ -211,6 +211,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     const renderingMessages = new Set<string>();
     const reportFailures = new Set<string>();
     const locationDiscoveryErrors = new Map<string, string>();
+    const conditionsSchema = { type: "object", additionalProperties: false, required: ["source", "applies_to"], properties: {
+      entrypoint: { type: "string" }, inputs: { type: "array", items: { type: "string" } }, timeout_seconds: { type: "number", exclusiveMinimum: 0 },
+      cost_limit_usd: { type: "number", exclusiveMinimum: 0 }, benchmark_attempts: { type: "integer", minimum: 1 },
+      grading: { type: "string", enum: ["none", "official"] }, source: { type: "string" }, applies_to: { type: "string" },
+    }, description: "Already confirmed runner/input/time/cost/attempt/grading conditions with source and application scope. This saves facts, not authorization or a budget reset.", "x-sortie-optional": true };
     let explicitWorkerSelection: { model?: string; variant?: string } | undefined;
     let control: Parameters<NonNullable<RuntimeBridge["connected"]>>[0] | undefined;
     const nativeSession = input.client?.session as unknown as Record<string, unknown> | undefined;
@@ -239,6 +244,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         : ["failed", "interrupted", "cancelled"].includes(String(info.outcome)) ? "failed" : "unknown";
       return { ...(typeof provider === "string" && typeof modelID === "string" ? { model: `${provider}/${modelID}` } : {}),
         ...(variant === undefined ? {} : { variant }), outcome };
+    }
+    function missionTaskFingerprint(args: Record<string, unknown>): string {
+      return goalFingerprint({ role: canonicalAgent(profile, String(args.subagent_type ?? args.agent)),
+        description: args.description, prompt: args.prompt, task_id: args.task_id ?? "" });
     }
     async function identity(id: string): Promise<{ role?: CanonicalAgentRole; parent?: string }> {
       const info = payload(await session("get", { path: { id }, query: { directory: input.directory } }));
@@ -421,11 +430,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           unit.unit.validation.some(candidate => normalizeCommand(candidate) === command);
       },
       ownsMissionDispatch: async (root, callID, taskID) => {
-        const owner = taskOwners.get(callID);
-        if (owner?.root !== root || owner.operator) return false;
         const mission = await missions.read(root), state = await operators.read(root);
         return mission !== undefined && state !== undefined && mission.runID === state.runID &&
-          mission.phase === "running" && state.phase === "running" &&
+          !["cancelled", "completed"].includes(mission.phase) && state.phase === "running" &&
           state.units.some(unit => unit.status === "running" && unit.callID === callID &&
             /^task_id: (.+)$/m.exec(unit.task.prompt)?.[1] === taskID);
       },
@@ -434,31 +441,66 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         const unit = run?.units.find(item => /^task_id: (.+)$/m.exec(item.task.prompt)?.[1] === taskID);
         if (!run || !unit?.callID) return undefined;
         if (run.phase !== "cancelled") {
-          const history = await messages(run.operatorSessionID ?? root);
-          const terminal = history.flatMap(message => Array.isArray(message.parts) ? message.parts : []).filter(part =>
-            record(part) && part.type === "tool" && part.callID === unit.callID && record(part.state) &&
+          const mission = await missions.read(root);
+          const attempt = mission?.attempts?.find(item => item.runID === run!.runID && item.unitID === unit.unit.id &&
+            item.callID === unit.callID && item.childSessionID === unit.childSessionID);
+          if (attempt?.terminal && attempt.terminal.taskID === taskID && attempt.terminal.callID === unit.callID &&
+              attempt.terminal.childSessionID === unit.childSessionID && attempt.terminal.ownerSessionID === (run.operatorSessionID ?? root)) {
+            const saved = await observeWorkerTerminal(mission!, run, attempt, true);
+            if (saved.status === "ready") return { callID: unit.callID, childSessionID: unit.childSessionID!, cancelled: false, nativeOutcome: saved.terminal.outcome };
+          }
+          const history = await messages(run.operatorSessionID ?? root).catch(() => []);
+          const terminal = history.flatMap(message => record(message.info) && message.info.role === "assistant" &&
+            message.info.sessionID === (run!.operatorSessionID ?? root) && Array.isArray(message.parts) ? message.parts : []).filter(part =>
+            record(part) && part.type === "tool" && part.tool === "task" && part.callID === unit.callID && record(part.state) &&
             ["completed", "error"].includes(String(part.state.status)));
-          if (!terminal.length) return undefined;
+          if (terminal.length !== 1) return undefined;
+          const terminalState = record(terminal[0]) && record(terminal[0].state) ? terminal[0].state : undefined;
+          if (!terminalState || (record(terminalState.input) && (attempt?.dispatchFingerprint
+              ? missionTaskFingerprint(terminalState.input) !== attempt.dispatchFingerprint
+              : !operators.matchesRecordedWorkerTask(run, unit.unit.id, terminalState.input))) ||
+              (taskChildSessionID(terminalState) !== undefined && taskChildSessionID(terminalState) !== unit.childSessionID)) return undefined;
           if (unit.childSessionID) {
             const request = { path: { id: unit.childSessionID }, query: { directory: input.directory } };
-            let child = payload(await session("get", request));
+            let child = payload(await session("get", request).catch(() => undefined));
             if (!record(child) || child.parentID !== (run.operatorSessionID ?? root)) return undefined;
-            if (!["succeeded", "failed", "interrupted"].includes(String(child.outcome))) {
+            if (!["succeeded", "completed", "failed", "interrupted", "cancelled"].includes(String(child.outcome))) {
               // V2 can abort the parent Task while leaving its Worker without an idle outcome.
               // Stop only that exact orphan. Native interrupt acknowledgement closes the lost
               // dispatch as a process defect, never as successful validation or acceptance.
               const state = terminal.length === 1 && record(terminal[0]) && record(terminal[0].state)
                 ? terminal[0].state : undefined;
               if (!record(state) || state.status !== "error" || !record(state.error) || state.error.type !== "aborted" ||
+                  !record(state.input) ||
                   child.id !== unit.childSessionID ||
                   !["dog-worker", "dog-luna-worker"].includes(String(canonicalAgent(profile, child.agent as string)))) return undefined;
               const stopped = await session("abort", request).catch(() => undefined);
               const acknowledgement = record(stopped) && "data" in stopped ? stopped.data : stopped;
               if (acknowledgement !== true && (!record(acknowledgement) ||
                   typeof acknowledgement.interrupted !== "boolean")) return undefined;
+              if (mission && attempt) {
+                const observed = await observeWorkerTerminal(mission, run, attempt, false, "failed");
+                if (observed.status !== "ready") return undefined;
+                await missions.update(root, current => {
+                  const exact = current.attempts?.find(item => item.attemptID === attempt.attemptID);
+                  if (exact) exact.terminal = observed.terminal;
+                });
+              }
+            }
+            if (mission && attempt) {
+              const saved = (await missions.required(root)).attempts?.find(item => item.attemptID === attempt.attemptID);
+              const observed = await observeWorkerTerminal(mission, run, saved ?? attempt, true);
+              if (observed.status !== "ready") return undefined;
+              await missions.update(root, current => {
+                const exact = current.attempts?.find(item => item.callID === unit.callID);
+                if (exact) exact.terminal = observed.terminal;
+              });
             }
           }
-          return { callID: unit.callID, ...(unit.childSessionID ? { childSessionID: unit.childSessionID } : {}), cancelled: false };
+          const exact = await missions.read(root);
+          const outcome = exact?.attempts?.find(item => item.callID === unit.callID)?.terminal?.outcome;
+          return { callID: unit.callID, ...(unit.childSessionID ? { childSessionID: unit.childSessionID } : {}), cancelled: false,
+            ...(outcome ? { nativeOutcome: outcome } : {}) };
         }
         await stopCancelledChildren(root, run);
         run = await operators.required(root);
@@ -478,6 +520,21 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         return mission?.runID === run?.runID && run !== undefined && run.phase === "running" &&
           run.units.some(unit => unit.status === "running" && unit.childSessionID === child);
       },
+      assertMissionWrite: async (child, paths) => {
+        const root = await rootFor(child);
+        if (!root) return;
+        const mission = await missions.read(root);
+        assertMissionWritePaths(mission, paths);
+      },
+      expandMissionScope: async (root, child, taskID, paths, activate) => {
+        const mission = await missions.required(root);
+        if (["cancelled", "completed"].includes(mission.phase)) throw new Error("mission-scope-update-terminal");
+        assertMissionWritePaths(mission, paths);
+        await operators.expandMissionWriteScope(root, child, taskID, paths, activate);
+        // Public scope is projected from the same durable unit; no parallel scope ledger.
+      },
+      missionDispatchCall: async (root, child, taskID) => (await operators.read(root))?.units.find(unit =>
+        unit.childSessionID === child && /^task_id: (.+)$/m.exec(unit.task.prompt)?.[1] === taskID)?.callID ?? undefined,
       defaultModelCatalog: { global: previewModelCatalog() },
       transformConfiguration: value => {
         if (!record(value) || !record(value.modelRouting)) return value;
@@ -506,6 +563,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         if (!unit) return;
         const recordedAttempt = [...(mission.attempts ?? [])].reverse().find(attempt => attempt.callID === result.callID);
         const observed = result.childSessionID ? await observedSessionModel(result.childSessionID) : { outcome: "unknown" as const };
+        const terminal = recordedAttempt && result.childSessionID
+          ? await observeWorkerTerminal(mission, run, { ...recordedAttempt, childSessionID: result.childSessionID }, false, result.nativeOutcome) : undefined;
         const currentCandidate = result.resultClass === "acceptance" && result.failure?.outcome === "fail"
           ? await missionReviewSource(input.directory, run, [], mission.reviewBaseline, mission.reviewScope).then(value => value.fingerprint)
           : undefined;
@@ -525,6 +584,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             attempt.status = result.disposition;
             attempt.resultClass = result.resultClass;
             attempt.nativeOutcome = observed.outcome;
+            if (terminal?.status === "ready") attempt.terminal = terminal.terminal;
             if (result.childSessionID) attempt.childSessionID = result.childSessionID;
             if (observed.model) attempt.observedModel = observed.model;
             if (observed.variant) attempt.observedVariant = observed.variant;
@@ -546,6 +606,20 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       },
       onRootTerminal: (root, receipt) => operators.terminal(root, receipt),
     };
+    function assertMissionWritePaths(mission: OperatorMission | undefined, paths: readonly string[]): void {
+      for (const path of paths) {
+        const absolute = resolve(input.directory, normalizeManifestScope(path).path);
+        for (const forbidden of mission?.prohibitedWrite ?? []) {
+          const scope = normalizeManifestScope(forbidden);
+          const target = resolve(input.directory, scope.path).replaceAll("\\", "/");
+          const normalized = absolute.replaceAll("\\", "/");
+          if (operatorGitPathAuthorized(normalized, [scope.directory ? `${target}/**` : target]) ||
+              (normalizeManifestScope(path).directory && operatorGitPathAuthorized(target, [`${normalized}/**`]))) {
+            throw new Error(`mission-explicit-write-prohibition:${path}`);
+          }
+        }
+      }
+    }
     const core = await canonicalPlugin({ ...input, worktree: input.directory, client, runtimeBridge }, {
       operationManifestPath: `${profile.stateDirectory}/contracts/operation-manifest.json`,
       handoffPaths: [`${profile.stateDirectory}/contracts/handoff.json`],
@@ -592,46 +666,88 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       return { root, mission };
     }
     async function missionWorkerTerminalProof(root: string, mission: OperatorMission,
-      run: OperatorState, attempt: NonNullable<OperatorMission["attempts"]>[number]): Promise<
+      run: OperatorState, attempt: NonNullable<OperatorMission["attempts"]>[number], checkLiveOutcome = false): Promise<
         { status: "ready"; child: string } | { status: "non_rescue"; reason: string }> {
       if (!attempt.callID || !attempt.childSessionID || !control) {
         return { status: "non_rescue", reason: "terminal_not_reconciled" };
       }
-      if (attempt.runID !== run.runID || attempt.unitID !== run.units.find(unit => unit.unit.id === attempt.unitID)?.unit.id) {
+      const unit = run.units.find(unit => unit.unit.id === attempt.unitID);
+      if (attempt.runID !== run.runID || !unit || unit.callID !== attempt.callID ||
+          unit.childSessionID !== attempt.childSessionID || /^task_id: (.+)$/m.exec(unit.task.prompt)?.[1] !== attempt.taskID) {
         return { status: "non_rescue", reason: "terminal_identity_conflict" };
       }
+      const observed = await observeWorkerTerminal(mission, run, attempt, !checkLiveOutcome);
+      if (observed.status !== "ready") return observed;
       try {
         await control.assertActiveGoal(root, await operators.completionGoalFingerprint(run));
       } catch {
         return { status: "non_rescue", reason: "goal_not_active" };
       }
-      const budget = await control.currentBudget(root);
+      const budget = await control.currentBudget(root, { reconcileUsage: false });
       if (!budget || budget.reserved_units !== 0) return { status: "non_rescue", reason: "goal_reservation_unsettled" };
-      const child = attempt.childSessionID;
-      const who = await identity(child);
-      const owner = mission.coordinator ?? root;
-      if (who.role !== "dog-worker" || who.parent !== owner) {
-        return { status: "non_rescue", reason: "terminal_identity_conflict" };
-      }
-      const info = payload(await session("get", { path: { id: child }, query: { directory: input.directory } }).catch(() => undefined));
-      const outcome = record(info) ? String(info.outcome) : "unknown";
-      if (!record(info) || info.id !== child || info.parentID !== owner ||
-          !["succeeded", "completed"].includes(outcome)) {
+      const reconciled = await control.missionWorkerTerminal(root, observed.terminal, unit.unit.write);
+      if (!reconciled.ready) return { status: "non_rescue", reason: reconciled.reason ?? "writer_not_released" };
+      await missions.update(root, current => {
+        const exact = current.attempts?.find(item => item.callID === attempt.callID && item.attemptID === attempt.attemptID);
+        if (exact) exact.terminal = observed.terminal;
+      });
+      return { status: "ready", child: attempt.childSessionID };
+    }
+    async function observeWorkerTerminal(mission: OperatorMission, run: OperatorState,
+      attempt: NonNullable<OperatorMission["attempts"]>[number], preferSaved = false, taskEnd?: "completed" | "failed"): Promise<
+        { status: "ready"; terminal: import("./runtime-bridge.js").MissionWorkerTerminalRecord } |
+        { status: "non_rescue"; reason: string }> {
+      // Escalation to a Coordinator does not change a prior Fast-lane Task's recorded parent.
+      const child = attempt.childSessionID, owner = run.operatorSessionID ?? mission.root;
+      const saved = attempt.terminal;
+      const exact = saved && saved.runID === run.runID && saved.unitID === attempt.unitID &&
+        saved.taskID === attempt.taskID && saved.callID === attempt.callID && saved.childSessionID === child && saved.ownerSessionID === owner &&
+        ["completed", "failed"].includes(saved.outcome) && Array.isArray(saved.descendants) &&
+        saved.descendants.every(id => typeof id === "string") && new Set(saved.descendants).size === saved.descendants.length;
+      if (preferSaved && exact) return { status: "ready", terminal: saved };
+      const info = child ? payload(await session("get", { path: { id: child }, query: { directory: input.directory } }).catch(() => undefined)) : undefined;
+      if (record(info) && (info.id !== child || info.parentID !== owner ||
+          !["dog-worker", "dog-luna-worker"].includes(String(canonicalAgent(profile, info.agent as string))))) return { status: "non_rescue", reason: "terminal_identity_conflict" };
+      if (record(info) && taskEnd === undefined && !["succeeded", "completed", "failed", "interrupted", "cancelled"].includes(String(info.outcome))) {
         return { status: "non_rescue", reason: "terminal_not_reconciled" };
       }
-      const descendants = payload(await session("children", { path: { id: child }, query: { directory: input.directory } }).catch(() => undefined));
-      if (!Array.isArray(descendants) || descendants.length !== 0) {
-        return { status: "non_rescue", reason: "terminal_not_reconciled" };
+      if (exact) return { status: "ready", terminal: saved };
+      if (!child || !attempt.callID || !record(info)) return { status: "non_rescue", reason: "terminal_record_unavailable" };
+      if (taskEnd === undefined) {
+        const history = await messages(owner).catch(() => undefined);
+        if (!history) return { status: "non_rescue", reason: "task_terminal_records_unavailable" };
+        const terminal = history.flatMap(message => record(message.info) && message.info.role === "assistant" &&
+          message.info.sessionID === owner && Array.isArray(message.parts) ? message.parts : [])
+          .filter(part => record(part) && part.type === "tool" && part.tool === "task" && part.callID === attempt.callID);
+        if (terminal.length !== 1 || !record(terminal[0]) || !record(terminal[0].state) ||
+            !["completed", "error"].includes(String(terminal[0].state.status))) return { status: "non_rescue", reason: "task_terminal_record_missing" };
+        const state = terminal[0].state;
+        if ((record(state.input) && (attempt.dispatchFingerprint ? missionTaskFingerprint(state.input) !== attempt.dispatchFingerprint
+            : !operators.matchesRecordedWorkerTask(run, attempt.unitID, state.input))) ||
+            (taskChildSessionID(state) !== undefined && taskChildSessionID(state) !== child)) return { status: "non_rescue", reason: "terminal_identity_conflict" };
+        taskEnd = state.status === "completed" ? "completed" : "failed";
       }
-      const terminalObserver = (control as unknown as { missionWorkerTerminal?:
-        (childSessionID: string, writeScopes: readonly string[]) => Promise<boolean> } | undefined)?.missionWorkerTerminal;
-      if (!terminalObserver) {
-        return { status: "non_rescue", reason: "terminal_not_reconciled" };
-      }
-      if (!await terminalObserver(child, run.units.find(unit => unit.unit.id === attempt.unitID)!.unit.write)) {
-        return { status: "non_rescue", reason: "writer_not_released" };
-      }
-      return { status: "ready", child };
+      const descendants: string[] = [];
+      const visit = async (id: string): Promise<string | undefined> => {
+        const children = payload(await session("children", { path: { id }, query: { directory: input.directory } }).catch(() => undefined));
+        if (!Array.isArray(children)) return "descendant_records_unavailable";
+        for (const entry of children) {
+          if (!record(entry) || typeof entry.id !== "string" || entry.parentID !== id || descendants.includes(entry.id)) return "terminal_identity_conflict";
+          const item = entry.outcome === undefined ? payload(await session("get", { path: { id: entry.id }, query: { directory: input.directory } }).catch(() => undefined)) : entry;
+          if (!record(item)) return "descendant_records_unavailable";
+          if (item.id !== entry.id || item.parentID !== id) return "terminal_identity_conflict";
+          if (!["succeeded", "completed", "failed", "interrupted", "cancelled"].includes(String(item.outcome))) return "descendant_dispatch_active";
+          descendants.push(entry.id);
+          const reason = await visit(entry.id);
+          if (reason) return reason;
+        }
+        return undefined;
+      };
+      const reason = await visit(child);
+      if (reason) return { status: "non_rescue", reason };
+      return { status: "ready", terminal: { runID: run.runID, unitID: attempt.unitID, taskID: attempt.taskID,
+        callID: attempt.callID, childSessionID: child, ownerSessionID: owner,
+        outcome: taskEnd === "failed" || ["failed", "interrupted", "cancelled"].includes(String(info.outcome)) ? "failed" : "completed", descendants } };
     }
     async function reconcileMissionDispatch(root: string): Promise<OperatorMission | undefined> {
       const mission = await missions.read(root);
@@ -1049,10 +1165,13 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       return identity;
     }
     tools[status] = { description: "Read the durable root-owned operator outcome and host budget counters (max_units, consumed_units, reserved_units, remaining_units) without claiming acceptance or retrying work. Omit view for the complete decision/evidence packet; view=progress returns a compact read-only projection of an existing Mission or execution run. Existing Mission dispatch reconciliation remains the same as in the complete status route. With no Mission or execution run, proposal/draft status remains unchanged. An investigating proposal returns its exact short Task reference only before a Task has been admitted; an existing admission never yields a redispatch Task.",
-      args: { view: optionalStringSchema }, execute: async (args, context) => {
+      args: { view: optionalStringSchema, confirmed_conditions: conditionsSchema as never }, execute: async (args, context) => {
         const view = (args as { view?: unknown }).view;
         const root = await rootFor(context.sessionID);
-        const mission = root && context.sessionID === root ? await reconcileMissionDispatch(root) : root ? await missions.read(root) : undefined;
+        let mission = root && context.sessionID === root ? await reconcileMissionDispatch(root) : root ? await missions.read(root) : undefined;
+        if (mission && (args as Record<string, unknown>).confirmed_conditions !== undefined) {
+          mission = await missions.recordLaunchConditions(root!, (args as Record<string, unknown>).confirmed_conditions);
+        }
         // Observation is available to every owned role. Only the root reconciles dispatch above.
         if (mission) {
           const budget = await control!.currentBudget(root!);
@@ -1491,6 +1610,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       } };
     tools[startMission] = { description: "Operator: save the current user requirements. Use intent=replace when the user changes an existing request (version, parallelism, target): host cancels the previous run and archives its requirements/results while retaining spend. If status reports mission-source-reconciliation-required and the saved requirements reflect that changed scope, call intent=replace with those exact requirements: the host repairs this mission in place and keeps its Coordinator. Supply the complete current requirements, retaining constraints the user has not changed. For separate work in a different location use intent=new. For one honest unit with an exact meaningful validation command, use plan_units and dispatch its Worker directly; after a returned failed Worker use one direct correction/retry when practical. Send the Coordinator for actual coordination or a contract that cannot be declared honestly. Item count, duration and independent review alone do not require a Coordinator.",
       args: { requirements: { ...stringList, minItems: 1, maxItems: 64 } as never,
+        confirmed_conditions: conditionsSchema as never,
+        prohibited_write: { ...stringList, description: "Only explicit user path prohibitions, never the complement of estimated unit.write.", "x-sortie-optional": true } as never,
         kind: { type: "string", enum: ["implementation", "operation"], description: "Use operation for running an existing benchmark, command or procedure. The host records its actual execution separately from setup and checks.", "x-sortie-optional": true } as never,
         intent: { type: "string", enum: ["", "continue", "new", "replace"], "x-sortie-optional": true } as never }, execute: async (args, context) => {
         await requireRoot(context.sessionID);
@@ -1527,6 +1648,12 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
               context: missionConversationContext(await messages(context.sessionID)),
               ...(args.intent === "replace" && cancelled?.phase === "cancelled" ? { cancelledRunID: cancelled.runID } : {}),
             });
+          const prohibited = (args as Record<string, unknown>).prohibited_write;
+          if (prohibited !== undefined) {
+            if (!Array.isArray(prohibited) || !prohibited.every(path => typeof path === "string")) throw new Error("mission-prohibited-write-invalid");
+            mission = await missions.update(context.sessionID, state => { state.prohibitedWrite = [...new Set([...(state.prohibitedWrite ?? []), ...prohibited.map(normalizeExecutionScope)])]; });
+          }
+          if ((args as Record<string, unknown>).confirmed_conditions !== undefined) mission = await missions.recordLaunchConditions(context.sessionID, (args as Record<string, unknown>).confirmed_conditions);
           if (sourceReconciliationRequired(mission, cancelled)) return JSON.stringify({ ...locationObservation(context.sessionID),
             ...missionDispatchPacket(mission, cancelled), budget: await control!.currentBudget(context.sessionID) });
           mission = await retainCancelledMissionAcceptance(context.sessionID, mission, cancelled);
@@ -1563,7 +1690,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         if (!unit || unit.status !== "failed" || unit.resultClass !== "acceptance" || unit.failure?.outcome !== "fail" ||
             unit.normalRemediationUsed || !attempt || attempt.kind !== "implementation" || attempt.status !== "failed" ||
             attempt.failure?.category !== "implementation") throw new Error("operator-mission-normal-remediation-unavailable");
-        const terminal = await missionWorkerTerminalProof(root, mission, run, attempt);
+        const terminal = await missionWorkerTerminalProof(root, mission, run, attempt, true);
         if (terminal.status !== "ready") {
           const packet = missionPacket(mission, run);
           return JSON.stringify({ ...packet, run_status: packet.status, status: "non_rescue", reason: terminal.reason });
@@ -1599,7 +1726,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             attempt.status !== "failed" || attempt.resultClass !== "acceptance" || attempt.failure?.category !== "implementation") {
           return nonRescue("normal_remediation_not_exhausted");
         }
-        const terminal = await missionWorkerTerminalProof(root, mission, run, attempt);
+        const terminal = await missionWorkerTerminalProof(root, mission, run, attempt, true);
         if (terminal.status !== "ready") return nonRescue(terminal.reason);
         const candidate = await missionReviewSource(input.directory, run, [], mission.reviewBaseline, mission.reviewScope);
         if (!attempt.candidateID || attempt.candidateID !== candidate.fingerprint) return nonRescue("accepted_candidate_changed");
@@ -1666,6 +1793,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           task: record(next) ? next.task : undefined, budget: await control!.currentBudget(root) });
       } };
     async function declareMissionUnits(root: string, actor: string, mission: OperatorMission, raw: unknown, reason?: string, execution?: unknown) {
+      await control!.currentBudget(root);
+      mission = await missions.required(root);
       const previous = await operators.read(root);
       if (sourceReconciliationRequired(mission, previous)) return JSON.stringify({ ...missionDispatchPacket(mission, previous),
         next_action: `Coordinator: do not repeat plan_units. Call ${submitMission} with status=blocked and report the saved ` +
@@ -1687,19 +1816,19 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         operation = { commands, directory, observations: operation?.observations ?? [] };
       }
       const plan = missionPlan(mission, raw);
+      assertMissionWritePaths(mission, plan.units.flatMap(unit => unit.write));
       if (actor === root && (mission.coordinator !== null || plan.units.length !== 1)) throw new Error("mission-coordinator-required: dispatch the returned Coordinator task");
       const same = previous?.planHash === createHash("sha256").update(JSON.stringify(plan)).digest("hex");
       const replanning = previous && !["completed", "cancelled"].includes(previous.phase) && !same;
       if (replanning) {
         if (!reason?.trim()) throw new Error("mission-replan-reason-required: name the observed correction or write-scope extension");
-        if (actor === root) for (const unit of previous.units) {
+        for (const unit of previous.units) {
           if (!unit.childSessionID) continue;
           const attempt = [...(mission.attempts ?? [])].reverse().find(item =>
             item.runID === previous.runID && item.unitID === unit.unit.id && item.childSessionID === unit.childSessionID);
-          if (!attempt || !["succeeded", "failed"].includes(attempt.status) ||
-              (await missionWorkerTerminalProof(root, mission, previous, attempt)).status !== "ready") {
-            throw new Error("mission-replan-worker-still-active");
-          }
+          const terminal = attempt ? await missionWorkerTerminalProof(root, mission, previous, attempt) :
+            { status: "non_rescue", reason: "terminal_record_missing" };
+          if (terminal.status !== "ready") throw new Error(`mission-replan-terminal-unreconciled:${"reason" in terminal ? terminal.reason : "unknown"}`);
         }
       }
       // A cancelled V2 delegate may leave its Worker Task running after the parent Task aborts.
@@ -1740,8 +1869,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           },
         }) : [];
       const dispatcher = actor === root ? undefined : { sessionID: actor, callID: mission.callID! };
-      const state = replanning ? await operators.replanMission(root, previous.runID, plan, dispatcher)
-        : await operators.prepareMission(root, plan, dispatcher, mission.supersededRunID, terminalChildren, mission.requirementsReplaced);
+      const context = { original_requests: mission.requests, requirements: mission.requirements, prohibited_write: mission.prohibitedWrite ?? [],
+        launch_conditions: mission.launchConditions ?? [] };
+      const state = replanning ? await operators.replanMission(root, previous.runID, plan, dispatcher, context)
+        : await operators.prepareMission(root, plan, dispatcher, mission.supersededRunID, terminalChildren, mission.requirementsReplaced, context);
       await control!.registerGoalDeclaration(root, state.units[0]!.task.prompt, true);
       control!.enableUnits(root, state.units.filter(unit => unit.status === "pending").length);
       await missions.update(root, item => {
@@ -1774,31 +1905,41 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           return await serializeDispatchTransition(root, () => declareMissionUnits(root, context.sessionID, mission,
             (args as Record<string, unknown>).units, args.reason, (args as Record<string, unknown>).execution));
         } catch (error) {
-          if (error instanceof Error && error.message === "mission-replan-worker-still-active") {
+          if (error instanceof Error && error.message.startsWith("mission-replan-terminal-unreconciled:")) {
             return JSON.stringify({ status: error.message, mission_id: mission.id,
-              next_action: (context.sessionID === root ? `Operator: do not repeat plan_units while a Worker is active. `
-                : `Coordinator: do not repeat plan_units or try ${cancel} (root-only). `) +
-                `If the Worker Task is still active, wait for its native completion. If its parent Task was interrupted, ` +
-                `submit_mission with status=blocked and report this code, the Worker/Task IDs and what did not run. ` +
-                `Operator root can then use ${cancel} with reason=plain to stop owned children and resume the request ` +
-                `through ${startMission} with intent=replace, preserving cumulative spend. No duplicate Worker.` });
+              next_action: "Inspect the named missing terminal/ownership record or active dispatch. Retain this mission, exact Task and cumulative budget; restore only the unavailable record or finish the active child before replanning. No cancel/replace or repair-only Worker is required." });
           }
           if (!(error instanceof OperatorContractError)) throw error;
           return JSON.stringify({ status: "invalid-plan", diagnostics: error.diagnostics, diagnostics_truncated: error.diagnostics_truncated,
             next_action: "Correct the reported field or control-storage problem and retry plan_units directly. Keep the original requirements and existing run; do not cancel or repeat passed work to repair the plan." });
         }
       } };
-    tools[expandUnit] = { description: "Coordinator: extend the stopped unit's write scope immediately within the original request. Keeps original requirements and cumulative budget; generates a replacement Worker contract. No Operator approval or handwritten manifest repair is needed. Use only after the Worker has returned.",
+    tools[expandUnit] = { description: "Owning Worker or Coordinator: correct an estimated write scope within the original request in this same active Task, unit and budget reservation. Concrete native paths are reconciled automatically; use this for shell outputs whose paths cannot be inferred. Explicit user prohibitions and host permissions remain in force. No approval, return or Worker restart is needed.",
       args: { unit_id: stringSchema, paths: stringList as never, reason: stringSchema }, execute: async (args, context) => {
-        const { root, mission } = await missionAuthority(context.sessionID);
+        const root = await rootFor(context.sessionID);
+        if (!root) throw new Error(RUNTIME_PROFILE_SESSION_INACTIVE);
+        const mission = await missions.required(root);
         return serializeDispatchTransition(root, async () => {
           const run = await operators.required(root);
-          if (run.units.some(unit => unit.status === "running")) throw new Error("mission-expansion-wait-for-worker-return");
           const paths = (args as Record<string, unknown>).paths;
           if (!Array.isArray(paths) || !paths.every(path => typeof path === "string") || !run.units.some(unit => unit.unit.id === args.unit_id)) throw new Error("mission-expansion-unit-or-paths-invalid");
-          const units = run.units.map(({ unit }) => ({ ...unit, requirement_ids: unit.acceptance_indices.map(i => mission.requirements[i]!.id),
-            write: unit.id === args.unit_id ? [...new Set([...unit.write, ...paths])] : unit.write }));
-          return declareMissionUnits(root, context.sessionID, mission, units, args.reason);
+          const unit = run.units.find(item => item.unit.id === args.unit_id)!;
+          if (unit.status === "running" && unit.childSessionID) {
+            if (context.sessionID !== unit.childSessionID && context.sessionID !== (mission.coordinator ?? root)) throw new Error("mission-scope-update-owner-required");
+            await control!.expandMissionWriteGate(unit.childSessionID, paths);
+            return JSON.stringify({ status: "scope-updated", unit_id: unit.unit.id, child_session_id: unit.childSessionID,
+              scope_write: (await operators.required(root)).units.find(item => item.unit.id === unit.unit.id)!.unit.write,
+              budget: await control!.currentBudget(root), next_action: "Continue the original operation and validation in this same Task. No redispatch." });
+          }
+          if (context.sessionID !== (mission.coordinator ?? root)) throw new Error("mission-scope-update-terminal-task");
+          const attempt = [...(mission.attempts ?? [])].reverse().find(item => item.runID === run.runID && item.callID === unit.callID);
+          if (!attempt || !unit.childSessionID) throw new Error("mission-scope-update-terminal-record-missing");
+          const terminal = await missionWorkerTerminalProof(root, mission, run, attempt);
+          if (terminal.status !== "ready") throw new Error(`mission-scope-update-terminal-unreconciled:${terminal.reason}`);
+          await runtimeBridge.expandMissionScope!(root, unit.childSessionID, attempt.taskID, paths, async () => async () => {});
+          return JSON.stringify({ status: "scope-updated", unit_id: unit.unit.id,
+            scope_write: (await operators.required(root)).units.find(item => item.unit.id === unit.unit.id)!.unit.write,
+            budget: await control!.currentBudget(root), next_action: "Host repaired the ended Task's contract without reviving it or consuming a unit. Continue Review/acceptance if evidence remains current; plan a continuation only for actual remaining implementation or required validation." });
         });
       } };
     tools[reviewMission] = { description: "Coordinator or direct Fast-lane root: prepare independent quality review from current source, original requirements and observed checks. Supply actual risk_tags (empty only for genuinely low risk); traces and focused excerpts are optional context, not a proof-writing gate. The Reviewer can read/search source directly when excerpts are clipped. Keep candidate lineage across corrections; repeat review for concrete fixes, not evidence formatting. A low-risk skip is recorded.",
@@ -1808,7 +1949,16 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           required: ["path", "offset", "limit"] }, description: "Focused excerpts from existing project files or declared external inputs/outputs. Project references need not be in the unit read/write scope. Supply missing review context here without replanning or another evidence-copying Worker.", "x-sortie-optional": true } as never,
         traces: { ...stringList, description: "Optional concise implementation notes. No R-ID labels or per-requirement proof required.", "x-sortie-optional": true } as never }, execute: async (args, context) => {
         const { root, mission } = await missionAuthority(context.sessionID);
+        await control!.currentBudget(root, { reconcileUsage: false });
         const run = await operators.required(root);
+        const currentMission = await missions.required(root);
+        for (const unit of run.units) {
+          if (!unit.childSessionID) continue;
+          const attempt = [...(currentMission.attempts ?? [])].reverse().find(item => item.runID === run.runID && item.callID === unit.callID);
+          if (!attempt) throw new Error("mission-review-terminal-unreconciled:terminal_record_missing");
+          const terminal = await missionWorkerTerminalProof(root, currentMission, run, attempt);
+          if (terminal.status !== "ready") throw new Error(`mission-review-terminal-unreconciled:${terminal.reason}`);
+        }
         if (run.phase !== "awaiting-acceptance") throw new Error("mission-review-awaits-unit-validation");
         // A source fingerprint alone would let a fresh Reviewer assess an edit against an old
         // Worker's successful check. Reuse the completion snapshot instead of adding a check run.
@@ -2097,6 +2247,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             textParts[0]!.text = admitted.prompt;
             const current = await operators.required(root);
             const activeUnit = current.units.find(unit => unit.status === "running" && unit.childSessionID === chat.sessionID);
+            const mission = await missions.read(root);
+            if (activeUnit?.callID && mission?.runID === current.runID) await missions.update(root, state => {
+              const exact = state.attempts?.find(attempt => attempt.runID === current.runID && attempt.unitID === activeUnit.unit.id && attempt.callID === activeUnit.callID);
+              if (exact) exact.childSessionID = chat.sessionID;
+            });
             if (activeUnit?.terminalRescue) missionRescueSelections.set(chat.sessionID, {
               attemptID: activeUnit.terminalRescue.attempt_id,
               model: activeUnit.terminalRescue.selected_model, variant: activeUnit.terminalRescue.selected_variant,
@@ -2415,6 +2570,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
               current.attempts.push({ attemptID: unit.terminalRescue?.attempt_id ?? randomUUID(), runID: admitted.runID,
                 unitID: unit.unit.id, taskID, ...(previousAttempt ? { predecessorAttemptID: previousAttempt.attemptID } : { predecessorAttemptID: null }),
                 kind, status: "dispatched", callID: request.callID,
+                dispatchFingerprint: missionTaskFingerprint(args),
                 ...(unit.terminalRescue ? { selectedModel: unit.terminalRescue.selected_model } :
                   typeof args.model === "string" ? { selectedModel: args.model } : {}) });
               current.attempts = current.attempts.slice(-64);
@@ -2601,6 +2757,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         if ((await identity(request.sessionID)).role === "dog-worker") {
           const context = await operators.workerContext(root, request.sessionID);
           if (context) (output.system ??= []).push(context);
+          const mission = await missions.read(root);
+          if (mission?.launchConditions?.length) (output.system ??= []).push(`Confirmed launch conditions (fixed caps, not remaining Worker/campaign budget): ${JSON.stringify(mission.launchConditions)}`);
         }
         const proposal = await proposals.read(root);
         if (proposal?.phase !== "approved" && proposal?.proposal_session_id === request.sessionID) {

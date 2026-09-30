@@ -135,6 +135,8 @@ for (const legacy of [false, true]) test(`V2 ${legacy ? "saved absolute" : "rela
     fixture = contextFixture();
     cleanup = await V2Plugin.setup({ ...fixture.context, location: { directory },
       session: { ...fixture.context.session,
+        list: async ({ parentID }) => ({ data: Object.entries(agents).filter(([, info]) => info.parentID === parentID)
+          .map(([id, info]) => ({ id, ...info })), cursor: { next: null } }),
         get: async ({ sessionID }) => ({ id: sessionID, ...agents[sessionID], model: { providerID: "openai",
           id: agents[sessionID]?.agent === "dog-worker-v010" ? "gpt-6-luna-fast" : "gpt-6-sol", variant: "max" } }),
         context: async ({ sessionID }) => history[sessionID] ?? [],
@@ -873,7 +875,7 @@ test("V2 compaction excludes Sortie schemas even when it bypasses the normal con
   } finally { cleanup?.(); }
 });
 
-test("V2 Worker can observe status without acquiring Coordinator control tools", async () => {
+test("V2 Worker can observe status and repair its scope without acquiring Coordinator control tools", async () => {
   const fixture = contextFixture();
   const cleanup = await V2Plugin.setup(fixture.context);
   try {
@@ -881,7 +883,7 @@ test("V2 Worker can observe status without acquiring Coordinator control tools",
     for (const agent of ["dog-worker-v010", "dog-luna-worker-v010"]) {
       const event = { sessionID: "worker", agent, system: [], tools: { ...exposed, read: {} } };
       await fixture.sessionHooks.get("context")!(event);
-      assert.deepEqual(Object.keys(event.tools).sort(), ["read", "sortie_v010_bind_write_gate", "sortie_v010_operator_status", "sortie_v010_release_write_gate"]);
+      assert.deepEqual(Object.keys(event.tools).sort(), ["read", "sortie_v010_bind_write_gate", "sortie_v010_expand_unit", "sortie_v010_operator_status", "sortie_v010_release_write_gate"]);
     }
   } finally { cleanup?.(); }
 });
