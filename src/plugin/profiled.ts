@@ -1025,12 +1025,13 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     }
     function missionProgress(mission: OperatorMission, run: OperatorState | undefined,
       budget: { readonly remaining_units: number } | null, packet: Record<string, unknown>) {
-      const units = run?.units ?? [];
+      const currentRun = packet.run_id === run?.runID ? run : undefined;
+      const units = currentRun?.units ?? [];
       const current = units.find(unit => unit.status !== "succeeded");
       return { profile: profile.id, view: "progress" as const, mission_id: mission.id,
         run_id: typeof packet.run_id === "string" ? packet.run_id : null,
         stage: typeof packet.status === "string" ? packet.status : mission.phase, mission_phase: mission.phase,
-        decision: run?.decision ?? null,
+        decision: currentRun?.decision ?? null,
         current_unit: current === undefined ? null : { id: current.unit.id, title: current.unit.title, status: current.status },
         completed_units: units.filter(unit => unit.status === "succeeded").length, total_units: units.length,
         budget_remaining_units: budget?.remaining_units ?? null,

@@ -721,6 +721,15 @@ test("explicit replacement links a cancelled legacy run without reviving its unr
   assert.equal(started.mission_id, unproven.mission_id, "repair the saved mission in place");
   assert.deepEqual(started.requirements.map((item: { text: string }) => item.text), requirements);
   assert.equal((await missions.required("root")).supersededRunID, previous.runID);
+  const full = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
+  const progress = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({ view: "progress" }, { sessionID: "root" }));
+  assert.equal(full.predecessor.run_id, previous.runID);
+  assert.equal(progress.run_id, null, "a predecessor is not the current mission's execution run");
+  assert.equal(progress.current_unit, null);
+  assert.equal(progress.total_units, 0);
+  assert.equal(progress.completed_units, full.execution_summary.completed_units);
+  assert.equal(progress.decision, null);
+  assert.equal(progress.next_action, full.next_action);
   const prepared = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ units: [{
     title: "Finish current stage", objective: "Validate only the new acceptance", read: [], write: ["result.txt"],
     validation: ["node check.mjs"], requirement_ids: ["R1", "R2"],

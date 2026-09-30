@@ -2043,8 +2043,6 @@ export class OperatorRuntime {
     if (!state) return undefined;
     const nextAction = this.continuationNextAction(state);
     if (nextAction === null) return undefined;
-    const cancelledRemediation = state.phase === "cancelled" &&
-      [ACCEPTANCE_REMEDIATION_DECISION, REVIEW_REMEDIATION_DECISION].includes(state.decision ?? "");
     const current = state.units.find(unit => unit.status !== "succeeded");
     return JSON.stringify({ authority: "durable-operator-state", root_session_id: state.rootSessionID,
       run_id: state.runID, generation: state.generation, sequence: state.sequence, plan_hash: state.planHash,
