@@ -105,8 +105,14 @@ export async function stopProcessGroup(child) {
 
 export async function startV2ReleaseServer(cwd, env, { inheritEnvironment = true } = {}) {
   const password = randomBytes(24).toString('hex');
-  const serverEnv = { ...(inheritEnvironment ? process.env : {}), ...env, PWD: cwd, OPENCODE_SERVER_PASSWORD: password };
-  const launch = nativeCLI('opencode', ['serve', '--hostname', '127.0.0.1', '--port', '0']);
+  // Public history is absent from V2's plugin context. Register this owned server
+  // in an isolated state directory so read-only Service.discover reaches its PID,
+  // never the user's shared service. Keep the actual session database unchanged.
+  const state = join(cwd, '.opencode', 'v2-service-state');
+  await mkdir(state, { recursive: true });
+  const serverEnv = { ...(inheritEnvironment ? process.env : {}), ...env, PWD: cwd,
+    XDG_STATE_HOME: state, OPENCODE_SERVER_PASSWORD: password };
+  const launch = nativeCLI('opencode', ['serve', '--service', '--hostname', '127.0.0.1', '--port', '0']);
   const child = spawn(launch.executable, launch.args, {
     cwd, env: serverEnv, shell: false, windowsHide: true, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
   });

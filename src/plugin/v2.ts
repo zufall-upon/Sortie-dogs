@@ -273,6 +273,10 @@ function toolSchema(args: Record<string, unknown>): JsonObject {
     const schema = plainSchema(value);
     if (optionalArgument(value)) {
       schema.description = `${typeof schema.description === "string" ? `${schema.description} ` : ""}Pass an empty string to omit this argument.`;
+      // Object-typed optional arguments otherwise force a model to manufacture blank
+      // required provenance fields. Admit the same omission sentinel we already decode.
+      if (schema.type === "object") return [name, { anyOf: [schema, { type: "string", enum: [""], minLength: 0, maxLength: 0 }],
+        description: schema.description }];
     }
     return [name, schema];
   })),
@@ -286,7 +290,8 @@ function toolSchema(args: Record<string, unknown>): JsonObject {
 function legacyToolArgs(input: unknown, args: Record<string, unknown>): Record<string, string> {
   const value = record(input) ? { ...input } : {};
   for (const [name, schema] of Object.entries(args)) {
-    if (optionalArgument(schema) && value[name] === "") delete value[name];
+    if (optionalArgument(schema) && (value[name] === "" || record(value[name]) &&
+        Object.values(value[name]).every(item => typeof item === "string" && !item.trim()))) delete value[name];
   }
   return value as Record<string, string>;
 }

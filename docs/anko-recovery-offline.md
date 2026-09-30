@@ -6,6 +6,9 @@ Branch: `fix/anko-lifecycle-contract-recovery`, based on
 `d19e8be0d21180cc23ad2ae4b853d846a18e77bc` (`origin/main`).
 Runtime/test candidate: `09487c0` (`fix: recover Anko mission lifecycle and in-task contracts`).
 PR: https://github.com/zufall-upon/Sortie-dogs/pull/146 (base: `main`).
+Subsequent user-authorized real-session findings and repairs are recorded in
+[`anko-recovery-live.md`](anko-recovery-live.md); the status below describes the
+original offline candidate, not the later live follow-up.
 This is an offline runtime fix, not a release or an Anko completion report.
 The original working tree, existing campaigns and historical Anko artifacts were
 not modified. No paid Worker/model campaign, publish or global apply was run.

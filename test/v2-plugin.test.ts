@@ -22,6 +22,7 @@ import { OperatorMissionRuntime, missionPlan } from "../dist/core/operator-missi
 import { OperatorRuntime } from "../dist/core/operator-runtime.js";
 import { missionProgressReader } from "../dist/plugin/mission-progress.js";
 import { completedMissionReviewPrompts, observedMissionValidation } from "../dist/plugin/mission-review.js";
+import { runtimeAssets } from "../dist/runtime-assets-v010.js";
 
 function contextFixture() {
   const history: Record<string, unknown>[] = [{
@@ -99,6 +100,36 @@ function contextFixture() {
   return { context, history, synthetic, tools, toolHooks, sessionHooks, permissionHooks, agentSwitches, modelSwitches, emit,
     failNextSynthetic: () => { failSynthetic = true; }, failNextContext: () => { failContext = true; }, aborted: () => aborted };
 }
+
+test("generated Mission Worker assets expose same-Task scope repair, not Coordinator controls", () => {
+  for (const name of ["dog-worker-v010", "dog-luna-worker-v010"]) {
+    const content = runtimeAssets.find(asset => asset.name === name)!.content;
+    assert.match(content, /sortie_v010_expand_unit: allow/);
+    assert.match(content, /sortie_v010_expand_unit: true/);
+    assert.doesNotMatch(content, /sortie_v010_(?:plan_units|complete_mission|cancel_operator): true/);
+  }
+});
+
+test("V2 optional condition objects admit omission without manufacturing provenance or erasing fixed facts", async () => {
+  const fixture = contextFixture();
+  const received: unknown[] = [];
+  const cleanup = await createSortieDogsV2Plugin(async () => ({ tool: { sortie_v010_conditions: {
+    description: "condition fixture", args: { confirmed_conditions: { type: "object", "x-sortie-optional": true,
+      required: ["source", "applies_to"], properties: { source: { type: "string" }, applies_to: { type: "string" } } } as never },
+    execute: async args => { received.push(args); return JSON.stringify(args); },
+  } } })).setup(fixture.context);
+  try {
+    const tool = fixture.tools.find(item => item.name === "sortie_v010_conditions") as any;
+    assert.equal(tool.input.properties.confirmed_conditions.anyOf[0].type, "object");
+    assert.deepEqual(tool.input.properties.confirmed_conditions.anyOf[1].enum, [""]);
+    for (const confirmed_conditions of ["", {}, { source: "", applies_to: "" }]) await tool.execute({ confirmed_conditions }, { sessionID: "root" });
+    const meaningful = { source: "User", applies_to: "original run" };
+    await tool.execute({ confirmed_conditions: meaningful }, { sessionID: "root" });
+    const invalid = { source: "", applies_to: "run", timeout_seconds: 0 };
+    await tool.execute({ confirmed_conditions: invalid }, { sessionID: "root" });
+    assert.deepEqual(received, [{}, {}, {}, { confirmed_conditions: meaningful }, { confirmed_conditions: invalid }]);
+  } finally { cleanup?.(); }
+});
 
 test("V2 native shell results retain build→test exits and timestamps through the Review history adapter", async () => {
   const fixture = contextFixture();
