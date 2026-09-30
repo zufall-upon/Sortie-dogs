@@ -239,6 +239,18 @@ export interface OperatorState {
   decision: string | null;
   receipt: GoalTerminalReceipt | null;
 }
+export interface OperatorProgress {
+  readonly profile: string;
+  readonly view: "progress";
+  readonly run_id: string;
+  readonly stage: OperatorPhase;
+  readonly decision: string | null;
+  readonly current_unit: { readonly id: string; readonly title: string; readonly status: UnitState["status"] } | null;
+  readonly completed_units: number;
+  readonly total_units: number;
+  readonly budget_remaining_units: number | null;
+  readonly next_action: string | null;
+}
 
 /** A later mission may replace an unexecuted cancellation, but must retain settled work's acceptance. */
 export function cancelledMissionRetainsAcceptance(state: OperatorState): boolean {
@@ -1890,6 +1902,16 @@ export class OperatorRuntime {
     }
     for (const unit of current.units) await this.verifyControls(unit);
   }
+  /** Compact, read-only projection of the same durable run and decision as the complete packet. */
+  progress(state: OperatorState, budgetRemainingUnits: number | null, nextAction?: string | null): OperatorProgress {
+    const current = state.units.find(unit => unit.status !== "succeeded");
+    const authoritativeAction = nextAction !== undefined ? nextAction
+      : this.continuationNextAction(state);
+    return { profile: state.profile, view: "progress", run_id: state.runID, stage: state.phase, decision: state.decision,
+      current_unit: current === undefined ? null : { id: current.unit.id, title: current.unit.title, status: current.status },
+      completed_units: state.units.filter(unit => unit.status === "succeeded").length, total_units: state.units.length,
+      budget_remaining_units: budgetRemainingUnits, next_action: typeof authoritativeAction === "string" ? authoritativeAction : null };
+  }
   packet(state: OperatorState): unknown {
     const proved = new Set(state.units.flatMap(unit => unit.evidence.flatMap(item => item.measurement.criterion_ids)));
     const current = state.units.find(unit => unit.status !== "succeeded");
@@ -2018,24 +2040,32 @@ export class OperatorRuntime {
   }
   async continuationCheckpoint(root: string): Promise<string | undefined> {
     const state = await this.read(root);
-    const cancelledRemediation = state?.phase === "cancelled" &&
+    if (!state) return undefined;
+    const nextAction = this.continuationNextAction(state);
+    if (nextAction === null) return undefined;
+    const cancelledRemediation = state.phase === "cancelled" &&
       [ACCEPTANCE_REMEDIATION_DECISION, REVIEW_REMEDIATION_DECISION].includes(state.decision ?? "");
-    if (!state || state.phase === "completed" || (state.phase === "cancelled" && !cancelledRemediation)) return undefined;
     const current = state.units.find(unit => unit.status !== "succeeded");
     return JSON.stringify({ authority: "durable-operator-state", root_session_id: state.rootSessionID,
       run_id: state.runID, generation: state.generation, sequence: state.sequence, plan_hash: state.planHash,
       status: state.phase, current_unit_id: current?.unit.id ?? null, current_unit_status: current?.status ?? null,
-       next_task_ref: current?.status === "pending" ? (state.units.length > 1
-         ? state.operatorSessionID === null ? this.dispatchTask(state).prompt : null
-         : current.repairValidation === null ? this.workerTask(state, current).prompt : this.repairWorkerTask(state, current).prompt) : null,
-         next_action: state.decision === ACCEPTANCE_REMEDIATION_DECISION || state.decision === REVIEW_REMEDIATION_DECISION
-          ? `call ${this.profile.toolPrefix}operator_status and execute its cancel-then-replacement next_action in this turn; do not stop after reporting status or call resume_operator`
-         : state.phase === "awaiting-acceptance" ? `call ${this.profile.toolPrefix}operator_status and follow its independent-review next_action; do not complete before review disposition`
-         : state.phase === "prepared" ? "call operator_status, then operator_next; dispatch only the exact returned Task"
-        : state.phase === "running" ? "call operator_status; do not duplicate the running Task"
-          : state.phase === "cancelled"
-            ? `call ${this.profile.toolPrefix}operator_status and execute its prepare_operator next_action in this turn; do not stop after reporting status`
-            : `call ${this.profile.toolPrefix}operator_status and execute its exact next_action in this turn; do not stop after reporting status` });
+        next_task_ref: current?.status === "pending" ? (state.units.length > 1
+          ? state.operatorSessionID === null ? this.dispatchTask(state).prompt : null
+          : current.repairValidation === null ? this.workerTask(state, current).prompt : this.repairWorkerTask(state, current).prompt) : null,
+      next_action: nextAction });
+  }
+  private continuationNextAction(state: OperatorState): string | null {
+    const cancelledRemediation = state.phase === "cancelled" &&
+      [ACCEPTANCE_REMEDIATION_DECISION, REVIEW_REMEDIATION_DECISION].includes(state.decision ?? "");
+    if (state.phase === "completed" || (state.phase === "cancelled" && !cancelledRemediation)) return null;
+    return state.decision === ACCEPTANCE_REMEDIATION_DECISION || state.decision === REVIEW_REMEDIATION_DECISION
+      ? `call ${this.profile.toolPrefix}operator_status and execute its cancel-then-replacement next_action in this turn; do not stop after reporting status or call resume_operator`
+      : state.phase === "awaiting-acceptance" ? `call ${this.profile.toolPrefix}operator_status and follow its independent-review next_action; do not complete before review disposition`
+        : state.phase === "prepared" ? "call operator_status, then operator_next; dispatch only the exact returned Task"
+          : state.phase === "running" ? "call operator_status; do not duplicate the running Task"
+            : state.phase === "cancelled"
+              ? `call ${this.profile.toolPrefix}operator_status and execute its prepare_operator next_action in this turn; do not stop after reporting status`
+              : `call ${this.profile.toolPrefix}operator_status and execute its exact next_action in this turn; do not stop after reporting status`;
   }
   private controlReference(path: string): string {
     const local = relative(this.projectRoot, path);

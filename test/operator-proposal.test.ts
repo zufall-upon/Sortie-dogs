@@ -1681,6 +1681,11 @@ test("proposal tool returns bounded typed proof diagnostics and accepts correcte
   assert.equal(Object.hasOwn(proposalOnly, "dispatch_instruction"), false);
   assert.match(proposalOnly.next_action, /already admitted; do not redispatch it or call operator_next/u);
   assert.match(proposalOnly.next_action, /same active claimed child/u);
+  const proposalProgress = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({ view: "progress" }, { sessionID: "root" }));
+  assert.equal(proposalProgress.proposal.task_admitted, true, "progress view without an execution run preserves proposal visibility");
+  assert.equal(proposalProgress.next_action, proposalOnly.next_action);
+  assert.equal(Object.hasOwn(proposalProgress, "task"), false, "an admitted proposal must not be redispatched");
+  assert.equal(Object.hasOwn(proposalProgress, "dispatch_instruction"), false);
   await assert.rejects(hooks.tool!.sortie_v010_operator_next.execute({}, { sessionID: "root" }), /operator-run-missing/);
 
   const firstCommand = "node test/shared-first.mjs", secondCommand = "node test/shared-second.mjs";
