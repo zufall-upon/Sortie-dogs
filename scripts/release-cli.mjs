@@ -49,8 +49,8 @@ export function v013StartupReceipt(result) {
     'v013 did not observe a clean native Worker start');
   const worker = result.models.find(item => item.agent === 'dog-worker-v010');
   const operator = result.models.find(item => item.sessionID === result.root && item.agent === 'dog-operator');
-  assert(operator?.model?.providerID === 'openai' && operator.model.id === 'gpt-6-sol' && operator.model.variant === 'xhigh',
-    'Mission Operator must actually run on Sol/xhigh');
+  assert(operator?.model?.providerID === 'openai' && operator.model.id === 'gpt-6.1-sol' && operator.model.variant === 'xhigh',
+    'Mission Operator must actually run on GPT-6.1 Sol/xhigh');
   assert(worker?.model?.providerID === 'openai' && worker.model.id === 'gpt-6-luna-fast' && worker.model.variant === 'max' &&
     Number.isFinite(worker.started_ms) && worker.started_ms >= 0, 'Mission Worker must actually start on Luna Fast/max');
   assert(/^0\.13\.\d+$/.test(result.package_version) && result.runtime_marker?.startsWith(`${result.package_version}-`),
@@ -256,7 +256,7 @@ export async function inside(tgz, directory, profileId = 'stable', { capUSD = 1,
     // timeout runs in WSL: Windows killing wsl.exe alone does not establish guest process cleanup.
     return jsonEvents(await command('timeout', ['--signal=TERM', '--kill-after=10s', `${timeoutSeconds}s`, 'opencode', 'run',
       ...runLocationArgsForOpenCodeVersion(cliVersion, project, v2Server?.url), '--format', 'json', '--print-logs', '--agent', coordinatorAgent,
-      ...(Number.parseInt(cliVersion.split('.')[0], 10) >= 2 ? ['--model', 'openai/gpt-6-sol#xhigh'] : []),
+      ...(Number.parseInt(cliVersion.split('.')[0], 10) >= 2 ? ['--model', 'openai/gpt-6.1-sol#xhigh'] : []),
       ...(sessionID ? ['--session', sessionID] : []), prompt], project, cliEnv, (timeoutSeconds + 40) * 1_000));
   }
   const executeSmoke = async () => {

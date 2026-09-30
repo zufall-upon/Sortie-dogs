@@ -12,8 +12,8 @@ export interface RoleModelRoute {
 
 export type ModelRoutingConfig = Readonly<Record<string, RoleModelRoute>>;
 
-/** The stable serial implementation route stays on Sol when Luna fan-out is unsafe or unavailable. */
-export const DEDICATED_WORKER_MODEL = "openai/gpt-6-sol";
+/** The stable serial implementation route stays on GPT-6.1 Sol when Luna fan-out is unsafe or unavailable. */
+export const DEDICATED_WORKER_MODEL = "openai/gpt-6.1-sol";
 export const DEDICATED_WORKER_VARIANT = "medium";
 
 /** Luna executes only units admitted to the fabric; it is not the serial worker's fallback target. */
@@ -21,11 +21,11 @@ export const LUNA_FABRIC_WORKER_MODEL = "openai/gpt-6-luna";
 export const LUNA_FABRIC_WORKER_VARIANT = "max";
 export const LUNA_FABRIC_WORKER_ROLE = "dog-luna-worker";
 
-/** The coordinator uses Sol 6 High so routing and progress decisions do not bottleneck the workflow. */
-export const DEFAULT_COORDINATOR_MODEL = "openai/gpt-6-sol";
+/** The coordinator uses GPT-6.1 Sol High so routing and progress decisions do not bottleneck the workflow. */
+export const DEFAULT_COORDINATOR_MODEL = "openai/gpt-6.1-sol";
 export const DEFAULT_COORDINATOR_VARIANT = "high";
 
-/** Compatibility names retained for the pre-v0.8 explicit Sol target. */
+/** Compatibility names retained for the pre-v0.8 explicit Sol route. */
 export const ESCALATION_WORKER_MODEL = DEDICATED_WORKER_MODEL;
 export const ESCALATION_WORKER_VARIANT = DEDICATED_WORKER_VARIANT;
 
@@ -102,7 +102,7 @@ const fixedModelRoleSet = new Set<string>(Object.keys(FIXED_MODEL_ROUTING));
 
 export const RECOMMENDED_LUNA_MODEL = LUNA_FABRIC_WORKER_MODEL;
 
-/** Coordinator state and routing use Sol 6 High; bounded evidence retrieval uses Luna High. */
+/** Coordinator state and routing use GPT-6.1 Sol High; bounded evidence retrieval uses Luna High. */
 export const DEFAULT_COORDINATOR_ROUTING: ModelRoutingConfig = Object.freeze({
   "dog-coordinator": Object.freeze({
     preferred: Object.freeze({
@@ -220,14 +220,7 @@ export const BUILT_IN_MODEL_CATALOG: ModelCatalog = Object.freeze({
   global: Object.freeze([
     Object.freeze({
       model: DEFAULT_COORDINATOR_MODEL,
-      variants: Object.freeze([DEFAULT_COORDINATOR_VARIANT]),
-    }),
-    Object.freeze({
-      model: DEDICATED_WORKER_MODEL,
-      variants: Object.freeze(
-        [DEDICATED_WORKER_VARIANT, CONSULTATION_FALLBACK_VARIANT]
-          .filter((variant, index, all) => all.indexOf(variant) === index),
-      ),
+      variants: Object.freeze(["low", "medium", "high", "xhigh", "max"]),
     }),
     Object.freeze({
       model: LUNA_FABRIC_WORKER_MODEL,

@@ -397,8 +397,7 @@ test("recommended coordinator and Luna routes cover exact installed roles and re
   assert.deepEqual(defaults.modelCatalog.global, [
     {
       model: DEFAULT_COORDINATOR_MODEL,
-      variants: [DEFAULT_COORDINATOR_VARIANT, DEDICATED_WORKER_VARIANT, CONSULTATION_FALLBACK_VARIANT]
-        .filter((variant, index, all) => all.indexOf(variant) === index),
+      variants: ["low", "medium", "high", "xhigh", "max"],
     },
     {
       model: LUNA_FABRIC_WORKER_MODEL,
@@ -2422,7 +2421,7 @@ test("chat message hook applies explicit catalog routing and fails closed with o
       { id: "provider", models: { "local-primary": { id: "local-primary" } } },
       { id: "openai", models: {
         "gpt-6-luna": { id: "gpt-6-luna" },
-        "gpt-6-sol": { id: "gpt-6-sol" },
+        "gpt-6.1-sol": { id: "gpt-6.1-sol" },
       } },
     ] } }) } };
     const hooks = await SortieDogsPlugin({ directory, client }, {
@@ -2474,7 +2473,7 @@ test("chat message hook applies explicit catalog routing and fails closed with o
     await chat({ sessionID: "routing", agent: "dog-coordinator" }, coordinator);
     assert.deepEqual(coordinator.message.model, {
       providerID: "openai",
-      modelID: "gpt-6-sol",
+      modelID: "gpt-6.1-sol",
       variant: DEFAULT_COORDINATOR_VARIANT,
     });
     for (const role of RECOMMENDED_CONSULTATION_ROLES) {
@@ -2485,7 +2484,7 @@ test("chat message hook applies explicit catalog routing and fails closed with o
       await chat({ sessionID: `routing-${role}`, agent: role }, consultation);
       assert.deepEqual(consultation.message.model, {
         providerID: "openai",
-        modelID: "gpt-6-sol",
+        modelID: "gpt-6.1-sol",
         variant: "xhigh",
       }, `${role} never keeps the caller model`);
     }
@@ -2536,7 +2535,7 @@ test("model routing rewrites only targets present in the cached host provider li
   });
 });
 
-test("consultation routing uses Sol xhigh before free tier when Opus is absent from the host", async () => {
+test("consultation routing uses GPT-6.1 Sol xhigh before free tier when Opus is absent from the host", async () => {
   await withProject("model-routing-consultation-host-fallback", async (directory) => {
     await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
     const hooks = await SortieDogsPlugin({
@@ -2545,12 +2544,12 @@ test("consultation routing uses Sol xhigh before free tier when Opus is absent f
         // The legacy configured-provider catalog can contain models hidden from the current picker.
         config: { providers: async () => ({ data: { providers: [
           { id: "anthropic", models: { "claude-opus-5": { id: "claude-opus-5" } } },
-          { id: "openai", models: { "gpt-6-sol": { id: "gpt-6-sol" } } },
+          { id: "openai", models: { "gpt-6.1-sol": { id: "gpt-6.1-sol" } } },
         ] } }) },
         provider: { list: async () => ({ data: {
           all: [
             { id: "anthropic", models: { "claude-opus-5": { id: "claude-opus-5" } } },
-            { id: "openai", models: { "gpt-6-sol": { id: "gpt-6-sol" } } },
+            { id: "openai", models: { "gpt-6.1-sol": { id: "gpt-6.1-sol" } } },
             { id: "opencode", models: { "deepseek-v4-flash-free": { id: "deepseek-v4-flash-free" } } },
           ],
           connected: ["openai", "opencode"],
@@ -2570,7 +2569,7 @@ test("consultation routing uses Sol xhigh before free tier when Opus is absent f
       await chat({ sessionID: `consultation-host-fallback-${role}`, agent: role }, output);
       assert.deepEqual(output.message.model, {
         providerID: "openai",
-        modelID: "gpt-6-sol",
+        modelID: "gpt-6.1-sol",
         variant: CONSULTATION_FALLBACK_VARIANT,
       });
     }
@@ -2798,7 +2797,7 @@ test("every packaged role follows default routing independently of write-gate ac
       id: "openai",
       models: {
         "gpt-6-luna": { id: "gpt-6-luna" },
-        "gpt-6-sol": { id: "gpt-6-sol" },
+        "gpt-6.1-sol": { id: "gpt-6.1-sol" },
       },
     }] } }) } };
     const hooks = await SortieDogsPlugin({ directory, client });
@@ -2807,13 +2806,13 @@ test("every packaged role follows default routing independently of write-gate ac
     const expected: Record<string, { providerID: string; modelID: string; variant?: string }> = {
       "dog-coordinator": {
         providerID: "openai",
-        modelID: "gpt-6-sol",
+        modelID: "gpt-6.1-sol",
         variant: DEFAULT_COORDINATOR_VARIANT,
       },
       "dog-scout": { providerID: "openai", modelID: "gpt-6-luna", variant: RECOMMENDED_SCOUT_VARIANT },
-      "dog-worker": { providerID: "openai", modelID: "gpt-6-sol", variant: DEDICATED_WORKER_VARIANT },
-      "dog-reviewer": { providerID: "openai", modelID: "gpt-6-sol", variant: CONSULTATION_FALLBACK_VARIANT },
-      "dog-advisor": { providerID: "openai", modelID: "gpt-6-sol", variant: CONSULTATION_FALLBACK_VARIANT },
+      "dog-worker": { providerID: "openai", modelID: "gpt-6.1-sol", variant: DEDICATED_WORKER_VARIANT },
+      "dog-reviewer": { providerID: "openai", modelID: "gpt-6.1-sol", variant: CONSULTATION_FALLBACK_VARIANT },
+      "dog-advisor": { providerID: "openai", modelID: "gpt-6.1-sol", variant: CONSULTATION_FALLBACK_VARIANT },
     };
     for (const [role, target] of Object.entries(expected)) {
       // A consultation or evidence session carries no /sortie trigger and no worker handoff.
@@ -6885,7 +6884,7 @@ test("proven silent consultation agents get isolated parent-scoped fallback retr
     const client = {
       config: { providers: async () => ({ data: { providers: [
         { id: "anthropic", models: { "claude-opus-5": { id: "claude-opus-5" } } },
-         { id: "openai", models: { "gpt-6-sol": { id: "gpt-6-sol" } } },
+         { id: "openai", models: { "gpt-6.1-sol": { id: "gpt-6.1-sol" } } },
       ] } }) },
       session: {
         get: async ({ path }: { path: { id: string } }) => ({ data: identities[path.id] }),
@@ -6897,7 +6896,7 @@ test("proven silent consultation agents get isolated parent-scoped fallback retr
     const hooks = await SortieDogsPlugin({ directory, client }, {
       modelCatalog: { global: [
         { model: RECOMMENDED_CONSULTATION_MODEL },
-         { model: "openai/gpt-6-sol", variants: [CONSULTATION_FALLBACK_VARIANT] },
+          { model: "openai/gpt-6.1-sol", variants: [CONSULTATION_FALLBACK_VARIANT] },
       ] },
     });
     const chat = hooks["chat.message"]!;
@@ -6929,7 +6928,7 @@ test("proven silent consultation agents get isolated parent-scoped fallback retr
       await chat({ sessionID: retryChild, agent: role, parentID: "parent" } as never, retryDispatch);
       assert.deepEqual(retryDispatch.message.model, {
         providerID: "openai",
-         modelID: "gpt-6-sol",
+         modelID: "gpt-6.1-sol",
         variant: CONSULTATION_FALLBACK_VARIANT,
       });
       const secondSilent = emptyTask(retryChild, "parent");

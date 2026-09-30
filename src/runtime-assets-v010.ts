@@ -90,7 +90,7 @@ permission rejection shows a different project root, do not repeat that path; re
 export const legacyCoordinatorContent = `---
 description: Sortie-dogs ${V010_RUNTIME_ASSET_VERSION} primary dog-operator — strategic authority with a bounded operations delegate.
 mode: primary
-model: openai/gpt-6-sol
+model: openai/gpt-6.1-sol
 variant: xhigh
 permission:
   question: allow
@@ -351,7 +351,7 @@ export const legacyOperatorContent = `---
 description: Sortie-dogs ${V010_RUNTIME_ASSET_VERSION} hidden dogs-coordinator operations delegate; no source or acceptance authority.
 mode: subagent
 hidden: true
-model: openai/gpt-6-sol#xhigh
+model: openai/gpt-6.1-sol#xhigh
 permission:
   edit: deny
   bash: deny
@@ -425,7 +425,7 @@ export const runtimeAssets: readonly RuntimeAsset[] = Object.freeze([
       content = content.replace("mode: subagent\n", "mode: subagent\nmodel: openai/gpt-6-luna-fast#max\n");
     }
     if (["dog-reviewer", "dog-advisor"].includes(asset.name)) {
-      content = content.replace("mode: subagent\n", "mode: subagent\nmodel: openai/gpt-6-sol#xhigh\n");
+      content = content.replace("mode: subagent\n", "mode: subagent\nmodel: openai/gpt-6.1-sol#xhigh\n");
     }
     if (asset.name === "dog-worker" || asset.name === "dog-luna-worker") {
       content = content.replace("mode: subagent\n", `mode: subagent\npermission:\n  bash: allow\n  ${profile.toolPrefix}bind_write_gate: allow\n  ${profile.toolPrefix}release_write_gate: allow\n  ${profile.toolPrefix}operator_status: allow\ntools:\n  "sortie_*": false\n  ${profile.toolPrefix}bind_write_gate: true\n  ${profile.toolPrefix}release_write_gate: true\n  ${profile.toolPrefix}operator_status: true\n`);

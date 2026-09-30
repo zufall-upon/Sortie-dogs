@@ -605,7 +605,7 @@ async function initializeRoot(
   };
 }
 
-export const V010_COORDINATOR_MODEL = "openai/gpt-6-sol#xhigh";
+export const V010_COORDINATOR_MODEL = "openai/gpt-6.1-sol#xhigh";
 
 /**
  * Report a user config that routes the v0.10 Coordinator away from its packaged model. Measured Luna

@@ -48,7 +48,7 @@ test("runner starts without a dist build, even after its script is moved to an i
 
 test("benchmark-local pricing matches the product estimator across supported routes and failure cases", () => {
   for (const [providerID, modelID] of [
-    ...["gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-6-luna-fast", "gpt-5.6-sol",
+    ...["gpt-6-astra", "gpt-6-sol", "gpt-6.1-sol", "gpt-6.1-sol-fast", "gpt-6-luna", "gpt-6-luna-fast", "gpt-5.6-sol",
       "gpt-5.6", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6-luna-fast"].map(model => ["openai", model]),
     ["anthropic", "claude-opus-5"], ["anthropic", "claude-opus-5-5"],
     ["unknown", "unknown-model"],
@@ -72,7 +72,7 @@ test("benchmark waits for the selected model and variant before starting a V2 se
     fetchModel: async (url: string, options: { headers: { authorization: string } }) => {
       assert.equal(url, "http://127.0.0.1:12345/api/model");
       assert.match(options.headers.authorization, /^Basic /u);
-      return { ok: true, json: async () => ({ data: calls++ === 0 ? [] : [{ providerID: "openai", id: "gpt-6-sol",
+      return { ok: true, json: async () => ({ data: calls++ === 0 ? [] : [{ providerID: "openai", id: "gpt-6.1-sol",
         variants: [{ id: "xhigh" }] }] }) };
     },
   });

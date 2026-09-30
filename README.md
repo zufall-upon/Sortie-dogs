@@ -214,7 +214,7 @@ not invent, probe, or translate variant names.
 - `freeTierFallbackModels`: ordered global last-resort model IDs. Default:
   `opencode/deepseek-v4-flash-free`; `[]` disables this fallback.
 - `dedicatedWorkerModel`: canonical stable serial target, default
-  `openai/gpt-6-sol` / `medium`. The v0.10 profile also supplies its explicit
+  `openai/gpt-6.1-sol` / `medium`. The v0.10 profile also supplies its explicit
   role routes below; do not infer the v0.10 worker route from this stable setting.
 - `consultation.strategy`: fixed advisor identity, optional `required`, and
   positive `maxCallsPerCandidate`; default one call and not required.
@@ -251,14 +251,14 @@ or explicit risk. Workers own static, targeted, and related checks; the root own
 canonical and full-suite checks. An unchanged candidate, command, and environment
 reuse the same evidence instead of spending the validation budget again.
 
-### Default v0.12 routes
+### Default routes
 
-- `dog-operator`: `openai/gpt-6-sol` / `xhigh`
-- `dogs-coordinator`: `openai/gpt-6-sol` / `xhigh`
+- `dog-operator`: `openai/gpt-6.1-sol` / `xhigh`
+- `dogs-coordinator`: `openai/gpt-6.1-sol` / `xhigh`
 - `dog-worker-v010`: `openai/gpt-6-luna-fast` / `max`
 - `dog-scout-v010`: `openai/gpt-6-luna-fast` / `max`
-- `dog-reviewer-v010`: `openai/gpt-6-sol` / `xhigh`
-- `dog-advisor-v010`: `openai/gpt-6-sol` / `xhigh`
+- `dog-reviewer-v010`: `openai/gpt-6.1-sol` / `xhigh`
+- `dog-advisor-v010`: `openai/gpt-6.1-sol` / `xhigh`
 
 An explicit model and variant selected in OpenCode remains authoritative for that
 session. Child role defaults fill absent native settings and may be overridden by

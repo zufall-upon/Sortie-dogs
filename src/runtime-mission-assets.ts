@@ -52,7 +52,7 @@ export function missionOperatorContent(profile: RuntimeProfile, version: string)
   return `---
 description: Sortie-dogs ${version} Operator — original requirements, user decisions and final acceptance.
 mode: primary
-model: openai/gpt-6-sol
+model: openai/gpt-6.1-sol
 variant: xhigh
 permission:
   question: allow
@@ -267,7 +267,7 @@ export function missionCoordinatorContent(profile: RuntimeProfile, version: stri
 description: Sortie-dogs ${version} Coordinator — investigation, unit dispatch, scope extension and correction loop.
 mode: subagent
 hidden: true
-model: openai/gpt-6-sol#xhigh
+model: openai/gpt-6.1-sol#xhigh
 permission:
   edit: deny
   write: deny

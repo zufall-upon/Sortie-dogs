@@ -3,6 +3,7 @@
 const OPENAI = {
   "gpt-6-astra": { input: 10, cacheRead: 1, cacheWrite: 12.5, output: 50 },
   "gpt-6-sol": { input: 2, cacheRead: 0.2, cacheWrite: 2.5, output: 10 },
+  "gpt-6.1-sol": { input: 2, cacheRead: 0.1, cacheWrite: 2.5, output: 10 },
   "gpt-6-luna": { input: 0.1, cacheRead: 0.01, cacheWrite: 0.125, output: 0.5 },
   "gpt-5.6-sol": { input: 4, cacheRead: 0.4, cacheWrite: 5, output: 20 },
   "gpt-5.6": { input: 4, cacheRead: 0.4, cacheWrite: 5, output: 20 },
@@ -22,14 +23,16 @@ export function estimateModelUsageCost(usage) {
   const counts = [usage.uncachedInputTokens, usage.cacheReadTokens, usage.cacheWriteTokens,
     usage.outputTokens, usage.reasoningTokens];
   if (!counts.every(tokenCount)) return { status: "unpriced", reason: "missing-usage" };
-  const alias = usage.providerID?.toLowerCase() === "openai" && usage.modelID === "gpt-6-luna-fast";
+  const lunaFastAlias = usage.providerID?.toLowerCase() === "openai" && usage.modelID === "gpt-6-luna-fast";
+  const sol61FastAlias = usage.providerID?.toLowerCase() === "openai" && usage.modelID === "gpt-6.1-sol-fast";
+  const alias = lunaFastAlias || sol61FastAlias;
   const fast = alias || (["fast", "priority"].includes(usage.serviceTier?.toLowerCase() ?? "") &&
-    usage.providerID?.toLowerCase() === "openai" && ["gpt-6-sol", "gpt-6-luna"].includes(usage.modelID ?? ""));
+    usage.providerID?.toLowerCase() === "openai" && ["gpt-6-sol", "gpt-6.1-sol", "gpt-6-luna"].includes(usage.modelID ?? ""));
   if (usage.serviceTier !== undefined && !(fast ? ["standard", "default", "fast", "priority"] : ["standard", "default"]).includes(usage.serviceTier.toLowerCase())) {
     return { status: "unpriced", reason: "unsupported-service-tier" };
   }
   const provider = usage.providerID?.toLowerCase();
-  const model = alias ? "gpt-6-luna" : usage.modelID;
+  const model = lunaFastAlias ? "gpt-6-luna" : sol61FastAlias ? "gpt-6.1-sol" : usage.modelID;
   const base = provider === "openai" && model !== undefined && Object.hasOwn(OPENAI, model) ? OPENAI[model]
     : provider === "anthropic" && model !== undefined && Object.hasOwn(ANTHROPIC, model) ? ANTHROPIC[model] : undefined;
   if (base === undefined) return { status: "unpriced", reason: "unknown-model" };
