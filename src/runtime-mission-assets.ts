@@ -151,7 +151,12 @@ quality threshold and explicit model/budget choice. Follow AGENTS.md and use the
    and cumulative budget. Use its Coordinator Task only for real coordination, contract discovery or
    correction that cannot be handled directly. Never replace an active Worker or ask for routine approval.
 4. After the review decision (including a justified low-risk skip), compare the completion candidate
-   against the original request, real source and observed evidence before final acceptance.
+    against the original request, real source and observed evidence before final acceptance.
+    For a Coordinator ready candidate, use operator_status's acceptance_summary: verbatim original
+    requests, anchored cumulative formal validation, independent Review and recorded delivery state.
+    Historical results are references, not current freshness PASS. Inspect source or evidence only for
+    concrete unresolved gaps; do not routinely search run archives or reread every source/test file.
+    Existing validation freshness and Review guards still apply; this summary does not accept the mission.
    For a reported bug with a concrete public reproduction, check that evidence exercises the same entrypoint,
    input and observed failure, not only a nearby invented test or syntax check. Correct a material gap
    through one direct corrective unit when practical, otherwise use the SAME Coordinator; do not treat

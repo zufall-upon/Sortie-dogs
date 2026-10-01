@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
-import { lstat, mkdir, open, readFile, realpath, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, readdir, realpath, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { acceptanceContinuityFingerprint, inspectAcceptanceContinuity, normalizeAcceptanceCriteria,
@@ -465,6 +465,42 @@ export class OperatorRuntime {
   }
   private file(root: string): string {
     return join(this.projectRoot, this.profile.stateDirectory, "operators", `${hash(root)}.json`);
+  }
+  /** Exact persisted source for read-only status projections. */
+  statePath(root: string): string { return this.file(root); }
+  /** Read-only lineage projection. Never imports archived evidence into current acceptance. */
+  async acceptanceHistory(state: OperatorState, missionRunIDs: readonly string[]): Promise<{
+    status: "available" | "unavailable"; runs: { path: string; state: OperatorState }[]; reason?: string;
+  }> {
+    const runs: { path: string; state: OperatorState }[] = [];
+    let parent = state.parentRunID;
+    const seen = new Set([state.runID]);
+    try {
+      if (!parent || parent === state.supersededRunID) return { status: "available", runs };
+      const file = this.file(state.rootSessionID);
+      const directory = join(this.projectRoot, this.profile.stateDirectory, "operators");
+      const names = await readdir(directory);
+      while (parent && parent !== state.supersededRunID) {
+        if (seen.has(parent) || !missionRunIDs.includes(parent)) throw new Error("same-mission-lineage-unavailable");
+        seen.add(parent);
+        const prefix = `${file.slice(directory.length + 1)}.${parent}.`;
+        const candidates = names.filter(name => name.startsWith(prefix) && /^\d+\.archive$/u.test(name.slice(prefix.length)))
+          .sort((a, b) => Number(b.slice(prefix.length).split(".")[0]) - Number(a.slice(prefix.length).split(".")[0]));
+        if (!candidates[0]) throw new Error("lineage-archive-missing");
+        const path = join(directory, candidates[0]);
+        const previous = JSON.parse(await readFile(path, "utf8")) as OperatorState;
+        if (previous.schema_version !== state.schema_version || previous.profile !== state.profile ||
+            previous.rootSessionID !== state.rootSessionID || previous.runID !== parent || !Array.isArray(previous.units) ||
+            !Array.isArray(previous.sourceRefs) || previous.sourceRefs.some(ref => !state.sourceRefs.includes(ref))) {
+          throw new Error("lineage-archive-identity-mismatch");
+        }
+        runs.push({ path, state: previous });
+        parent = previous.parentRunID;
+      }
+      return { status: "available", runs };
+    } catch (error) {
+      return { status: "unavailable", runs, reason: error instanceof Error ? error.message : String(error) };
+    }
   }
   async read(root: string): Promise<OperatorState | undefined> {
     await this.writes.get(root);

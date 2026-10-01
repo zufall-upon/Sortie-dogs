@@ -47,6 +47,30 @@ export function observedMissionValidation(validation: readonly string[], childSe
     omitted_attempts: attempts.length - shown.length };
 }
 
+/** Summary-only native reader: unavailable API/error is not a successfully observed empty history. */
+export async function observedMissionValidationSummary(validation: readonly string[], childSessionID: string,
+  read?: () => Promise<unknown>): Promise<Record<string, unknown>> {
+  if (!read) throw new Error("native-worker-history-api-unavailable");
+  const response = await read();
+  if (record(response) && response.error !== undefined && response.error !== null) throw new Error("native-worker-history-api-error");
+  const data = record(response) && "data" in response ? response.data : response;
+  if (!Array.isArray(data)) throw new Error("native-worker-history-response-not-array");
+  const observed = observedMissionValidation(validation, childSessionID, data.filter(record));
+  const grouped = new Map<string, { command: string; exit_code: number | null; observed_attempts: number;
+    latest_started_ms: number | null; latest_completed_ms: number | null }>();
+  for (const attempt of observed.attempts) {
+    const key = JSON.stringify([attempt.command, attempt.exit_code]);
+    const previous = grouped.get(key);
+    grouped.set(key, { command: attempt.command, exit_code: attempt.exit_code,
+      observed_attempts: (previous?.observed_attempts ?? 0) + 1,
+      latest_started_ms: attempt.started_ms, latest_completed_ms: attempt.completed_ms });
+  }
+  return { commands: [...grouped.values()], not_observed: observed.not_observed,
+    omitted_attempts: observed.omitted_attempts,
+    details_ref: { method: "session.messages", session_id: childSessionID,
+      omitted: "full native tool records and repeated attempts; summary contains only declared commands and observed exits" } };
+}
+
 /** Use the space left by short references for longer requested branches, without starving later references. */
 function focusedAllowances(sizes: readonly number[], budget: number): number[] {
   const allowances = sizes.map(() => 0);

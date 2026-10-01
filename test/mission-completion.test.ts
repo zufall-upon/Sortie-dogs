@@ -33,7 +33,8 @@ for (const mode of ["implementation", "executed", "NO_START", "legacy-background
       root: { agent: "dog-operator" }, coordinator: { agent: "dogs-coordinator", parentID: "root" },
       worker: { agent: "dog-worker-v010", parentID: "coordinator" }, reviewer: { agent: "dog-reviewer-v010", parentID: "coordinator" },
     };
-    const create = () => SortieDogsV010Plugin({ directory: root, returnReportTransport: "tool-result", client: { session: {
+    let latestSession: Record<string, unknown>;
+    const create = () => SortieDogsV010Plugin({ directory: root, returnReportTransport: "tool-result", client: { session: latestSession = {
       get: async ({ path }: { path: { id: string } }) => ({ data: { id: path.id, ...identities[path.id] } }),
       children: async ({ path }: { path: { id: string } }) => ({ data: Object.entries(identities)
         .filter(([, info]) => info.parentID === path.id).map(([id, info]) => ({ id, ...info })) }),
@@ -138,12 +139,34 @@ for (const mode of ["implementation", "executed", "NO_START", "legacy-background
       { sessionID: "coordinator" }), /mission-review-required-or-stale/);
     await writeFile(join(root, "reference.md"), reference);
     assert.equal((await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root")).coordinator, "coordinator");
-    await hooks.tool!.sortie_v010_submit_mission.execute({ status: "ready", summary: "Validated result, reviewed independently" }, { sessionID: "coordinator" });
+    const submittedText = await hooks.tool!.sortie_v010_submit_mission.execute({ status: "ready", summary: "Validated result, reviewed independently" }, { sessionID: "coordinator" });
+    assert.equal(Object.keys(JSON.parse(submittedText))[0], "acceptance_summary", "summary precedes the full authority packet");
     identities.coordinator!.outcome = "succeeded";
     await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "coordinator-call" }, { output: "ready", metadata: { sessionId: "coordinator" } });
     const cold = await create();
     const status = async () => JSON.parse(await cold.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
     assert.equal((await status()).completion.ready, true);
+    assert.equal(Object.keys(await status())[0], "acceptance_summary");
+    if (mode === "implementation") {
+      const emptyNative = (await status()).acceptance_summary.native_declared_validation[0];
+      assert.equal(emptyNative.status, "available");
+      assert.deepEqual(emptyNative.observations.commands, []);
+      assert.deepEqual(emptyNative.observations.not_observed, ["node check.mjs"]);
+      for (const [historyMode, reason] of [["missing", "native-worker-history-api-unavailable"],
+        ["error", "native-worker-history-api-error"], ["invalid", "native-worker-history-response-not-array"]] as const) {
+        // Root role is already observed in this live instance. Change only the summary reader's API
+        // availability; a cold root with no recovery API is a different existing host contract.
+        const normalMessages = latestSession!.messages;
+        if (historyMode === "missing") delete latestSession!.messages;
+        else latestSession!.messages = async () => historyMode === "error"
+          ? { data: undefined, error: { message: "unavailable" } } : { data: {} };
+        const observed = await status();
+        latestSession!.messages = normalMessages;
+        assert.equal(observed.completion.ready, true, "history display failure adds no acceptance gate");
+        assert.equal(observed.acceptance_summary.native_declared_validation[0].status, "unavailable");
+        assert.equal(observed.acceptance_summary.native_declared_validation[0].reason, reason);
+      }
+    }
     // The oracle is read-only and therefore outside the review diff. Completion must still name it.
     await writeFile(join(root, "check.mjs"), validator + "// changed after validation\n");
     const blocked = JSON.parse(await cold.tool!.sortie_v010_complete_mission.execute({}, { sessionID: "root" }));

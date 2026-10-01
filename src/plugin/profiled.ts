@@ -16,11 +16,11 @@ import { decoratePreviewHeadings, returnReportPanel } from "./receipt-presentati
 import { sanitizeTerminalReport, terminalRunOutcome } from "./run-metrics.js";
 import { normalizeCommand } from "./gate.js";
 import { normalizeExecutionScope, normalizeManifestScope, normalizeRelativePath } from "../core/path.js";
-import { OperatorMissionRuntime, missionPacket, missionPlan, missionReviewAccepted, missionReviewScope, missionReviewTask,
+import { OperatorMissionRuntime, missionAcceptanceSummary, missionPacket, missionPlan, missionReviewAccepted, missionReviewScope, missionReviewTask,
   missionCommandOutcome, missionConversationContext, missionExecutionStatus, missionValidationCommand, missionReviewTraces, missionReviewVerdict, type OperatorMission } from "../core/operator-mission.js";
 import { publishMissionProgress } from "./mission-progress.js";
 import { completedMissionReviewPrompts, initialMissionReviewPrompt, missionReviewBaseline, missionReviewSource,
-  observedMissionValidation } from "./mission-review.js";
+   observedMissionValidation, observedMissionValidationSummary } from "./mission-review.js";
 import { missionLocations, missionLocationPacket } from "./mission-location.js";
 import { prepareValidationScratch } from "./validation-scratch.js";
 import { SOURCE_REVIEW_RISK_TAGS } from "../core/consultation.js";
@@ -227,6 +227,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     async function messages(id: string): Promise<readonly Record<string, unknown>[]> {
       const result = payload(await session("messages", { path: { id }, query: { directory: input.directory } }));
       return Array.isArray(result) ? result.filter(record) : [];
+    }
+    async function acceptanceValidationObservation(validation: readonly string[], child: string | null) {
+      if (!child) throw new Error("native-worker-history-session-unavailable");
+      return observedMissionValidationSummary(validation, child, typeof nativeSession?.messages === "function"
+        ? () => session("messages", { path: { id: child }, query: { directory: input.directory } }) : undefined);
     }
     async function reviewMessages(id: string): Promise<readonly Record<string, unknown>[]> {
       const result = payload(await session(typeof nativeSession?.reviewMessages === "function" ? "reviewMessages" : "messages",
@@ -1178,7 +1183,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           const budget = await control!.currentBudget(root!);
           const run = await operators.read(root!);
           const completion = run?.phase === "awaiting-acceptance" ? await control!.completionReadiness(root!) : undefined;
-          const packet = { ...missionDispatchPacket(mission, run), budget,
+           const acceptanceSummary = await missionAcceptanceSummary(mission, run, operators, acceptanceValidationObservation);
+           const packet = { acceptance_summary: acceptanceSummary, ...missionDispatchPacket(mission, run), budget,
             ...(completion ? { completion, ...(!completion.ready ? { next_action: mission.coordinator === null &&
                 completion.blockers.some(item => item.reason === "source-changed" || item.reason === "candidate-changed")
                 ? `Fast-lane: source or candidate changed after formal validation. Call ${planUnits} with reason and ` +
@@ -2055,7 +2061,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         }
         const updated = await missions.update(root, state => { state.phase = "submitted";
           state.submission = { status: args.status as "ready" | "needs-decision" | "blocked", summary: args.summary }; });
-        return JSON.stringify({ ...missionPacket(updated, await operators.read(root)), next_action: "Return this result to Operator now. Completion still requires its final comparison and complete_mission receipt." });
+         const submittedRun = await operators.read(root);
+         return JSON.stringify({ acceptance_summary: await missionAcceptanceSummary(updated, submittedRun, operators, acceptanceValidationObservation),
+           ...missionPacket(updated, submittedRun),
+           next_action: "Return this result and acceptance_summary to Operator now. Compare the original requests with the candidate and actual evidence; inspect concrete gaps only, then complete_mission if satisfied. No routine archive search or full source reread. Completion still requires its final comparison and complete_mission receipt." });
       } };
     tools[completeMission] = { description: "Operator only: after comparing the original request, source, actual checks and required independent review, explicitly accept the whole mission. Returns the measured 🐾 report on success; never treat Worker start or one passing check as completion.",
       args: {}, execute: async (_args, context) => {
