@@ -659,6 +659,29 @@ test("correction execution permits focused tests/formatter/generator; formal pro
   } finally { await f.dispose(); }
 });
 
+for (const effect of ["allow", "ask", "deny"] as const) test(`correction shell sink keeps native ${effect}, Reviewer read-only and real output prohibitions`, async () => {
+  const f = await fixture();
+  try {
+    await initial(f);
+    const sink = process.platform === "win32" ? "NUL" : "/dev/null";
+    const command = `printf diagnostic 2>${sink}`;
+    await assert.rejects(f.before("author", "shell", { command }), /mission-reviewer-readonly/);
+    f.agentRules["dog-reviewer-v010"] = [{ action: "shell", resource: command, effect }];
+    await f.start();
+    const prepared = await f.tool("root", "repair_review"), dispatch = await f.before("root", "subagent", f.task(prepared.task));
+    await f.prompt("author", dispatch.input.prompt); await f.bind("author");
+    assert.equal(await f.permission("author", "shell", command), effect, "sink classification never grants native allow over ask/deny");
+    if (effect === "deny") await assert.rejects(f.before("author", "shell", { command }), /native permission denied shell/);
+    else await f.shell("author", command);
+    assert.equal((await f.run()).units[0]!.reviewerCorrection!.checks, undefined, "a sink diagnostic is not inherited formal proof");
+    await f.missions.update("root", state => { state.prohibitedWrite = ["result.txt"]; });
+    await assert.rejects(f.before("author", "shell", { command: `printf forbidden > result.txt 2>${sink}` }), /mission-explicit-write-prohibition/);
+    assert.equal(await readFile(join(f.directory, "result.txt"), "utf8"), "wrong\n");
+    await assert.rejects(f.tool("root", "complete_mission"), /incomplete|validation/);
+    await f.tool("root", "cancel_operator", { reason: "explicit-cancellation" });
+  } finally { await f.dispose(); }
+});
+
 for (const absolute of [false, true]) for (const declared of [false, true]) test(`correction known outputs use native ${absolute ? "absolute" : "relative"} shell workdir for prohibitions and write union: ${declared ? "declared text in other cwd" : "diagnostic"}`, async () => {
   const f = await fixture();
   try {

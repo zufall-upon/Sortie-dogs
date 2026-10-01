@@ -500,13 +500,17 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
     let assignment = false;
     const syntax = scanShellSyntax(source, dialect);
     for (const match of syntax.masked.matchAll(redirection)) {
-      applies = true;
       const target = redirectionTarget.exec(source.slice(match.index + match[0].length))?.[1];
+      // Only an output redirect to this host's literal discard device is pathless.
+      // Device mutations and real outputs in the same command still require their usual scope.
+      const destination = target === undefined ? undefined : unquote(target);
+      if (destination !== undefined && (process.platform === "win32" ? /^nul$/iu.test(destination) : destination === "/dev/null")) continue;
+      applies = true;
       if (target === undefined || target.startsWith("&")) {
         ambiguous = true;
         issue ??= commandIssue(source, "redirect-target-unresolved", "name one manifest-scoped output path");
       } else {
-        paths.push(unquote(target));
+        paths.push(destination!);
       }
     }
     if (syntax.unsafeExpansion) {
