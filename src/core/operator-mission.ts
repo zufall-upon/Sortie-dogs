@@ -95,6 +95,8 @@ export interface OperatorMission {
   requests: MissionRequest[];
   /** Prior public conversation context, not additional immutable requirements. */
   context?: MissionContext[];
+  /** Explicit continue deliveries, keyed by the original real turn. */
+  steering?: { requestID: string; child: string; status: "pending" | "queued" }[];
   kind?: "implementation" | "operation";
   /** Native shell observations of the requested operation, separate from auxiliary checks. */
   execution?: MissionExecution;
@@ -126,6 +128,7 @@ export interface OperatorMission {
   progress: { unit: string; title: string; status: string; at: string }[];
   submission: { status: "ready" | "needs-decision" | "blocked"; summary: string } | null;
   review?: { runID: string; risk: string[]; source: string; task: OperatorTask | null;
+    callID?: string;
     evidence?: MissionEvidenceExcerpt[];
     requestFingerprint?: string;
     verdict: "pending" | "PASS" | "findings" | "evidence-gaps" | "skipped-low-risk"; result?: string; child?: string;
@@ -284,11 +287,6 @@ export class OperatorMissionRuntime {
     await this.serial(root, async () => {
       // Captured before prompt rewriting, including exact whitespace. Never ask a model to recopy it.
       await this.save(this.file(root, ".request"), request);
-      const state = await this.loadMission(root);
-      if (state && !["completed", "cancelled"].includes(state.phase) && !state.requests.some(item => item.id === request.id)) {
-        state.requests.push(request);
-        await this.save(this.file(root), state);
-      }
     });
   }
   recordLaunchConditions(root: string, raw: unknown): Promise<OperatorMission> {
@@ -323,6 +321,8 @@ export class OperatorMissionRuntime {
           throw new Error("mission-requirements-preserved: keep the existing ordered requirements and append user additions");
         }
         previous.requirements = requirements.map((text, index) => ({ id: `R${index + 1}`, text }));
+        // Only an explicit Mission action adopts the latest real turn; chat capture alone never does.
+        if (!previous.requests.some(item => item.id === request.id)) previous.requests.push(request);
         if (options.kind === "operation") previous.kind = "operation";
         await this.save(this.file(root), previous);
         return previous;

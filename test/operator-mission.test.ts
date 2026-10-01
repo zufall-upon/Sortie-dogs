@@ -135,11 +135,12 @@ test("mission captures exact original messages, generates IDs, and preserves req
   const cold = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
   const restored = await cold.required("root");
   assert.equal(restored.id, mission.id);
-  assert.deepEqual(restored.requests, [{ id: "u1", text: " Fix this.\r\nDo not change tests.  " }, { id: "u2", text: "Also preserve the newline." }]);
+  assert.deepEqual(restored.requests, [{ id: "u1", text: " Fix this.\r\nDo not change tests.  " }], "chat capture alone never adopts a requirement");
   assert.deepEqual(restored.requirements.map(item => item.id), ["R1", "R2"]);
   await assert.rejects(cold.start("root", ["Only fix a smaller part"]), /requirements-preserved/);
   const extended = await cold.start("root", ["Fix result", "Do not change tests", "Preserve newline"]);
   assert.equal(extended.id, mission.id);
+  assert.deepEqual(extended.requests, [{ id: "u1", text: " Fix this.\r\nDo not change tests.  " }, { id: "u2", text: "Also preserve the newline." }]);
 }));
 
 test("mission status preserves review lineage without presenting an old run as currently accepted", async () => fixture(async directory => {
@@ -444,6 +445,7 @@ test("a later user turn can replace a cancelled mission without inheriting its o
   await assert.rejects(operators.prepareMission("root", missionPlan(sameTurn, [{ ...unit, requirement_ids: ["R1", "R2"] }])),
     /operator-acceptance-carry-forward-required/);
   await missions.capture("root", { id: "u2", text: "Use v0.12.4 and start a new mission" });
+  await missions.start("root", sameTurn.requirements.map(item => item.text));
   await missions.update("root", state => { state.phase = "cancelled"; state.runID = oldRun.runID; });
   const replacement = await missions.start("root", ["Run v0.12.4", "Keep cumulative budget"]);
   assert.equal(replacement.supersededRunID, oldRun.runID);
@@ -519,6 +521,7 @@ test("cancelled no-run successor preserves the old run's supersession across ano
   const intermediate = await missions.start("root", ["New package"]);
   assert.equal(intermediate.supersededRunID, run.runID);
   await missions.capture("root", { id: "latest-request", text: "Continue with five failed instances" });
+  await missions.start("root", intermediate.requirements.map(item => item.text));
   await missions.update("root", state => { state.phase = "cancelled"; });
   const current = await missions.start("root", ["Inspect the five failed instances"]);
   assert.equal(current.supersededRunID, run.runID);

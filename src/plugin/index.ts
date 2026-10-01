@@ -192,6 +192,8 @@ export interface OpenCodePluginInput {
   runtimeBridge?: RuntimeBridge;
   /** V2 has no assistant-part update API; return the canonical panel with explicit acceptance. */
   returnReportTransport?: "tool-result";
+  /** Native background Job ownership, persisted by the V2 adapter. */
+  nativeBackground?: { awaiting(sessionID: string): Promise<boolean> };
   /** The host SDK client. Absent in hosts that construct the plugin without one. */
   client?: SessionMessageReader & RunMetricsClient & ContinuationClient & OpenCodeModelAvailabilityClient & {
     app?: {
@@ -220,6 +222,8 @@ export interface OpenCodeEvent {
 }
 
 export interface OpenCodeHooks {
+  /** Internal adapter transport; retains the existing profile owner across reload. */
+  backgroundOwner?: (callID: string, restore?: Record<string, unknown>) => Record<string, unknown> | undefined;
   event?: (input: { event: OpenCodeEvent }) => Promise<void>;
   "permission.ask"?: (
     input: { permission: string; patterns: string[]; sessionID?: string },
@@ -1988,6 +1992,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     }
   }
   async function recoverCompletedGoalReservations(sessionID: string): Promise<void> {
+    if (await input.nativeBackground?.awaiting(sessionID)) return;
     const root = goalRoot(sessionID);
     const active = goalReservationRecoveries.get(root);
     if (active !== undefined) return active;
@@ -2716,8 +2721,23 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const reservation = goalReservations.get(callID);
     if (reservation === undefined) return;
     const ledger = await goalLedger(reservation.root);
-    const state = (await ledger.readGoal()).state;
+    const snapshot = await ledger.readGoal(), state = snapshot.state;
     if (state.goal_id === null || !state.outstanding_reservations.some(item => item.reservation_id === reservation.reservationID)) {
+      // The ledger append can succeed before the profile's durable projection fails. Replaying
+      // that same receipt repairs the projection without settling cost/reservation a second time.
+      const settled = snapshot.records.find(({ event }) => event.kind === "unit.settled" &&
+        event.reservation_id === reservation.reservationID && event.goal_id === state.goal_id)?.event;
+      if (settled?.kind === "unit.settled") {
+        const child = taskChildSessionID(output) ?? settled.native_session_id;
+        const failed = [...hostGoalExecutions.values()].find(execution => execution.root === reservation.root &&
+          execution.sessionID === child && execution.endedAt !== undefined && execution.outcome === "fail" &&
+          Date.parse(execution.startedAt) >= reservation.started - 1000);
+        await input.runtimeBridge?.onSerialSettlement?.({ rootSessionID: reservation.root, callID, unitID: settled.unit_id,
+          ...(child ? { childSessionID: child } : {}), disposition: settled.disposition, evidence: settled.evidence,
+          resultClass: settled.result_class ?? "process-defect", nativeOutcome: output.status === "error" || output.status === "cancelled" ? "failed" : "completed",
+          ...(settled.result_class === "acceptance" && failed ? { failure: { command: failed.command.slice(0, 8),
+            outcome: "fail" as const, exitCode: failed.exitCode ?? null } } : {}) });
+      }
       goalReservations.delete(callID);
       return;
     }
@@ -2774,7 +2794,6 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       evidence: settlementEvidence, elapsed_ms: Math.max(0, Date.now() - reservation.started),
       cost_usd: await nativeUnitCost(childSessionID, new Date(reservation.started).toISOString()),
       ...(childSessionID ? { native_session_id: childSessionID, native_started_at: new Date(reservation.started).toISOString() } : {}) });
-    goalReservations.delete(callID);
     await input.runtimeBridge?.onSerialSettlement?.({
       rootSessionID: reservation.root, callID, unitID: reservation.unitID,
       ...(childSessionID === undefined ? {} : { childSessionID }),
@@ -2785,6 +2804,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         exitCode: failedAcceptanceExecution.exitCode ?? null,
       } } : {}),
     });
+    goalReservations.delete(callID);
     if (childSessionID !== undefined) {
       goalValidationDefects.delete(childSessionID);
       for (const [executionCallID, execution] of hostGoalExecutions) {
@@ -4849,6 +4869,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   }
 
   async function sweepCoordinatorTaskWatchdog(sessionID: string, generation: number): Promise<void> {
+    if (await input.nativeBackground?.awaiting(sessionID)) {
+      clearCoordinatorTaskWatchdog(sessionID);
+      return;
+    }
     if (terminalCoordinatorTaskWatchdogs.has(sessionID)) return;
     const state = coordinatorTaskWatchdogs.get(sessionID);
     const calls = coordinatorTaskCalls.get(sessionID);
@@ -6240,6 +6264,22 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   }
 
   const hooks: OpenCodeHooks = {
+    backgroundOwner: (callID, restore) => {
+      if (restore && isRecord(restore.reservation)) {
+        const reservation = restore.reservation as unknown as NonNullable<ReturnType<typeof goalReservations.get>>;
+        goalReservations.set(callID, reservation);
+        const calls = coordinatorTaskCalls.get(reservation.root) ?? new Set<string>();
+        calls.add(callID);
+        coordinatorTaskCalls.set(reservation.root, calls);
+        if (Array.isArray(restore.executions)) for (const entry of restore.executions) {
+          if (Array.isArray(entry) && typeof entry[0] === "string" && isRecord(entry[1])) hostGoalExecutions.set(entry[0], entry[1] as unknown as HostGoalExecution);
+        }
+      }
+      const reservation = goalReservations.get(callID);
+      return reservation ? { reservation, calls: [...(coordinatorTaskCalls.get(reservation.root) ?? [])], executions: [...hostGoalExecutions]
+        .filter(([, execution]) => execution.root === reservation.root && execution.endedAt !== undefined)
+        .map(([id, { validation: _validation, ...execution }]) => [id, execution]) } : undefined;
+    },
     tool: {
       sortie_execute_adaptive_remediation: defineTool({
         description: "Auto-select and execute one bounded adaptive remediation from .opencode/sortie-dogs-adaptive-remediation.json using hidden Git candidates, the shared flight ledger, one canonical validation, independent review, CAS, and post-merge verification.",
@@ -6971,6 +7011,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
      * erases an answer the worker already produced and the coordinator re-dispatches the same work.
     */
     "tool.execute.after": async (toolInput, output): Promise<void> => {
+      if (toolInput.tool === "task" && isRecord(output.metadata) && output.metadata.status === "running") {
+        if (toolInput.sessionID) clearCoordinatorTaskWatchdog(toolInput.sessionID);
+        return;
+      }
       await recordHostGoalEnd(toolInput, output);
       // A completed host question is a new user-interaction boundary, just like chat input.
       // It authorizes one subsequent typed declaration; it does not itself grant budget or clear a stop.
@@ -7128,6 +7172,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
               appLogInfo("goal.settlement_failed", toolInput.sessionID!, {
                 code: error instanceof Error ? error.name : "unknown",
               });
+              throw error;
             });
           }
           fastLane.workerCompleted(toolInput.sessionID!);
@@ -7908,9 +7953,11 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           }
         }
       }
-      if (event.type === "session.idle") await continuation.sessionIdle(eventSessionID);
+      const awaitingBackground = event.type === "session.idle" && await input.nativeBackground?.awaiting(eventSessionID);
+      if (event.type === "session.idle" && !awaitingBackground) await continuation.sessionIdle(eventSessionID);
       if (event.type === "session.idle" && isCoordinatorSession(eventSessionID)) {
-        abortCoordinatorTasks(eventSessionID, true);
+        if (awaitingBackground) clearCoordinatorTaskWatchdog(eventSessionID);
+        else abortCoordinatorTasks(eventSessionID, true);
       }
       const diagnostic = diagnosisChildren.get(eventSessionID);
       if (event.type === "session.idle" && diagnostic !== undefined && !diagnostic.accepting) {
@@ -7923,6 +7970,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       if (!isActiveSession(eventSessionID)) return;
       if (event.type !== "session.idle") touchActiveSession(eventSessionID);
       if (event.type === "session.idle" && eventSessionID !== undefined) {
+        if (awaitingBackground) { touchActiveSession(eventSessionID); return; }
         if (childLifecycles.has(eventSessionID)) {
           observedChildTerminals.set(eventSessionID, true);
           const lease = sessionAuthorizations.get(eventSessionID)?.lease;

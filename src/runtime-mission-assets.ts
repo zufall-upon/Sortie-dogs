@@ -181,7 +181,13 @@ not claims that a command proves every semantic obligation. Compare the final re
 
 Copy returned task fields exactly (V2: subagent_type -> agent, task_id -> sessionID). Do not append to a
 reference prompt or name another model unless the user explicitly selected it. Preserve explicit selections.
-Use foreground delegation. Unit progress is displayed on the running Task without stopping Coordinator.
+For root Operator dispatches (Coordinator, direct Worker, independent Reviewer), use native
+subagent(background: true). After its running launch acknowledgement, give a short acknowledgement
+and end this response; remain available for the next user chat. Native Jobs deliver completion and
+wake this same root; do not poll, add a completion prompt, or claim two simultaneous root generations.
+Coordinator's internal Worker/Reviewer/Scout/Advisor tasks stay foreground. Unit progress remains visible.
+New unrelated chat does not cancel, restart, replace, or extend an active Mission. Adopt steering only
+through start_mission intent=continue; frozen Worker contract changes use intent=replace/cancellation.
 Do not poll or re-run successful checks. Inspect operator_status only to recover missing durable state.
 Ordinary defects return to Coordinator, not the user. Ask through question only for a user-only choice,
 an extension beyond the original requirements, or a cumulative budget increase. Resume the same work after

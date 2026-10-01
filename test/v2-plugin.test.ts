@@ -55,6 +55,11 @@ function contextFixture() {
     app: { version: "2.0.11" },
     location: { directory: process.cwd(), project: { id: "fixture" } },
     options: {},
+    storage: (() => { const state = new Map<string, unknown>(); return {
+      get: async (key: string) => structuredClone(state.get(key)),
+      set: async (key: string, value: unknown) => { state.set(key, structuredClone(value)); },
+      remove: async (key: string) => { state.delete(key); },
+    }; })(),
     agent: { transform: async () => ({ dispose() {} }), get: async ({ agentID }) => ({ model: {
       providerID: "openai", id: agentID === "dog-worker-v010" ? "gpt-6-luna-fast" : "gpt-6-sol",
       variant: agentID === "dog-worker-v010" ? "max" : "xhigh",
@@ -654,7 +659,7 @@ test("V2 missing child-list API recovers nested model gauges from native Task hi
   } finally { cleanup?.(); }
 });
 
-test("V2 operator dispatch rejects background before admission and accepts explicit foreground", async () => {
+test("V2 operator references admit native background and preserve explicit foreground compatibility", async () => {
   const fixture = contextFixture();
   const seen: Record<string, unknown>[] = [];
   const context: OpenCodeV2Context = { ...fixture.context, agent: {
@@ -667,16 +672,56 @@ test("V2 operator dispatch rejects background before admission and accepts expli
   try {
     for (const prompt of ["SORTIE_OPERATOR_DELEGATE_REF {}", "SORTIE_OPERATOR_TASK_REF {}", "SORTIE_OPERATOR_PROPOSAL_TASK_REF {}"]) {
       const input = { agent: "dogs-coordinator", description: "exact", prompt, background: true };
-      await assert.rejects(async () => fixture.toolHooks.get("execute.before")!({ tool: "subagent", input, sessionID: "root", id: "call" }),
-        /operator-background-dispatch-not-supported: retry the same exact Task with background omitted or false/);
-      assert.equal(seen.length, 0, "rejected transport must not reach admission or reserve budget");
+      await fixture.toolHooks.get("execute.before")!({ tool: "subagent", input, sessionID: "root", id: prompt });
+      assert.equal(seen.at(-1)!.background, true, "native admission retains the Job flag");
     }
+    seen.length = 0;
     const event = { tool: "subagent", input: { agent: "dogs-coordinator", description: "exact",
       prompt: "SORTIE_OPERATOR_DELEGATE_REF {}", background: false }, sessionID: "root", id: "call" };
     await fixture.toolHooks.get("execute.before")!(event);
     assert.deepEqual(seen, [{ subagent_type: "dogs-coordinator", description: "exact", prompt: "SORTIE_OPERATOR_DELEGATE_REF {}" }]);
     assert.deepEqual(event.input, { agent: "dogs-coordinator", description: "exact", prompt: "SORTIE_OPERATOR_DELEGATE_REF {}" });
   } finally { if (typeof dispose === "function") dispose(); }
+});
+
+for (const role of ["dogs-coordinator", "dog-worker-v010", "dog-reviewer-v010"]) test(`V2 native ${role} running launch returns original ack; completion calls existing after exactly once`, async () => {
+  const fixture = contextFixture();
+  const childHistory: Record<string, unknown>[] = [];
+  const seen: string[] = [];
+  let complete!: () => void;
+  const completed = new Promise<void>(resolve => { complete = resolve; });
+  let restored = false;
+  const context: OpenCodeV2Context = { ...fixture.context, session: { ...fixture.context.session,
+    get: async ({ sessionID }) => ({ id: sessionID, agent: sessionID === "root" ? "dog-operator" : role,
+      ...(sessionID === "root" ? {} : { parentID: "root" }) }),
+    context: async ({ sessionID }) => sessionID === "root" ? [] : childHistory,
+  } };
+  const cleanup = await createSortieDogsV2Plugin(async () => ({
+    backgroundOwner: (_call, restore) => { if (restore) restored = true; return { role, generation: 1 }; },
+    "tool.execute.before": async () => {},
+    "tool.execute.after": async (_request, output) => {
+      seen.push(String((output.metadata as Record<string, unknown>).status));
+      output.output = "accounted terminal text";
+      if ((output.metadata as Record<string, unknown>).status === "succeeded") complete();
+    },
+  })).setup(context);
+  try {
+    const input = { agent: role, prompt: "exact reference", description: "useful work", background: true };
+    await fixture.toolHooks.get("execute.before")!({ tool: "subagent", id: "call", sessionID: "root", input });
+    const result = { status: "running", content: "Native Job running", metadata: { sessionID: "child", status: "running" } };
+    const launch = { tool: "subagent", id: "call", sessionID: "root", input, status: "completed", result };
+    await fixture.toolHooks.get("execute.after")!(launch);
+    assert.equal(launch.result, result, "native running result is not replaced by a Mission terminal packet");
+    assert.deepEqual(seen, ["running"]);
+    childHistory.push({ id: "final", type: "assistant", finish: "stop", content: [{ type: "text", text: "actual result" }], time: { created: Date.now() } });
+    await fixture.emit({ type: "session.execution.succeeded", created: Date.now(), data: { sessionID: "child" } });
+    await completed;
+    await fixture.emit({ type: "session.execution.succeeded", created: Date.now(), data: { sessionID: "child" } });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.deepEqual(seen, ["running", "succeeded"]);
+    assert.equal(restored, true, "the durable owner snapshot is supplied to the existing terminal path");
+    assert.equal(fixture.synthetic.length, 0, "Sortie never creates a second completion prompt");
+  } finally { cleanup?.(); }
 });
 
 test("V2 legacy history retains each turn's agent after switching from Sortie to Build", async () => {
@@ -1269,7 +1314,8 @@ test("V2 event failures warn per event and keep lifecycle translation active", a
   const observed: string[] = [];
   const warnings: unknown[][] = [];
   const originalWarn = console.warn;
-  console.warn = (...values: unknown[]) => { warnings.push(values); };
+  const waiters: Array<() => void> = [];
+  console.warn = (...values: unknown[]) => { warnings.push(values); waiters.shift()?.(); };
   const legacy: OpenCodePlugin = async () => ({
     "experimental.text.complete": async (_input, output) => {
       output.text += "\n\n<details>\n<summary><strong>🐾 SORTIE DOGS — 帰還報告</strong></summary>\n\nproof\n\n</details>";
@@ -1280,15 +1326,19 @@ test("V2 event failures warn per event and keep lifecycle translation active", a
   try {
     fixture.failNextContext();
     await fixture.emit({ type: "session.execution.succeeded", data: { sessionID: "root" } });
+    if (warnings.length < 1) await new Promise<void>(resolve => { waiters.push(resolve); });
     fixture.failNextContext();
     await fixture.emit({ type: "session.execution.succeeded", data: { sessionID: "root" } });
+    if (warnings.length < 2) await new Promise<void>(resolve => { waiters.push(resolve); });
     await fixture.emit({ type: "session.idle", data: { sessionID: "root" } });
     await fixture.emit({ type: "session.compaction.ended", data: { sessionID: "root" } });
     await fixture.emit({ type: "filesystem.changed", data: { file: "changed.txt", event: "change" } });
+    await new Promise<void>(resolve => setImmediate(resolve));
     assert.equal(fixture.synthetic.length, 0);
     assert.ok(warnings.some(values => values[0] === "[sortie-dogs-v010] V2 event handling failed" && values[1] === "context unavailable"));
     assert.equal(warnings.filter(values => values[0] === "[sortie-dogs-v010] V2 event handling failed").length, 2);
-    assert.deepEqual(observed, ["session.idle:root", "session.compacted:root", "file.edited:changed.txt"]);
+    assert.deepEqual(observed.filter(value => !value.startsWith("file.")), ["session.idle:root", "session.compacted:root"]);
+    assert.ok(observed.includes("file.edited:changed.txt"), "different sessions/filesystem events need not wait for the root lane");
   } finally {
     console.warn = originalWarn;
     cleanup?.();

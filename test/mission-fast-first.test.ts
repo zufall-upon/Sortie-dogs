@@ -30,11 +30,13 @@ for (const verdict of ["PASS", "FINDINGS", "EVIDENCE_GAPS"] as const) test(`Fast
       'import { writeFileSync } from "node:fs";\nwriteFileSync("result.txt", "ready\\n");\n');
     const history: Record<string, Record<string, unknown>[]> = { worker: [] };
     let workerHistoryReads = 0;
+    let backgroundChild: string | undefined;
     const agents: Record<string, { agent: string; parentID?: string; outcome?: string }> = {
       root: { agent: "dog-operator" }, worker: { agent: "dog-worker-v010", parentID: "root" },
       reviewer: { agent: "dog-reviewer-v010", parentID: "root" },
     };
-    const hooks = await SortieDogsV010Plugin({ directory, client: { session: {
+    const hooks = await SortieDogsV010Plugin({ directory,
+      nativeBackground: { awaiting: async (id: string) => backgroundChild !== undefined && (id === "root" || id === backgroundChild) }, client: { session: {
       get: async ({ path }: { path: { id: string } }) => ({ data: { id: path.id, ...agents[path.id] } }),
       children: async ({ path }: { path: { id: string } }) => ({ data: Object.entries(agents)
         .filter(([, info]) => info.parentID === path.id).map(([id, info]) => ({ id, ...info })) }),
@@ -102,6 +104,26 @@ for (const verdict of ["PASS", "FINDINGS", "EVIDENCE_GAPS"] as const) test(`Fast
     await hooks.tool!.sortie_v010_bind_write_gate.execute({ project_root: directory, manifest_path: unit.manifestPath },
       { sessionID: "worker" });
     if (verdict === "PASS") {
+      backgroundChild = "worker";
+      const acknowledgement = { output: "Native Job started", metadata: { sessionID: "worker", status: "running" } };
+      await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "worker-call" }, acknowledgement);
+      assert.equal(acknowledgement.output, "Native Job started", "running tool return remains the native acknowledgement");
+      await hooks.event!({ event: { type: "session.idle", properties: { sessionID: "root" } } });
+      const pending = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
+      assert.equal(pending.units[0].status, "running");
+      assert.equal(pending.budget.reserved_units, 1, "root idle retains the admitted unit reservation");
+      assert.deepEqual((hooks.backgroundOwner!("worker-call")!.core as { calls: string[] }).calls, ["worker-call"], "idle preserves terminal settlement ownership");
+      await hooks["chat.message"]!({ sessionID: "root", messageID: "scope-change", agent: "dog-operator" }, {
+        message: { id: "scope-change", agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-6-sol" } },
+        parts: [{ type: "text", text: "Also create another output." }],
+      });
+      const change = JSON.parse(await hooks.tool!.sortie_v010_start_mission.execute({ intent: "continue",
+        requirements: ["Create validated result.txt", "Do not write forbidden.txt", "Create another output"] }, { sessionID: "root" }));
+      assert.equal(change.status, "mission-contract-change-requires-replace");
+      assert.match(change.next_action, /intent=replace/);
+      assert.deepEqual((await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).requests.map(item => item.id), ["request"], "frozen contract cannot adopt free text as a changed requirement");
+    }
+    if (verdict === "PASS") {
       await hooks["tool.execute.before"]!({ tool: "bash", sessionID: "worker", callID: "build" },
         { args: { command: "node build.mjs" } });
       await exec(process.execPath, ["build.mjs"], { cwd: directory });
@@ -134,8 +156,10 @@ for (const verdict of ["PASS", "FINDINGS", "EVIDENCE_GAPS"] as const) test(`Fast
       assert.equal((await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required('root')).review, undefined);
     }
     agents.worker!.outcome = "succeeded";
+    if (verdict === "PASS") assert.deepEqual((hooks.backgroundOwner!("worker-call")!.core as { calls: string[] }).calls, ["worker-call"], "validation retains parent Task ownership");
     await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "worker-call" },
       { output: "Validated result", metadata: { sessionId: "worker" } });
+    backgroundChild = undefined;
     const status = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
     assert.equal(status.coordinator_session_id, null);
     assert.equal(status.units[0].status, "succeeded", JSON.stringify(status));
@@ -180,12 +204,20 @@ for (const verdict of ["PASS", "FINDINGS", "EVIDENCE_GAPS"] as const) test(`Fast
       message: { id: "reviewer-request", agent: agents.reviewer!.agent, model: { providerID: "openai", modelID: "gpt-6-sol" } },
       parts: [{ type: "text", text: reviewer.args.prompt }],
     });
+    if (verdict === "PASS") {
+      backgroundChild = "reviewer";
+      await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "review-call" },
+        { output: "Native Reviewer Job started", metadata: { sessionID: "reviewer", status: "running" } });
+      await hooks.event!({ event: { type: "session.idle", properties: { sessionID: "root" } } });
+      assert.equal((await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).review!.verdict, "pending");
+    }
     for (const [tool, args] of [["read", { filePath: "public-contract.md" }], ["grep", { pattern: "ready" }], ["glob", { pattern: "*.mjs" }]] as const) {
       await hooks["tool.execute.before"]!({ tool, sessionID: "reviewer", callID: `review-${tool}` }, { args: { ...args } });
     }
     agents.reviewer!.outcome = "succeeded";
     await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "review-call" },
       { output: `${verdict}\nReviewed actual result and validation.`, metadata: { sessionId: "reviewer" } });
+    backgroundChild = undefined;
     const reviewed = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
     assert.equal(reviewed.review.verdict, verdict === "PASS" ? "PASS" : verdict === "EVIDENCE_GAPS" ? "evidence-gaps" : "findings");
     assert.equal(reviewed.review.reviewer_session_id, "reviewer");
