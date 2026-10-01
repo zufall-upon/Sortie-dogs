@@ -32,11 +32,11 @@ Instruction size and internal tests establish a design change, not model perform
 
 The intended outcome is fast, autonomous and visible completion of the original task. Removing required quality checks, hiding defects, substituting an easier task or waiting longer is not instruction improvement.
 
-## Follow-up proposal: host-owned Worker activation
+## Host-owned Worker activation
 
 The latest observed Mission Worker performed three control-document reads, a status call and a manual bind before repository work. The host already knows the admitted child, assignment and operation manifest. Asking the model to reconstruct that handshake adds bookkeeping without improving the implementation brief.
 
-Move activation of the existing assignment into completion of the authoritative handoff read. The Worker should receive the original task and a separate, concise activation result in the same response. Use the existing binding operation and its diagnostics; expose a denial with its actual recovery action rather than pretending the assignment is ready. Keep the manual binding path for compatibility and recovery.
+Activation of the existing assignment now occurs upon completion of the authoritative handoff read. The Worker receives the original task and a separate, concise activation result in the same response. This uses the existing binding operation and its diagnostics; a denial exposes its actual recovery action rather than pretending the assignment is ready. The manual binding path remains for compatibility and recovery.
 
 This proposal serves the three product principles:
 
@@ -46,4 +46,4 @@ This proposal serves the three product principles:
 
 The measured baseline has five startup calls and 12.68 seconds between the first handoff read and the first repository operation. The target is one handoff call; the entire interval is not assumed recoverable. This does not explain the remaining 57 model requests, implementation quality, or independent Review duration.
 
-Validate native hook behavior and existing binding compatibility first, then exercise the installed package in a small public integration fixture. That fixture establishes host integration only. Original Anko completion remains unproven until its original requirements, formal checks, independent Review and successful receipt all complete.
+Native hook/binding regressions, independent SourceReview, full tests and Windows tests passed. The installed package completed a small public fixture in 3m05.173s with one startup handoff read, no explicit bind, formal check PASS, requested commit, independent Review PASS and successful receipt. That fixture establishes host integration only. Original Anko completion remains unproven until its original requirements, formal checks, independent Review and successful receipt all complete.

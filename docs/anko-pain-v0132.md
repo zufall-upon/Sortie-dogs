@@ -231,4 +231,15 @@ The second full run exposed the adjacent assertion requiring “generated segmen
 - Final `npm run test:full`: **1,420/1,420 PASS**, exit **0**, test phase **160.809 s**, `_testenv/wsl-1790833773135-9980/`, source SHA-256 `24763f295633e99d8bd4b7e3f08246c06d32024308a080fe5a1e40091f06ce4a`.
 - Subsequent `npm run test:windows`: **12/12 PASS**, exit **0**, build **9.917 s**, test **3.905 s**.
 
-The installed public integration probe is pending. The previous Anko run remains observer-censored and unaccepted.
+Installed public integration probe candidate: `abcc14f2e2723e515322f3e62311d5cc292852d9`, package SHA-256 `bc7b1e8a731b1f62e6ede5941cef74fa6519b41a40ab6a6190259a6061ba94f7`. Actual Worker session `ses_f09f8d613ffe0yZJXr1IyDUC2h` uses `openai/gpt-6-luna-fast#max`. Installed Worker is **2,877 characters**, SHA-256 `c4039ed48d97af609c357017b2c438098f23407036d10545ad8a5fdcbb6432ab`, identical to the generated asset.
+
+#### Installed public fixture result
+
+- Root `ses_f09f93d1bffebA5NJLt6qB9oKU`: **native succeeded**, Mission completed, independent `openai/gpt-6.1-sol#xhigh` Review **PASS**, successful receipt, one commit (`d0730086bb5db3f7b579cf9f6faa072e6456c388`) and clean source. Formal `node check.mjs` exited **0**. No driver/user steering or continuation input.
+- **3m05.173s**, exit **0**, observed API-token-price estimate **$0.181552**, no pending/unpriced/failed-without-usage requests. This is a small public tag-normalization fixture, not the original Anko task or a matched performance baseline.
+- Startup control sequence: **one full handoff read**, containing the complete original request and `SORTIE_WORKER_ACTIVATION: {"status":"ready"}`; next calls read source and public checks. **Zero explicit bind calls**, no routine manifest/goal/status calls. Worker total **9 model requests / 11 tools**. First handoff read to first source read **5.012 s**; comparison with the earlier Anko 12.68 s is descriptive only because tasks differ.
+- The installed native path therefore confirms the intended host-owned activation and removal of four model-managed startup calls. It does not establish an improvement in the remaining original-task coding time, quality or rapid whole-Mission completion. Previous Anko outcome remains observer-censored and unaccepted.
+- Sanitized complete DB, fixed package/hash, source/Git bundle, trace analysis and cost evidence archived at `M:/_work/_Sortie-dogs-artifacts/records/worker-host-brief-20261001/` (**93 files**). Owned listener stopped, credentials removed, shared registration unchanged; generated plugin/cache retired, source retained.
+- Anko observation remains **$7.84380252 plus eleven unresolved requests**. Adding this separate integration probe gives **$8.02535452 observed**, retaining those unknowns. Probe launch metadata contains the prior consultation snapshot; final result records the updated independent consultation total below.
+
+Follow-up Advisor/implementation/SourceReview API-token-price estimate: **$1.3448852**, bringing selected consultation cumulative observation to **$5.5880496**, with no unknown usage in those eleven completed sessions. The implementation agent's “model cost $0” meant no additional model probes launched by that agent; its own delegation cost is included here (**$0.9371644**). Parent-assistant usage and subscription billing are excluded.
