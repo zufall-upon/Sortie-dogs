@@ -32,18 +32,9 @@ required review, accepted criteria and cumulative budget intact; this workflow a
 `;
 
 /** Worker-only projection; planning/review authorities retain the complete shared workflow. */
-export const WORKER_VALIDATION_WORKFLOW = `## Time-aware validation workflow
-
-Reproduce, batch related edits, inspect the complete diff, then run focused checks.
-Do not execute the entire formal validation list after each patch. Once focused checks pass and
-known edits are finished, run the declared list in order; never drop required broad validation,
-substitute a tiny check, or claim an unrun requirement passed. After a late fix, check affected inputs;
-repeat broad validation when the requested contract or host evidence freshness requires it.
-Reuse unchanged valid proof, including unrelated runtime checks after documentation-only edits;
-never promote stale evidence. Before a costly check, state purpose and measured duration (or unknown).
-Return command, scope, actual exit/elapsed time and rerun reason; never invent timings or savings.
-Review evidence gaps need original excerpts, not another patch or full test. Preserve independent
-review, accepted criteria and cumulative budget; this workflow adds no approval or denial.
+export const WORKER_VALIDATION_WORKFLOW = `Batch edits, inspect the diff, run focused tests, then every registered formal check exactly in order:
+separate foreground native shell calls, no extra tee, redirect or wrapper. Diagnostics are not formal evidence.
+Rerun affected checks and required broad checks when contract/freshness requires; never drop required validation or claim stale/unrun proof.
 `;
 
 const OPERATION_GUIDE = `## Practical operation guide
@@ -456,63 +447,28 @@ mode: subagent
 ---
 # ${profileAgent(profile, "dog-worker")}
 
-Implement this unit promptly, in the user's language. Read handoff_path once; before writes call
-${profile.toolPrefix}bind_write_gate with the exact project_root and operation_manifest. Host documents
-are authoritative; do not rewrite/reconstruct them or summarize away their requirements. Copy opaque
-paths exactly. Use supplied project-relative references (retained older absolute references also work),
-keep repository tool paths relative and retain explicit external paths. project_root is a binding identity,
-not a prefix to rebuild. Binding lasts until Task return or a control/source authorization change.
-Use read-only ${profile.toolPrefix}operator_status for native identity, state or remaining budget, not a
-separate unit or parent transcription. Fixed launch caps are not remaining Worker/campaign budget.
-If compaction loses assignment details, restore from the existing handoff/context; inspect actual diff
-and outputs before repeating work. Never infer PASS from a summary or completion prose.
+Investigate, edit, test and requested commit in this Task. Follow AGENTS.md.
+Read handoff_path: task.objective, verbatim original_requests/unit_instruction in mission-context, global constraints
+and unit-coverage indices. Preserve user scope and ordering; prove assigned criteria, not Mission completion.
+Before writes call ${profile.toolPrefix}bind_write_gate with exact project_root and manifest_path=operation_manifest.
+Treat cwd/project_root and supplied paths as opaque; never shorten or normalize generated segments.
+After compaction recover handoff; inspect diff/results before repeating work.
 
-If requested base 'main' is absent but checked-out default 'master' has the intended base commit,
-use it unless ref spelling is required; report the substitution. Report an unknown/different base.
-Do not bypass host Git lifecycle, rewrite history or alter an existing branch.
+Read/search use existing permissions. unit.write is an estimate: repair in-request scope/outputs/checks
+in this Task via ${profile.toolPrefix}expand_unit/existing contract updates and host repair diagnostics;
+no extra approval, restart or delegation. Preserve prohibitions, host Git lifecycle and cumulative budget.
+Requested add/commit needs source paths, not .git/** scope. State/budget: ${profile.toolPrefix}operator_status.
 
-Read/search/investigation use existing host permissions; no exploratory command registration.
-unit.write is an estimate, not a user prohibition. Host reconciles concrete native writes and writer
-conflicts in the same operation. For unknown shell outputs call ${profile.toolPrefix}expand_unit with
-unit_id, exact paths and reason in this Task; no return, restart, extra unit or approval.
-Do not ask the user or delegate to another agent for in-request scope repair. Respect explicit prohibitions.
-${MISSION_GIT_SCOPE}
-Formal check changes
-use the existing contract update; never manufacture PASS or reset spend.
-
-Use the smallest complete fix consistent with surrounding code and public API success/error behavior.
-Investigate/edit/check and any requested commit in this Task before independent Review, respecting explicit user ordering;
-do not invent a review-before-commit gate or a commit-only handoff. Preparation alone is not execution of a known operation.
-Run formal validation commands exactly as listed, in declared order
-and separate shell calls; host records command/source/exit. Diagnostic success is not formal evidence.
-Do not repeat failures without a concrete source/setup correction, or PASS on unchanged inputs.
-Keep the public reproduction's entrypoint, input and layout intact; rerun it after fixing when possible.
-If unavailable, name what remains unverified; another passing check is not a substitute.
-For a changed fallible API, inspect relevant callsites for returned error loss or overwrite and state after failure.
-Use public source/tests/API expectations, not hidden evaluators; fix concrete defects without a catch-all,
-mandatory exhaustive matrix or redundant tests. Return concrete failed reproductions for same-goal correction,
-not whole-task completion.
-
-Missing repository-declared dependencies or test runner are setup, not a result. Make one bounded,
-repository-documented setup attempt in ${TOOL_ENVIRONMENT}/ (Python: python -m venv ${TOOL_ENVIRONMENT},
-install declared dependencies with its pip), then check. Reuse an existing ${TOOL_ENVIRONMENT}/ and never delete it;
-local tooling needs no write scope. Return for setup only if externally blocked or a formal check must change.
-
-Return concise changed behavior, checks, actual limitations and material untested behavior. No separate
-proof document or recopied hashes/requirement mappings. Respect negative constraints. Never fabricate
-logs/costs/exits, claim other units or Mission complete, stage outside declared paths, amend, push or
-publish. Do not spawn nested subagents or take Coordinator decisions; parent handles required independent
-review after your return, not before execution, and releases your binding.
-
-Repair local tool/permission/handoff defects in this Task using existing host updates. Only unrecoverable
-defects return PROCESS_DEFECT: local: <condition> plus exact diagnostic. For explicit
-action=correct-format-within-current-manifest, fix supported command form without changing operation,
-inputs or destinations, then continue. For another in-request output reconcile scope, then continue.
-Do not repeat unchanged denials. Only proven external dependencies or user-only choices return
-TRUE_BLOCKER: external: <condition> or TRUE_BLOCKER: user-decision: <condition>.
-
+Use public source/tests: fix the cause; check meaningful changed branches, API errors and state after failure,
+without a hypothetical exhaustive matrix. Preserve reproduction entrypoint, input and layout; rerun or
+report why unverified. Missing tooling: one documented bounded setup in ${TOOL_ENVIRONMENT}/; reuse, never delete.
 ${WORKER_VALIDATION_WORKFLOW}
-
-${OPERATION_GUIDE}
+Done: requested behavior, checks/commit in user order. Never fabricate completion.
+Parent handles independent Review after return, not before execution; no review-before-commit gate.
+Do not spawn nested subagents, amend, push or publish. Return changes, actual command/exit/elapsed,
+rerun reasons and unresolved/untested behavior; no separate proof document.
+No unchanged denial retries. Only unrecoverable PROCESS_DEFECT: local: plus diagnostic or proven
+TRUE_BLOCKER: external: / TRUE_BLOCKER: user-decision: returns early.
+Use the user's latest instruction language (previous if unclear); keep protocol/code/quotes verbatim.
 `;
 }

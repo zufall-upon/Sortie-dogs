@@ -46,3 +46,37 @@ test("native original-request reads expose full multiline text without changing 
     assert.equal(await readFile(join(directory, path), "utf8"), source);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
+
+test("contract display references only exactly duplicated ledger criteria, preserving original text and bytes", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "sortie-dedup-contract-"));
+  try {
+    const path = ".sortie-dogs-v010/contracts/handoff.dedup.json";
+    await mkdir(join(directory, ".sortie-dogs-v010/contracts"), { recursive: true });
+    const original = "Original request\r\nPreserve exact spacing.  ";
+    const repeated = "Required behavior\nwith exact error text. ".repeat(8);
+    const criteria = [repeated, `${repeated} `, "Independent acceptance", repeated, "Short criterion"];
+    const contract = { task: { objective: repeated }, ext: {
+      "sortie-dogs/mission-context": { original_requests: [{ id: "u1", text: original }],
+        requirements: [{ id: "R1", text: repeated }, { id: "R2", text: "Short criterion" }] },
+      "sortie-dogs/acceptance-continuity": { criteria, fingerprint: "untouched" },
+    } };
+    const source = JSON.stringify(contract);
+    await writeFile(join(directory, path), source);
+    const view = (await nativeContractReadView(directory, { path }))!;
+    assert.ok(view.includes(original), "verbatim original request always displayed");
+    assert.match(view, /--- \/task\/objective \(string\) ---\nRequired behavior/);
+    assert.ok(view.includes(`${repeated} `), "near-equal strings are not deduplicated");
+    assert.ok(view.includes("Independent acceptance"));
+    assert.match(view, /--- \/ext\/sortie-dogs~1acceptance-continuity\/criteria\/4 \(string\) ---\nShort criterion/u,
+      "short duplicates stay verbatim rather than expanding into longer references");
+    assert.equal(view.match(/\(string, exact duplicate\)/gu)?.length, 2);
+    assert.equal(view.match(/Same exact string as \/ext\/sortie-dogs~1mission-context\/requirements\/0\/text/gu)?.length, 2);
+    assert.equal(await readFile(join(directory, path), "utf8"), source);
+
+    // Older contracts may place the ledger before requirements: no forward aliases.
+    contract.ext = { "sortie-dogs/acceptance-continuity": contract.ext["sortie-dogs/acceptance-continuity"],
+      "sortie-dogs/mission-context": contract.ext["sortie-dogs/mission-context"] };
+    await writeFile(join(directory, path), JSON.stringify(contract));
+    assert.doesNotMatch((await nativeContractReadView(directory, { path }))!, /\(string, exact duplicate\)/u);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});

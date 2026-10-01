@@ -14,6 +14,9 @@ implementation, validation, review, and model routing.
   continuation, remediation, and restart.
 - **Adaptive execution**: small work stays small; additional agents and stronger
   models are used only when task shape or risk justifies them.
+- **Clear Worker instructions**: give Luna a concise goal, explicit constraints
+  and completion criteria; keep orchestration bookkeeping in the harness.
+  See the [instruction design principles](docs/worker-instruction-design.md).
 - **Coexistence**: Sortie activates only when selected and preserves normal
   OpenCode agents, settings, and user-owned files.
 - **Cost, time, and proof**: the objective is a verified result at the lowest
