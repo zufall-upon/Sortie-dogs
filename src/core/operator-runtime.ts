@@ -1697,13 +1697,14 @@ export class OperatorRuntime {
         throw new Error("mission-scope-update-current-task-required");
       }
       await this.verifyControls(unit);
-      const write = [...new Set([...unit.unit.write, ...paths.map(normalizeExecutionScope)])];
-      for (const path of write) {
+      const requested = paths.map(normalizeExecutionScope);
+      for (const path of [...unit.unit.write, ...requested]) {
         const scoped = relative(this.projectRoot, resolve(this.projectRoot, normalizeManifestScope(path).path)).replaceAll("\\", "/");
         if ([".git", ...Object.values(RUNTIME_PROFILES).map(profile => profile.stateDirectory)].some(dir => scoped === dir || scoped.startsWith(`${dir}/`))) {
           throw new Error(`operator-control-write-forbidden:${path}`);
         }
       }
+      const write = [...new Set([...unit.unit.write, ...requested.filter(path => !this.pathAuthorized(path, unit.unit.write))])];
       if (JSON.stringify(write) === JSON.stringify(unit.unit.write)) return;
       const oldManifest = await readFile(unit.manifestPath, "utf8"), oldHandoff = await readFile(unit.handoffPath, "utf8");
       const manifest = { ...JSON.parse(oldManifest), write } as import("./types.js").OperationManifest;

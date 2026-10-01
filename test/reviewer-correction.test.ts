@@ -188,12 +188,12 @@ async function fixture(options: { permissionsUnavailable?: boolean } = {}) {
     dispose: async () => { cleanup?.(); await rm(directory, { recursive: true, force: true }); } };
 }
 
-async function initial(f: Awaited<ReturnType<typeof fixture>>, options: { readonly?: boolean; operation?: boolean; validation?: string[]; original?: string } = {}) {
+async function initial(f: Awaited<ReturnType<typeof fixture>>, options: { readonly?: boolean; operation?: boolean; validation?: string[]; original?: string; write?: string[] } = {}) {
   const original = options.original ?? "Produce ready output, validate, commit it, preserve all constraints and independently review.";
   await f.prompt("root", original);
   await f.tool("root", "start_mission", { requirements: ["Output must be ready", "Validate and commit; independent review"], ...(options.operation ? { kind: "operation" } : {}) });
   const plan = await f.tool("root", "plan_units", { units: [{ title: "Ready output", objective: "Produce ready output",
-     read: ["check.mjs", "required-test.mjs", "generate.mjs", "format.mjs"], write: options.readonly ? [] : ["result.txt"], validation: options.validation ?? ["node check.mjs"] }] });
+     read: ["check.mjs", "required-test.mjs", "generate.mjs", "format.mjs"], write: options.readonly ? [] : options.write ?? ["result.txt"], validation: options.validation ?? ["node check.mjs"] }] });
   assert(plan.task, JSON.stringify(plan));
   const worker = await f.before("root", "subagent", f.task(plan.task));
   await f.prompt("worker", worker.input.prompt); await f.bind("worker");
@@ -206,6 +206,43 @@ async function initial(f: Awaited<ReturnType<typeof fixture>>, options: { readon
    await f.finish(dispatch, "author", "FINDINGS\nMedium: result.txt is wrong rather than ready; correct its content.\nMedium: preserve the ready output contract.\nMedium: keep required validation and clean commit semantics.");
   return { original, run: await f.run(), mission: await f.missions.required("root") };
 }
+
+test("correction commits only actual changed outputs despite unchanged exact permission and deleted scratch", async () => {
+  const f = await fixture();
+  try {
+    await writeFile(join(f.directory, "untouched.txt"), "unchanged");
+    await exec("git", ["add", "untouched.txt"], { cwd: f.directory });
+    await exec("git", ["commit", "-m", "fixture unchanged input"], { cwd: f.directory });
+    await initial(f, { write: ["result.txt", "untouched.txt", "scratch.tmp"] });
+    const prepared = await f.tool("root", "repair_review"), dispatch = await f.before("root", "subagent", f.task(prepared.task));
+    await f.prompt("author", dispatch.input.prompt); await f.bind("author");
+    await f.edit("author", "ready");
+    await f.shell("author", "printf scratch > scratch.tmp"); await f.shell("author", "rm scratch.tmp");
+    await f.shell("author", "node check.mjs");
+    await f.shell("author", "git add result.txt && git diff --cached --stat");
+    await f.shell("author", "git commit -m correction-subset");
+    assert.equal((await exec("git", ["status", "--short"], { cwd: f.directory })).stdout, "");
+    await f.finish(dispatch, "author", inlineReport());
+    assert.equal((await f.tool("root", "complete_mission")).status, "succeeded");
+    assert.equal((await f.missions.required("root")).review!.verdict, "self-rechecked");
+    assert.equal((await f.ledger()).state.consumed_units, 2);
+  } finally { await f.dispose(); }
+});
+
+test("correction cached set still rejects a user-prohibited path inside its inherited glob", async () => {
+  const f = await fixture();
+  try {
+    await initial(f, { write: ["result.txt", "nested/**"] });
+    const prepared = await f.tool("root", "repair_review"), dispatch = await f.before("root", "subagent", f.task(prepared.task));
+    await f.prompt("author", dispatch.input.prompt); await f.bind("author");
+    await f.missions.update("root", state => { state.prohibitedWrite = ["nested/forbidden.txt"]; });
+    // An already-staged outside mutation must not be authorized merely because add was bypassed.
+    await mkdir(join(f.directory, "nested")); await writeFile(join(f.directory, "nested/forbidden.txt"), "forbidden");
+    await exec("git", ["add", "nested/forbidden.txt"], { cwd: f.directory });
+    await assert.rejects(f.before("author", "shell", { command: "git commit -m forbidden" }), /mission-explicit-write-prohibition/);
+    await f.tool("root", "cancel_operator", { reason: "explicit-cancellation" });
+  } finally { await f.dispose(); }
+});
 
 async function correctionReady(f: Awaited<ReturnType<typeof fixture>>) {
   const prepared = await f.tool("root", "repair_review");

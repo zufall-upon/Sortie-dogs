@@ -10357,12 +10357,13 @@ test("git add requires exact explicit paths and rejects broad or undeclared path
     );
     assert.equal((await bindWriteGate(hooks, directory, "git-add")).status, "bound");
     await invoke("git add -- allowed.txt second.txt");
+    await invoke("git add allowed.txt second.txt");
+    await invoke("git add allowed.txt second.txt && git diff --cached --stat");
+    await invoke("git add -- allowed.txt second.txt && git diff --cached --stat");
     await invoke("git add -- nested\\file.txt");
-    await expectMessage(
-      () => invoke("git add allowed.txt"),
-      'Write denied for "<missing-path>": write path must be explicit.',
-      "path-required",
-    );
+    for (const command of ["git add", "git add --", "git add -A", "git add --all allowed.txt", "git add *.txt", "git add :/allowed.txt"]) {
+      await assert.rejects(invoke(command), /missing-path|repeated-command/, command);
+    }
     await expectMessage(
       () => invoke("git add -- ."),
       'Write denied for "<missing-path>": write path must be explicit.',
@@ -10376,7 +10377,7 @@ test("git add requires exact explicit paths and rejects broad or undeclared path
   });
 });
 
-isolated("git commit requires the cached path set to equal the manifest", async () => {
+isolated("git commit checks actual cached paths are a nonempty subset of write permissions", async () => {
   await withProject("git-commit-gate", async (directory) => {
     await execFileAsync("git", ["init", directory]);
     await writeFile(join(directory, "allowed.txt"), "allowed");
@@ -10396,16 +10397,12 @@ isolated("git commit requires the cached path set to equal the manifest", async 
       { args: { command: "git commit -m gate" } },
     );
     await execFileAsync("git", ["-C", directory, "add", "--", "allowed.txt"]);
+    await commit();
+    await execFileAsync("git", ["-C", directory, "add", "--", "undeclared.txt"]);
     await expectMessage(
       commit,
       'Write denied for "<cached>": operation manifest write scope.',
       "manifest-scope",
-    );
-    await execFileAsync("git", ["-C", directory, "add", "--", "undeclared.txt"]);
-    await expectMessage(
-      commit,
-      'Write denied for "<repeated-command>": same command and denial reason already denied in this session; retry blocked.',
-      "repeated-denial",
     );
     await execFileAsync("git", ["-C", directory, "rm", "--cached", "--", "undeclared.txt"]);
     await execFileAsync("git", ["-C", directory, "add", "--", "second.txt"]);
@@ -10418,6 +10415,27 @@ isolated("git commit requires the cached path set to equal the manifest", async 
       'Write denied for "<missing-path>": write path must be explicit.',
       "path-required",
     );
+  });
+});
+
+isolated("git commit allows unchanged exact permission and deleted untracked scratch beside changed glob source", async () => {
+  await withProject("git-permission-subset", async directory => {
+    await execFileAsync("git", ["init", directory]);
+    await mkdir(join(directory, "src"));
+    await writeFile(join(directory, "src/a.ts"), "before");
+    await writeFile(join(directory, "unchanged.txt"), "unchanged");
+    await execFileAsync("git", ["-C", directory, "add", "--", "src/a.ts", "unchanged.txt"]);
+    await execFileAsync("git", ["-C", directory, "-c", "user.name=test", "-c", "user.email=test@example.invalid", "commit", "-m", "base"]);
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(operationManifest(["src/**", "unchanged.txt", "scratch.tmp"])));
+    const hooks = await SortieDogsPlugin({ directory });
+    await activate(hooks, "subset"); await bindWriteGate(hooks, directory, "subset");
+    await writeFile(join(directory, "scratch.tmp"), "generated"); await rm(join(directory, "scratch.tmp"));
+    await writeFile(join(directory, "src/a.ts"), "after");
+    await execFileAsync("git", ["-C", directory, "add", "--", "src/a.ts"]);
+    await hooks["tool.execute.before"]!({ tool: "bash", sessionID: "subset", callID: "commit" }, { args: { command: "git commit -m source" } });
+    await execFileAsync("git", ["-C", directory, "-c", "user.name=test", "-c", "user.email=test@example.invalid", "commit", "-m", "source"]);
+    assert.equal((await execFileAsync("git", ["-C", directory, "diff", "--cached", "--name-only"])).stdout, "");
+    await assert.rejects(hooks["tool.execute.before"]!({ tool: "bash", sessionID: "subset", callID: "empty" }, { args: { command: "git commit -m empty" } }), /cached/);
   });
 });
 

@@ -64,7 +64,10 @@ export interface ProjectPaths {
 }
 
 export interface WriteGate {
-  check(input: ToolExecuteBeforeInput, output: ToolExecuteBeforeOutput, options?: { investigativeShell?: boolean }): Promise<void>;
+  check(input: ToolExecuteBeforeInput, output: ToolExecuteBeforeOutput, options?: {
+    investigativeShell?: boolean;
+    assertWritePaths?: (paths: readonly string[]) => Promise<void>;
+  }): Promise<void>;
   checkPath(path: string): Promise<void>;
   toRelativePath(path: string): Promise<string>;
 }
@@ -342,8 +345,8 @@ function gitArchiveOutput(tokens: readonly string[]): { output?: string } | unde
 }
 
 function exactGitAddPaths(tokens: readonly string[]): string[] | undefined {
-  if (tokens.length < 4 || tokens[2] !== "--") return undefined;
-  const paths = tokens.slice(3);
+  const paths = tokens.slice(tokens[2] === "--" ? 3 : 2);
+  if (paths.length === 0) return undefined;
   if (paths.some((path) =>
     path === "." || path.startsWith("-") || path.startsWith(":") ||
     path.includes("*") || path.includes("?") || path.includes("[")
@@ -1241,7 +1244,7 @@ export async function createWriteGate(project: ProjectPaths, value: unknown, too
     }
     if (!await isWritable(normalized)) throw new WriteDeniedError("manifest-scope", normalized);
   };
-  const checkCachedSet = async (): Promise<void> => {
+  const checkCachedSet = async (assertWritePaths?: (paths: readonly string[]) => Promise<void>): Promise<void> => {
     let stdout: string;
     try {
       ({ stdout } = await execFileAsync(
@@ -1266,9 +1269,9 @@ export async function createWriteGate(project: ProjectPaths, value: unknown, too
     for (const path of cached) {
       if (!await isWritable(path)) throw new WriteDeniedError("manifest-scope", "<cached>");
     }
-    if ([...exactWritable].some((path) => !cached.has(path))) {
-      throw new WriteDeniedError("manifest-scope", "<cached>");
-    }
+    // Write scope is permission, not a requirement to stage unchanged or removed scratch outputs.
+    // Apply the caller's existing user prohibitions to actual staged paths as well as explicit add paths.
+    await assertWritePaths?.([...cached].map(path => resolve(project.root, path)));
   };
   return {
     checkPath,
@@ -1305,12 +1308,12 @@ export async function createWriteGate(project: ProjectPaths, value: unknown, too
         try { await checkPath(nativeFileTool ? resolve(toolDirectory, path) : path); }
         catch (error) {
           if (options?.investigativeShell && error instanceof WriteDeniedError && error.reason === "manifest-scope") {
-            error.message += " Coordinator: expand_unit with the exact missing output directory as dir/**, preserving settled units and cumulative spend; then dispatch the returned Task. No user approval is needed for an in-request correction.";
+            error.message += " Use expand_unit with the missing output path (dir/** for a directory), then retry this command in the SAME active Task. Preserve user prohibitions, native permissions, settled units and cumulative spend; no approval or redispatch is needed for an in-request scope repair.";
           }
           throw error;
         }
       }
-      if (extracted.gitCommit) await checkCachedSet();
+      if (extracted.gitCommit) await checkCachedSet(options?.assertWritePaths);
     },
   };
 }

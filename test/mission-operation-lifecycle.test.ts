@@ -223,7 +223,7 @@ for (const mode of ["cancel", "replace", "missed-after", "orphan-abort"]) test(`
     assert.equal(validated.budget.consumed_units, beforeBudget.consumed_units + 2 + (replaceActive ? 1 : 0));
     assert.equal(validated.budget.max_units, beforeBudget.max_units);
     assert.equal(validated.budget.reserved_units, 0);
-    assert.equal(validated.units[1].evidence[0].protected_binding.source_policy, "declared-paths-v1");
+    assert.equal(validated.units[1].evidence[0].protected_binding_ref.source_policy, "declared-paths-v1");
     const review = await tool("review_mission", "current", { risk_tags: ["public-logic"], traces: ["Both installed files verified by real validator processes"] });
     await before("current", "review-call", review.task);
     identities.reviewer!.outcome = "succeeded";

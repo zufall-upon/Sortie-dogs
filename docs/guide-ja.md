@@ -116,12 +116,15 @@ arbitrary Git、force push、release、publish authorityは付与しない。
 
 ### 簡潔な進捗表示
 
-`sortie_v010_operator_status`は`view`省略時に従来どおり完全な判断・証跡packetを返す。短い表示が必要な場合だけ
+`sortie_v010_operator_status`の既定Mission表示は判断・実測証跡を保持し、巨大なprotected path配列は永続証跡の参照に置き換える。
+`{ "view": "full" }`で従来の完全な診断packetを取得できる。短い表示が必要な場合は
 `{ "view": "progress" }`を渡すと、既存Missionまたはexecution runから`run_id`、段階、現在Unit、完了数/総Unit数、
-host budget残数、既存の`next_action`を投影する。Missionは完全packetの値、legacy execution runは完全packetの値を優先し、
+host budget残数、既存の`next_action`を投影する。Missionでは既存formal command・exit・時刻、native観測・terminal、記録済みdeliveryも保持する。
+未観測cleanや失敗commitを成功扱いにせず、`gitLifecycle:null`からGit完遂を推定しない。legacy execution runは完全packetの値を優先し、
 省略されている場合のみ既存の継続checkpointを使う。継続不要なら`null`。進捗表示からretry・dispatch・acceptanceは発生しない。
 進捗投影は状態を追加・変更せず、retry・dispatch・acceptanceもしない。Mission statusに既存のdispatch reconciliationがある場合も完全packet経路と同じ動作。
-判断、証跡確認、継続/差し戻しには完全packetを使う。execution runのないproposal/draftは既存表示を維持する。
+具体的なsnapshot診断には`view=full`または証跡の`details_ref`を使う。execution runのないproposal/draftは既存表示を維持する。
+既存証跡で足りる場合はstatusから`review_mission`、返されたReviewer Taskへ進める。元指示・diff・checkを儀式的に再転記する必要はない。
 
 ## 設定
 

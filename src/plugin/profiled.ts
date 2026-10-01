@@ -1254,7 +1254,13 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         current_unit: current === undefined ? null : { id: current.unit.id, title: current.unit.title, status: current.status },
         completed_units: units.filter(unit => unit.status === "succeeded").length, total_units: units.length,
         budget_remaining_units: budget?.remaining_units ?? null,
-        next_action: typeof packet.next_action === "string" ? packet.next_action : null };
+        next_action: typeof packet.next_action === "string" ? packet.next_action : null,
+        ...(record(packet.acceptance_summary) ? { observations: {
+          formal_validation: packet.acceptance_summary.formal_validation,
+          native_declared_validation: packet.acceptance_summary.native_declared_validation,
+          worker_terminals: (mission.attempts ?? []).map(attempt => ({ run_id: attempt.runID, status: attempt.status, terminal: attempt.terminal ?? null })),
+          delivery: packet.acceptance_summary.delivery,
+        }, completion: packet.completion ?? null } : {}) };
     }
     /**
      * Proposal accounting without the submitted packet body.
@@ -1269,7 +1275,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const { proposal: _packet, ...identity } = proposals.packet(state) as Record<string, unknown>;
       return identity;
     }
-    tools[status] = { description: "Read the durable root-owned operator outcome and host budget counters (max_units, consumed_units, reserved_units, remaining_units) without claiming acceptance or retrying work. Omit view for the complete decision/evidence packet; view=progress returns a compact read-only projection of an existing Mission or execution run. Existing Mission dispatch reconciliation remains the same as in the complete status route. With no Mission or execution run, proposal/draft status remains unchanged. An investigating proposal returns its exact short Task reference only before a Task has been admitted; an existing admission never yields a redispatch Task.",
+    tools[status] = { description: "Read the durable root-owned operator outcome and host budget counters (max_units, consumed_units, reserved_units, remaining_units) without claiming acceptance or retrying work. Default Mission status preserves measured evidence with persisted detail references, not duplicated protected path arrays; view=full retains the full diagnostic packet. view=progress returns a compact read-only projection with existing formal checks, native observations/terminals and recorded delivery, never inferred clean or success. Existing Mission dispatch reconciliation is unchanged. With no Mission or execution run, proposal/draft status remains unchanged. An investigating proposal returns its exact short Task reference only before a Task has been admitted; an existing admission never yields a redispatch Task.",
       args: { view: optionalStringSchema, confirmed_conditions: conditionsSchema as never }, execute: async (args, context) => {
         const view = (args as { view?: unknown }).view;
         const root = await rootFor(context.sessionID);
@@ -1283,7 +1289,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           const run = await operators.read(root!);
           const completion = run?.phase === "awaiting-acceptance" ? await control!.completionReadiness(root!) : undefined;
            const acceptanceSummary = await missionAcceptanceSummary(mission, run, operators, acceptanceValidationObservation);
-           const packet = { acceptance_summary: acceptanceSummary, ...missionDispatchPacket(mission, run), budget,
+           const packet: Record<string, unknown> = { acceptance_summary: acceptanceSummary, ...missionDispatchPacket(mission, run), budget,
             ...(completion ? { completion, ...(!completion.ready ? { next_action: mission.coordinator === null &&
                 completion.blockers.some(item => item.reason === "source-changed" || item.reason === "candidate-changed")
                 ? `Fast-lane: source or candidate changed after formal validation. Call ${planUnits} with reason and ` +
@@ -1291,7 +1297,13 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
                   `Keep the same mission and cumulative budget; old validation or Review cannot complete it.\n` +
                   completion.blockers.map(item => item.next_action).join("\n")
                 : completion.blockers.map(item => item.next_action).join("\n") } : {}) } : {}) };
-          return JSON.stringify(view === "progress" ? missionProgress(mission, run, budget, packet) : packet);
+           if (view === "progress") return JSON.stringify(missionProgress(mission, run, budget, packet));
+           if (view !== "full" && run?.runID === mission.runID && Array.isArray(packet.units)) {
+             const validation = missionReviewValidation(run, operators.statePath(root!));
+             packet.units = packet.units.map((unit, index) => ({ ...unit, evidence: validation[index]!.evidence,
+               evidence_details_ref: validation[index]!.details_ref }));
+           }
+           return JSON.stringify(packet);
         }
         if (root && context.sessionID !== root) {
           const owned = await operators.read(root);

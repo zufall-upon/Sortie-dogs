@@ -28,6 +28,12 @@ for (const verdict of ["PASS", "FINDINGS", "EVIDENCE_GAPS"] as const) test(`Fast
     await writeFile(join(directory, "public-contract.md"), "Public output is ready followed by a newline.\n");
     if (verdict === "PASS") await writeFile(join(directory, "build.mjs"),
       'import { writeFileSync } from "node:fs";\nwriteFileSync("result.txt", "ready\\n");\n');
+    if (verdict === "PASS") {
+      await writeFile(join(directory, "untouched.txt"), "unchanged\n");
+      await writeFile(join(directory, ".gitignore"), ".sortie-dogs-v010/\n");
+      await exec("git", ["add", "check.mjs", "build.mjs", "public-contract.md", "untouched.txt", ".gitignore"], { cwd: directory });
+      await exec("git", ["commit", "-m", "fixture base"], { cwd: directory });
+    }
     const history: Record<string, Record<string, unknown>[]> = { worker: [] };
     let workerHistoryReads = 0;
     let backgroundChild: string | undefined;
@@ -86,7 +92,7 @@ for (const verdict of ["PASS", "FINDINGS", "EVIDENCE_GAPS"] as const) test(`Fast
     assert.ok(open.task, "the same Coordinator reference remains available when the contract is not one unit");
     const planned = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ units: [{ title: "Write ready result",
       objective: "Create result.txt with ready followed by newline", read: verdict === "PASS" ? ["."] : ["check.mjs"],
-      write: ["result.txt"], validation: [...(verdict === "PASS" ? ["node build.mjs"] : []), "node check.mjs"] }] }, { sessionID: "root" }));
+      write: verdict === "PASS" ? ["result.txt", "untouched.txt", "scratch.tmp"] : ["result.txt"], validation: [...(verdict === "PASS" ? ["node build.mjs"] : []), "node check.mjs"] }] }, { sessionID: "root" }));
     const worker = { args: structuredClone(planned.task) };
     await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "worker-call" }, worker);
     await hooks["chat.message"]!({ sessionID: "worker", messageID: "worker-request", agent: agents.worker!.agent }, {
@@ -96,7 +102,7 @@ for (const verdict of ["PASS", "FINDINGS", "EVIDENCE_GAPS"] as const) test(`Fast
     const unit = (await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).units[0]!;
     if (verdict === "PASS") {
       assert.deepEqual(unit.unit.read, [`${directory.replaceAll("\\", "/")}/**`]);
-      assert.deepEqual(unit.unit.write, ["result.txt"], "root observation must not expand write scope");
+      assert.deepEqual(unit.unit.write, ["result.txt", "untouched.txt", "scratch.tmp"], "root observation must not expand write scope");
     }
     await hooks["tool.execute.before"]!({ tool: "read", sessionID: "worker", callID: "handoff" }, { args: { filePath: unit.handoffPath } });
     await hooks["tool.execute.after"]!({ tool: "read", sessionID: "worker", callID: "handoff", args: { filePath: unit.handoffPath } },
@@ -124,6 +130,11 @@ for (const verdict of ["PASS", "FINDINGS", "EVIDENCE_GAPS"] as const) test(`Fast
       assert.deepEqual((await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).requests.map(item => item.id), ["request"], "frozen contract cannot adopt free text as a changed requirement");
     }
     if (verdict === "PASS") {
+      for (const [callID, command] of [["branch", "git switch -c same-worker-delivery"], ["scratch", "printf generated > scratch.tmp"], ["cleanup", "rm scratch.tmp"]]) {
+        await hooks["tool.execute.before"]!({ tool: "bash", sessionID: "worker", callID: callID! }, { args: { command } });
+        const result = await exec("bash", ["-lc", command!], { cwd: directory });
+        await hooks["tool.execute.after"]!({ tool: "bash", sessionID: "worker", callID: callID! }, { output: result.stdout, metadata: { exit: 0, status: "completed" } });
+      }
       await hooks["tool.execute.before"]!({ tool: "bash", sessionID: "worker", callID: "build" },
         { args: { command: "node build.mjs" } });
       await exec(process.execPath, ["build.mjs"], { cwd: directory });
@@ -144,7 +155,7 @@ for (const verdict of ["PASS", "FINDINGS", "EVIDENCE_GAPS"] as const) test(`Fast
     if (verdict === 'PASS') {
       // Ordinary requested delivery stays in the validated Worker, with no .git/** write scope or prior Review.
       for (const [callID, command, argv] of [
-        ['git-add', 'git add -- result.txt', ['add', '--', 'result.txt']],
+        ['git-add', 'git add result.txt', ['add', 'result.txt']],
         ['git-commit', 'git commit -m "Create result"', ['commit', '-m', 'Create result']],
       ] as const) {
         await hooks['tool.execute.before']!({ tool: 'bash', sessionID: 'worker', callID }, { args: { command } });
@@ -153,6 +164,8 @@ for (const verdict of ["PASS", "FINDINGS", "EVIDENCE_GAPS"] as const) test(`Fast
           { output: result.stdout, metadata: { exit: 0, status: 'completed' } });
       }
       assert.match((await exec('git', ['log', '-1', '--format=%s'], { cwd: directory })).stdout, /Create result/);
+      assert.equal((await exec("git", ["status", "--short"], { cwd: directory })).stdout, "", "the SAME Worker delivers actual clean source after generated cleanup/formal check/commit");
+      assert.equal((await exec("git", ["branch", "--show-current"], { cwd: directory })).stdout.trim(), "same-worker-delivery");
       assert.equal((await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required('root')).review, undefined);
     }
     agents.worker!.outcome = "succeeded";
@@ -164,6 +177,8 @@ for (const verdict of ["PASS", "FINDINGS", "EVIDENCE_GAPS"] as const) test(`Fast
     assert.equal(status.coordinator_session_id, null);
     assert.equal(status.units[0].status, "succeeded", JSON.stringify(status));
     assert.equal(status.task, undefined, "a successful Fast unit must not prompt a Coordinator dispatch");
+    assert.equal(status.acceptance_summary.delivery.git_lifecycle, null, "absence of Git lifecycle is not forged delivery evidence");
+    assert.equal(status.acceptance_summary.delivery.clean, "not independently observed by this projection");
     assert.match(status.next_action, /Fast-lane.*review_mission/);
     const historyReadsBeforeReview = workerHistoryReads;
     const storedEvidence = (await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).units.map(unit => unit.evidence);

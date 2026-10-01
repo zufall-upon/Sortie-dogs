@@ -6,9 +6,11 @@ import { SCOUT_EVIDENCE_CODES } from "./core/scout-contract.ts";
 export const TOOL_ENVIRONMENT = ".sortie-env";
 
 /** Ordinary requested Git delivery uses source scope, not repository control-storage scope. */
-export const MISSION_GIT_SCOPE = `Requested git add -- <paths> and git commit -m ... are normal source-scope Git operations;
+export const MISSION_GIT_SCOPE = `Requested git add <paths> (with optional --) and git commit -m ... are normal source-scope Git operations;
 they do not require .git/** scope. Preserve explicit user ordering and host Git lifecycle; attempt supported
-operations and report actual denials, not inferred gaps.`;
+operations and report actual denials, not inferred gaps. Stage actual changed deliverables only: permission
+for an unchanged file or deleted untracked scratch does not require staging it. Repair a missing in-request
+output via expand_unit, then continue the SAME Task; covered paths need no new grant or dispatch.`;
 
 export const VALIDATION_WORKFLOW = `## Time-aware validation workflow
 
@@ -160,7 +162,11 @@ quality threshold and explicit model/budget choice. Follow AGENTS.md and use the
     is not independent approval) and recorded delivery state.
     Historical results are references, not current freshness PASS. Inspect source or evidence only for
     concrete unresolved gaps; do not routinely search run archives or reread every source/test file.
-    Existing validation freshness and Review guards still apply; this summary does not accept the mission.
+     Existing validation freshness and Review guards still apply; this summary does not accept the mission.
+     One compact status check can lead directly to review_mission and its returned Reviewer Task; original
+     requests, diff and checks are supplied automatically. Add traces only for concrete extra information.
+     Use existing host-observed Git evidence when available; unknown clean state or a failed commit still
+     needs a real delivery check, not an inferred success. view=full exposes diagnostic snapshot details.
    For a reported bug with a concrete public reproduction, check that evidence exercises the same entrypoint,
    input and observed failure, not only a nearby invented test or syntax check. Correct a material gap
    through one direct corrective unit when practical, otherwise use the SAME Coordinator; do not treat

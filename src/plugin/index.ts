@@ -7841,7 +7841,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           }
         }
         await (sessionAuthorizations.get(toolInput.sessionID)?.gate ?? gate).check(toolInput, output,
-          { investigativeShell: ["bash", "shell"].includes(toolInput.tool) && missionWorker });
+          { investigativeShell: ["bash", "shell"].includes(toolInput.tool) && missionWorker,
+            assertWritePaths: paths => input.runtimeBridge?.assertMissionWrite?.(toolInput.sessionID, paths) ?? Promise.resolve() });
       } catch (error) {
         activeState?.inFlightCalls.delete(toolInput.callID);
         if (error instanceof WriteDeniedError) goalValidationDefects.add(toolInput.sessionID);
