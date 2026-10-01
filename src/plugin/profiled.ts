@@ -1831,7 +1831,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         // A corrected command is allowed on replan; retain prior observations for accounting.
         operation = { commands, directory, observations: operation?.observations ?? [] };
       }
-      const plan = missionPlan(mission, raw);
+      const plan = missionPlan(mission, raw, input.directory);
       assertMissionWritePaths(mission, plan.units.flatMap(unit => unit.write));
       if (actor === root && (mission.coordinator !== null || plan.units.length !== 1)) throw new Error("mission-coordinator-required: dispatch the returned Coordinator task");
       const same = previous?.planHash === createHash("sha256").update(JSON.stringify(plan)).digest("hex");

@@ -199,14 +199,18 @@ export async function protectedSnapshot(authorization: { manifestPath: string; m
   const candidatePaths = actualPaths(manifest.write);
   const sourcePaths = [...new Set([...actualPaths(manifest.read), ...candidatePaths])];
   const external = sourcePaths.some(path => outside(authorization.projectRoot, path));
+  // The project root has an empty relative path, which is not a valid evidence path.
+  // Keep its absolute identity; resolving it still fingerprints the same directory.
+  const evidencePath = (path: string): string => outside(authorization.projectRoot, path)
+    ? path : relative(authorization.projectRoot, path).replaceAll("\\", "/") || path;
   if (options.captureFreshness !== false && Array.isArray(manifest.validation) && manifest.validation.length && manifest.task_id) {
     // New evidence pins validation inputs/outputs independently of the execution manifest hash.
     // Existing records keep their original recipe and cannot acquire exclusions retroactively.
     const tracked = await exec("git", ["ls-files", "-z"], { cwd: authorization.projectRoot, maxBuffer: 16 * 1024 * 1024 }).then(value => value.stdout.split("\0").filter(Boolean)).catch(() => []);
     const binding: Binding = { manifest_hash: `sha256:${manifestHash}`, project_root: authorization.projectRoot,
       manifest_path: relativePath, source_policy: external ? "declared-paths-v1" : "project-files-v1",
-      source_paths: sourcePaths.map(path => outside(authorization.projectRoot, path) ? path : relative(authorization.projectRoot, path).replaceAll("\\", "/")),
-      candidate_paths: candidatePaths.map(path => outside(authorization.projectRoot, path) ? path : relative(authorization.projectRoot, path).replaceAll("\\", "/")),
+      source_paths: sourcePaths.map(evidencePath),
+      candidate_paths: candidatePaths.map(evidencePath),
       freshness: { contract_hash: validationContractHash(manifest), scratch_paths: validationScratchPaths(authorization.projectRoot, manifest.validation),
         protected_paths: [...new Set([...actualPaths(manifest.read), ...tracked.map(path => resolve(authorization.projectRoot, path)),
           ...actualPaths(manifest.write.filter(path => !path.endsWith("/**")))] )], environment: environment(manifest) } };
@@ -221,8 +225,8 @@ export async function protectedSnapshot(authorization: { manifestPath: string; m
   if (source === undefined || candidate === undefined || relativePath.startsWith("../") || isAbsolute(relativePath)) return undefined;
   return { binding: { manifest_hash: `sha256:${manifestHash}`, project_root: authorization.projectRoot,
     manifest_path: relativePath, source_policy: external ? "declared-paths-v1" : "project-files-v1",
-    source_paths: sourcePaths.map(path => (outside(authorization.projectRoot, path) ? path : relative(authorization.projectRoot, path)).replaceAll("\\", "/")),
-    candidate_paths: candidatePaths.map(path => (outside(authorization.projectRoot, path) ? path : relative(authorization.projectRoot, path)).replaceAll("\\", "/")) }, source, candidate };
+    source_paths: sourcePaths.map(path => evidencePath(path).replaceAll("\\", "/")),
+    candidate_paths: candidatePaths.map(path => evidencePath(path).replaceAll("\\", "/")) }, source, candidate };
 }
 
 export async function refreshProtectedSnapshot(projectRoot: string, binding: Binding): Promise<{

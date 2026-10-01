@@ -83,7 +83,7 @@ for (const verdict of ["PASS", "FINDINGS", "EVIDENCE_GAPS"] as const) test(`Fast
     assert.match(open.next_action, /Fast-lane.*plan one useful Worker/);
     assert.ok(open.task, "the same Coordinator reference remains available when the contract is not one unit");
     const planned = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ units: [{ title: "Write ready result",
-      objective: "Create result.txt with ready followed by newline", read: ["check.mjs", ...(verdict === "PASS" ? ["build.mjs"] : [])],
+      objective: "Create result.txt with ready followed by newline", read: verdict === "PASS" ? ["."] : ["check.mjs"],
       write: ["result.txt"], validation: [...(verdict === "PASS" ? ["node build.mjs"] : []), "node check.mjs"] }] }, { sessionID: "root" }));
     const worker = { args: structuredClone(planned.task) };
     await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "worker-call" }, worker);
@@ -92,6 +92,10 @@ for (const verdict of ["PASS", "FINDINGS", "EVIDENCE_GAPS"] as const) test(`Fast
       parts: [{ type: "text", text: worker.args.prompt }],
     });
     const unit = (await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).units[0]!;
+    if (verdict === "PASS") {
+      assert.deepEqual(unit.unit.read, [`${directory.replaceAll("\\", "/")}/**`]);
+      assert.deepEqual(unit.unit.write, ["result.txt"], "root observation must not expand write scope");
+    }
     await hooks["tool.execute.before"]!({ tool: "read", sessionID: "worker", callID: "handoff" }, { args: { filePath: unit.handoffPath } });
     await hooks["tool.execute.after"]!({ tool: "read", sessionID: "worker", callID: "handoff", args: { filePath: unit.handoffPath } },
       { output: await readFile(unit.handoffPath, "utf8") });
@@ -134,7 +138,7 @@ for (const verdict of ["PASS", "FINDINGS", "EVIDENCE_GAPS"] as const) test(`Fast
       { output: "Validated result", metadata: { sessionId: "worker" } });
     const status = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
     assert.equal(status.coordinator_session_id, null);
-    assert.equal(status.units[0].status, "succeeded");
+    assert.equal(status.units[0].status, "succeeded", JSON.stringify(status));
     assert.equal(status.task, undefined, "a successful Fast unit must not prompt a Coordinator dispatch");
     assert.match(status.next_action, /Fast-lane.*review_mission/);
     const historyReadsBeforeReview = workerHistoryReads;

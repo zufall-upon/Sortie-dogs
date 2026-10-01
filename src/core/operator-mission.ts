@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { normalizeExecutionScope } from "./path.js";
 import { parseOperatorPlan, type OperatorPlan, type OperatorState, type OperatorTask, type OperatorRuntime } from "./operator-runtime.js";
 import { profileAgent, type RuntimeProfile } from "./runtime-profile.js";
@@ -460,7 +460,7 @@ export class OperatorMissionRuntime {
 }
 
 /** The model supplies only useful unit facts; IDs, proof projection and control documents are generated here. */
-export function missionPlan(mission: OperatorMission, raw: unknown): OperatorPlan {
+export function missionPlan(mission: OperatorMission, raw: unknown, projectRoot?: string): OperatorPlan {
   if (!Array.isArray(raw) || raw.length === 0 || raw.length > 32) throw new Error("mission-units: declare 1..32 units");
   const acceptance = mission.requirements.map(item => item.text);
   const declared = raw.map((value, index) => {
@@ -472,7 +472,12 @@ export function missionPlan(mission: OperatorMission, raw: unknown): OperatorPla
     const paths = (field: string): string[] => {
       const entries = value[field] ?? [];
       if (!Array.isArray(entries) || !entries.every(item => typeof item === "string")) throw new Error(`mission-unit-${index + 1}: ${field} must be paths`);
-      return [...new Set(entries.map(item => normalizeExecutionScope(item)))];
+      return [...new Set(entries.map(item => {
+        // A model's repository-root read means the current project, not an invalid empty path.
+        // Resolve only this read shorthand at the host boundary; saved plans and write scopes stay exact.
+        const rootRead = field === "read" && [".", "./", ".\\", "./**", ".\\**"].includes(item);
+        return normalizeExecutionScope(rootRead && projectRoot ? `${resolve(projectRoot).replaceAll("\\", "/")}/**` : item);
+      }))];
     };
     // A sole unit owns the whole request. This schedules work; it does not prove acceptance.
     const ids = value.requirement_ids ?? (raw.length === 1 || mission.requirements.length === 1 ? mission.requirements.map(item => item.id) : []);
