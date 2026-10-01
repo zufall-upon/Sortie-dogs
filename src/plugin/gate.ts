@@ -868,11 +868,16 @@ function declaredCommandMatch(segment: string, declared: readonly string[]): str
 
 /** Canonicalize only an exact or unambiguous basename-shortened sequence of declared validations. */
 export function canonicalDeclaredValidationSequence(command: string, declared: ReadonlySet<string>): string | undefined {
+  return canonicalDeclaredValidationMembers(command, declared)?.join(" && ");
+}
+
+/** Preserve ordered members (including repeats) without splitting quoted text or substring matching. */
+export function canonicalDeclaredValidationMembers(command: string, declared: ReadonlySet<string>): string[] | undefined {
   const normalized = normalizeCommand(command);
   const segments = shellSegments(command, "posix").map((segment) => segment.trim()).filter(Boolean);
   if (segments.length === 0 || normalized !== segments.map(normalizeCommand).join(" && ")) return undefined;
   const canonical = segments.map((segment) => declaredCommandMatch(segment, [...declared]));
-  return canonical.every((segment): segment is string => segment !== undefined) ? canonical.join(" && ") : undefined;
+  return canonical.every((segment): segment is string => segment !== undefined) ? canonical : undefined;
 }
 
 /** Correction shell authority is only inherited checks or a direct existing source-scope Git boundary. */

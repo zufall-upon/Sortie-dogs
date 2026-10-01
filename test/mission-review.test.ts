@@ -6,7 +6,7 @@ import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 import { completedMissionReviewPrompts, initialMissionReviewPrompt, missionReviewBaseline, missionReviewSource,
-  observedMissionValidation } from "../dist/plugin/mission-review.js";
+  observedMissionValidation, reviewerCorrectionValidation } from "../dist/plugin/mission-review.js";
 import { MISSION_REVIEW_REFERENCE, type OperatorMission } from "../dist/core/operator-mission.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
 import { FastLaneController } from "../dist/plugin/fast-lane.js";
@@ -14,6 +14,38 @@ import { declaredArtifacts } from "../dist/plugin/declared-artifacts.js";
 import { protectedSnapshot } from "../dist/plugin/protected-snapshot.js";
 
 const git = promisify(execFile);
+
+test("required validation matches ordered native occurrences, not a latest-per-command map or display excerpt", () => {
+  const A = "node a.mjs", B = "node b.mjs", declared = [A, B, A, B];
+  const part = (command: string, i: number, exit: number | null = 0, extra: Record<string, unknown> = {}) => ({
+    type: "tool", tool: "shell", callID: `call-${i}`, state: { status: "completed", input: { command }, metadata: { exit },
+      time: { start: 100 + i * 20, end: 110 + i * 20 } }, ...extra,
+  });
+  const check = (parts: Record<string, unknown>[]) => reviewerCorrectionValidation(declared, "author",
+    [{ info: { role: "assistant", sessionID: "author" }, parts }], 100);
+  const four = declared.map((command, i) => part(command, i));
+  assert.equal(check(four).ready, true);
+  assert.equal(check([...four, part(B, 4)]).ready, true, "an extra successful check does not erase a complete required sequence");
+  assert.equal(check([...four, part(A, 4, 1), part(B, 5)]).ready, false, "later failure cannot borrow an earlier complete pass");
+  assert.deepEqual(check(four).matched?.map(item => item.occurrence), [0, 1, 2, 3]);
+  assert.equal(check(four.slice(0, 2)).ready, false);
+  assert.equal(check([four[0]!, four[1]!, four[0]!, four[1]!]).ready, false, "same callID is never a second occurrence");
+  assert.equal(check([...declared].reverse().map((command, i) => part(command, i))).ready, false);
+  for (const failed of [0, 2, 3]) assert.equal(check(declared.map((command, i) => part(command, i, i === failed ? 1 : 0))).ready, false);
+  assert.equal(check([part(declared.join(" && "), 0)]).ready, true, "exact successful chain proves all ordered members");
+  assert.equal(check([part(declared.join(" && "), 0, 1)]).ready, false, "failed chain proves no member success");
+  assert.equal(check([part(`${B} && ${A} && ${B} && ${A}`, 0)]).ready, false);
+  assert.equal(check([part(`${A} && ${B}-suffix && ${A} && ${B}`, 0)]).ready, false, "substrings are not members");
+  assert.equal(check([part(declared.join(" && "), 0, null)]).ready, false);
+  assert.equal(check([part(declared.join(" && "), 0, 0, { state: { status: "completed", input: { command: declared.join(" && ") },
+    metadata: { exit: 0 }, time: { start: 99, end: 101 } } })]).ready, false, "admission time remains mandatory");
+  assert.equal(check([four[0]!, { ...four[1]!, state: { ...(four[1]!.state as object), time: { start: 105, end: 115 } } }, ...four.slice(2)]).ready, false);
+  const retries = Array.from({ length: 40 }, (_, i) => part(A, i, 1));
+  assert.equal(check([...retries, ...declared.map((command, i) => part(command, i + 40))]).ready, true, "acceptance scans beyond 32-attempt display excerpt");
+  const quoted = 'node -e "console.log(\'a && b\')"';
+  assert.equal(reviewerCorrectionValidation([quoted, B], "author", [{ info: { role: "assistant", sessionID: "author" },
+    parts: [part(`${quoted} && ${B}`, 0)] }], 100).ready, true, "quoted && stays inside its exact command");
+});
 
 test("native validation history reports only the current Worker's exact commands and real exits", () => {
   const part = (command: string, exit?: number, started = 100) => ({ type: "tool", tool: "shell", state: {

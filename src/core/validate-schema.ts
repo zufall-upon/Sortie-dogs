@@ -155,7 +155,6 @@ const OPERATION_MANIFEST_SCHEMA: JsonSchema = {
     },
     validation: {
       type: "array",
-      uniqueItems: true,
       items: { $ref: "#/$defs/validationCommand" },
     },
   },

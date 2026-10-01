@@ -30,6 +30,8 @@ export interface ValidationBudgetRequest {
   readonly reason: ValidationReason;
   readonly retry_of?: string;
   readonly changed_cause?: string;
+  /** Mandatory declared occurrences must execute, even on identical candidate bytes. */
+  readonly required_execution?: { readonly admission: string; readonly call_id: string };
 }
 
 export interface ValidationBudgetState {
@@ -134,7 +136,8 @@ export function validationEvidenceKey(request: ValidationBudgetRequest): string 
   // provenance: worker-targeted evidence must never satisfy coordinator-canonical validation.
   return `sha256:${createHash("sha256").update(JSON.stringify({ version: 4,
     candidate: request.candidate, command: request.command, environment: request.environment,
-    owner: request.owner, scope: normalizedScope(request.scope) })).digest("hex")}`;
+    owner: request.owner, scope: normalizedScope(request.scope),
+    ...(request.required_execution ? { required_execution: request.required_execution } : {}) })).digest("hex")}`;
 }
 
 export function validationResultFingerprint(request: ValidationBudgetRequest, outcome: ValidationOutcome,
@@ -163,7 +166,9 @@ export function decideValidationBudget(request: unknown, state: ValidationBudget
     marginal.unmet_criteria.every(id) && new Set(marginal.unmet_criteria).size === marginal.unmet_criteria.length &&
     (marginal.risk_hypothesis === null || id(marginal.risk_hypothesis)) &&
     (value.reason === "preflight" || value.reason === "acceptance" || value.reason === "retry") &&
-    (value.reason !== "retry" || (id(value.retry_of) && id(value.changed_cause)));
+    (value.reason !== "retry" || (id(value.retry_of) && id(value.changed_cause))) &&
+    (value.required_execution === undefined || (value.required_execution !== null && typeof value.required_execution === "object" &&
+      id(value.required_execution.admission) && id(value.required_execution.call_id)));
   if (!valid) return { decision: "DENY", reason: value.reason === "retry" ? "retry-justification-required" : "invalid-contract",
     scope: null, evidence_key: null, consumed: state.consumed, redundant_time_ms: 0 };
   if (value.owner !== validationOwner(value.scope)) return { decision: "DENY", reason: "owner-mismatch", scope: value.scope,

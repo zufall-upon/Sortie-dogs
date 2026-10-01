@@ -159,7 +159,7 @@ test("operation manifest requires every field and rejects unknown fields", () =>
   assertInvalidOperation(invalidOperationUnknownField);
 });
 
-test("operation manifest requires arrays of unique strings", () => {
+test("operation manifest requires string arrays, unique scopes and ordered validation occurrences", () => {
   for (const key of ["read", "write", "validation"]) {
     const wrongType = clone(validOperation);
     wrongType[key] = "not-an-array";
@@ -167,7 +167,11 @@ test("operation manifest requires arrays of unique strings", () => {
 
     const duplicate = clone(validOperation);
     duplicate[key] = ["same", "same"];
-    assertInvalidOperation(duplicate);
+    if (key === "validation") {
+      assertValidOperation(duplicate);
+      assert.equal(validateOperationManifestSchema(duplicate).ok, true);
+    }
+    else assertInvalidOperation(duplicate);
 
     const nonString = clone(validOperation);
     nonString[key] = [42];

@@ -12,8 +12,9 @@ import { canonicalAgent, type RuntimeProfile } from "../core/runtime-profile.js"
 import { taskChildSessionID } from "./task-result-repair.js";
 import { normalizeManifestScope } from "../core/path.js";
 import { declaredArtifacts } from "./declared-artifacts.js";
-import { canonicalDeclaredValidationSequence, normalizeCommand } from "./gate.js";
-import { currentSnapshotProtection, snapshotScratchExclusion } from "./protected-snapshot.js";
+import { canonicalDeclaredValidationMembers, normalizeCommand } from "./gate.js";
+import { currentSnapshotProtection, refreshProtectedSnapshot, snapshotScratchExclusion, validationInputSnapshot } from "./protected-snapshot.js";
+import type { ReviewerCorrectionCheck } from "./runtime-bridge.js";
 
 const exec = promisify(execFile);
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -69,12 +70,15 @@ export function observedMissionValidation(validation: readonly string[], childSe
 
 /** All inherited checks must have fresh real successful outcomes in this correction admission. */
 export function reviewerCorrectionValidation(validation: readonly string[], child: string,
-  history: readonly Record<string, unknown>[], notBefore: number): {
+  history: readonly Record<string, unknown>[], notBefore: number, checks?: readonly ReviewerCorrectionCheck[]): {
     ready: boolean; reason?: string; failure?: { command: readonly string[]; outcome: "fail"; exitCode: number | null };
+    matched?: readonly { callID: string; member: number; occurrence: number }[];
   } {
   const declared = validation.map(normalizeCommand), expected = new Set(declared);
   if (!Number.isFinite(notBefore)) return { ready: false, reason: "mission-review-correction-validation-admission-unavailable" };
-  const latest = new Map<string, { exit: number | null; started: number; completed: number }>();
+  const attempts: { callID: string; commands: string[]; exit: number | null; started: number; completed: number }[] = [];
+  const seen = new Set<string>();
+  let editedAt = notBefore;
   // Unlike the display excerpt, this acceptance comparison scans ALL native attempts.
   for (const message of history) {
     if (!record(message.info) || message.info.role !== "assistant" || message.info.sessionID !== child || !Array.isArray(message.parts)) continue;
@@ -82,14 +86,15 @@ export function reviewerCorrectionValidation(validation: readonly string[], chil
       if (record(part) && part.type === "tool" && ["edit", "write", "patch", "apply_patch"].includes(String(part.tool)) &&
           record(part.state) && part.state.status === "completed") {
         const end = record(part.time) ? part.time.completed : record(part.state.time) ? part.state.time.end : undefined;
-        if (typeof end === "number" && end >= notBefore) latest.clear(); // Earlier checks do not validate a later source correction.
+        if (typeof end === "number" && Number.isFinite(end) && end >= notBefore) editedAt = Math.max(editedAt, end);
         continue;
       }
       if (!record(part) || part.type !== "tool" || !["bash", "shell", "powershell", "pwsh"].includes(String(part.tool)) ||
           !record(part.state) || !["completed", "error"].includes(String(part.state.status)) ||
           !record(part.state.input) || typeof part.state.input.command !== "string") continue;
-      const sequence = canonicalDeclaredValidationSequence(part.state.input.command, expected);
-      if (!sequence) continue;
+      const commands = canonicalDeclaredValidationMembers(part.state.input.command, expected);
+      const callID = typeof part.callID === "string" ? part.callID : typeof part.id === "string" ? part.id : undefined;
+      if (!commands || !callID || seen.has(callID)) continue;
       const timing = record(part.time) ? { started: part.time.ran, completed: part.time.completed }
         : record(part.state.time) ? { started: part.state.time.start, completed: part.state.time.end } : undefined;
       if (!timing || typeof timing.started !== "number" || typeof timing.completed !== "number" ||
@@ -97,25 +102,62 @@ export function reviewerCorrectionValidation(validation: readonly string[], chil
           timing.started < notBefore || timing.completed < timing.started) continue;
       const rawExit = record(part.state.metadata) ? part.state.metadata.exit : undefined;
       const exit = part.state.status === "completed" && Number.isSafeInteger(rawExit) ? rawExit as number : null;
-      // A successful && sequence proves each member passed; a failed one cannot prove any member.
-      for (const command of expected) if (sequence === command || sequence.startsWith(`${command} && `) ||
-          sequence.endsWith(` && ${command}`) || sequence.includes(` && ${command} && `)) {
-        const previous = latest.get(command);
-        if (!previous || previous.started <= timing.started) latest.set(command, { exit, started: timing.started, completed: timing.completed });
-      }
+      seen.add(callID);
+      attempts.push({ callID, commands, exit, started: timing.started, completed: timing.completed });
     }
   }
-  let previous = notBefore;
-  for (const command of declared) {
-    const observed = latest.get(command);
-    if (!observed) return { ready: false, reason: `mission-review-correction-validation-missing:${command}` };
-    if (observed.exit !== 0) return { ready: false, reason: `mission-review-correction-validation-failed:${command}`,
-      failure: { command: [command], outcome: "fail", exitCode: observed.exit } };
-    if (observed.started < previous) return { ready: false, reason: `mission-review-correction-validation-order:${command}` };
-    // Same native && execution gives all members the same timing.
-    previous = observed.started;
+  const matched: { callID: string; member: number; occurrence: number }[] = [];
+  let complete: typeof matched | undefined;
+  let previousEnd = notBefore, failed: { command: readonly string[]; outcome: "fail"; exitCode: number | null } | undefined;
+  for (const attempt of attempts.sort((a, b) => a.started - b.started || a.completed - b.completed)) {
+    if (attempt.started < editedAt) continue;
+    if (attempt.started < previousEnd) return { ready: false, reason: "mission-review-correction-validation-order:overlap" };
+    previousEnd = attempt.completed;
+    if (attempt.commands[0] !== declared[matched.length] || matched.length === declared.length) matched.length = 0;
+    failed = undefined;
+    // A failed && chain cannot infer any member success (including commands before its failure).
+    if (attempt.exit !== 0) {
+      complete = undefined;
+      failed = { command: attempt.commands, outcome: "fail", exitCode: attempt.exit };
+      continue;
+    }
+    for (const [member, command] of attempt.commands.entries()) {
+      if (command !== declared[matched.length]) {
+        matched.length = 0;
+        if (command !== declared[0]) continue;
+      }
+      matched.push({ callID: attempt.callID, member, occurrence: matched.length });
+      if (matched.length === declared.length) complete = [...matched];
+    }
   }
-  return { ready: true };
+  if (failed) return { ready: false, reason: `mission-review-correction-validation-failed:${failed.command.join(" && ")}`, failure: failed };
+  if (!complete) return { ready: false, reason: `mission-review-correction-validation-missing:${declared[matched.length]}` };
+  for (const item of complete) {
+    const command = declared[item.occurrence]!;
+    const check = checks?.find(check => check.callID === item.callID && check.childSessionID === child);
+    if (checks && (!check || !check.fresh || check.exitCode !== 0 || check.command[item.member] !== command ||
+        !Number.isFinite(Date.parse(check.startedAt)) || !Number.isFinite(Date.parse(check.endedAt)) ||
+        Date.parse(check.startedAt) < notBefore || Date.parse(check.endedAt) < Date.parse(check.startedAt))) {
+      return { ready: false, reason: `mission-review-correction-validation-binding-unavailable:${command}` };
+    }
+  }
+  return { ready: true, matched: complete };
+}
+
+/** Refresh each actual run's saved recipe; never attach today's snapshot to historical native logs. */
+export async function reviewerCorrectionValidationFresh(validation: readonly string[], child: string,
+  history: readonly Record<string, unknown>[], notBefore: number, checks: readonly ReviewerCorrectionCheck[], projectRoot: string) {
+  const checked = reviewerCorrectionValidation(validation, child, history, notBefore, checks);
+  if (!checked.ready) return checked;
+  for (const callID of new Set(checked.matched?.map(item => item.callID))) {
+    const check = checks.find(item => item.callID === callID)!;
+    const current = await refreshProtectedSnapshot(projectRoot, check.binding).catch(() => undefined);
+    const fresh = check.generatedInputs !== undefined
+      ? current && await validationInputSnapshot(projectRoot, check.binding).catch(() => undefined) === check.generatedInputs
+      : current?.source === check.source && current?.candidate === check.candidate;
+    if (!fresh) return { ready: false, reason: `mission-review-correction-validation-stale:${check.command.join(" && ")}` };
+  }
+  return checked;
 }
 
 /** Summary-only native reader: unavailable API/error is not a successfully observed empty history. */

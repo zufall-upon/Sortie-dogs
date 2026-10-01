@@ -127,7 +127,8 @@ interface UnitState {
   callID: string | null;
   childSessionID: string | null;
   /** A scoped implementation continuation in the original native Reviewer, never a review PASS. */
-  reviewerCorrection?: { author: string; reviewIdentity: string; writeUnion: readonly string[]; admittedAt?: string };
+  reviewerCorrection?: { author: string; reviewIdentity: string; writeUnion: readonly string[]; admittedAt?: string;
+    checks?: import("../plugin/runtime-bridge.js").ReviewerCorrectionCheck[] };
   evidence: readonly GoalEvidence[];
   resultClass: string | null;
   failure?: SerialDispatchSettlement["failure"];
@@ -884,6 +885,18 @@ export class OperatorRuntime {
     return this.serial(root, () => this.prepareOnce(root, raw, undefined, {
       dispatcher, replaceRunID: runID, context, reviewerCorrection: { author, reviewIdentity, writeUnion },
     }));
+  }
+  recordReviewerCorrectionCheck(root: string, taskID: string, check: import("../plugin/runtime-bridge.js").ReviewerCorrectionCheck): Promise<void> {
+    return this.serial(root, async () => {
+      const state = await this.required(root);
+      const unit = state.units.find(item => /^task_id: (.+)$/mu.exec(item.task.prompt)?.[1] === taskID);
+      if (!unit?.reviewerCorrection || unit.callID !== check.dispatchCallID || unit.childSessionID !== check.childSessionID ||
+          unit.reviewerCorrection.author !== check.childSessionID) throw new Error("mission-review-correction-check-owner-mismatch");
+      const checks = unit.reviewerCorrection.checks ??= [];
+      if (checks.some(item => item.callID === check.callID)) return;
+      checks.push(structuredClone(check));
+      await this.save(state);
+    });
   }
   private async prepareOnce(root: string, raw: unknown, scopeApprovalTurnID?: string,
     mission?: { dispatcher?: { sessionID: string; callID: string }; supersededRunID?: string;

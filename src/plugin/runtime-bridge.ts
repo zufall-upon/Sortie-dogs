@@ -28,6 +28,23 @@ export interface MissionWorkerTerminalRecord {
   readonly descendants: readonly string[];
 }
 
+/** Actual required-check execution and its original protected-snapshot recipe, not acceptance criteria. */
+export interface ReviewerCorrectionCheck {
+  readonly dispatchCallID: string;
+  readonly childSessionID: string;
+  readonly callID: string;
+  readonly command: readonly string[];
+  readonly startedAt: string;
+  readonly endedAt: string;
+  readonly exitCode: number | null;
+  readonly binding: NonNullable<GoalEvidence["protected_binding"]>;
+  readonly source: string;
+  readonly candidate: string;
+  readonly fresh: boolean;
+  /** A command that actually generated/formatted declared outputs retains its stable input digest. */
+  readonly generatedInputs?: string;
+}
+
 /** Host-owned extension. It is not parsed from project JSON or a worker's prompt. */
 export interface RuntimeBridge {
   readonly profile: RuntimeProfile;
@@ -45,11 +62,16 @@ export interface RuntimeBridge {
   requiresExplicitAcceptance?(rootSessionID: string): Promise<boolean>;
   ownsCanonicalValidation?(rootSessionID: string, unitID: string, childSessionID: string,
     command: string): Promise<boolean>;
+  /** Finish the existing host Git boundary before capturing this admitted validation's candidate. */
+  beforeValidationSnapshot?(rootSessionID: string, childSessionID: string, command: string): Promise<boolean>;
+  /** A repeated declared occurrence is required work, not duplicate evidence to skip. */
+  requiresValidationExecution?(rootSessionID: string, taskID: string, childSessionID: string, commands: readonly string[]): Promise<boolean>;
   /** A mission's hash-pinned Task has already passed durable run/acceptance admission. */
   ownsMissionDispatch?(rootSessionID: string, callID: string, taskID: string): Promise<boolean>;
   /** Only an exact admitted correction Task is an implementation dispatch continuing the original Reviewer child. */
   ownsReviewerCorrectionDispatch?(rootSessionID: string, callID: string, taskID: string): Promise<boolean>;
   ownsReviewerCorrection?(childSessionID: string): Promise<boolean>;
+  recordReviewerCorrectionCheck?(rootSessionID: string, taskID: string, check: ReviewerCorrectionCheck): Promise<void>;
   reviewerCorrectionValidation?(rootSessionID: string, callID: string, childSessionID: string, startedAt: number): Promise<{
     ready: boolean; reason?: string; failure?: SerialDispatchSettlement["failure"];
   } | undefined>;

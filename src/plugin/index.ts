@@ -81,6 +81,7 @@ import {
   canonicalManifestReadScopes,
   canonicalManifestWriteScopes,
   canonicalDeclaredValidationSequence,
+  canonicalDeclaredValidationMembers,
   createProjectPaths,
   createWriteGate,
   describeUnclassifiedCommand,
@@ -490,11 +491,20 @@ interface HostGoalExecution {
   readonly validationInputs?: string;
   readonly validation?: { readonly ledger: RunFlightLedger; readonly request: ValidationBudgetRequest; readonly reservation: string };
   readonly reusedEvidence?: readonly GoalEvidence[];
+  readonly correction?: { readonly taskID: string; readonly dispatchCallID: string; readonly commands: readonly string[] };
   endedAt?: string;
   exitCode?: number | null;
   outcome?: "pass" | "fail" | "skip" | "cancel";
   immutableRef?: string;
   fresh?: boolean;
+}
+
+/** A completed exact && correction call proves each member, without reusing another occurrence. */
+function observedHostGoalEvidence(execution: Parameters<typeof evidenceFromObservedExecution>[0] & Pick<HostGoalExecution, "correction">,
+  goal: Parameters<typeof evidenceFromObservedExecution>[1], unitID: string): GoalEvidence[] {
+  if (!execution.correction) return evidenceFromObservedExecution(execution, goal, unitID);
+  return execution.correction.commands.flatMap((command, member) => evidenceFromObservedExecution({ ...execution, command: [command],
+    immutableRef: goalFingerprint({ native_execution: execution.immutableRef, member }) }, goal, unitID));
 }
 
 interface HostToolTiming {
@@ -1828,32 +1838,52 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     if (authorization === undefined || authorization.suspended || authorization.rootSessionID !== identity.parentID) return;
     const args = isRecord(output.args) ? output.args : undefined;
     const rawCommand = args !== undefined && typeof args.command === "string" ? normalizeCommand(args.command) : undefined;
-    if (rawCommand === undefined || rawCommand.length === 0 || !authorization.validationCommands.has(rawCommand)) return;
-    const snapshot = await protectedSnapshot(authorization).catch(() => undefined);
-    if (snapshot === undefined) return;
+    if (rawCommand === undefined || rawCommand.length === 0) return;
+    const correcting = await input.runtimeBridge?.ownsReviewerCorrection?.(toolInput.sessionID) === true;
+    const members = canonicalDeclaredValidationMembers(rawCommand, authorization.validationCommands);
+    if (!authorization.validationCommands.has(rawCommand) && (!correcting || !members)) return;
+    const requiredExecution = correcting || members !== undefined && await input.runtimeBridge?.requiresValidationExecution?.(
+      authorization.rootSessionID, authorization.taskID, toolInput.sessionID, members) === true;
+    const dispatchCallID = authorization.dispatchCallID ?? (requiredExecution
+      ? await input.runtimeBridge?.missionDispatchCall?.(authorization.rootSessionID, toolInput.sessionID, authorization.taskID) : undefined);
+    const correction = correcting && dispatchCallID && members
+      ? { taskID: authorization.taskID, dispatchCallID, commands: members } : undefined;
+    const admittedSnapshot = await protectedSnapshot(authorization).catch(() => undefined);
+    if (admittedSnapshot === undefined) return;
     const root = goalRoot(identity.parentID);
     const ledger = await goalLedger(root);
     const goalSnapshot = await ledger.readGoal(), goal = goalSnapshot.state;
     let validation: HostGoalExecution["validation"];
     let reusedEvidence: readonly GoalEvidence[] | undefined;
+    const unitID = authorization.taskID;
+    const repairResume = operatorContractRepairResumes.get(root);
+    const criteria = goal.acceptance_contract?.criteria.filter((criterion) =>
+      (correction ? criterion.validation_command !== undefined && correction.commands.includes(criterion.validation_command) : criterion.validation_command === rawCommand) &&
+      criterion.expected_outcome === "pass") ?? [];
+    const denyValidation = (reason: string): Error => {
+      goalValidationDefects.add(toolInput.sessionID);
+      return new Error(`SORTIE_VALIDATION_BUDGET_DENIED: ${reason}`);
+    };
     if (goal.goal_id !== null) {
-      const unitID = authorization.taskID;
-      const repairResume = operatorContractRepairResumes.get(root);
       const unitBound = unitID !== undefined && (goal.outstanding_reservations.some((reservation) =>
         reservation.unit_id === unitID && reservation.session_id === identity.parentID) ||
         (repairResume?.unitID === unitID && repairResume.childSessionID === toolInput.sessionID && repairResume.callID !== null));
-      const criteria = goal.acceptance_contract?.criteria.filter((criterion) =>
-        criterion.validation_command === rawCommand && criterion.expected_outcome === "pass") ?? [];
-      const denyValidation = (reason: string): Error => {
-        goalValidationDefects.add(toolInput.sessionID);
-        return new Error(`SORTIE_VALIDATION_BUDGET_DENIED: ${reason}`);
-      };
       if (!unitBound) throw denyValidation("requirement-unbound");
       // Exact generation and formatting checks may support acceptance without proving a criterion.
-      if (criteria.length === 0) return;
+      if (criteria.length === 0 && !correction) return;
+    }
+    // Preserve admission checks before the host Git side effect. Its commit hooks must finish
+    // BEFORE pinning the actual checked candidate; refresh the already captured recipe only.
+    const committed = authorization.expiresAt > Date.now() && await input.runtimeBridge?.beforeValidationSnapshot?.(
+      authorization.rootSessionID, toolInput.sessionID, rawCommand);
+    const current = committed ? await refreshProtectedSnapshot(authorization.projectRoot, admittedSnapshot.binding) : admittedSnapshot;
+    if (!current) return;
+    const snapshot = { ...admittedSnapshot, ...current };
+    if (goal.goal_id !== null && criteria.length > 0) {
       const requestedFull = criteria.some((criterion) => criterion.proof_scope === "requested-full");
       const coordinatorOwned = requestedFull && unitID !== undefined &&
-        await input.runtimeBridge?.ownsCanonicalValidation?.(root, unitID, toolInput.sessionID, rawCommand) === true;
+        await input.runtimeBridge?.ownsCanonicalValidation?.(root, unitID, toolInput.sessionID,
+          correction ? criteria[0]!.validation_command! : rawCommand) === true;
       if (requestedFull && !coordinatorOwned) throw denyValidation("owner-mismatch: coordinator-routing-unavailable");
       const profile = loaded?.validationProfile ?? DEFAULT_PLUGIN_OPTIONS.validationProfile;
       const scope = coordinatorOwned ? "full" : profile === "fast" ? "static" : profile === "assurance" ? "related" : "targeted";
@@ -1864,7 +1894,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         expected_evidence: [...new Set(criteria.flatMap((criterion) => [criterion.criterion_id, ...criterion.oracle_coverage,
           `unit:${unitID}`, "source_snapshot", "candidate", "command", "scope", "exit_code"]))],
         marginal_value: { unmet_criteria: criteria.map(criterion => criterion.criterion_id), risk_hypothesis: null },
-        reason: "acceptance" };
+        reason: "acceptance", ...(requiredExecution && dispatchCallID
+          ? { required_execution: { admission: dispatchCallID, call_id: toolInput.callID } } : {}) };
       const evidenceKey = validationEvidenceKey(request);
       const durable = goalSnapshot.records.flatMap(({ event }) =>
         event.kind === "unit.settled" || event.kind === "unit.evidence-reconciled" ? event.evidence : [])
@@ -1877,7 +1908,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         execution.outcome === "pass" && execution.immutableRef !== undefined && execution.fresh === true &&
         execution.source === snapshot.source && execution.candidate === snapshot.candidate &&
         execution.command.length === 1 && execution.command[0] === rawCommand)
-        .flatMap(execution => evidenceFromObservedExecution({ ...execution, owner,
+        .flatMap(execution => observedHostGoalEvidence({ ...execution, owner,
           endedAt: execution.endedAt!, exitCode: 0, outcome: "pass", immutableRef: execution.immutableRef!, fresh: true }, goal, unitID));
       const uniqueReconciliation = new Map<string, GoalEvidence>();
       for (const entry of [...live, ...durable]) {
@@ -1923,7 +1954,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const operationInputs = mission?.kind === "operation" && mission.execution?.commands.includes(rawCommand) &&
       resolve(input.directory, typeof args?.workdir === "string" ? args.workdir : ".") === mission.execution.directory
       ? await operationInputSnapshot(authorization.projectRoot, snapshot.binding).catch(() => undefined) : undefined;
-    const validationInputs = validation !== undefined && operationInputs === undefined
+    const validationInputs = (validation !== undefined || correction !== undefined) && operationInputs === undefined
       ? await validationInputSnapshot(authorization.projectRoot, snapshot.binding).catch(() => undefined) : undefined;
     hostGoalExecutions.set(toolInput.callID, { root, projectRoot: authorization.projectRoot,
       sessionID: toolInput.sessionID,
@@ -1932,6 +1963,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       ...(operationInputs === undefined ? {} : { operationInputs }),
       ...(validationInputs === undefined ? {} : { validationInputs }),
       owner: validation?.request.owner ?? "worker", validation,
+      ...(correction ? { correction } : {}),
       ...(reusedEvidence === undefined ? {} : { reusedEvidence }) });
   }
 
@@ -1975,6 +2007,17 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       ...(refreshed === undefined ? {} : { source: refreshed.source, candidate: refreshed.candidate }),
       startedAt: observedStartedAt, endedAt, exitCode: exitCode ?? null,
       ...(outcome === undefined ? {} : { outcome }), ...(immutableRef === undefined ? {} : { immutableRef }), fresh });
+    if (execution.correction) {
+      await input.runtimeBridge?.recordReviewerCorrectionCheck?.(execution.root, execution.correction.taskID, {
+        dispatchCallID: execution.correction.dispatchCallID, childSessionID: execution.sessionID, callID: execution.callID,
+        command: execution.correction.commands, startedAt: observedStartedAt, endedAt, exitCode: exitCode ?? null,
+        binding: execution.binding, source: refreshed?.source ?? execution.source, candidate: refreshed?.candidate ?? execution.candidate,
+        fresh: fresh && outcome === "pass",
+        ...(execution.validationInputs !== undefined && refreshed &&
+          (refreshed.source !== execution.source || refreshed.candidate !== execution.candidate)
+          ? { generatedInputs: execution.validationInputs } : {}),
+      });
+    }
   }
 
   async function nativeUnitCost(child: string | undefined, startedAt?: string): Promise<number | null> {
@@ -2760,7 +2803,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           : execution.immutableRef !== undefined))
       .flatMap(execution => execution.reusedEvidence !== undefined
         ? execution.reusedEvidence
-        : execution.exitCode === undefined || execution.outcome === undefined ? [] : evidenceFromObservedExecution({
+        : execution.exitCode === undefined || execution.outcome === undefined ? [] : observedHostGoalEvidence({
           ...execution, immutableRef: execution.immutableRef!, endedAt: execution.endedAt!, fresh: execution.fresh!,
           exitCode: execution.exitCode, outcome: execution.outcome }, state, reservation.unitID));
     const hostEvidence = [...new Map(observedEvidence.map(entry => [entry.evidence_id, entry])).values()];
@@ -2867,7 +2910,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       .filter(execution => execution.root === root && execution.sessionID === request.childSessionID && execution.endedAt !== undefined &&
         execution.exitCode === 0 && execution.outcome === "pass" && execution.immutableRef !== undefined && execution.fresh === true &&
         execution.source === current.source && execution.candidate === current.candidate)
-      .flatMap(execution => evidenceFromObservedExecution({ ...execution, endedAt: execution.endedAt!, exitCode: 0,
+      .flatMap(execution => observedHostGoalEvidence({ ...execution, endedAt: execution.endedAt!, exitCode: 0,
         outcome: "pass", immutableRef: execution.immutableRef!, fresh: true }, goal, request.unitID))
       .filter(entry => validGoalEvidence(entry, goal));
     if (liveEvidence.length > 0) {

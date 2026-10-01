@@ -496,9 +496,8 @@ export function missionPlan(mission: OperatorMission, raw: unknown, projectRoot?
       throw new Error(`mission-unit-${index + 1}: validation must contain exact commands; final command proves the unit`);
     }
     const validation = (value.validation as string[]).map(missionValidationCommand);
-    // Retain last occurrences so removing a redundant check preserves the final proof command.
     return { id: `unit-${index + 1}`, title: line("title"), objective: line("objective"), read: paths("read"), write: paths("write"),
-      validation: validation.filter((command, i) => validation.lastIndexOf(command) === i),
+      validation,
       acceptance_indices: [...new Set(ids.map(id => mission.requirements.findIndex(item => item.id === id)))] };
   });
   // The serial engine counts new proof milestones. Units sharing the same final suite are one
@@ -511,7 +510,7 @@ export function missionPlan(mission: OperatorMission, raw: unknown, projectRoot?
     same.read = [...new Set([...same.read, ...unit.read])];
     same.write = [...new Set([...same.write, ...unit.write])];
     same.acceptance_indices = [...new Set([...same.acceptance_indices, ...unit.acceptance_indices])];
-    same.validation = [...new Set([...same.validation.slice(0, -1), ...unit.validation])];
+    same.validation = [...same.validation, ...unit.validation];
   }
   const uncovered = mission.requirements.filter((_, i) => !units.some(unit => unit.acceptance_indices.includes(i)));
   if (uncovered.length) throw new Error(`mission-uncovered: ${uncovered.map(item => item.id).join(", ")}; retain all requirements in the unit plan`);

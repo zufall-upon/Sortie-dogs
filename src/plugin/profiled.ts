@@ -20,7 +20,7 @@ import { OperatorMissionRuntime, missionAcceptanceSummary, missionPacket, missio
   missionCommandOutcome, missionConversationContext, missionExecutionStatus, missionValidationCommand, missionReviewTraces, missionReviewVerdict, type OperatorMission } from "../core/operator-mission.js";
 import { publishMissionProgress } from "./mission-progress.js";
 import { completedMissionReviewPrompts, initialMissionReviewPrompt, missionReviewBaseline, missionReviewSource,
-   observedMissionValidation, observedMissionValidationSummary, missionReviewValidation, reviewerCorrectionValidation } from "./mission-review.js";
+   observedMissionValidation, observedMissionValidationSummary, missionReviewValidation, reviewerCorrectionValidationFresh } from "./mission-review.js";
 import { missionLocations, missionLocationPacket } from "./mission-location.js";
 import { prepareValidationScratch } from "./validation-scratch.js";
 import { SOURCE_REVIEW_RISK_TAGS } from "../core/consultation.js";
@@ -450,6 +450,13 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         return active && unit.childSessionID === child &&
           unit.unit.validation.some(candidate => normalizeCommand(candidate) === command);
       },
+      beforeValidationSnapshot: (root, child, command) => operators.beforePostCommitValidation(root, child, command),
+      requiresValidationExecution: async (root, taskID, child, commands) => {
+        const run = await operators.read(root);
+        const unit = run?.units.find(item => item.status === "running" && item.childSessionID === child &&
+          /^task_id: (.+)$/mu.exec(item.task.prompt)?.[1] === taskID);
+        return !!unit && commands.some(command => unit.unit.validation.filter(item => normalizeCommand(item) === command).length > 1);
+      },
       ownsMissionDispatch: async (root, callID, taskID) => {
         const mission = await missions.read(root), state = await operators.read(root);
         return mission !== undefined && state !== undefined && mission.runID === state.runID &&
@@ -458,11 +465,13 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             /^task_id: (.+)$/m.exec(unit.task.prompt)?.[1] === taskID);
       },
       ownsReviewerCorrection: async child => !!await reviewerCorrection(child),
+      recordReviewerCorrectionCheck: (root, taskID, check) => operators.recordReviewerCorrectionCheck(root, taskID, check),
       reviewerCorrectionValidation: async (root, callID, child, startedAt) => {
         const run = await operators.read(root);
         const unit = run?.units.find(item => item.callID === callID && item.childSessionID === child && item.reviewerCorrection?.author === child);
         if (!unit) return undefined;
-        try { return reviewerCorrectionValidation(unit.unit.validation, child, await messages(child), startedAt); }
+        try { return await reviewerCorrectionValidationFresh(unit.unit.validation, child, await messages(child), startedAt,
+          unit.reviewerCorrection?.checks ?? [], input.directory); }
         catch { return { ready: false, reason: "mission-review-correction-validation-history-unavailable" }; }
       },
       ownsReviewerCorrectionDispatch: async (root, callID, taskID) => {
@@ -2053,7 +2062,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             objective: "Correct the retained Reviewer's concrete findings in this same conversation; preserve every original requirement. Findings and prior review are at the exact correction_context reference in the handoff. Do not repeat discovery of unchanged code or optional improvements. Run the unchanged declared validation in order and retain the requested commit/clean boundary. Return CORRECTION_READY, never PASS; a different child owns final independent review.",
             read: [...new Set([...(mission.reviewScope?.read ?? []), ...run.units.flatMap(unit => unit.unit.read)])],
             write: [...new Set([...(mission.reviewScope?.write ?? []), ...run.units.flatMap(unit => unit.unit.write)])],
-            validation: [...new Set(run.units.flatMap(unit => unit.unit.validation))] }], input.directory);
+            validation: run.units.flatMap(unit => unit.unit.validation) }], input.directory);
           // Inherit fixed declaration budgets and Git authority, never infer fresh capacity.
           const goalPath = /^goal_declaration_path: (.+)$/mu.exec(run.units[0]!.task.prompt)?.[1];
           if (!goalPath) throw new Error("operator-declaration-path-invalid");
@@ -2190,8 +2199,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     async function assertCorrectionValidation(run: OperatorState) {
       for (const unit of run.units) {
         if (!unit.reviewerCorrection || !unit.childSessionID) continue;
-        const checked = reviewerCorrectionValidation(unit.unit.validation, unit.childSessionID, await messages(unit.childSessionID),
-          Date.parse(unit.reviewerCorrection.admittedAt ?? run.createdAt));
+        const checked = await reviewerCorrectionValidationFresh(unit.unit.validation, unit.childSessionID, await messages(unit.childSessionID),
+          Date.parse(unit.reviewerCorrection.admittedAt ?? run.createdAt), unit.reviewerCorrection.checks ?? [], input.directory);
         if (!checked.ready) throw new Error(checked.reason);
       }
     }
