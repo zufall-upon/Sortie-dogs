@@ -58,6 +58,10 @@ export interface RuntimeBridge {
   expandMissionScope?(rootSessionID: string, childSessionID: string, taskID: string, paths: readonly string[],
     activate: (manifest: import("../core/types.js").OperationManifest) => Promise<() => Promise<void>>): Promise<void>;
   missionDispatchCall?(rootSessionID: string, childSessionID: string, taskID: string): Promise<string | undefined>;
+  /** Exact existing running Mission grant, used by the full handoff Read transport. */
+  missionReadBinding?(rootSessionID: string, childSessionID: string, handoffPath: string): Promise<{
+    projectRoot: string; manifestPath: string; handoffHash: string; manifestHash: string;
+  } | undefined>;
   onSerialSettlement?(settlement: SerialDispatchSettlement): Promise<void>;
   onRootTerminal?(rootSessionID: string, receipt: GoalTerminalReceipt): Promise<void>;
   connected?(control: {

@@ -442,16 +442,17 @@ compares original requirements and accepts; you cannot complete, release or publ
 
 export function missionWorkerContent(profile: RuntimeProfile): string {
   return `---
-description: Bounded implementation Worker for the Sortie Coordinator
+description: Sortie implementation Worker
 mode: subagent
 ---
 # ${profileAgent(profile, "dog-worker")}
 
 Investigate, edit, test and requested commit in this Task. Follow AGENTS.md.
-Read handoff_path: task.objective, verbatim original_requests/unit_instruction in mission-context, global constraints
+Read handoff_path in full first: task.objective, verbatim original_requests/unit_instruction in mission-context, global constraints
 and unit-coverage indices. Preserve user scope and ordering; prove assigned criteria, not Mission completion.
-Before writes call ${profile.toolPrefix}bind_write_gate with exact project_root and manifest_path=operation_manifest.
-Treat cwd/project_root and supplied paths as opaque; never shorten or normalize generated segments.
+Host ready: implement. Denied: reason/remedy. No routine manifest/goal/status/bind.
+Legacy/recovery: ${profile.toolPrefix}bind_write_gate with exact project_root and manifest_path=operation_manifest.
+Treat cwd/project_root and paths as opaque; never shorten or normalize segments.
 After compaction recover handoff; inspect diff/results before repeating work.
 
 Read/search use existing permissions. unit.write is an estimate: repair in-request scope/outputs/checks
@@ -463,7 +464,7 @@ Use public source/tests: fix the cause; check meaningful changed branches, API e
 without a hypothetical exhaustive matrix. Preserve reproduction entrypoint, input and layout; rerun or
 report why unverified. Missing tooling: one documented bounded setup in ${TOOL_ENVIRONMENT}/; reuse, never delete.
 ${WORKER_VALIDATION_WORKFLOW}
-Done: requested behavior, checks/commit in user order. Never fabricate completion.
+Done: behavior, checks/commit in user order. Never fabricate completion.
 Parent handles independent Review after return, not before execution; no review-before-commit gate.
 Do not spawn nested subagents, amend, push or publish. Return changes, actual command/exit/elapsed,
 rerun reasons and unresolved/untested behavior; no separate proof document.

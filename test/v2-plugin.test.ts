@@ -16,7 +16,7 @@ import V2Plugin, {
 import type { OpenCodeHooks, OpenCodePlugin } from "../dist/plugin/index.js";
 import { collectRunMetrics } from "../dist/plugin/run-metrics.js";
 import { buildDebrief, renderDebrief } from "../dist/plugin/sortie-debrief.js";
-import { terminalCancelledMissionChildren } from "../dist/plugin/profiled.js";
+import { SortieDogsV010Plugin, terminalCancelledMissionChildren } from "../dist/plugin/profiled.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
 import { OperatorMissionRuntime, missionPlan } from "../dist/core/operator-mission.js";
 import { OperatorRuntime } from "../dist/core/operator-runtime.js";
@@ -152,7 +152,10 @@ test("V2 native shell results retain build→test exits and timestamps through t
   } finally { cleanup?.(); }
 });
 
-for (const legacy of [false, true]) test(`V2 ${legacy ? "saved absolute" : "relative"} mission controls survive Operator correction and cold resume`, async () => {
+for (const { legacy, commit, cancel } of [{ legacy: false, commit: false, cancel: false },
+  { legacy: true, commit: false, cancel: false }, { legacy: false, commit: true, cancel: false },
+  { legacy: false, commit: false, cancel: true }])
+test(`V2 ${cancel ? "cancelled Worker cannot reactivate" : commit ? "auto-bound commit and independent review" : legacy ? "saved absolute" : "relative"} mission controls survive Operator correction and cold resume`, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const directory = await mkdtemp(resolve("_testenv/swebench-night-long-project-root-"));
   const exec = promisify(execFile);
@@ -160,11 +163,25 @@ for (const legacy of [false, true]) test(`V2 ${legacy ? "saved absolute" : "rela
   const agents: Record<string, { agent: string; parentID?: string; outcome?: string }> = {
     root: { agent: "dog-operator" }, coordinator: { agent: "dogs-coordinator", parentID: "root" },
     first: { agent: "dog-worker-v010", parentID: "coordinator" }, second: { agent: "dog-worker-v010", parentID: "coordinator" },
+    reviewer: { agent: "dog-reviewer-v010", parentID: "coordinator" },
+    unrelated: { agent: "build", parentID: "root" },
   };
   let fixture = contextFixture(), cleanup: (() => void) | void, counter = 0;
+  let projectionRace: { path: string; source: string } | undefined;
   const start = async () => {
     fixture = contextFixture();
-    cleanup = await V2Plugin.setup({ ...fixture.context, location: { directory },
+    cleanup = await createSortieDogsV2Plugin(async (input, options) => {
+      const hooks = await SortieDogsV010Plugin(input, options);
+      const after = hooks["tool.execute.after"];
+      hooks["tool.execute.after"] = async (request, output) => {
+        if (projectionRace && request.tool === "read" && request.nativeReadHash) {
+          const race = projectionRace; projectionRace = undefined;
+          await writeFile(race.path, race.source);
+        }
+        await after?.(request, output);
+      };
+      return hooks;
+    }).setup({ ...fixture.context, location: { directory },
       session: { ...fixture.context.session,
         list: async ({ parentID }) => ({ data: Object.entries(agents).filter(([, info]) => info.parentID === parentID)
           .map(([id, info]) => ({ id, ...info })), cursor: { next: null } }),
@@ -191,7 +208,9 @@ for (const legacy of [false, true]) test(`V2 ${legacy ? "saved absolute" : "rela
       finish: "tool-calls", time: { created: now, completed: now }, content: [{ type: "tool", name: event.tool, id: event.id,
         state: { status: "completed", input: event.input, content: [{ type: "text", text: content }], metadata },
         time: { created: now, ran: now, completed: now } }] });
-    await fixture.toolHooks.get("execute.after")!({ ...event, status: "completed", result: { content, metadata } });
+    const completed = { ...event, status: "completed", result: { content, metadata } };
+    await fixture.toolHooks.get("execute.after")!(completed);
+    return completed.result.content;
   };
   const tool = async (sessionID: string, name: string, input: Record<string, unknown> = {}) => {
     const fullName = `sortie_v010_${name}`;
@@ -205,11 +224,18 @@ for (const legacy of [false, true]) test(`V2 ${legacy ? "saved absolute" : "rela
     description: task.description, ...(task.task_id ? { sessionID: task.task_id } : {}) });
   try {
     assert.notEqual(directory, process.cwd(), "control resolution must use the Location, not the service cwd");
-    await exec("git", ["init", "--quiet"], { cwd: directory });
+    await exec("git", ["init", "--quiet", "--initial-branch=base"], { cwd: directory });
     await writeFile(join(directory, "check.mjs"), 'import assert from "node:assert/strict";\nimport {readFileSync} from "node:fs";\n' +
       'const value = readFileSync("result.txt", "utf8");\nassert.ok(value.length);\nif (process.argv[2] === "ready") assert.equal(value, "ready\\n");\nconsole.log("PASS");\n');
     await start();
-    const original = "Create result.txt containing ready, and leave an uncommitted diff.";
+    if (commit) {
+      await exec("git", ["config", "user.name", "Fixture User"], { cwd: directory });
+      await exec("git", ["config", "user.email", "fixture@example.invalid"], { cwd: directory });
+      await writeFile(join(directory, ".gitignore"), ".sortie-dogs-v010/\n");
+      await exec("git", ["add", ".gitignore", "check.mjs"], { cwd: directory });
+      await exec("git", ["commit", "-m", "fixture base"], { cwd: directory });
+    }
+    const original = `Create result.txt containing ready, and ${commit ? "commit the change" : "leave an uncommitted diff"}.`;
     const objective = `${original} Keep this example text verbatim: handoff_path: /external/example.json`;
     await prompt("root", original);
     const mission = await tool("root", "start_mission", { requirements: [original] });
@@ -217,10 +243,12 @@ for (const legacy of [false, true]) test(`V2 ${legacy ? "saved absolute" : "rela
     await prompt("coordinator", String(dispatch.input.prompt));
     let firstRun: string | undefined;
     let budget: { max_units: number; consumed_units: number } | undefined;
-    for (const [index, child] of ["first", "second"].entries()) {
-      const command = `node check.mjs ${index === 0 ? "present" : "ready"}`;
+    let retiredHandoff: string | undefined;
+    for (const [index, child] of (commit ? ["first"] : ["first", "second"]).entries()) {
+      const finalCandidate = commit || index === 1;
+      const command = `node check.mjs ${finalCandidate ? "ready" : "present"}`;
       const plan = await tool("coordinator", "plan_units", { units: [{ title: "Write result", objective,
-        read: ["check.mjs"], write: index === 0 ? ["result.txt"] : ["result.txt", "node_modules/**"], validation: [command] }],
+        read: ["check.mjs"], write: ["result.txt"], validation: [command] }],
         ...(index === 1 ? { reason: "Operator rejected the partial output; preserve the original requirement and correct it" } : {}) });
       let runtime = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
       let state = await runtime.required("root");
@@ -238,6 +266,11 @@ for (const legacy of [false, true]) test(`V2 ${legacy ? "saved absolute" : "rela
         cleanup?.(); await start();
       }
       const unit = state.units[0]!;
+      if (retiredHandoff) {
+        const stale = await after({ sessionID: "first", tool: "read", id: `call_${++counter}`, input: { path: retiredHandoff } },
+          await readFile(resolve(directory, retiredHandoff), "utf8"));
+        assert.doesNotMatch(stale, /SORTIE_WORKER_ACTIVATION/, "old child cannot activate the replanned Mission grant");
+      }
       if (index === 0) firstRun = state.runID;
       else { assert.notEqual(state.runID, firstRun); assert.deepEqual(state.acceptance, [original]); }
       const reference = task.prompt;
@@ -257,10 +290,79 @@ for (const legacy of [false, true]) test(`V2 ${legacy ? "saved absolute" : "rela
       assert.equal(read.input.path, handoff);
       const handoffSource = await readFile(resolve(directory, String(read.input.path)), "utf8");
       assert.equal(JSON.parse(handoffSource).task.objective, objective, "original objective and embedded example remain verbatim");
-      await after(read, handoffSource);
+      if (!legacy && !commit && index === 0) {
+        const unrelated = await after({ sessionID: "unrelated", tool: "read", id: `call_${++counter}`, input: { path: handoff } }, handoffSource);
+        assert.doesNotMatch(unrelated, /SORTIE_WORKER_ACTIVATION/, "an unrelated native child cannot use a Mission grant");
+        const deniedWrite = () => assert.rejects(tool(child, "expand_unit", {
+          unit_id: unit.unit.id, paths: ["result.txt"], reason: "Observe whether a binding exists",
+        }), /mission-scope-update-binding-unavailable/);
+        for (const status of ["error", "cancelled"]) {
+          const failed = { ...read, status, result: { content: "read failed" } };
+          await fixture.toolHooks.get("execute.after")!(failed);
+          assert.equal(failed.result.content, "read failed");
+          await deniedWrite();
+        }
+        for (const args of [{ path: handoff, offset: 1, limit: 1 }, { path: "check.mjs" }]) {
+          const partial = await before(child, "read", args);
+          const content = await after(partial, "partial / unrelated content");
+          assert.doesNotMatch(content, /SORTIE_WORKER_ACTIVATION/);
+          await deniedWrite();
+        }
+        // The exact view and inspection must not activate a different registered identity.
+        const changed = JSON.parse(handoffSource);
+        changed.task.objective += " changed after native read";
+        await writeFile(unit.handoffPath, JSON.stringify(changed));
+        const raced = await after(read, handoffSource);
+        assert.match(raced, /SORTIE_WORKER_ACTIVATION: .*"status":"denied".*"reason":"handoff-mismatch"/);
+        await deniedWrite();
+        await writeFile(unit.handoffPath, handoffSource);
+        const manifestSource = await readFile(unit.manifestPath, "utf8");
+        const changedManifest = JSON.parse(manifestSource);
+        changedManifest.write.push("unregistered.txt");
+        await writeFile(unit.manifestPath, JSON.stringify(changedManifest));
+        const manifestRace = await after(read, handoffSource);
+        assert.match(manifestRace, /"status":"denied".*"reason":"binding-replay"/,
+          "native Read cannot activate a different manifest than the admitted grant");
+        await deniedWrite();
+        await writeFile(unit.manifestPath, manifestSource);
+        projectionRace = { path: unit.handoffPath, source: JSON.stringify(changed) };
+        const snapshotRace = await after(read, handoffSource);
+        assert.match(snapshotRace, /"status":"denied"/);
+        assert.match(snapshotRace, /handoff_read_identity_changed/,
+          "a change between exact view and core inspection must not bind a different identity");
+        assert.ok(snapshotRace.includes(objective), "the returned exact view is the observed snapshot, not the changed source");
+        await deniedWrite();
+        await writeFile(unit.handoffPath, handoffSource);
+      }
+      const ready = await after(read, handoffSource);
+      assert.match(ready, /SORTIE_EXACT_CONTRACT_VIEW/);
+      assert.match(ready, /SORTIE_WORKER_ACTIVATION: \{"status":"ready"\}/);
+      assert.ok(ready.includes(objective), "host activation must retain the original exact view");
+      if (cancel) {
+        agents[child]!.outcome = "interrupted";
+        await tool("root", "cancel_operator", { reason: "Cancel the current fixture Worker" });
+        const cancelledRead = await after(read, handoffSource);
+        assert.doesNotMatch(cancelledRead, /SORTIE_WORKER_ACTIVATION/,
+          "a successful delayed Read after real cancellation cannot reactivate the old grant");
+        assert.equal((await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).phase, "cancelled");
+        return;
+      }
       const manifest = /^operation_manifest: (.+)$/m.exec(expanded)![1]!;
-      assert.equal((await tool(child, "bind_write_gate", { project_root: directory, manifest_path: manifest })).status, "bound");
+      const reread = async () => after(await before(child, "read", { path: handoff }), await readFile(unit.handoffPath, "utf8"));
+      if (legacy || !commit && index === 0) {
+        const manual = await tool(child, "bind_write_gate", { project_root: directory, manifest_path: manifest });
+        assert.equal(manual.status, "bound");
+        assert.equal(manual.idempotent, true, "manual/auto overlap uses the existing binding");
+        assert.match(await reread(), /SORTIE_WORKER_ACTIVATION: \{"status":"ready"\}/);
+        await tool(child, "release_write_gate");
+        assert.match(await reread(), /SORTIE_WORKER_ACTIVATION: \{"status":"ready"\}/,
+          "repeat full Read reactivates the existing released binding");
+      }
       if (index === 1) {
+        assert.equal((await tool(child, "expand_unit", { unit_id: unit.unit.id, paths: ["node_modules/**"],
+          reason: "Same-Task dependency output repair" })).status, "scope-updated");
+        assert.match(await reread(), /SORTIE_WORKER_ACTIVATION: \{"status":"ready"\}/,
+          "scope expansion retains its current binding identity");
         // The real V2 Worker linked a project-local dependency environment before native shell validation.
         await mkdir(join(directory, ".sortie-env/node_modules/pkg"), { recursive: true });
         await writeFile(join(directory, ".sortie-env/node_modules/pkg/index.js"), "dependency");
@@ -272,17 +374,33 @@ for (const legacy of [false, true]) test(`V2 ${legacy ? "saved absolute" : "rela
       const paths = JSON.parse(retained.split("\n")[1]!);
       assert.equal(paths.handoff_path, relative(directory, unit.handoffPath).replaceAll("\\", "/"));
       assert.equal(paths.operation_manifest, manifest);
-      const patchText = index === 0 ? "*** Begin Patch\n*** Add File: result.txt\n+partial\n*** End Patch"
+      const patchText = index === 0 ? `*** Begin Patch\n*** Add File: result.txt\n+${finalCandidate ? "ready" : "partial"}\n*** End Patch`
         : "*** Begin Patch\n*** Update File: result.txt\n@@\n-partial\n+ready\n*** End Patch";
       const patch = await before(child, "patch", { patchText });
-      await writeFile(join(directory, "result.txt"), index === 0 ? "partial\n" : "ready\n");
+      await writeFile(join(directory, "result.txt"), finalCandidate ? "ready\n" : "partial\n");
       await after(patch, "Updated result.txt");
+      if (commit) {
+        for (const args of [["add", "--", "result.txt"], ["commit", "-m", "Implement result"]]) {
+          const gitCommand = args[0] === "add" ? "git add -- result.txt" : 'git commit -m "Implement result"';
+          const operation = await before(child, "shell", { command: gitCommand });
+          const executed = await exec("git", args, { cwd: directory });
+          await after(operation, executed.stdout, { exit: 0 });
+        }
+      }
       const validation = await before(child, "shell", { command });
-      const checked = await exec(process.execPath, ["check.mjs", index === 0 ? "present" : "ready"], { cwd: directory });
+      const checked = await exec(process.execPath, ["check.mjs", finalCandidate ? "ready" : "present"], { cwd: directory });
       await after(validation, checked.stdout, { exit: 0 });
       agents[child]!.outcome = "succeeded";
       await after(worker, "Validation passed", { sessionID: child });
-      await tool("coordinator", "review_mission", { risk_tags: [], traces: [`R1: result.txt checked using ${command}`] });
+      const review = await tool("coordinator", "review_mission", { risk_tags: commit ? ["public-logic"] : [], traces: [`R1: result.txt checked using ${command}`] });
+      if (commit) {
+        const reviewTask = await before("coordinator", "subagent", nativeTask(review.task));
+        await prompt("reviewer", String(reviewTask.input.prompt));
+        agents.reviewer!.outcome = "succeeded";
+        await after(reviewTask, "PASS\nCommitted result matches the original request and real validation.", { sessionID: "reviewer" });
+        assert.equal((await exec("git", ["log", "-1", "--format=%s"], { cwd: directory })).stdout.trim(), "Implement result");
+        assert.equal((await exec("git", ["status", "--porcelain"], { cwd: directory })).stdout, "");
+      }
       await tool("coordinator", "submit_mission", { status: "ready", summary: "Candidate for Operator acceptance" });
       agents.coordinator!.outcome = "succeeded";
       await after(dispatch, "Candidate ready", { sessionID: "coordinator" });
@@ -292,7 +410,8 @@ for (const legacy of [false, true]) test(`V2 ${legacy ? "saved absolute" : "rela
       if (budget) assert.equal(status.budget.max_units, budget.max_units);
       budget = status.budget;
       assert.equal((await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).receipt, null);
-      if (index === 0) {
+      if (index === 0 && !commit) {
+        retiredHandoff = handoff;
         cleanup?.(); await start(); // Same durable mission/Coordinator; no additional user turn.
         delete agents.coordinator!.outcome;
         dispatch = await before("root", "subagent", { agent: "dogs-coordinator", sessionID: "coordinator",

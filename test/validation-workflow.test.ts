@@ -52,7 +52,7 @@ test('planning and implementation share a staged validation workflow without new
   assert.match(operator, /Do not infer a parent glob from a project\/repository name/);
   assert.match(operator, /preserving the authorized clone and exact prohibited paths/);
   assert.doesNotMatch(operator, /If the original request supplies a meaningful formal validation command/);
-  assert.match(worker, /Read handoff_path:/);
+  assert.match(worker, /Read handoff_path in full first:/);
   assert.match(worker, /meaningful changed branches, API errors and state after failure/);
   assert.doesNotMatch(worker, /Assert public return value|Check a\s+materially different failure input|uncaught failures/);
   for (const boundary of [/in this Task via/, /\.git\/\*\* scope/, /formal evidence/,

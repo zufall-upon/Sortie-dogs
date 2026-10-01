@@ -62,7 +62,7 @@ test("public reproduction and shared-branch checks remain in the same mission Wo
   assert.doesNotMatch(expanded.prompt, /Implement task\.objective; preserve the original requests/u);
   assert.ok(expanded.prompt.length <= 1500, `navigation prompt: ${expanded.prompt.length}`);
   const currentNavigation = 'goal: handoff.task.objective; original: handoff.ext["sortie-dogs/mission-context"]\n' +
-    "Read the authoritative handoff before binding; do not recopy the original request.";
+    "Read the full authoritative handoff first. Host ready => implement; denied => follow its reason/remedy. No routine manifest/goal/status/bind calls; manual bind remains the legacy/recovery fallback. Do not recopy the original request.";
   const previousNavigation = "Read handoff_path once before binding. Implement task.objective; preserve the original requests, global criteria and constraints in ext, and prove this unit's assigned indices. Run verification checks exactly in order within this Task. Use supplied paths; do not reconstruct project_root. Return actual results and limitations, not whole-Mission completion.";
   t.diagnostic(JSON.stringify({ handoff_prompt_before_chars: expanded.prompt.replace(currentNavigation, previousNavigation).length,
     handoff_prompt_after_chars: expanded.prompt.length, navigation_before_chars: previousNavigation.length,

@@ -455,6 +455,7 @@ interface TaskToolExecuteAfterInput {
   readonly sessionID?: string;
   readonly callID?: string;
   readonly args?: unknown;
+  readonly nativeReadHash?: string;
 }
 
 interface TaskResultRepairOutput {
@@ -493,6 +494,8 @@ interface HostToolTiming {
 
 interface InspectionCacheEntry {
   fingerprint: string;
+  handoffHash: string;
+  manifestHash?: string;
   expiresAt: number;
   handoffPath: string;
   manifestPath: string;
@@ -4970,7 +4973,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   async function inspect(
     path: string,
     sessionID: string | undefined,
-    options: { readonly report?: boolean; readonly rescueSessionID?: string } = {},
+    options: { readonly report?: boolean; readonly rescueSessionID?: string; readonly readHash?: string } = {},
   ): Promise<InspectedContractIdentity | undefined> {
     const unregistered = (code: string): void => {
       if (!options.report) return;
@@ -4996,8 +4999,14 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const key = sessionID === undefined ? undefined : `${sessionID}\u0000${absolutePath}`;
     if (key !== undefined) inspected.delete(key);
     let value: unknown;
+    let handoffHash: string;
     try {
-      value = await readJson(absolutePath, INPUT_LIMITS.handoff);
+      const pinned = await readPinnedJson(absolutePath, INPUT_LIMITS.handoff);
+      if (options.readHash !== undefined && pinned.hash !== options.readHash) throw new HandoffDeniedError("contract-invalid", path, {
+          defects: [contractDefect("handoff", "/", "handoff_read_identity_changed")],
+        });
+      value = pinned.value;
+      handoffHash = pinned.hash;
     } catch (error) {
       if (error instanceof PluginInputError) {
         throw new HandoffDeniedError("input-unavailable", path, {
@@ -5016,6 +5025,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
 
     let authorizationGate: WriteGate;
     let manifestPath: string;
+    let manifestHash: string | undefined;
     let manifest: OperationManifest;
     let inspectedProjectRoot: string;
     const extension = validation.value.ext?.["sortie-dogs/write-gate"];
@@ -5077,8 +5087,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         }
         const relativeManifestPath = await candidateProject.toRelativePath(extension.operation_manifest);
         manifestPath = candidateProject.absolute(relativeManifestPath);
-        const manifestValue = await readJson(manifestPath, INPUT_LIMITS.manifest);
-        const manifestValidation = validateOperationManifestSchema(manifestValue);
+        const pinnedManifest = await readPinnedJson(manifestPath, INPUT_LIMITS.manifest);
+        manifestHash = pinnedManifest.hash;
+        const manifestValidation = validateOperationManifestSchema(pinnedManifest.value);
         if (!manifestValidation.ok) {
           throw new HandoffDeniedError("contract-invalid", path, {
             defects: schemaDefects("manifest", manifestValidation.diagnostics),
@@ -5159,6 +5170,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     pruneInspections(now, true);
     inspected.set(key!, {
       fingerprint,
+      handoffHash,
+      manifestHash,
       expiresAt: now + INSPECTION_CACHE.ttlMilliseconds,
       handoffPath: absolutePath,
       manifestPath,
@@ -5175,6 +5188,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     sessionID: string,
     projectRoot: string,
     manifestPathArgument: string,
+    readHash?: string,
+    registeredManifestHash?: string,
   ): Promise<string> {
     const remedies: Record<string, { recoverable: boolean; remedy: string }> = {
       "session-inactive": {
@@ -5278,6 +5293,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       const relativeManifestPath = await candidate.toRelativePath(manifestPathArgument);
       const manifestPath = candidate.absolute(relativeManifestPath);
       const pinned = await readPinnedJson(manifestPath, INPUT_LIMITS.manifest);
+      if (registeredManifestHash !== undefined && pinned.hash !== registeredManifestHash) return deny("binding-replay");
       const validation = validateOperationManifestSchema(pinned.value);
       if (!validation.ok) {
         return deny("manifest-invalid", schemaDefects("manifest", validation.diagnostics));
@@ -5323,7 +5339,14 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       };
       let handoffValue: unknown;
       try {
-        handoffValue = await readJson(inspectedEntry.handoffPath, INPUT_LIMITS.handoff);
+        if (readHash === undefined) handoffValue = await readJson(inspectedEntry.handoffPath, INPUT_LIMITS.handoff);
+        else {
+          const pinnedHandoff = await readPinnedJson(inspectedEntry.handoffPath, INPUT_LIMITS.handoff);
+          if (pinnedHandoff.hash !== readHash) return denyHandoffMismatch({ readHash, currentHash: pinnedHandoff.hash }, [
+            contractDefect("handoff", "/", "handoff_read_identity_changed"),
+          ]);
+          handoffValue = pinnedHandoff.value;
+        }
       } catch (error) {
         if (error instanceof PluginInputError) {
           return denyHandoffMismatch({ input: error.reason }, [
@@ -5826,17 +5849,46 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     clearSessionLinks(sessionID);
   }
 
-  async function inspectSuccessfulRead(toolInput: TaskToolExecuteAfterInput): Promise<void> {
+  async function inspectSuccessfulRead(toolInput: TaskToolExecuteAfterInput, output: TaskResultRepairOutput): Promise<void> {
     if (toolInput.tool.toLowerCase() !== "read" || toolInput.sessionID === undefined) return;
+    if (output.status !== undefined && output.status !== "completed") return;
     if (activeSessionStatus(toolInput.sessionID) !== "active" || !isRecord(toolInput.args)) return;
     const path = toolInput.args.filePath;
     if (typeof path !== "string" || path.length === 0) return;
     const absolutePath = isAbsolute(path) ? resolve(path) : resolve(input.worktree ?? input.directory, path);
     const key = `${toolInput.sessionID}\u0000${absolutePath}`;
-    const operation = inspectionOperations.get(key) ?? inspect(absolutePath, toolInput.sessionID).then(() => undefined);
+    const root = coordinatorRootForSession(toolInput.sessionID);
+    const binding = output.status === "completed" && toolInput.nativeReadHash !== undefined && root !== undefined
+      ? await input.runtimeBridge?.missionReadBinding?.(root, toolInput.sessionID, absolutePath) : undefined;
+    const append = (result: unknown): void => {
+      output.output = `${String(output.output ?? "")}\n\nSORTIE_WORKER_ACTIVATION: ${JSON.stringify(result)}`;
+    };
+    if (binding && binding.handoffHash !== toolInput.nativeReadHash) {
+      append({ status: "denied", reason: "handoff-mismatch", remedy: "Correct the registered handoff or its operation manifest, then read the handoff again." });
+      return;
+    }
+    // Join the before-read inspection for concurrent legacy manual binds. Reuse it
+    // only for the same completed native snapshot; bind rechecks freshness as usual.
+    const previous = inspectionOperations.get(key);
+    if (binding && previous) await previous.catch(() => undefined);
+    const cached = inspected.get(key);
+    const reuse = binding && cached?.handoffHash === toolInput.nativeReadHash && cached?.manifestHash === binding.manifestHash;
+    const operation = binding && !reuse
+      ? inspect(absolutePath, toolInput.sessionID, { readHash: toolInput.nativeReadHash }).then(() => undefined)
+      : reuse ? Promise.resolve() : previous ?? inspect(absolutePath, toolInput.sessionID).then(() => undefined);
     inspectionOperations.set(key, operation);
     try {
       await operation;
+      if (binding) {
+        const result = JSON.parse(await bindWriteGate(toolInput.sessionID, binding.projectRoot, binding.manifestPath,
+          toolInput.nativeReadHash, binding.manifestHash));
+        append(result.status === "bound" ? { status: "ready" } : result);
+      }
+    } catch (error) {
+      if (!binding) throw error;
+      append({ status: "denied", reason: error instanceof HandoffDeniedError || error instanceof PluginInputError
+        ? error.reason : "binding-failed", remedy: error instanceof Error ? error.message : String(error),
+        ...(error instanceof HandoffDeniedError ? { defects: error.defects } : {}) });
     } finally {
       if (inspectionOperations.get(key) === operation) inspectionOperations.delete(key);
     }
@@ -6948,7 +7000,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         if (lease !== undefined) childObservedLeases.set(completedChildSessionID, lease);
         pruneParallelChildMap(observedChildTerminals);
       }
-      const handoffInspection = inspectSuccessfulRead(toolInput);
+      const handoffInspection = inspectSuccessfulRead(toolInput, output);
       try {
         if (bootstrapRequired && toolInput.tool === "sortie_check_contract" && toolInput.sessionID !== undefined &&
           isCoordinatorSession(toolInput.sessionID) && successfulBootstrapContractCheck(output)) {

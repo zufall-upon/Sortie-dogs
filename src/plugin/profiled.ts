@@ -541,6 +541,15 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       },
       missionDispatchCall: async (root, child, taskID) => (await operators.read(root))?.units.find(unit =>
         unit.childSessionID === child && /^task_id: (.+)$/m.exec(unit.task.prompt)?.[1] === taskID)?.callID ?? undefined,
+      missionReadBinding: async (root, child, handoffPath) => {
+        const mission = await missions.read(root), run = await operators.read(root);
+        if (!mission || !run || mission.runID !== run.runID || run.phase !== "running" ||
+            ["cancelled", "completed"].includes(mission.phase)) return undefined;
+        const unit = run.units.find(unit => unit.status === "running" && unit.childSessionID === child &&
+          resolve(unit.handoffPath) === resolve(handoffPath));
+        return unit ? { projectRoot: operators.projectRoot, manifestPath: unit.manifestPath,
+          handoffHash: unit.hashes[0]!, manifestHash: unit.hashes[1]! } : undefined;
+      },
       defaultModelCatalog: { global: previewModelCatalog() },
       transformConfiguration: value => {
         if (!record(value) || !record(value.modelRouting)) return value;

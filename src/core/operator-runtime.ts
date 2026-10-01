@@ -1115,7 +1115,7 @@ export class OperatorRuntime {
         'acceptance: handoff.ext["sortie-dogs/acceptance-continuity"].criteria', "validation: handoff.verification",
         `unit_acceptance_indices: ${JSON.stringify(unit.acceptance_indices)}`, "",
         'goal: handoff.task.objective; original: handoff.ext["sortie-dogs/mission-context"]',
-        "Read the authoritative handoff before binding; do not recopy the original request.",
+        "Read the full authoritative handoff first. Host ready => implement; denied => follow its reason/remedy. No routine manifest/goal/status/bind calls; manual bind remains the legacy/recovery fallback. Do not recopy the original request.",
         ...commitBoundary,
       ] : [...promptHeader, "acceptance:", ...plan.acceptance.map(value => `  - ${value}`),
         "validation:", ...unit.validation.map(value => `  - ${value}`),

@@ -2,7 +2,7 @@ import type { OpenCodeHooks, OpenCodePlugin } from "./index.js";
 import { SortieDogsV010Plugin } from "./profiled.js";
 import { bindMissionProgress, missionProgressReader } from "./mission-progress.js";
 import { owningServiceMessageList, owningServiceSessionList } from "./v2-session-history.js";
-import { nativeContractReadView } from "./native-contract-read.js";
+import { nativeContractReadSnapshot } from "./native-contract-read.js";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { V010_RUNTIME_ASSET_VERSION } from "../asset-version.js";
@@ -457,12 +457,12 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks)
   await context.tool.hook("execute.after", async event => {
     const result = record(event.result) ? event.result : {};
     const mapped: JsonObject = { status: event.status, output: toolContentText(result.content), metadata: result.metadata ?? event.error };
+    const view = event.tool === "read" && event.status === "completed"
+      ? await nativeContractReadSnapshot(context.location.directory, event.input) : undefined;
+    if (view !== undefined) mapped.output = view.output;
     await hooks["tool.execute.after"]?.({ tool: legacyToolName(event.tool), sessionID: String(event.sessionID ?? ""),
-      callID: String(event.id ?? "") }, mapped);
-    if (event.tool === "read" && event.status === "completed") {
-      const view = await nativeContractReadView(context.location.directory, event.input);
-      if (view !== undefined) mapped.output = view;
-    }
+      callID: String(event.id ?? ""), args: legacyToolInput(event.tool, event.input),
+      ...(view ? { nativeReadHash: view.hash } : {}) }, mapped);
     if (typeof mapped.output === "string" && event.status === "completed") event.result = replaceToolContent(result, mapped.output);
   });
   if (hooks["chat.message"]) await context.session.hook("prompt", async event => {

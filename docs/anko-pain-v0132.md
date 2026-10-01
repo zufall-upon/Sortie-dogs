@@ -204,3 +204,31 @@ The revision targets the fully rendered implementation Worker, not only an objec
 - Complete sanitized database, fixed package, installed-asset measurement, before/after assets, source/Git bundle, usage and phase diagnosis archived at `M:/_work/_Sortie-dogs-artifacts/records/anko-pain-v0132-clarity-20261001/` (465 files). Owned listener stopped; credentials removed; shared registration unchanged; generated isolated plugin/cache retired. Source and evidence retained.
 
 The requested common-instruction redesign is implemented and exercised in a real session. It is **not yet a successful rapid whole-Mission outcome**. Preserve the short authoritative brief and the evidence above; do not restore verbose rules in response to unproven hypotheses, or label the observer cutoff a completed run. PR remains Draft, without merge/release/global apply.
+
+### Follow-up retrospective and implementation proposal
+
+The next user request asks for self-reflection, a PR proposal, and implementation checked against autonomy, efficiency and visibility. The central mistake was treating local prompt and contract improvements as the main response while accepted completion remained unproven. Repeating expensive unfinished runs did not isolate why 57 model requests remained. Shorter first-Worker time is not equivalent to same-quality faster completion, and increasing observer duration cannot repair that evidence gap.
+
+The Advisor identified a specific host-owned operation still delegated to the model: the current admitted Worker reads handoff, manifest and goal, calls status, then explicitly binds its assignment. The initial five calls include a bind-only model turn. Between the first handoff read and first repository operation, the observed interval was 12.68 seconds; the first read-group tool interval union was approximately 56 ms and the bind tool approximately 13 ms. Model/control overhead, rather than those tool durations, is the relevant target. These observations do not explain the whole 1,017,530 ms Worker interval.
+
+Proposed change: after a successful authoritative handoff read, have the host activate the already admitted assignment through the existing binding operation and return its actual result separately from the original task. Preserve legacy manual binding and existing permission decisions. The model should not repeat host-owned document reads or identifier transfer merely to start the assigned work.
+
+- Autonomy: remove the routine model-managed handshake, rather than moving it to an Operator approval turn.
+- Efficiency: target five startup calls down to one and eliminate the bind-only turn; verify this on the installed native path.
+- Visibility: show actual ready/denied state and recovery information while retaining the complete original requirements.
+- Validation: focused hook/binding regressions, independent source Review, required full/Windows checks, then a small public installed integration session. The public fixture is not an Anko substitute and cannot establish original-task quality or speed.
+
+Implemented the native V2 after-hook argument forwarding and exact-view-first activation path. A successful full registered handoff read by the current admitted Mission child now invokes the existing binding operation and appends `SORTIE_WORKER_ACTIVATION`; ready/denied reflects its actual result. Matching prior inspection is reused, while existing bind freshness checks remain authoritative. New Mission navigation is handoff-first, with manual binding retained for legacy/recovery. The rendered Worker is 2,877 characters; model, effort, permissions and `gate.ts` are unchanged.
+
+- Targeted `npm run test:targeted -- test/v2-plugin.test.ts test/operator-mission.test.ts test/validation-workflow.test.ts test/mission-binding-recovery.test.ts test/mission-operation-lifecycle.test.ts test/plugin.test.ts test/child-lifecycle-runtime.test.ts`: **296 PASS**, exit **0**, **30.502 s**, `_testenv/wsl-1790833138964-31800/`, source SHA-256 `2e4ba0b47951e12e5c1c96a2cd8f2d86b1793a468f84df4188465219a3bd7e9c`.
+- Final focused `npm run test:targeted -- test/v2-plugin.test.ts`: **42 PASS**, exit **0**, **15.233 s**, `_testenv/wsl-1790833238060-33572/`, source SHA-256 `ac07f1f106bde26e381f2ca5a89bc099a04a106b0dc24d52d025c5170f9f0b52`. Coverage includes failed/partial/wrong reads, view/manifest changes, old/cancelled children, manual/repeated/released bindings and same-Task scope expansion. The native fixture includes actual file edits, validation, requested Git commit, independent Review and receipt through a simulated V2 host.
+- Independent **SourceReview PASS**: actual prompt-claim/current-child/runtime grant wiring confirmed, unchanged original-request display, existing binding diagnostics and recovery retained, no additional approval/gate. No real-model or whole-Mission speed claim follows from this source Review.
+
+The first full validation stopped on one stale prose assertion in `test/v010-runtime.test.ts`: it required “supplied paths” where the shorter instruction now says “paths”. The assertion now accepts both wordings while still requiring opaque path handling. Product code was unchanged. Failed `npm run test:full`: exit **1**, test phase **154.748 s**, `_testenv/wsl-1790833336130-23128/`; the full suite is rerun because the fail-fast run did not complete the remaining files.
+
+The second full run exposed the adjacent assertion requiring “generated segments” rather than “segments” (exit **1**, **159.313 s**). Both wording assertions now accept the equivalent shorter instruction. Repeating full validation before checking the entire affected test was avoidable verification overhead. The corrected file then passed **119/119** targeted checks, exit **0**, **11.828 s**.
+
+- Final `npm run test:full`: **1,420/1,420 PASS**, exit **0**, test phase **160.809 s**, `_testenv/wsl-1790833773135-9980/`, source SHA-256 `24763f295633e99d8bd4b7e3f08246c06d32024308a080fe5a1e40091f06ce4a`.
+- Subsequent `npm run test:windows`: **12/12 PASS**, exit **0**, build **9.917 s**, test **3.905 s**.
+
+The installed public integration probe is pending. The previous Anko run remains observer-censored and unaccepted.

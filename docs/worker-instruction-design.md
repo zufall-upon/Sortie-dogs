@@ -31,3 +31,19 @@ Also measure the task brief, native handoff rendering, tool descriptions and acc
 Instruction size and internal tests establish a design change, not model performance. Keep the model/effort fixed while evaluating instruction changes. Observe real dispatch, tool use, initial implementation quality, required validation, independent Review, delivery, elapsed time and cost. Report incomplete outcomes as incomplete.
 
 The intended outcome is fast, autonomous and visible completion of the original task. Removing required quality checks, hiding defects, substituting an easier task or waiting longer is not instruction improvement.
+
+## Follow-up proposal: host-owned Worker activation
+
+The latest observed Mission Worker performed three control-document reads, a status call and a manual bind before repository work. The host already knows the admitted child, assignment and operation manifest. Asking the model to reconstruct that handshake adds bookkeeping without improving the implementation brief.
+
+Move activation of the existing assignment into completion of the authoritative handoff read. The Worker should receive the original task and a separate, concise activation result in the same response. Use the existing binding operation and its diagnostics; expose a denial with its actual recovery action rather than pretending the assignment is ready. Keep the manual binding path for compatibility and recovery.
+
+This proposal serves the three product principles:
+
+- **Autonomy:** a current admitted Worker can start its assignment without another parent turn or manual identifier transfer.
+- **Efficiency:** replace redundant control-document reads and a bind-only model turn with host-owned state handling.
+- **Visibility:** report the actual activation result alongside the assignment, retaining explicit blockers and original requirements.
+
+The measured baseline has five startup calls and 12.68 seconds between the first handoff read and the first repository operation. The target is one handoff call; the entire interval is not assumed recoverable. This does not explain the remaining 57 model requests, implementation quality, or independent Review duration.
+
+Validate native hook behavior and existing binding compatibility first, then exercise the installed package in a small public integration fixture. That fixture establishes host integration only. Original Anko completion remains unproven until its original requirements, formal checks, independent Review and successful receipt all complete.

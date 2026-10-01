@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { isAbsolute, relative, resolve } from "node:path";
 import { RUNTIME_PROFILES } from "../core/runtime-profile.js";
 
@@ -10,7 +11,14 @@ const record = (value: unknown): value is Record<string, unknown> =>
  * real line breaks, so the already-required read exposes the original requirements.
  * This is a read-result projection only: persisted JSON, identities and grants stay unchanged. */
 export async function nativeContractReadView(directory: string, input: unknown): Promise<string | undefined> {
+  return (await nativeContractReadSnapshot(directory, input))?.output;
+}
+
+export async function nativeContractReadSnapshot(directory: string, input: unknown): Promise<{ output: string; hash: string } | undefined> {
   if (!record(input) || typeof input.path !== "string") return undefined;
+  // Preserve native partial-read semantics; only the full contract projection supplies
+  // authoritative content for automatic activation.
+  if (input.offset !== undefined || input.limit !== undefined) return undefined;
   const absolute = resolve(directory, input.path);
   const scoped = relative(directory, absolute).replaceAll("\\", "/");
   if (scoped === ".." || scoped.startsWith("../") || isAbsolute(scoped)) return undefined;
@@ -63,9 +71,10 @@ export async function nativeContractReadView(directory: string, input: unknown):
     }
   };
   visit(value, "");
-  return `Read generated contract ${input.path}\n` +
+  const output = `Read generated contract ${input.path}\n` +
     "SORTIE_EXACT_CONTRACT_VIEW: exact JSON values; strings use their original line breaks. " +
     (referencedCriteria ? "Duplicate criteria reference equal displayed requirement text. " : "") +
     "This is not a summary or a replacement contract. The source JSON and its registered identity are unchanged.\n\n" +
     fields.join("\n\n");
+  return { output, hash: createHash("sha256").update(source).digest("hex") };
 }

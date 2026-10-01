@@ -267,8 +267,8 @@ test("preview assets coexist with stable assets and markers", async () => fixtur
   const primary = previewAssets.find(asset => asset.name === "dog-operator")!.content;
   for (const asset of previewAssets.filter(asset => asset.installPath.startsWith("agent/"))) {
     if (asset.name === "dog-worker-v010") {
-      assert.match(asset.content, /Treat cwd\/project_root and supplied paths as opaque/u);
-      assert.match(asset.content, /never shorten or normalize generated segments/u);
+      assert.match(asset.content, /Treat cwd\/project_root and (?:supplied )?paths as opaque/u);
+      assert.match(asset.content, /never shorten or normalize (?:generated )?segments/u);
     } else {
       assert.match(asset.content, /Treat the current working directory and every project_root value as opaque/u);
       assert.match(asset.content, /Never shorten, hand-normalize,[\s\S]+generated path segment/u);
