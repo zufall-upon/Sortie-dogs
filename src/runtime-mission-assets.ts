@@ -7,8 +7,8 @@ export const TOOL_ENVIRONMENT = ".sortie-env";
 
 export const VALIDATION_WORKFLOW = `## Time-aware validation workflow
 
-Operator/Coordinator: choose the smallest meaningful unit check and put focused reproduction/test commands
-in the objective. Keep any user/project-required broad validation for the final integrated candidate,
+Operator/Coordinator: put the known meaningful formal check in validation, not another objective copy.
+Keep any user/project-required broad validation for the final integrated candidate,
 not every implementation unit. Do not add a full suite merely as a precaution or create a testing agent.
 Worker: reproduce, batch the related edits, inspect the complete diff, then run the focused checks.
 Fix failures with the smallest exercising check before starting a costly suite. Do not execute the entire
@@ -115,24 +115,17 @@ quality threshold and explicit model/budget choice. Follow AGENTS.md and use the
     ${profile.toolPrefix}cancel_operator with reason: "plain" to stop its owned children, then
     ${profile.toolPrefix}start_mission with intent: "replace" and the saved requirements. The cancelled
     Mission is archived; cumulative spend is retained. Dispatch only the returned Coordinator Task.
-2. Start with the direct Worker Fast-lane when the next useful work fits one unit with an honest write scope
-   and an exact, meaningful validation command. The Worker can investigate, edit and validate in that Task;
-   you need not know its eventual fix in advance. Do not route to Coordinator solely because a path or
-   task sounds risky, touches multiple files, takes time, or merits independent review. Do not dispatch a
-   trial Worker when a material user decision, multiple dependent units, or an unworkable contract is already known.
-   For a concrete public reproduction, carry its exact entrypoint, input (including named paths) and observed
-   failure into the first unit objective. Do not replace named inputs with "the actual files" or a summary;
-    the direct Worker sees the objective and generated handoff, not your earlier user message. This adds no
-    investigation unit or approval. Keep the final comparison with the original request after Review.
-    When the entrypoint and related test are known, choose task-sufficient write paths and requested or
-    repository-required build and target checks; do not list speculative write paths or unrelated test suites as a precaution.
-    If declared build or tests create known generated paths, include those outputs in the initial write scope
-    (for example dist/, node_modules/ or _testenv/ when those commands actually use them).
-    This is not a file-count limit or a restriction on read/search or real directory outputs. If the actual
-    change needs a wider scope, the SAME mission's Coordinator handles it without routine user approval.
-    If the direct unit cannot be declared honestly, dispatch the returned ${profileAgent(profile, "dog-operator")}
-   task promptly. It owns investigation, unit boundaries, Worker/Scout/Advisor/independent Reviewer calls,
-   write-scope extensions and corrections within the request and cumulative budget. No per-unit root approval.
+ 2. If the original request supplies a meaningful formal validation command and the work fits one unit,
+    call plan_units and dispatch its Worker immediately. Source investigation, shell/environment checks,
+    fix design and output inventory belong inside that Worker, not a routine Operator preflight.
+    Use estimated read/write paths; native scope reconciliation and expand_unit cover actual outputs.
+    Write objective as the target or corrective delta: aim for 2000 characters, allow 3000 internally.
+    The Worker reads the full original request natively from its handoff, including exact public reproduction
+    inputs, paths and failures; do not copy that request into objective. Preserve it, not a summary.
+    Do not list speculative write paths or unrelated test suites as a precaution. Risk, file count,
+    duration and independent review alone do not require Coordinator. If the check is unknown, real unit
+    decomposition is needed, or a material user decision prevents work, use the returned
+    ${profileAgent(profile, "dog-operator")} Task for targeted discovery/coordination within the same budget.
 3. After a direct Worker succeeds, use its recorded result and inspect only missing source or evidence
    needed to assess the ACTUAL change. Batch focused reads where practical; do not repeat an unchanged
    check. Call ${profile.toolPrefix}review_mission promptly with real risk_tags and concise traces.
@@ -168,18 +161,12 @@ quality threshold and explicit model/budget choice. Follow AGENTS.md and use the
 
 ${VALIDATION_WORKFLOW}
 
-Fast-lane: Call ${profile.toolPrefix}plan_units directly after start_mission for one useful Worker unit, then
-dispatch its exact Worker task. The formal validation command must be real and exact, not a dummy check;
-the Worker owns investigation within that unit. If no honest validation command can yet be declared,
-send the Coordinator for targeted discovery rather than inventing proof.
 Use title, objective, read/write file or directory scopes, and validation commands. The final command
 proves the unit; investigation commands need no registration. After success, record actual risk tags and
 optional concise implementation notes in review_mission, dispatch its Reviewer if returned, then complete_mission
 only after required review and your final comparison. Unit start or a passing tiny task is never whole-task completion.
-Item count, parallelism inside an existing runner, or long duration alone do not require Coordinator.
-For example, a configured 23-case benchmark run can be one unit. A subsequent result-dependent
-reproduce/fix/PR loop needs Coordinator, which should start the known runner promptly and use actual
-results to guide the following units. Do not invent preparation units or plan-approval rounds.
+Parallelism inside a known runner can stay in one unit. A result-dependent reproduce/fix/PR loop needs
+Coordinator, which starts the known runner promptly. Do not invent preparation units or plan approval.
 For operations, plan_units.execution names the actual run/grade commands and working directory. Keep
 setup, execution and result collection in the same Worker. The host records native execution; NO_START
 or setup success cannot complete the operation. Reward/score zero is a result, not failure to execute.
@@ -329,15 +316,18 @@ For a named release in the one-attempt case-study fixture, pass its --release-re
 the v0127 matched profile intentionally pins 0.12.7, not the newest release. If these identities differ,
 select the matching runner/profile before starting rather than changing the pinned comparison or spending an arm.
 
-Investigate only enough to start the first useful Worker. Prefer a targeted read/reproduction over a broad
-inventory or speculative full design. Call ${profile.toolPrefix}plan_units with concise units:
+When the formal check is known, start the first useful Worker without source/shell preparation.
+Let it investigate, check the environment, design the fix and discover actual outputs. Investigate here
+only a genuinely unknown check or unit boundary, not a broad inventory. Call ${profile.toolPrefix}plan_units with concise units:
 title, objective, read/write file or directory scopes, validation commands, and related requirement_ids
 when splitting multiple requirements across multiple units; a single unit inherits all requirements when
 requirement_ids is omitted. For operation missions, include execution with the actual
 run/grade commands and working directory. Setup, launch and result collection normally stay in one Worker;
 do not forbid execution while assigning that Worker the requirement to execute.
-When the issue includes a concrete public reproduction, pass its entrypoint, relevant input and observed
-failure into the first useful unit objective without inventing an expected representation. If the public
+Write objective as a target or corrective delta: 2000 characters is the target, 3000 is allowed internally.
+The Worker reads the original requests verbatim from the handoff; do not copy them into objective.
+For a concrete public reproduction, preserve its entrypoint, relevant input and observed failure in that
+original request without inventing an expected representation. If the public
 example depends on a working directory or package layout, preserve that context. Point the Worker at
 existing analogous source/tests for the expected contract when available. Avoid separate investigation
 units just to restate the issue. A test of a neighboring name is not an adjacent check unless it runs

@@ -8,6 +8,7 @@ import { acceptanceContinuityFingerprint, inspectAcceptanceContinuity, normalize
 import { expandGoalDeclaration, goalDeclarationDefaults, goalDeclarationFieldDiagnostics, hasGoalCommandAliasConflict } from "./goal-declaration-format.js";
 import { normalizeExecutionScope, normalizeManifestPath, normalizeManifestScope, normalizeRelativePath } from "./path.js";
 import { CONTRACT_TEXT_LIMITS, validateHandoffSchema, validateOperationManifestSchema } from "./validate-schema.js";
+import { MISSION_OBJECTIVE_LIMITS } from "./contract-limits.js";
 import { validateManifest } from "./validate-manifest.js";
 import { profileAgent, RUNTIME_PROFILES, type RuntimeProfile } from "./runtime-profile.js";
 import type { GoalEvidence, GoalTerminalReceipt } from "./goal-bound.js";
@@ -1032,12 +1033,24 @@ export class OperatorRuntime {
       const manifestRelative = `${this.profile.stateDirectory}/contracts/${taskID}.operation-manifest.json`;
       const handoffPath = join(directory, `handoff.${taskID}.json`);
       const manifest = { version: "0.1.0", task_id: taskID, read: unit.read, write: unit.write, validation: unit.validation };
+      const objectiveLength = Array.from(unit.objective).length;
+      // New Mission handoffs already carry the user's verbatim request separately. An oversized
+      // authored unit instruction is retained too, not rejected or silently clipped. Stored plans
+      // and existing Task/handoff identities keep the legacy limit and are never regenerated here.
+      const referencedObjective = Array.isArray(mission?.context?.original_requests) &&
+        objectiveLength > MISSION_OBJECTIVE_LIMITS.maximum && objectiveLength <= CONTRACT_TEXT_LIMITS.objective;
+      const originalObjective = referencedObjective && (mission!.context!.original_requests as unknown[])
+        .some(request => record(request) && request.text === unit.objective);
+      const objective = referencedObjective
+        ? `Implement this unit using the verbatim original requests${originalObjective ? "" : " and full unit_instruction"} in handoff.ext["sortie-dogs/mission-context"]. Preserve the assigned requirements; run the declared validation.`
+        : unit.objective;
       const handoff = {
         version: "0.1.0", profile: "minimal", id: taskID, created_at: new Date().toISOString(),
-        task: { title: unit.title, objective: unit.objective }, state: { done: [], next: [unit.title], blocked: [] }, risks: [],
+        task: { title: unit.title, objective }, state: { done: [], next: [unit.title], blocked: [] }, risks: [],
         verification: unit.validation.map(check => ({ check, status: "not_run", exit_code: null, summary: "Execute in the admitted worker." })),
         ext: {
-          ...(mission ? { "sortie-dogs/mission-context": { write_scope_origin: "coordinator-estimate", ...mission.context } } : {}),
+          ...(mission ? { "sortie-dogs/mission-context": { write_scope_origin: "coordinator-estimate", ...mission.context,
+            ...(referencedObjective && !originalObjective ? { unit_instruction: unit.objective } : {}) } } : {}),
           "sortie-dogs/write-gate": { operation_manifest: manifestRelative, project_root: this.projectRoot },
           [ACCEPTANCE_CONTINUITY_EXTENSION]: { schema_version: "0.1", authority: "dispatch", task_id: taskID,
             criteria: plan.acceptance, fingerprint: acceptanceFingerprint,
@@ -1096,7 +1109,7 @@ export class OperatorRuntime {
         "Complete every source write before invoking any git_post_commit_validation command. Its first exact invocation is the host commit boundary; after it, source mutation and undeclared shell commands are denied. Run every listed command and return its real evidence.",
       ] : [];
       // Mission Workers already must read this host-generated handoff before binding. Preserve its
-      // verbatim objective, original requests, criteria and checks there, not in another prompt copy.
+      // original requests, full unit instructions, criteria and checks there, not in another prompt copy.
       // Saved Tasks and non-Mission dispatch keep their existing text/identity.
       const prompt = (mission ? [...promptHeader, "contract_reference: handoff",
         'acceptance: handoff.ext["sortie-dogs/acceptance-continuity"].criteria', "validation: handoff.verification",

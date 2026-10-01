@@ -829,7 +829,9 @@ test("V2 read result projection exposes full original requirements on the native
   const path = ".sortie-dogs-v010/contracts/handoff.native.json";
   await mkdir(join(directory, ".sortie-dogs-v010/contracts"), { recursive: true });
   const requirement = "Context. ".repeat(300) + "\nError text must contain type error and <nil>.";
-  const source = JSON.stringify({ task: { objective: "typed bindings" }, ext: { original_requests: [{ text: requirement }] } });
+  const instruction = "Unit details. ".repeat(260) + "\nPreserve the exact original API.";
+  const source = JSON.stringify({ task: { objective: "typed bindings" },
+    ext: { "sortie-dogs/mission-context": { original_requests: [{ text: requirement }], unit_instruction: instruction } } });
   await writeFile(join(directory, path), source);
   const cleanup = await createSortieDogsV2Plugin(async () => ({})).setup({ ...fixture.context, location: { directory } });
   try {
@@ -838,6 +840,7 @@ test("V2 read result projection exposes full original requirements on the native
     const completed = { tool: "read", input: { path }, status: "completed", result: nativeResult };
     await after(completed);
     assert(completed.result.content[0]!.text.includes(requirement));
+    assert(completed.result.content[0]!.text.includes(instruction), "overflow instructions remain native-visible, not clipped or summarized");
     assert.deepEqual(completed.result.metadata, { truncated: false });
     assert.equal(await readFile(join(directory, path), "utf8"), source);
     const failed = { tool: "read", input: { path }, status: "error", result: nativeResult };

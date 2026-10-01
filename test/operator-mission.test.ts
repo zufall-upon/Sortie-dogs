@@ -26,7 +26,7 @@ test("public reproduction and shared-branch checks remain in the same mission Wo
   const worker = missionWorkerContent(V010_RUNTIME_PROFILE);
   assert.match(operator, /Keep the SAME mission, original requirements, failure history\s+and cumulative budget/u);
   assert.match(operator, /Coordinator Task only for real coordination/u);
-  assert.match(coordinator, /first useful unit objective/u);
+  assert.match(coordinator, /do not copy them into objective/u);
   assert.match(coordinator, /working directory or package layout/u);
   assert.match(coordinator, /not an adjacent check unless it runs\s+the changed branch/u);
   assert.match(worker, /entrypoint, input and layout intact/u);

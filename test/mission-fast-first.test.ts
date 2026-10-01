@@ -4,11 +4,13 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
-import { OperatorMissionRuntime } from "../dist/core/operator-mission.js";
+import { OperatorMissionRuntime, missionPlan } from "../dist/core/operator-mission.js";
 import { OperatorRuntime } from "../dist/core/operator-runtime.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
 import { SortieDogsV010Plugin } from "../dist/plugin/profiled.js";
 import { missionOperatorContent } from "../dist/runtime-mission-assets.js";
+import { CONTRACT_TEXT_LIMITS, MISSION_OBJECTIVE_LIMITS } from "../dist/core/contract-limits.js";
+import { nativeContractReadView } from "../dist/plugin/native-contract-read.js";
 
 const exec = promisify(execFile);
 
@@ -40,13 +42,12 @@ for (const verdict of ["PASS", "FINDINGS", "EVIDENCE_GAPS"] as const) test(`Fast
     assert.match(hooks.tool!.sortie_v010_start_mission.description, /dispatch its Worker directly/u);
     assert.doesNotMatch(hooks.tool!.sortie_v010_start_mission.description, /Dispatch the Coordinator immediately/u);
     assert.match(missionOperatorContent(V010_RUNTIME_PROFILE, "test"),
-      /exact entrypoint, input \(including named paths\) and observed\s+failure into the first unit objective/u);
+      /full original request natively from its handoff/u);
     assert.match(hooks.tool!.sortie_v010_plan_units.description,
-      /exact entrypoint, named input paths and observed failure in the first unit objective/u);
+      /full original request\/public reproduction is supplied separately/u);
     assert.match(missionOperatorContent(V010_RUNTIME_PROFILE, "test"),
-      /do not list speculative write paths or unrelated test suites as a precaution/u);
-    assert.match(hooks.tool!.sortie_v010_plan_units.description,
-      /do not list speculative write paths or unrelated test suites as a precaution/u);
+      /Do not list speculative write paths or unrelated test suites as a precaution/u);
+    assert.match(hooks.tool!.sortie_v010_plan_units.description, /estimated read\/write scope/u);
     assert.match(missionOperatorContent(V010_RUNTIME_PROFILE, "test"), /EVIDENCE_GAPS is advisory/u);
     await hooks["chat.message"]!({ sessionID: "root", messageID: "request", agent: agents.root!.agent }, {
       message: { id: "request", agent: agents.root!.agent, model: { providerID: "openai", modelID: "gpt-6-sol" } },
@@ -176,5 +177,111 @@ for (const verdict of ["PASS", "FINDINGS", "EVIDENCE_GAPS"] as const) test(`Fast
     const completed = JSON.parse(await hooks.tool!.sortie_v010_complete_mission.execute({}, { sessionID: "root" }));
     assert.equal(completed.status, "succeeded", JSON.stringify(completed));
     assert.equal((await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).coordinator, null);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+for (const length of [2000, 2001, 3000, 3001, 32768]) test(`known-check direct dispatch: new objective ${length}, no Operator source/shell preparation`, async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const directory = await mkdtemp(resolve("_testenv/mission-fast-objective-"));
+  try {
+    await exec("git", ["init", "--quiet"], { cwd: directory }); // Fixture setup, not Operator investigation.
+    await writeFile(join(directory, "check.mjs"), 'if (!process.env.PATH) process.exit(1);\n');
+    const original = "Use node check.mjs as formal validation. " + "Public context. ".repeat(500) +
+      "\nExact late requirement: errors contain type error and <nil>. Do not publish or widen the budget.  ";
+    const objective = "x".repeat(length);
+    const agents = { root: { agent: "dog-operator" }, worker: { agent: "dog-worker-v010", parentID: "root" } };
+    const hooks = await SortieDogsV010Plugin({ directory, client: { session: {
+      get: async ({ path }: { path: { id: keyof typeof agents } }) => ({ data: { id: path.id, ...agents[path.id] } }),
+      messages: async () => ({ data: [] }), children: async () => ({ data: [] }),
+    } } } as never);
+    const operatorCalls: string[] = [];
+    await hooks["chat.message"]!({ sessionID: "root", messageID: "request", agent: agents.root.agent }, {
+      message: { id: "request", agent: agents.root.agent, model: { providerID: "openai", modelID: "gpt-6-sol" } },
+      parts: [{ type: "text", text: original }],
+    });
+    operatorCalls.push("start_mission");
+    const started = JSON.parse(await hooks.tool!.sortie_v010_start_mission.execute({ requirements: ["Implement exact public contract", "Validate without publishing"] }, { sessionID: "root" }));
+    operatorCalls.push("plan_units");
+    const planned = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ units: [{ title: "Implement public contract",
+      objective, read: ["check.mjs"], write: ["src"], validation: ["node check.mjs"] }] }, { sessionID: "root" }));
+    operatorCalls.push("task");
+    const task = { args: structuredClone(planned.task) };
+    await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "worker-call" }, task);
+    const runtime = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
+    const state = await runtime.required("root");
+    assert.equal(state.units[0]!.status, "running", "real native Task admission does not require Operator source/shell calls");
+    assert.deepEqual(operatorCalls, ["start_mission", "plan_units", "task"]);
+    assert.equal(state.units[0]!.childSessionID, null, "Worker has not inspected source or bound a manifest yet");
+    assert.equal(started.mission_id, (await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).id);
+    await hooks["chat.message"]!({ sessionID: "worker", messageID: "worker-request", agent: agents.worker.agent }, {
+      message: { id: "worker-request", agent: agents.worker.agent, model: { providerID: "openai", modelID: "gpt-6-luna-fast" } },
+      parts: [{ type: "text", text: task.args.prompt }],
+    });
+    const unit = (await runtime.required("root")).units[0]!;
+    const handoff = JSON.parse(await readFile(unit.handoffPath, "utf8"));
+    assert.equal(MISSION_OBJECTIVE_LIMITS.target, 2000);
+    assert.equal(MISSION_OBJECTIVE_LIMITS.maximum, 3000);
+    assert.ok(Array.from(handoff.task.objective).length <= 3000);
+    if (length <= 3000) assert.equal(handoff.task.objective, objective, "2000 is guidance, not a refusal boundary");
+    else assert.equal(handoff.ext["sortie-dogs/mission-context"].unit_instruction, objective, "overflow is retained verbatim, without repair/reapproval");
+    assert.equal(handoff.ext["sortie-dogs/mission-context"].original_requests[0].text, original);
+    await hooks["tool.execute.before"]!({ tool: "read", sessionID: "worker", callID: "handoff" }, { args: { filePath: unit.handoffPath } });
+    const nativeRead = { output: await readFile(unit.handoffPath, "utf8") };
+    await hooks["tool.execute.after"]!({ tool: "read", sessionID: "worker", callID: "handoff", args: { filePath: unit.handoffPath } }, nativeRead);
+    // V2's native Read uses this projection (the V2 hook regression below verifies its invocation).
+    const nativeView = await nativeContractReadView(directory, { path: unit.handoffPath });
+    assert.ok(nativeView?.includes(original), "native Worker sees the entire original, including late exact error/prohibition clauses");
+    if (length > 3000) assert.ok(nativeView?.includes(objective), "native view also retains the full overflow instruction");
+    assert.equal((await runtime.required("root")).receipt, null, "admission/contract display is not success");
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("legacy 32768-character objective retains exact saved handoff and Task identities on cold resume", async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const directory = await mkdtemp(resolve("_testenv/mission-legacy-objective-"));
+  try {
+    const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+    await missions.capture("root", { id: "legacy-request", text: "Original legacy request" });
+    const mission = await missions.start("root", ["Preserve legacy work"]);
+    const objective = "L".repeat(32768);
+    const runtime = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
+    // Saved pre-native-context Missions did not pass the separately retained original request.
+    const state = await runtime.prepareMission("root", missionPlan(mission, [{ title: "Legacy unit", objective,
+      read: [], write: ["src"], validation: ["node check.mjs"] }]));
+    const handoff = await readFile(state.units[0]!.handoffPath, "utf8");
+    assert.equal(CONTRACT_TEXT_LIMITS.objective, 32768);
+    assert.equal(JSON.parse(handoff).task.objective, objective);
+    const cold = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
+    const resumed = await cold.required("root");
+    assert.equal(resumed.units[0]!.unit.objective, objective);
+    assert.deepEqual(resumed.units[0]!.hashes, state.units[0]!.hashes);
+    const next = await cold.next("root", "root") as { task: { prompt: string } };
+    assert.match(next.task.prompt, /^SORTIE_OPERATOR_TASK_REF /u);
+    await cold.admitWorker("root", "root", "legacy-call", next.task as never);
+    const restarted = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
+    const claimed = await restarted.claimAdmittedWorkerPrompt("root", "root", "worker", next.task.prompt);
+    assert.equal(claimed.prompt, state.units[0]!.task.prompt, "the opaque dispatch expands to the exact saved legacy Task");
+    assert.equal(await readFile(state.units[0]!.handoffPath, "utf8"), handoff, "resume never regenerates/clips legacy objective");
+    assert.deepEqual((await restarted.required("root")).units[0]!.hashes, state.units[0]!.hashes);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("oversized objective copied from the original request references that exact text without a second full copy", async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const directory = await mkdtemp(resolve("_testenv/mission-objective-original-"));
+  try {
+    const original = "Full original request. ".repeat(200) + "\nLate exact constraint: type error and <nil>.  ";
+    const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+    await missions.capture("root", { id: "request", text: original });
+    const mission = await missions.start("root", ["Preserve the original request"]);
+    const runtime = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
+    const state = await runtime.prepareMission("root", missionPlan(mission, [{ title: "Implement", objective: original,
+      read: [], write: ["src"], validation: ["node check.mjs"] }]), undefined, undefined, [], false,
+      { original_requests: mission.requests, requirements: mission.requirements });
+    const handoff = JSON.parse(await readFile(state.units[0]!.handoffPath, "utf8"));
+    assert.ok(handoff.task.objective.length <= 3000);
+    assert.equal(handoff.ext["sortie-dogs/mission-context"].original_requests[0].text, original);
+    assert.equal(handoff.ext["sortie-dogs/mission-context"].unit_instruction, undefined);
+    assert.doesNotMatch(handoff.task.objective, /full unit_instruction/);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
