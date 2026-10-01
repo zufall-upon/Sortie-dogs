@@ -57,7 +57,7 @@ export interface RuntimeBridge {
   completedReviewPrompts?(rootSessionID: string, requestedPrompt: string): Promise<readonly string[]>;
   /** Existing native Mission review state for the final user-facing card; no new review is run. */
   missionReviewPresentation?(rootSessionID: string): Promise<{
-    verdict?: "PASS" | "evidence-gaps" | "skipped-low-risk"; evidenceGaps?: string;
+    verdict?: "PASS" | "evidence-gaps" | "skipped-low-risk" | "self-rechecked"; evidenceGaps?: string;
   } | undefined>;
   requiresExplicitAcceptance?(rootSessionID: string): Promise<boolean>;
   ownsCanonicalValidation?(rootSessionID: string, unitID: string, childSessionID: string,
@@ -144,7 +144,7 @@ export interface RuntimeBridge {
       readonly remaining_units: number;
     }>;
     renderReturnReport(rootSessionID: string, text: string, receiptFingerprint: string,
-      missionReview?: "PASS" | "evidence-gaps" | "skipped-low-risk", reviewEvidenceGaps?: string): Promise<string | undefined>;
+      missionReview?: "PASS" | "evidence-gaps" | "skipped-low-risk" | "self-rechecked", reviewEvidenceGaps?: string): Promise<string | undefined>;
     recoverUnitEvidence(rootSessionID: string, request: { unitID: string; childSessionID: string; manifestPath: string;
       manifestHash: string; goalFingerprint: string }): Promise<readonly GoalEvidence[]>;
     completionReadiness(rootSessionID: string): Promise<import("./goal-completion.js").CompletionReadiness>;

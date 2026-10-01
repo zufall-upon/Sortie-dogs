@@ -127,11 +127,13 @@ export class NativeBackgroundLifecycle {
     for (const dispatch of dispatches.filter(item => !item.settled && item.launched && (item.child || item.terminal))) {
       const history = dispatch.child ? values(await this.context.session.context({ sessionID: dispatch.child })) : [];
       const promptIndex = dispatch.promptID ? history.findIndex(item => item.id === dispatch.promptID) : -1;
-      const fresh = promptIndex >= 0 ? history.slice(promptIndex + 1) : history.filter(item => !dispatch.baseline.includes(String(item.id)) &&
+      const fresh = promptIndex >= 0 ? history.slice(promptIndex + 1) : dispatch.promptID ? [] : history.filter(item => !dispatch.baseline.includes(String(item.id)) &&
         (!object(item.time) || typeof item.time.created !== "number" || item.time.created >= dispatch.admittedAt));
       const last = [...fresh].reverse().find(item => item.type === "assistant" &&
         (item.finish === "stop" || item.error !== undefined));
-      if (!dispatch.terminal && last) dispatch.terminal = last.error === undefined ? "succeeded" : "failed";
+      // When logs exist, the delivered native prompt/execution event is authoritative. Old idle
+      // text from a reused Reviewer cannot stand in for a correction or self-recheck terminal.
+      if (!dispatch.terminal && last && !this.context.session.log) dispatch.terminal = last.error === undefined ? "succeeded" : "failed";
       if (!dispatch.terminal && dispatch.child && this.context.session.log) {
         let delivered = false;
         for await (const event of this.context.session.log({ sessionID: dispatch.child, follow: false })) {

@@ -32,10 +32,15 @@ ${canonicalFixture("READABLE_OUTPUT_FIXTURE")}
 export const PREVIEW_TERMINAL_REPORT_POLICY = `
 ## Terminal report contract
 
-A task turn that ends without another tool call is a terminal return. Its first non-empty line must be one
+A short background launch acknowledgement while an owned native child is still running is NONTERMINAL.
+Brief ordinary prose is allowed then; do not label it DONE, INTERRUPTED, BLOCKED or NEED_DECISION.
+Root idle or completion of the launch tool is not child completion, cancellation or a Mission receipt.
+Continue on the real native completion wakeup; actual cancellation/failure keeps its precise status.
+
+A task turn that actually returns terminally (not the background acknowledgement above) must start with one
 machine checkpoint: exactly one of DONE, INTERRUPTED, BLOCKED, or NEED_DECISION with that status icon,
 followed by a short conclusion in the user's language. Never close a task turn with bare prose, an unlabeled
-summary, a plan, a progress note, or a preamble, and never leave the run without one of these four tokens.
+summary, a plan, a progress note, or a preamble at the actual terminal boundary.
 The status token, its icon, TRUE_INTERRUPTION and TRUE_BLOCKER are protocol tokens: keep them verbatim
 even when the surrounding conclusion is translated. Translate only the display labels and keep their order.
 

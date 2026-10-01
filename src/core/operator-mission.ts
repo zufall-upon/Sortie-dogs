@@ -88,6 +88,19 @@ export interface MissionLaunchConditions {
   applies_to: string;
   recordedAt?: string;
 }
+/** Native terminal self-recheck by the correction author, explicitly not independent approval. */
+export interface MissionSelfRecheck {
+  runID: string;
+  source: string;
+  author: string;
+  callID: string;
+  promptID: string;
+  messageID: string;
+  nativeOutcome: "completed";
+  result: string;
+  unresolvedFindings: string[];
+  residualMajor?: { reachable_path: string; consequence: string };
+}
 export interface OperatorMission {
   version: "0.12";
   id: string;
@@ -131,15 +144,20 @@ export interface OperatorMission {
     callID?: string;
     evidence?: MissionEvidenceExcerpt[];
     requestFingerprint?: string;
-    verdict: "pending" | "PASS" | "findings" | "evidence-gaps" | "skipped-low-risk"; result?: string; child?: string;
+    verdict: "pending" | "PASS" | "findings" | "evidence-gaps" | "skipped-low-risk" | "self-rechecked"; result?: string; child?: string;
+    mode?: "independent" | "self-recheck";
+    admittedAt?: number;
+    promptID?: string;
+    selfRecheck?: MissionSelfRecheck;
     /** Completed, independent initial review for this mission, not merely an inherited child ID. */
     initialPrompt?: string;
     /** Observed evidence-only reviews; reporting only, never an acceptance threshold. */
     evidenceGapReviews?: number };
-  /** Retained independently of later review generations; authors cannot approve their own correction. */
+  /** Retained independently of later review generations; authors never become independent reviewers. */
   corrections?: { author: string; reviewIdentity: string; priorRunID: string; runID: string;
     priorSource: string; findings: string; initialPrompt: string; baseline?: string;
-    status: "prepared" | "running" | "ready" | "failed" | "cancelled" }[];
+    status: "prepared" | "running" | "ready" | "failed" | "cancelled";
+    selfRecheck?: MissionSelfRecheck }[];
 }
 
 export const MISSION_CONSULTATION_LIMIT = 32;
@@ -162,8 +180,33 @@ export function missionReviewVerdict(text: string): "PASS" | "evidence-gaps" | "
 
 /** Whether the recorded review permits submission and acceptance of the current candidate. */
 export function missionReviewAccepted(review: NonNullable<OperatorMission["review"]>): boolean {
+  if (review.verdict === "self-rechecked") {
+    const checked = review.selfRecheck;
+    return review.mode === "self-recheck" && !!checked && checked.runID === review.runID &&
+      checked.source === review.source && checked.author === review.child && checked.callID === review.callID &&
+      checked.promptID === review.promptID && !!checked.messageID && checked.nativeOutcome === "completed" &&
+      checked.unresolvedFindings.length === 0 && !checked.residualMajor;
+  }
+  if (review.mode === "self-recheck") return false;
   return review.verdict === "PASS" || review.verdict === "skipped-low-risk" ||
     review.verdict === "evidence-gaps";
+}
+
+/** A short native report, not a tag/hash-based second-review policy or an approval checklist. */
+export function missionSelfRecheckReport(text: string, source: string): Pick<MissionSelfRecheck, "unresolvedFindings" | "residualMajor"> | undefined {
+  if (!/^\s*SELF_RECHECKED(?:\s|$)/u.test(text)) return undefined;
+  const line = /^self_recheck: (.+)$/mu.exec(text)?.[1];
+  try {
+    const report: unknown = JSON.parse(line ?? "");
+    if (!record(report) || report.candidate !== source || !Array.isArray(report.unresolved_findings) ||
+        !report.unresolved_findings.every(item => typeof item === "string" && item.trim()) ||
+        !(report.residual_major === null || record(report.residual_major) &&
+          typeof report.residual_major.reachable_path === "string" && report.residual_major.reachable_path.trim() &&
+          typeof report.residual_major.consequence === "string" && report.residual_major.consequence.trim())) return undefined;
+    return { unresolvedFindings: report.unresolved_findings,
+      ...(record(report.residual_major) ? { residualMajor: { reachable_path: report.residual_major.reachable_path as string,
+        consequence: report.residual_major.consequence as string } } : {}) };
+  } catch { return undefined; }
 }
 
 export function missionExecutionStatus(mission: OperatorMission): "not-required" | "not-started" | "running" | "execution-failed" | "executed" {
@@ -583,8 +626,9 @@ export async function missionAcceptanceSummary(mission: OperatorMission, run: Op
       ...history.runs.flatMap(item => validation(item.state, item.path, true))],
     native_declared_validation: nativeValidation,
     independent_review: mission.review ? { run_id: mission.review.runID, current_run: mission.review.runID === current?.runID,
+      independent: missionReviewIndependent(mission, mission.review.child), mode: mission.review.mode ?? "independent",
       reviewer_session_id: mission.review.child ?? null, source_fingerprint: mission.review.source,
-      verdict: mission.review.verdict, result: mission.review.result ?? null,
+      verdict: mission.review.verdict, result: mission.review.result ?? null, self_recheck: mission.review.selfRecheck ?? null,
       freshness: "not established by run ID; existing source comparison remains required" } : null,
     delivery: { submission: mission.submission, git_lifecycle: current?.gitLifecycle ?? null,
       observation_source: "persisted operator Git lifecycle and formal validation records; no new Git inspection",
@@ -621,6 +665,8 @@ export function missionPacket(mission: OperatorMission, run?: OperatorState): Re
       historical_failed_attempts: mission.progress.filter(unit => unit.status === "failed").length,
       accepted: mission.phase === "completed" },
     review: mission.review ? { risk_tags: mission.review.risk, verdict: mission.review.verdict,
+      independent: missionReviewIndependent(mission, mission.review.child), mode: mission.review.mode ?? "independent",
+      self_recheck: mission.review.selfRecheck ?? null,
       run_id: mission.review.runID, current_run: currentReview,
       source_fingerprint: mission.review.source, reviewer_session_id: mission.review.child ?? null,
       result: mission.review.result ?? null, evidence_gap_reviews: mission.review.evidenceGapReviews ?? 0,
@@ -638,7 +684,11 @@ export function missionPacket(mission: OperatorMission, run?: OperatorState): Re
       : mission.phase === "submitted" && mission.submission?.status === "ready"
        ? "Operator: use acceptance_summary to compare the submitted candidate with the verbatim original requests and actual evidence, inspect concrete gaps only, then complete_mission if satisfied. Do not routinely search archives or reread all source. Historical PASS is not current PASS. Report remaining evidence gaps; they are not a review PASS."
       : run?.phase === "awaiting-acceptance" && mission.corrections?.some(item => item.runID === run.runID && item.status === "ready") && !reviewAccepted
-        ? "Correction ready; pending independent review. Call review_mission (or dispatch its current pending Task) for a DIFFERENT child to compare the correction and relevant impact with the retained findings. Do not start a fresh Worker or restart unchanged review/checks. Correction is not PASS."
+        ? mission.corrections.find(item => item.runID === run.runID)?.selfRecheck?.unresolvedFindings.length
+          ? "Known Major/Medium findings remain after self-recheck. Call repair_review for the SAME original correction owner; do not dispatch another Reviewer or accept unresolved Medium. Retain original requirements and cumulative spend."
+          : mission.corrections.find(item => item.runID === run.runID)?.selfRecheck?.residualMajor
+            ? "A concrete reachable Major risk remains after native author self-recheck. Call review_mission for a DIFFERENT Reviewer of the correction, retained findings and relevant impact; dispatch the exact returned Task if not already active. No fresh Worker or unchanged validation is required."
+            : "Correction ready; call review_mission for the SAME native author to explicitly self-recheck the retained findings, relevant impact and original requirements. Only a concrete reachable Major risk remaining after self-recheck requires a DIFFERENT Reviewer. Known Major/Medium defects still require correction. Do not restart unchanged checks or investigation; CORRECTION_READY alone is not acceptance."
       : mission.kind === "operation" && operationStatus === "running"
         ? "The declared operation is already running. Inspect its native shell/progress; do not start another Worker or run. Wait for a terminal result, or report the existing run as blocked if its completion cannot be observed."
       : run?.phase === "awaiting-decision" ? (run.units.some(unit => unit.dispatchDenial)
@@ -652,7 +702,7 @@ export function missionPacket(mission: OperatorMission, run?: OperatorState): Re
         ? `Requested operation is ${operationStatus}. Continue the actual operation or report its blocker; auxiliary checks and review disposition cannot complete it.`
       : run?.phase === "awaiting-acceptance" ? (reviewAccepted
           ? "Coordinator: review permits submission. Retain advisory review notes; do not repeat passed validation or review for evidence formatting. Operator performs final acceptance against the original requirements."
-          : "Coordinator: address recorded findings or obtain the required independent review, then submit_mission. Operator compares all requirements with source/evidence before complete_mission.")
+          : "Coordinator: correct known Major/Medium findings, then obtain explicit native author self-recheck (different Reviewer only for residual concrete Major risk), or initial independent review, then submit_mission. Operator compares all requirements with source/evidence before complete_mission.")
       : "Coordinator: continue the next useful unit within original requirements. Return only a completion candidate, user-only decision, or scope/budget extension." };
 }
 

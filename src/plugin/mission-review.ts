@@ -32,6 +32,12 @@ export function missionReviewValidation(run: OperatorState, statePath: string) {
         source_policy: protected_binding.source_policy,
       } } : {}),
     })),
+    ...(unit.reviewerCorrection ? { correction_checks: (unit.reviewerCorrection.checks ?? []).map(check => ({
+      call_id: check.callID, dispatch_call_id: check.dispatchCallID, child_session_id: check.childSessionID,
+      command: check.command, exit_code: check.exitCode, started_at: check.startedAt, ended_at: check.endedAt,
+      source: check.source, candidate: check.candidate, fresh_when_observed: check.fresh,
+      details_ref: { path: statePath, run_id: run.runID, unit_id: unit.unit.id, field: "units[].reviewerCorrection.checks" },
+    })) } : {}),
     details_ref: { path: statePath, run_id: run.runID, unit_id: unit.unit.id,
       field: "units[].evidence", omitted: "host snapshot recipe: source/candidate paths and freshness environment" },
   }));
@@ -40,7 +46,7 @@ export function missionReviewValidation(run: OperatorState, statePath: string) {
 /** Show native command outcomes to the Reviewer without turning non-criterion checks into acceptance evidence. */
 export function observedMissionValidation(validation: readonly string[], childSessionID: string | null,
   history: readonly Record<string, unknown>[], notBefore?: number): {
-    attempts: readonly { command: string; exit_code: number | null; started_ms: number | null; completed_ms: number | null }[];
+    attempts: readonly { command: string; observed_members?: readonly string[]; exit_code: number | null; started_ms: number | null; completed_ms: number | null }[];
     not_observed: readonly string[]; omitted_attempts: number;
   } {
   const declared = validation.map(normalizeCommand), expected = new Set(declared);
@@ -53,18 +59,19 @@ export function observedMissionValidation(validation: readonly string[], childSe
            !record(part.state) || !["completed", "error"].includes(String(part.state.status)) || !record(part.state.input) ||
           typeof part.state.input.command !== "string") return [];
       const command = normalizeCommand(part.state.input.command);
-      if (!expected.has(command)) return [];
+      const members = canonicalDeclaredValidationMembers(command, expected);
+      if (!members) return [];
        const exit = record(part.state.metadata) ? part.state.metadata.exit : undefined;
        const started = record(part.time) ? time(part.time.ran) : record(part.state.time) ? time(part.state.time.start) : null;
        const completed = record(part.time) ? time(part.time.completed) : record(part.state.time) ? time(part.state.time.end) : null;
        if (notBefore !== undefined && (started === null || completed === null || started < notBefore || completed < started)) return [];
-      return [{ command, exit_code: typeof exit === "number" && Number.isSafeInteger(exit) ? exit : null,
+      return [{ command, ...(members.length > 1 ? { observed_members: members } : {}), exit_code: typeof exit === "number" && Number.isSafeInteger(exit) ? exit : null,
          started_ms: started, completed_ms: completed }];
     });
   });
   // Retain early attempts and the latest checks if a Worker retried many times.
   const shown = attempts.length > 32 ? [...attempts.slice(0, 8), ...attempts.slice(-24)] : attempts;
-  return { attempts: shown, not_observed: declared.filter(command => !attempts.some(item => item.command === command)),
+  return { attempts: shown, not_observed: declared.filter(command => !attempts.some(item => item.command === command || item.observed_members?.includes(command))),
     omitted_attempts: attempts.length - shown.length };
 }
 

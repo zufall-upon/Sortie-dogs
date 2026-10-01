@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import test from "node:test";
-import { OperatorMissionRuntime, missionAcceptanceSummary, missionPlan } from "../dist/core/operator-mission.js";
+import { OperatorMissionRuntime, missionAcceptanceSummary, missionPlan, missionReviewAccepted, missionPacket } from "../dist/core/operator-mission.js";
 import { OperatorRuntime } from "../dist/core/operator-runtime.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
 import { observedMissionValidationSummary } from "../dist/plugin/mission-review.js";
@@ -122,4 +122,27 @@ test("lineage lookup failures are unavailable, never successful empty history", 
   assert.equal(native[0]!.status, "unavailable");
   assert.equal(native[0]!.reason, "history-fetch-failed");
   assert.equal((await operators.acceptanceHistory(current, [])).reason, "same-mission-lineage-unavailable");
+}));
+
+test("author self-recheck summary and packet never claim independent PASS; exact report identity is required", async () => fixture(async directory => {
+  const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE), operators = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
+  await missions.capture("root", { id: "u", text: "Original requirements verbatim" });
+  const mission = await missions.start("root", ["Preserve requirements"]);
+  const run = await operators.prepareMission("root", missionPlan(mission, [{ title: "Fix", objective: "Fix", write: ["src"], validation: ["go test ./..."] }]));
+  mission.runID = run.runID;
+  const checked = { runID: run.runID, source: "candidate", author: "author", callID: "call", promptID: "prompt", messageID: "terminal",
+    nativeOutcome: "completed" as const, result: "SELF_RECHECKED", unresolvedFindings: [] };
+  mission.corrections = [{ author: "author", reviewIdentity: "initial", priorRunID: "prior", runID: run.runID, priorSource: "prior-source",
+    findings: "Medium corrected", initialPrompt: "initial", status: "ready", selfRecheck: checked }];
+  mission.review = { runID: run.runID, source: "candidate", risk: ["public-api"], task: null, child: "author", callID: "call", promptID: "prompt",
+    mode: "self-recheck", verdict: "self-rechecked", selfRecheck: checked };
+  assert.equal(missionReviewAccepted(mission.review), true);
+  const summary = await missionAcceptanceSummary(mission, run, operators);
+  assert.equal((summary.independent_review as Record<string, unknown>).independent, false);
+  assert.equal((summary.independent_review as Record<string, unknown>).verdict, "self-rechecked");
+  const packet = missionPacket(mission, run).review as Record<string, unknown>;
+  assert.equal(packet.independent, false); assert.equal(packet.accepted, true); assert.equal(packet.passed, false);
+  for (const changed of [{ callID: "old" }, { promptID: "old" }, { child: "different" }, { source: "stale" }, { verdict: "PASS" as const }]) {
+    assert.equal(missionReviewAccepted({ ...mission.review, ...changed }), false);
+  }
 }));

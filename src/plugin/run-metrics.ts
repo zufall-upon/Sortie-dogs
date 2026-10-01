@@ -501,7 +501,7 @@ export interface SortieResultPresentation {
   readonly statusSummary?: string;
   readonly stopReason?: string;
   /** Host-owned Mission review disposition; the generic debrief may not observe native Reviewer Tasks. */
-  readonly missionReview?: "PASS" | "evidence-gaps" | "skipped-low-risk";
+  readonly missionReview?: "PASS" | "evidence-gaps" | "skipped-low-risk" | "self-rechecked";
   readonly reviewNote?: string;
 }
 
@@ -526,6 +526,7 @@ export function formatSortieResult(result: SortieResult, presentation: SortieRes
   const color = result.mission.status === "COMPLETED" ? "🟢" : result.mission.status === "EXTERNAL_BLOCKER" ? "🔴" : "🟡";
   const proof = renderDebriefProof(result.debrief);
   const review = presentation.missionReview === "PASS" ? "🟢 PASS（独立Reviewer）"
+    : presentation.missionReview === "self-rechecked" ? "🟢 自己再確認済み（修正著者・独立PASSではない）"
     : presentation.missionReview === "evidence-gaps" ? "🟡 補足あり（非ブロッキング・PASSではない）"
       : presentation.missionReview === "skipped-low-risk" ? "免除（低リスク）" : proof.review;
   const estimate = result.debrief?.estimatedCost;

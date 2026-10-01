@@ -2401,6 +2401,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     readonly records?: Awaited<ReturnType<RunFlightLedger["readGoal"]>>["records"];
   }> {
     const outcome = terminalRunOutcome(text);
+    if (await input.nativeBackground?.awaiting(sessionID)) {
+      return { outcome, goal: await currentGoal(sessionID).catch(() => undefined), receipt: undefined, delivery: "running" };
+    }
     if (outcome === undefined || !isCoordinatorSession(sessionID)) {
       return { outcome, goal: undefined, receipt: undefined, delivery: "ready" };
     }
@@ -2464,6 +2467,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       return text;
     }
     const goal = await currentGoal(sessionID).catch(() => undefined);
+    if (await input.nativeBackground?.awaiting(sessionID)) return replaceTerminalStatus(text,
+      "status: IN_PROGRESS — owned native background child running; awaiting actual completion wakeup")
+      .replace(INTERNAL_ROOT_INTERRUPTION, "goal_control: background execution remains active: $1");
     if (goal === undefined || goal.goal_id === null || goal.receipt !== null) return text;
     return replaceTerminalStatus(text,
       "status: IN_PROGRESS — local/process/step continuation remains active in the same session")
@@ -6640,8 +6646,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       const terminal = runOutcome === undefined || !isCoordinatorSession(textInput.sessionID)
         ? undefined
         : await terminalGoalFromHostText(textInput.sessionID, textOutput.text);
-      if (runOutcome === "DONE" && terminal?.delivery === "running") {
-        textOutput.text = replaceDoneTerminalStatus(textOutput.text,
+      if (terminal?.delivery === "running") {
+        textOutput.text = replaceTerminalStatus(textOutput.text,
           "status: IN_PROGRESS — durable delivery active; same sessionでjoinまたはstale reconcileが必要");
       } else if (runOutcome === "DONE" && terminal?.receipt === undefined &&
         terminal?.goal !== undefined && terminal.goal.goal_id !== null) {

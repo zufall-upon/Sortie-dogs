@@ -780,6 +780,9 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
         if (!key.startsWith("sortie_")) continue;
         if (!allowed || !key.startsWith("sortie_v010_") || !allowed.includes(key.slice("sortie_v010_".length))) delete event.tools[key];
       }
+      if ((event.agent === "dog-reviewer-v010" || correctionAgent(event.agent)) && Array.isArray(event.system)) {
+        event.system.push({ type: "text", text: `Native tools actually available in this request: ${Object.keys(event.tools).sort().join(", ")}. Use these tools directly; do not infer missing tools or ask the root to transcribe source.` });
+      }
     }
   });
   if (hooks["experimental.session.compacting"]) await context.session.hook("compaction", async event => {
