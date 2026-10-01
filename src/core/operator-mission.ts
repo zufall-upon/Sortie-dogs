@@ -92,6 +92,8 @@ export interface MissionLaunchConditions {
 export interface MissionSelfRecheck {
   runID: string;
   source: string;
+  /** Candidate source/check identity, excluding optional excerpt presentation. */
+  candidateSource?: string;
   author: string;
   callID: string;
   promptID: string;
@@ -140,7 +142,7 @@ export interface OperatorMission {
   plans: number;
   progress: { unit: string; title: string; status: string; at: string }[];
   submission: { status: "ready" | "needs-decision" | "blocked"; summary: string } | null;
-  review?: { runID: string; risk: string[]; source: string; task: OperatorTask | null;
+  review?: { runID: string; risk: string[]; source: string; candidateSource?: string; task: OperatorTask | null;
     callID?: string;
     evidence?: MissionEvidenceExcerpt[];
     requestFingerprint?: string;
@@ -193,12 +195,12 @@ export function missionReviewAccepted(review: NonNullable<OperatorMission["revie
 }
 
 /** A short native report, not a tag/hash-based second-review policy or an approval checklist. */
-export function missionSelfRecheckReport(text: string, source: string): Pick<MissionSelfRecheck, "unresolvedFindings" | "residualMajor"> | undefined {
+export function missionSelfRecheckReport(text: string, source: string, hostBound = false): Pick<MissionSelfRecheck, "unresolvedFindings" | "residualMajor"> | undefined {
   if (!/^\s*SELF_RECHECKED(?:\s|$)/u.test(text)) return undefined;
   const line = /^self_recheck: (.+)$/mu.exec(text)?.[1];
   try {
     const report: unknown = JSON.parse(line ?? "");
-    if (!record(report) || report.candidate !== source || !Array.isArray(report.unresolved_findings) ||
+    if (!record(report) || (report.candidate !== source && !(hostBound && report.candidate === "current-validated")) || !Array.isArray(report.unresolved_findings) ||
         !report.unresolved_findings.every(item => typeof item === "string" && item.trim()) ||
         !(report.residual_major === null || record(report.residual_major) &&
           typeof report.residual_major.reachable_path === "string" && report.residual_major.reachable_path.trim() &&

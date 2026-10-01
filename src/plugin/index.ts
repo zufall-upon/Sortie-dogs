@@ -1840,7 +1840,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const rawCommand = args !== undefined && typeof args.command === "string" ? normalizeCommand(args.command) : undefined;
     if (rawCommand === undefined || rawCommand.length === 0) return;
     const correcting = await input.runtimeBridge?.ownsReviewerCorrection?.(toolInput.sessionID) === true;
-    const members = canonicalDeclaredValidationMembers(rawCommand, authorization.validationCommands);
+    const members = correcting ? await input.runtimeBridge?.reviewerCorrectionValidationMembers?.(toolInput.sessionID, rawCommand)
+      : canonicalDeclaredValidationMembers(rawCommand, authorization.validationCommands);
     if (!authorization.validationCommands.has(rawCommand) && (!correcting || !members)) return;
     const requiredExecution = correcting || members !== undefined && await input.runtimeBridge?.requiresValidationExecution?.(
       authorization.rootSessionID, authorization.taskID, toolInput.sessionID, members) === true;
@@ -7818,9 +7819,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         const missionWorker = await input.runtimeBridge?.allowsInvestigativeShell?.(toolInput.sessionID) === true;
         if (missionWorker) {
           const extracted = extractWritePaths(toolInput.tool, output.args);
+          if (extracted.paths.length) await input.runtimeBridge?.assertMissionWrite?.(toolInput.sessionID, extracted.paths);
           const nativeFile = /^(?:write|edit)(?:$|[_-])/iu.test(toolInput.tool) || /patch/iu.test(toolInput.tool);
           if (nativeFile && !extracted.ambiguous && extracted.paths.length) {
-            await input.runtimeBridge?.assertMissionWrite?.(toolInput.sessionID, extracted.paths);
             const missing: string[] = [];
             for (const path of extracted.paths) {
               const actual = nativeFile ? resolve(input.directory, path) : path;

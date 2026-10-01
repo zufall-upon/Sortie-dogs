@@ -49,9 +49,9 @@ export function observedMissionValidation(validation: readonly string[], childSe
     attempts: readonly { command: string; observed_members?: readonly string[]; exit_code: number | null; started_ms: number | null; completed_ms: number | null }[];
     not_observed: readonly string[]; omitted_attempts: number;
   } {
-  const declared = validation.map(normalizeCommand), expected = new Set(declared);
+  const declared = validation.map(normalizeCommand);
   const time = (value: unknown): number | null => typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
-  const attempts = childSessionID === null ? [] : history.flatMap(message => {
+  const rawAttempts = childSessionID === null ? [] : history.flatMap(message => {
     if (!record(message.info) || message.info.role !== "assistant" || message.info.sessionID !== childSessionID ||
         !Array.isArray(message.parts)) return [];
     return message.parts.flatMap(part => {
@@ -59,15 +59,24 @@ export function observedMissionValidation(validation: readonly string[], childSe
            !record(part.state) || !["completed", "error"].includes(String(part.state.status)) || !record(part.state.input) ||
           typeof part.state.input.command !== "string") return [];
       const command = normalizeCommand(part.state.input.command);
-      const members = canonicalDeclaredValidationMembers(command, expected);
-      if (!members) return [];
-       const exit = record(part.state.metadata) ? part.state.metadata.exit : undefined;
-       const started = record(part.time) ? time(part.time.ran) : record(part.state.time) ? time(part.state.time.start) : null;
-       const completed = record(part.time) ? time(part.time.completed) : record(part.state.time) ? time(part.state.time.end) : null;
-       if (notBefore !== undefined && (started === null || completed === null || started < notBefore || completed < started)) return [];
-      return [{ command, ...(members.length > 1 ? { observed_members: members } : {}), exit_code: typeof exit === "number" && Number.isSafeInteger(exit) ? exit : null,
-         started_ms: started, completed_ms: completed }];
+      const exit = record(part.state.metadata) ? part.state.metadata.exit : undefined;
+      const started = record(part.time) ? time(part.time.ran) : record(part.state.time) ? time(part.state.time.start) : null;
+      const completed = record(part.time) ? time(part.time.completed) : record(part.state.time) ? time(part.state.time.end) : null;
+      if (notBefore !== undefined && (started === null || completed === null || started < notBefore || completed < started)) return [];
+      return [{ command, exit_code: typeof exit === "number" && Number.isSafeInteger(exit) ? exit : null,
+        started_ms: started, completed_ms: completed }];
     });
+  });
+  let occurrence = 0;
+  const attempts = rawAttempts.sort((a, b) => (a.started_ms ?? 0) - (b.started_ms ?? 0) || (a.completed_ms ?? 0) - (b.completed_ms ?? 0)).flatMap(attempt => {
+    const members = canonicalDeclaredValidationMembers(attempt.command, declared, occurrence);
+    if (!members) return [];
+    if (attempt.exit_code !== 0) occurrence = 0;
+    else for (const command of members) {
+      if (command !== declared[occurrence]) occurrence = 0;
+      if (command === declared[occurrence]) occurrence = (occurrence + 1) % declared.length;
+    }
+    return [{ ...attempt, ...(members.length > 1 ? { observed_members: members } : {}) }];
   });
   // Retain early attempts and the latest checks if a Worker retried many times.
   const shown = attempts.length > 32 ? [...attempts.slice(0, 8), ...attempts.slice(-24)] : attempts;
@@ -80,10 +89,11 @@ export function reviewerCorrectionValidation(validation: readonly string[], chil
   history: readonly Record<string, unknown>[], notBefore: number, checks?: readonly ReviewerCorrectionCheck[]): {
     ready: boolean; reason?: string; failure?: { command: readonly string[]; outcome: "fail"; exitCode: number | null };
     matched?: readonly { callID: string; member: number; occurrence: number }[];
+    nextOccurrence?: number;
   } {
-  const declared = validation.map(normalizeCommand), expected = new Set(declared);
+  const declared = validation.map(normalizeCommand);
   if (!Number.isFinite(notBefore)) return { ready: false, reason: "mission-review-correction-validation-admission-unavailable" };
-  const attempts: { callID: string; commands: string[]; exit: number | null; started: number; completed: number }[] = [];
+  const attempts: { callID: string; command: string; exit: number | null; started: number; completed: number }[] = [];
   const seen = new Set<string>();
   let editedAt = notBefore;
   // Unlike the display excerpt, this acceptance comparison scans ALL native attempts.
@@ -99,9 +109,8 @@ export function reviewerCorrectionValidation(validation: readonly string[], chil
       if (!record(part) || part.type !== "tool" || !["bash", "shell", "powershell", "pwsh"].includes(String(part.tool)) ||
           !record(part.state) || !["completed", "error"].includes(String(part.state.status)) ||
           !record(part.state.input) || typeof part.state.input.command !== "string") continue;
-      const commands = canonicalDeclaredValidationMembers(part.state.input.command, expected);
       const callID = typeof part.callID === "string" ? part.callID : typeof part.id === "string" ? part.id : undefined;
-      if (!commands || !callID || seen.has(callID)) continue;
+      if (!callID || seen.has(callID)) continue;
       const timing = record(part.time) ? { started: part.time.ran, completed: part.time.completed }
         : record(part.state.time) ? { started: part.state.time.start, completed: part.state.time.end } : undefined;
       if (!timing || typeof timing.started !== "number" || typeof timing.completed !== "number" ||
@@ -110,7 +119,7 @@ export function reviewerCorrectionValidation(validation: readonly string[], chil
       const rawExit = record(part.state.metadata) ? part.state.metadata.exit : undefined;
       const exit = part.state.status === "completed" && Number.isSafeInteger(rawExit) ? rawExit as number : null;
       seen.add(callID);
-      attempts.push({ callID, commands, exit, started: timing.started, completed: timing.completed });
+      attempts.push({ callID, command: part.state.input.command, exit, started: timing.started, completed: timing.completed });
     }
   }
   const matched: { callID: string; member: number; occurrence: number }[] = [];
@@ -118,17 +127,20 @@ export function reviewerCorrectionValidation(validation: readonly string[], chil
   let previousEnd = notBefore, failed: { command: readonly string[]; outcome: "fail"; exitCode: number | null } | undefined;
   for (const attempt of attempts.sort((a, b) => a.started - b.started || a.completed - b.completed)) {
     if (attempt.started < editedAt) continue;
+    const commands = canonicalDeclaredValidationMembers(attempt.command, declared, matched.length % declared.length);
+    if (!commands) continue; // Focused diagnostics are not formal proof.
     if (attempt.started < previousEnd) return { ready: false, reason: "mission-review-correction-validation-order:overlap" };
     previousEnd = attempt.completed;
-    if (attempt.commands[0] !== declared[matched.length] || matched.length === declared.length) matched.length = 0;
+    if (commands[0] !== declared[matched.length] || matched.length === declared.length) matched.length = 0;
     failed = undefined;
     // A failed && chain cannot infer any member success (including commands before its failure).
     if (attempt.exit !== 0) {
       complete = undefined;
-      failed = { command: attempt.commands, outcome: "fail", exitCode: attempt.exit };
+      matched.length = 0;
+      failed = { command: commands, outcome: "fail", exitCode: attempt.exit };
       continue;
     }
-    for (const [member, command] of attempt.commands.entries()) {
+    for (const [member, command] of commands.entries()) {
       if (command !== declared[matched.length]) {
         matched.length = 0;
         if (command !== declared[0]) continue;
@@ -137,8 +149,8 @@ export function reviewerCorrectionValidation(validation: readonly string[], chil
       if (matched.length === declared.length) complete = [...matched];
     }
   }
-  if (failed) return { ready: false, reason: `mission-review-correction-validation-failed:${failed.command.join(" && ")}`, failure: failed };
-  if (!complete) return { ready: false, reason: `mission-review-correction-validation-missing:${declared[matched.length]}` };
+  if (failed) return { ready: false, reason: `mission-review-correction-validation-failed:${failed.command.join(" && ")}`, failure: failed, nextOccurrence: 0 };
+  if (!complete) return { ready: false, reason: `mission-review-correction-validation-missing:${declared[matched.length]}`, nextOccurrence: matched.length };
   for (const item of complete) {
     const command = declared[item.occurrence]!;
     const check = checks?.find(check => check.callID === item.callID && check.childSessionID === child);
@@ -148,7 +160,7 @@ export function reviewerCorrectionValidation(validation: readonly string[], chil
       return { ready: false, reason: `mission-review-correction-validation-binding-unavailable:${command}` };
     }
   }
-  return { ready: true, matched: complete };
+  return { ready: true, matched: complete, nextOccurrence: matched.length % declared.length };
 }
 
 /** Refresh each actual run's saved recipe; never attach today's snapshot to historical native logs. */
@@ -294,7 +306,7 @@ export async function completedMissionReviewPrompts(mission: OperatorMission | u
 /** Pin all scoped tracked/untracked source bytes, including deletions; display a bounded excerpt only. */
 export async function missionReviewSource(directory: string, run: OperatorState,
   evidence: readonly MissionEvidenceExcerpt[] = [], baseline?: string, priorScope?: MissionReviewScope, displayBaseline = baseline): Promise<{
-    fingerprint: string; excerpt: string; truncatedEvidence: string[]; truncatedSource: string[] }> {
+    fingerprint: string; candidateFingerprint: string; excerpt: string; truncatedEvidence: string[]; truncatedSource: string[] }> {
   const scope = missionReviewScope(priorScope, run);
   const bindings = scope.validationBindings ?? [];
   const protection = bindings.some(binding => binding.freshness) ? await currentSnapshotProtection(directory, scope) : [];
@@ -312,6 +324,8 @@ export async function missionReviewSource(directory: string, run: OperatorState,
     scope: bindings.length ? { read: scope.read } : scope,
     units: run.units.map(unit => bindings.length ? { id: unit.unit.id, read: unit.unit.read, validation: unit.unit.validation,
       acceptance: unit.unit.acceptance_indices } : { unit: unit.unit, hashes: unit.hashes }) }));
+  const candidateHash = hash.copy(); // Optional excerpt selection is presentation, not candidate bytes.
+  const sourceUpdate = (value: string | Buffer) => { hash.update(value); candidateHash.update(value); };
   const writes = [...new Set(scope.write.map(path => path === "." ? path : normalizeManifestScope(path).path))];
   const focused: { entry: MissionEvidenceExcerpt; lines: string[]; bytes: number; lineCapped: boolean }[] = [];
   for (const entry of evidence) {
@@ -385,7 +399,7 @@ export async function missionReviewSource(directory: string, run: OperatorState,
     if (needsNotice[index]) selected += truncated(item.entry);
   }
   const truncatedEvidence = focused.flatMap(({ entry }, index) => needsNotice[index] ? [`${entry.path}:${entry.offset}`] : []);
-  if (writes.length === 0) return { fingerprint: `sha256:${hash.digest("hex")}`,
+  if (writes.length === 0) return { fingerprint: `sha256:${hash.digest("hex")}`, candidateFingerprint: `sha256:${candidateHash.digest("hex")}`,
     excerpt: selected + "[Read-only units: no declared output files. Review the supplied observations, traces and validation evidence.]",
     truncatedEvidence, truncatedSource: [] };
   // The shared dependency environment is local tooling, never reviewed or pinned source.
@@ -440,20 +454,20 @@ export async function missionReviewSource(directory: string, run: OperatorState,
     if (excluded(path)) return;
     if (visited.has(path)) return;
     visited.add(path);
-    hash.update(JSON.stringify(path));
+    sourceUpdate(JSON.stringify(path));
     try {
       const absolute = resolve(directory, path), stat = await lstat(absolute);
-      hash.update(String(stat.mode));
+      sourceUpdate(String(stat.mode));
       const include = includedByParent || untracked.has(path) || unchanged;
       const heading = `\n--- ${includedByParent || untracked.has(path) ? "new file" : "current file"}: ${path} ---\n`;
       const room = include ? Math.max(0, 24_000 - Buffer.byteLength(excerpt) - Buffer.byteLength(heading)) : 0;
       let preview = Buffer.alloc(0);
       if (stat.isSymbolicLink()) {
         const content = Buffer.from(await readlink(absolute));
-        hash.update(String(content.length)).update(content);
+        sourceUpdate(String(content.length)); sourceUpdate(content);
         preview = content.subarray(0, room);
       } else if (stat.isDirectory()) {
-        hash.update("directory");
+        sourceUpdate("directory");
         if (include) {
           const marker = "[directory; contained artifacts follow]\n";
           const headingFits = Buffer.byteLength(excerpt) + Buffer.byteLength(heading) + Buffer.byteLength(marker) <= 24_000;
@@ -470,10 +484,10 @@ export async function missionReviewSource(directory: string, run: OperatorState,
         }
       } else {
         if (!stat.isFile()) throw new Error("mission-review-source: unsupported artifact type");
-        hash.update(String(stat.size));
+        sourceUpdate(String(stat.size));
         for await (const part of createReadStream(absolute)) {
           const bytes = Buffer.isBuffer(part) ? part : Buffer.from(part);
-          hash.update(bytes);
+          sourceUpdate(bytes);
           if (preview.length < room) preview = Buffer.concat([preview, bytes.subarray(0, room - preview.length)]);
         }
       }
@@ -497,7 +511,7 @@ export async function missionReviewSource(directory: string, run: OperatorState,
           if (stat.size > room || Buffer.byteLength(rendered) > room) omitted.push(path);
         } else omitted.push(path);
       }
-    } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; hash.update("deleted"); }
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; sourceUpdate("deleted"); }
   };
   for (const path of paths) await visit(path);
   if (external.length) {
@@ -506,7 +520,7 @@ export async function missionReviewSource(directory: string, run: OperatorState,
     // validation still requires readable outputs and does not use this review-only option.
     const artifacts = await declaredArtifacts(external, Math.max(1, 24_000 - Buffer.byteLength(excerpt)),
       { reportUnreadableDirectories: true });
-    hash.update(JSON.stringify(artifacts.entries));
+    sourceUpdate(JSON.stringify(artifacts.entries));
     excerpt += artifacts.excerpt;
     if (artifacts.truncated) omitted.push("external artifacts");
     unreadable.push(...artifacts.unreadable);
@@ -514,7 +528,7 @@ export async function missionReviewSource(directory: string, run: OperatorState,
   const bytes = Buffer.from(excerpt);
   const truncatedSource = [...new Set(omitted)];
   if (bytes.length > 24_000 && truncatedSource.length === 0) truncatedSource.push("(source diff exceeds excerpt budget)");
-  return { fingerprint: `sha256:${hash.digest("hex")}`, excerpt: (bytes.length > 24_000 ? bytes.subarray(0, 24_000).toString("utf8") : excerpt) +
+  return { fingerprint: `sha256:${hash.digest("hex")}`, candidateFingerprint: `sha256:${candidateHash.digest("hex")}`, excerpt: (bytes.length > 24_000 ? bytes.subarray(0, 24_000).toString("utf8") : excerpt) +
     (truncatedSource.length ? `\n[EXCERPT TRUNCATED: ${truncatedSource.slice(0, 20).join(", ")}; Reviewer can read/search the relevant source directly]` : "") +
     (unreadable.length ? `\n[UNINSPECTED EXTERNAL DIRECTORIES: ${unreadable.slice(0, 20).join(", ")}; select specific result files as review evidence]` : ""),
     truncatedEvidence, truncatedSource };

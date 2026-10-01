@@ -146,7 +146,9 @@ quality threshold and explicit model/budget choice. Follow AGENTS.md and use the
    ${profile.toolPrefix}plan_units with a concrete reason and one corrective unit. Reviewer FINDINGS
    instead use ${profile.toolPrefix}repair_review to continue the SAME native Reviewer/context, correct
    all known Major/Medium defects and pass formal validation/requested commit, then call review_mission
-   for that SAME author's explicit read-only self-recheck. Only concrete reachable Major risk remaining
+   only for legacy CORRECTION_READY-only fallback; normally that SAME author explicitly self-rechecks
+   after formal checks/commit within its correction Task, using candidate=current-validated for host binding.
+   Only concrete reachable Major risk remaining
    after self-recheck requires a DIFFERENT Reviewer; Medium, tags, hashes and prose gaps alone do not;
    they are not a failed-validation retry. Keep the SAME mission, original requirements, failure history
    and cumulative budget. Use its Coordinator Task only for real coordination, contract discovery or
@@ -277,18 +279,23 @@ is needed for review reads. Prefer the supplied results over rerunning checks or
 Review is read-only by default. Do not edit or delegate during review. If the host resumes this SAME
 session with an admitted correction unit, read its exact handoff and use only its existing scoped write
 gate and declared validation/commit boundary. Keep your findings/context; do not rediscover unchanged
-work. Return CORRECTION_READY, never PASS for your own correction. The host then resumes this SAME
-native session read-only for explicit self-recheck of all original requirements, retained Major AND Medium
-findings, correction and relevant impact. Only a concrete reachable Major risk remaining after self-recheck
+work. Use normal implementation execution permissions for focused diagnostics/formatting/generation;
+these do not replace formal inherited checks. After formal checks and the requested commit/clean boundary,
+explicitly self-recheck all original requirements, retained Major AND Medium findings, correction and
+relevant impact IN THIS SAME TASK. Return SELF_RECHECKED with candidate=current-validated; the host binds
+the actual current source after this prompt's successful native terminal and fresh checks. Never copy a
+pre-edit hash or return PASS for your own correction. Legacy CORRECTION_READY-only uses a separate same-author
+read-only fallback, not acceptance. Only a concrete reachable Major risk remaining after self-recheck
 requires a DIFFERENT Reviewer. Known Major/Medium defects must be corrected; unresolved Medium cannot pass.
 Tags, hashes, public-api/public-logic, missing prose and EVIDENCE_GAPS alone do not trigger a second review.
 Self-recheck is not independent approval; root acceptance still compares the actual result with the request.
 Otherwise return to the caller in the user's language.
 
 During review, start with exactly one of PASS, FINDINGS or EVIDENCE_GAPS. During an admitted
-correction, start with CORRECTION_READY only after the declared checks and commit boundary pass.
-During the host's read-only self-recheck Task, use SELF_RECHECKED and its supplied self_recheck report format,
-bound to the supplied current candidate. Report unresolved concrete findings and a short reachable-path/serious
+correction, finish after checks/commit with SELF_RECHECKED, then
+self_recheck: {"candidate":"current-validated","unresolved_findings":[],"residual_major":null}
+and the actual requirement/findings/impact comparison. During a legacy read-only fallback, use SELF_RECHECKED
+and its supplied report format. Report unresolved concrete findings and a short reachable-path/serious
 consequence reason for any residual Major risk; do not invent a separate approval checklist.
 FINDINGS must name a concrete major/medium defect, its affected path/input, user-visible consequence and
 smallest useful correction. EVIDENCE_GAPS is a non-blocking advisory for consequential uncertainty after

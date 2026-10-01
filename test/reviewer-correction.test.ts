@@ -15,7 +15,7 @@ import { OperatorRuntime } from "../dist/core/operator-runtime.js";
 import { RunFlightLedger } from "../dist/core/run-flight-ledger.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
 import { runtimeAssets } from "../dist/runtime-assets-v010.js";
-import { canonicalDeclaredValidationMembers, declaredValidationShellResources, reviewerCorrectionShellAllowed } from "../dist/plugin/gate.js";
+import { canonicalDeclaredValidationMembers } from "../dist/plugin/gate.js";
 import type { OpenCodeHooks } from "../dist/plugin/index.js";
 
 const exec = promisify(execFile);
@@ -115,7 +115,10 @@ async function fixture(options: { permissionsUnavailable?: boolean } = {}) {
       assert.equal(agents[input.sessionID]!.agent, event.input.agent);
     }
     if (tool === "shell" && agents[sessionID]!.agent.startsWith("dog-reviewer-correction-")) {
-      assert.notEqual(await permission(sessionID, "shell", declaredValidationShellResources(input.command), false, event.id), "deny", "native permission denied shell");
+      // Independent pinned scanLegacy command-node fixtures, NOT a production permission helper.
+      const resources = input.command === "node required-test.mjs; node check.mjs"
+        ? ["node required-test.mjs", "node check.mjs"] : input.command.split(" && ");
+      assert.notEqual(await permission(sessionID, "shell", resources, false, event.id), "deny", "native permission denied shell");
     }
     return event;
   };
@@ -213,6 +216,104 @@ async function correctionReady(f: Awaited<ReturnType<typeof fixture>>) {
   await f.finish(dispatch, "author", "CORRECTION_READY\nAll retained findings corrected and declared checks/commit passed.");
 }
 
+const inlineReport = (unresolved: string[] = [], residual: unknown = null, candidate = "current-validated") =>
+  `SELF_RECHECKED\nself_recheck: ${JSON.stringify({ candidate, unresolved_findings: unresolved, residual_major: residual })}\nCompared every original requirement, all retained findings, corrected source and relevant impact against actual fresh formal checks and clean commit.`;
+
+for (const mode of ["foreground", "background-cold", "medium", "major", "missing", "PASS", "old-report", "nonterminal", "old-terminal", "failed-check", "edited-after-check", "native-failed", "missing-prompt", "later-prompt"] as const) {
+  test(`inline correction native self-recheck: ${mode}`, async () => {
+    const f = await fixture();
+    try {
+      const previous = await initial(f, { validation: ["node required-test.mjs", "node check.mjs"] });
+      const prepared = await f.tool("root", "repair_review");
+      assert.match((await f.run()).units[0]!.unit.objective, /in this Task/);
+      assert.match((await f.run()).units[0]!.unit.objective, /current-validated/);
+      const dispatch = await f.before("root", "subagent", { ...f.task(prepared.task), ...(["background-cold", "missing-prompt"].includes(mode) ? { background: true } : {}) });
+      await f.prompt("author", dispatch.input.prompt); await f.bind("author");
+      const unit = (await f.run()).units[0]!;
+      assert.equal(unit.reviewerCorrection!.promptID, f.history.author!.filter(message => message.type === "user").at(-1)!.id);
+      const authorTaskCount = () => f.history.root!.flatMap(message => message.content ?? []).filter(part => part.type === "tool" && part.name === "subagent" && part.state.input.sessionID === "author").length;
+      if (mode === "missing-prompt") await f.after(dispatch, "Native Job running", { sessionID: "author", status: "running" });
+      if (mode === "background-cold") {
+        await f.after(dispatch, "Native Job running", { sessionID: "author", status: "running" });
+        await f.start();
+        await f.bind("author"); // Existing cold binding recovery, not a new Task or validation.
+        assert.equal((await f.run()).units[0]!.reviewerCorrection!.promptID, unit.reviewerCorrection!.promptID);
+        assert.equal((await f.ledger()).state.outstanding_reservations.length, 1);
+      }
+      await f.edit("author", mode === "failed-check" ? "bad-required" : "ready");
+      await f.shell("author", "git add -- result.txt"); await f.shell("author", "git commit -m inline-correction");
+      await f.shell("author", "node required-test.mjs"); await f.shell("author", "node check.mjs");
+      if (mode === "edited-after-check") await f.edit("author", "ready but unvalidated edit");
+      if (mode === "missing-prompt") {
+        const runtime = new OperatorRuntime(f.directory, V010_RUNTIME_PROFILE), state = await f.run();
+        delete state.units[0]!.reviewerCorrection!.promptID;
+        await writeFile(runtime.statePath("root"), JSON.stringify(state));
+        await f.start();
+      }
+      if (mode === "later-prompt") f.history.author!.push({ id: "unowned-later-user", type: "user", text: "Different prompt", time: { created: Date.now() } });
+      const text = mode === "missing" ? "CORRECTION_READY" : mode === "PASS" ? "PASS" :
+        inlineReport(mode === "medium" ? ["Medium: retained output behavior remains broken"] : [],
+          mode === "major" ? { reachable_path: "caller retries an unsuccessful transaction", consequence: "persisted state corruption across retries" } : null,
+          mode === "old-report" ? previous.mission.review!.source : "current-validated");
+      if (mode === "nonterminal" || mode === "old-terminal") {
+        if (mode === "nonterminal") f.history.author!.push({ id: "still-tool-calls", type: "assistant", finish: "tool-calls", time: { created: Date.now(), completed: Date.now() }, content: [{ type: "text", text }] });
+        await f.after(dispatch, text, { sessionID: "author" });
+      } else if (mode === "native-failed") {
+        f.terminal("author", text, true); await f.after(dispatch, text, { sessionID: "author", status: "failed" }, "error");
+      } else if (mode === "background-cold" || mode === "missing-prompt") {
+        f.terminal("author", text); await f.start(); await f.tool("root", "operator_status");
+      } else await f.finish(dispatch, "author", text);
+      const mission = await f.missions.required("root"), settledRun = await f.run();
+      if (["foreground", "background-cold", "medium", "major"].includes(mode)) {
+        const proof = mission.review!.selfRecheck!;
+        assert(proof, "actual correction terminal records self-recheck without another author Task");
+        assert.equal(mission.review!.mode, "self-recheck"); assert.equal(proof.callID, dispatch.id);
+        assert.equal(proof.promptID, unit.reviewerCorrection!.promptID); assert.equal(proof.runID, settledRun.runID);
+        assert.equal(proof.author, "author"); assert.equal(proof.nativeOutcome, "completed");
+        assert.equal(proof.messageID, f.history.author!.filter(message => message.type === "assistant" && message.finish === "stop").at(-1)!.id);
+        assert.notEqual(proof.source, previous.mission.review!.source, "HOST binds post-edit source, never the old prompt hash");
+        assert.equal(missionReviewIndependent(mission, "author"), false);
+        assert.equal(mission.corrections![0]!.selfRecheck!.messageID, proof.messageID);
+        if (mode === "medium") {
+          await assert.rejects(f.tool("root", "complete_mission"), /mission-review/);
+          await assert.rejects(f.tool("root", "review_mission", { risk_tags: [] }), /known-findings-require-correction/);
+          const retry = await f.tool("root", "repair_review");
+          assert.equal(retry.status, "correction-required"); assert.equal(retry.task.task_id, "author");
+        } else if (mode === "major") {
+          await assert.rejects(f.tool("root", "complete_mission"), /mission-review/);
+          const second = await f.tool("root", "review_mission", { risk_tags: [] });
+          assert.equal(second.status, "review-required"); assert.equal(second.task.task_id, undefined);
+        } else {
+          await f.start();
+          assert.equal((await f.tool("root", "review_mission", { risk_tags: ["public-api"] })).status, "review-recorded");
+          const acceptance = (await f.tool("root", "operator_status")).acceptance_summary;
+          const count = authorTaskCount(), receipt = await f.tool("root", "complete_mission");
+          assert.equal(receipt.status, "succeeded"); assert.equal(acceptance.independent_review.independent, false);
+          assert.equal(acceptance.independent_review.verdict, "self-rechecked");
+          assert.equal(authorTaskCount(), count, "root receipt adds NO second author Task");
+          const beforeDuplicate = await f.ledger();
+          await f.after(dispatch, text, { sessionID: "author" });
+          const ledger = await f.ledger();
+          assert.equal(ledger.state.consumed_units, 2); assert.equal(ledger.state.outstanding_reservations.length, 0);
+          assert.deepEqual(ledger.records.filter(item => item.event.kind === "unit.settled"), beforeDuplicate.records.filter(item => item.event.kind === "unit.settled"));
+          const spend = ledger.records.filter(item => item.event.kind === "unit.settled").at(-1)!.event.cost_usd!;
+          assert(Math.abs(spend - (mode === "background-cold" ? 0.0032 : 0.0028)) < 1e-12, "owned correction native requests charged once; no self-recheck round spend");
+          assert.equal(f.agents.author!.agent, "dog-reviewer-v010");
+          await assert.rejects(f.before("author", "patch", { patchText: "*** Begin Patch\n*** Update File: result.txt\n@@\n-ready\n+changed\n*** End Patch" }), /mission-reviewer-readonly/);
+        }
+      } else {
+        assert.notEqual(mission.review!.verdict, "self-rechecked");
+        await assert.rejects(f.tool("root", "complete_mission"), /mission-review|validation|incomplete|unit-validation/);
+        if (["missing", "PASS", "old-report", "missing-prompt", "later-prompt"].includes(mode)) {
+          assert.equal(settledRun.phase, "awaiting-acceptance", "successful formal unit alone cannot certify missing native self-recheck proof");
+          const fallback = await f.tool("root", "review_mission", { risk_tags: [] });
+          assert.equal(fallback.status, "self-recheck-required"); assert.equal(fallback.task.task_id, "author");
+        }
+      }
+    } finally { await f.dispose(); }
+  });
+}
+
 async function selfRecheck(f: Awaited<ReturnType<typeof fixture>>, residual: unknown = null, unresolved: string[] = []) {
   const review = await f.tool("root", "review_mission", { risk_tags: [] });
   assert.equal(review.status, "self-recheck-required");
@@ -303,7 +404,7 @@ test("native Reviewer gets verbatim full original request outside source excerpt
   } finally { await f.dispose(); }
 });
 
-for (const residual of [false, true]) test(`evidence refresh ${residual ? "invalidates old Major report" : "after acceptance"} stays in the SAME author`, async () => {
+for (const residual of [false, true]) test(`evidence refresh ${residual ? "invalidates old Major report" : "after acceptance is presentation only"} stays in the SAME author`, async () => {
   const f = await fixture();
   try {
     await initial(f); await correctionReady(f);
@@ -311,6 +412,12 @@ for (const residual of [false, true]) test(`evidence refresh ${residual ? "inval
     await f.finish(self.dispatch, "author", self.text);
     const before = await f.run(), prior = (await f.missions.required("root")).review!;
     const refreshed = await f.tool("root", "review_mission", { risk_tags: ["public-api"], evidence: [{ path: "result.txt", offset: 1, limit: 1 }] });
+    if (!residual) {
+      assert.equal(refreshed.status, "review-recorded", "unchanged candidate/semantics need no extra author Task for optional presentation");
+      assert.deepEqual((await f.missions.required("root")).review, prior, "accepted source/evidence pin remains unchanged");
+      assert.equal((await f.tool("root", "complete_mission")).status, "succeeded");
+      return;
+    }
     assert.equal(refreshed.status, "self-recheck-required");
     assert.equal(refreshed.task.task_id, "author", "excerpt/hash changes cannot purchase a second Reviewer");
     assert.equal((await f.missions.required("root")).review!.mode, "self-recheck");
@@ -422,8 +529,132 @@ test("declared composite validation is atomic before chain decomposition", () =>
   assert.deepEqual(canonicalDeclaredValidationMembers(`${C} && ${C}`, new Set([C])), [C, C]);
   assert.deepEqual(canonicalDeclaredValidationMembers(`${C} && ${A}`, new Set([C, A])), [C, A]);
   assert.equal(canonicalDeclaredValidationMembers(A, new Set([C])), undefined);
-  assert.equal(reviewerCorrectionShellAllowed(`${C} && printf x > undeclared.txt`, [C]), false);
-  assert.equal(reviewerCorrectionShellAllowed(`${C}; printf x > result.txt`, [C]), false);
+  assert.equal(canonicalDeclaredValidationMembers(`${C} && printf x > undeclared.txt`, [C]), undefined);
+  assert.equal(canonicalDeclaredValidationMembers(`${C}; printf x > result.txt`, [C]), undefined);
+  assert.deepEqual(canonicalDeclaredValidationMembers(`${C} && ${C}`, [A, B, C]), [A, B, C]);
+  assert.deepEqual(canonicalDeclaredValidationMembers(`${C} && ${C}`, [C, A, B]), [C, A, B]);
+  assert.deepEqual(canonicalDeclaredValidationMembers(`${C} && ${C}`, [A, B, A, B]), [A, B, A, B]);
+  assert.deepEqual(canonicalDeclaredValidationMembers(C, [A, B, C]), [C], "exact WHOLE declaration wins before occurrence-aware coalescing");
+  assert.deepEqual(canonicalDeclaredValidationMembers(`${C} && ${C}`, [A, B, C], 2), [C, A, B], "current occurrence, not longest Set match");
+});
+
+for (const order of ["A,B,C", "C,A,B", "A,B,A,B", "C,C", "A,B,C,A,B,C"] as const) for (const failed of [false, true]) {
+  test(`mixed coalesced validation ${order} ${failed ? "failed chain" : "success"} binds execution/history identically`, async () => {
+    const f = await fixture();
+    try {
+      const A = "node required-test.mjs", B = "node check.mjs", C = `${A} && ${B}`;
+      const map = { A, B, C }, validation = order.split(",").map(key => map[key as keyof typeof map]);
+      await initial(f, { validation });
+      const prepared = await f.tool("root", "repair_review"), dispatch = await f.before("root", "subagent", f.task(prepared.task));
+      await f.prompt("author", dispatch.input.prompt); await f.bind("author");
+      await f.edit("author", failed ? "bad-required" : "ready");
+      await f.shell("author", "git add -- result.txt"); await f.shell("author", "git commit -m ordered-composite");
+      await f.shell("author", validation.join(" && "));
+      const check = (await f.run()).units[0]!.reviewerCorrection!.checks!.at(-1)!;
+      assert.deepEqual(check.command, validation); assert.equal(check.dispatchCallID, dispatch.id);
+      assert.equal(check.exitCode, failed ? 1 : 0);
+      await f.finish(dispatch, "author", inlineReport());
+      assert.equal((await f.missions.required("root")).corrections![0]!.status, failed ? "failed" : "ready");
+      if (failed) await assert.rejects(f.tool("root", "complete_mission"), /validation|incomplete/);
+      else assert.equal((await f.tool("root", "complete_mission")).status, "succeeded");
+    } finally { await f.dispose(); }
+  });
+}
+
+test("ordered mixed composite uses progress from preceding actual calls and retains call/member/occurrence binding", async () => {
+  const f = await fixture();
+  try {
+    const A = "node required-test.mjs", B = "node check.mjs", C = `${A} && ${B}`;
+    await initial(f, { validation: [A, B, C] });
+    const prepared = await f.tool("root", "repair_review"), dispatch = await f.before("root", "subagent", f.task(prepared.task));
+    await f.prompt("author", dispatch.input.prompt); await f.bind("author");
+    await f.edit("author", "ready"); await f.shell("author", "git add -- result.txt"); await f.shell("author", "git commit -m occurrence-position");
+    await f.shell("author", A);
+    await f.shell("author", `${B} && ${C}`);
+    const checks = (await f.run()).units[0]!.reviewerCorrection!.checks!;
+    assert.deepEqual(checks.map(check => check.command), [[A], [B, C]]);
+    assert.notEqual(checks[0]!.callID, checks[1]!.callID);
+    const runtime = new OperatorRuntime(f.directory, V010_RUNTIME_PROFILE), state = await f.run();
+    state.units[0]!.reviewerCorrection!.checks![1]!.command = [C, B];
+    await writeFile(runtime.statePath("root"), JSON.stringify(state));
+    await f.start();
+    await f.finish(dispatch, "author", inlineReport());
+    assert.equal((await f.missions.required("root")).corrections![0]!.status, "failed", "different saved call-member decomposition cannot certify actual history");
+  } finally { await f.dispose(); }
+});
+
+test("semicolon declaration uses independent native parsed resources, one atomic formal check, and unchanged explicit deny/ask", async () => {
+  const f = await fixture();
+  try {
+    const A = "node required-test.mjs", B = "node check.mjs", C = `${A}; ${B}`;
+    await initial(f, { validation: [C] });
+    const prepared = await f.tool("root", "repair_review"), dispatch = await f.before("root", "subagent", f.task(prepared.task));
+    await f.prompt("author", dispatch.input.prompt); await f.bind("author");
+    await f.edit("author", "ready"); await f.shell("author", "git add -- result.txt"); await f.shell("author", "git commit -m semicolon-declaration");
+    for (const effect of ["deny", "ask"] as const) {
+      f.agents.author!.permissions = [{ action: "shell", resource: B, effect }];
+      assert.equal(await f.permission("author", "shell", [A, B]), effect);
+      if (effect === "deny") await assert.rejects(f.before("author", "shell", { command: C }), /native permission denied shell/);
+    }
+    delete f.agents.author!.permissions;
+    await f.shell("author", A); await f.shell("author", B);
+    assert.equal((await f.run()).units[0]!.reviewerCorrection!.checks, undefined, "standalone resources are diagnostics, not the composite declaration");
+    await f.shell("author", C);
+    assert.deepEqual((await f.run()).units[0]!.reviewerCorrection!.checks!.map(check => check.command), [[C]]);
+    await f.finish(dispatch, "author", inlineReport());
+    assert.equal((await f.tool("root", "complete_mission")).status, "succeeded");
+  } finally { await f.dispose(); }
+});
+
+for (const effect of ["allow", "ask", "deny"] as const) test(`native configured order: historical wildcard deny then Reviewer-specific ${effect}, including cold reload`, async () => {
+  const f = await fixture();
+  try {
+    await initial(f);
+    f.globalRules.push({ action: "shell", resource: "*", effect: "deny" });
+    f.agentRules["dog-reviewer-v010"] = [{ action: "shell", resource: "node check.mjs", effect },
+      ...(effect === "deny" ? [{ action: "shell", resource: "node check.mjs", effect: "allow" as const }, { action: "shell", resource: "node check.mjs", effect }] : [])];
+    await f.start();
+    const original = evaluate("shell", "node check.mjs", f.registry()["dog-reviewer-v010"]!.permissions).effect;
+    const workerOriginal = evaluate("shell", "node check.mjs", f.registry()["dog-worker-v010"]!.permissions).effect;
+    assert.equal(original, effect);
+    const prepared = await f.tool("root", "repair_review"), dispatch = await f.before("root", "subagent", f.task(prepared.task));
+    await f.prompt("author", dispatch.input.prompt); await f.bind("author");
+    for (const cold of [false, true]) {
+      if (cold) await f.start();
+      assert.equal(await f.permission("author", "shell", "node check.mjs"), original);
+      assert.equal(await f.permission("author", "shell", "node required-test.mjs"), "deny");
+      assert.equal(f.registry()["dog-reviewer-v010"]!.permissions.some((rule: Rule) => rule.action === "edit" && rule.effect === "deny"), true);
+      assert.equal(await f.permission("worker", "shell", "node check.mjs"), workerOriginal, "unrelated Worker registry is unchanged");
+      if (effect === "deny") await assert.rejects(f.before("author", "shell", { command: "node check.mjs" }), /native permission denied shell/);
+      else await f.before("author", "shell", { command: "node check.mjs" });
+    }
+    await f.tool("root", "cancel_operator", { reason: "explicit-cancellation" });
+  } finally { await f.dispose(); }
+});
+
+test("correction execution permits focused tests/formatter/generator; formal proof and known output/prohibition gates remain", async () => {
+  const f = await fixture();
+  try {
+    await initial(f, { validation: ["node required-test.mjs", "node check.mjs"] });
+    await f.missions.update("root", state => { state.prohibitedWrite = ["check.mjs"]; });
+    const prepared = await f.tool("root", "repair_review"), dispatch = await f.before("root", "subagent", f.task(prepared.task));
+    await f.prompt("author", dispatch.input.prompt); await f.bind("author");
+    for (const command of ["go test ./vm -run '^TestTypedBindings$' -count=1", "gofmt -w result.txt", "node generate.mjs", "node format.mjs"]) {
+      const event = await f.before("author", "shell", { command });
+      await f.after(event, "Focused diagnostic/formatter admitted under native policy", { exit: 0 });
+    }
+    assert.equal((await f.run()).units[0]!.reviewerCorrection!.checks, undefined, "focused execution NEVER substitutes for formal inherited checks");
+    await f.shell("author", "node generate.mjs"); await f.shell("author", "node format.mjs");
+    await f.shell("author", "printf 'ready\\n' > result.txt");
+    await assert.rejects(f.before("author", "shell", { command: "printf x > check.mjs" }), /mission-explicit-write-prohibition/);
+    await assert.rejects(f.before("author", "shell", { command: "printf x > outside.txt" }), /manifest write scope|write-union|write-denied/);
+    await assert.rejects(f.before("author", "shell", { command: "printf x > ../outside.txt" }), /repository-relative path without traversal/);
+    await f.shell("author", "git add -- result.txt"); await f.shell("author", "git commit -m diagnostics-then-formal");
+    await f.shell("author", "node required-test.mjs"); await f.shell("author", "node check.mjs");
+    await f.finish(dispatch, "author", inlineReport());
+    assert.equal((await f.tool("root", "complete_mission")).status, "succeeded");
+    assert.equal(whollyDisabled("shell", f.registry()["dog-reviewer-v010"]!.permissions), true, "ordinary Reviewer snapshot stays read-only after restoration");
+  } finally { await f.dispose(); }
 });
 
 test("atomic composite shell admission preserves native parsed-member and whole-command deny/ask", async () => {
@@ -436,11 +667,11 @@ test("atomic composite shell admission preserves native parsed-member and whole-
     await f.prompt("author", dispatch.input.prompt); await f.bind("author");
     for (const resource of [A, C]) for (const effect of ["deny", "ask"] as const) {
       f.agents.author!.permissions = [{ action: "shell", resource, effect }];
-      assert.equal(await f.permission("author", "shell", C, true), effect, "saved whole-command allow cannot override configured member/composite ask or deny");
-      if (effect === "deny") await assert.rejects(f.before("author", "shell", { command: C }), /native permission denied shell/);
+      assert.equal(await f.permission("author", "shell", resource), effect, "real configured rule keeps its native effect");
+      if (effect === "deny" && resource === A) await assert.rejects(f.before("author", "shell", { command: C }), /native permission denied shell/);
       else {
         const shell = await f.before("author", "shell", { command: C });
-        assert.equal(await f.permission("author", "shell", [A, B], true, shell.id), "ask", "actual ShellTool parsed resources retain the atomic configured ask");
+        assert.equal(await f.permission("author", "shell", [A, B], false, shell.id), resource === A ? effect : "allow", "ACTUAL parsed resources, not invented whole-command projection");
       }
     }
     await f.tool("root", "cancel_operator", { reason: "explicit-cancellation" });
@@ -457,7 +688,7 @@ for (const failed of [false, true]) test(`native exact composite required check 
     await f.prompt("author", dispatch.input.prompt); await f.bind("author");
     await f.edit("author", failed ? "bad-required" : "ready");
     await f.shell("author", "git add -- result.txt"); await f.shell("author", "git commit -m composite-correction");
-    await assert.rejects(f.before("author", "shell", { command: "node required-test.mjs" }), /correction-shell-boundary/);
+    await f.shell("author", "node required-test.mjs"); // Diagnostic, never partial composite proof.
     await f.shell("author", C); await f.shell("author", C);
     const checks = (await f.run()).units[0]!.reviewerCorrection!.checks!;
     assert.equal(checks.length, 2);
@@ -509,9 +740,8 @@ for (const mode of ["foreground", "background-restart", "failure", "self-review"
       assert.equal(f.switches.filter(input => "agent" in input).length, 1, "only the same author's scoped profile is selected, never Worker");
       assert.equal(f.switches.filter(input => "model" in input).length, priorModelSwitches, "same-child correction retains the native Sol model and variant too");
       const grants = f.rules.at(-1)!.permissions;
-      assert(grants.some((rule: ObjectValue) => rule.action === "edit" && rule.resource.endsWith("/result.txt") && rule.effect === "allow"));
-      assert(!grants.some((rule: ObjectValue) => rule.action === "edit" && rule.resource === "*" && rule.effect === "allow"));
-      assert(grants.some((rule: ObjectValue) => rule.action === "edit" && rule.resource === "result.txt" && rule.effect === "allow"));
+       assert.equal(evaluate("edit", "result.txt", grants).effect, "allow", "existing implementation defaults, not generated scope grants");
+       assert.equal(grants.some((rule: ObjectValue) => rule.action === "shell" && rule.effect === "deny"), false, "only shipped shell role deny removed");
       const context = { sessionID: "author", agent: f.agents.author!.agent, tools: Object.fromEntries(["read", "patch", "write", "shell",
         "sortie_v010_bind_write_gate", "sortie_v010_expand_unit", "sortie_v010_review_mission"].filter(name =>
           !whollyDisabled(["patch", "write"].includes(name) ? "edit" : name,
@@ -520,8 +750,9 @@ for (const mode of ["foreground", "background-restart", "failure", "self-review"
       await f.context(context);
       assert.deepEqual(Object.keys(context.tools).sort(), ["patch", "read", "shell", "sortie_v010_bind_write_gate", "write"].sort());
       await assert.rejects(f.before("author", "patch", { patchText: "*** Begin Patch\n*** Add File: undeclared.txt\n+x\n*** End Patch" }), /operation manifest write scope|mission-review-correction-write-union-fixed|write-denied|path-not-declared|outside|not-allowed/);
-      await assert.rejects(f.before("author", "shell", { command: "printf x > undeclared.txt" }), /mission-review-correction-shell-boundary/);
-      await assert.rejects(f.before("author", "shell", { command: "printf x > result.txt" }), /mission-review-correction-shell-boundary/);
+       await assert.rejects(f.before("author", "shell", { command: "printf x > undeclared.txt" }), /manifest write scope|write-union|write-denied/);
+       const knownWrite = await f.before("author", "shell", { command: "printf x > result.txt" });
+       await f.after(knownWrite, "Known scoped diagnostic allowed", { exit: 0 });
       await f.edit("author", "ready"); await f.shell("author", "git add -- result.txt"); await f.shell("author", "git commit -m correction");
       await f.shell("author", "node check.mjs", mode === "failure" ? 1 : 0);
       if (mode === "background-restart") {
@@ -533,11 +764,11 @@ for (const mode of ["foreground", "background-restart", "failure", "self-review"
       assert.deepEqual(f.agents.author!.permissions, undefined, "native session rules are never changed");
       assert.equal(f.agents.author!.agent, "dog-reviewer-v010", "terminal restores Reviewer immediately");
       assert.equal(f.storage.has("v2-reviewer-correction-permissions:author"), false);
-      assert(Math.abs(status.budget.settled_cost_usd - 0.0048) < 1e-12, "initial Worker and six correction requests are each priced exactly once");
+       assert(Math.abs(status.budget.settled_cost_usd - 0.0052) < 1e-12, "initial Worker and seven correction requests are each priced exactly once");
       const settled = (await f.ledger()).records.map(record => record.event).filter(event => event.kind === "unit.settled");
       assert.equal(settled.length, 2);
       const correctionSettlement = settled.find(event => event.native_session_id === "author")!;
-      assert(Math.abs(correctionSettlement.cost_usd! - 0.0024) < 1e-12, "same-child review history is excluded from correction spend");
+       assert(Math.abs(correctionSettlement.cost_usd! - 0.0028) < 1e-12, "same-child review history is excluded from correction spend");
       assert(correctionSettlement.native_started_at);
       assert.equal(corrected.corrections![0]!.author, "author");
       assert.equal(corrected.corrections![0]!.status, mode === "failure" ? "failed" : "ready");
@@ -716,8 +947,8 @@ test("exact correction chains preserve each member's native deny and ask", async
     await f.prompt("author", correction.input.prompt); await f.bind("author");
     for (const effect of ["deny", "ask", "allow"] as const) {
       f.agents.author!.permissions = [{ action: "shell", resource: A, effect }];
-      assert.equal(await f.permission("author", "shell", `${A} && ${B}`, true), effect,
-        "saved chain allow cannot bypass an individual required member's permission");
+      assert.equal(await f.permission("author", "shell", [A, B]), effect,
+        "actual native parsed resources preserve each configured member effect");
     }
     await f.tool("root", "cancel_operator", { reason: "explicit-cancellation" });
   } finally { await f.dispose(); }
@@ -886,7 +1117,7 @@ for (const place of ["global", "project", "session", "global-all"] as const) tes
     await f.prompt("author", correction.input.prompt); await f.bind("author");
     await assert.rejects(f.before("author", "shell", { command: "node check.mjs" }), /native permission denied shell/);
     assert.equal(f.registry()[f.agents.author!.agent]!.permissions.some((rule: Rule) => rule.action === "shell" && rule.resource === "*" && rule.effect === "allow"), false);
-    await assert.rejects(f.before("author", "shell", { command: "printf x > undeclared.txt" }), /mission-review-correction-shell-boundary/);
+    await assert.rejects(f.before("author", "shell", { command: "printf x > undeclared.txt" }), /manifest write scope|write-union|write-denied/);
     await f.tool("root", "cancel_operator", { reason: "explicit-cancellation" });
     assert.equal(f.agents.author!.agent, "dog-reviewer-v010");
     assert.deepEqual(f.agents.author!.permissions, place === "session" ? [deny] : undefined);
@@ -1005,6 +1236,8 @@ test("Reviewer correction inherits the host Git lifecycle and exact proof/declar
       await runtime.claimAdmittedWorkerPrompt("root", "root", child, task.prompt);
       await writeFile(join(f.directory, "result.txt"), text + "\n");
       await runtime.beforePostCommitValidation("root", child, "node check.mjs");
+      assert.equal(await runtime.postCommitLocked("root"), true);
+      await assert.rejects(runtime.beforePostCommitValidation("root", child, "node format.mjs"), /operator-git-post-commit-command-denied/);
       await exec(process.execPath, ["check.mjs"], { cwd: f.directory });
       // Focused core boundary test: bridge evidence is synthetic here, not a native live receipt.
       await runtime.settled({ rootSessionID: "root", callID, childSessionID: child, unitID: state.units[0]!.unit.id,

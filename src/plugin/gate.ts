@@ -872,13 +872,33 @@ export function canonicalDeclaredValidationSequence(command: string, declared: R
 }
 
 /** Preserve ordered members (including repeats) without splitting quoted text or substring matching. */
-export function canonicalDeclaredValidationMembers(command: string, declared: ReadonlySet<string>): string[] | undefined {
+export function canonicalDeclaredValidationMembers(command: string, declared: ReadonlySet<string> | readonly string[], occurrence = 0): string[] | undefined {
   const normalized = normalizeCommand(command);
   // A declared composite is ONE required execution, not inferred successes of its shell members.
-  const atomic = declaredCommandMatch(command, [...declared]);
+  const identities = [...new Set(declared)];
+  const atomic = declaredCommandMatch(command, identities);
   if (atomic !== undefined) return [atomic];
   const segments = shellSegments(command, "posix").map((segment) => segment.trim()).filter(Boolean);
   if (segments.length === 0 || normalized !== segments.map(normalizeCommand).join(" && ")) return undefined;
+  if (Array.isArray(declared)) {
+    const ordered = declared as readonly string[];
+    if (!ordered.length) return undefined;
+    const from = (position: number): string[] | undefined => {
+      const result: string[] = [];
+      for (let start = 0; start < segments.length;) {
+        const expected = ordered[(position + result.length) % ordered.length]!;
+        let matched = false;
+        for (let end = start + 1; end <= segments.length; end++) {
+          const member = declaredCommandMatch(segments.slice(start, end).join(" && "), [expected]);
+          if (member === undefined) continue;
+          result.push(member); start = end; matched = true; break;
+        }
+        if (!matched) return undefined;
+      }
+      return result;
+    };
+    return from(occurrence) ?? (occurrence ? from(0) : undefined);
+  }
   // Coalescing may include composite declarations too. Prefer complete declared identities at
   // each boundary; never accept a partial composite or an undeclared trailing shell command.
   const matched = new Map<number, string[] | undefined>();
@@ -886,7 +906,7 @@ export function canonicalDeclaredValidationMembers(command: string, declared: Re
     if (start === segments.length) return [];
     if (matched.has(start)) return matched.get(start);
     for (let end = segments.length; end > start; end--) {
-      const member = declaredCommandMatch(segments.slice(start, end).join(" && "), [...declared]);
+      const member = declaredCommandMatch(segments.slice(start, end).join(" && "), identities);
       if (member === undefined) continue;
       const rest = sequence(end);
       if (rest) { const result = [member, ...rest]; matched.set(start, result); return result; }
@@ -895,23 +915,6 @@ export function canonicalDeclaredValidationMembers(command: string, declared: Re
     return undefined;
   };
   return sequence(0);
-}
-
-/** Native ShellTool asserts parsed command resources, even for one atomic && declaration. */
-export function declaredValidationShellResources(command: string): string[] {
-  const normalized = normalizeCommand(command);
-  const segments = shellSegments(command, "posix").map(normalizeCommand).filter(Boolean);
-  return segments.length && normalized === segments.join(" && ") ? segments : [normalized];
-}
-
-/** Correction shell authority is only inherited checks or a direct existing source-scope Git boundary. */
-export function reviewerCorrectionShellAllowed(command: string, validation: readonly string[]): boolean {
-  if (canonicalDeclaredValidationSequence(command, new Set(validation)) !== undefined) return true;
-  if (!/^git (?:add|commit) /u.test(normalizeCommand(command)) || shellSegments(command, "posix").length !== 1) return false;
-  const syntax = scanShellSyntax(command, "posix");
-  if (syntax.unsafeExpansion || /[<>|;&\r\n]/u.test(syntax.masked)) return false;
-  const extracted = extractWritePaths("bash", { command });
-  return extracted.gitMutation === true && !extracted.ambiguous;
 }
 
 /** Unbound sessions may invoke only tools whose complete input is known to be read-only. */
@@ -1263,10 +1266,13 @@ export async function createWriteGate(project: ProjectPaths, value: unknown, too
       if (command !== undefined && declaredValidation.has(command)) return;
       // Shell syntax is not an execution permission boundary. Mission workers already use
       // native host permissions; only declared checks produce formal validation evidence.
-      if (options?.investigativeShell && ["bash", "shell"].includes(_input.tool)) return;
+      const nativeImplementationShell = options?.investigativeShell && ["bash", "shell"].includes(_input.tool);
       const extracted = extractWritePaths(_input.tool, output.args);
       if (!extracted.applies) return;
-      if (extracted.ambiguous || (extracted.paths.length === 0 && !extracted.gitCommit)) {
+      // Unknown program internals are native execution policy, NOT a proof of output scope.
+      // Still check every known destination (redirect/copy/etc.) and the existing Git boundary.
+      if ((!nativeImplementationShell || extracted.gitMutation) &&
+          (extracted.ambiguous || (extracted.paths.length === 0 && !extracted.gitCommit))) {
         if (extracted.issue !== undefined) {
           throw new WriteDeniedError("unclassified-command", issuePath(extracted.issue));
         }

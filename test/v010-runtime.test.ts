@@ -307,7 +307,9 @@ test("preview assets coexist with stable assets and markers", async () => fixtur
   assert.match(reviewer, /If a missing check genuinely\naffects correctness or a requested deliverable/u);
   assert.doesNotMatch(reviewer, /Require the enumeration to name the target artifact/u);
   assert.match(reviewer, /During review, start with exactly one of PASS, FINDINGS or EVIDENCE_GAPS/u);
-  assert.match(reviewer, /During an admitted\s+correction, start with CORRECTION_READY only after the declared checks and commit boundary pass/u);
+  assert.match(reviewer, /During an admitted\s+correction, finish after checks\/commit with SELF_RECHECKED/u);
+  assert.match(reviewer, /self_recheck: \{"candidate":"current-validated"/u);
+  assert.match(reviewer, /Legacy CORRECTION_READY-only uses a separate same-author\s+read-only fallback, not acceptance/u);
   assert.match(reviewer, /Report FINDINGS only for concrete major or medium defects with a material impact/u);
   assert.match(reviewer, /Do not turn minor style, wording, optional improvements or speculative edge cases into FINDINGS or EVIDENCE_GAPS/u);
   const coordinator = previewAssets.find(asset => asset.name === "dogs-coordinator")!.content;

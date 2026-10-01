@@ -127,7 +127,7 @@ interface UnitState {
   callID: string | null;
   childSessionID: string | null;
   /** A scoped implementation continuation in the original native Reviewer, never a review PASS. */
-  reviewerCorrection?: { author: string; reviewIdentity: string; writeUnion: readonly string[]; admittedAt?: string;
+  reviewerCorrection?: { author: string; reviewIdentity: string; writeUnion: readonly string[]; admittedAt?: string; promptID?: string;
     checks?: import("../plugin/runtime-bridge.js").ReviewerCorrectionCheck[] };
   evidence: readonly GoalEvidence[];
   resultClass: string | null;
@@ -895,6 +895,16 @@ export class OperatorRuntime {
       const checks = unit.reviewerCorrection.checks ??= [];
       if (checks.some(item => item.callID === check.callID)) return;
       checks.push(structuredClone(check));
+      await this.save(state);
+    });
+  }
+  bindReviewerCorrectionPrompt(root: string, child: string, callID: string, promptID: string): Promise<void> {
+    return this.serial(root, async () => {
+      const state = await this.required(root);
+      const unit = state.units.find(item => item.status === "running" && item.callID === callID && item.childSessionID === child);
+      if (!promptID || !unit?.reviewerCorrection || unit.reviewerCorrection.author !== child) throw new Error("mission-review-correction-prompt-owner-mismatch");
+      if (unit.reviewerCorrection.promptID && unit.reviewerCorrection.promptID !== promptID) throw new Error("mission-review-correction-prompt-generation-mismatch");
+      unit.reviewerCorrection.promptID = promptID;
       await this.save(state);
     });
   }

@@ -7,9 +7,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { V010_RUNTIME_ASSET_VERSION } from "../asset-version.js";
 import { NativeBackgroundLifecycle } from "./native-background.js";
-import { isAbsolute, relative, resolve, sep } from "node:path";
-import { normalizeManifestScope } from "../core/path.js";
-import { canonicalDeclaredValidationMembers, declaredValidationShellResources, reviewerCorrectionShellAllowed } from "./gate.js";
+import { resolve } from "node:path";
 import { isSessionNotFoundError } from "@opencode/client";
 
 // Capture once when this module evaluates. A later package replacement must not make an old
@@ -481,30 +479,6 @@ async function syncReviewerCorrectionPermissionsOnce(context: OpenCodeV2Context,
   const original = record(saved) && typeof saved.agent === "string" ? saved.agent : info.agent;
   if (original !== "dog-reviewer-v010") throw new Error("native-reviewer-correction-author-role-mismatch");
   await context.storage.set(key, { agent: original, model: info.model, generation: scope.generation });
-  const grants: NativePermissionRule[] = [
-    ...["edit", "shell", "sortie_*"].map(action => ({ action, resource: "*", effect: "deny" as const })),
-    ...scope.validation.map(resource => ({ action: "shell", resource, effect: "allow" as const })),
-    // ShellTool.prepare asserts each ShellParse command resource. These narrow resources are
-    // usable only through an exact inherited whole-command admission, checked before execution.
-    ...scope.validation.flatMap(declaredValidationShellResources).map(resource => ({ action: "shell", resource, effect: "allow" as const })),
-    // A native shell may ask about the whole exact && call rather than its members. Defer
-    // contiguous required chains to evaluate so a member's explicit deny still wins.
-    ...scope.validation.flatMap((_, start) => scope.validation.slice(start + 1).map((_, offset) => ({
-      action: "shell", resource: scope.validation.slice(start, start + offset + 2).join(" && "), effect: "ask" as const }))),
-    ...["git add -- *", "git commit -m *"].map(resource => ({ action: "shell", resource, effect: "allow" as const })),
-    ...["sortie_v010_bind_write_gate", "sortie_v010_release_write_gate", "sortie_v010_operator_status"].map(action =>
-      ({ action, resource: "*", effect: "allow" as const })),
-    ...scope.write.flatMap(path => {
-      const scope = normalizeManifestScope(path);
-      const absolute = resolve(context.location.directory, scope.path);
-      const local = relative(context.location.directory, absolute);
-      // Native edit checks internal paths relative to Location, external paths absolutely.
-      const inside = local !== ".." && !local.startsWith(`..${sep}`) && !isAbsolute(local);
-      const paths = [...new Set([...(inside ? [local || "."] : []), absolute].map(path => path.replaceAll("\\", "/")))];
-      return paths.flatMap(path => [path, ...(scope.directory ? [`${path}/**`] : [])])
-        .map(resource => ({ action: "edit", resource, effect: "allow" as const }));
-    }),
-  ];
   if (active.get(sessionID)?.generation !== scope.generation) {
     await active.get(sessionID)?.registration.dispose();
     active.delete(sessionID);
@@ -522,14 +496,13 @@ async function syncReviewerCorrectionPermissionsOnce(context: OpenCodeV2Context,
       if (start < 0) throw new Error("native-reviewer-correction-readonly-role-block-unavailable");
       const inherited = [...rules.slice(0, start), ...nativeReviewerRoleRules.filter(rule => !["edit", "shell"].includes(rule.action)),
         ...rules.slice(start + nativeReviewerRoleRules.length)];
-      const grantActions = [...new Set(grants.filter(rule => rule.effect === "allow").map(rule => rule.action))];
-      const preservedDenies = inherited.filter(rule => rule.effect === "deny").flatMap(rule => grantActions
-        .filter(action => nativeRuleMatch(action, rule.action)).map(action => ({ ...rule, action })));
       editor.update(id, agent => Object.assign(agent, reviewer, { id, name: id, mode: "subagent", hidden: true,
         model: { ...info.model as JsonObject },
-        // Config/project/global denies stay authoritative; native session permissions are unchanged
-        // and merged LAST by SessionContext.select. Ordinary Reviewer remains wholly read-only.
-        permissions: [...inherited, ...grants, ...preservedDenies] }));
+        // Remove ONLY the shipped read-only edit/shell role entries. Native implementation
+        // defaults and every real configured rule keep their original order/effective meaning.
+        // No grants, copied historical denies, command scanner or session-rule replacement.
+        // Common implementation gates own known output scope; the ordinary Reviewer is untouched.
+        permissions: inherited }));
     });
     active.set(sessionID, { generation: scope.generation, registration });
   }
@@ -538,8 +511,6 @@ async function syncReviewerCorrectionPermissionsOnce(context: OpenCodeV2Context,
 }
 
 async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks, background: NativeBackgroundLifecycle): Promise<void> {
-  const correctionShellCalls = new Map<string, string>();
-  const shellCallKey = (sessionID: unknown, callID: unknown) => `${sessionID}\0${callID}`;
   const explicitlySelectedChildren = new Set<string>();
   const selectedChildModels = new Set<string>();
   const selectionKey = (parent: string, role: string, prompt: string) => `${parent}\0${role}\0${prompt}`;
@@ -626,18 +597,9 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
       throw new Error("native-reviewer-correction-permissions-unavailable");
     }
     const mapped = { args: legacyToolInput(event.tool, event.input) };
-    if (event.tool === "shell") {
-      const scope = await hooks.reviewerCorrectionScope?.(String(event.sessionID));
-      if (scope && (!record(event.input) || typeof event.input.command !== "string" ||
-          !reviewerCorrectionShellAllowed(event.input.command, scope.validation))) throw new Error("mission-review-correction-shell-boundary");
-    }
     await hooks["tool.execute.before"]!({ tool: legacyToolName(event.tool), sessionID: String(event.sessionID ?? ""),
       callID: String(event.id ?? ""), ...(typeof event.agent === "string" ? { agent: event.agent } : {}) }, mapped);
     event.input = v2ToolInput(event.tool, record(mapped.args) ? mapped.args : {});
-    if (event.tool === "shell" && record(event.input) && typeof event.input.command === "string" &&
-        await hooks.reviewerCorrectionScope?.(String(event.sessionID))) {
-      correctionShellCalls.set(shellCallKey(event.sessionID, event.id), event.input.command);
-    }
     if (event.tool === "subagent" && record(event.input) && typeof event.input.sessionID === "string" && event.input.agent === "dog-reviewer-v010") {
       const child = event.input.sessionID;
       try {
@@ -674,7 +636,6 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
     }
   });
   await context.tool.hook("execute.after", async event => {
-    if (event.tool === "shell") correctionShellCalls.delete(shellCallKey(event.sessionID, event.id));
     const result = record(event.result) ? event.result : {};
     const mapped: JsonObject = { status: event.status, output: toolContentText(result.content), metadata: result.metadata ?? event.error };
     const resumedReviewer = event.tool === "subagent" && record(event.input) && (event.input.agent === "dog-reviewer-v010" || correctionAgent(event.input.agent))
@@ -804,28 +765,6 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
   await context.permission.hook("evaluate", async event => {
     const alias = event.action === "subagent" && array(event.resources).some(correctionAgent);
     let original = alias ? await originalReviewerPermission(context, String(event.sessionID)) : undefined;
-    const admittedShell = record(event.source) && event.source.type === "tool"
-      ? correctionShellCalls.get(shellCallKey(event.sessionID, event.source.id)) : undefined;
-    if (event.action === "shell" && (correctionAgent(event.agent) || correctionAgents.get(context)?.has(String(event.sessionID))) &&
-        (admittedShell !== undefined || array(event.resources).some(resource => typeof resource === "string" && resource.includes(" && ")))) {
-      const info = await context.session.get({ sessionID: String(event.sessionID) });
-      const scope = record(info) && correctionAgent(info.agent) ? await hooks.reviewerCorrectionScope?.(String(event.sessionID)) : undefined;
-      if (scope) {
-        const effects: NativePermissionRule["effect"][] = [];
-        for (const resource of admittedShell !== undefined ? [admittedShell] : array(event.resources)) {
-          const members = typeof resource === "string" ? canonicalDeclaredValidationMembers(resource, new Set(scope.validation)) : undefined;
-          if (!members) {
-            // Git boundaries still undergo the native resource assertion and scoped write gate.
-            if (typeof resource !== "string" || !reviewerCorrectionShellAllowed(resource, scope.validation)) effects.push("deny");
-            continue;
-          }
-          for (const member of new Set([...members, ...members.flatMap(declaredValidationShellResources)])) {
-            effects.push(await configuredPermission(context, String(event.sessionID), "shell", member));
-          }
-        }
-        if (effects.length) original = effects.includes("deny") ? "deny" : effects.includes("ask") ? "ask" : "allow";
-      }
-    }
     const output = { status: event.effect === "deny" ? "deny" : event.effect === "allow" ? "allow" : "ask" } as { status: "ask" | "deny" | "allow" };
     await hooks["permission.ask"]?.({ permission: String(event.action ?? ""), patterns: array(event.resources).map(String),
       ...(typeof event.sessionID === "string" ? { sessionID: event.sessionID } : {}) }, output);

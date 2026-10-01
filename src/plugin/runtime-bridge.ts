@@ -71,6 +71,7 @@ export interface RuntimeBridge {
   /** Only an exact admitted correction Task is an implementation dispatch continuing the original Reviewer child. */
   ownsReviewerCorrectionDispatch?(rootSessionID: string, callID: string, taskID: string): Promise<boolean>;
   ownsReviewerCorrection?(childSessionID: string): Promise<boolean>;
+  reviewerCorrectionValidationMembers?(childSessionID: string, command: string): Promise<string[] | undefined>;
   recordReviewerCorrectionCheck?(rootSessionID: string, taskID: string, check: ReviewerCorrectionCheck): Promise<void>;
   reviewerCorrectionValidation?(rootSessionID: string, callID: string, childSessionID: string, startedAt: number): Promise<{
     ready: boolean; reason?: string; failure?: SerialDispatchSettlement["failure"];
