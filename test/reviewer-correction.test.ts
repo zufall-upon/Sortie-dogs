@@ -219,8 +219,8 @@ test("correction commits only actual changed outputs despite unchanged exact per
     await f.edit("author", "ready");
     await f.shell("author", "printf scratch > scratch.tmp"); await f.shell("author", "rm scratch.tmp");
     await f.shell("author", "node check.mjs");
-    await f.shell("author", "git add result.txt && git diff --cached --stat");
-    await f.shell("author", "git commit -m correction-subset");
+    assert.equal((await exec("git", ["diff", "--cached", "--name-only"], { cwd: f.directory })).stdout, "");
+    await f.shell("author", "git add result.txt && git diff --cached --stat && git commit -m correction-subset");
     assert.equal((await exec("git", ["status", "--short"], { cwd: f.directory })).stdout, "");
     await f.finish(dispatch, "author", inlineReport());
     assert.equal((await f.tool("root", "complete_mission")).status, "succeeded");
@@ -229,17 +229,23 @@ test("correction commits only actual changed outputs despite unchanged exact per
   } finally { await f.dispose(); }
 });
 
-test("correction cached set still rejects a user-prohibited path inside its inherited glob", async () => {
+for (const mode of ["outside-index", "prohibited-index", "prohibited-add"] as const) test(`correction add then commit preserves actual index and prohibited glob: ${mode}`, async () => {
   const f = await fixture();
   try {
     await initial(f, { write: ["result.txt", "nested/**"] });
     const prepared = await f.tool("root", "repair_review"), dispatch = await f.before("root", "subagent", f.task(prepared.task));
     await f.prompt("author", dispatch.input.prompt); await f.bind("author");
-    await f.missions.update("root", state => { state.prohibitedWrite = ["nested/forbidden.txt"]; });
-    // An already-staged outside mutation must not be authorized merely because add was bypassed.
-    await mkdir(join(f.directory, "nested")); await writeFile(join(f.directory, "nested/forbidden.txt"), "forbidden");
-    await exec("git", ["add", "nested/forbidden.txt"], { cwd: f.directory });
-    await assert.rejects(f.before("author", "shell", { command: "git commit -m forbidden" }), /mission-explicit-write-prohibition/);
+    await f.missions.update("root", state => { state.prohibitedWrite = ["nested/forbidden/**"]; });
+    await f.edit("author", "ready"); await f.shell("author", "node check.mjs");
+    const path = mode === "outside-index" ? "outside.txt" : "nested/forbidden/file.txt";
+    await mkdir(join(f.directory, "nested/forbidden"), { recursive: true }); await writeFile(join(f.directory, path), "forbidden");
+    if (mode !== "prohibited-add") await exec("git", ["add", path], { cwd: f.directory });
+    const indexBefore = (await exec("git", ["diff", "--cached", "--name-only"], { cwd: f.directory })).stdout;
+    if (mode !== "prohibited-add") await assert.rejects(f.before("author", "shell", { command: "git commit -m forbidden" }),
+      mode === "outside-index" ? /cached/ : /mission-explicit-write-prohibition/);
+    await assert.rejects(f.before("author", "shell", { command: `git add result.txt${mode === "prohibited-add" ? ` ${path}` : ""} && git commit -m forbidden` }),
+      mode === "outside-index" ? /cached/ : /mission-explicit-write-prohibition/);
+    assert.equal((await exec("git", ["diff", "--cached", "--name-only"], { cwd: f.directory })).stdout, indexBefore, "denied preflight leaves the actual index unchanged");
     await f.tool("root", "cancel_operator", { reason: "explicit-cancellation" });
   } finally { await f.dispose(); }
 });
@@ -255,6 +261,32 @@ async function correctionReady(f: Awaited<ReturnType<typeof fixture>>) {
 
 const inlineReport = (unresolved: string[] = [], residual: unknown = null, candidate = "current-validated") =>
   `SELF_RECHECKED\nself_recheck: ${JSON.stringify({ candidate, unresolved_findings: unresolved, residual_major: residual })}\nCompared every original requirement, all retained findings, corrected source and relevant impact against actual fresh formal checks and clean commit.`;
+
+for (const mode of ["missing-add", "failed-commit"] as const) test(`failed native correction after actual add then commit failure cannot produce receipt: ${mode}`, async () => {
+  const f = await fixture();
+  try {
+    await initial(f, { write: ["result.txt", "missing.txt"] });
+    const prepared = await f.tool("root", "repair_review"), dispatch = await f.before("root", "subagent", f.task(prepared.task));
+    await f.prompt("author", dispatch.input.prompt); await f.bind("author");
+    await f.edit("author", "ready"); await f.shell("author", "node check.mjs");
+    const evidenceBefore = structuredClone((await f.run()).units[0]!.reviewerCorrection!.checks);
+    const headBefore = (await exec("git", ["rev-parse", "HEAD"], { cwd: f.directory })).stdout;
+    if (mode === "failed-commit") {
+      const hook = join(f.directory, ".git/hooks/pre-commit");
+      await writeFile(hook, "#!/bin/sh\nexit 1\n"); await chmod(hook, 0o755);
+    }
+    await f.shell("author", `git add ${mode === "missing-add" ? "missing.txt" : "result.txt"} && git commit -m failed-chain`);
+    const native = f.history.author!.at(-1)!.content[0];
+    assert.notEqual(native.state.metadata.exit, 0, "real Git failure is recorded, not prospective success");
+    assert.equal((await exec("git", ["rev-parse", "HEAD"], { cwd: f.directory })).stdout, headBefore);
+    assert.deepEqual((await f.run()).units[0]!.reviewerCorrection!.checks, evidenceBefore, "Git preflight never manufactures formal evidence");
+    f.terminal("author", "Requested Git delivery failed", true);
+    await f.after(dispatch, "Requested Git delivery failed", { sessionID: "author", status: "failed" }, "error");
+    assert.equal((await f.missions.required("root")).corrections![0]!.status, "failed");
+    await assert.rejects(f.tool("root", "complete_mission"), /correction-validation|required|incomplete/);
+    assert.equal((await f.ledger()).state.consumed_units, 2, "failed correction settles once");
+  } finally { await f.dispose(); }
+});
 
 for (const mode of ["foreground", "background-cold", "synthetic-notification", "medium", "major", "missing", "PASS", "old-report", "nonterminal", "old-terminal", "failed-check", "edited-after-check", "native-failed", "missing-prompt", "later-prompt"] as const) {
   test(`inline correction native self-recheck: ${mode}`, async () => {
@@ -1139,7 +1171,7 @@ for (const mode of ["hook-edit", "hook-edit-rerun", "scratch-cold", "missing-bin
         const hook = join(f.directory, ".git", "hooks", "pre-commit");
         await writeFile(hook, '#!/bin/sh\nprintf "hook-changed\\n" > result.txt\ngit add -- result.txt\n'); await chmod(hook, 0o755);
       }
-      await f.shell("author", "git add -- result.txt"); await f.shell("author", "git commit -m correction");
+      await f.shell("author", "git add -- result.txt && git commit -m correction");
       if (mode === "hook-edit-rerun") await f.shell("author", "node required-test.mjs");
       await f.shell("author", validation.at(-1)!);
       await f.finish(correction, "author", "CORRECTION_READY");

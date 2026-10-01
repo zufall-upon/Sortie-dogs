@@ -79,6 +79,7 @@ interface Extraction {
   createdDirectories?: string[];
   requiredDirectories?: string[];
   gitCommit?: boolean;
+  gitCommitAdds?: string[][];
   gitMutation?: boolean;
   remoteMutation?: boolean;
   issue?: CommandIssue;
@@ -488,6 +489,8 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
   let applies = false;
   let ambiguous = false;
   let gitCommit = false;
+  let gitAdds: string[] = [];
+  const gitCommitAdds: string[][] = [];
   let gitMutation = false;
   let remoteMutation = false;
   const createdDirectories: string[] = [];
@@ -678,12 +681,18 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
       gitMutation = true;
       const selected = exactGitAddPaths(tokens);
       if (selected === undefined) ambiguous = true;
-      else paths.push(...selected);
+      else {
+        paths.push(...selected);
+        gitAdds.push(...selected);
+      }
     } else if (executable === "git" && tokens[1]?.toLowerCase() === "commit") {
       applies = true;
       gitMutation = true;
-      if (isSafeGitCommit(tokens)) gitCommit = true;
-      else ambiguous = true;
+      if (isSafeGitCommit(tokens)) {
+        gitCommit = true;
+        gitCommitAdds.push(gitAdds);
+        gitAdds = [];
+      } else ambiguous = true;
     } else if (executable === "git" && tokens[1] === "archive") {
       const archive = gitArchiveOutput(tokens);
       if (archive === undefined) {
@@ -711,6 +720,7 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
         ambiguous ||= nested.ambiguous;
         paths.push(...nested.paths);
         gitCommit ||= nested.gitCommit === true;
+        gitCommitAdds.push(...(nested.gitCommitAdds ?? []));
         gitMutation ||= nested.gitMutation === true;
         remoteMutation ||= nested.remoteMutation === true;
         createdDirectories.push(...(nested.createdDirectories ?? []));
@@ -730,6 +740,7 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
     ...(createdDirectories.length > 0 ? { createdDirectories } : {}),
     ...(requiredDirectories.length > 0 ? { requiredDirectories } : {}),
     ...(gitCommit ? { gitCommit: true } : {}),
+    ...(gitCommitAdds.length > 0 ? { gitCommitAdds } : {}),
     ...(gitMutation ? { gitMutation: true } : {}),
     ...(remoteMutation ? { remoteMutation: true } : {}),
     ...(issue ? { issue } : {}),
@@ -780,18 +791,21 @@ export function extractWritePaths(tool: string, args: unknown, toolDirectory?: s
     // outputs against that cwd. Do not authorize a same-named path at the project root.
     const workdir = toolDirectory !== undefined && isRecord(args) && typeof args.workdir === "string"
       ? resolve(toolDirectory, args.workdir) : undefined;
+    const rebase = (path: string): string => {
+      if (workdir === undefined) return path;
+      let normalized: ReturnType<typeof normalizeManifestPath>;
+      try { normalized = normalizeManifestPath(path); }
+      catch (error) { throw new WriteDeniedError("project-boundary", path, { cause: error }); }
+      return normalized.kind === "absolute" ? normalized.path : resolve(workdir, normalized.path);
+    };
     return {
       applies: extracted.applies || paths.length > 0,
       ambiguous: extracted.ambiguous,
-      paths: workdir === undefined ? destinations : destinations.map(path => {
-        let normalized: ReturnType<typeof normalizeManifestPath>;
-        try { normalized = normalizeManifestPath(path); }
-        catch (error) { throw new WriteDeniedError("project-boundary", path, { cause: error }); }
-        return normalized.kind === "absolute" ? normalized.path : resolve(workdir, normalized.path);
-      }),
+      paths: destinations.map(rebase),
       ...(extracted.createdDirectories ? { createdDirectories: extracted.createdDirectories } : {}),
       ...(extracted.requiredDirectories ? { requiredDirectories: extracted.requiredDirectories } : {}),
       ...(extracted.gitCommit ? { gitCommit: true } : {}),
+      ...(extracted.gitCommitAdds ? { gitCommitAdds: extracted.gitCommitAdds.map(paths => paths.map(rebase)) } : {}),
       ...(extracted.gitMutation ? { gitMutation: true } : {}),
       ...(extracted.remoteMutation ? { remoteMutation: true } : {}),
       ...(extracted.issue ? { issue: extracted.issue } : {}),
@@ -1244,7 +1258,7 @@ export async function createWriteGate(project: ProjectPaths, value: unknown, too
     }
     if (!await isWritable(normalized)) throw new WriteDeniedError("manifest-scope", normalized);
   };
-  const checkCachedSet = async (assertWritePaths?: (paths: readonly string[]) => Promise<void>): Promise<void> => {
+  const checkCachedSet = async (adds: readonly string[], assertWritePaths?: (paths: readonly string[]) => Promise<void>): Promise<void> => {
     let stdout: string;
     try {
       ({ stdout } = await execFileAsync(
@@ -1262,6 +1276,9 @@ export async function createWriteGate(project: ProjectPaths, value: unknown, too
     let cached: Set<string>;
     try {
       cached = new Set(stdout.split("\0").filter(Boolean).map(normalizeRelativePath));
+      // Native shell runs the whole command after this preflight. Explicit earlier add paths
+      // contribute to its prospective index; later adds and other write destinations do not.
+      for (const path of adds) cached.add(await project.toRelativePath(path));
     } catch (error) {
       throw new WriteDeniedError("manifest-scope", "<cached>", { cause: error });
     }
@@ -1270,7 +1287,7 @@ export async function createWriteGate(project: ProjectPaths, value: unknown, too
       if (!await isWritable(path)) throw new WriteDeniedError("manifest-scope", "<cached>");
     }
     // Write scope is permission, not a requirement to stage unchanged or removed scratch outputs.
-    // Apply the caller's existing user prohibitions to actual staged paths as well as explicit add paths.
+    // Preserve existing staged paths and caller prohibitions in the prospective union.
     await assertWritePaths?.([...cached].map(path => resolve(project.root, path)));
   };
   return {
@@ -1313,7 +1330,9 @@ export async function createWriteGate(project: ProjectPaths, value: unknown, too
           throw error;
         }
       }
-      if (extracted.gitCommit) await checkCachedSet(options?.assertWritePaths);
+      if (extracted.gitCommit) {
+        for (const adds of extracted.gitCommitAdds ?? [[]]) await checkCachedSet(adds, options?.assertWritePaths);
+      }
     },
   };
 }

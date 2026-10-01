@@ -154,15 +154,12 @@ for (const verdict of ["PASS", "FINDINGS", "EVIDENCE_GAPS"] as const) test(`Fast
       time: { ran: 1200, completed: 1300 } }] });
     if (verdict === 'PASS') {
       // Ordinary requested delivery stays in the validated Worker, with no .git/** write scope or prior Review.
-      for (const [callID, command, argv] of [
-        ['git-add', 'git add result.txt', ['add', 'result.txt']],
-        ['git-commit', 'git commit -m "Create result"', ['commit', '-m', 'Create result']],
-      ] as const) {
-        await hooks['tool.execute.before']!({ tool: 'bash', sessionID: 'worker', callID }, { args: { command } });
-        const result = await exec('git', [...argv], { cwd: directory });
-        await hooks['tool.execute.after']!({ tool: 'bash', sessionID: 'worker', callID },
-          { output: result.stdout, metadata: { exit: 0, status: 'completed' } });
-      }
+      const command = 'git add result.txt && git commit -m "Create result"', callID = 'git-add-commit';
+      assert.equal((await exec('git', ['diff', '--cached', '--name-only'], { cwd: directory })).stdout, '');
+      await hooks['tool.execute.before']!({ tool: 'bash', sessionID: 'worker', callID }, { args: { command } });
+      const result = await exec('bash', ['-c', command], { cwd: directory });
+      await hooks['tool.execute.after']!({ tool: 'bash', sessionID: 'worker', callID },
+        { output: result.stdout, metadata: { exit: 0, status: 'completed' } });
       assert.match((await exec('git', ['log', '-1', '--format=%s'], { cwd: directory })).stdout, /Create result/);
       assert.equal((await exec("git", ["status", "--short"], { cwd: directory })).stdout, "", "the SAME Worker delivers actual clean source after generated cleanup/formal check/commit");
       assert.equal((await exec("git", ["branch", "--show-current"], { cwd: directory })).stdout.trim(), "same-worker-delivery");

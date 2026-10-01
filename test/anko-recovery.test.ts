@@ -297,11 +297,10 @@ test("compact status never promotes a real failed commit or failed native termin
   await writeFile(join(f.directory, ".git/hooks/pre-commit"), "#!/bin/sh\nexit 1\n");
   await exec("chmod", ["+x", join(f.directory, ".git/hooks/pre-commit")]);
   await f.start(); await f.dispatch(); await writeFile(join(f.directory, "result.txt"), "ready\n"); await f.validate();
-  await f.hooks["tool.execute.before"]({ tool: "bash", sessionID: "worker", callID: "stage" }, { args: { command: "git add result.txt" } });
-  await exec("git", ["add", "result.txt"], { cwd: f.directory });
-  await f.hooks["tool.execute.after"]({ tool: "bash", sessionID: "worker", callID: "stage" }, { output: "", metadata: { exit: 0 } });
-  await f.hooks["tool.execute.before"]({ tool: "bash", sessionID: "worker", callID: "failed-commit" }, { args: { command: "git commit -m requested" } });
-  await assert.rejects(exec("git", ["commit", "-m", "requested"], { cwd: f.directory }), (error: any) => error.code === 1);
+  const command = "git add result.txt && git commit -m requested";
+  assert.equal((await exec("git", ["diff", "--cached", "--name-only"], { cwd: f.directory })).stdout, "");
+  await f.hooks["tool.execute.before"]({ tool: "bash", sessionID: "worker", callID: "failed-commit" }, { args: { command } });
+  await assert.rejects(exec("bash", ["-c", command], { cwd: f.directory }), (error: any) => error.code === 1);
   await f.hooks["tool.execute.after"]({ tool: "bash", sessionID: "worker", callID: "failed-commit" }, { output: "commit hook failed", metadata: { exit: 1, status: "completed" } });
   await f.finish("failed");
   const status = await f.tool("operator_status"), progress = await f.tool("operator_status", { view: "progress" });

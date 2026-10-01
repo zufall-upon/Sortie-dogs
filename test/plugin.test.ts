@@ -10377,6 +10377,44 @@ test("git add requires exact explicit paths and rejects broad or undeclared path
   });
 });
 
+isolated("git add then commit preflights earlier explicit paths with the existing index without staging", async () => {
+  await withProject("git-add-commit-chain", async directory => {
+    await execFileAsync("git", ["init", directory]);
+    await execFileAsync("git", ["-C", directory, "config", "user.name", "test"]);
+    await execFileAsync("git", ["-C", directory, "config", "user.email", "test@example.invalid"]);
+    await mkdir(join(directory, "src"));
+    const paths = Array.from({ length: 9 }, (_, index) => `src/file-${index}.txt`);
+    for (const path of paths) await writeFile(join(directory, path), "deliverable");
+    const gate = await createWriteGate(await createProjectPaths(directory), operationManifest(["src/**"]));
+    const command = `git add ${paths.join(" ")} && git commit -m "Add typed variable bindings"`;
+    const check = (command: string, workdir = directory) => gate.check(
+      { tool: "shell", sessionID: "chain", callID: command }, { args: { command, workdir } });
+    assert.equal((await execFileAsync("git", ["-C", directory, "diff", "--cached", "--name-only"])).stdout, "");
+    await check(command);
+    await check('git add -- file-0.txt && git commit -m rebased', join(directory, "src"));
+    assert.equal((await execFileAsync("git", ["-C", directory, "diff", "--cached", "--name-only"])).stdout, "", "preflight does not execute add");
+    for (const unsupported of [
+      'git commit -m first && git add src/file-0.txt',
+      'touch src/file-0.txt && git commit -m no-add',
+      'git add -A && git commit -m broad',
+      'git add src/file-0.txt && git commit -m path-qualified -- src/file-0.txt',
+      'git add ../outside.txt && git commit -m outside',
+    ]) await assert.rejects(check(unsupported), /cached|missing-path|project-root-relative/, unsupported);
+    await writeFile(join(directory, "outside.txt"), "outside");
+    await execFileAsync("git", ["-C", directory, "add", "outside.txt"]);
+    await assert.rejects(check(command), /cached/, "new authorized add must not hide preexisting outside index");
+    assert.equal((await execFileAsync("git", ["-C", directory, "diff", "--cached", "--name-only"])).stdout.trim(), "outside.txt");
+    await execFileAsync("git", ["-C", directory, "rm", "--cached", "outside.txt"]);
+    await execFileAsync("git", ["-C", directory, "add", "src/file-0.txt"]);
+    await check(command);
+    assert.equal((await execFileAsync("git", ["-C", directory, "diff", "--cached", "--name-only"])).stdout.trim(), "src/file-0.txt", "authorized existing index plus explicit earlier additions is allowed without preflight mutation");
+    await execFileAsync("bash", ["-c", command], { cwd: directory });
+    assert.deepEqual((await execFileAsync("git", ["-C", directory, "show", "--format=", "--name-only", "HEAD"])).stdout.trim().split("\n"), paths);
+    assert.equal((await execFileAsync("git", ["-C", directory, "diff", "--cached", "--name-only"])).stdout, "");
+    await assert.rejects(check('git commit -m empty'), /cached/, "standalone empty-index commit stays denied");
+  });
+});
+
 isolated("git commit checks actual cached paths are a nonempty subset of write permissions", async () => {
   await withProject("git-commit-gate", async (directory) => {
     await execFileAsync("git", ["init", directory]);
