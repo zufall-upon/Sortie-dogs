@@ -875,6 +875,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           : "Fast-lane: assess actual risk and call review_mission with real risk_tags. Implementation notes are optional. Dispatch its Reviewer Task if required; then compare all requirements before complete_mission." };
       }
       if (mission.coordinator === null && mission.runID === run?.runID && !mission.dispatchOpen &&
+          run?.phase === "awaiting-decision" && mission.corrections?.some(item => item.runID === run.runID && item.status === "failed")) {
+        return { ...packet, next_action: `Fast-lane: correction failed; call ${repairReview} for a new scoped Task in the SAME original Reviewer's native session. Fix its own regression, run inherited validation and retain the commit/clean boundary. No ordinary Worker retry, fresh Worker replan or duplicate settlement; cumulative spend and failed history remain.` };
+      }
+      if (mission.coordinator === null && mission.runID === run?.runID && !mission.dispatchOpen &&
           run?.phase === "awaiting-decision" && run.units.length === 1 &&
           run.units[0]?.status === "failed" && run.units[0]?.resultClass === "acceptance" &&
           run.units[0]?.failure?.outcome === "fail" && !run.units[0]?.normalRemediationUsed) {
@@ -888,6 +892,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       if (mission.coordinator === null && mission.runID === run?.runID && !mission.dispatchOpen &&
           run?.phase === "awaiting-acceptance" && mission.review?.verdict === "findings") {
         const checked = mission.corrections?.find(item => item.runID === run.runID)?.selfRecheck;
+        if (mission.corrections?.some(item => item.runID === run.runID && item.status === "ready") && !checked) {
+          return { ...packet, next_action: `Fast-lane: correction ready; call ${reviewMission} for explicit read-only self-recheck in the SAME native author. CORRECTION_READY is not acceptance; only concrete reachable residual Major risk then requires a different Reviewer.` };
+        }
         if (checked?.residualMajor && !checked.unresolvedFindings.length && mission.review.mode === "self-recheck") {
           return { ...packet, next_action: `Fast-lane: native author self-recheck retained concrete reachable Major risk. ` +
             `Call ${reviewMission} for a DIFFERENT Reviewer of this correction, prior findings and relevant impact. ` +
@@ -1895,6 +1902,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       await control!.currentBudget(root);
       mission = await missions.required(root);
       const previous = await operators.read(root);
+      if (previous && mission.runID === previous.runID && previous.units.some(unit => unit.reviewerCorrection)) {
+        return JSON.stringify({ ...missionPacket(mission, previous), status: "correction-owner-continuation-required",
+          next_action: `Call ${repairReview} to continue the SAME original Reviewer after a terminal failed correction or newer findings. Do not replace the correction owner with a fresh Worker through plan_units; retain requirements, checks and cumulative spend.` });
+      }
       if (sourceReconciliationRequired(mission, previous)) return JSON.stringify({ ...missionDispatchPacket(mission, previous),
         next_action: `Coordinator: do not repeat plan_units. Call ${submitMission} with status=blocked and report the saved ` +
           `requirements to Operator. Operator can relink this mission in place via ${startMission} intent=replace ` +
@@ -2051,20 +2062,27 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           const review = mission.review;
           const newFindings = review?.runID === run.runID && review.verdict === "findings" &&
             existing?.reviewIdentity !== missionReviewIdentity(mission);
-          if (existing && (!newFindings || ["prepared", "running"].includes(existing.status))) return JSON.stringify({ status: `correction-${existing.status}`,
+          const recovery = existing?.status === "failed" && run.phase === "awaiting-decision";
+          if (existing && ((!newFindings && !recovery) || ["prepared", "running"].includes(existing.status))) return JSON.stringify({ status: `correction-${existing.status}`,
             ...(run.phase === "prepared" ? { task: operators.nextWorkerTask(run) } : {}),
             next_action: "Continue only the existing correction Task. Ready requires explicit SAME-author native self-recheck; only residual concrete Major risk requires a different Reviewer. Failure retains the candidate and cumulative spend." });
           if (mission.kind === "operation" || !run.units.some(unit => unit.unit.write.length) ||
-              run.phase !== "awaiting-acceptance" || review?.runID !== run.runID || review.verdict !== "findings" ||
+              (!recovery && (run.phase !== "awaiting-acceptance" || review?.runID !== run.runID)) || review?.verdict !== "findings" ||
               !review.child || !review.initialPrompt || !review.result) throw new Error("mission-review-correction-unavailable");
           const original = mission.corrections?.at(-1);
           const authorID = original?.author ?? review.child;
           const author = await identity(authorID), native = payload(await session("get", { path: { id: authorID } }));
           if (author.role !== "dog-reviewer" || author.parent !== (mission.coordinator ?? root) ||
-              !record(native) || !["succeeded", "completed"].includes(String(native.outcome))) throw new Error("mission-review-correction-reviewer-not-terminal");
-          const readiness = await control!.completionReadiness(root);
-          if (readiness.blockers.length || review.source !== (await missionReviewSource(input.directory, run,
-              review.evidence, mission.reviewBaseline, mission.reviewScope)).fingerprint) throw new Error("mission-review-correction-source-stale");
+              !record(native) || !(recovery ? ["succeeded", "completed", "failed"] : ["succeeded", "completed"]).includes(String(native.outcome))) throw new Error("mission-review-correction-reviewer-not-terminal");
+          if (recovery) {
+            const attempt = [...(mission.attempts ?? [])].reverse().find(item => item.runID === run.runID && item.kind === "reviewer_correction");
+            const terminal = attempt ? await missionWorkerTerminalProof(root, mission, run, attempt, true) : undefined;
+            if (terminal?.status !== "ready" || terminal.child !== authorID) throw new Error(`mission-review-correction-terminal-unreconciled:${terminal && "reason" in terminal ? terminal.reason : "terminal_record_missing"}`);
+          } else {
+            const readiness = await control!.completionReadiness(root);
+            if (readiness.blockers.length || review.source !== (await missionReviewSource(input.directory, run,
+                review.evidence, mission.reviewBaseline, mission.reviewScope)).fingerprint) throw new Error("mission-review-correction-source-stale");
+          }
           const budget = await control!.currentBudget(root);
           if (!budget || budget.reserved_units || budget.remaining_units < 1) throw new Error("mission-review-correction-budget-unavailable");
           const reviewIdentity = missionReviewIdentity(mission);
@@ -2097,7 +2115,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           await missions.update(root, item => {
             if (["cancelled", "completed"].includes(item.phase) || missionReviewIdentity(item) !== reviewIdentity) throw new Error("mission-review-correction-generation-stale");
             (item.corrections ??= []).push({ author: authorID, reviewIdentity, priorRunID: run.runID, runID: prepared.runID,
-              priorSource: review.source, findings: review.result!, initialPrompt: review.initialPrompt!, ...(baseline ? { baseline } : {}), status: "prepared" });
+              priorSource: review.source, findings: recovery ? existing.findings : review.result!,
+              initialPrompt: recovery ? existing.initialPrompt : review.initialPrompt!, ...(baseline ? { baseline } : {}), status: "prepared" });
             item.reviewScope = missionReviewScope(item.reviewScope, run, prepared);
             item.runID = prepared.runID; item.phase = "running"; item.submission = null; item.plans++;
           });
@@ -2133,21 +2152,24 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             throw new Error("mission-review-awaits-current-validation: revalidate the changed candidate in the same mission before Review");
           }
           const correction = mission.corrections?.find(item => item.runID === run.runID);
-          const selfRecheck = !!correction && !correction.selfRecheck;
           if (correction?.selfRecheck?.unresolvedFindings.length) throw new Error("mission-review-known-findings-require-correction");
-          const secondReview = !!correction?.selfRecheck?.residualMajor;
-          if (correction && !selfRecheck && !secondReview && mission.review?.verdict !== "self-rechecked") {
-            throw new Error("mission-review-self-recheck-required-or-stale");
-          }
           const requestedRisk = (args as Record<string, unknown>).risk_tags;
           const risk = correction && Array.isArray(requestedRisk) && requestedRisk.length === 0 ? mission.review?.risk : requestedRisk;
           const traces = missionReviewTraces(mission, (args as Record<string, unknown>).traces);
           if (!Array.isArray(risk) || !risk.every(tag => SOURCE_REVIEW_RISK_TAGS.includes(tag as never))) {
             throw new Error("mission-review-input: use recognized risk tags");
           }
-          const evidence = (args as Record<string, unknown>).evidence as import("../core/operator-mission.js").MissionEvidenceExcerpt[] | undefined;
+          const evidence = ((args as Record<string, unknown>).evidence ?? mission.review?.evidence) as import("../core/operator-mission.js").MissionEvidenceExcerpt[] | undefined;
           if (evidence !== undefined && (!Array.isArray(evidence) || evidence.length > 6)) throw new Error("mission-review-evidence: select at most six focused excerpts");
           const source = await missionReviewSource(input.directory, run, evidence, mission.reviewBaseline, mission.reviewScope, correction?.baseline);
+          const report = correction?.selfRecheck;
+          const secondReview = !!report?.residualMajor && report.runID === run.runID && report.source === source.fingerprint &&
+            report.author === correction?.author && report.nativeOutcome === "completed" &&
+            (mission.review?.mode === "self-recheck" ? JSON.stringify(mission.review.selfRecheck) === JSON.stringify(report)
+              : mission.review?.runID === run.runID && mission.review.source === report.source);
+          // An old report is not authority for a different Reviewer. Evidence/hash refreshes that
+          // need a new disposition stay read-only in the SAME author's context, never auto-approve.
+          const selfRecheck = !!correction && !secondReview;
           if (mission.review?.mode === "self-recheck" && mission.review.verdict === "pending" && mission.review.callID && mission.review.runID === run.runID) {
             return JSON.stringify({ ...missionPacket(mission, run), status: "review-running",
               next_action: "The exact admitted native review/self-recheck Task is active. Await its actual terminal; do not replace its prompt generation or dispatch another Reviewer." });

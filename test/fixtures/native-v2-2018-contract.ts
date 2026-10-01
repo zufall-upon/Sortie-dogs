@@ -2,7 +2,8 @@
 // cd9a14a6b688d4021bee381dfd39d2cef9c0f862 (MIT):
 // core/src/v1/config/agent.ts normalize, v1/config/migrate.ts permissions/normalizeAction,
 // core/src/util/wildcard.ts match, permission.ts evaluate, tool.ts whollyDisabled,
-// session/context.ts select and tool/plugin/subagent.ts existing-session selection.
+// session/context.ts select, tool/plugin/subagent.ts resolve/assert -> existing-child comparison
+// -> prompt, and tool/plugin/shell.ts prepare's parsed-command permission resources.
 // This is not a live OpenCode execution or a replacement for native acceptance.
 export type Rule = { action: string; resource: string; effect: "allow" | "deny" | "ask" };
 

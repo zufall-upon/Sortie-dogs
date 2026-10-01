@@ -935,8 +935,14 @@ export class OperatorRuntime {
       if (!previous || previous.runID !== mission.replaceRunID || ["cancelled", "completed"].includes(previous.phase)) {
         throw new Error("mission-replan-run-mismatch");
       }
+      if (previous.units.some(unit => unit.reviewerCorrection) && !mission.reviewerCorrection) {
+        throw new Error("mission-review-correction-owner-continuation-required");
+      }
       if (previous.units.some(unit => unit.status === "running") || (previous.gitLifecycle !== null && !mission.reviewerCorrection)) throw new Error("mission-replan-worker-still-active");
-      if (mission.reviewerCorrection && (previous.phase !== "awaiting-acceptance" || previous.units.some(unit => unit.status !== "succeeded") ||
+      const failedContinuation = previous.phase === "awaiting-decision" && previous.units.every(unit =>
+        unit.status === "failed" && unit.reviewerCorrection?.author === mission.reviewerCorrection?.author);
+      if (mission.reviewerCorrection && ((!failedContinuation && (previous.phase !== "awaiting-acceptance" || previous.units.some(unit => unit.status !== "succeeded"))) ||
+          previous.units.some(unit => unit.reviewerCorrection && unit.reviewerCorrection.author !== mission.reviewerCorrection!.author) ||
           plan.units.length !== 1 || plan.acceptance.length !== previous.acceptance.length ||
           previous.acceptance.some((text, i) => text !== plan.acceptance[i]) ||
           JSON.stringify(plan.acceptance_proof) !== JSON.stringify(previous.acceptanceProof) ||

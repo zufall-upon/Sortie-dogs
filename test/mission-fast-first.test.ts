@@ -35,7 +35,7 @@ for (const verdict of ["PASS", "FINDINGS", "EVIDENCE_GAPS"] as const) test(`Fast
       root: { agent: "dog-operator" }, worker: { agent: "dog-worker-v010", parentID: "root" },
       reviewer: { agent: "dog-reviewer-v010", parentID: "root" },
     };
-    const hooks = await SortieDogsV010Plugin({ directory,
+    const hooks = await SortieDogsV010Plugin({ directory, reviewerCorrectionPermissions: true,
       nativeBackground: { awaiting: async (id: string) => backgroundChild !== undefined && (id === "root" || id === backgroundChild) }, client: { session: {
       get: async ({ path }: { path: { id: string } }) => ({ data: { id: path.id, ...agents[path.id] } }),
       children: async ({ path }: { path: { id: string } }) => ({ data: Object.entries(agents)
@@ -215,6 +215,9 @@ for (const verdict of ["PASS", "FINDINGS", "EVIDENCE_GAPS"] as const) test(`Fast
       await hooks["tool.execute.before"]!({ tool, sessionID: "reviewer", callID: `review-${tool}` }, { args: { ...args } });
     }
     agents.reviewer!.outcome = "succeeded";
+    history.reviewer = [{ info: { id: "reviewer-terminal", sessionID: "reviewer", role: "assistant", agent: agents.reviewer!.agent,
+      finish: "stop", time: { created: Date.now(), completed: Date.now() } },
+      parts: [{ type: "text", text: `${verdict}\n${verdict === "FINDINGS" ? "Medium: retained output violates a required consumer behavior; correct result.txt." : "Reviewed actual result and validation."}` }] }];
     await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "review-call" },
       { output: `${verdict}\nReviewed actual result and validation.`, metadata: { sessionId: "reviewer" } });
     backgroundChild = undefined;
@@ -224,26 +227,21 @@ for (const verdict of ["PASS", "FINDINGS", "EVIDENCE_GAPS"] as const) test(`Fast
     assert.equal(reviewed.coordinator_session_id, null);
     if (verdict === "FINDINGS") {
       await assert.rejects(hooks.tool!.sortie_v010_complete_mission.execute({}, { sessionID: "root" }), /mission-review-required-or-stale/);
-      assert.ok(reviewed.task, "the same mission's Coordinator remains an available fallback");
-      assert.match(reviewed.next_action, /Fast-lane: Reviewer FINDINGS require correction/);
+      assert.equal(reviewed.task, undefined, "FINDINGS do not dispatch a Coordinator/fresh Worker repair workaround");
+      assert.match(reviewed.next_action, /Fast-lane: known Major\/Medium findings.*repair_review.*SAME original Reviewer's/);
       assert.equal(await readFile(join(directory, "result.txt"), "utf8"), "ready\n", "Fast work survives escalation");
-      agents.coordinator = { agent: "dogs-coordinator", parentID: "root" };
-      await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "coordinator-call" },
-        { args: structuredClone(reviewed.task) });
-      await hooks["chat.message"]!({ sessionID: "coordinator", messageID: "coordinator-request", agent: agents.coordinator.agent }, {
-        message: { id: "coordinator-request", agent: agents.coordinator.agent,
-          model: { providerID: "openai", modelID: "gpt-6-sol" } },
-        parts: [{ type: "text", text: reviewed.task.prompt }],
-      });
-      const correction = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ units: [{ title: "Correct review finding",
-        objective: "Keep the validated result and address the concrete review finding", read: ["check.mjs"],
-        write: ["result.txt"], validation: ["node check.mjs"] }],
-        reason: "The independent Reviewer found a concrete defect in the current candidate" }, { sessionID: "coordinator" }));
+      const correction = JSON.parse(await hooks.tool!.sortie_v010_repair_review.execute({}, { sessionID: "root" }));
       assert.ok(correction.task);
+      assert.equal(correction.task.task_id, "reviewer");
+      assert.equal(correction.task.subagent_type, "dog-reviewer-v010");
+      const correctedRun = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+      assert.deepEqual(correctedRun.units[0]!.unit.validation, ["node check.mjs"]);
+      assert.equal(correctedRun.units[0]!.reviewerCorrection!.author, "reviewer");
       const escalated = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
       assert.equal(escalated.id, started.mission_id);
-      assert.equal(escalated.coordinator, "coordinator");
-      assert.equal(escalated.review?.verdict, "findings", "a replan must not turn FINDINGS into PASS");
+      assert.equal(escalated.coordinator, null);
+      assert.equal(escalated.review?.verdict, "findings", "correction preparation cannot turn FINDINGS into PASS");
+      await assert.rejects(hooks.tool!.sortie_v010_complete_mission.execute({}, { sessionID: "root" }), /correction-validation-missing/);
       return;
     }
     assert.equal(reviewed.task, undefined);

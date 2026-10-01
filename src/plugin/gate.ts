@@ -874,10 +874,34 @@ export function canonicalDeclaredValidationSequence(command: string, declared: R
 /** Preserve ordered members (including repeats) without splitting quoted text or substring matching. */
 export function canonicalDeclaredValidationMembers(command: string, declared: ReadonlySet<string>): string[] | undefined {
   const normalized = normalizeCommand(command);
+  // A declared composite is ONE required execution, not inferred successes of its shell members.
+  const atomic = declaredCommandMatch(command, [...declared]);
+  if (atomic !== undefined) return [atomic];
   const segments = shellSegments(command, "posix").map((segment) => segment.trim()).filter(Boolean);
   if (segments.length === 0 || normalized !== segments.map(normalizeCommand).join(" && ")) return undefined;
-  const canonical = segments.map((segment) => declaredCommandMatch(segment, [...declared]));
-  return canonical.every((segment): segment is string => segment !== undefined) ? canonical : undefined;
+  // Coalescing may include composite declarations too. Prefer complete declared identities at
+  // each boundary; never accept a partial composite or an undeclared trailing shell command.
+  const matched = new Map<number, string[] | undefined>();
+  const sequence = (start: number): string[] | undefined => {
+    if (start === segments.length) return [];
+    if (matched.has(start)) return matched.get(start);
+    for (let end = segments.length; end > start; end--) {
+      const member = declaredCommandMatch(segments.slice(start, end).join(" && "), [...declared]);
+      if (member === undefined) continue;
+      const rest = sequence(end);
+      if (rest) { const result = [member, ...rest]; matched.set(start, result); return result; }
+    }
+    matched.set(start, undefined);
+    return undefined;
+  };
+  return sequence(0);
+}
+
+/** Native ShellTool asserts parsed command resources, even for one atomic && declaration. */
+export function declaredValidationShellResources(command: string): string[] {
+  const normalized = normalizeCommand(command);
+  const segments = shellSegments(command, "posix").map(normalizeCommand).filter(Boolean);
+  return segments.length && normalized === segments.join(" && ") ? segments : [normalized];
 }
 
 /** Correction shell authority is only inherited checks or a direct existing source-scope Git boundary. */
