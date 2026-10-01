@@ -225,7 +225,7 @@ export interface OpenCodeEvent {
 
 export interface OpenCodeHooks {
   /** Native session permission projection for one running, durable Reviewer correction. */
-  reviewerCorrectionScope?: (sessionID: string) => Promise<{ write: readonly string[]; generation: number } | undefined>;
+  reviewerCorrectionScope?: (sessionID: string) => Promise<{ write: readonly string[]; validation: readonly string[]; generation: number } | undefined>;
   /** Durable correction authors for cleanup, including after cancellation or agent change. */
   reviewerCorrectionSessions?: (sessionID: string) => Promise<readonly string[]>;
   /** Internal adapter transport; retains the existing profile owner across reload. */
@@ -2781,15 +2781,17 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       ["failed", "interrupted", "cancelled"].includes(String(childOutcome));
     const interrupted = metadata?.status === "cancel" || metadata?.status === "cancelled" ||
       output.status === "cancel" || output.status === "cancelled" || ["interrupted", "cancelled"].includes(String(childOutcome));
-    const validated = !terminalFailed && !interrupted && acceptedEvidence.length > 0;
-    const settlementEvidence = terminalFailed || interrupted ? [] : acceptedEvidence;
+    const correctionChecks = childSessionID && !terminalFailed && !interrupted
+      ? await input.runtimeBridge?.reviewerCorrectionValidation?.(reservation.root, callID, childSessionID, reservation.started) : undefined;
+    const validated = !terminalFailed && !interrupted && acceptedEvidence.length > 0 && correctionChecks?.ready !== false;
+    const settlementEvidence = terminalFailed || interrupted || correctionChecks?.ready === false ? [] : acceptedEvidence;
     const hostBindingDefect = childSessionID !== undefined && [...(bindingDenials.get(reservation.root)?.values() ?? [])]
       .some((candidateDenials) => [...candidateDenials.values()].includes(childSessionID));
     const failedAcceptanceExecution = [...hostGoalExecutions.values()].find((execution) =>
       execution.root === reservation.root && execution.sessionID === childSessionID &&
       execution.endedAt !== undefined && Date.parse(execution.startedAt) >= reservation.started - 1000 &&
       execution.outcome === "fail");
-    const processDefect = failedAcceptanceExecution === undefined && (childSessionID === undefined || hostBindingDefect ||
+    const processDefect = !correctionChecks?.failure && failedAcceptanceExecution === undefined && (childSessionID === undefined || hostBindingDefect ||
       goalValidationDefects.has(childSessionID) || !validated);
     const resultClass = validated ? "acceptance" : interrupted ? "interrupted" : processDefect ? "process-defect" : "acceptance";
     await ledger.appendGoal({ kind: "unit.settled", at: new Date().toISOString(),
@@ -2805,7 +2807,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       ...(childSessionID === undefined ? {} : { childSessionID }),
       disposition: validated ? "succeeded" : interrupted ? "cancelled" : "failed",
       evidence: settlementEvidence, resultClass, nativeOutcome: terminalFailed || interrupted ? "failed" : "completed",
-      ...(resultClass === "acceptance" && failedAcceptanceExecution !== undefined ? { failure: {
+      ...(correctionChecks?.failure ? { failure: correctionChecks.failure } : resultClass === "acceptance" && failedAcceptanceExecution !== undefined ? { failure: {
         command: failedAcceptanceExecution.command.slice(0, 8), outcome: "fail" as const,
         exitCode: failedAcceptanceExecution.exitCode ?? null,
       } } : {}),

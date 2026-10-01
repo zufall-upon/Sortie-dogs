@@ -875,6 +875,16 @@ export function canonicalDeclaredValidationSequence(command: string, declared: R
   return canonical.every((segment): segment is string => segment !== undefined) ? canonical.join(" && ") : undefined;
 }
 
+/** Correction shell authority is only inherited checks or a direct existing source-scope Git boundary. */
+export function reviewerCorrectionShellAllowed(command: string, validation: readonly string[]): boolean {
+  if (canonicalDeclaredValidationSequence(command, new Set(validation)) !== undefined) return true;
+  if (!/^git (?:add|commit) /u.test(normalizeCommand(command)) || shellSegments(command, "posix").length !== 1) return false;
+  const syntax = scanShellSyntax(command, "posix");
+  if (syntax.unsafeExpansion || /[<>|;&\r\n]/u.test(syntax.masked)) return false;
+  const extracted = extractWritePaths("bash", { command });
+  return extracted.gitMutation === true && !extracted.ambiguous;
+}
+
 /** Unbound sessions may invoke only tools whose complete input is known to be read-only. */
 export function isKnownReadOnlyTool(
   tool: string,

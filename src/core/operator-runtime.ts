@@ -127,7 +127,7 @@ interface UnitState {
   callID: string | null;
   childSessionID: string | null;
   /** A scoped implementation continuation in the original native Reviewer, never a review PASS. */
-  reviewerCorrection?: { author: string; reviewIdentity: string; writeUnion: readonly string[] };
+  reviewerCorrection?: { author: string; reviewIdentity: string; writeUnion: readonly string[]; admittedAt?: string };
   evidence: readonly GoalEvidence[];
   resultClass: string | null;
   failure?: SerialDispatchSettlement["failure"];
@@ -1423,6 +1423,7 @@ export class OperatorRuntime {
     } else state.dispatched++;
     unit.status = "running";
     unit.callID = callID;
+    if (unit.reviewerCorrection) unit.reviewerCorrection.admittedAt = new Date().toISOString();
     if (unit.terminalRescue) unit.terminalRescue.status = "dispatched";
     state.phase = "running";
     await this.save(state);

@@ -12,7 +12,7 @@ import { canonicalAgent, type RuntimeProfile } from "../core/runtime-profile.js"
 import { taskChildSessionID } from "./task-result-repair.js";
 import { normalizeManifestScope } from "../core/path.js";
 import { declaredArtifacts } from "./declared-artifacts.js";
-import { normalizeCommand } from "./gate.js";
+import { canonicalDeclaredValidationSequence, normalizeCommand } from "./gate.js";
 import { currentSnapshotProtection, snapshotScratchExclusion } from "./protected-snapshot.js";
 
 const exec = promisify(execFile);
@@ -38,7 +38,7 @@ export function missionReviewValidation(run: OperatorState, statePath: string) {
 
 /** Show native command outcomes to the Reviewer without turning non-criterion checks into acceptance evidence. */
 export function observedMissionValidation(validation: readonly string[], childSessionID: string | null,
-  history: readonly Record<string, unknown>[]): {
+  history: readonly Record<string, unknown>[], notBefore?: number): {
     attempts: readonly { command: string; exit_code: number | null; started_ms: number | null; completed_ms: number | null }[];
     not_observed: readonly string[]; omitted_attempts: number;
   } {
@@ -49,14 +49,16 @@ export function observedMissionValidation(validation: readonly string[], childSe
         !Array.isArray(message.parts)) return [];
     return message.parts.flatMap(part => {
       if (!record(part) || part.type !== "tool" || !["bash", "shell", "powershell", "pwsh"].includes(String(part.tool)) ||
-          !record(part.state) || part.state.status !== "completed" || !record(part.state.input) ||
+           !record(part.state) || !["completed", "error"].includes(String(part.state.status)) || !record(part.state.input) ||
           typeof part.state.input.command !== "string") return [];
       const command = normalizeCommand(part.state.input.command);
       if (!expected.has(command)) return [];
-      const exit = record(part.state.metadata) ? part.state.metadata.exit : undefined;
+       const exit = record(part.state.metadata) ? part.state.metadata.exit : undefined;
+       const started = record(part.time) ? time(part.time.ran) : record(part.state.time) ? time(part.state.time.start) : null;
+       const completed = record(part.time) ? time(part.time.completed) : record(part.state.time) ? time(part.state.time.end) : null;
+       if (notBefore !== undefined && (started === null || completed === null || started < notBefore || completed < started)) return [];
       return [{ command, exit_code: typeof exit === "number" && Number.isSafeInteger(exit) ? exit : null,
-        started_ms: record(part.time) ? time(part.time.ran) : null,
-        completed_ms: record(part.time) ? time(part.time.completed) : null }];
+         started_ms: started, completed_ms: completed }];
     });
   });
   // Retain early attempts and the latest checks if a Worker retried many times.
@@ -65,15 +67,66 @@ export function observedMissionValidation(validation: readonly string[], childSe
     omitted_attempts: attempts.length - shown.length };
 }
 
+/** All inherited checks must have fresh real successful outcomes in this correction admission. */
+export function reviewerCorrectionValidation(validation: readonly string[], child: string,
+  history: readonly Record<string, unknown>[], notBefore: number): {
+    ready: boolean; reason?: string; failure?: { command: readonly string[]; outcome: "fail"; exitCode: number | null };
+  } {
+  const declared = validation.map(normalizeCommand), expected = new Set(declared);
+  if (!Number.isFinite(notBefore)) return { ready: false, reason: "mission-review-correction-validation-admission-unavailable" };
+  const latest = new Map<string, { exit: number | null; started: number; completed: number }>();
+  // Unlike the display excerpt, this acceptance comparison scans ALL native attempts.
+  for (const message of history) {
+    if (!record(message.info) || message.info.role !== "assistant" || message.info.sessionID !== child || !Array.isArray(message.parts)) continue;
+    for (const part of message.parts) {
+      if (record(part) && part.type === "tool" && ["edit", "write", "patch", "apply_patch"].includes(String(part.tool)) &&
+          record(part.state) && part.state.status === "completed") {
+        const end = record(part.time) ? part.time.completed : record(part.state.time) ? part.state.time.end : undefined;
+        if (typeof end === "number" && end >= notBefore) latest.clear(); // Earlier checks do not validate a later source correction.
+        continue;
+      }
+      if (!record(part) || part.type !== "tool" || !["bash", "shell", "powershell", "pwsh"].includes(String(part.tool)) ||
+          !record(part.state) || !["completed", "error"].includes(String(part.state.status)) ||
+          !record(part.state.input) || typeof part.state.input.command !== "string") continue;
+      const sequence = canonicalDeclaredValidationSequence(part.state.input.command, expected);
+      if (!sequence) continue;
+      const timing = record(part.time) ? { started: part.time.ran, completed: part.time.completed }
+        : record(part.state.time) ? { started: part.state.time.start, completed: part.state.time.end } : undefined;
+      if (!timing || typeof timing.started !== "number" || typeof timing.completed !== "number" ||
+          !Number.isFinite(timing.started) || !Number.isFinite(timing.completed) ||
+          timing.started < notBefore || timing.completed < timing.started) continue;
+      const rawExit = record(part.state.metadata) ? part.state.metadata.exit : undefined;
+      const exit = part.state.status === "completed" && Number.isSafeInteger(rawExit) ? rawExit as number : null;
+      // A successful && sequence proves each member passed; a failed one cannot prove any member.
+      for (const command of expected) if (sequence === command || sequence.startsWith(`${command} && `) ||
+          sequence.endsWith(` && ${command}`) || sequence.includes(` && ${command} && `)) {
+        const previous = latest.get(command);
+        if (!previous || previous.started <= timing.started) latest.set(command, { exit, started: timing.started, completed: timing.completed });
+      }
+    }
+  }
+  let previous = notBefore;
+  for (const command of declared) {
+    const observed = latest.get(command);
+    if (!observed) return { ready: false, reason: `mission-review-correction-validation-missing:${command}` };
+    if (observed.exit !== 0) return { ready: false, reason: `mission-review-correction-validation-failed:${command}`,
+      failure: { command: [command], outcome: "fail", exitCode: observed.exit } };
+    if (observed.started < previous) return { ready: false, reason: `mission-review-correction-validation-order:${command}` };
+    // Same native && execution gives all members the same timing.
+    previous = observed.started;
+  }
+  return { ready: true };
+}
+
 /** Summary-only native reader: unavailable API/error is not a successfully observed empty history. */
 export async function observedMissionValidationSummary(validation: readonly string[], childSessionID: string,
-  read?: () => Promise<unknown>): Promise<Record<string, unknown>> {
+  read?: () => Promise<unknown>, notBefore?: number): Promise<Record<string, unknown>> {
   if (!read) throw new Error("native-worker-history-api-unavailable");
   const response = await read();
   if (record(response) && response.error !== undefined && response.error !== null) throw new Error("native-worker-history-api-error");
   const data = record(response) && "data" in response ? response.data : response;
   if (!Array.isArray(data)) throw new Error("native-worker-history-response-not-array");
-  const observed = observedMissionValidation(validation, childSessionID, data.filter(record));
+  const observed = observedMissionValidation(validation, childSessionID, data.filter(record), notBefore);
   const grouped = new Map<string, { command: string; exit_code: number | null; observed_attempts: number;
     latest_started_ms: number | null; latest_completed_ms: number | null }>();
   for (const attempt of observed.attempts) {

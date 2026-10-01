@@ -47,9 +47,12 @@ export interface RuntimeBridge {
     command: string): Promise<boolean>;
   /** A mission's hash-pinned Task has already passed durable run/acceptance admission. */
   ownsMissionDispatch?(rootSessionID: string, callID: string, taskID: string): Promise<boolean>;
-  /** Only an exact admitted correction Task is an implementation dispatch despite its native Reviewer role. */
+  /** Only an exact admitted correction Task is an implementation dispatch continuing the original Reviewer child. */
   ownsReviewerCorrectionDispatch?(rootSessionID: string, callID: string, taskID: string): Promise<boolean>;
   ownsReviewerCorrection?(childSessionID: string): Promise<boolean>;
+  reviewerCorrectionValidation?(rootSessionID: string, callID: string, childSessionID: string, startedAt: number): Promise<{
+    ready: boolean; reason?: string; failure?: SerialDispatchSettlement["failure"];
+  } | undefined>;
   /** Durable operator dispatch identity survives adapter reload and missed after hooks. */
   recoverMissionDispatch?(rootSessionID: string, taskID: string): Promise<{
     callID: string; childSessionID?: string; cancelled: boolean; nativeOutcome?: "completed" | "failed";

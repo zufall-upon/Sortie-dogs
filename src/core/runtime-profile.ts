@@ -49,6 +49,8 @@ export function profileAgent(profile: RuntimeProfile, role: CanonicalAgentRole):
 }
 
 export function canonicalAgent(profile: RuntimeProfile, agent: string | undefined): CanonicalAgentRole | undefined {
+  // V2 correction profiles are hidden, session-specific aliases, not globally writable Reviewers.
+  if (profile.id === "v010" && /^dog-reviewer-correction-v010-[a-f0-9]{16}$/u.test(agent ?? "")) return "dog-reviewer";
   return CANONICAL_AGENT_ROLES.find(role => profileAgent(profile, role) === agent);
 }
 

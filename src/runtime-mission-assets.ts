@@ -78,7 +78,7 @@ permission:
     ${profileAgent(profile, "dog-advisor")}: allow
 tools:
   "sortie_*": false
-${controls(profile, ["start_mission", "plan_units", "operator_next", "operator_status", "extend_mission_budget", "expand_unit", "review_mission", "complete_mission", "cancel_operator", "reflection"])}
+${controls(profile, ["start_mission", "plan_units", "operator_next", "operator_status", "extend_mission_budget", "expand_unit", "review_mission", "repair_review", "complete_mission", "cancel_operator", "reflection"])}
 ---
 # ${profileAgent(profile, "dog-coordinator")}
 
@@ -303,7 +303,7 @@ permission:
     ${profileAgent(profile, "dog-advisor")}: allow
 tools:
   "sortie_*": false
-${controls(profile, ["plan_units", "operator_next", "operator_status", "expand_unit", "review_mission", "submit_mission", "skip_mission_consultation", "retry_mission_unit", "rescue_mission_unit"])}
+${controls(profile, ["plan_units", "operator_next", "operator_status", "expand_unit", "review_mission", "repair_review", "submit_mission", "skip_mission_consultation", "retry_mission_unit", "rescue_mission_unit"])}
 ---
 # ${profileAgent(profile, "dog-operator")}
 

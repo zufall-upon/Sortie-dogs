@@ -5,7 +5,10 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
-import { createSortieDogsV2Plugin, type OpenCodeV2Context } from "../dist/plugin/v2.js";
+import { createSortieDogsV2Plugin, nativeReviewerRoleRules, type OpenCodeV2Context } from "../dist/plugin/v2.js";
+import { Agent } from "@opencode/schema/agent";
+import { OpenCode } from "@opencode/client";
+import { convertedAssetPermissions, evaluate, whollyDisabled, type Rule } from "./fixtures/native-v2-2018-contract.ts";
 import { SortieDogsV010Plugin } from "../dist/plugin/profiled.js";
 import { OperatorMissionRuntime, missionPlan, missionReviewIndependent } from "../dist/core/operator-mission.js";
 import { OperatorRuntime } from "../dist/core/operator-runtime.js";
@@ -26,43 +29,73 @@ async function fixture(options: { permissionsUnavailable?: boolean } = {}) {
   await writeFile(join(directory, ".gitignore"), ".sortie-dogs-v010/\n");
   await writeFile(join(directory, "result.txt"), "old\n");
   await writeFile(join(directory, "check.mjs"), 'import { readFileSync } from "node:fs"; if (!readFileSync("result.txt", "utf8").trim()) process.exit(1);\n');
+  await writeFile(join(directory, "required-test.mjs"), 'import { readFileSync } from "node:fs"; if (readFileSync("result.txt", "utf8").trim() === "bad-required") process.exit(1);\n');
   await exec("git", ["add", "--all"], { cwd: directory });
   await exec("git", ["commit", "--quiet", "-m", "base"], { cwd: directory });
   const agents: Record<string, ObjectValue> = { root: { agent: "dog-operator" }, worker: { agent: "dog-worker-v010", parentID: "root" },
     author: { agent: "dog-reviewer-v010", parentID: "root" }, final: { agent: "dog-reviewer-v010", parentID: "root" } };
   const history: Record<string, ObjectValue[]> = {}, storage = new Map<string, unknown>(), rules: ObjectValue[] = [], switches: ObjectValue[] = [];
+  const globalRules: Rule[] = [];
+  let registry: Record<string, ObjectValue>;
   let tools: ObjectValue[], toolHooks: Map<string, Function>, sessionHooks: Map<string, Function>, hooks: OpenCodeHooks;
   let cleanup: (() => void) | void, counter = 0;
   const projection = { failGrant: false };
   const start = async () => {
     cleanup?.(); tools = []; toolHooks = new Map(); sessionHooks = new Map();
+    const transforms: Function[] = [];
+    const rebuild = () => {
+      const next: Record<string, ObjectValue> = Object.fromEntries(runtimeAssets.filter(asset => asset.installPath.startsWith("agent/")).map(asset =>
+        [asset.name, { ...Agent.Info.default(asset.name as never), system: asset.content.split("---").slice(2).join("---"),
+          permissions: [...Agent.Info.default(asset.name as never).permissions, ...globalRules, ...convertedAssetPermissions(asset.content)] }]));
+      const editor = { get: (id: string) => next[id], update: (id: string, update: Function) => {
+        if (id.startsWith("dog-reviewer-correction-") && projection.failGrant) { projection.failGrant = false; throw new Error("native-permission-storage-failed"); }
+        update(next[id] ??= { ...Agent.Info.default(id as never) });
+      } };
+      for (const transform of transforms) transform(editor);
+      registry = next;
+      for (const [id, info] of Object.entries(registry)) if (id.startsWith("dog-reviewer-correction-")) rules.push({ agent: id, permissions: structuredClone(info.permissions) });
+    };
+    rebuild();
     const context: OpenCodeV2Context = {
       location: { directory }, storage: { get: async key => structuredClone(storage.get(key)),
-        set: async (key, value) => { storage.set(key, structuredClone(value)); }, remove: async key => { storage.delete(key); } },
-      agent: { transform: async () => ({ dispose() {} }), get: async ({ agentID }) => ({ model: {
-        providerID: "openai", id: agentID === "dog-worker-v010" ? "gpt-6-luna-fast" : "gpt-6.1-sol", variant: agentID === "dog-worker-v010" ? "max" : "xhigh" } }) },
+        set: async (key, value) => { storage.set(key, structuredClone(value)); }, remove: async key => { storage.delete(key); },
+        scan: async ({ prefix }) => ({ entries: [...storage].filter(([key]) => key.startsWith(prefix)).map(([key, value]) => ({ key, value: structuredClone(value) })) }) },
+      ...(!options.permissionsUnavailable ? { agent: { transform: async (callback: Function) => {
+        transforms.push(callback);
+        try { rebuild(); } catch (error) { transforms.pop(); throw error; }
+        return { dispose() { transforms.splice(transforms.indexOf(callback), 1); rebuild(); } };
+      }, get: async ({ agentID }: { agentID: string }) => ({ ...registry[agentID], model: registry[agentID]?.model ?? {
+        providerID: "openai", id: agentID === "dog-worker-v010" ? "gpt-6-luna-fast" : "gpt-6.1-sol", variant: agentID === "dog-worker-v010" ? "max" : "xhigh" } }) } } : {}),
       event: { subscribe: async function* () {} },
       tool: { transform: async callback => { callback({ add: tool => tools.push(tool) }); return { dispose() {} }; },
         hook: async (name, callback) => { toolHooks.set(name, callback); return { dispose() {} }; } },
-      session: { get: async ({ sessionID }) => ({ id: sessionID, ...agents[sessionID], model: { providerID: "openai", id: "gpt-6.1-sol", variant: "xhigh" } }),
+      session: { get: async ({ sessionID }) => ({ id: sessionID, model: { providerID: "openai", id: "gpt-6.1-sol", variant: "xhigh" }, ...agents[sessionID] }),
         context: async ({ sessionID }) => history[sessionID] ?? [],
         list: async ({ parentID }) => ({ data: Object.entries(agents).filter(([, info]) => info.parentID === parentID).map(([id, info]) => ({ id, ...info })), cursor: {} }),
         prompt: async () => ({}), synthetic: async () => ({}), interrupt: async ({ sessionID }) => { agents[String(sessionID)]!.outcome = "interrupted"; return { interrupted: true }; },
-        switchAgent: async input => { switches.push(input); }, switchModel: async input => { switches.push(input); },
+        switchAgent: async input => { switches.push(input); agents[String(input.sessionID)]!.agent = input.agent; },
+        switchModel: async input => { switches.push(input); agents[String(input.sessionID)]!.model = input.model; },
         hook: async (name, callback) => { sessionHooks.set(name, callback); return { dispose() {} }; } },
-      permission: { hook: async () => ({ dispose() {} }), ...(!options.permissionsUnavailable ? { rules: async (input: ObjectValue) => {
-        if (projection.failGrant && input.permissions.some((rule: ObjectValue) => rule.action === "edit" && rule.effect === "allow")) {
-          projection.failGrant = false; throw new Error("native-permission-storage-failed");
-        }
-        rules.push(structuredClone(input)); agents[input.sessionID]!.permissions = input.permissions;
-      } } : {}) },
+      permission: { hook: async () => ({ dispose() {} }) }, // Actual PermissionDomain 2.0.18: NO rules API.
       provider: { list: async () => ({ data: [] }) }, model: { list: async () => ({ data: [] }) },
     };
     cleanup = await createSortieDogsV2Plugin(async (input, options) => { hooks = await SortieDogsV010Plugin(input, options); return hooks; }).setup(context);
   };
   const before = async (sessionID: string, tool: string, input: ObjectValue) => {
     const event = { sessionID, agent: agents[sessionID]!.agent, tool, id: `call_${++counter}`, input: structuredClone(input) };
-    await toolHooks.get("execute.before")!(event); return event;
+    await toolHooks.get("execute.before")!(event);
+    if (tool === "subagent" && input.sessionID && event.input.agent?.startsWith("dog-reviewer-correction-")) {
+      // SubagentTool asserts the selected agent ID; the pre-switch prevents different-agent model replacement.
+      assert.notEqual(evaluate("subagent", event.input.agent, registry[agents[sessionID]!.agent]!.permissions,
+        agents[sessionID]!.permissions ?? []).effect, "deny");
+      assert.equal(agents[input.sessionID]!.agent, event.input.agent);
+      assert.deepEqual(registry[event.input.agent]!.model, agents[input.sessionID]!.model ?? { providerID: "openai", id: "gpt-6.1-sol", variant: "xhigh" });
+    }
+    if (tool === "shell" && agents[sessionID]!.agent.startsWith("dog-reviewer-correction-")) {
+      assert.notEqual(evaluate("shell", input.command, registry[agents[sessionID]!.agent]!.permissions,
+        agents[sessionID]!.permissions ?? []).effect, "deny", "native permission denied shell");
+    }
+    return event;
   };
   const after = async (event: ObjectValue, content: string, metadata: ObjectValue = {}, status = "completed") => {
     const now = Date.now();
@@ -101,8 +134,8 @@ async function fixture(options: { permissionsUnavailable?: boolean } = {}) {
   const shell = async (child: string, command: string, exit = 0) => {
     const event = await before(child, "shell", { command });
     const output = await exec(command.startsWith("git ") ? "git" : process.execPath,
-      command.startsWith("git ") ? command.slice(4).split(" ") : ["check.mjs"], { cwd: directory });
-    await after(event, output.stdout, { exit });
+      command.startsWith("git ") ? command.slice(4).split(" ") : command.slice(5).split(" "), { cwd: directory }).catch(error => ({ stdout: error.stdout, code: error.code }));
+    await after(event, output.stdout, { exit: "code" in output ? output.code : exit });
   };
   const terminal = (child: string, text: string, failed = false) => {
     agents[child]!.outcome = failed ? "failed" : "succeeded";
@@ -126,21 +159,22 @@ async function fixture(options: { permissionsUnavailable?: boolean } = {}) {
     throw new Error("fixture-goal-ledger-missing");
   };
   await start();
-  return { directory, agents, history, storage, rules, switches, projection, start, before, after, prompt, tool, task, run, missions, bind, edit, shell, finish, terminal, ledger,
+  return { directory, agents, history, storage, rules, switches, projection, globalRules, registry: () => registry, start, before, after, prompt, tool, task, run, missions, bind, edit, shell, finish, terminal, ledger,
     hooks: () => hooks, context: (event: ObjectValue) => sessionHooks.get("context")!(event),
     dispose: async () => { cleanup?.(); await rm(directory, { recursive: true, force: true }); } };
 }
 
-async function initial(f: Awaited<ReturnType<typeof fixture>>, options: { readonly?: boolean; operation?: boolean } = {}) {
+async function initial(f: Awaited<ReturnType<typeof fixture>>, options: { readonly?: boolean; operation?: boolean; validation?: string[] } = {}) {
   const original = "Produce ready output, validate, commit it, preserve all constraints and independently review.";
   await f.prompt("root", original);
   await f.tool("root", "start_mission", { requirements: ["Output must be ready", "Validate and commit; independent review"], ...(options.operation ? { kind: "operation" } : {}) });
   const plan = await f.tool("root", "plan_units", { units: [{ title: "Ready output", objective: "Produce ready output",
-    read: ["check.mjs"], write: options.readonly ? [] : ["result.txt"], validation: ["node check.mjs"] }] });
+     read: ["check.mjs", "required-test.mjs"], write: options.readonly ? [] : ["result.txt"], validation: options.validation ?? ["node check.mjs"] }] });
   const worker = await f.before("root", "subagent", f.task(plan.task));
   await f.prompt("worker", worker.input.prompt); await f.bind("worker");
   if (!options.readonly) { await f.edit("worker", "wrong"); await f.shell("worker", "git add -- result.txt"); await f.shell("worker", "git commit -m candidate"); }
-  await f.shell("worker", "node check.mjs"); await f.finish(worker, "worker", "Implemented");
+  for (const command of options.validation ?? ["node check.mjs"]) await f.shell("worker", command);
+  await f.finish(worker, "worker", "Implemented");
   const review = await f.tool("root", "review_mission", { risk_tags: ["public-logic"] });
   const dispatch = await f.before("root", "subagent", f.task(review.task));
   await f.prompt("author", dispatch.input.prompt);
@@ -166,7 +200,7 @@ for (const mode of ["foreground", "background-restart", "failure", "self-review"
       assert.deepEqual((await f.run()).units[0]!.unit.validation, previous.run.units[0]!.unit.validation);
       assert.deepEqual((await f.tool("root", "repair_review")).task, prepared.task, "prepare is idempotent, not another unit/model run");
       const correction = await f.before("root", "subagent", { ...f.task(prepared.task), ...(mode === "background-restart" ? { background: true } : {}) });
-      assert.equal(correction.input.sessionID, "author"); assert.equal(correction.input.agent, "dog-reviewer-v010");
+      assert.equal(correction.input.sessionID, "author"); assert.match(correction.input.agent, /^dog-reviewer-correction-v010-/);
       assert.equal((await f.tool("root", "operator_status")).budget.reserved_units, 1);
       await f.prompt("author", correction.input.prompt);
       if (mode === "background-restart") {
@@ -175,18 +209,23 @@ for (const mode of ["foreground", "background-restart", "failure", "self-review"
         assert.equal((await f.tool("root", "operator_status")).budget.reserved_units, 1);
       }
       await f.bind("author");
-      assert.equal(f.agents.author!.agent, "dog-reviewer-v010");
-      assert.equal(f.switches.filter(input => "agent" in input).length, 0, "no worker switch or ignored resume agent assumption");
-      assert.equal(f.switches.length, priorModelSwitches, "same-child correction retains the native Sol model and variant too");
+      assert.equal(f.agents.author!.agent, correction.input.agent);
+      assert.equal(f.switches.filter(input => "agent" in input).length, 1, "only the same author's scoped profile is selected, never Worker");
+      assert.equal(f.switches.filter(input => "model" in input).length, priorModelSwitches, "same-child correction retains the native Sol model and variant too");
       const grants = f.rules.at(-1)!.permissions;
       assert(grants.some((rule: ObjectValue) => rule.action === "edit" && rule.resource.endsWith("/result.txt") && rule.effect === "allow"));
-      assert(!grants.some((rule: ObjectValue) => rule.action === "edit" && rule.resource === "*"));
+      assert(!grants.some((rule: ObjectValue) => rule.action === "edit" && rule.resource === "*" && rule.effect === "allow"));
       assert(grants.some((rule: ObjectValue) => rule.action === "edit" && rule.resource === "result.txt" && rule.effect === "allow"));
-      const context = { sessionID: "author", agent: "dog-reviewer-v010", tools: Object.fromEntries(["read", "patch", "write", "shell",
-        "sortie_v010_bind_write_gate", "sortie_v010_expand_unit", "sortie_v010_review_mission"].map(name => [name, { description: name, input: {} }])), system: [] };
+      const context = { sessionID: "author", agent: f.agents.author!.agent, tools: Object.fromEntries(["read", "patch", "write", "shell",
+        "sortie_v010_bind_write_gate", "sortie_v010_expand_unit", "sortie_v010_review_mission"].filter(name =>
+          !whollyDisabled(["patch", "write"].includes(name) ? "edit" : name,
+            [...f.registry()[f.agents.author!.agent]!.permissions, ...(f.agents.author!.permissions ?? [])]))
+        .map(name => [name, { description: name, input: {} }])), system: [] };
       await f.context(context);
       assert.deepEqual(Object.keys(context.tools).sort(), ["patch", "read", "shell", "sortie_v010_bind_write_gate", "write"].sort());
-      await assert.rejects(f.before("author", "patch", { patchText: "*** Begin Patch\n*** Add File: undeclared.txt\n+x\n*** End Patch" }), /mission-review-correction-write-union-fixed|write-denied|path-not-declared|outside|not-allowed/);
+      await assert.rejects(f.before("author", "patch", { patchText: "*** Begin Patch\n*** Add File: undeclared.txt\n+x\n*** End Patch" }), /operation manifest write scope|mission-review-correction-write-union-fixed|write-denied|path-not-declared|outside|not-allowed/);
+      await assert.rejects(f.before("author", "shell", { command: "printf x > undeclared.txt" }), /mission-review-correction-shell-boundary/);
+      await assert.rejects(f.before("author", "shell", { command: "printf x > result.txt" }), /mission-review-correction-shell-boundary/);
       await f.edit("author", "ready"); await f.shell("author", "git add -- result.txt"); await f.shell("author", "git commit -m correction");
       await f.shell("author", "node check.mjs", mode === "failure" ? 1 : 0);
       if (mode === "background-restart") {
@@ -195,7 +234,8 @@ for (const mode of ["foreground", "background-restart", "failure", "self-review"
       } else await f.finish(correction, "author", "CORRECTION_READY\nFixed the retained finding and ran its exact validation.");
       const corrected = await f.missions.required("root"), status = await f.tool("root", "operator_status");
       assert.equal(status.budget.reserved_units, 0); assert.equal(status.budget.consumed_units, 2);
-      assert.deepEqual(f.agents.author!.permissions, [], "terminal restores the original native session rules immediately");
+      assert.deepEqual(f.agents.author!.permissions, undefined, "native session rules are never changed");
+      assert.equal(f.agents.author!.agent, "dog-reviewer-v010", "terminal restores Reviewer immediately");
       assert.equal(f.storage.has("v2-reviewer-correction-permissions:author"), false);
       assert(Math.abs(status.budget.settled_cost_usd - 0.0048) < 1e-12, "initial Worker and six correction requests are each priced exactly once");
       const settled = (await f.ledger()).records.map(record => record.event).filter(event => event.kind === "unit.settled");
@@ -254,6 +294,119 @@ test("shipped Reviewer remains read-only and retains Sol/xhigh", () => {
   assert.match(asset, /model: openai\/gpt-6\.1-sol#xhigh/);
   assert.match(asset, /edit: deny/); assert.match(asset, /bash: false/);
   assert.match(asset, /CORRECTION_READY/);
+  assert.deepEqual(convertedAssetPermissions(asset), nativeReviewerRoleRules, "native role-block projection is grounded in the actual shipped header");
+});
+
+test("installed client 2.0.18 and converted role tool snapshots support correction without permission.rules", async () => {
+  const client = OpenCode.make({ baseUrl: "http://unused.invalid", fetch: async () => { throw new Error("no-network-contract-test"); } });
+  assert.equal("rules" in client.permission, false);
+  assert.equal(typeof client.session.switchAgent, "function");
+  assert.equal(typeof client.session.switchModel, "function");
+  const f = await fixture();
+  try {
+    for (const role of ["dog-operator", "dogs-coordinator"]) {
+      const asset = runtimeAssets.find(item => item.name === role)!.content;
+      assert.match(asset, /sortie_v010_repair_review: true/);
+      const tool = "sortie_v010_repair_review", native = convertedAssetPermissions(asset);
+      assert.equal(whollyDisabled(tool, native), false, "tool must survive snapshot creation before the context hook");
+      const context = { sessionID: "root", agent: role, system: [], tools: { [tool]: { description: "repair", input: {} } } };
+      await f.context(context);
+      assert(tool in context.tools, "context filtering retains the real snapshot's repair tool");
+    }
+    const reviewer = f.registry()["dog-reviewer-v010"]!;
+    assert.equal(whollyDisabled("edit", reviewer.permissions), true);
+    assert.equal(whollyDisabled("shell", reviewer.permissions), true);
+  } finally { await f.dispose(); }
+});
+
+for (const mode of ["missing", "failed", "historical", "out-of-order", "source-changed", "fresh-pass"] as const) {
+  test(`all inherited correction checks require fresh native outcomes: ${mode}`, async () => {
+    const f = await fixture();
+    try {
+      await initial(f, { validation: ["node required-test.mjs", "node check.mjs"] });
+      if (mode === "historical") {
+        const past = Date.now() - 60_000;
+        (f.history.author ??= []).push({ id: "old-review-context", type: "assistant", agent: "dog-reviewer-v010", content: [{ type: "tool", name: "shell", id: "historical-check",
+          time: { ran: past, completed: past + 1 }, state: { status: "completed", input: { command: "node required-test.mjs" }, metadata: { exit: 0 } } }] });
+      }
+      const prepared = await f.tool("root", "repair_review");
+      const correction = await f.before("root", "subagent", f.task(prepared.task));
+      await f.prompt("author", correction.input.prompt); await f.bind("author");
+      await f.edit("author", mode === "failed" ? "bad-required" : "ready");
+      if (mode === "out-of-order") await f.shell("author", "node check.mjs");
+      if (!["missing", "historical"].includes(mode)) await f.shell("author", "node required-test.mjs");
+      if (mode === "source-changed") await f.edit("author", "ready-again");
+      await f.shell("author", "git add -- result.txt"); await f.shell("author", "git commit -m correction");
+      if (mode !== "out-of-order") await f.shell("author", "node check.mjs");
+      await f.finish(correction, "author", "CORRECTION_READY\nThe canonical check passed.");
+      const mission = await f.missions.required("root"), run = await f.run(), ledger = await f.ledger();
+      assert.equal(mission.corrections![0]!.status, mode === "fresh-pass" ? "ready" : "failed");
+      assert.equal(ledger.state.outstanding_reservations.length, 0);
+      assert.equal(ledger.state.consumed_units, 2);
+      assert.equal(f.agents.author!.agent, "dog-reviewer-v010");
+      const settled = ledger.records.map(record => record.event).filter(event => event.kind === "unit.settled").at(-1)!;
+      assert.equal(settled.disposition, mode === "fresh-pass" ? "succeeded" : "failed");
+      if (mode !== "fresh-pass") {
+        assert.equal(run.phase, "awaiting-decision");
+        assert.equal(settled.evidence.length, 0, "canonical-only evidence cannot silently satisfy a missing mandatory check");
+        if (mode === "historical") {
+          const status = await f.tool("root", "operator_status");
+          const validation = status.acceptance_summary.native_declared_validation.find((item: ObjectValue) => !item.historical);
+          assert(validation.observations.not_observed.includes("node required-test.mjs"), "acceptance summary also excludes initial Reviewer history");
+        }
+        await assert.rejects(f.tool("root", "review_mission", { risk_tags: ["public-logic"] }), /awaits-unit-validation|terminal-unreconciled/);
+        // Even an independently accepted final Reviewer cannot mask the inherited missing check.
+        await f.missions.update("root", state => { state.review = { ...state.review!, runID: run.runID, child: "final", verdict: "PASS" }; });
+        await assert.rejects(f.tool("root", "complete_mission"), /correction-validation|unit-validation|awaiting|incomplete/);
+      } else {
+        const review = await f.tool("root", "review_mission", { risk_tags: ["public-logic"] });
+        const dispatch = await f.before("root", "subagent", f.task(review.task));
+        await f.prompt("final", dispatch.input.prompt); await f.finish(dispatch, "final", "PASS\nBoth inherited checks passed on this correction.");
+        assert.equal((await f.tool("root", "complete_mission")).status, "succeeded");
+      }
+    } finally { await f.dispose(); }
+  });
+}
+
+for (const place of ["global", "project", "session", "global-all"] as const) test(`correction profile preserves explicit ${place} shell denies`, async () => {
+  const f = await fixture();
+  try {
+    await initial(f);
+    const deny: Rule = { action: "shell", resource: place === "global-all" ? "*" : "node check.mjs", effect: "deny" };
+    if (place === "session") f.agents.author!.permissions = [deny];
+    else f.globalRules.push(deny); // Host converts both project/global documents into the registry's inherited rules.
+    await f.start();
+    const prepared = await f.tool("root", "repair_review");
+    const correction = await f.before("root", "subagent", f.task(prepared.task));
+    await f.prompt("author", correction.input.prompt); await f.bind("author");
+    await assert.rejects(f.before("author", "shell", { command: "node check.mjs" }), /native permission denied shell/);
+    assert.equal(f.registry()[f.agents.author!.agent]!.permissions.some((rule: Rule) => rule.action === "shell" && rule.resource === "*" && rule.effect === "allow"), false);
+    await assert.rejects(f.before("author", "shell", { command: "printf x > undeclared.txt" }), /mission-review-correction-shell-boundary/);
+    await f.tool("root", "cancel_operator", { reason: "explicit-cancellation" });
+    assert.equal(f.agents.author!.agent, "dog-reviewer-v010");
+    assert.deepEqual(f.agents.author!.permissions, place === "session" ? [deny] : undefined);
+  } finally { await f.dispose(); }
+});
+
+test("native same-child preselection retains the author's current model and non-default variant", async () => {
+  const f = await fixture();
+  try {
+    await initial(f);
+    const selected = { providerID: "openai", id: "gpt-6.1-sol", variant: "high" };
+    f.agents.author!.model = selected; // A genuine native user model switch after the initial review.
+    const previous = f.switches.filter(item => "model" in item).length;
+    const prepared = await f.tool("root", "repair_review");
+    const dispatch = await f.before("root", "subagent", f.task(prepared.task));
+    assert.equal(dispatch.input.sessionID, "author"); assert.equal(dispatch.input.model, undefined);
+    assert.deepEqual(f.registry()[dispatch.input.agent]!.model, selected);
+    await f.prompt("author", dispatch.input.prompt); await f.start();
+    assert.deepEqual(f.agents.author!.model, selected);
+    assert.equal(f.switches.filter(item => "model" in item).length, previous);
+    await f.tool("root", "cancel_operator", { reason: "explicit-cancellation" });
+    assert.equal(f.agents.author!.agent, "dog-reviewer-v010");
+    assert.deepEqual(f.agents.author!.model, selected);
+    assert.equal(f.switches.filter(item => "model" in item).length, previous);
+  } finally { await f.dispose(); }
 });
 
 for (const mode of ["cancel", "agent-change", "native-launch-error", "background-failed", "permission-failed"] as const) {
@@ -320,7 +473,8 @@ test("native correction session grants preserve explicit session denies without 
     f.agents.author!.permissions = prior;
     const prepared = await f.tool("root", "repair_review");
     await f.before("root", "subagent", f.task(prepared.task));
-    assert.deepEqual(f.rules.at(-1)!.permissions.at(-1), prior[0], "native last-match semantics retain user denial");
+    assert.deepEqual(f.agents.author!.permissions, prior, "session denies never get replaced");
+    assert.equal(evaluate("edit", "result.txt", f.rules.at(-1)!.permissions, prior).effect, "deny", "native last-match semantics retain user denial");
     assert.deepEqual(f.agents.final!.permissions, undefined);
     await f.tool("root", "cancel_operator", { reason: "explicit-cancellation" });
     assert.deepEqual(f.agents.author!.permissions, prior);

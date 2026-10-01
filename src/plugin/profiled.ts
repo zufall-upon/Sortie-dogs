@@ -14,13 +14,13 @@ import { BUILT_IN_MODEL_CATALOG, type CatalogModel } from "./model-routing.js";
 import { goalFingerprint } from "../core/goal-bound.js";
 import { decoratePreviewHeadings, returnReportPanel } from "./receipt-presentation.js";
 import { sanitizeTerminalReport, terminalRunOutcome } from "./run-metrics.js";
-import { normalizeCommand } from "./gate.js";
+import { normalizeCommand, reviewerCorrectionShellAllowed } from "./gate.js";
 import { normalizeExecutionScope, normalizeManifestScope, normalizeRelativePath } from "../core/path.js";
 import { OperatorMissionRuntime, missionAcceptanceSummary, missionPacket, missionPlan, missionReviewAccepted, missionReviewIndependent, missionReviewScope, missionReviewTask,
   missionCommandOutcome, missionConversationContext, missionExecutionStatus, missionValidationCommand, missionReviewTraces, missionReviewVerdict, type OperatorMission } from "../core/operator-mission.js";
 import { publishMissionProgress } from "./mission-progress.js";
 import { completedMissionReviewPrompts, initialMissionReviewPrompt, missionReviewBaseline, missionReviewSource,
-   observedMissionValidation, observedMissionValidationSummary, missionReviewValidation } from "./mission-review.js";
+   observedMissionValidation, observedMissionValidationSummary, missionReviewValidation, reviewerCorrectionValidation } from "./mission-review.js";
 import { missionLocations, missionLocationPacket } from "./mission-location.js";
 import { prepareValidationScratch } from "./validation-scratch.js";
 import { SOURCE_REVIEW_RISK_TAGS } from "../core/consultation.js";
@@ -228,10 +228,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const result = payload(await session("messages", { path: { id }, query: { directory: input.directory } }));
       return Array.isArray(result) ? result.filter(record) : [];
     }
-    async function acceptanceValidationObservation(validation: readonly string[], child: string | null) {
+    async function acceptanceValidationObservation(validation: readonly string[], child: string | null, notBefore?: number) {
       if (!child) throw new Error("native-worker-history-session-unavailable");
       return observedMissionValidationSummary(validation, child, typeof nativeSession?.messages === "function"
-        ? () => session("messages", { path: { id: child }, query: { directory: input.directory } }) : undefined);
+        ? () => session("messages", { path: { id: child }, query: { directory: input.directory } }) : undefined, notBefore);
     }
     async function reviewMessages(id: string): Promise<readonly Record<string, unknown>[]> {
       const result = payload(await session(typeof nativeSession?.reviewMessages === "function" ? "reviewMessages" : "messages",
@@ -458,6 +458,13 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             /^task_id: (.+)$/m.exec(unit.task.prompt)?.[1] === taskID);
       },
       ownsReviewerCorrection: async child => !!await reviewerCorrection(child),
+      reviewerCorrectionValidation: async (root, callID, child, startedAt) => {
+        const run = await operators.read(root);
+        const unit = run?.units.find(item => item.callID === callID && item.childSessionID === child && item.reviewerCorrection?.author === child);
+        if (!unit) return undefined;
+        try { return reviewerCorrectionValidation(unit.unit.validation, child, await messages(child), startedAt); }
+        catch { return { ready: false, reason: "mission-review-correction-validation-history-unavailable" }; }
+      },
       ownsReviewerCorrectionDispatch: async (root, callID, taskID) => {
         const run = await operators.read(root), mission = await missions.read(root);
         return !!run && mission?.runID === run.runID && !["completed", "cancelled"].includes(mission.phase) &&
@@ -548,7 +555,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         if (!root) return false;
         const mission = await missions.read(root), run = await operators.read(root);
         return mission?.runID === run?.runID && run !== undefined && run.phase === "running" &&
-          run.units.some(unit => unit.status === "running" && unit.childSessionID === child);
+          run.units.some(unit => unit.status === "running" && unit.childSessionID === child && !unit.reviewerCorrection);
       },
       assertMissionWrite: async (child, paths) => {
         const root = await rootFor(child);
@@ -2098,7 +2105,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             const terminal = await missionWorkerTerminalProof(root, currentMission, run, attempt);
             if (terminal.status !== "ready") throw new Error(`mission-review-terminal-unreconciled:${terminal.reason}`);
           }
-          if (run.phase !== "awaiting-acceptance") throw new Error("mission-review-awaits-unit-validation");
+           if (run.phase !== "awaiting-acceptance") throw new Error("mission-review-awaits-unit-validation");
+           await assertCorrectionValidation(run);
           // A source fingerprint alone would let a fresh Reviewer assess an edit against an old
           // Worker's successful check. Reuse the completion snapshot instead of adding a check run.
           const readiness = await control!.completionReadiness(root);
@@ -2139,7 +2147,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           const observedValidation = risk.length === 0 ? [] : await Promise.all(run.units.filter(unit => unit.unit.validation.length > 1).map(async unit => ({
             unit_id: unit.unit.id,
             ...observedMissionValidation(unit.unit.validation, unit.childSessionID,
-              unit.childSessionID ? await messages(unit.childSessionID).catch(() => []) : []),
+               unit.childSessionID ? await messages(unit.childSessionID).catch(() => []) : [],
+               unit.reviewerCorrection ? Date.parse(unit.reviewerCorrection.admittedAt ?? run.createdAt) : undefined),
           })));
           const task = risk.length === 0 ? null : { subagent_type: profileAgent(profile, "dog-reviewer"),
             description: `🔎 ${run.units[0]!.unit.title}`, prompt: [
@@ -2178,8 +2187,17 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             : { status: "skipped-low-risk" });
         });
       } };
+    async function assertCorrectionValidation(run: OperatorState) {
+      for (const unit of run.units) {
+        if (!unit.reviewerCorrection || !unit.childSessionID) continue;
+        const checked = reviewerCorrectionValidation(unit.unit.validation, unit.childSessionID, await messages(unit.childSessionID),
+          Date.parse(unit.reviewerCorrection.admittedAt ?? run.createdAt));
+        if (!checked.ready) throw new Error(checked.reason);
+      }
+    }
     async function assertMissionReview(root: string, mission: OperatorMission) {
       const run = await operators.required(root), review = mission.review;
+      await assertCorrectionValidation(run);
       if (!review || review.runID !== run.runID || !missionReviewAccepted(review) ||
           (!missionReviewIndependent(mission, review.child) && review.verdict !== "skipped-low-risk") ||
           review.source !== (await missionReviewSource(input.directory, run, review.evidence, mission.reviewBaseline, mission.reviewScope)).fingerprint) throw new Error("mission-review-required-or-stale");
@@ -2282,11 +2300,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     const hooks: OpenCodeHooks & { config(config: Record<string, unknown>): Promise<void> } = {
       reviewerCorrectionScope: async id => {
         const correction = await reviewerCorrection(id);
-        return correction ? { write: correction.unit.unit.write, generation: correction.run.generation } : undefined;
+        return correction ? { write: correction.unit.unit.write, validation: correction.unit.unit.validation, generation: correction.run.generation } : undefined;
       },
       reviewerCorrectionSessions: async id => {
         // Cleanup follows native lineage rather than active role authority: stop/agent change
-        // deliberately revoke rootFor before the adapter restores the former session rules.
+        // deliberately revoke rootFor before the adapter restores the original native Reviewer profile.
         for (let depth = 0; depth < 4; depth++) {
           const mission = await missions.read(id);
           if (mission) return [...new Set(mission.corrections?.map(item => item.author) ?? [])];
@@ -2496,6 +2514,12 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           }
         }
         const args = record(output.args) ? output.args : {};
+        if (who.role === "dog-reviewer" && writer && ["bash", "shell", "powershell", "pwsh"].includes(request.tool.toLowerCase())) {
+          const correction = (await reviewerCorrection(request.sessionID))!;
+          if (typeof args.command !== "string" || !reviewerCorrectionShellAllowed(args.command, correction.unit.unit.validation)) {
+            throw new Error("mission-review-correction-shell-boundary");
+          }
+        }
         const repairAccess = writer ? await operators.repairValidationAccess(root, request.sessionID) : null;
         if (repairAccess !== null) {
           const bind = profileTool(profile, "sortie_bind_write_gate"), release = profileTool(profile, "sortie_release_write_gate");
