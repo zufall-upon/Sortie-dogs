@@ -20,7 +20,7 @@ import { OperatorMissionRuntime, missionAcceptanceSummary, missionPacket, missio
   missionCommandOutcome, missionConversationContext, missionExecutionStatus, missionValidationCommand, missionReviewTraces, missionReviewVerdict, type OperatorMission } from "../core/operator-mission.js";
 import { publishMissionProgress } from "./mission-progress.js";
 import { completedMissionReviewPrompts, initialMissionReviewPrompt, missionReviewBaseline, missionReviewSource,
-   observedMissionValidation, observedMissionValidationSummary } from "./mission-review.js";
+   observedMissionValidation, observedMissionValidationSummary, missionReviewValidation } from "./mission-review.js";
 import { missionLocations, missionLocationPacket } from "./mission-location.js";
 import { prepareValidationScratch } from "./validation-scratch.js";
 import { SOURCE_REVIEW_RISK_TAGS } from "../core/consultation.js";
@@ -2030,7 +2030,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             ...(phase === "verification" ? ["Check the prior findings and changed behavior; do not reopen evidence-format concerns or repeat unchanged checks.",
               `prior_review: ${mission.review?.result ?? "See current source and requirements."}`] : []),
             `manifest: ${JSON.stringify(run.units.map(unit => unit.unit))}`, `sourceFingerprint: ${source.fingerprint}`,
-            `validation: ${JSON.stringify(run.units.map(unit => ({ command: unit.unit.validation, evidence: unit.evidence })))}`,
+            "Validation below preserves exact observed commands, outcomes, coverage and candidate identity. Full snapshot recipes remain at details_ref; the host checks freshness. Read them only for a concrete evidence question, not routine re-verification.",
+            `validation: ${JSON.stringify(missionReviewValidation(run, operators.statePath(root)))}`,
             ...(observedValidation.length ? [
               "Observed native validation history (existing Worker tool records, not new checks). Use recorded outcomes directly; absent history fields are not proof that a check failed or was skipped. The host separately checks current candidate validation at completion.",
               `observed_validation: ${JSON.stringify(observedValidation)}`,

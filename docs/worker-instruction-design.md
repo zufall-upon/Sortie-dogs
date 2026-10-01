@@ -47,3 +47,11 @@ This proposal serves the three product principles:
 The measured baseline has five startup calls and 12.68 seconds between the first handoff read and the first repository operation. The target is one handoff call; the entire interval is not assumed recoverable. This does not explain the remaining 57 model requests, implementation quality, or independent Review duration.
 
 Native hook/binding regressions, independent SourceReview, full tests and Windows tests passed. The installed package completed a small public fixture in 3m05.173s with one startup handoff read, no explicit bind, formal check PASS, requested commit, independent Review PASS and successful receipt. That fixture establishes host integration only. Original Anko completion remains unproven until its original requirements, formal checks, independent Review and successful receipt all complete.
+
+## Review handoff: execution facts, not snapshot internals
+
+The saved second Anko Review prompt contained 47,028 characters, including 20,755 characters of validation JSON. One evidence record's `protected_binding` accounted for 18,076 characters of paths and freshness environment. These are host-owned comparison inputs, not instructions the Reviewer needs to interpret routinely.
+
+The Reviewer-facing validation projection preserves exact commands, exits, outcomes, timestamps, coverage, measurement, source/candidate identity and proof scope. It replaces the full snapshot recipe with its manifest reference and an explicit reference to the persisted Operator state, run and unit. Full evidence remains unchanged and available for concrete questions. Host freshness and acceptance checks still use the original evidence.
+
+This is a deterministic display projection, not a model-authored evidence summary, a new proof gate or a cached Review verdict. It must not omit original requirements, relevant source, prior findings or actual validation failures. Verify those invariants against saved real prompts and the full validation/Review/receipt path; display-size reduction alone does not prove faster completion.

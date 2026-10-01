@@ -18,6 +18,24 @@ import { currentSnapshotProtection, snapshotScratchExclusion } from "./protected
 const exec = promisify(execFile);
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 
+/** Reviewer-facing evidence preserves execution/coverage; the host retains the full snapshot recipe. */
+export function missionReviewValidation(run: OperatorState, statePath: string) {
+  return run.units.map(unit => ({
+    unit_id: unit.unit.id,
+    command: unit.unit.validation,
+    evidence: unit.evidence.map(({ protected_binding, ...evidence }) => ({
+      ...evidence,
+      ...(protected_binding ? { protected_binding_ref: {
+        manifest_path: protected_binding.manifest_path,
+        manifest_hash: protected_binding.manifest_hash,
+        source_policy: protected_binding.source_policy,
+      } } : {}),
+    })),
+    details_ref: { path: statePath, run_id: run.runID, unit_id: unit.unit.id,
+      field: "units[].evidence", omitted: "host snapshot recipe: source/candidate paths and freshness environment" },
+  }));
+}
+
 /** Show native command outcomes to the Reviewer without turning non-criterion checks into acceptance evidence. */
 export function observedMissionValidation(validation: readonly string[], childSessionID: string | null,
   history: readonly Record<string, unknown>[]): {

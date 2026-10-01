@@ -142,9 +142,19 @@ for (const verdict of ["PASS", "FINDINGS", "EVIDENCE_GAPS"] as const) test(`Fast
     assert.equal(status.task, undefined, "a successful Fast unit must not prompt a Coordinator dispatch");
     assert.match(status.next_action, /Fast-lane.*review_mission/);
     const historyReadsBeforeReview = workerHistoryReads;
+    const storedEvidence = (await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).units.map(unit => unit.evidence);
     const review = JSON.parse(await hooks.tool!.sortie_v010_review_mission.execute({ risk_tags: ["public-logic"],
       ...(verdict === "EVIDENCE_GAPS" ? {} : { traces: ["R1: result.txt has ready newline; node check.mjs exited 0"] }) }, { sessionID: "root" }));
     const reviewPrompt = (await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).review?.task?.prompt ?? "";
+    const reviewValidation = JSON.parse(reviewPrompt.split("\n").find(line => line.startsWith("validation: "))!.slice("validation: ".length));
+    for (const [index, unit] of reviewValidation.entries()) {
+      assert.equal(unit.details_ref.path, new OperatorRuntime(directory, V010_RUNTIME_PROFILE).statePath("root"));
+      assert.deepEqual(unit.evidence.map(({ protected_binding_ref, ...evidence }: Record<string, unknown>) => evidence),
+        storedEvidence[index]!.map(({ protected_binding, ...evidence }) => evidence), "all execution/coverage/identity facts remain visible");
+      assert.ok(unit.evidence.every((evidence: Record<string, unknown>) => !Object.hasOwn(evidence, "protected_binding")));
+    }
+    assert.deepEqual((await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).units.map(unit => unit.evidence),
+      storedEvidence, "display projection must not change authoritative validation evidence");
     assert.match(reviewPrompt, /Report FINDINGS only for concrete major or medium defects with a material impact/u);
     assert.match(reviewPrompt, /Do not turn minor style, wording, optional improvements or speculative edge cases into FINDINGS or EVIDENCE_GAPS/u);
     if (verdict === "PASS") {
