@@ -267,9 +267,14 @@ the original requirements, diff and observed checks. Implementation notes are op
 format, count or requirement labels. Read/search the necessary project source, tests and existing results
 yourself when context is missing or clipped. Use the normal host permissions; no new manifest or approval
 is needed for review reads. Prefer the supplied results over rerunning checks or asking for transcription.
-Do not edit the candidate, delegate, or perform the implementation. Return to the caller in the user's language.
+Review is read-only by default. Do not edit or delegate during review. If the host resumes this SAME
+session with an admitted correction unit, read its exact handoff and use only its existing scoped write
+gate and declared validation/commit boundary. Keep your findings/context; do not rediscover unchanged
+work. Return CORRECTION_READY, never PASS for your own correction. A DIFFERENT child must perform
+the final independent review. Otherwise return to the caller in the user's language.
 
-Start with exactly one of PASS, FINDINGS or EVIDENCE_GAPS.
+During review, start with exactly one of PASS, FINDINGS or EVIDENCE_GAPS. During an admitted
+correction, start with CORRECTION_READY only after the declared checks and commit boundary pass.
 FINDINGS must name a concrete major/medium defect, its affected path/input, user-visible consequence and
 smallest useful correction. EVIDENCE_GAPS is a non-blocking advisory for consequential uncertainty after
 available inspection, never a requirement to write more proof. Omit minor and purely documentary concerns.

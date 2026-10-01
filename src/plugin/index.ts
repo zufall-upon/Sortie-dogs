@@ -194,6 +194,8 @@ export interface OpenCodePluginInput {
   returnReportTransport?: "tool-result";
   /** Native background Job ownership, persisted by the V2 adapter. */
   nativeBackground?: { awaiting(sessionID: string): Promise<boolean> };
+  /** V2 adapter can project and restore native session-scoped correction permissions. */
+  reviewerCorrectionPermissions?: boolean;
   /** The host SDK client. Absent in hosts that construct the plugin without one. */
   client?: SessionMessageReader & RunMetricsClient & ContinuationClient & OpenCodeModelAvailabilityClient & {
     app?: {
@@ -222,6 +224,10 @@ export interface OpenCodeEvent {
 }
 
 export interface OpenCodeHooks {
+  /** Native session permission projection for one running, durable Reviewer correction. */
+  reviewerCorrectionScope?: (sessionID: string) => Promise<{ write: readonly string[]; generation: number } | undefined>;
+  /** Durable correction authors for cleanup, including after cancellation or agent change. */
+  reviewerCorrectionSessions?: (sessionID: string) => Promise<readonly string[]>;
   /** Internal adapter transport; retains the existing profile owner across reload. */
   backgroundOwner?: (callID: string, restore?: Record<string, unknown>) => Record<string, unknown> | undefined;
   event?: (input: { event: OpenCodeEvent }) => Promise<void>;
@@ -7297,6 +7303,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         const taskRole = isRecord(output.args) && typeof output.args.subagent_type === "string"
           ? output.args.subagent_type
           : undefined;
+        const correctionDispatch = toolInput.tool === "task" && taskRole === REVIEWER_AGENT && isRecord(output.args) &&
+          await input.runtimeBridge?.ownsReviewerCorrectionDispatch?.(toolInput.sessionID, toolInput.callID,
+            handoffValue(handoffEntries(String(output.args.prompt ?? "")), ["task_id"]) ?? "") === true;
+        const implementationDispatch = taskRole !== undefined && (IMPLEMENTATION_AGENTS.has(taskRole) || correctionDispatch);
         const role = consultationAgent(taskRole);
         const consultationFallbackAuthorized = role !== undefined &&
           consultationRetries.get(consultationRetryKey(toolInput.sessionID, role))?.phase === "pending";
@@ -7306,7 +7316,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         let machineBoundCoordinator: ParallelDispatchCoordinator | undefined;
         let machineBoundSnapshot: ParallelDispatchSnapshot | undefined;
         let validatedRootAcceptance: AcceptanceContinuityLedger | undefined;
-        if (toolInput.tool === "task" && taskRole !== undefined && IMPLEMENTATION_AGENTS.has(taskRole) &&
+        if (toolInput.tool === "task" && implementationDispatch &&
           isRecord(output.args)) {
           await ensureLoaded();
           const assetVersionStatus = await pinAssetVersion(toolInput.sessionID);
@@ -7594,7 +7604,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
             counts.dispatched - currentContribution, counts.running - currentContribution, counts.total);
           parallelWorkerAuthorized = true;
         }
-        if (toolInput.tool === "task" && taskRole !== undefined && IMPLEMENTATION_AGENTS.has(taskRole) &&
+        if (toolInput.tool === "task" && implementationDispatch &&
           isRecord(output.args)) {
           // Declaration admission precedes routing state and reservation. A concrete field denial can
           // therefore be repaired by a corrected Task call in this same coordinator turn.
@@ -7604,7 +7614,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         // Accounting is provisional until this dispatch is fully admitted. A later denial such as a
         // budget stop must release the serial slot, or no worker could be dispatched or resumed again.
         const workerAccounting = fastLane.snapshotWorkerAccounting(toolInput.sessionID);
-        if (toolInput.tool === "task" && isRecord(output.args) && output.args.subagent_type === REVIEWER_AGENT &&
+        if (!correctionDispatch && toolInput.tool === "task" && isRecord(output.args) && output.args.subagent_type === REVIEWER_AGENT &&
             typeof output.args.prompt === "string" && /^\s*review_phase:\s*(verification|final)\s*$/mu.test(output.args.prompt) &&
             !fastLane.hasReviewLineage(toolInput.sessionID, output.args.prompt) && isCoordinatorSession(toolInput.sessionID)) {
           const reviewGoal = await goalLedger(toolInput.sessionID).then(ledger => ledger.readGoal());
@@ -7630,7 +7640,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           prompts.push(...await input.runtimeBridge?.completedReviewPrompts?.(toolInput.sessionID, output.args.prompt) ?? []);
           fastLane.restoreReviewLineage(toolInput.sessionID, output.args.prompt, prompts);
         }
-        const resumedWorkerSessionID = fastLane.beforeTool(toolInput.sessionID, toolInput.tool, output.args, {
+        // Account the correction as implementation, without changing the native agent or Task input.
+        const accountingArgs = correctionDispatch && isRecord(output.args) ? { ...output.args, subagent_type: SERIAL_WORKER_AGENT } : output.args;
+        const resumedWorkerSessionID = fastLane.beforeTool(toolInput.sessionID, toolInput.tool, accountingArgs, {
           readonlyDiagnosisAuthorized: readonlyDiagnosis,
           consultationFallbackAuthorized,
           parallelWorkerAlreadyBound,
@@ -7645,7 +7657,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           throw new Error("operator-contract-repair-resume-identity-mismatch");
         }
         try {
-        if (toolInput.tool === "task" && taskRole !== undefined && IMPLEMENTATION_AGENTS.has(taskRole) &&
+        if (toolInput.tool === "task" && implementationDispatch &&
           isRecord(output.args) && !repairResume) {
           await reserveGoalDispatch(toolInput.sessionID, toolInput.callID,
             typeof output.args.prompt === "string" ? output.args.prompt : "");
@@ -7666,7 +7678,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           }
           if (!repairResume) recoverableWorkerChildren.delete(resumedWorkerSessionID);
         }
-        if (toolInput.tool === "task" && taskRole !== undefined && IMPLEMENTATION_AGENTS.has(taskRole)) {
+        if (toolInput.tool === "task" && implementationDispatch) {
           if (readonlyDiagnosis && isRecord(output.args)) await claimDiagnosisTask(toolInput.sessionID, toolInput.callID, output.args, true);
           bootstrapRequired = false;
           bootstrapCompleted = true;
@@ -8398,7 +8410,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         cost_status: state.consumed_cost_usd === null ? "unknown-usage" : reserved > 0 ? "in-flight-not-final" : "settled",
         cost_source: "native-usage-price-table",
         cost_scope: "worker-only", campaign_remaining_usd: null,
-        cost_note: "Worker token-price estimates from complete native usage; missing requests remain unknown and are reconciled on later status. Excludes orchestration/review and external campaign spend. Zero settled cost does not mean free execution." };
+        cost_note: "Implementation token-price estimates from complete native usage; scoped Reviewer corrections use this same Worker-unit ledger. Missing requests remain unknown and are reconciled on later status. Excludes orchestration/read-only review and external campaign spend. Zero settled cost does not mean free execution." };
       return snapshot;
     },
     extendMissionUnitBudget: (root, maxUnits) => serializeChatTransition(root, async () => {
@@ -8424,6 +8436,18 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       return { status: changed ? "extended" : "unchanged", max_units: updated.budget!.max_units, consumed_units: updated.consumed_units,
         reserved_units: reserved, remaining_units: updated.budget!.max_units - updated.consumed_units - reserved };
     }),
+    restoreReviewerCorrectionChild: async (root, child, callID, taskID) => {
+      if (!await input.runtimeBridge?.ownsReviewerCorrection?.(child) ||
+          !await input.runtimeBridge?.ownsReviewerCorrectionDispatch?.(root, callID, taskID)) throw new Error("mission-review-correction-grant-stale");
+      if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) throw new Error("operator-coordinator-required");
+      const native = await hostSessionIdentity(child);
+      if (native?.agent !== REVIEWER_AGENT || native.parentID !== root) throw new Error("mission-review-correction-child-mismatch");
+      if (activeSessionStatus(child) === "active") return;
+      rememberParent(child, root);
+      sessionRoots.set(child, root);
+      sessionTaskIDs.set(child, taskID);
+      activateSession(child);
+    },
       missionWorkerTerminal: async (root, terminal, writeScopes) => {
         const childSessionID = terminal.childSessionID;
         const snapshot = await (await goalLedger(root)).readGoal();

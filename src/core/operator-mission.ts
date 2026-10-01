@@ -45,7 +45,7 @@ export interface MissionAttempt {
   predecessorAttemptID?: string | null;
   /** Fingerprint of the settled scoped candidate against which a later Rescue is proposed. */
   candidateID?: string;
-  kind: "implementation" | "normal_remediation" | "astra_rescue";
+  kind: "implementation" | "normal_remediation" | "astra_rescue" | "reviewer_correction";
   status: "pending" | "dispatched" | "succeeded" | "failed" | "cancelled" | "unconfirmed";
   callID?: string;
   childSessionID?: string;
@@ -136,6 +136,10 @@ export interface OperatorMission {
     initialPrompt?: string;
     /** Observed evidence-only reviews; reporting only, never an acceptance threshold. */
     evidenceGapReviews?: number };
+  /** Retained independently of later review generations; authors cannot approve their own correction. */
+  corrections?: { author: string; reviewIdentity: string; priorRunID: string; runID: string;
+    priorSource: string; findings: string; initialPrompt: string; baseline?: string;
+    status: "prepared" | "running" | "ready" | "failed" | "cancelled" }[];
 }
 
 export const MISSION_CONSULTATION_LIMIT = 32;
@@ -212,6 +216,9 @@ export class OperatorMissionRuntime {
   constructor(readonly projectRoot: string, readonly profile: RuntimeProfile) {}
   private file(root: string, suffix = ""): string {
     return join(this.projectRoot, this.profile.stateDirectory, "missions", `${digest(root)}${suffix}.json`);
+  }
+  correctionReference(root: string, reviewIdentity: string): string {
+    return JSON.stringify({ path: this.file(root), field: "corrections[]", review_identity: reviewIdentity });
   }
   private async load<T>(file: string): Promise<T | undefined> {
     try { return JSON.parse(await readFile(file, "utf8")) as T; }
@@ -585,6 +592,10 @@ export async function missionAcceptanceSummary(mission: OperatorMission, run: Op
     interpretation: "Compare original requests with the submitted candidate and actual evidence. Historical PASS is not current PASS. Inspect concrete gaps, not routine archive searches or full source rereads. Existing completion and Review guards still apply." };
 }
 
+export function missionReviewIndependent(mission: OperatorMission, child: string | undefined): boolean {
+  return child !== undefined && !(mission.corrections ?? []).some(correction => correction.author === child);
+}
+
 export function missionPacket(mission: OperatorMission, run?: OperatorState): Record<string, unknown> {
   const predecessor = run && mission.runID !== run.runID && (mission.supersededRunID === run.runID || run.phase === "cancelled") ? run : undefined;
   if (predecessor) run = undefined;
@@ -598,9 +609,9 @@ export function missionPacket(mission: OperatorMission, run?: OperatorState): Re
       note: "Historical results and spend are retained; they do not complete the current requirements." } } : {}),
      requirements: mission.requirements, original_request_refs: mission.requests.map(item => `user:${item.id}`),
     launch_conditions: mission.launchConditions ?? [], prohibited_write: mission.prohibitedWrite ?? [],
-    accounting_scope: "Worker units are not benchmark attempts. Host budget is Worker-only; orchestration, Review and external campaign costs are excluded. Launch caps are fixed conditions, not a known campaign remainder.",
+     accounting_scope: "Implementation units (Worker or scoped Reviewer correction) are not benchmark attempts. Host budget uses the existing Worker-unit ledger; orchestration, read-only Review and external campaign costs are excluded. Launch caps are fixed conditions, not a known campaign remainder.",
     submission: mission.submission, progress: mission.progress, consultations: mission.consultations ?? [],
-    attempts: mission.attempts ?? [], ...(mission.rescue ? { rescue: mission.rescue } : {}),
+    attempts: mission.attempts ?? [], corrections: (mission.corrections ?? []).map(({ findings: _findings, initialPrompt: _prompt, ...item }) => item), ...(mission.rescue ? { rescue: mission.rescue } : {}),
     operation: { kind: mission.kind ?? "implementation", status: missionExecutionStatus(mission),
       ...(mission.execution ? { ...mission.execution } : {}) },
     execution_summary: { completed_units: run?.units.filter(unit => unit.status === "succeeded").length ?? 0,
@@ -626,6 +637,8 @@ export function missionPacket(mission: OperatorMission, run?: OperatorState): Re
     next_action: mission.phase === "completed" ? "Mission completed. Report the accepted result and retained review gaps; no further dispatch or completion call is needed."
       : mission.phase === "submitted" && mission.submission?.status === "ready"
        ? "Operator: use acceptance_summary to compare the submitted candidate with the verbatim original requests and actual evidence, inspect concrete gaps only, then complete_mission if satisfied. Do not routinely search archives or reread all source. Historical PASS is not current PASS. Report remaining evidence gaps; they are not a review PASS."
+      : run?.phase === "awaiting-acceptance" && mission.corrections?.some(item => item.runID === run.runID && item.status === "ready") && !reviewAccepted
+        ? "Correction ready; pending independent review. Call review_mission (or dispatch its current pending Task) for a DIFFERENT child to compare the correction and relevant impact with the retained findings. Do not start a fresh Worker or restart unchanged review/checks. Correction is not PASS."
       : mission.kind === "operation" && operationStatus === "running"
         ? "The declared operation is already running. Inspect its native shell/progress; do not start another Worker or run. Wait for a terminal result, or report the existing run as blocked if its completion cannot be observed."
       : run?.phase === "awaiting-decision" ? (run.units.some(unit => unit.dispatchDenial)

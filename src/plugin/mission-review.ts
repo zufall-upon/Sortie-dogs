@@ -191,7 +191,7 @@ export async function completedMissionReviewPrompts(mission: OperatorMission | u
 
 /** Pin all scoped tracked/untracked source bytes, including deletions; display a bounded excerpt only. */
 export async function missionReviewSource(directory: string, run: OperatorState,
-  evidence: readonly MissionEvidenceExcerpt[] = [], baseline?: string, priorScope?: MissionReviewScope): Promise<{
+  evidence: readonly MissionEvidenceExcerpt[] = [], baseline?: string, priorScope?: MissionReviewScope, displayBaseline = baseline): Promise<{
     fingerprint: string; excerpt: string; truncatedEvidence: string[]; truncatedSource: string[] }> {
   const scope = missionReviewScope(priorScope, run);
   const bindings = scope.validationBindings ?? [];
@@ -306,20 +306,20 @@ export async function missionReviewSource(directory: string, run: OperatorState,
   const omitted: string[] = [];
   const unreadable: string[] = [];
   let diff = "";
-  if (local.length && baseline) {
-    // HEAD-only diffs are empty once the Worker commits. Show bounded changes from the
-    // mission's original HEAD across all replans, not arbitrary alphabetical repository files.
-    const changed = (await git(["diff", "--name-only", "-z", "--no-ext-diff", baseline, "--", ...scopes]))
+  if (local.length && displayBaseline) {
+    // HEAD-only diffs are empty once the author commits. Display the original mission delta
+    // or the focused correction delta without changing the full fingerprint basis.
+    const changed = (await git(["diff", "--name-only", "-z", "--no-ext-diff", displayBaseline, "--", ...scopes]))
       .split("\0").filter(path => path && !excluded(path));
     const shown = changed.slice(0, 16);
-    const heading = changed.length ? `Changed since mission baseline (${baseline}; ${changed.length} paths):\n` : "";
+    const heading = changed.length ? `Changed since ${displayBaseline === baseline ? "mission" : "correction"} baseline (${displayBaseline}; ${changed.length} paths):\n` : "";
     const headers = shown.map(path => `\n--- changed: ${path} ---\n`);
     const available = Math.max(0, 24_000 - Buffer.byteLength(selected + heading) -
       headers.reduce((size, title) => size + Buffer.byteLength(title), 0) - 500);
     const allowance = shown.length ? Math.min(3_000, Math.floor(available / shown.length)) : 0;
     diff = heading;
     for (const [index, path] of shown.entries()) {
-      const patch = await git(["diff", "--no-ext-diff", "--no-textconv", baseline, "--", path]);
+      const patch = await git(["diff", "--no-ext-diff", "--no-textconv", displayBaseline, "--", path]);
       const bytes = Buffer.from(patch);
       if (allowance <= 0) { omitted.push(path); continue; }
       diff += `${headers[index]}${bytes.subarray(0, allowance).toString("utf8")}`;

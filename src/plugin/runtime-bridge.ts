@@ -47,6 +47,9 @@ export interface RuntimeBridge {
     command: string): Promise<boolean>;
   /** A mission's hash-pinned Task has already passed durable run/acceptance admission. */
   ownsMissionDispatch?(rootSessionID: string, callID: string, taskID: string): Promise<boolean>;
+  /** Only an exact admitted correction Task is an implementation dispatch despite its native Reviewer role. */
+  ownsReviewerCorrectionDispatch?(rootSessionID: string, callID: string, taskID: string): Promise<boolean>;
+  ownsReviewerCorrection?(childSessionID: string): Promise<boolean>;
   /** Durable operator dispatch identity survives adapter reload and missed after hooks. */
   recoverMissionDispatch?(rootSessionID: string, taskID: string): Promise<{
     callID: string; childSessionID?: string; cancelled: boolean; nativeOutcome?: "completed" | "failed";
@@ -122,6 +125,7 @@ export interface RuntimeBridge {
     completionReadiness(rootSessionID: string): Promise<import("./goal-completion.js").CompletionReadiness>;
     missionWorkerTerminal(rootSessionID: string, terminal: MissionWorkerTerminalRecord,
       writeScopes: readonly string[]): Promise<{ ready: boolean; reason?: string }>;
+    restoreReviewerCorrectionChild(rootSessionID: string, childSessionID: string, callID: string, taskID: string): Promise<void>;
     expandMissionWriteGate(childSessionID: string, paths: readonly string[]): Promise<void>;
     completeRoot(rootSessionID: string, acceptanceFingerprint: string): Promise<{
       status: "succeeded" | "awaiting-evidence";

@@ -7,6 +7,8 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { V010_RUNTIME_ASSET_VERSION } from "../asset-version.js";
 import { NativeBackgroundLifecycle } from "./native-background.js";
+import { isAbsolute, relative, resolve, sep } from "node:path";
+import { normalizeManifestScope } from "../core/path.js";
 
 // Capture once when this module evaluates. A later package replacement must not make an old
 // process report the replacement's bytes as its loaded adapter.
@@ -23,6 +25,7 @@ const loadedAdapter = Object.freeze({ adapter_url: import.meta.url,
 const childSelectionKey = (id: string) => `v2-child-model-selection:${id}`;
 
 type JsonObject = Record<string, unknown>;
+type NativePermissionRule = { action: string; resource: string; effect: "allow" | "deny" | "ask" };
 type Registration = { dispose(): Promise<void> | void };
 
 interface V2ToolEditor {
@@ -74,6 +77,7 @@ export interface OpenCodeV2Context {
     remove?(key: string): Promise<void>;
   };
   readonly permission: {
+    rules?(input: { sessionID: string; permissions: NativePermissionRule[] }): Promise<unknown>;
     hook(name: "evaluate", callback: (event: JsonObject) => Promise<void> | void): Promise<Registration>;
   };
   readonly provider?: { list(input?: unknown): Promise<unknown> };
@@ -381,10 +385,60 @@ export function createV2ReturnReportFinalizer(context: OpenCodeV2Context, hooks:
   };
 }
 
+/** Project one exact running correction grant; restore original session rules on every terminal path. */
+export async function syncReviewerCorrectionPermissions(context: OpenCodeV2Context, hooks: OpenCodeHooks, sessionID: string): Promise<void> {
+  const lanes = correctionPermissionLanes.get(context) ?? new Map<string, Promise<void>>();
+  correctionPermissionLanes.set(context, lanes);
+  const operation = (lanes.get(sessionID) ?? Promise.resolve()).catch(() => undefined).then(() =>
+    syncReviewerCorrectionPermissionsOnce(context, hooks, sessionID));
+  lanes.set(sessionID, operation);
+  try { await operation; }
+  finally { if (lanes.get(sessionID) === operation) lanes.delete(sessionID); }
+}
+const correctionPermissionLanes = new WeakMap<OpenCodeV2Context, Map<string, Promise<void>>>();
+
+async function syncReviewerCorrectionPermissionsOnce(context: OpenCodeV2Context, hooks: OpenCodeHooks, sessionID: string): Promise<void> {
+  const scope = await hooks.reviewerCorrectionScope?.(sessionID);
+  const key = `v2-reviewer-correction-permissions:${sessionID}`;
+  const saved = await context.storage?.get(key);
+  if (!scope && !record(saved)) return;
+  if (!context.permission.rules || !context.storage) throw new Error("native-reviewer-correction-permissions-unavailable");
+  const prior = record(saved) && Array.isArray(saved.permissions) ? saved.permissions as NativePermissionRule[] : undefined;
+  if (!scope) {
+    await context.permission.rules({ sessionID, permissions: prior ?? [] });
+    await context.storage.remove?.(key);
+    return;
+  }
+  const info = prior ? undefined : await context.session.get({ sessionID });
+  const permissions = prior ?? (record(info) && Array.isArray(info.permissions) ? info.permissions as NativePermissionRule[] : []);
+  await context.storage.set(key, { permissions, generation: scope.generation });
+  const grants: NativePermissionRule[] = [
+    ...["shell", "execute", "sortie_v010_bind_write_gate", "sortie_v010_release_write_gate", "sortie_v010_operator_status"].map(action =>
+      ({ action, resource: "*", effect: "allow" as const })),
+    ...scope.write.flatMap(path => {
+      const scope = normalizeManifestScope(path);
+      const absolute = resolve(context.location.directory, scope.path);
+      const local = relative(context.location.directory, absolute);
+      // Native edit checks internal paths relative to Location, external paths absolutely.
+      const inside = local !== ".." && !local.startsWith(`..${sep}`) && !isAbsolute(local);
+      const paths = [...new Set([...(inside ? [local || "."] : []), absolute].map(path => path.replaceAll("\\", "/")))];
+      return paths.flatMap(path => [path, ...(scope.directory ? [`${path}/**`] : [])])
+        .map(resource => ({ action: "edit", resource, effect: "allow" as const }));
+    }),
+  ];
+  // Explicit session rules remain last; a user's session deny is not erased by this mode.
+  await context.permission.rules({ sessionID, permissions: [...grants, ...permissions] });
+}
+
 async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks, background: NativeBackgroundLifecycle): Promise<void> {
   const explicitlySelectedChildren = new Set<string>();
   const selectedChildModels = new Set<string>();
   const selectionKey = (parent: string, role: string, prompt: string) => `${parent}\0${role}\0${prompt}`;
+  const correctionPermissions = (sessionID: string) => syncReviewerCorrectionPermissions(context, hooks, sessionID);
+  const reconcileCorrectionPermissions = async (sessionID: string) => {
+    for (const child of await hooks.reviewerCorrectionSessions?.(sessionID) ?? []) await correctionPermissions(child);
+    await correctionPermissions(sessionID);
+  };
   // The V1 config hook is not invoked by OpenCode V2. Apply only missing role
   // defaults in its native registry; a user's configured agent model wins.
   await context.agent?.transform(editor => {
@@ -445,8 +499,10 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
       editor.add({ name, description: definition.description, input: toolSchema(definition.args), options: { codemode: false },
         execute: async (input, execution) => {
           await background.reconcile(String(execution.sessionID ?? ""));
-          const content = await definition.execute(legacyToolArgs(input, definition.args), {
-            sessionID: String(execution.sessionID ?? ""), ...(typeof execution.agent === "string" ? { agent: execution.agent } : {}) });
+          let content: string;
+          try { content = await definition.execute(legacyToolArgs(input, definition.args), {
+            sessionID: String(execution.sessionID ?? ""), ...(typeof execution.agent === "string" ? { agent: execution.agent } : {}) }); }
+          finally { await reconcileCorrectionPermissions(String(execution.sessionID ?? "")); }
           if (name !== "sortie_v010_operator_status") return { content };
           const status: unknown = JSON.parse(content);
           return { content: record(status) ? JSON.stringify({ ...status,
@@ -456,10 +512,27 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
   });
   if (hooks["tool.execute.before"]) await context.tool.hook("execute.before", async event => {
     await background.resume(String(event.sessionID ?? ""));
+    if (event.tool === "subagent" && record(event.input) && event.input.agent === "dog-reviewer-v010" &&
+        typeof event.input.sessionID === "string" && (!context.permission.rules || !context.storage)) {
+      throw new Error("native-reviewer-correction-permissions-unavailable");
+    }
     const mapped = { args: legacyToolInput(event.tool, event.input) };
     await hooks["tool.execute.before"]!({ tool: legacyToolName(event.tool), sessionID: String(event.sessionID ?? ""),
       callID: String(event.id ?? ""), ...(typeof event.agent === "string" ? { agent: event.agent } : {}) }, mapped);
     event.input = v2ToolInput(event.tool, record(mapped.args) ? mapped.args : {});
+    if (event.tool === "subagent" && record(event.input) && typeof event.input.sessionID === "string" && event.input.agent === "dog-reviewer-v010") {
+      const child = event.input.sessionID;
+      try { await correctionPermissions(child); }
+      catch (error) {
+        // Native launch has not run. Settle this already-admitted dispatch through the same
+        // failure path, so permission/storage failures cannot strand a writer or reservation.
+        await hooks["tool.execute.after"]?.({ tool: "task", sessionID: String(event.sessionID), callID: String(event.id),
+          args: legacyToolInput("subagent", event.input) }, { status: "error", output: "Native correction permission projection failed before launch.",
+          metadata: { sessionID: child, status: "failed" } });
+        await correctionPermissions(child);
+        throw error;
+      }
+    }
     if (event.tool === "subagent" && record(event.input) && event.input.background === true) {
       const info = await context.session.get({ sessionID: String(event.sessionID) });
       if (record(info) && typeof info.parentID === "string") delete event.input.background;
@@ -475,6 +548,12 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
   await context.tool.hook("execute.after", async event => {
     const result = record(event.result) ? event.result : {};
     const mapped: JsonObject = { status: event.status, output: toolContentText(result.content), metadata: result.metadata ?? event.error };
+    const resumedReviewer = event.tool === "subagent" && record(event.input) && event.input.agent === "dog-reviewer-v010"
+      ? string(event.input.sessionID) : undefined;
+    if (resumedReviewer && await hooks.reviewerCorrectionScope?.(resumedReviewer) &&
+        (!record(mapped.metadata) || typeof mapped.metadata.sessionID !== "string")) {
+      mapped.metadata = { ...(record(mapped.metadata) ? mapped.metadata : {}), sessionID: resumedReviewer };
+    }
     const running = event.tool === "subagent" && (result.status === "running" || record(result.metadata) && result.metadata.status === "running");
     if (running) mapped.metadata = { ...(record(mapped.metadata) ? mapped.metadata : {}), status: "running" };
     const view = event.tool === "read" && event.status === "completed"
@@ -486,6 +565,8 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
     if (event.tool === "subagent") {
       const metadata = record(result.metadata) ? result.metadata : {};
       await background.launched(String(event.sessionID), String(event.id), string(metadata.sessionID), running);
+      if (typeof metadata.sessionID === "string") await correctionPermissions(metadata.sessionID);
+      if (resumedReviewer && resumedReviewer !== metadata.sessionID) await correctionPermissions(resumedReviewer);
     }
     await background.checkpoint(String(event.sessionID));
     if (!running && typeof mapped.output === "string" && event.status === "completed") event.result = replaceToolContent(result, mapped.output);
@@ -536,6 +617,7 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
       parts: [{ type: "text", text: legacyText }] };
     await hooks["chat.message"]!({ sessionID: String(event.sessionID), messageID: String(event.messageID ?? ""),
       ...(typeof info.agent === "string" ? { agent: info.agent } : {}), model }, output);
+    await reconcileCorrectionPermissions(String(event.sessionID));
     // Native explicit selections and configured role models already won above. Legacy fixed serial
     // routing must not undo them at prompt admission (including same-child resumes).
     if (typeof info.parentID === "string" && selectedChildModels.has(String(event.sessionID))) output.message.model = model;
@@ -555,20 +637,24 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
     await background.reconcile(String(event.sessionID ?? ""));
     const output = { system: [] as string[] };
     await hooks["experimental.chat.system.transform"]!({ sessionID: String(event.sessionID ?? "") }, output);
+    await reconcileCorrectionPermissions(String(event.sessionID));
     if (Array.isArray(event.system)) event.system.push(...output.system.map(text => ({ type: "text", text })));
     if (record(event.tools)) {
       const visible: Record<string, string[]> = {
-        "dog-operator": ["start_mission", "plan_units", "operator_next", "operator_status", "expand_unit", "review_mission", "complete_mission", "cancel_operator", "reflection"],
-        "dogs-coordinator": ["plan_units", "operator_next", "operator_status", "expand_unit", "review_mission", "submit_mission", "skip_mission_consultation", "retry_mission_unit", "rescue_mission_unit"],
+        "dog-operator": ["start_mission", "plan_units", "operator_next", "operator_status", "expand_unit", "review_mission", "repair_review", "complete_mission", "cancel_operator", "reflection"],
+        "dogs-coordinator": ["plan_units", "operator_next", "operator_status", "expand_unit", "review_mission", "repair_review", "submit_mission", "skip_mission_consultation", "retry_mission_unit", "rescue_mission_unit"],
         "dog-worker-v010": ["bind_write_gate", "release_write_gate", "operator_status", "expand_unit"],
         "dog-luna-worker-v010": ["bind_write_gate", "release_write_gate", "operator_status", "expand_unit"],
-        "dog-reviewer-v010": [], "dog-scout-v010": [], "dog-advisor-v010": [],
+        "dog-reviewer-v010": await hooks.reviewerCorrectionScope?.(String(event.sessionID)) ? ["bind_write_gate", "release_write_gate", "operator_status"] : [], "dog-scout-v010": [], "dog-advisor-v010": [],
       };
-       const allowed = visible[String(event.agent)];
-       for (const key of Object.keys(event.tools)) {
-         if (!key.startsWith("sortie_")) continue;
-         if (!allowed || !key.startsWith("sortie_v010_") || !allowed.includes(key.slice("sortie_v010_".length))) delete event.tools[key];
-       }
+      const allowed = visible[String(event.agent)];
+      const correcting = event.agent === "dog-reviewer-v010" && !!await hooks.reviewerCorrectionScope?.(String(event.sessionID));
+      for (const key of Object.keys(event.tools)) {
+        if (event.agent === "dog-reviewer-v010" && !correcting &&
+            ["edit", "write", "patch", "shell"].includes(key)) { delete event.tools[key]; continue; }
+        if (!key.startsWith("sortie_")) continue;
+        if (!allowed || !key.startsWith("sortie_v010_") || !allowed.includes(key.slice("sortie_v010_".length))) delete event.tools[key];
+      }
     }
   });
   if (hooks["experimental.session.compacting"]) await context.session.hook("compaction", async event => {
@@ -600,9 +686,11 @@ export function createSortieDogsV2Plugin(legacyFactory: OpenCodePlugin = SortieD
         await hooks["tool.execute.after"]?.({ tool: "task", sessionID: dispatch.parent, callID: dispatch.callID,
           args: legacyToolInput("subagent", dispatch.input) }, { status: dispatch.terminal === "succeeded" ? "completed" : dispatch.terminal === "interrupted" ? "cancelled" : "error",
           output: text, metadata: { sessionID: dispatch.child, status: dispatch.terminal } });
+        if (dispatch.child) await syncReviewerCorrectionPermissions(context, hooks, dispatch.child);
       }, (callID, restore) => hooks.backgroundOwner?.(callID, restore));
       hooks = await legacyFactory({ directory: context.location.directory, client: legacyClient(context) as never,
-        nativeBackground: background, returnReportTransport: "tool-result" }, context.options ?? {});
+        nativeBackground: background, returnReportTransport: "tool-result",
+        reviewerCorrectionPermissions: !!context.permission.rules && !!context.storage }, context.options ?? {});
       await registerV2Hooks(context, hooks, background);
       const finalize = createV2ReturnReportFinalizer(context, hooks);
       const controller = new AbortController();
@@ -621,6 +709,7 @@ export function createSortieDogsV2Plugin(legacyFactory: OpenCodePlugin = SortieD
         if (event.type === "session.created" || event.type === "session.deleted" || event.type === "session.idle") {
           const info = event.type === "session.created" ? await context.session.get({ sessionID: id }).catch(() => ({ id })) : { id };
           await hooks.event?.({ event: { type: String(event.type), properties: { sessionID: id, info } } });
+          for (const child of await hooks.reviewerCorrectionSessions?.(id) ?? []) await syncReviewerCorrectionPermissions(context, hooks, child);
         }
         if (event.type === "session.compaction.ended") await hooks.event?.({ event: { type: "session.compacted", properties: { sessionID: id } } });
       };

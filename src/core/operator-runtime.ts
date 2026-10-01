@@ -126,6 +126,8 @@ interface UnitState {
   status: "pending" | "running" | "succeeded" | "failed" | "cancelled";
   callID: string | null;
   childSessionID: string | null;
+  /** A scoped implementation continuation in the original native Reviewer, never a review PASS. */
+  reviewerCorrection?: { author: string; reviewIdentity: string; writeUnion: readonly string[] };
   evidence: readonly GoalEvidence[];
   resultClass: string | null;
   failure?: SerialDispatchSettlement["failure"];
@@ -877,9 +879,16 @@ export class OperatorRuntime {
   replanMission(root: string, runID: string, raw: unknown, dispatcher?: { sessionID: string; callID: string }, context?: Record<string, unknown>): Promise<OperatorState> {
     return this.serial(root, () => this.prepareOnce(root, raw, undefined, { dispatcher, replaceRunID: runID, context }));
   }
+  prepareReviewerCorrection(root: string, runID: string, raw: unknown, author: string, reviewIdentity: string, writeUnion: readonly string[],
+    dispatcher?: { sessionID: string; callID: string }, context?: Record<string, unknown>): Promise<OperatorState> {
+    return this.serial(root, () => this.prepareOnce(root, raw, undefined, {
+      dispatcher, replaceRunID: runID, context, reviewerCorrection: { author, reviewIdentity, writeUnion },
+    }));
+  }
   private async prepareOnce(root: string, raw: unknown, scopeApprovalTurnID?: string,
     mission?: { dispatcher?: { sessionID: string; callID: string }; supersededRunID?: string;
-      terminalChildren?: readonly string[]; replaceRunID?: string; replaceRequirements?: boolean; context?: Record<string, unknown> }): Promise<OperatorState> {
+      terminalChildren?: readonly string[]; replaceRunID?: string; replaceRequirements?: boolean; context?: Record<string, unknown>;
+      reviewerCorrection?: { author: string; reviewIdentity: string; writeUnion: readonly string[] } }): Promise<OperatorState> {
     const previous = await this.read(root);
     const superseding = mission?.supersededRunID !== undefined && previous?.runID === mission.supersededRunID &&
       previous.phase === "cancelled";
@@ -913,7 +922,28 @@ export class OperatorRuntime {
       if (!previous || previous.runID !== mission.replaceRunID || ["cancelled", "completed"].includes(previous.phase)) {
         throw new Error("mission-replan-run-mismatch");
       }
-      if (previous.units.some(unit => unit.status === "running") || previous.gitLifecycle !== null) throw new Error("mission-replan-worker-still-active");
+      if (previous.units.some(unit => unit.status === "running") || (previous.gitLifecycle !== null && !mission.reviewerCorrection)) throw new Error("mission-replan-worker-still-active");
+      if (mission.reviewerCorrection && (previous.phase !== "awaiting-acceptance" || previous.units.some(unit => unit.status !== "succeeded") ||
+          plan.units.length !== 1 || plan.acceptance.length !== previous.acceptance.length ||
+          previous.acceptance.some((text, i) => text !== plan.acceptance[i]) ||
+          JSON.stringify(plan.acceptance_proof) !== JSON.stringify(previous.acceptanceProof) ||
+          JSON.stringify(plan.units[0]!.validation) !== JSON.stringify(previous.units.flatMap(item => item.unit.validation)) ||
+          JSON.stringify(plan.source_refs) !== JSON.stringify(previous.sourceRefs) ||
+          plan.units.some(unit => unit.write.some(path => !this.pathAuthorized(path, mission.reviewerCorrection!.writeUnion))))) {
+        throw new Error("mission-review-correction-contract-mismatch");
+      }
+      if (mission.reviewerCorrection) {
+        await this.verifyContinuityControls(previous);
+        const declarationPath = /^goal_declaration_path: (.+)$/mu.exec(previous.units[0]!.task.prompt)?.[1];
+        if (!declarationPath || JSON.stringify(plan.goal_declaration) !== JSON.stringify(JSON.parse(await readFile(declarationPath, "utf8"))) ||
+            (previous.gitLifecycle === null ? plan.git_lifecycle !== undefined :
+              !plan.git_lifecycle || plan.git_lifecycle.branch_create.branch !== previous.gitLifecycle.branch ||
+              plan.git_lifecycle.branch_create.start_ref !== previous.gitLifecycle.startRef ||
+              plan.git_lifecycle.commit.message !== previous.gitLifecycle.commitMessage ||
+              JSON.stringify(plan.git_lifecycle.post_commit_validation) !== JSON.stringify(previous.gitLifecycle.postCommitValidation))) {
+          throw new Error("mission-review-correction-contract-mismatch");
+        }
+      }
       if (previous.planHash === validatedPlanHash) return previous;
     }
     if (mission?.supersededRunID !== undefined && previous?.supersededRunID === mission.supersededRunID &&
@@ -1123,11 +1153,17 @@ export class OperatorRuntime {
         "Preserve existing public API success and error return semantics unless acceptance explicitly changes them, and cover those compatibility boundaries in the declared validation.",
         "Do not spawn nested subagents for consultation. Required consultations belong to the root before dispatch; use the confirmed decisions and evidence declared in the unit objective and inputs. If required consultation results or user decisions are missing, return the exact contract gap to the parent instead of attempting a deeper Task, inventing consent, or asking the user to repeat an already recorded decision.",
         ...commitBoundary, `unit_acceptance_indices: ${JSON.stringify(unit.acceptance_indices)}`, "", unit.objective]).join("\n");
-      units.push({ unit, task: { subagent_type: profileAgent(this.profile, "dog-worker"), description: unit.title, prompt },
+      units.push({ unit, task: { subagent_type: profileAgent(this.profile, mission?.reviewerCorrection ? "dog-reviewer" : "dog-worker"), description: unit.title, prompt,
+          ...(mission?.reviewerCorrection ? { task_id: mission.reviewerCorrection.author } : {}) },
         handoffPath, manifestPath, hashes: [...contents.map(hash), hash(declaration)], status: "pending", callID: null,
-        childSessionID: null, evidence: [], resultClass: null, repairValidationAttempts: 0, repairValidation: null });
+        childSessionID: mission?.reviewerCorrection?.author ?? null,
+        ...(mission?.reviewerCorrection ? { reviewerCorrection: mission.reviewerCorrection } : {}),
+        evidence: [], resultClass: null, repairValidationAttempts: 0, repairValidation: null });
     }
-    const gitLifecycle = await this.createGitLifecycle(plan, remediationHead);
+    // Reuse the authorized branch/commit boundary. No cancellation, new branch, or new Git authority.
+    const gitLifecycle = mission?.reviewerCorrection && previous?.gitLifecycle
+      ? { ...structuredClone(previous.gitLifecycle), committedHead: null, commitProvenance: null }
+      : await this.createGitLifecycle(plan, remediationHead);
     const state: OperatorState = { schema_version: "0.1", profile: this.profile.id, rootSessionID: root, runID, planHash: validatedPlanHash,
       acceptance: plan.acceptance, acceptanceProof: plan.acceptance_proof, acceptanceFingerprint, sourceRefs: plan.source_refs, createdAt: new Date().toISOString(),
       parentRunID: parent?.runID ?? null, ...(superseding ? { supersededRunID: previous!.runID } : {}), priorAcceptedUnits,
@@ -1170,7 +1206,7 @@ export class OperatorRuntime {
       return state;
     } catch (error) {
       const cleanup = await Promise.allSettled(created.reverse().map(path => rm(path, { force: true })));
-      if (gitLifecycle !== null) await this.cleanupCreatedBranch(gitLifecycle).catch(() => {
+      if (gitLifecycle !== null && !mission?.reviewerCorrection) await this.cleanupCreatedBranch(gitLifecycle).catch(() => {
         throw new OperatorContractError([{ document: "controls", pointer: "/git_lifecycle", code: "operator-git-branch-cleanup-refused",
           rule: "clean-known-created-branch-only", repair_kind: "retry-storage-after-cleanup" }]);
       });
@@ -1284,7 +1320,8 @@ export class OperatorRuntime {
       return args.task_id === expected.task_id && args.subagent_type === expected.subagent_type &&
         args.description === expected.description && args.prompt === expected.prompt;
     }
-    if (args.task_id !== undefined && args.task_id !== "") return false;
+    if (unit.reviewerCorrection && (args.model !== undefined || args.variant !== undefined)) return false;
+    if (unit.reviewerCorrection ? args.task_id !== unit.reviewerCorrection.author : args.task_id !== undefined && args.task_id !== "") return false;
     if (args.subagent_type !== unit.task.subagent_type || args.description !== unit.task.description) return false;
     return args.prompt === unit.task.prompt || args.prompt === this.workerTask(state, unit).prompt;
   }
@@ -1622,6 +1659,9 @@ export class OperatorRuntime {
     return this.serial(root, async () => {
       const state = await this.required(root);
       const unit = state.units.find(item => /^task_id: (.+)$/m.exec(item.task.prompt)?.[1] === taskID && item.childSessionID === child);
+      if (unit?.reviewerCorrection && paths.some(path => !this.pathAuthorized(normalizeExecutionScope(path), unit.unit.write))) {
+        throw new Error("mission-review-correction-write-union-fixed");
+      }
       if (!unit || !["running", "failed", "succeeded"].includes(unit.status) ||
           !["running", "awaiting-decision", "awaiting-acceptance"].includes(state.phase) || !unit.callID || state.gitLifecycle) {
         throw new Error("mission-scope-update-current-task-required");
