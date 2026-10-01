@@ -232,7 +232,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     async function acceptanceValidationObservation(validation: readonly string[], child: string | null, notBefore?: number) {
       if (!child) throw new Error("native-worker-history-session-unavailable");
       return observedMissionValidationSummary(validation, child, typeof nativeSession?.messages === "function"
-        ? () => session("messages", { path: { id: child }, query: { directory: input.directory } }) : undefined, notBefore);
+        ? () => session("messages", { path: { id: child }, query: { directory: input.directory } }) : undefined, notBefore,
+        notBefore === undefined ? undefined : input.directory);
     }
     async function reviewMessages(id: string): Promise<readonly Record<string, unknown>[]> {
       const result = payload(await session(typeof nativeSession?.reviewMessages === "function" ? "reviewMessages" : "messages",
@@ -471,7 +472,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         if (!correction) return undefined;
         const unit = correction.unit;
         const progress = reviewerCorrectionValidation(unit.unit.validation, child, await messages(child),
-          Date.parse(unit.reviewerCorrection!.admittedAt ?? correction.run.createdAt));
+          Date.parse(unit.reviewerCorrection!.admittedAt ?? correction.run.createdAt), undefined, input.directory);
         return canonicalDeclaredValidationMembers(command, unit.unit.validation, progress.nextOccurrence ?? 0);
       },
       recordReviewerCorrectionCheck: (root, taskID, check) => operators.recordReviewerCorrectionCheck(root, taskID, check),
@@ -2232,8 +2233,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           const observedValidation = risk.length === 0 && !correction ? [] : await Promise.all(run.units.filter(unit => unit.unit.validation.length > 0).map(async unit => ({
             unit_id: unit.unit.id,
             ...observedMissionValidation(unit.unit.validation, unit.childSessionID,
-               unit.childSessionID ? await messages(unit.childSessionID).catch(() => []) : [],
-               unit.reviewerCorrection ? Date.parse(unit.reviewerCorrection.admittedAt ?? run.createdAt) : undefined),
+                unit.childSessionID ? await messages(unit.childSessionID).catch(() => []) : [],
+                unit.reviewerCorrection ? Date.parse(unit.reviewerCorrection.admittedAt ?? run.createdAt) : undefined,
+                unit.reviewerCorrection ? input.directory : undefined),
           })));
           const task = risk.length === 0 && !correction ? null : { subagent_type: profileAgent(profile, "dog-reviewer"),
             ...(selfRecheck ? { task_id: correction!.author } : {}),
@@ -2295,7 +2297,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const history = suppliedHistory ?? await messages(author);
       const prompt = history.findIndex(message => record(message.info) && message.info.id === promptID && message.info.role === "user" && message.info.sessionID === author);
       if (prompt < 0) return undefined;
-      if (history.slice(prompt + 1).some(message => record(message.info) && message.info.role === "user")) return undefined;
+      // Native shell Job completions are synthetic continuation input, not a new
+      // user instruction replacing this admitted correction/self-recheck prompt.
+      if (history.slice(prompt + 1).some(message => record(message.info) && message.info.role === "user" &&
+          !(Array.isArray(message.parts) && message.parts.some(part => record(part) && part.synthetic === true)))) return undefined;
       const last = history.slice(prompt + 1).reverse().find(message => record(message.info) && message.info.role === "assistant");
       const info = record(last?.info) ? last.info : undefined;
       const native = payload(await session("get", { path: { id: author } })), who = await identity(author);

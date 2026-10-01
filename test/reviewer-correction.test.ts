@@ -219,7 +219,7 @@ async function correctionReady(f: Awaited<ReturnType<typeof fixture>>) {
 const inlineReport = (unresolved: string[] = [], residual: unknown = null, candidate = "current-validated") =>
   `SELF_RECHECKED\nself_recheck: ${JSON.stringify({ candidate, unresolved_findings: unresolved, residual_major: residual })}\nCompared every original requirement, all retained findings, corrected source and relevant impact against actual fresh formal checks and clean commit.`;
 
-for (const mode of ["foreground", "background-cold", "medium", "major", "missing", "PASS", "old-report", "nonterminal", "old-terminal", "failed-check", "edited-after-check", "native-failed", "missing-prompt", "later-prompt"] as const) {
+for (const mode of ["foreground", "background-cold", "synthetic-notification", "medium", "major", "missing", "PASS", "old-report", "nonterminal", "old-terminal", "failed-check", "edited-after-check", "native-failed", "missing-prompt", "later-prompt"] as const) {
   test(`inline correction native self-recheck: ${mode}`, async () => {
     const f = await fixture();
     try {
@@ -251,6 +251,8 @@ for (const mode of ["foreground", "background-cold", "medium", "major", "missing
         await f.start();
       }
       if (mode === "later-prompt") f.history.author!.push({ id: "unowned-later-user", type: "user", text: "Different prompt", time: { created: Date.now() } });
+      if (mode === "synthetic-notification") f.history.author!.push({ id: "native-shell-job-completion", type: "synthetic",
+        text: "Background command completed (shell ID: diagnostic-shell). Exit code: 0", time: { created: Date.now() } });
       const text = mode === "missing" ? "CORRECTION_READY" : mode === "PASS" ? "PASS" :
         inlineReport(mode === "medium" ? ["Medium: retained output behavior remains broken"] : [],
           mode === "major" ? { reachable_path: "caller retries an unsuccessful transaction", consequence: "persisted state corruption across retries" } : null,
@@ -264,7 +266,7 @@ for (const mode of ["foreground", "background-cold", "medium", "major", "missing
         f.terminal("author", text); await f.start(); await f.tool("root", "operator_status");
       } else await f.finish(dispatch, "author", text);
       const mission = await f.missions.required("root"), settledRun = await f.run();
-      if (["foreground", "background-cold", "medium", "major"].includes(mode)) {
+      if (["foreground", "background-cold", "synthetic-notification", "medium", "major"].includes(mode)) {
         const proof = mission.review!.selfRecheck!;
         assert(proof, "actual correction terminal records self-recheck without another author Task");
         assert.equal(mission.review!.mode, "self-recheck"); assert.equal(proof.callID, dispatch.id);
@@ -654,6 +656,78 @@ test("correction execution permits focused tests/formatter/generator; formal pro
     await f.finish(dispatch, "author", inlineReport());
     assert.equal((await f.tool("root", "complete_mission")).status, "succeeded");
     assert.equal(whollyDisabled("shell", f.registry()["dog-reviewer-v010"]!.permissions), true, "ordinary Reviewer snapshot stays read-only after restoration");
+  } finally { await f.dispose(); }
+});
+
+for (const absolute of [false, true]) for (const declared of [false, true]) test(`correction known outputs use native ${absolute ? "absolute" : "relative"} shell workdir for prohibitions and write union: ${declared ? "declared text in other cwd" : "diagnostic"}`, async () => {
+  const f = await fixture();
+  try {
+    const command = declared ? "node generate.mjs > result.txt" : "printf overwritten > result.txt";
+    await initial(f, declared ? { validation: [command, "node check.mjs"] } : {});
+    await mkdir(join(f.directory, "nested"));
+    await writeFile(join(f.directory, "nested", "result.txt"), "protected nested output\n");
+    const prepared = await f.tool("root", "repair_review"), dispatch = await f.before("root", "subagent", f.task(prepared.task));
+    await f.prompt("author", dispatch.input.prompt); await f.bind("author");
+    const input = { command, workdir: absolute ? join(f.directory, "nested") : "nested" };
+    await assert.rejects(f.before("author", "shell", input), /manifest write scope|write-union|write-denied/,
+      "native nested/result.txt is outside the result.txt correction write union");
+    await f.missions.update("root", state => { state.prohibitedWrite = ["nested/result.txt"]; });
+    await assert.rejects(f.before("author", "shell", input), /mission-explicit-write-prohibition/,
+      "prohibition checks inspect the same destination native shell would write");
+    assert.equal(await readFile(join(f.directory, "nested", "result.txt"), "utf8"), "protected nested output\n");
+    const scoped = await f.before("author", "shell", { command: "printf 'ready\\n' > result.txt", workdir: f.directory });
+    await exec("bash", ["-c", scoped.input.command], { cwd: scoped.input.workdir });
+    await f.after(scoped, "Known root output executed", { exit: 0 });
+    assert.equal((await f.run()).units[0]!.reviewerCorrection!.checks, undefined, "diagnostic writes are not formal check evidence");
+    await f.tool("root", "cancel_operator", { reason: "explicit-cancellation" });
+  } finally { await f.dispose(); }
+});
+
+for (const mode of ["wrong-only", "diagnostic-before", "diagnostic-after"] as const) test(`correction formal proof binds native check directory: ${mode}`, async () => {
+  const f = await fixture();
+  try {
+    const A = "node required-test.mjs", B = "node check.mjs", C = `${A} && ${B}`;
+    const validation = [A, B, C];
+    await initial(f, { validation });
+    const other = join(f.directory, ".cache", "other");
+    await mkdir(other, { recursive: true });
+    for (const name of ["required-test.mjs", "check.mjs"]) await writeFile(join(other, name), await readFile(join(f.directory, name)));
+    await writeFile(join(other, "result.txt"), "ready\n");
+    const prepared = await f.tool("root", "repair_review"), dispatch = await f.before("root", "subagent", f.task(prepared.task));
+    await f.prompt("author", dispatch.input.prompt); await f.bind("author");
+    await f.edit("author", mode === "wrong-only" ? "bad-required" : "ready");
+    await f.shell("author", "git add -- result.txt"); await f.shell("author", "git commit -m directory-binding");
+    let diagnostic = 0;
+    const elsewhere = async (command: string) => {
+      const event = await f.before("author", "shell", { command, workdir: diagnostic++ % 2 ? other : ".cache/other" });
+      const result = await exec("bash", ["-c", event.input.command], { cwd: resolve(f.directory, event.input.workdir) })
+        .catch(error => ({ stdout: error.stdout, code: error.code }));
+      await f.after(event, result.stdout, { exit: "code" in result ? result.code : 0 });
+    };
+    if (mode === "wrong-only") {
+      for (const command of validation) await elsewhere(command);
+      assert.equal((await f.run()).units[0]!.reviewerCorrection!.checks, undefined,
+        "checks of another directory never acquire the root candidate binding");
+    } else {
+      await f.shell("author", A);
+      if (mode === "diagnostic-before") await elsewhere(`${B} && ${C}`);
+      const formal = await f.before("author", "shell", { command: `${B} && ${C}`, workdir: mode === "diagnostic-after" ? f.directory : "." });
+      const output = await exec("bash", ["-c", formal.input.command], { cwd: resolve(f.directory, formal.input.workdir) });
+      await f.after(formal, output.stdout, { exit: 0 });
+      if (mode === "diagnostic-after") {
+        await writeFile(join(other, "result.txt"), "bad-required\n");
+        for (const command of validation) await elsewhere(command);
+      }
+      assert.deepEqual((await f.run()).units[0]!.reviewerCorrection!.checks!.map(check => check.command), [[A], [B, C]],
+        "other-directory diagnostics do not alter ordered formal progress or call-member bindings");
+    }
+    await f.finish(dispatch, "author", inlineReport());
+    if (mode === "wrong-only") {
+      assert.equal((await f.missions.required("root")).corrections![0]!.status, "failed");
+      await assert.rejects(f.tool("root", "complete_mission"), /validation|incomplete/);
+      const summary = (await f.tool("root", "operator_status")).acceptance_summary.native_declared_validation.find((item: ObjectValue) => !item.historical);
+      assert.deepEqual(summary.observations.not_observed, validation);
+    } else assert.equal((await f.tool("root", "complete_mission")).status, "succeeded");
   } finally { await f.dispose(); }
 });
 

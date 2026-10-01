@@ -1840,6 +1840,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const rawCommand = args !== undefined && typeof args.command === "string" ? normalizeCommand(args.command) : undefined;
     if (rawCommand === undefined || rawCommand.length === 0) return;
     const correcting = await input.runtimeBridge?.ownsReviewerCorrection?.(toolInput.sessionID) === true;
+    // A same-text check in another cwd is a diagnostic of other inputs, not proof
+    // of this correction's inherited Location-based recipe. Native execution stays allowed.
+    if (correcting && typeof args?.workdir === "string" && resolve(input.directory, args.workdir) !== resolve(input.directory)) return;
     const members = correcting ? await input.runtimeBridge?.reviewerCorrectionValidationMembers?.(toolInput.sessionID, rawCommand)
       : canonicalDeclaredValidationMembers(rawCommand, authorization.validationCommands);
     if (!authorization.validationCommands.has(rawCommand) && (!correcting || !members)) return;
@@ -7807,10 +7810,12 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         ) throw new WriteDeniedError("parallel-validation", "<parallel-unit>");
         const declaredSequence = command === undefined || authorization === undefined ? undefined
           : canonicalDeclaredValidationSequence(command, authorization.validationCommands);
+        const declaredDirectory = !isRecord(output.args) || typeof output.args.workdir !== "string" ||
+          resolve(input.directory, output.args.workdir) === resolve(input.directory);
         const settledPassNotice = settledPassNotices.get(toolInput.callID);
         if (activeState?.parallel !== "valid" && settledPassNotice?.sessionID === toolInput.sessionID &&
           isRecord(output.args) && output.args.command === settledPassNotice.command) return;
-        if (activeState?.parallel !== "valid" && declaredSequence !== undefined) return;
+        if (activeState?.parallel !== "valid" && declaredSequence !== undefined && declaredDirectory) return;
         if (activeState?.parallel === "valid") {
           const extracted = extractWritePaths(toolInput.tool, output.args);
           const relativeWrite = extracted.paths.find((path) => !isAbsolute(path));
@@ -7818,7 +7823,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         }
         const missionWorker = await input.runtimeBridge?.allowsInvestigativeShell?.(toolInput.sessionID) === true;
         if (missionWorker) {
-          const extracted = extractWritePaths(toolInput.tool, output.args);
+          const extracted = extractWritePaths(toolInput.tool, output.args, input.directory);
           if (extracted.paths.length) await input.runtimeBridge?.assertMissionWrite?.(toolInput.sessionID, extracted.paths);
           const nativeFile = /^(?:write|edit)(?:$|[_-])/iu.test(toolInput.tool) || /patch/iu.test(toolInput.tool);
           if (nativeFile && !extracted.ambiguous && extracted.paths.length) {

@@ -18,6 +18,8 @@ import type { ReviewerCorrectionCheck } from "./runtime-bridge.js";
 
 const exec = promisify(execFile);
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
+const validationDirectoryMatches = (input: Record<string, unknown>, directory?: string): boolean =>
+  directory === undefined || typeof input.workdir !== "string" || resolve(directory, input.workdir) === resolve(directory);
 
 /** Reviewer-facing evidence preserves execution/coverage; the host retains the full snapshot recipe. */
 export function missionReviewValidation(run: OperatorState, statePath: string) {
@@ -45,7 +47,7 @@ export function missionReviewValidation(run: OperatorState, statePath: string) {
 
 /** Show native command outcomes to the Reviewer without turning non-criterion checks into acceptance evidence. */
 export function observedMissionValidation(validation: readonly string[], childSessionID: string | null,
-  history: readonly Record<string, unknown>[], notBefore?: number): {
+  history: readonly Record<string, unknown>[], notBefore?: number, directory?: string): {
     attempts: readonly { command: string; observed_members?: readonly string[]; exit_code: number | null; started_ms: number | null; completed_ms: number | null }[];
     not_observed: readonly string[]; omitted_attempts: number;
   } {
@@ -57,7 +59,7 @@ export function observedMissionValidation(validation: readonly string[], childSe
     return message.parts.flatMap(part => {
       if (!record(part) || part.type !== "tool" || !["bash", "shell", "powershell", "pwsh"].includes(String(part.tool)) ||
            !record(part.state) || !["completed", "error"].includes(String(part.state.status)) || !record(part.state.input) ||
-          typeof part.state.input.command !== "string") return [];
+          typeof part.state.input.command !== "string" || !validationDirectoryMatches(part.state.input, directory)) return [];
       const command = normalizeCommand(part.state.input.command);
       const exit = record(part.state.metadata) ? part.state.metadata.exit : undefined;
       const started = record(part.time) ? time(part.time.ran) : record(part.state.time) ? time(part.state.time.start) : null;
@@ -86,7 +88,7 @@ export function observedMissionValidation(validation: readonly string[], childSe
 
 /** All inherited checks must have fresh real successful outcomes in this correction admission. */
 export function reviewerCorrectionValidation(validation: readonly string[], child: string,
-  history: readonly Record<string, unknown>[], notBefore: number, checks?: readonly ReviewerCorrectionCheck[]): {
+  history: readonly Record<string, unknown>[], notBefore: number, checks?: readonly ReviewerCorrectionCheck[], directory?: string): {
     ready: boolean; reason?: string; failure?: { command: readonly string[]; outcome: "fail"; exitCode: number | null };
     matched?: readonly { callID: string; member: number; occurrence: number }[];
     nextOccurrence?: number;
@@ -108,7 +110,7 @@ export function reviewerCorrectionValidation(validation: readonly string[], chil
       }
       if (!record(part) || part.type !== "tool" || !["bash", "shell", "powershell", "pwsh"].includes(String(part.tool)) ||
           !record(part.state) || !["completed", "error"].includes(String(part.state.status)) ||
-          !record(part.state.input) || typeof part.state.input.command !== "string") continue;
+          !record(part.state.input) || typeof part.state.input.command !== "string" || !validationDirectoryMatches(part.state.input, directory)) continue;
       const callID = typeof part.callID === "string" ? part.callID : typeof part.id === "string" ? part.id : undefined;
       if (!callID || seen.has(callID)) continue;
       const timing = record(part.time) ? { started: part.time.ran, completed: part.time.completed }
@@ -166,7 +168,7 @@ export function reviewerCorrectionValidation(validation: readonly string[], chil
 /** Refresh each actual run's saved recipe; never attach today's snapshot to historical native logs. */
 export async function reviewerCorrectionValidationFresh(validation: readonly string[], child: string,
   history: readonly Record<string, unknown>[], notBefore: number, checks: readonly ReviewerCorrectionCheck[], projectRoot: string) {
-  const checked = reviewerCorrectionValidation(validation, child, history, notBefore, checks);
+  const checked = reviewerCorrectionValidation(validation, child, history, notBefore, checks, projectRoot);
   if (!checked.ready) return checked;
   for (const callID of new Set(checked.matched?.map(item => item.callID))) {
     const check = checks.find(item => item.callID === callID)!;
@@ -181,13 +183,13 @@ export async function reviewerCorrectionValidationFresh(validation: readonly str
 
 /** Summary-only native reader: unavailable API/error is not a successfully observed empty history. */
 export async function observedMissionValidationSummary(validation: readonly string[], childSessionID: string,
-  read?: () => Promise<unknown>, notBefore?: number): Promise<Record<string, unknown>> {
+  read?: () => Promise<unknown>, notBefore?: number, directory?: string): Promise<Record<string, unknown>> {
   if (!read) throw new Error("native-worker-history-api-unavailable");
   const response = await read();
   if (record(response) && response.error !== undefined && response.error !== null) throw new Error("native-worker-history-api-error");
   const data = record(response) && "data" in response ? response.data : response;
   if (!Array.isArray(data)) throw new Error("native-worker-history-response-not-array");
-  const observed = observedMissionValidation(validation, childSessionID, data.filter(record), notBefore);
+  const observed = observedMissionValidation(validation, childSessionID, data.filter(record), notBefore, directory);
   const grouped = new Map<string, { command: string; exit_code: number | null; observed_attempts: number;
     latest_started_ms: number | null; latest_completed_ms: number | null }>();
   for (const attempt of observed.attempts) {

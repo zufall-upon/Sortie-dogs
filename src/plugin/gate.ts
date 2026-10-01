@@ -741,7 +741,7 @@ export function describeUnclassifiedCommand(tool: string, args: unknown): string
 }
 
 /** Extract known write destinations; unknown shell executables fail closed as ambiguous. */
-export function extractWritePaths(tool: string, args: unknown): Extraction {
+export function extractWritePaths(tool: string, args: unknown, toolDirectory?: string): Extraction {
   const name = tool.toLowerCase();
   const paths = directPaths(args);
   if (/^(?:write|edit)(?:$|[_-])/u.test(name)) return { applies: true, ambiguous: paths.length === 0, paths };
@@ -768,10 +768,20 @@ export function extractWritePaths(tool: string, args: unknown): Extraction {
     const powershell = /^(?:powershell|pwsh)(?:$|[_-])/u.test(name) ||
       /^\s*&\s+(?:"[^"]+"|'[^']+'|\S+)/u.test(command);
     const extracted = shellPaths(command, powershell);
+    const destinations = [...paths, ...extracted.paths];
+    // Native ShellTool resolves an explicit workdir against Location, then relative
+    // outputs against that cwd. Do not authorize a same-named path at the project root.
+    const workdir = toolDirectory !== undefined && isRecord(args) && typeof args.workdir === "string"
+      ? resolve(toolDirectory, args.workdir) : undefined;
     return {
       applies: extracted.applies || paths.length > 0,
       ambiguous: extracted.ambiguous,
-      paths: [...paths, ...extracted.paths],
+      paths: workdir === undefined ? destinations : destinations.map(path => {
+        let normalized: ReturnType<typeof normalizeManifestPath>;
+        try { normalized = normalizeManifestPath(path); }
+        catch (error) { throw new WriteDeniedError("project-boundary", path, { cause: error }); }
+        return normalized.kind === "absolute" ? normalized.path : resolve(workdir, normalized.path);
+      }),
       ...(extracted.createdDirectories ? { createdDirectories: extracted.createdDirectories } : {}),
       ...(extracted.requiredDirectories ? { requiredDirectories: extracted.requiredDirectories } : {}),
       ...(extracted.gitCommit ? { gitCommit: true } : {}),
@@ -1263,11 +1273,13 @@ export async function createWriteGate(project: ProjectPaths, value: unknown, too
       const command = isRecord(output.args) && typeof output.args.command === "string"
         ? normalizeCommand(output.args.command)
         : undefined;
-      if (command !== undefined && declaredValidation.has(command)) return;
+      const declaredDirectory = !isRecord(output.args) || typeof output.args.workdir !== "string" ||
+        resolve(toolDirectory, output.args.workdir) === resolve(toolDirectory);
+      if (command !== undefined && declaredValidation.has(command) && declaredDirectory) return;
       // Shell syntax is not an execution permission boundary. Mission workers already use
       // native host permissions; only declared checks produce formal validation evidence.
       const nativeImplementationShell = options?.investigativeShell && ["bash", "shell"].includes(_input.tool);
-      const extracted = extractWritePaths(_input.tool, output.args);
+      const extracted = extractWritePaths(_input.tool, output.args, toolDirectory);
       if (!extracted.applies) return;
       // Unknown program internals are native execution policy, NOT a proof of output scope.
       // Still check every known destination (redirect/copy/etc.) and the existing Git boundary.
