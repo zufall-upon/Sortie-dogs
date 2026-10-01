@@ -30,8 +30,8 @@ test("public reproduction and shared-branch checks remain in the same mission Wo
   assert.match(coordinator, /working directory or package layout/u);
   assert.match(coordinator, /not an adjacent check unless it runs\s+the changed branch/u);
   assert.match(worker, /entrypoint, input and layout intact/u);
-  assert.match(worker, /underlying operation, reachable inputs and uncaught failures/u);
-  assert.match(worker, /avoid redundant\s+checks/u);
+  assert.match(worker, /changed fallible API, inspect relevant callsites for returned error loss or overwrite and state after failure/u);
+  assert.match(worker, /without a catch-all,\s+mandatory exhaustive matrix or redundant tests/u);
   assert.match(worker, /do not append a tee pipeline/u);
   assert.match(coordinator, /a preview is not the live run/u);
   assert.match(operator, /Do not turn a chosen preflight step into a user requirement/u);

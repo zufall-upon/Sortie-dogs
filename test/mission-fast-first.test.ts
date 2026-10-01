@@ -19,6 +19,10 @@ for (const verdict of ["PASS", "FINDINGS", "EVIDENCE_GAPS"] as const) test(`Fast
   const directory = await mkdtemp(resolve("_testenv/mission-fast-review-"));
   try {
     await exec("git", ["init", "--quiet"], { cwd: directory });
+    if (verdict === 'PASS') {
+      await exec('git', ['config', 'user.name', 'Fixture'], { cwd: directory });
+      await exec('git', ['config', 'user.email', 'fixture@example.invalid'], { cwd: directory });
+    }
     await writeFile(join(directory, "check.mjs"),
       'import { readFileSync } from "node:fs";\nif (readFileSync("result.txt", "utf8") !== "ready\\n") process.exit(1);\n');
     await writeFile(join(directory, "public-contract.md"), "Public output is ready followed by a newline.\n");
@@ -40,6 +44,15 @@ for (const verdict of ["PASS", "FINDINGS", "EVIDENCE_GAPS"] as const) test(`Fast
       }, abort: async () => ({ data: true }),
     } } } as never);
     assert.match(hooks.tool!.sortie_v010_start_mission.description, /dispatch its Worker directly/u);
+    for (const name of ['sortie_v010_start_mission', 'sortie_v010_plan_units']) {
+      assert.match(hooks.tool![name]!.description, /meaningful formal check known from user, project or task context/u);
+      assert.match(hooks.tool![name]!.description, /do not require \.git\/\*\* scope/u);
+      assert.match(hooks.tool![name]!.description, /requested commit before independent Review/u);
+    }
+    const prohibitionDescription = (hooks.tool!.sortie_v010_start_mission.args.prohibited_write as { description: string }).description;
+    assert.match(prohibitionDescription, /user or applicable instructions/u);
+    assert.match(prohibitionDescription, /Never infer a parent glob/u);
+    assert.match(prohibitionDescription, /Preserve the authorized clone and exact prohibited paths/u);
     assert.doesNotMatch(hooks.tool!.sortie_v010_start_mission.description, /Dispatch the Coordinator immediately/u);
     assert.match(missionOperatorContent(V010_RUNTIME_PROFILE, "test"),
       /full original request natively from its handoff/u);
@@ -49,12 +62,22 @@ for (const verdict of ["PASS", "FINDINGS", "EVIDENCE_GAPS"] as const) test(`Fast
       /Do not list speculative write paths or unrelated test suites as a precaution/u);
     assert.match(hooks.tool!.sortie_v010_plan_units.description, /estimated read\/write scope/u);
     assert.match(missionOperatorContent(V010_RUNTIME_PROFILE, "test"), /EVIDENCE_GAPS is advisory/u);
+    const original = `Create result.txt with ready, validate and review it.${verdict === 'PASS' ? ' Commit the result in this authorized clone; do not modify the upstream product.' : ''} Do not write forbidden.txt.`;
     await hooks["chat.message"]!({ sessionID: "root", messageID: "request", agent: agents.root!.agent }, {
       message: { id: "request", agent: agents.root!.agent, model: { providerID: "openai", modelID: "gpt-6-sol" } },
-      parts: [{ type: "text", text: "Create result.txt with ready, validate and review it." }],
+      parts: [{ type: "text", text: original }],
     });
-    const started = JSON.parse(await hooks.tool!.sortie_v010_start_mission.execute({ requirements: ["Create validated result.txt"] },
+    const started = JSON.parse(await hooks.tool!.sortie_v010_start_mission.execute({ requirements: ["Create validated result.txt", "Do not write forbidden.txt"], prohibited_write: ["forbidden.txt"] },
       { sessionID: "root" }));
+    const mission = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required('root');
+    assert.equal(mission.requests[0]!.text, original, 'request without a literal check command remains exact');
+    assert.deepEqual(mission.prohibitedWrite, ['forbidden.txt'], 'semantic product restriction does not become an inferred parent prohibition');
+    await assert.rejects(hooks.tool!.sortie_v010_plan_units.execute({ units: [{ title: 'Forbidden write',
+      objective: 'Write forbidden file', read: ['check.mjs'], write: ['forbidden.txt'], validation: ['node check.mjs'] }] },
+      { sessionID: 'root' }), /mission-explicit-write-prohibition/);
+    await assert.rejects(hooks.tool!.sortie_v010_plan_units.execute({ units: [{ title: 'Empty check',
+      objective: 'Write result', read: ['check.mjs'], write: ['result.txt'], validation: [] }] },
+      { sessionID: 'root' }), /validation must contain exact commands/);
     assert.match(started.next_action, /Default to plan_units/);
     const open = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
     assert.match(open.next_action, /Fast-lane.*plan one useful Worker/);
@@ -92,6 +115,20 @@ for (const verdict of ["PASS", "FINDINGS", "EVIDENCE_GAPS"] as const) test(`Fast
     if (verdict === "PASS") history.worker!.push({ info: { role: "assistant", sessionID: "worker" }, parts: [{ type: "tool", tool: "bash",
       state: { status: "completed", input: { command: "node check.mjs" }, metadata: { exit: 0 } },
       time: { ran: 1200, completed: 1300 } }] });
+    if (verdict === 'PASS') {
+      // Ordinary requested delivery stays in the validated Worker, with no .git/** write scope or prior Review.
+      for (const [callID, command, argv] of [
+        ['git-add', 'git add -- result.txt', ['add', '--', 'result.txt']],
+        ['git-commit', 'git commit -m "Create result"', ['commit', '-m', 'Create result']],
+      ] as const) {
+        await hooks['tool.execute.before']!({ tool: 'bash', sessionID: 'worker', callID }, { args: { command } });
+        const result = await exec('git', [...argv], { cwd: directory });
+        await hooks['tool.execute.after']!({ tool: 'bash', sessionID: 'worker', callID },
+          { output: result.stdout, metadata: { exit: 0, status: 'completed' } });
+      }
+      assert.match((await exec('git', ['log', '-1', '--format=%s'], { cwd: directory })).stdout, /Create result/);
+      assert.equal((await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required('root')).review, undefined);
+    }
     agents.worker!.outcome = "succeeded";
     await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "worker-call" },
       { output: "Validated result", metadata: { sessionId: "worker" } });

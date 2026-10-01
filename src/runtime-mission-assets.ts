@@ -5,9 +5,15 @@ import { SCOUT_EVIDENCE_CODES } from "./core/scout-contract.ts";
 /** Repository-local dependency environment shared by all units; excluded from reviewed and captured source. */
 export const TOOL_ENVIRONMENT = ".sortie-env";
 
+/** Ordinary requested Git delivery uses source scope, not repository control-storage scope. */
+export const MISSION_GIT_SCOPE = `Requested git add -- <paths> and git commit -m ... are normal source-scope Git operations;
+they do not require .git/** scope. Preserve explicit user ordering and host Git lifecycle; attempt supported
+operations and report actual denials, not inferred gaps.`;
+
 export const VALIDATION_WORKFLOW = `## Time-aware validation workflow
 
-Operator/Coordinator: put the known meaningful formal check in validation, not another objective copy.
+Operator/Coordinator: put the known meaningful formal check from the user, project or task context in validation,
+not another objective copy. A literal command in the original request is not required; empty or dummy checks do not qualify.
 Keep any user/project-required broad validation for the final integrated candidate,
 not every implementation unit. Do not add a full suite merely as a precaution or create a testing agent.
 Worker: reproduce, batch the related edits, inspect the complete diff, then run the focused checks.
@@ -93,7 +99,10 @@ quality threshold and explicit model/budget choice. Follow AGENTS.md and use the
     user message verbatim and recent public context and generates IDs; do not copy it or author contracts, hashes or a proposal.
     Use kind: "operation" for an existing command, benchmark or procedure. Preserve the previously selected
     target/artifact. Requirements come from the user and applicable project instructions; your chosen
-    procedure, package-comparison strategy or caution is not a new immutable requirement or approval gate.
+     procedure, package-comparison strategy or caution is not a new immutable requirement or approval gate.
+    prohibited_write contains only explicit path prohibitions from the user or applicable instructions.
+    Do not infer a parent glob from a project/repository name or "do not modify the product"; retain that
+    semantic constraint as a requirement, preserving the authorized clone and exact prohibited paths.
    On resume, read operator_status first. If status/start_mission returns mission-location-required, use
    the host session_move operation to its resume_location.directory and read status there; do not create
    a substitute mission in the current worktree. Multiple candidates are selected by the user's request.
@@ -115,17 +124,20 @@ quality threshold and explicit model/budget choice. Follow AGENTS.md and use the
     ${profile.toolPrefix}cancel_operator with reason: "plain" to stop its owned children, then
     ${profile.toolPrefix}start_mission with intent: "replace" and the saved requirements. The cancelled
     Mission is archived; cumulative spend is retained. Dispatch only the returned Coordinator Task.
- 2. If the original request supplies a meaningful formal validation command and the work fits one unit,
+  2. If a meaningful formal check is known from the user, project or task context and the work fits one unit,
     call plan_units and dispatch its Worker immediately. Source investigation, shell/environment checks,
     fix design and output inventory belong inside that Worker, not a routine Operator preflight.
     Use estimated read/write paths; native scope reconciliation and expand_unit cover actual outputs.
     Write objective as the target or corrective delta: aim for 2000 characters, allow 3000 internally.
-    The Worker reads the full original request natively from its handoff, including exact public reproduction
+    The Worker reads the full original request natively from its handoff once, including exact public reproduction
     inputs, paths and failures; do not copy that request into objective. Preserve it, not a summary.
     Do not list speculative write paths or unrelated test suites as a precaution. Risk, file count,
     duration and independent review alone do not require Coordinator. If the check is unknown, real unit
     decomposition is needed, or a material user decision prevents work, use the returned
-    ${profileAgent(profile, "dog-operator")} Task for targeted discovery/coordination within the same budget.
+     ${profileAgent(profile, "dog-operator")} Task for targeted discovery/coordination within the same budget.
+    Investigation, edits, formal checks and any requested commit stay in that Worker before independent Review;
+    do not invent a review-before-commit gate or a commit-only handoff. Preserve explicit user ordering.
+    ${MISSION_GIT_SCOPE}
 3. After a direct Worker succeeds, use its recorded result and inspect only missing source or evidence
    needed to assess the ACTUAL change. Batch focused reads where practical; do not repeat an unchanged
    check. Call ${profile.toolPrefix}review_mission promptly with real risk_tags and concise traces.
@@ -316,7 +328,7 @@ For a named release in the one-attempt case-study fixture, pass its --release-re
 the v0127 matched profile intentionally pins 0.12.7, not the newest release. If these identities differ,
 select the matching runner/profile before starting rather than changing the pinned comparison or spending an arm.
 
-When the formal check is known, start the first useful Worker without source/shell preparation.
+When a meaningful formal check is known from the user, project or task context, start the first useful Worker without source/shell preparation.
 Let it investigate, check the environment, design the fix and discover actual outputs. Investigate here
 only a genuinely unknown check or unit boundary, not a broad inventory. Call ${profile.toolPrefix}plan_units with concise units:
 title, objective, read/write file or directory scopes, validation commands, and related requirement_ids
@@ -325,16 +337,17 @@ requirement_ids is omitted. For operation missions, include execution with the a
 run/grade commands and working directory. Setup, launch and result collection normally stay in one Worker;
 do not forbid execution while assigning that Worker the requirement to execute.
 Write objective as a target or corrective delta: 2000 characters is the target, 3000 is allowed internally.
-The Worker reads the original requests verbatim from the handoff; do not copy them into objective.
+The Worker reads the original requests verbatim from the handoff once; do not copy them into objective.
+Keep investigation, edits, formal checks and any requested commit in the same Worker before independent Review;
+do not invent a review-before-commit gate or a commit-only handoff. Preserve explicit user ordering.
+${MISSION_GIT_SCOPE}
 For a concrete public reproduction, preserve its entrypoint, relevant input and observed failure in that
 original request without inventing an expected representation. If the public
 example depends on a working directory or package layout, preserve that context. Point the Worker at
 existing analogous source/tests for the expected contract when available. Avoid separate investigation
 units just to restate the issue. A test of a neighboring name is not an adjacent check unless it runs
 the changed branch on a relevant different input; keep validation focused and do not require an extra
-test when the existing checks already exercise that boundary. For an exception fix, identify the failing
-operation and ask the Worker to consider its other source/API-backed failure inputs, including ones the
-new handler does not catch. A normal input alone does not check a different failure outcome.
+test when the existing checks already exercise that boundary.
 For read-only verification, use write: []; do not invent an output file or request write access to inputs.
 If declared build or tests create known generated paths, include those outputs in the initial write scope;
 do not add a separate setup unit just to prepare them.
@@ -463,22 +476,22 @@ unit.write is an estimate, not a user prohibition. Host reconciles concrete nati
 conflicts in the same operation. For unknown shell outputs call ${profile.toolPrefix}expand_unit with
 unit_id, exact paths and reason in this Task; no return, restart, extra unit or approval.
 Do not ask the user or delegate to another agent for in-request scope repair. Respect explicit prohibitions.
-Requested git add -- <paths> and git commit -m ... are normal source-scope Git operations; they do not require
-.git/** scope. Attempt supported operations; report actual denials, not inferred gaps. Formal check changes
+${MISSION_GIT_SCOPE}
+Formal check changes
 use the existing contract update; never manufacture PASS or reset spend.
 
-Use the smallest complete fix consistent with surrounding code and public API success/error behavior,
-not a catch-all or exhaustive exception matrix. Diagnose/edit/check in this Task; preparation alone is
-not execution of a known operation. Run formal validation commands exactly as listed, in declared order
+Use the smallest complete fix consistent with surrounding code and public API success/error behavior.
+Investigate/edit/check and any requested commit in this Task before independent Review, respecting explicit user ordering;
+do not invent a review-before-commit gate or a commit-only handoff. Preparation alone is not execution of a known operation.
+Run formal validation commands exactly as listed, in declared order
 and separate shell calls; host records command/source/exit. Diagnostic success is not formal evidence.
 Do not repeat failures without a concrete source/setup correction, or PASS on unchanged inputs.
 Keep the public reproduction's entrypoint, input and layout intact; rerun it after fixing when possible.
-If unavailable, name what remains unverified; another passing check is not a substitute. For changed
-conditions/handlers inspect the underlying operation, reachable inputs and uncaught failures. Check a
-materially different failure input when public source/tests/API support the same contract: a normal input
-alone cannot verify failure behavior. Assert public return value, error and post-failure state together,
-not error text alone. Derive expectations from public code/tests, not hidden evaluators; avoid redundant
-checks. Return concrete failed reproductions for same-goal correction, not whole-task completion.
+If unavailable, name what remains unverified; another passing check is not a substitute.
+For a changed fallible API, inspect relevant callsites for returned error loss or overwrite and state after failure.
+Use public source/tests/API expectations, not hidden evaluators; fix concrete defects without a catch-all,
+mandatory exhaustive matrix or redundant tests. Return concrete failed reproductions for same-goal correction,
+not whole-task completion.
 
 Missing repository-declared dependencies or test runner are setup, not a result. Make one bounded,
 repository-documented setup attempt in ${TOOL_ENVIRONMENT}/ (Python: python -m venv ${TOOL_ENVIRONMENT},
