@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { normalizeExecutionScope } from "./path.js";
-import { parseOperatorPlan, type OperatorPlan, type OperatorState, type OperatorTask } from "./operator-runtime.js";
+import { parseOperatorPlan, type OperatorPlan, type OperatorState, type OperatorTask, type OperatorRuntime } from "./operator-runtime.js";
 import { profileAgent, type RuntimeProfile } from "./runtime-profile.js";
 
 const digest = (value: string): string => createHash("sha256").update(value).digest("hex");
@@ -95,6 +95,8 @@ export interface OperatorMission {
   requests: MissionRequest[];
   /** Prior public conversation context, not additional immutable requirements. */
   context?: MissionContext[];
+  /** Explicit continue deliveries, keyed by the original real turn. */
+  steering?: { requestID: string; child: string; status: "pending" | "queued" }[];
   kind?: "implementation" | "operation";
   /** Native shell observations of the requested operation, separate from auxiliary checks. */
   execution?: MissionExecution;
@@ -126,6 +128,7 @@ export interface OperatorMission {
   progress: { unit: string; title: string; status: string; at: string }[];
   submission: { status: "ready" | "needs-decision" | "blocked"; summary: string } | null;
   review?: { runID: string; risk: string[]; source: string; task: OperatorTask | null;
+    callID?: string;
     evidence?: MissionEvidenceExcerpt[];
     requestFingerprint?: string;
     verdict: "pending" | "PASS" | "findings" | "evidence-gaps" | "skipped-low-risk"; result?: string; child?: string;
@@ -284,11 +287,6 @@ export class OperatorMissionRuntime {
     await this.serial(root, async () => {
       // Captured before prompt rewriting, including exact whitespace. Never ask a model to recopy it.
       await this.save(this.file(root, ".request"), request);
-      const state = await this.loadMission(root);
-      if (state && !["completed", "cancelled"].includes(state.phase) && !state.requests.some(item => item.id === request.id)) {
-        state.requests.push(request);
-        await this.save(this.file(root), state);
-      }
     });
   }
   recordLaunchConditions(root: string, raw: unknown): Promise<OperatorMission> {
@@ -323,6 +321,8 @@ export class OperatorMissionRuntime {
           throw new Error("mission-requirements-preserved: keep the existing ordered requirements and append user additions");
         }
         previous.requirements = requirements.map((text, index) => ({ id: `R${index + 1}`, text }));
+        // Only an explicit Mission action adopts the latest real turn; chat capture alone never does.
+        if (!previous.requests.some(item => item.id === request.id)) previous.requests.push(request);
         if (options.kind === "operation") previous.kind = "operation";
         await this.save(this.file(root), previous);
         return previous;
@@ -460,7 +460,7 @@ export class OperatorMissionRuntime {
 }
 
 /** The model supplies only useful unit facts; IDs, proof projection and control documents are generated here. */
-export function missionPlan(mission: OperatorMission, raw: unknown): OperatorPlan {
+export function missionPlan(mission: OperatorMission, raw: unknown, projectRoot?: string): OperatorPlan {
   if (!Array.isArray(raw) || raw.length === 0 || raw.length > 32) throw new Error("mission-units: declare 1..32 units");
   const acceptance = mission.requirements.map(item => item.text);
   const declared = raw.map((value, index) => {
@@ -472,7 +472,12 @@ export function missionPlan(mission: OperatorMission, raw: unknown): OperatorPla
     const paths = (field: string): string[] => {
       const entries = value[field] ?? [];
       if (!Array.isArray(entries) || !entries.every(item => typeof item === "string")) throw new Error(`mission-unit-${index + 1}: ${field} must be paths`);
-      return [...new Set(entries.map(item => normalizeExecutionScope(item)))];
+      return [...new Set(entries.map(item => {
+        // A model's repository-root read means the current project, not an invalid empty path.
+        // Resolve only this read shorthand at the host boundary; saved plans and write scopes stay exact.
+        const rootRead = field === "read" && [".", "./", ".\\", "./**", ".\\**"].includes(item);
+        return normalizeExecutionScope(rootRead && projectRoot ? `${resolve(projectRoot).replaceAll("\\", "/")}/**` : item);
+      }))];
     };
     // A sole unit owns the whole request. This schedules work; it does not prove acceptance.
     const ids = value.requirement_ids ?? (raw.length === 1 || mission.requirements.length === 1 ? mission.requirements.map(item => item.id) : []);
@@ -517,6 +522,69 @@ export function missionPlan(mission: OperatorMission, raw: unknown): OperatorPla
     units }, "execution");
 }
 
+/** Compact provenance, not a new acceptance verdict or a substitute for original-request comparison. */
+export async function missionAcceptanceSummary(mission: OperatorMission, run: OperatorState | undefined,
+  operators: OperatorRuntime, observe?: (validation: readonly string[], child: string | null) => Promise<unknown>): Promise<Record<string, unknown>> {
+  const current = run?.runID === mission.runID ? run : undefined;
+  const history = current ? await operators.acceptanceHistory(current, [...new Set((mission.attempts ?? []).map(item => item.runID))])
+    : { status: "unavailable", runs: [], reason: "current-mission-run-unavailable" };
+  const acceptedAnchor = (unit: OperatorState["units"][number]) => current?.priorAcceptedUnits.find(item => item.handoffPath === unit.handoffPath &&
+      item.handoffHash === unit.hashes[0] && item.taskID === unit.task.prompt.match(/^task_id: (.+)$/mu)?.[1]);
+  const missingAnchors = current?.priorAcceptedUnits.filter(anchor => !history.runs.some(item => item.state.units.some(unit =>
+    unit.status === "succeeded" && acceptedAnchor(unit)?.taskID === anchor.taskID))) ?? [];
+  const validation = (state: OperatorState, path: string | null, historical: boolean) => state.units.flatMap(unit => {
+    const anchor = historical ? acceptedAnchor(unit) : undefined;
+    if (historical && (!anchor || unit.status !== "succeeded")) return [];
+    return (unit.evidence ?? []).map(proof => ({ run_id: state.runID, unit_id: unit.unit.id,
+      task_id: unit.task.prompt.match(/^task_id: (.+)$/mu)?.[1] ?? null,
+      worker_session_id: unit.childSessionID, state_archive_path: path, handoff_path: unit.handoffPath,
+      ...(anchor ? { accepted_anchor: anchor } : {}), evidence_id: proof.evidence_id,
+      command: proof.execution.command, exit: proof.execution.exit_code, outcome: proof.execution.outcome,
+      started_at: proof.execution.started_at, ended_at: proof.execution.ended_at,
+      identity: proof.identity,
+      ...(proof.protected_binding ? { binding_hashes: { manifest_hash: proof.protected_binding.manifest_hash,
+        ...(proof.protected_binding.freshness ? { contract_hash: proof.protected_binding.freshness.contract_hash } : {}) },
+        operation_manifest_path: proof.protected_binding.manifest_path } : {}),
+      details_ref: { path: path ?? operators.statePath(state.rootSessionID),
+        unit_id: unit.unit.id, evidence_id: proof.evidence_id,
+        omitted: "protected_binding path arrays, project root and environment remain in this exact persisted evidence record" },
+      proof_scope: proof.proof_scope,
+      applicability: historical ? "historical-reference; current applicability not established by this projection"
+        : "current-run record; consult completion readiness for current protected identity" }));
+  });
+  const nativeValidation = await Promise.all([
+    ...(current ? [{ path: null, state: current, historical: false }] : []),
+    ...history.runs.map(item => ({ ...item, historical: true })),
+  ].flatMap(item => item.state.units.filter(unit => !item.historical ||
+    (unit.status === "succeeded" && acceptedAnchor(unit))).map(async unit => {
+      const provenance = { run_id: item.state.runID, unit_id: unit.unit.id, worker_session_id: unit.childSessionID,
+        state_archive_path: item.path, handoff_path: unit.handoffPath, historical: item.historical,
+        authority: "native declared-command observations; not additional formal evidence or current freshness" };
+      try {
+        if (!observe || !unit.childSessionID) throw new Error("native-worker-history-unavailable");
+        return { ...provenance, status: "available", observations: await observe(unit.unit.validation, unit.childSessionID) };
+      } catch (error) {
+        return { ...provenance, status: "unavailable", reason: error instanceof Error ? error.message : String(error) };
+      }
+    })));
+  return { original_requests: mission.requests, requirements: mission.requirements,
+    history: { status: missingAnchors.length ? "unavailable" : history.status,
+      ...(history.reason ? { reason: history.reason } : missingAnchors.length ? { reason: "accepted-handoff-anchor-unavailable" } : {}),
+      ...(missingAnchors.length ? { unavailable_anchors: missingAnchors } : {}),
+      selection: "same-mission Worker run IDs, parent lineage and exact accepted handoff anchors" },
+    formal_validation: [...(current ? validation(current, null, false) : []),
+      ...history.runs.flatMap(item => validation(item.state, item.path, true))],
+    native_declared_validation: nativeValidation,
+    independent_review: mission.review ? { run_id: mission.review.runID, current_run: mission.review.runID === current?.runID,
+      reviewer_session_id: mission.review.child ?? null, source_fingerprint: mission.review.source,
+      verdict: mission.review.verdict, result: mission.review.result ?? null,
+      freshness: "not established by run ID; existing source comparison remains required" } : null,
+    delivery: { submission: mission.submission, git_lifecycle: current?.gitLifecycle ?? null,
+      observation_source: "persisted operator Git lifecycle and formal validation records; no new Git inspection",
+      clean: "not independently observed by this projection" },
+    interpretation: "Compare original requests with the submitted candidate and actual evidence. Historical PASS is not current PASS. Inspect concrete gaps, not routine archive searches or full source rereads. Existing completion and Review guards still apply." };
+}
+
 export function missionPacket(mission: OperatorMission, run?: OperatorState): Record<string, unknown> {
   const predecessor = run && mission.runID !== run.runID && (mission.supersededRunID === run.runID || run.phase === "cancelled") ? run : undefined;
   if (predecessor) run = undefined;
@@ -528,7 +596,7 @@ export function missionPacket(mission: OperatorMission, run?: OperatorState): Re
     ...(predecessor ? { predecessor: { run_id: predecessor.runID, status: predecessor.phase,
       completed_units: predecessor.units.filter(unit => unit.status === "succeeded").length,
       note: "Historical results and spend are retained; they do not complete the current requirements." } } : {}),
-    requirements: mission.requirements, original_request_refs: mission.requests.map(item => `user:${item.id}`),
+     requirements: mission.requirements, original_request_refs: mission.requests.map(item => `user:${item.id}`),
     launch_conditions: mission.launchConditions ?? [], prohibited_write: mission.prohibitedWrite ?? [],
     accounting_scope: "Worker units are not benchmark attempts. Host budget is Worker-only; orchestration, Review and external campaign costs are excluded. Launch caps are fixed conditions, not a known campaign remainder.",
     submission: mission.submission, progress: mission.progress, consultations: mission.consultations ?? [],
@@ -557,7 +625,7 @@ export function missionPacket(mission: OperatorMission, run?: OperatorState): Re
          ...(unit.dispatchDenial ? { dispatch_denial: unit.dispatchDenial } : {}) })) } : {}),
     next_action: mission.phase === "completed" ? "Mission completed. Report the accepted result and retained review gaps; no further dispatch or completion call is needed."
       : mission.phase === "submitted" && mission.submission?.status === "ready"
-      ? "Operator: compare the submitted candidate with the original requirements and actual evidence, then complete_mission if satisfied. Report remaining evidence gaps; they are not a review PASS."
+       ? "Operator: use acceptance_summary to compare the submitted candidate with the verbatim original requests and actual evidence, inspect concrete gaps only, then complete_mission if satisfied. Do not routinely search archives or reread all source. Historical PASS is not current PASS. Report remaining evidence gaps; they are not a review PASS."
       : mission.kind === "operation" && operationStatus === "running"
         ? "The declared operation is already running. Inspect its native shell/progress; do not start another Worker or run. Wait for a terminal result, or report the existing run as blocked if its completion cannot be observed."
       : run?.phase === "awaiting-decision" ? (run.units.some(unit => unit.dispatchDenial)

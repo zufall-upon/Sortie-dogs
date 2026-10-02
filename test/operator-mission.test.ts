@@ -20,19 +20,19 @@ const unit = { title: "Fix result", objective: "Implement the requested result w
   write: ["src"], validation: ["node check.mjs"] };
 const independentReviewAcceptance = "After implementation and formal validation, the Coordinator must dispatch an independent Dog-Reviewer with review_mission and risk_tags [public-logic] to examine root cause and public logic, then reflect all FINDINGS; this SourceReview is post-validation and must not block Worker dispatch.";
 
-test("public reproduction and shared-branch checks remain in the same mission Worker handoff", async () => fixture(async directory => {
+test("public reproduction and shared-branch checks remain in the same mission Worker handoff", async t => fixture(async directory => {
   const operator = missionOperatorContent(V010_RUNTIME_PROFILE, "0.12.17");
   const coordinator = missionCoordinatorContent(V010_RUNTIME_PROFILE, "0.12.17");
   const worker = missionWorkerContent(V010_RUNTIME_PROFILE);
   assert.match(operator, /Keep the SAME mission, original requirements, failure history\s+and cumulative budget/u);
   assert.match(operator, /Coordinator Task only for real coordination/u);
-  assert.match(coordinator, /first useful unit objective/u);
+  assert.match(coordinator, /do not copy them into objective/u);
   assert.match(coordinator, /working directory or package layout/u);
   assert.match(coordinator, /not an adjacent check unless it runs\s+the changed branch/u);
-  assert.match(worker, /entrypoint, input and layout intact/u);
-  assert.match(worker, /underlying operation, reachable inputs and uncaught failures/u);
-  assert.match(worker, /avoid redundant\s+checks/u);
-  assert.match(worker, /do not append a tee pipeline/u);
+  assert.match(worker, /entrypoint, input and layout; rerun or\s+report why unverified/u);
+  assert.match(worker, /meaningful changed branches, API errors and state after failure/u);
+  assert.match(worker, /without a hypothetical exhaustive matrix/u);
+  assert.match(worker, /no extra tee, redirect or wrapper/u);
   assert.match(coordinator, /a preview is not the live run/u);
   assert.match(operator, /Do not turn a chosen preflight step into a user requirement/u);
   assert.match(coordinator, /Evaluating an unchanged published package is not a release or source edit/u);
@@ -40,7 +40,7 @@ test("public reproduction and shared-branch checks remain in the same mission Wo
   assert.match(coordinator, /process-defect with no formal validation evidence/u);
   assert.match(coordinator, /custom container tool is not\s+native shell validation/u);
   assert.match(coordinator, /use\s+the existing ref as start_ref in a lifecycle plan/u);
-  assert.match(worker, /checked-out default 'master' has the intended base commit/u);
+  assert.match(worker, /host Git lifecycle/u);
   assert.doesNotMatch(worker, /hidden evaluator details.*as (?:proof|tests)/u);
 
   // Public-only synthetic case analogous to a shared exception handler. This asserts the
@@ -58,6 +58,15 @@ test("public reproduction and shared-branch checks remain in the same mission Wo
   await operators.admitWorker("root", "root", "worker-call", task as never);
   const expanded = await operators.claimAdmittedWorkerPrompt("root", "root", "worker", task.prompt);
   assert.match(expanded.prompt, /^contract_reference: handoff$/m);
+  assert.match(expanded.prompt, /^goal: handoff\.task\.objective; original: handoff\.ext\["sortie-dogs\/mission-context"\]$/m);
+  assert.doesNotMatch(expanded.prompt, /Implement task\.objective; preserve the original requests/u);
+  assert.ok(expanded.prompt.length <= 1500, `navigation prompt: ${expanded.prompt.length}`);
+  const currentNavigation = 'goal: handoff.task.objective; original: handoff.ext["sortie-dogs/mission-context"]\n' +
+    "Read the full authoritative handoff first. Host ready => implement; denied => follow its reason/remedy. No routine manifest/goal/status/bind calls; manual bind remains the legacy/recovery fallback. Do not recopy the original request.";
+  const previousNavigation = "Read handoff_path once before binding. Implement task.objective; preserve the original requests, global criteria and constraints in ext, and prove this unit's assigned indices. Run verification checks exactly in order within this Task. Use supplied paths; do not reconstruct project_root. Return actual results and limitations, not whole-Mission completion.";
+  t.diagnostic(JSON.stringify({ handoff_prompt_before_chars: expanded.prompt.replace(currentNavigation, previousNavigation).length,
+    handoff_prompt_after_chars: expanded.prompt.length, navigation_before_chars: previousNavigation.length,
+    navigation_after_chars: currentNavigation.length }));
   const handoff = JSON.parse(await readFile(run.units[0]!.handoffPath, "utf8"));
   assert.equal(handoff.task.objective, objective, "public entrypoint, layout and adjacent failure stay verbatim in the mandatory handoff");
   assert.deepEqual(handoff.verification.map((item: { check: string }) => item.check), ["python -m pytest tests/test_format.py"]);
@@ -126,11 +135,12 @@ test("mission captures exact original messages, generates IDs, and preserves req
   const cold = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
   const restored = await cold.required("root");
   assert.equal(restored.id, mission.id);
-  assert.deepEqual(restored.requests, [{ id: "u1", text: " Fix this.\r\nDo not change tests.  " }, { id: "u2", text: "Also preserve the newline." }]);
+  assert.deepEqual(restored.requests, [{ id: "u1", text: " Fix this.\r\nDo not change tests.  " }], "chat capture alone never adopts a requirement");
   assert.deepEqual(restored.requirements.map(item => item.id), ["R1", "R2"]);
   await assert.rejects(cold.start("root", ["Only fix a smaller part"]), /requirements-preserved/);
   const extended = await cold.start("root", ["Fix result", "Do not change tests", "Preserve newline"]);
   assert.equal(extended.id, mission.id);
+  assert.deepEqual(extended.requests, [{ id: "u1", text: " Fix this.\r\nDo not change tests.  " }, { id: "u2", text: "Also preserve the newline." }]);
 }));
 
 test("mission status preserves review lineage without presenting an old run as currently accepted", async () => fixture(async directory => {
@@ -169,7 +179,7 @@ test("mission Coordinator owns a single Worker unit without a proposal or root a
   await assert.rejects(operators.claimAdmittedWorkerPrompt("root", "root", "worker", next.task.prompt), /parent-mismatch/);
   const admitted = await operators.claimAdmittedWorkerPrompt("root", "coordinator", "worker", next.task.prompt);
   assert.match(admitted.prompt, /^contract_reference: handoff$/m);
-  assert.match(missionWorkerContent(V010_RUNTIME_PROFILE), /Read\/search\/investigation use existing host permissions/);
+  assert.match(missionWorkerContent(V010_RUNTIME_PROFILE), /Read\/search use existing permissions/);
   assert.equal((await operators.required("root")).runID, state.runID);
   await assert.rejects(operators.replanMission("root", state.runID, missionPlan(mission, [{ ...unit, write: ["src", "test"] }])), /still-active/);
 }));
@@ -203,7 +213,7 @@ test("mission Worker separates prior decisions from post-validation independent 
   const expanded = await operators.claimAdmittedWorkerPrompt("root", "coordinator", "worker", workerTask.prompt);
   assert.match(expanded.prompt, /^contract_reference: handoff$/m);
   const instructions = missionWorkerContent(V010_RUNTIME_PROFILE);
-  assert.match(instructions, /parent handles required independent\s+review after your return, not before execution/u);
+  assert.match(instructions, /Parent handles independent Review after return, not before execution/u);
   assert.match(instructions, /Do not spawn nested subagents/u);
   assert.doesNotMatch(expanded.prompt, /Required consultations belong to the root before dispatch/u);
   assert.doesNotMatch(expanded.prompt, /If required consultation results or user decisions are missing/u);
@@ -241,7 +251,7 @@ test("multi-unit mission retains review sequence in each referenced handoff and 
     assert.match(prompt, /^contract_reference: handoff$/m);
     assert.match(prompt, /^acceptance: handoff\.ext\["sortie-dogs\/acceptance-continuity"\]\.criteria$/m);
     const instructions = missionWorkerContent(V010_RUNTIME_PROFILE);
-    assert.match(instructions, /parent handles required independent\s+review after your return, not before execution/u);
+    assert.match(instructions, /Parent handles independent Review after return, not before execution/u);
     assert.match(instructions, /Do not spawn nested subagents/u);
     assert.doesNotMatch(prompt, /Required consultations belong to the root before dispatch/u);
     assert.doesNotMatch(prompt, /If required consultation results or user decisions are missing/u);
@@ -264,7 +274,7 @@ test("multi-unit mission retains review sequence in each referenced handoff and 
   expandedPrompts.push(secondExpanded.prompt);
   assert.equal(expandedPrompts.length, run.units.length);
   assertMissionWorkerPrompt(expandedPrompts[1]!, [2]);
-  assert.match(missionWorkerContent(V010_RUNTIME_PROFILE), /review after your return, not before execution/u);
+  assert.match(missionWorkerContent(V010_RUNTIME_PROFILE), /Review after return, not before execution/u);
   assert.equal(expanded.prompt.match(/^unit_acceptance_indices: .*$/mu)?.[0], "unit_acceptance_indices: [0,1]");
 }));
 
@@ -435,6 +445,7 @@ test("a later user turn can replace a cancelled mission without inheriting its o
   await assert.rejects(operators.prepareMission("root", missionPlan(sameTurn, [{ ...unit, requirement_ids: ["R1", "R2"] }])),
     /operator-acceptance-carry-forward-required/);
   await missions.capture("root", { id: "u2", text: "Use v0.12.4 and start a new mission" });
+  await missions.start("root", sameTurn.requirements.map(item => item.text));
   await missions.update("root", state => { state.phase = "cancelled"; state.runID = oldRun.runID; });
   const replacement = await missions.start("root", ["Run v0.12.4", "Keep cumulative budget"]);
   assert.equal(replacement.supersededRunID, oldRun.runID);
@@ -510,6 +521,7 @@ test("cancelled no-run successor preserves the old run's supersession across ano
   const intermediate = await missions.start("root", ["New package"]);
   assert.equal(intermediate.supersededRunID, run.runID);
   await missions.capture("root", { id: "latest-request", text: "Continue with five failed instances" });
+  await missions.start("root", intermediate.requirements.map(item => item.text));
   await missions.update("root", state => { state.phase = "cancelled"; });
   const current = await missions.start("root", ["Inspect the five failed instances"]);
   assert.equal(current.supersededRunID, run.runID);

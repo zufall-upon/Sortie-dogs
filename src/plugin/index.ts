@@ -192,6 +192,8 @@ export interface OpenCodePluginInput {
   runtimeBridge?: RuntimeBridge;
   /** V2 has no assistant-part update API; return the canonical panel with explicit acceptance. */
   returnReportTransport?: "tool-result";
+  /** Native background Job ownership, persisted by the V2 adapter. */
+  nativeBackground?: { awaiting(sessionID: string): Promise<boolean> };
   /** The host SDK client. Absent in hosts that construct the plugin without one. */
   client?: SessionMessageReader & RunMetricsClient & ContinuationClient & OpenCodeModelAvailabilityClient & {
     app?: {
@@ -220,6 +222,8 @@ export interface OpenCodeEvent {
 }
 
 export interface OpenCodeHooks {
+  /** Internal adapter transport; retains the existing profile owner across reload. */
+  backgroundOwner?: (callID: string, restore?: Record<string, unknown>) => Record<string, unknown> | undefined;
   event?: (input: { event: OpenCodeEvent }) => Promise<void>;
   "permission.ask"?: (
     input: { permission: string; patterns: string[]; sessionID?: string },
@@ -455,6 +459,7 @@ interface TaskToolExecuteAfterInput {
   readonly sessionID?: string;
   readonly callID?: string;
   readonly args?: unknown;
+  readonly nativeReadHash?: string;
 }
 
 interface TaskResultRepairOutput {
@@ -493,6 +498,8 @@ interface HostToolTiming {
 
 interface InspectionCacheEntry {
   fingerprint: string;
+  handoffHash: string;
+  manifestHash?: string;
   expiresAt: number;
   handoffPath: string;
   manifestPath: string;
@@ -1985,6 +1992,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     }
   }
   async function recoverCompletedGoalReservations(sessionID: string): Promise<void> {
+    if (await input.nativeBackground?.awaiting(sessionID)) return;
     const root = goalRoot(sessionID);
     const active = goalReservationRecoveries.get(root);
     if (active !== undefined) return active;
@@ -2713,8 +2721,23 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const reservation = goalReservations.get(callID);
     if (reservation === undefined) return;
     const ledger = await goalLedger(reservation.root);
-    const state = (await ledger.readGoal()).state;
+    const snapshot = await ledger.readGoal(), state = snapshot.state;
     if (state.goal_id === null || !state.outstanding_reservations.some(item => item.reservation_id === reservation.reservationID)) {
+      // The ledger append can succeed before the profile's durable projection fails. Replaying
+      // that same receipt repairs the projection without settling cost/reservation a second time.
+      const settled = snapshot.records.find(({ event }) => event.kind === "unit.settled" &&
+        event.reservation_id === reservation.reservationID && event.goal_id === state.goal_id)?.event;
+      if (settled?.kind === "unit.settled") {
+        const child = taskChildSessionID(output) ?? settled.native_session_id;
+        const failed = [...hostGoalExecutions.values()].find(execution => execution.root === reservation.root &&
+          execution.sessionID === child && execution.endedAt !== undefined && execution.outcome === "fail" &&
+          Date.parse(execution.startedAt) >= reservation.started - 1000);
+        await input.runtimeBridge?.onSerialSettlement?.({ rootSessionID: reservation.root, callID, unitID: settled.unit_id,
+          ...(child ? { childSessionID: child } : {}), disposition: settled.disposition, evidence: settled.evidence,
+          resultClass: settled.result_class ?? "process-defect", nativeOutcome: output.status === "error" || output.status === "cancelled" ? "failed" : "completed",
+          ...(settled.result_class === "acceptance" && failed ? { failure: { command: failed.command.slice(0, 8),
+            outcome: "fail" as const, exitCode: failed.exitCode ?? null } } : {}) });
+      }
       goalReservations.delete(callID);
       return;
     }
@@ -2771,7 +2794,6 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       evidence: settlementEvidence, elapsed_ms: Math.max(0, Date.now() - reservation.started),
       cost_usd: await nativeUnitCost(childSessionID, new Date(reservation.started).toISOString()),
       ...(childSessionID ? { native_session_id: childSessionID, native_started_at: new Date(reservation.started).toISOString() } : {}) });
-    goalReservations.delete(callID);
     await input.runtimeBridge?.onSerialSettlement?.({
       rootSessionID: reservation.root, callID, unitID: reservation.unitID,
       ...(childSessionID === undefined ? {} : { childSessionID }),
@@ -2782,6 +2804,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         exitCode: failedAcceptanceExecution.exitCode ?? null,
       } } : {}),
     });
+    goalReservations.delete(callID);
     if (childSessionID !== undefined) {
       goalValidationDefects.delete(childSessionID);
       for (const [executionCallID, execution] of hostGoalExecutions) {
@@ -4846,6 +4869,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   }
 
   async function sweepCoordinatorTaskWatchdog(sessionID: string, generation: number): Promise<void> {
+    if (await input.nativeBackground?.awaiting(sessionID)) {
+      clearCoordinatorTaskWatchdog(sessionID);
+      return;
+    }
     if (terminalCoordinatorTaskWatchdogs.has(sessionID)) return;
     const state = coordinatorTaskWatchdogs.get(sessionID);
     const calls = coordinatorTaskCalls.get(sessionID);
@@ -4970,7 +4997,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   async function inspect(
     path: string,
     sessionID: string | undefined,
-    options: { readonly report?: boolean; readonly rescueSessionID?: string } = {},
+    options: { readonly report?: boolean; readonly rescueSessionID?: string; readonly readHash?: string } = {},
   ): Promise<InspectedContractIdentity | undefined> {
     const unregistered = (code: string): void => {
       if (!options.report) return;
@@ -4996,8 +5023,14 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const key = sessionID === undefined ? undefined : `${sessionID}\u0000${absolutePath}`;
     if (key !== undefined) inspected.delete(key);
     let value: unknown;
+    let handoffHash: string;
     try {
-      value = await readJson(absolutePath, INPUT_LIMITS.handoff);
+      const pinned = await readPinnedJson(absolutePath, INPUT_LIMITS.handoff);
+      if (options.readHash !== undefined && pinned.hash !== options.readHash) throw new HandoffDeniedError("contract-invalid", path, {
+          defects: [contractDefect("handoff", "/", "handoff_read_identity_changed")],
+        });
+      value = pinned.value;
+      handoffHash = pinned.hash;
     } catch (error) {
       if (error instanceof PluginInputError) {
         throw new HandoffDeniedError("input-unavailable", path, {
@@ -5016,6 +5049,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
 
     let authorizationGate: WriteGate;
     let manifestPath: string;
+    let manifestHash: string | undefined;
     let manifest: OperationManifest;
     let inspectedProjectRoot: string;
     const extension = validation.value.ext?.["sortie-dogs/write-gate"];
@@ -5077,8 +5111,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         }
         const relativeManifestPath = await candidateProject.toRelativePath(extension.operation_manifest);
         manifestPath = candidateProject.absolute(relativeManifestPath);
-        const manifestValue = await readJson(manifestPath, INPUT_LIMITS.manifest);
-        const manifestValidation = validateOperationManifestSchema(manifestValue);
+        const pinnedManifest = await readPinnedJson(manifestPath, INPUT_LIMITS.manifest);
+        manifestHash = pinnedManifest.hash;
+        const manifestValidation = validateOperationManifestSchema(pinnedManifest.value);
         if (!manifestValidation.ok) {
           throw new HandoffDeniedError("contract-invalid", path, {
             defects: schemaDefects("manifest", manifestValidation.diagnostics),
@@ -5159,6 +5194,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     pruneInspections(now, true);
     inspected.set(key!, {
       fingerprint,
+      handoffHash,
+      manifestHash,
       expiresAt: now + INSPECTION_CACHE.ttlMilliseconds,
       handoffPath: absolutePath,
       manifestPath,
@@ -5175,6 +5212,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     sessionID: string,
     projectRoot: string,
     manifestPathArgument: string,
+    readHash?: string,
+    registeredManifestHash?: string,
   ): Promise<string> {
     const remedies: Record<string, { recoverable: boolean; remedy: string }> = {
       "session-inactive": {
@@ -5278,6 +5317,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       const relativeManifestPath = await candidate.toRelativePath(manifestPathArgument);
       const manifestPath = candidate.absolute(relativeManifestPath);
       const pinned = await readPinnedJson(manifestPath, INPUT_LIMITS.manifest);
+      if (registeredManifestHash !== undefined && pinned.hash !== registeredManifestHash) return deny("binding-replay");
       const validation = validateOperationManifestSchema(pinned.value);
       if (!validation.ok) {
         return deny("manifest-invalid", schemaDefects("manifest", validation.diagnostics));
@@ -5323,7 +5363,14 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       };
       let handoffValue: unknown;
       try {
-        handoffValue = await readJson(inspectedEntry.handoffPath, INPUT_LIMITS.handoff);
+        if (readHash === undefined) handoffValue = await readJson(inspectedEntry.handoffPath, INPUT_LIMITS.handoff);
+        else {
+          const pinnedHandoff = await readPinnedJson(inspectedEntry.handoffPath, INPUT_LIMITS.handoff);
+          if (pinnedHandoff.hash !== readHash) return denyHandoffMismatch({ readHash, currentHash: pinnedHandoff.hash }, [
+            contractDefect("handoff", "/", "handoff_read_identity_changed"),
+          ]);
+          handoffValue = pinnedHandoff.value;
+        }
       } catch (error) {
         if (error instanceof PluginInputError) {
           return denyHandoffMismatch({ input: error.reason }, [
@@ -5826,17 +5873,46 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     clearSessionLinks(sessionID);
   }
 
-  async function inspectSuccessfulRead(toolInput: TaskToolExecuteAfterInput): Promise<void> {
+  async function inspectSuccessfulRead(toolInput: TaskToolExecuteAfterInput, output: TaskResultRepairOutput): Promise<void> {
     if (toolInput.tool.toLowerCase() !== "read" || toolInput.sessionID === undefined) return;
+    if (output.status !== undefined && output.status !== "completed") return;
     if (activeSessionStatus(toolInput.sessionID) !== "active" || !isRecord(toolInput.args)) return;
     const path = toolInput.args.filePath;
     if (typeof path !== "string" || path.length === 0) return;
     const absolutePath = isAbsolute(path) ? resolve(path) : resolve(input.worktree ?? input.directory, path);
     const key = `${toolInput.sessionID}\u0000${absolutePath}`;
-    const operation = inspectionOperations.get(key) ?? inspect(absolutePath, toolInput.sessionID).then(() => undefined);
+    const root = coordinatorRootForSession(toolInput.sessionID);
+    const binding = output.status === "completed" && toolInput.nativeReadHash !== undefined && root !== undefined
+      ? await input.runtimeBridge?.missionReadBinding?.(root, toolInput.sessionID, absolutePath) : undefined;
+    const append = (result: unknown): void => {
+      output.output = `${String(output.output ?? "")}\n\nSORTIE_WORKER_ACTIVATION: ${JSON.stringify(result)}`;
+    };
+    if (binding && binding.handoffHash !== toolInput.nativeReadHash) {
+      append({ status: "denied", reason: "handoff-mismatch", remedy: "Correct the registered handoff or its operation manifest, then read the handoff again." });
+      return;
+    }
+    // Join the before-read inspection for concurrent legacy manual binds. Reuse it
+    // only for the same completed native snapshot; bind rechecks freshness as usual.
+    const previous = inspectionOperations.get(key);
+    if (binding && previous) await previous.catch(() => undefined);
+    const cached = inspected.get(key);
+    const reuse = binding && cached?.handoffHash === toolInput.nativeReadHash && cached?.manifestHash === binding.manifestHash;
+    const operation = binding && !reuse
+      ? inspect(absolutePath, toolInput.sessionID, { readHash: toolInput.nativeReadHash }).then(() => undefined)
+      : reuse ? Promise.resolve() : previous ?? inspect(absolutePath, toolInput.sessionID).then(() => undefined);
     inspectionOperations.set(key, operation);
     try {
       await operation;
+      if (binding) {
+        const result = JSON.parse(await bindWriteGate(toolInput.sessionID, binding.projectRoot, binding.manifestPath,
+          toolInput.nativeReadHash, binding.manifestHash));
+        append(result.status === "bound" ? { status: "ready" } : result);
+      }
+    } catch (error) {
+      if (!binding) throw error;
+      append({ status: "denied", reason: error instanceof HandoffDeniedError || error instanceof PluginInputError
+        ? error.reason : "binding-failed", remedy: error instanceof Error ? error.message : String(error),
+        ...(error instanceof HandoffDeniedError ? { defects: error.defects } : {}) });
     } finally {
       if (inspectionOperations.get(key) === operation) inspectionOperations.delete(key);
     }
@@ -6188,6 +6264,22 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   }
 
   const hooks: OpenCodeHooks = {
+    backgroundOwner: (callID, restore) => {
+      if (restore && isRecord(restore.reservation)) {
+        const reservation = restore.reservation as unknown as NonNullable<ReturnType<typeof goalReservations.get>>;
+        goalReservations.set(callID, reservation);
+        const calls = coordinatorTaskCalls.get(reservation.root) ?? new Set<string>();
+        calls.add(callID);
+        coordinatorTaskCalls.set(reservation.root, calls);
+        if (Array.isArray(restore.executions)) for (const entry of restore.executions) {
+          if (Array.isArray(entry) && typeof entry[0] === "string" && isRecord(entry[1])) hostGoalExecutions.set(entry[0], entry[1] as unknown as HostGoalExecution);
+        }
+      }
+      const reservation = goalReservations.get(callID);
+      return reservation ? { reservation, calls: [...(coordinatorTaskCalls.get(reservation.root) ?? [])], executions: [...hostGoalExecutions]
+        .filter(([, execution]) => execution.root === reservation.root && execution.endedAt !== undefined)
+        .map(([id, { validation: _validation, ...execution }]) => [id, execution]) } : undefined;
+    },
     tool: {
       sortie_execute_adaptive_remediation: defineTool({
         description: "Auto-select and execute one bounded adaptive remediation from .opencode/sortie-dogs-adaptive-remediation.json using hidden Git candidates, the shared flight ledger, one canonical validation, independent review, CAS, and post-merge verification.",
@@ -6919,6 +7011,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
      * erases an answer the worker already produced and the coordinator re-dispatches the same work.
     */
     "tool.execute.after": async (toolInput, output): Promise<void> => {
+      if (toolInput.tool === "task" && isRecord(output.metadata) && output.metadata.status === "running") {
+        if (toolInput.sessionID) clearCoordinatorTaskWatchdog(toolInput.sessionID);
+        return;
+      }
       await recordHostGoalEnd(toolInput, output);
       // A completed host question is a new user-interaction boundary, just like chat input.
       // It authorizes one subsequent typed declaration; it does not itself grant budget or clear a stop.
@@ -6948,7 +7044,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         if (lease !== undefined) childObservedLeases.set(completedChildSessionID, lease);
         pruneParallelChildMap(observedChildTerminals);
       }
-      const handoffInspection = inspectSuccessfulRead(toolInput);
+      const handoffInspection = inspectSuccessfulRead(toolInput, output);
       try {
         if (bootstrapRequired && toolInput.tool === "sortie_check_contract" && toolInput.sessionID !== undefined &&
           isCoordinatorSession(toolInput.sessionID) && successfulBootstrapContractCheck(output)) {
@@ -7076,6 +7172,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
               appLogInfo("goal.settlement_failed", toolInput.sessionID!, {
                 code: error instanceof Error ? error.name : "unknown",
               });
+              throw error;
             });
           }
           fastLane.workerCompleted(toolInput.sessionID!);
@@ -7856,9 +7953,11 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           }
         }
       }
-      if (event.type === "session.idle") await continuation.sessionIdle(eventSessionID);
+      const awaitingBackground = event.type === "session.idle" && await input.nativeBackground?.awaiting(eventSessionID);
+      if (event.type === "session.idle" && !awaitingBackground) await continuation.sessionIdle(eventSessionID);
       if (event.type === "session.idle" && isCoordinatorSession(eventSessionID)) {
-        abortCoordinatorTasks(eventSessionID, true);
+        if (awaitingBackground) clearCoordinatorTaskWatchdog(eventSessionID);
+        else abortCoordinatorTasks(eventSessionID, true);
       }
       const diagnostic = diagnosisChildren.get(eventSessionID);
       if (event.type === "session.idle" && diagnostic !== undefined && !diagnostic.accepting) {
@@ -7871,6 +7970,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       if (!isActiveSession(eventSessionID)) return;
       if (event.type !== "session.idle") touchActiveSession(eventSessionID);
       if (event.type === "session.idle" && eventSessionID !== undefined) {
+        if (awaitingBackground) { touchActiveSession(eventSessionID); return; }
         if (childLifecycles.has(eventSessionID)) {
           observedChildTerminals.set(eventSessionID, true);
           const lease = sessionAuthorizations.get(eventSessionID)?.lease;

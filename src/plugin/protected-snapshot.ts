@@ -25,10 +25,34 @@ const validationContractHash = (manifest: OperationManifest) => goalFingerprint(
   read: manifest.read, validation: manifest.validation });
 
 export function snapshotScratchExcluded(binding: Binding, absolute: string, currentProtection: readonly string[] = []): boolean {
+  return snapshotScratchExclusion(binding, currentProtection)(absolute);
+}
+
+/** Prepare the same lexical containment rules once per snapshot/Review, not once per
+ * cache-file × protected-file pair. This is call-local; edits and new deliverables are
+ * still rediscovered by currentSnapshotProtection on the next freshness check. */
+export function snapshotScratchExclusion(binding: Binding, currentProtection: readonly string[] = []): (absolute: string) => boolean {
   const fixed = binding.freshness;
-  if (!fixed) return false;
-  return fixed.scratch_paths.some(root => !outside(root, absolute)) &&
-    ![...fixed.protected_paths, ...currentProtection].some(path => !outside(path, absolute) || !outside(absolute, path));
+  if (!fixed) return () => false;
+  const rawProtection = [...fixed.protected_paths, ...currentProtection];
+  const previous = (absolute: string) => fixed.scratch_paths.some(root => !outside(root, absolute)) &&
+    !rawProtection.some(path => !outside(path, absolute) || !outside(absolute, path));
+  // POSIX permits literal backslashes in a filename. The previous relative-path rule
+  // must decide those uncommon names; they are not Windows directory separators.
+  if (process.platform !== "win32" && [...fixed.scratch_paths, ...rawProtection].some(path => path.includes("\\"))) return previous;
+  const canonical = (path: string) => {
+    const normalized = resolve(path).replaceAll("\\", "/");
+    return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+  };
+  const prepared = (path: string) => ({ exact: path, prefix: path.endsWith("/") ? path : `${path}/` });
+  const scratch = fixed.scratch_paths.map(path => prepared(canonical(path)));
+  const protection = [...new Set(rawProtection.map(canonical))].map(prepared);
+  return absolute => {
+    if (process.platform !== "win32" && absolute.includes("\\")) return previous(absolute);
+    const target = prepared(canonical(absolute));
+    return scratch.some(root => target.exact === root.exact || target.exact.startsWith(root.prefix)) &&
+      !protection.some(path => target.exact === path.exact || target.exact.startsWith(path.prefix) || path.exact.startsWith(target.prefix));
+  };
 }
 
 /** Tighten old scratch exclusions for current real inputs/outputs; never rewrite the saved recipe. */
@@ -66,9 +90,10 @@ async function protectedScopeDigest(projectRoot: string, paths: readonly string[
   sourcePolicy?: Binding["source_policy"], excluded: readonly string[] = [], binding?: Binding): Promise<string | undefined> {
   const entries: Array<readonly [string, string, string?]> = [];
   const canonicalRoot = await realpath(projectRoot);
+  const scratchExcluded = binding ? snapshotScratchExclusion(binding) : () => false;
   const visit = async (absolute: string, ancestors: ReadonlySet<string> = new Set()): Promise<boolean> => {
     if (excluded.some(root => !outside(root, absolute))) return true;
-    if (binding && snapshotScratchExcluded(binding, absolute)) return true;
+    if (scratchExcluded(absolute)) return true;
     const scoped = relative(projectRoot, absolute).replaceAll("\\", "/");
     if (scoped === ".." || scoped.startsWith("../") || isAbsolute(scoped)) return false;
     if (sourcePolicy === "project-files-v1" && isRuntimeControlPath(scoped)) return true;
@@ -174,14 +199,18 @@ export async function protectedSnapshot(authorization: { manifestPath: string; m
   const candidatePaths = actualPaths(manifest.write);
   const sourcePaths = [...new Set([...actualPaths(manifest.read), ...candidatePaths])];
   const external = sourcePaths.some(path => outside(authorization.projectRoot, path));
+  // The project root has an empty relative path, which is not a valid evidence path.
+  // Keep its absolute identity; resolving it still fingerprints the same directory.
+  const evidencePath = (path: string): string => outside(authorization.projectRoot, path)
+    ? path : relative(authorization.projectRoot, path).replaceAll("\\", "/") || path;
   if (options.captureFreshness !== false && Array.isArray(manifest.validation) && manifest.validation.length && manifest.task_id) {
     // New evidence pins validation inputs/outputs independently of the execution manifest hash.
     // Existing records keep their original recipe and cannot acquire exclusions retroactively.
     const tracked = await exec("git", ["ls-files", "-z"], { cwd: authorization.projectRoot, maxBuffer: 16 * 1024 * 1024 }).then(value => value.stdout.split("\0").filter(Boolean)).catch(() => []);
     const binding: Binding = { manifest_hash: `sha256:${manifestHash}`, project_root: authorization.projectRoot,
       manifest_path: relativePath, source_policy: external ? "declared-paths-v1" : "project-files-v1",
-      source_paths: sourcePaths.map(path => outside(authorization.projectRoot, path) ? path : relative(authorization.projectRoot, path).replaceAll("\\", "/")),
-      candidate_paths: candidatePaths.map(path => outside(authorization.projectRoot, path) ? path : relative(authorization.projectRoot, path).replaceAll("\\", "/")),
+      source_paths: sourcePaths.map(evidencePath),
+      candidate_paths: candidatePaths.map(evidencePath),
       freshness: { contract_hash: validationContractHash(manifest), scratch_paths: validationScratchPaths(authorization.projectRoot, manifest.validation),
         protected_paths: [...new Set([...actualPaths(manifest.read), ...tracked.map(path => resolve(authorization.projectRoot, path)),
           ...actualPaths(manifest.write.filter(path => !path.endsWith("/**")))] )], environment: environment(manifest) } };
@@ -196,8 +225,8 @@ export async function protectedSnapshot(authorization: { manifestPath: string; m
   if (source === undefined || candidate === undefined || relativePath.startsWith("../") || isAbsolute(relativePath)) return undefined;
   return { binding: { manifest_hash: `sha256:${manifestHash}`, project_root: authorization.projectRoot,
     manifest_path: relativePath, source_policy: external ? "declared-paths-v1" : "project-files-v1",
-    source_paths: sourcePaths.map(path => (outside(authorization.projectRoot, path) ? path : relative(authorization.projectRoot, path)).replaceAll("\\", "/")),
-    candidate_paths: candidatePaths.map(path => (outside(authorization.projectRoot, path) ? path : relative(authorization.projectRoot, path)).replaceAll("\\", "/")) }, source, candidate };
+    source_paths: sourcePaths.map(path => evidencePath(path).replaceAll("\\", "/")),
+    candidate_paths: candidatePaths.map(path => evidencePath(path).replaceAll("\\", "/")) }, source, candidate };
 }
 
 export async function refreshProtectedSnapshot(projectRoot: string, binding: Binding): Promise<{

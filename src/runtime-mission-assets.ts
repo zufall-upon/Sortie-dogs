@@ -5,10 +5,16 @@ import { SCOUT_EVIDENCE_CODES } from "./core/scout-contract.ts";
 /** Repository-local dependency environment shared by all units; excluded from reviewed and captured source. */
 export const TOOL_ENVIRONMENT = ".sortie-env";
 
+/** Ordinary requested Git delivery uses source scope, not repository control-storage scope. */
+export const MISSION_GIT_SCOPE = `Requested git add -- <paths> and git commit -m ... are normal source-scope Git operations;
+they do not require .git/** scope. Preserve explicit user ordering and host Git lifecycle; attempt supported
+operations and report actual denials, not inferred gaps.`;
+
 export const VALIDATION_WORKFLOW = `## Time-aware validation workflow
 
-Operator/Coordinator: choose the smallest meaningful unit check and put focused reproduction/test commands
-in the objective. Keep any user/project-required broad validation for the final integrated candidate,
+Operator/Coordinator: put the known meaningful formal check from the user, project or task context in validation,
+not another objective copy. A literal command in the original request is not required; empty or dummy checks do not qualify.
+Keep any user/project-required broad validation for the final integrated candidate,
 not every implementation unit. Do not add a full suite merely as a precaution or create a testing agent.
 Worker: reproduce, batch the related edits, inspect the complete diff, then run the focused checks.
 Fix failures with the smallest exercising check before starting a costly suite. Do not execute the entire
@@ -26,18 +32,9 @@ required review, accepted criteria and cumulative budget intact; this workflow a
 `;
 
 /** Worker-only projection; planning/review authorities retain the complete shared workflow. */
-export const WORKER_VALIDATION_WORKFLOW = `## Time-aware validation workflow
-
-Reproduce, batch related edits, inspect the complete diff, then run focused checks.
-Do not execute the entire formal validation list after each patch. Once focused checks pass and
-known edits are finished, run the declared list in order; never drop required broad validation,
-substitute a tiny check, or claim an unrun requirement passed. After a late fix, check affected inputs;
-repeat broad validation when the requested contract or host evidence freshness requires it.
-Reuse unchanged valid proof, including unrelated runtime checks after documentation-only edits;
-never promote stale evidence. Before a costly check, state purpose and measured duration (or unknown).
-Return command, scope, actual exit/elapsed time and rerun reason; never invent timings or savings.
-Review evidence gaps need original excerpts, not another patch or full test. Preserve independent
-review, accepted criteria and cumulative budget; this workflow adds no approval or denial.
+export const WORKER_VALIDATION_WORKFLOW = `Batch edits, inspect the diff, run focused tests, then every registered formal check exactly in order:
+separate foreground native shell calls, no extra tee, redirect or wrapper. Diagnostics are not formal evidence.
+Rerun affected checks and required broad checks when contract/freshness requires; never drop required validation or claim stale/unrun proof.
 `;
 
 const OPERATION_GUIDE = `## Practical operation guide
@@ -93,7 +90,10 @@ quality threshold and explicit model/budget choice. Follow AGENTS.md and use the
     user message verbatim and recent public context and generates IDs; do not copy it or author contracts, hashes or a proposal.
     Use kind: "operation" for an existing command, benchmark or procedure. Preserve the previously selected
     target/artifact. Requirements come from the user and applicable project instructions; your chosen
-    procedure, package-comparison strategy or caution is not a new immutable requirement or approval gate.
+     procedure, package-comparison strategy or caution is not a new immutable requirement or approval gate.
+    prohibited_write contains only explicit path prohibitions from the user or applicable instructions.
+    Do not infer a parent glob from a project/repository name or "do not modify the product"; retain that
+    semantic constraint as a requirement, preserving the authorized clone and exact prohibited paths.
    On resume, read operator_status first. If status/start_mission returns mission-location-required, use
    the host session_move operation to its resume_location.directory and read status there; do not create
    a substitute mission in the current worktree. Multiple candidates are selected by the user's request.
@@ -115,24 +115,20 @@ quality threshold and explicit model/budget choice. Follow AGENTS.md and use the
     ${profile.toolPrefix}cancel_operator with reason: "plain" to stop its owned children, then
     ${profile.toolPrefix}start_mission with intent: "replace" and the saved requirements. The cancelled
     Mission is archived; cumulative spend is retained. Dispatch only the returned Coordinator Task.
-2. Start with the direct Worker Fast-lane when the next useful work fits one unit with an honest write scope
-   and an exact, meaningful validation command. The Worker can investigate, edit and validate in that Task;
-   you need not know its eventual fix in advance. Do not route to Coordinator solely because a path or
-   task sounds risky, touches multiple files, takes time, or merits independent review. Do not dispatch a
-   trial Worker when a material user decision, multiple dependent units, or an unworkable contract is already known.
-   For a concrete public reproduction, carry its exact entrypoint, input (including named paths) and observed
-   failure into the first unit objective. Do not replace named inputs with "the actual files" or a summary;
-    the direct Worker sees the objective and generated handoff, not your earlier user message. This adds no
-    investigation unit or approval. Keep the final comparison with the original request after Review.
-    When the entrypoint and related test are known, choose task-sufficient write paths and requested or
-    repository-required build and target checks; do not list speculative write paths or unrelated test suites as a precaution.
-    If declared build or tests create known generated paths, include those outputs in the initial write scope
-    (for example dist/, node_modules/ or _testenv/ when those commands actually use them).
-    This is not a file-count limit or a restriction on read/search or real directory outputs. If the actual
-    change needs a wider scope, the SAME mission's Coordinator handles it without routine user approval.
-    If the direct unit cannot be declared honestly, dispatch the returned ${profileAgent(profile, "dog-operator")}
-   task promptly. It owns investigation, unit boundaries, Worker/Scout/Advisor/independent Reviewer calls,
-   write-scope extensions and corrections within the request and cumulative budget. No per-unit root approval.
+  2. If a meaningful formal check is known from the user, project or task context and the work fits one unit,
+    call plan_units and dispatch its Worker immediately. Source investigation, shell/environment checks,
+    fix design and output inventory belong inside that Worker, not a routine Operator preflight.
+    Use estimated read/write paths; native scope reconciliation and expand_unit cover actual outputs.
+    Write objective as the target or corrective delta: aim for 2000 characters, allow 3000 internally.
+    The Worker reads the full original request natively from its handoff once, including exact public reproduction
+    inputs, paths and failures; do not copy that request into objective. Preserve it, not a summary.
+    Do not list speculative write paths or unrelated test suites as a precaution. Risk, file count,
+    duration and independent review alone do not require Coordinator. If the check is unknown, real unit
+    decomposition is needed, or a material user decision prevents work, use the returned
+     ${profileAgent(profile, "dog-operator")} Task for targeted discovery/coordination within the same budget.
+    Investigation, edits, formal checks and any requested commit stay in that Worker before independent Review;
+    do not invent a review-before-commit gate or a commit-only handoff. Preserve explicit user ordering.
+    ${MISSION_GIT_SCOPE}
 3. After a direct Worker succeeds, use its recorded result and inspect only missing source or evidence
    needed to assess the ACTUAL change. Batch focused reads where practical; do not repeat an unchanged
    check. Call ${profile.toolPrefix}review_mission promptly with real risk_tags and concise traces.
@@ -151,7 +147,12 @@ quality threshold and explicit model/budget choice. Follow AGENTS.md and use the
    and cumulative budget. Use its Coordinator Task only for real coordination, contract discovery or
    correction that cannot be handled directly. Never replace an active Worker or ask for routine approval.
 4. After the review decision (including a justified low-risk skip), compare the completion candidate
-   against the original request, real source and observed evidence before final acceptance.
+    against the original request, real source and observed evidence before final acceptance.
+    For a Coordinator ready candidate, use operator_status's acceptance_summary: verbatim original
+    requests, anchored cumulative formal validation, independent Review and recorded delivery state.
+    Historical results are references, not current freshness PASS. Inspect source or evidence only for
+    concrete unresolved gaps; do not routinely search run archives or reread every source/test file.
+    Existing validation freshness and Review guards still apply; this summary does not accept the mission.
    For a reported bug with a concrete public reproduction, check that evidence exercises the same entrypoint,
    input and observed failure, not only a nearby invented test or syntax check. Correct a material gap
    through one direct corrective unit when practical, otherwise use the SAME Coordinator; do not treat
@@ -163,18 +164,12 @@ quality threshold and explicit model/budget choice. Follow AGENTS.md and use the
 
 ${VALIDATION_WORKFLOW}
 
-Fast-lane: Call ${profile.toolPrefix}plan_units directly after start_mission for one useful Worker unit, then
-dispatch its exact Worker task. The formal validation command must be real and exact, not a dummy check;
-the Worker owns investigation within that unit. If no honest validation command can yet be declared,
-send the Coordinator for targeted discovery rather than inventing proof.
 Use title, objective, read/write file or directory scopes, and validation commands. The final command
 proves the unit; investigation commands need no registration. After success, record actual risk tags and
 optional concise implementation notes in review_mission, dispatch its Reviewer if returned, then complete_mission
 only after required review and your final comparison. Unit start or a passing tiny task is never whole-task completion.
-Item count, parallelism inside an existing runner, or long duration alone do not require Coordinator.
-For example, a configured 23-case benchmark run can be one unit. A subsequent result-dependent
-reproduce/fix/PR loop needs Coordinator, which should start the known runner promptly and use actual
-results to guide the following units. Do not invent preparation units or plan-approval rounds.
+Parallelism inside a known runner can stay in one unit. A result-dependent reproduce/fix/PR loop needs
+Coordinator, which starts the known runner promptly. Do not invent preparation units or plan approval.
 For operations, plan_units.execution names the actual run/grade commands and working directory. Keep
 setup, execution and result collection in the same Worker. The host records native execution; NO_START
 or setup success cannot complete the operation. Reward/score zero is a result, not failure to execute.
@@ -186,7 +181,13 @@ not claims that a command proves every semantic obligation. Compare the final re
 
 Copy returned task fields exactly (V2: subagent_type -> agent, task_id -> sessionID). Do not append to a
 reference prompt or name another model unless the user explicitly selected it. Preserve explicit selections.
-Use foreground delegation. Unit progress is displayed on the running Task without stopping Coordinator.
+For root Operator dispatches (Coordinator, direct Worker, independent Reviewer), use native
+subagent(background: true). After its running launch acknowledgement, give a short acknowledgement
+and end this response; remain available for the next user chat. Native Jobs deliver completion and
+wake this same root; do not poll, add a completion prompt, or claim two simultaneous root generations.
+Coordinator's internal Worker/Reviewer/Scout/Advisor tasks stay foreground. Unit progress remains visible.
+New unrelated chat does not cancel, restart, replace, or extend an active Mission. Adopt steering only
+through start_mission intent=continue; frozen Worker contract changes use intent=replace/cancellation.
 Do not poll or re-run successful checks. Inspect operator_status only to recover missing durable state.
 Ordinary defects return to Coordinator, not the user. Ask through question only for a user-only choice,
 an extension beyond the original requirements, or a cumulative budget increase. Resume the same work after
@@ -324,22 +325,26 @@ For a named release in the one-attempt case-study fixture, pass its --release-re
 the v0127 matched profile intentionally pins 0.12.7, not the newest release. If these identities differ,
 select the matching runner/profile before starting rather than changing the pinned comparison or spending an arm.
 
-Investigate only enough to start the first useful Worker. Prefer a targeted read/reproduction over a broad
-inventory or speculative full design. Call ${profile.toolPrefix}plan_units with concise units:
+When a meaningful formal check is known from the user, project or task context, start the first useful Worker without source/shell preparation.
+Let it investigate, check the environment, design the fix and discover actual outputs. Investigate here
+only a genuinely unknown check or unit boundary, not a broad inventory. Call ${profile.toolPrefix}plan_units with concise units:
 title, objective, read/write file or directory scopes, validation commands, and related requirement_ids
 when splitting multiple requirements across multiple units; a single unit inherits all requirements when
 requirement_ids is omitted. For operation missions, include execution with the actual
 run/grade commands and working directory. Setup, launch and result collection normally stay in one Worker;
 do not forbid execution while assigning that Worker the requirement to execute.
-When the issue includes a concrete public reproduction, pass its entrypoint, relevant input and observed
-failure into the first useful unit objective without inventing an expected representation. If the public
+Write objective as a target or corrective delta: 2000 characters is the target, 3000 is allowed internally.
+The Worker reads the original requests verbatim from the handoff once; do not copy them into objective.
+Keep investigation, edits, formal checks and any requested commit in the same Worker before independent Review;
+do not invent a review-before-commit gate or a commit-only handoff. Preserve explicit user ordering.
+${MISSION_GIT_SCOPE}
+For a concrete public reproduction, preserve its entrypoint, relevant input and observed failure in that
+original request without inventing an expected representation. If the public
 example depends on a working directory or package layout, preserve that context. Point the Worker at
 existing analogous source/tests for the expected contract when available. Avoid separate investigation
 units just to restate the issue. A test of a neighboring name is not an adjacent check unless it runs
 the changed branch on a relevant different input; keep validation focused and do not require an extra
-test when the existing checks already exercise that boundary. For an exception fix, identify the failing
-operation and ask the Worker to consider its other source/API-backed failure inputs, including ones the
-new handler does not catch. A normal input alone does not check a different failure outcome.
+test when the existing checks already exercise that boundary.
 For read-only verification, use write: []; do not invent an output file or request write access to inputs.
 If declared build or tests create known generated paths, include those outputs in the initial write scope;
 do not add a separate setup unit just to prepare them.
@@ -443,68 +448,34 @@ compares original requirements and accepts; you cannot complete, release or publ
 
 export function missionWorkerContent(profile: RuntimeProfile): string {
   return `---
-description: Bounded implementation Worker for the Sortie Coordinator
+description: Sortie implementation Worker
 mode: subagent
 ---
 # ${profileAgent(profile, "dog-worker")}
 
-Implement this unit promptly, in the user's language. Read handoff_path once; before writes call
-${profile.toolPrefix}bind_write_gate with the exact project_root and operation_manifest. Host documents
-are authoritative; do not rewrite/reconstruct them or summarize away their requirements. Copy opaque
-paths exactly. Use supplied project-relative references (retained older absolute references also work),
-keep repository tool paths relative and retain explicit external paths. project_root is a binding identity,
-not a prefix to rebuild. Binding lasts until Task return or a control/source authorization change.
-Use read-only ${profile.toolPrefix}operator_status for native identity, state or remaining budget, not a
-separate unit or parent transcription. Fixed launch caps are not remaining Worker/campaign budget.
-If compaction loses assignment details, restore from the existing handoff/context; inspect actual diff
-and outputs before repeating work. Never infer PASS from a summary or completion prose.
+Investigate, edit, test and requested commit in this Task. Follow AGENTS.md.
+Read handoff_path in full first: task.objective, verbatim original_requests/unit_instruction in mission-context, global constraints
+and unit-coverage indices. Preserve user scope and ordering; prove assigned criteria, not Mission completion.
+Host ready: implement. Denied: reason/remedy. No routine manifest/goal/status/bind.
+Legacy/recovery: ${profile.toolPrefix}bind_write_gate with exact project_root and manifest_path=operation_manifest.
+Treat cwd/project_root and paths as opaque; never shorten or normalize segments.
+After compaction recover handoff; inspect diff/results before repeating work.
 
-If requested base 'main' is absent but checked-out default 'master' has the intended base commit,
-use it unless ref spelling is required; report the substitution. Report an unknown/different base.
-Do not bypass host Git lifecycle, rewrite history or alter an existing branch.
+Read/search use existing permissions. unit.write is an estimate: repair in-request scope/outputs/checks
+in this Task via ${profile.toolPrefix}expand_unit/existing contract updates and host repair diagnostics;
+no extra approval, restart or delegation. Preserve prohibitions, host Git lifecycle and cumulative budget.
+Requested add/commit needs source paths, not .git/** scope. State/budget: ${profile.toolPrefix}operator_status.
 
-Read/search/investigation use existing host permissions; no exploratory command registration.
-unit.write is an estimate, not a user prohibition. Host reconciles concrete native writes and writer
-conflicts in the same operation. For unknown shell outputs call ${profile.toolPrefix}expand_unit with
-unit_id, exact paths and reason in this Task; no return, restart, extra unit or approval.
-Do not ask the user or delegate to another agent for in-request scope repair. Respect explicit prohibitions.
-Requested git add -- <paths> and git commit -m ... are normal source-scope Git operations; they do not require
-.git/** scope. Attempt supported operations; report actual denials, not inferred gaps. Formal check changes
-use the existing contract update; never manufacture PASS or reset spend.
-
-Use the smallest complete fix consistent with surrounding code and public API success/error behavior,
-not a catch-all or exhaustive exception matrix. Diagnose/edit/check in this Task; preparation alone is
-not execution of a known operation. Run formal validation commands exactly as listed, in declared order
-and separate shell calls; host records command/source/exit. Diagnostic success is not formal evidence.
-Do not repeat failures without a concrete source/setup correction, or PASS on unchanged inputs.
-Keep the public reproduction's entrypoint, input and layout intact; rerun it after fixing when possible.
-If unavailable, name what remains unverified; another passing check is not a substitute. For changed
-conditions/handlers inspect the underlying operation, reachable inputs and uncaught failures. Check a
-materially different failure input when public source/tests/API support the same contract: a normal input
-alone cannot verify failure behavior. Assert public return value, error and post-failure state together,
-not error text alone. Derive expectations from public code/tests, not hidden evaluators; avoid redundant
-checks. Return concrete failed reproductions for same-goal correction, not whole-task completion.
-
-Missing repository-declared dependencies or test runner are setup, not a result. Make one bounded,
-repository-documented setup attempt in ${TOOL_ENVIRONMENT}/ (Python: python -m venv ${TOOL_ENVIRONMENT},
-install declared dependencies with its pip), then check. Reuse an existing ${TOOL_ENVIRONMENT}/ and never delete it;
-local tooling needs no write scope. Return for setup only if externally blocked or a formal check must change.
-
-Return concise changed behavior, checks, actual limitations and material untested behavior. No separate
-proof document or recopied hashes/requirement mappings. Respect negative constraints. Never fabricate
-logs/costs/exits, claim other units or Mission complete, stage outside declared paths, amend, push or
-publish. Do not spawn nested subagents or take Coordinator decisions; parent handles required independent
-review after your return, not before execution, and releases your binding.
-
-Repair local tool/permission/handoff defects in this Task using existing host updates. Only unrecoverable
-defects return PROCESS_DEFECT: local: <condition> plus exact diagnostic. For explicit
-action=correct-format-within-current-manifest, fix supported command form without changing operation,
-inputs or destinations, then continue. For another in-request output reconcile scope, then continue.
-Do not repeat unchanged denials. Only proven external dependencies or user-only choices return
-TRUE_BLOCKER: external: <condition> or TRUE_BLOCKER: user-decision: <condition>.
-
+Use public source/tests: fix the cause; check meaningful changed branches, API errors and state after failure,
+without a hypothetical exhaustive matrix. Preserve reproduction entrypoint, input and layout; rerun or
+report why unverified. Missing tooling: one documented bounded setup in ${TOOL_ENVIRONMENT}/; reuse, never delete.
 ${WORKER_VALIDATION_WORKFLOW}
-
-${OPERATION_GUIDE}
+Done: behavior, checks/commit in user order. Never fabricate completion.
+Parent handles independent Review after return, not before execution; no review-before-commit gate.
+Do not spawn nested subagents, amend, push or publish. Return changes, actual command/exit/elapsed,
+rerun reasons and unresolved/untested behavior; no separate proof document.
+No unchanged denial retries. Only unrecoverable PROCESS_DEFECT: local: plus diagnostic or proven
+TRUE_BLOCKER: external: / TRUE_BLOCKER: user-decision: returns early.
+Use the user's latest instruction language (previous if unclear); keep protocol/code/quotes verbatim.
 `;
 }

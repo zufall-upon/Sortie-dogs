@@ -7,6 +7,9 @@ import { projectKey } from '../../dist/reflection/config.js';
 import { createProjectPaths, createWriteGate, WriteDeniedError } from '../../dist/plugin/gate.js';
 import { stopOwnedTree } from '../helpers/full-test-runner.ts';
 import { validationScratchPaths, prepareValidationScratch } from '../../dist/plugin/validation-scratch.js';
+// Exercise the optimized containment and exact contract view on the native Windows path implementation too.
+import '../snapshot-scratch-exclusion.test.ts';
+import '../native-contract-read.test.ts';
 
 assert.equal(process.platform, 'win32', 'Windows suite requires Windows');
 test('Windows reflection identity is case insensitive', () => {

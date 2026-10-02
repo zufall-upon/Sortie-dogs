@@ -395,7 +395,7 @@ Only in the execution phase, call next to read authoritative queue state and its
 reconstructing criteria from a summary. Never use a standalone/generic worker as a fallback.
 `;
 
-/** Keep coverage tied to actual changed branches, not a generic inventory of the whole API. */
+/** Legacy Luna Worker keeps its existing contract; the mission Worker owns its concise policy. */
 const CHANGED_PATH_COVERAGE_WORKER = `
 ## Changed-path coverage
 
@@ -429,13 +429,16 @@ export const runtimeAssets: readonly RuntimeAsset[] = Object.freeze([
     }
     if (asset.name === "dog-worker" || asset.name === "dog-luna-worker") {
       content = content.replace("mode: subagent\n", `mode: subagent\npermission:\n  bash: allow\n  ${profile.toolPrefix}bind_write_gate: allow\n  ${profile.toolPrefix}release_write_gate: allow\n  ${profile.toolPrefix}operator_status: allow\n  ${profile.toolPrefix}expand_unit: allow\ntools:\n  "sortie_*": false\n  ${profile.toolPrefix}bind_write_gate: true\n  ${profile.toolPrefix}release_write_gate: true\n  ${profile.toolPrefix}operator_status: true\n  ${profile.toolPrefix}expand_unit: true\n`);
-      content += `\n## Root-approved unit coverage\nWhen the immutable handoff contains ext["sortie-dogs/unit-coverage"], its indices identify this unit's assigned criteria within the unchanged global acceptance ledger. Prove those assigned criteria and preserve all global constraints. Report other units' criteria as pending; do not implement outside the unit manifest or claim global completion. The host records unit evidence, and the root alone accepts the whole goal.\n`;
-      content += CHANGED_PATH_COVERAGE_WORKER;
+      if (asset.name === "dog-luna-worker") {
+        content += `\n## Root-approved unit coverage\nWhen the immutable handoff contains ext["sortie-dogs/unit-coverage"], its indices identify this unit's assigned criteria within the unchanged global acceptance ledger. Prove those assigned criteria and preserve all global constraints. Report other units' criteria as pending; do not implement outside the unit manifest or claim global completion. The host records unit evidence, and the root alone accepts the whole goal.\n`;
+        content += CHANGED_PATH_COVERAGE_WORKER;
+      }
     }
     if (asset.name !== "dog-coordinator") {
       content = content.replace(/^description: .*$/m, match => `${match} [${V010_RUNTIME_ASSET_VERSION}]`);
     }
-    return { name, version: V010_RUNTIME_ASSET_VERSION, installPath: `${asset.installPath.split("/")[0]}/${name}.md`, content: content + COMMUNICATION_LANGUAGE_POLICY };
+    return { name, version: V010_RUNTIME_ASSET_VERSION, installPath: `${asset.installPath.split("/")[0]}/${name}.md`,
+      content: content + (asset.name === "dog-worker" ? "" : COMMUNICATION_LANGUAGE_POLICY) };
   }),
   { name: operator, version: V010_RUNTIME_ASSET_VERSION, installPath: `agent/${operator}.md`, content: missionCoordinatorContent(profile, V010_RUNTIME_ASSET_VERSION) + COMMUNICATION_LANGUAGE_POLICY } satisfies RuntimeAsset,
 ]);

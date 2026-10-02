@@ -2,9 +2,11 @@ import type { OpenCodeHooks, OpenCodePlugin } from "./index.js";
 import { SortieDogsV010Plugin } from "./profiled.js";
 import { bindMissionProgress, missionProgressReader } from "./mission-progress.js";
 import { owningServiceMessageList, owningServiceSessionList } from "./v2-session-history.js";
+import { nativeContractReadSnapshot } from "./native-contract-read.js";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { V010_RUNTIME_ASSET_VERSION } from "../asset-version.js";
+import { NativeBackgroundLifecycle } from "./native-background.js";
 
 // Capture once when this module evaluates. A later package replacement must not make an old
 // process report the replacement's bytes as its loaded adapter.
@@ -14,7 +16,7 @@ const loadedAdapter = Object.freeze({ adapter_url: import.meta.url,
   // Named module snapshots, not a claim to identify every transitive dependency. Retain these
   // bytes across package replacement so an unchanged adapter cannot conceal an old implementation.
   implementation_sha256: Object.freeze(Object.fromEntries([
-    "index", "profiled", "gate", "protected-snapshot", "declared-artifacts",
+    "index", "profiled", "gate", "protected-snapshot", "declared-artifacts", "native-contract-read", "native-background",
   ].map(name => [`${name}.js`, createHash("sha256").update(readFileSync(
     new URL(`./${name}.${import.meta.url.endsWith(".ts") ? "ts" : "js"}`, import.meta.url))).digest("hex")]))),
   loaded_at: new Date().toISOString(), pid: process.pid });
@@ -56,6 +58,8 @@ export interface OpenCodeV2Context {
     list?(input: JsonObject): Promise<unknown>;
     get(input: { sessionID: string }): Promise<unknown>;
     context(input: { sessionID: string }): Promise<unknown>;
+    log?(input: { sessionID: string; follow: false }): AsyncIterable<JsonObject>;
+    inbox?: { list(input: { sessionID: string }): Promise<unknown> };
     prompt(input: JsonObject): Promise<unknown>;
     synthetic(input: JsonObject): Promise<unknown>;
     interrupt(input: JsonObject): Promise<unknown>;
@@ -230,6 +234,17 @@ function legacyClient(context: OpenCodeV2Context): JsonObject {
       return id === undefined ? undefined : await context.session.prompt({ sessionID: id, text, delivery: "queue", resume: true,
         metadata: { "sortie-dogs/source": "v1-continuation-adapter", directory } });
     },
+    missionSteering: async (request: unknown) => {
+      if (!record(request) || typeof request.child !== "string" || typeof request.requestID !== "string" || typeof request.text !== "string") throw new Error("mission-steering-input-invalid");
+      const id = `msg_${createHash("sha256").update(`${request.child}\0${request.requestID}`).digest("hex").slice(0, 26)}`;
+      const pending = context.session.inbox ? array(await context.session.inbox.list({ sessionID: request.child })) : [];
+      const existing = [...pending, ...array(await context.session.context({ sessionID: request.child }))]
+        .find(item => record(item) && item.id === id);
+      if (existing) return existing;
+      // Native prompt acknowledges queued inbox work, never execution completion.
+      return await context.session.prompt({ sessionID: request.child, id, text: request.text, delivery: "queue", resume: true,
+        metadata: { "sortie-dogs/source": "mission-steering", requestID: request.requestID } });
+    },
   };
   return {
     session,
@@ -303,9 +318,6 @@ function legacyToolName(name: unknown): string {
 function legacyToolInput(name: unknown, input: unknown): JsonObject {
   const value = record(input) ? { ...input } : {};
   if (name === "subagent") {
-    if (value.background === true && typeof value.prompt === "string" && value.prompt.startsWith("SORTIE_OPERATOR_")) {
-      throw new Error("operator-background-dispatch-not-supported: retry the same exact Task with background omitted or false; no admission or budget reservation occurred. Operator dispatch requires foreground completion for lifecycle accounting.");
-    }
     if (value.background === false) delete value.background;
     if (typeof value.agent === "string") value.subagent_type = value.agent;
     if (typeof value.sessionID === "string") value.task_id = value.sessionID;
@@ -369,7 +381,7 @@ export function createV2ReturnReportFinalizer(context: OpenCodeV2Context, hooks:
   };
 }
 
-async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks): Promise<void> {
+async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks, background: NativeBackgroundLifecycle): Promise<void> {
   const explicitlySelectedChildren = new Set<string>();
   const selectedChildModels = new Set<string>();
   const selectionKey = (parent: string, role: string, prompt: string) => `${parent}\0${role}\0${prompt}`;
@@ -432,6 +444,7 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks)
     for (const [name, definition] of Object.entries(hooks.tool ?? {})) {
       editor.add({ name, description: definition.description, input: toolSchema(definition.args), options: { codemode: false },
         execute: async (input, execution) => {
+          await background.reconcile(String(execution.sessionID ?? ""));
           const content = await definition.execute(legacyToolArgs(input, definition.args), {
             sessionID: String(execution.sessionID ?? ""), ...(typeof execution.agent === "string" ? { agent: execution.agent } : {}) });
           if (name !== "sortie_v010_operator_status") return { content };
@@ -442,10 +455,16 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks)
     }
   });
   if (hooks["tool.execute.before"]) await context.tool.hook("execute.before", async event => {
+    await background.resume(String(event.sessionID ?? ""));
     const mapped = { args: legacyToolInput(event.tool, event.input) };
     await hooks["tool.execute.before"]!({ tool: legacyToolName(event.tool), sessionID: String(event.sessionID ?? ""),
       callID: String(event.id ?? ""), ...(typeof event.agent === "string" ? { agent: event.agent } : {}) }, mapped);
     event.input = v2ToolInput(event.tool, record(mapped.args) ? mapped.args : {});
+    if (event.tool === "subagent" && record(event.input) && event.input.background === true) {
+      const info = await context.session.get({ sessionID: String(event.sessionID) });
+      if (record(info) && typeof info.parentID === "string") delete event.input.background;
+      else await background.admit(String(event.sessionID), String(event.id), event.input, hooks.backgroundOwner?.(String(event.id)));
+    }
     if (event.tool === "subagent" && record(event.input) && typeof event.input.agent === "string" && typeof event.input.prompt === "string") {
       // Record only admitted explicit choices, scoped by role as well as parent and prompt.
       const key = selectionKey(String(event.sessionID), event.input.agent, event.input.prompt);
@@ -453,12 +472,23 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks)
       else explicitlySelectedChildren.delete(key);
     }
   });
-  if (hooks["tool.execute.after"]) await context.tool.hook("execute.after", async event => {
+  await context.tool.hook("execute.after", async event => {
     const result = record(event.result) ? event.result : {};
     const mapped: JsonObject = { status: event.status, output: toolContentText(result.content), metadata: result.metadata ?? event.error };
-    await hooks["tool.execute.after"]!({ tool: legacyToolName(event.tool), sessionID: String(event.sessionID ?? ""),
-      callID: String(event.id ?? "") }, mapped);
-    if (typeof mapped.output === "string" && event.status === "completed") event.result = replaceToolContent(result, mapped.output);
+    const running = event.tool === "subagent" && (result.status === "running" || record(result.metadata) && result.metadata.status === "running");
+    if (running) mapped.metadata = { ...(record(mapped.metadata) ? mapped.metadata : {}), status: "running" };
+    const view = event.tool === "read" && event.status === "completed"
+      ? await nativeContractReadSnapshot(context.location.directory, event.input) : undefined;
+    if (view !== undefined) mapped.output = view.output;
+    await hooks["tool.execute.after"]?.({ tool: legacyToolName(event.tool), sessionID: String(event.sessionID ?? ""),
+      callID: String(event.id ?? ""), args: legacyToolInput(event.tool, event.input),
+      ...(view ? { nativeReadHash: view.hash } : {}) }, mapped);
+    if (event.tool === "subagent") {
+      const metadata = record(result.metadata) ? result.metadata : {};
+      await background.launched(String(event.sessionID), String(event.id), string(metadata.sessionID), running);
+    }
+    await background.checkpoint(String(event.sessionID));
+    if (!running && typeof mapped.output === "string" && event.status === "completed") event.result = replaceToolContent(result, mapped.output);
   });
   if (hooks["chat.message"]) await context.session.hook("prompt", async event => {
     const info = await context.session.get({ sessionID: String(event.sessionID ?? "") });
@@ -467,6 +497,12 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks)
     const legacyText = typeof info.parentID === "string" && nativeText.startsWith(V2_SUBAGENT_PROMPT_PREFIX)
       ? nativeText.slice(V2_SUBAGENT_PROMPT_PREFIX.length)
       : nativeText;
+    if (typeof info.parentID === "string") await background.bind(info.parentID, String(event.sessionID), String(info.agent), legacyText,
+      string(event.messageID) ?? string(event.prompt.id));
+    else await background.reconcile(String(event.sessionID));
+    const nativeMetadata = record(event.metadata) ? event.metadata : record(event.prompt.metadata) ? event.prompt.metadata : {};
+    // A native Job's completion is host inbox work, not a new user requirement or Sortie ticket.
+    if (nativeMetadata.source === "subagent" || event.prompt.type === "synthetic") return;
     let model = modelReference(info.model) ?? { providerID: "unknown", modelID: "unknown" };
     if (typeof info.parentID === "string" && typeof info.agent === "string" && context.agent?.get) {
       const key = selectionKey(info.parentID, info.agent, legacyText);
@@ -515,6 +551,8 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks)
     }
   });
   if (hooks["experimental.chat.system.transform"]) await context.session.hook("context", async event => {
+    await background.resume(String(event.sessionID ?? ""));
+    await background.reconcile(String(event.sessionID ?? ""));
     const output = { system: [] as string[] };
     await hooks["experimental.chat.system.transform"]!({ sessionID: String(event.sessionID ?? "") }, output);
     if (Array.isArray(event.system)) event.system.push(...output.system.map(text => ({ type: "text", text })));
@@ -556,31 +594,44 @@ export function createSortieDogsV2Plugin(legacyFactory: OpenCodePlugin = SortieD
   return {
     id: "sortie-dogs.v010",
     async setup(context) {
-      const hooks = await legacyFactory({ directory: context.location.directory, client: legacyClient(context) as never,
-        returnReportTransport: "tool-result" }, context.options ?? {});
-      await registerV2Hooks(context, hooks);
+      let hooks: OpenCodeHooks;
+      const background = new NativeBackgroundLifecycle(context, async (dispatch, text) => {
+        if (dispatch.owner) hooks.backgroundOwner?.(dispatch.callID, dispatch.owner);
+        await hooks["tool.execute.after"]?.({ tool: "task", sessionID: dispatch.parent, callID: dispatch.callID,
+          args: legacyToolInput("subagent", dispatch.input) }, { status: dispatch.terminal === "succeeded" ? "completed" : dispatch.terminal === "interrupted" ? "cancelled" : "error",
+          output: text, metadata: { sessionID: dispatch.child, status: dispatch.terminal } });
+      }, (callID, restore) => hooks.backgroundOwner?.(callID, restore));
+      hooks = await legacyFactory({ directory: context.location.directory, client: legacyClient(context) as never,
+        nativeBackground: background, returnReportTransport: "tool-result" }, context.options ?? {});
+      await registerV2Hooks(context, hooks, background);
       const finalize = createV2ReturnReportFinalizer(context, hooks);
       const controller = new AbortController();
+      const eventOperations = new Map<string, Promise<void>>();
+      const handleEvent = async (event: JsonObject): Promise<void> => {
+        const data = record(event.data) ? event.data : {};
+        const id = string(data.sessionID);
+        if (event.type === "filesystem.changed" && typeof data.file === "string") {
+          await hooks.event?.({ event: { type: "file.edited", properties: { file: data.file } } });
+          return;
+        }
+        if (id === undefined) return;
+        if (String(event.type).startsWith("session.execution.") || event.type === "session.inbox.enqueued" || event.type === "session.idle") await background.event(event);
+        if (event.type === "session.deleted") await context.storage?.remove?.(childSelectionKey(id));
+        if (event.type === "session.execution.succeeded") await finalize(id);
+        if (event.type === "session.created" || event.type === "session.deleted" || event.type === "session.idle") {
+          const info = event.type === "session.created" ? await context.session.get({ sessionID: id }).catch(() => ({ id })) : { id };
+          await hooks.event?.({ event: { type: String(event.type), properties: { sessionID: id, info } } });
+        }
+        if (event.type === "session.compaction.ended") await hooks.event?.({ event: { type: "session.compacted", properties: { sessionID: id } } });
+      };
       void (async () => {
         for await (const event of context.event.subscribe({ signal: controller.signal })) {
-          try {
-            const data = record(event.data) ? event.data : {};
-            const id = string(data.sessionID);
-            if (event.type === "filesystem.changed" && typeof data.file === "string") {
-              await hooks.event?.({ event: { type: "file.edited", properties: { file: data.file } } });
-              continue;
-            }
-            if (id === undefined) continue;
-            if (event.type === "session.deleted") await context.storage?.remove?.(childSelectionKey(id));
-            if (event.type === "session.execution.succeeded") await finalize(id);
-            if (event.type === "session.created" || event.type === "session.deleted" || event.type === "session.idle") {
-              const info = event.type === "session.created" ? await context.session.get({ sessionID: id }).catch(() => ({ id })) : { id };
-              await hooks.event?.({ event: { type: String(event.type), properties: { sessionID: id, info } } });
-            }
-            if (event.type === "session.compaction.ended") await hooks.event?.({ event: { type: "session.compacted", properties: { sessionID: id } } });
-          } catch (error) {
+          const data = record(event.data) ? event.data : {};
+          const lane = string(data.sessionID) ?? "filesystem";
+          const operation = (eventOperations.get(lane) ?? Promise.resolve()).then(() => handleEvent(event)).catch(error => {
             console.warn("[sortie-dogs-v010] V2 event handling failed", error instanceof Error ? error.message : "unknown");
-          }
+          }).finally(() => { if (eventOperations.get(lane) === operation) eventOperations.delete(lane); });
+          eventOperations.set(lane, operation);
         }
       })().catch(error => {
         if (!controller.signal.aborted) console.warn("[sortie-dogs-v010] V2 event adapter stopped", error instanceof Error ? error.message : "unknown");

@@ -1,5 +1,5 @@
 import { V010_RUNTIME_ASSET_VERSION } from "../asset-version.js";
-import { MISSION_BEHAVIOR_REVIEW } from "../runtime-mission-assets.js";
+import { MISSION_BEHAVIOR_REVIEW, MISSION_GIT_SCOPE } from "../runtime-mission-assets.js";
 import { cancelledMissionRetainsAcceptance, operatorGitPathAuthorized, OperatorContractError, OperatorRuntime, type OperatorProgress, type OperatorState } from "../core/operator-runtime.js";
 import { DEFAULT_OPERATOR_PROPOSAL_BUDGET, OPERATOR_APPROVAL_CONTRACT, OPERATOR_PROPOSAL_BUDGET_CAPS, OPERATOR_PROPOSAL_REVISION_CONTRACT,
   OperatorProposalBudgetError, OperatorProposalRuntime } from "../core/operator-proposal.js";
@@ -16,11 +16,11 @@ import { decoratePreviewHeadings, returnReportPanel } from "./receipt-presentati
 import { sanitizeTerminalReport, terminalRunOutcome } from "./run-metrics.js";
 import { normalizeCommand } from "./gate.js";
 import { normalizeExecutionScope, normalizeManifestScope, normalizeRelativePath } from "../core/path.js";
-import { OperatorMissionRuntime, missionPacket, missionPlan, missionReviewAccepted, missionReviewScope, missionReviewTask,
+import { OperatorMissionRuntime, missionAcceptanceSummary, missionPacket, missionPlan, missionReviewAccepted, missionReviewScope, missionReviewTask,
   missionCommandOutcome, missionConversationContext, missionExecutionStatus, missionValidationCommand, missionReviewTraces, missionReviewVerdict, type OperatorMission } from "../core/operator-mission.js";
 import { publishMissionProgress } from "./mission-progress.js";
 import { completedMissionReviewPrompts, initialMissionReviewPrompt, missionReviewBaseline, missionReviewSource,
-  observedMissionValidation } from "./mission-review.js";
+   observedMissionValidation, observedMissionValidationSummary, missionReviewValidation } from "./mission-review.js";
 import { missionLocations, missionLocationPacket } from "./mission-location.js";
 import { prepareValidationScratch } from "./validation-scratch.js";
 import { SOURCE_REVIEW_RISK_TAGS } from "../core/consultation.js";
@@ -195,7 +195,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     const missions = new OperatorMissionRuntime(input.directory, profile);
     const selected = new Map<string, string>();
     const operatorParents = new Map<string, string>();
-    const taskOwners = new Map<string, { root: string; actor: string; operator: boolean; proposal?: boolean; mission?: boolean; consultation?: string }>();
+    const taskOwners = new Map<string, { root: string; actor: string; operator: boolean; proposal?: boolean; mission?: boolean; consultation?: string; reviewIdentity?: string }>();
     const missionRescueSelections = new Map<string, { attemptID: string; model: string; variant: string | null }>();
     const operatorTurnLifecycle = new Map<string, "historical" | "cancelled">();
     const historicalTurnMessages = new Map<string, string>();
@@ -228,6 +228,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const result = payload(await session("messages", { path: { id }, query: { directory: input.directory } }));
       return Array.isArray(result) ? result.filter(record) : [];
     }
+    async function acceptanceValidationObservation(validation: readonly string[], child: string | null) {
+      if (!child) throw new Error("native-worker-history-session-unavailable");
+      return observedMissionValidationSummary(validation, child, typeof nativeSession?.messages === "function"
+        ? () => session("messages", { path: { id: child }, query: { directory: input.directory } }) : undefined);
+    }
     async function reviewMessages(id: string): Promise<readonly Record<string, unknown>[]> {
       const result = payload(await session(typeof nativeSession?.reviewMessages === "function" ? "reviewMessages" : "messages",
         { path: { id }, query: { directory: input.directory } }));
@@ -248,6 +253,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     function missionTaskFingerprint(args: Record<string, unknown>): string {
       return goalFingerprint({ role: canonicalAgent(profile, String(args.subagent_type ?? args.agent)),
         description: args.description, prompt: args.prompt, task_id: args.task_id ?? "" });
+    }
+    function missionReviewIdentity(mission: OperatorMission): string {
+      return goalFingerprint({ mission: mission.id, missionRun: mission.runID, run: mission.review?.runID, source: mission.review?.source,
+        request: mission.review?.requestFingerprint, task: mission.review?.task ? missionTaskFingerprint({ ...mission.review.task }) : null });
     }
     async function identity(id: string): Promise<{ role?: CanonicalAgentRole; parent?: string }> {
       const info = payload(await session("get", { path: { id }, query: { directory: input.directory } }));
@@ -536,6 +545,15 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       },
       missionDispatchCall: async (root, child, taskID) => (await operators.read(root))?.units.find(unit =>
         unit.childSessionID === child && /^task_id: (.+)$/m.exec(unit.task.prompt)?.[1] === taskID)?.callID ?? undefined,
+      missionReadBinding: async (root, child, handoffPath) => {
+        const mission = await missions.read(root), run = await operators.read(root);
+        if (!mission || !run || mission.runID !== run.runID || run.phase !== "running" ||
+            ["cancelled", "completed"].includes(mission.phase)) return undefined;
+        const unit = run.units.find(unit => unit.status === "running" && unit.childSessionID === child &&
+          resolve(unit.handoffPath) === resolve(handoffPath));
+        return unit ? { projectRoot: operators.projectRoot, manifestPath: unit.manifestPath,
+          handoffHash: unit.hashes[0]!, manifestHash: unit.hashes[1]! } : undefined;
+      },
       defaultModelCatalog: { global: previewModelCatalog() },
       transformConfiguration: value => {
         if (!record(value) || !record(value.modelRouting)) return value;
@@ -753,6 +771,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     async function reconcileMissionDispatch(root: string): Promise<OperatorMission | undefined> {
       const mission = await missions.read(root);
       if (!mission?.dispatchOpen || !mission.callID || ["cancelled", "completed"].includes(mission.phase)) return mission;
+      if (await input.nativeBackground?.awaiting(root)) return mission;
       // A native Task can be interrupted without an execute.after/event callback. Its in-memory
       // owner then survives even though the host has already persisted a terminal tool part.
       // The native record, not that cache, decides whether this exact dispatch can be resumed.
@@ -792,7 +811,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
            `and verifies old children before preparing a Worker. Otherwise obtain the user's scope decision.` };
       if (mission.coordinator === null && mission.runID === null && !mission.dispatchOpen && mission.phase === "open") {
         return { ...packet, task: missions.task(mission),
-          next_action: "Fast-lane: plan one useful Worker unit with honest scope and exact meaningful validation, then dispatch its Task. Dispatch the returned Coordinator Task only when the work cannot be declared as one useful unit." };
+          next_action: "Fast-lane: plan one useful Worker unit with the meaningful formal check known from user, project or task context and estimated scope, then dispatch its Task immediately. Investigation/edit/check/requested commit belong inside Worker before independent Review. Objective: target 2000 characters, allow 3000; original requests are supplied separately. Use Coordinator for an unknown check or real unit decomposition." };
       }
       if (mission.coordinator === null && mission.runID === run?.runID && !mission.dispatchOpen &&
           run?.phase === "awaiting-acceptance" && mission.kind === "operation" && missionExecutionStatus(mission) !== "executed") {
@@ -1048,7 +1067,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       if (state.phase !== "prepared" || state.dispatched > 0) return JSON.stringify(operators.packet(state));
       control!.enableUnits(state.rootSessionID, state.units.length);
       return JSON.stringify({ profile: profile.id, run_id: state.runID, acceptance_fingerprint: state.acceptanceFingerprint,
-        dispatch_instruction: "Dispatch this exact Task in the foreground. Omit background or set it to false; background=true is not supported by the operator lifecycle. Required consultations belong to the root before dispatch; confirmed user decisions must already be in the approved unit objective and inputs, not appended to this Task reference.",
+        dispatch_instruction: "Dispatch this exact Task with native background=true from Operator root, acknowledge its running launch briefly and end the response. Coordinator internal Tasks stay foreground. Required consultations belong to the root before dispatch; confirmed user decisions must already be in the approved unit objective and inputs, not appended to this Task reference.",
         fast_path: state.units.length === 1, task: state.units.length === 1 ? operators.nextWorkerTask(state) : operators.dispatchTask(state) });
     }
     tools[prepare] = { description: `Freeze an approved serial operator plan. Invalid plans return bounded diagnostics and a draft_id for field-only repair; no worker is started. After operator-acceptance-remediation-required, cancel first and prepare only the same exact acceptance, a write scope within the prior approved union, and a Git lifecycle starting at the failed committed head; consumed goal budget is retained. Coordinator only. ${planContract}`,
@@ -1178,7 +1197,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           const budget = await control!.currentBudget(root!);
           const run = await operators.read(root!);
           const completion = run?.phase === "awaiting-acceptance" ? await control!.completionReadiness(root!) : undefined;
-          const packet = { ...missionDispatchPacket(mission, run), budget,
+           const acceptanceSummary = await missionAcceptanceSummary(mission, run, operators, acceptanceValidationObservation);
+           const packet = { acceptance_summary: acceptanceSummary, ...missionDispatchPacket(mission, run), budget,
             ...(completion ? { completion, ...(!completion.ready ? { next_action: mission.coordinator === null &&
                 completion.blockers.some(item => item.reason === "source-changed" || item.reason === "candidate-changed")
                 ? `Fast-lane: source or candidate changed after formal validation. Call ${planUnits} with reason and ` +
@@ -1609,10 +1629,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             next_action: "Read operator_status: if the Coordinator dispatch is active, continue it; otherwise dispatch the returned task to resume the same Coordinator. Retain requirements, spend and candidate; no new mission or plan approval." });
         });
       } };
-    tools[startMission] = { description: "Operator: save the current user requirements. Use intent=replace when the user changes an existing request (version, parallelism, target): host cancels the previous run and archives its requirements/results while retaining spend. If status reports mission-source-reconciliation-required and the saved requirements reflect that changed scope, call intent=replace with those exact requirements: the host repairs this mission in place and keeps its Coordinator. Supply the complete current requirements, retaining constraints the user has not changed. For separate work in a different location use intent=new. For one honest unit with an exact meaningful validation command, use plan_units and dispatch its Worker directly; after a returned failed Worker use one direct correction/retry when practical. Send the Coordinator for actual coordination or a contract that cannot be declared honestly. Item count, duration and independent review alone do not require a Coordinator.",
+    tools[startMission] = { description: `Operator: save current requirements; the host retains the original request verbatim. With a meaningful formal check known from user, project or task context and one useful unit, call plan_units and dispatch its Worker directly. A literal command in the original request is not required. Worker owns investigation/edit/check/requested commit before independent Review; no routine preparation or commit-only handoff. ${MISSION_GIT_SCOPE} Unknown checks or real unit decomposition use Coordinator. intent=replace follows an actual user requirement change, retaining unchanged constraints and cumulative spend; for mission-source-reconciliation-required use the saved requirements when they reflect that change. intent=new is separate work in another location.`,
       args: { requirements: { ...stringList, minItems: 1, maxItems: 64 } as never,
         confirmed_conditions: conditionsSchema as never,
-        prohibited_write: { ...stringList, description: "Only explicit user path prohibitions, never the complement of estimated unit.write.", "x-sortie-optional": true } as never,
+        prohibited_write: { ...stringList, description: "Only explicit path prohibitions from the user or applicable instructions. Never infer a parent glob from project/repository names, semantic 'do not modify the product', or the complement of estimated unit.write. Preserve the authorized clone and exact prohibited paths; semantic constraints stay in requirements.", "x-sortie-optional": true } as never,
         kind: { type: "string", enum: ["implementation", "operation"], description: "Use operation for running an existing benchmark, command or procedure. The host records its actual execution separately from setup and checks.", "x-sortie-optional": true } as never,
         intent: { type: "string", enum: ["", "continue", "new", "replace"], "x-sortie-optional": true } as never }, execute: async (args, context) => {
         await requireRoot(context.sessionID);
@@ -1621,6 +1641,12 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           const existing = await reconcileMissionDispatch(context.sessionID);
           const prior = await operators.read(context.sessionID);
           const requirements = (args as Record<string, unknown>).requirements;
+          if (args.intent !== "replace" && existing && !["cancelled", "completed"].includes(existing.phase) &&
+              prior && prior.runID === existing.runID && Array.isArray(requirements) &&
+              JSON.stringify(requirements) !== JSON.stringify(existing.requirements.map(item => item.text))) {
+            return JSON.stringify({ ...missionDispatchPacket(existing, prior), status: "mission-contract-change-requires-replace",
+              next_action: `The Worker contract is already frozen. Call ${startMission} with intent=replace and the current complete requirements to cancel owned work and replace its contract; do not forward free text into the Worker.` });
+          }
           if (args.intent === "replace" && existing && !existing.dispatchOpen && existing.runID === null &&
               existing.phase !== "cancelled" && existing.phase !== "completed" &&
               (existing.phase !== "submitted" || existing.submission?.status === "blocked") &&
@@ -1658,6 +1684,25 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           if (sourceReconciliationRequired(mission, cancelled)) return JSON.stringify({ ...locationObservation(context.sessionID),
             ...missionDispatchPacket(mission, cancelled), budget: await control!.currentBudget(context.sessionID) });
           mission = await retainCancelledMissionAcceptance(context.sessionID, mission, cancelled);
+          if (args.intent === "continue" && mission.dispatchOpen && mission.coordinator) {
+            if (mission.phase !== "running") return JSON.stringify({ ...missionDispatchPacket(mission, cancelled),
+              status: "mission-steering-awaits-submission-decision",
+              next_action: "The Coordinator has already submitted this Mission. Compare its existing submission with the requirements and use complete_mission when satisfied; use intent=replace for a changed frozen contract. Do not queue steering into a submitted Coordinator or dispatch a duplicate." });
+            const request = mission.requests.at(-1)!;
+            if (request.id !== mission.requests[0]!.id && !mission.steering?.some(item => item.requestID === request.id && item.status === "queued")) {
+              const child = mission.coordinator;
+              if (typeof nativeSession?.missionSteering !== "function") {
+                return JSON.stringify({ ...missionDispatchPacket(mission, cancelled), status: "mission-steering-native-api-unavailable",
+                  next_action: "This host cannot queue steering. Continue the admitted Coordinator in its native session, or use intent=replace for a frozen contract change; do not redispatch a duplicate." });
+              }
+              await missions.update(context.sessionID, state => {
+                state.steering ??= [];
+                if (!state.steering.some(item => item.requestID === request.id)) state.steering.push({ requestID: request.id, child, status: "pending" });
+              });
+              await session("missionSteering", { child, requestID: request.id, text: `Mission steering (existing scope and budget remain authoritative):\n${request.text}` });
+              mission = await missions.update(context.sessionID, state => { state.steering!.find(item => item.requestID === request.id)!.status = "queued"; });
+            }
+          }
           if (!mission.reviewBaseline) {
             const baseline = await missionReviewBaseline(input.directory);
             if (baseline) mission = await missions.update(context.sessionID, state => { state.reviewBaseline = baseline; });
@@ -1665,7 +1710,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           return JSON.stringify({ ...locationObservation(context.sessionID), ...(mission.dispatchOpen
             ? missionDispatchPacket(mission, await operators.read(context.sessionID))
             : { mission_id: mission.id, requirements: mission.requirements, task: missions.task(mission),
-              next_action: "Default to plan_units for one useful Worker unit with an honest scope and exact meaningful check; dispatch its returned Task. Use the Coordinator Task when coordination or targeted contract discovery is actually needed. Do not create a proposal or ask for plan approval." }) });
+              next_action: "Default to plan_units with a meaningful formal check known from user, project or task context and estimated read/write scope; dispatch its returned Worker now. Worker owns investigation/edit/check/requested commit before independent Review. Objective target 2000 characters, internal allowance 3000; original request is separate and verbatim. Use Coordinator for an unknown check or real unit decomposition, not routine preparation." }) });
         });
       } };
     tools[skipMissionConsultation] = { description: "Coordinator: durably record why a concrete optional Advisor/Scout consultation is unnecessary. This is observation only: it adds no approval, consultation requirement, or dispatch gate.",
@@ -1816,7 +1861,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         // A corrected command is allowed on replan; retain prior observations for accounting.
         operation = { commands, directory, observations: operation?.observations ?? [] };
       }
-      const plan = missionPlan(mission, raw);
+      const plan = missionPlan(mission, raw, input.directory);
       assertMissionWritePaths(mission, plan.units.flatMap(unit => unit.write));
       if (actor === root && (mission.coordinator !== null || plan.units.length !== 1)) throw new Error("mission-coordinator-required: dispatch the returned Coordinator task");
       const same = previous?.planHash === createHash("sha256").update(JSON.stringify(plan)).digest("hex");
@@ -1892,9 +1937,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           next_action: "Before dispatch, correct or prepare the listed in-project TMPDIR directories. Keep this plan and its budget; no new approval or validation run is needed." } : {}) }
         : next);
     }
-    tools[planUnits] = { description: "Coordinator (or single-unit Fast-lane Operator): declare useful units, then dispatch the returned Worker immediately. Host generates IDs, handoff, manifest and proof mapping. Keep every original requirement covered. For a concrete public reproduction, include its exact entrypoint, named input paths and observed failure in the first unit objective; the Worker does not see the earlier user message. When entrypoint/test are known, choose task-sufficient write paths and requested or repository-required build and target checks; do not list speculative write paths or unrelated test suites as a precaution. Read/search is unrestricted; this is not a file-count limit, and actual directory outputs or later same-mission scope extensions remain available. Use write: [] for read-only verification; use dir/** for directory outputs including not-yet-created trees. Native absolute paths support global installs and external outputs under host permissions; include their actual paths in read/write for evidence. Final validation command in each unit proves that unit; read-only diagnostic commands need no registration. Recalling with reason replaces settled work within unchanged requirements and cumulative budget; include the observed failure or Reviewer finding in a corrective unit's objective and required scope extensions here. Repeating an unchanged plan does not retry a failed Worker: use retry_mission_unit for same-scope validation failure. Rejected budget, contract or control-storage preparation preserves the existing run so you can correct the plan directly.",
+    tools[planUnits] = { description: `Coordinator or single-unit Fast-lane Operator: with a meaningful formal check known from user, project or task context, declare estimated read/write scope and dispatch the returned Worker immediately. Worker owns investigation/edit/check/requested commit before independent Review, not a commit-only handoff. ${MISSION_GIT_SCOPE} Native scope reconciliation/expand_unit retain host permissions and explicit path prohibitions. Objective is the target or corrective delta: aim for 2000 characters, allow 3000; the full original request/public reproduction is supplied separately, not copied here. Oversized unit instructions are retained verbatim in handoff Mission context, not rejected for another planning round. Keep every requirement covered. Final validation proves the unit; empty or dummy checks do not qualify. Diagnostics need no registration. write: [] is read-only; dir/** and native absolute paths support actual outputs. reason replans settled work in the same requirements/budget; same-scope failed validation uses retry_mission_unit. Review FINDINGS require correction, formal validation and fresh Review.`,
       args: { units: { type: "array", minItems: 1, maxItems: 32, items: { type: "object", additionalProperties: false,
-        properties: { title: { type: "string" }, objective: { type: "string" },
+        properties: { title: { type: "string" }, objective: { type: "string", description: "Target or corrective delta, about 2000 characters; new task objective allows 3000. Do not copy the original request. Longer authored instructions are preserved separately without a retry gate." },
           read: { ...stringList, description: "Inputs that affect validation, not an allowlist for observation. Do not include whole live session/database/log trees just to inspect them." }, write: stringList,
           validation: stringList, requirement_ids: { ...stringList, description: "Related requirement IDs. A single unit inherits all requirements when omitted; specify coverage when splitting work across units." } }, required: ["title", "objective", "write", "validation"] } } as never,
         execution: { type: "object", properties: { commands: stringList, directory: { type: "string" } },
@@ -1946,8 +1991,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     tools[reviewMission] = { description: "Coordinator or direct Fast-lane root: prepare independent quality review from current source, original requirements and observed checks. Supply actual risk_tags (empty only for genuinely low risk); traces and focused excerpts are optional context, not a proof-writing gate. The Reviewer can read/search source directly when excerpts are clipped. Keep candidate lineage across corrections; repeat review for concrete fixes, not evidence formatting. A low-risk skip is recorded.",
       args: { risk_tags: { type: "array", items: { type: "string", enum: SOURCE_REVIEW_RISK_TAGS } } as never,
         evidence: { type: "array", maxItems: 6, items: { type: "object", additionalProperties: false,
-          properties: { path: { type: "string" }, offset: { type: "integer", minimum: 1 }, limit: { type: "integer", minimum: 1, maximum: 200 } },
-          required: ["path", "offset", "limit"] }, description: "Focused excerpts from existing project files or declared external inputs/outputs. Project references need not be in the unit read/write scope. Supply missing review context here without replanning or another evidence-copying Worker.", "x-sortie-optional": true } as never,
+          properties: { path: { type: "string" }, offset: { type: "integer", minimum: 1 }, limit: { type: "integer", minimum: 1 } },
+          required: ["path", "offset", "limit"] }, description: "Focused excerpts from existing project files or declared external inputs/outputs. Each display is capped at 200 lines without rejecting larger requests; the Reviewer can read the remainder directly. Project references need not be in the unit read/write scope. Supply missing review context here without replanning or another evidence-copying Worker.", "x-sortie-optional": true } as never,
         traces: { ...stringList, description: "Optional concise implementation notes. No R-ID labels or per-requirement proof required.", "x-sortie-optional": true } as never }, execute: async (args, context) => {
         const { root, mission } = await missionAuthority(context.sessionID);
         await control!.currentBudget(root, { reconcileUsage: false });
@@ -2015,7 +2060,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             ...(phase === "verification" ? ["Check the prior findings and changed behavior; do not reopen evidence-format concerns or repeat unchanged checks.",
               `prior_review: ${mission.review?.result ?? "See current source and requirements."}`] : []),
             `manifest: ${JSON.stringify(run.units.map(unit => unit.unit))}`, `sourceFingerprint: ${source.fingerprint}`,
-            `validation: ${JSON.stringify(run.units.map(unit => ({ command: unit.unit.validation, evidence: unit.evidence })))}`,
+            "Validation below preserves exact observed commands, outcomes, coverage and candidate identity. Full snapshot recipes remain at details_ref; the host checks freshness. Read them only for a concrete evidence question, not routine re-verification.",
+            `validation: ${JSON.stringify(missionReviewValidation(run, operators.statePath(root)))}`,
             ...(observedValidation.length ? [
               "Observed native validation history (existing Worker tool records, not new checks). Use recorded outcomes directly; absent history fields are not proof that a check failed or was skipped. The host separately checks current candidate validation at completion.",
               `observed_validation: ${JSON.stringify(observedValidation)}`,
@@ -2055,7 +2101,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         }
         const updated = await missions.update(root, state => { state.phase = "submitted";
           state.submission = { status: args.status as "ready" | "needs-decision" | "blocked", summary: args.summary }; });
-        return JSON.stringify({ ...missionPacket(updated, await operators.read(root)), next_action: "Return this result to Operator now. Completion still requires its final comparison and complete_mission receipt." });
+         const submittedRun = await operators.read(root);
+         return JSON.stringify({ acceptance_summary: await missionAcceptanceSummary(updated, submittedRun, operators, acceptanceValidationObservation),
+           ...missionPacket(updated, submittedRun),
+           next_action: "Return this result and acceptance_summary to Operator now. Compare the original requests with the candidate and actual evidence; inspect concrete gaps only, then complete_mission if satisfied. No routine archive search or full source reread. Completion still requires its final comparison and complete_mission receipt." });
       } };
     tools[completeMission] = { description: "Operator only: after comparing the original request, source, actual checks and required independent review, explicitly accept the whole mission. Returns the measured 🐾 report on success; never treat Worker start or one passing check as completion.",
       args: {}, execute: async (_args, context) => {
@@ -2132,6 +2181,14 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     }
 
     const hooks: OpenCodeHooks & { config(config: Record<string, unknown>): Promise<void> } = {
+      backgroundOwner: (callID, restore) => {
+        if (restore) {
+          if (record(restore.profile)) taskOwners.set(callID, restore.profile as unknown as NonNullable<ReturnType<typeof taskOwners.get>>);
+          core.backgroundOwner?.(callID, record(restore.core) ? restore.core : undefined);
+        }
+        const owner = taskOwners.get(callID);
+        return owner ? { profile: owner, core: core.backgroundOwner?.(callID) } : undefined;
+      },
       config: async config => {
         const configuredPermission = config.permission;
         const permission = typeof configuredPermission === "string"
@@ -2357,6 +2414,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         }
         const consultRole = typeof args.subagent_type === "string" ? canonicalAgent(profile, args.subagent_type) : undefined;
         if ((missionCoordinator || fastReviewer) && request.tool === "task" && ["dog-scout", "dog-reviewer", "dog-advisor"].includes(consultRole ?? "")) {
+          const reviewIdentity = consultRole === "dog-reviewer" ? missionReviewIdentity(mission) : undefined;
           if (consultRole === "dog-reviewer") {
             if (!mission.review?.task || args.prompt !== missionReviewTask(mission).prompt || args.task_id) {
               throw new Error("mission-review-task-required: dispatch review_mission's generated task");
@@ -2374,6 +2432,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
               throw new Error("mission-review-snapshot-stale: refresh review_mission with current evidence; revalidate only if the candidate changed");
             }
             args.prompt = mission.review.task.prompt;
+            await missions.update(root, state => {
+              if (!state.review || missionReviewIdentity(state) !== reviewIdentity) throw new Error("mission-review-task-stale: dispatch the current review_mission task");
+              state.review.callID = request.callID;
+            });
           }
           const mapped = translate(output, false) as typeof output;
           await core["tool.execute.before"]?.({ ...request, sessionID: root, agent: "dog-coordinator" }, mapped);
@@ -2383,7 +2445,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             await missions.recordConsultationDispatch(root, { role, callID: request.callID,
               ...missionConsultationDetails(role, args.prompt) });
           }
-          taskOwners.set(request.callID, { root, actor: request.sessionID, operator: false, consultation: consultRole });
+          taskOwners.set(request.callID, { root, actor: request.sessionID, operator: false, consultation: consultRole,
+            ...(reviewIdentity === undefined ? {} : { reviewIdentity }) });
           return;
         }
         const proposal = who.role === "dog-operator" ? await proposals.read(root) : undefined;
@@ -2584,8 +2647,18 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         if (!id) return;
         const ownership = request.callID === undefined ? undefined : taskOwners.get(request.callID);
         const returnedOutput = output.output;
+        if (request.tool === "task" && record(output.metadata) && output.metadata.status === "running") {
+          const child = taskChildSessionID(output);
+          if (ownership && !ownership.mission && !ownership.operator && !ownership.consultation && !ownership.proposal && child) {
+            await operators.observeChild(ownership.root, request.callID!, child);
+          }
+          await core["tool.execute.after"]?.({ ...request, ...(ownership ? { sessionID: ownership.root } : {}) }, output);
+          return;
+        }
         if (ownership?.mission) {
-          const mission = await missions.update(ownership.root, state => { state.dispatchOpen = false; });
+          const current = await missions.required(ownership.root);
+          if (current.callID !== request.callID) { taskOwners.delete(request.callID!); return; }
+          const mission = await missions.update(ownership.root, state => { if (state.callID === request.callID) state.dispatchOpen = false; });
           output.output = JSON.stringify({ ...missionPacket(mission, await operators.read(ownership.root)),
             coordinator_report: output.output, budget: await control!.currentBudget(ownership.root) });
           taskOwners.delete(request.callID!);
@@ -2595,14 +2668,19 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           const raw = output.output;
           await core["tool.execute.after"]?.({ ...request, sessionID: ownership.root }, output);
           if (ownership.consultation === "dog-reviewer") {
+            const current = await missions.required(ownership.root);
+            const reviewIdentity = ownership.reviewIdentity ?? missionReviewIdentity(current);
+            if (current.review?.callID !== request.callID || missionReviewIdentity(current) !== reviewIdentity) { taskOwners.delete(request.callID!); return; }
             const child = taskChildSessionID(output);
             const who = child ? await identity(child) : undefined;
             const history = child ? await messages(child) : [];
             const last = [...history].reverse().find(message => (record(message.info) ? message.info.role : message.role) === "assistant");
             const text = Array.isArray(last?.parts) ? last.parts.filter(record).filter(part => part.type === "text").map(part => part.text).join("\n") : String(raw);
             const independent = who?.role === "dog-reviewer" && who.parent === ownership.actor;
+            let adopted = false;
             const reviewed = await missions.update(ownership.root, mission => {
-              if (mission.review) {
+              if (mission.review && mission.review.callID === request.callID && missionReviewIdentity(mission) === reviewIdentity) {
+                adopted = true;
                 mission.review.result = text.slice(0, 16_000);
                 const verdict = missionReviewVerdict(text);
                 mission.review.verdict = independent ? verdict : "findings";
@@ -2613,7 +2691,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
                 }
               }
             });
-            if (reviewed.review?.verdict === "evidence-gaps" && typeof output.output === "string") {
+            if (adopted && reviewed.review?.verdict === "evidence-gaps" && typeof output.output === "string") {
               output.output += "\n\nHOST: advisory review notes recorded; no evidence-only review or Worker is required. Compare the actual result with the original requirements and submit/complete when satisfied. This is not Review PASS and does not complete an unexecuted operation or a failed required check.";
             }
           } else if (ownership.consultation === "dog-advisor" || ownership.consultation === "dog-scout") {
@@ -2638,6 +2716,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           return;
         }
         if (ownership?.operator) {
+          if ((await operators.required(ownership.root)).operatorCallID !== request.callID) { taskOwners.delete(request.callID!); return; }
           const state = await operators.operatorReturned(ownership.root);
           output.output = JSON.stringify(await operatorPacket(state));
           taskOwners.delete(request.callID!);
@@ -2783,7 +2862,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       "experimental.text.complete": async (request, output) => {
         const role = (await identity(request.sessionID)).role;
         if (role === "dog-operator" || !await rootFor(request.sessionID)) return;
-        const mapped = { text: role === "dog-coordinator" ? forwardTerminalText(output.text) : output.text };
+        const forwardedText = role === "dog-coordinator" ? forwardTerminalText(output.text) : output.text;
+        // Ordinary Operator chat is not a request for a historical Mission return panel.
+        if (role === "dog-coordinator" && terminalRunOutcome(forwardedText) === undefined) return;
+        const mapped = { text: forwardedText };
         const originalText = sanitizeTerminalReport(mapped.text);
         const hadTerminalHeading = terminalRunOutcome(mapped.text) !== undefined;
         await core["experimental.text.complete"]?.(request, mapped);

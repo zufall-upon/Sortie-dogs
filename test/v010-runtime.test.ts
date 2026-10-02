@@ -266,16 +266,28 @@ test("preview assets coexist with stable assets and markers", async () => fixtur
   ]);
   const primary = previewAssets.find(asset => asset.name === "dog-operator")!.content;
   for (const asset of previewAssets.filter(asset => asset.installPath.startsWith("agent/"))) {
-    assert.match(asset.content, /Treat the current working directory and every project_root value as opaque/u);
-    assert.match(asset.content, /Never shorten, hand-normalize,[\s\S]+generated path segment/u);
+    if (asset.name === "dog-worker-v010") {
+      assert.match(asset.content, /Treat cwd\/project_root and (?:supplied )?paths as opaque/u);
+      assert.match(asset.content, /never shorten or normalize (?:generated )?segments/u);
+    } else {
+      assert.match(asset.content, /Treat the current working directory and every project_root value as opaque/u);
+      assert.match(asset.content, /Never shorten, hand-normalize,[\s\S]+generated path segment/u);
+    }
   }
   for (const name of ["dog-worker-v010", "dog-luna-worker-v010"]) {
     const asset = previewAssets.find(item => item.name === name)!.content;
     assert.match(asset, /^model: openai\/gpt-6-luna-fast#max$/m);
     assert.match(asset, /^permission:\r?\n  bash: allow\r?\n  sortie_v010_bind_write_gate: allow\r?\n  sortie_v010_release_write_gate: allow$/mu);
-    assert.match(asset, /inspect the affected source branches and the public\nentry path in the request/u);
-    assert.match(asset, /add targeted cases for\nindependent branches or multiple affected targets/u);
-    assert.match(asset, /Do not turn this into an exhaustive inventory of creation, binding, mutation/u);
+    if (name === "dog-worker-v010") {
+      assert.match(asset, /Use public source\/tests: fix the cause; check meaningful changed branches, API errors and state after failure/u);
+      assert.match(asset, /Preserve reproduction entrypoint, input and layout/u);
+      assert.match(asset, /without a hypothetical exhaustive matrix/u);
+      assert.match(asset, /unresolved\/untested behavior/u);
+    } else {
+      assert.match(asset, /inspect the affected source branches and the public\nentry path in the request/u);
+      assert.match(asset, /add targeted cases for\nindependent branches or multiple affected targets/u);
+      assert.match(asset, /Do not turn this into an exhaustive inventory of creation, binding, mutation/u);
+    }
     assert.doesNotMatch(asset, /every existing form that reaches/u);
   }
   const reviewer = previewAssets.find(asset => asset.name === "dog-reviewer-v010")!.content;
@@ -302,8 +314,8 @@ test("preview assets coexist with stable assets and markers", async () => fixtur
   assert.match(coordinator, /not a speculative route inventory\nor raw history to prove incidental process constraints/u);
   assert.match(coordinator, /Never plan a separate setup\nunit/u);
   const worker = previewAssets.find(asset => asset.name === "dog-worker-v010")!.content;
-  assert.match(worker, /Missing repository-declared dependencies or test runner are setup, not a result/u);
-  assert.match(worker, /Reuse an existing \.sortie-env\/ and never delete it/u);
+  assert.match(worker, /Missing tooling: one documented bounded setup in \.sortie-env\//u);
+  assert.match(worker, /reuse, never delete/u);
   assert.match(primary, /^model: openai\/gpt-6.1-sol$/m);
   assert.match(primary, /^variant: xhigh$/m);
   assert.match(primary, /^  "sortie_v010_\*": allow$/m);
@@ -311,7 +323,7 @@ test("preview assets coexist with stable assets and markers", async () => fixtur
   assert.match(primary, /^  sortie_v010_complete_mission: true$/m);
   assert.doesNotMatch(primary, /^  sortie_v010_begin_operator_proposal: true$/m);
   assert.match(primary, /host saves the original\n\s+user message verbatim/u);
-  assert.match(primary, /Start with the direct Worker Fast-lane/u);
+  assert.match(primary, /call plan_units and dispatch its Worker immediately/u);
   assert.match(primary, /inspect only missing source or evidence/u);
   assert.match(primary, /Batch focused reads where practical/u);
   assert.match(primary, /use \[\] only for genuinely low-risk work/u);
@@ -407,9 +419,13 @@ test("preview tools are denied globally and allowed only by profile agents", asy
   }
 }));
 
-test("every preview role carries the same user-language contract without translating protocol keys", () => {
+test("every preview role preserves user language and protocol keys without duplicated Worker boilerplate", () => {
   for (const asset of previewAssets) {
-    assert.equal(asset.content.split(COMMUNICATION_LANGUAGE_POLICY).length, 2, asset.name);
+    if (asset.name === "dog-worker-v010") {
+      assert.match(asset.content, /Use the user's latest instruction language \(previous if unclear\)/u);
+      assert.match(asset.content, /keep protocol\/code\/quotes verbatim/u);
+      assert.equal(asset.content.split(COMMUNICATION_LANGUAGE_POLICY).length, 1, asset.name);
+    } else assert.equal(asset.content.split(COMMUNICATION_LANGUAGE_POLICY).length, 2, asset.name);
   }
   assert.match(COMMUNICATION_LANGUAGE_POLICY, /delegated questions, handoff prose, findings and final replies/);
   assert.match(COMMUNICATION_LANGUAGE_POLICY, /Japanese instructions require Japanese/);
@@ -452,9 +468,9 @@ test("preview primary closes every task turn with one machine terminal checkpoin
 test("preview primary continues approved sequential scope and uses interactive questions", () => {
   const primary = previewAssets.find(asset => asset.name === "dog-operator")!.content;
   const coordinator = previewAssets.find(asset => asset.name === "dogs-coordinator")!.content;
-  assert.match(primary, /No per-unit root approval/);
+  assert.match(primary, /no routine approval round trip/u);
   assert.match(primary, /Coordinator Task only for real coordination/u);
-  assert.match(primary, /If declared build or tests create known generated paths, include those outputs in the initial write scope/u);
+  assert.match(primary, /Use estimated read\/write paths; native scope reconciliation and expand_unit cover actual outputs/u);
   assert.match(primary, /Ask through question only for a user-only choice/);
   assert.match(primary, /Resume the same work after\nthe answer/);
   assert.match(primary, /Reviewer FINDINGS\s+instead need a corrective unit, formal validation, then fresh independent Review/u);

@@ -549,7 +549,7 @@ test("review references retain declared external inputs and report actionable pa
       [{ path: "missing.py", offset: 1, limit: 1 }, /missing.py: ENOENT/u],
       [{ path: ".", offset: 1, limit: 1 }, /\.: select a regular file/u],
       [{ path: "source.py", offset: 2, limit: 1 }, /source.py: offset 2 exceeds 1 lines/u],
-      [{ path: "source.py", offset: 1, limit: 201 }, /source.py: use a positive line offset/u],
+      [{ path: "source.py", offset: 1, limit: 0 }, /source.py: use a positive safe-integer line offset/u],
       [{ path: "../undeclared.log", offset: 1, limit: 1 }, /undeclared.log: outside the project/u],
     ] as const) {
       await assert.rejects(missionReviewSource(project, run, [entry]), reason);
