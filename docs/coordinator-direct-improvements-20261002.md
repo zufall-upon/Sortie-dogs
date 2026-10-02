@@ -1,5 +1,10 @@
 # Coordinator direct execution and avoidable round trips
 
+Follow-up: [continuous nightly loop](nightly-quality-loop-20261002.md) records
+the later direct-v2 candidate, another original Anko score-0 result, and a successful
+real-V2 two-unit same-Coordinator direct execution. The fixed results below retain
+their original candidate identities; subsequent test-oracle changes are tracked there.
+
 ## Scope
 
 Base: `b9b1246` (main, v0.13.3). Restore the practical implementation,

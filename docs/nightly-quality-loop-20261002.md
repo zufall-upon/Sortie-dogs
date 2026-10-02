@@ -79,3 +79,103 @@ Fixed native candidate:
 - Prepared a separate two-unit native direct-Coordinator fixture with the same
   package and its own initially empty database. Preparation is not execution
   evidence; native launch/result will be recorded separately.
+
+### Cycle 1 result and observed limitation
+
+Native completion: 1881.045 s, $1.83757332, 80 requests, unknown usage 0. Worker
+Luna-fast/max, Operator and the initial/correction Reviewer SOL/xhigh throughout.
+Anko branch `typed-variable-bindings`, clean final commit
+`4ec2864a89823a61f41ed800a86f5069ecbfe0c1`; genuine Mission succeeded receipt.
+Initial Reviewer found four Medium defects: invocation-option capture, native
+pointer writeback, channel-status error suppression and unknown qualified types.
+The same native Reviewer added public regressions, observed failure twice, fixed
+the defects, ran `go test ./...`, committed and returned `SELF_RECHECKED`.
+No second Reviewer. The 25-minute checkpoint continued execution.
+
+Pinned official local verifier: exit 0, 15.645 s; **binary score 0**, F2P 5/9,
+P2P 94/94. Failed groups remain declarations, representative flows, error return
+value, and scoped/control-flow assignments. Final source remains frozen/clean.
+Compared with the previous direct-v1 run: +506.625 s (+36.86%) and +$0.68787792
+(+59.83%), no score improvement. Compared with old mixed: -312.957 s (-14.26%)
+but +$0.06147924 (+3.46%), score 1 to 0. Each is one sample, not a causal estimate.
+
+The new evidence rules were actually followed for retained findings, but did not
+validate the test oracle. Worker commit `eee284d` already asserted that rejected
+ordinary assignment returns its RHS (`vm/vmTypedBindings_test.go:49-54`). Initial
+Reviewer read that file and the pre-existing public helper `vm/main_test.go`, yet
+retained the assertion. Correction tests at lines 279-288 and 303-308 then asserted
+the rejected RHS too; the final self-recheck explicitly calls that behavior fixed.
+Other correction tests correctly require a nil result for invocation/unknown types.
+
+The unchanged public helper checks `RunOutput` even on error (`main_test.go:199-218`).
+Pre-existing type-rejection examples such as `vm_test.go:197-212` use its default
+nil output. This makes the next concrete improvement test-oracle independence:
+distinguish pre-existing public expectations from tests added alongside the new
+implementation, and compare analogous failure paths before endorsing a new result.
+Adding assertions alone can encode the defect. Do not prescribe a language-specific
+return value or change the scored candidate. Trace is retained in
+`_testenv/anko-nightly-quality-v2-20261002/review-trace.md`; costs, comparison and
+native outcomes in `comparison-summary.json`.
+
+The separate direct-controller probe started after Anko completed. At
+`2026-10-02T13:28:02.460Z`, native Coordinator `ses_f0333bf59ffeEQ36kTJrUSnB2o`
+actually used SOL/xhigh and owned direct `unit-1` under root
+`ses_f033431e3ffeC6OleTcsrA4X0Q`.
+
+### Native direct-controller result
+
+**PASS**: 278.110 s, $0.33391280, 30 requests, unknown usage 0. Same SOL/xhigh
+Coordinator owned both sequential direct units. For each, the real declared check
+failed before editing and passed after the fix; the second check covered both
+requirements. No implementation/validation Worker. Two saved `direct_execution`
+attempts have formal evidence and no fabricated child-terminal records. Initial
+independent Reviewer PASS, Coordinator ready submission and Operator genuine
+Mission succeeded receipt; all three native sessions succeeded.
+
+Final clean commit `868d54174ce12a0f633807e5c7b764619ef5e84c` on
+`diagnose/direct-controller-76d4f137`; all three check-file hashes unchanged.
+An observer-side `node check-all.mjs` also passed after measurement. Native source,
+states, checks and model/receipt records: `_testenv/nightly-direct-native-20261002/`.
+This verifies the two-unit same-Coordinator direct route, not Anko quality or native
+root direct/cold-resume/cancellation/failure-from-Worker paths.
+
+## Cycle 2: independent test expectations
+
+Public-only read-only diagnostic on frozen cycle-1 Anko: exit 0, 0.616 s,
+zero model requests. Pre-existing incompatible indexed assignment returns nil
+with an error; analogous new typed assignment/declaration returns the rejected
+string. Commands and output: `_testenv/coordinator-direct/night-oracle-probe.*`.
+
+Replace, rather than stack, the behavioral guidance: independently establish the
+oracle from pre-change analogous public tests and shared-helper defaults; treat
+tests added with the patch as claims to review. Reuse the established harness for
+small distinguishing regressions, and do not make expected results agree with
+current code merely to obtain green tests. No universal failure-result value,
+new evidence packet, mandatory review round or runtime gate is introduced.
+
+First focused check found an obsolete reproduction sentence assertion and Worker
+prose length 2406 vs the existing 2400 limit. Restore the original reproduction
+reporting sentence and shorten the new wording; preserve the existing thresholds.
+
+Corrected focused suite: 153/153 PASS, test 10.871 s; generated Worker 2876,
+common content 2455 and prose 2391 characters. Full integration is pending.
+Nightly measured inference total after cycle 1 and direct probe: **$2.17148612**, unknown 0.
+
+## Retained archives
+
+Both stopped native environments were archived on `2026-10-02T13:33:56Z` under
+`/home/user/Sortie-dogs/_testenv/anko-pr149-ubuntu-20261001/nightly-quality-20261002/`.
+Package SHA-256 and retained native root identity were checked before removing
+only the generated `.opencode/` and cache directories. Source/Git and private DBs
+remain locally; source/Git/native histories/fixed package and analysis are archived.
+
+- `anko-nightly-quality-v2-20261002/attempt-evidence.tar`:
+  `7f7371941e53b7cbc0defa7695b0e71ebb6b7942c43db8c785be20fba0988e2c`.
+- Its `product-checks-and-analysis.tar`:
+  `9e8357892994da44076ce82158be1908ac18a4a48bd55d777731045494967d00`.
+- `nightly-direct-native-20261002/attempt-evidence.tar`:
+  `07da0a61b68fac6757951522cf6d6743095371cb45d924cf147356bf2d262799`.
+- Its `product-checks-and-analysis.tar`:
+  `b24d440dcd36ef9860208bdae4b0f67e6c9ae634030b7944c6b8efb52543e2bd`.
+
+These archives predate the cycle-2 full check and retain their as-of contents.

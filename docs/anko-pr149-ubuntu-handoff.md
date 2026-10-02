@@ -18,6 +18,13 @@ Observed time/cost fell 37.36%/35.27% versus prior mixed; quality did not pass.
 The report records the stale assignment-error return value, fixed candidate and
 archive. Direct controller execution was not used by that Anko route.
 
+The [continuous nightly loop](nightly-quality-loop-20261002.md) then completed
+direct-v2 Anko in 1881.045 s / $1.83757332, still reward 0 (F2P 5/9, P2P 94/94).
+New tests asserted the wrong return value; independent test-oracle selection is
+the next improvement. A separate native same-Coordinator two-unit direct probe
+passed in 278.110 s / $0.33391280, including real failed/passed checks, independent
+Review and genuine Mission completion. Product PR #152 remains the working PR.
+
 ## Historical authority and status through run7
 
 The user confirmed PR149 as the intended starting point (PR194 returned 404),
