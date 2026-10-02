@@ -36,7 +36,15 @@ findings or prove installed runtime behavior.
   Actual Worker Luna Fast/max, Operator/Reviewer Sol6.1/xhigh. Price **$1.01202472
   plus unknown usage1**, no intervention. This is not a 25-minute timeout or any
   original-task completion proof; no blind paid replay.
-- Branch pushed through `04343cd`; PR creation still blocked by locked existing
+- User subsequently approved ONE fresh original run at **$3 observed-price threshold
+  and 1500 s**, unchanged models/effort/quality. **run7 observation complete,
+  UNACCEPTED: 1500.009 s timeout**, not cost cutoff; **$1.00455676 plus unknown1**.
+  Initial Review authored **one Major and two Medium**; SAME Reviewer applied a
+  five-source-file correction before cutoff. No post-correction formal test,
+  correction commit/clean, self-recheck or true receipt. This demonstrates actual
+  initial Review/same-context correction writes, not semantic completion. Budget
+  increase alone did not achieve the 25-minute original-task boundary.
+- Branch pushed through documentation-only `797a759`; PR creation blocked by locked existing
   OS keyring. No original-task success or release-readiness claim. Release remains
   assigned to the separate chat.
 
@@ -44,12 +52,14 @@ findings or prove installed runtime behavior.
 
 1. Use branch `bench/reviewer-remediation-pr149-20261001`. Its documentation-only
    handoff tip is distinct from tested candidate `04343cd` and fixed package above.
-2. Keep all six original runs unaccepted; fixture3 proves only the generic native
+2. Keep all seven original runs unaccepted; fixture3 proves only the generic native
    correction mechanism. Do not rerun full/package/native fixtures on unchanged code
-   or resume/extend completed run6.
-3. Next useful investigation is read-only retained-history attribution of the
-   correction context cost and handoff/tool retries. No established new product
-   defect yet. Preserve max/xhigh, required quality and observed $1 threshold.
+   or resume/extend completed run6/run7.
+3. The approved $3/25-minute observation is complete; no further paid replay needed
+   merely to keep observing. Keep partial run7 changes intact and unvalidated. No
+   new product defect or permission obstruction established. If further improvement
+   is requested, use retained phase histories rather than lowering effort/quality
+   or inventing an extra approval/security/parser mechanism.
 4. PR still uncreated. With existing GitHub authentication available, use the
    recorded draft create command/body; otherwise retain the real keyring blocker.
    Do not export/change credentials, unlock services or wait in repeated auth calls.
@@ -815,6 +825,68 @@ the old actual fixture's false activation predicate; no retroactive relabeling.
   Record: `_testenv/pr149-remediation/completed-install-cleanup-6.json`.
   DB/dataset/source/Git/history/fixed package remain untouched.
 
+### Original run7 — approved $3 experiment, observation complete at25minutes
+
+- User approved one fresh run at observed **$3** with the same1500-second deadline,
+  saying to finish observation if the system is operating normally. This changes
+  the price condition, not quality or the definition of Mission success. Previous
+  six runs and their$1conditions remain unchanged; this is not a matched-cost claim.
+- Same tested candidate `04343cd` and fixed `e7fd7f65...` package reused; no build,
+  full-suite, packaging or generic fixture replay. Preparation host tip `797a759`
+  differs only by the handoff document. All fixed candidate source bytes matched;
+  installed204distfiles/8assets matched. Original1825bytes/hash/base/onecommit/clean/
+  remote0 preserved in a NEW clone `_testenv/pr149-native-attempt-7/`.
+- Native2.0.18/Node22.22.1/Go1.27.1/same Docker image and repo-local Git identity
+  retained. Baseline preparation `go test ./...` exit0,5.604590s inside5.694456s
+  preflight, not candidate acceptance. Ignored cost/duration observer6/6PASS, exit0,0.098178s;
+  confirms future live threshold/launch record agree and wrapper/models/deadline
+  unchanged, not product/native quality proof.
+- Root `ses_f056c844cffe1LpDXMeTzObMQ9`, start `2026-10-02T03:06:05.288Z`,
+  deadline `2026-10-02T03:31:05.288Z`; actual stop `03:31:05.297Z`,
+  **1500.009s timeout**, interventions0. Parent shell cancelled on server restart,
+  existing container `cb7e9184dd67`/driverPID7 remained live. A read-only observer
+  was interrupted during connection switching; final `docker wait` attached to the
+  SAME container and returned1. No duplicate launch, input, deadline extension or
+  source/package change; parent cancellation does not establish a cause for the measured timeout.
+- Actual Worker LunaFast/max: first37.486s, last completion920.615s,
+  52requests/87tools. Root formal `go test ./...` PASS781.859s/818.139s,
+  actual execution0.554s/0.348s. Same Worker commit
+  `65a2b085874a1aebddb99f1f77070051aae4a3fa`, branch `typed-variable-bindings`,
+  one new commit. Initial delivery was clean; final delivery is not clean because
+  the subsequent Reviewer correction remains uncommitted.
+- Initial Reviewer `ses_f055e28c8ffeaWMf37FOKou5sF`, actualSol6.1/xhigh,
+  starts940.653s and authors FINDINGS1240.315s: **one Major, two Medium**.
+  Qualified-type lookup panic/unknown-type marker; channel status assignment hides
+  constraint errors; Go-function pointer writeback hides rejected assignments.
+  Source-review findings retained, not parent extra grading or reproduction.
+- SAME native Reviewer correction starts1258.476s, **241.524s available**.
+  Nine actual correction tools include one completed patch at1484.062s to
+  `env/env.go`, `env/envValues.go`, `vm/vmLetExpr.go`, `vm/vmStmt.go` and
+  `vm/vmExprFunction.go`. No recorded native permission rejection or manual binding;
+  ordinary diagnostic combined Git worked. No correction regression tests/formal
+  check/commit/self-recheck before cutoff. All five partial modified source files
+  remain intact; no parent repair, post-run test or completion synthesized.
+- Final Mission stillrunning, correctioncancelled/nativeinterrupted, receiptnull,
+  no all-native success and final Gitdirty. **UNACCEPTED** despite CLIbackgroundack0.
+  No different second Reviewer was triggered before self-recheck.
+- Observed **$1.00455676 plus unknown1**, below$3. First correction model request
+  101063input/cache-read0/$0.202676; observed context cost, not proof of a cache bug.
+  Raising budget removed the early$1stop but did not prove25-minute semantic
+  completion in this stochastic fresh run. Required quality was not relaxed.
+- Raw final/cutoff/history/model/check/report/source snapshots, phase attribution,
+  `acceptance-attribution.json` and `unfinished-correction.diff` retained. No hidden
+  grading, scoring, Anko publication, extra paid replay or release/global effect.
+  Owned server stopped and registration removed; original observation is complete.
+- Archived at
+  `/home/user/Sortie-dogs/_testenv/anko-pr149-ubuntu-20261001/attempt-7-04343cd-1500s-usd3`.
+  Verified all five partial modified source hashes, actual archived Gitdirty status,
+  unfinished diff and raw native evidence hashes. Only confirmed-idle generated
+  `anko/.opencode` and npm `cache` removed afterward; partial source/Git/history,
+  sharedDB/dataset/fixed package untouched. `completed-install-cleanup-7.json`.
+  Existing GitHub keyring stillLocked=true after run7; no credential changes/auth
+  wait or PR creation. This final observation document is a documentation-only tip,
+  not a rebuilt or newly tested runtime package.
+
 ## Observed cost and retained evidence
 
 - Initial Advisor consultation: $4.886146, 18 native model requests, unknown usage
@@ -929,6 +1001,11 @@ the old actual fixture's false activation predicate; no retroactive relabeling.
   start probe + three generic fixtures **$5.22116308 plus unknown9**. Named-child
   development remains separate **$36.064024 plus unknown2**. Parent/subscription,
   earlier campaign history and complete billing excluded; unknown usage not zeroed.
+- After originalrun7: current seven original runs **$4.36794528 plus unknown8**;
+  all nine Ubuntu originals **$5.82303288 plus unknown10**. Current seven originals +
+  start probe + three generic fixtures **$6.22571984 plus unknown10**. Named-child
+  development unchanged **$36.064024 plus unknown2**. Earlier overlapping snapshots
+  are not added; parent/subscription, old history and complete billing excluded.
 
 ## Separate-chat handoff
 
@@ -962,7 +1039,7 @@ Read-only capability recheck at approximately02:37UTC still returned`b true`.
 
 Latest code/full/package candidate remains `04343cd`; the handoff commit is
 documentation-only and does not identify the fixed package as rebuilt at that tip.
-No code or full-suite rerun followed fixture3/run6 observations.
+No product-code or full-suite rerun followed fixture3/run6/run7 observations.
 
 Run3/4 and the startup probe were also archived after owned-process shutdown.
 Only their idle generated plugin installs/npm caches removed, preserving source,
