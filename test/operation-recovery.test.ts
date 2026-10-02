@@ -8,12 +8,26 @@ import { existsSync } from "node:fs";
 import test from "node:test";
 import { createProjectPaths, createWriteGate, canonicalManifestWriteScopes, extractWritePaths } from "../dist/plugin/gate.js";
 import { protectedSnapshot, refreshProtectedSnapshot } from "../dist/plugin/protected-snapshot.js";
-import { missionReviewSource } from "../dist/plugin/mission-review.js";
+import { missionDeliveryObservation, missionReviewSource } from "../dist/plugin/mission-review.js";
 import { OperatorMissionRuntime, missionPlan } from "../dist/core/operator-mission.js";
 import { OperatorRuntime, operatorGitPathAuthorized } from "../dist/core/operator-runtime.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
 
 const exec = promisify(execFile);
+test("delivery records actual native Git state, including a later dirty candidate", async () => fixture(async root => {
+  await exec("git", ["init", "--quiet", "-b", "delivery-test"], { cwd: root });
+  await writeFile(join(root, "result.txt"), "delivered\n");
+  await exec("git", ["add", "result.txt"], { cwd: root });
+  await exec("git", ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "Deliver"], { cwd: root });
+  const observed = await missionDeliveryObservation(root, "run");
+  assert.equal(observed?.head, (await exec("git", ["rev-parse", "HEAD"], { cwd: root })).stdout.trim());
+  assert.equal(observed?.branch, "delivery-test");
+  assert.equal(observed?.clean, true);
+  await writeFile(join(root, "result.txt"), "later edit\n");
+  const changed = await missionDeliveryObservation(root, "run");
+  assert.equal(changed?.head, observed?.head);
+  assert.equal(changed?.clean, false, "same commit is not proof of clean source");
+}));
 async function fixture(run: (root: string) => Promise<void>) {
   await mkdir(resolve("_testenv"), { recursive: true });
   const root = await mkdtemp(resolve("_testenv/operation-recovery-"));
@@ -91,6 +105,25 @@ test("mission shell uses native execution policy while known destinations retain
     { args: { filePath: "other/result", content: "result" } }, { investigativeShell: true }), /Use expand_unit.*retry this command in the SAME active Task/);
   await assert.rejects(gate.check({ tool: "shell", sessionID: "legacy", callID: "legacy" },
     { args: { command: "curl --progress-bar -o output/result https://example.test/result" } }), /retry=false/);
+}));
+
+test("native formatter and exact Git delivery compose without reviving unrelated shell ambiguity", async () => fixture(async root => {
+  await exec("git", ["init", "--quiet"], { cwd: root });
+  await writeFile(join(root, "result.go"), "package result\n");
+  const gate = await createWriteGate(await createProjectPaths(root), {
+    version: "0.1.0", task_id: "formatter-git", read: [], write: ["result.go"], validation: [],
+  });
+  const shell = (command: string) => gate.check({ tool: "shell", sessionID: "worker", callID: command },
+    { args: { command } }, { investigativeShell: true });
+  await shell("gofmt -w result.go && git add -- result.go");
+  await shell('gofmt -w result.go && git add -- result.go && git commit -m "Format result"');
+  await assert.rejects(shell("gofmt -w result.go && git add ."), /write denied/iu);
+  await assert.rejects(shell('gofmt -w result.go && git commit -am "Include unscoped files"'), /write denied/iu);
+  await assert.rejects(shell('git add "$UNKNOWN" && git commit -m "Unknown paths"'), /write denied/iu);
+  await assert.rejects(shell("gofmt -w result.go && git add -- outside.go"), /write scope/iu);
+  await writeFile(join(root, "outside.go"), "package outside\n");
+  await exec("git", ["add", "outside.go"], { cwd: root });
+  await assert.rejects(shell('gofmt -w result.go && git add -- result.go && git commit -m "No unrelated index"'), /write scope/iu);
 }));
 
 test("global-style offline npm install is plannable, writable, snapshot-bound and reviewable", async () => fixture(async area => {

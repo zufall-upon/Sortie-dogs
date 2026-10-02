@@ -243,6 +243,21 @@ export async function missionReviewBaseline(directory: string): Promise<string |
   } catch { return undefined; } // A mission can start before Git is initialized.
 }
 
+/** Read-only Git observation at a workflow boundary, independent of who made the commit. */
+export async function missionDeliveryObservation(directory: string, runID: string) {
+  try {
+    const { stdout } = await exec("git", ["status", "--porcelain=v2", "--branch", "--untracked-files=all", "-z"], { cwd: directory });
+    const entries = stdout.split("\0").filter(Boolean);
+    const head = entries.find(line => line.startsWith("# branch.oid "))?.slice(13);
+    const branch = entries.find(line => line.startsWith("# branch.head "))?.slice(14);
+    return { run_id: runID, observed_at: new Date().toISOString(),
+      head: head && /^[a-f0-9]{40,64}$/u.test(head) ? head : null,
+      branch: branch && branch !== "(detached)" ? branch : null,
+      clean: !entries.some(line => !line.startsWith("# ")),
+      source: "host:git status --porcelain=v2 --branch --untracked-files=all -z" as const };
+  } catch { return undefined; }
+}
+
 /** A child ID alone cannot establish the initial phase after a restart or failed dispatch. */
 export function initialMissionReviewPrompt(mission: OperatorMission, prompts: readonly string[]): string | undefined {
   return [mission.review?.initialPrompt, ...prompts].find(prompt => typeof prompt === "string" &&

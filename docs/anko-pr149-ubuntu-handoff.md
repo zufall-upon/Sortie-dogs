@@ -1,6 +1,19 @@
 # PR149 Ubuntu remediation and original Anko verification
 
-## Authority and current status
+## Follow-up results (2026-10-02)
+
+The original uncapped task subsequently completed in both comparison routes:
+single SOL 1372.413 s / $0.78903480 / official reward 1; Luna/SOL Sortie
+2194.002 s / $1.77609408 / reward 1. A later all-SOL Sortie execution completed
+its workflow in 2320.256 s / $2.43757400 but received reward 0 (F2P 7/9,
+P2P 94/94). Each used a fresh clone and private DB. Full results, concrete defect
+diagnosis, scoring identities and retained evidence are summarized in
+[the three-route investigation](anko-three-route-investigation-20261002.md).
+
+The follow-up [Coordinator restoration](coordinator-direct-improvements-20261002.md)
+is a new product candidate and evaluation; historical PASS is not evidence for it.
+
+## Historical authority and status through run7
 
 The user confirmed PR149 as the intended starting point (PR194 returned 404),
 requested the previously Advisor-refined improvements, actual original Anko

@@ -326,7 +326,7 @@ test("preview assets coexist with stable assets and markers", async () => fixtur
   assert.match(primary, /^  sortie_v010_complete_mission: true$/m);
   assert.doesNotMatch(primary, /^  sortie_v010_begin_operator_proposal: true$/m);
   assert.match(primary, /host saves the original\n\s+user message verbatim/u);
-  assert.match(primary, /call plan_units and dispatch its Worker immediately/u);
+  assert.match(primary, /include unit in start_mission to receive its Worker immediately in the same call/u);
   assert.match(primary, /inspect only missing source or evidence/u);
   assert.match(primary, /Batch focused reads where practical/u);
   assert.match(primary, /use \[\] only for genuinely low-risk work/u);
@@ -410,7 +410,11 @@ test("preview tools are denied globally and allowed only by profile agents", asy
   });
 
   const operations = previewAssets.find(asset => asset.name === "dogs-coordinator")!.content;
-  assert.match(operations, /^  edit: deny$/m);
+  assert.match(operations, /^  edit: allow$/m);
+  assert.match(operations, /^  write: allow$/m);
+  assert.match(operations, /^  patch: allow$/m);
+  assert.match(operations, /^  sortie_v010_start_direct_unit: true$/m);
+  assert.match(operations, /^  sortie_v010_finish_direct_unit: true$/m);
   assert.match(operations, /^  bash: allow$/m);
   assert.match(operations, /^  sortie_v010_operator_next: true$/m);
   assert.match(operations, /^  sortie_v010_plan_units: true$/m);
@@ -2247,7 +2251,7 @@ test("root discards one exact diagnosed transient and resumes only remaining val
   assert.equal(complete.status, "succeeded");
   assert.match(complete.return_report, /^<details>\n<summary><strong>🐾 SORTIE DOGS — 帰還報告｜🟢 完了/u);
   assert.ok(complete.return_report.endsWith("</details>"), "the report must not include duplicated terminal prose");
-  assert.match(complete.return_report_instruction, /verbatim exactly once/);
+  assert.match(complete.return_report_instruction, /do not transcribe this card/);
   assert.equal(await git(root, ["status", "--porcelain=v1"]), "");
 }));
 

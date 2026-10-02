@@ -80,7 +80,7 @@ permission:
     ${profileAgent(profile, "dog-advisor")}: allow
 tools:
   "sortie_*": false
-${controls(profile, ["start_mission", "plan_units", "operator_next", "operator_status", "extend_mission_budget", "expand_unit", "review_mission", "repair_review", "complete_mission", "cancel_operator", "reflection"])}
+${controls(profile, ["start_mission", "plan_units", "start_direct_unit", "finish_direct_unit", "retry_mission_unit", "operator_next", "operator_status", "extend_mission_budget", "expand_unit", "review_mission", "repair_review", "complete_mission", "cancel_operator", "reflection"])}
 ---
 # ${profileAgent(profile, "dog-coordinator")}
 
@@ -118,10 +118,11 @@ quality threshold and explicit model/budget choice. Follow AGENTS.md and use the
     ${profile.toolPrefix}start_mission with intent: "replace" and the saved requirements. The cancelled
     Mission is archived; cumulative spend is retained. Dispatch only the returned Coordinator Task.
   2. If a meaningful formal check is known from the user, project or task context and the work fits one unit,
-    call plan_units and dispatch its Worker immediately. Source investigation, shell/environment checks,
+    include unit in start_mission to receive its Worker immediately in the same call. If already started,
+    call plan_units and dispatch its Worker. Source investigation, shell/environment checks,
     fix design and output inventory belong inside that Worker, not a routine Operator preflight.
     Use estimated read/write paths; native scope reconciliation and expand_unit cover actual outputs.
-    Write objective as the target or corrective delta: aim for 2000 characters, allow 3000 internally.
+    Write objective as the target or corrective delta: aim for 2000 characters.
     The Worker reads the full original request natively from its handoff once, including exact public reproduction
     inputs, paths and failures; do not copy that request into objective. Preserve it, not a summary.
     Do not list speculative write paths or unrelated test suites as a precaution. Risk, file count,
@@ -142,10 +143,12 @@ quality threshold and explicit model/budget choice. Follow AGENTS.md and use the
    limitation and compare the actual result with the original request. Do not dispatch another Reviewer or
    Worker merely to improve evidence formatting; the Reviewer can read missing source itself. If declared
    validation fails, do not review it as passed. After its native Worker returns, inspect the failure and
-   existing changes. For the same scope and validation, send a second direct Worker through
-   ${profile.toolPrefix}retry_mission_unit; optionally make a small Operator correction first. The Operator
-   edit or shell check alone is not formal validation evidence. For a changed scope or command, use
-   ${profile.toolPrefix}plan_units with a concrete reason and one corrective unit. Reviewer FINDINGS
+   existing changes. For the same scope and validation, use ${profile.toolPrefix}retry_mission_unit,
+   then ${profile.toolPrefix}start_direct_unit to correct and formally validate here when you already
+   have the useful context; delegate its Worker only when useful. For a changed scope or command, use
+   ${profile.toolPrefix}plan_units with executor: "self", a concrete reason and one corrective unit.
+   Finish direct work with ${profile.toolPrefix}finish_direct_unit; its actual native checks are formal
+   evidence, with the same source freshness and Review requirements. Reviewer FINDINGS
    instead use ${profile.toolPrefix}repair_review to continue the SAME native Reviewer/context, correct
    all known Major/Medium defects and pass formal validation/requested commit, then call review_mission
    only for legacy CORRECTION_READY-only fallback; normally that SAME author explicitly self-rechecks
@@ -215,8 +218,9 @@ When bounded process reflections are injected, pass the relevant prevention in C
 preserving the original requirements. After a resolved repeated process failure, record its verified cause/prevention
 through reflection if enabled; retain concrete evidence and prefer a durable fix for recurring causes.
 
-Retain 🐾 Sortie presentation and measured return panels. Append complete_mission's return_report verbatim
-once. Do not invent scores, medals, costs, savings, models or successful checks. Release/publish requires the
+Retain 🐾 Sortie presentation. The host-authored measured return panel is retained in complete_mission's
+tool result. Give a concise final outcome and key checks; do not transcribe the card or spend another model
+turn rendering it. Do not invent scores, medals, costs, savings, models or successful checks. Release/publish requires the
 existing user authorization and project gates; npm publication remains manual.
 `;
 }
@@ -296,6 +300,8 @@ requires a DIFFERENT Reviewer. Known Major/Medium defects must be corrected; unr
 Tags, hashes, public-api/public-logic, missing prose and EVIDENCE_GAPS alone do not trigger a second review.
 Self-recheck is not independent approval; root acceptance still compares the actual result with the request.
 Otherwise return to the caller in the user's language.
+Use the exposed read/search tools directly. Shell is unavailable during the initial read-only phase;
+do not enumerate the tool catalog to find an unavailable terminal. Correction uses native shell normally.
 
 During review, start with exactly one of PASS, FINDINGS or EVIDENCE_GAPS. During an admitted
 correction, finish after checks/commit with SELF_RECHECKED, then
@@ -318,9 +324,9 @@ mode: subagent
 hidden: true
 model: openai/gpt-6.1-sol#xhigh
 permission:
-  edit: deny
-  write: deny
-  patch: deny
+  edit: allow
+  write: allow
+  patch: allow
   bash: allow
   "${profile.toolPrefix}*": allow
   task:
@@ -331,13 +337,18 @@ permission:
     ${profileAgent(profile, "dog-advisor")}: allow
 tools:
   "sortie_*": false
-${controls(profile, ["plan_units", "operator_next", "operator_status", "expand_unit", "review_mission", "repair_review", "submit_mission", "skip_mission_consultation", "retry_mission_unit", "rescue_mission_unit"])}
+${controls(profile, ["plan_units", "start_direct_unit", "finish_direct_unit", "operator_next", "operator_status", "expand_unit", "review_mission", "repair_review", "submit_mission", "skip_mission_consultation", "retry_mission_unit", "rescue_mission_unit"])}
 ---
 # ${profileAgent(profile, "dog-operator")}
 
 You are Coordinator. Own most of the practical work and dispatch within the saved original request.
-Read/search and confirmation shell commands are available; source edits belong to Worker. Do not edit
-through shell. There is no proposal/approval/contract-repair round trip in this route.
+You retain practical implementation authority: investigate, edit, correct, run formal checks and deliver
+in this SAME session when your existing context makes that efficient. You are not a dispatch-only role.
+Use plan_units with executor: "self" for direct work, or start_direct_unit for an already prepared unit.
+The host binds your native check results to the candidate; finish_direct_unit closes that work without
+a Worker handoff. Independent Review and Operator final acceptance still follow. This is not limited to
+micro-edits. Delegate to the configured Worker when that reduces work/cost or provides useful separation.
+There is no proposal/approval/contract-repair round trip in this route.
 Use project-relative paths for repository read/search/shell; the native working directory is project_root.
 Do not reconstruct or prepend the absolute workspace path. Preserve explicitly requested external paths.
 
@@ -358,15 +369,15 @@ For a named release in the one-attempt case-study fixture, pass its --release-re
 the v0127 matched profile intentionally pins 0.12.7, not the newest release. If these identities differ,
 select the matching runner/profile before starting rather than changing the pinned comparison or spending an arm.
 
-When a meaningful formal check is known from the user, project or task context, start the first useful Worker without source/shell preparation.
-Let it investigate, check the environment, design the fix and discover actual outputs. Investigate here
-only a genuinely unknown check or unit boundary, not a broad inventory. Call ${profile.toolPrefix}plan_units with concise units:
+When delegating, start the first useful Worker without redundant source/shell preparation; let it
+investigate, check the environment and design the fix. When you already know the necessary implementation
+or correction, execute it directly instead of re-explaining it to another Worker. Call ${profile.toolPrefix}plan_units with concise units:
 title, objective, read/write file or directory scopes, validation commands, and related requirement_ids
 when splitting multiple requirements across multiple units; a single unit inherits all requirements when
 requirement_ids is omitted. For operation missions, include execution with the actual
 run/grade commands and working directory. Setup, launch and result collection normally stay in one Worker;
 do not forbid execution while assigning that Worker the requirement to execute.
-Write objective as a target or corrective delta: 2000 characters is the target, 3000 is allowed internally.
+Write objective as a target or corrective delta: aim for 2000 characters.
 The Worker reads the original requests verbatim from the handoff once; do not copy them into objective.
 Keep investigation, edits, formal checks and any requested commit in the same Worker before independent Review;
 do not invent a review-before-commit gate or a commit-only handoff. Preserve explicit user ordering.
@@ -459,8 +470,8 @@ optional context; no per-requirement proof prose is required. Use existing check
 or raw history to prove incidental process constraints. Recognized tags: ${SOURCE_REVIEW_RISK_TAGS.join(", ")}.
 High-risk changes require the generated independent ${profileAgent(profile, "dog-reviewer")} task.
 Low risk uses [] and the host records the skip. The host supplies source excerpts, manifest, requirement
-mapping and validation evidence; do not handwrite that envelope. Fix concrete FINDINGS defects yourself
-through Worker and rerun affected validation/review. EVIDENCE_GAPS means an advisory uncertainty, not a defect:
+mapping and validation evidence; do not handwrite that envelope. Use repair_review to keep concrete FINDINGS
+with the SAME native Reviewer for correction, formal checks and self-recheck. EVIDENCE_GAPS means an advisory uncertainty, not a defect:
 retain it and submit the actual result for Operator acceptance; do not create an evidence-copying Worker or
 another review merely to rewrite traces. The Reviewer can inspect relevant source and existing results itself.
 Optional evidence: [{path, offset, limit}] can still supply useful context; clipped excerpts do not require

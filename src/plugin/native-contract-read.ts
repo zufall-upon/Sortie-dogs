@@ -16,9 +16,12 @@ export async function nativeContractReadView(directory: string, input: unknown):
 
 export async function nativeContractReadSnapshot(directory: string, input: unknown): Promise<{ output: string; hash: string } | undefined> {
   if (!record(input) || typeof input.path !== "string") return undefined;
-  // Preserve native partial-read semantics; only the full contract projection supplies
-  // authoritative content for automatic activation.
-  if (input.offset !== undefined || input.limit !== undefined) return undefined;
+  // Read offset/limit count lines, not characters. An explicit default-sized read of
+  // a one-line generated envelope is still a full read. Keep authoring targets out
+  // of this transport: original requests and host metadata need their full space.
+  const offset = input.offset ?? 1;
+  const limit = input.limit;
+  if (offset !== 1 || limit !== undefined && (!Number.isInteger(limit) || Number(limit) < 1)) return undefined;
   const absolute = resolve(directory, input.path);
   const scoped = relative(directory, absolute).replaceAll("\\", "/");
   if (scoped === ".." || scoped.startsWith("../") || isAbsolute(scoped)) return undefined;
@@ -31,6 +34,10 @@ export async function nativeContractReadSnapshot(directory: string, input: unkno
   if (!generated) return undefined;
   const source = await readFile(absolute, "utf8").catch(() => undefined);
   if (source === undefined) return undefined;
+  // Only a range covering the complete file may activate a contract. Do not turn
+  // an actually partial read into either an expanded response or authority.
+  const lines = source.replace(/\r?\n$/u, "").split("\n").length;
+  if (limit !== undefined && Number(limit) < lines) return undefined;
   let value: unknown;
   try { value = JSON.parse(source); } catch { return undefined; }
   if (!record(value) || !(record(value.task) && typeof value.task.objective === "string" && record(value.ext)) &&

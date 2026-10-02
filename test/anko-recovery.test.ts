@@ -258,7 +258,7 @@ test("covered write scope expansion is a no-op for controls, evidence, freshness
   await assert.rejects(f.tool("review_mission", { risk_tags: [] }), /mission-review-awaits-current-validation/);
 }));
 
-test("default and progress status retain measured checks/terminal and unknown Git delivery without duplicating protected arrays", async () => fixture(async f => {
+test("default and progress status retain measured checks/terminal and observed Git delivery without duplicating protected arrays", async () => fixture(async f => {
   for (let i = 0; i < 180; i++) await writeFile(join(f.directory, `context-${i}.txt`), "protected source\n");
   await exec("git", ["add", "--", "check.mjs", "result.txt", ...Array.from({ length: 180 }, (_, i) => `context-${i}.txt`)], { cwd: f.directory });
   await exec("git", ["-c", "user.name=test", "-c", "user.email=test@example.invalid", "commit", "-m", "fixture protected inputs"], { cwd: f.directory });
@@ -284,7 +284,8 @@ test("default and progress status retain measured checks/terminal and unknown Gi
   }, "actual command/exit/timestamps survive the compact projection");
   assert.deepEqual(progress.observations.worker_terminals[0].terminal, (await f.missions.required("root")).attempts[0].terminal);
   assert.equal(progress.observations.delivery.git_lifecycle, null);
-  assert.equal(progress.observations.delivery.clean, "not independently observed by this projection");
+  assert.equal(progress.observations.delivery.clean, (await exec("git", ["status", "--porcelain"], { cwd: f.directory })).stdout === "");
+  assert.match(progress.observations.delivery.observation.source, /^host:git status/u);
   assert.equal(compact.execution_summary.accepted, false, "validated/terminal unit is not Mission acceptance or clean Git proof");
   assert.deepEqual((await f.runtime.required("root")).units[0].evidence, state.units[0].evidence, "display does not rewrite proof or freshness");
 }));
@@ -307,7 +308,7 @@ test("compact status never promotes a real failed commit or failed native termin
   assert.equal(status.execution_summary.accepted, false); assert.notEqual(status.units[0].status, "succeeded");
   assert.equal(progress.observations.worker_terminals[0].terminal.outcome, "failed");
   assert.equal(progress.observations.delivery.git_lifecycle, null);
-  assert.equal(progress.observations.delivery.clean, "not independently observed by this projection");
+  assert.equal(progress.observations.delivery.clean, false);
   assert.match((await exec("git", ["status", "--short"], { cwd: f.directory })).stdout, /result.txt/, "failed commit really leaves staged source");
 }));
 

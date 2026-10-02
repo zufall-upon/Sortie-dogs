@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { nativeContractReadView } from "../dist/plugin/native-contract-read.js";
+import { nativeContractReadSnapshot, nativeContractReadView } from "../dist/plugin/native-contract-read.js";
 
 test("native contract read exposes late verbatim requirements hidden by the 2000-character line clip", async () => {
   const directory = await mkdtemp(join(tmpdir(), "sortie-readable-contract-"));
@@ -21,12 +21,42 @@ test("native contract read exposes late verbatim requirements hidden by the 2000
     const source = JSON.stringify(contract);
     await writeFile(join(directory, path), source);
     assert(!source.slice(0, 2000).includes("type error"), "reproduce the native long-line visibility defect");
-    const view = await nativeContractReadView(directory, { path });
+    const view = await nativeContractReadView(directory, { path, limit: 2000 });
     assert(view?.includes(original));
     assert(view?.includes(command));
     assert(view?.includes("Full task, including exact error text"));
     assert.match(view!, /SORTIE_EXACT_CONTRACT_VIEW/);
+    assert.equal(view, await nativeContractReadView(directory, { path }), "explicit line allowance must not disable internal full-text transport");
+    assert.equal(view, await nativeContractReadView(directory, { path, offset: 1, limit: 1 }), "one line contains this entire generated envelope");
     assert.equal(await readFile(join(directory, path), "utf8"), source, "display must not rewrite the registered contract");
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("only complete generated-contract ranges supply authoritative content, independent of envelope size", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "sortie-contract-range-"));
+  try {
+    const path = ".sortie-dogs-v010/contracts/handoff.range.json";
+    await mkdir(join(directory, ".sortie-dogs-v010/contracts"), { recursive: true });
+    const objective = "a".repeat(2000);
+    const original = "Long original request. ".repeat(450) + "Late required behavior.";
+    const contract = { task: { objective }, ext: { original } };
+    const singleLine = JSON.stringify(contract);
+    await writeFile(join(directory, path), singleLine);
+    const full = await nativeContractReadSnapshot(directory, { path, limit: 2000 });
+    assert(full?.output.includes(original), "host envelope space does not slide the authored objective target");
+    assert(full?.output.includes(objective));
+    assert.equal(await nativeContractReadSnapshot(directory, { path, offset: 2 }), undefined);
+    for (const limit of [0, -1, 0.5, "2000"]) {
+      assert.equal(await nativeContractReadSnapshot(directory, { path, limit }), undefined);
+    }
+    const pretty = JSON.stringify(contract, null, 2) + "\n";
+    await writeFile(join(directory, path), pretty);
+    assert.equal(await nativeContractReadSnapshot(directory, { path, limit: 1 }), undefined);
+    assert.equal(await nativeContractReadSnapshot(directory, { path, offset: 2, limit: 2000 }), undefined);
+    const complete = await nativeContractReadSnapshot(directory, { path, offset: 1, limit: pretty.trimEnd().split("\n").length });
+    assert(complete?.output.includes(original));
+    assert.notEqual(complete?.hash, full?.hash, "authority remains bound to exact stored bytes");
+    assert.equal(await readFile(join(directory, path), "utf8"), pretty);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 

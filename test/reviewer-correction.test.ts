@@ -255,8 +255,11 @@ test("claimed Mission correction activates before limit-bearing Read or shell, w
     const unit = (await f.run()).units[0]!;
     const read = await f.before("author", "read", { path: unit.handoffPath, limit: 2000 });
     const clipped = 'Read file, lines 1-1\n1: ' + (await readFile(unit.handoffPath, "utf8")).slice(0, 2000) + '... (line truncated to 2000 chars)';
-    assert.equal(await f.after(read, clipped, { truncated: false }), clipped, "limited content is never relabeled as a full native Read");
-    await f.shell("author", `cat ${unit.handoffPath}`);
+    assert.match(await f.after(read, clipped, { truncated: false }), /SORTIE_EXACT_CONTRACT_VIEW/u,
+      "limit is a line count; a full-file request receives exact values despite native line clipping");
+    const partial = await f.before("author", "read", { path: unit.handoffPath, offset: 2, limit: 1 });
+    assert.equal(await f.after(partial, "partial line", { truncated: false }), "partial line",
+      "a true partial range does not acquire a full projection");
     await f.shell("author", "node check.mjs");
     const checks = (await f.run()).units[0]!.reviewerCorrection!.checks;
     assert.equal(checks?.length, 1, "exact admission must bind before a model-chosen Read or its first actual formal check");

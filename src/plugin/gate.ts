@@ -81,6 +81,8 @@ interface Extraction {
   gitCommit?: boolean;
   gitCommitAdds?: string[][];
   gitMutation?: boolean;
+  /** Ambiguity in the Git mutation itself, not another native shell segment. */
+  gitAmbiguous?: boolean;
   remoteMutation?: boolean;
   issue?: CommandIssue;
 }
@@ -492,6 +494,8 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
   let gitAdds: string[] = [];
   const gitCommitAdds: string[][] = [];
   let gitMutation = false;
+  let gitAmbiguous = false;
+  let unresolvedExpansion = false;
   let remoteMutation = false;
   const createdDirectories: string[] = [];
   const requiredDirectories: string[] = [];
@@ -522,6 +526,7 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
     if (syntax.unsafeExpansion) {
       applies = true;
       ambiguous = true;
+      unresolvedExpansion = true;
       issue ??= commandIssue(source, "active-expansion", "remove substitution and run a direct literal command");
       continue;
     }
@@ -680,7 +685,7 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
       applies = true;
       gitMutation = true;
       const selected = exactGitAddPaths(tokens);
-      if (selected === undefined) ambiguous = true;
+      if (selected === undefined) { ambiguous = true; gitAmbiguous = true; }
       else {
         paths.push(...selected);
         gitAdds.push(...selected);
@@ -692,7 +697,7 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
         gitCommit = true;
         gitCommitAdds.push(gitAdds);
         gitAdds = [];
-      } else ambiguous = true;
+      } else { ambiguous = true; gitAmbiguous = true; }
     } else if (executable === "git" && tokens[1] === "archive") {
       const archive = gitArchiveOutput(tokens);
       if (archive === undefined) {
@@ -722,6 +727,7 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
         gitCommit ||= nested.gitCommit === true;
         gitCommitAdds.push(...(nested.gitCommitAdds ?? []));
         gitMutation ||= nested.gitMutation === true;
+        gitAmbiguous ||= nested.gitAmbiguous === true;
         remoteMutation ||= nested.remoteMutation === true;
         createdDirectories.push(...(nested.createdDirectories ?? []));
         requiredDirectories.push(...(nested.requiredDirectories ?? []));
@@ -742,6 +748,7 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
     ...(gitCommit ? { gitCommit: true } : {}),
     ...(gitCommitAdds.length > 0 ? { gitCommitAdds } : {}),
     ...(gitMutation ? { gitMutation: true } : {}),
+    ...(gitAmbiguous || gitMutation && unresolvedExpansion ? { gitAmbiguous: true } : {}),
     ...(remoteMutation ? { remoteMutation: true } : {}),
     ...(issue ? { issue } : {}),
   };
@@ -807,6 +814,7 @@ export function extractWritePaths(tool: string, args: unknown, toolDirectory?: s
       ...(extracted.gitCommit ? { gitCommit: true } : {}),
       ...(extracted.gitCommitAdds ? { gitCommitAdds: extracted.gitCommitAdds.map(paths => paths.map(rebase)) } : {}),
       ...(extracted.gitMutation ? { gitMutation: true } : {}),
+      ...(extracted.gitAmbiguous ? { gitAmbiguous: true } : {}),
       ...(extracted.remoteMutation ? { remoteMutation: true } : {}),
       ...(extracted.issue ? { issue: extracted.issue } : {}),
     };
@@ -1307,8 +1315,8 @@ export async function createWriteGate(project: ProjectPaths, value: unknown, too
       if (!extracted.applies) return;
       // Unknown program internals are native execution policy, NOT a proof of output scope.
       // Still check every known destination (redirect/copy/etc.) and the existing Git boundary.
-      if ((!nativeImplementationShell || extracted.gitMutation) &&
-          (extracted.ambiguous || (extracted.paths.length === 0 && !extracted.gitCommit))) {
+      if (nativeImplementationShell ? extracted.gitAmbiguous :
+          extracted.ambiguous || (extracted.paths.length === 0 && !extracted.gitCommit)) {
         if (extracted.issue !== undefined) {
           throw new WriteDeniedError("unclassified-command", issuePath(extracted.issue));
         }

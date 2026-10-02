@@ -293,7 +293,7 @@ test(`V2 ${cancel ? "cancelled Worker cannot reactivate" : commit ? "auto-bound 
       assert.equal(resolve(directory, handoff), unit.handoffPath);
       assert.equal(JSON.parse(await readFile(resolve(directory, declaration), "utf8")).delivery_intent, "implementation");
       // V2 native read(path) reaches the shared engine as filePath without rewriting its target.
-      const read = await before(child, "read", { path: handoff });
+      const read = await before(child, "read", { path: handoff, limit: 2000 });
       assert.equal(read.input.path, handoff);
       const handoffSource = await readFile(resolve(directory, String(read.input.path)), "utf8");
       assert.equal(JSON.parse(handoffSource).task.objective, objective, "original objective and embedded example remain verbatim");
@@ -309,7 +309,7 @@ test(`V2 ${cancel ? "cancelled Worker cannot reactivate" : commit ? "auto-bound 
           assert.equal(failed.result.content, "read failed");
           await retainedBinding();
         }
-        for (const args of [{ path: handoff, offset: 1, limit: 1 }, { path: "check.mjs" }]) {
+        for (const args of [{ path: handoff, offset: 2, limit: 1 }, { path: "check.mjs" }]) {
           const partial = await before(child, "read", args);
           const content = await after(partial, "partial / unrelated content");
           assert.doesNotMatch(content, /SORTIE_WORKER_ACTIVATION/);

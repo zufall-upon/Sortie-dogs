@@ -81,10 +81,13 @@ export interface RuntimeBridge {
   /** Only an exact admitted correction Task is an implementation dispatch continuing the original Reviewer child. */
   ownsReviewerCorrectionDispatch?(rootSessionID: string, callID: string, taskID: string): Promise<boolean>;
   ownsReviewerCorrection?(childSessionID: string): Promise<boolean>;
+  /** Existing controller executing a declared unit itself; never a fictitious native Task. */
+  directMissionExecution?(sessionID: string): Promise<{ root: string; taskID: string; callID: string; startedAt: string } | undefined>;
   reviewerCorrectionValidationMembers?(childSessionID: string, command: string): Promise<string[] | undefined>;
   recordReviewerCorrectionCheck?(rootSessionID: string, taskID: string, check: ReviewerCorrectionCheck): Promise<void>;
   reviewerCorrectionValidation?(rootSessionID: string, callID: string, childSessionID: string, startedAt: number): Promise<{
     ready: boolean; reason?: string; failure?: SerialDispatchSettlement["failure"];
+    matched?: readonly { callID: string; member: number; occurrence: number }[];
   } | undefined>;
   /** Durable operator dispatch identity survives adapter reload and missed after hooks. */
   recoverMissionDispatch?(rootSessionID: string, taskID: string): Promise<{
@@ -165,6 +168,9 @@ export interface RuntimeBridge {
     restoreReviewerCorrectionChild(rootSessionID: string, childSessionID: string, callID: string, taskID: string): Promise<void>;
     activateMissionWorker(rootSessionID: string, childSessionID: string, handoffPath: string,
       admission: MissionImplementationAdmission): Promise<void>;
+    activateDirectUnit(rootSessionID: string, actorSessionID: string, prompt: string, handoffPath: string): Promise<void>;
+    finishDirectUnit(rootSessionID: string, actorSessionID: string, checks: readonly ReviewerCorrectionCheck[]): Promise<void>;
+    releaseDirectUnit(actorSessionID: string): Promise<void>;
     expandMissionWriteGate(childSessionID: string, paths: readonly string[]): Promise<void>;
     completeRoot(rootSessionID: string, acceptanceFingerprint: string): Promise<{
       status: "succeeded" | "awaiting-evidence";
