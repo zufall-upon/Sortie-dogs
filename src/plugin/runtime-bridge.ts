@@ -45,6 +45,16 @@ export interface ReviewerCorrectionCheck {
   readonly generatedInputs?: string;
 }
 
+/** Exact durable Mission Task claim, not authority supplied by a tool argument or Read. */
+export interface MissionImplementationAdmission {
+  readonly runID: string;
+  readonly generation: number;
+  readonly unitID: string;
+  readonly taskID: string;
+  readonly callID: string;
+  readonly promptID?: string;
+}
+
 /** Host-owned extension. It is not parsed from project JSON or a worker's prompt. */
 export interface RuntimeBridge {
   readonly profile: RuntimeProfile;
@@ -87,8 +97,9 @@ export interface RuntimeBridge {
   expandMissionScope?(rootSessionID: string, childSessionID: string, taskID: string, paths: readonly string[],
     activate: (manifest: import("../core/types.js").OperationManifest) => Promise<() => Promise<void>>): Promise<void>;
   missionDispatchCall?(rootSessionID: string, childSessionID: string, taskID: string): Promise<string | undefined>;
-  /** Exact existing running Mission grant, used by the full handoff Read transport. */
-  missionReadBinding?(rootSessionID: string, childSessionID: string, handoffPath: string): Promise<{
+  /** Current durable Mission grant; an admission additionally pins its Task/call/generation. */
+  missionReadBinding?(rootSessionID: string, childSessionID: string, handoffPath: string,
+    admission?: MissionImplementationAdmission): Promise<{
     projectRoot: string; manifestPath: string; handoffHash: string; manifestHash: string;
   } | undefined>;
   onSerialSettlement?(settlement: SerialDispatchSettlement): Promise<void>;
@@ -152,6 +163,8 @@ export interface RuntimeBridge {
     missionWorkerTerminal(rootSessionID: string, terminal: MissionWorkerTerminalRecord,
       writeScopes: readonly string[]): Promise<{ ready: boolean; reason?: string }>;
     restoreReviewerCorrectionChild(rootSessionID: string, childSessionID: string, callID: string, taskID: string): Promise<void>;
+    activateMissionWorker(rootSessionID: string, childSessionID: string, handoffPath: string,
+      admission: MissionImplementationAdmission): Promise<void>;
     expandMissionWriteGate(childSessionID: string, paths: readonly string[]): Promise<void>;
     completeRoot(rootSessionID: string, acceptanceFingerprint: string): Promise<{
       status: "succeeded" | "awaiting-evidence";

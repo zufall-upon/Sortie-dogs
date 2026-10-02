@@ -5058,7 +5058,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   async function inspect(
     path: string,
     sessionID: string | undefined,
-    options: { readonly report?: boolean; readonly rescueSessionID?: string; readonly readHash?: string } = {},
+    options: { readonly report?: boolean; readonly rescueSessionID?: string; readonly expectedHandoffHash?: string } = {},
   ): Promise<InspectedContractIdentity | undefined> {
     const unregistered = (code: string): void => {
       if (!options.report) return;
@@ -5087,7 +5087,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     let handoffHash: string;
     try {
       const pinned = await readPinnedJson(absolutePath, INPUT_LIMITS.handoff);
-      if (options.readHash !== undefined && pinned.hash !== options.readHash) throw new HandoffDeniedError("contract-invalid", path, {
+      if (options.expectedHandoffHash !== undefined && pinned.hash !== options.expectedHandoffHash) throw new HandoffDeniedError("contract-invalid", path, {
           defects: [contractDefect("handoff", "/", "handoff_read_identity_changed")],
         });
       value = pinned.value;
@@ -5273,7 +5273,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     sessionID: string,
     projectRoot: string,
     manifestPathArgument: string,
-    readHash?: string,
+    expectedHandoffHash?: string,
     registeredManifestHash?: string,
   ): Promise<string> {
     const remedies: Record<string, { recoverable: boolean; remedy: string }> = {
@@ -5424,10 +5424,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       };
       let handoffValue: unknown;
       try {
-        if (readHash === undefined) handoffValue = await readJson(inspectedEntry.handoffPath, INPUT_LIMITS.handoff);
+        if (expectedHandoffHash === undefined) handoffValue = await readJson(inspectedEntry.handoffPath, INPUT_LIMITS.handoff);
         else {
           const pinnedHandoff = await readPinnedJson(inspectedEntry.handoffPath, INPUT_LIMITS.handoff);
-          if (pinnedHandoff.hash !== readHash) return denyHandoffMismatch({ readHash, currentHash: pinnedHandoff.hash }, [
+          if (pinnedHandoff.hash !== expectedHandoffHash) return denyHandoffMismatch({ expectedHandoffHash, currentHash: pinnedHandoff.hash }, [
             contractDefect("handoff", "/", "handoff_read_identity_changed"),
           ]);
           handoffValue = pinnedHandoff.value;
@@ -5934,6 +5934,20 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     clearSessionLinks(sessionID);
   }
 
+  /** The pin is either the approved admission identity or an actual completed full Read snapshot.
+   * This inspects/binds authority only; it does not claim the model has read the handoff. */
+  async function activateMissionBinding(sessionID: string, handoffPath: string,
+    binding: NonNullable<Awaited<ReturnType<NonNullable<RuntimeBridge["missionReadBinding"]>>>>): Promise<Record<string, unknown>> {
+    const key = `${sessionID}\u0000${handoffPath}`;
+    await inspectionOperations.get(key)?.catch(() => undefined);
+    const cached = inspected.get(key);
+    if (cached?.handoffHash !== binding.handoffHash || cached.manifestHash !== binding.manifestHash) {
+      await inspect(handoffPath, sessionID, { expectedHandoffHash: binding.handoffHash });
+    }
+    return JSON.parse(await bindWriteGate(sessionID, binding.projectRoot, binding.manifestPath,
+      binding.handoffHash, binding.manifestHash));
+  }
+
   async function inspectSuccessfulRead(toolInput: TaskToolExecuteAfterInput, output: TaskResultRepairOutput): Promise<void> {
     if (toolInput.tool.toLowerCase() !== "read" || toolInput.sessionID === undefined) return;
     if (output.status !== undefined && output.status !== "completed") return;
@@ -5952,30 +5966,19 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       append({ status: "denied", reason: "handoff-mismatch", remedy: "Correct the registered handoff or its operation manifest, then read the handoff again." });
       return;
     }
-    // Join the before-read inspection for concurrent legacy manual binds. Reuse it
-    // only for the same completed native snapshot; bind rechecks freshness as usual.
     const previous = inspectionOperations.get(key);
-    if (binding && previous) await previous.catch(() => undefined);
-    const cached = inspected.get(key);
-    const reuse = binding && cached?.handoffHash === toolInput.nativeReadHash && cached?.manifestHash === binding.manifestHash;
-    const operation = binding && !reuse
-      ? inspect(absolutePath, toolInput.sessionID, { readHash: toolInput.nativeReadHash }).then(() => undefined)
-      : reuse ? Promise.resolve() : previous ?? inspect(absolutePath, toolInput.sessionID).then(() => undefined);
-    inspectionOperations.set(key, operation);
     try {
-      await operation;
       if (binding) {
-        const result = JSON.parse(await bindWriteGate(toolInput.sessionID, binding.projectRoot, binding.manifestPath,
-          toolInput.nativeReadHash, binding.manifestHash));
+        const result = await serializeChatTransition(toolInput.sessionID, () => activateMissionBinding(toolInput.sessionID!, absolutePath, binding));
         append(result.status === "bound" ? { status: "ready" } : result);
-      }
+      } else await (previous ?? inspect(absolutePath, toolInput.sessionID));
     } catch (error) {
       if (!binding) throw error;
       append({ status: "denied", reason: error instanceof HandoffDeniedError || error instanceof PluginInputError
         ? error.reason : "binding-failed", remedy: error instanceof Error ? error.message : String(error),
         ...(error instanceof HandoffDeniedError ? { defects: error.defects } : {}) });
     } finally {
-      if (inspectionOperations.get(key) === operation) inspectionOperations.delete(key);
+      if (inspectionOperations.get(key) === previous) inspectionOperations.delete(key);
     }
   }
 
@@ -8506,6 +8509,27 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       sessionTaskIDs.set(child, taskID);
       activateSession(child);
     },
+    activateMissionWorker: (root, child, handoffPath, admission) => serializeChatTransition(child, async () => {
+      // Resolve CURRENT durable pins inside the existing session lane. A retried prompt must
+      // retain legitimate scope growth, not replay the original manifest hash from dispatch.
+      const binding = await input.runtimeBridge?.missionReadBinding?.(root, child, handoffPath, admission);
+      if (!binding || coordinatorRootForSession(child) !== root) throw new Error("mission-activation-grant-stale");
+      const previous = sessionAuthorizations.get(child);
+      if (previous && (previous.taskID !== admission.taskID || previous.dispatchCallID !== admission.callID)) {
+        const released = JSON.parse(await releaseWriteGate(child));
+        if (released.status === "denied") throw new Error(`mission-activation:${released.reason}`);
+        releaseSessionEnforcement(child);
+        activateSession(child);
+      }
+      const result = await activateMissionBinding(child, handoffPath, binding);
+      if (result.status !== "bound") throw new Error(`mission-activation:${String(result.reason)}`);
+      // Cancellation can settle this dispatch while control-file I/O is pending. Do not
+      // leave its just-bound writer live; native failure/return owns the ordinary settlement.
+      if (!await input.runtimeBridge?.ownsMissionDispatch?.(root, admission.callID, admission.taskID)) {
+        await releaseWriteGate(child);
+        throw new Error("mission-activation-grant-stale");
+      }
+    }),
       missionWorkerTerminal: async (root, terminal, writeScopes) => {
         const childSessionID = terminal.childSessionID;
         const snapshot = await (await goalLedger(root)).readGoal();

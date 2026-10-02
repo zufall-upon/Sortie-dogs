@@ -131,11 +131,11 @@ async function fixture(options: { permissionsUnavailable?: boolean } = {}) {
     const completed = { ...event, status, result: { content, metadata } };
     await toolHooks.get("execute.after")!(completed); return completed.result.content;
   };
-  const prompt = async (sessionID: string, text: string) => {
+  const prompt = async (sessionID: string, text: string, messageID = `msg_${++counter}`) => {
     delete agents[sessionID]!.outcome;
-    const event = { sessionID, messageID: `msg_${++counter}`, prompt: { text: sessionID === "root" ? text : `You are a subagent spawned by another session.\n${text}` } };
+    const event = { sessionID, messageID, prompt: { text: sessionID === "root" ? text : `You are a subagent spawned by another session.\n${text}` } };
     await sessionHooks.get("prompt")!(event);
-    (history[sessionID] ??= []).push({ id: event.messageID, type: "user", text: event.prompt.text, time: { created: Date.now() } });
+    if (!(history[sessionID] ??= []).some(message => message.id === messageID)) history[sessionID]!.push({ id: event.messageID, type: "user", text: event.prompt.text, time: { created: Date.now() } });
     return event.prompt.text;
   };
   const tool = async (sessionID: string, name: string, input: ObjectValue = {}) => {
@@ -244,6 +244,143 @@ async function correctUnicode(f: Awaited<ReturnType<typeof fixture>>) {
   const patch = await f.before("author", "patch", { patchText: `*** Begin Patch\n${sections.join("\n")}\n*** End Patch` });
   for (const [path, content] of Object.entries(unicodeCorrection)) await writeFile(join(f.directory, path), content);
   await f.after(patch, "Updated greet.mjs and check.mjs");
+}
+
+test("claimed Mission correction activates before limit-bearing Read or shell, without manual binding", async () => {
+  const f = await fixture();
+  try {
+    await stagedInitial(f);
+    const prepared = await f.tool("root", "repair_review"), dispatch = await f.before("root", "subagent", f.task(prepared.task));
+    await f.prompt("author", dispatch.input.prompt);
+    const unit = (await f.run()).units[0]!;
+    const read = await f.before("author", "read", { path: unit.handoffPath, limit: 2000 });
+    const clipped = 'Read file, lines 1-1\n1: ' + (await readFile(unit.handoffPath, "utf8")).slice(0, 2000) + '... (line truncated to 2000 chars)';
+    assert.equal(await f.after(read, clipped, { truncated: false }), clipped, "limited content is never relabeled as a full native Read");
+    await f.shell("author", `cat ${unit.handoffPath}`);
+    await f.shell("author", "node check.mjs");
+    const checks = (await f.run()).units[0]!.reviewerCorrection!.checks;
+    assert.equal(checks?.length, 1, "exact admission must bind before a model-chosen Read or its first actual formal check");
+    assert.equal(checks![0]!.fresh, true); assert.equal(checks![0]!.dispatchCallID, dispatch.id);
+    await correctUnicode(f);
+    const expanded = (await f.run()).units[0]!;
+    assert.deepEqual(expanded.unit.write, ["README.md", "greet.mjs", "check.mjs"]);
+    assert.deepEqual(expanded.reviewerCorrection!.writeUnion, expanded.unit.write);
+    await f.shell("author", "node check.mjs");
+    await f.shell("author", "git add greet.mjs check.mjs && git commit -m admitted-unicode");
+    const current = (await f.run()).units[0]!, evidence = structuredClone(current.reviewerCorrection!.checks), budget = await f.ledger();
+    await Promise.all([f.prompt("author", current.task.prompt, current.reviewerCorrection!.promptID),
+      f.prompt("author", current.task.prompt, current.reviewerCorrection!.promptID)]);
+    assert.deepEqual((await f.run()).units[0]!.unit.write, current.unit.write, "duplicate hook retains CURRENT expanded scope");
+    assert.deepEqual((await f.run()).units[0]!.reviewerCorrection!.checks, evidence, "activation does not create or replace execution proof");
+    assert.deepEqual((await f.ledger()).state.outstanding_reservations, budget.state.outstanding_reservations);
+    assert.equal((await exec("git", ["status", "--short"], { cwd: f.directory })).stdout, "");
+    await f.finish(dispatch, "author", inlineReport());
+    assert.equal((await f.missions.required("root")).review!.verdict, "self-rechecked");
+    assert.equal((await f.tool("root", "complete_mission")).status, "succeeded");
+    assert.equal((await f.ledger()).state.consumed_units, 2, "one Worker and one correction, no activation unit");
+    assert.equal((await f.missions.required("root")).corrections!.length, 1);
+    assert.equal(f.history.author!.some(message => message.content?.some((part: ObjectValue) => part.name === "sortie_v010_bind_write_gate")), false);
+    assert.equal(f.agents.author!.agent, "dog-reviewer-v010");
+    assert.equal(f.storage.has("v2-reviewer-correction-permissions:author"), false);
+    assert.equal(Object.keys(f.registry()).some(id => id.startsWith("dog-reviewer-correction-")), false);
+  } finally { await f.dispose(); }
+});
+
+test("admission activation and legacy bind retries retain expanded correction scope and check occurrences", async () => {
+  const f = await fixture();
+  try {
+    await stagedInitial(f);
+    const prepared = await f.tool("root", "repair_review"), dispatch = await f.before("root", "subagent", f.task(prepared.task));
+    await f.prompt("author", dispatch.input.prompt); await correctUnicode(f); await f.shell("author", "node check.mjs");
+    const current = (await f.run()).units[0]!, checks = structuredClone(current.reviewerCorrection!.checks), budget = await f.ledger();
+    await f.prompt("author", current.task.prompt, current.reviewerCorrection!.promptID);
+    for (let retry = 0; retry < 2; retry++) {
+      const bound = await f.tool("author", "bind_write_gate", { project_root: f.directory, manifest_path: current.manifestPath });
+      assert.equal(bound.idempotent, true); assert.equal(bound.manifest_hash, current.hashes[1]);
+    }
+    await f.prompt("author", current.task.prompt, current.reviewerCorrection!.promptID);
+    assert.deepEqual((await f.run()).units[0]!.reviewerCorrection!.checks, checks);
+    assert.deepEqual((await f.run()).units[0]!.unit.write, current.unit.write);
+    assert.deepEqual((await f.ledger()).state.outstanding_reservations, budget.state.outstanding_reservations);
+    await f.tool("root", "cancel_operator", { reason: "explicit-cancellation" });
+  } finally { await f.dispose(); }
+});
+
+test("ordinary Reviewer and an unclaimed copied correction Task cannot acquire admission authority", async () => {
+  const f = await fixture();
+  try {
+    await stagedInitial(f);
+    const prepared = await f.tool("root", "repair_review");
+    await f.prompt("author", prepared.task.prompt);
+    await assert.rejects(f.before("author", "patch", { patchText: "*** Begin Patch\n*** Add File: greet.mjs\n+x\n*** End Patch" }), /mission-reviewer-readonly/);
+    assert.equal((await f.run()).phase, "prepared");
+    assert.equal((await f.run()).units[0]!.reviewerCorrection!.promptID, undefined);
+    assert.equal(f.storage.has("v2-reviewer-correction-permissions:author"), false);
+    assert.equal((await f.ledger()).state.consumed_units, 1);
+    const dispatch = await f.before("root", "subagent", f.task(prepared.task));
+    await f.prompt("author", dispatch.input.prompt); await f.shell("author", "node check.mjs");
+    assert.equal((await f.run()).units[0]!.reviewerCorrection!.checks!.length, 1, "only the actual native admission activates it");
+    await f.tool("root", "cancel_operator", { reason: "explicit-cancellation" });
+  } finally { await f.dispose(); }
+});
+
+test("cancelled admission cannot reactivate a saved correction prompt or settle its unit twice", async () => {
+  const f = await fixture();
+  try {
+    await stagedInitial(f);
+    const prepared = await f.tool("root", "repair_review"), dispatch = await f.before("root", "subagent", f.task(prepared.task));
+    await f.prompt("author", dispatch.input.prompt);
+    const unit = (await f.run()).units[0]!;
+    await f.tool("root", "cancel_operator", { reason: "explicit-cancellation" });
+    const settled = (await f.ledger()).records.filter(({ event }) => event.kind === "unit.settled");
+    await f.prompt("author", unit.task.prompt, unit.reviewerCorrection!.promptID);
+    await assert.rejects(f.before("author", "patch", { patchText: "*** Begin Patch\n*** Add File: greet.mjs\n+x\n*** End Patch" }), /mission-reviewer-readonly|session-inactive/);
+    await f.after(dispatch, "Duplicate old native cancellation", { sessionID: "author", status: "cancelled" }, "cancelled");
+    assert.deepEqual((await f.ledger()).records.filter(({ event }) => event.kind === "unit.settled"), settled);
+    assert.equal((await f.run()).phase, "cancelled");
+    assert.equal(f.agents.author!.agent, "dog-reviewer-v010"); assert.equal(f.storage.has("v2-reviewer-correction-permissions:author"), false);
+  } finally { await f.dispose(); }
+});
+
+for (const mode of ["handoff", "manifest", "copied-child", "wrong-reference", "wrong-parent", "prompt-generation"] as const) {
+  test(`admission-owned activation does not authorize a changed or foreign identity: ${mode}`, async () => {
+    const f = await fixture();
+    try {
+      await stagedInitial(f);
+      const prepared = await f.tool("root", "repair_review"), dispatch = await f.before("root", "subagent", f.task(prepared.task));
+      const unit = (await f.run()).units[0]!;
+      if (mode === "handoff" || mode === "manifest") {
+        const path = mode === "handoff" ? unit.handoffPath : unit.manifestPath;
+        const source = await readFile(path, "utf8"), changed = JSON.parse(source);
+        if (mode === "handoff") changed.task.objective += " unauthorized replacement";
+        else changed.write.push("settings.json");
+        await writeFile(path, JSON.stringify(changed));
+        await assert.rejects(f.prompt("author", dispatch.input.prompt), /Handoff denied|contract-invalid|mission-activation/);
+        await writeFile(path, source);
+      } else if (mode === "copied-child") {
+        f.agents.final!.agent = "dog-worker-v010";
+        await assert.rejects(f.prompt("final", dispatch.input.prompt), /worker-child-mismatch/);
+        assert.equal((await f.run()).units[0]!.childSessionID, "author");
+      } else if (mode === "wrong-reference") {
+        await assert.rejects(f.prompt("author", dispatch.input.prompt + " altered"), /task-reference-mismatch/);
+      } else if (mode === "wrong-parent") {
+        await assert.rejects(new OperatorRuntime(f.directory, V010_RUNTIME_PROFILE).claimAdmittedWorkerPrompt("root", "final", "author", dispatch.input.prompt), /parent-mismatch/);
+      } else {
+        await f.prompt("author", dispatch.input.prompt);
+        const admitted = (await f.run()).units[0]!.reviewerCorrection!;
+        await assert.rejects(f.prompt("author", unit.task.prompt), /prompt-generation-mismatch/);
+        assert.equal((await f.run()).units[0]!.reviewerCorrection!.promptID, admitted.promptID);
+      }
+      f.terminal("author", "FINDINGS\nNative admission stopped; candidate unchanged.", true);
+      await f.after(dispatch, "Native prompt failed", { sessionID: "author", status: "failed" }, "error");
+      assert.equal((await f.run()).units[0]!.status, "failed");
+      assert.equal((await f.ledger()).state.outstanding_reservations.length, 0);
+      assert.equal((await f.ledger()).state.consumed_units, 2);
+      assert.equal(f.agents.author!.agent, "dog-reviewer-v010");
+      assert.equal(f.storage.has("v2-reviewer-correction-permissions:author"), false);
+      await assert.rejects(f.before("author", "patch", { patchText: "*** Begin Patch\n*** Add File: settings.json\n+x\n*** End Patch" }), /mission-reviewer-readonly/);
+    } finally { await f.dispose(); }
+  });
 }
 
 test("staged native correction repairs source/test scope in the SAME admitted Reviewer and completes a fresh receipt", async () => {

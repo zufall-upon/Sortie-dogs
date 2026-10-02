@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { createServer } from "node:http";
@@ -279,6 +279,8 @@ test(`V2 ${cancel ? "cancelled Worker cannot reactivate" : commit ? "auto-bound 
       if (index === 0) firstRun = state.runID;
       else { assert.notEqual(state.runID, firstRun); assert.deepEqual(state.acceptance, [original]); }
       const reference = task.prompt;
+      const manifestTime = new Date();
+      await utimes(unit.manifestPath, manifestTime, manifestTime);
       const worker = await before("coordinator", "subagent", task);
       assert.equal(worker.input.prompt, reference, "native delegation keeps the exact opaque reference");
       const expanded = await prompt(child, String(reference));
@@ -298,20 +300,20 @@ test(`V2 ${cancel ? "cancelled Worker cannot reactivate" : commit ? "auto-bound 
       if (!legacy && !commit && index === 0) {
         const unrelated = await after({ sessionID: "unrelated", tool: "read", id: `call_${++counter}`, input: { path: handoff } }, handoffSource);
         assert.doesNotMatch(unrelated, /SORTIE_WORKER_ACTIVATION/, "an unrelated native child cannot use a Mission grant");
-        const deniedWrite = () => assert.rejects(tool(child, "expand_unit", {
+        const retainedBinding = async () => assert.equal((await tool(child, "expand_unit", {
           unit_id: unit.unit.id, paths: ["result.txt"], reason: "Observe whether a binding exists",
-        }), /mission-scope-update-binding-unavailable/);
+        })).status, "scope-updated", "Read failure/partial content does not revoke the exact already-claimed admission");
         for (const status of ["error", "cancelled"]) {
           const failed = { ...read, status, result: { content: "read failed" } };
           await fixture.toolHooks.get("execute.after")!(failed);
           assert.equal(failed.result.content, "read failed");
-          await deniedWrite();
+          await retainedBinding();
         }
         for (const args of [{ path: handoff, offset: 1, limit: 1 }, { path: "check.mjs" }]) {
           const partial = await before(child, "read", args);
           const content = await after(partial, "partial / unrelated content");
           assert.doesNotMatch(content, /SORTIE_WORKER_ACTIVATION/);
-          await deniedWrite();
+          await retainedBinding();
         }
         // The exact view and inspection must not activate a different registered identity.
         const changed = JSON.parse(handoffSource);
@@ -319,7 +321,6 @@ test(`V2 ${cancel ? "cancelled Worker cannot reactivate" : commit ? "auto-bound 
         await writeFile(unit.handoffPath, JSON.stringify(changed));
         const raced = await after(read, handoffSource);
         assert.match(raced, /SORTIE_WORKER_ACTIVATION: .*"status":"denied".*"reason":"handoff-mismatch"/);
-        await deniedWrite();
         await writeFile(unit.handoffPath, handoffSource);
         const manifestSource = await readFile(unit.manifestPath, "utf8");
         const changedManifest = JSON.parse(manifestSource);
@@ -328,15 +329,16 @@ test(`V2 ${cancel ? "cancelled Worker cannot reactivate" : commit ? "auto-bound 
         const manifestRace = await after(read, handoffSource);
         assert.match(manifestRace, /"status":"denied".*"reason":"binding-replay"/,
           "native Read cannot activate a different manifest than the admitted grant");
-        await deniedWrite();
         await writeFile(unit.manifestPath, manifestSource);
+        // Restore this fixture's exact original pin as well as its bytes after the tamper test.
+        // Production still refuses changed mtime; no in-flight reservation/adapter is replaced.
+        await utimes(unit.manifestPath, manifestTime, manifestTime);
         projectionRace = { path: unit.handoffPath, source: JSON.stringify(changed) };
         const snapshotRace = await after(read, handoffSource);
         assert.match(snapshotRace, /"status":"denied"/);
         assert.match(snapshotRace, /handoff_read_identity_changed/,
           "a change between exact view and core inspection must not bind a different identity");
         assert.ok(snapshotRace.includes(objective), "the returned exact view is the observed snapshot, not the changed source");
-        await deniedWrite();
         await writeFile(unit.handoffPath, handoffSource);
       }
       const ready = await after(read, handoffSource);

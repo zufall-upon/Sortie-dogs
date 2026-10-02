@@ -7,7 +7,7 @@ import { CANONICAL_AGENT_ROLES, canonicalAgent, profileAgent, profileTool, V010_
   type CanonicalAgentRole, type RuntimeProfile } from "../core/runtime-profile.js";
 import { SortieDogsPlugin as canonicalPlugin, type OpenCodeHooks, type OpenCodePlugin, type OpenCodePluginInput } from "./index.js";
 import { taskChildSessionID } from "./task-result-repair.js";
-import type { RuntimeBridge } from "./runtime-bridge.js";
+import type { MissionImplementationAdmission, RuntimeBridge } from "./runtime-bridge.js";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { readFile, realpath } from "node:fs/promises";
 import { BUILT_IN_MODEL_CATALOG, type CatalogModel } from "./model-routing.js";
@@ -591,12 +591,18 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       },
       missionDispatchCall: async (root, child, taskID) => (await operators.read(root))?.units.find(unit =>
         unit.childSessionID === child && /^task_id: (.+)$/m.exec(unit.task.prompt)?.[1] === taskID)?.callID ?? undefined,
-      missionReadBinding: async (root, child, handoffPath) => {
+      missionReadBinding: async (root, child, handoffPath, admission) => {
         const mission = await missions.read(root), run = await operators.read(root);
         if (!mission || !run || mission.runID !== run.runID || run.phase !== "running" ||
             ["cancelled", "completed"].includes(mission.phase)) return undefined;
         const unit = run.units.find(unit => unit.status === "running" && unit.childSessionID === child &&
           resolve(unit.handoffPath) === resolve(handoffPath));
+        if (admission && (!unit || mission.kind === "operation" || unit.repairValidation !== null ||
+            run.runID !== admission.runID || run.generation !== admission.generation || unit.unit.id !== admission.unitID ||
+            unit.callID !== admission.callID || /^task_id: (.+)$/mu.exec(unit.task.prompt)?.[1] !== admission.taskID ||
+            (await identity(child)).parent !== (run.operatorSessionID ?? root) ||
+            (unit.reviewerCorrection && (unit.reviewerCorrection.author !== child ||
+              unit.reviewerCorrection.promptID !== admission.promptID || !await reviewerCorrection(child))))) return undefined;
         return unit ? { projectRoot: operators.projectRoot, manifestPath: unit.manifestPath,
           handoffHash: unit.hashes[0]!, manifestHash: unit.hashes[1]! } : undefined;
       },
@@ -2552,6 +2558,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           operatorParents.set(chat.sessionID, root);
           if (!await rootFor(chat.sessionID)) throw new Error("operator-grant-invalid");
         }
+        let missionActivation: { root: string; handoffPath: string; admission: MissionImplementationAdmission } | undefined;
         if (role === "dog-worker" || (role === "dog-reviewer" && await reviewerCorrection(chat.sessionID))) {
           const root = await rootFor(chat.sessionID);
           if (root) {
@@ -2580,6 +2587,14 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
               const exact = state.attempts?.find(attempt => attempt.runID === current.runID && attempt.unitID === activeUnit.unit.id && attempt.callID === activeUnit.callID);
               if (exact) exact.childSessionID = chat.sessionID;
             });
+            if (activeUnit?.callID === admitted.callID && mission?.runID === current.runID &&
+                mission.kind !== "operation" && activeUnit.repairValidation === null) {
+              missionActivation = { root, handoffPath: activeUnit.handoffPath, admission: {
+                runID: current.runID, generation: current.generation, unitID: activeUnit.unit.id,
+                taskID: /^task_id: (.+)$/mu.exec(activeUnit.task.prompt)![1]!, callID: admitted.callID,
+                ...(activeUnit.reviewerCorrection ? { promptID: chat.messageID } : {}),
+              } };
+            }
             if (activeUnit?.terminalRescue) missionRescueSelections.set(chat.sessionID, {
               attemptID: activeUnit.terminalRescue.attempt_id,
               model: activeUnit.terminalRescue.selected_model, variant: activeUnit.terminalRescue.selected_variant,
@@ -2610,6 +2625,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         if (rescueSelection) mappedChat.missionRescueSelection = { attempt_id: rescueSelection.attemptID,
           model: rescueSelection.model, variant: rescueSelection.variant };
         await core["chat.message"]?.(mappedChat, mapped);
+        if (missionActivation) await control!.activateMissionWorker(missionActivation.root, chat.sessionID,
+          missionActivation.handoffPath, missionActivation.admission);
         Object.assign(output, translate(mapped, true));
         if (role === "dog-worker" || (role === "dog-reviewer" && await reviewerCorrection(chat.sessionID))) for (const part of output.parts) {
           if (record(part) && part.type === "text" && typeof part.text === "string") part.text = workerControlPrompt(part.text, true);
