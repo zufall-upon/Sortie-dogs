@@ -11,7 +11,12 @@ diagnosis, scoring identities and retained evidence are summarized in
 [the three-route investigation](anko-three-route-investigation-20261002.md).
 
 The follow-up [Coordinator restoration](coordinator-direct-improvements-20261002.md)
-is a new product candidate and evaluation; historical PASS is not evidence for it.
+completed a fresh mixed-model run in **1374.420 s / $1.14969540**, with native
+success and a genuine Mission receipt, but official local reward **0** (F2P 5/9,
+P2P 94/94). Its final Anko commit is `59fa8d902db71183de8241464ae6cf553464ba2e`.
+Observed time/cost fell 37.36%/35.27% versus prior mixed; quality did not pass.
+The report records the stale assignment-error return value, fixed candidate and
+archive. Direct controller execution was not used by that Anko route.
 
 ## Historical authority and status through run7
 

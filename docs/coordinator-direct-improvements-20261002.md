@@ -136,11 +136,130 @@ Final verification:
   `candidate.json`, `installed-build-match.json`, `run-1/`.
 - Product PR: <https://github.com/zufall-upon/Sortie-dogs/pull/152>.
 
-## Remaining sequence
+## Original Anko result: faster workflow, failed quality score
 
-1. Observe the running original Anko task through native completion, then grade the fixed
-   completed Anko commit with the retained verifier and record the comparison.
-2. Product PR and persistent evidence archive. Main merge/release remain separate.
+The fixed candidate completed the workflow in **1374.420 s (22m 54.420s)**,
+**$1.14969540**, unknown usage **0**. Measurement starts at inference launch
+`2026-10-02T11:44:46.808Z` and ends at the last native completion observation
+`2026-10-02T12:07:41.228Z`; preparation and grading are excluded. No time or cost
+stop occurred. Usage-based prices exclude parent development and subscriptions.
 
-The historical investigation and fixed prior candidates remain in
-`/home/user/Sortie-dogs/_testenv/anko-pr149-ubuntu-20261001/`.
+- Final Anko commit: `59fa8d902db71183de8241464ae6cf553464ba2e`, new branch
+  `typed-bindings`, clean. Initial Worker commit:
+  `1e0d9cd2a629228cd336e88d0f0b1ae4c391c33e`.
+- Actual model requests: 70 (Operator 14, Luna Worker 38, initial Review 7,
+  same-native-Reviewer correction 11). All models/variants match the fixed policy.
+- Three native sessions ended successfully. Mission receipt has `status=succeeded`,
+  `stop_reason=completed`; host Git observation records the final branch/HEAD/clean.
+- Worker corrected an initial `go test ./...` failure, then passed the same check.
+  Reviewer correction also ran the actual project-root `go test ./...`, exit 0.
+- Initial Review found three Medium defects: channel OK-target assignment errors
+  were suppressed, Go pointer-writeback errors were overwritten, and unknown
+  qualified declarations used the wrong error contract. The same Reviewer fixed,
+  validated, committed and returned `SELF_RECHECKED`. No reported unresolved
+  findings or residual Major; no second Reviewer. This is author self-recheck,
+  not independent final PASS.
+
+Post-completion local replay of the unchanged pinned official verifier returned
+**binary reward 0, F2P 5/9, P2P 94/94**. Command:
+`node _testenv/coordinator-direct/score-anko.mjs`; verifier exit 0, 15.931 s,
+no timeout. Exit 0 means grading completed; auxiliary partial 0.9611650485436893
+does not mean the candidate passed. Protocol/image/verifier hashes are the same
+as the [prior comparison](anko-three-route-investigation-20261002.md).
+The candidate remained clean at the same commit after grading; no candidate
+edits or additional model inference followed it.
+
+### Observed comparison
+
+- Prior mixed: 2194.002 s / $1.77609408 / reward 1. Current delta:
+  **−819.582 s (−37.36%), −$0.62639868 (−35.27%)**, reward **1 → 0**.
+- Prior single SOL: 1372.413 s / $0.78903480 / reward 1. Current delta:
+  **+2.007 s (+0.15%), +$0.36066060 (+45.71%)**, reward **1 → 0**.
+- Current stage windows: Worker **626.875 s / $0.15326380**;
+  initial Review **194.665 s / $0.23648720**;
+  correction **436.257 s / $0.42745800**;
+  other elapsed **116.623 s**. Operator total **$0.33248640** overlaps those
+  windows and must not be added as another time stage.
+- Against prior mixed, stage reductions are Worker 44.293 s, Review 138.118 s,
+  correction 576.166 s and other 61.005 s. Most observed time saving is in the
+  correction window, with different patches and three rather than five findings.
+  One later sample does not causally attribute those savings to product changes.
+
+Original task SHA-256, normalized common prompt, review policy and pricing-module
+hash match both comparison baselines. This run does not establish quality
+improvement or successful Anko acceptance against the official tests.
+
+### Which workflow changes were actually exercised
+
+- Combined `start_mission(unit=...)` used; root invoked 10 tools in total, with no
+  separate `plan_units`, source reread or root Git shell call.
+- Both generated handoff reads received the exact full-contract projection.
+  This run used default Read ranges, so explicit-limit behavior remains covered
+  by tests rather than this particular native trace.
+- Initial Review used read/search without searching for an unavailable shell.
+  Its only recorded tool error was a nonexistent `vm/vmChan_test.go` search path.
+- Formal correction and inline self-recheck stayed in the original Reviewer;
+  host-recorded Git delivery facts reached acceptance and the completion card.
+- **Direct execution and a child Coordinator were not used.** Root/Coordinator
+  direct execution, cold resume and cancellation have fixture coverage, but this
+  Anko sample does not supply real-model coverage for those paths or multiple units.
+- No combined formatter/Git command occurred; its fix has regression coverage,
+  not a demonstrated native invocation in this run.
+- The saved final response still includes the full return card. The completion
+  result explicitly told the model not to transcribe it, but the saved rendered
+  message alone does not distinguish transcription from presentation processing.
+  Final request: **28.771 s / $0.07317000**. Elimination of final-card cost is
+  therefore not established. Card figures are pre-final-response estimates;
+  use the measured whole-run cost above for comparison.
+
+### Remaining semantic defect
+
+All four failed F2P groups concern a stale return value on typed assignment error:
+`TestTypedBindingsDeclarations`, `TestTypedBindingsAdditionalRepresentativeFlows`,
+`TestTypedBindingsErrorReturnValue`, and `TestTypedBindingsScopeAndControlFlow`.
+
+In `vm/vmLetExpr.go:16-19`, `SetValueWithTypeCheck` returns an error and the
+identifier branch sets `runInfo.err` without clearing `runInfo.rv`.
+`vm/vmStmt.go:49` then returns the stale RHS alongside the error. For example,
+`var x: int64 = 10; x = "hello"` returns `"hello"` where the verifier expects nil.
+This path is unchanged between the initial Worker commit and final correction.
+
+Candidate tests at `vm/vm_typed_bindings_test.go:83-100` check the error and
+preserved binding but discard the public return value. Review explicitly had
+instructions to consider return value, error and post-failure state together;
+the relevant source was available, yet the gap survived. This is the same missed
+error-return family as prior all-SOL, now in assignment rather than declaration.
+No corrected candidate, overlay experiment or regrade is claimed for this run.
+
+Next quality-improvement target: make existing public failure-result behavior
+part of concrete regression evidence, without weakening review or encoding hidden
+Anko cases. A separate real-V2 direct-execution probe is still needed to establish
+that restored controller path in practice; this result must not be relabeled as it.
+
+## Evidence and handoff
+
+Run/comparison records: `_testenv/anko-coordinator-direct-20261002/`, especially
+`comparison-summary.json`, `run-1/final-result.json`, `run-1/observation.json`,
+`run-1/session-history.json`, `run-1/mission.json`, and `run-1/cleanup.json`.
+Scoring protocol, fixed patch, result and test logs:
+`_testenv/anko-coordinator-direct-scoring-20261002/`.
+
+Persistent archive:
+`/home/user/Sortie-dogs/_testenv/anko-pr149-ubuntu-20261001/coordinator-direct-20261002/`.
+It retains source/Git, native history, fixed package, commands, test snapshots,
+cost records and grading evidence. The private native DB stays at its original
+local path. Only generated plugin/cache directories are removed after confirming
+shutdown and archiving. Product code remains at the evaluated candidate; later
+commits record results only. Main merge/release remain separate.
+
+Archive completed `2026-10-02T12:21:29.177Z`:
+
+- `attempt-evidence.tar` SHA-256:
+  `a806d9b8d21f83616dce708826fbed24c934ab6e8303bd4911f954d8d381fc28`.
+- `product-checks-and-scoring.tar` SHA-256:
+  `5c7c324ef23ff95451c682cafa376edb1d61781867a576f69682a1ef0bf61bff`.
+- Fixed package hash matched after copying; archived native root identity matched.
+- No owned server/container or process using the Anko project remained. Removed
+  generated `anko/.opencode` and isolated npm cache. Source/Git and private DB retained.
+- Final updates are documentation-only, so the passing fixed-candidate full suite
+  remains the relevant verification; no redundant full-suite rerun was performed.
