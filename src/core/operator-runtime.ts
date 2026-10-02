@@ -1689,9 +1689,6 @@ export class OperatorRuntime {
     return this.serial(root, async () => {
       const state = await this.required(root);
       const unit = state.units.find(item => /^task_id: (.+)$/m.exec(item.task.prompt)?.[1] === taskID && item.childSessionID === child);
-      if (unit?.reviewerCorrection && paths.some(path => !this.pathAuthorized(normalizeExecutionScope(path), unit.unit.write))) {
-        throw new Error("mission-review-correction-write-union-fixed");
-      }
       if (!unit || !["running", "failed", "succeeded"].includes(unit.status) ||
           !["running", "awaiting-decision", "awaiting-acceptance"].includes(state.phase) || !unit.callID || state.gitLifecycle) {
         throw new Error("mission-scope-update-current-task-required");
@@ -1718,6 +1715,7 @@ export class OperatorRuntime {
         await writeFile(unit.handoffPath, nextHandoff);
         rollback = await activate(manifest);
         (unit as { unit: OperatorUnit }).unit = { ...unit.unit, write };
+        if (unit.reviewerCorrection) unit.reviewerCorrection = { ...unit.reviewerCorrection, writeUnion: write };
         unit.hashes = [hash(nextHandoff), hash(nextManifest), unit.hashes[2]!];
         unit.task = { ...unit.task, prompt: unit.task.prompt.replace(/^source_manifest: .*$/mu, `source_manifest: ${write.join(", ")}`) };
         await this.save(state);

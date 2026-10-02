@@ -586,10 +586,6 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         const mission = await missions.required(root);
         if (["cancelled", "completed"].includes(mission.phase)) throw new Error("mission-scope-update-terminal");
         assertMissionWritePaths(mission, paths);
-        const correction = await reviewerCorrection(child);
-        if (correction && paths.some(path => !operatorGitPathAuthorized(path, correction.unit.unit.write))) {
-          throw new Error("mission-review-correction-write-union-fixed");
-        }
         await operators.expandMissionWriteScope(root, child, taskID, paths, activate);
         // Public scope is projected from the same durable unit; no parallel scope ledger.
       },

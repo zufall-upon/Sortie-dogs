@@ -207,6 +207,201 @@ async function initial(f: Awaited<ReturnType<typeof fixture>>, options: { readon
   return { original, run: await f.run(), mission: await f.missions.required("root") };
 }
 
+async function stagedInitial(f: Awaited<ReturnType<typeof fixture>>) {
+  await writeFile(join(f.directory, "README.md"), "draft\n");
+  await writeFile(join(f.directory, "greet.mjs"), 'export const greet = name => `Hello, ${name.replace(/[^\\x00-\\x7f]/g, "")}!`;\n');
+  await writeFile(join(f.directory, "check.mjs"), 'import assert from "node:assert/strict"; import { greet } from "./greet.mjs"; assert.equal(greet("Ada"), "Hello, Ada!");\n');
+  await exec("git", ["add", "README.md", "greet.mjs", "check.mjs"], { cwd: f.directory });
+  await exec("git", ["commit", "-m", "staged fixture baseline"], { cwd: f.directory });
+  const original = "First Worker changes only the README release label, validates and commits. Complete delivery must preserve Unicode names exactly. After initial Review, the SAME Reviewer may correct source/tests with regression coverage, fresh node check.mjs, a real commit and clean source, then SELF_RECHECKED. Do not modify settings or contracts.";
+  await f.prompt("root", original);
+  await f.tool("root", "start_mission", { requirements: ["Stage one changes only README.md from draft to ready", "Complete delivery preserves Unicode names; SAME Reviewer corrects source/tests, validates and commits"],
+    prohibited_write: ["settings.json", ".opencode/**", ".sortie-dogs-v010/**"] });
+  const plan = await f.tool("root", "plan_units", { units: [{ title: "Stage one release label", objective: "Change only README.md from draft to ready",
+    read: ["README.md", "greet.mjs", "check.mjs"], write: ["README.md"], validation: ["node check.mjs"] }] });
+  const worker = await f.before("root", "subagent", f.task(plan.task));
+  await f.prompt("worker", worker.input.prompt); await f.bind("worker");
+  await f.shell("worker", "git switch -c stage-one/readme");
+  const patch = await f.before("worker", "patch", { patchText: "*** Begin Patch\n*** Update File: README.md\n@@\n-draft\n+ready\n*** End Patch" });
+  await writeFile(join(f.directory, "README.md"), "ready\n"); await f.after(patch, "Updated README.md");
+  await f.shell("worker", "node check.mjs"); await f.shell("worker", "git add README.md && git commit -m stage-one");
+  await f.finish(worker, "worker", "Stage one committed and checked, clean source");
+  const review = await f.tool("root", "review_mission", { risk_tags: ["public-logic"] });
+  const dispatch = await f.before("root", "subagent", f.task(review.task));
+  await f.prompt("author", dispatch.input.prompt);
+  await f.finish(dispatch, "author", "FINDINGS\nMedium: greet.mjs deletes non-ASCII characters, violating exact-name preservation. Correct source and add Unicode regressions to check.mjs.");
+  return { original, run: await f.run(), mission: await f.missions.required("root") };
+}
+
+const unicodeCorrection = {
+  "greet.mjs": 'export const greet = name => `Hello, ${name}!`;\n',
+  "check.mjs": 'import assert from "node:assert/strict"; import { greet } from "./greet.mjs"; assert.equal(greet("Ada"), "Hello, Ada!"); assert.equal(greet("Zoë"), "Hello, Zoë!"); assert.equal(greet("あい"), "Hello, あい!");\n',
+};
+
+async function correctUnicode(f: Awaited<ReturnType<typeof fixture>>) {
+  const sections = await Promise.all(Object.entries(unicodeCorrection).map(async ([path, content]) =>
+    `*** Update File: ${join(f.directory, path)}\n@@\n-${(await readFile(join(f.directory, path), "utf8")).trimEnd()}\n+${content.trimEnd()}`));
+  const patch = await f.before("author", "patch", { patchText: `*** Begin Patch\n${sections.join("\n")}\n*** End Patch` });
+  for (const [path, content] of Object.entries(unicodeCorrection)) await writeFile(join(f.directory, path), content);
+  await f.after(patch, "Updated greet.mjs and check.mjs");
+}
+
+test("staged native correction repairs source/test scope in the SAME admitted Reviewer and completes a fresh receipt", async () => {
+  const f = await fixture();
+  try {
+    const previous = await stagedInitial(f);
+    assert.deepEqual(previous.run.units[0]!.unit.write, ["README.md"]);
+    const prepared = await f.tool("root", "repair_review"), dispatch = await f.before("root", "subagent", f.task(prepared.task));
+    await f.prompt("author", dispatch.input.prompt); await f.bind("author");
+    const before = await f.run(), unit = before.units[0]!, budget = await f.ledger(), switches = f.switches.length;
+    await f.shell("author", "node check.mjs");
+    const oldChecks = structuredClone((await f.run()).units[0]!.reviewerCorrection!.checks);
+    await correctUnicode(f);
+    const expanded = await f.run(), next = expanded.units[0]!;
+    assert.deepEqual(next.unit.write, ["README.md", "greet.mjs", "check.mjs"]);
+    assert.deepEqual(next.reviewerCorrection!.writeUnion, next.unit.write);
+    assert.equal(next.callID, dispatch.id); assert.equal(next.childSessionID, "author");
+    assert.equal(next.reviewerCorrection!.promptID, unit.reviewerCorrection!.promptID);
+    assert.equal(next.reviewerCorrection!.reviewIdentity, unit.reviewerCorrection!.reviewIdentity);
+    assert.equal(next.reviewerCorrection!.admittedAt, unit.reviewerCorrection!.admittedAt);
+    assert.equal(expanded.generation, before.generation); assert.equal(expanded.dispatched, before.dispatched);
+    assert.notEqual(next.hashes[1], unit.hashes[1]); assert.equal(next.hashes[0], unit.hashes[0]);
+    assert.deepEqual(next.reviewerCorrection!.checks, oldChecks, "scope repair retains historical proof, never relabels it");
+    assert.equal(f.switches.length, switches, "scope repair changes no model, native role or prompt generation");
+    assert.deepEqual((await f.ledger()).state.outstanding_reservations, budget.state.outstanding_reservations);
+    const manifest = await readFile(next.manifestPath, "utf8"), checks = structuredClone(next.reviewerCorrection!.checks);
+    await f.tool("root", "expand_unit", { unit_id: next.unit.id, paths: ["greet.mjs", "check.mjs"], reason: "Already covered correction outputs" });
+    assert.equal(await readFile(next.manifestPath, "utf8"), manifest, "covered expansion is a no-op");
+    assert.deepEqual((await f.run()).units[0]!.reviewerCorrection!.checks, checks);
+    await f.shell("author", "node check.mjs");
+    await f.shell("author", "git add greet.mjs check.mjs && git commit -m unicode-correction");
+    assert.equal((await exec("git", ["status", "--short"], { cwd: f.directory })).stdout, "");
+    await f.finish(dispatch, "author", inlineReport());
+    const mission = await f.missions.required("root");
+    assert.equal(mission.review!.verdict, "self-rechecked"); assert.equal(mission.review!.selfRecheck!.promptID, unit.reviewerCorrection!.promptID);
+    assert.equal(mission.review!.selfRecheck!.author, "author"); assert.equal(missionReviewIndependent(mission, "author"), false);
+    assert.equal((await f.tool("root", "complete_mission")).status, "succeeded");
+    const settled = (await f.ledger()).records.filter(({ event }) => event.kind === "unit.settled");
+    await f.after(dispatch, inlineReport(), { sessionID: "author" });
+    assert.deepEqual((await f.ledger()).records.filter(({ event }) => event.kind === "unit.settled"), settled);
+    assert.equal((await f.ledger()).state.consumed_units, 2);
+    assert.equal(f.agents.author!.agent, "dog-reviewer-v010"); assert.equal(f.storage.has("v2-reviewer-correction-permissions:author"), false);
+    assert.equal(Object.keys(f.registry()).some(id => id.startsWith("dog-reviewer-correction-")), false);
+  } finally { await f.dispose(); }
+});
+
+test("staged correction shell scope repair retries the original command without a new admission", async () => {
+  const f = await fixture();
+  try {
+    await stagedInitial(f);
+    const prepared = await f.tool("root", "repair_review"), dispatch = await f.before("root", "subagent", f.task(prepared.task));
+    await f.prompt("author", dispatch.input.prompt); await f.bind("author");
+    const command = "printf 'regression diagnostic' > correction.txt";
+    await assert.rejects(f.before("author", "shell", { command }), /manifest write scope/);
+    const run = await f.run(), budget = await f.ledger();
+    const expanded = await f.tool("root", "expand_unit", { unit_id: "unit-1", paths: ["correction.txt"], reason: "Original request correction diagnostic output" });
+    assert.equal(expanded.status, "scope-updated"); await f.shell("author", command);
+    assert.equal(await readFile(join(f.directory, "correction.txt"), "utf8"), "regression diagnostic");
+    assert.equal((await f.run()).units[0]!.callID, dispatch.id); assert.equal((await f.run()).generation, run.generation);
+    assert.deepEqual((await f.ledger()).state.outstanding_reservations, budget.state.outstanding_reservations);
+    await f.tool("root", "cancel_operator", { reason: "explicit-cancellation" });
+  } finally { await f.dispose(); }
+});
+
+test("expanded correction cannot accept old-scope checks after actual source/test changes", async () => {
+  const f = await fixture();
+  try {
+    await stagedInitial(f);
+    const prepared = await f.tool("root", "repair_review"), dispatch = await f.before("root", "subagent", f.task(prepared.task));
+    await f.prompt("author", dispatch.input.prompt); await f.bind("author"); await f.shell("author", "node check.mjs");
+    await correctUnicode(f); await f.shell("author", "git add greet.mjs check.mjs && git commit -m unvalidated-correction");
+    await f.finish(dispatch, "author", inlineReport());
+    assert.equal((await f.missions.required("root")).corrections![0]!.status, "failed");
+    assert.notEqual((await f.missions.required("root")).review!.verdict, "self-rechecked");
+    await assert.rejects(f.tool("root", "complete_mission"), /validation|incomplete/);
+    assert.equal(f.agents.author!.agent, "dog-reviewer-v010"); assert.equal(f.storage.has("v2-reviewer-correction-permissions:author"), false);
+    const retry = await f.tool("root", "repair_review");
+    assert.equal(retry.task.task_id, "author");
+    assert.deepEqual((await f.run()).units[0]!.unit.write, ["README.md", "greet.mjs", "check.mjs"]);
+    const admitted = await f.before("root", "subagent", f.task(retry.task));
+    await f.prompt("author", admitted.input.prompt); await f.bind("author"); await f.shell("author", "node check.mjs");
+    await f.finish(admitted, "author", inlineReport());
+    assert.equal((await f.tool("root", "complete_mission")).status, "succeeded");
+    assert.equal((await f.ledger()).state.consumed_units, 3, "failed and fresh same-owner correction settle once each");
+  } finally { await f.dispose(); }
+});
+
+test("failed narrow correction restores read-only, repairs its scope and retries only the SAME native owner", async () => {
+  const f = await fixture();
+  try {
+    await stagedInitial(f);
+    const prepared = await f.tool("root", "repair_review"), failed = await f.before("root", "subagent", f.task(prepared.task));
+    await f.prompt("author", failed.input.prompt); await f.bind("author");
+    await f.finish(failed, "author", "FINDINGS\nRetained Unicode defect unresolved; no correction validation or commit occurred.");
+    const old = await f.run(), oldLedger = await f.ledger();
+    assert.equal(old.units[0]!.status, "failed"); assert.equal(f.agents.author!.agent, "dog-reviewer-v010");
+    assert.equal(f.storage.has("v2-reviewer-correction-permissions:author"), false);
+    assert.equal(Object.keys(f.registry()).some(id => id.startsWith("dog-reviewer-correction-")), false);
+    const scope = await f.tool("root", "expand_unit", { unit_id: "unit-1", paths: ["greet.mjs", "check.mjs"], reason: "Original post-Review source/test correction, not a new user requirement" });
+    assert.equal(scope.status, "scope-updated"); assert.equal(scope.task, undefined);
+    assert.equal((await f.run()).runID, old.runID); assert.equal((await f.run()).units[0]!.callID, failed.id);
+    assert.deepEqual((await f.run()).units[0]!.reviewerCorrection!.writeUnion, ["README.md", "greet.mjs", "check.mjs"]);
+    assert.deepEqual((await f.ledger()).records.filter(({ event }) => event.kind === "unit.settled"), oldLedger.records.filter(({ event }) => event.kind === "unit.settled"));
+    await assert.rejects(f.before("author", "patch", { patchText: "*** Begin Patch\n*** Add File: greet.mjs\n+x\n*** End Patch" }), /mission-reviewer-readonly/);
+    const retry = await f.tool("root", "repair_review");
+    assert.equal(retry.task.task_id, "author");
+    const admitted = await f.before("root", "subagent", f.task(retry.task));
+    await f.prompt("author", admitted.input.prompt); await f.bind("author"); await correctUnicode(f);
+    await f.shell("author", "node check.mjs"); await f.shell("author", "git add greet.mjs check.mjs && git commit -m recovered-unicode");
+    await f.finish(admitted, "author", inlineReport());
+    assert.equal((await f.tool("root", "complete_mission")).status, "succeeded");
+    await f.after(failed, "Duplicate old failed terminal", { sessionID: "author", status: "failed" }, "error");
+    assert.equal((await f.ledger()).state.consumed_units, 3); assert.equal((await f.ledger()).state.outstanding_reservations.length, 0);
+    assert.equal(f.agents.author!.agent, "dog-reviewer-v010");
+    assert.equal(f.storage.has("v2-reviewer-correction-permissions:author"), false);
+  } finally { await f.dispose(); }
+});
+
+for (const mode of ["settings", "contracts", "outside-shell", "traversal", "wrong-owner", "stale-owner", "native-deny", "native-ask"] as const) {
+  test(`staged correction scope repair preserves existing boundaries: ${mode}`, async () => {
+    const f = await fixture();
+    try {
+      await stagedInitial(f);
+      const prepared = await f.tool("root", "repair_review"), dispatch = await f.before("root", "subagent", f.task(prepared.task));
+      await f.prompt("author", dispatch.input.prompt); await f.bind("author");
+      const before = await f.run(), unit = before.units[0]!, manifest = await readFile(unit.manifestPath, "utf8");
+      if (mode === "settings" || mode === "contracts") {
+        const path = mode === "settings" ? "settings.json" : ".sortie-dogs-v010/contracts/forbidden.json";
+        await assert.rejects(f.tool("root", "expand_unit", { unit_id: "unit-1", paths: [path], reason: "Forbidden output" }), /mission-explicit-write-prohibition/);
+        await assert.rejects(f.before("author", "patch", { patchText: `*** Begin Patch\n*** Add File: ${path}\n+x\n*** End Patch` }), /mission-explicit-write-prohibition/);
+      } else if (mode === "outside-shell") {
+        await assert.rejects(f.before("author", "shell", { command: `printf x > ${join(f.directory, "../outside.txt")}` }), /project-root-relative path required/);
+      } else if (mode === "traversal" || mode === "wrong-owner") {
+        await assert.rejects(new OperatorRuntime(f.directory, V010_RUNTIME_PROFILE).expandMissionWriteScope("root", mode === "wrong-owner" ? "final" : "author",
+          /^task_id: (.+)$/mu.exec(unit.task.prompt)![1]!, [mode === "traversal" ? "../outside.txt" : "greet.mjs"], async () => async () => {}),
+        mode === "traversal" ? /traversal/ : /current-task-required/);
+      } else if (mode === "stale-owner") {
+        f.terminal("author", "FINDINGS\nCorrection failed without current validation.", true);
+        await f.after(dispatch, "Correction failed", { sessionID: "author", status: "failed" }, "error");
+        await assert.rejects(f.before("author", "patch", { patchText: "*** Begin Patch\n*** Update File: greet.mjs\n@@\n-old\n+new\n*** End Patch" }), /mission-reviewer-readonly/);
+        await f.tool("root", "operator_status");
+        assert.equal(f.agents.author!.agent, "dog-reviewer-v010");
+        assert.equal(f.storage.has("v2-reviewer-correction-permissions:author"), false);
+      } else {
+        const effect = mode === "native-deny" ? "deny" : "ask";
+        const prior = [{ action: "edit", resource: "*greet.mjs", effect }];
+        f.agents.author!.permissions = prior;
+        await f.tool("root", "expand_unit", { unit_id: "unit-1", paths: ["greet.mjs"], reason: "Original source correction" });
+        assert.equal(await f.permission("author", "edit", join(f.directory, "greet.mjs"), effect === "deny"), effect);
+        assert.deepEqual(f.agents.author!.permissions, prior);
+        assert.equal(await readFile(join(f.directory, "greet.mjs"), "utf8"), 'export const greet = name => `Hello, ${name.replace(/[^\\x00-\\x7f]/g, "")}!`;\n');
+      }
+      if (!["native-deny", "native-ask"].includes(mode)) assert.equal(await readFile(unit.manifestPath, "utf8"), manifest);
+      await f.tool("root", "cancel_operator", { reason: "explicit-cancellation" });
+    } finally { await f.dispose(); }
+  });
+}
+
 test("correction commits only actual changed outputs despite unchanged exact permission and deleted scratch", async () => {
   const f = await fixture();
   try {
@@ -915,8 +1110,9 @@ for (const mode of ["foreground", "background-restart", "failure", "self-review"
         .map(name => [name, { description: name, input: {} }])), system: [] };
       await f.context(context);
       assert.deepEqual(Object.keys(context.tools).sort(), ["patch", "read", "shell", "sortie_v010_bind_write_gate", "write"].sort());
-      await assert.rejects(f.before("author", "patch", { patchText: "*** Begin Patch\n*** Add File: undeclared.txt\n+x\n*** End Patch" }), /operation manifest write scope|mission-review-correction-write-union-fixed|write-denied|path-not-declared|outside|not-allowed/);
-       await assert.rejects(f.before("author", "shell", { command: "printf x > undeclared.txt" }), /manifest write scope|write-union|write-denied/);
+      await f.missions.update("root", mission => { mission.prohibitedWrite = ["undeclared.txt"]; });
+      await assert.rejects(f.before("author", "patch", { patchText: "*** Begin Patch\n*** Add File: undeclared.txt\n+x\n*** End Patch" }), /mission-explicit-write-prohibition/);
+       await assert.rejects(f.before("author", "shell", { command: "printf x > undeclared.txt" }), /mission-explicit-write-prohibition/);
        const knownWrite = await f.before("author", "shell", { command: "printf x > result.txt" });
        await f.after(knownWrite, "Known scoped diagnostic allowed", { exit: 0 });
       await f.edit("author", "ready"); await f.shell("author", "git add -- result.txt"); await f.shell("author", "git commit -m correction");
