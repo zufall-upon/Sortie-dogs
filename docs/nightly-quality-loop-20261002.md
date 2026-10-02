@@ -59,3 +59,23 @@ Validation progression:
   missing or duplicate files; exit 0, 198.960 s including build. Source snapshot
   SHA-256 `2162e50f4fce6f2178c7d39fb1276424bcc1937eb266434fff95c6d31edcce44`.
   Command/reason/output: `_testenv/coordinator-direct/night-full-2.*`.
+
+Fixed native candidate:
+
+- Product commit `a0c82e57e7244c2adeec14c9a536f38fff0f6e7d`.
+- Package SHA-256 `e779647bf5261c9183eec9953408117bc6221788b7d88c2cc81ea77a8c96ba62`.
+- Runtime marker `0.13.3-coordinator-direct-v2`; installed 204 package files and
+  eight assets match the fixed package.
+- Fresh original Anko clone/private database, zero initial sessions; original
+  task 1825 bytes and base `3f269a72ff69398b1250c584171f32d12c0d8085` retained.
+- Preflight exit 0, 5.644 s; baseline `go test ./...` exit 0, 5.576 s.
+- Started via `node _testenv/nightly-20261002/run-cycle.mjs anko-nightly-quality-v2-20261002 anko-nightly-quality-v2-scoring-20261002`.
+  The wrapper launches native inference and only after successful terminal
+  completion invokes the pinned offline verifier. No time/cost cutoff.
+- Native startup observed at `2026-10-02T12:55:30.387Z`: root
+  `ses_f0351658affelI5alHAC3o77ZW` actually used SOL/xhigh; Worker
+  `ses_f0350ec4dffe3s5n5sxvBfK8Z6` actually used Luna-fast/max. Startup
+  evidence is `actual-worker-start.json`; completion and effectiveness pending.
+- Prepared a separate two-unit native direct-Coordinator fixture with the same
+  package and its own initially empty database. Preparation is not execution
+  evidence; native launch/result will be recorded separately.
