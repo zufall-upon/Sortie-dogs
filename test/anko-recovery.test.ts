@@ -232,6 +232,85 @@ test("native write and shell scope correction keep the same Task, call, unit and
   assert.equal((await f.tool("operator_status")).budget.consumed_units, 1);
 }));
 
+test("covered write scope expansion is a no-op for controls, evidence, freshness and spend; real repair retries the SAME command", async () => fixture(async f => {
+  await f.start();
+  const { unit } = await f.dispatch("Implement and verify", "node check.mjs", ["result.txt", "src/**"]);
+  await mkdir(join(f.directory, "src")); await writeFile(join(f.directory, "src/a.ts"), "source");
+  await f.validate();
+  const before = await f.runtime.required("root"), budget = (await f.tool("operator_status")).budget;
+  const manifest = await readFile(unit.manifestPath, "utf8"), handoff = await readFile(unit.handoffPath, "utf8");
+  const result = await f.tool("expand_unit", { unit_id: "unit-1", paths: ["src/a.ts", "src/nested/**"], reason: "Already permitted" }, "worker");
+  assert.equal(result.task, undefined); assert.deepEqual(result.budget, budget);
+  assert.equal(await readFile(unit.manifestPath, "utf8"), manifest);
+  assert.equal(await readFile(unit.handoffPath, "utf8"), handoff);
+  assert.deepEqual(await f.runtime.required("root"), before, "no state/hash/evidence mutation for an ineffective grant");
+  await assert.rejects(f.tool("expand_unit", { unit_id: "unit-1", paths: ["forbidden.txt"], reason: "Denied" }, "worker"), /mission-explicit-write-prohibition/);
+  const command = "printf generated > generated.txt";
+  const invoke = () => f.hooks["tool.execute.before"]({ tool: "bash", sessionID: "worker", callID: "same-shell" }, { args: { command } });
+  await assert.rejects(invoke(), /manifest write scope/);
+  await f.tool("expand_unit", { unit_id: "unit-1", paths: ["generated.txt"], reason: "Requested shell output" }, "worker");
+  await invoke();
+  assert.deepEqual((await f.tool("operator_status")).budget, budget);
+  await f.finish();
+  assert.equal((await f.tool("operator_status")).completion.ready, true, "no-op does not require repeat formal validation");
+  await writeFile(join(f.directory, "src/a.ts"), "changed after validation");
+  assert.equal((await f.tool("operator_status")).completion.ready, false, "covered scope no-op never makes changed protected source fresh");
+  await assert.rejects(f.tool("review_mission", { risk_tags: [] }), /mission-review-awaits-current-validation/);
+}));
+
+test("default and progress status retain measured checks/terminal and unknown Git delivery without duplicating protected arrays", async () => fixture(async f => {
+  for (let i = 0; i < 180; i++) await writeFile(join(f.directory, `context-${i}.txt`), "protected source\n");
+  await exec("git", ["add", "--", "check.mjs", "result.txt", ...Array.from({ length: 180 }, (_, i) => `context-${i}.txt`)], { cwd: f.directory });
+  await exec("git", ["-c", "user.name=test", "-c", "user.email=test@example.invalid", "commit", "-m", "fixture protected inputs"], { cwd: f.directory });
+  await f.start(); await f.dispatch();
+  const started = Date.now(); await f.validate(); const completed = Date.now();
+  f.history.worker = [{ info: { role: "assistant", sessionID: "worker" }, parts: [{ type: "tool", tool: "bash",
+    state: { status: "completed", input: { command: "node check.mjs" }, metadata: { exit: 0 } }, time: { ran: started, completed } }] }];
+  await f.finish();
+  const state = await f.runtime.required("root");
+  const full = await f.tool("operator_status", { view: "full" });
+  const compact = await f.tool("operator_status");
+  const progress = await f.tool("operator_status", { view: "progress" });
+  assert.deepEqual(full.units[0].evidence, state.units[0].evidence, "explicit full diagnostics preserve authoritative records");
+  assert.ok(full.units[0].evidence[0].protected_binding);
+  assert.equal(compact.units[0].evidence[0].protected_binding, undefined);
+  assert.deepEqual(compact.units[0].evidence[0].execution, full.units[0].evidence[0].execution);
+  assert.equal(compact.units[0].evidence_details_ref.path, new OperatorRuntime(f.directory, V010_RUNTIME_PROFILE).statePath("root"));
+  assert.ok(JSON.stringify(full).length - JSON.stringify(compact).length > 10000, "real tracked protected source arrays are no longer duplicated in default status");
+  assert.deepEqual(progress.observations.formal_validation, compact.acceptance_summary.formal_validation);
+  assert.deepEqual(progress.observations.native_declared_validation, compact.acceptance_summary.native_declared_validation);
+  assert.deepEqual(progress.observations.native_declared_validation[0].observations.commands[0], {
+    command: "node check.mjs", exit_code: 0, observed_attempts: 1, latest_started_ms: started, latest_completed_ms: completed,
+  }, "actual command/exit/timestamps survive the compact projection");
+  assert.deepEqual(progress.observations.worker_terminals[0].terminal, (await f.missions.required("root")).attempts[0].terminal);
+  assert.equal(progress.observations.delivery.git_lifecycle, null);
+  assert.equal(progress.observations.delivery.clean, "not independently observed by this projection");
+  assert.equal(compact.execution_summary.accepted, false, "validated/terminal unit is not Mission acceptance or clean Git proof");
+  assert.deepEqual((await f.runtime.required("root")).units[0].evidence, state.units[0].evidence, "display does not rewrite proof or freshness");
+}));
+
+test("compact status never promotes a real failed commit or failed native terminal to Mission success/clean", async () => fixture(async f => {
+  await exec("git", ["config", "user.name", "test"], { cwd: f.directory });
+  await exec("git", ["config", "user.email", "test@example.invalid"], { cwd: f.directory });
+  await exec("git", ["add", "check.mjs", "result.txt"], { cwd: f.directory });
+  await exec("git", ["commit", "-m", "fixture base"], { cwd: f.directory });
+  await writeFile(join(f.directory, ".git/hooks/pre-commit"), "#!/bin/sh\nexit 1\n");
+  await exec("chmod", ["+x", join(f.directory, ".git/hooks/pre-commit")]);
+  await f.start(); await f.dispatch(); await writeFile(join(f.directory, "result.txt"), "ready\n"); await f.validate();
+  const command = "git add result.txt && git commit -m requested";
+  assert.equal((await exec("git", ["diff", "--cached", "--name-only"], { cwd: f.directory })).stdout, "");
+  await f.hooks["tool.execute.before"]({ tool: "bash", sessionID: "worker", callID: "failed-commit" }, { args: { command } });
+  await assert.rejects(exec("bash", ["-c", command], { cwd: f.directory }), (error: any) => error.code === 1);
+  await f.hooks["tool.execute.after"]({ tool: "bash", sessionID: "worker", callID: "failed-commit" }, { output: "commit hook failed", metadata: { exit: 1, status: "completed" } });
+  await f.finish("failed");
+  const status = await f.tool("operator_status"), progress = await f.tool("operator_status", { view: "progress" });
+  assert.equal(status.execution_summary.accepted, false); assert.notEqual(status.units[0].status, "succeeded");
+  assert.equal(progress.observations.worker_terminals[0].terminal.outcome, "failed");
+  assert.equal(progress.observations.delivery.git_lifecycle, null);
+  assert.equal(progress.observations.delivery.clean, "not independently observed by this projection");
+  assert.match((await exec("git", ["status", "--short"], { cwd: f.directory })).stdout, /result.txt/, "failed commit really leaves staged source");
+}));
+
 test("scope update persistence failure rolls back manifest, handoff and binding without a new unit", async () => fixture(async f => {
   await f.start();
   const { unit } = await f.dispatch();
@@ -311,7 +390,8 @@ test("validation cache generation and post-PASS cleanup preserve freshness and R
 for (const promotion of ["exact-output", "tracked-source"]) test(`new ${promotion} under old cache blocks completion and stale Review, not same-Task scope repair`, async () => fixture(async f => {
   await f.start();
   const command = `TMPDIR=${join(f.directory, ".tmp")} node check.mjs`;
-  await f.dispatch("Implement and verify", command, ["result.txt", ".tmp/**"]);
+  // Exact output is a real new grant; adding an already-covered path is not artifact declaration.
+  await f.dispatch("Implement and verify", command, promotion === "exact-output" ? ["result.txt"] : ["result.txt", ".tmp/**"]);
   await f.validate(command); await f.finish();
   const evidence = (await f.runtime.required("root")).units[0].evidence;
   const budget = (await f.tool("operator_status")).budget;

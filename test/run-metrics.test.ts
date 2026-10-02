@@ -336,6 +336,9 @@ test("types unavailable Sortie Result metrics without synthetic estimates", () =
   assert.match(formatSortieResult(result), /使用量\s+計測不可/u);
   assert.doesNotMatch(formatSortieResult(result), /host-metrics-unavailable|goal-clock-invalid|evidence_refs/u);
   assert.doesNotMatch(formatSortieResult(result), /\$0\.0000|0 tokens/u);
+  const selfchecked = formatSortieResult(result, { missionReview: "self-rechecked" });
+  assert.match(selfchecked, /自己再確認済み（修正著者・独立PASSではない）/);
+  assert.doesNotMatch(selfchecked, /PASS（独立Reviewer）/);
 });
 
 test("uses real terminal presentation fields without letting fenced status text become a checkpoint", () => {

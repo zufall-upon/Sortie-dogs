@@ -28,6 +28,12 @@ for (const verdict of ["PASS", "FINDINGS", "EVIDENCE_GAPS"] as const) test(`Fast
     await writeFile(join(directory, "public-contract.md"), "Public output is ready followed by a newline.\n");
     if (verdict === "PASS") await writeFile(join(directory, "build.mjs"),
       'import { writeFileSync } from "node:fs";\nwriteFileSync("result.txt", "ready\\n");\n');
+    if (verdict === "PASS") {
+      await writeFile(join(directory, "untouched.txt"), "unchanged\n");
+      await writeFile(join(directory, ".gitignore"), ".sortie-dogs-v010/\n");
+      await exec("git", ["add", "check.mjs", "build.mjs", "public-contract.md", "untouched.txt", ".gitignore"], { cwd: directory });
+      await exec("git", ["commit", "-m", "fixture base"], { cwd: directory });
+    }
     const history: Record<string, Record<string, unknown>[]> = { worker: [] };
     let workerHistoryReads = 0;
     let backgroundChild: string | undefined;
@@ -35,7 +41,7 @@ for (const verdict of ["PASS", "FINDINGS", "EVIDENCE_GAPS"] as const) test(`Fast
       root: { agent: "dog-operator" }, worker: { agent: "dog-worker-v010", parentID: "root" },
       reviewer: { agent: "dog-reviewer-v010", parentID: "root" },
     };
-    const hooks = await SortieDogsV010Plugin({ directory,
+    const hooks = await SortieDogsV010Plugin({ directory, reviewerCorrectionPermissions: true,
       nativeBackground: { awaiting: async (id: string) => backgroundChild !== undefined && (id === "root" || id === backgroundChild) }, client: { session: {
       get: async ({ path }: { path: { id: string } }) => ({ data: { id: path.id, ...agents[path.id] } }),
       children: async ({ path }: { path: { id: string } }) => ({ data: Object.entries(agents)
@@ -86,7 +92,7 @@ for (const verdict of ["PASS", "FINDINGS", "EVIDENCE_GAPS"] as const) test(`Fast
     assert.ok(open.task, "the same Coordinator reference remains available when the contract is not one unit");
     const planned = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ units: [{ title: "Write ready result",
       objective: "Create result.txt with ready followed by newline", read: verdict === "PASS" ? ["."] : ["check.mjs"],
-      write: ["result.txt"], validation: [...(verdict === "PASS" ? ["node build.mjs"] : []), "node check.mjs"] }] }, { sessionID: "root" }));
+      write: verdict === "PASS" ? ["result.txt", "untouched.txt", "scratch.tmp"] : ["result.txt"], validation: [...(verdict === "PASS" ? ["node build.mjs"] : []), "node check.mjs"] }] }, { sessionID: "root" }));
     const worker = { args: structuredClone(planned.task) };
     await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "worker-call" }, worker);
     await hooks["chat.message"]!({ sessionID: "worker", messageID: "worker-request", agent: agents.worker!.agent }, {
@@ -96,7 +102,7 @@ for (const verdict of ["PASS", "FINDINGS", "EVIDENCE_GAPS"] as const) test(`Fast
     const unit = (await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).units[0]!;
     if (verdict === "PASS") {
       assert.deepEqual(unit.unit.read, [`${directory.replaceAll("\\", "/")}/**`]);
-      assert.deepEqual(unit.unit.write, ["result.txt"], "root observation must not expand write scope");
+      assert.deepEqual(unit.unit.write, ["result.txt", "untouched.txt", "scratch.tmp"], "root observation must not expand write scope");
     }
     await hooks["tool.execute.before"]!({ tool: "read", sessionID: "worker", callID: "handoff" }, { args: { filePath: unit.handoffPath } });
     await hooks["tool.execute.after"]!({ tool: "read", sessionID: "worker", callID: "handoff", args: { filePath: unit.handoffPath } },
@@ -124,6 +130,11 @@ for (const verdict of ["PASS", "FINDINGS", "EVIDENCE_GAPS"] as const) test(`Fast
       assert.deepEqual((await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).requests.map(item => item.id), ["request"], "frozen contract cannot adopt free text as a changed requirement");
     }
     if (verdict === "PASS") {
+      for (const [callID, command] of [["branch", "git switch -c same-worker-delivery"], ["scratch", "printf generated > scratch.tmp"], ["cleanup", "rm scratch.tmp"]]) {
+        await hooks["tool.execute.before"]!({ tool: "bash", sessionID: "worker", callID: callID! }, { args: { command } });
+        const result = await exec("bash", ["-lc", command!], { cwd: directory });
+        await hooks["tool.execute.after"]!({ tool: "bash", sessionID: "worker", callID: callID! }, { output: result.stdout, metadata: { exit: 0, status: "completed" } });
+      }
       await hooks["tool.execute.before"]!({ tool: "bash", sessionID: "worker", callID: "build" },
         { args: { command: "node build.mjs" } });
       await exec(process.execPath, ["build.mjs"], { cwd: directory });
@@ -143,16 +154,15 @@ for (const verdict of ["PASS", "FINDINGS", "EVIDENCE_GAPS"] as const) test(`Fast
       time: { ran: 1200, completed: 1300 } }] });
     if (verdict === 'PASS') {
       // Ordinary requested delivery stays in the validated Worker, with no .git/** write scope or prior Review.
-      for (const [callID, command, argv] of [
-        ['git-add', 'git add -- result.txt', ['add', '--', 'result.txt']],
-        ['git-commit', 'git commit -m "Create result"', ['commit', '-m', 'Create result']],
-      ] as const) {
-        await hooks['tool.execute.before']!({ tool: 'bash', sessionID: 'worker', callID }, { args: { command } });
-        const result = await exec('git', [...argv], { cwd: directory });
-        await hooks['tool.execute.after']!({ tool: 'bash', sessionID: 'worker', callID },
-          { output: result.stdout, metadata: { exit: 0, status: 'completed' } });
-      }
+      const command = 'git add result.txt && git commit -m "Create result"', callID = 'git-add-commit';
+      assert.equal((await exec('git', ['diff', '--cached', '--name-only'], { cwd: directory })).stdout, '');
+      await hooks['tool.execute.before']!({ tool: 'bash', sessionID: 'worker', callID }, { args: { command } });
+      const result = await exec('bash', ['-c', command], { cwd: directory });
+      await hooks['tool.execute.after']!({ tool: 'bash', sessionID: 'worker', callID },
+        { output: result.stdout, metadata: { exit: 0, status: 'completed' } });
       assert.match((await exec('git', ['log', '-1', '--format=%s'], { cwd: directory })).stdout, /Create result/);
+      assert.equal((await exec("git", ["status", "--short"], { cwd: directory })).stdout, "", "the SAME Worker delivers actual clean source after generated cleanup/formal check/commit");
+      assert.equal((await exec("git", ["branch", "--show-current"], { cwd: directory })).stdout.trim(), "same-worker-delivery");
       assert.equal((await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required('root')).review, undefined);
     }
     agents.worker!.outcome = "succeeded";
@@ -164,6 +174,8 @@ for (const verdict of ["PASS", "FINDINGS", "EVIDENCE_GAPS"] as const) test(`Fast
     assert.equal(status.coordinator_session_id, null);
     assert.equal(status.units[0].status, "succeeded", JSON.stringify(status));
     assert.equal(status.task, undefined, "a successful Fast unit must not prompt a Coordinator dispatch");
+    assert.equal(status.acceptance_summary.delivery.git_lifecycle, null, "absence of Git lifecycle is not forged delivery evidence");
+    assert.equal(status.acceptance_summary.delivery.clean, "not independently observed by this projection");
     assert.match(status.next_action, /Fast-lane.*review_mission/);
     const historyReadsBeforeReview = workerHistoryReads;
     const storedEvidence = (await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).units.map(unit => unit.evidence);
@@ -215,6 +227,9 @@ for (const verdict of ["PASS", "FINDINGS", "EVIDENCE_GAPS"] as const) test(`Fast
       await hooks["tool.execute.before"]!({ tool, sessionID: "reviewer", callID: `review-${tool}` }, { args: { ...args } });
     }
     agents.reviewer!.outcome = "succeeded";
+    history.reviewer = [{ info: { id: "reviewer-terminal", sessionID: "reviewer", role: "assistant", agent: agents.reviewer!.agent,
+      finish: "stop", time: { created: Date.now(), completed: Date.now() } },
+      parts: [{ type: "text", text: `${verdict}\n${verdict === "FINDINGS" ? "Medium: retained output violates a required consumer behavior; correct result.txt." : "Reviewed actual result and validation."}` }] }];
     await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "review-call" },
       { output: `${verdict}\nReviewed actual result and validation.`, metadata: { sessionId: "reviewer" } });
     backgroundChild = undefined;
@@ -224,26 +239,21 @@ for (const verdict of ["PASS", "FINDINGS", "EVIDENCE_GAPS"] as const) test(`Fast
     assert.equal(reviewed.coordinator_session_id, null);
     if (verdict === "FINDINGS") {
       await assert.rejects(hooks.tool!.sortie_v010_complete_mission.execute({}, { sessionID: "root" }), /mission-review-required-or-stale/);
-      assert.ok(reviewed.task, "the same mission's Coordinator remains an available fallback");
-      assert.match(reviewed.next_action, /Fast-lane: Reviewer FINDINGS require correction/);
+      assert.equal(reviewed.task, undefined, "FINDINGS do not dispatch a Coordinator/fresh Worker repair workaround");
+      assert.match(reviewed.next_action, /Fast-lane: known Major\/Medium findings.*repair_review.*SAME original Reviewer's/);
       assert.equal(await readFile(join(directory, "result.txt"), "utf8"), "ready\n", "Fast work survives escalation");
-      agents.coordinator = { agent: "dogs-coordinator", parentID: "root" };
-      await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "coordinator-call" },
-        { args: structuredClone(reviewed.task) });
-      await hooks["chat.message"]!({ sessionID: "coordinator", messageID: "coordinator-request", agent: agents.coordinator.agent }, {
-        message: { id: "coordinator-request", agent: agents.coordinator.agent,
-          model: { providerID: "openai", modelID: "gpt-6-sol" } },
-        parts: [{ type: "text", text: reviewed.task.prompt }],
-      });
-      const correction = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ units: [{ title: "Correct review finding",
-        objective: "Keep the validated result and address the concrete review finding", read: ["check.mjs"],
-        write: ["result.txt"], validation: ["node check.mjs"] }],
-        reason: "The independent Reviewer found a concrete defect in the current candidate" }, { sessionID: "coordinator" }));
+      const correction = JSON.parse(await hooks.tool!.sortie_v010_repair_review.execute({}, { sessionID: "root" }));
       assert.ok(correction.task);
+      assert.equal(correction.task.task_id, "reviewer");
+      assert.equal(correction.task.subagent_type, "dog-reviewer-v010");
+      const correctedRun = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+      assert.deepEqual(correctedRun.units[0]!.unit.validation, ["node check.mjs"]);
+      assert.equal(correctedRun.units[0]!.reviewerCorrection!.author, "reviewer");
       const escalated = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
       assert.equal(escalated.id, started.mission_id);
-      assert.equal(escalated.coordinator, "coordinator");
-      assert.equal(escalated.review?.verdict, "findings", "a replan must not turn FINDINGS into PASS");
+      assert.equal(escalated.coordinator, null);
+      assert.equal(escalated.review?.verdict, "findings", "correction preparation cannot turn FINDINGS into PASS");
+      await assert.rejects(hooks.tool!.sortie_v010_complete_mission.execute({}, { sessionID: "root" }), /correction-validation-missing/);
       return;
     }
     assert.equal(reviewed.task, undefined);

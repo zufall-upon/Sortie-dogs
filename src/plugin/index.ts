@@ -81,6 +81,7 @@ import {
   canonicalManifestReadScopes,
   canonicalManifestWriteScopes,
   canonicalDeclaredValidationSequence,
+  canonicalDeclaredValidationMembers,
   createProjectPaths,
   createWriteGate,
   describeUnclassifiedCommand,
@@ -194,6 +195,8 @@ export interface OpenCodePluginInput {
   returnReportTransport?: "tool-result";
   /** Native background Job ownership, persisted by the V2 adapter. */
   nativeBackground?: { awaiting(sessionID: string): Promise<boolean> };
+  /** V2 adapter can project and restore native session-scoped correction permissions. */
+  reviewerCorrectionPermissions?: boolean;
   /** The host SDK client. Absent in hosts that construct the plugin without one. */
   client?: SessionMessageReader & RunMetricsClient & ContinuationClient & OpenCodeModelAvailabilityClient & {
     app?: {
@@ -222,6 +225,10 @@ export interface OpenCodeEvent {
 }
 
 export interface OpenCodeHooks {
+  /** Native session permission projection for one running, durable Reviewer correction. */
+  reviewerCorrectionScope?: (sessionID: string) => Promise<{ write: readonly string[]; validation: readonly string[]; generation: number } | undefined>;
+  /** Durable correction authors for cleanup, including after cancellation or agent change. */
+  reviewerCorrectionSessions?: (sessionID: string) => Promise<readonly string[]>;
   /** Internal adapter transport; retains the existing profile owner across reload. */
   backgroundOwner?: (callID: string, restore?: Record<string, unknown>) => Record<string, unknown> | undefined;
   event?: (input: { event: OpenCodeEvent }) => Promise<void>;
@@ -484,11 +491,20 @@ interface HostGoalExecution {
   readonly validationInputs?: string;
   readonly validation?: { readonly ledger: RunFlightLedger; readonly request: ValidationBudgetRequest; readonly reservation: string };
   readonly reusedEvidence?: readonly GoalEvidence[];
+  readonly correction?: { readonly taskID: string; readonly dispatchCallID: string; readonly commands: readonly string[] };
   endedAt?: string;
   exitCode?: number | null;
   outcome?: "pass" | "fail" | "skip" | "cancel";
   immutableRef?: string;
   fresh?: boolean;
+}
+
+/** A completed exact && correction call proves each member, without reusing another occurrence. */
+function observedHostGoalEvidence(execution: Parameters<typeof evidenceFromObservedExecution>[0] & Pick<HostGoalExecution, "correction">,
+  goal: Parameters<typeof evidenceFromObservedExecution>[1], unitID: string): GoalEvidence[] {
+  if (!execution.correction) return evidenceFromObservedExecution(execution, goal, unitID);
+  return execution.correction.commands.flatMap((command, member) => evidenceFromObservedExecution({ ...execution, command: [command],
+    immutableRef: goalFingerprint({ native_execution: execution.immutableRef, member }) }, goal, unitID));
 }
 
 interface HostToolTiming {
@@ -1822,32 +1838,56 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     if (authorization === undefined || authorization.suspended || authorization.rootSessionID !== identity.parentID) return;
     const args = isRecord(output.args) ? output.args : undefined;
     const rawCommand = args !== undefined && typeof args.command === "string" ? normalizeCommand(args.command) : undefined;
-    if (rawCommand === undefined || rawCommand.length === 0 || !authorization.validationCommands.has(rawCommand)) return;
-    const snapshot = await protectedSnapshot(authorization).catch(() => undefined);
-    if (snapshot === undefined) return;
+    if (rawCommand === undefined || rawCommand.length === 0) return;
+    const correcting = await input.runtimeBridge?.ownsReviewerCorrection?.(toolInput.sessionID) === true;
+    // A same-text check in another cwd is a diagnostic of other inputs, not proof
+    // of this correction's inherited Location-based recipe. Native execution stays allowed.
+    if (correcting && typeof args?.workdir === "string" && resolve(input.directory, args.workdir) !== resolve(input.directory)) return;
+    const members = correcting ? await input.runtimeBridge?.reviewerCorrectionValidationMembers?.(toolInput.sessionID, rawCommand)
+      : canonicalDeclaredValidationMembers(rawCommand, authorization.validationCommands);
+    if (!authorization.validationCommands.has(rawCommand) && (!correcting || !members)) return;
+    const requiredExecution = correcting || members !== undefined && await input.runtimeBridge?.requiresValidationExecution?.(
+      authorization.rootSessionID, authorization.taskID, toolInput.sessionID, members) === true;
+    const dispatchCallID = authorization.dispatchCallID ?? (requiredExecution
+      ? await input.runtimeBridge?.missionDispatchCall?.(authorization.rootSessionID, toolInput.sessionID, authorization.taskID) : undefined);
+    const correction = correcting && dispatchCallID && members
+      ? { taskID: authorization.taskID, dispatchCallID, commands: members } : undefined;
+    const admittedSnapshot = await protectedSnapshot(authorization).catch(() => undefined);
+    if (admittedSnapshot === undefined) return;
     const root = goalRoot(identity.parentID);
     const ledger = await goalLedger(root);
     const goalSnapshot = await ledger.readGoal(), goal = goalSnapshot.state;
     let validation: HostGoalExecution["validation"];
     let reusedEvidence: readonly GoalEvidence[] | undefined;
+    const unitID = authorization.taskID;
+    const repairResume = operatorContractRepairResumes.get(root);
+    const criteria = goal.acceptance_contract?.criteria.filter((criterion) =>
+      (correction ? criterion.validation_command !== undefined && correction.commands.includes(criterion.validation_command) : criterion.validation_command === rawCommand) &&
+      criterion.expected_outcome === "pass") ?? [];
+    const denyValidation = (reason: string): Error => {
+      goalValidationDefects.add(toolInput.sessionID);
+      return new Error(`SORTIE_VALIDATION_BUDGET_DENIED: ${reason}`);
+    };
     if (goal.goal_id !== null) {
-      const unitID = authorization.taskID;
-      const repairResume = operatorContractRepairResumes.get(root);
       const unitBound = unitID !== undefined && (goal.outstanding_reservations.some((reservation) =>
         reservation.unit_id === unitID && reservation.session_id === identity.parentID) ||
         (repairResume?.unitID === unitID && repairResume.childSessionID === toolInput.sessionID && repairResume.callID !== null));
-      const criteria = goal.acceptance_contract?.criteria.filter((criterion) =>
-        criterion.validation_command === rawCommand && criterion.expected_outcome === "pass") ?? [];
-      const denyValidation = (reason: string): Error => {
-        goalValidationDefects.add(toolInput.sessionID);
-        return new Error(`SORTIE_VALIDATION_BUDGET_DENIED: ${reason}`);
-      };
       if (!unitBound) throw denyValidation("requirement-unbound");
       // Exact generation and formatting checks may support acceptance without proving a criterion.
-      if (criteria.length === 0) return;
+      if (criteria.length === 0 && !correction) return;
+    }
+    // Preserve admission checks before the host Git side effect. Its commit hooks must finish
+    // BEFORE pinning the actual checked candidate; refresh the already captured recipe only.
+    const committed = authorization.expiresAt > Date.now() && await input.runtimeBridge?.beforeValidationSnapshot?.(
+      authorization.rootSessionID, toolInput.sessionID, rawCommand);
+    const current = committed ? await refreshProtectedSnapshot(authorization.projectRoot, admittedSnapshot.binding) : admittedSnapshot;
+    if (!current) return;
+    const snapshot = { ...admittedSnapshot, ...current };
+    if (goal.goal_id !== null && criteria.length > 0) {
       const requestedFull = criteria.some((criterion) => criterion.proof_scope === "requested-full");
       const coordinatorOwned = requestedFull && unitID !== undefined &&
-        await input.runtimeBridge?.ownsCanonicalValidation?.(root, unitID, toolInput.sessionID, rawCommand) === true;
+        await input.runtimeBridge?.ownsCanonicalValidation?.(root, unitID, toolInput.sessionID,
+          correction ? criteria[0]!.validation_command! : rawCommand) === true;
       if (requestedFull && !coordinatorOwned) throw denyValidation("owner-mismatch: coordinator-routing-unavailable");
       const profile = loaded?.validationProfile ?? DEFAULT_PLUGIN_OPTIONS.validationProfile;
       const scope = coordinatorOwned ? "full" : profile === "fast" ? "static" : profile === "assurance" ? "related" : "targeted";
@@ -1858,7 +1898,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         expected_evidence: [...new Set(criteria.flatMap((criterion) => [criterion.criterion_id, ...criterion.oracle_coverage,
           `unit:${unitID}`, "source_snapshot", "candidate", "command", "scope", "exit_code"]))],
         marginal_value: { unmet_criteria: criteria.map(criterion => criterion.criterion_id), risk_hypothesis: null },
-        reason: "acceptance" };
+        reason: "acceptance", ...(requiredExecution && dispatchCallID
+          ? { required_execution: { admission: dispatchCallID, call_id: toolInput.callID } } : {}) };
       const evidenceKey = validationEvidenceKey(request);
       const durable = goalSnapshot.records.flatMap(({ event }) =>
         event.kind === "unit.settled" || event.kind === "unit.evidence-reconciled" ? event.evidence : [])
@@ -1871,7 +1912,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         execution.outcome === "pass" && execution.immutableRef !== undefined && execution.fresh === true &&
         execution.source === snapshot.source && execution.candidate === snapshot.candidate &&
         execution.command.length === 1 && execution.command[0] === rawCommand)
-        .flatMap(execution => evidenceFromObservedExecution({ ...execution, owner,
+        .flatMap(execution => observedHostGoalEvidence({ ...execution, owner,
           endedAt: execution.endedAt!, exitCode: 0, outcome: "pass", immutableRef: execution.immutableRef!, fresh: true }, goal, unitID));
       const uniqueReconciliation = new Map<string, GoalEvidence>();
       for (const entry of [...live, ...durable]) {
@@ -1917,7 +1958,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const operationInputs = mission?.kind === "operation" && mission.execution?.commands.includes(rawCommand) &&
       resolve(input.directory, typeof args?.workdir === "string" ? args.workdir : ".") === mission.execution.directory
       ? await operationInputSnapshot(authorization.projectRoot, snapshot.binding).catch(() => undefined) : undefined;
-    const validationInputs = validation !== undefined && operationInputs === undefined
+    const validationInputs = (validation !== undefined || correction !== undefined) && operationInputs === undefined
       ? await validationInputSnapshot(authorization.projectRoot, snapshot.binding).catch(() => undefined) : undefined;
     hostGoalExecutions.set(toolInput.callID, { root, projectRoot: authorization.projectRoot,
       sessionID: toolInput.sessionID,
@@ -1926,6 +1967,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       ...(operationInputs === undefined ? {} : { operationInputs }),
       ...(validationInputs === undefined ? {} : { validationInputs }),
       owner: validation?.request.owner ?? "worker", validation,
+      ...(correction ? { correction } : {}),
       ...(reusedEvidence === undefined ? {} : { reusedEvidence }) });
   }
 
@@ -1969,6 +2011,17 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       ...(refreshed === undefined ? {} : { source: refreshed.source, candidate: refreshed.candidate }),
       startedAt: observedStartedAt, endedAt, exitCode: exitCode ?? null,
       ...(outcome === undefined ? {} : { outcome }), ...(immutableRef === undefined ? {} : { immutableRef }), fresh });
+    if (execution.correction) {
+      await input.runtimeBridge?.recordReviewerCorrectionCheck?.(execution.root, execution.correction.taskID, {
+        dispatchCallID: execution.correction.dispatchCallID, childSessionID: execution.sessionID, callID: execution.callID,
+        command: execution.correction.commands, startedAt: observedStartedAt, endedAt, exitCode: exitCode ?? null,
+        binding: execution.binding, source: refreshed?.source ?? execution.source, candidate: refreshed?.candidate ?? execution.candidate,
+        fresh: fresh && outcome === "pass",
+        ...(execution.validationInputs !== undefined && refreshed &&
+          (refreshed.source !== execution.source || refreshed.candidate !== execution.candidate)
+          ? { generatedInputs: execution.validationInputs } : {}),
+      });
+    }
   }
 
   async function nativeUnitCost(child: string | undefined, startedAt?: string): Promise<number | null> {
@@ -2352,6 +2405,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     readonly records?: Awaited<ReturnType<RunFlightLedger["readGoal"]>>["records"];
   }> {
     const outcome = terminalRunOutcome(text);
+    if (await input.nativeBackground?.awaiting(sessionID)) {
+      return { outcome, goal: await currentGoal(sessionID).catch(() => undefined), receipt: undefined, delivery: "running" };
+    }
     if (outcome === undefined || !isCoordinatorSession(sessionID)) {
       return { outcome, goal: undefined, receipt: undefined, delivery: "ready" };
     }
@@ -2415,6 +2471,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       return text;
     }
     const goal = await currentGoal(sessionID).catch(() => undefined);
+    if (await input.nativeBackground?.awaiting(sessionID)) return replaceTerminalStatus(text,
+      "status: IN_PROGRESS — owned native background child running; awaiting actual completion wakeup")
+      .replace(INTERNAL_ROOT_INTERRUPTION, "goal_control: background execution remains active: $1");
     if (goal === undefined || goal.goal_id === null || goal.receipt !== null) return text;
     return replaceTerminalStatus(text,
       "status: IN_PROGRESS — local/process/step continuation remains active in the same session")
@@ -2754,7 +2813,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           : execution.immutableRef !== undefined))
       .flatMap(execution => execution.reusedEvidence !== undefined
         ? execution.reusedEvidence
-        : execution.exitCode === undefined || execution.outcome === undefined ? [] : evidenceFromObservedExecution({
+        : execution.exitCode === undefined || execution.outcome === undefined ? [] : observedHostGoalEvidence({
           ...execution, immutableRef: execution.immutableRef!, endedAt: execution.endedAt!, fresh: execution.fresh!,
           exitCode: execution.exitCode, outcome: execution.outcome }, state, reservation.unitID));
     const hostEvidence = [...new Map(observedEvidence.map(entry => [entry.evidence_id, entry])).values()];
@@ -2775,15 +2834,17 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       ["failed", "interrupted", "cancelled"].includes(String(childOutcome));
     const interrupted = metadata?.status === "cancel" || metadata?.status === "cancelled" ||
       output.status === "cancel" || output.status === "cancelled" || ["interrupted", "cancelled"].includes(String(childOutcome));
-    const validated = !terminalFailed && !interrupted && acceptedEvidence.length > 0;
-    const settlementEvidence = terminalFailed || interrupted ? [] : acceptedEvidence;
+    const correctionChecks = childSessionID && !terminalFailed && !interrupted
+      ? await input.runtimeBridge?.reviewerCorrectionValidation?.(reservation.root, callID, childSessionID, reservation.started) : undefined;
+    const validated = !terminalFailed && !interrupted && acceptedEvidence.length > 0 && correctionChecks?.ready !== false;
+    const settlementEvidence = terminalFailed || interrupted || correctionChecks?.ready === false ? [] : acceptedEvidence;
     const hostBindingDefect = childSessionID !== undefined && [...(bindingDenials.get(reservation.root)?.values() ?? [])]
       .some((candidateDenials) => [...candidateDenials.values()].includes(childSessionID));
     const failedAcceptanceExecution = [...hostGoalExecutions.values()].find((execution) =>
       execution.root === reservation.root && execution.sessionID === childSessionID &&
       execution.endedAt !== undefined && Date.parse(execution.startedAt) >= reservation.started - 1000 &&
       execution.outcome === "fail");
-    const processDefect = failedAcceptanceExecution === undefined && (childSessionID === undefined || hostBindingDefect ||
+    const processDefect = !correctionChecks?.failure && failedAcceptanceExecution === undefined && (childSessionID === undefined || hostBindingDefect ||
       goalValidationDefects.has(childSessionID) || !validated);
     const resultClass = validated ? "acceptance" : interrupted ? "interrupted" : processDefect ? "process-defect" : "acceptance";
     await ledger.appendGoal({ kind: "unit.settled", at: new Date().toISOString(),
@@ -2799,7 +2860,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       ...(childSessionID === undefined ? {} : { childSessionID }),
       disposition: validated ? "succeeded" : interrupted ? "cancelled" : "failed",
       evidence: settlementEvidence, resultClass, nativeOutcome: terminalFailed || interrupted ? "failed" : "completed",
-      ...(resultClass === "acceptance" && failedAcceptanceExecution !== undefined ? { failure: {
+      ...(correctionChecks?.failure ? { failure: correctionChecks.failure } : resultClass === "acceptance" && failedAcceptanceExecution !== undefined ? { failure: {
         command: failedAcceptanceExecution.command.slice(0, 8), outcome: "fail" as const,
         exitCode: failedAcceptanceExecution.exitCode ?? null,
       } } : {}),
@@ -2859,7 +2920,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       .filter(execution => execution.root === root && execution.sessionID === request.childSessionID && execution.endedAt !== undefined &&
         execution.exitCode === 0 && execution.outcome === "pass" && execution.immutableRef !== undefined && execution.fresh === true &&
         execution.source === current.source && execution.candidate === current.candidate)
-      .flatMap(execution => evidenceFromObservedExecution({ ...execution, endedAt: execution.endedAt!, exitCode: 0,
+      .flatMap(execution => observedHostGoalEvidence({ ...execution, endedAt: execution.endedAt!, exitCode: 0,
         outcome: "pass", immutableRef: execution.immutableRef!, fresh: true }, goal, request.unitID))
       .filter(entry => validGoalEvidence(entry, goal));
     if (liveEvidence.length > 0) {
@@ -4997,7 +5058,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   async function inspect(
     path: string,
     sessionID: string | undefined,
-    options: { readonly report?: boolean; readonly rescueSessionID?: string; readonly readHash?: string } = {},
+    options: { readonly report?: boolean; readonly rescueSessionID?: string; readonly expectedHandoffHash?: string } = {},
   ): Promise<InspectedContractIdentity | undefined> {
     const unregistered = (code: string): void => {
       if (!options.report) return;
@@ -5026,7 +5087,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     let handoffHash: string;
     try {
       const pinned = await readPinnedJson(absolutePath, INPUT_LIMITS.handoff);
-      if (options.readHash !== undefined && pinned.hash !== options.readHash) throw new HandoffDeniedError("contract-invalid", path, {
+      if (options.expectedHandoffHash !== undefined && pinned.hash !== options.expectedHandoffHash) throw new HandoffDeniedError("contract-invalid", path, {
           defects: [contractDefect("handoff", "/", "handoff_read_identity_changed")],
         });
       value = pinned.value;
@@ -5212,7 +5273,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     sessionID: string,
     projectRoot: string,
     manifestPathArgument: string,
-    readHash?: string,
+    expectedHandoffHash?: string,
     registeredManifestHash?: string,
   ): Promise<string> {
     const remedies: Record<string, { recoverable: boolean; remedy: string }> = {
@@ -5363,10 +5424,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       };
       let handoffValue: unknown;
       try {
-        if (readHash === undefined) handoffValue = await readJson(inspectedEntry.handoffPath, INPUT_LIMITS.handoff);
+        if (expectedHandoffHash === undefined) handoffValue = await readJson(inspectedEntry.handoffPath, INPUT_LIMITS.handoff);
         else {
           const pinnedHandoff = await readPinnedJson(inspectedEntry.handoffPath, INPUT_LIMITS.handoff);
-          if (pinnedHandoff.hash !== readHash) return denyHandoffMismatch({ readHash, currentHash: pinnedHandoff.hash }, [
+          if (pinnedHandoff.hash !== expectedHandoffHash) return denyHandoffMismatch({ expectedHandoffHash, currentHash: pinnedHandoff.hash }, [
             contractDefect("handoff", "/", "handoff_read_identity_changed"),
           ]);
           handoffValue = pinnedHandoff.value;
@@ -5873,6 +5934,20 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     clearSessionLinks(sessionID);
   }
 
+  /** The pin is either the approved admission identity or an actual completed full Read snapshot.
+   * This inspects/binds authority only; it does not claim the model has read the handoff. */
+  async function activateMissionBinding(sessionID: string, handoffPath: string,
+    binding: NonNullable<Awaited<ReturnType<NonNullable<RuntimeBridge["missionReadBinding"]>>>>): Promise<Record<string, unknown>> {
+    const key = `${sessionID}\u0000${handoffPath}`;
+    await inspectionOperations.get(key)?.catch(() => undefined);
+    const cached = inspected.get(key);
+    if (cached?.handoffHash !== binding.handoffHash || cached.manifestHash !== binding.manifestHash) {
+      await inspect(handoffPath, sessionID, { expectedHandoffHash: binding.handoffHash });
+    }
+    return JSON.parse(await bindWriteGate(sessionID, binding.projectRoot, binding.manifestPath,
+      binding.handoffHash, binding.manifestHash));
+  }
+
   async function inspectSuccessfulRead(toolInput: TaskToolExecuteAfterInput, output: TaskResultRepairOutput): Promise<void> {
     if (toolInput.tool.toLowerCase() !== "read" || toolInput.sessionID === undefined) return;
     if (output.status !== undefined && output.status !== "completed") return;
@@ -5891,30 +5966,19 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       append({ status: "denied", reason: "handoff-mismatch", remedy: "Correct the registered handoff or its operation manifest, then read the handoff again." });
       return;
     }
-    // Join the before-read inspection for concurrent legacy manual binds. Reuse it
-    // only for the same completed native snapshot; bind rechecks freshness as usual.
     const previous = inspectionOperations.get(key);
-    if (binding && previous) await previous.catch(() => undefined);
-    const cached = inspected.get(key);
-    const reuse = binding && cached?.handoffHash === toolInput.nativeReadHash && cached?.manifestHash === binding.manifestHash;
-    const operation = binding && !reuse
-      ? inspect(absolutePath, toolInput.sessionID, { readHash: toolInput.nativeReadHash }).then(() => undefined)
-      : reuse ? Promise.resolve() : previous ?? inspect(absolutePath, toolInput.sessionID).then(() => undefined);
-    inspectionOperations.set(key, operation);
     try {
-      await operation;
       if (binding) {
-        const result = JSON.parse(await bindWriteGate(toolInput.sessionID, binding.projectRoot, binding.manifestPath,
-          toolInput.nativeReadHash, binding.manifestHash));
+        const result = await serializeChatTransition(toolInput.sessionID, () => activateMissionBinding(toolInput.sessionID!, absolutePath, binding));
         append(result.status === "bound" ? { status: "ready" } : result);
-      }
+      } else await (previous ?? inspect(absolutePath, toolInput.sessionID));
     } catch (error) {
       if (!binding) throw error;
       append({ status: "denied", reason: error instanceof HandoffDeniedError || error instanceof PluginInputError
         ? error.reason : "binding-failed", remedy: error instanceof Error ? error.message : String(error),
         ...(error instanceof HandoffDeniedError ? { defects: error.defects } : {}) });
     } finally {
-      if (inspectionOperations.get(key) === operation) inspectionOperations.delete(key);
+      if (inspectionOperations.get(key) === previous) inspectionOperations.delete(key);
     }
   }
 
@@ -6589,8 +6653,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       const terminal = runOutcome === undefined || !isCoordinatorSession(textInput.sessionID)
         ? undefined
         : await terminalGoalFromHostText(textInput.sessionID, textOutput.text);
-      if (runOutcome === "DONE" && terminal?.delivery === "running") {
-        textOutput.text = replaceDoneTerminalStatus(textOutput.text,
+      if (terminal?.delivery === "running") {
+        textOutput.text = replaceTerminalStatus(textOutput.text,
           "status: IN_PROGRESS — durable delivery active; same sessionでjoinまたはstale reconcileが必要");
       } else if (runOutcome === "DONE" && terminal?.receipt === undefined &&
         terminal?.goal !== undefined && terminal.goal.goal_id !== null) {
@@ -7297,6 +7361,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         const taskRole = isRecord(output.args) && typeof output.args.subagent_type === "string"
           ? output.args.subagent_type
           : undefined;
+        const correctionDispatch = toolInput.tool === "task" && taskRole === REVIEWER_AGENT && isRecord(output.args) &&
+          await input.runtimeBridge?.ownsReviewerCorrectionDispatch?.(toolInput.sessionID, toolInput.callID,
+            handoffValue(handoffEntries(String(output.args.prompt ?? "")), ["task_id"]) ?? "") === true;
+        const implementationDispatch = taskRole !== undefined && (IMPLEMENTATION_AGENTS.has(taskRole) || correctionDispatch);
         const role = consultationAgent(taskRole);
         const consultationFallbackAuthorized = role !== undefined &&
           consultationRetries.get(consultationRetryKey(toolInput.sessionID, role))?.phase === "pending";
@@ -7306,7 +7374,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         let machineBoundCoordinator: ParallelDispatchCoordinator | undefined;
         let machineBoundSnapshot: ParallelDispatchSnapshot | undefined;
         let validatedRootAcceptance: AcceptanceContinuityLedger | undefined;
-        if (toolInput.tool === "task" && taskRole !== undefined && IMPLEMENTATION_AGENTS.has(taskRole) &&
+        if (toolInput.tool === "task" && implementationDispatch &&
           isRecord(output.args)) {
           await ensureLoaded();
           const assetVersionStatus = await pinAssetVersion(toolInput.sessionID);
@@ -7594,7 +7662,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
             counts.dispatched - currentContribution, counts.running - currentContribution, counts.total);
           parallelWorkerAuthorized = true;
         }
-        if (toolInput.tool === "task" && taskRole !== undefined && IMPLEMENTATION_AGENTS.has(taskRole) &&
+        if (toolInput.tool === "task" && implementationDispatch &&
           isRecord(output.args)) {
           // Declaration admission precedes routing state and reservation. A concrete field denial can
           // therefore be repaired by a corrected Task call in this same coordinator turn.
@@ -7604,7 +7672,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         // Accounting is provisional until this dispatch is fully admitted. A later denial such as a
         // budget stop must release the serial slot, or no worker could be dispatched or resumed again.
         const workerAccounting = fastLane.snapshotWorkerAccounting(toolInput.sessionID);
-        if (toolInput.tool === "task" && isRecord(output.args) && output.args.subagent_type === REVIEWER_AGENT &&
+        if (!correctionDispatch && toolInput.tool === "task" && isRecord(output.args) && output.args.subagent_type === REVIEWER_AGENT &&
             typeof output.args.prompt === "string" && /^\s*review_phase:\s*(verification|final)\s*$/mu.test(output.args.prompt) &&
             !fastLane.hasReviewLineage(toolInput.sessionID, output.args.prompt) && isCoordinatorSession(toolInput.sessionID)) {
           const reviewGoal = await goalLedger(toolInput.sessionID).then(ledger => ledger.readGoal());
@@ -7630,7 +7698,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           prompts.push(...await input.runtimeBridge?.completedReviewPrompts?.(toolInput.sessionID, output.args.prompt) ?? []);
           fastLane.restoreReviewLineage(toolInput.sessionID, output.args.prompt, prompts);
         }
-        const resumedWorkerSessionID = fastLane.beforeTool(toolInput.sessionID, toolInput.tool, output.args, {
+        // Account the correction as implementation, without changing the native agent or Task input.
+        const accountingArgs = correctionDispatch && isRecord(output.args) ? { ...output.args, subagent_type: SERIAL_WORKER_AGENT } : output.args;
+        const resumedWorkerSessionID = fastLane.beforeTool(toolInput.sessionID, toolInput.tool, accountingArgs, {
           readonlyDiagnosisAuthorized: readonlyDiagnosis,
           consultationFallbackAuthorized,
           parallelWorkerAlreadyBound,
@@ -7645,7 +7715,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           throw new Error("operator-contract-repair-resume-identity-mismatch");
         }
         try {
-        if (toolInput.tool === "task" && taskRole !== undefined && IMPLEMENTATION_AGENTS.has(taskRole) &&
+        if (toolInput.tool === "task" && implementationDispatch &&
           isRecord(output.args) && !repairResume) {
           await reserveGoalDispatch(toolInput.sessionID, toolInput.callID,
             typeof output.args.prompt === "string" ? output.args.prompt : "");
@@ -7666,7 +7736,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           }
           if (!repairResume) recoverableWorkerChildren.delete(resumedWorkerSessionID);
         }
-        if (toolInput.tool === "task" && taskRole !== undefined && IMPLEMENTATION_AGENTS.has(taskRole)) {
+        if (toolInput.tool === "task" && implementationDispatch) {
           if (readonlyDiagnosis && isRecord(output.args)) await claimDiagnosisTask(toolInput.sessionID, toolInput.callID, output.args, true);
           bootstrapRequired = false;
           bootstrapCompleted = true;
@@ -7743,10 +7813,12 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         ) throw new WriteDeniedError("parallel-validation", "<parallel-unit>");
         const declaredSequence = command === undefined || authorization === undefined ? undefined
           : canonicalDeclaredValidationSequence(command, authorization.validationCommands);
+        const declaredDirectory = !isRecord(output.args) || typeof output.args.workdir !== "string" ||
+          resolve(input.directory, output.args.workdir) === resolve(input.directory);
         const settledPassNotice = settledPassNotices.get(toolInput.callID);
         if (activeState?.parallel !== "valid" && settledPassNotice?.sessionID === toolInput.sessionID &&
           isRecord(output.args) && output.args.command === settledPassNotice.command) return;
-        if (activeState?.parallel !== "valid" && declaredSequence !== undefined) return;
+        if (activeState?.parallel !== "valid" && declaredSequence !== undefined && declaredDirectory) return;
         if (activeState?.parallel === "valid") {
           const extracted = extractWritePaths(toolInput.tool, output.args);
           const relativeWrite = extracted.paths.find((path) => !isAbsolute(path));
@@ -7754,10 +7826,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         }
         const missionWorker = await input.runtimeBridge?.allowsInvestigativeShell?.(toolInput.sessionID) === true;
         if (missionWorker) {
-          const extracted = extractWritePaths(toolInput.tool, output.args);
+          const extracted = extractWritePaths(toolInput.tool, output.args, input.directory);
+          if (extracted.paths.length) await input.runtimeBridge?.assertMissionWrite?.(toolInput.sessionID, extracted.paths);
           const nativeFile = /^(?:write|edit)(?:$|[_-])/iu.test(toolInput.tool) || /patch/iu.test(toolInput.tool);
           if (nativeFile && !extracted.ambiguous && extracted.paths.length) {
-            await input.runtimeBridge?.assertMissionWrite?.(toolInput.sessionID, extracted.paths);
             const missing: string[] = [];
             for (const path of extracted.paths) {
               const actual = nativeFile ? resolve(input.directory, path) : path;
@@ -7772,7 +7844,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           }
         }
         await (sessionAuthorizations.get(toolInput.sessionID)?.gate ?? gate).check(toolInput, output,
-          { investigativeShell: ["bash", "shell"].includes(toolInput.tool) && missionWorker });
+          { investigativeShell: ["bash", "shell"].includes(toolInput.tool) && missionWorker,
+            assertWritePaths: paths => input.runtimeBridge?.assertMissionWrite?.(toolInput.sessionID, paths) ?? Promise.resolve() });
       } catch (error) {
         activeState?.inFlightCalls.delete(toolInput.callID);
         if (error instanceof WriteDeniedError) goalValidationDefects.add(toolInput.sessionID);
@@ -8398,7 +8471,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         cost_status: state.consumed_cost_usd === null ? "unknown-usage" : reserved > 0 ? "in-flight-not-final" : "settled",
         cost_source: "native-usage-price-table",
         cost_scope: "worker-only", campaign_remaining_usd: null,
-        cost_note: "Worker token-price estimates from complete native usage; missing requests remain unknown and are reconciled on later status. Excludes orchestration/review and external campaign spend. Zero settled cost does not mean free execution." };
+        cost_note: "Implementation token-price estimates from complete native usage; scoped Reviewer corrections use this same Worker-unit ledger. Missing requests remain unknown and are reconciled on later status. Excludes orchestration/read-only review and external campaign spend. Zero settled cost does not mean free execution." };
       return snapshot;
     },
     extendMissionUnitBudget: (root, maxUnits) => serializeChatTransition(root, async () => {
@@ -8423,6 +8496,39 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       const reserved = updated.outstanding_reservations.length;
       return { status: changed ? "extended" : "unchanged", max_units: updated.budget!.max_units, consumed_units: updated.consumed_units,
         reserved_units: reserved, remaining_units: updated.budget!.max_units - updated.consumed_units - reserved };
+    }),
+    restoreReviewerCorrectionChild: async (root, child, callID, taskID) => {
+      if (!await input.runtimeBridge?.ownsReviewerCorrection?.(child) ||
+          !await input.runtimeBridge?.ownsReviewerCorrectionDispatch?.(root, callID, taskID)) throw new Error("mission-review-correction-grant-stale");
+      if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) throw new Error("operator-coordinator-required");
+      const native = await hostSessionIdentity(child);
+      if (native?.agent !== REVIEWER_AGENT || native.parentID !== root) throw new Error("mission-review-correction-child-mismatch");
+      if (activeSessionStatus(child) === "active") return;
+      rememberParent(child, root);
+      sessionRoots.set(child, root);
+      sessionTaskIDs.set(child, taskID);
+      activateSession(child);
+    },
+    activateMissionWorker: (root, child, handoffPath, admission) => serializeChatTransition(child, async () => {
+      // Resolve CURRENT durable pins inside the existing session lane. A retried prompt must
+      // retain legitimate scope growth, not replay the original manifest hash from dispatch.
+      const binding = await input.runtimeBridge?.missionReadBinding?.(root, child, handoffPath, admission);
+      if (!binding || coordinatorRootForSession(child) !== root) throw new Error("mission-activation-grant-stale");
+      const previous = sessionAuthorizations.get(child);
+      if (previous && (previous.taskID !== admission.taskID || previous.dispatchCallID !== admission.callID)) {
+        const released = JSON.parse(await releaseWriteGate(child));
+        if (released.status === "denied") throw new Error(`mission-activation:${released.reason}`);
+        releaseSessionEnforcement(child);
+        activateSession(child);
+      }
+      const result = await activateMissionBinding(child, handoffPath, binding);
+      if (result.status !== "bound") throw new Error(`mission-activation:${String(result.reason)}`);
+      // Cancellation can settle this dispatch while control-file I/O is pending. Do not
+      // leave its just-bound writer live; native failure/return owns the ordinary settlement.
+      if (!await input.runtimeBridge?.ownsMissionDispatch?.(root, admission.callID, admission.taskID)) {
+        await releaseWriteGate(child);
+        throw new Error("mission-activation-grant-stale");
+      }
     }),
       missionWorkerTerminal: async (root, terminal, writeScopes) => {
         const childSessionID = terminal.childSessionID;

@@ -45,7 +45,7 @@ export interface MissionAttempt {
   predecessorAttemptID?: string | null;
   /** Fingerprint of the settled scoped candidate against which a later Rescue is proposed. */
   candidateID?: string;
-  kind: "implementation" | "normal_remediation" | "astra_rescue";
+  kind: "implementation" | "normal_remediation" | "astra_rescue" | "reviewer_correction";
   status: "pending" | "dispatched" | "succeeded" | "failed" | "cancelled" | "unconfirmed";
   callID?: string;
   childSessionID?: string;
@@ -88,6 +88,21 @@ export interface MissionLaunchConditions {
   applies_to: string;
   recordedAt?: string;
 }
+/** Native terminal self-recheck by the correction author, explicitly not independent approval. */
+export interface MissionSelfRecheck {
+  runID: string;
+  source: string;
+  /** Candidate source/check identity, excluding optional excerpt presentation. */
+  candidateSource?: string;
+  author: string;
+  callID: string;
+  promptID: string;
+  messageID: string;
+  nativeOutcome: "completed";
+  result: string;
+  unresolvedFindings: string[];
+  residualMajor?: { reachable_path: string; consequence: string };
+}
 export interface OperatorMission {
   version: "0.12";
   id: string;
@@ -127,15 +142,24 @@ export interface OperatorMission {
   plans: number;
   progress: { unit: string; title: string; status: string; at: string }[];
   submission: { status: "ready" | "needs-decision" | "blocked"; summary: string } | null;
-  review?: { runID: string; risk: string[]; source: string; task: OperatorTask | null;
+  review?: { runID: string; risk: string[]; source: string; candidateSource?: string; task: OperatorTask | null;
     callID?: string;
     evidence?: MissionEvidenceExcerpt[];
     requestFingerprint?: string;
-    verdict: "pending" | "PASS" | "findings" | "evidence-gaps" | "skipped-low-risk"; result?: string; child?: string;
+    verdict: "pending" | "PASS" | "findings" | "evidence-gaps" | "skipped-low-risk" | "self-rechecked"; result?: string; child?: string;
+    mode?: "independent" | "self-recheck";
+    admittedAt?: number;
+    promptID?: string;
+    selfRecheck?: MissionSelfRecheck;
     /** Completed, independent initial review for this mission, not merely an inherited child ID. */
     initialPrompt?: string;
     /** Observed evidence-only reviews; reporting only, never an acceptance threshold. */
     evidenceGapReviews?: number };
+  /** Retained independently of later review generations; authors never become independent reviewers. */
+  corrections?: { author: string; reviewIdentity: string; priorRunID: string; runID: string;
+    priorSource: string; findings: string; initialPrompt: string; baseline?: string;
+    status: "prepared" | "running" | "ready" | "failed" | "cancelled";
+    selfRecheck?: MissionSelfRecheck }[];
 }
 
 export const MISSION_CONSULTATION_LIMIT = 32;
@@ -158,8 +182,33 @@ export function missionReviewVerdict(text: string): "PASS" | "evidence-gaps" | "
 
 /** Whether the recorded review permits submission and acceptance of the current candidate. */
 export function missionReviewAccepted(review: NonNullable<OperatorMission["review"]>): boolean {
+  if (review.verdict === "self-rechecked") {
+    const checked = review.selfRecheck;
+    return review.mode === "self-recheck" && !!checked && checked.runID === review.runID &&
+      checked.source === review.source && checked.author === review.child && checked.callID === review.callID &&
+      checked.promptID === review.promptID && !!checked.messageID && checked.nativeOutcome === "completed" &&
+      checked.unresolvedFindings.length === 0 && !checked.residualMajor;
+  }
+  if (review.mode === "self-recheck") return false;
   return review.verdict === "PASS" || review.verdict === "skipped-low-risk" ||
     review.verdict === "evidence-gaps";
+}
+
+/** A short native report, not a tag/hash-based second-review policy or an approval checklist. */
+export function missionSelfRecheckReport(text: string, source: string, hostBound = false): Pick<MissionSelfRecheck, "unresolvedFindings" | "residualMajor"> | undefined {
+  if (!/^\s*SELF_RECHECKED(?:\s|$)/u.test(text)) return undefined;
+  const line = /^self_recheck: (.+)$/mu.exec(text)?.[1];
+  try {
+    const report: unknown = JSON.parse(line ?? "");
+    if (!record(report) || (report.candidate !== source && !(hostBound && report.candidate === "current-validated")) || !Array.isArray(report.unresolved_findings) ||
+        !report.unresolved_findings.every(item => typeof item === "string" && item.trim()) ||
+        !(report.residual_major === null || record(report.residual_major) &&
+          typeof report.residual_major.reachable_path === "string" && report.residual_major.reachable_path.trim() &&
+          typeof report.residual_major.consequence === "string" && report.residual_major.consequence.trim())) return undefined;
+    return { unresolvedFindings: report.unresolved_findings,
+      ...(record(report.residual_major) ? { residualMajor: { reachable_path: report.residual_major.reachable_path as string,
+        consequence: report.residual_major.consequence as string } } : {}) };
+  } catch { return undefined; }
 }
 
 export function missionExecutionStatus(mission: OperatorMission): "not-required" | "not-started" | "running" | "execution-failed" | "executed" {
@@ -212,6 +261,9 @@ export class OperatorMissionRuntime {
   constructor(readonly projectRoot: string, readonly profile: RuntimeProfile) {}
   private file(root: string, suffix = ""): string {
     return join(this.projectRoot, this.profile.stateDirectory, "missions", `${digest(root)}${suffix}.json`);
+  }
+  correctionReference(root: string, reviewIdentity: string): string {
+    return JSON.stringify({ path: this.file(root), field: "corrections[]", review_identity: reviewIdentity });
   }
   private async load<T>(file: string): Promise<T | undefined> {
     try { return JSON.parse(await readFile(file, "utf8")) as T; }
@@ -489,9 +541,8 @@ export function missionPlan(mission: OperatorMission, raw: unknown, projectRoot?
       throw new Error(`mission-unit-${index + 1}: validation must contain exact commands; final command proves the unit`);
     }
     const validation = (value.validation as string[]).map(missionValidationCommand);
-    // Retain last occurrences so removing a redundant check preserves the final proof command.
     return { id: `unit-${index + 1}`, title: line("title"), objective: line("objective"), read: paths("read"), write: paths("write"),
-      validation: validation.filter((command, i) => validation.lastIndexOf(command) === i),
+      validation,
       acceptance_indices: [...new Set(ids.map(id => mission.requirements.findIndex(item => item.id === id)))] };
   });
   // The serial engine counts new proof milestones. Units sharing the same final suite are one
@@ -504,7 +555,7 @@ export function missionPlan(mission: OperatorMission, raw: unknown, projectRoot?
     same.read = [...new Set([...same.read, ...unit.read])];
     same.write = [...new Set([...same.write, ...unit.write])];
     same.acceptance_indices = [...new Set([...same.acceptance_indices, ...unit.acceptance_indices])];
-    same.validation = [...new Set([...same.validation.slice(0, -1), ...unit.validation])];
+    same.validation = [...same.validation, ...unit.validation];
   }
   const uncovered = mission.requirements.filter((_, i) => !units.some(unit => unit.acceptance_indices.includes(i)));
   if (uncovered.length) throw new Error(`mission-uncovered: ${uncovered.map(item => item.id).join(", ")}; retain all requirements in the unit plan`);
@@ -524,7 +575,7 @@ export function missionPlan(mission: OperatorMission, raw: unknown, projectRoot?
 
 /** Compact provenance, not a new acceptance verdict or a substitute for original-request comparison. */
 export async function missionAcceptanceSummary(mission: OperatorMission, run: OperatorState | undefined,
-  operators: OperatorRuntime, observe?: (validation: readonly string[], child: string | null) => Promise<unknown>): Promise<Record<string, unknown>> {
+  operators: OperatorRuntime, observe?: (validation: readonly string[], child: string | null, notBefore?: number) => Promise<unknown>): Promise<Record<string, unknown>> {
   const current = run?.runID === mission.runID ? run : undefined;
   const history = current ? await operators.acceptanceHistory(current, [...new Set((mission.attempts ?? []).map(item => item.runID))])
     : { status: "unavailable", runs: [], reason: "current-mission-run-unavailable" };
@@ -562,7 +613,8 @@ export async function missionAcceptanceSummary(mission: OperatorMission, run: Op
         authority: "native declared-command observations; not additional formal evidence or current freshness" };
       try {
         if (!observe || !unit.childSessionID) throw new Error("native-worker-history-unavailable");
-        return { ...provenance, status: "available", observations: await observe(unit.unit.validation, unit.childSessionID) };
+        return { ...provenance, status: "available", observations: await observe(unit.unit.validation, unit.childSessionID,
+          unit.reviewerCorrection ? Date.parse(unit.reviewerCorrection.admittedAt ?? item.state.createdAt) : undefined) };
       } catch (error) {
         return { ...provenance, status: "unavailable", reason: error instanceof Error ? error.message : String(error) };
       }
@@ -576,13 +628,18 @@ export async function missionAcceptanceSummary(mission: OperatorMission, run: Op
       ...history.runs.flatMap(item => validation(item.state, item.path, true))],
     native_declared_validation: nativeValidation,
     independent_review: mission.review ? { run_id: mission.review.runID, current_run: mission.review.runID === current?.runID,
+      independent: missionReviewIndependent(mission, mission.review.child), mode: mission.review.mode ?? "independent",
       reviewer_session_id: mission.review.child ?? null, source_fingerprint: mission.review.source,
-      verdict: mission.review.verdict, result: mission.review.result ?? null,
+      verdict: mission.review.verdict, result: mission.review.result ?? null, self_recheck: mission.review.selfRecheck ?? null,
       freshness: "not established by run ID; existing source comparison remains required" } : null,
     delivery: { submission: mission.submission, git_lifecycle: current?.gitLifecycle ?? null,
       observation_source: "persisted operator Git lifecycle and formal validation records; no new Git inspection",
       clean: "not independently observed by this projection" },
     interpretation: "Compare original requests with the submitted candidate and actual evidence. Historical PASS is not current PASS. Inspect concrete gaps, not routine archive searches or full source rereads. Existing completion and Review guards still apply." };
+}
+
+export function missionReviewIndependent(mission: OperatorMission, child: string | undefined): boolean {
+  return child !== undefined && !(mission.corrections ?? []).some(correction => correction.author === child);
 }
 
 export function missionPacket(mission: OperatorMission, run?: OperatorState): Record<string, unknown> {
@@ -598,9 +655,9 @@ export function missionPacket(mission: OperatorMission, run?: OperatorState): Re
       note: "Historical results and spend are retained; they do not complete the current requirements." } } : {}),
      requirements: mission.requirements, original_request_refs: mission.requests.map(item => `user:${item.id}`),
     launch_conditions: mission.launchConditions ?? [], prohibited_write: mission.prohibitedWrite ?? [],
-    accounting_scope: "Worker units are not benchmark attempts. Host budget is Worker-only; orchestration, Review and external campaign costs are excluded. Launch caps are fixed conditions, not a known campaign remainder.",
+     accounting_scope: "Implementation units (Worker or scoped Reviewer correction) are not benchmark attempts. Host budget uses the existing Worker-unit ledger; orchestration, read-only Review and external campaign costs are excluded. Launch caps are fixed conditions, not a known campaign remainder.",
     submission: mission.submission, progress: mission.progress, consultations: mission.consultations ?? [],
-    attempts: mission.attempts ?? [], ...(mission.rescue ? { rescue: mission.rescue } : {}),
+    attempts: mission.attempts ?? [], corrections: (mission.corrections ?? []).map(({ findings: _findings, initialPrompt: _prompt, ...item }) => item), ...(mission.rescue ? { rescue: mission.rescue } : {}),
     operation: { kind: mission.kind ?? "implementation", status: missionExecutionStatus(mission),
       ...(mission.execution ? { ...mission.execution } : {}) },
     execution_summary: { completed_units: run?.units.filter(unit => unit.status === "succeeded").length ?? 0,
@@ -610,6 +667,8 @@ export function missionPacket(mission: OperatorMission, run?: OperatorState): Re
       historical_failed_attempts: mission.progress.filter(unit => unit.status === "failed").length,
       accepted: mission.phase === "completed" },
     review: mission.review ? { risk_tags: mission.review.risk, verdict: mission.review.verdict,
+      independent: missionReviewIndependent(mission, mission.review.child), mode: mission.review.mode ?? "independent",
+      self_recheck: mission.review.selfRecheck ?? null,
       run_id: mission.review.runID, current_run: currentReview,
       source_fingerprint: mission.review.source, reviewer_session_id: mission.review.child ?? null,
       result: mission.review.result ?? null, evidence_gap_reviews: mission.review.evidenceGapReviews ?? 0,
@@ -626,8 +685,16 @@ export function missionPacket(mission: OperatorMission, run?: OperatorState): Re
     next_action: mission.phase === "completed" ? "Mission completed. Report the accepted result and retained review gaps; no further dispatch or completion call is needed."
       : mission.phase === "submitted" && mission.submission?.status === "ready"
        ? "Operator: use acceptance_summary to compare the submitted candidate with the verbatim original requests and actual evidence, inspect concrete gaps only, then complete_mission if satisfied. Do not routinely search archives or reread all source. Historical PASS is not current PASS. Report remaining evidence gaps; they are not a review PASS."
+      : run?.phase === "awaiting-acceptance" && mission.corrections?.some(item => item.runID === run.runID && item.status === "ready") && !reviewAccepted
+        ? mission.corrections.find(item => item.runID === run.runID)?.selfRecheck?.unresolvedFindings.length
+          ? "Known Major/Medium findings remain after self-recheck. Call repair_review for the SAME original correction owner; do not dispatch another Reviewer or accept unresolved Medium. Retain original requirements and cumulative spend."
+          : mission.corrections.find(item => item.runID === run.runID)?.selfRecheck?.residualMajor
+            ? "A concrete reachable Major risk remains after native author self-recheck. Call review_mission for a DIFFERENT Reviewer of the correction, retained findings and relevant impact; dispatch the exact returned Task if not already active. No fresh Worker or unchanged validation is required."
+            : "Correction ready; call review_mission for the SAME native author to explicitly self-recheck the retained findings, relevant impact and original requirements. Only a concrete reachable Major risk remaining after self-recheck requires a DIFFERENT Reviewer. Known Major/Medium defects still require correction. Do not restart unchanged checks or investigation; CORRECTION_READY alone is not acceptance."
       : mission.kind === "operation" && operationStatus === "running"
         ? "The declared operation is already running. Inspect its native shell/progress; do not start another Worker or run. Wait for a terminal result, or report the existing run as blocked if its completion cannot be observed."
+      : run?.phase === "awaiting-decision" && mission.corrections?.some(item => item.runID === run.runID && item.status === "failed")
+        ? "Correction validation or native execution failed. Call repair_review for a new admission in the SAME original Reviewer's native session; fix its own regression, rerun inherited checks and retain the commit/clean boundary and cumulative spend. Do not use ordinary retry, Rescue or a fresh Worker replan. Failure is never acceptance."
       : run?.phase === "awaiting-decision" ? (run.units.some(unit => unit.dispatchDenial)
         ? "Coordinator: inspect units[].dispatch_denial before changing the plan. Correct only its diagnosed cause; do not repeat an unchanged refused Task or replan for a host-state mismatch. Report an unresolved runtime mismatch with the loaded runtime identity; preserve requirements and cumulative spend."
         : run.units.some(unit => unit.status === "failed" && unit.resultClass === "acceptance" && unit.failure?.outcome === "fail" && !unit.normalRemediationUsed)
@@ -639,7 +706,7 @@ export function missionPacket(mission: OperatorMission, run?: OperatorState): Re
         ? `Requested operation is ${operationStatus}. Continue the actual operation or report its blocker; auxiliary checks and review disposition cannot complete it.`
       : run?.phase === "awaiting-acceptance" ? (reviewAccepted
           ? "Coordinator: review permits submission. Retain advisory review notes; do not repeat passed validation or review for evidence formatting. Operator performs final acceptance against the original requirements."
-          : "Coordinator: address recorded findings or obtain the required independent review, then submit_mission. Operator compares all requirements with source/evidence before complete_mission.")
+          : "Coordinator: correct known Major/Medium findings, then obtain explicit native author self-recheck (different Reviewer only for residual concrete Major risk), or initial independent review, then submit_mission. Operator compares all requirements with source/evidence before complete_mission.")
       : "Coordinator: continue the next useful unit within original requirements. Return only a completion candidate, user-only decision, or scope/budget extension." };
 }
 

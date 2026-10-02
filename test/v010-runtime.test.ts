@@ -306,7 +306,10 @@ test("preview assets coexist with stable assets and markers", async () => fixtur
   assert.doesNotMatch(reviewer, /invoke no tools|reject a missing index|mapping count|supplied artifact.*only/u);
   assert.match(reviewer, /If a missing check genuinely\naffects correctness or a requested deliverable/u);
   assert.doesNotMatch(reviewer, /Require the enumeration to name the target artifact/u);
-  assert.match(reviewer, /Start with exactly one of PASS, FINDINGS or EVIDENCE_GAPS/u);
+  assert.match(reviewer, /During review, start with exactly one of PASS, FINDINGS or EVIDENCE_GAPS/u);
+  assert.match(reviewer, /During an admitted\s+correction, finish after checks\/commit with SELF_RECHECKED/u);
+  assert.match(reviewer, /self_recheck: \{"candidate":"current-validated"/u);
+  assert.match(reviewer, /Legacy CORRECTION_READY-only uses a separate same-author\s+read-only fallback, not acceptance/u);
   assert.match(reviewer, /Report FINDINGS only for concrete major or medium defects with a material impact/u);
   assert.match(reviewer, /Do not turn minor style, wording, optional improvements or speculative edge cases into FINDINGS or EVIDENCE_GAPS/u);
   const coordinator = previewAssets.find(asset => asset.name === "dogs-coordinator")!.content;
@@ -445,7 +448,7 @@ test("preview keeps canonical game-style guidance and does not decorate unproved
   assert.equal(decoratePreviewHeadings("    ## Changes\ncode"), "    ## Changes\ncode");
 });
 
-test("preview primary closes every task turn with one machine terminal checkpoint", () => {
+test("preview primary requires machine checkpoints at actual terminal boundaries, not background acknowledgements", () => {
   const primary = previewAssets.find(asset => asset.name === "dog-operator")!.content;
   assert.ok(primary.includes(PREVIEW_TERMINAL_REPORT_POLICY.replaceAll("complete_operator", "complete_mission")));
   const stable = stableAssets.find(asset => asset.name === "dog-coordinator")!.content;
@@ -454,7 +457,9 @@ test("preview primary closes every task turn with one machine terminal checkpoin
     const fixtureText = stable.slice(start, stable.indexOf(`END_${marker}`, start) + `END_${marker}`.length);
     assert.ok(start >= 0 && primary.includes(fixtureText), `${marker} must reuse the canonical body`);
   }
-  assert.match(primary, /first non-empty line must be one\nmachine checkpoint: exactly one of DONE, INTERRUPTED, BLOCKED, or NEED_DECISION/);
+  assert.match(primary, /actually returns terminally.*must start with one\nmachine checkpoint: exactly one of DONE, INTERRUPTED, BLOCKED, or NEED_DECISION/);
+  assert.match(primary, /background launch acknowledgement.*NONTERMINAL/);
+  assert.match(primary, /Brief ordinary prose is allowed then/);
   assert.match(primary, /Never close a task turn with bare prose/);
   assert.match(primary, /DONE requires a succeeded sortie_v010_complete_mission receipt/);
   assert.match(primary, /TRUE_INTERRUPTION: user: <condition>/);
@@ -473,7 +478,8 @@ test("preview primary continues approved sequential scope and uses interactive q
   assert.match(primary, /Use estimated read\/write paths; native scope reconciliation and expand_unit cover actual outputs/u);
   assert.match(primary, /Ask through question only for a user-only choice/);
   assert.match(primary, /Resume the same work after\nthe answer/);
-  assert.match(primary, /Reviewer FINDINGS\s+instead need a corrective unit, formal validation, then fresh independent Review/u);
+  assert.match(primary, /Reviewer FINDINGS\s+instead use sortie_v010_repair_review to continue the SAME native Reviewer\/context/u);
+  assert.match(primary, /Only concrete reachable Major risk remaining\s+after self-recheck requires a DIFFERENT Reviewer/u);
   assert.match(primary, /cumulative budget increase/);
   assert.match(primary, /Only its succeeded receipt authorizes DONE/);
   assert.match(coordinator, /write-scope addition within the original request/);
@@ -2525,6 +2531,12 @@ test("fresh repair validation reopens one interrupted admission once without imp
   const ledgerPath = join(root, ".git", "sortie-dogs", "run-flight-v010",
     `${createHash("sha256").update("v010\0root").digest("hex")}.json`);
   const interruptedLedger = await RunFlightLedger.openGoal(ledgerPath);
+  assert.equal((await interruptedLedger.readGoal()).state.validation_budget.reservations.length, 0,
+    "phase-1 host commit failure precedes snapshot/admission and cannot leave an invented validation reservation");
+  // Complete the repaired host Git boundary, then interrupt an actually admitted validation.
+  // The resumed admission below still must reopen that exact candidate once without Worker spend.
+  await hooks["tool.execute.before"]!({ tool: "bash", sessionID: "worker", callID: "interrupted-validator" },
+    { args: { command: validator } });
   const interruptedSnapshot = await interruptedLedger.readGoal();
   const interruptedReservation = interruptedSnapshot.state.validation_budget.reservations[0]!;
   await interruptedLedger.appendGoal({ kind: "validation.settled", at: new Date().toISOString(),
@@ -2542,8 +2554,8 @@ test("fresh repair validation reopens one interrupted admission once without imp
 
   const now = Date.now();
   hostMessages.worker = [{ info: { role: "assistant", sessionID: "worker", finish: "stop", time: { created: now, completed: now + 1 } },
-    parts: [{ type: "tool", tool: "bash", callID: "host-commit-defect", state: { status: "error",
-      input: { command: validator }, output: "operator-git-command-failed:commit:73" } },
+    parts: [{ type: "tool", tool: "bash", callID: "interrupted-validator", state: { status: "error",
+      input: { command: validator }, output: "native validation interrupted after admission" } },
     { type: "text", text: "host process defect" }] }];
   hostMessages.root = [{ info: { role: "assistant", sessionID: "root", finish: "stop", time: { created: now, completed: now + 1 } },
     parts: [{ type: "tool", tool: "task", callID: "repair-validation-first", state: { status: "completed",

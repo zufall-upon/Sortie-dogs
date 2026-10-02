@@ -34,6 +34,12 @@ test("background Coordinator: short ack, root idle, unrelated chat, explicit onc
     const ack = { output: "Job running", metadata: { status: "running", sessionID: "coordinator" } };
     await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "coordinator-call" }, ack);
     assert.equal(ack.output, "Job running");
+    for (const text of ["Background task launched; waiting for its real wakeup.", "⚠️ **INTERRUPTED** — launch tool ended\nTRUE_INTERRUPTION: internal: background acknowledgement", "✅ **DONE** — launched"]) {
+      const response = { text };
+      await hooks["experimental.text.complete"]!({ sessionID: "root", messageID: "ack" }, response);
+      assert.doesNotMatch(response.text, /\*\*(?:INTERRUPTED|DONE)\*\*/);
+      assert.equal((await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).phase, "running");
+    }
     await hooks.event!({ event: { type: "session.idle", properties: { sessionID: "root" } } });
     const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
     const original = await missions.required("root");

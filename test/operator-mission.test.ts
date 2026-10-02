@@ -371,7 +371,7 @@ test("generated proof retains negative constraints and rejects dropped requireme
   assert.throws(() => missionPlan(mission, [{ ...unit, write: ["../escape"] }]));
 }));
 
-test("mission validation drops repeated checks while retaining the final proof command", async () => fixture(async directory => {
+test("mission validation preserves repeated required occurrences and the final proof command", async () => fixture(async directory => {
   const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
   await missions.capture("root", { id: "u1", text: "Fix and verify the result" });
   const mission = await missions.start("root", ["Fix the result", "Verify behavior"]);
@@ -379,9 +379,16 @@ test("mission validation drops repeated checks while retaining the final proof c
   const operators = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
   const run = await operators.prepareMission("root", plan);
   const manifest = JSON.parse(await readFile(run.units[0]!.manifestPath, "utf8"));
-  assert.deepEqual(manifest.validation, ["node adjacent.mjs", "node check.mjs"]);
+  assert.deepEqual(manifest.validation, ["node check.mjs", "node adjacent.mjs", "node check.mjs"]);
   assert.equal((plan.goal_declaration.criteria as { validation_command: string }[])[0]!.validation_command, "node check.mjs");
   assert.deepEqual(plan.acceptance, ["Fix the result", "Verify behavior"]);
+  const merged = missionPlan(mission, [
+    { ...unit, requirement_ids: ["R1"], validation: ["node adjacent.mjs", "node check.mjs"] },
+    { ...unit, requirement_ids: ["R2"], validation: ["node adjacent.mjs", "node check.mjs"] },
+  ]);
+  assert.equal(merged.units.length, 1, "coalescing a proof milestone does not create another execution unit");
+  assert.deepEqual(merged.units[0]!.validation, ["node adjacent.mjs", "node check.mjs", "node adjacent.mjs", "node check.mjs"],
+    "coalescing preserves each original ordered validation occurrence too");
 }));
 
 test("mission replan archives failed execution, keeps original acceptance and binds a fresh bounded scope", async () => fixture(async directory => {

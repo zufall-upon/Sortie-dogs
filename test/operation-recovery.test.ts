@@ -78,16 +78,17 @@ test("candidate preparation classifies real curl, local archive and tag observat
   }
 });
 
-test("mission shell uses native permissions while file-tool scope errors name the remedy", async () => fixture(async root => {
+test("mission shell uses native execution policy while known destinations retain common scope checks", async () => fixture(async root => {
   const gate = await createWriteGate(await createProjectPaths(root), {
     version: "0.1.0", task_id: "format-repair", read: [], write: ["output/**"], validation: [],
   });
   const shell = (command: string) => gate.check({ tool: "shell", sessionID: "worker", callID: command }, { args: { command } }, { investigativeShell: true });
   await shell("curl --progress-bar -o output/result https://example.test/result");
   await shell("curl -fLsS -o output/result https://example.test/result");
-  await shell("curl -fLsS -o other/result https://example.test/result");
+  await assert.rejects(shell("curl -fLsS -o other/result https://example.test/result"), /Use expand_unit.*retry this command in the SAME active Task/);
+  await shell("go test ./vm -run '^TestTypedBindings$' -count=1"); // Opaque program internals are native policy, not formal proof.
   await assert.rejects(gate.check({ tool: "write", sessionID: "worker", callID: "file-write" },
-    { args: { filePath: "other/result", content: "result" } }, { investigativeShell: true }), /Coordinator: expand_unit/);
+    { args: { filePath: "other/result", content: "result" } }, { investigativeShell: true }), /Use expand_unit.*retry this command in the SAME active Task/);
   await assert.rejects(gate.check({ tool: "shell", sessionID: "legacy", callID: "legacy" },
     { args: { command: "curl --progress-bar -o output/result https://example.test/result" } }), /retry=false/);
 }));

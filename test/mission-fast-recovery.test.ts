@@ -137,7 +137,7 @@ test("Fast-lane failed validation permits root micro-fix then a second direct Wo
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test("Fast-lane Reviewer FINDINGS use a corrective direct unit and a new Reviewer, never failed-validation retry", async () => {
+test("Fast-lane Reviewer FINDINGS use the SAME author correction and native self-recheck, never ordinary Worker retry", async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const directory = await mkdtemp(resolve("_testenv/mission-fast-findings-"));
   try {
@@ -146,11 +146,10 @@ test("Fast-lane Reviewer FINDINGS use a corrective direct unit and a new Reviewe
       'import { readFileSync } from "node:fs";\nif (!/^(ready|fixed)\\n$/.test(readFileSync("result.txt", "utf8"))) process.exit(1);\n');
     const agents: Record<string, { agent: string; parentID?: string; outcome?: string }> = {
       root: { agent: "dog-operator" }, worker1: { agent: "dog-worker-v010", parentID: "root" },
-      worker2: { agent: "dog-worker-v010", parentID: "root" }, reviewer1: { agent: "dog-reviewer-v010", parentID: "root" },
-      reviewer2: { agent: "dog-reviewer-v010", parentID: "root" },
+      reviewer1: { agent: "dog-reviewer-v010", parentID: "root" },
     };
-    const history: Record<string, Record<string, unknown>[]> = { reviewer1: [], reviewer2: [] };
-    const create = () => SortieDogsV010Plugin({ directory, client: { session: {
+    const history: Record<string, Record<string, unknown>[]> = { worker1: [], reviewer1: [] };
+    const create = () => SortieDogsV010Plugin({ directory, reviewerCorrectionPermissions: true, client: { session: {
       get: async ({ path }: { path: { id: string } }) => ({ data: { id: path.id, ...agents[path.id] } }),
       children: async ({ path }: { path: { id: string } }) => ({ data: Object.entries(agents)
         .filter(([, info]) => info.parentID === path.id).map(([id, info]) => ({ id, ...info })) }),
@@ -166,11 +165,13 @@ test("Fast-lane Reviewer FINDINGS use a corrective direct unit and a new Reviewe
       units: [{ title: "Fix result", objective, read: ["check.mjs"], write: ["result.txt"], validation: ["node check.mjs"] }],
       ...(reason ? { reason } : {}),
     }, { sessionID: "root" });
-    const perform = async (task: Record<string, unknown>, id: "worker1" | "worker2", value: string) => {
+    const perform = async (task: Record<string, unknown>, id: "worker1" | "reviewer1", value: string) => {
+      const callID = id === "worker1" ? "worker1" : "correction-call";
+      delete agents[id]!.outcome;
       const output = { args: structuredClone(task) };
-      await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: id }, output);
+      await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID }, output);
       await hooks["chat.message"]!({ sessionID: id, messageID: `${id}-request`, agent: agents[id]!.agent }, {
-        message: { id: `${id}-request`, agent: agents[id]!.agent, model: { providerID: "openai", modelID: "gpt-6-luna-fast" } },
+         message: { id: `${id}-request`, agent: agents[id]!.agent, model: { providerID: "openai", modelID: id === "worker1" ? "gpt-6-luna-fast" : "gpt-6.1-sol" } },
         parts: [{ type: "text", text: String(output.args.prompt) }],
       });
       const unit = (await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).units[0]!;
@@ -181,56 +182,74 @@ test("Fast-lane Reviewer FINDINGS use a corrective direct unit and a new Reviewe
         { project_root: directory, manifest_path: unit.manifestPath }, { sessionID: id }));
       assert.equal(bound.status, "bound", JSON.stringify(bound));
       await writeFile(join(directory, "result.txt"), value);
+      const started = Date.now();
       await hooks["tool.execute.before"]!({ tool: "bash", sessionID: id, callID: `${id}-check` }, { args: { command: "node check.mjs" } });
       await exec(process.execPath, ["check.mjs"], { cwd: directory });
+      history[id]!.push({ info: { id: `${id}-validation`, role: "assistant", sessionID: id }, parts: [{ type: "tool", tool: "bash", callID: `${id}-check`,
+        state: { status: "completed", input: { command: "node check.mjs" }, metadata: { exit: 0 }, time: { start: started, end: Date.now() } } }] });
       await hooks["tool.execute.after"]!({ tool: "bash", sessionID: id, callID: `${id}-check` },
         { output: "PASS", metadata: { exit: 0, status: "completed" } });
       agents[id]!.outcome = "succeeded";
-      await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: id },
-        { output: "Validated result", metadata: { sessionId: id } });
+      await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID },
+        { output: id === "worker1" ? "Validated result" : "CORRECTION_READY\nFixed result and passed the inherited check.", metadata: { sessionId: id } });
     };
-    const review = async (id: "reviewer1" | "reviewer2", verdict: "FINDINGS" | "PASS") => {
+    const review = async (selfRecheck = false) => {
+      const id = "reviewer1", callID = selfRecheck ? "self-recheck-call" : "review-call";
       const request = JSON.parse(await hooks.tool!.sortie_v010_review_mission.execute({ risk_tags: ["public-logic"],
-        traces: [id === "reviewer1" ? "check passed, but requested fixed value is missing" : "fixed value present; check passed"] },
+        traces: [selfRecheck ? "fixed value present; check passed" : "check passed, but requested fixed value is missing"] },
         { sessionID: "root" }));
-      if (id === "reviewer2") {
+      if (selfRecheck) {
+        assert.equal(request.status, "self-recheck-required"); assert.equal(request.task.task_id, id);
         const pending = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
         assert.equal(pending.coordinator, null);
         assert.match(pending.review?.task?.prompt ?? "", /^review_phase: verification$/mu);
         assert.ok(pending.review?.initialPrompt, "the first independent Review remains durable");
         hooks = await create(); // A fresh plugin/turn must admit the exact pending verification Task.
       }
-      await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: id },
-        { args: structuredClone(request.task) });
+      delete agents[id]!.outcome;
+      const dispatch = { args: structuredClone(request.task) };
+      await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID }, dispatch);
+      const promptID = `${callID}-prompt`;
+      await hooks["chat.message"]!({ sessionID: id, messageID: promptID, agent: agents[id]!.agent }, {
+        message: { id: promptID, agent: agents[id]!.agent, model: { providerID: "openai", modelID: "gpt-6.1-sol" } },
+        parts: [{ type: "text", text: String(dispatch.args.prompt) }],
+      });
+      history[id]!.push({ info: { id: promptID, role: "user", sessionID: id }, parts: [{ type: "text", text: dispatch.args.prompt }] });
+      const candidate = (await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).review!.source;
+      const text = selfRecheck ? `SELF_RECHECKED\nself_recheck: ${JSON.stringify({ candidate, unresolved_findings: [], residual_major: null })}\nCompared original fixed requirement, retained finding and correction with the actual inherited check.`
+        : "FINDINGS\nMedium: result is ready, not the required fixed value; correct result.txt.";
       agents[id]!.outcome = "succeeded";
-      history[id]!.push({ info: { role: "assistant", sessionID: id }, parts: [{ type: "text",
-        text: `${verdict}\n${verdict === "FINDINGS" ? "Result is ready, not fixed" : "Result is fixed"}` }] });
-      await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: id },
-        { output: `${verdict}\n${verdict === "FINDINGS" ? "Result is ready, not fixed" : "Result is fixed"}`, metadata: { sessionId: id } });
+      history[id]!.push({ info: { id: `${callID}-terminal`, role: "assistant", sessionID: id, finish: "stop",
+        time: { created: Date.now(), completed: Date.now() } }, parts: [{ type: "text", text }] });
+      await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID }, { output: text, metadata: { sessionId: id } });
     };
     const first = JSON.parse(await plan("Create result.txt and check it"));
     await perform(first.task, "worker1", "ready\n");
-    await review("reviewer1", "FINDINGS");
+    await review();
     const findings = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
     assert.equal(findings.review.verdict, "findings");
-    assert.match(findings.next_action, /plan_units/u);
+    assert.match(findings.next_action, /repair_review.*SAME original Reviewer/u);
     await assert.rejects(hooks.tool!.sortie_v010_retry_mission_unit.execute({ unit_id: "unit-1" }, { sessionID: "root" }),
       /operator-mission-normal-remediation-unavailable/u);
-    const correction = JSON.parse(await plan("Correct Reviewer finding: result must be fixed, not ready",
-      "Reviewer found ready instead of the required fixed value"));
+    await assert.rejects(hooks.tool!.sortie_v010_complete_mission.execute({}, { sessionID: "root" }), /mission-review/);
+    const correction = JSON.parse(await hooks.tool!.sortie_v010_repair_review.execute({}, { sessionID: "root" }));
     assert.ok(correction.task, JSON.stringify(correction));
+    assert.equal(correction.task.task_id, "reviewer1");
+    assert.equal(correction.task.subagent_type, "dog-reviewer-v010");
     assert.equal((await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).review?.verdict,
-      "findings", "old FINDINGS cannot become PASS when replanning");
-    await perform(correction.task, "worker2", "fixed\n");
-    await review("reviewer2", "PASS");
+      "findings", "old FINDINGS cannot become PASS when preparing correction");
+    await perform(correction.task, "reviewer1", "fixed\n");
+    await assert.rejects(hooks.tool!.sortie_v010_complete_mission.execute({}, { sessionID: "root" }), /mission-review/);
+    await review(true);
     const completed = JSON.parse(await hooks.tool!.sortie_v010_complete_mission.execute({}, { sessionID: "root" }));
     assert.equal(completed.status, "succeeded", JSON.stringify(completed));
     const mission = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
     assert.equal(mission.id, started.mission_id);
     assert.equal(mission.coordinator, null);
-    assert.equal(mission.review?.child, "reviewer2");
-    assert.equal(mission.review?.verdict, "PASS");
+    assert.equal(mission.review?.child, "reviewer1");
+    assert.equal(mission.review?.verdict, "self-rechecked");
+    assert.equal(mission.review?.mode, "self-recheck");
     assert.equal(mission.attempts?.length, 2);
-    assert.equal(mission.attempts?.[1]?.kind, "implementation", "FINDINGS is not a validation-failure retry");
+    assert.equal(mission.attempts?.[1]?.kind, "reviewer_correction", "FINDINGS retains original Reviewer correction ownership");
   } finally { await rm(directory, { recursive: true, force: true }); }
 });

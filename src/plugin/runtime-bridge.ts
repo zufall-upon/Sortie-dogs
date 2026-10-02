@@ -28,6 +28,33 @@ export interface MissionWorkerTerminalRecord {
   readonly descendants: readonly string[];
 }
 
+/** Actual required-check execution and its original protected-snapshot recipe, not acceptance criteria. */
+export interface ReviewerCorrectionCheck {
+  readonly dispatchCallID: string;
+  readonly childSessionID: string;
+  readonly callID: string;
+  readonly command: readonly string[];
+  readonly startedAt: string;
+  readonly endedAt: string;
+  readonly exitCode: number | null;
+  readonly binding: NonNullable<GoalEvidence["protected_binding"]>;
+  readonly source: string;
+  readonly candidate: string;
+  readonly fresh: boolean;
+  /** A command that actually generated/formatted declared outputs retains its stable input digest. */
+  readonly generatedInputs?: string;
+}
+
+/** Exact durable Mission Task claim, not authority supplied by a tool argument or Read. */
+export interface MissionImplementationAdmission {
+  readonly runID: string;
+  readonly generation: number;
+  readonly unitID: string;
+  readonly taskID: string;
+  readonly callID: string;
+  readonly promptID?: string;
+}
+
 /** Host-owned extension. It is not parsed from project JSON or a worker's prompt. */
 export interface RuntimeBridge {
   readonly profile: RuntimeProfile;
@@ -40,13 +67,25 @@ export interface RuntimeBridge {
   completedReviewPrompts?(rootSessionID: string, requestedPrompt: string): Promise<readonly string[]>;
   /** Existing native Mission review state for the final user-facing card; no new review is run. */
   missionReviewPresentation?(rootSessionID: string): Promise<{
-    verdict?: "PASS" | "evidence-gaps" | "skipped-low-risk"; evidenceGaps?: string;
+    verdict?: "PASS" | "evidence-gaps" | "skipped-low-risk" | "self-rechecked"; evidenceGaps?: string;
   } | undefined>;
   requiresExplicitAcceptance?(rootSessionID: string): Promise<boolean>;
   ownsCanonicalValidation?(rootSessionID: string, unitID: string, childSessionID: string,
     command: string): Promise<boolean>;
+  /** Finish the existing host Git boundary before capturing this admitted validation's candidate. */
+  beforeValidationSnapshot?(rootSessionID: string, childSessionID: string, command: string): Promise<boolean>;
+  /** A repeated declared occurrence is required work, not duplicate evidence to skip. */
+  requiresValidationExecution?(rootSessionID: string, taskID: string, childSessionID: string, commands: readonly string[]): Promise<boolean>;
   /** A mission's hash-pinned Task has already passed durable run/acceptance admission. */
   ownsMissionDispatch?(rootSessionID: string, callID: string, taskID: string): Promise<boolean>;
+  /** Only an exact admitted correction Task is an implementation dispatch continuing the original Reviewer child. */
+  ownsReviewerCorrectionDispatch?(rootSessionID: string, callID: string, taskID: string): Promise<boolean>;
+  ownsReviewerCorrection?(childSessionID: string): Promise<boolean>;
+  reviewerCorrectionValidationMembers?(childSessionID: string, command: string): Promise<string[] | undefined>;
+  recordReviewerCorrectionCheck?(rootSessionID: string, taskID: string, check: ReviewerCorrectionCheck): Promise<void>;
+  reviewerCorrectionValidation?(rootSessionID: string, callID: string, childSessionID: string, startedAt: number): Promise<{
+    ready: boolean; reason?: string; failure?: SerialDispatchSettlement["failure"];
+  } | undefined>;
   /** Durable operator dispatch identity survives adapter reload and missed after hooks. */
   recoverMissionDispatch?(rootSessionID: string, taskID: string): Promise<{
     callID: string; childSessionID?: string; cancelled: boolean; nativeOutcome?: "completed" | "failed";
@@ -58,8 +97,9 @@ export interface RuntimeBridge {
   expandMissionScope?(rootSessionID: string, childSessionID: string, taskID: string, paths: readonly string[],
     activate: (manifest: import("../core/types.js").OperationManifest) => Promise<() => Promise<void>>): Promise<void>;
   missionDispatchCall?(rootSessionID: string, childSessionID: string, taskID: string): Promise<string | undefined>;
-  /** Exact existing running Mission grant, used by the full handoff Read transport. */
-  missionReadBinding?(rootSessionID: string, childSessionID: string, handoffPath: string): Promise<{
+  /** Current durable Mission grant; an admission additionally pins its Task/call/generation. */
+  missionReadBinding?(rootSessionID: string, childSessionID: string, handoffPath: string,
+    admission?: MissionImplementationAdmission): Promise<{
     projectRoot: string; manifestPath: string; handoffHash: string; manifestHash: string;
   } | undefined>;
   onSerialSettlement?(settlement: SerialDispatchSettlement): Promise<void>;
@@ -116,12 +156,15 @@ export interface RuntimeBridge {
       readonly remaining_units: number;
     }>;
     renderReturnReport(rootSessionID: string, text: string, receiptFingerprint: string,
-      missionReview?: "PASS" | "evidence-gaps" | "skipped-low-risk", reviewEvidenceGaps?: string): Promise<string | undefined>;
+      missionReview?: "PASS" | "evidence-gaps" | "skipped-low-risk" | "self-rechecked", reviewEvidenceGaps?: string): Promise<string | undefined>;
     recoverUnitEvidence(rootSessionID: string, request: { unitID: string; childSessionID: string; manifestPath: string;
       manifestHash: string; goalFingerprint: string }): Promise<readonly GoalEvidence[]>;
     completionReadiness(rootSessionID: string): Promise<import("./goal-completion.js").CompletionReadiness>;
     missionWorkerTerminal(rootSessionID: string, terminal: MissionWorkerTerminalRecord,
       writeScopes: readonly string[]): Promise<{ ready: boolean; reason?: string }>;
+    restoreReviewerCorrectionChild(rootSessionID: string, childSessionID: string, callID: string, taskID: string): Promise<void>;
+    activateMissionWorker(rootSessionID: string, childSessionID: string, handoffPath: string,
+      admission: MissionImplementationAdmission): Promise<void>;
     expandMissionWriteGate(childSessionID: string, paths: readonly string[]): Promise<void>;
     completeRoot(rootSessionID: string, acceptanceFingerprint: string): Promise<{
       status: "succeeded" | "awaiting-evidence";

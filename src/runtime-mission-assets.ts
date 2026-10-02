@@ -6,9 +6,11 @@ import { SCOUT_EVIDENCE_CODES } from "./core/scout-contract.ts";
 export const TOOL_ENVIRONMENT = ".sortie-env";
 
 /** Ordinary requested Git delivery uses source scope, not repository control-storage scope. */
-export const MISSION_GIT_SCOPE = `Requested git add -- <paths> and git commit -m ... are normal source-scope Git operations;
+export const MISSION_GIT_SCOPE = `Requested git add <paths> (with optional --) and git commit -m ... are normal source-scope Git operations;
 they do not require .git/** scope. Preserve explicit user ordering and host Git lifecycle; attempt supported
-operations and report actual denials, not inferred gaps.`;
+operations and report actual denials, not inferred gaps. Stage actual changed deliverables only: permission
+for an unchanged file or deleted untracked scratch does not require staging it. Repair a missing in-request
+output via expand_unit, then continue the SAME Task; covered paths need no new grant or dispatch.`;
 
 export const VALIDATION_WORKFLOW = `## Time-aware validation workflow
 
@@ -78,7 +80,7 @@ permission:
     ${profileAgent(profile, "dog-advisor")}: allow
 tools:
   "sortie_*": false
-${controls(profile, ["start_mission", "plan_units", "operator_next", "operator_status", "extend_mission_budget", "expand_unit", "review_mission", "complete_mission", "cancel_operator", "reflection"])}
+${controls(profile, ["start_mission", "plan_units", "operator_next", "operator_status", "extend_mission_budget", "expand_unit", "review_mission", "repair_review", "complete_mission", "cancel_operator", "reflection"])}
 ---
 # ${profileAgent(profile, "dog-coordinator")}
 
@@ -131,7 +133,9 @@ quality threshold and explicit model/budget choice. Follow AGENTS.md and use the
     ${MISSION_GIT_SCOPE}
 3. After a direct Worker succeeds, use its recorded result and inspect only missing source or evidence
    needed to assess the ACTUAL change. Batch focused reads where practical; do not repeat an unchanged
-   check. Call ${profile.toolPrefix}review_mission promptly with real risk_tags and concise traces.
+   check. The host supplies source/diff and actual check observations; routine root diff rereads or long
+   trace transcription are optional, not prerequisites. Call ${profile.toolPrefix}review_mission promptly
+   with real risk_tags; concise traces are optional.
    Dispatch its exact independent Reviewer Task when required;
    use [] only for genuinely low-risk work. A review skip is not implied by Fast-lane. If source/evidence
    is unchanged, do not repeat validation or an identical review. EVIDENCE_GAPS is advisory: retain the
@@ -142,23 +146,34 @@ quality threshold and explicit model/budget choice. Follow AGENTS.md and use the
    ${profile.toolPrefix}retry_mission_unit; optionally make a small Operator correction first. The Operator
    edit or shell check alone is not formal validation evidence. For a changed scope or command, use
    ${profile.toolPrefix}plan_units with a concrete reason and one corrective unit. Reviewer FINDINGS
-   instead need a corrective unit, formal validation, then fresh independent Review after any change;
+   instead use ${profile.toolPrefix}repair_review to continue the SAME native Reviewer/context, correct
+   all known Major/Medium defects and pass formal validation/requested commit, then call review_mission
+   only for legacy CORRECTION_READY-only fallback; normally that SAME author explicitly self-rechecks
+   after formal checks/commit within its correction Task, using candidate=current-validated for host binding.
+   Only concrete reachable Major risk remaining
+   after self-recheck requires a DIFFERENT Reviewer; Medium, tags, hashes and prose gaps alone do not;
    they are not a failed-validation retry. Keep the SAME mission, original requirements, failure history
    and cumulative budget. Use its Coordinator Task only for real coordination, contract discovery or
    correction that cannot be handled directly. Never replace an active Worker or ask for routine approval.
 4. After the review decision (including a justified low-risk skip), compare the completion candidate
     against the original request, real source and observed evidence before final acceptance.
     For a Coordinator ready candidate, use operator_status's acceptance_summary: verbatim original
-    requests, anchored cumulative formal validation, independent Review and recorded delivery state.
+    requests, anchored cumulative formal validation, current review disposition (author self-recheck
+    is not independent approval) and recorded delivery state.
     Historical results are references, not current freshness PASS. Inspect source or evidence only for
     concrete unresolved gaps; do not routinely search run archives or reread every source/test file.
-    Existing validation freshness and Review guards still apply; this summary does not accept the mission.
+     Existing validation freshness and Review guards still apply; this summary does not accept the mission.
+     One compact status check can lead directly to review_mission and its returned Reviewer Task; original
+     requests, diff and checks are supplied automatically. Add traces only for concrete extra information.
+     Use existing host-observed Git evidence when available; unknown clean state or a failed commit still
+     needs a real delivery check, not an inferred success. view=full exposes diagnostic snapshot details.
    For a reported bug with a concrete public reproduction, check that evidence exercises the same entrypoint,
    input and observed failure, not only a nearby invented test or syntax check. Correct a material gap
    through one direct corrective unit when practical, otherwise use the SAME Coordinator; do not treat
    Reviewer PASS as proof that an unrun public scenario works.
    If incomplete, correct directly or resume the SAME Coordinator with concrete feedback. If complete and review
-   permits submission (PASS, low-risk skip, or advisory EVIDENCE_GAPS), call ${profile.toolPrefix}complete_mission.
+    permits submission (independent PASS, native author self-rechecked with no unresolved Major/Medium
+    or residual Major risk, low-risk skip, or advisory EVIDENCE_GAPS), call ${profile.toolPrefix}complete_mission.
    Preserve advisory notes without calling them Review PASS or inventing unfinished work or mandatory follow-up.
    Only its succeeded receipt authorizes DONE.
 
@@ -181,7 +196,7 @@ not claims that a command proves every semantic obligation. Compare the final re
 
 Copy returned task fields exactly (V2: subagent_type -> agent, task_id -> sessionID). Do not append to a
 reference prompt or name another model unless the user explicitly selected it. Preserve explicit selections.
-For root Operator dispatches (Coordinator, direct Worker, independent Reviewer), use native
+For root Operator dispatches (Coordinator, direct Worker, Reviewer including same-author self-recheck), use native
 subagent(background: true). After its running launch acknowledgement, give a short acknowledgement
 and end this response; remain available for the next user chat. Native Jobs deliver completion and
 wake this same root; do not poll, add a completion prompt, or claim two simultaneous root generations.
@@ -267,9 +282,27 @@ the original requirements, diff and observed checks. Implementation notes are op
 format, count or requirement labels. Read/search the necessary project source, tests and existing results
 yourself when context is missing or clipped. Use the normal host permissions; no new manifest or approval
 is needed for review reads. Prefer the supplied results over rerunning checks or asking for transcription.
-Do not edit the candidate, delegate, or perform the implementation. Return to the caller in the user's language.
+Review is read-only by default. Do not edit or delegate during review. If the host resumes this SAME
+session with an admitted correction unit, read its exact handoff and use only its existing scoped write
+gate and declared validation/commit boundary. Keep your findings/context; do not rediscover unchanged
+work. Use normal implementation execution permissions for focused diagnostics/formatting/generation;
+these do not replace formal inherited checks. After formal checks and the requested commit/clean boundary,
+explicitly self-recheck all original requirements, retained Major AND Medium findings, correction and
+relevant impact IN THIS SAME TASK. Return SELF_RECHECKED with candidate=current-validated; the host binds
+the actual current source after this prompt's successful native terminal and fresh checks. Never copy a
+pre-edit hash or return PASS for your own correction. Legacy CORRECTION_READY-only uses a separate same-author
+read-only fallback, not acceptance. Only a concrete reachable Major risk remaining after self-recheck
+requires a DIFFERENT Reviewer. Known Major/Medium defects must be corrected; unresolved Medium cannot pass.
+Tags, hashes, public-api/public-logic, missing prose and EVIDENCE_GAPS alone do not trigger a second review.
+Self-recheck is not independent approval; root acceptance still compares the actual result with the request.
+Otherwise return to the caller in the user's language.
 
-Start with exactly one of PASS, FINDINGS or EVIDENCE_GAPS.
+During review, start with exactly one of PASS, FINDINGS or EVIDENCE_GAPS. During an admitted
+correction, finish after checks/commit with SELF_RECHECKED, then
+self_recheck: {"candidate":"current-validated","unresolved_findings":[],"residual_major":null}
+and the actual requirement/findings/impact comparison. During a legacy read-only fallback, use SELF_RECHECKED
+and its supplied report format. Report unresolved concrete findings and a short reachable-path/serious
+consequence reason for any residual Major risk; do not invent a separate approval checklist.
 FINDINGS must name a concrete major/medium defect, its affected path/input, user-visible consequence and
 smallest useful correction. EVIDENCE_GAPS is a non-blocking advisory for consequential uncertainty after
 available inspection, never a requirement to write more proof. Omit minor and purely documentary concerns.
@@ -298,7 +331,7 @@ permission:
     ${profileAgent(profile, "dog-advisor")}: allow
 tools:
   "sortie_*": false
-${controls(profile, ["plan_units", "operator_next", "operator_status", "expand_unit", "review_mission", "submit_mission", "skip_mission_consultation", "retry_mission_unit", "rescue_mission_unit"])}
+${controls(profile, ["plan_units", "operator_next", "operator_status", "expand_unit", "review_mission", "repair_review", "submit_mission", "skip_mission_consultation", "retry_mission_unit", "rescue_mission_unit"])}
 ---
 # ${profileAgent(profile, "dog-operator")}
 

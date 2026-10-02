@@ -150,3 +150,26 @@ test("reload restores ownership before continued child observations and checkpoi
   await cold.event({ type: "session.execution.succeeded", created: Date.now(), data: { sessionID: "child" } });
   assert.deepEqual(recovered, { reservation: "held", evidence: ["native-formal-check"] });
 });
+
+test("reused Reviewer old idle/text cannot settle a missing new prompt; log failure overrides text success", async () => {
+  const f = fixture(), events: Record<string, unknown>[] = [], settled: string[] = [];
+  f.history.child!.push({ id: "old-review", type: "assistant", finish: "stop", content: [{ type: "text", text: "PASS old" }] });
+  const base = f.context as unknown as { session: Record<string, unknown> };
+  const context = { ...base, session: { ...base.session, log: async function* () { yield* events; } } } as never;
+  const lifecycle = new NativeBackgroundLifecycle(context, async dispatch => { settled.push(dispatch.terminal!); });
+  await lifecycle.admit("root", "correction", { agent: "dog-reviewer-v010", sessionID: "child", prompt: "correction" });
+  await lifecycle.bind("root", "child", "dog-reviewer-v010", "correction", "new-prompt");
+  f.history.child!.push({ id: "old-unpaged-review", type: "assistant", finish: "stop", content: [{ type: "text", text: "old ready" }] });
+  await lifecycle.launched("root", "correction", "child", true);
+  await lifecycle.event({ type: "session.idle", data: { sessionID: "root" } });
+  assert.equal(settled.length, 0);
+  assert.equal(await lifecycle.awaiting("root"), true);
+  f.history.child!.push({ id: "new-prompt", type: "user" }, { id: "new-report", type: "assistant", finish: "stop", content: [{ type: "text", text: "CORRECTION_READY" }] });
+  events.push({ type: "session.inbox.delivered", data: { inboxID: "new-prompt" } });
+  await lifecycle.reconcile("root");
+  assert.equal(settled.length, 0, "text alone is not execution success when native logs are available");
+  events.push({ type: "session.execution.failed", data: { sessionID: "child" } });
+  await lifecycle.reconcile("root");
+  await lifecycle.reconcile("root");
+  assert.deepEqual(settled, ["failed"]);
+});

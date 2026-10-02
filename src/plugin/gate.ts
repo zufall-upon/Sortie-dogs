@@ -64,7 +64,10 @@ export interface ProjectPaths {
 }
 
 export interface WriteGate {
-  check(input: ToolExecuteBeforeInput, output: ToolExecuteBeforeOutput, options?: { investigativeShell?: boolean }): Promise<void>;
+  check(input: ToolExecuteBeforeInput, output: ToolExecuteBeforeOutput, options?: {
+    investigativeShell?: boolean;
+    assertWritePaths?: (paths: readonly string[]) => Promise<void>;
+  }): Promise<void>;
   checkPath(path: string): Promise<void>;
   toRelativePath(path: string): Promise<string>;
 }
@@ -76,6 +79,7 @@ interface Extraction {
   createdDirectories?: string[];
   requiredDirectories?: string[];
   gitCommit?: boolean;
+  gitCommitAdds?: string[][];
   gitMutation?: boolean;
   remoteMutation?: boolean;
   issue?: CommandIssue;
@@ -342,8 +346,8 @@ function gitArchiveOutput(tokens: readonly string[]): { output?: string } | unde
 }
 
 function exactGitAddPaths(tokens: readonly string[]): string[] | undefined {
-  if (tokens.length < 4 || tokens[2] !== "--") return undefined;
-  const paths = tokens.slice(3);
+  const paths = tokens.slice(tokens[2] === "--" ? 3 : 2);
+  if (paths.length === 0) return undefined;
   if (paths.some((path) =>
     path === "." || path.startsWith("-") || path.startsWith(":") ||
     path.includes("*") || path.includes("?") || path.includes("[")
@@ -485,6 +489,8 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
   let applies = false;
   let ambiguous = false;
   let gitCommit = false;
+  let gitAdds: string[] = [];
+  const gitCommitAdds: string[][] = [];
   let gitMutation = false;
   let remoteMutation = false;
   const createdDirectories: string[] = [];
@@ -500,13 +506,17 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
     let assignment = false;
     const syntax = scanShellSyntax(source, dialect);
     for (const match of syntax.masked.matchAll(redirection)) {
-      applies = true;
       const target = redirectionTarget.exec(source.slice(match.index + match[0].length))?.[1];
+      // Only an output redirect to this host's literal discard device is pathless.
+      // Device mutations and real outputs in the same command still require their usual scope.
+      const destination = target === undefined ? undefined : unquote(target);
+      if (destination !== undefined && (process.platform === "win32" ? /^nul$/iu.test(destination) : destination === "/dev/null")) continue;
+      applies = true;
       if (target === undefined || target.startsWith("&")) {
         ambiguous = true;
         issue ??= commandIssue(source, "redirect-target-unresolved", "name one manifest-scoped output path");
       } else {
-        paths.push(unquote(target));
+        paths.push(destination!);
       }
     }
     if (syntax.unsafeExpansion) {
@@ -671,12 +681,18 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
       gitMutation = true;
       const selected = exactGitAddPaths(tokens);
       if (selected === undefined) ambiguous = true;
-      else paths.push(...selected);
+      else {
+        paths.push(...selected);
+        gitAdds.push(...selected);
+      }
     } else if (executable === "git" && tokens[1]?.toLowerCase() === "commit") {
       applies = true;
       gitMutation = true;
-      if (isSafeGitCommit(tokens)) gitCommit = true;
-      else ambiguous = true;
+      if (isSafeGitCommit(tokens)) {
+        gitCommit = true;
+        gitCommitAdds.push(gitAdds);
+        gitAdds = [];
+      } else ambiguous = true;
     } else if (executable === "git" && tokens[1] === "archive") {
       const archive = gitArchiveOutput(tokens);
       if (archive === undefined) {
@@ -704,6 +720,7 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
         ambiguous ||= nested.ambiguous;
         paths.push(...nested.paths);
         gitCommit ||= nested.gitCommit === true;
+        gitCommitAdds.push(...(nested.gitCommitAdds ?? []));
         gitMutation ||= nested.gitMutation === true;
         remoteMutation ||= nested.remoteMutation === true;
         createdDirectories.push(...(nested.createdDirectories ?? []));
@@ -723,6 +740,7 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
     ...(createdDirectories.length > 0 ? { createdDirectories } : {}),
     ...(requiredDirectories.length > 0 ? { requiredDirectories } : {}),
     ...(gitCommit ? { gitCommit: true } : {}),
+    ...(gitCommitAdds.length > 0 ? { gitCommitAdds } : {}),
     ...(gitMutation ? { gitMutation: true } : {}),
     ...(remoteMutation ? { remoteMutation: true } : {}),
     ...(issue ? { issue } : {}),
@@ -741,7 +759,7 @@ export function describeUnclassifiedCommand(tool: string, args: unknown): string
 }
 
 /** Extract known write destinations; unknown shell executables fail closed as ambiguous. */
-export function extractWritePaths(tool: string, args: unknown): Extraction {
+export function extractWritePaths(tool: string, args: unknown, toolDirectory?: string): Extraction {
   const name = tool.toLowerCase();
   const paths = directPaths(args);
   if (/^(?:write|edit)(?:$|[_-])/u.test(name)) return { applies: true, ambiguous: paths.length === 0, paths };
@@ -768,13 +786,26 @@ export function extractWritePaths(tool: string, args: unknown): Extraction {
     const powershell = /^(?:powershell|pwsh)(?:$|[_-])/u.test(name) ||
       /^\s*&\s+(?:"[^"]+"|'[^']+'|\S+)/u.test(command);
     const extracted = shellPaths(command, powershell);
+    const destinations = [...paths, ...extracted.paths];
+    // Native ShellTool resolves an explicit workdir against Location, then relative
+    // outputs against that cwd. Do not authorize a same-named path at the project root.
+    const workdir = toolDirectory !== undefined && isRecord(args) && typeof args.workdir === "string"
+      ? resolve(toolDirectory, args.workdir) : undefined;
+    const rebase = (path: string): string => {
+      if (workdir === undefined) return path;
+      let normalized: ReturnType<typeof normalizeManifestPath>;
+      try { normalized = normalizeManifestPath(path); }
+      catch (error) { throw new WriteDeniedError("project-boundary", path, { cause: error }); }
+      return normalized.kind === "absolute" ? normalized.path : resolve(workdir, normalized.path);
+    };
     return {
       applies: extracted.applies || paths.length > 0,
       ambiguous: extracted.ambiguous,
-      paths: [...paths, ...extracted.paths],
+      paths: destinations.map(rebase),
       ...(extracted.createdDirectories ? { createdDirectories: extracted.createdDirectories } : {}),
       ...(extracted.requiredDirectories ? { requiredDirectories: extracted.requiredDirectories } : {}),
       ...(extracted.gitCommit ? { gitCommit: true } : {}),
+      ...(extracted.gitCommitAdds ? { gitCommitAdds: extracted.gitCommitAdds.map(paths => paths.map(rebase)) } : {}),
       ...(extracted.gitMutation ? { gitMutation: true } : {}),
       ...(extracted.remoteMutation ? { remoteMutation: true } : {}),
       ...(extracted.issue ? { issue: extracted.issue } : {}),
@@ -868,11 +899,53 @@ function declaredCommandMatch(segment: string, declared: readonly string[]): str
 
 /** Canonicalize only an exact or unambiguous basename-shortened sequence of declared validations. */
 export function canonicalDeclaredValidationSequence(command: string, declared: ReadonlySet<string>): string | undefined {
+  return canonicalDeclaredValidationMembers(command, declared)?.join(" && ");
+}
+
+/** Preserve ordered members (including repeats) without splitting quoted text or substring matching. */
+export function canonicalDeclaredValidationMembers(command: string, declared: ReadonlySet<string> | readonly string[], occurrence = 0): string[] | undefined {
   const normalized = normalizeCommand(command);
+  // A declared composite is ONE required execution, not inferred successes of its shell members.
+  const identities = [...new Set(declared)];
+  const atomic = declaredCommandMatch(command, identities);
+  if (atomic !== undefined) return [atomic];
   const segments = shellSegments(command, "posix").map((segment) => segment.trim()).filter(Boolean);
   if (segments.length === 0 || normalized !== segments.map(normalizeCommand).join(" && ")) return undefined;
-  const canonical = segments.map((segment) => declaredCommandMatch(segment, [...declared]));
-  return canonical.every((segment): segment is string => segment !== undefined) ? canonical.join(" && ") : undefined;
+  if (Array.isArray(declared)) {
+    const ordered = declared as readonly string[];
+    if (!ordered.length) return undefined;
+    const from = (position: number): string[] | undefined => {
+      const result: string[] = [];
+      for (let start = 0; start < segments.length;) {
+        const expected = ordered[(position + result.length) % ordered.length]!;
+        let matched = false;
+        for (let end = start + 1; end <= segments.length; end++) {
+          const member = declaredCommandMatch(segments.slice(start, end).join(" && "), [expected]);
+          if (member === undefined) continue;
+          result.push(member); start = end; matched = true; break;
+        }
+        if (!matched) return undefined;
+      }
+      return result;
+    };
+    return from(occurrence) ?? (occurrence ? from(0) : undefined);
+  }
+  // Coalescing may include composite declarations too. Prefer complete declared identities at
+  // each boundary; never accept a partial composite or an undeclared trailing shell command.
+  const matched = new Map<number, string[] | undefined>();
+  const sequence = (start: number): string[] | undefined => {
+    if (start === segments.length) return [];
+    if (matched.has(start)) return matched.get(start);
+    for (let end = segments.length; end > start; end--) {
+      const member = declaredCommandMatch(segments.slice(start, end).join(" && "), identities);
+      if (member === undefined) continue;
+      const rest = sequence(end);
+      if (rest) { const result = [member, ...rest]; matched.set(start, result); return result; }
+    }
+    matched.set(start, undefined);
+    return undefined;
+  };
+  return sequence(0);
 }
 
 /** Unbound sessions may invoke only tools whose complete input is known to be read-only. */
@@ -1185,7 +1258,7 @@ export async function createWriteGate(project: ProjectPaths, value: unknown, too
     }
     if (!await isWritable(normalized)) throw new WriteDeniedError("manifest-scope", normalized);
   };
-  const checkCachedSet = async (): Promise<void> => {
+  const checkCachedSet = async (adds: readonly string[], assertWritePaths?: (paths: readonly string[]) => Promise<void>): Promise<void> => {
     let stdout: string;
     try {
       ({ stdout } = await execFileAsync(
@@ -1203,6 +1276,9 @@ export async function createWriteGate(project: ProjectPaths, value: unknown, too
     let cached: Set<string>;
     try {
       cached = new Set(stdout.split("\0").filter(Boolean).map(normalizeRelativePath));
+      // Native shell runs the whole command after this preflight. Explicit earlier add paths
+      // contribute to its prospective index; later adds and other write destinations do not.
+      for (const path of adds) cached.add(await project.toRelativePath(path));
     } catch (error) {
       throw new WriteDeniedError("manifest-scope", "<cached>", { cause: error });
     }
@@ -1210,9 +1286,9 @@ export async function createWriteGate(project: ProjectPaths, value: unknown, too
     for (const path of cached) {
       if (!await isWritable(path)) throw new WriteDeniedError("manifest-scope", "<cached>");
     }
-    if ([...exactWritable].some((path) => !cached.has(path))) {
-      throw new WriteDeniedError("manifest-scope", "<cached>");
-    }
+    // Write scope is permission, not a requirement to stage unchanged or removed scratch outputs.
+    // Preserve existing staged paths and caller prohibitions in the prospective union.
+    await assertWritePaths?.([...cached].map(path => resolve(project.root, path)));
   };
   return {
     checkPath,
@@ -1221,13 +1297,18 @@ export async function createWriteGate(project: ProjectPaths, value: unknown, too
       const command = isRecord(output.args) && typeof output.args.command === "string"
         ? normalizeCommand(output.args.command)
         : undefined;
-      if (command !== undefined && declaredValidation.has(command)) return;
+      const declaredDirectory = !isRecord(output.args) || typeof output.args.workdir !== "string" ||
+        resolve(toolDirectory, output.args.workdir) === resolve(toolDirectory);
+      if (command !== undefined && declaredValidation.has(command) && declaredDirectory) return;
       // Shell syntax is not an execution permission boundary. Mission workers already use
       // native host permissions; only declared checks produce formal validation evidence.
-      if (options?.investigativeShell && ["bash", "shell"].includes(_input.tool)) return;
-      const extracted = extractWritePaths(_input.tool, output.args);
+      const nativeImplementationShell = options?.investigativeShell && ["bash", "shell"].includes(_input.tool);
+      const extracted = extractWritePaths(_input.tool, output.args, toolDirectory);
       if (!extracted.applies) return;
-      if (extracted.ambiguous || (extracted.paths.length === 0 && !extracted.gitCommit)) {
+      // Unknown program internals are native execution policy, NOT a proof of output scope.
+      // Still check every known destination (redirect/copy/etc.) and the existing Git boundary.
+      if ((!nativeImplementationShell || extracted.gitMutation) &&
+          (extracted.ambiguous || (extracted.paths.length === 0 && !extracted.gitCommit))) {
         if (extracted.issue !== undefined) {
           throw new WriteDeniedError("unclassified-command", issuePath(extracted.issue));
         }
@@ -1244,12 +1325,14 @@ export async function createWriteGate(project: ProjectPaths, value: unknown, too
         try { await checkPath(nativeFileTool ? resolve(toolDirectory, path) : path); }
         catch (error) {
           if (options?.investigativeShell && error instanceof WriteDeniedError && error.reason === "manifest-scope") {
-            error.message += " Coordinator: expand_unit with the exact missing output directory as dir/**, preserving settled units and cumulative spend; then dispatch the returned Task. No user approval is needed for an in-request correction.";
+            error.message += " Use expand_unit with the missing output path (dir/** for a directory), then retry this command in the SAME active Task. Preserve user prohibitions, native permissions, settled units and cumulative spend; no approval or redispatch is needed for an in-request scope repair.";
           }
           throw error;
         }
       }
-      if (extracted.gitCommit) await checkCachedSet();
+      if (extracted.gitCommit) {
+        for (const adds of extracted.gitCommitAdds ?? [[]]) await checkCachedSet(adds, options?.assertWritePaths);
+      }
     },
   };
 }

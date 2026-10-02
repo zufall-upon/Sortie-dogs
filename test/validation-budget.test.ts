@@ -46,6 +46,18 @@ test("request identity does not affect deduplication, but candidate content does
   assert.equal(decideValidationBudget(changed, state(0, [first])).decision, "ALLOW");
 });
 
+test("mandatory correction executions count separately while ordinary duplicate validation still skips", () => {
+  const first = request({ required_execution: { admission: "correction-task", call_id: "native-first" } });
+  const key = validationEvidenceKey(first);
+  const next = request({ required_execution: { admission: "correction-task", call_id: "native-second" } });
+  assert.notEqual(validationEvidenceKey(next), key);
+  assert.equal(decideValidationBudget(next, { ...state(1, [key]), limit: 2 }).decision, "ALLOW");
+  assert.equal(decideValidationBudget(first, { ...state(1, [key]), limit: 2 }).decision, "SKIP", "same native execution remains idempotent");
+  assert.equal(decideValidationBudget({ ...first, required_execution: { admission: "", call_id: "x" } }, state()).decision, "DENY");
+  const ordinary = request();
+  assert.equal(decideValidationBudget(ordinary, state(1, [validationEvidenceKey(ordinary)])).decision, "SKIP");
+});
+
 test("retry requires a bounded cause and consumes one reservation", () => {
   assert.equal(decideValidationBudget({ ...request(), reason: "retry" }, state()).reason, "retry-justification-required");
   const result = decideValidationBudget({ ...request(), reason: "retry", retry_of: "prior", changed_cause: "source changed" }, state());
