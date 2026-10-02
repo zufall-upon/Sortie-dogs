@@ -115,13 +115,32 @@ Final verification:
 - Logs, commands, exit, elapsed time, reasons and per-file source hashes:
   `_testenv/coordinator-direct/{full-1,full-2,remaining-1,focused-2,full-3}.*`.
 
+## Fixed candidate and original Anko launch
+
+- Product commit: `f5c758c5d4e1165dccd066ee2157d439386f5402`.
+- Fixed package SHA-256:
+  `5239eae736031916e0bc38da8bc8d938f423f87adb5e070f02daff39536f9a55`.
+- Runtime marker: `0.13.3-coordinator-direct-v1`. Installed 204 dist files and
+  8 assets matched the archive. Isolated preflight exit 0, 5.615 s; baseline
+  `go test ./...` exit 0, 5.547 s. These are preparation checks, not task completion.
+- New private native DB began with zero sessions. Only the authorized provider
+  credential was provisioned from the retained pinned empty schema.
+- Actual Operator: `openai/gpt-6.1-sol#xhigh`, root
+  `ses_f0391a3c8ffeMohjTiQbMSpCrw`.
+- Actual Worker: `openai/gpt-6-luna-fast#max`, child
+  `ses_f03913660ffetRfvfjmmNAC6Sb`, started 27.656 s after inference launch;
+  observed `2026-10-02T11:45:17.447Z`. Startup proof is not completion.
+- Original task/base/environment/review conditions retained; no time/cost cutoff.
+  Run command: `node _testenv/anko-coordinator-direct-20261002/container-command.mjs run`.
+- Evidence: `_testenv/anko-coordinator-direct-20261002/actual-worker-start.json`,
+  `candidate.json`, `installed-build-match.json`, `run-1/`.
+- Product PR: <https://github.com/zufall-upon/Sortie-dogs/pull/152>.
+
 ## Remaining sequence
 
-1. Fix the commit/package hash and repeat the original Anko task in a fresh clone and
-   private DB with the established mixed model configuration, then grade the fixed
+1. Observe the running original Anko task through native completion, then grade the fixed
    completed Anko commit with the retained verifier and record the comparison.
 2. Product PR and persistent evidence archive. Main merge/release remain separate.
 
 The historical investigation and fixed prior candidates remain in
-`/home/user/Sortie-dogs/_testenv/anko-pr149-ubuntu-20261001/`. No additional model run
-has been launched during step 1.
+`/home/user/Sortie-dogs/_testenv/anko-pr149-ubuntu-20261001/`.
