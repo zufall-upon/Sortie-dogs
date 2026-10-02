@@ -17,8 +17,9 @@ runs use new candidates. Release/main merge/global installation belong to the
 separate release session.
 
 The durable work queue and commands live under `_testenv/nightly-20261002/`.
-Pending themes: public failure-result coverage, a fresh original Anko evaluation,
-then real-V2 direct controller/multiple-unit execution. Diagnose subsequent concrete
+Completed themes: public failure-result coverage, a fresh original Anko evaluation,
+and real-V2 direct controller/multiple-unit execution. The next observed inefficiency
+is model re-generation of the retained host completion card. Diagnose concrete
 failures rather than repeat unchanged failed runs or weaken acceptance.
 
 ## Cycle 1: public failure-result coverage
@@ -75,7 +76,7 @@ Fixed native candidate:
 - Native startup observed at `2026-10-02T12:55:30.387Z`: root
   `ses_f0351658affelI5alHAC3o77ZW` actually used SOL/xhigh; Worker
   `ses_f0350ec4dffe3s5n5sxvBfK8Z6` actually used Luna-fast/max. Startup
-  evidence is `actual-worker-start.json`; completion and effectiveness pending.
+  evidence is `actual-worker-start.json`; terminal results follow below.
 - Prepared a separate two-unit native direct-Coordinator fixture with the same
   package and its own initially empty database. Preparation is not execution
   evidence; native launch/result will be recorded separately.
@@ -175,7 +176,81 @@ Cycle-2 fixed candidate and launch:
 - Launched with `node _testenv/nightly-20261002/run-cycle.mjs anko-nightly-quality-v3-20261002 anko-nightly-quality-v3-scoring-20261002`.
   Same task/base/common prompt, Luna-fast/max Worker and SOL/xhigh control/review
   policy. No timeout/cost cutoff. Wrapper fixes the native terminal candidate before
-  scoring and does not modify/re-prompt it after grading. Result pending.
+  scoring and does not modify/re-prompt it after grading. Terminal results follow below.
+
+### Cycle 2 result: original Anko passes
+
+**Official local binary score 1, F2P 9/9, P2P 94/94.** Fixed verifier exit 0,
+15.379 s; no failed tests, model requests 0, final source still clean/frozen at
+`c103668da55cb958a45c13236abd8adc0231082d`, branch `feature/typed-variable-bindings`.
+Native measurement `2026-10-02T13:38:52.387Z` to `14:12:51.968Z`: **2039.581 s**,
+86 requests, priced **$1.80364484 plus one unknown-usage request**. All three native
+sessions succeeded and the true Mission succeeded receipt was observed. Actual
+Worker Luna-fast/max; Operator/initial/correction Reviewer SOL/xhigh, mismatches 0.
+
+Worker used the pre-existing `runTests`/`Test` public harness for typed declarations
+and rejected assignments (`vm/typed_bindings_test.go:59-101`). Its first implementation
+commit `5f23ad3` already cleared `runInfo.rv` on incompatible assignment. Thus the
+old four failing semantic groups were addressed before Review, not by a new grader
+hint or post-score repair. Reviewer found three Medium defects (Go pointer copy-back,
+channel status assignment and qualified unknown types), reproduced them with existing
+harness assertions, corrected and formally tested them. Same-author self-recheck
+then found/reproduced a concrete catch-visible error-type incompatibility in its own
+fix, corrected it and reran `go test ./...` before the second correction commit.
+No second Reviewer and no unresolved Medium. Self-recheck remains author verification,
+not independent final PASS. The final full check was an actual native exit 0.
+
+Measured actor windows (not pure inference, overlapping control window): Worker
+660.428 s / $0.19951124; initial Review 297.778 s / $0.30125760; correction
+940.603 s / $0.90585680 plus unknown usage; Operator $0.39701920. One correction
+request failed `provider.transport: WebSocket closed with code 1006`, 33.250 s,
+without tokens/usage. The same Reviewer continued; this duration remains in the
+measurement and no zero price or complete-cost comparison is claimed.
+
+Compared with old mixed (score 1), measured time -154.421 s (-7.04%); priced
+subtotal +$0.02755076 before the missing usage. Compared with direct-v1 (score 0),
+time +665.161 s (+48.40%), priced subtotal +$0.65394944. Every candidate is one
+sample; these deltas do not establish prompt changes as the sole cause. Native
+direct implementation was not used in this Anko route; the separate two-unit
+probe above proves that route only.
+
+Nightly priced subtotal now **$3.97513096 plus one unknown-usage request**, including
+both original Anko runs and the separate direct probe. Costs, request error, native
+models/terminal outcomes and review/correction traces are retained in the arm's
+`comparison-summary.json`, `finish-analysis.json` and `review-trace.md`.
+
+## Cycle 3: avoid model re-generation of the host completion card
+
+Cycle-2 final Operator request spent 35.091 s / $0.085442 and returned 1731 visible
+characters, including the exact 1283-character `return_report` from complete_mission.
+This is model-authored native assistant content: the V2 finalizer observes accounting
+without persisting replacement output, and profiled text-complete returns early for
+the Operator. The final response still copied the card despite the no-transcription
+instruction. The entire final-request cost is not a card-only cost or guaranteed
+saving. The card's pre-final cost $1.6915 also differs from the $1.8036 subtotal
+observed at final native completion; its existing caveat is retained.
+
+Next change: preserve the full card in native tool history/UI, but remove only its
+presentation body from the outgoing V2 model context. Keep status, receipt, run and
+acceptance identities, all evidence and limitations; provide a compact indication
+that the full card is saved in that tool result. No synthetic message, extra model
+turn, acceptance bypass or change to user/source/review messages. Confirm the real
+2.0.18 request shape before implementation, then exercise a new fixed native probe.
+
+Implementation uses the published V2 context/compaction hooks, after checking
+`@opencode/plugin@2.0.18` and `@opencode/ai@2.0.18`'s `Message`/`ToolResultPart`
+types. Only successful `sortie_v010_complete_mission` tool-result cards are
+projected; JSON, text and text-plus-file results preserve all other data. The
+request-only clone preserves the Message prototype and identifiers. Native history,
+tool output and user/assistant content are untouched. The regression checks both
+hooks, idempotence, files, malformed/error/blocked results, evidence and metadata.
+
+Focused validation (`night-v4-focused`): 62/62 PASS, test phase 2.672 s;
+full integration started via the recorded `night-v4-full` command. Native probe
+preparation adds an observing-only plugin: retain the context draft, inspect it at
+`model.request` after all context hooks, and record only card-presence, receipt hash,
+identity and size. It changes neither prompts nor requests. Compare that actual
+outgoing request with saved native completion-tool and terminal-assistant content.
 
 ## Retained archives
 
@@ -195,3 +270,12 @@ remain locally; source/Git/native histories/fixed package and analysis are archi
   `b24d440dcd36ef9860208bdae4b0f67e6c9ae634030b7944c6b8efb52543e2bd`.
 
 These archives predate the cycle-2 full check and retain their as-of contents.
+
+The completed cycle-2 passing arm was archived at `2026-10-02T22:35:51.083Z`
+under the same parent directory, then only inactive generated plugin/cache paths
+were removed. Source/Git and private DB remain locally.
+
+- `anko-nightly-quality-v3-20261002/attempt-evidence.tar`:
+  `f2499e1e5e7434e60d7cc83fb9b3b87dccebb2a97cc1ae0c508bee4fc1e91583`.
+- Its `product-checks-and-analysis.tar`:
+  `04e11f9f5e3c47f5277bf6d4a3c377f45ef0f9f6fd7d26c65792470ab49d10b6`.

@@ -23,7 +23,13 @@ direct-v2 Anko in 1881.045 s / $1.83757332, still reward 0 (F2P 5/9, P2P 94/94).
 New tests asserted the wrong return value; independent test-oracle selection is
 the next improvement. A separate native same-Coordinator two-unit direct probe
 passed in 278.110 s / $0.33391280, including real failed/passed checks, independent
-Review and genuine Mission completion. Product PR #152 remains the working PR.
+Review and genuine Mission completion.
+
+Direct-v3 then passed the original Anko task: official local reward 1, F2P 9/9,
+P2P 94/94; 2039.581 s, priced $1.80364484 plus one unknown-usage transport failure.
+Frozen Anko `c103668da55cb958a45c13236abd8adc0231082d`, product `8b536aa` and
+package hash are recorded in the continuous-loop record. Product PR #152 remains
+the working PR; release/main merge/global apply remain separate.
 
 ## Historical authority and status through run7
 

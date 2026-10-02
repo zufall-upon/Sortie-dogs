@@ -1,9 +1,11 @@
 # Coordinator direct execution and avoidable round trips
 
 Follow-up: [continuous nightly loop](nightly-quality-loop-20261002.md) records
-the later direct-v2 candidate, another original Anko score-0 result, and a successful
-real-V2 two-unit same-Coordinator direct execution. The fixed results below retain
-their original candidate identities; subsequent test-oracle changes are tracked there.
+the later direct-v2 score-0 result, **direct-v3 original Anko score 1 (F2P 9/9,
+P2P 94/94)**, and successful real-V2 two-unit same-Coordinator direct execution.
+The passing Anko run took 2039.581 s, priced $1.80364484 plus one unknown-usage
+transport failure. The fixed results below retain their original candidate identities;
+subsequent test-oracle changes and complete retained evidence are tracked there.
 
 ## Scope
 
