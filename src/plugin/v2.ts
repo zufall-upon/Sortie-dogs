@@ -9,6 +9,7 @@ import { V010_RUNTIME_ASSET_VERSION } from "../asset-version.js";
 import { NativeBackgroundLifecycle } from "./native-background.js";
 import { resolve } from "node:path";
 import { isSessionNotFoundError } from "@opencode/client";
+import { completionReportModelMessages } from "./receipt-presentation.js";
 
 // Capture once when this module evaluates. A later package replacement must not make an old
 // process report the replacement's bytes as its loaded adapter.
@@ -724,6 +725,7 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
     }
   });
   if (hooks["experimental.chat.system.transform"]) await context.session.hook("context", async event => {
+    if (Array.isArray(event.messages)) event.messages = completionReportModelMessages(event.messages);
     await background.resume(String(event.sessionID ?? ""));
     await background.reconcile(String(event.sessionID ?? ""));
     const output = { system: [] as string[] };
@@ -752,6 +754,7 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
     }
   });
   if (hooks["experimental.session.compacting"]) await context.session.hook("compaction", async event => {
+    if (Array.isArray(event.messages)) event.messages = completionReportModelMessages(event.messages);
     // V2 compaction builds its own tool snapshot and does not run the normal
     // context hook's agent-specific Sortie filter. Summary calls cannot run
     // local tools, so do not expose Sortie schemas to the compaction provider.

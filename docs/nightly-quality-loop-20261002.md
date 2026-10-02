@@ -246,7 +246,13 @@ tool output and user/assistant content are untouched. The regression checks both
 hooks, idempotence, files, malformed/error/blocked results, evidence and metadata.
 
 Focused validation (`night-v4-focused`): 62/62 PASS, test phase 2.672 s;
-full integration started via the recorded `night-v4-full` command. Native probe
+full integration (`night-v4-full`): **1598/1598 PASS**, 101 files, exit 0,
+198.021 s including build; skipped/missing/duplicate 0. Source snapshot SHA-256
+`e7eb58d66fec44b414b7cd813ee4ef9f11dac1156bb485d98c33de75be76d6a3`.
+Pure replay of the passing frozen arm's native completion packet: saved result
+2557 to model projection 1330 characters, full native packet and receipt unchanged,
+zero model requests. This replay is not live hook or measured savings evidence.
+Native probe
 preparation adds an observing-only plugin: retain the context draft, inspect it at
 `model.request` after all context hooks, and record only card-presence, receipt hash,
 identity and size. It changes neither prompts nor requests. Compare that actual
