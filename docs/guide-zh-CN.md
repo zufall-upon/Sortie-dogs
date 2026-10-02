@@ -15,7 +15,7 @@
 
 **当前release：[v0.13.3](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.13.3)**
 （[发布说明](release-v0.13.3.md)）。默认Mission runtime保留`v010` profile、命令和配置名称以兼容已有安装；
-名称中的`v010`不表示安装的仍是v0.10。当前asset marker为`0.13.3-coordinator-direct-v1`。
+名称中的`v010`不表示安装的仍是v0.10。当前asset marker为`0.13.3-coordinator-direct-v2`。
 
 > **Beta：** v0.13.x仍在稳定化。1.0之前runtime behavior、配置和生成asset仍可能变化。
 
@@ -307,7 +307,7 @@ npx sortie-dogs init .
 遇到unknown ownership或冲突file时安全停止。
 
 同时将精确版本配置和独立bridge dependency对齐到目标release。
-`0.13.3-coordinator-direct-v1`标识已安装asset，不证明正在运行的OpenCode已经重新加载新plugin。
+`0.13.3-coordinator-direct-v2`标识已安装asset，不证明正在运行的OpenCode已经重新加载新plugin。
 
 目前没有受支持的uninstall command。请单独删除npm dependency，再按
 [安全手动删除指南](uninstall.md)操作。只能删除已知Sortie-owned exact path，

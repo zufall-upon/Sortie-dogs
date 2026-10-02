@@ -226,7 +226,17 @@ existing user authorization and project gates; npm publication remains manual.
 }
 
 /** Shared by the installed Reviewer and its host-generated mission prompt. */
-export const MISSION_BEHAVIOR_REVIEW = `For a changed failure handler, inspect the operation it calls and the public inputs reaching it,
+export const MISSION_BEHAVIOR_REVIEW = `Start changed failure-path checks at the public entrypoint's existing tests and shared assertion helpers:
+derive the expected result, error and observable state from that established contract, not error text alone.
+Then trace a concrete rejected input through the changed code back to the public caller, including any
+earlier result that can survive the failure. Inspect what the new tests actually assert: discarding a return
+value or checking only the error cannot prove the other outputs. A concrete source contradiction is a
+finding even when the added tests pass; an unasserted value alone is not proof of a defect.
+During correction, exercise the smallest public-entrypoint regression that distinguishes the defect from
+the intended behavior, checking the affected outputs together. Verify that its assertions expose the old
+failure and pass with the fix; a green suite or prose self-recheck cannot replace that comparison.
+
+For a changed failure handler, inspect the operation it calls and the public inputs reaching it,
 including failures not listed in the new handler. Use the supplied source/tests and established API behavior
 to identify a concrete input that could still violate the requested contract. A passing normal input does
 not settle a different failure outcome of that same operation. A demonstrable material defect is FINDINGS; ask for
@@ -246,8 +256,9 @@ For incidental workflow constraints such as cache settings or command-path spell
 absence of a separate settings dump or historical log is not itself an evidence gap. Flag observed material
 contradictions. The Operator owns final comparison with the original request. If a missing check genuinely
 affects correctness or a requested deliverable, name that consequence and the smallest useful next check.
-On verification, focus on previous findings and the correction; do not repeat unchanged checks or expand
-the review to optional improvements. PASS means no material finding, not exhaustive proof of every path.`;
+On verification, compare the correction and its affected public outcomes with the original contract, not
+only the wording of previous findings. Reuse unchanged evidence; do not expand into optional improvements
+or an exhaustive input matrix. PASS means no material finding, not exhaustive proof of every path.`;
 
 /** Mission Reviewer uses ordinary host read/search permissions, not a supplied-packet-only protocol. */
 export function missionReviewerContent(profile: RuntimeProfile): string {
@@ -510,7 +521,7 @@ in this Task via ${profile.toolPrefix}expand_unit/existing contract updates and 
 no extra approval, restart or delegation. Preserve prohibitions, host Git lifecycle and cumulative budget.
 Requested add/commit needs source paths, not .git/** scope. State/budget: ${profile.toolPrefix}operator_status.
 
-Use public source/tests: fix the cause; check meaningful changed branches, API errors and state after failure,
+Use public source/test helpers: test changed API return/result, errors and state after failure together,
 without a hypothetical exhaustive matrix. Preserve reproduction entrypoint, input and layout; rerun or
 report why unverified. Missing tooling: one documented bounded setup in ${TOOL_ENVIRONMENT}/; reuse, never delete.
 ${WORKER_VALIDATION_WORKFLOW}
