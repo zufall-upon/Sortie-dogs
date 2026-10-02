@@ -304,9 +304,34 @@ plugin only observes outgoing context and does not edit requests or tool results
 Its source hash is fixed in `request-observer-provenance.json`. Actual Worker
 Luna-fast/max and Operator SOL/xhigh started, recorded at `2026-10-02T22:51:08.594Z`,
 initial sessions 0. No timeout/cost cutoff; 25 minutes is an observation checkpoint.
-Source will be fixed at native completion before the official local verifier runs.
-Original Anko result and semantic score for v4 are **pending**; the v3 score is not
-reused as evidence for this changed candidate.
+The fixed v4 original-task attempt **did not complete the Mission**. All five native
+sessions reached succeeded transport outcomes, but Operator explicitly returned
+`TRUE_INTERRUPTION: internal:` at `2026-10-02T23:33:54.629Z`; receipt is absent.
+Native launch→final terminal: **2601.378 seconds / $2.42897368**, 146 requests,
+unknown usage 0. The same Reviewer repaired three Medium findings (Go pointer
+writeback, channel-status assignment, oversized channel constructor) and returned
+honest author `SELF_RECHECKED` twice. The first correction used a composite shell
+command that the host did not recognize as the declared formal command; recovery
+then ran standalone `go test ./...` with exit 0, but broad read inputs still included
+inherited compiler-cache updates, leaving process-defect and no formal evidence.
+No second Reviewer, source clean at `f0c2e0715de6bcf460726f77d1a7601355d5ef9b` on
+`feature/typed-bindings`. No source/prompt/package change by the observer, no Anko
+push/PR/publication, no resumed inference, **no semantic scoring performed**.
+
+The original observer did not recognize native succeeded transport plus explicit
+internal interruption while Mission phase remained submitted. It kept an idle
+owned server after all inference had stopped. Read-only history and all 204
+installed package hashes were retained/checked before stopping only that owned
+server at `23:42:32Z`. The raw driver records `owned-server-exited`, 3120.205
+seconds and exit 1; this includes **518.827 seconds of post-terminal observation**
+and is not the native task latency. Both timestamps remain retained in
+`native-interruption.json` and the raw result; no time/cost cutoff. No completion
+tool/card exists in this original-task failure, so its projection result is
+**not exercised**, not a PASS borrowed from the separate v4 direct probe.
+
+Completed-attempt inference subtotal is now **$6.73286784 plus one prior
+unknown-usage transport failure**. The v3 semantic score remains attached only to
+its fixed product/package; the v4 semantic score is null/unscored, not zero or one.
 
 ## Cycle 4: inherited compiler-cache output falsely invalidates formal proof
 
@@ -365,6 +390,28 @@ Evidence: `cache-freshness-reproduction-v2.json`, `cache-freshness-fixed-replay.
 the initial compile-only reproduction remains retained
 as superseded evidence, not substituted for the real assertion run.
 
+### Cycle 4 fixed v5 package and next original-task run
+
+- Product commit `9dd53119207671d42b00afcba4af71a609e880c1`, runtime marker
+  `0.13.3-coordinator-direct-v5`; package SHA-256
+  `dc8a08bac481dddf5752747a22c948cb443ecc7f0d8533c8d19e34eebc429ea2`.
+- Fresh original 1825-byte task/base, private DB initially empty, 204 package files
+  and eight assets match. Candidate preflight/baseline `go test ./...` PASS.
+  Same model/review/common prompt conditions, no time/cost cutoff.
+- Before inference, the observing-only driver was corrected to recognize an
+  explicit native internal interruption only when every native session is
+  terminal. Actual v4 history replay plus seven boundary checks PASS, model
+  requests 0, no product/package/source/prompt change and no success promotion.
+  The old raw driver result is retained, not rewritten. Driver/protocol hashes are
+  fixed in `interruption-observer-proof.json` and the new launch record.
+- Fresh v5 original-task inference launched with the fixed package; actual
+  Luna-fast/max Worker and SOL/xhigh Operator verified at
+  `2026-10-02T23:47:11.233Z`, private DB initially zero sessions. Root
+  `ses_f00fcb9eeffeCfEnmhT29cpWVm`; Worker startup 29.120 seconds.
+  Command: `node _testenv/nightly-20261002/run-cycle.mjs anko-nightly-cache-v5-package-20261003 anko-nightly-cache-v5-scoring-20261003`.
+  It never repairs or rescores the frozen failed v4 source. Native completion, same-Reviewer behavior, original
+  semantic quality and any reduction in handoffs remain unproven for v5.
+
 ## Retained archives
 
 Both stopped native environments were archived on `2026-10-02T13:33:56Z` under
@@ -401,3 +448,13 @@ generated `.opencode/` and cache. Source/Git/private native DB retained.
   `1465f1d0314bca131a503419df78d3a4abd1ff6a1be84d2d36a39973cc4808ae`.
 - Its `product-checks-and-analysis.tar`:
   `d6568d0a1146a07d4e3db9f26fac39ce0d6ca41dfdf60d851c274d954623f658`.
+
+Failed original-task v4 attempt archived at `2026-10-02T23:46:39.366Z` under the
+same parent. True native-interruption record and raw delayed observer result both
+retained, source/Git/private DB/package preserved, generated plugin/cache removed
+only after owned-server/container/process inactivity checks.
+
+- `anko-nightly-card-v4-package-20261003/attempt-evidence.tar`:
+  `9387f5168a629992068814205dca41309805a662588e7f601814f687f97bfd68`.
+- Its `product-checks-and-analysis.tar`:
+  `398fc3e7e8ac4be2e82aa0d982a7c4e3421424e74c0c1e1a137ad72fa23a863b`.
