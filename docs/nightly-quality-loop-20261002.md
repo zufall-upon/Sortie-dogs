@@ -214,7 +214,7 @@ sample; these deltas do not establish prompt changes as the sole cause. Native
 direct implementation was not used in this Anko route; the separate two-unit
 probe above proves that route only.
 
-Nightly priced subtotal now **$3.97513096 plus one unknown-usage request**, including
+Through cycle 2, completed-run priced subtotal **$3.97513096 plus one unknown-usage request**, including
 both original Anko runs and the separate direct probe. Costs, request error, native
 models/terminal outcomes and review/correction traces are retained in the arm's
 `comparison-summary.json`, `finish-analysis.json` and `review-trace.md`.
@@ -258,6 +258,56 @@ preparation adds an observing-only plugin: retain the context draft, inspect it 
 identity and size. It changes neither prompts nor requests. Compare that actual
 outgoing request with saved native completion-tool and terminal-assistant content.
 
+### Cycle 3 native direct probe: observed projection and no re-transcription
+
+Fixed product `12ec5defb9ceba3682e3e523b965eba8a89abf6f`, marker
+`0.13.3-coordinator-direct-v4`, package SHA-256
+`49a799dce6fbd004b8ede303c6f1cdcef68d5fb39253ddcc09fe05938b34d4d5`.
+Installed 204 files / 8 assets match. Separate private native DB starts with zero
+sessions; actual same Coordinator SOL/xhigh direct activation was recorded, not
+inferred from configuration. Original Anko is not this diagnostic's task.
+
+Native completion **PASS**, 255.017 s / **$0.32876320**, 33 requests, unknown 0.
+Two units in the same Coordinator, each actual failed check then exit-0 check,
+Worker absent, initial independent Reviewer PASS, all three native sessions
+succeeded, genuine Mission succeeded receipt. Unchanged check hashes, clean source
+`9cf97f820b3a1bad729005952e3156e0c86b7a0d`, branch
+`diagnostic/direct-controller`; no push/publication and no product tool errors.
+
+The final model request actually received the projected successful completion
+packet (tool-result `text`), without `return_report`, with its retained marker,
+identical receipt SHA-256 and unchanged run/acceptance identities. Native tool
+history still stores the full **1109-character** card in its 2307-character packet.
+The terminal assistant contains **267 characters**, no card heading or exact card,
+and reports outcome/checks/independent Review/diagnostic limits. Final request
+11.247 s / $0.046764. No extra model turn was added for presentation.
+
+The prior direct-v2 probe used the same normalized prompt and initial file/check
+hashes. Its final request 31.817 s / $0.053330 / 1422 visible characters copied the
+1127-character card. Observed deltas: final request -20.570 s / -$0.006566;
+whole diagnostic -23.093 s / -$0.00514960, but request count **+3**. Each is one
+sample, different execution times and product guidance also changed; no causal
+saving or general reliability conclusion. Preserved native tool content is proven;
+rendered desktop/terminal card appearance was not directly inspected. The card is
+now retained in the completion tool result, not duplicated in final assistant prose.
+
+Completed-run priced subtotal **$4.30389416 plus one unknown-usage request**, before
+the new original Anko run. `completion-projection-summary.json`,
+`paired-card-probe-comparison.json`, `native-direct-summary.json` and actual
+request-observer records retain projection, provenance, measurements and limits.
+
+### Cycle 3 original Anko: same fixed package launched
+
+Fresh original 1825-byte task/base and private native DB, same unchanged common
+prompt/model/review policy, package above; preparation/baseline PASS. The additional
+plugin only observes outgoing context and does not edit requests or tool results.
+Its source hash is fixed in `request-observer-provenance.json`. Actual Worker
+Luna-fast/max and Operator SOL/xhigh started, recorded at `2026-10-02T22:51:08.594Z`,
+initial sessions 0. No timeout/cost cutoff; 25 minutes is an observation checkpoint.
+Source will be fixed at native completion before the official local verifier runs.
+Original Anko result and semantic score for v4 are **pending**; the v3 score is not
+reused as evidence for this changed candidate.
+
 ## Retained archives
 
 Both stopped native environments were archived on `2026-10-02T13:33:56Z` under
@@ -285,3 +335,12 @@ were removed. Source/Git and private DB remain locally.
   `f2499e1e5e7434e60d7cc83fb9b3b87dccebb2a97cc1ae0c508bee4fc1e91583`.
 - Its `product-checks-and-analysis.tar`:
   `04e11f9f5e3c47f5277bf6d4a3c377f45ef0f9f6fd7d26c65792470ab49d10b6`.
+
+Cycle-3 native direct probe archived at `2026-10-02T22:50:55.492Z`, verified
+package/result identity and inactive owned container/processes before removing only
+generated `.opencode/` and cache. Source/Git/private native DB retained.
+
+- `nightly-card-native-v4-20261003/attempt-evidence.tar`:
+  `1465f1d0314bca131a503419df78d3a4abd1ff6a1be84d2d36a39973cc4808ae`.
+- Its `product-checks-and-analysis.tar`:
+  `d6568d0a1146a07d4e3db9f26fac39ce0d6ca41dfdf60d851c274d954623f658`.
