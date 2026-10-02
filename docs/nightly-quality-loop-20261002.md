@@ -165,6 +165,18 @@ common content 2455 and prose 2391 characters. Full integration (`night-v3-full`
 Main was fetched again before cycle 2 and remains `b9b1246`.
 Nightly measured inference total after cycle 1 and direct probe: **$2.17148612**, unknown 0.
 
+Cycle-2 fixed candidate and launch:
+
+- Product `8b536aa4bd25bd197c1c6de4961f7c284b79af61`; marker
+  `0.13.3-coordinator-direct-v3`.
+- Package SHA-256 `3840ca2e5cda118bc9c4878bb99b5afc025c4815b29cb0e3e492f16b59775574`.
+- Fresh original Anko clone/private DB; 204 package files/eight assets verified.
+  Preflight exit 0, 5.640 s; baseline `go test ./...` exit 0, 5.571 s.
+- Launched with `node _testenv/nightly-20261002/run-cycle.mjs anko-nightly-quality-v3-20261002 anko-nightly-quality-v3-scoring-20261002`.
+  Same task/base/common prompt, Luna-fast/max Worker and SOL/xhigh control/review
+  policy. No timeout/cost cutoff. Wrapper fixes the native terminal candidate before
+  scoring and does not modify/re-prompt it after grading. Result pending.
+
 ## Retained archives
 
 Both stopped native environments were archived on `2026-10-02T13:33:56Z` under
