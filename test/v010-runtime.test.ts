@@ -279,7 +279,7 @@ test("preview assets coexist with stable assets and markers", async () => fixtur
     assert.match(asset, /^model: openai\/gpt-6-luna-fast#max$/m);
     assert.match(asset, /^permission:\r?\n  bash: allow\r?\n  sortie_v010_bind_write_gate: allow\r?\n  sortie_v010_release_write_gate: allow$/mu);
     if (name === "dog-worker-v010") {
-      assert.match(asset, /Use public source\/test helpers: test changed API return\/result, errors and state after failure together/u);
+      assert.match(asset, /pre-change test helpers as oracles, not new implementation\/tests\. Check\s+result\/error\/state together/u);
       assert.match(asset, /Preserve reproduction entrypoint, input and layout/u);
       assert.match(asset, /without a hypothetical exhaustive matrix/u);
       assert.match(asset, /unresolved\/untested behavior/u);

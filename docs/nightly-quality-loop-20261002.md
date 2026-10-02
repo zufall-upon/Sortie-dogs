@@ -158,7 +158,11 @@ prose length 2406 vs the existing 2400 limit. Restore the original reproduction
 reporting sentence and shorten the new wording; preserve the existing thresholds.
 
 Corrected focused suite: 153/153 PASS, test 10.871 s; generated Worker 2876,
-common content 2455 and prose 2391 characters. Full integration is pending.
+common content 2455 and prose 2391 characters. Full integration (`night-v3-full`):
+**1597/1597 PASS**, 101 files, no skipped/missing/duplicate files; exit 0,
+199.113 s including build. Source snapshot SHA-256
+`3c53658ce61b5130f1563af356d252c4a9fb30d511afd9f3ecba32f201b4c779`.
+Main was fetched again before cycle 2 and remains `b9b1246`.
 Nightly measured inference total after cycle 1 and direct probe: **$2.17148612**, unknown 0.
 
 ## Retained archives

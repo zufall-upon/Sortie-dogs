@@ -30,7 +30,7 @@ test("public reproduction and shared-branch checks remain in the same mission Wo
   assert.match(coordinator, /working directory or package layout/u);
   assert.match(coordinator, /not an adjacent check unless it runs\s+the changed branch/u);
   assert.match(worker, /entrypoint, input and layout; rerun or\s+report why unverified/u);
-  assert.match(worker, /public source\/test helpers: test changed API return\/result, errors and state after failure together/u);
+  assert.match(worker, /pre-change test helpers as oracles, not new implementation\/tests\. Check\s+result\/error\/state together/u);
   assert.match(worker, /without a hypothetical exhaustive matrix/u);
   assert.match(worker, /no extra tee, redirect or wrapper/u);
   assert.match(coordinator, /a preview is not the live run/u);

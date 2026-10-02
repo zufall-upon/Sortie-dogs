@@ -53,7 +53,7 @@ test('planning and implementation share a staged validation workflow without new
   assert.match(operator, /preserving the authorized clone and exact prohibited paths/);
   assert.doesNotMatch(operator, /If the original request supplies a meaningful formal validation command/);
   assert.match(worker, /Read handoff_path in full first:/);
-  assert.match(worker, /public source\/test helpers: test changed API return\/result, errors and state after failure together/);
+  assert.match(worker, /pre-change test helpers as oracles, not new implementation\/tests\. Check\s+result\/error\/state together/);
   assert.doesNotMatch(worker, /Assert public return value|Check a\s+materially different failure input|uncaught failures/);
   for (const boundary of [/in this Task via/, /\.git\/\*\* scope/, /formal evidence/,
     /without a hypothetical exhaustive matrix/, /\.sortie-env\//, /Do not spawn nested subagents/,

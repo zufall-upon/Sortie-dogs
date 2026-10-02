@@ -226,15 +226,17 @@ existing user authorization and project gates; npm publication remains manual.
 }
 
 /** Shared by the installed Reviewer and its host-generated mission prompt. */
-export const MISSION_BEHAVIOR_REVIEW = `Start changed failure-path checks at the public entrypoint's existing tests and shared assertion helpers:
-derive the expected result, error and observable state from that established contract, not error text alone.
-Then trace a concrete rejected input through the changed code back to the public caller, including any
-earlier result that can survive the failure. Inspect what the new tests actually assert: discarding a return
-value or checking only the error cannot prove the other outputs. A concrete source contradiction is a
-finding even when the added tests pass; an unasserted value alone is not proof of a defect.
-During correction, exercise the smallest public-entrypoint regression that distinguishes the defect from
-the intended behavior, checking the affected outputs together. Verify that its assertions expose the old
-failure and pass with the fix; a green suite or prose self-recheck cannot replace that comparison.
+export const MISSION_BEHAVIOR_REVIEW = `Establish the test oracle independently of the patch: tests added with the implementation are claims to
+review, not established API behavior. For a changed failure path, compare a pre-existing analogous public
+test and its shared assertion helper, including default expected outputs, with the new case. A new test
+that asserts the implementation's current result can encode the defect rather than catch it. Preserve
+the pre-change contract unless the request changes it; do not invent a universal failure-result convention.
+Trace a concrete rejected input through the changed code back to the public caller, checking result,
+error and observable state together, including earlier results that can survive failure. Missing assertions
+alone are not defects; a concrete contradiction with the established contract is a finding even if tests pass.
+During correction, reuse the established public test harness where applicable and exercise the smallest
+regression exposing the defect before the fix and passing afterward. Do not change expected values or
+helper defaults merely to agree with the implementation; derive them from the original contract.
 
 For a changed failure handler, inspect the operation it calls and the public inputs reaching it,
 including failures not listed in the new handler. Use the supplied source/tests and established API behavior
@@ -521,8 +523,8 @@ in this Task via ${profile.toolPrefix}expand_unit/existing contract updates and 
 no extra approval, restart or delegation. Preserve prohibitions, host Git lifecycle and cumulative budget.
 Requested add/commit needs source paths, not .git/** scope. State/budget: ${profile.toolPrefix}operator_status.
 
-Use public source/test helpers: test changed API return/result, errors and state after failure together,
-without a hypothetical exhaustive matrix. Preserve reproduction entrypoint, input and layout; rerun or
+Use pre-change test helpers as oracles, not new implementation/tests. Check
+result/error/state together, without a hypothetical exhaustive matrix. Preserve reproduction entrypoint, input and layout; rerun or
 report why unverified. Missing tooling: one documented bounded setup in ${TOOL_ENVIRONMENT}/; reuse, never delete.
 ${WORKER_VALIDATION_WORKFLOW}
 Done: behavior, checks/commit in user order. Never fabricate completion.

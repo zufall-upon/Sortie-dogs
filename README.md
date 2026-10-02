@@ -38,7 +38,7 @@ Guides: [日本語](docs/guide-ja.md) · [简体中文](docs/guide-zh-CN.md) ·
 **Current release: [v0.13.3](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.13.3)**
 ([release notes](docs/release-v0.13.3.md)). The default Mission runtime retains the `v010`
 profile, command and configuration names for compatibility; these names do not mean v0.10 is installed.
-The current asset marker is `0.13.3-coordinator-direct-v2`.
+The current asset marker is `0.13.3-coordinator-direct-v3`.
 
 ## SWE-bench Lite: 170/300 (56.67%)
 
@@ -428,7 +428,7 @@ version, preserves user configuration, and stops safely on unknown ownership or
 conflicting files.
 
 Align any exact version pin or separate bridge dependency with the intended release too. An installed
-marker of `0.13.3-coordinator-direct-v2` identifies the assets; it does not prove an already-running
+marker of `0.13.3-coordinator-direct-v3` identifies the assets; it does not prove an already-running
 OpenCode process has reloaded the plugin.
 
 There is no supported uninstall command. Remove the npm dependency separately,
