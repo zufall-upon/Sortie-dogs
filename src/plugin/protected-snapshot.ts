@@ -14,7 +14,7 @@ type Binding = NonNullable<GoalEvidence["protected_binding"]>;
 const controlRoots = new Set([".git", ...Object.values(RUNTIME_PROFILES).map(profile => profile.stateDirectory)]);
 const exec = promisify(execFile);
 const environmentKeys = ["PATH", "GOOS", "GOARCH", "CGO_ENABLED", "GOFLAGS", "GOPROXY", "GOSUMDB", "NODE_OPTIONS", "NODE_ENV",
-  "PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV", "CC", "CXX", "CFLAGS", "CXXFLAGS", "LDFLAGS"];
+  "PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV", "CC", "CXX", "CFLAGS", "CXXFLAGS", "LDFLAGS", "TMPDIR", "GOCACHE", "GOMODCACHE", "GOPATH"];
 const environment = (manifest: OperationManifest) => ({
   ...Object.fromEntries([...new Set([...environmentKeys, ...manifest.validation.flatMap(command =>
     [...command.matchAll(/\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/gu)].map(match => match[1] ?? match[2]!))])]
@@ -64,7 +64,10 @@ export async function currentSnapshotProtection(projectRoot: string, manifest: P
   // An absent execution grant is not a newly delivered artifact. Initial missing paths remain
   // protected by the immutable binding, while new outputs become protected when materialized.
   const materialized = await Promise.all(outputs.map(async path => await lstat(path).catch(() => undefined) ? path : undefined));
-  return [...new Set([...manifest.read.map(actual), ...tracked, ...materialized.filter((path): path is string => path !== undefined)])];
+  // A whole-project read includes real source, not every configured compiler-cache output.
+  // Specific cache inputs, tracked files and exact deliverables still tighten the recipe.
+  return [...new Set([...manifest.read.map(actual).filter(path => path !== resolve(projectRoot)),
+    ...tracked, ...materialized.filter((path): path is string => path !== undefined)])];
 }
 
 async function snapshotManifest(projectRoot: string, binding: Binding): Promise<{ manifest: OperationManifest; hash: string } | undefined> {
@@ -73,8 +76,12 @@ async function snapshotManifest(projectRoot: string, binding: Binding): Promise<
   const hash = createHash("sha256").update(source).digest("hex");
   const manifest = JSON.parse(source.toString("utf8")) as OperationManifest;
   if (binding.freshness) {
+    const currentEnvironment: Record<string, unknown> = environment(manifest);
+    // Compare the saved environment recipe only. Old proof cannot gain new cache exclusions
+    // or lose validity merely because new captures bind additional environment variables.
+    const boundEnvironment = Object.fromEntries(Object.keys(binding.freshness.environment).map(key => [key, currentEnvironment[key]]));
     if (validationContractHash(manifest) !== binding.freshness.contract_hash ||
-        goalFingerprint(environment(manifest)) !== goalFingerprint(binding.freshness.environment)) return undefined;
+        goalFingerprint(boundEnvironment) !== goalFingerprint(binding.freshness.environment)) return undefined;
     return { manifest, hash: binding.freshness.contract_hash.slice("sha256:".length) };
   }
   return `sha256:${hash}` === binding.manifest_hash ? { manifest, hash } : undefined;
@@ -211,8 +218,9 @@ export async function protectedSnapshot(authorization: { manifestPath: string; m
       manifest_path: relativePath, source_policy: external ? "declared-paths-v1" : "project-files-v1",
       source_paths: sourcePaths.map(evidencePath),
       candidate_paths: candidatePaths.map(evidencePath),
-      freshness: { contract_hash: validationContractHash(manifest), scratch_paths: validationScratchPaths(authorization.projectRoot, manifest.validation),
-        protected_paths: [...new Set([...actualPaths(manifest.read), ...tracked.map(path => resolve(authorization.projectRoot, path)),
+      freshness: { contract_hash: validationContractHash(manifest), scratch_paths: validationScratchPaths(authorization.projectRoot, manifest.validation, process.env),
+        protected_paths: [...new Set([...actualPaths(manifest.read).filter(path => path !== resolve(authorization.projectRoot)),
+          ...tracked.map(path => resolve(authorization.projectRoot, path)),
           ...actualPaths(manifest.write.filter(path => !path.endsWith("/**")))] )], environment: environment(manifest) } };
     const current = await refreshProtectedSnapshot(authorization.projectRoot, binding);
     return current && { binding, ...current };

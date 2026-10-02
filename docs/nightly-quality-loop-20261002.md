@@ -308,6 +308,63 @@ Source will be fixed at native completion before the official local verifier run
 Original Anko result and semantic score for v4 are **pending**; the v3 score is not
 reused as evidence for this changed candidate.
 
+## Cycle 4: inherited compiler-cache output falsely invalidates formal proof
+
+While v4 continues under its unchanged fixed package, a read-only native snapshot
+identified a concrete extra loop. The first Worker actually ran literal
+`go test ./...` with host exit 0, call `call_HMIY0qclo3q95gNLoz3qnijh`. Its saved
+native background owner record nevertheless contains `fresh:false`, empty
+`scratch_paths`, and a whole-project read input. `GOCACHE` was explicitly set in
+the inherited environment to the project's `.gocache`; 37 surviving cache files
+have modification times inside that formal check's recorded interval. Source was
+committed at `c980fc6`, native Worker succeeded, but the unit became process-defect
+and Review was rejected as `mission-review-awaits-unit-validation`.
+
+Operator then launched Coordinator, which replanned narrower inputs and sent
+another Worker. That Worker made **no source edit and no new commit**; it inspected
+the same implementation and reran focused/formal checks before Review could start.
+The trace also retains the empty-replan-reason and copied-Task-hash errors; these
+are not attributed to the cache mechanism. Live unknown-usage entries in the
+snapshot are pending tool/model requests, not established transport failures or
+completed-run costs. The v4 run, original source and prompts were not altered.
+
+Separate offline reproduction uses a real Go test assertion, freshly empty
+configured inherited caches, identical source/test bytes and model requests 0.
+Broad project read: exit 0 but stale input digest. Focused source read: exit 0 and
+fresh digest. After the next-candidate fix, both retain freshness with actual
+compiler output, no synthetic cache writes and no source/test change. Native old
+`fresh:false` evidence is kept unchanged; exhaustive native per-file before/after
+hashes were not recorded, so the reproduction proves the mechanism rather than
+claiming a complete retrospective source diff.
+
+The fix captures configured inherited `TMPDIR`, `GOCACHE`, `GOMODCACHE` and Go
+module-cache paths, respecting command overrides and pinning that environment.
+A whole-project input no longer implicitly turns those compiler outputs into real
+source. Explicit cache inputs, tracked files, exact deliverables and changed
+source/configuration still invalidate proof. No filename/ignored/untracked heuristic,
+new permission gate, approval, check weakening or retroactive old-proof exclusion.
+Older recipes compare only their already-bound environment fields and keep their
+original protected/scratch paths.
+
+First focused verification: **68/68 PASS**; integrated focused verification:
+**81/81 PASS**, exit 0, including same-original-Worker→Review without replacement,
+unchanged evidence after cache cleanup, stale real-source rejection and v5 asset
+coverage. `npm run test:full`: **1603/1603 PASS**, 101 files, exit 0,
+**199.284 seconds**, no skipped/missing/duplicate files. Full source snapshot:
+`ce1094145de7af3e373171395a6885fd7508bb0ea70bc50d730a78004dd860b2`;
+subsequent updates are documentation only. A new fixed native candidate is being
+prepared; its original Anko result and semantic score are not established.
+Tests and the separate Go replay
+ran on the same host during v4 inference, a further limitation on timing comparisons;
+the active arm's installed package is unchanged. The v5 change is not part of v4's
+future semantic score or its projection measurement.
+
+Evidence: `cache-freshness-reproduction-v2.json`, `cache-freshness-fixed-replay.json`,
+`night-v4-cache-reproduction-2.*`, `night-v5-cache-focused.*` and
+`night-v5-cache-focused-2.*`, `night-v5-cache-full.*`, and `night-v5-cache-replay.*`;
+the initial compile-only reproduction remains retained
+as superseded evidence, not substituted for the real assertion run.
+
 ## Retained archives
 
 Both stopped native environments were archived on `2026-10-02T13:33:56Z` under

@@ -18,7 +18,7 @@ model routingが必要なtaskだけSortieを起動する。
 **現行release: [v0.13.3](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.13.3)**
 （[release notes](release-v0.13.3.md)）。既定Mission runtimeの`v010` profile、command、設定名は
 互換性のため維持している。名前が`v010`でも導入版がv0.10という意味ではない。
-現行asset markerは`0.13.3-coordinator-direct-v4`。
+現行asset markerは`0.13.3-coordinator-direct-v5`。
 
 > **Beta:** v0.13.xは安定化中。1.0まではruntime behavior、設定、生成assetが
 > 変更される可能性がある。
@@ -319,7 +319,7 @@ npx sortie-dogs init .
 unknown ownershipまたは競合fileでは安全に停止する。
 
 固定version設定や別bridge dependencyも対象releaseへ揃える。
-`0.13.3-coordinator-direct-v4`は導入assetの識別子であり、稼働中OpenCodeの新plugin読込を証明しない。
+`0.13.3-coordinator-direct-v5`は導入assetの識別子であり、稼働中OpenCodeの新plugin読込を証明しない。
 
 uninstall commandは未提供。npm dependencyを別途削除後、
 [安全な手動削除ガイド](uninstall.md)に従う。既知のSortie-owned exact pathだけを削除し、

@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promis
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
-import { operationInputSnapshot, protectedSnapshot, refreshProtectedSnapshot } from "../dist/plugin/protected-snapshot.js";
+import { operationInputSnapshot, protectedSnapshot, refreshProtectedSnapshot, validationInputSnapshot } from "../dist/plugin/protected-snapshot.js";
 import { goalFingerprint } from "../dist/core/goal-bound.js";
 
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -50,6 +50,78 @@ test("fixed validation scratch ignores generation/cleanup but protects read, tra
     await writeFile(join(root, path), "original");
   }
   assert.equal(JSON.stringify(pinned.binding), original, "freshness never rewrites the old execution binding");
+}));
+
+test("a broad project read excludes inherited compiler outputs, but source and configured environment stay bound", async () => fixture(async root => {
+  const previous = process.env.GOCACHE;
+  process.env.GOCACHE = join(root, "compiler-output");
+  try {
+    await exec("git", ["init", "--quiet"], { cwd: root });
+    await mkdir(join(root, "src"));
+    await writeFile(join(root, "src/input.go"), "original source");
+    await exec("git", ["add", "--", "src/input.go"], { cwd: root });
+    const pinned = await validationPin(root, [root + "/**"], ["src/**"], ["go test ./..."]);
+    const saved = JSON.stringify(pinned.binding), inputs = await validationInputSnapshot(root, pinned.binding);
+    const unchanged = { source: pinned.source, candidate: pinned.candidate };
+    await mkdir(process.env.GOCACHE);
+    await writeFile(join(process.env.GOCACHE, "generated-cache"), "compiler bytes");
+    assert.equal(await validationInputSnapshot(root, pinned.binding), inputs);
+    assert.deepEqual(await refreshProtectedSnapshot(root, pinned.binding), unchanged);
+    await writeFile(join(root, "src/input.go"), "modified source");
+    assert.notEqual(await validationInputSnapshot(root, pinned.binding), inputs);
+    await writeFile(join(root, "src/input.go"), "original source");
+    await mkdir(join(root, "compiler-output-neighbor"));
+    await writeFile(join(root, "compiler-output-neighbor/input"), "real untracked input");
+    assert.notEqual(await validationInputSnapshot(root, pinned.binding), inputs, "similarly named directories are not ignored");
+    await rm(join(root, "compiler-output-neighbor"), { recursive: true });
+    process.env.GOCACHE = join(root, "other-cache");
+    assert.equal(await refreshProtectedSnapshot(root, pinned.binding), undefined, "changed inherited configuration is not old proof");
+    assert.equal(JSON.stringify(pinned.binding), saved, "saved proof is never rewritten");
+  } finally { if (previous === undefined) delete process.env.GOCACHE; else process.env.GOCACHE = previous; }
+}));
+
+test("broad reads still protect explicit cache inputs, tracked files and exact deliverables", async () => fixture(async root => {
+  const previous = process.env.GOCACHE;
+  process.env.GOCACHE = join(root, "compiler-output");
+  try {
+    await exec("git", ["init", "--quiet"], { cwd: root });
+    await mkdir(process.env.GOCACHE);
+    for (const path of ["input", "tracked.go", "deliverable"]) await writeFile(join(process.env.GOCACHE, path), "original");
+    await exec("git", ["add", "--", "compiler-output/tracked.go"], { cwd: root });
+    const pinned = await validationPin(root, [root + "/**", "compiler-output/input"],
+      ["compiler-output/**", "compiler-output/deliverable"], ["go test ./..."]);
+    const inputs = await validationInputSnapshot(root, pinned.binding), unchanged = { source: pinned.source, candidate: pinned.candidate };
+    await writeFile(join(process.env.GOCACHE, "cache"), "generated cache");
+    assert.equal(await validationInputSnapshot(root, pinned.binding), inputs);
+    assert.deepEqual(await refreshProtectedSnapshot(root, pinned.binding), unchanged);
+    for (const path of ["input", "tracked.go", "deliverable"]) {
+      await writeFile(join(process.env.GOCACHE, path), "changed");
+      assert.notEqual(await validationInputSnapshot(root, pinned.binding), inputs, path);
+      assert.notDeepEqual(await refreshProtectedSnapshot(root, pinned.binding), unchanged, path);
+      await writeFile(join(process.env.GOCACHE, path), "original");
+    }
+  } finally { if (previous === undefined) delete process.env.GOCACHE; else process.env.GOCACHE = previous; }
+}));
+
+test("older broad-read proof retains its cache and environment recipe rather than gaining new exclusions", async () => fixture(async root => {
+  const previous = process.env.GOCACHE;
+  process.env.GOCACHE = join(root, "compiler-output");
+  try {
+    await mkdir(process.env.GOCACHE);
+    await writeFile(join(process.env.GOCACHE, "cache"), "old bytes");
+    const pinned = await validationPin(root, [root + "/**"], ["result.txt"], ["go test ./..."]);
+    const older = structuredClone(pinned.binding);
+    older.freshness!.scratch_paths = [];
+    older.freshness!.protected_paths.push(root);
+    for (const key of ["TMPDIR", "GOCACHE", "GOMODCACHE", "GOPATH"]) delete older.freshness!.environment[key];
+    const inputs = await validationInputSnapshot(root, older);
+    assert.ok(inputs, "the old environment recipe remains readable");
+    await writeFile(join(process.env.GOCACHE, "cache"), "new compiler bytes");
+    assert.notEqual(await validationInputSnapshot(root, older), inputs, "no retroactive freshness repair");
+    const current = await validationInputSnapshot(root, pinned.binding);
+    await writeFile(join(process.env.GOCACHE, "cache"), "another compiler output");
+    assert.equal(await validationInputSnapshot(root, pinned.binding), current);
+  } finally { if (previous === undefined) delete process.env.GOCACHE; else process.env.GOCACHE = previous; }
 }));
 
 test("scope-only grants preserve proof; new real output, input, check and environment changes invalidate it", async () => fixture(async root => {

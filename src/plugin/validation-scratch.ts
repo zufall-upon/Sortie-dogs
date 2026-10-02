@@ -1,5 +1,5 @@
 import { lstat, mkdir } from "node:fs/promises";
-import { isAbsolute, relative, resolve, win32 } from "node:path";
+import { delimiter, isAbsolute, relative, resolve, win32 } from "node:path";
 import { createProjectPaths } from "./gate.js";
 import { RUNTIME_PROFILES } from "../core/runtime-profile.js";
 
@@ -20,16 +20,27 @@ function localScratchPath(directory: string, target: string): string | undefined
 
 const isControl = (path: string) => controlDirectories.has(process.platform === "win32" ? path.split("/")[0]!.toLowerCase() : path.split("/")[0]!);
 
-/** Only explicitly configured tool scratch/cache outputs; no filename, ignored or untracked heuristic. */
-export function validationScratchPaths(directory: string, commands: readonly string[]): string[] {
+/** Only configured tool scratch/cache outputs; no filename, ignored or untracked heuristic. */
+export function validationScratchPaths(directory: string, commands: readonly string[],
+  inherited: Readonly<Record<string, string | undefined>> = {}): string[] {
   const paths = new Set<string>();
-  for (const command of commands) for (const match of command.matchAll(/(?:^|\s)(TMPDIR|GOCACHE|GOMODCACHE|GOPATH)=(?:"([^"]+)"|'([^']+)'|([^\s"']+))/gu)) {
-    const absolute = nativeScratchPath(directory, match[2] ?? match[3] ?? match[4]!);
-    if (!absolute) continue;
-    const scoped = localScratchPath(directory, absolute);
-    if (!scoped || isControl(scoped)) continue;
-    if (match[1] === "GOPATH") { paths.add(resolve(absolute, "pkg/mod")); paths.add(resolve(absolute, "pkg/sumdb")); }
-    else paths.add(absolute);
+  for (const command of commands) {
+    const configured = new Map<string, string>();
+    for (const key of ["TMPDIR", "GOCACHE", "GOMODCACHE", "GOPATH"]) {
+      if (inherited[key]) configured.set(key, inherited[key]!);
+    }
+    for (const match of command.matchAll(/(?:^|\s)(TMPDIR|GOCACHE|GOMODCACHE|GOPATH)=(?:"([^"]*)"|'([^']*)'|([^\s"']*))/gu)) {
+      configured.set(match[1]!, match[2] ?? match[3] ?? match[4]!);
+    }
+    for (const [key, value] of configured) for (const declared of key === "GOPATH" ? value.split(delimiter) : [value]) {
+      if (!declared || key === "GOCACHE" && declared === "off") continue;
+      const absolute = nativeScratchPath(directory, declared);
+      if (!absolute) continue;
+      const scoped = localScratchPath(directory, absolute);
+      if (!scoped || isControl(scoped)) continue;
+      if (key === "GOPATH") { paths.add(resolve(absolute, "pkg/mod")); paths.add(resolve(absolute, "pkg/sumdb")); }
+      else paths.add(absolute);
+    }
   }
   return [...paths].sort();
 }

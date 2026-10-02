@@ -46,8 +46,8 @@ async function fixture(run: (f: any) => Promise<void>) {
     await chat("root", "Implement requested source and verify it. Preserve check.mjs; do not write forbidden.txt. Original negative acceptance remains required.");
     const start = async (conditions?: object) => tool("start_mission", { requirements: ["Implement result and preserve checks", "Do not write forbidden.txt"],
       prohibited_write: ["forbidden.txt"], ...(conditions ? { confirmed_conditions: conditions } : {}) });
-    const dispatch = async (objective = "Implement and verify", validation = "node check.mjs", write = ["result.txt"]) => {
-      const planned = await tool("plan_units", { units: [{ title: "Implement result", objective, read: ["check.mjs"], write, validation: [validation] }] });
+    const dispatch = async (objective = "Implement and verify", validation = "node check.mjs", write = ["result.txt"], read = ["check.mjs"]) => {
+      const planned = await tool("plan_units", { units: [{ title: "Implement result", objective, read, write, validation: [validation] }] });
       const task = { args: structuredClone(planned.task) };
       await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "worker-call" }, task);
       await chat("worker", String(task.args.prompt));
@@ -386,6 +386,34 @@ test("validation cache generation and post-PASS cleanup preserve freshness and R
   await writeFile(join(f.directory, "result.txt"), "changed after check");
   assert.equal((await f.tool("operator_status")).completion.ready, false);
   await assert.rejects(f.tool("review_mission", { risk_tags: [] }), /mission-review-awaits-current-validation/);
+}));
+
+test("inherited cache generation under a whole-project read settles the original Worker and enters Review without a replacement", async () => fixture(async f => {
+  const previous = process.env.GOCACHE;
+  process.env.GOCACHE = join(f.directory, "compiler-cache");
+  try {
+    await f.start();
+    await f.dispatch("Implement and verify", "node check.mjs", ["result.txt"], [f.directory + "/**"]);
+    await f.validate("node check.mjs", async () => {
+      await mkdir(process.env.GOCACHE!);
+      await writeFile(join(process.env.GOCACHE!, "compiled-output"), "generated compiler output");
+    });
+    await f.finish();
+    const state = await f.runtime.required("root"), evidence = state.units[0].evidence;
+    assert.equal(state.units[0].status, "succeeded");
+    assert.equal(state.units[0].resultClass, "acceptance");
+    assert.equal(state.units.length, 1);
+    assert.equal(state.dispatched, 1);
+    assert.equal(evidence.length, 1);
+    assert.equal((await f.tool("operator_status")).completion.ready, true);
+    assert.equal((await f.tool("review_mission", { risk_tags: [] })).status, "skipped-low-risk");
+    await rm(process.env.GOCACHE!, { recursive: true });
+    assert.equal((await f.tool("operator_status")).completion.ready, true);
+    assert.deepEqual((await f.runtime.required("root")).units[0].evidence, evidence);
+    await writeFile(join(f.directory, "result.txt"), "unverified change");
+    assert.equal((await f.tool("operator_status")).completion.ready, false);
+    await assert.rejects(f.tool("review_mission", { risk_tags: [] }), /mission-review-awaits-current-validation/);
+  } finally { if (previous === undefined) delete process.env.GOCACHE; else process.env.GOCACHE = previous; }
 }));
 
 for (const promotion of ["exact-output", "tracked-source"]) test(`new ${promotion} under old cache blocks completion and stale Review, not same-Task scope repair`, async () => fixture(async f => {
