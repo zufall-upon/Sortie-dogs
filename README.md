@@ -81,6 +81,20 @@ internal children and must not be selected as task entry points.
 model routing. A new session alone does not reload an updated
 plugin process, so restart OpenCode after installation or upgrade.
 
+## v0.13.3 runtime updates
+
+The current release integrates native background Mission execution, concise authoritative Worker
+handoffs, and same-context Reviewer corrections from PRs #148/#149 and their Ubuntu remediation.
+After finding defects, the original Reviewer can correct and explicitly self-recheck in the same
+native session, retaining formal checks, current-source evidence, Git delivery and cumulative budget.
+Author self-recheck is recorded as non-independent; a different Reviewer is conditional on a concrete
+reachable residual Major risk. Unresolved Major or Medium findings still block acceptance.
+
+The installed native correction fixture succeeded, but the original Anko measurements remain
+unaccepted, including the latest 25-minute run. This release does not claim general speedup,
+original-task completion or a new SWE-bench score. See the [release notes](docs/release-v0.13.3.md)
+and [retained implementation and measurement history](docs/anko-pr149-ubuntu-handoff.md).
+
 ## v0.12.0 workflow
 
 v0.12.0 keeps Operator → Coordinator → Worker, with independent review:
