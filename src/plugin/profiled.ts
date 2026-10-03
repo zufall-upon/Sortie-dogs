@@ -2203,12 +2203,23 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             budget: await control!.currentBudget(root), next_action: "Host repaired the ended Task's contract without reviving it or consuming a unit. Continue Review/acceptance if evidence remains current; plan a continuation only for actual remaining implementation or required validation." });
         });
       } };
-    async function startInlineReviewerCorrection(root: string, author: string) {
+    async function startInlineReviewerCorrection(root: string, author: string, additionalFindings?: string) {
       const mission = await missions.required(root);
       const correction = mission.corrections?.find(item => item.runID === mission.runID && item.author === author && item.inlineReview &&
         item.inlineReview.callID === mission.review?.callID && item.inlineReview.promptID === mission.review?.promptID &&
         ["prepared", "running"].includes(item.status));
       if (!correction) throw new Error("mission-review-correction-generation-stale");
+      // Further independently reproduced defects belong to this same correction,
+      // not to a new independent Review, Task, contract or budget reservation.
+      const body = additionalFindings?.replace(/^\s*FINDINGS(?:\s|$)/u, "").trim();
+      if (body && !correction.findings.includes(body)) {
+        const updated = await missions.update(root, item => {
+          const retained = item.corrections!.find(entry => entry.runID === correction.runID && entry.author === author &&
+            entry.inlineReview?.callID === correction.inlineReview!.callID && entry.inlineReview?.promptID === correction.inlineReview!.promptID)!;
+          retained.findings += `\n\n${additionalFindings}`;
+        });
+        correction.findings = updated.corrections!.find(item => item.runID === correction.runID)!.findings;
+      }
       let run = await operators.required(root);
       if (run.phase === "prepared") run = await operators.admitReviewerDirect(root, author, `direct-review-${randomUUID()}`, correction.inlineReview!.promptID);
       const unit = run.units.find(item => item.status === "running" && item.directExecution?.actor === author);
@@ -2236,7 +2247,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           const existing = mission.corrections?.find(item => item.runID === run.runID);
           let review = mission.review;
           if (reviewer && existing?.inlineReview && existing.author === context.sessionID &&
-              ["prepared", "running"].includes(existing.status)) return startInlineReviewerCorrection(root, context.sessionID);
+               ["prepared", "running"].includes(existing.status)) return startInlineReviewerCorrection(root, context.sessionID,
+                 typeof args.findings === "string" ? args.findings : undefined);
           if (reviewer) {
             if (!review || review.verdict !== "pending" || review.mode === "self-recheck" || mission.corrections?.length || review.child !== context.sessionID ||
                 !review.callID || !review.promptID || !review.task || !missionReviewIndependent(mission, context.sessionID) ||
@@ -3409,8 +3421,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         const inline = mission?.corrections?.find(item => item.runID === run?.runID && item.author === request.sessionID &&
           item.inlineReview && ["running", "ready"].includes(item.status) && !item.selfRecheck);
         if (inline && run) {
-          // Fixed assignment only. Keep this prefix through the actual native self-recheck
-          // terminal, without changing phase/counters or reintroducing a handoff-read ritual.
+          // Assignment/known defects only. New actual findings may update this context;
+          // routine phase/counters never do, nor require another handoff-read ritual.
           (output.system ??= []).push(`SORTIE_REVIEWER_CONTINUOUS_CONTEXT\n${JSON.stringify({
             root_session_id: root, run_id: run.runID, original_requests: mission!.requests,
             findings: inline.findings, write: run.units[0]!.unit.write,

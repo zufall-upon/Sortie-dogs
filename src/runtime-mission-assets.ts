@@ -241,6 +241,12 @@ During correction, reuse the established public test harness where applicable an
 regression exposing the defect before the fix and passing afterward. Do not change expected values or
 helper defaults merely to agree with the implementation; derive them from the original contract.
 
+For a requested per-call mode/option, trace where the setting is chosen and where changed code uses
+retained objects or closures. Distinguish the current caller's setting from a captured creation-time
+setting; use the requested contract to decide which governs. If actual source crosses that boundary
+and existing tests do not cover it, exercise its smallest public case, including the disabled behavior.
+Do not invent a lifecycle matrix or infer that an opt-in feature is correct from only its enabled path.
+
 For a changed failure handler, inspect the operation it calls and the public inputs reaching it,
 including failures not listed in the new handler. Use the supplied source/tests and established API behavior
 to identify a concrete input that could still violate the requested contract. A passing normal input does
@@ -534,19 +540,20 @@ Legacy/recovery: ${profile.toolPrefix}bind_write_gate with exact project_root an
 Treat cwd/project_root and paths as opaque; never shorten or normalize segments.
 After compaction recover handoff; inspect diff/results before repeating work.
 
-Read/search use existing permissions. unit.write is an estimate: repair in-request scope/outputs/checks
+Read/search use existing permissions. Repair estimated unit.write scope/outputs/checks
 in this Task via ${profile.toolPrefix}expand_unit/existing contract updates and host repair diagnostics;
-no extra approval, restart or delegation. Preserve prohibitions, host Git lifecycle and cumulative budget.
-Requested add/commit needs source paths, not .git/** scope. State/budget: ${profile.toolPrefix}operator_status.
+no extra approval, restart or delegation. Keep prohibitions, host Git lifecycle and cumulative budget.
+Requested add/commit needs source paths, not .git/** scope.
 
 Use pre-change test helpers as oracles, not new implementation/tests. Check
 result/error/state together, without a hypothetical exhaustive matrix. Preserve reproduction entrypoint, input and layout; rerun or
 report why unverified. Missing tooling: one documented bounded setup in ${TOOL_ENVIRONMENT}/; reuse, never delete.
+Per-call modes: check retained creation/use code for captured vs current settings.
 ${WORKER_VALIDATION_WORKFLOW}
-Done: behavior, checks/commit in user order. Never fabricate completion.
+Done: behavior, ordered checks/commit; never fabricate completion.
 Parent handles independent Review after return, not before execution; no review-before-commit gate.
 Do not spawn nested subagents, amend, push or publish. Return changes, actual command/exit/elapsed,
-rerun reasons and unresolved/untested behavior; no separate proof document.
+rerun reasons and unresolved/untested behavior; no proof document.
 No unchanged denial retries. Only unrecoverable PROCESS_DEFECT: local: plus diagnostic or proven
 TRUE_BLOCKER: external: / TRUE_BLOCKER: user-decision: returns early.
 Use the user's latest instruction language (previous if unclear); keep protocol/code/quotes verbatim.

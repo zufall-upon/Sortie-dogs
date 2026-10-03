@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import test from 'node:test';
-import { MISSION_GIT_SCOPE, VALIDATION_WORKFLOW, WORKER_VALIDATION_WORKFLOW, missionWorkerContent } from '../dist/runtime-mission-assets.js';
+import { MISSION_BEHAVIOR_REVIEW, MISSION_GIT_SCOPE, VALIDATION_WORKFLOW, WORKER_VALIDATION_WORKFLOW, missionWorkerContent } from '../dist/runtime-mission-assets.js';
 import { V010_RUNTIME_PROFILE } from '../dist/core/runtime-profile.js';
 import { runtimeAssets } from '../dist/runtime-assets-v010.js';
 
@@ -89,4 +89,17 @@ test('native CLI init installs the validation workflow in each active mission ro
       }
     }
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('per-call feature review distinguishes current use from retained creation settings without a new gate', () => {
+  const reviewer = runtimeAssets.find(item => item.name === 'dog-reviewer-v010')!.content;
+  const worker = runtimeAssets.find(item => item.name === 'dog-worker-v010')!.content;
+  assert.equal(reviewer.split(MISSION_BEHAVIOR_REVIEW).length, 2);
+  assert.match(MISSION_BEHAVIOR_REVIEW, /current caller's setting from a captured creation-time\s+setting/);
+  assert.match(MISSION_BEHAVIOR_REVIEW, /requested contract to decide which governs/);
+  assert.match(MISSION_BEHAVIOR_REVIEW, /actual source crosses that boundary\s+and existing tests do not cover it/);
+  assert.match(MISSION_BEHAVIOR_REVIEW, /smallest public case, including the disabled behavior/);
+  assert.match(MISSION_BEHAVIOR_REVIEW, /Do not invent a lifecycle matrix/);
+  assert.match(worker, /Per-call modes: check retained creation\/use code for captured vs current settings/);
+  assert.doesNotMatch(MISSION_BEHAVIOR_REVIEW, /TypedBindings|Anko|namedSlice|must run a new|second Reviewer/);
 });

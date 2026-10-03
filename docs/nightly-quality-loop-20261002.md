@@ -20,8 +20,10 @@ The durable work queue and commands live under `_testenv/nightly-20261002/`.
 Completed themes: public failure-result coverage, fresh original Anko evaluations,
 real-V2 direct controller/multiple-unit execution, retained host-card projection,
 inherited compiler-cache freshness, and continuous Reviewer correction. The fixed
-v6 original-task sample below observes a 644.715-second saving with official score 1;
-this is a single-sample result, not established merely by product unit checks.
+v6 original-task sample below observes a 644.715-second saving with official score 1,
+but later unchanged public probes pass only **5/9** (v5 **9/9**). The time saving
+is real on that sample; preserving known public quality remains **unmet**. This
+is a single-sample result, not established merely by product unit checks.
 Diagnose concrete failures rather than repeat unchanged failed runs or weaken
 acceptance.
 
@@ -669,8 +671,10 @@ Fixed product `7f94d24`, package SHA-256
 - Whole native workflow **1,391.645 s** / **$1.26273448**, **82** requests,
   usage unknown **0**. Original request/common prompt/pricing matched v5.
 - Versus fixed v5: **644.715 s (31.66%) faster**, **$0.49610480 (28.21%) lower**.
-  The 300-second goal is observed on this original-task sample with preserved
-  official quality, not by adding overlapping actor windows or shifting work.
+  The 300-second timing goal and unchanged official score are observed on this
+  original-task sample, not by adding overlapping actor windows or shifting work.
+  Later public probes below show known quality is not preserved, so the combined
+  quality-and-saving objective remains unmet.
 - Final Anko **`1abf91ab1dee0ba124fbf4334f2f42ddc4f53e07`**, new branch
   **`feature/typed-bindings`**, clean. Worker/Reviewer/root each have their actual
   native `succeeded` terminal, with a genuine Mission succeeded receipt.
@@ -745,3 +749,102 @@ source/Git/native history and scoring/check/analysis artifacts also archived.
   `0cb2b8971a35ac2fffb8f7e1dafea83c6840bdc3fdf35387066105304d972313`.
 - Its `product-checks-and-analysis.tar`:
   `e94ee87c58fb33d006c68afc4cccefdf1d1e4691fe07b43fdaf021c37595e268`.
+
+### Post-score public-probe addendum: known v5 quality not preserved in v6
+
+`compare-bare-review-value.mjs anko-nightly-continuous-v6-package-20261003
+bare-review-value-v6-comparison` replays the **unchanged** public API probe used
+for v5 (`b45d25b39fb462688334fa174b2008743dba57405c9993fa53fed73ba0935e53`).
+It adds **0** model requests, official verifier runs or candidate edits; both
+scored source trees/commits/clean states remain byte-identical before and after.
+Probe process exits 0 because it reports outcomes; that does **not** mean all
+cases pass.
+
+- v6 **5/9**, prior v5 **9/9**, Bare **7/9** on these selected public cases.
+- All four v6 caller-option cases fail. A function created with enforcement
+  enabled incorrectly retains enforcement when called with it disabled; a
+  function created with enforcement disabled incorrectly remains dynamic when
+  called with it enabled. Direct Anko calls and Go callback calls both reproduce.
+- Concrete source cause: the retained function in `vm/vmExprFunction.go` builds
+  its call execution with creation-time `runInfo.options`, instead of the
+  current public invocation's setting. The original request explicitly makes
+  enforcement optional and otherwise assignments dynamic in any scope. This
+  is a concrete public contract defect, not an exhaustive hypothetical matrix.
+
+The official score **1**, genuine receipt and **644.715 s** saving remain genuine
+observations for immutable v6. They do **not** establish original-task completion
+quality across already known public behavior. The stronger five-minute goal with
+that known quality remains **unmet**. Preserve the frozen source rather than
+repair it after scoring. Before sending the next candidate, add general
+implementation/Reviewer guidance to trace a per-call setting across retained
+object/closure creation and use when the actual changed source carries that
+setting; test the concrete boundary through the established public harness.
+Do not inject these Anko-specific inputs/expected values or hidden grading into
+the next run, add a separate Reviewer, reduce effort or require a large matrix.
+`bare-review-value-v6-comparison.json` is a later retained addendum, not contained
+in the earlier immutable v6 archive hashes listed above.
+Separate retained `public-probes-addendum.tar` SHA-256:
+`0cf4233f82e022354f443e0135ca66d4cf3065390d4cb2a769535a583ab68c55`.
+
+## v7: retain additional findings in the running continuous correction
+
+The actual second v6 `repair_review` tool input exposed a retained-findings bug.
+`night-v7-findings-repro` reproduces it against fixed v6 runtime: exit **1**,
+**1.408 s**, all three live/cold/native-failure-continuation cases lose the new
+concrete finding. No model requests or changes to the scored v6 source.
+
+Candidate marker `0.13.3-reviewer-continuous-v7` appends genuinely new supplied
+findings to the current exact author's durable correction and returns the entire
+retained set immediately. Identical body/header-only retries do not duplicate
+findings. Existing serialized native dispatch, actor/call/prompt/run identity,
+unit, reservation, scope, initial independent report/identity and immutable
+handoff/check contract remain unchanged. A later failure continuation receives
+the full cumulative set in its correction context, not a Mission reread.
+Outgoing continuous context reconstructs all currently known findings, including
+after cold reload. Only new actual findings change that content; routine phase,
+budget counters and validation settlement still do not. This is not a synthetic
+independent Review and does not relax fresh formal checks or final acceptance.
+
+- `night-v7-findings-focused`: **161/161 PASS**, existing correction/generation/
+  marker regressions plus live, cold reload and failed-native continuation.
+- `night-v7-findings-focused-2`: **3/4 PASS**, exit 1. New concurrency assertion
+  wrongly required Promise input order rather than actual native-hook arrival
+  order. Product retained both findings correctly; production unchanged.
+- `night-v7-findings-focused-3`: **4/4 PASS**, concurrency assertion corrected;
+  verifies serialized exact full submissions, owner/generation binding and
+  harmless empty/header-only retries. No added approval or independent Reviewer.
+- Integrated full verification of the accumulation change was already running
+  when the public defect above was reproduced. Fold the related generic
+  lifecycle guidance into the final candidate and verify that integrated source
+  before a **new** fixed-package original-task run. Prior v6 official score/saving
+  are never attributed to this unscored
+  candidate. A fresh native run must explicitly report whether additional
+  `repair_review` calls occur; unit fixtures alone are not native coverage.
+
+The accumulation-only full run `night-v7-findings-full` completed **1,618/1,618
+PASS**, all **101** files, exit 0, **202.399 s**. Its snapshot predates the
+newly reproduced lifecycle guidance, so it is not the final integrated package
+proof. Worker now has a compact, general current-vs-captured-setting cue;
+Reviewer shared behavior guidance asks for the concrete public creation/use
+boundary only where actual changed source and the requested contract make it
+relevant and existing tests do not cover it. It explicitly excludes a lifecycle
+matrix and includes disabled behavior. No Anko syntax/type/expected value,
+hidden grader, model effort change, extra approval or Reviewer is added.
+Compact equivalent Worker prose offsets the cue while retaining the existing
+3,000-character asset and 2,400-character common-prose bounds. Capability,
+scope/check order, Git delivery and final acceptance are unchanged.
+First `night-v7-lifecycle-focused`: **304/306 PASS**, exit 1; compacted opaque-path
+wording no longer matched an existing asset assertion, and common Worker prose
+was 2,413 characters. Restore the original opaque-path sentence and shorten only
+the new setting cue, retaining the **2,400** bound rather than moving it.
+The owned next-run driver now queues the same read-only public probes after
+source freeze/official scoring, so official score and selected public quality
+are reported separately without new model input or candidate edits.
+`night-v7-lifecycle-focused-2`: **122/122 PASS**, exit 0; installed Worker
+**2,881** characters, common body **2,459**, prose **2,395**. The original bounds
+and opaque-path guidance now pass. Final integrated full verification follows
+before source/package freeze and original-task resubmission.
+
+`origin/main` was re-fetched before this cycle and remains
+`b9b1246fd04eb4c18142ac8861e94a809394280d`; no main integration/release/global
+apply performed here.
