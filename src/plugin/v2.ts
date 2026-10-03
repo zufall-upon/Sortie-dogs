@@ -20,11 +20,12 @@ const loadedAdapter = Object.freeze({ adapter_url: import.meta.url,
   // Named module snapshots, not a claim to identify every transitive dependency. Retain these
   // bytes across package replacement so an unchanged adapter cannot conceal an old implementation.
   implementation_sha256: Object.freeze(Object.fromEntries([
-    "index", "profiled", "gate", "protected-snapshot", "declared-artifacts", "native-contract-read", "native-background",
+    "index", "profiled", "gate", "protected-snapshot", "declared-artifacts", "native-contract-read", "native-background", "model-live-state",
   ].map(name => [`${name}.js`, createHash("sha256").update(readFileSync(
     new URL(`./${name}.${import.meta.url.endsWith(".ts") ? "ts" : "js"}`, import.meta.url))).digest("hex")]))),
   loaded_at: new Date().toISOString(), pid: process.pid });
 const childSelectionKey = (id: string) => `v2-child-model-selection:${id}`;
+const liveStateKey = (id: string) => `v2-model-live-state:${id}`;
 
 type JsonObject = Record<string, unknown>;
 type NativePermissionRule = { action: string; resource: string; effect: "allow" | "deny" | "ask" };
@@ -516,7 +517,8 @@ async function syncReviewerCorrectionPermissionsOnce(context: OpenCodeV2Context,
   if (info.agent !== selected) await context.session.switchAgent({ sessionID, agent: selected });
 }
 
-async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks, background: NativeBackgroundLifecycle): Promise<void> {
+async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks, background: NativeBackgroundLifecycle,
+  liveState: Map<string, unknown>): Promise<void> {
   const explicitlySelectedChildren = new Set<string>();
   const selectedChildModels = new Set<string>();
   const selectionKey = (parent: string, role: string, prompt: string) => `${parent}\0${role}\0${prompt}`;
@@ -756,7 +758,18 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
         output.system.push(`Native tools actually available in this request: ${Object.keys(event.tools).sort().join(", ")}. Use these tools directly; do not infer missing tools or ask the root to transcribe source.`);
       }
     }
-    const projection = modelLiveState(output.system, Array.isArray(event.messages) ? event.messages : undefined);
+    const id = String(event.sessionID ?? "");
+    const previous = liveState.get(id) ?? await context.storage?.get(liveStateKey(id)).catch(() => {
+      console.warn("[sortie-dogs-v010] Live-state projection restore unavailable; rebuilding current host state");
+      return undefined;
+    });
+    const projection = modelLiveState(output.system, Array.isArray(event.messages) ? event.messages : undefined, previous);
+    if (projection.history) {
+      liveState.set(id, projection.history);
+      await context.storage?.set(liveStateKey(id), projection.history).catch(() => {
+        console.warn("[sortie-dogs-v010] Live-state projection persistence unavailable; current instance retains continuity");
+      });
+    }
     if (Array.isArray(event.system)) event.system.push(...projection.system.map(text => ({ type: "text", text })));
     if (projection.messages) event.messages = projection.messages;
   });
@@ -788,6 +801,7 @@ export function createSortieDogsV2Plugin(legacyFactory: OpenCodePlugin = SortieD
     id: "sortie-dogs.v010",
     async setup(context) {
       let hooks: OpenCodeHooks;
+      const liveState = new Map<string, unknown>();
       const background = new NativeBackgroundLifecycle(context, async (dispatch, text) => {
         if (dispatch.owner) hooks.backgroundOwner?.(dispatch.callID, dispatch.owner);
         await hooks["tool.execute.after"]?.({ tool: "task", sessionID: dispatch.parent, callID: dispatch.callID,
@@ -798,7 +812,7 @@ export function createSortieDogsV2Plugin(legacyFactory: OpenCodePlugin = SortieD
       hooks = await legacyFactory({ directory: context.location.directory, client: legacyClient(context) as never,
         nativeBackground: background, returnReportTransport: "tool-result",
         reviewerCorrectionPermissions: !!context.agent && !!context.storage && !!context.session.switchAgent }, context.options ?? {});
-      await registerV2Hooks(context, hooks, background);
+      await registerV2Hooks(context, hooks, background, liveState);
       // Recreate exact durable correction profiles at plugin setup, before resumed native Steps
       // resolve their agent/tool snapshots. Storage.scan is part of Plugin 2.0.18's public domain.
       if (context.storage?.scan) {
@@ -823,6 +837,8 @@ export function createSortieDogsV2Plugin(legacyFactory: OpenCodePlugin = SortieD
         if (String(event.type).startsWith("session.execution.") || event.type === "session.inbox.enqueued" || event.type === "session.idle") await background.event(event);
         if (event.type === "session.deleted") {
           await context.storage?.remove?.(childSelectionKey(id));
+          liveState.delete(id);
+          await context.storage?.remove?.(liveStateKey(id));
           // This native event is definite deletion, unlike a transient session.get failure.
           await disposeCorrectionPermissions(context, id);
         }

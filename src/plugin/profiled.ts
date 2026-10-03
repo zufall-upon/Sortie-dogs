@@ -3418,7 +3418,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           `Shared MkII protocol role names are logical: ${protocolMap}. Use only ${profile.toolPrefix} tools for this profile. ` +
           "Never rewrite user acceptance or evidence to rename protocol roles. Final acceptance belongs only to the root coordinator.");
         output.system.push("SORTIE_LIVE_STATE_POLICY\nCurrent host state may follow the conversation as a request-only system update. " +
-          "Use that latest snapshot for current findings, assignment, counters, acceptance continuity and receipt. " +
+          "Use the latest update of each named state block for current findings, assignment, counters, acceptance continuity and receipt. " +
+          "SORTIE_LIVE_STATE_WITHDRAWN retires the listed blocks; earlier scope, tool lists and receipts are historical, not current authority. " +
           "It does not replace original requirements, native tool outcomes or formal evidence; author self-recheck is not independent approval.");
         const mission = await missions.read(root), run = await operators.read(root);
         const inline = mission?.corrections?.find(item => item.runID === run?.runID && item.author === request.sessionID &&
